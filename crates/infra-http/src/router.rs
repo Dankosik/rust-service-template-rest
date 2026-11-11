@@ -21,11 +21,25 @@ pub(crate) const HEALTH_PROBE_ROUTES: &[&str] = &[probes::LIVE_PATH, probes::REA
 
 /// Whether a matched route template is a probe route, also beneath an outer
 /// nest: the hardened chain wraps the nest, so it sees the prefixed template
-/// and no `NestedPath`.
+/// and no `NestedPath`. The suffix alone would also exempt a service route
+/// such as `/vendors/{id}/health/ready`, so contract finalization refuses
+/// every operation with such a template except the probes themselves (see
+/// [`is_health_probe_operation`]).
 pub(crate) fn is_health_probe_route(route: &str) -> bool {
     HEALTH_PROBE_ROUTES
         .iter()
         .any(|probe| route.ends_with(probe))
+}
+
+/// Whether a documented operation is a probe: its template ends with the
+/// probe's, also beneath a nest, and it carries the probe's operation id.
+pub(crate) fn is_health_probe_operation(path: &str, operation_id: Option<&str>) -> bool {
+    [
+        (probes::LIVE_PATH, probes::LIVE_OPERATION_ID),
+        (probes::READY_PATH, probes::READY_OPERATION_ID),
+    ]
+    .iter()
+    .any(|(probe, id)| path.ends_with(probe) && operation_id == Some(*id))
 }
 
 /// The probe routes with their contract and the problem components, as one

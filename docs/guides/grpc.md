@@ -469,7 +469,7 @@ constraint, never the submitted value. `Failure::retry_after` adds
 | `method_not_allowed` | `UNIMPLEMENTED` |
 | `request_entity_too_large`, `too_many_requests` | `RESOURCE_EXHAUSTED` |
 | `service_unavailable`, `authentication_unavailable`, `idempotency_unavailable` | `UNAVAILABLE` |
-| `gateway_timeout` | `DEADLINE_EXCEEDED` |
+| `request_timeout`, `gateway_timeout` | `DEADLINE_EXCEEDED` |
 | `internal_error` | `INTERNAL` |
 
 The transport answers its own rejections from the same catalog, so each

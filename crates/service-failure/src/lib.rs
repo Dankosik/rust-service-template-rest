@@ -70,6 +70,7 @@ codes! {
     TooManyRequests => "too_many_requests",
     InternalServerError => "internal_error",
     ServiceUnavailable => "service_unavailable",
+    RequestTimeout => "request_timeout",
     GatewayTimeout => "gateway_timeout",
 }
 

@@ -89,7 +89,9 @@ pub struct HardenOptions {
     /// axum's own default is independent, so omitting the extractor layer
     /// would keep a different ceiling than `http.max_body_bytes`.
     pub max_body_bytes: usize,
-    /// Per-request budget; expiry answers 504 with code `gateway_timeout`.
+    /// Per-request budget; expiry answers 504 with code `gateway_timeout`, or
+    /// 408 with code `request_timeout` while the handler waits for request
+    /// body bytes the caller has not sent.
     /// Time a request spends waiting for an in-flight permit is spent from
     /// this same budget, so the handler gets only what admission leaves.
     pub request_timeout: Duration,

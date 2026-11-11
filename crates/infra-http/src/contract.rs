@@ -15,6 +15,7 @@ use utoipa_axum::router::OpenApiRouter;
 #[cfg(test)]
 use crate::problem::SANITIZED_DETAIL;
 use crate::problem::sanitized_internal_error;
+use crate::router::{is_health_probe_operation, is_health_probe_route};
 
 /// A closed finalization error naming the first operation that failed; no
 /// partially served contract is returned.
@@ -30,6 +31,13 @@ pub enum FinalizeError {
         "HTTP contract finalization failed: {method} {path} has an unsupported or ambiguous effective security policy"
     )]
     InvalidPolicy { path: String, method: &'static str },
+    /// A route template ending like a probe's is reserved for the probe
+    /// handler, since the hardened chain exempts it from in-flight admission
+    /// and the access log.
+    #[error(
+        "HTTP contract finalization failed: {method} {path} is not a health probe but its route ends like one"
+    )]
+    ReservedProbeRoute { path: String, method: &'static str },
 }
 
 /// Finalize a document whose operations are all public.
@@ -111,6 +119,15 @@ impl Policy {
                 ("TRACE", &item.trace),
             ] {
                 if let Some(operation) = operation {
+                    if is_health_probe_route(&path)
+                        && !(method == "GET"
+                            && is_health_probe_operation(&path, operation.operation_id.as_deref()))
+                    {
+                        return Err(FinalizeError::ReservedProbeRoute {
+                            path: path.clone(),
+                            method,
+                        });
+                    }
                     let access = Access::from_operation(document, operation).map_err(|fault| {
                         tracing::error!(
                             path,
@@ -296,6 +313,43 @@ mod tests {
         FinalizeError::InvalidPolicy {
             path: "/_test/policy".to_owned(),
             method: "GET",
+        }
+    }
+
+    #[test]
+    fn only_the_probe_operations_may_end_like_a_probe_route() {
+        for (path, method, operation_id, accepted) in [
+            ("/health/live", "get", "healthLive", true),
+            ("/api/health/ready", "get", "healthReady", true),
+            ("/vendors/{id}/health/ready", "get", "vendorReady", false),
+            ("/health/live", "get", "healthReady", false),
+            ("/health/live", "post", "healthLive", false),
+            ("/vendors/{id}/health", "get", "vendorHealth", true),
+        ] {
+            let document = serde_json::json!({
+                "openapi": "3.1.0",
+                "info": {"title": "probe fixture", "version": "1"},
+                "paths": {path: {method: {
+                    "operationId": operation_id,
+                    "responses": {"200": {"description": "ok"}}
+                }}}
+            });
+            let contract = OpenApiRouter::<()>::with_openapi(
+                serde_json::from_value(document).expect("valid OpenAPI fixture"),
+            );
+            let expected = if accepted {
+                Ok(())
+            } else {
+                Err(FinalizeError::ReservedProbeRoute {
+                    path: path.to_owned(),
+                    method: if method == "get" { "GET" } else { "POST" },
+                })
+            };
+            assert_eq!(
+                finalize_public(contract).map(|_| ()),
+                expected,
+                "{method} {path} {operation_id}"
+            );
         }
     }
 

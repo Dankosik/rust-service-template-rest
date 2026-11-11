@@ -177,6 +177,31 @@ async fn timeout_is_a_504_problem() {
     assert_eq!(json["request_id"].as_str(), Some(id.to_str().unwrap()));
 }
 
+#[tokio::test]
+async fn a_body_the_caller_stops_sending_is_a_408_problem_that_closes_the_connection() {
+    let first_chunk = futures_util::stream::once(async {
+        Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"{"))
+    });
+    let stalled = futures_util::StreamExt::chain(first_chunk, futures_util::stream::pending());
+    let request = HttpRequest::builder()
+        .method(Method::POST)
+        .uri("/echo")
+        .body(Body::from_stream(stalled))
+        .unwrap();
+
+    let response = app(&options()).oneshot(request).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::CONNECTION)
+            .unwrap(),
+        "close"
+    );
+    assert_eq!(body_json(response).await["code"], "request_timeout");
+}
+
 #[derive(Clone)]
 struct RecoveryEvents(Arc<Mutex<Vec<String>>>);
 

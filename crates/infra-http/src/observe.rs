@@ -16,7 +16,11 @@
 //! Prometheus renders them: the response-head duration by method, route
 //! template, and status, whose `_count` series is the request count, and the
 //! active requests by method, held until the response body is dropped
-//! (including after consumption or cancellation).
+//! (including after consumption or cancellation). A request dropped before
+//! its response head, because the caller closed the connection or reset the
+//! stream, is recorded with status 499, nginx's "client closed request", as
+//! the gRPC transport records an abandoned call as `Canceled`; recording
+//! nothing would hide latency the callers gave up on from the alerts.
 //!
 //! The access-log line is written inside the span, so it carries the trace
 //! and span ids through the subscriber, and outside admission and the opening
@@ -94,6 +98,13 @@ pub(crate) fn describe() {
 /// Label for requests the router did not match.
 pub(crate) const UNMATCHED_ROUTE: &str = "<unmatched>";
 
+/// The status recorded for a request its caller abandoned before the
+/// response head; no response was sent.
+const CLIENT_CLOSED_REQUEST: StatusCode = match StatusCode::from_u16(499) {
+    Ok(status) => status,
+    Err(_) => panic!("499 is a valid status code"),
+};
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct AccessLogOptions {
     pub(crate) log_health_probes: bool,
@@ -119,6 +130,15 @@ pub(crate) async fn observe(
         .as_ref()
         .map_or(UNMATCHED_ROUTE, MatchedPath::as_str);
     let active = Active::start(method_label(&method));
+    let mut pending = Pending {
+        options,
+        method: &method,
+        route,
+        request_id,
+        span: &span,
+        started,
+        answered: false,
+    };
 
     let traced = next.run(request).instrument(span.clone());
     let response = match fallback {
@@ -133,31 +153,65 @@ pub(crate) async fn observe(
     // gauge below follows the body's lifetime.
     let response = complete_problem(response, request_id);
     let status = response.status();
-    record_duration(method_label(&method), route, status, started.elapsed());
-    if !suppresses_access_log(options, &method, route) {
-        let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        // problem_code separates the failures that share a status: a 503 is
-        // load shedding, a saturated pool, or a draining instance, and during
-        // an incident that distinction is the whole question. Bounded by the
-        // catalog.
-        let problem_code = response
-            .extensions()
-            .get::<Problem>()
-            .map(|problem| problem.code().as_str());
-        span.in_scope(|| {
+    // problem_code separates the failures that share a status: a 503 is load
+    // shedding, a saturated pool, or a draining instance, and during an
+    // incident that distinction is the whole question. Bounded by the
+    // catalog.
+    let problem_code = response
+        .extensions()
+        .get::<Problem>()
+        .map(|problem| problem.code().as_str());
+    pending.answer(status, problem_code);
+    update_span_from_response(&span, status);
+    active.until_body_ends(response)
+}
+
+/// One request's duration and access-log line, written once: with the
+/// response head's status, or with [`CLIENT_CLOSED_REQUEST`] when the request
+/// future is dropped before it.
+struct Pending<'a> {
+    options: AccessLogOptions,
+    method: &'a Method,
+    route: &'a str,
+    request_id: Option<&'a str>,
+    span: &'a tracing::Span,
+    started: Instant,
+    answered: bool,
+}
+
+impl Pending<'_> {
+    fn answer(&mut self, status: StatusCode, problem_code: Option<&str>) {
+        self.answered = true;
+        self.record(status, problem_code);
+    }
+
+    fn record(&self, status: StatusCode, problem_code: Option<&str>) {
+        let elapsed = self.started.elapsed();
+        record_duration(method_label(self.method), self.route, status, elapsed);
+        if suppresses_access_log(self.options, self.method, self.route) {
+            return;
+        }
+        let duration_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+        self.span.in_scope(|| {
             tracing::info!(
-                method = method_label(&method),
-                route = %route,
+                method = method_label(self.method),
+                route = %self.route,
                 status = status.as_u16(),
                 duration_ms,
                 problem_code,
-                request_id,
+                request_id = self.request_id,
                 "http_request"
             );
         });
     }
-    update_span_from_response(&span, status);
-    active.until_body_ends(response)
+}
+
+impl Drop for Pending<'_> {
+    fn drop(&mut self) {
+        if !self.answered {
+            self.record(CLIENT_CLOSED_REQUEST, None);
+        }
+    }
 }
 
 /// The server span. Only what every log record inside the request should
@@ -415,6 +469,52 @@ mod tests {
                 ]
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_request_dropped_before_its_response_head_is_recorded_as_499() {
+        use tower::ServiceExt as _;
+
+        let histograms = Histograms::default();
+        let _recorder = metrics::set_default_local_recorder(&histograms);
+        let handler_1 = || std::future::pending::<&'static str>();
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
+        )]
+        let app = crate::harden(
+            axum::Router::new().route("/hang", axum::routing::get(handler_1)),
+            &crate::HardenOptions {
+                max_body_bytes: 64,
+                request_timeout: Duration::from_secs(60),
+                max_in_flight: std::num::NonZeroU32::new(2),
+                log_health_probes: false,
+            },
+        );
+        let request = Request::builder().uri("/hang").body(Body::empty()).unwrap();
+
+        // The caller gives up long before the request budget.
+        let abandoned = tokio::time::timeout(Duration::from_millis(10), app.oneshot(request)).await;
+
+        assert!(abandoned.is_err());
+        let keys = histograms.0.lock().unwrap();
+        let recorded: Vec<Vec<(&str, &str)>> = keys
+            .iter()
+            .filter(|key| key.name() == REQUEST_DURATION_METRIC)
+            .map(|key| {
+                key.labels()
+                    .map(|label| (label.key(), label.value()))
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            recorded,
+            [[
+                ("http_request_method", "GET"),
+                ("http_response_status_code", "499"),
+                ("http_route", "/hang"),
+            ]]
+        );
     }
 
     #[test]
