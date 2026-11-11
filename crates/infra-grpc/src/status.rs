@@ -137,7 +137,9 @@ const fn projection(code: Code) -> (tonic::Code, &'static str) {
         // template:begin http-idempotency:grpc-idempotency-unavailable-status
         Code::IdempotencyUnavailable => UNAVAILABLE,
         // template:end http-idempotency:grpc-idempotency-unavailable-status
-        Code::GatewayTimeout => (tonic::Code::DeadlineExceeded, "request deadline exceeded"),
+        Code::RequestTimeout | Code::GatewayTimeout => {
+            (tonic::Code::DeadlineExceeded, "request deadline exceeded")
+        }
         Code::InternalServerError => (tonic::Code::Internal, SANITIZED_DETAIL),
     }
 }
@@ -243,6 +245,11 @@ mod tests {
                 Code::ServiceUnavailable,
                 tonic::Code::Unavailable,
                 "service is unavailable",
+            ),
+            (
+                Code::RequestTimeout,
+                tonic::Code::DeadlineExceeded,
+                "request deadline exceeded",
             ),
             (
                 Code::GatewayTimeout,

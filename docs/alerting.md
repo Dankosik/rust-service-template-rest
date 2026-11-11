@@ -96,7 +96,8 @@ in the `http_request` log events separates the causes that share a status:
 `service_unavailable` with the at-capacity detail is load shedding (see
 `http_server_shed_requests_total`) after a request waited `http.request_timeout`
 for a permit (see `http_server_admission_wait_seconds`), `gateway_timeout` is
-the request deadline, and other codes name a failed dependency. Correlate by
+the request deadline (a caller that stopped sending its body gets `408
+request_timeout` instead and does not count here), and other codes name a failed dependency. Correlate by
 `http_route`:
 
 ```promql

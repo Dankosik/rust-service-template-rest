@@ -1,12 +1,16 @@
 //! Request opening and explicitly continuing response work have distinct lifetimes.
 
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
 use axum::body::{Body, Bytes};
 use axum::extract::{FromRequestParts, Request, State};
+use axum::http::header::CONNECTION;
 use axum::http::request::Parts;
+use axum::http::{HeaderValue, Version};
 use axum::middleware::Next;
 use axum::response::{IntoResponse as _, Response};
 use http_body::{Body as HttpBody, Frame, SizeHint};
@@ -113,13 +117,19 @@ pub(crate) async fn opening(
         request.extensions_mut().insert(deadline);
     }
     // template:end request-budget:http-request-deadline-projection
+    let upload = Upload::track(&mut request);
     let response = tokio::select! {
         biased;
-        reason = request_operation.wait_stopped() => return stopped_response(reason),
+        // The upload is read when the budget expires, before `select!` drops
+        // the handler and with it the body.
+        stop = async {
+            let reason = request_operation.wait_stopped().await;
+            (reason, upload.awaited())
+        } => return stopped_response(stop.0, stop.1),
         response = next.run(request) => response,
     };
     if let Some(reason) = request_operation.stopped() {
-        return stopped_response(reason);
+        return stopped_response(reason, upload.awaited());
     }
     response.map(|body| {
         if body.is_end_stream() {
@@ -134,17 +144,106 @@ pub(crate) async fn opening(
     })
 }
 
-fn stopped_response(reason: Stopped) -> Response {
-    match reason {
-        Stopped::Deadline => budget_expired_response(),
-        Stopped::Cancelled => Problem::new(Code::ServiceUnavailable).into_response(),
+fn stopped_response(reason: Stopped, upload: Option<Version>) -> Response {
+    match (reason, upload) {
+        (Stopped::Deadline, Some(version)) => upload_timeout_response(version),
+        (Stopped::Deadline, None) => budget_expired_response(),
+        (Stopped::Cancelled, _) => Problem::new(Code::ServiceUnavailable).into_response(),
     }
+}
+
+/// The handler was waiting for body bytes the caller had not sent, so the
+/// caller was slow: 408, not the server's own 504. RFC 9110 §15.5.9 asks for
+/// `Connection: close`, since an HTTP/1.1 caller may still be sending; HTTP/2
+/// forbids the field and resets the stream instead.
+fn upload_timeout_response(version: Version) -> Response {
+    let mut response = Problem::new(Code::RequestTimeout)
+        .detail("request body was not received within the request budget")
+        .into_response();
+    if version < Version::HTTP_2 {
+        response
+            .headers_mut()
+            .insert(CONNECTION, HeaderValue::from_static("close"));
+    }
+    response
 }
 
 pub(crate) fn budget_expired_response() -> Response {
     Problem::new(Code::GatewayTimeout)
         .detail("request budget expired before a response could be committed")
         .into_response()
+}
+
+/// Whether the handler is waiting on the caller for request body bytes: the
+/// body's last poll was pending and the body is still held. A body that
+/// arrived empty is not tracked.
+struct Upload {
+    awaiting: Option<Arc<AtomicBool>>,
+    version: Version,
+}
+
+impl Upload {
+    fn track(request: &mut Request) -> Self {
+        let version = request.version();
+        if request.body().is_end_stream() {
+            return Self {
+                awaiting: None,
+                version,
+            };
+        }
+        let awaiting = Arc::new(AtomicBool::new(false));
+        let body = std::mem::take(request.body_mut());
+        *request.body_mut() = Body::new(UploadBody {
+            body,
+            awaiting: Arc::clone(&awaiting),
+        });
+        Self {
+            awaiting: Some(awaiting),
+            version,
+        }
+    }
+
+    /// The request version when the handler is blocked on the caller's body.
+    fn awaited(&self) -> Option<Version> {
+        self.awaiting
+            .as_ref()
+            .filter(|awaiting| awaiting.load(Ordering::Relaxed))
+            .map(|_| self.version)
+    }
+}
+
+struct UploadBody {
+    body: Body,
+    awaiting: Arc<AtomicBool>,
+}
+
+impl HttpBody for UploadBody {
+    type Data = Bytes;
+    type Error = axum::Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
+        let this = self.get_mut();
+        let result = Pin::new(&mut this.body).poll_frame(cx);
+        this.awaiting.store(result.is_pending(), Ordering::Relaxed);
+        result
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.body.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.body.size_hint()
+    }
+}
+
+impl Drop for UploadBody {
+    fn drop(&mut self) {
+        self.awaiting.store(false, Ordering::Relaxed);
+    }
 }
 
 struct CancelBody {

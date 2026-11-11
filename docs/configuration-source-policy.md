@@ -713,7 +713,9 @@ budgets, final event names and binary exit mapping.
 - `http.request_timeout` (default `8s`) is the per-request handler budget and
   the only bound on how long one request may hold a task and its pooled
   resources. Body reads happen inside it because extractors run inside the
-  handler future. Expiry answers a `504` problem with code `gateway_timeout`.
+  handler future. Expiry answers a `504` problem with code `gateway_timeout`,
+  or a `408` problem with code `request_timeout` when the handler was still
+  waiting for request body bytes the caller had not sent.
   It must not exceed the drain budget left after readiness propagation, so
   in-flight requests can finish inside the drain.
 - `http.header_read_timeout` (default `5s`) bounds delivery of a request head
@@ -759,7 +761,8 @@ budgets, final event names and binary exit mapping.
   `http.request_timeout`, and that wait is spent from the request's budget; only
   a request that finds none in that time is shed with `503` and
   `Retry-After: 1`. Zero disables shedding. The health probe routes are admitted without a permit,
-  so a saturated instance is not restarted as dead. `http.max_connections` (default `4096`) bounds accepted
+  so a saturated instance is not restarted as dead; contract finalization
+  refuses any other operation whose route template ends like a probe's. `http.max_connections` (default `4096`) bounds accepted
   connections; the excess is closed at accept without a response. It must be
   at least `max_in_flight` so the informative rejection stays the common one.
 - `http.max_connection_age` (default `0s`, off) tells a connection that

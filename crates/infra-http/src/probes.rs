@@ -28,6 +28,8 @@ use crate::problem::responses::TransportProblemResponses;
 /// see [`crate::router::HEALTH_PROBE_ROUTES`] for their other effects.
 pub(crate) const LIVE_PATH: &str = "/health/live";
 pub(crate) const READY_PATH: &str = "/health/ready";
+pub(crate) const LIVE_OPERATION_ID: &str = "healthLive";
+pub(crate) const READY_OPERATION_ID: &str = "healthReady";
 
 /// Probe bodies: what the handler sends and what the contract shows as the
 /// example, from one constant each.
@@ -39,7 +41,7 @@ const NOT_READY_BODY: &str = "not ready";
     get,
     path = LIVE_PATH,
     tag = "system",
-    operation_id = "healthLive",
+    operation_id = LIVE_OPERATION_ID,
     summary = "Liveness probe",
     security(),
     extensions(("x-security-decision" = json!({
@@ -60,7 +62,7 @@ pub(crate) async fn live() -> (StatusCode, &'static str) {
     get,
     path = READY_PATH,
     tag = "system",
-    operation_id = "healthReady",
+    operation_id = READY_OPERATION_ID,
     summary = "Readiness probe",
     security(),
     extensions(("x-security-decision" = json!({

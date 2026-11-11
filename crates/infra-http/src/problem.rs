@@ -57,7 +57,9 @@ pub(crate) const fn http_status(code: Code) -> StatusCode {
         Code::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
         Code::InternalServerError => StatusCode::INTERNAL_SERVER_ERROR,
         Code::ServiceUnavailable => StatusCode::SERVICE_UNAVAILABLE,
-        // The server's own budget expired, so the caller was not slow (408).
+        // The caller had not delivered the request body when the budget expired.
+        Code::RequestTimeout => StatusCode::REQUEST_TIMEOUT,
+        // The server's own budget expired while the caller waited.
         Code::GatewayTimeout => StatusCode::GATEWAY_TIMEOUT,
     }
 }
@@ -386,7 +388,7 @@ pub mod responses {
     /// The problem responses the OpenAPI document declares on every
     /// operation as shared transport answers. This is the Problem set every
     /// operation can name without colliding with probe-owned 503 `text/plain`.
-    /// The hardened chain also emits Problem 503/504/405 at runtime; those
+    /// The hardened chain also emits Problem 503/504/408/405 at runtime; those
     /// stay out of this group (ready already documents 503 as `text/plain`).
     /// Header overflow is hyper-native 431 before the router, not a
     /// `Problem`. Name this type in `responses(...)` beside the operation's
