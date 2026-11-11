@@ -1,6 +1,6 @@
 //! PostgreSQL pool admission.
 
-use super::shutdown::Background;
+use super::background::Background;
 use infra_postgres::{Dsn, PgPool, PoolOptions, SessionBudgets};
 use secrecy::ExposeSecret;
 use service_config::Config;

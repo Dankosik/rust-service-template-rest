@@ -3,7 +3,10 @@
 Load for startup, readiness, drain, shutdown, exit codes, or
 process-resource ownership. `crates/service/src/bootstrap` is the code:
 `mod.rs` is the startup order, each retained profile keeps its step in a
-module beside it, and `shutdown.rs` is the teardown. The process-test surface
+module beside it, `telemetry.rs` registers metrics and writes the startup
+record, `signals.rs` owns the stop signals, `background.rs` owns the
+service's background tasks, and `shutdown.rs` is the teardown. The
+process-test surface
 is `crates/service/tests`; the current validation receipt owns what has been
 proved against a built binary.
 

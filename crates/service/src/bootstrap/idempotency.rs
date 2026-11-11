@@ -1,6 +1,6 @@
 //! HTTP idempotency boundary composition and activation.
 
-use super::shutdown::Background;
+use super::background::Background;
 use infra_http::idempotency::{Activation, Composer};
 use infra_idempotency_store::Store;
 use infra_postgres::PgPool;

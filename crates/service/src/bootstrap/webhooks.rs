@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use super::shutdown::Background;
+use super::background::Background;
 use infra_http::webhooks::WebhookState;
 use infra_postgres::PgPool;
 use infra_webhooks::inbound::{Receiver, Verifier};

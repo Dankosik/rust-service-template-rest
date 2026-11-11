@@ -1,7 +1,7 @@
 //! The service's API contract, assembled from the routers the transport and
-//! feature crates own. The `service` binary serves it (`main.rs` and
-//! `bootstrap`), the `openapi` binary renders it, and the integration tests
-//! hold the committed document to it.
+//! feature crates own, and the composition root that serves it. The
+//! `service` binary calls [`run`], the `openapi` binary renders the contract,
+//! and the integration tests hold the committed document to it.
 
 pub mod api;
 
@@ -10,8 +10,7 @@ pub use bootstrap::{BackgroundFailureReporter, BackgroundRegistration};
 mod state;
 pub use state::AppState;
 // template:begin grpc:service-registration-module
-mod grpc;
-pub use grpc::GrpcRegistration;
+pub use bootstrap::GrpcRegistration;
 // template:end grpc:service-registration-module
 
 use std::ffi::OsString;

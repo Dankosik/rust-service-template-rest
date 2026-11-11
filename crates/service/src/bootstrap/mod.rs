@@ -11,6 +11,10 @@
 //! Each optional profile keeps its own startup step in a module beside this
 //! one; this file is the order they run in.
 
+mod background;
+// template:begin grpc:bootstrap-grpc-module
+mod grpc;
+// template:end grpc:bootstrap-grpc-module
 // template:begin authn:bootstrap-authn-module
 mod authn;
 // template:end authn:bootstrap-authn-module
@@ -30,6 +34,8 @@ mod postgres;
 mod service_auth;
 // template:end service-auth:bootstrap-service-auth-module
 mod shutdown;
+mod signals;
+mod telemetry;
 // template:begin inbound-webhooks:bootstrap-webhooks-module
 mod webhooks;
 // template:end inbound-webhooks:bootstrap-webhooks-module
@@ -44,16 +50,20 @@ use futures_util::FutureExt;
 use health::{Probe, Readiness, RefreshPolicy};
 use infra_http::{HardenOptions, Server, ServerOptions};
 use infra_telemetry::{
-    ExporterState, LoggingFormat, LoggingOptions, Metrics, ResolvedSampler, TracingOptions,
-    diagnostics_router, install_panic_hook, install_subscriber, install_tracer_provider,
-    runtime_metrics,
+    LoggingFormat, LoggingOptions, Metrics, diagnostics_router, install_panic_hook,
+    install_subscriber, install_tracer_provider, runtime_metrics,
 };
-use service_config::{BuildInfo, Config, LoadOptions, LogFormat, TracesSampler, process_failure};
+use service_config::{BuildInfo, Config, LoadOptions, LogFormat, process_failure};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use self::shutdown::{Background, BackgroundFailure, Dependencies, Outcome, Serving, Signals};
-pub use self::shutdown::{BackgroundFailureReporter, BackgroundRegistration};
+use self::background::{Background, BackgroundFailure, background_failure};
+pub use self::background::{BackgroundFailureReporter, BackgroundRegistration};
+// template:begin grpc:bootstrap-grpc-registration-export
+pub use self::grpc::GrpcRegistration;
+// template:end grpc:bootstrap-grpc-registration-export
+use self::shutdown::{Dependencies, Outcome, Serving};
+use self::signals::Signals;
 
 pub(crate) const BUILD_INFO: BuildInfo = BuildInfo::from_package_version(env!("CARGO_PKG_VERSION"));
 
@@ -72,7 +82,7 @@ pub(crate) enum BootstrapError {
     #[error("install stop signal handlers: {0}")]
     Signals(#[source] std::io::Error),
     #[error(transparent)]
-    SignalClosed(#[from] shutdown::SignalError),
+    SignalClosed(#[from] signals::SignalError),
     #[error(transparent)]
     Tracing(#[from] infra_telemetry::TracingError),
     #[error(transparent)]
@@ -235,33 +245,6 @@ where
     }
 }
 
-fn install_metrics() -> Result<Metrics, BootstrapError> {
-    Ok(Metrics::install(
-        &[
-            infra_http::HISTOGRAMS,
-            // template:begin authn:bootstrap-authn-histograms
-            infra_bearerauthn::HISTOGRAMS,
-            // template:end authn:bootstrap-authn-histograms
-            // template:begin postgres:bootstrap-postgres-histograms
-            infra_postgres::HISTOGRAMS,
-            // template:end postgres:bootstrap-postgres-histograms
-            // template:begin outbound-http:service-bootstrap-outbound-histogram
-            infra_outbound_http::HISTOGRAMS,
-            // template:end outbound-http:service-bootstrap-outbound-histogram
-            // template:begin grpc:bootstrap-grpc-histograms
-            infra_grpc::HISTOGRAMS,
-            // template:end grpc:bootstrap-grpc-histograms
-            // template:begin cache:service-bootstrap-cache-histogram
-            infra_cache::HISTOGRAMS,
-            // template:end cache:service-bootstrap-cache-histogram
-            // template:begin object-storage:service-bootstrap-object-storage-histogram
-            infra_object_storage::HISTOGRAMS,
-            // template:end object-storage:service-bootstrap-object-storage-histogram
-        ]
-        .concat(),
-    )?)
-}
-
 #[allow(
     clippy::too_many_lines,
     reason = "retained lifecycle state stays beside its single unwind and teardown boundary"
@@ -288,7 +271,7 @@ async fn serve(
         let race = {
             let startup = async {
                 let provider =
-                    tracer_provider.insert(install_tracer_provider(&tracing_options(&config))?);
+                    tracer_provider.insert(install_tracer_provider(&telemetry::tracing_options(&config))?);
                 logger = Some(install_subscriber(&LoggingOptions {
                     level: &config.log.level,
                     format: match config.log.format {
@@ -307,9 +290,9 @@ async fn serve(
                 if let Err(error) = rlimit::increase_nofile_limit(u64::MAX) {
                     tracing::warn!(error = %error, "open_file_limit_unchanged");
                 }
-                let metrics = install_metrics()?;
+                let metrics = telemetry::install_metrics()?;
                 metrics.record_trace_exporter(Some(&provider.exporter_state));
-                log_startup_summary(&config, &provider.exporter_state);
+                telemetry::log_startup_summary(&config, &provider.exporter_state);
                 background.spawn(
                     "metrics_upkeep",
                     metrics.clone().upkeep(background.child_token()),
@@ -337,7 +320,7 @@ async fn serve(
             tokio::select! {
                 biased;
                 stopped = signals.wait() => stopped.map(|()| StartupRace::Stopped).map_err(BootstrapError::from),
-                failed = shutdown::background_failure(&mut observer) => Err(background_error(failed)),
+                failed = background_failure(&mut observer) => Err(background_error(failed)),
                 started = startup => started.map(|()| StartupRace::Completed),
             }
         };
@@ -362,7 +345,7 @@ async fn serve(
                 tokio::select! {
                     biased;
                     stopped = signals.wait() => stopped.err().map(BootstrapError::from),
-                    failed = shutdown::background_failure(&mut observer) => Some(background_error(failed)),
+                    failed = background_failure(&mut observer) => Some(background_error(failed)),
                 }
             };
             if failure.is_none() {
@@ -570,62 +553,19 @@ async fn start(
 
     // template:begin grpc:bootstrap-grpc-prepare-start
     let grpc_prepared = if config.grpc.enabled {
-        #[allow(
-            unused_variables,
-            reason = "bearer authentication alone reads it; service tokens replace it"
-        )]
-        let service_tokens = false;
-        // template:end grpc:bootstrap-grpc-prepare-start
-        // template:begin service-auth:bootstrap-grpc-service-tokens
-        #[allow(
-            unused_variables,
-            reason = "bearer authentication alone reads it; without AUTHN nothing does"
-        )]
-        let service_tokens = service_auth.verifier.is_some();
-        // template:end service-auth:bootstrap-grpc-service-tokens
-        // template:begin grpc-authn:bootstrap-grpc-verifier
-        let verifier = match &auth {
-            PreparedAuth::Enabled(verifier) => Some((**verifier).clone()),
-            // Service tokens replace bearer authentication on this listener.
-            PreparedAuth::None if service_tokens => None,
-            PreparedAuth::None => {
-                return Err(service_config::ValidationError::new(
-                    "grpc.enabled",
-                    "requires authn.mode = oidc-jwt or oidc-introspection",
-                )
-                .into());
-            }
-        };
-        // template:end grpc-authn:bootstrap-grpc-verifier
-        // template:begin grpc:bootstrap-grpc-prepare-call
-        let limits = crate::grpc::limits(&config.grpc);
-        let services = crate::grpc::services(
+        Some(grpc::prepare(
+            config,
             grpc_registration,
             &state,
-            &mut BackgroundRegistration { background },
-        )?;
-        // template:end grpc:bootstrap-grpc-prepare-call
-        // template:begin service-auth:bootstrap-grpc-service-auth
-        let mut services = services;
-        if let Some(verifier) = &service_auth.verifier {
-            services.authenticate_callers(verifier.clone());
-        }
-        // template:end service-auth:bootstrap-grpc-service-auth
-        // template:begin grpc:bootstrap-grpc-prepare-router
-        Some((
-            infra_grpc::router(
-                services,
-                readiness.reader(),
-                // template:end grpc:bootstrap-grpc-prepare-router
-                // template:begin grpc-authn:bootstrap-grpc-verifier-argument
-                verifier,
-                // template:end grpc-authn:bootstrap-grpc-verifier-argument
-                // template:begin grpc:bootstrap-grpc-prepare-finish
-                limits,
-            )?,
-            crate::grpc::tls(&config.grpc)?,
-            infra_grpc::server_options(limits),
-        ))
+            readiness,
+            &auth,
+            // template:end grpc:bootstrap-grpc-prepare-start
+            // template:begin service-auth:bootstrap-grpc-service-auth-argument
+            &service_auth,
+            // template:end service-auth:bootstrap-grpc-service-auth-argument
+            // template:begin grpc:bootstrap-grpc-prepare-finish
+            background,
+        )?)
     } else {
         None
     };
@@ -696,11 +636,11 @@ async fn start(
     }
 
     // template:begin grpc:bootstrap-grpc-bind
-    if let Some((grpc_router, tls, grpc_options)) = grpc_prepared {
+    if let Some(grpc) = grpc_prepared {
         let addr = config.grpc.listen_addr()?;
-        let bound = match tls {
-            Some(tls) => Server::bind_tls(addr, grpc_router, grpc_options, tls).await?,
-            None => Server::bind(addr, grpc_router, grpc_options).await?,
+        let bound = match grpc.tls {
+            Some(tls) => Server::bind_tls(addr, grpc.router, grpc.options, tls).await?,
+            None => Server::bind(addr, grpc.router, grpc.options).await?,
         };
         let listener = serving.grpc_listener.insert(bound);
         background.watch_listener("grpc_accept", listener);
@@ -718,63 +658,17 @@ enum PreparedAuth {
     // template:end authn:bootstrap-prepared-auth-enabled
 }
 
-fn tracing_options(config: &Config) -> TracingOptions {
-    let otel = &config.observability.otel;
-    let sampler = match otel.traces_sampler {
-        TracesSampler::AlwaysOn => ResolvedSampler::AlwaysOn,
-        TracesSampler::AlwaysOff => ResolvedSampler::AlwaysOff,
-        TracesSampler::TraceIdRatio => ResolvedSampler::TraceIdRatio(otel.traces_sampler_arg),
-        TracesSampler::ParentBasedTraceIdRatio => {
-            ResolvedSampler::ParentBasedTraceIdRatio(otel.traces_sampler_arg)
-        }
-    };
-    TracingOptions {
-        service_name: otel.service_name.clone(),
-        service_version: config.app.version.clone(),
-        vcs_revision: config.app.commit.clone(),
-        instance_id: config.app.instance_id.clone(),
-        deployment_environment: config.app.env.clone(),
-        sampler,
-        otlp_endpoint: otel.exporter.otlp_endpoint.clone(),
-        otlp_headers: otel.exporter.otlp_headers.clone(),
-    }
-}
-
-/// One record with the non-secret facts an operator needs on every boot.
-fn log_startup_summary(config: &Config, exporter: &ExporterState) {
-    exporter.log();
-    tracing::info!(
-        app.env = %config.app.env,
-        app.version = %config.app.version,
-        app.commit = %config.app.commit,
-        runtime.worker_threads = tokio::runtime::Handle::current().metrics().num_workers(),
-        http.addr = %config.http.addr,
-        http.request_timeout = ?config.http.request_timeout,
-        http.drain_timeout = ?config.http.drain_timeout,
-        http.grace_period = ?config.http.grace_period,
-        observability.metrics.addr = ?config.observability.metrics.addr,
-        // template:begin postgres:bootstrap-startup-log-postgres
-        postgres.enabled = config.postgres.enabled,
-        // template:end postgres:bootstrap-startup-log-postgres
-        // template:begin service-auth:bootstrap-startup-log-service-auth
-        service_auth.mode = config.service_auth.mode(),
-        // template:end service-auth:bootstrap-startup-log-service-auth
-        log.level = %config.log.level,
-        tracing.exporter = exporter.as_str(),
-        "service_starting"
-    );
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use service_config::OtelConfig;
 
     /// The global recorder installs once per test binary, so every test that
     /// starts the process shares it.
     fn shared_metrics() -> Metrics {
         static METRICS: std::sync::OnceLock<Metrics> = std::sync::OnceLock::new();
-        METRICS.get_or_init(|| install_metrics().unwrap()).clone()
+        METRICS
+            .get_or_init(|| telemetry::install_metrics().unwrap())
+            .clone()
     }
 
     #[tokio::test(start_paused = true)]
@@ -823,23 +717,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn tracing_options_attaches_the_ratio_only_to_ratio_variants() {
-        let mut config = Config::default();
-        config.observability.otel = OtelConfig {
-            traces_sampler: TracesSampler::AlwaysOn,
-            traces_sampler_arg: 0.5,
-            ..OtelConfig::default()
-        };
-        let options = tracing_options(&config);
-        assert!(matches!(options.sampler, ResolvedSampler::AlwaysOn));
-
-        config.observability.otel.traces_sampler = TracesSampler::TraceIdRatio;
-        let options = tracing_options(&config);
-        assert!(
-            matches!(options.sampler, ResolvedSampler::TraceIdRatio(ratio) if (ratio - 0.5).abs() < f64::EPSILON)
-        );
-    }
     #[tokio::test]
     async fn a_later_bind_failure_retains_and_closes_the_first_listener_and_live_peer() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
