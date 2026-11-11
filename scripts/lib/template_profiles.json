@@ -1610,6 +1610,7 @@
       "crates/infra-http/src/webhooks.rs",
       "crates/service/src/bootstrap/webhooks.rs",
       "crates/infra-webhooks/src/inbound.rs",
+      "crates/infra-webhooks/src/inbound/",
       "migrations/20260926022945_create_webhook_receipts.sql",
       "migrations/20260926130000_native_webhook_receipts.sql",
       "test/tests/webhooks/inbound.rs",

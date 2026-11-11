@@ -118,8 +118,10 @@ and a fixed startup map of endpoint clients and key rings. It is the only webhoo
 <!-- template:end webhooks:docs-structure-webhooks-outbound -->
 
 <!-- template:begin inbound-webhooks:docs-structure-webhooks-inbound -->
-`crates/infra-webhooks/src/inbound.rs` owns receipt/processor SQL and the
-consumer seam. `register` in `crates/jobs-worker/src/main.rs` is the adopter's
+`crates/infra-webhooks/src/inbound.rs` owns verified receipt admission and the
+durable `Incoming` payload; `inbound/processing.rs` owns the consumer seam and
+the worker's processing handler; `inbound/maintenance.rs` owns expired-receipt
+cleanup and its backlog observation. `register` in `crates/jobs-worker/src/main.rs` is the adopter's
 registration edit point; real consumer adapters call feature behavior without
 moving it into the provider.
 `crates/infra-http/src/webhooks.rs` owns only route/state/
