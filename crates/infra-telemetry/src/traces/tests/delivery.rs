@@ -237,6 +237,8 @@ fn unusable_trust_material_degrades_the_exporter_and_names_the_variable() {
             &Endpoint::Typed("https://127.0.0.1:1"),
             HashMap::new(),
             &trust,
+            export_timeout(&|_: &str| None),
+            &|_: &str| None,
         )
         .expect_err("unusable trust material prevents construction");
         assert!(error.to_string().starts_with(expected));
@@ -300,7 +302,7 @@ fn batch_handle(exporter: impl SpanExporter + 'static) -> TracerProviderHandle {
     let drain = Arc::default();
     let processor = sdktrace::BatchSpanProcessor::builder(ObservedExporter {
         inner: exporter,
-        timeout: export_timeout(),
+        timeout: export_timeout(&|_: &str| None),
         drain: Arc::clone(&drain),
     })
     .with_batch_config(
@@ -330,6 +332,8 @@ fn a_receiver_failure_only_poisons_the_drain_if_it_completes_after_shutdown_begi
             &Endpoint::Typed(&format!("http://{}/v1/traces", collector.addr)),
             HashMap::new(),
             &CollectorTrust::default(),
+            export_timeout(&|_: &str| None),
+            &|_: &str| None,
         )
         .unwrap();
         let handle = batch_handle(exporter);
@@ -404,6 +408,8 @@ fn an_exhausted_allowance_returns_before_the_receiver_is_released() {
             &Endpoint::Typed(&format!("http://{}/v1/traces", collector.addr)),
             HashMap::new(),
             &CollectorTrust::default(),
+            export_timeout(&|_: &str| None),
+            &|_: &str| None,
         )
         .unwrap();
         let handle = batch_handle(exporter);
@@ -498,9 +504,11 @@ fn collector_diagnostics_cannot_escape_to_local_records_or_span_events() {
                                     HEADER_SECRET.to_owned(),
                                 )]),
                                 &CollectorTrust::default(),
+                                export_timeout(&|_: &str| None),
+                                &|_: &str| None,
                             )
                             .unwrap(),
-                            timeout: export_timeout(),
+                            timeout: export_timeout(&|_: &str| None),
                             drain: Arc::default(),
                         };
                         let result = exporter

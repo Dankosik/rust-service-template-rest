@@ -64,7 +64,7 @@ async fn shutdown_reserves_join_slack_inside_the_absolute_deadline() {
         };
         let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
         assert_eq!(
-            handle.shutdown_until(sdk_budget, deadline).await,
+            handle.shutdown_with_budget(sdk_budget, deadline).await,
             ProviderShutdown::Completed
         );
         let budget = budget.await.unwrap();

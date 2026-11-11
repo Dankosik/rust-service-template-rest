@@ -14,7 +14,9 @@ mod format;
 mod output;
 mod sdk_diagnostics;
 
-pub use output::{LogSnapshot, LoggerGuard, LoggerShutdown, LoggerShutdownReasons};
+pub use output::{
+    DropReason, LogSnapshot, LoggerGuard, LoggerShutdown, LoggerShutdownReasons, SinkOperation,
+};
 
 use crate::traces::TracerProviderHandle;
 use tracing::level_filters::LevelFilter;
@@ -56,7 +58,7 @@ pub enum LoggingError {
     AlreadyInstalled,
     #[error("a global `log` logger is already installed")]
     LogLoggerInstalled,
-    #[error("the local logging worker could not start")]
+    #[error("start the logging writer thread: {0}")]
     WorkerStart(#[source] std::io::Error),
 }
 
@@ -142,6 +144,11 @@ pub fn install_panic_hook() {
     }));
 }
 
+pub(crate) fn describe_metrics() {
+    output::describe_metrics();
+    sdk_diagnostics::describe_metrics();
+}
+
 pub(crate) fn publish_observations() {
     output::publish();
     sdk_diagnostics::publish();
@@ -165,7 +172,11 @@ fn directive_filters(directive: &str) -> Result<DirectiveFilters, LoggingError> 
     })
 }
 
-/// A level filter that also enables every span at INFO and above.
+/// The directive's filter under the process-wide [`Admission`] rules: SDK
+/// diagnostic targets are refused, except known diagnostics, which
+/// [`Layer::event_enabled`] counts through [`sdk_diagnostics::observe`] as
+/// their only output; `log` bridge records are decided per event; and every
+/// span at INFO and above is enabled.
 ///
 /// The HTTP and gRPC server spans, the job attempt span, and the client
 /// spans are INFO. Under a plain filter `log.level = warn` disables them:
@@ -189,7 +200,7 @@ enum Admission {
 }
 
 fn admission(metadata: &Metadata<'_>) -> Admission {
-    if sdk_diagnostics::denied(metadata.target()) {
+    if sdk_diagnostics::is_denied_target(metadata.target()) {
         if sdk_diagnostics::is_known_diagnostic(metadata) {
             Admission::Always
         } else {
@@ -228,7 +239,7 @@ impl<S: Subscriber, F: Layer<S>> Layer<S> for WithInfoSpans<F> {
     fn event_enabled(&self, event: &Event<'_>, ctx: Context<'_, S>) -> bool {
         let normalized = event.normalized_metadata();
         let metadata = normalized.as_ref().unwrap_or_else(|| event.metadata());
-        if sdk_diagnostics::denied(metadata.target()) {
+        if sdk_diagnostics::is_denied_target(metadata.target()) {
             sdk_diagnostics::observe(event, metadata);
             return false;
         }

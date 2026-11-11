@@ -19,7 +19,7 @@
 //! them, so this module builds the exporter's HTTP client when one is set.
 
 use std::collections::HashMap;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -49,9 +49,14 @@ pub(super) const CLIENT_KEY_VARS: [&str; 2] = [
     "OTEL_EXPORTER_OTLP_CLIENT_KEY",
 ];
 
+/// Whether a variable's value is empty or whitespace only.
+fn is_blank(value: &OsStr) -> bool {
+    value.to_string_lossy().trim().is_empty()
+}
+
 /// A variable's value unless blank.
 fn non_blank(value: OsString) -> Option<OsString> {
-    (!value.to_string_lossy().trim().is_empty()).then_some(value)
+    (!is_blank(&value)).then_some(value)
 }
 
 /// Where spans are exported.
@@ -96,13 +101,13 @@ pub(super) fn resolve_endpoint(
         } else {
             OTEL_EXPORTER_OTLP_HEADERS
         };
-        if env(name).and_then(non_blank).is_some() {
+        if env(name).as_deref().is_some_and(|value| !is_blank(value)) {
             return Err(TracingError::AmbientCredential { name });
         }
         return Ok(Some(Endpoint::Typed(endpoint)));
     }
     let traces = env(OTEL_EXPORTER_OTLP_TRACES_ENDPOINT);
-    if traces.clone().and_then(non_blank).is_some() {
+    if traces.as_deref().is_some_and(|value| !is_blank(value)) {
         return Ok(Some(Endpoint::Environment));
     }
     let Some(root) = env(OTEL_EXPORTER_OTLP_ENDPOINT).and_then(non_blank) else {
@@ -152,12 +157,12 @@ pub(super) struct CollectorTrust {
 }
 
 impl CollectorTrust {
-    pub(super) fn from_env(var: impl Fn(&str) -> Option<OsString>) -> Self {
+    pub(super) fn from_env(env: impl Fn(&str) -> Option<OsString>) -> Self {
         let file = |variables: [&'static str; 2]| {
             variables.into_iter().find_map(|variable| {
                 Some(TrustFile {
                     variable,
-                    path: var(variable).and_then(non_blank)?.into(),
+                    path: env(variable).and_then(non_blank)?.into(),
                 })
             })
         };
@@ -210,10 +215,11 @@ pub(super) fn span_exporter(
     endpoint: &Endpoint<'_>,
     headers: HashMap<String, String>,
     trust: &CollectorTrust,
+    timeout: Duration,
+    env: &impl Fn(&str) -> Option<OsString>,
 ) -> Result<opentelemetry_otlp::SpanExporter, ExporterError> {
     // Always OTLP/HTTP protobuf. An environment endpoint still lets the SDK
     // pick the URL; it does not select gRPC or another protocol.
-    let timeout = export_timeout();
     let mut builder = opentelemetry_otlp::SpanExporter::builder()
         .with_http()
         .with_protocol(opentelemetry_otlp::Protocol::HttpBinary)
@@ -226,7 +232,7 @@ pub(super) fn span_exporter(
     if !headers.is_empty() {
         builder = builder.with_headers(headers);
     }
-    if let Some(compression) = compression(|name| std::env::var_os(name))? {
+    if let Some(compression) = compression(env)? {
         builder = builder.with_compression(compression);
     }
     if let Some(client) = collector_client(trust, timeout)? {
@@ -240,24 +246,23 @@ pub(super) fn span_exporter(
 /// The SDK skips a value it cannot apply with a warning nobody sees, so such
 /// a value fails the build here instead.
 fn compression(
-    lookup: impl Fn(&str) -> Option<OsString>,
+    env: &impl Fn(&str) -> Option<OsString>,
 ) -> Result<Option<opentelemetry_otlp::Compression>, ExporterError> {
-    for variable in [
+    let Some((variable, value)) = [
         OTEL_EXPORTER_OTLP_TRACES_COMPRESSION,
         OTEL_EXPORTER_OTLP_COMPRESSION,
-    ] {
-        let Some(value) = lookup(variable).filter(|value| !value.is_empty()) else {
-            continue;
-        };
-        return match value.to_str() {
-            Some(value) if value.eq_ignore_ascii_case("gzip") => {
-                Ok(Some(opentelemetry_otlp::Compression::Gzip))
-            }
-            Some(value) if value.eq_ignore_ascii_case("none") => Ok(None),
-            _ => Err(ExporterError::Compression { variable }),
-        };
+    ]
+    .into_iter()
+    .find_map(|variable| Some((variable, env(variable).filter(|value| !value.is_empty())?))) else {
+        return Ok(None);
+    };
+    match value.to_str() {
+        Some(value) if value.eq_ignore_ascii_case("gzip") => {
+            Ok(Some(opentelemetry_otlp::Compression::Gzip))
+        }
+        Some(value) if value.eq_ignore_ascii_case("none") => Ok(None),
+        _ => Err(ExporterError::Compression { variable }),
     }
-    Ok(None)
 }
 
 /// The exporter's HTTP client when a trust variable is set; `None` leaves
@@ -335,15 +340,15 @@ fn trusting_client(
 
 /// The export timeout as the SDK resolves it from the environment: the
 /// traces variable, then the general one, in milliseconds, then ten seconds.
-/// Set on the exporter as well, so the SDK's retry deadline and a supplied
-/// client share this one value.
-pub(super) fn export_timeout() -> Duration {
+/// Set on the exporter as well, so the SDK's retry deadline, a supplied
+/// client, and the export classification share this one value.
+pub(super) fn export_timeout(env: &impl Fn(&str) -> Option<OsString>) -> Duration {
     [
         OTEL_EXPORTER_OTLP_TRACES_TIMEOUT,
         OTEL_EXPORTER_OTLP_TIMEOUT,
     ]
     .into_iter()
-    .find_map(|name| std::env::var(name).ok()?.parse().ok())
+    .find_map(|name| env(name)?.to_str()?.parse().ok())
     .map_or(OTEL_EXPORTER_OTLP_TIMEOUT_DEFAULT, Duration::from_millis)
 }
 

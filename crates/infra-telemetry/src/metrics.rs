@@ -35,11 +35,11 @@ pub const DEFAULT_BUCKETS: &[f64] = &[
 const HISTOGRAM_UPKEEP_INTERVAL: Duration = Duration::from_secs(1);
 
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
-const SCHEDULER_LAG: &str = "runtime_scheduler_lag_seconds";
-const SCHEDULER_LAG_MAX: &str = "runtime_scheduler_lag_max_seconds";
-const SCHEDULER_SAMPLES: &str = "runtime_scheduler_samples_total";
-const SCHEDULER_AGE: &str = "runtime_scheduler_sample_age_seconds";
-const SCHEDULER_FRESHNESS: &str = "runtime_scheduler_freshness_limit_seconds";
+const SCHEDULER_LAG_METRIC: &str = "runtime_scheduler_lag_seconds";
+const SCHEDULER_LAG_MAX_METRIC: &str = "runtime_scheduler_lag_max_seconds";
+const SCHEDULER_SAMPLES_METRIC: &str = "runtime_scheduler_samples_total";
+const SCHEDULER_AGE_METRIC: &str = "runtime_scheduler_sample_age_seconds";
+const SCHEDULER_FRESHNESS_METRIC: &str = "runtime_scheduler_freshness_limit_seconds";
 const SCHEDULER_LAG_BUCKETS: &[f64] = &[
     0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0,
 ];
@@ -61,29 +61,29 @@ impl Progress {
     /// first sample.
     fn describe_and_initialize() {
         metrics::describe_histogram!(
-            SCHEDULER_LAG,
+            SCHEDULER_LAG_METRIC,
             "Monotonic lateness of the runtime progress sampler."
         );
         metrics::describe_gauge!(
-            SCHEDULER_LAG_MAX,
+            SCHEDULER_LAG_MAX_METRIC,
             "Largest actual observed monotonic lateness since sampler startup; NaN before the first sample."
         );
         metrics::describe_counter!(
-            SCHEDULER_SAMPLES,
+            SCHEDULER_SAMPLES_METRIC,
             "Completed runtime progress observations."
         );
         metrics::describe_gauge!(
-            SCHEDULER_AGE,
+            SCHEDULER_AGE_METRIC,
             "Monotonic age of the last completed observation; NaN before the first sample."
         );
         metrics::describe_gauge!(
-            SCHEDULER_FRESHNESS,
+            SCHEDULER_FRESHNESS_METRIC,
             "Observation freshness threshold in seconds; not a readiness policy."
         );
-        metrics::gauge!(SCHEDULER_LAG_MAX).set(f64::NAN);
-        metrics::counter!(SCHEDULER_SAMPLES).absolute(0);
-        metrics::gauge!(SCHEDULER_AGE).set(f64::NAN);
-        metrics::gauge!(SCHEDULER_FRESHNESS).set(1.0);
+        metrics::gauge!(SCHEDULER_LAG_MAX_METRIC).set(f64::NAN);
+        metrics::counter!(SCHEDULER_SAMPLES_METRIC).absolute(0);
+        metrics::gauge!(SCHEDULER_AGE_METRIC).set(f64::NAN);
+        metrics::gauge!(SCHEDULER_FRESHNESS_METRIC).set(1.0);
     }
 
     /// Stores a completed observation; returns the largest lag so far.
@@ -134,13 +134,14 @@ impl Metrics {
         }
         let handle = builder
             .set_buckets_for_metric(
-                Matcher::Full(SCHEDULER_LAG.to_owned()),
+                Matcher::Full(SCHEDULER_LAG_METRIC.to_owned()),
                 SCHEDULER_LAG_BUCKETS,
             )?
             .install_recorder()?;
         let process = metrics_process::Collector::default();
         process.describe();
         crate::traces::describe_metrics();
+        crate::logging::describe_metrics();
         crate::logging::publish_observations();
         Progress::describe_and_initialize();
         Ok(Self {
@@ -163,7 +164,7 @@ impl Metrics {
     pub fn render(&self) -> String {
         self.process.collect();
         crate::logging::publish_observations();
-        metrics::gauge!(SCHEDULER_AGE).set(self.progress.age());
+        metrics::gauge!(SCHEDULER_AGE_METRIC).set(self.progress.age());
         self.handle.render()
     }
 
@@ -183,11 +184,11 @@ impl Metrics {
             }
             let observed = Instant::now();
             let lag = observed.saturating_duration_since(expected);
-            metrics::histogram!(SCHEDULER_LAG).record(lag.as_secs_f64());
-            metrics::counter!(SCHEDULER_SAMPLES).increment(1);
+            metrics::histogram!(SCHEDULER_LAG_METRIC).record(lag.as_secs_f64());
+            metrics::counter!(SCHEDULER_SAMPLES_METRIC).increment(1);
             let completed = Instant::now();
             let max_lag = self.progress.record(completed, lag);
-            metrics::gauge!(SCHEDULER_LAG_MAX).set(max_lag.as_secs_f64());
+            metrics::gauge!(SCHEDULER_LAG_MAX_METRIC).set(max_lag.as_secs_f64());
             expected = completed + PROGRESS_INTERVAL;
         }
     }
@@ -274,10 +275,10 @@ mod tests {
         tokio::pin!(sampler);
         assert!(sampler.as_mut().now_or_never().is_none());
         let startup = scraper.render();
-        assert_eq!(value(&startup, SCHEDULER_SAMPLES), 0.0);
-        assert!(value(&startup, SCHEDULER_AGE).is_nan());
-        assert!(value(&startup, SCHEDULER_LAG_MAX).is_nan());
-        assert_eq!(value(&startup, SCHEDULER_FRESHNESS), 1.0);
+        assert_eq!(value(&startup, SCHEDULER_SAMPLES_METRIC), 0.0);
+        assert!(value(&startup, SCHEDULER_AGE_METRIC).is_nan());
+        assert!(value(&startup, SCHEDULER_LAG_MAX_METRIC).is_nan());
+        assert_eq!(value(&startup, SCHEDULER_FRESHNESS_METRIC), 1.0);
         assert!(
             !startup
                 .lines()
@@ -287,18 +288,18 @@ mod tests {
         tokio::time::advance(PROGRESS_INTERVAL).await;
         assert!(sampler.as_mut().now_or_never().is_none());
         let first = scraper.render();
-        assert_eq!(value(&first, SCHEDULER_SAMPLES), 1.0);
+        assert_eq!(value(&first, SCHEDULER_SAMPLES_METRIC), 1.0);
         assert_eq!(value(&first, "runtime_scheduler_lag_seconds_sum"), 0.0);
-        assert_eq!(value(&first, SCHEDULER_AGE), 0.0);
-        assert_eq!(value(&first, SCHEDULER_LAG_MAX), 0.0);
+        assert_eq!(value(&first, SCHEDULER_AGE_METRIC), 0.0);
+        assert_eq!(value(&first, SCHEDULER_LAG_MAX_METRIC), 0.0);
 
         // Keep the sampler unpolled while the scrape path still makes progress.
         tokio::time::advance(Duration::from_millis(2100)).await;
-        assert_eq!(value(&scraper.render(), SCHEDULER_AGE), 2.1);
+        assert_eq!(value(&scraper.render(), SCHEDULER_AGE_METRIC), 2.1);
         assert!(sampler.as_mut().now_or_never().is_none());
         let resumed = scraper.render();
-        assert_eq!(value(&resumed, SCHEDULER_SAMPLES), 2.0);
-        assert_eq!(value(&resumed, SCHEDULER_LAG_MAX), 2.0);
+        assert_eq!(value(&resumed, SCHEDULER_SAMPLES_METRIC), 2.0);
+        assert_eq!(value(&resumed, SCHEDULER_LAG_MAX_METRIC), 2.0);
         assert_eq!(value(&resumed, "runtime_scheduler_lag_seconds_sum"), 2.0);
         assert_eq!(
             value(&resumed, "runtime_scheduler_lag_seconds_bucket{le=\"1\"}"),
@@ -309,23 +310,23 @@ mod tests {
             2.0
         );
         assert!(sampler.as_mut().now_or_never().is_none());
-        assert_eq!(value(&scraper.render(), SCHEDULER_SAMPLES), 2.0);
+        assert_eq!(value(&scraper.render(), SCHEDULER_SAMPLES_METRIC), 2.0);
 
         tokio::time::advance(PROGRESS_INTERVAL).await;
         assert!(sampler.as_mut().now_or_never().is_none());
         let recovered = scraper.render();
-        assert_eq!(value(&recovered, SCHEDULER_SAMPLES), 3.0);
-        assert_eq!(value(&recovered, SCHEDULER_LAG_MAX), 2.0);
+        assert_eq!(value(&recovered, SCHEDULER_SAMPLES_METRIC), 3.0);
+        assert_eq!(value(&recovered, SCHEDULER_LAG_MAX_METRIC), 2.0);
         assert_eq!(value(&recovered, "runtime_scheduler_lag_seconds_sum"), 2.0);
 
         tokio::time::advance(Duration::from_millis(1500)).await;
-        assert_eq!(value(&scraper.render(), SCHEDULER_AGE), 1.5);
+        assert_eq!(value(&scraper.render(), SCHEDULER_AGE_METRIC), 1.5);
         cancel.cancel();
         assert!(sampler.as_mut().now_or_never().is_some());
-        assert_eq!(value(&scraper.render(), SCHEDULER_SAMPLES), 3.0);
+        assert_eq!(value(&scraper.render(), SCHEDULER_SAMPLES_METRIC), 3.0);
         tokio::time::advance(Duration::from_secs(1)).await;
         let stopped = scraper.render();
-        assert_eq!(value(&stopped, SCHEDULER_AGE), 2.5);
-        assert_eq!(value(&stopped, SCHEDULER_LAG_MAX), 2.0);
+        assert_eq!(value(&stopped, SCHEDULER_AGE_METRIC), 2.5);
+        assert_eq!(value(&stopped, SCHEDULER_LAG_MAX_METRIC), 2.0);
     }
 }

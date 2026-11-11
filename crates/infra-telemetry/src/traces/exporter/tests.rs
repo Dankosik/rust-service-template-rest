@@ -196,6 +196,8 @@ fn https_otlp_endpoint_is_admitted_by_the_exporter_client() {
         &Endpoint::Typed("https://127.0.0.1:1/v1/traces"),
         HashMap::new(),
         &CollectorTrust::default(),
+        export_timeout(&|_: &str| None),
+        &|_: &str| None,
     )
     .expect("https endpoint must build");
     let result = {
@@ -231,17 +233,17 @@ fn compression_variables_select_gzip_or_none_and_refuse_the_rest() {
     let traces = OTEL_EXPORTER_OTLP_TRACES_COMPRESSION;
     let general = OTEL_EXPORTER_OTLP_COMPRESSION;
 
-    assert_eq!(compression(env(&[])).unwrap(), None);
+    assert_eq!(compression(&env(&[])).unwrap(), None);
     assert_eq!(
-        compression(env(&[(general, "GZIP")])).unwrap(),
+        compression(&env(&[(general, "GZIP")])).unwrap(),
         Some(opentelemetry_otlp::Compression::Gzip)
     );
     assert_eq!(
-        compression(env(&[(traces, "none"), (general, "gzip")])).unwrap(),
+        compression(&env(&[(traces, "none"), (general, "gzip")])).unwrap(),
         None
     );
     assert_eq!(
-        compression(env(&[(traces, ""), (general, "gzip")])).unwrap(),
+        compression(&env(&[(traces, ""), (general, "gzip")])).unwrap(),
         Some(opentelemetry_otlp::Compression::Gzip)
     );
     for (pairs, refused) in [
@@ -250,7 +252,7 @@ fn compression_variables_select_gzip_or_none_and_refuse_the_rest() {
     ] {
         assert!(
             matches!(
-                compression(env(pairs)),
+                compression(&env(pairs)),
                 Err(ExporterError::Compression { variable }) if variable == refused
             ),
             "{pairs:?}"
