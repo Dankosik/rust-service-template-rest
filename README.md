@@ -1,16 +1,19 @@
-<h1 align="center">
-  <img src="docs/assets/banner.png" alt="rust-service-template-rest: a crab with a wrench and a laptop" width="760">
-</h1>
-
+<!-- template:begin source-template:readme-banner -->
 <p align="center">
-  <strong>Rust REST API service template on Tokio and axum, built to be developed by coding agents.</strong>
+  <img src="docs/assets/banner.png" alt="rust-service-template-rest: a crab with a wrench and a laptop" width="760">
 </p>
 
 <p align="center">
   <a href="#start-a-service">Start a service</a> ·
-  <a href="#how-agents-work-here">How agents work here</a> ·
-  <a href="https://github.com/Dankosik/rust-service-template-rest">Repository</a>
+  <a href="#how-agents-work-here">How agents work here</a>
 </p>
+<!-- template:end source-template:readme-banner -->
+
+# rust-service-template-rest
+
+Rust REST API service template on Tokio and axum, built to be developed by coding agents.
+
+Repository: https://github.com/Dankosik/rust-service-template-rest
 
 <!-- template:begin source-template:readme-template-overview -->
 [![CI](https://github.com/Dankosik/rust-service-template-rest/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Dankosik/rust-service-template-rest/actions/workflows/ci.yml)
