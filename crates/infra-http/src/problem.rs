@@ -243,14 +243,6 @@ pub(crate) fn body_too_large() -> Problem {
     Problem::new(Code::RequestEntityTooLarge).detail("request body exceeds the configured limit")
 }
 
-/// Whether a body read failed at a length limit. axum boxes the transport
-/// limit's error into [`axum::Error`] when a request has no `Content-Length`,
-/// so the limit can sit anywhere in the source chain.
-pub(crate) fn caused_by_length_limit(error: &(dyn std::error::Error + 'static)) -> bool {
-    std::iter::successors(Some(error), |&error| error.source())
-        .any(<dyn std::error::Error>::is::<http_body_util::LengthLimitError>)
-}
-
 /// The 400 for a request body stream that failed before it was fully read.
 pub(crate) fn body_unreadable() -> Problem {
     Problem::new(Code::BadRequest).detail("request body could not be read")

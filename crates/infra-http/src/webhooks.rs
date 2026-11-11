@@ -21,9 +21,7 @@ use utoipa_axum::routes;
 use crate::extract::Path;
 use crate::harden::RequestDeadline;
 use crate::problem::responses::WebhookProblemResponses;
-use crate::problem::{
-    Code, Problem, body_too_large, caused_by_length_limit, sanitized_internal_error,
-};
+use crate::problem::{Code, Problem, body_too_large, sanitized_internal_error};
 
 /// Webhook ingress results. Label `outcome` is `accepted`, `duplicate`,
 /// `rejected`, `unavailable`, or `unknown_endpoint`. A configured endpoint
@@ -221,6 +219,16 @@ impl EndpointOutcome {
         };
         counter.increment(1);
     }
+}
+
+/// Whether a body read failed at a length limit. axum boxes the transport
+/// limit's error into [`axum::Error`] when a request has no `Content-Length`,
+/// so the limit can sit anywhere in the source chain. The inbound-webhooks
+/// and http-idempotency profiles each keep a copy: a shared one in
+/// `problem.rs` is dead code in a projection that drops both.
+fn caused_by_length_limit(error: &(dyn std::error::Error + 'static)) -> bool {
+    std::iter::successors(Some(error), |&error| error.source())
+        .any(<dyn std::error::Error>::is::<http_body_util::LengthLimitError>)
 }
 
 #[cfg(test)]

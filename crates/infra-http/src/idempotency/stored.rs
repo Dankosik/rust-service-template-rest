@@ -10,7 +10,7 @@ use axum::response::Response;
 use http_body_util::{BodyExt, Limited};
 use infra_idempotency_store::{HeaderPair, Record};
 
-use crate::problem::caused_by_length_limit;
+use super::caused_by_length_limit;
 
 /// The largest success body the boundary stores and replays (1 MiB).
 const MAX_STORED_BODY_BYTES: usize = 1_048_576;
