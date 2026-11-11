@@ -8,7 +8,9 @@ use std::time::Duration;
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
-use infra_idempotency_store::{AttemptError, Attempted, CallerIdentity, Digest, ScopeKey, Store};
+use infra_idempotency_store::{
+    AttemptError, Attempted, CallerIdentity, Digest, Record, ScopeKey, Store,
+};
 use tokio::time::Instant;
 
 use super::Tx;
@@ -162,21 +164,7 @@ impl Idempotency {
                     &fingerprint,
                     attempt_end,
                     async |tx: &mut Tx<'_>| {
-                        let response = work(tx).await.into_response();
-                        if !response.status().is_success() {
-                            return Err(Rollback::Response(response));
-                        }
-                        stored::capture(response)
-                            .await
-                            .and_then(|stored| Ok((stored.to_record()?, stored)))
-                            .map_err(|unstorable| {
-                                tracing::warn!(
-                                    operation = %operation_id,
-                                    failure = unstorable.class(),
-                                    "http_idempotency_success_not_stored"
-                                );
-                                Rollback::Unstorable
-                            })
+                        commit_candidate(work(tx).await.into_response(), &operation_id).await
                     },
                 );
                 tokio::time::timeout_at(attempt_end, attempt)
@@ -188,6 +176,31 @@ impl Idempotency {
             .settle(deadline.at(), outcome)
             .await
     }
+}
+
+/// Only a storable 2xx commits; any other response rolls the work back.
+#[expect(
+    clippy::result_large_err,
+    reason = "the store's work contract returns the rollback, which carries the handler's Response"
+)]
+async fn commit_candidate(
+    response: Response,
+    operation_id: &str,
+) -> Result<(Record, Stored), Rollback> {
+    if !response.status().is_success() {
+        return Err(Rollback::Response(response));
+    }
+    stored::capture(response)
+        .await
+        .and_then(|stored| Ok((stored.to_record()?, stored)))
+        .map_err(|unstorable| {
+            tracing::warn!(
+                operation = operation_id,
+                failure = unstorable.class(),
+                "http_idempotency_success_not_stored"
+            );
+            Rollback::Unstorable
+        })
 }
 
 /// What work hands back for rollback.
@@ -252,14 +265,14 @@ fn map_attempted(
         Ok(Attempted::RolledBack(Rollback::Unstorable)) => {
             Answer::boundary_problem(sanitized_internal_error(), Outcome::Unstorable)
         }
-        Err(AttemptError::Integrity) => integrity_failure(),
+        Err(AttemptError::Integrity) => integrity_failure(operation_id, "store_undecodable"),
         Ok(Attempted::Mismatch) => Answer::boundary_problem(key_mismatch(), Outcome::KeyMismatch),
         Ok(Attempted::Replay(record)) => match stored::decode(record) {
             Ok(stored) => Answer::operation_response(
                 mark_provenance(stored.into_response(), Provenance::Replayed),
                 Outcome::Replayed,
             ),
-            Err(stored::Undecodable) => integrity_failure(),
+            Err(stored::Undecodable) => integrity_failure(operation_id, "replay_undecodable"),
         },
         Ok(Attempted::InProgress) => {
             Answer::boundary_problem(in_progress(scope, operation_id), Outcome::InProgress)
@@ -279,8 +292,12 @@ pub(super) fn mark_provenance(mut response: Response, provenance: Provenance) ->
     response
 }
 
-fn integrity_failure() -> Answer {
-    tracing::error!(failure = "integrity", "http_idempotency_integrity_failed");
+fn integrity_failure(operation_id: &str, failure: &'static str) -> Answer {
+    tracing::error!(
+        operation = operation_id,
+        failure,
+        "http_idempotency_integrity_failed"
+    );
     Answer::boundary_problem(sanitized_internal_error(), Outcome::Integrity)
 }
 
