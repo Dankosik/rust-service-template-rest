@@ -34,9 +34,9 @@ use tracing_subscriber::registry::LookupSpan;
 use super::LoggingFormat;
 use super::output::{DropReason, MAX_RECORD_BYTES, Output, Record};
 
-const MAX_FIELDS: usize = 128;
-const SPAN_BYTES: usize = 4096;
-const SPAN_FIELDS: usize = 64;
+const MAX_EVENT_FIELDS: usize = 128;
+const MAX_SPAN_BYTES: usize = 4096;
+const MAX_SPAN_FIELDS: usize = 64;
 /// Callbacks formatting at once across threads; one more is dropped as `busy`.
 const MAX_ACTIVE_CALLBACKS: usize = 32;
 /// Spans holding a field cache at once; one more is left without one.
@@ -94,11 +94,11 @@ impl Drop for Permit {
 
 /// A callback admitted to format: not reentrant on its thread, and within
 /// [`MAX_ACTIVE_CALLBACKS`].
-struct Admission {
+struct FormatGuard {
     _permit: Permit,
 }
 
-impl Admission {
+impl FormatGuard {
     fn enter() -> Result<Self, DropReason> {
         // A thread whose local is gone is treated as already formatting.
         let already = FORMATTING
@@ -115,7 +115,7 @@ impl Admission {
     }
 }
 
-impl Drop for Admission {
+impl Drop for FormatGuard {
     fn drop(&mut self) {
         let _ = FORMATTING.try_with(|active| active.set(false));
     }
@@ -139,8 +139,19 @@ impl<const N: usize> Bytes<N> {
         }
     }
 
+    /// Bytes that still fit within the limit.
+    fn room(&self) -> usize {
+        self.limit.saturating_sub(self.len)
+    }
+
+    /// Back to `mark`, clearing a failure written after it.
+    fn rewind(&mut self, mark: usize) {
+        self.len = mark;
+        self.failed = false;
+    }
+
     fn append(&mut self, bytes: &[u8]) {
-        if self.failed || bytes.len() > self.limit.saturating_sub(self.len) {
+        if self.failed || bytes.len() > self.room() {
             self.failed = true;
             return;
         }
@@ -191,7 +202,7 @@ const EMPTY: Entry = Entry {
 struct Scratch {
     line: Bytes<MAX_RECORD_BYTES>,
     values: Bytes<MAX_RECORD_BYTES>,
-    fields: [Entry; MAX_FIELDS],
+    fields: [Entry; MAX_EVENT_FIELDS],
     field_count: usize,
     /// The record lacks something its call site gave: a value or field that did
     /// not fit, or the fields of a span with no cache.
@@ -203,10 +214,20 @@ impl Scratch {
         Self {
             line: Bytes::new(MAX_RECORD_BYTES),
             values: Bytes::new(value_limit),
-            fields: [EMPTY; MAX_FIELDS],
+            fields: [EMPTY; MAX_EVENT_FIELDS],
             field_count: 0,
             truncated: false,
         }
+    }
+
+    /// Records the value written since `start` under `key`.
+    fn add_field(&mut self, key: &'static str, start: usize) {
+        self.fields[self.field_count] = Entry {
+            key,
+            start,
+            end: self.values.len,
+        };
+        self.field_count += 1;
     }
 
     /// Nothing more is captured. A span cache cannot be cut, so for a span this
@@ -237,12 +258,7 @@ impl Scratch {
             self.truncated = true;
             return;
         }
-        self.fields[self.field_count] = Entry {
-            key,
-            start,
-            end: self.values.len,
-        };
-        self.field_count += 1;
+        self.add_field(key, start);
     }
 
     /// A string value of an event, written as the JSON string [`Self::push`] would
@@ -251,7 +267,7 @@ impl Scratch {
         if self.values.failed {
             return;
         }
-        if self.field_count == MAX_FIELDS || self.values.limit.saturating_sub(self.values.len) < 2 {
+        if self.field_count == MAX_EVENT_FIELDS || self.values.room() < 2 {
             self.stop();
             return;
         }
@@ -270,12 +286,7 @@ impl Scratch {
             return;
         }
         self.values.append(b"\"");
-        self.fields[self.field_count] = Entry {
-            key,
-            start,
-            end: self.values.len,
-        };
-        self.field_count += 1;
+        self.add_field(key, start);
         self.truncated |= cut;
     }
 
@@ -283,7 +294,7 @@ impl Scratch {
         if self.values.failed {
             return;
         }
-        if self.field_count == MAX_FIELDS {
+        if self.field_count == MAX_EVENT_FIELDS {
             self.stop();
             return;
         }
@@ -293,12 +304,7 @@ impl Scratch {
             self.truncated = true;
             return;
         }
-        self.fields[self.field_count] = Entry {
-            key: field.key,
-            start,
-            end: self.values.len,
-        };
-        self.field_count += 1;
+        self.add_field(field.key, start);
     }
 
     /// Writes the captured span fields into `cache`, the last value of a key
@@ -318,7 +324,7 @@ impl Scratch {
             {
                 continue;
             }
-            if cache.field_count == SPAN_FIELDS {
+            if cache.field_count == MAX_SPAN_FIELDS {
                 return false;
             }
             let start = cache.values.len;
@@ -348,7 +354,7 @@ impl fmt::Write for Quoted<'_> {
         for character in text.chars() {
             let mut unit = [0; 6];
             let escaped = escape(character, &mut unit);
-            if escaped.len() >= self.values.limit.saturating_sub(self.values.len) {
+            if escaped.len() >= self.values.room() {
                 // Stopping the formatter here also ends a source that streams.
                 self.cut = true;
                 return Err(fmt::Error);
@@ -369,16 +375,8 @@ fn escape(character: char, unit: &mut [u8; 6]) -> &[u8] {
         '\r' => b"\\r",
         '\t' => b"\\t",
         '\0'..='\u{1f}' => {
-            const DIGITS: &[u8; 16] = b"0123456789abcdef";
-            let byte = character as u8;
-            *unit = [
-                b'\\',
-                b'u',
-                b'0',
-                b'0',
-                DIGITS[usize::from(byte >> 4)],
-                DIGITS[usize::from(byte & 15)],
-            ];
+            let [high, low] = hex_pair(character as u8);
+            *unit = [b'\\', b'u', b'0', b'0', high, low];
             &unit[..]
         }
         _ => character.encode_utf8(&mut unit[..4]).as_bytes(),
@@ -386,8 +384,8 @@ fn escape(character: char, unit: &mut [u8; 6]) -> &[u8] {
 }
 
 struct SpanFields {
-    values: Bytes<SPAN_BYTES>,
-    fields: [Entry; SPAN_FIELDS],
+    values: Bytes<MAX_SPAN_BYTES>,
+    fields: [Entry; MAX_SPAN_FIELDS],
     field_count: usize,
     _slot: Permit,
 }
@@ -417,9 +415,9 @@ impl Capture<'_> {
             return;
         }
         let max_fields = if self.source == Source::Span {
-            SPAN_FIELDS
+            MAX_SPAN_FIELDS
         } else {
-            MAX_FIELDS
+            MAX_EVENT_FIELDS
         };
         self.scratch.push(key, value, max_fields);
     }
@@ -448,13 +446,7 @@ impl Visit for Capture<'_> {
     fn record_str(&mut self, field: &Field, value: &str) {
         if self.source != Source::Span {
             self.push_text(field.name(), format_args!("{value}"));
-        } else if value.len()
-            > self
-                .scratch
-                .values
-                .limit
-                .saturating_sub(self.scratch.values.len)
-        {
+        } else if value.len() > self.scratch.values.room() {
             self.scratch.stop();
         } else {
             self.push(field.name(), value);
@@ -477,9 +469,9 @@ impl Visit for Capture<'_> {
 }
 
 impl FormatLayer {
-    fn admit(&self) -> Option<Admission> {
-        match Admission::enter() {
-            Ok(admission) => Some(admission),
+    fn admit(&self) -> Option<FormatGuard> {
+        match FormatGuard::enter() {
+            Ok(guard) => Some(guard),
             Err(reason) => {
                 self.output.record_drop(reason);
                 None
@@ -579,18 +571,14 @@ impl FormatLayer {
         if !ids.is_valid() {
             return;
         }
-        write_key(line, "trace_id", self.format);
-        line.append(b"\"");
-        write_hex(line, &ids.trace_id().to_bytes());
-        line.append(b"\"");
-        write_key(line, "span_id", self.format);
-        line.append(b"\"");
-        write_hex(line, &ids.span_id().to_bytes());
-        line.append(b"\"");
-        write_key(line, "trace_flags", self.format);
-        line.append(b"\"");
-        write_hex(line, &[ids.trace_flags().to_u8()]);
-        line.append(b"\"");
+        write_hex_field(line, "trace_id", &ids.trace_id().to_bytes(), self.format);
+        write_hex_field(line, "span_id", &ids.span_id().to_bytes(), self.format);
+        write_hex_field(
+            line,
+            "trace_flags",
+            &[ids.trace_flags().to_u8()],
+            self.format,
+        );
     }
 }
 
@@ -603,22 +591,22 @@ where
     }
 
     fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
-        let Some(_admission) = self.admit() else {
+        let Some(_guard) = self.admit() else {
             return;
         };
         let Some(slot) = Permit::take(&CACHED_SPANS, MAX_CACHED_SPANS) else {
             self.output.record_drop(DropReason::SpanCapacity);
             return;
         };
-        let mut scratch = Scratch::new(SPAN_BYTES);
+        let mut scratch = Scratch::new(MAX_SPAN_BYTES);
         attrs.record(&mut Capture {
             scratch: &mut scratch,
             source: Source::Span,
         });
-        scratch.push("name", attrs.metadata().name(), SPAN_FIELDS);
+        scratch.push("name", attrs.metadata().name(), MAX_SPAN_FIELDS);
         let mut cache = SpanFields {
-            values: Bytes::new(SPAN_BYTES),
-            fields: [EMPTY; SPAN_FIELDS],
+            values: Bytes::new(MAX_SPAN_BYTES),
+            fields: [EMPTY; MAX_SPAN_FIELDS],
             field_count: 0,
             _slot: slot,
         };
@@ -633,11 +621,11 @@ where
     }
 
     fn on_record(&self, id: &Id, values: &SpanRecord<'_>, ctx: Context<'_, S>) {
-        // Admission rejection leaves prior cached data intact and never touches extensions.
-        let Some(_admission) = self.admit() else {
+        // A refused guard leaves prior cached data intact and never touches extensions.
+        let Some(_guard) = self.admit() else {
             return;
         };
-        let mut scratch = Scratch::new(SPAN_BYTES);
+        let mut scratch = Scratch::new(MAX_SPAN_BYTES);
         values.record(&mut Capture {
             scratch: &mut scratch,
             source: Source::Span,
@@ -671,7 +659,7 @@ where
 
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
-        let Some(_admission) = self.admit() else {
+        let Some(_guard) = self.admit() else {
             return;
         };
         let mut scratch = Scratch::new(MAX_RECORD_BYTES);
@@ -779,14 +767,12 @@ fn write_sorted(
         write_key(line, field.key, format);
         line.append(value);
         if line.failed {
-            line.len = kept;
-            line.failed = false;
+            line.rewind(kept);
             if value.first() == Some(&b'"') {
                 write_key(line, field.key, format);
                 write_cut_string(line, value);
                 if line.failed {
-                    line.len = kept;
-                    line.failed = false;
+                    line.rewind(kept);
                 }
             }
             return false;
@@ -800,7 +786,7 @@ fn write_sorted(
 /// what is written is a valid string.
 fn write_cut_string(line: &mut Bytes<MAX_RECORD_BYTES>, value: &[u8]) {
     let inner = &value[1..value.len() - 1];
-    let room = line.limit.saturating_sub(line.len).saturating_sub(2);
+    let room = line.room().saturating_sub(2);
     let mut end = 0;
     while end < inner.len() {
         let width = match inner[end] {
@@ -822,17 +808,13 @@ fn write_cut_string(line: &mut Bytes<MAX_RECORD_BYTES>, value: &[u8]) {
 }
 
 fn write_key(line: &mut Bytes<MAX_RECORD_BYTES>, key: &str, format: LoggingFormat) {
-    line.append(if matches!(format, LoggingFormat::Json) {
-        b","
-    } else {
-        b" "
-    });
+    let (separator, assign) = match format {
+        LoggingFormat::Json => (b",", b":"),
+        LoggingFormat::Text => (b" ", b"="),
+    };
+    line.append(separator);
     line.json(key);
-    line.append(if matches!(format, LoggingFormat::Json) {
-        b":"
-    } else {
-        b"="
-    });
+    line.append(assign);
 }
 
 fn write_timestamp(line: &mut Bytes<MAX_RECORD_BYTES>) {
@@ -847,14 +829,28 @@ fn write_timestamp(line: &mut Bytes<MAX_RECORD_BYTES>) {
     let _ = SystemTime.format_time(&mut Writer::new(line));
 }
 
-fn write_hex(line: &mut Bytes<MAX_RECORD_BYTES>, bytes: &[u8]) {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    for byte in bytes {
-        line.append(&[
-            DIGITS[usize::from(byte >> 4)],
-            DIGITS[usize::from(byte & 15)],
-        ]);
+/// `key` with `bytes` as a quoted lowercase hex string.
+fn write_hex_field(
+    line: &mut Bytes<MAX_RECORD_BYTES>,
+    key: &str,
+    bytes: &[u8],
+    format: LoggingFormat,
+) {
+    write_key(line, key, format);
+    line.append(b"\"");
+    for &byte in bytes {
+        line.append(&hex_pair(byte));
     }
+    line.append(b"\"");
+}
+
+/// The two lowercase hex digits of `byte`.
+fn hex_pair(byte: u8) -> [u8; 2] {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    [
+        DIGITS[usize::from(byte >> 4)],
+        DIGITS[usize::from(byte & 15)],
+    ]
 }
 
 #[cfg(test)]

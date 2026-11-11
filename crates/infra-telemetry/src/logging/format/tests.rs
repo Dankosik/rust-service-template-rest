@@ -55,7 +55,12 @@ fn complete_record_limit_includes_escaping_and_newline_in_both_formats() {
         assert_eq!(lines[0].len(), 16_384);
         assert!(!lines[0].contains("truncated"));
         assert!(lines[3].contains("survivor"));
-        assert_eq!(snapshot.dropped, [0; 6]);
+        assert!(
+            DropReason::ALL
+                .into_iter()
+                .all(|reason| snapshot.dropped(reason) == 0),
+            "{snapshot:?}"
+        );
         for cut in &lines[1..3] {
             assert!(cut.len() <= 16_384);
             assert!(is_marked(cut, format), "{cut}");
@@ -95,7 +100,12 @@ fn a_value_cut_between_characters_stays_valid_text_and_names_the_cut() {
             payload(&wide);
             tracing::info!(truncated = false, "own_field_cannot_spoof_the_marker");
         });
-        assert_eq!(snapshot.dropped, [0; 6]);
+        assert!(
+            DropReason::ALL
+                .into_iter()
+                .all(|reason| snapshot.dropped(reason) == 0),
+            "{snapshot:?}"
+        );
         let lines: Vec<_> = records.lines().collect();
         assert_eq!(lines.len(), 2);
         assert!(lines[0].len() < 16_384 && is_marked(lines[0], format));
@@ -148,7 +158,12 @@ fn debug_and_display_stop_serializing_at_the_owned_byte_limit() {
         });
         assert!(debug_writes.load(Ordering::Relaxed) <= 8192);
         assert!(display_writes.load(Ordering::Relaxed) <= 8192);
-        assert_eq!(snapshot.dropped, [0; 6]);
+        assert!(
+            DropReason::ALL
+                .into_iter()
+                .all(|reason| snapshot.dropped(reason) == 0),
+            "{snapshot:?}"
+        );
         let lines: Vec<_> = records.lines().collect();
         assert_eq!(lines.len(), 3, "the streamed values are cut, not dropped");
         assert!(lines[..2].iter().all(|line| is_marked(line, format)));
@@ -186,7 +201,11 @@ fn repeated_span_updates_compact_and_overflow_permanently_withholds_context() {
         );
         assert!(whole.iter().all(|line| !line.contains("truncated")));
         assert!(records.contains("at_limit") && records.contains("survivor"));
-        assert_eq!(snapshot.dropped[2], 2, "two span caches refused");
+        assert_eq!(
+            snapshot.dropped(DropReason::SpanCapacity),
+            2,
+            "two span caches refused"
+        );
     }
 }
 
@@ -242,7 +261,7 @@ fn reentrant_event_and_span_delta_keep_outer_record_without_extension_deadlock()
         assert_eq!(records.lines().count(), 2);
         assert!(!records.contains("nested_formatter_event"));
         assert_eq!(records.matches("admitted_outer_value").count(), 2);
-        assert_eq!(snapshot.dropped[4], 2);
+        assert_eq!(snapshot.dropped(DropReason::Reentrant), 2);
     }
 }
 
@@ -263,7 +282,12 @@ fn flattened_field_limit_counts_duplicate_span_names_before_deduplication() {
         assert_eq!(lines.len(), 2);
         assert!(lines[0].contains("at_field_limit") && !lines[0].contains("truncated"));
         assert!(lines[1].contains("past_field_limit") && is_marked(lines[1], format));
-        assert_eq!(snapshot.dropped, [0; 6]);
+        assert!(
+            DropReason::ALL
+                .into_iter()
+                .all(|reason| snapshot.dropped(reason) == 0),
+            "{snapshot:?}"
+        );
     }
 }
 #[test]
@@ -316,7 +340,11 @@ fn span_field_limit_includes_its_name_and_applies_to_later_additions() {
             assert!(line.contains(name), "{line}");
             assert_eq!(is_marked(line, format), marked, "{line}");
         }
-        assert_eq!(snapshot.dropped[2], 2, "two span caches refused");
+        assert_eq!(
+            snapshot.dropped(DropReason::SpanCapacity),
+            2,
+            "two span caches refused"
+        );
     }
 }
 #[test]
@@ -356,7 +384,12 @@ fn escaped_field_keys_count_toward_the_complete_record_limit() {
         assert!(lines[0].len() <= 16_384 && is_marked(lines[0], format));
         assert!(!lines[0].contains("\\\"\\\""), "the oversize key stays out");
         assert!(lines[1].contains("survivor"));
-        assert_eq!(snapshot.dropped, [0; 6]);
+        assert!(
+            DropReason::ALL
+                .into_iter()
+                .all(|reason| snapshot.dropped(reason) == 0),
+            "{snapshot:?}"
+        );
     }
 }
 /// Runs the actual global limits in a fresh test process so saturation never
@@ -467,7 +500,11 @@ fn callback_capacity(format: LoggingFormat) {
     // These observations are made while every admitted callback is stopped
     // inside its source Display, before it can finish or release a permit.
     assert!(!*release.0.lock().expect("callback release lock"));
-    assert_eq!(guard.snapshot().dropped[3], 1, "the 33rd callback is busy");
+    assert_eq!(
+        guard.snapshot().dropped(DropReason::Busy),
+        1,
+        "the 33rd callback is busy"
+    );
     assert_eq!(
         denied_writes.load(Ordering::Relaxed),
         0,
@@ -497,7 +534,7 @@ fn callback_capacity(format: LoggingFormat) {
             .split_inclusive('\n')
             .all(|line| line.len() <= 16_384)
     );
-    assert_eq!(snapshot.dropped[3], 1);
+    assert_eq!(snapshot.dropped(DropReason::Busy), 1);
 }
 
 fn span_capacity(format: LoggingFormat) {
@@ -524,5 +561,9 @@ fn span_capacity(format: LoggingFormat) {
         assert_eq!(is_marked(line, format), marked, "{line}");
         assert!(marked || line.contains("at_span_capacity") || line.contains("after_span_close"));
     }
-    assert_eq!(snapshot.dropped[2], 1, "one rejected capture");
+    assert_eq!(
+        snapshot.dropped(DropReason::SpanCapacity),
+        1,
+        "one rejected capture"
+    );
 }

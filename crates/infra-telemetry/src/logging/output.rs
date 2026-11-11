@@ -2,7 +2,6 @@
 
 use std::cell::Cell;
 use std::io::{self, Write};
-use std::ops::{BitOr, BitOrAssign};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
@@ -10,6 +9,8 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 pub(super) const MAX_RECORD_BYTES: usize = 16 * 1024;
+/// With [`MAX_RECORD_BYTES`] and the capture limits, part of the memory
+/// budget that `docs/configuration-source-policy.md` owns.
 const QUEUE_RECORDS: usize = 512;
 /// The subscriber holds a sender until the process exits, so the channel
 /// never disconnects on shutdown; the worker polls the closed flag instead.
@@ -35,8 +36,9 @@ pub(super) struct Record {
     pub(super) len: usize,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub(super) enum DropReason {
+/// Why the logger rejected a record; a label of `telemetry_log_records_dropped_total`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DropReason {
     QueueFull,
     Oversize,
     SpanCapacity,
@@ -47,7 +49,7 @@ pub(super) enum DropReason {
 
 impl DropReason {
     /// Every reason, in discriminant order: a reason indexes the counters.
-    const ALL: [Self; 6] = [
+    pub(super) const ALL: [Self; 6] = [
         Self::QueueFull,
         Self::Oversize,
         Self::SpanCapacity,
@@ -68,14 +70,15 @@ impl DropReason {
     }
 }
 
-#[derive(Clone, Copy)]
-enum SinkError {
+/// The writer operation that failed; a label of `telemetry_log_sink_errors_total`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SinkOperation {
     Write,
     Flush,
     Worker,
 }
 
-impl SinkError {
+impl SinkOperation {
     /// Every operation, in discriminant order: an operation indexes the counters.
     const ALL: [Self; 3] = [Self::Write, Self::Flush, Self::Worker];
 
@@ -95,8 +98,8 @@ const _: () = {
         index += 1;
     }
     let mut index = 0;
-    while index < SinkError::ALL.len() {
-        assert!(SinkError::ALL[index] as usize == index);
+    while index < SinkOperation::ALL.len() {
+        assert!(SinkOperation::ALL[index] as usize == index);
         index += 1;
     }
 };
@@ -104,60 +107,44 @@ const _: () = {
 /// Local observations, independent of recorder installation or scrape timing.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct LogSnapshot {
-    /// Counts ordered as `queue_full`, oversize, `span_capacity`, busy, reentrant, closed.
-    pub dropped: [u64; DropReason::ALL.len()],
-    /// Counts ordered as write, flush, worker.
-    pub sink_errors: [u64; SinkError::ALL.len()],
+    dropped: [u64; DropReason::ALL.len()],
+    sink_errors: [u64; SinkOperation::ALL.len()],
 }
 
-/// Finite reasons why local completion could not be established. The
-/// composition root receives them from [`LoggerGuard::shutdown`] in the
-/// `logger` shutdown stage and uses them for its degraded outcome; because
-/// that stage is last, they are not written as a record.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct LoggerShutdownReasons(u32);
-
-impl LoggerShutdownReasons {
-    /// The deadline passed before the writer exited and was joined.
-    pub const DEADLINE: Self = Self(1);
-    /// The writer panicked or its completion channel disconnected; recorded
-    /// whenever it happens, since a dead writer never drains.
-    pub const WORKER: Self = Self(1 << 1);
-    /// A sink write failed after [`LoggerGuard::begin_shutdown`].
-    pub const WRITE: Self = Self(1 << 2);
-    /// A sink flush failed after [`LoggerGuard::begin_shutdown`].
-    pub const FLUSH: Self = Self(1 << 3);
-    /// A record was dropped after [`LoggerGuard::begin_shutdown`].
-    pub const DROPPED: Self = Self(1 << 4);
-
+impl LogSnapshot {
     #[must_use]
-    pub const fn bits(self) -> u32 {
-        self.0
+    pub const fn dropped(&self, reason: DropReason) -> u64 {
+        self.dropped[reason as usize]
     }
 
     #[must_use]
-    pub const fn contains(self, other: Self) -> bool {
-        self.0 & other.0 == other.0
-    }
-
-    const fn is_empty(self) -> bool {
-        self.0 == 0
+    pub const fn sink_errors(&self, operation: SinkOperation) -> u64 {
+        self.sink_errors[operation as usize]
     }
 }
 
-impl BitOr for LoggerShutdownReasons {
-    type Output = Self;
-
-    fn bitor(self, other: Self) -> Self {
-        Self(self.0 | other.0)
+bitflags::bitflags! {
+    /// Finite reasons why local completion could not be established. The
+    /// composition root receives them from [`LoggerGuard::shutdown`] in the
+    /// `logger` shutdown stage and uses them for its degraded outcome; because
+    /// that stage is last, they are not written as a record.
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub struct LoggerShutdownReasons: u32 {
+        /// The deadline passed before the writer exited and was joined.
+        const DEADLINE = 1;
+        /// The writer panicked or its completion channel disconnected; recorded
+        /// whenever it happens, since a dead writer never drains.
+        const WORKER = 1 << 1;
+        /// A sink write failed after [`LoggerGuard::begin_shutdown`].
+        const WRITE = 1 << 2;
+        /// A sink flush failed after [`LoggerGuard::begin_shutdown`].
+        const FLUSH = 1 << 3;
+        /// A record was dropped after [`LoggerGuard::begin_shutdown`].
+        const DROPPED = 1 << 4;
     }
 }
 
-impl BitOrAssign for LoggerShutdownReasons {
-    fn bitor_assign(&mut self, other: Self) {
-        self.0 |= other.0;
-    }
-}
+const _: () = assert!(LoggerShutdownReasons::all().bits() & DRAINING == 0);
 
 /// A local writer result; completion makes no remote-delivery claim.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -172,14 +159,14 @@ pub enum LoggerShutdown {
 #[derive(Debug)]
 struct Counters {
     dropped: [AtomicU64; DropReason::ALL.len()],
-    sink_errors: [AtomicU64; SinkError::ALL.len()],
+    sink_errors: [AtomicU64; SinkOperation::ALL.len()],
 }
 
 impl Counters {
     const fn new() -> Self {
         Self {
             dropped: [const { AtomicU64::new(0) }; DropReason::ALL.len()],
-            sink_errors: [const { AtomicU64::new(0) }; SinkError::ALL.len()],
+            sink_errors: [const { AtomicU64::new(0) }; SinkOperation::ALL.len()],
         }
     }
 
@@ -228,13 +215,13 @@ impl Shared {
             });
     }
 
-    fn record_sink_error(&self, kind: SinkError) {
-        self.counters.sink_errors[kind as usize].fetch_add(1, Ordering::Relaxed);
-        TOTALS.sink_errors[kind as usize].fetch_add(1, Ordering::Relaxed);
-        match kind {
-            SinkError::Write => self.latch_drain_failure(LoggerShutdownReasons::WRITE),
-            SinkError::Flush => self.latch_drain_failure(LoggerShutdownReasons::FLUSH),
-            SinkError::Worker => {
+    fn record_sink_error(&self, operation: SinkOperation) {
+        self.counters.sink_errors[operation as usize].fetch_add(1, Ordering::Relaxed);
+        TOTALS.sink_errors[operation as usize].fetch_add(1, Ordering::Relaxed);
+        match operation {
+            SinkOperation::Write => self.latch_drain_failure(LoggerShutdownReasons::WRITE),
+            SinkOperation::Flush => self.latch_drain_failure(LoggerShutdownReasons::FLUSH),
+            SinkOperation::Worker => {
                 // A dead worker can never make a later clean drain.
                 self.drain
                     .fetch_or(LoggerShutdownReasons::WORKER.bits(), Ordering::Relaxed);
@@ -251,22 +238,21 @@ pub(super) struct Output {
 
 impl Output {
     pub(super) fn submit(&self, record: Record) {
-        let result = {
+        // `None` when admission is closed.
+        let sent = {
             let closed = self
                 .shared
                 .closed
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if *closed {
-                Err(TrySendError::Disconnected(record))
-            } else {
-                self.sender.try_send(record)
-            }
+            (!*closed).then(|| self.sender.try_send(record))
         };
-        match result {
-            Ok(()) => {}
-            Err(TrySendError::Full(_)) => self.record_drop(DropReason::QueueFull),
-            Err(TrySendError::Disconnected(_)) => self.record_drop(DropReason::Closed),
+        match sent {
+            Some(Ok(())) => {}
+            Some(Err(TrySendError::Full(_))) => self.record_drop(DropReason::QueueFull),
+            None | Some(Err(TrySendError::Disconnected(_))) => {
+                self.record_drop(DropReason::Closed);
+            }
         }
     }
 
@@ -310,7 +296,8 @@ impl LoggerGuard {
         if Instant::now() >= deadline {
             reasons |= LoggerShutdownReasons::DEADLINE;
         }
-        reasons |= LoggerShutdownReasons(self.shared.drain.load(Ordering::Relaxed) & !DRAINING);
+        reasons |=
+            LoggerShutdownReasons::from_bits_truncate(self.shared.drain.load(Ordering::Relaxed));
         let snapshot = self.snapshot();
         if reasons.is_empty() {
             LoggerShutdown::Completed(snapshot)
@@ -326,7 +313,7 @@ impl LoggerGuard {
         if remaining.is_zero() {
             return LoggerShutdownReasons::DEADLINE;
         }
-        let mut reasons = LoggerShutdownReasons::default();
+        let mut reasons = LoggerShutdownReasons::empty();
         match self.completion.recv_timeout(remaining) {
             Ok(()) => {}
             Err(RecvTimeoutError::Timeout) => return LoggerShutdownReasons::DEADLINE,
@@ -353,7 +340,7 @@ impl LoggerGuard {
         if let Some(worker) = self.worker.take()
             && worker.join().is_err()
         {
-            self.shared.record_sink_error(SinkError::Worker);
+            self.shared.record_sink_error(SinkOperation::Worker);
             reasons |= LoggerShutdownReasons::WORKER;
         }
         reasons
@@ -388,7 +375,7 @@ pub(super) fn start<W: Write + Send + 'static>(writer: W) -> io::Result<(Output,
                 write_records(writer, records, shared);
             }));
             if result.is_err() {
-                worker_shared.record_sink_error(SinkError::Worker);
+                worker_shared.record_sink_error(SinkOperation::Worker);
             }
             drop(result);
             let _ = complete.try_send(());
@@ -423,7 +410,7 @@ fn write_records<W: Write>(mut writer: W, records: Receiver<Record>, shared: &Sh
             Err(RecvTimeoutError::Timeout) => {
                 if dirty {
                     if writer.flush().is_err() {
-                        shared.record_sink_error(SinkError::Flush);
+                        shared.record_sink_error(SinkOperation::Flush);
                     }
                     dirty = false;
                 }
@@ -433,7 +420,7 @@ fn write_records<W: Write>(mut writer: W, records: Receiver<Record>, shared: &Sh
         };
         if torn {
             if write_line(&mut writer, b"\n") != Written::Whole {
-                shared.record_sink_error(SinkError::Write);
+                shared.record_sink_error(SinkOperation::Write);
                 dirty = true;
                 continue;
             }
@@ -441,13 +428,13 @@ fn write_records<W: Write>(mut writer: W, records: Receiver<Record>, shared: &Sh
         }
         let written = write_line(&mut writer, &record.bytes[..record.len]);
         if written != Written::Whole {
-            shared.record_sink_error(SinkError::Write);
+            shared.record_sink_error(SinkOperation::Write);
         }
         torn |= written == Written::Part;
         dirty = true;
     }
     if writer.flush().is_err() {
-        shared.record_sink_error(SinkError::Flush);
+        shared.record_sink_error(SinkOperation::Flush);
     }
     drop(records);
 }
@@ -480,9 +467,7 @@ fn write_line(writer: &mut impl Write, line: &[u8]) -> Written {
     }
 }
 
-/// Publish absolute process totals so observations before recorder installation
-/// and repeated upkeep calls neither disappear nor count twice.
-pub(crate) fn publish() {
+pub(super) fn describe_metrics() {
     metrics::describe_counter!(
         DROPPED_METRIC,
         "Local records rejected by the bounded logger, by finite reason."
@@ -491,14 +476,19 @@ pub(crate) fn publish() {
         SINK_ERRORS_METRIC,
         "Local writer failures, by finite operation."
     );
+}
+
+/// Publish absolute process totals so observations before recorder installation
+/// and repeated upkeep calls neither disappear nor count twice.
+pub(super) fn publish() {
     let snapshot = TOTALS.snapshot();
     for reason in DropReason::ALL {
         metrics::counter!(DROPPED_METRIC, "reason" => reason.label())
-            .absolute(snapshot.dropped[reason as usize]);
+            .absolute(snapshot.dropped(reason));
     }
-    for operation in SinkError::ALL {
+    for operation in SinkOperation::ALL {
         metrics::counter!(SINK_ERRORS_METRIC, "operation" => operation.label())
-            .absolute(snapshot.sink_errors[operation as usize]);
+            .absolute(snapshot.sink_errors(operation));
     }
 }
 
@@ -819,9 +809,9 @@ mod tests {
                 assert_eq!(snapshot.sink_errors, [0, 0, 1]);
             } else {
                 assert_eq!(reasons, LoggerShutdownReasons::FLUSH);
-                assert_eq!(snapshot.sink_errors[0], 0);
-                assert!(snapshot.sink_errors[1] >= 1);
-                assert_eq!(snapshot.sink_errors[2], 0);
+                assert_eq!(snapshot.sink_errors(SinkOperation::Write), 0);
+                assert!(snapshot.sink_errors(SinkOperation::Flush) >= 1);
+                assert_eq!(snapshot.sink_errors(SinkOperation::Worker), 0);
             }
             assert!(!format!("{result:?}").contains("private"));
         }
@@ -837,9 +827,9 @@ mod tests {
         let handle = recorder.handle();
         metrics::with_local_recorder(&recorder, || {
             for _ in 0..2 {
-                let before = TOTALS.snapshot().dropped[5];
+                let before = TOTALS.snapshot().dropped(DropReason::Closed);
                 publish();
-                let after = TOTALS.snapshot().dropped[5];
+                let after = TOTALS.snapshot().dropped(DropReason::Closed);
                 let rendered = handle.render();
                 let line = rendered
                     .lines()

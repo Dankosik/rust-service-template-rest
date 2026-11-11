@@ -2816,6 +2816,7 @@ name = "infra-telemetry"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "bitflags 2.13.2",
  "futures-util",
  "gethostname",
  "hotpath",

@@ -10,7 +10,6 @@ use exporter::{CollectorTrust, export_timeout, parse_headers, resolve_endpoint, 
 
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::ops::{BitOr, BitOrAssign};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -28,7 +27,7 @@ use secrecy::{ExposeSecret, SecretString};
 /// Counter: spans in batches whose SDK exporter returned success or failure.
 /// `error_type` is finite. Success does not prove receiver acceptance or delivery;
 /// SDK queue loss and reported rejection have separate observed metrics.
-pub const TRACE_SPANS_EXPORTED_METRIC: &str = "otel_sdk_exporter_span_exported_total";
+pub(crate) const TRACE_SPANS_EXPORTED_METRIC: &str = "otel_sdk_exporter_span_exported_total";
 
 /// Gauge: 1 when the OTLP trace exporter was configured and initialized at
 /// startup, 0 otherwise. A startup-configuration signal, not delivery health.
@@ -204,6 +203,7 @@ fn tracer_provider(
         Some(raw) => parse_headers(raw.expose_secret())?,
         None => HashMap::new(),
     };
+    let timeout = export_timeout(&env);
 
     let mut builder = SdkTracerProvider::builder()
         .with_resource(resource(options))
@@ -212,12 +212,12 @@ fn tracer_provider(
     let drain = Arc::new(Mutex::new(DrainObservation::default()));
     let exporter_state = match endpoint {
         None => ExporterState::Disabled,
-        Some(endpoint) => match span_exporter(&endpoint, headers, trust) {
+        Some(endpoint) => match span_exporter(&endpoint, headers, trust, timeout, &env) {
             Ok(span_exporter) => {
                 builder = builder.with_span_processor(
                     sdktrace::BatchSpanProcessor::builder(ObservedExporter {
                         inner: span_exporter,
-                        timeout: export_timeout(),
+                        timeout,
                         drain: Arc::clone(&drain),
                     })
                     .with_batch_config(batch_config(&env))
@@ -271,16 +271,17 @@ impl TracerProviderHandle {
     /// Stop the provider off the async workers within the caller's deadline.
     ///
     /// The SDK receives the time left when its blocking job starts, minus
-    /// [`SHUTDOWN_JOIN_SLACK`]. An exhausted allowance skips the wait but still
-    /// submits zero-budget cleanup on a blocking thread, since dropping the
-    /// final SDK provider can itself block; its unconfirmed completion is
-    /// reported without extending the deadline.
+    /// [`SHUTDOWN_JOIN_SLACK`]. The SDK's `shutdown_with_timeout` blocks, so it
+    /// always runs on a blocking thread. An exhausted allowance skips the wait
+    /// but still submits that call with a zero budget, so the shared span
+    /// processors are told to stop; its unconfirmed completion is reported
+    /// without extending the deadline.
     pub async fn shutdown(self, deadline: tokio::time::Instant) -> ProviderShutdown {
-        self.shutdown_until(Duration::MAX, deadline).await
+        self.shutdown_with_budget(Duration::MAX, deadline).await
     }
 
     /// [`Self::shutdown`] with the SDK's time also capped at `sdk_budget`.
-    async fn shutdown_until(
+    async fn shutdown_with_budget(
         self,
         sdk_budget: Duration,
         deadline: tokio::time::Instant,
@@ -298,33 +299,33 @@ impl TracerProviderHandle {
                     .saturating_sub(SHUTDOWN_JOIN_SLACK),
             );
             let started = tokio::time::Instant::now();
-            let result = provider.shutdown_with_timeout(budget);
-            (result, started.elapsed(), budget)
+            provider
+                .shutdown_with_timeout(budget)
+                .map_err(|error| SdkFailure::classify(&error, started.elapsed(), budget))
         });
-        let mut additional = if allowance <= SHUTDOWN_JOIN_SLACK {
+        let mut observed_here = if allowance <= SHUTDOWN_JOIN_SLACK {
             ProviderShutdownReasons::DEADLINE
         } else {
             match tokio::time::timeout_at(deadline, job).await {
-                Ok(Ok((Ok(()), _, _))) => ProviderShutdownReasons::default(),
-                Ok(Ok((Err(ref error), elapsed, budget))) => {
-                    ProviderShutdownReasons::PROVIDER_SHUTDOWN
-                        | SdkFailure::classify(error, elapsed, budget).reason()
+                Err(_elapsed) => ProviderShutdownReasons::DEADLINE,
+                Ok(Err(_join)) => ProviderShutdownReasons::JOIN,
+                Ok(Ok(Ok(()))) => ProviderShutdownReasons::empty(),
+                Ok(Ok(Err(failure))) => {
+                    ProviderShutdownReasons::PROVIDER_SHUTDOWN | failure.reason()
                 }
-                Ok(Err(_)) => ProviderShutdownReasons::JOIN,
-                Err(_) => ProviderShutdownReasons::DEADLINE,
             }
         };
         // Tokio polls the inner future before its timeout. A result observed
         // after the deadline cannot turn an expired wait into completion.
         if tokio::time::Instant::now() >= deadline {
-            additional |= ProviderShutdownReasons::DEADLINE;
+            observed_here |= ProviderShutdownReasons::DEADLINE;
         }
         let reasons = self
             .drain
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .reasons
-            | additional;
+            | observed_here;
         if reasons.is_empty() {
             ProviderShutdown::Completed
         } else {
@@ -342,56 +343,28 @@ pub enum ProviderShutdown {
     Incomplete(ProviderShutdownReasons),
 }
 
-/// Finite failure observations; no exporter error text is retained.
-/// Operators see [`Self::bits`] in the `telemetry` shutdown stage.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ProviderShutdownReasons(u32);
-
-impl ProviderShutdownReasons {
-    /// An SDK operation during the drain (an export, or the exporter's or
-    /// provider's shutdown) reported a timeout or failed after its whole
-    /// budget.
-    pub const SDK_TIMEOUT: Self = Self(1);
-    /// An SDK operation during the drain found its target already shut down.
-    pub const SDK_ALREADY_SHUTDOWN: Self = Self(1 << 1);
-    /// An SDK operation during the drain reported an internal failure.
-    pub const SDK_INTERNAL_FAILURE: Self = Self(1 << 2);
-    /// The exporter's shutdown failed; an `SDK_*` bit says how.
-    pub const EXPORTER_SHUTDOWN: Self = Self(1 << 3);
-    /// The provider's shutdown failed; an `SDK_*` bit says how.
-    pub const PROVIDER_SHUTDOWN: Self = Self(1 << 4);
-    /// The blocking shutdown task panicked or was cancelled.
-    pub const JOIN: Self = Self(1 << 5);
-    /// The caller's deadline left no time for the SDK or passed before its
-    /// shutdown was confirmed.
-    pub const DEADLINE: Self = Self(1 << 6);
-
-    #[must_use]
-    pub const fn bits(self) -> u32 {
-        self.0
-    }
-
-    #[must_use]
-    pub const fn contains(self, other: Self) -> bool {
-        self.0 & other.0 == other.0
-    }
-
-    const fn is_empty(self) -> bool {
-        self.0 == 0
-    }
-}
-
-impl BitOr for ProviderShutdownReasons {
-    type Output = Self;
-
-    fn bitor(self, other: Self) -> Self {
-        Self(self.0 | other.0)
-    }
-}
-
-impl BitOrAssign for ProviderShutdownReasons {
-    fn bitor_assign(&mut self, other: Self) {
-        self.0 |= other.0;
+bitflags::bitflags! {
+    /// Finite failure observations; no exporter error text is retained.
+    /// Operators see [`Self::bits`] in the `telemetry` shutdown stage.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct ProviderShutdownReasons: u32 {
+        /// An SDK operation during the drain (an export, or the exporter's or
+        /// provider's shutdown) reported a timeout or failed after its whole
+        /// budget.
+        const SDK_TIMEOUT = 1;
+        /// An SDK operation during the drain found its target already shut down.
+        const SDK_ALREADY_SHUTDOWN = 1 << 1;
+        /// An SDK operation during the drain reported an internal failure.
+        const SDK_INTERNAL_FAILURE = 1 << 2;
+        /// The exporter's shutdown failed; an `SDK_*` bit says how.
+        const EXPORTER_SHUTDOWN = 1 << 3;
+        /// The provider's shutdown failed; an `SDK_*` bit says how.
+        const PROVIDER_SHUTDOWN = 1 << 4;
+        /// The blocking shutdown task panicked or was cancelled.
+        const JOIN = 1 << 5;
+        /// The caller's deadline left no time for the SDK or passed before its
+        /// shutdown was confirmed.
+        const DEADLINE = 1 << 6;
     }
 }
 
@@ -402,13 +375,13 @@ struct DrainObservation {
 }
 
 impl DrainObservation {
-    /// Records a failure once draining, with `also` naming the operation.
-    fn latch(drain: &Mutex<Self>, failure: SdkFailure, also: ProviderShutdownReasons) {
+    /// Records a failure once draining, with `operation` naming the operation.
+    fn latch(drain: &Mutex<Self>, failure: SdkFailure, operation: ProviderShutdownReasons) {
         let mut drain = drain
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if drain.draining {
-            drain.reasons |= also | failure.reason();
+            drain.reasons |= operation | failure.reason();
         }
     }
 }
@@ -486,7 +459,7 @@ impl<E: SpanExporter> SpanExporter for ObservedExporter<E> {
             Ok(()) => metrics::counter!(TRACE_SPANS_EXPORTED_METRIC).increment(spans),
             Err(error) => {
                 let failure = SdkFailure::classify(error, started.elapsed(), self.timeout);
-                DrainObservation::latch(&self.drain, failure, ProviderShutdownReasons::default());
+                DrainObservation::latch(&self.drain, failure, ProviderShutdownReasons::empty());
                 metrics::counter!(TRACE_SPANS_EXPORTED_METRIC, "error_type" => failure.label())
                     .increment(spans);
             }
