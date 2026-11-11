@@ -697,7 +697,7 @@ async fn start(
 
     // template:begin grpc:bootstrap-grpc-bind
     if let Some((grpc_router, tls, grpc_options)) = grpc_prepared {
-        let addr = config.grpc.listen_addr()?;
+        let addr = config.grpc.required_addr()?;
         let bound = match tls {
             Some(tls) => Server::bind_tls(addr, grpc_router, grpc_options, tls).await?,
             None => Server::bind(addr, grpc_router, grpc_options).await?,

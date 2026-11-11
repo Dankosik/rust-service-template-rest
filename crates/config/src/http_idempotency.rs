@@ -14,7 +14,7 @@ use serde::Deserialize;
 
 use crate::de::blank_as_none;
 use crate::postgres::PostgresConfig;
-use crate::validate::{ValidationError, duration_range};
+use crate::validate::{ValidationError, duration_range, required};
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -47,12 +47,11 @@ impl HttpIdempotencyConfig {
                 "must be true when an idempotent operation is served",
             ));
         }
-        self.retention.ok_or_else(|| {
-            ValidationError::new(
-                "http_idempotency.retention",
-                "is required when an idempotent operation is served",
-            )
-        })
+        required(
+            "http_idempotency.retention",
+            self.retention,
+            "an idempotent operation is served",
+        )
     }
 
     pub(crate) fn validate(&self) -> Result<(), ValidationError> {

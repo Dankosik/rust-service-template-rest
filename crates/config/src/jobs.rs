@@ -61,7 +61,8 @@ impl JobsConfig {
             return Err(ValidationError::new(
                 "postgres.max_connections",
                 format!(
-                    "must be at least jobs.max_workers + {WORKER_MANAGEMENT_CONNECTIONS} ({required}) for the jobs worker"
+                    "must be at least jobs.max_workers + {WORKER_MANAGEMENT_CONNECTIONS} ({required}) for the jobs worker, got {}",
+                    postgres.max_connections
                 ),
             ));
         }
@@ -100,7 +101,10 @@ impl JobsConfig {
         if u64::from(postgres.max_connections.get()) < required {
             return Err(ValidationError::new(
                 "postgres.max_connections",
-                format!("must be at least {formula} ({required}) for the outbox worker"),
+                format!(
+                    "must be at least {formula} ({required}) for the outbox worker, got {}",
+                    postgres.max_connections
+                ),
             ));
         }
         Ok(())

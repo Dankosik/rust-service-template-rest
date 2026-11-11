@@ -111,8 +111,8 @@ fn retained_outbox_reserves_profile_specific_connection_capacity() {
         !diagnostics.contains("postgres.dsn") && !diagnostics.contains("messaging."),
         "capacity must refuse before another configuration failure: {diagnostics}"
     );
-    let outbox_only = "must be at least 3 (3) for the outbox worker";
-    let ordinary_jobs = "must be at least jobs.max_workers + 5 (6) for the outbox worker";
+    let outbox_only = "must be at least 3 (3) for the outbox worker, got 2";
+    let ordinary_jobs = "must be at least jobs.max_workers + 5 (6) for the outbox worker, got 2";
     assert!(
         diagnostics.contains(outbox_only) || diagnostics.contains(ordinary_jobs),
         "diagnostics: {diagnostics}"

@@ -23,7 +23,7 @@ pub(crate) fn value_free<E: serde::de::Error>(message: impl std::fmt::Display) -
 }
 
 /// What a listen address must be, for the decode message.
-const LISTEN_ADDR: &str = "an IP address and port, or :port; hostnames are not resolved";
+const LISTEN_ADDR_FORM: &str = "an IP address and port, or :port; hostnames are not resolved";
 
 /// Missing, empty, or whitespace-only text is vacant (`None`); a present
 /// value is stored trimmed, as text or as the path it names.
@@ -74,7 +74,7 @@ where
 }
 
 fn invalid_listen_addr<E: serde::de::Error>(value: &str) -> E {
-    E::invalid_value(Unexpected::Str(value), &LISTEN_ADDR)
+    E::invalid_value(Unexpected::Str(value), &LISTEN_ADDR_FORM)
 }
 
 /// Parse an IP listen address: `ip:port`, or the Go-style `:port` meaning
@@ -118,6 +118,6 @@ mod tests {
         let err = toml::from_str::<Probe>("addr = \"localhost:8080\"").unwrap_err();
         let rendered = err.to_string();
         assert!(rendered.contains("localhost:8080"), "{rendered}");
-        assert!(rendered.contains(LISTEN_ADDR), "{rendered}");
+        assert!(rendered.contains(LISTEN_ADDR_FORM), "{rendered}");
     }
 }

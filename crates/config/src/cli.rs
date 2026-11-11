@@ -7,25 +7,8 @@
 //! version.
 
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
 
 use clap::Parser;
-
-/// Print `message` to stderr and return [`ExitCode::FAILURE`].
-///
-/// Does not call `process::exit`, so destructors still run. Use this when
-/// tracing is absent or not yet installed.
-#[must_use]
-pub fn process_failure(message: impl std::fmt::Display) -> ExitCode {
-    #[expect(
-        clippy::print_stderr,
-        reason = "finite process failure output before tracing or after runtime shutdown"
-    )]
-    {
-        eprintln!("{message}");
-    }
-    ExitCode::FAILURE
-}
 
 /// Command-line loader options every binary in this repository accepts.
 #[derive(Clone, Debug, Default, Parser, PartialEq, Eq)]

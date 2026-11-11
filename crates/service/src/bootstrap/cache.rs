@@ -16,16 +16,14 @@ pub(super) async fn open(
     let Some(dsn) = &config.cache.dsn else {
         return Ok(());
     };
-    // Configuration validation has already refused one path without the other.
-    let client_certificate = config
-        .cache
-        .client_cert_path
-        .clone()
-        .zip(config.cache.client_key_path.clone())
-        .map(|(cert_path, key_path)| ClientCertificate {
-            cert_path,
-            key_path,
-        });
+    let client_certificate =
+        config
+            .cache
+            .client_certificate()?
+            .map(|certificate| ClientCertificate {
+                cert_path: certificate.cert_path.to_path_buf(),
+                key_path: certificate.key_path.to_path_buf(),
+            });
     let options = CacheOptions {
         dsn: dsn.clone(),
         password_file: config.cache.password_file.clone(),

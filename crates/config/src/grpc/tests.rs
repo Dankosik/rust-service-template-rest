@@ -151,7 +151,7 @@ fn grpc_environment_enables_an_explicit_plaintext_listener() {
     )
     .unwrap();
     assert!(cfg.grpc.enabled);
-    assert_eq!(cfg.grpc.listen_addr().unwrap().port(), 0);
+    assert_eq!(cfg.grpc.required_addr().unwrap().port(), 0);
     assert_eq!(cfg.grpc.security, Some(crate::GrpcSecurity::Plaintext));
 }
 

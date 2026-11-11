@@ -15,10 +15,10 @@ use serde::Deserialize;
 use crate::HttpConfig;
 use crate::de::{blank_as_none, blank_secret_as_none};
 use crate::http::{
-    connection_age_range, connection_count_range, in_flight_range, request_budget_fits_drain,
-    request_timeout_range,
+    DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_IN_FLIGHT, DEFAULT_REQUEST_TIMEOUT, connection_age_range,
+    connection_count_range, in_flight_range, request_budget_fits_drain, request_timeout_range,
 };
-use crate::validate::{ValidationError, duration_range};
+use crate::validate::{ValidationError, duration_range, required};
 
 /// Explicit security mode for a native gRPC server or client.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -87,11 +87,10 @@ impl Default for GrpcConfig {
             certificate: None,
             private_key: None,
             client_ca: None,
-            // The HTTP request budget and capacity bounds, for the same reasons.
-            request_timeout: Duration::from_secs(8),
-            max_in_flight: 256,
+            request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            max_in_flight: DEFAULT_MAX_IN_FLIGHT,
             admission_wait: Duration::from_secs(1),
-            max_connections: 4096,
+            max_connections: DEFAULT_MAX_CONNECTIONS,
             // A gRPC channel keeps one connection for the life of its
             // process, so behind a connection-level balancer replicas added
             // later get no calls until something closes it. Thirty minutes
@@ -123,10 +122,8 @@ impl GrpcConfig {
     /// # Errors
     ///
     /// Returns an error when `grpc.addr` is absent.
-    pub fn listen_addr(&self) -> Result<SocketAddr, ValidationError> {
-        self.addr.ok_or_else(|| {
-            ValidationError::new("grpc.addr", "is required when grpc.enabled is true")
-        })
+    pub fn required_addr(&self) -> Result<SocketAddr, ValidationError> {
+        required("grpc.addr", self.addr, "grpc.enabled is true")
     }
 
     /// Adapter form of `grpc.max_in_flight`: `None` means shedding is off.
@@ -155,9 +152,7 @@ impl GrpcConfig {
     /// Returns the key that is missing for the selected mode, or the TLS
     /// key that plaintext must not carry.
     pub fn listener_security(&self) -> Result<GrpcListenerSecurity<'_>, ValidationError> {
-        let security = self.security.ok_or_else(|| {
-            ValidationError::new("grpc.security", "is required when grpc.enabled is true")
-        })?;
+        let security = required("grpc.security", self.security, "grpc.enabled is true")?;
         match security {
             GrpcSecurity::Plaintext => {
                 for (key, present) in [
@@ -175,15 +170,14 @@ impl GrpcConfig {
                 Ok(GrpcListenerSecurity::Plaintext)
             }
             GrpcSecurity::Tls => Ok(GrpcListenerSecurity::Tls {
-                certificate: self
-                    .certificate
-                    .as_deref()
-                    .filter(|certificate| !certificate.is_empty())
-                    .ok_or_else(|| tls_required("grpc.certificate"))?,
-                private_key: self
-                    .private_key
-                    .as_ref()
-                    .ok_or_else(|| tls_required("grpc.private_key"))?,
+                certificate: required(
+                    "grpc.certificate",
+                    self.certificate
+                        .as_deref()
+                        .filter(|certificate| !certificate.is_empty()),
+                    TLS_SELECTED,
+                )?,
+                private_key: required("grpc.private_key", self.private_key.as_ref(), TLS_SELECTED)?,
                 client_ca: self.client_ca.as_deref(),
             }),
         }
@@ -195,7 +189,7 @@ impl GrpcConfig {
             return Ok(());
         }
 
-        self.listen_addr()?;
+        self.required_addr()?;
         self.validate_limits(http)?;
         self.listener_security()?;
         Ok(())
@@ -241,9 +235,7 @@ pub enum GrpcListenerSecurity<'a> {
     },
 }
 
-fn tls_required(key: &'static str) -> ValidationError {
-    ValidationError::new(key, "is required when grpc.security is tls")
-}
+const TLS_SELECTED: &str = "grpc.security is tls";
 
 #[cfg(test)]
 mod tests;

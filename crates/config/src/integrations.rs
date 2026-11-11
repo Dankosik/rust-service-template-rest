@@ -106,36 +106,39 @@ pub struct OAuthConfig {
         default = "default_provider_concurrency",
         deserialize_with = "deserialize_provider_concurrency"
     )]
-    pub provider_concurrency: u32,
+    pub provider_concurrency: std::num::NonZeroU32,
 }
 
 impl OAuthConfig {
     /// One retained token per user active within a token lifetime on one
     /// replica.
-    pub(crate) const DEFAULT_EXCHANGE_CACHE_CAPACITY: u32 = 1024;
+    const DEFAULT_EXCHANGE_CACHE_CAPACITY: u32 = 1024;
     const EXCHANGE_CACHE_CAPACITY_RANGE: std::ops::RangeInclusive<u32> = 1..=65_536;
     /// Matches introspection's default while bounding distinct token attempts.
-    pub(crate) const DEFAULT_PROVIDER_CONCURRENCY: u32 = 32;
+    const DEFAULT_PROVIDER_CONCURRENCY: std::num::NonZeroU32 =
+        const { std::num::NonZeroU32::new(32).expect("32 is nonzero") };
 }
 
 const fn default_exchange_cache_capacity() -> u32 {
     OAuthConfig::DEFAULT_EXCHANGE_CACHE_CAPACITY
 }
 
-const fn default_provider_concurrency() -> u32 {
+const fn default_provider_concurrency() -> std::num::NonZeroU32 {
     OAuthConfig::DEFAULT_PROVIDER_CONCURRENCY
 }
 
 // Buffer the scalar kind before decoding: config-rs otherwise coerces floats
 // and booleans to integers. Environment values arrive as strings.
-fn deserialize_provider_concurrency<'de, D>(deserializer: D) -> Result<u32, D::Error>
+fn deserialize_provider_concurrency<'de, D>(
+    deserializer: D,
+) -> Result<std::num::NonZeroU32, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     #[derive(Deserialize)]
     #[serde(untagged)]
     enum Input {
-        Typed(u32),
+        Typed(std::num::NonZeroU32),
         Text(String),
     }
 
@@ -294,12 +297,11 @@ impl OAuthConfig {
         validate_token_url(&token_url_key, &self.token_url)?;
 
         crate::validate::non_blank(&format!("{prefix}.client_id"), &self.client_id)?;
-        if self.private_key.is_none() {
-            return Err(ValidationError::new(
-                format!("{prefix}.private_key"),
-                "cannot be empty",
-            ));
-        }
+        crate::validate::required(
+            &format!("{prefix}.private_key"),
+            self.private_key.as_ref(),
+            &format!("{prefix} is set"),
+        )?;
         crate::validate::non_blank(&format!("{prefix}.key_id"), &self.key_id)?;
         crate::validate::non_blank(
             &format!("{prefix}.assertion_audience"),
@@ -328,12 +330,6 @@ impl OAuthConfig {
             u64::from(*capacity.start()),
             u64::from(*capacity.end()),
         )?;
-        if self.provider_concurrency == 0 {
-            return Err(ValidationError::new(
-                format!("{prefix}.provider_concurrency"),
-                "must be greater than zero",
-            ));
-        }
         Ok(())
     }
 }
