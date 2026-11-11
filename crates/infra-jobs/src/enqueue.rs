@@ -136,7 +136,7 @@ pub async fn enqueue<K: JobKind>(
             "wake job workers",
             sqlx::query!(
                 "SELECT pg_notify($1, $2)",
-                crate::claim::WAKE_CHANNEL,
+                crate::listener::WAKE_CHANNEL,
                 K::NAME
             )
             .execute(&mut *tx),

@@ -1,0 +1,415 @@
+//! Batched COMPLETE writes: one statement for every completion queued while
+//! the previous batch was in flight.
+
+use std::sync::Arc;
+
+use infra_postgres::observed;
+use tokio::time::Instant;
+
+use super::outcome::{Unacknowledged, Written};
+use super::{AttemptSlots, COMPLETION_MEMBERSHIPS_METRIC, MetricMembership, expired, within};
+use crate::engine::{Operation, OperationError, Shared, backstop, observe_failure};
+use crate::kind::JobId;
+
+type CompletionReply = Result<Written, Unacknowledged>;
+
+/// Completions waiting for the next batch, and the one batch in flight.
+///
+/// The first waiter that holds `writer` writes every queued completion in one
+/// statement; completions queued meanwhile go in the next batch. A waiter
+/// whose completion another waiter wrote finds the queue empty and reads its
+/// answer. A batch whose writer was dropped answers nobody, and each of its
+/// waiters retries as after a failed statement.
+#[derive(Default)]
+pub(crate) struct Completions {
+    queued: std::sync::Mutex<Vec<QueuedCompletion>>,
+    writer: tokio::sync::Mutex<()>,
+}
+
+struct QueuedCompletion {
+    id: JobId,
+    generation: i64,
+    deadline: Instant,
+    // Fields drop in declaration order: the membership retires before reply
+    // closure can wake a waiter that immediately registers another completion.
+    membership: MetricMembership,
+    slots: Arc<AttemptSlots>,
+    reply: tokio::sync::oneshot::Sender<CompletionReply>,
+}
+
+impl QueuedCompletion {
+    fn retire(self) -> tokio::sync::oneshot::Sender<CompletionReply> {
+        let Self {
+            membership,
+            slots,
+            reply,
+            ..
+        } = self;
+        drop(membership);
+        drop(slots);
+        reply
+    }
+}
+
+/// Dropping a waiting supervisor removes only its own queued registration.
+/// Once taken by the writer, the batch owns retirement instead.
+struct CompletionRegistration<'a> {
+    completions: &'a Completions,
+    id: JobId,
+    generation: i64,
+}
+
+impl Drop for CompletionRegistration<'_> {
+    fn drop(&mut self) {
+        let retired = {
+            let mut queued = self.completions.lock_queue();
+            queued
+                .iter()
+                .position(|entry| entry.id == self.id && entry.generation == self.generation)
+                .map(|index| queued.swap_remove(index))
+        };
+        drop(retired);
+    }
+}
+
+impl Completions {
+    fn register(
+        &self,
+        id: JobId,
+        generation: i64,
+        deadline: Instant,
+        slots: &Arc<AttemptSlots>,
+    ) -> (
+        CompletionRegistration<'_>,
+        tokio::sync::oneshot::Receiver<CompletionReply>,
+    ) {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        let registration = CompletionRegistration {
+            completions: self,
+            id,
+            generation,
+        };
+        self.lock_queue().push(QueuedCompletion {
+            id,
+            generation,
+            deadline,
+            membership: MetricMembership::new(COMPLETION_MEMBERSHIPS_METRIC),
+            slots: Arc::clone(slots),
+            reply,
+        });
+        (registration, response)
+    }
+
+    fn lock_queue(&self) -> std::sync::MutexGuard<'_, Vec<QueuedCompletion>> {
+        self.queued
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// Retire the entire batch before a reply or sender closure can wake a waiter.
+struct CompletionBatch {
+    queued: Vec<QueuedCompletion>,
+    pruned_replies: Vec<tokio::sync::oneshot::Sender<CompletionReply>>,
+}
+
+impl CompletionBatch {
+    fn new(queued: Vec<QueuedCompletion>) -> Self {
+        Self {
+            queued,
+            pruned_replies: Vec::new(),
+        }
+    }
+
+    /// Retire the entries `stale` selects, keeping the order of the rest. Their
+    /// senders stay open until the batch finishes or drops.
+    fn prune(&mut self, stale: impl FnMut(&mut QueuedCompletion) -> bool) {
+        self.pruned_replies.extend(
+            self.queued
+                .extract_if(.., stale)
+                .map(QueuedCompletion::retire),
+        );
+    }
+
+    fn retire(&mut self) -> Vec<tokio::sync::oneshot::Sender<CompletionReply>> {
+        std::mem::take(&mut self.queued)
+            .into_iter()
+            .map(QueuedCompletion::retire)
+            .collect()
+    }
+
+    fn finish(mut self, results: Vec<CompletionReply>) {
+        let replies: Vec<_> = self.retire().into_iter().zip(results).collect();
+        // Also close pruned replies only after every entry and SQL buffer is gone.
+        drop(self);
+        for (reply, result) in replies {
+            let _ = reply.send(result);
+        }
+    }
+}
+
+impl Drop for CompletionBatch {
+    fn drop(&mut self) {
+        drop(self.retire());
+    }
+}
+
+pub(super) async fn complete_batched(
+    shared: &Shared,
+    id: JobId,
+    generation: i64,
+    supervisor_deadline: Instant,
+    slots: &Arc<AttemptSlots>,
+) -> CompletionReply {
+    let (_registration, response) =
+        shared
+            .completions
+            .register(id, generation, supervisor_deadline, slots);
+    let writer = shared.completions.writer.lock().await;
+    let batch = CompletionBatch::new(std::mem::take(&mut *shared.completions.lock_queue()));
+    write_batch(shared, batch).await;
+    drop(writer);
+    response.await.unwrap_or(Err(Unacknowledged))
+}
+
+async fn write_batch(shared: &Shared, mut batch: CompletionBatch) {
+    batch.prune(|entry| entry.reply.is_closed() || expired(shared, entry.deadline));
+    let Some(deadline) = batch.queued.iter().map(|entry| entry.deadline).min() else {
+        return;
+    };
+    // The batch's bind arrays live in this scope so the statement future ends,
+    // and its borrow of them with it, before any reply wakes a waiter.
+    let result = {
+        let (ids, generations): (Vec<_>, Vec<_>) = batch
+            .queued
+            .iter()
+            .map(|queued| (queued.id.0, queued.generation))
+            .unzip();
+        within(
+            shared,
+            deadline,
+            backstop(Box::pin(async {
+                let mut connection = infra_postgres::acquire(&shared.pool, "complete jobs batch")
+                    .await
+                    .map_err(OperationError::Acquire)?;
+                if expired(shared, deadline) {
+                    return Err(OperationError::TimedOut);
+                }
+                // COMPLETE for every attempt queued while the previous batch was in
+                // flight, under the fence `outcome::complete` explains. Returns the 1-based
+                // position of each applied completion.
+                observed(
+                    "complete jobs",
+                    sqlx::query_scalar!(
+                        "UPDATE background_jobs AS job \
+                         SET state = 'completed', finished_at = statement_timestamp(), claim_expires_at = NULL \
+                         FROM unnest($1::uuid[], $2::bigint[]) WITH ORDINALITY AS done (id, generation, position) \
+                         WHERE job.id = done.id AND job.claim_generation = done.generation \
+                           AND job.claim_expires_at IS NOT NULL \
+                         RETURNING done.position AS \"position!\"",
+                        &ids,
+                        &generations,
+                    )
+                    .fetch_all(&mut *connection),
+                )
+                .await
+                .map_err(OperationError::from)
+            })),
+        )
+        .await
+    };
+    match result {
+        Some(Ok(positions)) => {
+            let results = written_by_position(&positions, batch.queued.len())
+                .into_iter()
+                .map(Ok)
+                .collect();
+            batch.finish(results);
+        }
+        Some(Err(error)) => {
+            observe_failure(shared, Operation::Record, &error);
+            drop(error);
+            let results = vec![Err(Unacknowledged); batch.queued.len()];
+            batch.finish(results);
+        }
+        None => {}
+    }
+}
+
+/// Each of `len` batched completions' writes, from the 1-based positions the
+/// statement applied.
+fn written_by_position(positions: &[i64], len: usize) -> Vec<Written> {
+    let mut written = vec![Written::Unchanged; len];
+    for &position in positions {
+        if let Some(entry) = usize::try_from(position - 1)
+            .ok()
+            .and_then(|index| written.get_mut(index))
+        {
+            *entry = Written::Applied;
+        }
+    }
+    written
+}
+#[cfg(test)]
+mod tests {
+    use std::future::Future as _;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    use super::*;
+    use crate::attempt::{OWNED_ATTEMPTS_METRIC, describe_metrics};
+    use crate::gauge_recorder::Gauges;
+
+    fn admitted(slots: &Arc<tokio::sync::Semaphore>) -> Arc<AttemptSlots> {
+        Arc::new(AttemptSlots {
+            _membership: MetricMembership::new(OWNED_ATTEMPTS_METRIC),
+            _global: Arc::clone(slots).try_acquire_owned().unwrap(),
+            _kind: None,
+        })
+    }
+
+    const ID: JobId = JobId(uuid::Uuid::nil());
+
+    #[test]
+    fn cancelled_queued_registration_retires_only_its_claim_generation() {
+        let gauges = Gauges::default();
+        metrics::with_local_recorder(&gauges, || {
+            let completions = Completions::default();
+            let capacity = Arc::new(tokio::sync::Semaphore::new(2));
+            let first = admitted(&capacity);
+            let second = admitted(&capacity);
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let (first_registration, mut first_reply) =
+                completions.register(ID, 1, deadline, &first);
+            let (second_registration, mut second_reply) =
+                completions.register(ID, 2, deadline, &second);
+            drop(first);
+            drop(second);
+            assert_eq!(capacity.available_permits(), 0);
+            assert_eq!(gauges.get(OWNED_ATTEMPTS_METRIC, None), 2.0);
+            assert_eq!(gauges.get(COMPLETION_MEMBERSHIPS_METRIC, None), 2.0);
+            describe_metrics();
+            assert_eq!(
+                gauges.get(OWNED_ATTEMPTS_METRIC, None),
+                2.0,
+                "another engine startup must not reset live memberships"
+            );
+
+            drop(first_registration);
+            assert_eq!(capacity.available_permits(), 1);
+            assert_eq!(gauges.get(OWNED_ATTEMPTS_METRIC, None), 1.0);
+            assert_eq!(gauges.get(COMPLETION_MEMBERSHIPS_METRIC, None), 1.0);
+            assert_eq!(completions.lock_queue().len(), 1);
+            assert!(matches!(
+                first_reply.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+            ));
+            assert!(matches!(
+                second_reply.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ));
+            drop(second_registration);
+            assert_eq!(capacity.available_permits(), 2);
+            assert_eq!(gauges.get(OWNED_ATTEMPTS_METRIC, None), 0.0);
+            assert_eq!(gauges.get(COMPLETION_MEMBERSHIPS_METRIC, None), 0.0);
+            assert!(completions.lock_queue().is_empty());
+        });
+    }
+
+    struct ReplyWake {
+        capacity: Arc<tokio::sync::Semaphore>,
+        available_at_wake: std::sync::atomic::AtomicUsize,
+    }
+
+    impl std::task::Wake for ReplyWake {
+        fn wake(self: Arc<Self>) {
+            self.available_at_wake
+                .store(self.capacity.available_permits(), Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn entire_batch_retires_before_success_failure_cancellation_or_pruning_wakes_a_waiter() {
+        let gauges = Gauges::default();
+        metrics::with_local_recorder(&gauges, || {
+            for result in [
+                Some(Ok(Written::Applied)),
+                Some(Ok(Written::Unchanged)),
+                Some(Err(Unacknowledged)),
+                None,
+            ] {
+                for prune in [false, true] {
+                    let completions = Completions::default();
+                    let capacity = Arc::new(tokio::sync::Semaphore::new(4));
+                    let mut registrations = Vec::new();
+                    let mut responses = Vec::new();
+                    let mut observers = Vec::new();
+                    for generation in 1..=4 {
+                        let slots = admitted(&capacity);
+                        let (registration, mut response) = completions.register(
+                            ID,
+                            generation,
+                            Instant::now() + Duration::from_secs(10),
+                            &slots,
+                        );
+                        let wake = Arc::new(ReplyWake {
+                            capacity: Arc::clone(&capacity),
+                            available_at_wake: std::sync::atomic::AtomicUsize::new(usize::MAX),
+                        });
+                        let waker = std::task::Waker::from(Arc::clone(&wake));
+                        let mut context = std::task::Context::from_waker(&waker);
+                        assert!(
+                            std::pin::Pin::new(&mut response)
+                                .poll(&mut context)
+                                .is_pending()
+                        );
+                        registrations.push(registration);
+                        responses.push(response);
+                        observers.push(wake);
+                    }
+                    let mut batch =
+                        CompletionBatch::new(std::mem::take(&mut *completions.lock_queue()));
+                    drop(registrations);
+                    assert_eq!(capacity.available_permits(), 0, "batch retains admission");
+                    assert_eq!(gauges.get(OWNED_ATTEMPTS_METRIC, None), 4.0);
+                    assert_eq!(gauges.get(COMPLETION_MEMBERSHIPS_METRIC, None), 4.0);
+
+                    if prune {
+                        batch.prune(|entry| entry.generation == 1);
+                        assert!(matches!(
+                            responses[0].try_recv(),
+                            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+                        ));
+                        assert_eq!(
+                            observers[0].available_at_wake.load(Ordering::SeqCst),
+                            usize::MAX,
+                            "a pruned sender stays open until the remaining batch retires"
+                        );
+                    }
+                    match result {
+                        Some(result) => {
+                            let results = vec![result; batch.queued.len()];
+                            batch.finish(results);
+                        }
+                        None => drop(batch),
+                    }
+                    assert_eq!(capacity.available_permits(), 4);
+                    assert_eq!(gauges.get(OWNED_ATTEMPTS_METRIC, None), 0.0);
+                    assert_eq!(gauges.get(COMPLETION_MEMBERSHIPS_METRIC, None), 0.0);
+                    for (index, (wake, mut response)) in
+                        observers.into_iter().zip(responses).enumerate()
+                    {
+                        assert_eq!(wake.available_at_wake.load(Ordering::SeqCst), 4);
+                        match result.filter(|_| !prune || index != 0) {
+                            Some(result) => assert_eq!(response.try_recv().unwrap(), result),
+                            None => assert!(matches!(
+                                response.try_recv(),
+                                Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+                            )),
+                        }
+                    }
+                }
+            }
+        });
+    }
+}

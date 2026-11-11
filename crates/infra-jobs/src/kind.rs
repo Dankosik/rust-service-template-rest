@@ -24,9 +24,9 @@ pub const MAX_ATTEMPTS: u16 = 25;
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 /// Delay of [`JobError::unavailable`], in microseconds. A refunded attempt does
 /// not count, so the delay cannot grow with attempts as the retry backoff
-/// (`retry_or_exhaust` in [`crate::attempt`]) does; 10 s sits between that
-/// backoff's first two steps, long enough for an overloaded dependency to
-/// drain and short enough to notice its recovery.
+/// (`retry_or_exhaust` in `crate::attempt::outcome`) does; 10 s sits between
+/// that backoff's first two steps, long enough for an overloaded dependency
+/// to drain and short enough to notice its recovery.
 pub(crate) const UNAVAILABLE_DELAY_MICROS: i64 = 10_000_000;
 pub const MIN_TIMEOUT: Duration = Duration::from_secs(1);
 /// The longest attempt timeout a [`Policy`] may declare.
@@ -53,7 +53,8 @@ pub(crate) fn checked_delay_micros(duration: Duration) -> Result<i64, InvalidDel
 
 /// Bound, in UTF-8 bytes, on a stored error summary. [`with_sources`] appends
 /// another source only while the text stays below it; `sanitize_summary` in
-/// [`crate::attempt`] owns the final stored bound and control replacement.
+/// `crate::attempt::outcome` owns the final stored bound and control
+/// replacement.
 pub(crate) const MAX_ERROR_SUMMARY_BYTES: usize = 1024;
 
 /// A payload type a worker can run.

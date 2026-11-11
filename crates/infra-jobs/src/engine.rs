@@ -15,7 +15,9 @@ use tokio_util::task::TaskTracker;
 
 use crate::Kinds;
 use crate::claim;
+use crate::listener;
 use crate::maintenance;
+use crate::session::StartupError;
 
 pub const POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// Recovery reserve added to each kind's attempt timeout.
@@ -62,20 +64,6 @@ pub struct DrainEnd {
     pub uncertain: usize,
     /// The deadline passed before every supervisor finished and the claim loop exited.
     pub timed_out: bool,
-}
-
-/// Why the jobs store cannot start.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum StartupError {
-    #[error("the jobs store requires UTF8 server encoding")]
-    UnsupportedEncoding,
-    #[error("the PostgreSQL session is not writable")]
-    NotWritable,
-    #[error("the jobs store requires READ COMMITTED session isolation")]
-    UnsupportedIsolation,
-    /// Anything else, including the check's bound.
-    #[error("the jobs store is unavailable")]
-    Unavailable,
 }
 
 /// Why one engine statement did not finish with an acknowledgement.
@@ -219,7 +207,7 @@ impl Engine {
     /// for incompatible session defaults, and [`StartupError::Unavailable`] for
     /// anything else, including the bound.
     pub async fn check_startup(&self) -> Result<(), StartupError> {
-        maintenance::check_startup(&self.shared.pool).await
+        crate::session::check_startup(&self.shared.pool).await
     }
 
     /// Delete expired completed jobs once and return how many were deleted.
@@ -390,7 +378,7 @@ fn spawn_guarded(
         match run {
             Run::Claim => claim::run_claim_loop(shared, token, failure).await,
             Run::Retention => maintenance::run_retention(shared, token).await,
-            Run::Listener => claim::run_listener(shared, token).await,
+            Run::Listener => listener::run_listener(shared, token).await,
             Run::Sampling => maintenance::run_sampling(shared, token).await,
         }
     });
@@ -744,65 +732,11 @@ pub(crate) async fn backstop<T>(
 }
 
 #[cfg(test)]
-pub(super) mod tests {
-    use std::collections::HashMap;
-
-    use metrics::{
-        Counter, Gauge, GaugeFn, Histogram, Key, KeyName, Metadata, Recorder, SharedString, Unit,
-    };
+mod tests {
     use serde::{Deserialize, Serialize};
 
     use super::*;
-
-    #[derive(Default)]
-    struct RecordedGauge(Mutex<f64>);
-
-    impl GaugeFn for RecordedGauge {
-        fn increment(&self, value: f64) {
-            *self.0.lock().unwrap() += value;
-        }
-
-        fn decrement(&self, value: f64) {
-            *self.0.lock().unwrap() -= value;
-        }
-
-        fn set(&self, value: f64) {
-            *self.0.lock().unwrap() = value;
-        }
-    }
-
-    #[derive(Default)]
-    pub(crate) struct Gauges(Mutex<HashMap<Key, Arc<RecordedGauge>>>);
-
-    impl Gauges {
-        pub(crate) fn get(&self, name: &'static str, kind: Option<&'static str>) -> f64 {
-            let key = match kind {
-                Some(kind) => Key::from_parts(name, &[("kind", kind)]),
-                None => Key::from_name(name),
-            };
-            *self.0.lock().unwrap()[&key].0.lock().unwrap()
-        }
-    }
-
-    impl Recorder for Gauges {
-        fn describe_counter(&self, _: KeyName, _: Option<Unit>, _: SharedString) {}
-        fn describe_gauge(&self, _: KeyName, _: Option<Unit>, _: SharedString) {}
-        fn describe_histogram(&self, _: KeyName, _: Option<Unit>, _: SharedString) {}
-
-        fn register_counter(&self, _: &Key, _: &Metadata<'_>) -> Counter {
-            Counter::noop()
-        }
-
-        fn register_gauge(&self, key: &Key, _: &Metadata<'_>) -> Gauge {
-            Gauge::from_arc(Arc::clone(
-                self.0.lock().unwrap().entry(key.clone()).or_default(),
-            ))
-        }
-
-        fn register_histogram(&self, _: &Key, _: &Metadata<'_>) -> Histogram {
-            Histogram::noop()
-        }
-    }
+    use crate::gauge_recorder::Gauges;
 
     #[derive(Deserialize, Serialize)]
     struct Ordinary;
