@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_nats::HeaderMap;
+use async_nats::jetstream::message::Info;
 use async_nats::jetstream::{AckKind, Message};
 use futures_util::FutureExt as _;
 use operation_context::{Deadline, OperationContext, Stopped};
@@ -13,9 +14,10 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument as _;
 
+use crate::budget::BROKER_OPERATION_BUDGET;
 use crate::error::HandlerError;
-use crate::messaging::{BROKER_OPERATION_BUDGET, Shared};
-use crate::observe::{OutcomeLabel as _, Outcomes, outcome_label};
+use crate::messaging::Shared;
+use crate::observe::{OutcomeLabel as _, Outcomes, outcome_label, record_span_outcome};
 use crate::producer::send_publication;
 use crate::registry::{DispatchError, Registry};
 use crate::wire;
@@ -35,15 +37,15 @@ const SETTLEMENT_RETRY_DELAY: Duration = Duration::from_secs(30);
 /// Runs and settles the deliveries of one admitted consumer.
 #[derive(Debug)]
 pub(super) struct DeliveryHandler {
-    pub(super) shared: Arc<Shared>,
+    shared: Arc<Shared>,
     registry: Registry,
     metrics: HandlerMetrics,
     /// The durable's filter: the low-cardinality name of what it processes.
     filter_subject: String,
     /// `process <filter>`, the exported name of every delivery span.
     span_name: String,
-    dlq_subject: String,
-    dlq_stream: String,
+    dead_letter_subject: String,
+    dead_letter_stream: String,
 }
 
 /// `event_type` label of a delivery whose type has no registered handler,
@@ -81,8 +83,8 @@ impl HandlerMetrics {
         };
         Self {
             registered: registry
-                .handled()
-                .map(|route| (route.key.0, event(route.key.0)))
+                .handled_routes()
+                .map(|route| (route.key.event_type, event(route.key.event_type)))
                 .collect(),
             unregistered: event(UNREGISTERED),
         }
@@ -134,28 +136,27 @@ fn settlement(outcome: Outcome, delivery_attempt: usize) -> Settlement {
     }
 }
 
-/// Builds the dead-letter transfer message; `None` when the source has no
-/// transfer identity.
+/// Builds the dead-letter transfer message; `None` when the delivery's
+/// stored time cannot form a transfer identity.
 fn transfer_message(
     source: &Message,
-    dlq_stream: &str,
+    info: &Info<'_>,
+    dead_letter_stream: &str,
     reason: wire::DeadLetterReason,
 ) -> Option<async_nats::jetstream::message::PublishMessage> {
     let empty = HeaderMap::new();
     let original = source.headers.as_ref().unwrap_or(&empty);
-    let transfer_id = source.info().ok().and_then(|info| {
-        wire::dead_letter_id(
-            info.stream,
-            info.stream_sequence,
-            info.published,
-            wire::header_value(original, wire::name::NATS_MSG_ID),
-        )
-        .ok()
-    })?;
+    let transfer_id = wire::dead_letter_id(
+        info.stream,
+        info.stream_sequence,
+        info.published,
+        wire::header_value(original, wire::header_name::NATS_MSG_ID),
+    )
+    .ok()?;
     let headers = wire::dead_letter_headers(
         original,
         source.subject.as_str(),
-        dlq_stream,
+        dead_letter_stream,
         &transfer_id,
         reason,
     );
@@ -171,8 +172,8 @@ impl DeliveryHandler {
         shared: Arc<Shared>,
         registry: Registry,
         filter_subject: String,
-        dlq_subject: String,
-        dlq_stream: String,
+        dead_letter_subject: String,
+        dead_letter_stream: String,
     ) -> Self {
         Self {
             shared,
@@ -180,25 +181,25 @@ impl DeliveryHandler {
             registry,
             span_name: format!("process {filter_subject}"),
             filter_subject,
-            dlq_subject,
-            dlq_stream,
+            dead_letter_subject,
+            dead_letter_stream,
         }
     }
 
     /// Runs the handler for one delivery and settles it when the delivery
     /// carries `JetStream` metadata. A handler failure stays with the
     /// delivery: it is logged, counted and retried by the broker. Without
-    /// metadata the attempt count and deterministic DLQ identity are
+    /// metadata the attempt count and deterministic dead-letter identity are
     /// unavailable, so the delivery is logged and left unacknowledged for
     /// ack-wait redelivery.
     pub(super) async fn handle(&self, message: Message, cancel: CancellationToken) {
-        let Some(delivery_attempt) = message
-            .info()
-            .ok()
-            .and_then(|info| usize::try_from(info.delivered).ok())
-        else {
-            // The attempt count and deterministic DLQ identity both need
-            // delivery metadata; leave the delivery for ack-wait redelivery.
+        let Some((info, delivery_attempt)) = message.info().ok().and_then(|info| {
+            let attempt = usize::try_from(info.delivered).ok()?;
+            Some((info, attempt))
+        }) else {
+            // The attempt count and deterministic dead-letter identity both
+            // need delivery metadata; leave the delivery for ack-wait
+            // redelivery.
             tracing::warn!(
                 subject = message.subject.as_str(),
                 "messaging_delivery_metadata_missing"
@@ -216,6 +217,7 @@ impl DeliveryHandler {
             return self
                 .dead_letter(
                     &message,
+                    &info,
                     wire::DeadLetterReason::Malformed,
                     UNREGISTERED,
                     &cancel,
@@ -229,6 +231,7 @@ impl DeliveryHandler {
             return self
                 .dead_letter(
                     &message,
+                    &info,
                     wire::DeadLetterReason::Exhausted,
                     metrics.event_type,
                     &cancel,
@@ -250,15 +253,23 @@ impl DeliveryHandler {
             otel.status_code = tracing::field::Empty,
         );
         crate::trace::set_remote_parent(&span, headers);
-        self.process(&message, envelope, metrics, delivery_attempt, &cancel)
-            .instrument(span)
-            .await;
+        self.process(
+            &message,
+            &info,
+            envelope,
+            metrics,
+            delivery_attempt,
+            &cancel,
+        )
+        .instrument(span)
+        .await;
     }
 
     /// Runs the typed handler inside the delivery span and settles the source.
     async fn process(
         &self,
         message: &Message,
+        info: &Info<'_>,
         envelope: wire::InboundEnvelope,
         metrics: &EventMetrics,
         delivery_attempt: usize,
@@ -269,12 +280,11 @@ impl DeliveryHandler {
         metrics.outcomes.record(outcome, started.elapsed());
         let event_type = metrics.event_type;
         let label = outcome.label();
-        let span = tracing::Span::current();
-        span.record("outcome", label);
-        if outcome != Outcome::Success {
-            span.record("error.type", label);
-            span.record("otel.status_code", "ERROR");
-        }
+        record_span_outcome(
+            &tracing::Span::current(),
+            label,
+            outcome != Outcome::Success,
+        );
         // A handler's cause stays with the handler, which logs it inside this
         // span; the adapter reports only its closed outcome vocabulary.
         match outcome {
@@ -296,9 +306,10 @@ impl DeliveryHandler {
         }
 
         match settlement(outcome, delivery_attempt) {
-            Settlement::Acknowledge => acknowledge(&self.shared.client, message).await,
+            Settlement::Acknowledge => acknowledge(&self.shared.connection.client, message).await,
             Settlement::DeadLetter(reason) => {
-                self.dead_letter(message, reason, event_type, cancel).await;
+                self.dead_letter(message, info, reason, event_type, cancel)
+                    .await;
             }
             Settlement::Redeliver(delay) => redeliver_after(message, delay).await,
         }
@@ -309,29 +320,29 @@ impl DeliveryHandler {
     async fn dead_letter(
         &self,
         source: &Message,
+        info: &Info<'_>,
         reason: wire::DeadLetterReason,
         event_type: &'static str,
         cancel: &CancellationToken,
     ) {
-        let Some(message) = transfer_message(source, &self.dlq_stream, reason) else {
+        let Some(message) = transfer_message(source, info, &self.dead_letter_stream, reason) else {
             tracing::error!(
                 subject = source.subject.as_str(),
-                reason = reason.as_str(),
+                reason = reason.label(),
                 "messaging_dead_letter_identity_unavailable"
             );
             return redeliver_after(source, SETTLEMENT_RETRY_DELAY).await;
         };
-        let reason = reason.as_str();
+        let reason = reason.label();
 
-        // DLQ copies malformed source bytes: native send enforces broker bounds.
-        let result = send_publication(
-            &self.shared,
-            &self.dlq_subject,
-            message,
-            Instant::now() + BROKER_OPERATION_BUDGET,
-            cancel,
-        )
-        .await;
+        // The transfer copies malformed source bytes: native send enforces
+        // broker bounds.
+        let context = OperationContext::new(
+            Some(Deadline::new(Instant::now(), BROKER_OPERATION_BUDGET)),
+            cancel.clone(),
+        );
+        let result =
+            send_publication(&self.shared, &self.dead_letter_subject, message, &context).await;
         let outcome = match &result {
             Ok(_) => "accepted",
             Err(crate::PublishError::Ambiguous) => "ambiguous",
@@ -345,7 +356,7 @@ impl DeliveryHandler {
         )
         .increment(1);
         if result.is_ok() {
-            acknowledge(&self.shared.client, source).await;
+            acknowledge(&self.shared.connection.client, source).await;
         } else {
             tracing::error!(
                 subject = source.subject.as_str(),

@@ -11,76 +11,141 @@ use tokio::sync::watch;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+use crate::budget::{BROKER_OPERATION_BUDGET, bounded_operation, within_operation_budget};
 use crate::credentials::{CredentialsFile, CredentialsFileError};
 use crate::error::MessagingError;
-use crate::messaging::{
-    BROKER_OPERATION_BUDGET, CloseOutcome, Credentials, MessagingOptions, bounded_operation,
-    within_operation_budget,
-};
+use crate::messaging::{CloseOutcome, Credentials, MessagingOptions};
 
 /// async-nats 0.50 caps its reconnect backoff at 4 s, reached from the
 /// thirteenth attempt (`connector.rs`).
 const RECONNECT_BACKOFF_CAP: Duration = Duration::from_secs(4);
 const RECONNECT_CAP_ATTEMPT: usize = 13;
 
-/// Opens the first connection and returns the client with the receiver that
-/// reports its final `Closed` event.
-pub(crate) async fn connect_client(
-    options: &MessagingOptions,
-    deadline: Instant,
-    cancel: &CancellationToken,
-) -> Result<(async_nats::Client, watch::Receiver<bool>), MessagingError> {
-    let (closed_event_tx, closed_event) = watch::channel(false);
-    let servers: Vec<_> = options
-        .servers
-        .to_server_addrs()
-        .map_err(|_| MessagingError::Configuration("broker server address is invalid"))?
-        .collect();
-    let all_tls = servers.iter().all(async_nats::ServerAddr::tls_required);
-    if options.tls_first && !all_tls {
-        return Err(MessagingError::Configuration(
-            "TLS-first requires every configured server to use TLS",
-        ));
+/// The native client and the receiver that reports its final `Closed` event.
+#[derive(Clone, Debug)]
+pub(crate) struct NativeConnection {
+    pub(crate) client: async_nats::Client,
+    /// Final event submission is separate from native runner completion.
+    closed_event: watch::Receiver<bool>,
+}
+
+impl NativeConnection {
+    /// Opens the first connection.
+    pub(crate) async fn open(
+        options: &MessagingOptions,
+        deadline: Instant,
+        cancel: &CancellationToken,
+    ) -> Result<Self, MessagingError> {
+        let (closed_event_tx, closed_event) = watch::channel(false);
+        let servers: Vec<_> = options
+            .servers
+            .to_server_addrs()
+            .map_err(|_| MessagingError::Configuration("broker server address is invalid"))?
+            .collect();
+        let all_tls = servers.iter().all(async_nats::ServerAddr::tls_required);
+        if options.tls_first && !all_tls {
+            return Err(MessagingError::Configuration(
+                "TLS-first requires every configured server to use TLS",
+            ));
+        }
+        let any_tls = servers.iter().any(async_nats::ServerAddr::tls_required);
+        let connect_deadline = within_operation_budget(deadline);
+        let connect_budget = connect_deadline.saturating_duration_since(Instant::now());
+        let random = async_nats::rustls::crypto::aws_lc_rs::default_provider().secure_random;
+        let mut connect = connect_options(options.credentials.as_ref(), deadline, cancel)
+            .await?
+            .name(&options.connection_name)
+            .connection_timeout(BROKER_OPERATION_BUDGET)
+            .initial_connect_deadline(connect_deadline)
+            .request_timeout(Some(BROKER_OPERATION_BUDGET))
+            .reconnect_delay_callback(move |attempts| reconnect_delay(attempts, random))
+            .require_tls(!options.allow_plaintext)
+            .event_callback(move |event| {
+                // Close acknowledgement lets the owner retire telemetry.
+                // Submit this final event before publishing completion.
+                report_connection_event(&event);
+                if matches!(event, async_nats::Event::Closed) {
+                    closed_event_tx.send_replace(true);
+                }
+                std::future::ready(())
+            });
+        if options.tls_first {
+            connect = connect.tls_first();
+        } else if any_tls {
+            // Ordinary TLS sees INFO before the TLS handshake. Mixed
+            // seeds cannot share a single discovery trust boundary.
+            connect = connect.ignore_discovered_servers();
+        }
+        if let Some(root_ca) = options.root_ca_path.clone() {
+            connect = connect.add_root_certificates(root_ca);
+        }
+        let client = bounded_operation(connect_deadline, cancel, async {
+            connect
+                .connect(servers)
+                .await
+                .map_err(|error| connect_failure(&error, connect_budget))
+        })
+        .await?;
+        Ok(Self {
+            client,
+            closed_event,
+        })
     }
-    let any_tls = servers.iter().any(async_nats::ServerAddr::tls_required);
-    let connect_deadline = within_operation_budget(deadline);
-    let connect_budget = connect_deadline.saturating_duration_since(Instant::now());
-    let random = async_nats::rustls::crypto::aws_lc_rs::default_provider().secure_random;
-    let mut connect = connect_options(options.credentials.as_ref(), deadline, cancel)
-        .await?
-        .name(&options.connection_name)
-        .connection_timeout(BROKER_OPERATION_BUDGET)
-        .initial_connect_deadline(connect_deadline)
-        .request_timeout(Some(BROKER_OPERATION_BUDGET))
-        .reconnect_delay_callback(move |attempts| reconnect_delay(attempts, random))
-        .require_tls(!options.allow_plaintext)
-        .event_callback(move |event| {
-            // Close acknowledgement lets the owner retire telemetry.
-            // Submit this final event before publishing completion.
-            report_connection_event(&event);
-            if matches!(event, async_nats::Event::Closed) {
-                closed_event_tx.send_replace(true);
+
+    /// Drains and closes the client, bounded by `deadline`, `cancel` and one
+    /// [`BROKER_OPERATION_BUDGET`], and observes native and final-event
+    /// completion.
+    ///
+    /// A client already closed, with its final event observed, returns
+    /// [`CloseOutcome::Complete`]. Otherwise an already-cancelled `cancel`, or
+    /// a deadline that has passed, skips the drain, force-closes the native
+    /// client, and returns [`CloseOutcome::TimedOut`].
+    pub(crate) async fn close(
+        &self,
+        deadline: Instant,
+        cancel: &CancellationToken,
+    ) -> CloseOutcome {
+        let deadline = within_operation_budget(deadline);
+        let client = &self.client;
+        let mut closed_event = self.closed_event.clone();
+        let closed_now = || client.wait_closed().now_or_never() == Some(true);
+        if closed_now() && *closed_event.borrow() {
+            return CloseOutcome::Complete;
+        }
+        let drain = async {
+            // The second check observes a close that `drain` itself completed.
+            if !closed_now() && client.drain().await.is_err() && !closed_now() {
+                return CloseOutcome::UnobservedClose;
             }
-            std::future::ready(())
-        });
-    if options.tls_first {
-        connect = connect.tls_first();
-    } else if any_tls {
-        // Ordinary TLS sees INFO before the TLS handshake. Mixed
-        // seeds cannot share a single discovery trust boundary.
-        connect = connect.ignore_discovered_servers();
+            // A submitted Closed event cannot stand in for native resource release.
+            if !client.wait_closed().await {
+                return CloseOutcome::UnobservedClose;
+            }
+            if closed_event.wait_for(|submitted| *submitted).await.is_ok() {
+                CloseOutcome::Complete
+            } else {
+                CloseOutcome::UnobservedClose
+            }
+        };
+        let outcome = if cancel.is_cancelled() || Instant::now() >= deadline {
+            CloseOutcome::TimedOut
+        } else {
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => CloseOutcome::TimedOut,
+                () = tokio::time::sleep_until(deadline) => CloseOutcome::TimedOut,
+                result = drain => result,
+            }
+        };
+        if outcome != CloseOutcome::Complete {
+            client.force_close();
+            if Instant::now() < deadline {
+                // Forced closure does not gain a fresh wait budget.
+                let _ = tokio::time::timeout_at(deadline, client.wait_closed()).await;
+            }
+        }
+        outcome
     }
-    if let Some(root_ca) = options.root_ca_path.clone() {
-        connect = connect.add_root_certificates(root_ca);
-    }
-    let client = bounded_operation(connect_deadline, cancel, async {
-        connect
-            .connect(servers)
-            .await
-            .map_err(|error| connect_failure(&error, connect_budget))
-    })
-    .await?;
-    Ok((client, closed_event))
 }
 
 /// Client options that authenticate with the configured credential source.
@@ -116,52 +181,6 @@ async fn connect_options(
     }
 }
 
-pub(crate) async fn close_client(
-    client: &async_nats::Client,
-    closed_event: &watch::Receiver<bool>,
-    deadline: Instant,
-    cancel: &CancellationToken,
-) -> CloseOutcome {
-    let mut closed_event = closed_event.clone();
-    let closed_now = || client.wait_closed().now_or_never() == Some(true);
-    if closed_now() && *closed_event.borrow() {
-        return CloseOutcome::Complete;
-    }
-    let drain = async {
-        // The second check observes a close that `drain` itself completed.
-        if !closed_now() && client.drain().await.is_err() && !closed_now() {
-            return CloseOutcome::UnobservedClose;
-        }
-        // A submitted Closed event cannot stand in for native resource release.
-        if !client.wait_closed().await {
-            return CloseOutcome::UnobservedClose;
-        }
-        if closed_event.wait_for(|submitted| *submitted).await.is_ok() {
-            CloseOutcome::Complete
-        } else {
-            CloseOutcome::UnobservedClose
-        }
-    };
-    let outcome = if cancel.is_cancelled() || Instant::now() >= deadline {
-        CloseOutcome::TimedOut
-    } else {
-        tokio::select! {
-            biased;
-            () = cancel.cancelled() => CloseOutcome::TimedOut,
-            () = tokio::time::sleep_until(deadline) => CloseOutcome::TimedOut,
-            result = drain => result,
-        }
-    };
-    if outcome != CloseOutcome::Complete {
-        client.force_close();
-        if Instant::now() < deadline {
-            // Forced closure does not gain a fresh wait budget.
-            let _ = tokio::time::timeout_at(deadline, client.wait_closed()).await;
-        }
-    }
-    outcome
-}
-
 /// Preserve the SDK's immediate attempts and capped backoff while spreading
 /// each later attempt independently. The SDK still owns all retry and sleep.
 /// The spread only shortens a delay, so it never exceeds the SDK's own.
@@ -181,10 +200,9 @@ fn reconnect_delay(attempts: usize, random: &dyn SecureRandom) -> Duration {
 }
 
 fn spread_reconnect_delay(base: Duration, sample: Result<u16, GetRandomFailed>) -> Duration {
-    // The capped base is at most 4e9 ns; its 10% window times a u16 fits u64.
-    let base_nanos = u64::try_from(base.as_nanos()).unwrap_or(u64::MAX);
-    let spread = (base_nanos / 10) * u64::from(sample.unwrap_or_default()) / u64::from(u16::MAX);
-    Duration::from_nanos(base_nanos - spread)
+    // A failed random sample spreads nothing.
+    let spread = base / 10 * u32::from(sample.unwrap_or_default()) / u32::from(u16::MAX);
+    base.saturating_sub(spread)
 }
 
 /// Classifies an unusable credentials source and logs why, without the path
@@ -200,6 +218,7 @@ fn credentials_failure(error: CredentialsFileError) -> MessagingError {
         operation = "credentials",
         reason = %failure,
         error.type = error.error_type(),
+        io.error_kind = error.io_error_kind(),
         "messaging_admission_failed"
     );
     failure

@@ -12,7 +12,7 @@ use utoipa::ToSchema;
 use utoipa::openapi::RefOr;
 use utoipa::openapi::schema::Schema;
 
-use crate::registry::Registry;
+use crate::registry::{Registry, RouteKey};
 use crate::wire::{
     CREATED_AT, EVENT_SCHEMA, EVENT_TYPE, IDENTITY_MAX_BYTES, MESSAGE_ID, NATS_MSG_ID, schema_label,
 };
@@ -60,7 +60,10 @@ impl Registry {
         let mut channels = BTreeMap::<&str, BTreeMap<String, Value>>::new();
         let mut schemas = BTreeMap::<String, Value>::new();
         for route in self.routes() {
-            let (event_type, schema_version) = route.key;
+            let RouteKey {
+                event_type,
+                schema_version,
+            } = route.key;
             let subject = route.subject.as_str();
             let schema = route.schema.ok_or(ContractError::Undocumented {
                 event_type,

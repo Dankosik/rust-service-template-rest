@@ -24,6 +24,7 @@ use infra_messaging::{
     BROKER_OPERATION_BUDGET, CloseOutcome, Credentials, Messaging, MessagingOptions,
     MessagingStartup, PreparedEvent, PublishError,
 };
+use operation_context::{Deadline, OperationContext};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
@@ -518,7 +519,10 @@ async fn redrive(args: &[String], resources: &mut Resources, deadline: Instant) 
         state.ack = None;
         save(&state_path, &state, Persist::Replace)?;
         match producer
-            .publish(&prepared, deadline, &CancellationToken::new())
+            .publish(
+                &prepared,
+                &OperationContext::new(Some(Deadline::at(deadline)), CancellationToken::new()),
+            )
             .await
         {
             Ok(ack) if ack.stream == config.source_stream && ack.sequence > 0 => {

@@ -29,6 +29,7 @@ use infra_messaging::{
     ConsumerOptions, HandlerError, Messaging, MessagingOptions, Registry, Route,
 };
 use infra_postgres::{Closed, Isolation, PgPool, PoolOptions, TxError, in_tx};
+use operation_context::{Deadline, OperationContext};
 // template:begin inbound-webhooks:outbox-test-messaging-outbox-inbound-imports-2
 use infra_jobs::{JobError, KindsBuilder, Policy};
 use infra_webhooks::inbound::{
@@ -472,7 +473,7 @@ async fn business_rollback_hides_intent_commit_publishes_exact_prepared_event(po
     let publisher = template_pool(&pool, 3).await;
     let run = start(
         &publisher,
-        infra_messaging::outbox::registry(messaging.producer())
+        infra_messaging::outbox::kinds(messaging.producer())
             .expect("outbox publisher registry is valid"),
     )
     .await;
@@ -633,7 +634,7 @@ async fn lost_broker_ack_retries_then_republishes_the_same_immutable_identity(po
     let first_pool = template_pool(&pool, 3).await;
     let first_run = start(
         &first_pool,
-        infra_messaging::outbox::registry(first_messaging.producer())
+        infra_messaging::outbox::kinds(first_messaging.producer())
             .expect("outbox publisher registry is valid"),
     )
     .await;
@@ -681,7 +682,7 @@ async fn lost_broker_ack_retries_then_republishes_the_same_immutable_identity(po
     let retry_pool = template_pool(&pool, 3).await;
     let retry_run = start(
         &retry_pool,
-        infra_messaging::outbox::registry(retry_messaging.producer())
+        infra_messaging::outbox::kinds(retry_messaging.producer())
             .expect("retry publisher registry is valid"),
     )
     .await;
@@ -733,7 +734,7 @@ async fn final_attempt_publication_failure_leaves_a_visible_failed_job(pool: PgP
     let publisher = template_pool(&pool, 3).await;
     let run = start(
         &publisher,
-        infra_messaging::outbox::registry(messaging.producer())
+        infra_messaging::outbox::kinds(messaging.producer())
             .expect("outbox publisher registry is valid"),
     )
     .await;
@@ -791,7 +792,7 @@ async fn malformed_stored_intent_is_terminal_and_never_false_completion(pool: Pg
     let publisher = template_pool(&pool, 3).await;
     let run = start(
         &publisher,
-        infra_messaging::outbox::registry(messaging.producer())
+        infra_messaging::outbox::kinds(messaging.producer())
             .expect("outbox publisher registry is valid"),
     )
     .await;
@@ -833,7 +834,13 @@ async fn durable_consumer_effect_dedupes_same_logical_id_after_broker_window(poo
     let event = prepared(&fixture, "event-durable-effect", "same");
     messaging
         .producer()
-        .publish(&event, Instant::now() + WAIT, &CancellationToken::new())
+        .publish(
+            &event,
+            &OperationContext::new(
+                Some(Deadline::at(Instant::now() + WAIT)),
+                CancellationToken::new(),
+            ),
+        )
         .await
         .expect("first publication ACKs");
     until("first durable effect commits", async || {
@@ -847,7 +854,13 @@ async fn durable_consumer_effect_dedupes_same_logical_id_after_broker_window(poo
     tokio::time::sleep(fixture.duplicate_window + Duration::from_millis(20)).await;
     messaging
         .producer()
-        .publish(&event, Instant::now() + WAIT, &CancellationToken::new())
+        .publish(
+            &event,
+            &OperationContext::new(
+                Some(Deadline::at(Instant::now() + WAIT)),
+                CancellationToken::new(),
+            ),
+        )
         .await
         .expect("same-ID publication after broker window ACKs");
     until(
@@ -970,7 +983,10 @@ async fn committed_effect_after_lost_settlement(pool: PgPool, drop_request: bool
     let event = prepared(&fixture, "event-lost-settlement", "committed");
     let ack = messaging
         .producer()
-        .publish(&event, Instant::now() + WAIT, &cancel)
+        .publish(
+            &event,
+            &OperationContext::new(Some(Deadline::at(Instant::now() + WAIT)), cancel.clone()),
+        )
         .await
         .unwrap();
     relay.wait_for_drop().await;
@@ -1147,7 +1163,7 @@ async fn dedicated_publisher_progresses_while_real_inbound_webhook_processing_sl
     );
     let publisher = start(
         &shared_pool,
-        infra_messaging::outbox::registry(messaging.producer())
+        infra_messaging::outbox::kinds(messaging.producer())
             .expect("dedicated publisher registry is valid"),
     )
     .await;

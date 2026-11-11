@@ -11,13 +11,13 @@ use crate::error::EnvelopeError;
 /// Serialized, routed event intent. Retrying never reserializes or reroutes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedEvent {
-    pub(crate) subject: String,
-    pub(crate) message_id: String,
-    pub(crate) publication_id: String,
-    pub(crate) event_type: Cow<'static, str>,
-    pub(crate) schema_version: u16,
-    pub(crate) occurred_at: OffsetDateTime,
-    pub(crate) payload: Bytes,
+    subject: String,
+    message_id: String,
+    publication_id: String,
+    event_type: Cow<'static, str>,
+    schema_version: u16,
+    occurred_at: OffsetDateTime,
+    payload: Bytes,
 }
 
 impl PreparedEvent {
@@ -42,16 +42,7 @@ impl PreparedEvent {
         event: &Event<T>,
         max_payload_bytes: usize,
     ) -> Result<Self, EnvelopeError> {
-        const {
-            assert!(
-                T::SCHEMA_VERSION > 0,
-                "event schema version must be positive"
-            );
-            assert!(
-                crate::wire::valid_identity(T::EVENT_TYPE),
-                "event type must be 1 to IDENTITY_MAX_BYTES bytes without control characters"
-            );
-        }
+        let key = crate::registry::route_key::<T>();
         let subject = subject.into();
         if !crate::wire::valid_subject(&subject) {
             return Err(EnvelopeError::Subject);
@@ -78,10 +69,46 @@ impl PreparedEvent {
             subject,
             message_id: event.id.clone(),
             publication_id: event.id.clone(),
-            event_type: Cow::Borrowed(T::EVENT_TYPE),
-            schema_version: T::SCHEMA_VERSION,
+            event_type: Cow::Borrowed(key.event_type),
+            schema_version: key.schema_version,
             occurred_at,
             payload: payload.bytes.into(),
+        })
+    }
+
+    /// Rebuilds an event from stored parts, checking everything
+    /// [`Self::prepare`] guarantees: a concrete subject, identities of at most
+    /// [`IDENTITY_MAX_BYTES`](crate::wire::IDENTITY_MAX_BYTES) bytes, so the
+    /// five headers stay far below
+    /// [`HEADER_LIMIT_BYTES`](crate::wire::HEADER_LIMIT_BYTES), a positive
+    /// schema version, and a creation time that is set and can be formatted.
+    pub(crate) fn from_parts(
+        subject: String,
+        message_id: String,
+        publication_id: String,
+        event_type: String,
+        schema_version: u16,
+        occurred_at: OffsetDateTime,
+        payload: Bytes,
+    ) -> Result<Self, EnvelopeError> {
+        if !crate::wire::valid_subject(&subject) {
+            return Err(EnvelopeError::Subject);
+        }
+        for value in [&message_id, &publication_id, &event_type] {
+            crate::wire::validate_identity(value)?;
+        }
+        if schema_version == 0 || crate::wire::is_zero_time(occurred_at) {
+            return Err(EnvelopeError::Identity);
+        }
+        crate::wire::format_timestamp(occurred_at)?;
+        Ok(Self {
+            subject,
+            message_id,
+            publication_id,
+            event_type: event_type.into(),
+            schema_version,
+            occurred_at,
+            payload,
         })
     }
     #[must_use]

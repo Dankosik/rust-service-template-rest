@@ -29,9 +29,9 @@ pub(super) async fn publisher(
         .messaging
         .as_ref()
         .ok_or(MessagingError::Connection)?;
-    let registry = infra_messaging::outbox::registry(messaging.producer())?;
+    let kinds = infra_messaging::outbox::kinds(messaging.producer())?;
     if ordinary.is_some_and(|ordinary| {
-        registry
+        kinds
             .names()
             .any(|reserved| ordinary.kinds().any(|name| name == reserved))
     }) {
@@ -39,10 +39,10 @@ pub(super) async fn publisher(
     }
     // One listener and one retention loop serve both engines of this process.
     let publisher = match ordinary {
-        Some(ordinary) => ordinary.beside(registry, NonZeroU32::MIN),
+        Some(ordinary) => ordinary.beside(kinds, NonZeroU32::MIN),
         None => Engine::new(
             super::postgres::admitted_pool(resources)?,
-            registry,
+            kinds,
             NonZeroU32::MIN,
         ),
     };
@@ -60,7 +60,7 @@ impl RetainedCapabilities {
             // `consumes_messages` retained the registry once a factory was registered.
             let registry = self.messages.as_mut().ok_or(WorkerError::NoRegistrations)?;
             factory(pool, registry).map_err(WorkerError::Registration)?;
-            registry.validate_consumer()?;
+            registry.require_handlers()?;
         }
         Ok(())
     }

@@ -50,6 +50,15 @@ impl CredentialsFileError {
             Self::Malformed => "malformed_credentials",
         }
     }
+
+    /// The I/O error kind of an unreadable file, a closed vocabulary that
+    /// tells a missing file from a forbidden one without the path.
+    pub(crate) fn io_error_kind(self) -> Option<tracing::field::DebugValue<std::io::ErrorKind>> {
+        match self {
+            Self::Unreadable(kind) => Some(tracing::field::debug(kind)),
+            Self::Malformed => None,
+        }
+    }
 }
 
 /// The admitted credentials file.
@@ -89,7 +98,11 @@ impl CredentialsFile {
         let credentials = read(&self.path).await;
         let (jwt, key) = credentials.inspect_err(|error| {
             error.observe_challenge_failure();
-            tracing::warn!(error.type = error.error_type(), "messaging_credentials_file_failed");
+            tracing::warn!(
+                error.type = error.error_type(),
+                io.error_kind = error.io_error_kind(),
+                "messaging_credentials_file_failed"
+            );
         })?;
         let signature = key
             .sign(nonce)
@@ -121,7 +134,7 @@ async fn read(path: &Path) -> Result<(String, nkeys::KeyPair), CredentialsFileEr
 /// The user JWT and key of a credentials file: the first and the second
 /// value that stands alone on a line between two dashed marker lines, the
 /// layout `nsc` writes and the NATS clients read.
-pub(crate) fn parse(content: &str) -> Result<(String, nkeys::KeyPair), CredentialsFileError> {
+fn parse(content: &str) -> Result<(String, nkeys::KeyPair), CredentialsFileError> {
     let lines: Vec<&str> = content.lines().map(str::trim).collect();
     let mut values = lines.windows(3).filter_map(|window| {
         let &[opening, value, closing] = window else {

@@ -48,6 +48,8 @@ features = ["jetstream"]
 workspace = true
 [dependencies.infra-messaging]
 workspace = true
+[dependencies.operation-context]
+workspace = true
 [dependencies.infra-webhooks]
 workspace = true
 features = ["test-support"]

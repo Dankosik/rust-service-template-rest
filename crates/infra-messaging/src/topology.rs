@@ -3,25 +3,35 @@
 
 use std::num::NonZeroUsize;
 
+use async_nats::jetstream::consumer::PullConsumer;
+use async_nats::jetstream::consumer::pull::Config as PullConfig;
 use async_nats::jetstream::context::{
     GetStreamByNameErrorKind, GetStreamError, GetStreamErrorKind,
 };
-use async_nats::jetstream::stream::{Config as StreamConfig, PersistenceMode, StorageType};
+use async_nats::jetstream::stream::{
+    Config as StreamConfig, ConsumerErrorKind, PersistenceMode, StorageType, Stream,
+};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+use crate::budget::{BROKER_OPERATION_BUDGET, bounded_operation};
 use crate::error::MessagingError;
-use crate::messaging::{
-    BROKER_OPERATION_BUDGET, ConsumerOptions, MessagingOptions, bounded_operation,
-};
+use crate::messaging::{ConsumerOptions, MessagingOptions};
 use crate::registry::Registry;
 use crate::wire;
 
-/// A configured consumer and the dead-letter topology admitted for it.
+/// Oldest broker version this adapter admits; see the durable-messaging
+/// guide for the server requirements.
+const MIN_SERVER_VERSION: (i64, i64, i64) = (2, 12, 3);
+
+/// A configured consumer, the dead-letter topology admitted for it, and the
+/// startup budget its durable creation still runs under.
 #[derive(Clone, Debug)]
 pub(crate) struct ConsumerAdmission {
     pub(crate) options: ConsumerOptions,
     pub(crate) dead_letter: DeadLetterTopology,
+    pub(crate) deadline: Instant,
+    pub(crate) cancel: CancellationToken,
 }
 
 /// The topology already read at startup; consumer admission adds route lengths.
@@ -44,32 +54,26 @@ impl DeadLetterTopology {
         filter: &str,
         server_limit: usize,
     ) -> Result<usize, MessagingError> {
-        let subject_bytes = registry
-            .routes()
-            .filter(|route| wire::matches_filter(filter, &route.subject))
-            .map(|route| route.subject.len())
-            .max()
-            .ok_or_else(|| {
-                refusal_failure(
-                    "dead_letter_stream",
-                    Refusal::DeadLetterBoundsUnavailable,
-                    0,
-                    None,
-                )
-            })?;
-        let bounds = wire::dead_letter_bounds(
-            self.source_max_message_bytes,
-            subject_bytes,
-            self.stream.len(),
-        )
-        .ok_or_else(|| {
+        let bounds_unavailable = || {
             refusal_failure(
                 "dead_letter_stream",
                 Refusal::DeadLetterBoundsUnavailable,
                 0,
                 None,
             )
-        })?;
+        };
+        let subject_bytes = registry
+            .routes()
+            .filter(|route| wire::matches_filter(filter, &route.subject))
+            .map(|route| route.subject.len())
+            .max()
+            .ok_or_else(bounds_unavailable)?;
+        let bounds = wire::dead_letter_bounds(
+            self.source_max_message_bytes,
+            subject_bytes,
+            self.stream.len(),
+        )
+        .ok_or_else(bounds_unavailable)?;
         if bounds.headers > wire::NATIVE_HEADER_LIMIT_BYTES {
             return Err(refusal_failure(
                 "dead_letter_stream",
@@ -119,7 +123,14 @@ pub(crate) async fn admit_topology(
             i64::try_from(client.server_info().max_payload).ok(),
         )
     })?;
-    let source = get_stream(jetstream, &options.source_stream, deadline, cancel).await?;
+    let source = get_stream(
+        jetstream,
+        &options.source_stream,
+        "source",
+        deadline,
+        cancel,
+    )
+    .await?;
     validate_stream_publication(&source.cached_info().config)
         .map_err(|refusal| refusal_failure("source_stream", refusal, envelope_limit, None))?;
     let Some(consumer) = &options.consumer else {
@@ -136,25 +147,11 @@ pub(crate) async fn admit_topology(
                 Some(raw_source_limit.into()),
             )
         })?;
-    let dlq_name = match &consumer.dlq_stream {
+    let dead_letter_name = match &consumer.dlq_stream {
         Some(name) => name.clone(),
-        None => {
-            bounded_operation(deadline, cancel, async {
-                jetstream
-                    .stream_by_subject(consumer.dlq_subject.clone())
-                    .await
-                    .map_err(|error| {
-                        let broker = match error.kind() {
-                            GetStreamByNameErrorKind::JetStream(broker) => Some(broker),
-                            _ => None,
-                        };
-                        topology_failure("stream_by_subject", &error, broker.as_ref())
-                    })
-            })
-            .await?
-        }
+        None => stream_name_for_subject(jetstream, &consumer.dlq_subject, deadline, cancel).await?,
     };
-    if dlq_name == options.source_stream {
+    if dead_letter_name == options.source_stream {
         return Err(refusal_failure(
             "dead_letter_stream",
             Refusal::DeadLetterIsSource,
@@ -162,20 +159,29 @@ pub(crate) async fn admit_topology(
             None,
         ));
     }
-    let dlq = get_stream(jetstream, &dlq_name, deadline, cancel).await?;
-    validate_stream_publication(&dlq.cached_info().config)
+    let dead_letter = get_stream(
+        jetstream,
+        &dead_letter_name,
+        "dead_letter",
+        deadline,
+        cancel,
+    )
+    .await?;
+    validate_stream_publication(&dead_letter.cached_info().config)
         .map_err(|refusal| refusal_failure("dead_letter_stream", refusal, envelope_limit, None))?;
     Ok(Some(ConsumerAdmission {
         options: consumer.clone(),
         dead_letter: DeadLetterTopology {
-            stream: dlq_name,
+            stream: dead_letter_name,
             source_max_message_bytes,
             dead_letter_max_message_bytes: usize::try_from(
-                dlq.cached_info().config.max_message_size,
+                dead_letter.cached_info().config.max_message_size,
             )
             .ok()
             .and_then(NonZeroUsize::new),
         },
+        deadline,
+        cancel: cancel.clone(),
     }))
 }
 
@@ -204,36 +210,77 @@ fn validate_stream_publication(config: &StreamConfig) -> Result<(), Refusal> {
     Ok(())
 }
 
+/// Reads one stream; `role` names it in a failure log without the
+/// configured stream name.
 async fn get_stream(
     jetstream: &async_nats::jetstream::Context,
     name: &str,
+    role: &'static str,
     deadline: Instant,
     cancel: &CancellationToken,
-) -> Result<async_nats::jetstream::stream::Stream, MessagingError> {
+) -> Result<Stream, MessagingError> {
     bounded_operation(deadline, cancel, async {
         jetstream
             .get_stream(name)
             .await
-            .map_err(|error| get_stream_failure(&error))
+            .map_err(|error| get_stream_failure(&error, role))
     })
     .await
 }
 
-pub(crate) fn get_stream_failure(error: &GetStreamError) -> MessagingError {
+pub(crate) fn get_stream_failure(error: &GetStreamError, role: &'static str) -> MessagingError {
     let broker = match error.kind() {
         GetStreamErrorKind::JetStream(broker) => Some(broker),
         _ => None,
     };
-    topology_failure("get_stream", error, broker.as_ref())
+    topology_failure("get_stream", Some(role), error, broker.as_ref())
+}
+
+/// Asks the broker which stream stores `subject`.
+async fn stream_name_for_subject(
+    jetstream: &async_nats::jetstream::Context,
+    subject: &str,
+    deadline: Instant,
+    cancel: &CancellationToken,
+) -> Result<String, MessagingError> {
+    bounded_operation(deadline, cancel, async {
+        jetstream
+            .stream_by_subject(subject.to_owned())
+            .await
+            .map_err(|error| {
+                let broker = match error.kind() {
+                    GetStreamByNameErrorKind::JetStream(broker) => Some(broker),
+                    _ => None,
+                };
+                topology_failure("stream_by_subject", None, &error, broker.as_ref())
+            })
+    })
+    .await
+}
+
+/// Creates the durable consumer, or updates its editable fields.
+pub(crate) async fn create_durable(
+    stream: &Stream,
+    config: PullConfig,
+) -> Result<PullConsumer, MessagingError> {
+    stream.create_consumer(config).await.map_err(|error| {
+        let broker = match error.kind() {
+            ConsumerErrorKind::JetStream(broker) => Some(broker),
+            _ => None,
+        };
+        topology_failure("create_consumer", None, &error, broker.as_ref())
+    })
 }
 
 /// Classifies a failed topology request and logs which request failed.
 ///
-/// `broker` is the `JetStream` API error when the broker answered with one.
-/// Its numeric code is a closed vocabulary; its description can quote
-/// configuration and stays out of the log.
-pub(crate) fn topology_failure(
+/// `stream_role` says which stream a stream request read. `broker` is the
+/// `JetStream` API error when the broker answered with one. Its numeric code
+/// is a closed vocabulary; its description can quote configuration and stays
+/// out of the log.
+fn topology_failure(
     operation: &'static str,
+    stream_role: Option<&'static str>,
     error: &(dyn std::error::Error + 'static),
     broker: Option<&async_nats::jetstream::Error>,
 ) -> MessagingError {
@@ -244,6 +291,7 @@ pub(crate) fn topology_failure(
     };
     tracing::warn!(
         operation,
+        stream_role,
         reason = %failure,
         jetstream.error_code = broker.map(|broker| broker.error_code().0),
         "messaging_admission_failed"
@@ -336,7 +384,8 @@ pub(crate) fn validate_server(
     envelope_limit: usize,
 ) -> Result<(), Refusal> {
     let info = client.server_info();
-    if !client.is_server_compatible(2, 12, 3) {
+    let (major, minor, patch) = MIN_SERVER_VERSION;
+    if !client.is_server_compatible(major, minor, patch) {
         return Err(Refusal::ServerVersion);
     }
     if !info.jetstream {

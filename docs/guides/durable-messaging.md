@@ -243,7 +243,7 @@ let prepared = infra_messaging::wire::restore_dead_letter(
         stored_at: record.time,
     },
 )?;
-producer.publish(&prepared, deadline, &cancel).await?;
+producer.publish(&prepared, &context).await?;
 ```
 
 Only confirmed publication plus custody of that exact record and the operator's
@@ -634,12 +634,14 @@ JetStream >= 2.12.3, validates the named streams and the source message limit,
 and fails with sanitized configuration, authentication, connection, topology,
 bounds, or timeout reasons. A refused stream or durable request also logs
 `messaging_admission_failed` with the request, that reason, and the broker's
-numeric JetStream error code; the broker's description can quote configuration
-and is not logged. A failed first connection logs the same event with
+numeric JetStream error code; a stream read also names the stream's role as
+`stream_role` (`source` or `dead_letter`). The broker's description can quote
+configuration and is not logged. A failed first connection logs the same event with
 `operation="connect"` and an `error.type` that names the stage: `dns`, `tls`,
 `io`, `timeout`, `authentication`, `authorization_violation`, `server_parse`,
 or `max_reconnects`; unusable credentials log `operation="credentials"` with
-`malformed_credentials` or `unreadable_credentials_file`.
+`malformed_credentials` or `unreadable_credentials_file`; an unreadable file
+also carries `io.error_kind`, such as `NotFound` or `PermissionDenied`.
 
 Brokers are reached with `tls://` URLs. `nats://` needs an explicit
 operator decision: `messaging.allow_plaintext` for a local or development
@@ -681,7 +683,7 @@ reconnect, allowing for file delivery, reading and broker acceptance. Publish
 the complete replacement atomically with provider-supported overlap; a
 half-written, unreadable or malformed file cannot authenticate that attempt.
 Read/parse failures log `messaging_credentials_file_failed` with the closed
-`error.type`, and recovery continues. Kubernetes Secret projections are
+`error.type`, and `io.error_kind` for an unreadable file, and recovery continues. Kubernetes Secret projections are
 eventual, and a `subPath` mount does not receive updates. The template does not
 renew a lease or issue credentials. Expiry or broker refusal can cause repeated
 reconnect failures until a valid file is available and accepted. Inline

@@ -14,6 +14,8 @@ mod dead_letter;
 pub(crate) use dead_letter::{DeadLetterReason, dead_letter_bounds, dead_letter_headers};
 pub use dead_letter::{DeadLetterRecord, dead_letter_id, restore_dead_letter};
 
+/// The encoded header limit of one envelope; the Go service enforces the same
+/// limit, so either side accepts what the other publishes.
 pub const HEADER_LIMIT_BYTES: usize = 8 * 1024;
 pub const MESSAGE_ID: &str = "Message-Id";
 pub const EVENT_TYPE: &str = "Event-Type";
@@ -33,34 +35,9 @@ const DIGEST_HEX_LEN: usize = 64;
 /// The `NATS/1.0` status line and the blank line that ends a header block.
 const HEADER_PREAMBLE_BYTES: usize = "NATS/1.0\r\n\r\n".len();
 
-/// NATS 2.15 counts the original subject and ACK reply in a pull's byte limit.
-/// V2 ACKs cover V1 too: prefix, domain, eight-byte account hash, stream,
-/// consumer, then five 64-bit decimal fields (including a signed timestamp).
-pub(crate) fn pull_delivery_bytes(
-    payload_bytes: usize,
-    subject_bytes: usize,
-    stream: &str,
-    consumer: &str,
-    domain: Option<&str>,
-) -> Option<usize> {
-    // Three separators between names, then a separator and at most 20 bytes
-    // for each numeric field. An absent or empty domain is written as "_".
-    let ack_fixed_bytes = "$JS.ACK.".len() + 8 + 3 + 5 * 21;
-    [
-        HEADER_LIMIT_BYTES,
-        subject_bytes,
-        stream.len(),
-        consumer.len(),
-        domain.map_or(0, str::len).max(1),
-        ack_fixed_bytes,
-    ]
-    .into_iter()
-    .try_fold(payload_bytes, usize::checked_add)
-}
-
 // A `&str` header name is validated and copied on every insert and lookup;
 // these are built at compile time.
-pub(crate) mod name {
+pub(crate) mod header_name {
     use async_nats::HeaderName;
 
     pub(crate) const MESSAGE_ID: HeaderName = HeaderName::from_static(super::MESSAGE_ID);
@@ -93,36 +70,15 @@ pub struct InboundEnvelope {
 /// formatted.
 pub fn encode_prepared(event: &PreparedEvent) -> Result<HeaderMap, EnvelopeError> {
     let mut headers = HeaderMap::new();
-    headers.insert(name::MESSAGE_ID, event.message_id());
-    headers.insert(name::EVENT_TYPE, event.event_type());
-    headers.insert(name::EVENT_SCHEMA, event.schema_label());
+    headers.insert(header_name::MESSAGE_ID, event.message_id());
+    headers.insert(header_name::EVENT_TYPE, event.event_type());
+    headers.insert(header_name::EVENT_SCHEMA, event.schema_label());
     let created_at = format_timestamp(event.occurred_at())?;
-    headers.insert(name::CREATED_AT, created_at.as_str());
-    headers.insert(name::NATS_MSG_ID, event.publication_id());
+    headers.insert(header_name::CREATED_AT, created_at.as_str());
+    headers.insert(header_name::NATS_MSG_ID, event.publication_id());
     validate_header_bytes(&headers)?;
     Ok(headers)
 }
-
-// template:begin outbox:messaging-outbox-validate-prepared
-/// Checks the identity and creation time every [`PreparedEvent`] carries.
-///
-/// Each text value is at most [`IDENTITY_MAX_BYTES`], so the five headers stay far below
-/// [`HEADER_LIMIT_BYTES`]; `encode_prepared` still checks the encoded bytes.
-pub(crate) fn validate_prepared(event: &PreparedEvent) -> Result<(), EnvelopeError> {
-    for value in [
-        event.message_id(),
-        event.publication_id(),
-        event.event_type(),
-    ] {
-        validate_identity(value)?;
-    }
-    if event.schema_version() == 0 || is_zero_time(event.occurred_at()) {
-        return Err(EnvelopeError::Identity);
-    }
-    format_timestamp(event.occurred_at())?;
-    Ok(())
-}
-// template:end outbox:messaging-outbox-validate-prepared
 
 /// Decodes the Go envelope before allocating a typed handler payload.
 ///
@@ -230,10 +186,9 @@ pub(crate) fn valid_subject(subject: &str) -> bool {
 }
 
 /// Whether the concrete `subject` is selected by the NATS `filter`.
+///
+/// `subject` is a concrete subject accepted by [`valid_subject`].
 pub(crate) fn matches_filter(filter: &str, subject: &str) -> bool {
-    if !valid_subject(subject) {
-        return false;
-    }
     let mut filter_tokens = filter.split('.');
     let mut subject_tokens = subject.split('.');
     loop {
@@ -252,9 +207,9 @@ pub(crate) fn header_value(headers: &HeaderMap, name: HeaderName) -> &str {
 
 fn required_value<'a>(
     value: Option<&'a str>,
-    label: &'static str,
+    header: &'static str,
 ) -> Result<&'a str, EnvelopeError> {
-    let value = value.ok_or(EnvelopeError::MissingHeader(label))?;
+    let value = value.ok_or(EnvelopeError::MissingHeader(header))?;
     validate_identity(value)?;
     Ok(value)
 }
@@ -262,11 +217,11 @@ fn required_value<'a>(
 fn required_header<'a>(
     headers: &'a HeaderMap,
     name: HeaderName,
-    label: &'static str,
+    header: &'static str,
 ) -> Result<&'a str, EnvelopeError> {
     required_value(
         headers.get(name).map(async_nats::HeaderValue::as_str),
-        label,
+        header,
     )
 }
 
@@ -311,21 +266,21 @@ pub(crate) const fn valid_identity(value: &str) -> bool {
 }
 
 /// The `: ` after a header name and the line break after its value.
-const HEADER_ENTRY_FRAMING_BYTES: usize = ": \r\n".len();
+const HEADER_LINE_FRAMING_BYTES: usize = ": \r\n".len();
 
 /// Encoded bytes of one `name: value` header line.
 fn header_line_bytes(name: &str, value: &str) -> usize {
-    name.len() + value.len() + HEADER_ENTRY_FRAMING_BYTES
+    name.len() + value.len() + HEADER_LINE_FRAMING_BYTES
 }
 
 /// [`header_line_bytes`] for a value of `value_bytes`, `None` on overflow.
-fn header_entry_bytes(name: &str, value_bytes: usize) -> Option<usize> {
+fn checked_header_line_bytes(name: &str, value_bytes: usize) -> Option<usize> {
     name.len()
-        .checked_add(HEADER_ENTRY_FRAMING_BYTES)?
+        .checked_add(HEADER_LINE_FRAMING_BYTES)?
         .checked_add(value_bytes)
 }
 
-pub(crate) fn encoded_header_bytes(headers: &HeaderMap) -> usize {
+fn encoded_header_bytes(headers: &HeaderMap) -> usize {
     if headers.is_empty() {
         return 0;
     }
@@ -405,31 +360,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pull_budget_covers_native_ack_metadata_and_checks_overflow() {
-        let subject = "x".repeat(57_000);
-        let source = "SOURCE";
-        let consumer = "handler";
-        let maximum = u64::MAX;
-        let timestamp = i64::MIN;
-        let v1 = format!(
-            "$JS.ACK.{source}.{consumer}.{maximum}.{maximum}.{maximum}.{timestamp}.{maximum}"
-        );
-        let long_domain = "domain".repeat(1000);
-        for domain in [None, Some(""), Some(long_domain.as_str())] {
-            let ack_domain = domain.filter(|domain| !domain.is_empty()).unwrap_or("_");
-            let v2 = format!(
-                "$JS.ACK.{ack_domain}.01234567.{source}.{consumer}.{maximum}.{maximum}.{maximum}.{timestamp}.{maximum}"
-            );
-            let bound = pull_delivery_bytes(1024, subject.len(), source, consumer, domain).unwrap();
-            assert_eq!(bound, 1024 + HEADER_LIMIT_BYTES + subject.len() + v2.len());
-            assert!(1024 + HEADER_LIMIT_BYTES + subject.len() + v1.len() <= bound);
-        }
-        for [payload, subject] in [[usize::MAX, 1], [1, usize::MAX]] {
-            assert!(pull_delivery_bytes(payload, subject, "s", "c", Some("d")).is_none());
-        }
-    }
-
-    #[test]
     fn header_text_rejects_exactly_the_unicode_control_characters() {
         for control in ['\0', '\u{1f}', '\u{7f}', '\u{80}', '\u{85}', '\u{9f}'] {
             assert!(!valid_identity(&format!("id{control}x")), "{control:?}");
@@ -444,18 +374,18 @@ mod tests {
 
     pub(super) fn envelope_headers() -> HeaderMap {
         let mut headers = HeaderMap::new();
-        headers.insert(name::MESSAGE_ID, "event-1");
-        headers.insert(name::EVENT_TYPE, "order.created");
-        headers.insert(name::EVENT_SCHEMA, "v2");
-        headers.insert(name::CREATED_AT, "2026-09-29T10:00:00Z");
-        headers.insert(name::NATS_MSG_ID, "event-1");
+        headers.insert(header_name::MESSAGE_ID, "event-1");
+        headers.insert(header_name::EVENT_TYPE, "order.created");
+        headers.insert(header_name::EVENT_SCHEMA, "v2");
+        headers.insert(header_name::CREATED_AT, "2026-09-29T10:00:00Z");
+        headers.insert(header_name::NATS_MSG_ID, "event-1");
         headers
     }
 
     #[test]
     fn decode_reads_the_first_value_of_each_identity_header_and_ignores_others() {
         let mut headers = envelope_headers();
-        headers.append(name::MESSAGE_ID, "event-2");
+        headers.append(header_name::MESSAGE_ID, "event-2");
         headers.insert(
             "Traceparent",
             "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
@@ -486,7 +416,7 @@ mod tests {
             );
         }
         let mut headers = envelope_headers();
-        headers.insert(name::EVENT_TYPE, "order\u{85}created");
+        headers.insert(header_name::EVENT_TYPE, "order\u{85}created");
         assert!(decode_envelope("orders.created", &headers, Bytes::new()).is_err());
     }
 }

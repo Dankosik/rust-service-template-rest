@@ -33,6 +33,7 @@ mod fixture {
         ConsumerOptions, HandlerError, Messaging, MessagingOptions, Registry, Route,
     };
     use infra_postgres::{Dsn, Isolation, PgPool, PoolOptions, Tx, in_tx};
+    use operation_context::{Deadline, OperationContext};
     use serde::{Deserialize, Serialize};
     use tokio::time::{Instant, timeout};
     use tokio_util::sync::CancellationToken;
@@ -318,7 +319,13 @@ mod fixture {
         let prepared = routes().prepare(&event(id), 1024).unwrap();
         messaging
             .producer()
-            .publish(&prepared, Instant::now() + WAIT, &CancellationToken::new())
+            .publish(
+                &prepared,
+                &OperationContext::new(
+                    Some(Deadline::at(Instant::now() + WAIT)),
+                    CancellationToken::new(),
+                ),
+            )
             .await
             .expect("republication ACK");
         close(messaging).await;

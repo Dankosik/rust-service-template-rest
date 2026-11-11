@@ -20,6 +20,7 @@ use infra_messaging::{
     ConsumerError, ConsumerOptions, Credentials, HandlerError, Messaging, MessagingOptions,
     PublishError, Registry, Route,
 };
+use operation_context::{Deadline, OperationContext};
 use tokio::sync::{Notify, oneshot};
 use tokio::time::{Instant, timeout};
 use tokio::{
@@ -210,6 +211,10 @@ fn nats_url() -> String {
 
 fn deadline() -> Instant {
     Instant::now() + Duration::from_secs(5)
+}
+
+fn context(deadline: Instant, cancel: &CancellationToken) -> OperationContext {
+    OperationContext::new(Some(Deadline::at(deadline)), cancel.clone())
 }
 
 fn event(id: &str) -> Event<ExampleEvent> {

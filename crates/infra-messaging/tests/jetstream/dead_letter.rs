@@ -41,7 +41,7 @@ async fn permanent_failure_transfers_original_record_then_redrive_keeps_logical_
     .expect("fixture event is prepared");
     messaging
         .producer()
-        .publish(&prepared, deadline(), &cancel)
+        .publish(&prepared, &context(deadline(), &cancel))
         .await
         .expect("fixture event publication is acknowledged");
     timeout(Duration::from_secs(3), called_rx)
@@ -94,7 +94,7 @@ async fn permanent_failure_transfers_original_record_then_redrive_keeps_logical_
     assert_eq!(redrive.publication_id(), repeated.publication_id());
     let redrive_ack = messaging
         .producer()
-        .publish(&redrive, deadline(), &cancel)
+        .publish(&redrive, &context(deadline(), &cancel))
         .await
         .expect("redrive publication receives a JetStream acknowledgment");
     assert_eq!(redrive_ack.stream, fixture.stream);
@@ -136,7 +136,7 @@ async fn lost_dlq_or_source_ack_reply_preserves_the_transfer_and_settles_without
         let mut handle = messaging.consumer(registered).await.unwrap().start(&cancel);
         messaging
             .producer()
-            .publish(&prepared, deadline(), &cancel)
+            .publish(&prepared, &context(deadline(), &cancel))
             .await
             .unwrap();
         let first = wait_for_dead_letter(&fixture).await;
@@ -375,7 +375,7 @@ async fn definite_dlq_refusal_keeps_the_source_for_redelivery_and_the_consumer_r
     .expect("fixture event is prepared");
     messaging
         .producer()
-        .publish(&prepared, deadline(), &cancel)
+        .publish(&prepared, &context(deadline(), &cancel))
         .await
         .expect("fixture event publication is acknowledged");
 
@@ -426,7 +426,7 @@ async fn sixth_delivery_bypasses_the_handler_and_transfers_as_exhausted() {
     .expect("fixture event is prepared");
     messaging
         .producer()
-        .publish(&prepared, deadline(), &cancel)
+        .publish(&prepared, &context(deadline(), &cancel))
         .await
         .expect("fixture event publication is acknowledged");
     redeliver_until_attempt(&fixture, 6).await;
@@ -480,7 +480,7 @@ async fn oversized_source_message_is_dead_lettered_without_invoking_the_handler(
         .expect("fixture event is valid for the original producer bound");
     producer
         .producer()
-        .publish(&oversized, deadline(), &cancel)
+        .publish(&oversized, &context(deadline(), &cancel))
         .await
         .expect("source retains the event before the operator shrinks its bound");
     close(producer).await;

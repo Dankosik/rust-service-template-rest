@@ -4,13 +4,14 @@ use std::sync::Arc;
 use async_nats::jetstream::ErrorCode;
 use async_nats::jetstream::context::PublishErrorKind;
 use async_nats::jetstream::message::PublishMessage;
+use operation_context::{Deadline, OperationContext};
 use tokio::time::Instant;
-use tokio_util::sync::CancellationToken;
 use tracing::Instrument as _;
 
+use crate::budget::BROKER_OPERATION_BUDGET;
 use crate::error::PublishError;
-use crate::messaging::{Shared, within_operation_budget};
-use crate::observe::{OutcomeLabel as _, outcome_label};
+use crate::messaging::Shared;
+use crate::observe::{OutcomeLabel as _, Outcomes, outcome_label, record_span_outcome};
 use crate::prepared::PreparedEvent;
 use crate::wire::{encode_prepared, validate_header_bytes};
 
@@ -20,6 +21,27 @@ outcome_label! {
         Acknowledged => "acknowledged",
         Rejected => "rejected",
         Ambiguous => "ambiguous",
+    }
+}
+
+const PUBLISH_TOTAL: &str = "messaging_publish_total";
+const PUBLISH_DURATION_SECONDS: &str = "messaging_publish_duration_seconds";
+const PUBLISH_ADMISSION_REFUSED_TOTAL: &str = "messaging_publish_admission_refused_total";
+
+/// Publication outcome metrics, registered once per messaging resource.
+#[derive(Debug)]
+pub(crate) struct PublishMetrics {
+    outcomes: Outcomes<PublishOutcome>,
+    /// Native admission refusals: every ACK permit was occupied.
+    admission_refused: metrics::Counter,
+}
+
+impl PublishMetrics {
+    pub(crate) fn register() -> Self {
+        Self {
+            outcomes: Outcomes::register(PUBLISH_TOTAL, PUBLISH_DURATION_SECONDS, "result", None),
+            admission_refused: metrics::counter!(PUBLISH_ADMISSION_REFUSED_TOTAL),
+        }
     }
 }
 
@@ -39,9 +61,8 @@ pub struct PublishAck {
 }
 
 impl Producer {
-    /// Dispatches and awaits one confirmed `JetStream` acknowledgment under one
-    /// deadline, at most one [`BROKER_OPERATION_BUDGET`](crate::messaging::BROKER_OPERATION_BUDGET)
-    /// away.
+    /// Dispatches and awaits one confirmed `JetStream` acknowledgment within
+    /// `context`, at most one [`BROKER_OPERATION_BUDGET`] away.
     ///
     /// # Errors
     ///
@@ -50,36 +71,33 @@ impl Producer {
     pub async fn publish(
         &self,
         event: &PreparedEvent,
-        deadline: Instant,
-        cancel: &CancellationToken,
+        context: &OperationContext,
     ) -> Result<PublishAck, PublishError> {
         let started = Instant::now();
         let span = tracing::info_span!(
             "messaging_publish",
-            otel.name = format!("publish {}", event.subject),
+            otel.name = format!("publish {}", event.subject()),
             otel.kind = "producer",
             messaging.system = "nats",
             messaging.operation.type = "send",
             messaging.operation.name = "publish",
-            messaging.destination.name = event.subject.as_str(),
+            messaging.destination.name = event.subject(),
             outcome = tracing::field::Empty,
             error.type = tracing::field::Empty,
             otel.status_code = tracing::field::Empty,
         );
-        let result = self.dispatch(event, &span, deadline, cancel).await;
+        let result = self.send_prepared(event, &span, context).await;
         let outcome = match &result {
             Ok(_) => PublishOutcome::Acknowledged,
             Err(PublishError::Rejected) => PublishOutcome::Rejected,
             Err(PublishError::Ambiguous) => PublishOutcome::Ambiguous,
         };
         let label = outcome.label();
-        span.record("outcome", label);
+        record_span_outcome(&span, label, result.is_err());
         if result.is_err() {
-            span.record("error.type", label);
-            span.record("otel.status_code", "ERROR");
             span.in_scope(|| {
                 tracing::warn!(
-                    subject = event.subject.as_str(),
+                    subject = event.subject(),
                     outcome = label,
                     "messaging_publish_failed"
                 );
@@ -87,16 +105,16 @@ impl Producer {
         }
         self.shared
             .publish_metrics
+            .outcomes
             .record(outcome, started.elapsed());
         result
     }
 
-    async fn dispatch(
+    async fn send_prepared(
         &self,
         event: &PreparedEvent,
         span: &tracing::Span,
-        deadline: Instant,
-        cancel: &CancellationToken,
+        context: &OperationContext,
     ) -> Result<PublishAck, PublishError> {
         if self.shared.refuses_work() {
             return Err(PublishError::Rejected);
@@ -107,7 +125,7 @@ impl Producer {
             &self.shared.source_stream,
             self.shared.max_payload_bytes,
         )?;
-        send_publication(&self.shared, &event.subject, message, deadline, cancel)
+        send_publication(&self.shared, event.subject(), message, context)
             .instrument(span.clone())
             .await
     }
@@ -120,7 +138,7 @@ fn source_message(
     expected_stream: &str,
     max_payload_bytes: usize,
 ) -> Result<PublishMessage, PublishError> {
-    if event.payload.len() > max_payload_bytes {
+    if event.payload().len() > max_payload_bytes {
         return Err(PublishError::Rejected);
     }
     let mut headers = encode_prepared(event).map_err(|_| PublishError::Rejected)?;
@@ -130,7 +148,7 @@ fn source_message(
     validate_header_bytes(&headers).map_err(|_| PublishError::Rejected)?;
     Ok(PublishMessage::build()
         .headers(headers)
-        .payload(event.payload.clone()))
+        .payload(event.payload().clone()))
 }
 
 /// Sends the finalized message unchanged and awaits its `JetStream` acknowledgement.
@@ -143,15 +161,24 @@ pub(crate) async fn send_publication(
     shared: &Shared,
     subject: &str,
     message: PublishMessage,
-    deadline: Instant,
-    cancel: &CancellationToken,
+    context: &OperationContext,
 ) -> Result<PublishAck, PublishError> {
-    let deadline = within_operation_budget(deadline);
-    if cancel.is_cancelled() || Instant::now() >= deadline {
+    // The caller's cancellation token is shared rather than given a child,
+    // which would register with its parent on every publication.
+    let local = Deadline::new(Instant::now(), BROKER_OPERATION_BUDGET);
+    let context = OperationContext::new(
+        Some(
+            context
+                .deadline()
+                .map_or(local, |deadline| deadline.earlier(local)),
+        ),
+        context.cancellation().clone(),
+    );
+    if context.stopped().is_some() {
         return Err(PublishError::Rejected);
     }
     let classify = |error: async_nats::jetstream::context::PublishError| {
-        classify_publish(&error, &shared.publish_admission_refused)
+        classify_publish(&error, &shared.publish_metrics.admission_refused)
     };
     let exchange = async {
         let ack = shared
@@ -171,8 +198,7 @@ pub(crate) async fn send_publication(
     // exchange, so a cancellation or timeout here may follow dispatch.
     tokio::select! {
         biased;
-        () = cancel.cancelled() => Err(PublishError::Ambiguous),
-        () = tokio::time::sleep_until(deadline) => Err(PublishError::Ambiguous),
+        _ = context.wait_stopped() => Err(PublishError::Ambiguous),
         result = exchange => result,
     }
 }
@@ -233,15 +259,15 @@ pub(crate) fn describe_metrics() {
     use metrics::{Unit, describe_counter, describe_histogram};
 
     describe_counter!(
-        "messaging_publish_admission_refused_total",
+        PUBLISH_ADMISSION_REFUSED_TOTAL,
         "Native publication admission refusals because all ACK permits are occupied"
     );
     describe_counter!(
-        "messaging_publish_total",
+        PUBLISH_TOTAL,
         "Publications by result: acknowledged, rejected or ambiguous"
     );
     describe_histogram!(
-        "messaging_publish_duration_seconds",
+        PUBLISH_DURATION_SECONDS,
         Unit::Seconds,
         "Time from publication start to its result"
     );

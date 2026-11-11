@@ -1,35 +1,25 @@
-use std::future::Future;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 
 use secrecy::SecretString;
-use tokio::sync::watch;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use crate::connection::{close_client, connect_client};
+use crate::budget::BROKER_OPERATION_BUDGET;
+use crate::connection::NativeConnection;
 use crate::consumer::Consumer;
 use crate::error::MessagingError;
-use crate::observe::Outcomes;
 use crate::probe::{MessagingProbe, PublishWork};
-use crate::producer::{Producer, PublishOutcome};
+use crate::producer::{Producer, PublishMetrics};
 use crate::registry::Registry;
 use crate::topology::{ConsumerAdmission, admit_topology};
 use crate::wire::HEADER_LIMIT_BYTES;
 
-/// Bounds every broker round trip, inside any longer caller deadline.
-pub const BROKER_OPERATION_BUDGET: Duration = Duration::from_secs(5);
 /// One native publication window shared by source, outbox and dead-letter
 /// publication; its permits are `floor(window / envelope_limit)`.
 const PUBLICATION_WINDOW_BYTES: usize = 64 * 1024 * 1024;
-
-/// The earlier of `deadline` and one [`BROKER_OPERATION_BUDGET`] from now.
-pub(crate) fn within_operation_budget(deadline: Instant) -> Instant {
-    deadline.min(Instant::now() + BROKER_OPERATION_BUDGET)
-}
 
 /// Configuration already validated by the composition root, which owns the
 /// transport, credential and resident-memory policy.
@@ -53,22 +43,13 @@ pub struct MessagingOptions {
 }
 
 /// Where the broker credentials come from.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum Credentials {
     /// The content of a credentials file. `Debug` redacts it.
     Inline(SecretString),
     /// A credentials file read again for every connection, for a platform
     /// that rotates it.
     File(PathBuf),
-}
-
-impl std::fmt::Debug for Credentials {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Inline(secret) => formatter.debug_tuple("Inline").field(secret).finish(),
-            Self::File(path) => formatter.debug_tuple("File").field(path).finish(),
-        }
-    }
 }
 
 impl std::fmt::Debug for MessagingOptions {
@@ -115,31 +96,38 @@ pub struct Messaging {
 /// to [`Messaging`] or explicitly closed by the process owner.
 #[derive(Debug)]
 pub struct MessagingStartup {
-    options: Option<MessagingOptions>,
+    options: MessagingOptions,
     publication_permits: usize,
     envelope_limit: usize,
     deadline: Instant,
     cancel: CancellationToken,
-    connection: Option<(async_nats::Client, watch::Receiver<bool>)>,
+    phase: StartupPhase,
+}
+
+/// How far a [`MessagingStartup`] got.
+#[derive(Debug)]
+enum StartupPhase {
+    /// No connection was opened yet.
+    Prepared,
+    /// The connection is open and owned here until admission succeeds or
+    /// [`MessagingStartup::close`] closes it.
+    Connected(NativeConnection),
+    /// Ownership moved to the admitted [`Messaging`].
+    Admitted,
 }
 
 #[derive(Debug)]
 pub(crate) struct Shared {
-    pub(crate) client: async_nats::Client,
+    pub(crate) connection: NativeConnection,
     pub(crate) jetstream: async_nats::jetstream::Context,
     pub(crate) source_stream: String,
     pub(crate) max_payload_bytes: usize,
     /// The largest encoded envelope the configured payload limit admits.
     pub(crate) envelope_limit: usize,
-    pub(crate) startup_deadline: Instant,
-    pub(crate) startup_cancel: CancellationToken,
     draining: AtomicBool,
     failed: AtomicBool,
-    pub(crate) publish_metrics: Outcomes<PublishOutcome>,
-    pub(crate) publish_admission_refused: metrics::Counter,
+    pub(crate) publish_metrics: PublishMetrics,
     pub(crate) publish_work: PublishWork,
-    /// Final event submission is separate from native runner completion.
-    closed_event: watch::Receiver<bool>,
 }
 
 impl Shared {
@@ -230,12 +218,12 @@ impl Messaging {
             return Err(MessagingError::Bounds);
         }
         Ok(MessagingStartup {
-            options: Some(options),
+            options,
             publication_permits,
             envelope_limit,
             deadline,
             cancel,
-            connection: None,
+            phase: StartupPhase::Prepared,
         })
     }
 
@@ -268,7 +256,7 @@ impl Messaging {
             .clone()
             .ok_or(MessagingError::Configuration("consumer is not configured"))?;
         registry
-            .validate_consumer()
+            .require_handlers()
             .map_err(|_| MessagingError::Configuration("no typed event handlers are registered"))?;
         Consumer::admit(Arc::clone(&self.shared), admission, registry).await
     }
@@ -282,13 +270,7 @@ impl Messaging {
     /// client, and returns [`CloseOutcome::TimedOut`].
     pub async fn close(self, deadline: Instant, cancel: &CancellationToken) -> CloseOutcome {
         self.shared.begin_drain();
-        close_client(
-            &self.shared.client,
-            &self.shared.closed_event,
-            within_operation_budget(deadline),
-            cancel,
-        )
-        .await
+        self.shared.connection.close(deadline, cancel).await
     }
 }
 
@@ -301,9 +283,7 @@ impl MessagingStartup {
     /// Returns a sanitized connection, topology, cancellation or timeout failure,
     /// or a configuration refusal if this owner has already been admitted.
     pub async fn admit(&mut self) -> Result<Messaging, MessagingError> {
-        let options = self.options.as_ref().ok_or(MessagingError::Configuration(
-            "messaging is already admitted",
-        ))?;
+        let options = &self.options;
         let deadline = self.deadline;
         let cancel = &self.cancel;
         crate::producer::describe_metrics();
@@ -313,12 +293,20 @@ impl MessagingStartup {
         crate::credentials::describe_metrics();
         // The connection is retained before topology admission, so `close`
         // owns it when admission fails.
-        let (client, closed_event) = match &mut self.connection {
-            Some(connection) => connection.clone(),
-            slot @ None => slot
-                .insert(connect_client(options, deadline, cancel).await?)
-                .clone(),
+        let connection = match &mut self.phase {
+            StartupPhase::Admitted => {
+                return Err(MessagingError::Configuration(
+                    "messaging is already admitted",
+                ));
+            }
+            StartupPhase::Connected(connection) => connection.clone(),
+            phase @ StartupPhase::Prepared => {
+                let connection = NativeConnection::open(options, deadline, cancel).await?;
+                *phase = StartupPhase::Connected(connection.clone());
+                connection
+            }
         };
+        let client = &connection.client;
         let jetstream = async_nats::jetstream::context::ContextBuilder::new()
             .timeout(BROKER_OPERATION_BUDGET)
             .ack_timeout(BROKER_OPERATION_BUDGET)
@@ -330,7 +318,7 @@ impl MessagingStartup {
         let consumer = admit_topology(
             options,
             self.envelope_limit,
-            &client,
+            client,
             &jetstream,
             deadline,
             cancel,
@@ -338,34 +326,22 @@ impl MessagingStartup {
         .await?;
         let messaging = Messaging {
             shared: Arc::new(Shared {
-                client,
                 jetstream,
                 source_stream: options.source_stream.clone(),
                 max_payload_bytes: options.max_payload_bytes,
                 envelope_limit: self.envelope_limit,
-                startup_deadline: deadline,
-                startup_cancel: cancel.clone(),
                 draining: AtomicBool::new(false),
                 failed: AtomicBool::new(false),
-                publish_metrics: Outcomes::register(
-                    "messaging_publish_total",
-                    "messaging_publish_duration_seconds",
-                    "result",
-                    None,
-                ),
-                publish_admission_refused: metrics::counter!(
-                    "messaging_publish_admission_refused_total"
-                ),
+                publish_metrics: PublishMetrics::register(),
                 publish_work: PublishWork::register(
                     self.publication_permits,
                     &options.connection_name,
                 ),
-                closed_event,
+                connection,
             }),
             consumer,
         };
-        self.connection = None;
-        self.options = None;
+        self.phase = StartupPhase::Admitted;
         Ok(messaging)
     }
 
@@ -376,33 +352,10 @@ impl MessagingStartup {
     /// a deadline that has passed, skips the drain, force-closes the native
     /// client, and returns [`CloseOutcome::TimedOut`].
     pub async fn close(self, deadline: Instant, cancel: &CancellationToken) -> CloseOutcome {
-        let Some((client, closed_event)) = self.connection else {
-            return CloseOutcome::Complete;
-        };
-        close_client(
-            &client,
-            &closed_event,
-            within_operation_budget(deadline),
-            cancel,
-        )
-        .await
-    }
-}
-
-/// Runs one broker operation within [`within_operation_budget`] of `deadline`,
-/// unless `cancel` fires first.
-pub(crate) async fn bounded_operation<T>(
-    deadline: Instant,
-    cancel: &CancellationToken,
-    operation: impl Future<Output = Result<T, MessagingError>>,
-) -> Result<T, MessagingError> {
-    let deadline = within_operation_budget(deadline);
-    let budget = deadline.saturating_duration_since(Instant::now());
-    tokio::select! {
-        biased;
-        () = cancel.cancelled() => Err(MessagingError::Cancelled),
-        () = tokio::time::sleep_until(deadline) => Err(MessagingError::TimedOut { budget }),
-        result = operation => result,
+        match self.phase {
+            StartupPhase::Connected(connection) => connection.close(deadline, cancel).await,
+            StartupPhase::Prepared | StartupPhase::Admitted => CloseOutcome::Complete,
+        }
     }
 }
 
@@ -431,20 +384,5 @@ mod tests {
             .await;
             assert!(matches!(result, Err(MessagingError::Bounds)));
         }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn a_timed_out_operation_reports_the_shorter_caller_deadline() {
-        let caller = Duration::from_millis(100);
-        let result = bounded_operation(
-            Instant::now() + caller,
-            &CancellationToken::new(),
-            std::future::pending::<Result<(), MessagingError>>(),
-        )
-        .await;
-        assert!(
-            matches!(result, Err(MessagingError::TimedOut { budget }) if budget == caller),
-            "{result:?}"
-        );
     }
 }
