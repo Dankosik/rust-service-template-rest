@@ -69,7 +69,7 @@ fn credentials_are_required_and_redacted() {
     let rendered = format!("{storage:?}");
     assert!(!rendered.contains("hunter2"), "{rendered}");
     assert!(!rendered.contains("evidence-bucket"), "{rendered}");
-    assert_eq!(storage.provider(), "cloudflare_r2");
+    assert_eq!(storage.provider_name(), "cloudflare_r2");
 }
 
 #[test]
@@ -82,7 +82,7 @@ fn workload_identity_is_built_without_io_and_only_for_amazon() {
     assert_eq!(format!("{:?}", amazon.credentials), "WorkloadIdentity");
     // No runtime and no network: credentials load on the first call.
     assert_eq!(
-        ObjectStorage::try_new(amazon).unwrap().provider(),
+        ObjectStorage::try_new(amazon).unwrap().provider_name(),
         "amazon_s3"
     );
 
@@ -1149,7 +1149,7 @@ async fn a_failure_reports_the_request_identifiers_of_its_response() {
             .build(),
     );
     assert_eq!(
-        late.get_with_context(&context, &key()).await.map(|_| ()),
+        late.get_with_context(&key(), &context).await.map(|_| ()),
         Err(ObjectStorageError::Unavailable)
     );
     let failed = records.matching("event", "object_storage_operation_failed");
@@ -1221,25 +1221,25 @@ async fn stopped_parents_refuse_every_storage_entry_before_dispatch() {
     for context in [OperationContext::with_timeout(Duration::ZERO), cancelled] {
         assert_eq!(
             storage
-                .put_with_context(&context, &key(), Bytes::new().into(), PutOptions::default())
+                .put_with_context(&key(), Bytes::new().into(), PutOptions::default(), &context)
                 .await,
             Err(ObjectStorageError::Unavailable)
         );
         assert_eq!(
-            storage.get_with_context(&context, &key()).await.err(),
+            storage.get_with_context(&key(), &context).await.err(),
             Some(ObjectStorageError::Unavailable)
         );
         assert_eq!(
-            storage.head_with_context(&context, &key()).await,
+            storage.head_with_context(&key(), &context).await,
             Err(ObjectStorageError::Unavailable)
         );
         assert_eq!(
-            storage.delete_with_context(&context, &key()).await,
+            storage.delete_with_context(&key(), &context).await,
             Err(ObjectStorageError::Unavailable)
         );
         assert_eq!(
             storage
-                .presign_get_with_context(&context, &key(), Duration::from_secs(60))
+                .presign_get_with_context(&key(), Duration::from_secs(60), &context)
                 .await
                 .err(),
             Some(ObjectStorageError::Unavailable)
@@ -1267,10 +1267,10 @@ async fn dispatched_mutation_stop_is_unknown_without_a_replay() {
         let call = tokio::spawn(async move {
             if put {
                 storage
-                    .put_with_context(&context, &key(), Bytes::new().into(), PutOptions::default())
+                    .put_with_context(&key(), Bytes::new().into(), PutOptions::default(), &context)
                     .await
             } else {
-                storage.delete_with_context(&context, &key()).await
+                storage.delete_with_context(&key(), &context).await
             }
         });
         tokio::time::timeout(Duration::from_secs(2), dispatched.notified())
@@ -1550,7 +1550,7 @@ async fn get_headers_and_body_spend_the_same_context_budget() {
     .await;
     let storage = stub.storage(|_| {});
     let context = OperationContext::with_timeout(Duration::from_millis(350));
-    let download = storage.get_with_context(&context, &key()).await.unwrap();
+    let download = storage.get_with_context(&key(), &context).await.unwrap();
     assert_eq!(
         download.into_bytes().await,
         Err(ObjectStorageError::Unavailable)
@@ -1628,11 +1628,11 @@ async fn final_sdk_answers_preserve_mutations_but_reject_late_get_headers() {
         let result = match method {
             Method::PUT => {
                 storage
-                    .put_with_context(&context, &key(), Bytes::new().into(), PutOptions::default())
+                    .put_with_context(&key(), Bytes::new().into(), PutOptions::default(), &context)
                     .await
             }
-            Method::DELETE => storage.delete_with_context(&context, &key()).await,
-            Method::GET => storage.get_with_context(&context, &key()).await.map(|_| ()),
+            Method::DELETE => storage.delete_with_context(&key(), &context).await,
+            Method::GET => storage.get_with_context(&key(), &context).await.map(|_| ()),
             _ => unreachable!(),
         };
         assert!(context.stopped().is_some());

@@ -130,7 +130,7 @@ pub(crate) fn admit(provider: &Provider, bucket: &str) -> Result<Admitted, Confi
         }
         Provider::CloudflareR2 { endpoint } => {
             let origin = origin(endpoint, false)?;
-            if !r2_host(origin.host_str().unwrap_or_default()) || origin.port().is_some() {
+            if !origin.host_str().is_some_and(r2_host) || origin.port().is_some() {
                 return Err(ConfigError::Endpoint);
             }
             Ok(Admitted {

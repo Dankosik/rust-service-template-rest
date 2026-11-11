@@ -8,7 +8,7 @@ use aws_sdk_s3::config::timeout::TimeoutConfig;
 use operation_context::{OperationContext, Stopped};
 
 use crate::ObjectStorageError;
-use crate::error::{Call, Failure, FailureKind, classify};
+use crate::error::{Call, Failure};
 use crate::observe::OperationGuard;
 
 /// Standard retry for reads. A put or delete makes one attempt: the SDK
@@ -94,10 +94,11 @@ pub(crate) struct Interrupted {
 impl Interrupted {
     /// Before the first poll nothing was sent; after it, the reply is lost.
     pub(crate) fn fail(self, guard: &mut OperationGuard, call: Call) -> ObjectStorageError {
-        let mut failure = Failure::stopped(self.stopped);
-        if self.polled {
-            failure.error = classify(call, FailureKind::Lost);
-        }
+        let failure = if self.polled {
+            Failure::stopped_after_send(call, self.stopped)
+        } else {
+            Failure::stopped(self.stopped)
+        };
         guard.fail(&failure)
     }
 }

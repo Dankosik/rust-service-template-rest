@@ -92,19 +92,15 @@ impl PutBody {
     }
 
     /// hyper never polls a body declared empty, so validate an empty stream
-    /// before sending and normalize its EOF to an in-memory body. This can
-    /// change [`UploadSource`], so callers read the checksum source after it.
-    pub(crate) async fn prepare_empty_stream(&mut self) -> Result<(), Failure> {
+    /// before sending and normalize its EOF to an in-memory body.
+    pub(crate) async fn normalize_empty_stream(mut self) -> Result<Self, Failure> {
         if self.len != 0 || matches!(self.source, UploadSource::InMemory) {
-            return Ok(());
+            return Ok(self);
         }
         match self.stream.next().await {
             Some(_) if self.source.mismatched() => Err(length_refusal()),
             Some(_) => Err(Failure::new(ObjectStorageError::Rejected, "body")),
-            None => {
-                *self = Self::from(Bytes::new());
-                Ok(())
-            }
+            None => Ok(Self::from(Bytes::new())),
         }
     }
 }

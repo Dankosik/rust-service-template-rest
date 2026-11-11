@@ -208,7 +208,7 @@ impl OperationGuard {
     }
 
     /// Record a failure. `failure.error_type` is bounded: a provider error
-    /// code, an HTTP status, or a transport class. The caller's error carries
+    /// code, an HTTP status, a transport class, or a fixed local label. The caller's error carries
     /// no provider detail, so the event is the operator's only record of it
     /// without tracing: a failure of the store, the configuration, or the
     /// data is a warning; an answer about the object or the admission limit
