@@ -19,6 +19,11 @@ pub const OPERATION_DURATION_BUCKETS: &[f64] = &[
 pub const HISTOGRAMS: &[(&str, &[f64])] =
     &[(OPERATION_DURATION_METRIC, OPERATION_DURATION_BUCKETS)];
 
+pub(crate) const ADMISSION_REFUSED_METRIC: &str = "cache_command_admission_refused_total";
+pub(crate) const COMMANDS_IN_FLIGHT_METRIC: &str = "cache_commands_in_flight";
+pub(crate) const RETIREMENTS_METRIC: &str = "cache_connection_retirements_total";
+pub(crate) const PASSWORD_REFRESHES_METRIC: &str = "cache_password_file_refreshes_total";
+
 /// The closed set of namespace operations.
 #[derive(Clone, Copy)]
 pub(crate) enum Operation {
@@ -286,12 +291,32 @@ impl Drop for OperationGuard<'_> {
     }
 }
 
-/// Describes the histogram to the installed recorder. Repeating it is harmless.
+/// Describes every cache metric to the installed recorder. Repeating it is harmless.
 pub(crate) fn describe() {
     metrics::describe_histogram!(
         OPERATION_DURATION_METRIC,
         Unit::Seconds,
         "Cache operation duration in seconds"
+    );
+    metrics::describe_counter!(
+        ADMISSION_REFUSED_METRIC,
+        Unit::Count,
+        "Cache application or probe commands refused because their admission slots are full"
+    );
+    metrics::describe_gauge!(
+        COMMANDS_IN_FLIGHT_METRIC,
+        Unit::Count,
+        "Admitted cache application and probe commands, including connection waits, until completion or retirement"
+    );
+    metrics::describe_counter!(
+        RETIREMENTS_METRIC,
+        Unit::Count,
+        "Published cache connection generations synchronously removed from reuse, not remote socket finality"
+    );
+    metrics::describe_counter!(
+        PASSWORD_REFRESHES_METRIC,
+        Unit::Count,
+        "Completed maintained-connection password-file refreshes; auth_accepted requires an accepted AUTH reply."
     );
 }
 
