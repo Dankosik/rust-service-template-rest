@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 use crate::engine::{
     Operation, OperationError, Shared, backstop, observe_failure, observe_recovery,
 };
-use crate::session::set_statement_timeout;
+use infra_postgres::set_statement_timeout;
 
 /// Gauge of live jobs. Labels `kind`, `state` (`available`, `scheduled`, `running`).
 const LIVE_JOBS_METRIC: &str = "jobs_live_jobs";
@@ -28,13 +28,13 @@ pub(crate) const OBSERVATION_TIMESTAMP_METRIC: &str = "jobs_observation_timestam
 const RETAIN_COMPLETED_FOR: Duration = Duration::from_hours(24);
 const RETENTION_BATCH_ROWS: u32 = 500;
 /// The hang guard on one retention batch: a slow batch is waited for.
-const RETENTION_STATEMENT_TIMEOUT: &str = "5s";
+const RETENTION_STATEMENT_TIMEOUT: Duration = Duration::from_secs(5);
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(10);
 /// How long a population read waits for the engine's statement turn.
 const POPULATION_TURN_WAIT: Duration = Duration::from_secs(1);
 const LIVE_JOBS_SAMPLE_CAP: i64 = 1_000;
 /// The statement bound of one registered-kind sample.
-const SAMPLE_STATEMENT_TIMEOUT: &str = "2000ms";
+const SAMPLE_STATEMENT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Delete expired completed jobs in batches of [`RETENTION_BATCH_ROWS`] and
 /// return how many were deleted.

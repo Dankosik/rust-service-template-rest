@@ -5,7 +5,7 @@
 //! principal, its `async-trait` port through `State`, and the JSON input;
 //! it authorizes every attempt before the seam and runs its work through
 //! `Idempotency::execute`, where the port's adapter writes through
-//! `infra_postgres::connection`. `Composer::route` composes it with
+//! `Tx::connection`. `Composer::route` composes it with
 //! the real introspection verifier, which asks a TLS fixture provider on
 //! loopback; activation is asserted active, and `axum-test` drives the
 //! hardened router. Each response is checked for status, content type,
@@ -172,7 +172,7 @@ impl CreateWidgets for SqlWidgets {
             sqlx::query_scalar("INSERT INTO widgets (name, color) VALUES ($1, $2) RETURNING id")
                 .bind(&input.name)
                 .bind(&input.color)
-                .fetch_one(infra_postgres::connection(tx))
+                .fetch_one(tx.connection())
                 .await
                 .map_err(|_| CreateError::Store)?;
         // Test control: an armed hold keeps this attempt inside its

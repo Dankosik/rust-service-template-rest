@@ -25,7 +25,7 @@ pub fn sqlstate(err: &sqlx::Error) -> Option<Cow<'_, str>> {
 /// read-only session (`25006`). Without one: a pool that timed out or closed,
 /// or a failed socket or TLS session.
 #[must_use]
-pub fn transient(err: &sqlx::Error) -> bool {
+pub fn is_transient(err: &sqlx::Error) -> bool {
     match sqlstate(err) {
         Some(code) => {
             code.starts_with("08")
@@ -76,15 +76,17 @@ pub(crate) mod tests {
 
     #[test]
     fn transient_covers_the_conditions_a_later_attempt_may_not_meet() {
-        assert!(transient(&database("40001")));
-        assert!(transient(&database("40P01")));
-        assert!(transient(&database("40003")));
-        assert!(transient(&database("08006")));
-        assert!(transient(&database("57014")));
-        assert!(transient(&database("25P03")));
-        assert!(transient(&sqlx::Error::PoolTimedOut));
-        assert!(!transient(&database("25P02")));
-        assert!(!transient(&sqlx::Error::Protocol("driver misuse".into())));
+        assert!(is_transient(&database("40001")));
+        assert!(is_transient(&database("40P01")));
+        assert!(is_transient(&database("40003")));
+        assert!(is_transient(&database("08006")));
+        assert!(is_transient(&database("57014")));
+        assert!(is_transient(&database("25P03")));
+        assert!(is_transient(&sqlx::Error::PoolTimedOut));
+        assert!(!is_transient(&database("25P02")));
+        assert!(!is_transient(&sqlx::Error::Protocol(
+            "driver misuse".into()
+        )));
     }
 
     #[test]

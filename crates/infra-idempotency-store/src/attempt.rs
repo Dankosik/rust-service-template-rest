@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use infra_postgres::{
-    Tx, TxError, failure_cause, in_tx_until, in_tx_with, observed, sqlstate, transient,
+    Tx, TxError, failure_cause, in_tx_until, in_tx_with, is_transient, observed, sqlstate,
 };
 
 use crate::{READ_COMMITTED, Store};
@@ -442,7 +442,7 @@ fn classify_tx(err: &TxError) -> AttemptError {
 }
 
 fn classify(err: &sqlx::Error) -> AttemptError {
-    if transient(err) {
+    if is_transient(err) {
         AttemptError::Unavailable
     } else {
         AttemptError::Internal

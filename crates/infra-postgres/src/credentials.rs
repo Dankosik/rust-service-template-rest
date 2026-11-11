@@ -6,7 +6,7 @@
 //! options when the pool is built; `Pool::set_connect_options` is the
 //! driver's own way to hand it later ones, and this task is what calls it.
 //! Connections already open are left alone: the server authenticates a
-//! session once. [`crate::MAX_CONNECTION_LIFETIME`] is an age threshold for
+//! session once. [`crate::pool::MAX_CONNECTION_LIFETIME`] is an age threshold for
 //! retirement at pool lifecycle points, not forced interruption of checked-out
 //! sessions or a hard revocation deadline.
 

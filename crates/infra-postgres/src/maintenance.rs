@@ -14,12 +14,12 @@ use crate::observe::observed;
 use crate::transaction::{Isolation, Tx, TxError, TxOptions, in_tx_with};
 
 /// The terminal duration of a cleanup pass, including every admitted wait.
-pub const CLEANUP_DURATION_METRIC: &str = "postgres_cleanup_pass_duration_seconds";
+pub(crate) const CLEANUP_DURATION_METRIC: &str = "postgres_cleanup_pass_duration_seconds";
 
 /// Buckets in seconds for [`CLEANUP_DURATION_METRIC`]. They reach 3600 s so
 /// long passes, which have no deadline, stay visible.
 /// Roots override only this name.
-pub const CLEANUP_DURATION_BUCKETS: &[f64] = &[
+pub(crate) const CLEANUP_DURATION_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0,
     600.0, 1200.0, 1800.0, 3600.0,
 ];
@@ -64,13 +64,10 @@ pub enum MaintenancePopulation {
 }
 
 impl MaintenancePopulation {
-    #[must_use]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Jobs => "jobs",
-            Self::HttpIdempotency => "http_idempotency",
-            Self::WebhookReceipts => "webhook_receipts",
-            Self::FailedJobs => "failed_jobs",
+    pub(crate) const fn label(self) -> &'static str {
+        match self.cleanup() {
+            Some(cleanup) => cleanup.label(),
+            None => "failed_jobs",
         }
     }
 
@@ -94,8 +91,7 @@ pub enum Cleanup {
 }
 
 impl Cleanup {
-    #[must_use]
-    pub const fn label(self) -> &'static str {
+    pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Jobs => "jobs",
             Self::HttpIdempotency => "http_idempotency",
@@ -217,54 +213,58 @@ pub struct MaintenanceObserver {
     failing: bool,
 }
 
+fn describe_observer() {
+    for (name, description) in [
+        (
+            OBSERVER_ENABLED_METRIC,
+            "Whether this process owns this maintenance population",
+        ),
+        (
+            OBSERVER_STARTED_METRIC,
+            "Local Unix time at sampler startup",
+        ),
+        (
+            LAST_SUCCESS_METRIC,
+            "Local receipt time of the last valid acknowledged read",
+        ),
+        (
+            DATABASE_OBSERVED_METRIC,
+            "Database time belonging to the last valid acknowledged read",
+        ),
+        (
+            PRESENT_METRIC,
+            "Whether the last valid population sample was nonempty; NaN before success",
+        ),
+        (
+            OLDEST_METRIC,
+            "Oldest population time; zero when empty and NaN before success",
+        ),
+        (
+            LAST_ATTEMPT_SUCCESS_METRIC,
+            "Whether the last population attempt succeeded",
+        ),
+        (
+            CLOCK_VALID_METRIC,
+            "Whether the last checked local and database clocks were consistent",
+        ),
+    ] {
+        metrics::describe_gauge!(name, description);
+    }
+    metrics::describe_counter!(
+        OBSERVATIONS_METRIC,
+        Unit::Count,
+        "Population attempts by success, failed, or cancelled outcome"
+    );
+}
+
 impl MaintenanceObserver {
     /// Start once for this population's process owner, never once per sample.
     #[must_use]
     pub fn start(population: MaintenancePopulation) -> Self {
-        for (name, description) in [
-            (
-                OBSERVER_ENABLED_METRIC,
-                "Whether this process owns this maintenance population",
-            ),
-            (
-                OBSERVER_STARTED_METRIC,
-                "Local Unix time at sampler startup",
-            ),
-            (
-                LAST_SUCCESS_METRIC,
-                "Local receipt time of the last valid acknowledged read",
-            ),
-            (
-                DATABASE_OBSERVED_METRIC,
-                "Database time belonging to the last valid acknowledged read",
-            ),
-            (
-                PRESENT_METRIC,
-                "Whether the last valid population sample was nonempty; NaN before success",
-            ),
-            (
-                OLDEST_METRIC,
-                "Oldest population time; zero when empty and NaN before success",
-            ),
-            (
-                LAST_ATTEMPT_SUCCESS_METRIC,
-                "Whether the last population attempt succeeded",
-            ),
-            (
-                CLOCK_VALID_METRIC,
-                "Whether the last checked local and database clocks were consistent",
-            ),
-        ] {
-            metrics::describe_gauge!(name, description);
-        }
-        metrics::describe_counter!(
-            OBSERVATIONS_METRIC,
-            Unit::Count,
-            "Population attempts by success, failed, or cancelled outcome"
-        );
+        describe_observer();
         let label = population.label();
         let gauge = |name| metrics::gauge!(name, "population" => label);
-        let observations = |outcome: AttemptEnd| metrics::counter!(OBSERVATIONS_METRIC, "population" => label, "outcome" => outcome.label());
+        let observations = |outcome: AttemptOutcome| metrics::counter!(OBSERVATIONS_METRIC, "population" => label, "outcome" => outcome.label());
         let previous_clock = MaintenanceClock::now();
         gauge(OBSERVER_STARTED_METRIC).set(previous_clock.wall.unwrap_or(0.0));
         let this = Self {
@@ -276,9 +276,9 @@ impl MaintenanceObserver {
             oldest: gauge(OLDEST_METRIC),
             last_attempt_success: gauge(LAST_ATTEMPT_SUCCESS_METRIC),
             clock_valid: gauge(CLOCK_VALID_METRIC),
-            successes: observations(AttemptEnd::Succeeded),
-            failures: observations(AttemptEnd::Failed),
-            cancellations: observations(AttemptEnd::Cancelled),
+            successes: observations(AttemptOutcome::Succeeded),
+            failures: observations(AttemptOutcome::Failed),
+            cancellations: observations(AttemptOutcome::Cancelled),
             previous_clock,
             failing: false,
         };
@@ -320,23 +320,23 @@ impl MaintenanceObserver {
         MaintenanceAttempt {
             observer: self,
             requested: MaintenanceClock::now(),
-            end: AttemptEnd::Cancelled,
+            outcome: AttemptOutcome::Cancelled,
         }
     }
 
-    const fn observations(&self, end: AttemptEnd) -> &metrics::Counter {
-        match end {
-            AttemptEnd::Succeeded => &self.successes,
-            AttemptEnd::Failed => &self.failures,
-            AttemptEnd::Cancelled => &self.cancellations,
+    const fn observations(&self, outcome: AttemptOutcome) -> &metrics::Counter {
+        match outcome {
+            AttemptOutcome::Succeeded => &self.successes,
+            AttemptOutcome::Failed => &self.failures,
+            AttemptOutcome::Cancelled => &self.cancellations,
         }
     }
 
     /// Count an attempt that published no sample; one run of them is one
     /// warning.
-    fn record_unsuccessful(&mut self, end: AttemptEnd, cause: &'static str) {
+    fn record_unsuccessful(&mut self, outcome: AttemptOutcome, cause: &'static str) {
         self.last_attempt_success.set(0.0);
-        self.observations(end).increment(1);
+        self.observations(outcome).increment(1);
         if !self.failing {
             tracing::warn!(
                 population = self.population.label(),
@@ -357,13 +357,13 @@ impl Drop for MaintenanceObserver {
 /// How one observation attempt ended; the `outcome` label of
 /// `postgres_maintenance_observations_total`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AttemptEnd {
+enum AttemptOutcome {
     Succeeded,
     Failed,
     Cancelled,
 }
 
-impl AttemptEnd {
+impl AttemptOutcome {
     const fn label(self) -> &'static str {
         match self {
             Self::Succeeded => "success",
@@ -378,7 +378,7 @@ impl AttemptEnd {
 struct MaintenanceAttempt<'a> {
     observer: &'a mut MaintenanceObserver,
     requested: MaintenanceClock,
-    end: AttemptEnd,
+    outcome: AttemptOutcome,
 }
 
 impl MaintenanceAttempt<'_> {
@@ -387,13 +387,14 @@ impl MaintenanceAttempt<'_> {
         self.succeeded_at(sample, MaintenanceClock::now());
     }
 
-    /// An invalid sample is a failed attempt that keeps the last-good one.
-    fn succeeded_at(mut self, sample: PopulationSample, received: MaintenanceClock) {
+    /// Whether the local clocks agree across the attempt and the sample's
+    /// times fall inside it.
+    fn accepts(&self, sample: PopulationSample, received: MaintenanceClock) -> bool {
         let PopulationSample {
             observed_at,
             oldest,
         } = sample;
-        let valid = self.requested.agrees_with(self.observer.previous_clock)
+        self.requested.agrees_with(self.observer.previous_clock)
             && received.agrees_with(self.requested)
             && observed_at.is_finite()
             && observed_at > 0.0
@@ -405,11 +406,19 @@ impl MaintenanceAttempt<'_> {
                 .wall
                 .is_some_and(|end| observed_at <= end + CLOCK_TOLERANCE_SECONDS)
             && oldest
-                .is_none_or(|oldest| oldest.is_finite() && oldest > 0.0 && oldest <= observed_at);
-        if !valid {
+                .is_none_or(|oldest| oldest.is_finite() && oldest > 0.0 && oldest <= observed_at)
+    }
+
+    /// An invalid sample is a failed attempt that keeps the last-good one.
+    fn succeeded_at(mut self, sample: PopulationSample, received: MaintenanceClock) {
+        if !self.accepts(sample, received) {
             self.failed_at(MaintenanceFailure::ClockInvalid, received);
             return;
         }
+        let PopulationSample {
+            observed_at,
+            oldest,
+        } = sample;
         self.observer.previous_clock = received;
         // Publish the dated sample before its final success markers. A scrape
         // between writes may conservatively observe unknown, never fresh absence.
@@ -422,8 +431,8 @@ impl MaintenanceAttempt<'_> {
         self.observer.clock_valid.set(1.0);
         self.observer.last_success.set(received.wall.unwrap_or(0.0));
         self.observer.last_attempt_success.set(1.0);
-        self.end = AttemptEnd::Succeeded;
-        self.observer.observations(self.end).increment(1);
+        self.outcome = AttemptOutcome::Succeeded;
+        self.observer.observations(self.outcome).increment(1);
         if self.observer.failing {
             tracing::info!(
                 population = self.observer.population.label(),
@@ -439,25 +448,26 @@ impl MaintenanceAttempt<'_> {
     }
 
     fn failed_at(mut self, failure: MaintenanceFailure, clock: MaintenanceClock) {
-        self.end = AttemptEnd::Failed;
+        self.outcome = AttemptOutcome::Failed;
         self.observer.previous_clock = clock;
         if failure == MaintenanceFailure::ClockInvalid {
             self.observer.clock_valid.set(0.0);
         }
-        self.observer.record_unsuccessful(self.end, failure.label());
+        self.observer
+            .record_unsuccessful(self.outcome, failure.label());
     }
 }
 
 impl Drop for MaintenanceAttempt<'_> {
     fn drop(&mut self) {
-        if self.end == AttemptEnd::Cancelled {
+        if self.outcome == AttemptOutcome::Cancelled {
             self.observer.previous_clock = MaintenanceClock::now();
             self.observer
-                .record_unsuccessful(self.end, self.end.label());
+                .record_unsuccessful(self.outcome, self.outcome.label());
         }
         tracing::debug!(
             population = self.observer.population.label(),
-            outcome = self.end.label(),
+            outcome = self.outcome.label(),
             elapsed_seconds = self.requested.monotonic.elapsed().as_secs_f64(),
             "postgres_maintenance_observation_finished"
         );
@@ -482,31 +492,32 @@ where
             read_only: true,
         },
         async |tx| -> Result<T, MaintenanceFailure> {
-            let read = async || -> Result<T, sqlx::Error> {
-                observed(
-                    "set observation statement timeout",
-                    sqlx::query!("SET LOCAL statement_timeout = '2000ms'").execute(&mut *tx),
-                )
-                .await?;
-                observed(
-                    "set observation lock timeout",
-                    sqlx::query!("SET LOCAL lock_timeout = '100ms'").execute(&mut *tx),
-                )
-                .await?;
-                observed(
-                    "set observation idle timeout",
-                    sqlx::query!("SET LOCAL idle_in_transaction_session_timeout = '5000ms'")
-                        .execute(&mut *tx),
-                )
-                .await?;
-                read(tx).await
-            };
-            read()
+            limit_observation(tx)
                 .await
-                .map_err(|_: sqlx::Error| MaintenanceFailure::Statement)
+                .map_err(|_| MaintenanceFailure::Statement)?;
+            read(tx).await.map_err(|_| MaintenanceFailure::Statement)
         },
     )
     .await
+}
+
+async fn limit_observation(tx: &mut Tx<'_>) -> Result<(), sqlx::Error> {
+    observed(
+        "set observation statement timeout",
+        sqlx::query!("SET LOCAL statement_timeout = '2000ms'").execute(&mut *tx),
+    )
+    .await?;
+    observed(
+        "set observation lock timeout",
+        sqlx::query!("SET LOCAL lock_timeout = '100ms'").execute(&mut *tx),
+    )
+    .await?;
+    observed(
+        "set observation idle timeout",
+        sqlx::query!("SET LOCAL idle_in_transaction_session_timeout = '5000ms'").execute(&mut *tx),
+    )
+    .await?;
+    Ok(())
 }
 
 /// Every `outcome` label of a cleanup pass.
@@ -525,6 +536,34 @@ impl CleanupOutcome {
             Self::Cancelled => "cancelled",
         }
     }
+}
+
+fn describe_cleanup() {
+    metrics::describe_gauge!(
+        CLEANUP_ACTIVE_METRIC,
+        Unit::Count,
+        "Started PostgreSQL cleanup passes that have not terminated in this process"
+    );
+    metrics::describe_counter!(
+        CLEANUP_BATCHES_METRIC,
+        Unit::Count,
+        "Cleanup batches confirmed committed, including empty terminal batches"
+    );
+    metrics::describe_counter!(
+        CLEANUP_REMOVED_ROWS_METRIC,
+        Unit::Count,
+        "Deleted rows confirmed committed by PostgreSQL cleanup"
+    );
+    metrics::describe_counter!(
+        CLEANUP_PASSES_METRIC,
+        Unit::Count,
+        "Terminated PostgreSQL cleanup passes by outcome"
+    );
+    metrics::describe_histogram!(
+        CLEANUP_DURATION_METRIC,
+        Unit::Seconds,
+        "Whole PostgreSQL cleanup pass duration including admission and database waits"
+    );
 }
 
 /// Whole-pass cleanup evidence, including direct and concurrent callers.
@@ -549,31 +588,7 @@ impl CleanupPass {
     #[must_use]
     pub fn start(cleanup: Cleanup) -> Self {
         let started = tokio::time::Instant::now();
-        metrics::describe_gauge!(
-            CLEANUP_ACTIVE_METRIC,
-            Unit::Count,
-            "Started PostgreSQL cleanup passes that have not terminated in this process"
-        );
-        metrics::describe_counter!(
-            CLEANUP_BATCHES_METRIC,
-            Unit::Count,
-            "Cleanup batches confirmed committed, including empty terminal batches"
-        );
-        metrics::describe_counter!(
-            CLEANUP_REMOVED_ROWS_METRIC,
-            Unit::Count,
-            "Deleted rows confirmed committed by PostgreSQL cleanup"
-        );
-        metrics::describe_counter!(
-            CLEANUP_PASSES_METRIC,
-            Unit::Count,
-            "Terminated PostgreSQL cleanup passes by outcome"
-        );
-        metrics::describe_histogram!(
-            CLEANUP_DURATION_METRIC,
-            Unit::Seconds,
-            "Whole PostgreSQL cleanup pass duration including admission and database waits"
-        );
+        describe_cleanup();
         let label = cleanup.label();
         let active = metrics::gauge!(CLEANUP_ACTIVE_METRIC, "cleanup" => label);
         active.increment(1.0);

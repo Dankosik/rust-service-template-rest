@@ -1,9 +1,8 @@
-//! The PostgreSQL session preconditions the engine and the operator share:
-//! the startup check and transaction-local statement bounds.
+//! The PostgreSQL session preconditions the engine and the operator share.
 
 use std::time::Duration;
 
-use infra_postgres::{Tx, observed};
+use infra_postgres::observed;
 use sqlx::PgPool;
 
 /// Why the jobs store cannot start.
@@ -21,23 +20,6 @@ pub enum StartupError {
 }
 
 pub(crate) const STARTUP_CHECK_BUDGET: Duration = Duration::from_secs(5);
-
-/// Bound every later statement of `tx` by `timeout`, in PostgreSQL interval
-/// syntax. `set_config(..., is_local = true)` lasts until the transaction
-/// ends, so PostgreSQL restores the session timeout itself on commit,
-/// rollback, or a dropped connection.
-pub(crate) async fn set_statement_timeout(
-    tx: &mut Tx<'_>,
-    timeout: &'static str,
-) -> Result<(), sqlx::Error> {
-    observed(
-        "set statement timeout",
-        sqlx::query!("SELECT set_config('statement_timeout', $1, true)", timeout)
-            .fetch_one(&mut *tx),
-    )
-    .await?;
-    Ok(())
-}
 
 /// Check UTF8, READ COMMITTED and writability, bounded by
 /// [`STARTUP_CHECK_BUDGET`].

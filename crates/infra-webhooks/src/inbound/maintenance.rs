@@ -5,7 +5,7 @@ use std::time::Duration;
 use infra_postgres::{
     Cleanup, CleanupPass, CleanupSchedule, MAINTENANCE_OBSERVATION_INTERVAL, MaintenanceFailure,
     MaintenanceObserver, MaintenancePopulation, PopulationSample, TxError, failure_cause,
-    in_observation_tx, in_tx, observed, sqlstate,
+    in_observation_tx, in_tx, observed, set_statement_timeout, sqlstate,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -64,13 +64,9 @@ impl Receiver {
                 // Bounds the batch on the server, so a batch whose client has
                 // gone still ends within 5 s. A hang guard, not a pace: a slow
                 // batch is waited for.
-                observed(
-                    "set statement timeout",
-                    sqlx::query!("SELECT set_config('statement_timeout', $1, true)", "5s")
-                        .fetch_one(&mut *tx),
-                )
-                .await
-                .map_err(|err| cleanup_failed(&err, CleanupError::Statement))?;
+                set_statement_timeout(tx, Duration::from_secs(5))
+                    .await
+                    .map_err(|err| cleanup_failed(&err, CleanupError::Statement))?;
                 let deleted = observed(
                     "delete expired webhook receipts",
                     sqlx::query!(

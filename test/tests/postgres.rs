@@ -30,7 +30,7 @@ use commit_proxy::{CommitProxy, Fault, ReadyBoundary};
 use health::Probe;
 use infra_postgres::{
     ACQUIRE_TIMEOUT, ConnectError, Dsn, Isolation, PASSWORD_REFRESH_INTERVAL, PgPool, PoolOptions,
-    PostgresProbe, SessionBudgets, TxError, TxOptions, connection, in_tx, in_tx_with,
+    PostgresProbe, SessionBudgets, TxError, TxOptions, in_tx, in_tx_with,
     refresh_password_periodically, sqlstate,
 };
 use integration_tests::{DATABASE_URL, dsn_for, fixture_dir, pooler_dsn_for, url_for};
@@ -528,7 +528,7 @@ async fn cancelled_operations_release_capacity_while_the_old_socket_stays_silent
                 if boundary == "pre-commit" {
                     // Borrowing withdraws the seam's statement-success proof,
                     // so it verifies with SELECT 1 before sending COMMIT.
-                    let _ = connection(tx);
+                    let _ = tx.connection();
                     proxy.arm_autocommit(Fault::ForwardThenSilence, "SELECT 1");
                 }
                 Ok::<(), AppError>(())
@@ -1186,7 +1186,7 @@ async fn a_savepoint_inside_the_transaction_contains_an_expected_failure(pool: P
         .unwrap();
     let result: Result<(), AppError> = in_tx(&pool, async |tx| {
         tx.execute("INSERT INTO t VALUES (1)").await?;
-        let mut savepoint = connection(tx).begin().await?;
+        let mut savepoint = tx.connection().begin().await?;
         let duplicate = (&mut *savepoint).execute("INSERT INTO t VALUES (1)").await;
         assert!(duplicate.is_err());
         savepoint.rollback().await?;
@@ -1262,7 +1262,7 @@ async fn a_failure_on_the_borrowed_connection_is_found_before_the_commit(pool: P
     // cannot know what happened on it.
     let result: Result<(), AppError> = in_tx(&pool, async |tx| {
         tx.execute("INSERT INTO t VALUES (1)").await?;
-        let _ = connection(tx).execute("INSERT INTO t VALUES (1)").await;
+        let _ = tx.connection().execute("INSERT INTO t VALUES (1)").await;
         Ok(())
     })
     .await;
@@ -1276,13 +1276,13 @@ async fn a_failure_on_the_borrowed_connection_is_found_before_the_commit(pool: P
     // The same borrow with nothing failing commits, and so does a statement
     // through the handle after it.
     let borrowed: Result<(), AppError> = in_tx(&pool, async |tx| {
-        connection(tx).execute("INSERT INTO t VALUES (2)").await?;
+        tx.connection().execute("INSERT INTO t VALUES (2)").await?;
         Ok(())
     })
     .await;
     assert!(borrowed.is_ok(), "{borrowed:?}");
     let through_the_handle: Result<(), AppError> = in_tx(&pool, async |tx| {
-        connection(tx).execute("INSERT INTO t VALUES (3)").await?;
+        tx.connection().execute("INSERT INTO t VALUES (3)").await?;
         tx.execute("INSERT INTO t VALUES (4)").await?;
         Ok(())
     })

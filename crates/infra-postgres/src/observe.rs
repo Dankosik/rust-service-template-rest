@@ -18,8 +18,10 @@ use tracing::{Instrument, Span};
 
 use crate::error::{failure_cause, sqlstate};
 use crate::maintenance::{CLEANUP_DURATION_BUCKETS, CLEANUP_DURATION_METRIC};
-use crate::pool::SLOW_ACQUIRE_THRESHOLD;
 use crate::transaction::TxError;
+
+/// Successful acquisitions slower than this receive operation diagnostics.
+const SLOW_ACQUIRE_THRESHOLD: Duration = Duration::from_secs(1);
 
 /// Pool occupancy, named after the OpenTelemetry database client semantic
 /// convention `db.client.connection.count` with its required attributes
@@ -33,11 +35,11 @@ const CONNECTION_MAX_METRIC: &str = "db_client_connection_max";
 
 /// How long a transaction waited for its pooled connection
 /// (`db.client.connection.wait_time`), including opening a new one.
-pub const CONNECTION_WAIT_METRIC: &str = "db_client_connection_wait_time_seconds";
+pub(crate) const CONNECTION_WAIT_METRIC: &str = "db_client_connection_wait_time_seconds";
 
 /// Buckets in seconds for [`CONNECTION_WAIT_METRIC`], up to the acquire
 /// budget.
-pub const CONNECTION_WAIT_BUCKETS: &[f64] = &[
+pub(crate) const CONNECTION_WAIT_BUCKETS: &[f64] = &[
     0.0005,
     0.001,
     0.005,
@@ -52,11 +54,11 @@ pub const CONNECTION_WAIT_BUCKETS: &[f64] = &[
 /// How long a transaction took from asking for a connection to its commit
 /// answer, or to the closure's error (the rollback is not awaited), by
 /// `outcome`.
-pub const TRANSACTION_DURATION_METRIC: &str = "postgres_transaction_duration_seconds";
+pub(crate) const TRANSACTION_DURATION_METRIC: &str = "postgres_transaction_duration_seconds";
 
 /// Buckets in seconds for [`TRANSACTION_DURATION_METRIC`], up to the
 /// statement budget.
-pub const TRANSACTION_DURATION_BUCKETS: &[f64] = &[
+pub(crate) const TRANSACTION_DURATION_BUCKETS: &[f64] = &[
     0.001,
     0.0025,
     0.005,
@@ -68,7 +70,7 @@ pub const TRANSACTION_DURATION_BUCKETS: &[f64] = &[
     0.5,
     1.0,
     2.5,
-    crate::STATEMENT_TIMEOUT.as_secs_f64(),
+    crate::pool::STATEMENT_TIMEOUT.as_secs_f64(),
 ];
 
 const _: () = {
@@ -90,12 +92,12 @@ const fn strictly_increasing(buckets: &[f64]) -> bool {
 /// How long one statement took from sending it to its complete answer
 /// (`db.client.operation.duration`), by `db.query.summary` and, when it
 /// failed, `error.type`.
-pub const OPERATION_DURATION_METRIC: &str = "db_client_operation_duration_seconds";
+pub(crate) const OPERATION_DURATION_METRIC: &str = "db_client_operation_duration_seconds";
 
 /// Buckets in seconds for [`OPERATION_DURATION_METRIC`]: the boundaries the
 /// OpenTelemetry convention advises for this histogram. The composition
 /// root passes both to the Prometheus recorder.
-pub const OPERATION_DURATION_BUCKETS: &[f64] =
+pub(crate) const OPERATION_DURATION_BUCKETS: &[f64] =
     &[0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0];
 
 /// Every histogram this crate records. A composition root hands it to the
@@ -158,8 +160,7 @@ pub fn record_metrics(pool: &PgPool) {
         .set(f64::from(pool.options().get_max_connections()));
 }
 
-/// Same missed-tick policy as histogram upkeep (`Delay`): a late tick is
-/// skipped rather than replayed.
+/// A late tick shifts the schedule instead of bursting to catch up.
 pub async fn record_metrics_periodically(
     pool: PgPool,
     interval: Duration,

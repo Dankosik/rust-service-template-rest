@@ -5,7 +5,7 @@ use infra_jobs::{
     EnqueueError, EnqueueOptions, Enqueued, JobId, JobKind, LivePayloadComparison, MAX_DELAY,
     MAX_PAYLOAD_BYTES, compare_live_payload, enqueue,
 };
-use infra_postgres::{Isolation, PgPool, Tx, TxError, TxOptions, connection, in_tx, in_tx_with};
+use infra_postgres::{Isolation, PgPool, Tx, TxError, TxOptions, in_tx, in_tx_with};
 use integration_tests::dsn_for;
 use serde::ser::Error as _;
 use serde::{Deserialize, Serialize};
@@ -1179,7 +1179,7 @@ async fn e6_repeatable_read_40001_when_a_claim_write_commits_after_the_snapshot(
     );
     super::bounded("the snapshot", snapshot.notified()).await;
     in_tx(&jobs, async |tx| -> Result<(), AttemptError> {
-        claim_like(connection(tx), key).await;
+        claim_like(tx.connection(), key).await;
         Ok(())
     })
     .await

@@ -38,14 +38,11 @@ const SESSION_VERIFICATION_TIMEOUT: Duration = Duration::from_secs(5);
 /// refused startup is reported instead of waiting on a remote socket close.
 const SESSION_REJECTION_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Successful acquisitions slower than this receive operation diagnostics.
-pub(crate) const SLOW_ACQUIRE_THRESHOLD: Duration = Duration::from_secs(1);
-
 /// Session default for `statement_timeout` on every pooled connection.
 /// Matches the default HTTP request budget (`http.request_timeout` 8s). It
 /// is not kept in lockstep with a configured request timeout; both stay
 /// independent adapter vs operator values.
-pub const STATEMENT_TIMEOUT: Duration = Duration::from_secs(8);
+pub(crate) const STATEMENT_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// Session default for `idle_in_transaction_session_timeout` on every
 /// pooled connection. Same duration as [`STATEMENT_TIMEOUT`] by policy, but
@@ -55,7 +52,7 @@ pub const STATEMENT_TIMEOUT: Duration = Duration::from_secs(8);
 /// It covers what `statement_timeout` cannot: a transaction that ran a fast
 /// statement and then lost its client holds its locks while no statement is
 /// running at all.
-pub const IDLE_IN_TRANSACTION_TIMEOUT: Duration = Duration::from_secs(8);
+pub(crate) const IDLE_IN_TRANSACTION_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// Statements slower than this are logged at `warn` with their SQL text and
 /// duration. Statement-level logging is otherwise off: it would repeat every
@@ -76,11 +73,11 @@ const PING_IDLE_AFTER: Duration = Duration::from_secs(1);
 /// changed since a connection opened: a rotated password, a changed role or
 /// database default, a DNS answer that moved to another server. The driver's
 /// own default, named here because password rotation depends on it.
-pub const MAX_CONNECTION_LIFETIME: Duration = Duration::from_mins(30);
+pub(crate) const MAX_CONNECTION_LIFETIME: Duration = Duration::from_mins(30);
 
 /// A pooled connection unused for this long is closed, so a pool sized for a
 /// peak returns its server slots after it. The driver's own default.
-pub const IDLE_CONNECTION_TIMEOUT: Duration = Duration::from_mins(10);
+pub(crate) const IDLE_CONNECTION_TIMEOUT: Duration = Duration::from_mins(10);
 
 /// Bound on the ping of a connection idle past [`PING_IDLE_AFTER`]. A peer
 /// that vanished without a reset (a load balancer's idle cut-off, a failed
@@ -124,10 +121,11 @@ pub enum ConnectError {
     },
     /// The session's default isolation is not the one this process requires.
     #[error(
-        "postgres session: default_transaction_isolation is not {expected}; {}",
+        "postgres session: default_transaction_isolation is {found}, expected {expected}; {}",
         .source_of_budgets.remedy()
     )]
     SessionIsolation {
+        found: String,
         expected: &'static str,
         source_of_budgets: SessionBudgets,
     },
@@ -215,7 +213,7 @@ pub fn prepare_pool(dsn: &Dsn, options: &PoolOptions<'_>) -> PgPool {
             settings.push(("default_transaction_isolation", level.to_owned()));
         }
     }
-    let connect_options = session(dsn, options.application_name, settings)
+    let connect_options = session_connect_options(dsn, options.application_name, settings)
         .log_slow_statements(log::LevelFilter::Warn, SLOW_STATEMENT_THRESHOLD);
     let pool_options = PgPoolOptions::new()
         .max_connections(options.max_connections.get())
@@ -255,7 +253,7 @@ fn ping_if_idle(
         let started = tokio::time::Instant::now();
         let (cause, error) = match tokio::time::timeout(IDLE_PING_TIMEOUT, conn.ping()).await {
             Ok(Ok(())) => return Ok(true),
-            Ok(Err(error)) => (crate::failure_cause(&error), error),
+            Ok(Err(error)) => (crate::error::failure_cause(&error), error),
             Err(_elapsed) => (
                 "timeout",
                 sqlx::Error::Io(std::io::ErrorKind::TimedOut.into()),
@@ -359,6 +357,7 @@ async fn verify_session(pool: &PgPool, options: &PoolOptions<'_>) -> Result<(), 
     match options.default_isolation.as_sql() {
         Some(expected) if !expected.eq_ignore_ascii_case(&session.isolation) => {
             Err(ConnectError::SessionIsolation {
+                found: session.isolation,
                 expected,
                 source_of_budgets: options.session_budgets,
             })
@@ -415,7 +414,12 @@ pub async fn connect_session(
             .iter()
             .map(|&(name, value)| (name, value.to_owned())),
     );
-    PgConnection::connect_with(&session(dsn, options.application_name, settings)).await
+    PgConnection::connect_with(&session_connect_options(
+        dsn,
+        options.application_name,
+        settings,
+    ))
+    .await
 }
 
 /// Connect options that publish `settings` through the startup packet, so a
@@ -426,7 +430,7 @@ pub async fn connect_session(
 /// publish `2`, which every supported server already treats like its own
 /// default, and which a pooler refuses as a startup parameter it does not
 /// track.
-fn session<'a>(
+fn session_connect_options<'a>(
     dsn: &Dsn,
     application_name: &str,
     settings: impl IntoIterator<Item = (&'a str, String)>,

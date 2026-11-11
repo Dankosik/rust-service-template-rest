@@ -685,7 +685,7 @@ else can work:
 - **One host.** The DSN admits no host list and no
   `target_session_attrs`; failover is the endpoint's job (a managed
   endpoint, a virtual IP, DNS). After a failover a session on a server that
-  became read-only fails its write with `25006`, which `transient` reports.
+  became read-only fails its write with `25006`, which `is_transient` reports.
 - **Password authentication.** The password is static in the DSN or
   rotated through `postgres.password_file`, which covers a secrets manager's
   agent, a mounted Kubernetes secret, and a sidecar that writes short-lived
@@ -1141,7 +1141,7 @@ scratch project against `postgres:18.4`):
   session-revocation timer.
 - **No `retryable` helper**: it had no caller outside tests, and a
   classifier with that name invites the retry loop this adapter refuses to
-  own. `sqlstate` and `transient` remain.
+  own. `sqlstate` and `is_transient` remain.
 - **No exemption from the static history check**: the check already treats a
   migration added in the change range as an addition, including amendments
   before merge, and a merged migration may already have been applied
