@@ -25,12 +25,16 @@ pub enum FinalizeError {
     #[error(
         "HTTP contract finalization failed: {method} {path} is protected and requires enabled authentication"
     )]
-    NonPublicOperation { path: String, method: &'static str },
+    ProtectedOperation { path: String, method: &'static str },
     /// An operation's effective security policy is unsupported or ambiguous.
     #[error(
-        "HTTP contract finalization failed: {method} {path} has an unsupported or ambiguous effective security policy"
+        "HTTP contract finalization failed: {method} {path} has an unsupported or ambiguous effective security policy ({fault})"
     )]
-    InvalidPolicy { path: String, method: &'static str },
+    InvalidPolicy {
+        path: String,
+        method: &'static str,
+        fault: &'static str,
+    },
     /// A route template ending like a probe's is reserved for the probe
     /// handler, since the hardened chain exempts it from in-flight admission
     /// and the access log.
@@ -53,7 +57,7 @@ where
 {
     let policy = Policy::compile(contract.get_openapi())?;
     if let Some((path, method)) = policy.first_protected() {
-        return Err(FinalizeError::NonPublicOperation {
+        return Err(FinalizeError::ProtectedOperation {
             path: path.to_owned(),
             method,
         });
@@ -108,17 +112,10 @@ fn compile_operation(
             method,
         });
     }
-    Access::from_operation(document, operation).map_err(|fault| {
-        tracing::error!(
-            path,
-            method,
-            fault = fault.as_str(),
-            "http_contract_policy_rejected"
-        );
-        FinalizeError::InvalidPolicy {
-            path: path.to_owned(),
-            method,
-        }
+    Access::from_operation(document, operation).map_err(|fault| FinalizeError::InvalidPolicy {
+        path: path.to_owned(),
+        method,
+        fault: fault.as_str(),
     })
 }
 
@@ -182,13 +179,19 @@ impl Policy {
 }
 
 async fn enforce_public(State(policy): State<Policy>, request: Request, next: Next) -> Response {
-    let public = contract_path(request.extensions())
+    let route = contract_path(request.extensions());
+    let public = route
         .and_then(|path| policy.access(path, request.method()))
         .is_some_and(|access| matches!(access, Access::Public));
     if public {
         next.run(request).await
     } else {
-        tracing::error!(failure = "policy_absent", "http_contract_wiring_failed");
+        tracing::error!(
+            route,
+            method = %request.method(),
+            failure = "policy_absent",
+            "http_contract_wiring_failed"
+        );
         sanitized_internal_error()
     }
 }
@@ -204,6 +207,9 @@ pub(crate) fn contract_path(extensions: &axum::http::Extensions) -> Option<&str>
         .map_or(matched, |inner| if inner.is_empty() { "/" } else { inner });
     Some(inner)
 }
+
+/// The one security scheme name a requirement may use.
+const BEARER_SCHEME: &str = "bearerAuth";
 
 #[derive(Clone, Copy, Debug)]
 enum PolicyFault {
@@ -243,7 +249,7 @@ impl Access {
             .map_err(|_| PolicyFault::UnreadableRequirement)?;
         if requirements
             .iter()
-            .any(|requirement| requirement.len() != 1 || !requirement.contains_key("bearerAuth"))
+            .any(|requirement| requirement.len() != 1 || !requirement.contains_key(BEARER_SCHEME))
         {
             return Err(PolicyFault::UnsupportedRequirement);
         }
@@ -263,7 +269,7 @@ fn declares_bearer_scheme(document: &OpenApi) -> bool {
     document
         .components
         .as_ref()
-        .and_then(|components| components.security_schemes.get("bearerAuth"))
+        .and_then(|components| components.security_schemes.get(BEARER_SCHEME))
         .is_some_and(|scheme| {
             matches!(scheme, RefOr::T(SecurityScheme::Http(http)) if matches!(http.scheme, HttpAuthScheme::Bearer))
         })
@@ -315,16 +321,17 @@ mod tests {
     }
 
     fn protected() -> FinalizeError {
-        FinalizeError::NonPublicOperation {
+        FinalizeError::ProtectedOperation {
             path: "/_test/policy".to_owned(),
             method: "GET",
         }
     }
 
-    fn invalid() -> FinalizeError {
+    fn invalid(fault: &'static str) -> FinalizeError {
         FinalizeError::InvalidPolicy {
             path: "/_test/policy".to_owned(),
             method: "GET",
+            fault,
         }
     }
 
@@ -384,7 +391,12 @@ mod tests {
             ),
             (None, Some(serde_json::json!([])), Some("protected"), Ok(())),
             (None, Some(serde_json::json!([])), Some("public"), Ok(())),
-            (None, Some(serde_json::json!([{}])), None, Err(invalid())),
+            (
+                None,
+                Some(serde_json::json!([{}])),
+                None,
+                Err(invalid("unsupported_requirement")),
+            ),
             (
                 None,
                 Some(serde_json::json!([{"bearerAuth": ["write"]}])),
@@ -395,13 +407,13 @@ mod tests {
                 None,
                 Some(serde_json::json!([{"unknown": []}])),
                 None,
-                Err(invalid()),
+                Err(invalid("unsupported_requirement")),
             ),
             (
                 None,
                 Some(serde_json::json!([{"bearerAuth": []}, {}])),
                 None,
-                Err(invalid()),
+                Err(invalid("unsupported_requirement")),
             ),
         ] {
             let mut document = serde_json::json!({

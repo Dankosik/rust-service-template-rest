@@ -78,6 +78,17 @@ impl RequestDeadline {
             .checked_sub(RESPONSE_RESERVE)
             .filter(|end| *end > tokio::time::Instant::now())
     }
+
+    /// Runs one attempt that must end at [`Self::attempt_end`], handing that
+    /// instant to the attempt too. `None` when no window is left or the attempt
+    /// overran it; the attempt is never started without a window.
+    pub(crate) async fn within_attempt<F: Future>(
+        &self,
+        attempt: impl FnOnce(tokio::time::Instant) -> F,
+    ) -> Option<F::Output> {
+        let end = self.attempt_end()?;
+        tokio::time::timeout_at(end, attempt(end)).await.ok()
+    }
 }
 // template:end request-budget:http-request-deadline
 
@@ -110,11 +121,13 @@ impl<S: Send + Sync> FromRequestParts<S> for ResponseContext {
     reason = "the error is the extractor's axum rejection, a Response"
 )]
 pub(crate) fn extension<T: Clone + Send + Sync + 'static>(parts: &Parts) -> Result<T, Response> {
-    parts
-        .extensions
-        .get::<T>()
-        .cloned()
-        .ok_or_else(sanitized_internal_error)
+    parts.extensions.get::<T>().cloned().ok_or_else(|| {
+        tracing::error!(
+            extractor = std::any::type_name::<T>(),
+            "http_extractor_wiring_failed"
+        );
+        sanitized_internal_error()
+    })
 }
 
 /// When the request reached admission. The opening budget counts from here, so
@@ -156,10 +169,10 @@ pub(crate) async fn opening(
         biased;
         // The upload is read when the budget expires, before `select!` drops
         // the handler and with it the body.
-        stop = async {
+        stopped = async {
             let reason = request_operation.wait_stopped().await;
-            (reason, upload.awaited())
-        } => return stopped_response(stop.0, stop.1),
+            stopped_response(reason, upload.awaited())
+        } => return stopped,
         response = next.run(request) => response,
     };
     if let Some(reason) = request_operation.stopped() {

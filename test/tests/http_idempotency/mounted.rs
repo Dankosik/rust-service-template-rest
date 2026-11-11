@@ -565,7 +565,7 @@ fn widget_contract_declares_supported_protected_security() {
     let contract = widget_contract(&mut composer);
     assert!(matches!(
         infra_http::finalize_public(contract).unwrap_err(),
-        infra_http::FinalizeError::NonPublicOperation { .. },
+        infra_http::FinalizeError::ProtectedOperation { .. },
     ));
 }
 

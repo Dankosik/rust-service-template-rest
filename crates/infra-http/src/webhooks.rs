@@ -160,15 +160,20 @@ async fn receive(
     State(state): State<WebhookState>,
     request: Request,
 ) -> Response {
-    let Some(receiver) = state.receiver.as_ref() else {
+    let Some(receiver) = state
+        .receiver
+        .as_ref()
+        .filter(|receiver| receiver.has_endpoint(&endpoint_id))
+    else {
         return unknown_endpoint();
     };
-    if !receiver.has_endpoint(&endpoint_id) {
-        return unknown_endpoint();
-    }
     let (parts, body) = request.into_parts();
     let Some(deadline) = parts.extensions.get::<RequestDeadline>() else {
-        tracing::error!(failure = "deadline_missing", "webhook_wiring_failed");
+        tracing::error!(
+            endpoint = %endpoint_id,
+            failure = "deadline_missing",
+            "webhook_wiring_failed"
+        );
         return sanitized_internal_error();
     };
     let body = match Limited::new(body, MAX_BODY_BYTES).collect().await {
@@ -182,22 +187,18 @@ async fn receive(
             return Problem::new(Code::WebhookRejected).into_response();
         }
     };
-    let result = if let Some(attempt_end) = deadline.attempt_end() {
-        tokio::time::timeout_at(
-            attempt_end,
+    let result = deadline
+        .within_attempt(|attempt_end| {
             receiver.receive_bytes(
                 &endpoint_id,
                 &parts.headers,
                 body,
                 SystemTime::now(),
                 attempt_end,
-            ),
-        )
+            )
+        })
         .await
-        .unwrap_or(Err(ReceiveError::Unavailable))
-    } else {
-        Err(ReceiveError::Unavailable)
-    };
+        .unwrap_or(Err(ReceiveError::Unavailable));
     match result {
         Ok(outcome) => {
             let outcome = match outcome {
@@ -235,30 +236,31 @@ enum EndpointOutcome {
 }
 
 impl EndpointOutcome {
+    const fn label(&self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::Duplicate => "duplicate",
+            Self::Rejected(_) => "rejected",
+            Self::Unavailable => "unavailable",
+        }
+    }
+
     fn record(self, endpoint_id: &str) {
         let endpoint = endpoint_id.to_owned();
-        let counter = match self {
-            Self::Accepted => metrics::counter!(
+        let outcome = self.label();
+        let counter = if let Self::Rejected(reason) = self {
+            metrics::counter!(
                 WEBHOOK_INGRESS_OUTCOMES_METRIC,
                 "endpoint" => endpoint,
-                "outcome" => "accepted"
-            ),
-            Self::Duplicate => metrics::counter!(
-                WEBHOOK_INGRESS_OUTCOMES_METRIC,
-                "endpoint" => endpoint,
-                "outcome" => "duplicate"
-            ),
-            Self::Rejected(reason) => metrics::counter!(
-                WEBHOOK_INGRESS_OUTCOMES_METRIC,
-                "endpoint" => endpoint,
-                "outcome" => "rejected",
+                "outcome" => outcome,
                 "reason" => reason
-            ),
-            Self::Unavailable => metrics::counter!(
+            )
+        } else {
+            metrics::counter!(
                 WEBHOOK_INGRESS_OUTCOMES_METRIC,
                 "endpoint" => endpoint,
-                "outcome" => "unavailable"
-            ),
+                "outcome" => outcome
+            )
         };
         counter.increment(1);
     }

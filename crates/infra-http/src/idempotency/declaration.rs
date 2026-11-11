@@ -43,7 +43,9 @@ pub(super) enum Rule {
     Shape,
     Method,
     KeyParameter,
-    SuccessResponses,
+    NonSuccessStatus,
+    NoSuccess,
+    UnreplayableHeader,
     ReferencedSuccess,
     ProblemResponses,
     ReplayHeader,
@@ -59,9 +61,11 @@ impl Rule {
             Self::KeyParameter => {
                 "Idempotency-Key must be absent or one byte-equal generated header parameter"
             }
-            Self::SuccessResponses => {
-                "declare a 2xx response, no 1xx or 3xx response, and only replayable 2xx headers"
+            Self::NonSuccessStatus => {
+                "an idempotent operation must not declare a 1xx or 3xx response"
             }
+            Self::NoSuccess => "an idempotent operation must declare a 2xx response",
+            Self::UnreplayableHeader => "a 2xx response may declare only replayable headers",
             Self::ReferencedSuccess => {
                 "each 2xx response must be inline so its replay metadata can be checked"
             }
@@ -75,11 +79,11 @@ impl Rule {
     }
 }
 
-/// Generate idempotency metadata for one route carrier, returning its bounded
-/// operation label for the runtime middleware.
+/// Generate idempotency metadata for one route carrier, returning the
+/// operation id the runtime middleware logs.
 pub(super) fn prepare(paths: &mut Paths) -> Result<String, CompositionError> {
-    let label = route_label(paths);
-    let shape = || CompositionError::new(&label, Rule::Shape);
+    let subject = route_subject(paths);
+    let shape = || CompositionError::new(&subject, Rule::Shape);
     let mut items = paths.paths.values_mut();
     let (Some(item), None) = (items.next(), items.next()) else {
         return Err(shape());
@@ -155,7 +159,7 @@ fn prepare_success_responses(
     for (status, response) in &mut operation.responses.responses {
         match status.as_bytes().first() {
             Some(b'1' | b'3') => {
-                return Err(CompositionError::new(operation_id, Rule::SuccessResponses));
+                return Err(CompositionError::new(operation_id, Rule::NonSuccessStatus));
             }
             Some(b'2') => {
                 success = true;
@@ -168,7 +172,7 @@ fn prepare_success_responses(
         }
     }
     if !success {
-        return Err(CompositionError::new(operation_id, Rule::SuccessResponses));
+        return Err(CompositionError::new(operation_id, Rule::NoSuccess));
     }
     Ok(())
 }
@@ -194,7 +198,10 @@ fn prepare_success_headers(
         !name.eq_ignore_ascii_case(super::openapi::REPLAYED_HEADER)
             && !stored::is_replayable_header_name(name)
     }) {
-        return Err(CompositionError::new(operation_id, Rule::SuccessResponses));
+        return Err(CompositionError::new(
+            operation_id,
+            Rule::UnreplayableHeader,
+        ));
     }
     Ok(())
 }
@@ -222,7 +229,7 @@ fn one_operation_mut(item: &mut PathItem) -> Option<(&'static str, &mut Operatio
     operations.next().is_none().then_some(operation)
 }
 
-fn route_label(paths: &Paths) -> String {
+fn route_subject(paths: &Paths) -> String {
     paths
         .paths
         .keys()
@@ -322,7 +329,7 @@ mod tests {
             .remove("201");
         assert_eq!(
             prepare(&mut missing_success).unwrap_err().rule(),
-            Rule::SuccessResponses
+            Rule::NoSuccess
         );
 
         let (_, mut referenced, _): UtoipaMethodRouter = route();
@@ -390,7 +397,7 @@ mod tests {
         );
         assert_eq!(
             prepare(&mut unsupported).unwrap_err().rule(),
-            Rule::SuccessResponses
+            Rule::UnreplayableHeader
         );
     }
 }

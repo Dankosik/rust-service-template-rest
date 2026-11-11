@@ -1,9 +1,11 @@
+use std::io;
 use std::net::{IpAddr, Ipv4Addr};
 use std::num::NonZeroU32;
 
 use axum::routing::get;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+use super::sniff::HTTP2_PREFACE;
 use super::*;
 
 fn loopback() -> SocketAddr {
