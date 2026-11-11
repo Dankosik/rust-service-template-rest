@@ -54,7 +54,7 @@ pub(super) fn open(config: &Config) -> Result<Option<ObjectStorage>, BootstrapEr
         operation_timeout: settings.operation_timeout,
     })?;
     tracing::info!(
-        object_storage.provider = storage.provider(),
+        object_storage.provider = storage.provider_name(),
         object_storage.credentials = credentials_label,
         object_storage.max_object_bytes = settings.max_object_bytes.as_u64(),
         object_storage.max_concurrency = settings.max_concurrency,

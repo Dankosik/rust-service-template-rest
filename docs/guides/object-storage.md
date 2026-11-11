@@ -310,7 +310,7 @@ A `head` response has no body, so a missing bucket on `head` also reads as
   protection can fail a body earlier. Raise the operation limit with
   `max_object_bytes` when the transfer requires it.
 - Request-bound callers pass `&operation_context::OperationContext` as the
-  first argument to `put_with_context`, `get_with_context`, `head_with_context`,
+  last argument to `put_with_context`, `get_with_context`, `head_with_context`,
   `delete_with_context`, or `presign_get_with_context`; remaining arguments are
   the same as their convenience methods. `put_with_context` accepts both bytes
   and streamed `PutBody`. The convenience methods use the same enforcement

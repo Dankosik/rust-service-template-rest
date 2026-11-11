@@ -118,7 +118,7 @@ impl Call {
 
 /// The transport-level class of an SDK failure, before the call decides.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum FailureKind<'a> {
+enum FailureKind<'a> {
     /// The request was never sent: it could not be built or signed.
     NotSent,
     /// The request was never sent: the credential source yielded none.
@@ -134,12 +134,18 @@ pub(crate) enum FailureKind<'a> {
 pub(crate) struct Failure {
     pub(crate) error: ObjectStorageError,
     /// The provider's error code when it is a short identifier, otherwise the
-    /// HTTP status or the transport class. Never provider message text.
+    /// HTTP status, the transport class, or a fixed local label (see
+    /// [`Failure::new`]). Never provider message text.
     pub(crate) error_type: Cow<'static, str>,
 }
 
 impl Failure {
-    /// A local cause with a static observation label.
+    /// A local cause with a static observation label: `too_large`, `busy`,
+    /// `expires_in`, `presigned_headers`, `content_range`, `body_length`,
+    /// `checksum`, `content_length`, or `body`; [`Failure::stopped`] adds
+    /// `timeout` and `cancelled`. `body` names two causes with different
+    /// errors: `Rejected` for a failed upload source, `Unavailable` for a
+    /// failed download body.
     pub(crate) fn new(error: ObjectStorageError, error_type: &'static str) -> Self {
         Self {
             error,
@@ -147,19 +153,26 @@ impl Failure {
         }
     }
 
-    /// The operation context stopped before the outcome was known.
+    /// The operation context stopped before the request could have been sent.
     pub(crate) fn stopped(stopped: Stopped) -> Self {
-        Self::new(
-            ObjectStorageError::Unavailable,
-            match stopped {
-                Stopped::Deadline => "timeout",
-                Stopped::Cancelled => "cancelled",
-            },
-        )
+        Self::new(ObjectStorageError::Unavailable, stop_label(stopped))
+    }
+
+    /// The operation context stopped after the request may have been sent:
+    /// its reply is lost.
+    pub(crate) fn stopped_after_send(call: Call, stopped: Stopped) -> Self {
+        Self::new(classify(call, FailureKind::Lost), stop_label(stopped))
     }
 }
 
-pub(crate) type SdkFailure<E> = SdkError<E, HttpResponse>;
+fn stop_label(stopped: Stopped) -> &'static str {
+    match stopped {
+        Stopped::Deadline => "timeout",
+        Stopped::Cancelled => "cancelled",
+    }
+}
+
+type SdkFailure<E> = SdkError<E, HttpResponse>;
 
 pub(crate) fn from_sdk<E>(call: Call, error: &SdkFailure<E>) -> Failure
 where
@@ -203,7 +216,7 @@ fn is_identifier(code: &str) -> bool {
 }
 
 /// The one mapping from a provider reply to the failure a caller sees.
-pub(crate) fn classify(call: Call, kind: FailureKind<'_>) -> ObjectStorageError {
+fn classify(call: Call, kind: FailureKind<'_>) -> ObjectStorageError {
     use ObjectStorageError as E;
     match kind {
         FailureKind::NotSent => E::Rejected,

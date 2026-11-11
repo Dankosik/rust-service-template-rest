@@ -43,7 +43,7 @@ pub struct Download {
 #[derive(Debug)]
 struct State {
     waker: Option<Waker>,
-    status: DownloadState,
+    status: Status,
 }
 
 #[derive(Debug)]
@@ -51,7 +51,7 @@ struct State {
     clippy::large_enum_variant,
     reason = "State already lives in one Arc allocation; inline custody avoids another allocation"
 )]
-enum DownloadState {
+enum Status {
     Open(Resources),
     Succeeded,
     Failed(ObjectStorageError),
@@ -65,7 +65,7 @@ struct Resources {
     context: OperationContext,
     body: ByteStream,
     remaining: u64,
-    last: Option<Bytes>,
+    final_chunk: Option<Bytes>,
     guard: OperationGuard,
     _permit: OwnedSemaphorePermit,
 }
@@ -126,15 +126,15 @@ type ReadPoll = Poll<Result<ReadStep, ObjectStorageError>>;
 /// releases the resources after the lock is gone.
 impl State {
     fn close(&mut self, outcome: Outcome) -> Option<Completion> {
-        if !matches!(self.status, DownloadState::Open(_)) {
+        if !matches!(self.status, Status::Open(_)) {
             return None;
         }
         let terminal = match &outcome {
-            Outcome::Success => DownloadState::Succeeded,
-            Outcome::Failure(failure) => DownloadState::Failed(failure.error),
-            Outcome::Cancelled => DownloadState::Failed(ObjectStorageError::Unavailable),
+            Outcome::Success => Status::Succeeded,
+            Outcome::Failure(failure) => Status::Failed(failure.error),
+            Outcome::Cancelled => Status::Failed(ObjectStorageError::Unavailable),
         };
-        let DownloadState::Open(resources) = std::mem::replace(&mut self.status, terminal) else {
+        let Status::Open(resources) = std::mem::replace(&mut self.status, terminal) else {
             return None;
         };
         Some(Completion {
@@ -168,23 +168,23 @@ impl State {
     /// chunk; `None` once the download failed.
     fn unread(&self) -> Option<u64> {
         match &self.status {
-            DownloadState::Open(resources) => Some(
+            Status::Open(resources) => Some(
                 resources.remaining
                     + resources
-                        .last
+                        .final_chunk
                         .as_ref()
                         .map_or(0, |chunk| chunk.len() as u64),
             ),
-            DownloadState::Succeeded => Some(0),
-            DownloadState::Failed(_) => None,
+            Status::Succeeded => Some(0),
+            Status::Failed(_) => None,
         }
     }
 
     fn poll(&mut self, context: &mut Context<'_>) -> (ReadPoll, Option<Completion>) {
         let resources = match &mut self.status {
-            DownloadState::Open(resources) => resources,
-            DownloadState::Succeeded => return (Poll::Ready(Ok(ReadStep::Chunk(None))), None),
-            DownloadState::Failed(error) => return (Poll::Ready(Err(*error)), None),
+            Status::Open(resources) => resources,
+            Status::Succeeded => return (Poll::Ready(Ok(ReadStep::Chunk(None))), None),
+            Status::Failed(error) => return (Poll::Ready(Err(*error)), None),
         };
         if let Some(stopped) = resources.context.stopped() {
             return self.close_failed(Failure::stopped(stopped));
@@ -217,7 +217,7 @@ impl State {
                 match resources.remaining.checked_sub(chunk.len() as u64) {
                     Some(0) => {
                         resources.remaining = 0;
-                        resources.last = Some(chunk);
+                        resources.final_chunk = Some(chunk);
                         (Poll::Ready(Ok(ReadStep::Buffered)), None)
                     }
                     Some(remaining) => {
@@ -240,7 +240,7 @@ impl State {
                 Err(error),
             ),
             Poll::Ready(None) if resources.remaining == 0 => {
-                let chunk = resources.last.take();
+                let chunk = resources.final_chunk.take();
                 (
                     Poll::Ready(Ok(ReadStep::Chunk(chunk))),
                     self.close(Outcome::Success),
@@ -273,8 +273,8 @@ fn terminate(shared: &Mutex<State>, outcome: Outcome) {
     let completion = {
         let mut state = lock(shared);
         let stopped = match &state.status {
-            DownloadState::Open(resources) => resources.context.stopped(),
-            DownloadState::Succeeded | DownloadState::Failed(_) => return,
+            Status::Open(resources) => resources.context.stopped(),
+            Status::Succeeded | Status::Failed(_) => return,
         };
         let outcome = stopped.map_or(outcome, |stopped| {
             Outcome::Failure(Failure::stopped(stopped))
@@ -296,11 +296,11 @@ impl Download {
     ) -> Self {
         let shared = Arc::new(Mutex::new(State {
             waker: None,
-            status: DownloadState::Open(Resources {
+            status: Status::Open(Resources {
                 context: context.clone(),
                 body,
                 remaining: metadata.size,
-                last: None,
+                final_chunk: None,
                 guard,
                 _permit: permit,
             }),
@@ -414,7 +414,7 @@ impl http_body::Body for Download {
     }
 
     fn is_end_stream(&self) -> bool {
-        matches!(lock(&self.shared).status, DownloadState::Succeeded)
+        matches!(lock(&self.shared).status, Status::Succeeded)
     }
 
     fn size_hint(&self) -> SizeHint {

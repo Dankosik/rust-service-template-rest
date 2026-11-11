@@ -103,7 +103,7 @@ pub struct ObjectStorage {
 
 struct Inner {
     client: aws_sdk_s3::Client,
-    provider: &'static str,
+    provider_name: &'static str,
     cloud_region: Option<String>,
     bucket: String,
     expected_bucket_owner: Option<String>,
@@ -119,7 +119,7 @@ impl std::fmt::Debug for ObjectStorage {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("ObjectStorage")
-            .field("provider", &self.inner.provider)
+            .field("provider", &self.inner.provider_name)
             .field("max_object_bytes", &self.inner.max_object_bytes)
             .finish_non_exhaustive()
     }
@@ -269,7 +269,7 @@ impl ObjectStorage {
         Self {
             inner: Arc::new(Inner {
                 client: aws_sdk_s3::Client::from_conf(config.build()),
-                provider: provider.name(),
+                provider_name: provider.name(),
                 cloud_region: admitted.cloud_region,
                 bucket,
                 expected_bucket_owner: admitted.expected_bucket_owner,
@@ -284,8 +284,8 @@ impl ObjectStorage {
 
     /// The configured provider name, safe to log.
     #[must_use]
-    pub fn provider(&self) -> &'static str {
-        self.inner.provider
+    pub fn provider_name(&self) -> &'static str {
+        self.inner.provider_name
     }
 
     /// Store an object, replacing any existing one unless
@@ -302,7 +302,7 @@ impl ObjectStorage {
         body: PutBody,
         options: PutOptions,
     ) -> Result<(), ObjectStorageError> {
-        self.put_with_context(&OperationContext::unbounded(), key, body, options)
+        self.put_with_context(key, body, options, &OperationContext::unbounded())
             .await
     }
 
@@ -316,23 +316,20 @@ impl ObjectStorage {
     /// outer caller remains responsible for its own terminal deadline.
     pub async fn put_with_context(
         &self,
-        parent: &OperationContext,
         key: &ObjectKey,
-        mut body: PutBody,
+        body: PutBody,
         options: PutOptions,
+        parent: &OperationContext,
     ) -> Result<(), ObjectStorageError> {
         let (context, mut guard) = self.begin(parent, Operation::Put)?;
         if body.len > self.inner.max_object_bytes {
             return Err(guard.fail(&Failure::new(ObjectStorageError::TooLarge, "too_large")));
         }
         let _permit = self.admit(&mut guard)?;
-        within(&context, body.prepare_empty_stream())
+        let body = within(&context, body.normalize_empty_stream())
             .await
             .map_err(|interrupted| guard.fail(&Failure::stopped(interrupted.stopped)))?
             .map_err(|failure| guard.fail(&failure))?;
-        // `prepare_empty_stream` may have replaced a streamed body with an
-        // in-memory empty one; read the normalized source so the checksum
-        // describes the request that will be sent.
         let checksum = self
             .inner
             .checksum
@@ -346,9 +343,10 @@ impl ObjectStorage {
         // Under the client's `WhenRequired` the SDK sends the named
         // algorithm but computes no checksum value. An upload that carries
         // CRC64NVME therefore switches this one call to `WhenSupported`.
-        let mut once = self.operation_config(&context, call);
+        let mut call_config = self.operation_config(&context, call);
         if checksum.is_some() {
-            once = once.request_checksum_calculation(RequestChecksumCalculation::WhenSupported);
+            call_config =
+                call_config.request_checksum_calculation(RequestChecksumCalculation::WhenSupported);
         }
         let request = self
             .inner
@@ -363,7 +361,7 @@ impl ObjectStorage {
             .set_if_none_match(options.create_only.then(|| "*".to_owned()))
             .set_expected_bucket_owner(self.inner.expected_bucket_owner.clone())
             .customize()
-            .config_override(once)
+            .config_override(call_config)
             .interceptor(ResponseLimit::SuccessBody)
             .send();
         let result = within(&context, request).await;
@@ -375,10 +373,13 @@ impl ObjectStorage {
                 guard.succeed();
                 Ok(())
             }
+            // The body broke its declared length: report refused input
+            // (`Rejected`), not the transport error or unknown outcome it
+            // caused; see [`PutBody::stream`].
             Ok(Err(_)) | Err(_) if body.source.mismatched() => {
                 Err(guard.fail(&body::length_refusal()))
             }
-            Ok(Err(failure)) => Err(guard.fail(&error::from_sdk(call, &failure))),
+            Ok(Err(sdk_error)) => Err(guard.fail(&error::from_sdk(call, &sdk_error))),
             Err(interrupted) => Err(interrupted.fail(&mut guard, call)),
         }
     }
@@ -394,7 +395,7 @@ impl ObjectStorage {
     /// exceeds `max_object_bytes`; `Integrity` for a range or unsized
     /// response; otherwise `Busy`, `Unavailable`, or `Rejected`.
     pub async fn get(&self, key: &ObjectKey) -> Result<Download, ObjectStorageError> {
-        self.get_with_context(&OperationContext::unbounded(), key)
+        self.get_with_context(key, &OperationContext::unbounded())
             .await
     }
 
@@ -404,9 +405,10 @@ impl ObjectStorage {
     /// yield a newly obtained body chunk or successful EOF.
     pub async fn get_with_context(
         &self,
-        parent: &OperationContext,
         key: &ObjectKey,
+        parent: &OperationContext,
     ) -> Result<Download, ObjectStorageError> {
+        let call = Call::Read;
         let (context, mut guard) = self.begin(parent, Operation::Get)?;
         let permit = self.admit(&mut guard)?;
         // Keep the SDK's large send future off every GET caller's stack.
@@ -419,12 +421,12 @@ impl ObjectStorage {
                 .checksum_mode(ChecksumMode::Enabled)
                 .set_expected_bucket_owner(self.inner.expected_bucket_owner.clone())
                 .customize()
-                .config_override(self.operation_config(&context, Call::Read))
+                .config_override(self.operation_config(&context, call))
                 .send(),
         );
         let result = within(&context, request)
             .await
-            .map_err(|interrupted| interrupted.fail(&mut guard, Call::Read))?;
+            .map_err(|interrupted| interrupted.fail(&mut guard, call))?;
         guard.answered_by(&result);
         // Unlike mutation finality, a still-open GET rejects a late header
         // response before it can transfer body custody.
@@ -433,8 +435,8 @@ impl ObjectStorage {
         // stopped context takes precedence over preparation that finishes late.
         let output = match result {
             Ok(output) => output,
-            Err(failure) => {
-                let failure = error::from_sdk(Call::Read, &failure);
+            Err(sdk_error) => {
+                let failure = error::from_sdk(call, &sdk_error);
                 Self::check(&context, &mut guard)?;
                 return Err(guard.fail(&failure));
             }
@@ -462,7 +464,7 @@ impl ObjectStorage {
     /// reads as `NotFound`. `Integrity` when the response has no size;
     /// otherwise `Busy`, `Unavailable`, or `Rejected`.
     pub async fn head(&self, key: &ObjectKey) -> Result<ObjectMetadata, ObjectStorageError> {
-        self.head_with_context(&OperationContext::unbounded(), key)
+        self.head_with_context(key, &OperationContext::unbounded())
             .await
     }
 
@@ -474,9 +476,10 @@ impl ObjectStorage {
     /// As [`Self::head`].
     pub async fn head_with_context(
         &self,
-        parent: &OperationContext,
         key: &ObjectKey,
+        parent: &OperationContext,
     ) -> Result<ObjectMetadata, ObjectStorageError> {
+        let call = Call::Read;
         let (context, mut guard) = self.begin(parent, Operation::Head)?;
         let _permit = self.admit(&mut guard)?;
         let request = self
@@ -487,17 +490,17 @@ impl ObjectStorage {
             .key(key.as_str())
             .set_expected_bucket_owner(self.inner.expected_bucket_owner.clone())
             .customize()
-            .config_override(self.operation_config(&context, Call::Read))
+            .config_override(self.operation_config(&context, call))
             .interceptor(ResponseLimit::SuccessBody)
             .send();
         let result = within(&context, request)
             .await
-            .map_err(|interrupted| interrupted.fail(&mut guard, Call::Read))?;
+            .map_err(|interrupted| interrupted.fail(&mut guard, call))?;
         guard.answered_by(&result);
         Self::check(&context, &mut guard)?;
         let output = match result {
             Ok(output) => output,
-            Err(failure) => return Err(guard.fail(&error::from_sdk(Call::Read, &failure))),
+            Err(sdk_error) => return Err(guard.fail(&error::from_sdk(call, &sdk_error))),
         };
         let metadata = ObjectMetadata::from_response_fields(
             output.content_length(),
@@ -517,7 +520,7 @@ impl ObjectStorage {
     ///
     /// `Busy`, `Unavailable`, `Rejected`, or `OutcomeUnknown`.
     pub async fn delete(&self, key: &ObjectKey) -> Result<(), ObjectStorageError> {
-        self.delete_with_context(&OperationContext::unbounded(), key)
+        self.delete_with_context(key, &OperationContext::unbounded())
             .await
     }
 
@@ -527,9 +530,10 @@ impl ObjectStorage {
     /// `OutcomeUnknown`; recovery does not grant replay authority.
     pub async fn delete_with_context(
         &self,
-        parent: &OperationContext,
         key: &ObjectKey,
+        parent: &OperationContext,
     ) -> Result<(), ObjectStorageError> {
+        let call = Call::Mutation;
         let (context, mut guard) = self.begin(parent, Operation::Delete)?;
         let _permit = self.admit(&mut guard)?;
         let request = self
@@ -540,12 +544,12 @@ impl ObjectStorage {
             .key(key.as_str())
             .set_expected_bucket_owner(self.inner.expected_bucket_owner.clone())
             .customize()
-            .config_override(self.operation_config(&context, Call::Mutation))
+            .config_override(self.operation_config(&context, call))
             .interceptor(ResponseLimit::SuccessBody)
             .send();
         let result = within(&context, request)
             .await
-            .map_err(|interrupted| interrupted.fail(&mut guard, Call::Mutation))?;
+            .map_err(|interrupted| interrupted.fail(&mut guard, call))?;
         guard.answered_by(&result);
         match result {
             Ok(_) => {
@@ -554,13 +558,14 @@ impl ObjectStorage {
             }
             // S3 and R2 answer 204; a provider that answers `NoSuchKey` means
             // the same thing.
-            Err(failure)
-                if aws_sdk_s3::error::ProvideErrorMetadata::code(&failure) == Some("NoSuchKey") =>
+            Err(sdk_error)
+                if aws_sdk_s3::error::ProvideErrorMetadata::code(&sdk_error)
+                    == Some("NoSuchKey") =>
             {
                 guard.succeed();
                 Ok(())
             }
-            Err(failure) => Err(guard.fail(&error::from_sdk(Call::Mutation, &failure))),
+            Err(sdk_error) => Err(guard.fail(&error::from_sdk(call, &sdk_error))),
         }
     }
 
@@ -584,7 +589,7 @@ impl ObjectStorage {
         key: &ObjectKey,
         expires_in: Duration,
     ) -> Result<PresignedUrl, ObjectStorageError> {
-        self.presign_get_with_context(&OperationContext::unbounded(), key, expires_in)
+        self.presign_get_with_context(key, expires_in, &OperationContext::unbounded())
             .await
     }
 
@@ -596,10 +601,11 @@ impl ObjectStorage {
     /// As [`Self::presign_get`]. A stopped context maps to `Unavailable`.
     pub async fn presign_get_with_context(
         &self,
-        parent: &OperationContext,
         key: &ObjectKey,
         expires_in: Duration,
+        parent: &OperationContext,
     ) -> Result<PresignedUrl, ObjectStorageError> {
+        let call = Call::Read;
         let (context, mut guard) = self.begin(parent, Operation::PresignGet)?;
         if !(PRESIGN_MIN..=PRESIGN_MAX).contains(&expires_in) {
             return Err(guard.fail(&Failure::new(ObjectStorageError::Rejected, "expires_in")));
@@ -615,11 +621,11 @@ impl ObjectStorage {
             .bucket(&self.inner.bucket)
             .key(key.as_str())
             .customize()
-            .config_override(self.operation_config(&context, Call::Read))
+            .config_override(self.operation_config(&context, call))
             .presigned(config);
         let result = within(&context, request)
             .await
-            .map_err(|interrupted| interrupted.fail(&mut guard, Call::Read))?;
+            .map_err(|interrupted| interrupted.fail(&mut guard, call))?;
         Self::check(&context, &mut guard)?;
         match result {
             // The URL must work alone. The SDK signs headers as headers, not
@@ -635,7 +641,7 @@ impl ObjectStorage {
                 guard.succeed();
                 Ok(url)
             }
-            Err(failure) => Err(guard.fail(&error::from_sdk(Call::Read, &failure))),
+            Err(sdk_error) => Err(guard.fail(&error::from_sdk(call, &sdk_error))),
         }
     }
 
@@ -764,8 +770,8 @@ impl health::Probe for BucketProbe {
                 guard.succeed();
                 Ok(())
             }
-            Err(failure) => {
-                let failure = error::from_sdk(Call::Read, &failure);
+            Err(sdk_error) => {
+                let failure = error::from_sdk(Call::Read, &sdk_error);
                 guard.fail(&failure);
                 Err(health::ProbeError::new(format!(
                     "object storage bucket check failed: {}",
