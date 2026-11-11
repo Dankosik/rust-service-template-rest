@@ -344,3 +344,6 @@ impl fmt::Display for Causes<'_> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests;

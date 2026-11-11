@@ -153,3 +153,6 @@ fn frame_body(request: &mut Request<Bytes>) {
 fn has_userinfo(url: &Url) -> bool {
     !url.username().is_empty() || url.password().is_some()
 }
+
+#[cfg(test)]
+mod tests;
