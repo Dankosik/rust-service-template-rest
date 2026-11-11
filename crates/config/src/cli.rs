@@ -6,7 +6,7 @@
 //! identity through [`crate::BuildInfo`] / `app.version`, not clap's crate
 //! version.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::Parser;
@@ -16,7 +16,7 @@ use clap::Parser;
 /// Does not call `process::exit`, so destructors still run. Use this when
 /// tracing is absent or not yet installed.
 #[must_use]
-pub fn process_failure(message: &str) -> ExitCode {
+pub fn process_failure(message: impl std::fmt::Display) -> ExitCode {
     #[expect(
         clippy::print_stderr,
         reason = "finite process failure output before tracing or after runtime shutdown"
@@ -47,7 +47,7 @@ pub struct LoadOptions {
 
 impl LoadOptions {
     /// Parse argv, including the program name, so binaries need not depend
-    /// on clap. `--help` exits 0 and a flag error exits 2; clap prints both.
+    /// on clap.
     #[must_use]
     pub fn parse_from<I, T>(args: I) -> Self
     where
@@ -58,8 +58,11 @@ impl LoadOptions {
     }
 
     /// Base file first, then overlays in order.
-    pub fn files(&self) -> impl Iterator<Item = &PathBuf> {
-        self.config.iter().chain(self.config_overlay.iter())
+    pub(crate) fn files(&self) -> impl Iterator<Item = &Path> {
+        self.config
+            .iter()
+            .chain(self.config_overlay.iter())
+            .map(PathBuf::as_path)
     }
 }
 

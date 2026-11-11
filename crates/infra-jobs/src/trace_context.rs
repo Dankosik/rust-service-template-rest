@@ -28,12 +28,9 @@ pub(crate) fn capture() -> Carrier {
 }
 
 /// Link `span` to a valid, remote stored context without changing its parent.
-pub(crate) fn link(span: &tracing::Span, trace_parent: Option<&str>, trace_state: Option<&str>) {
-    let Some(carrier) = Carrier::from_stored(trace_parent, trace_state) else {
-        return;
-    };
+pub(crate) fn link(span: &tracing::Span, carrier: &Carrier) {
     let context = global::get_text_map_propagator(|propagator| {
-        propagator.extract_with_context(&opentelemetry::Context::new(), &carrier)
+        propagator.extract_with_context(&opentelemetry::Context::new(), carrier)
     });
     let span_ref = TraceContextExt::span(&context);
     let context = span_ref.span_context();
@@ -53,7 +50,7 @@ pub(crate) fn link(span: &tracing::Span, trace_parent: Option<&str>, trace_state
 /// judge `traceparent` syntax: [`link`] adds a link only when extraction
 /// reports the context valid and remote. A state-only carrier is storable, and
 /// never links for want of a valid `traceparent`.
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub(crate) struct Carrier {
     pub(crate) trace_parent: Option<String>,
     pub(crate) trace_state: Option<String>,
@@ -62,7 +59,10 @@ pub(crate) struct Carrier {
 impl Carrier {
     /// The stored pair without a refused `tracestate`, or `None` when
     /// `traceparent` is refused.
-    fn from_stored(trace_parent: Option<&str>, trace_state: Option<&str>) -> Option<Self> {
+    pub(crate) fn from_stored(
+        trace_parent: Option<&str>,
+        trace_state: Option<&str>,
+    ) -> Option<Self> {
         if trace_parent.is_some_and(|value| !is_allowed(value, TRACEPARENT_MAX_BYTES)) {
             return None;
         }

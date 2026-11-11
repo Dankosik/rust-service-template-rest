@@ -21,7 +21,7 @@ use utoipa_axum::routes;
 use crate::extract::Path;
 use crate::harden::RequestDeadline;
 use crate::problem::responses::WebhookProblemResponses;
-use crate::problem::{Code, Problem, sanitized_internal_error};
+use crate::problem::{Code, Problem, body_too_large, sanitized_internal_error};
 
 /// Webhook ingress results. Label `outcome` is `accepted`, `duplicate`,
 /// `rejected`, `unavailable`, or `unknown_endpoint`. A configured endpoint
@@ -29,7 +29,7 @@ use crate::problem::{Code, Problem, sanitized_internal_error};
 /// `reason`: the receiver's, or `body_too_large` / `body_unreadable` when the
 /// body could not be read within its limit. A requested ID that matches no configured
 /// endpoint is caller-controlled and never becomes a label.
-pub const WEBHOOK_INGRESS_OUTCOMES_METRIC: &str = "webhook_ingress_outcomes_total";
+pub(crate) const WEBHOOK_INGRESS_OUTCOMES_METRIC: &str = "webhook_ingress_outcomes_total";
 
 /// Route state supplied by the composition root.
 ///
@@ -131,11 +131,11 @@ async fn receive(
     let body = match Limited::new(body, MAX_BODY_BYTES).collect().await {
         Ok(collected) => collected.to_bytes(),
         Err(error) if caused_by_length_limit(&*error) => {
-            record_rejection(&endpoint_id, "body_too_large");
-            return Problem::new(Code::RequestEntityTooLarge).into_response();
+            EndpointOutcome::Rejected("body_too_large").record(&endpoint_id);
+            return body_too_large().into_response();
         }
         Err(_) => {
-            record_rejection(&endpoint_id, "body_unreadable");
+            EndpointOutcome::Rejected("body_unreadable").record(&endpoint_id);
             return Problem::new(Code::WebhookRejected).into_response();
         }
     };
@@ -158,19 +158,19 @@ async fn receive(
     match result {
         Ok(outcome) => {
             let outcome = match outcome {
-                ReceiptOutcome::Accepted => "accepted",
-                ReceiptOutcome::Duplicate => "duplicate",
+                ReceiptOutcome::Accepted => EndpointOutcome::Accepted,
+                ReceiptOutcome::Duplicate => EndpointOutcome::Duplicate,
             };
-            record_outcome(&endpoint_id, outcome);
+            outcome.record(&endpoint_id);
             StatusCode::NO_CONTENT.into_response()
         }
         Err(ReceiveError::UnknownEndpoint) => unknown_endpoint(),
         Err(ReceiveError::Rejected(rejection)) => {
-            record_rejection(&endpoint_id, rejection.reason());
+            EndpointOutcome::Rejected(rejection.reason()).record(&endpoint_id);
             Problem::new(Code::WebhookRejected).into_response()
         }
         Err(ReceiveError::Unavailable) => {
-            record_outcome(&endpoint_id, "unavailable");
+            EndpointOutcome::Unavailable.record(&endpoint_id);
             Problem::new(Code::ServiceUnavailable).into_response()
         }
     }
@@ -182,23 +182,43 @@ fn unknown_endpoint() -> Response {
     Problem::new(Code::NotFound).into_response()
 }
 
-fn record_outcome(endpoint_id: &str, outcome: &'static str) {
-    metrics::counter!(
-        WEBHOOK_INGRESS_OUTCOMES_METRIC,
-        "endpoint" => endpoint_id.to_owned(),
-        "outcome" => outcome
-    )
-    .increment(1);
+/// The outcome of a delivery to a configured endpoint.
+enum EndpointOutcome {
+    Accepted,
+    Duplicate,
+    /// Carries the static `reason` label.
+    Rejected(&'static str),
+    Unavailable,
 }
 
-fn record_rejection(endpoint_id: &str, reason: &'static str) {
-    metrics::counter!(
-        WEBHOOK_INGRESS_OUTCOMES_METRIC,
-        "endpoint" => endpoint_id.to_owned(),
-        "outcome" => "rejected",
-        "reason" => reason
-    )
-    .increment(1);
+impl EndpointOutcome {
+    fn record(self, endpoint_id: &str) {
+        let endpoint = endpoint_id.to_owned();
+        let counter = match self {
+            Self::Accepted => metrics::counter!(
+                WEBHOOK_INGRESS_OUTCOMES_METRIC,
+                "endpoint" => endpoint,
+                "outcome" => "accepted"
+            ),
+            Self::Duplicate => metrics::counter!(
+                WEBHOOK_INGRESS_OUTCOMES_METRIC,
+                "endpoint" => endpoint,
+                "outcome" => "duplicate"
+            ),
+            Self::Rejected(reason) => metrics::counter!(
+                WEBHOOK_INGRESS_OUTCOMES_METRIC,
+                "endpoint" => endpoint,
+                "outcome" => "rejected",
+                "reason" => reason
+            ),
+            Self::Unavailable => metrics::counter!(
+                WEBHOOK_INGRESS_OUTCOMES_METRIC,
+                "endpoint" => endpoint,
+                "outcome" => "unavailable"
+            ),
+        };
+        counter.increment(1);
+    }
 }
 
 /// Whether a body read failed at a length limit. axum boxes the transport
@@ -277,8 +297,8 @@ mod tests {
     fn outcomes_label_a_configured_endpoint_and_never_an_unknown_one() {
         let keys = Keys::default();
         metrics::with_local_recorder(&keys, || {
-            record_outcome("partner", "accepted");
-            record_rejection("partner", "invalid_signature");
+            EndpointOutcome::Accepted.record("partner");
+            EndpointOutcome::Rejected("invalid_signature").record("partner");
             let _ = unknown_endpoint();
         });
         let labels: Vec<Vec<(String, String)>> = keys

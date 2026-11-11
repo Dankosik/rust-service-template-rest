@@ -23,6 +23,17 @@ pub(crate) enum CredentialsFileError {
     Malformed,
 }
 
+/// Describes the credentials-file metric to the installed recorder.
+/// Repeating it is harmless.
+pub(crate) fn describe_metrics() {
+    use metrics::describe_counter;
+
+    describe_counter!(
+        "messaging_credentials_file_challenges_total",
+        "Completed file-backed JWT/signature challenge preparations; not broker authentication."
+    );
+}
+
 impl CredentialsFileError {
     fn observe_challenge_failure(self) {
         let reason = match self {

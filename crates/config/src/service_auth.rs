@@ -7,9 +7,9 @@
 use secrecy::SecretString;
 use serde::Deserialize;
 
-use crate::ValidationError;
 use crate::app::is_local_development;
 use crate::de::{blank_as_none, blank_secret_as_none};
+use crate::validate::{ValidationError, required_when};
 
 /// How gRPC calls between services are authenticated.
 #[derive(Clone, Deserialize)]
@@ -42,6 +42,8 @@ pub enum ServiceAuthConfig {
     },
 }
 
+/// Leaves trust and credential inputs out of `Debug`, as
+/// `docs/configuration-source-policy.md` requires.
 impl std::fmt::Debug for ServiceAuthConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ServiceAuthConfig")
@@ -74,7 +76,9 @@ impl ServiceAuthConfig {
             Self::None {} if grpc_enabled && !is_local_development(app_env) => {
                 Err(ValidationError::new(
                     "service_auth.mode",
-                    "must be jwt when grpc.enabled is true outside app.env local or development",
+                    format!(
+                        "must be jwt when grpc.enabled is true outside app.env local or development, but app.env is \"{app_env}\""
+                    ),
                 ))
             }
             Self::None {} => Ok(()),
@@ -90,12 +94,7 @@ impl ServiceAuthConfig {
                     ("service_auth.jwt_type", jwt_type),
                     ("service_auth.trust", trust),
                 ] {
-                    if value.trim().is_empty() {
-                        return Err(ValidationError::new(
-                            key,
-                            "is required when service_auth.mode = jwt",
-                        ));
-                    }
+                    required_when(key, value, "service_auth.mode = jwt")?;
                 }
                 match (key_id, private_key) {
                     (Some(_), None) => Err(ValidationError::new(

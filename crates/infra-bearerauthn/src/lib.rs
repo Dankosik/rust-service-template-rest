@@ -4,10 +4,9 @@
 //! verified identity. HTTP routing, configuration loading, and authorization
 //! policy remain with their existing owners.
 //!
-//! Transports enter through [`Verifier::authenticate_with_context`]: parse one bearer envelope,
-//! run the prepared engine, and record the transport outcome even on cancellation.
-//! [`Verifier::verify_with_context`] accepts an already parsed envelope and records only the
-//! engine decision. Both return a sealed [`Principal`] or a closed [`Failure`].
+//! Transports enter only through [`Verifier::authenticate_with_context`]: parse one bearer
+//! envelope, run the prepared engine, and record the transport outcome even on cancellation.
+//! It returns a sealed [`Principal`] or a closed [`Failure`].
 
 mod authenticate;
 mod bearer;
@@ -39,7 +38,7 @@ pub use introspection::{IntrospectionCacheOptions, IntrospectionOptions, prepare
 // template:begin oidc-jwt:authn-jwt-prepare-export
 pub use jwt::{JwtAlgorithm, JwtOptions, RefreshTask, TokenProfile, prepare_jwt};
 // template:end oidc-jwt:authn-jwt-prepare-export
-pub use provider::{EndpointUrl, IssuerUrl, ProviderFailure};
+pub use provider::{EndpointUrl, HISTOGRAMS, IssuerUrl, ProviderFailure};
 
 /// The fixed authentication outcomes each inbound transport maps to its response.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -59,8 +58,10 @@ pub enum Failure {
 pub enum PreparationPhase {
     Options,
     Client,
+    // template:begin oidc-jwt:authn-jwt-preparation-phases
     Discovery,
     Jwks,
+    // template:end oidc-jwt:authn-jwt-preparation-phases
 }
 
 /// A closed preparation reason. These variants never retain dependency errors.
@@ -70,11 +71,13 @@ pub enum PreparationReason {
     ClientBuild,
     /// An option is empty or outside its accepted range.
     InvalidOption,
+    // template:begin oidc-jwt:authn-jwt-preparation-reasons
     Fetch(ProviderFailure),
     /// A provider document could not be read.
     Parse,
     IssuerMismatch,
     NoUsableKeys,
+    // template:end oidc-jwt:authn-jwt-preparation-reasons
 }
 
 /// Only an issuer mismatch names values: the configured and discovered issuer URLs.
@@ -85,6 +88,7 @@ pub enum PreparationError {
         phase: PreparationPhase,
         reason: PreparationReason,
     },
+    // template:begin oidc-jwt:authn-jwt-issuer-mismatch
     #[error(
         "authentication preparation failed during Discovery: IssuerMismatch \
          (configured issuer {configured:?}, discovered issuer {discovered:?})"
@@ -93,6 +97,7 @@ pub enum PreparationError {
         configured: String,
         discovered: String,
     },
+    // template:end oidc-jwt:authn-jwt-issuer-mismatch
 }
 
 impl PreparationError {
@@ -108,7 +113,9 @@ impl PreparationError {
     pub const fn phase(&self) -> PreparationPhase {
         match self {
             Self::Failed { phase, .. } => *phase,
+            // template:begin oidc-jwt:authn-jwt-issuer-mismatch-phase
             Self::IssuerMismatch { .. } => PreparationPhase::Discovery,
+            // template:end oidc-jwt:authn-jwt-issuer-mismatch-phase
         }
     }
 
@@ -116,7 +123,9 @@ impl PreparationError {
     pub const fn reason(&self) -> PreparationReason {
         match self {
             Self::Failed { reason, .. } => *reason,
+            // template:begin oidc-jwt:authn-jwt-issuer-mismatch-reason
             Self::IssuerMismatch { .. } => PreparationReason::IssuerMismatch,
+            // template:end oidc-jwt:authn-jwt-issuer-mismatch-reason
         }
     }
 }
@@ -181,11 +190,18 @@ pub(crate) struct VerificationError {
 }
 
 impl VerificationError {
-    pub(crate) const fn new(failure: Failure, reason: VerificationReason) -> Self {
-        Self { failure, reason }
+    pub(crate) const fn unavailable(reason: VerificationReason) -> Self {
+        Self {
+            failure: Failure::Unavailable,
+            reason,
+        }
     }
+
     pub(crate) const fn invalid(reason: VerificationReason) -> Self {
-        Self::new(Failure::Invalid, reason)
+        Self {
+            failure: Failure::Invalid,
+            reason,
+        }
     }
 }
 
@@ -197,7 +213,7 @@ pub(crate) fn unix_now() -> Result<u64, VerificationError> {
 fn unix_time(now: std::time::SystemTime) -> Result<u64, VerificationError> {
     now.duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs())
-        .map_err(|_| VerificationError::new(Failure::Unavailable, VerificationReason::Clock))
+        .map_err(|_| VerificationError::unavailable(VerificationReason::Clock))
 }
 
 const TOKEN_VERIFICATIONS_METRIC: &str = "authn_token_verifications_total";
@@ -321,11 +337,20 @@ impl Principal {
         self.identity.client_id.as_deref()
     }
 
-    /// The normalized, exact-case scopes from verified token evidence, sorted
-    /// and deduplicated so callers may binary-search them.
+    /// The normalized, exact-case scopes from verified token evidence.
     #[must_use]
     pub fn scopes(&self) -> &[String] {
         &self.identity.scopes
+    }
+
+    /// True when every scope in `required` was granted; an empty `required`
+    /// is any authenticated caller.
+    #[must_use]
+    pub fn has_scopes(&self, required: &[String]) -> bool {
+        // Engines store scopes sorted and deduplicated.
+        required
+            .iter()
+            .all(|scope| self.identity.scopes.binary_search(scope).is_ok())
     }
 
     /// The verified `exp` claim as Unix time in seconds, without leeway.
@@ -486,7 +511,7 @@ impl Verifier {
 
     /// Fixture-only: verifies under a fresh 3-second budget that is not linked
     /// to any caller's deadline or cancellation. Production code has a caller
-    /// context and uses [`Verifier::verify_with_context`].
+    /// context and uses [`Verifier::authenticate_with_context`].
     ///
     /// # Errors
     /// Returns [`Failure`] for invalid token evidence or an unavailable provider.
@@ -506,7 +531,7 @@ impl Verifier {
     /// Returns [`Failure::Unavailable`] when the caller stops, including when
     /// synchronous verification finishes after its cutoff. Other failures retain
     /// the existing invalid-evidence and provider classifications.
-    pub async fn verify_with_context(
+    pub(crate) async fn verify_with_context(
         &self,
         token: &BearerToken<'_>,
         context: &OperationContext,

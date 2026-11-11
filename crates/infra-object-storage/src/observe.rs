@@ -6,6 +6,7 @@
 use std::sync::OnceLock;
 use std::time::Instant;
 
+use aws_sdk_s3::operation::{RequestId, RequestIdExt};
 use metrics::{Histogram, Unit};
 use tracing::Span;
 
@@ -86,14 +87,19 @@ enum Outcome {
 impl Outcome {
     const COUNT: usize = 2 + ObjectStorageError::COUNT;
 
-    fn metric_slot(self) -> (usize, &'static str) {
+    fn column(self) -> usize {
         match self {
-            Self::Ok => (0, "ok"),
-            Self::Cancelled => (1, "cancelled"),
-            Self::Failure(error) => {
-                let (column, label) = error.metric_slot();
-                (2 + column, label)
-            }
+            Self::Ok => 0,
+            Self::Cancelled => 1,
+            Self::Failure(error) => 2 + error.column(),
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Cancelled => "cancelled",
+            Self::Failure(error) => error.label(),
         }
     }
 }
@@ -119,12 +125,11 @@ impl std::fmt::Debug for Histograms {
 
 impl Histograms {
     fn get(&self, operation: Operation, outcome: Outcome) -> &Histogram {
-        let (column, label) = outcome.metric_slot();
-        self.0[operation as usize][column].get_or_init(|| {
+        self.0[operation as usize][outcome.column()].get_or_init(|| {
             metrics::histogram!(
                 OPERATION_DURATION_METRIC,
                 "operation" => operation.label(),
-                "outcome" => label,
+                "outcome" => outcome.label(),
             )
         })
     }
@@ -186,13 +191,9 @@ impl OperationGuard {
     /// `x-amz-request-id` and S3's `x-amz-id-2`, which its support asks for.
     /// A failure after this, such as a download body that fails its
     /// checksum, reports them too. After a retry they name the last attempt.
-    pub(crate) fn answered_by(
-        &mut self,
-        request_id: Option<&str>,
-        extended_request_id: Option<&str>,
-    ) {
-        self.request_id = request_id.and_then(identifier);
-        self.extended_request_id = extended_request_id.and_then(identifier);
+    pub(crate) fn answered_by(&mut self, answer: &(impl RequestId + RequestIdExt)) {
+        self.request_id = answer.request_id().and_then(identifier);
+        self.extended_request_id = answer.extended_request_id().and_then(identifier);
         if let Some(request_id) = self.request_id.as_deref() {
             self.span.record("aws.request_id", request_id);
         }
@@ -251,8 +252,7 @@ impl OperationGuard {
 
     fn finish(&mut self, outcome: Outcome) {
         self.finalized = true;
-        self.span
-            .record("object_storage.outcome", outcome.metric_slot().1);
+        self.span.record("object_storage.outcome", outcome.label());
         self.histograms
             .get(self.operation, outcome)
             .record(self.started.elapsed().as_secs_f64());
@@ -335,7 +335,7 @@ mod tests {
         let mut columns = HashSet::new();
         let mut labels = HashSet::new();
         for outcome in outcomes {
-            let (column, label) = outcome.metric_slot();
+            let (column, label) = (outcome.column(), outcome.label());
             assert!(column < Outcome::COUNT, "{label} is outside the cache");
             assert!(columns.insert(column), "{label} shares a column");
             assert!(labels.insert(label), "{label} is used twice");

@@ -217,17 +217,23 @@ impl IntoResponse for Problem {
         )
             .into_response();
         if let Some(after) = retry_after {
-            let seconds = after
-                .as_secs()
-                .checked_add(u64::from(after.subsec_nanos() != 0));
-            let value = match seconds {
-                Some(seconds) => HeaderValue::from(seconds.max(1)),
-                // The only overflow is the exact ceiling u64::MAX + 1.
-                None => HeaderValue::from_static("18446744073709551616"),
-            };
-            response.headers_mut().insert(RETRY_AFTER, value);
+            response
+                .headers_mut()
+                .insert(RETRY_AFTER, retry_after_value(after));
         }
         response
+    }
+}
+
+/// Whole seconds, rounded up and at least one.
+fn retry_after_value(after: Duration) -> HeaderValue {
+    let seconds = after
+        .as_secs()
+        .checked_add(u64::from(after.subsec_nanos() != 0));
+    match seconds {
+        Some(seconds) => HeaderValue::from(seconds.max(1)),
+        // The only overflow is the exact ceiling u64::MAX + 1.
+        None => HeaderValue::from_static("18446744073709551616"),
     }
 }
 

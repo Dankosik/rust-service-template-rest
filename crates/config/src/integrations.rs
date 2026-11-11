@@ -112,10 +112,10 @@ pub struct OAuthConfig {
 impl OAuthConfig {
     /// One retained token per user active within a token lifetime on one
     /// replica.
-    pub const DEFAULT_EXCHANGE_CACHE_CAPACITY: u32 = 1024;
+    pub(crate) const DEFAULT_EXCHANGE_CACHE_CAPACITY: u32 = 1024;
     const EXCHANGE_CACHE_CAPACITY_RANGE: std::ops::RangeInclusive<u32> = 1..=65_536;
     /// Matches introspection's default while bounding distinct token attempts.
-    pub const DEFAULT_PROVIDER_CONCURRENCY: u32 = 32;
+    pub(crate) const DEFAULT_PROVIDER_CONCURRENCY: u32 = 32;
 }
 
 const fn default_exchange_cache_capacity() -> u32 {
@@ -139,12 +139,7 @@ where
         Text(String),
     }
 
-    let invalid = || {
-        serde::de::Error::custom(format_args!(
-            "{}must be an integer from 1 to 4294967295",
-            crate::de::VALUE_FREE
-        ))
-    };
+    let invalid = || crate::de::value_free("must be an integer from 1 to 4294967295");
     match Input::deserialize(deserializer).map_err(|_| invalid())? {
         Input::Typed(value) => Ok(value),
         Input::Text(value) => value.parse().map_err(|_| invalid()),
@@ -180,10 +175,7 @@ impl<'de> Deserialize<'de> for OAuthAlgorithm {
             "RS256" => Ok(Self::Rs256),
             "PS256" => Ok(Self::Ps256),
             "ES256" => Ok(Self::Es256),
-            _ => Err(serde::de::Error::custom(format_args!(
-                "{}must be RS256, PS256 or ES256",
-                crate::de::VALUE_FREE
-            ))),
+            _ => Err(crate::de::value_free("must be RS256, PS256 or ES256")),
         }
     }
 }
@@ -196,11 +188,6 @@ impl Scopes {
     #[must_use]
     pub fn as_slice(&self) -> &[String] {
         &self.0
-    }
-
-    #[must_use]
-    pub fn into_inner(self) -> Vec<String> {
-        self.0
     }
 }
 
@@ -223,10 +210,7 @@ impl<'de> Deserialize<'de> for Scopes {
         }
 
         let input = Input::deserialize(deserializer).map_err(|_| {
-            serde::de::Error::custom(format_args!(
-                "{}must be a list of strings or a space-separated string",
-                crate::de::VALUE_FREE
-            ))
+            crate::de::value_free("must be a list of strings or a space-separated string")
         })?;
         let scopes = match input {
             Input::Text(value) => value
@@ -270,35 +254,29 @@ impl GrpcClientConfig {
             .any(|character| character.is_control() || character.is_whitespace())
         {
             return Err(ValidationError::new(
-                &format!("{prefix}.destination"),
+                format!("{prefix}.destination"),
                 "must not contain whitespace or controls",
             ));
         }
         match self.security {
             GrpcSecurity::Plaintext => {
-                if self.ca_certificate.is_some() {
-                    return Err(ValidationError::new(
-                        &format!("{prefix}.ca_certificate"),
-                        "is only valid when security is tls",
-                    ));
-                }
-                if self.certificate.is_some() {
-                    return Err(ValidationError::new(
-                        &format!("{prefix}.certificate"),
-                        "is only valid when security is tls",
-                    ));
-                }
-                if self.private_key.is_some() {
-                    return Err(ValidationError::new(
-                        &format!("{prefix}.private_key"),
-                        "is only valid when security is tls",
-                    ));
+                for (name, present) in [
+                    ("ca_certificate", self.ca_certificate.is_some()),
+                    ("certificate", self.certificate.is_some()),
+                    ("private_key", self.private_key.is_some()),
+                ] {
+                    if present {
+                        return Err(ValidationError::new(
+                            format!("{prefix}.{name}"),
+                            "is only valid when security is tls",
+                        ));
+                    }
                 }
             }
             GrpcSecurity::Tls => {
                 if self.certificate.is_some() != self.private_key.is_some() {
                     return Err(ValidationError::new(
-                        &format!("{prefix}.certificate/{prefix}.private_key"),
+                        format!("{prefix}.certificate/{prefix}.private_key"),
                         "must be configured together for mTLS",
                     ));
                 }
@@ -318,7 +296,7 @@ impl OAuthConfig {
         crate::validate::non_blank(&format!("{prefix}.client_id"), &self.client_id)?;
         if self.private_key.is_none() {
             return Err(ValidationError::new(
-                &format!("{prefix}.private_key"),
+                format!("{prefix}.private_key"),
                 "cannot be empty",
             ));
         }
@@ -333,25 +311,26 @@ impl OAuthConfig {
             .is_some_and(|audience| audience.trim().is_empty())
         {
             return Err(ValidationError::new(
-                &format!("{prefix}.audience"),
+                format!("{prefix}.audience"),
                 "cannot be empty when configured",
             ));
         }
         if self.scopes.0.iter().any(|scope| !is_scope_token(scope)) {
             return Err(ValidationError::new(
-                &format!("{prefix}.scopes"),
+                format!("{prefix}.scopes"),
                 "must contain RFC 6749 scope tokens",
             ));
         }
-        if !Self::EXCHANGE_CACHE_CAPACITY_RANGE.contains(&self.exchange_cache_capacity) {
-            return Err(ValidationError::new(
-                &format!("{prefix}.exchange_cache_capacity"),
-                "must be from 1 to 65536",
-            ));
-        }
+        let capacity = Self::EXCHANGE_CACHE_CAPACITY_RANGE;
+        crate::validate::int_range(
+            &format!("{prefix}.exchange_cache_capacity"),
+            u64::from(self.exchange_cache_capacity),
+            u64::from(*capacity.start()),
+            u64::from(*capacity.end()),
+        )?;
         if self.provider_concurrency == 0 {
             return Err(ValidationError::new(
-                &format!("{prefix}.provider_concurrency"),
+                format!("{prefix}.provider_concurrency"),
                 "must be greater than zero",
             ));
         }
@@ -400,6 +379,8 @@ fn raw_authority_has_userinfo(token_url: &str) -> bool {
     authority[..authority_end].contains('@')
 }
 
+/// RFC 6749 §3.3 `scope-token = 1*NQCHAR`, where `NQCHAR` is
+/// `%x21 / %x23-5B / %x5D-7E`.
 fn is_scope_token(scope: &str) -> bool {
     !scope.is_empty()
         && scope

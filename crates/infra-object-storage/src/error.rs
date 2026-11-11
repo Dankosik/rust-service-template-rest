@@ -4,6 +4,7 @@ use std::borrow::Cow;
 
 use aws_sdk_s3::config::http::HttpResponse;
 use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
+use operation_context::Stopped;
 
 /// Why an operation failed. Each variant tells the caller what it may do next.
 ///
@@ -37,8 +38,8 @@ pub enum ObjectStorageError {
     /// state; a create-only retry may find this call's own object.
     #[error("object storage mutation outcome is unknown")]
     OutcomeUnknown,
-    /// A checksum mismatch detected by the SDK, a range response, or invalid
-    /// body length. Absent or skipped checksums do not produce this error.
+    /// A checksum mismatch detected by the SDK, a range or unsized response,
+    /// or a body whose length differs from its declared size. Absent or skipped checksums do not produce this error.
     #[error("object storage integrity check failed")]
     Integrity,
 }
@@ -46,26 +47,27 @@ pub enum ObjectStorageError {
 impl ObjectStorageError {
     pub(crate) const COUNT: usize = 8;
 
-    pub(crate) fn label(self) -> &'static str {
-        self.metric_slot().1
+    /// The cached histogram column.
+    pub(crate) fn column(self) -> usize {
+        self as usize
     }
 
-    /// The cached histogram column and its label have one owner.
-    pub(crate) fn metric_slot(self) -> (usize, &'static str) {
+    pub(crate) fn label(self) -> &'static str {
         match self {
-            Self::NotFound => (0, "not_found"),
-            Self::AlreadyExists => (1, "already_exists"),
-            Self::TooLarge => (2, "too_large"),
-            Self::Busy => (3, "busy"),
-            Self::Unavailable => (4, "unavailable"),
-            Self::Rejected => (5, "rejected"),
-            Self::OutcomeUnknown => (6, "outcome_unknown"),
-            Self::Integrity => (7, "integrity"),
+            Self::NotFound => "not_found",
+            Self::AlreadyExists => "already_exists",
+            Self::TooLarge => "too_large",
+            Self::Busy => "busy",
+            Self::Unavailable => "unavailable",
+            Self::Rejected => "rejected",
+            Self::OutcomeUnknown => "outcome_unknown",
+            Self::Integrity => "integrity",
         }
     }
 }
 
-/// What the failed call was, which decides how an ambiguous failure reads.
+/// Whether a call reads or mutates, which decides its timeout and retry policy
+/// and how an ambiguous failure reads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Call {
     /// Get, head, presign, or the bucket probe.
@@ -74,6 +76,17 @@ pub(crate) enum Call {
     Mutation,
     /// A put with `If-None-Match: *`, sent once.
     CreateOnly,
+}
+
+impl Call {
+    /// A failure that may have reached the provider: a read retries safely,
+    /// a mutation may have applied.
+    fn ambiguous(self) -> ObjectStorageError {
+        match self {
+            Self::Read => ObjectStorageError::Unavailable,
+            Self::Mutation | Self::CreateOnly => ObjectStorageError::OutcomeUnknown,
+        }
+    }
 }
 
 /// The transport-level class of an SDK failure, before the call decides.
@@ -106,6 +119,17 @@ impl Failure {
             error_type: Cow::Borrowed(error_type),
         }
     }
+
+    /// The operation context stopped before the outcome was known.
+    pub(crate) fn stopped(stopped: Stopped) -> Self {
+        Self::new(
+            ObjectStorageError::Unavailable,
+            match stopped {
+                Stopped::Deadline => "timeout",
+                Stopped::Cancelled => "cancelled",
+            },
+        )
+    }
 }
 
 pub(crate) type SdkFailure<E> = SdkError<E, HttpResponse>;
@@ -114,14 +138,14 @@ pub(crate) fn from_sdk<E>(call: Call, error: &SdkFailure<E>) -> Failure
 where
     E: ProvideErrorMetadata + std::error::Error + 'static,
 {
-    let (kind, error_type) = match error {
-        SdkError::ConstructionFailure(_) => (FailureKind::NotSent, "construction".to_owned()),
+    let (kind, error_type): (_, Cow<'static, str>) = match error {
+        SdkError::ConstructionFailure(_) => (FailureKind::NotSent, "construction".into()),
         SdkError::ServiceError(context) => {
             let status = context.raw().status().as_u16();
             let code = context.err().code();
             let error_type = match code {
-                Some(code) if is_identifier(code) => code.to_owned(),
-                _ => status.to_string(),
+                Some(code) if is_identifier(code) => code.to_owned().into(),
+                _ => status.to_string().into(),
             };
             (FailureKind::Status { status, code }, error_type)
         }
@@ -130,19 +154,19 @@ where
         SdkError::DispatchFailure(_)
             if caused_by::<aws_credential_types::provider::error::CredentialsError>(error) =>
         {
-            (FailureKind::NoCredentials, "credentials".to_owned())
+            (FailureKind::NoCredentials, "credentials".into())
         }
-        SdkError::TimeoutError(_) => (FailureKind::Lost, "timeout".to_owned()),
+        SdkError::TimeoutError(_) => (FailureKind::Lost, "timeout".into()),
         SdkError::DispatchFailure(failure) if failure.is_timeout() => {
-            (FailureKind::Lost, "timeout".to_owned())
+            (FailureKind::Lost, "timeout".into())
         }
-        SdkError::DispatchFailure(_) => (FailureKind::Lost, "dispatch".to_owned()),
+        SdkError::DispatchFailure(_) => (FailureKind::Lost, "dispatch".into()),
         // A response that could not be read, and any future variant.
-        _ => (FailureKind::Lost, "response".to_owned()),
+        _ => (FailureKind::Lost, "response".into()),
     };
     Failure {
         error: classify(call, kind),
-        error_type: error_type.into(),
+        error_type,
     }
 }
 
@@ -157,10 +181,7 @@ pub(crate) fn classify(call: Call, kind: FailureKind<'_>) -> ObjectStorageError 
     match kind {
         FailureKind::NotSent => E::Rejected,
         FailureKind::NoCredentials => E::Unavailable,
-        FailureKind::Lost => match call {
-            Call::Read => E::Unavailable,
-            Call::Mutation | Call::CreateOnly => E::OutcomeUnknown,
-        },
+        FailureKind::Lost => call.ambiguous(),
         FailureKind::Status { status, code } => match (status_of_reply(status, code), code) {
             // A missing bucket is configuration, not a missing object. S3
             // answers a delete of a missing key with 204, so a delete 404 is
@@ -176,10 +197,7 @@ pub(crate) fn classify(call: Call, kind: FailureKind<'_>) -> ObjectStorageError 
             (409 | 429 | 503, _) | (_, Some("RequestTimeout")) => E::Unavailable,
             // An unsupported header or operation is permanent.
             (501, _) => E::Rejected,
-            (500..=599, _) => match call {
-                Call::Read => E::Unavailable,
-                Call::Mutation | Call::CreateOnly => E::OutcomeUnknown,
-            },
+            (500..=599, _) => call.ambiguous(),
             _ => E::Rejected,
         },
     }

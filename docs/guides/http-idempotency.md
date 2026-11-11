@@ -236,7 +236,9 @@ each need an operator or a code change, so alert on them separately from it.
 Their log events are `http_idempotency_store_failed` (with `phase`,
 `failure_class`, SQLSTATE, and bounded cause),
 `http_idempotency_success_not_stored` (with `operation` and `failure`), and
-`http_idempotency_integrity_failed`.
+`http_idempotency_integrity_failed` (with `operation` and `failure`:
+`store_undecodable` when the store cannot decode the live row,
+`replay_undecodable` when the decoded record fails replay validation).
 
 The first stored success and replay have byte-exact status/body and preserve
 only these response headers, including repeated values and per-name order:

@@ -18,10 +18,11 @@ mod service_auth;
 mod status;
 mod tls;
 
+pub use call::client_response_code;
 pub use client::{
     Client, ClientIdentity, ClientSecurity, ClientTimeout, ClientTlsMaterial, PreparedCall,
 };
-pub use error::Error;
+pub use error::{Error, TlsMaterialError};
 pub use observe::{HANDLING_SECONDS_BUCKETS, HISTOGRAMS};
 pub use router::{
     Limits, ResponseContext, Services, grpc_timeout, metadata_grpc_timeout, router, server_options,

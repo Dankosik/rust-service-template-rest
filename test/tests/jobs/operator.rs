@@ -93,7 +93,6 @@ async fn redrive_preserves_identity_archives_each_cycle_and_rejects_old_versions
     let receipt = in_tx(&jobs, async |tx| operator::redrive(tx, &target).await)
         .await
         .expect("redrive commits");
-    assert_eq!(receipt.target, target);
     assert_ne!(receipt.new_version, target.version().to_string());
     let after = stored(&pool, &target).await;
     for field in [
@@ -150,7 +149,7 @@ async fn redrive_preserves_identity_archives_each_cycle_and_rejects_old_versions
     for discard in [false, true] {
         let error = in_tx(&jobs, async |tx| {
             if discard {
-                operator::discard(tx, &target).await.map(|_| ())
+                operator::discard(tx, &target).await
             } else {
                 operator::redrive(tx, &target).await.map(|_| ())
             }
@@ -448,7 +447,7 @@ async fn recovery_initial_lock_has_local_statement_budget_and_preserves_failed_c
             std::time::Duration::from_secs(5),
             in_tx(&jobs, async |tx| {
                 if discard {
-                    operator::discard(tx, &target).await.map(|_| ())
+                    operator::discard(tx, &target).await
                 } else {
                     operator::redrive(tx, &target).await.map(|_| ())
                 }
@@ -504,7 +503,7 @@ async fn concurrent_recovery_has_one_winner_after_the_row_lock(pool: PgPool) {
             async move {
                 in_tx(&jobs, async |tx| {
                     if discard {
-                        operator::discard(tx, &target).await.map(|_| ())
+                        operator::discard(tx, &target).await
                     } else {
                         operator::redrive(tx, &target).await.map(|_| ())
                     }

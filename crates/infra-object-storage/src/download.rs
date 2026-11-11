@@ -13,7 +13,7 @@ use tokio::task::JoinHandle;
 
 use crate::error::Failure;
 use crate::observe::OperationGuard;
-use crate::{ObjectMetadata, ObjectStorageError, error, stop_type};
+use crate::{ObjectMetadata, ObjectStorageError, error};
 
 /// An open download. Dropping it releases the admission slot and owned SDK
 /// body; the operation is recorded as `cancelled` unless it already ended or
@@ -187,12 +187,11 @@ impl State {
             DownloadState::Failed(error) => return (Poll::Ready(Err(*error)), None),
         };
         if let Some(stopped) = resources.context.stopped() {
-            return self.close_failed(Failure::new(
-                ObjectStorageError::Unavailable,
-                stop_type(stopped),
-            ));
+            return self.close_failed(Failure::stopped(stopped));
         }
         self.waker = Some(context.waker().clone());
+        // `poll_chunk` loops over ready empty and buffered chunks without
+        // returning, so it spends the task's cooperative budget by hand.
         let Poll::Ready(coop) = tokio::task::coop::poll_proceed(context) else {
             return (Poll::Pending, None);
         };
@@ -203,10 +202,7 @@ impl State {
         // Strict GET finality: a body poll that crossed the original cutoff
         // cannot yield a new chunk, error mapping, or successful EOF.
         if let Some(stopped) = resources.context.stopped() {
-            let (result, mut completion) = self.close_failed(Failure::new(
-                ObjectStorageError::Unavailable,
-                stop_type(stopped),
-            ));
+            let (result, mut completion) = self.close_failed(Failure::stopped(stopped));
             if let (Some(completion), Poll::Ready(item)) = (&mut completion, polled) {
                 completion.discarded = item;
             }
@@ -281,10 +277,7 @@ fn terminate(shared: &Mutex<State>, outcome: Outcome) {
             DownloadState::Succeeded | DownloadState::Failed(_) => return,
         };
         let outcome = stopped.map_or(outcome, |stopped| {
-            Outcome::Failure(Failure::new(
-                ObjectStorageError::Unavailable,
-                stop_type(stopped),
-            ))
+            Outcome::Failure(Failure::stopped(stopped))
         });
         state.close(outcome)
     };
@@ -317,13 +310,7 @@ impl Download {
         let timer = tokio::spawn(async move {
             let stopped = timer_context.wait_stopped().await;
             if let Some(shared) = exit.0.upgrade() {
-                terminate(
-                    &shared,
-                    Outcome::Failure(Failure::new(
-                        ObjectStorageError::Unavailable,
-                        stop_type(stopped),
-                    )),
-                );
+                terminate(&shared, Outcome::Failure(Failure::stopped(stopped)));
             }
         });
         Self {

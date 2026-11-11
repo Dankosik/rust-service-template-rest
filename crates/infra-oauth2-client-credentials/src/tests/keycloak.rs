@@ -20,7 +20,7 @@ use url::Url;
 use uuid::Uuid;
 
 use super::{AcquisitionError, Algorithm, Credentials, Options, Rejection, TOKEN_LIMITS};
-use crate::subject_key;
+use crate::{Admitted, SubjectKey};
 
 const KEY_ID: &str = "key-1";
 /// The audience client an exchanged token is addressed to.
@@ -215,9 +215,13 @@ impl Realm {
             exchange_cache_capacity: 1024,
             provider_concurrency: 32,
         };
+        let admitted = Admitted {
+            endpoint,
+            permits: crate::admitted_provider_concurrency(options.provider_concurrency).unwrap(),
+        };
         let (credentials, driver) = Credentials::build(
             options,
-            endpoint,
+            admitted,
             Client::try_new_for_test_http(&self.origin, TOKEN_LIMITS).unwrap(),
         )
         .unwrap();
@@ -347,7 +351,7 @@ async fn every_algorithm_authenticates_the_client_and_exchanges_a_subject_token(
         )
         .unwrap()
         .claims;
-        let key = subject_key(secrecy::ExposeSecret::expose_secret(&subject).as_bytes());
+        let key = SubjectKey::of(&subject);
         let exchanged = credentials
             .exchange(key, &subject, deadline())
             .await
@@ -385,7 +389,7 @@ async fn refusals_carry_the_error_code_keycloak_reports() {
     // RFC 8693 section 2.2.2 reports an unusable subject token as
     // `invalid_request`, so it is not distinguishable from a malformed form.
     let subject = SecretString::from("not-a-token");
-    let key = subject_key(b"not-a-token");
+    let key = SubjectKey::of(&subject);
     assert_eq!(
         registered
             .exchange(key, &subject, deadline())

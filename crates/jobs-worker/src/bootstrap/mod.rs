@@ -162,7 +162,7 @@ pub(crate) async fn serve(
         if resources.logger.is_some() {
             tracing::error!(error = %error, "jobs worker failed");
         } else {
-            let _ = service_config::process_failure(&error.to_string());
+            let _ = service_config::process_failure(error);
         }
     }
     let outcome = shutdown::run(shutdown::Plan {

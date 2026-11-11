@@ -16,6 +16,8 @@
 pub(crate) fn is_secret_like_key(key: &str) -> bool {
     let lowered = key.trim().to_ascii_lowercase();
     // template:begin oidc-jwt:secret-policy-token-profile-exception
+    // It selects a token contract, not a credential; only this exact key is
+    // exempt, so `cache.token_profile` stays secret-like.
     if lowered == "authn.token_profile" {
         return false;
     }
@@ -26,8 +28,8 @@ pub(crate) fn is_secret_like_key(key: &str) -> bool {
         .collect();
     segments.iter().enumerate().any(|(i, segment)| {
         let previous = i.checked_sub(1).and_then(|j| segments.get(j)).copied();
-        let next = segments.get(i + 1).copied();
-        let rest = segments.get(i + 1..).unwrap_or_default();
+        let rest = &segments[i + 1..];
+        let next = rest.first().copied();
         match *segment {
             "secret" | "secrets" | "authorization" | "dsn" => true,
             "password" | "credentials" => rest != ["file"],

@@ -91,7 +91,7 @@ fn main() -> ExitCode {
                 format: LoggingFormat::Json,
                 tracer_provider: None,
             }) else {
-                return process_failure(&err.to_string());
+                return process_failure(&err);
             };
             return finish_setup_failure(
                 format!("install logger: {err}"),

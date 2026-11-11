@@ -36,6 +36,15 @@ const MAX_RESPONSE_BYTES: usize = 1_048_576;
 pub(crate) const PROVIDER_TIMEOUT: Duration = Duration::from_secs(3);
 const REQUEST_DURATION_METRIC: &str = "authn_provider_request_duration_seconds";
 
+/// Every histogram this crate records. A composition root hands it to the
+/// Prometheus recorder; a metric left out renders the default buckets.
+pub const HISTOGRAMS: &[(&str, &[f64])] = &[(
+    REQUEST_DURATION_METRIC,
+    &[
+        0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+    ],
+)];
+
 /// Why a provider exchange produced no usable body. Closed, and free of
 /// provider-supplied text, URLs and credentials.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -86,7 +95,11 @@ impl IssuerUrl {
     ///
     /// Returns [`PreparationError`] when the URL violates the provider grammar.
     pub fn parse(raw: &str) -> Result<Self, PreparationError> {
-        admit(raw, false).map(Self)
+        let url = admit(raw)?;
+        if url.url.query().is_some() {
+            return Err(invalid_url());
+        }
+        Ok(Self(url))
     }
 
     /// The unmodified accepted spelling, used for exact issuer identity.
@@ -123,7 +136,7 @@ impl EndpointUrl {
     /// Returns [`PreparationError`] for a non-HTTPS URL, missing host, userinfo,
     /// fragment, whitespace or control characters.
     pub fn parse(raw: &str) -> Result<Self, PreparationError> {
-        admit(raw, true)
+        admit(raw)
     }
 
     #[must_use]
@@ -144,34 +157,39 @@ impl fmt::Debug for EndpointUrl {
 
 /// [`Url::parse`] silently drops whitespace and an empty userinfo, so the raw
 /// spelling is checked too.
-fn admit(raw: &str, allow_query: bool) -> Result<EndpointUrl, PreparationError> {
-    let invalid =
-        || PreparationError::new(PreparationPhase::Options, PreparationReason::InvalidUrl);
+fn admit(raw: &str) -> Result<EndpointUrl, PreparationError> {
     if raw
         .bytes()
         .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
     {
-        return Err(invalid());
+        return Err(invalid_url());
     }
-    let url = Url::parse(raw).map_err(|_| invalid())?;
+    let url = Url::parse(raw).map_err(|_| invalid_url())?;
     let authority = raw
         .split_once("://")
-        .map(|(_, value)| value.split(['/', '?', '#']).next().unwrap_or_default())
+        .map(|(_, value)| {
+            value
+                .split_once(['/', '?', '#'])
+                .map_or(value, |(authority, _)| authority)
+        })
         .unwrap_or_default();
     if url.scheme() != "https"
         || url.host().is_none()
         || !url.username().is_empty()
         || url.password().is_some()
         || url.fragment().is_some()
-        || (!allow_query && url.query().is_some())
         || authority.contains('@')
     {
-        return Err(invalid());
+        return Err(invalid_url());
     }
     Ok(EndpointUrl {
         exact: raw.to_owned(),
         url,
     })
+}
+
+const fn invalid_url() -> PreparationError {
+    PreparationError::new(PreparationPhase::Options, PreparationReason::InvalidUrl)
 }
 
 /// The only outbound client authentication engines may use.
@@ -327,17 +345,15 @@ impl Exchange {
             Some(_) => None,
         };
         self.span.record("http.response.status_code", status);
-        self.record(
-            failure.map_or("success", ProviderFailure::label),
-            failure.is_some(),
-        );
+        self.record(failure.map(ProviderFailure::label));
     }
 
-    fn record(&self, outcome: &'static str, failed: bool) {
-        if failed {
-            self.span.record("error.type", outcome);
+    fn record(&self, failure: Option<&'static str>) {
+        if let Some(failure) = failure {
+            self.span.record("error.type", failure);
             self.span.record("otel.status_code", "ERROR");
         }
+        let outcome = failure.unwrap_or("success");
         metrics::histogram!(
             REQUEST_DURATION_METRIC,
             "operation" => self.operation,
@@ -350,7 +366,7 @@ impl Exchange {
 impl Drop for Exchange {
     fn drop(&mut self) {
         if !self.finished {
-            self.record("cancelled", true);
+            self.record(Some("cancelled"));
         }
     }
 }

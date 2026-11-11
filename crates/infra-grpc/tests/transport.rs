@@ -38,7 +38,7 @@ use infra_bearerauthn::{
 // template:end authn:grpc-transport-test-auth-imports
 use infra_grpc::{
     ClientIdentity, ClientSecurity, ClientTimeout, ClientTlsMaterial, ERROR_DOMAIN, Error, Failure,
-    Limits, ServerTlsMaterial, Services, server_options, server_tls_config,
+    Limits, ServerTlsMaterial, Services, TlsMaterialError, server_options, server_tls_config,
 };
 use infra_http::{Drained, Server};
 use rcgen::{
@@ -857,7 +857,7 @@ fn a_scope_requirement_needs_a_described_method_of_a_registered_service_and_is_d
     let mut services = described();
     assert_eq!(
         services.require_scopes(UNARY_PATH, &["echo.read"]),
-        Err(Error::UnregisteredMethodPath)
+        Err(Error::UnregisteredMethodPath(UNARY_PATH.to_owned()))
     );
     services
         .add(EchoServiceServer::new(Echo::new()))
@@ -873,7 +873,7 @@ fn a_scope_requirement_needs_a_described_method_of_a_registered_service_and_is_d
     ] {
         assert_eq!(
             services.require_scopes(path, &["echo.read"]),
-            Err(Error::UnregisteredMethodPath),
+            Err(Error::UnregisteredMethodPath(path.to_owned())),
             "{path}"
         );
     }
@@ -882,7 +882,7 @@ fn a_scope_requirement_needs_a_described_method_of_a_registered_service_and_is_d
         .expect("first requirement");
     assert_eq!(
         services.require_scopes(UNARY_PATH, &["echo.write"]),
-        Err(Error::DuplicateScopeRequirement)
+        Err(Error::DuplicateScopeRequirement(UNARY_PATH.to_owned()))
     );
 }
 // template:end authn:grpc-transport-test-insufficient-scope
@@ -2256,7 +2256,7 @@ fn server_tls_refuses_a_chain_entry_that_is_not_a_certificate() {
                 client_ca_pem: None,
             })
             .unwrap_err(),
-            Error::InvalidCertificate
+            TlsMaterialError::InvalidCertificate
         );
     }
 }

@@ -16,8 +16,9 @@ const TRACESTATE_MAX_BYTES: usize = 512;
 /// Writes `span`'s context into a publication's headers. A span that is not
 /// recorded writes nothing.
 ///
-/// Only the two trace headers are admitted, and at most 768 bytes of them, so
-/// the five identity headers plus these stay far below the 8 KiB header limit.
+/// Only the two trace headers are admitted, at most [`TRACEPARENT_MAX_BYTES`]
+/// and [`TRACESTATE_MAX_BYTES`] of them, so the five identity headers plus
+/// these stay far below [`crate::wire::HEADER_LIMIT_BYTES`].
 pub(crate) fn inject(span: &tracing::Span, headers: &mut HeaderMap) {
     let context = span.context();
     global::get_text_map_propagator(|propagator| {

@@ -24,6 +24,8 @@ use crate::wire::{prefixed_digest_hex, valid_subject, validate_prepared};
 
 const OUTBOX_KIND: &str = "publish_domain_event";
 const FORMAT_VERSION: u8 = 1;
+/// Caller text measured between yields, so one long field cannot hold the
+/// executor while its serialized size is counted.
 const PREFLIGHT_BYTES_PER_POLL: usize = 4096;
 
 /// A failed publication retries with the jobs backoff, whether it was rejected
@@ -164,6 +166,7 @@ impl PreparedEvent {
                 while !field.is_char_boundary(end) {
                     end -= 1;
                 }
+                // The remaining budget is smaller than the next character.
                 if end == offset {
                     tokio::task::yield_now().await;
                     budget = PREFLIGHT_BYTES_PER_POLL;
@@ -216,7 +219,8 @@ impl Handler<PublishDomainEvent> for Publisher {
 
 #[derive(Clone, Deserialize, Serialize)]
 struct PublishDomainEvent {
-    version: u8,
+    #[serde(rename = "version")]
+    format_version: u8,
     subject: String,
     message_id: String,
     publication_id: String,
@@ -243,28 +247,25 @@ impl From<&PreparedEvent> for PublishDomainEvent {
 impl PublishDomainEvent {
     /// Every field but the payload.
     fn without_payload(event: &PreparedEvent) -> Self {
-        let [subject, message_id, publication_id, event_type] = event.outbox_variable_fields();
+        Self::with_text(event, event.outbox_variable_fields())
+    }
+
+    /// Only the fields whose serialized size does not depend on caller text.
+    /// Empty strings do not allocate, so the preflight never clones that text.
+    fn fixed_fields(event: &PreparedEvent) -> Self {
+        Self::with_text(event, [""; 4])
+    }
+
+    fn with_text(
+        event: &PreparedEvent,
+        [subject, message_id, publication_id, event_type]: [&str; 4],
+    ) -> Self {
         Self {
+            format_version: FORMAT_VERSION,
             subject: subject.to_owned(),
             message_id: message_id.to_owned(),
             publication_id: publication_id.to_owned(),
             event_type: event_type.to_owned(),
-            version: FORMAT_VERSION,
-            schema_version: event.schema_version,
-            occurred_at_unix_seconds: event.occurred_at.unix_timestamp(),
-            occurred_at_nanosecond: event.occurred_at.nanosecond(),
-            payload_base64: String::new(),
-        }
-    }
-
-    /// Only the fields whose serialized size does not depend on caller text.
-    fn fixed_fields(event: &PreparedEvent) -> Self {
-        Self {
-            version: FORMAT_VERSION,
-            subject: String::new(),
-            message_id: String::new(),
-            publication_id: String::new(),
-            event_type: String::new(),
             schema_version: event.schema_version,
             occurred_at_unix_seconds: event.occurred_at.unix_timestamp(),
             occurred_at_nanosecond: event.occurred_at.nanosecond(),
@@ -275,7 +276,7 @@ impl PublishDomainEvent {
 
 impl PublishDomainEvent {
     fn prepared(&self) -> Option<PreparedEvent> {
-        if self.version != FORMAT_VERSION || !valid_subject(&self.subject) {
+        if self.format_version != FORMAT_VERSION || !valid_subject(&self.subject) {
             return None;
         }
         let occurred_at = OffsetDateTime::from_unix_timestamp(self.occurred_at_unix_seconds)
@@ -356,7 +357,7 @@ mod tests {
         let event = prepared(Bytes::from_static(br#"{"escaped":"\\\\u0000","n":1.0}"#));
         let stored = PublishDomainEvent::from(&event);
 
-        assert_eq!(stored.version, FORMAT_VERSION);
+        assert_eq!(stored.format_version, FORMAT_VERSION);
         assert_eq!(
             stored.payload_base64,
             "eyJlc2NhcGVkIjoiXFxcXHUwMDAwIiwibiI6MS4wfQ=="
@@ -401,7 +402,7 @@ mod tests {
     fn payload_limit_fits_exact_base64_boundary_for_varied_metadata() {
         let compact = PublishDomainEvent::from(&prepared(Bytes::from_static(br"{}")));
         let wide = PublishDomainEvent {
-            version: FORMAT_VERSION,
+            format_version: FORMAT_VERSION,
             subject: "s".repeat(256),
             message_id: "i".repeat(256),
             publication_id: "p".repeat(256),

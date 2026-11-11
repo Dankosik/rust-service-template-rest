@@ -185,10 +185,10 @@ where
     let options = LoadOptions::parse_from(args);
     let config = match service_config::load(&options, BUILD_INFO) {
         Ok(config) => config,
-        Err(err) => return process_failure(&err.to_string()),
+        Err(err) => return process_failure(&err),
     };
     if let Err(err) = shutdown::validate_grace_budget(&config.http) {
-        return process_failure(&err.to_string());
+        return process_failure(&err);
     }
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .worker_threads(config.runtime.effective_worker_threads())
@@ -196,7 +196,7 @@ where
         .build()
     {
         Ok(runtime) => runtime,
-        Err(err) => return process_failure(&format!("build tokio runtime: {err}")),
+        Err(err) => return process_failure(format!("build tokio runtime: {err}")),
     };
 
     let mut logger_installed = false;
@@ -229,7 +229,7 @@ where
             if logger_installed {
                 ExitCode::FAILURE
             } else {
-                process_failure(&err.to_string())
+                process_failure(&err)
             }
         }
     }
@@ -239,6 +239,9 @@ fn install_metrics() -> Result<Metrics, BootstrapError> {
     Ok(Metrics::install(
         &[
             infra_http::HISTOGRAMS,
+            // template:begin authn:bootstrap-authn-histograms
+            infra_bearerauthn::HISTOGRAMS,
+            // template:end authn:bootstrap-authn-histograms
             // template:begin postgres:bootstrap-postgres-histograms
             infra_postgres::HISTOGRAMS,
             // template:end postgres:bootstrap-postgres-histograms

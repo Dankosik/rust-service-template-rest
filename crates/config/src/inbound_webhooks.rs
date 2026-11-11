@@ -10,7 +10,8 @@ use secrecy::SecretString;
 use serde::Deserialize;
 
 use crate::ValidationError;
-use crate::validate::{is_env_addressable, validate_endpoint_id};
+use crate::load::is_env_addressable;
+use crate::validate::validate_endpoint_id;
 
 /// Static inbound endpoints and their environment-only verification secrets.
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -46,21 +47,21 @@ impl InboundWebhooksConfig {
         }
         for (endpoint_id, endpoint) in &self.endpoints {
             validate_endpoint_id("inbound_webhooks.endpoints", endpoint_id)?;
-            let key = format!("inbound_webhooks.endpoints.{endpoint_id}.active_key");
-            validate_key_ref(&key, &endpoint.active_key)?;
+            let config_key = format!("inbound_webhooks.endpoints.{endpoint_id}.active_key");
+            validate_key_ref(&config_key, &endpoint.active_key)?;
             if let Some(previous_key) = &endpoint.previous_key {
-                let key = format!("inbound_webhooks.endpoints.{endpoint_id}.previous_key");
-                validate_key_ref(&key, previous_key)?;
+                let config_key = format!("inbound_webhooks.endpoints.{endpoint_id}.previous_key");
+                validate_key_ref(&config_key, previous_key)?;
                 if previous_key == &endpoint.active_key {
                     return Err(ValidationError::new(
-                        &key,
+                        config_key,
                         "must differ from active_key when present",
                     ));
                 }
             }
         }
         for reference in self.secrets.keys() {
-            validate_key_ref("inbound_webhooks.secrets", reference)?;
+            validate_key_ref(&format!("inbound_webhooks.secrets.{reference}"), reference)?;
         }
         Ok(())
     }
@@ -68,10 +69,10 @@ impl InboundWebhooksConfig {
 
 /// A reference names an `APP__INBOUND_WEBHOOKS__SECRETS__<REF>` variable,
 /// which the loader lowercases; any other spelling could never resolve.
-fn validate_key_ref(key: &str, reference: &str) -> Result<(), ValidationError> {
+fn validate_key_ref(config_key: &str, reference: &str) -> Result<(), ValidationError> {
     if !is_env_addressable(reference) {
         return Err(ValidationError::new(
-            key,
+            config_key,
             "key references must be lowercase letters, digits, `_`, or `-`, without `__` or a trailing `_`",
         ));
     }

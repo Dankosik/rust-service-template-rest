@@ -14,11 +14,6 @@ use utoipa_axum::router::OpenApiRouter;
 use crate::contract::{Access, FinalizeError, Policy, layer_routes};
 use crate::problem::{Code, Problem, sanitized_internal_error};
 
-const AUTHENTICATION_REQUIRED_DETAIL: &str = "bearer authentication is required";
-const AUTHENTICATION_MALFORMED_DETAIL: &str = "bearer authentication is malformed";
-const AUTHENTICATION_INVALID_DETAIL: &str = "bearer authentication is invalid";
-const AUTHENTICATION_UNAVAILABLE_DETAIL: &str = "bearer authentication is unavailable";
-
 /// A principal verified by the final authentication layer.
 ///
 /// The wrapped principal is private, so handlers can inspect only identity
@@ -195,15 +190,12 @@ fn stopped_response(stopped: Stopped) -> Response {
     }
 }
 
-/// At least one alternative's scopes must all be present in the sorted,
-/// deduplicated `principal.scopes()`; an alternative with no scopes is any
-/// authenticated caller.
+/// At least one alternative's scopes must all be granted; an alternative with
+/// no scopes is any authenticated caller.
 fn grants_any(alternatives: &[Box<[String]>], principal: &Principal) -> bool {
-    alternatives.iter().any(|scopes| {
-        scopes
-            .iter()
-            .all(|scope| principal.scopes().binary_search(scope).is_ok())
-    })
+    alternatives
+        .iter()
+        .any(|scopes| principal.has_scopes(scopes))
 }
 
 fn insufficient_scope_response() -> Response {
@@ -223,29 +215,21 @@ fn wiring_failure(failure: &'static str) -> Response {
 }
 
 fn failure_response(failure: Failure) -> Response {
-    let (code, detail, challenge) = match failure {
-        Failure::Missing => (
-            Code::AuthenticationRequired,
-            AUTHENTICATION_REQUIRED_DETAIL,
-            Some("Bearer"),
-        ),
+    let (code, challenge) = match failure {
+        Failure::Missing => (Code::AuthenticationRequired, Some("Bearer")),
         Failure::Malformed => (
             Code::AuthenticationMalformed,
-            AUTHENTICATION_MALFORMED_DETAIL,
             Some("Bearer error=\"invalid_request\""),
         ),
         Failure::Invalid => (
             Code::AuthenticationInvalid,
-            AUTHENTICATION_INVALID_DETAIL,
             Some("Bearer error=\"invalid_token\""),
         ),
-        Failure::Unavailable => (
-            Code::AuthenticationUnavailable,
-            AUTHENTICATION_UNAVAILABLE_DETAIL,
-            None,
-        ),
+        Failure::Unavailable => (Code::AuthenticationUnavailable, None),
     };
-    let mut response = Problem::new(code).detail(detail).into_response();
+    let mut response = Problem::new(code)
+        .detail(failure.to_string())
+        .into_response();
     if let Some(challenge) = challenge {
         response.headers_mut().insert(
             WWW_AUTHENTICATE,

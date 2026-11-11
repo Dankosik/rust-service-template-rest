@@ -16,10 +16,11 @@ use axum::http::HeaderValue;
 use axum::http::header::CONTENT_TYPE;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use http_body_util::{BodyExt, Full};
+use http_body_util::{BodyExt, Collected, Full};
 use infra_idempotency_store::Store;
 use utoipa::OpenApi as _;
 
+use super::caused_by_length_limit;
 use super::declaration::{self, CompositionError};
 use super::execute::{Attempt, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Outcome, Provenance};
 use super::identity::{self, KEY_GRAMMAR, MAX_KEY_BYTES};
@@ -196,38 +197,24 @@ async fn capture_attempt(state: AttemptState, request: Request) -> ControlFlow<R
         Outcome::InvalidKey.record();
         return ControlFlow::Break(invalid_key());
     };
-    let Some(scope) = identity::scope_key(&caller, &key) else {
-        return ControlFlow::Break(wiring_failure(&operation_id, "scope_unencodable"));
+    let scope = identity::scope_key(&caller, &key);
+    let collected = match buffer_body(body).await {
+        Ok(collected) => collected,
+        Err(refusal) => return ControlFlow::Break(refusal),
     };
+    let trailers = collected.trailers().cloned();
+    let body = collected.to_bytes();
     let uri = parts
         .extensions
         .get::<OriginalUri>()
-        .map_or_else(|| parts.uri.clone(), |original| original.0.clone());
+        .map_or(&parts.uri, |original| &original.0);
     let content_types = parts
         .headers
         .get_all(CONTENT_TYPE)
         .iter()
-        .map(|value| value.as_bytes().to_vec())
+        .map(HeaderValue::as_bytes)
         .collect::<Vec<_>>();
-    let collected = match body.collect().await {
-        Ok(collected) => collected,
-        Err(error) => {
-            Outcome::NotStored.record();
-            let problem = if caused_by_length_limit(&error) {
-                body_too_large()
-            } else {
-                body_unreadable()
-            };
-            return ControlFlow::Break(problem.into_response());
-        }
-    };
-    let trailers = collected.trailers().cloned();
-    let body = collected.to_bytes();
-    let Some(fingerprint) =
-        identity::request_fingerprint(&parts.method, &uri, &content_types, &body)
-    else {
-        return ControlFlow::Break(wiring_failure(&operation_id, "fingerprint_unencodable"));
-    };
+    let fingerprint = identity::request_fingerprint(&parts.method, uri, &content_types, &body);
     parts.extensions.insert(Attempt {
         store,
         scope,
@@ -237,6 +224,23 @@ async fn capture_attempt(state: AttemptState, request: Request) -> ControlFlow<R
         deadline,
     });
     ControlFlow::Continue(Request::from_parts(parts, restore_body(body, trailers)))
+}
+
+/// Read the bounded body whole, or answer the 413/400 refusal.
+#[expect(
+    clippy::result_large_err,
+    reason = "the error is the refusal response the middleware returns"
+)]
+async fn buffer_body(body: Body) -> Result<Collected<Bytes>, Response> {
+    body.collect().await.map_err(|error| {
+        Outcome::NotStored.record();
+        let problem = if caused_by_length_limit(&error) {
+            body_too_large()
+        } else {
+            body_unreadable()
+        };
+        problem.into_response()
+    })
 }
 
 fn restore_body(body: Bytes, trailers: Option<axum::http::HeaderMap>) -> Body {
@@ -291,16 +295,6 @@ fn wiring_failure(operation_id: &str, failure: &'static str) -> Response {
         "http_idempotency_wiring_failed"
     );
     sanitized_internal_error()
-}
-
-/// Whether a body read failed at a length limit. axum boxes the transport
-/// limit's error into [`axum::Error`] when a request has no `Content-Length`,
-/// so the limit can sit anywhere in the source chain. The inbound-webhooks
-/// and http-idempotency profiles each keep a copy: a shared one in
-/// `problem.rs` is dead code in a projection that drops both.
-fn caused_by_length_limit(error: &(dyn std::error::Error + 'static)) -> bool {
-    std::iter::successors(Some(error), |&error| error.source())
-        .any(<dyn std::error::Error>::is::<http_body_util::LengthLimitError>)
 }
 
 #[cfg(test)]

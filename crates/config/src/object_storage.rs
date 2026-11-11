@@ -13,13 +13,13 @@ use bytesize::ByteSize;
 use secrecy::SecretString;
 use serde::Deserialize;
 
-use crate::app::is_local_development;
+use crate::app::local_development_only;
 use crate::de::blank_secret_as_none;
 use crate::validate::{ValidationError, duration_range, int_range, non_blank};
 
 /// Largest object without multipart: R2's single-upload limit (5 GiB minus
 /// 5 MiB), the smallest documented across the supported providers.
-pub const MAX_OBJECT_BYTES_CEILING: u64 = 5 * 1024 * 1024 * 1024 - 5 * 1024 * 1024;
+pub(crate) const MAX_OBJECT_BYTES_CEILING: u64 = 5 * 1024 * 1024 * 1024 - 5 * 1024 * 1024;
 
 /// Where the bucket lives.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -113,12 +113,6 @@ impl Default for ObjectStorageConfig {
 }
 
 impl ObjectStorageConfig {
-    /// Whether a provider is selected.
-    #[must_use]
-    pub fn is_active(&self) -> bool {
-        self.provider != ObjectStorageProvider::None
-    }
-
     /// The secret that `access_key` credentials require.
     ///
     /// # Errors
@@ -154,6 +148,11 @@ impl ObjectStorageConfig {
             Duration::from_secs(1),
             Duration::from_mins(15),
         )?;
+        local_development_only(
+            "object_storage.provider",
+            self.provider == ObjectStorageProvider::Local,
+            app_env,
+        )?;
         let (endpoint_requirement, region_requirement, owner_requirement) = match self.provider {
             ObjectStorageProvider::None => return Ok(()),
             ObjectStorageProvider::AmazonS3 => (Forbidden, Required, Required),
@@ -166,18 +165,9 @@ impl ObjectStorageConfig {
                 }
                 (Required, Optional, Forbidden)
             }
-            ObjectStorageProvider::Railway | ObjectStorageProvider::S3Compatible => {
-                (Required, Optional, Forbidden)
-            }
-            ObjectStorageProvider::Local => {
-                if !is_local_development(app_env) {
-                    return Err(ValidationError::new(
-                        "object_storage.provider",
-                        "local is local/development-only",
-                    ));
-                }
-                (Required, Optional, Forbidden)
-            }
+            ObjectStorageProvider::Railway
+            | ObjectStorageProvider::S3Compatible
+            | ObjectStorageProvider::Local => (Required, Optional, Forbidden),
         };
         endpoint_requirement.check("object_storage.endpoint", &self.endpoint)?;
         region_requirement.check("object_storage.region", &self.region)?;
@@ -192,6 +182,10 @@ impl ObjectStorageConfig {
             ));
         }
         non_blank("object_storage.bucket", &self.bucket)?;
+        self.validate_credentials()
+    }
+
+    fn validate_credentials(&self) -> Result<(), ValidationError> {
         match self.credentials {
             ObjectStorageCredentials::AccessKey => {
                 non_blank("object_storage.access_key_id", &self.access_key_id)?;
@@ -265,7 +259,7 @@ mod tests {
     #[test]
     fn defaults_are_inert() {
         let config = ObjectStorageConfig::default();
-        assert!(!config.is_active());
+        assert_eq!(config.provider, ObjectStorageProvider::None);
         assert_eq!(config.max_object_bytes, ByteSize::mib(8));
         assert_eq!(config.max_concurrency, 8);
         assert_eq!(config.operation_timeout, Duration::from_secs(5));

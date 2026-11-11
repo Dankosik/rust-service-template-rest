@@ -5,7 +5,7 @@ use rustls::server::ParsedCertificate;
 use rustls::{RootCertStore, ServerConfig};
 use secrecy::{ExposeSecret as _, SecretString};
 
-use crate::Error;
+use crate::TlsMaterialError;
 
 /// Server certificate material admitted by configuration. The key is borrowed
 /// so building a config needs no clone of its [`SecretString`];
@@ -23,14 +23,16 @@ pub struct ServerTlsMaterial<'a> {
 ///
 /// # Errors
 ///
-/// Returns the [`Error`] variant naming the certificate, private key, or
+/// Returns the [`TlsMaterialError`] naming the certificate, private key, or
 /// client CA that cannot be used.
 ///
 /// # Panics
 ///
 /// Only if the bundled aws-lc-rs provider stopped supporting TLS 1.3, which
 /// is a build defect rather than operator input.
-pub fn server_tls_config(material: ServerTlsMaterial<'_>) -> Result<Arc<ServerConfig>, Error> {
+pub fn server_tls_config(
+    material: ServerTlsMaterial<'_>,
+) -> Result<Arc<ServerConfig>, TlsMaterialError> {
     let certificates = chain(material.certificate_pem)?;
     let key = private_key(material.private_key_pem)?;
     let provider = rustls::crypto::aws_lc_rs::default_provider();
@@ -45,53 +47,50 @@ pub fn server_tls_config(material: ServerTlsMaterial<'_>) -> Result<Arc<ServerCo
         Some(ca) => {
             let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots(ca)?))
                 .build()
-                .map_err(|_| Error::InvalidCaCertificate)?;
+                .map_err(|_| TlsMaterialError::InvalidCaCertificate)?;
             builder.with_client_cert_verifier(verifier)
         }
         None => builder.with_no_client_auth(),
     }
     .with_single_cert(certificates, key)
-    .map_err(|_| Error::InvalidPrivateKey)?;
+    .map_err(|_| TlsMaterialError::InvalidPrivateKey)?;
     config.alpn_protocols = vec![b"h2".to_vec()];
     Ok(Arc::new(config))
 }
 
-pub(crate) fn certificates(
-    input: &str,
-    invalid: Error,
-) -> Result<Vec<CertificateDer<'static>>, Error> {
+/// Every PEM certificate in `input`; `None` when one does not decode or
+/// there is none.
+fn certificates(input: &str) -> Option<Vec<CertificateDer<'static>>> {
     let certificates = CertificateDer::pem_slice_iter(input.as_bytes())
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| invalid.clone())?;
-    if certificates.is_empty() {
-        return Err(invalid);
-    }
-    Ok(certificates)
+        .ok()?;
+    (!certificates.is_empty()).then_some(certificates)
 }
 
 /// A presented chain, each entry parsed as an X.509 certificate. Rustls
 /// itself parses only the leaf, so a broken intermediate would otherwise
 /// pass startup and fail the handshake of every peer that needs it. Trust
 /// anchors skip this: rustls admits X.509 v1 roots that this parse refuses.
-pub(crate) fn chain(input: &str) -> Result<Vec<CertificateDer<'static>>, Error> {
-    let certificates = certificates(input, Error::InvalidCertificate)?;
+pub(crate) fn chain(input: &str) -> Result<Vec<CertificateDer<'static>>, TlsMaterialError> {
+    let certificates = certificates(input).ok_or(TlsMaterialError::InvalidCertificate)?;
     for certificate in &certificates {
-        ParsedCertificate::try_from(certificate).map_err(|_| Error::InvalidCertificate)?;
+        ParsedCertificate::try_from(certificate)
+            .map_err(|_| TlsMaterialError::InvalidCertificate)?;
     }
     Ok(certificates)
 }
 
-pub(crate) fn private_key(pem: &SecretString) -> Result<PrivateKeyDer<'static>, Error> {
+pub(crate) fn private_key(pem: &SecretString) -> Result<PrivateKeyDer<'static>, TlsMaterialError> {
     PrivateKeyDer::from_pem_slice(pem.expose_secret().as_bytes())
-        .map_err(|_| Error::InvalidPrivateKey)
+        .map_err(|_| TlsMaterialError::InvalidPrivateKey)
 }
 
-pub(crate) fn roots(input: &str) -> Result<RootCertStore, Error> {
+pub(crate) fn roots(input: &str) -> Result<RootCertStore, TlsMaterialError> {
     let mut roots = RootCertStore::empty();
-    for certificate in certificates(input, Error::InvalidCaCertificate)? {
+    for certificate in certificates(input).ok_or(TlsMaterialError::InvalidCaCertificate)? {
         roots
             .add(certificate)
-            .map_err(|_| Error::InvalidCaCertificate)?;
+            .map_err(|_| TlsMaterialError::InvalidCaCertificate)?;
     }
     Ok(roots)
 }

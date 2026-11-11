@@ -7,9 +7,6 @@ use crate::{Failure, Principal, Verifier, parse_bearer};
 /// Bearer-authentication outcomes at an inbound transport boundary.
 pub const AUTHN_VERIFICATIONS_METRIC: &str = "authn_verifications_total";
 
-const SUCCESS_RESULT: &str = "success";
-const NO_FAILURE: &str = "none";
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Transport {
     Http,
@@ -39,8 +36,8 @@ impl TransportSuccessCounters {
             "Inbound bearer-authentication verification outcomes."
         );
         Self {
-            http: counter(Transport::Http, SUCCESS_RESULT, NO_FAILURE),
-            grpc: counter(Transport::Grpc, SUCCESS_RESULT, NO_FAILURE),
+            http: counter(Transport::Http, Outcome::Success),
+            grpc: counter(Transport::Grpc, Outcome::Success),
         }
     }
 
@@ -52,7 +49,29 @@ impl TransportSuccessCounters {
     }
 }
 
-fn counter(transport: Transport, result: &'static str, failure: &'static str) -> metrics::Counter {
+/// One recorded transport outcome; it owns the `result` and `failure` label pair.
+#[derive(Clone, Copy)]
+enum Outcome {
+    Success,
+    Failure(Failure),
+    Cancelled,
+}
+
+impl Outcome {
+    const fn labels(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Success => ("success", "none"),
+            Self::Failure(Failure::Missing) => ("failure", "missing"),
+            Self::Failure(Failure::Malformed) => ("failure", "malformed"),
+            Self::Failure(Failure::Invalid) => ("failure", "invalid"),
+            Self::Failure(Failure::Unavailable) => ("failure", "unavailable"),
+            Self::Cancelled => ("cancelled", "cancelled"),
+        }
+    }
+}
+
+fn counter(transport: Transport, outcome: Outcome) -> metrics::Counter {
+    let (result, failure) = outcome.labels();
     metrics::counter!(
         AUTHN_VERIFICATIONS_METRIC,
         "transport" => transport.label(),
@@ -113,7 +132,7 @@ impl Verifier {
         match &result {
             Ok(_) => self.counters.transport.get(transport).increment(1),
             Err(failure) => {
-                counter(transport, "failure", failure_class(*failure)).increment(1);
+                counter(transport, Outcome::Failure(*failure)).increment(1);
             }
         }
         outcome.recorded = true;
@@ -130,16 +149,7 @@ struct OutcomeGuard {
 impl Drop for OutcomeGuard {
     fn drop(&mut self) {
         if !self.recorded {
-            counter(self.transport, "cancelled", "cancelled").increment(1);
+            counter(self.transport, Outcome::Cancelled).increment(1);
         }
-    }
-}
-
-const fn failure_class(failure: Failure) -> &'static str {
-    match failure {
-        Failure::Missing => "missing",
-        Failure::Malformed => "malformed",
-        Failure::Invalid => "invalid",
-        Failure::Unavailable => "unavailable",
     }
 }

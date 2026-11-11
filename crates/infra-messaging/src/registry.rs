@@ -142,7 +142,7 @@ impl Registry {
     pub fn try_new(routes: impl IntoIterator<Item = Route>) -> Result<Self, RegistryError> {
         let mut mapped = HashMap::default();
         for route in routes {
-            if crate::wire::validate_text(route.key.0).is_err() {
+            if crate::wire::validate_identity(route.key.0).is_err() {
                 return Err(RegistryError::InvalidRoute("event type is invalid"));
             }
             if !valid_subject(&route.subject) {
@@ -209,7 +209,7 @@ impl Registry {
         &self,
         event: &Event<T>,
         max_payload_bytes: usize,
-    ) -> Result<PreparedEvent, crate::MessagingError> {
+    ) -> Result<PreparedEvent, EnvelopeError> {
         let subject = self.subject_for::<T>().ok_or(EnvelopeError::MissingRoute {
             event_type: T::EVENT_TYPE,
             schema_version: T::SCHEMA_VERSION,
@@ -234,11 +234,6 @@ impl Registry {
         } else {
             Err(RegistryError::Empty)
         }
-    }
-
-    #[must_use]
-    pub fn has_route<T: EventPayload>(&self) -> bool {
-        self.routes.contains_key(&route_key::<T>())
     }
 
     pub(crate) fn subject_for<T: EventPayload>(&self) -> Option<&str> {

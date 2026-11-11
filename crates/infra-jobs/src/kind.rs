@@ -119,11 +119,6 @@ impl<K: JobKind> Job<K> {
         self.attempt.id
     }
 
-    #[must_use]
-    pub const fn kind(&self) -> &'static str {
-        K::NAME
-    }
-
     /// Attempts used, including this one.
     #[must_use]
     pub const fn attempt(&self) -> u16 {
@@ -479,16 +474,10 @@ impl KindsBuilder {
             }
             seen.push(entry.name);
             if !(1..=MAX_ATTEMPTS).contains(&entry.policy.max_attempts) {
-                return Err(KindError::InvalidPolicy {
-                    kind: entry.name,
-                    reason: "max_attempts must be between 1 and 25",
-                });
+                return Err(KindError::InvalidMaxAttempts { kind: entry.name });
             }
             if !(MIN_TIMEOUT..=MAX_TIMEOUT).contains(&entry.policy.timeout) {
-                return Err(KindError::InvalidPolicy {
-                    kind: entry.name,
-                    reason: "timeout must be between 1s and 1h",
-                });
+                return Err(KindError::InvalidTimeout { kind: entry.name });
             }
         }
         Ok(Kinds {
@@ -564,13 +553,14 @@ pub enum KindError {
         "job kind name {0:?} must be 1 to {MAX_KIND_LEN} characters of a-z, 0-9, '.', '_', or '-', starting with a lowercase letter"
     )]
     InvalidName(&'static str),
-    /// `max_attempts` or `timeout` is outside its range.
-    #[error("job kind {kind:?}: {reason}")]
-    InvalidPolicy {
-        kind: &'static str,
-        /// `max_attempts must be between 1 and 25` or `timeout must be between 1s and 1h`.
-        reason: &'static str,
-    },
+    #[error("job kind {kind:?}: max_attempts must be between 1 and {MAX_ATTEMPTS}")]
+    InvalidMaxAttempts { kind: &'static str },
+    #[error(
+        "job kind {kind:?}: timeout must be between {} and {}",
+        humantime::format_duration(MIN_TIMEOUT),
+        humantime::format_duration(MAX_TIMEOUT)
+    )]
+    InvalidTimeout { kind: &'static str },
 }
 
 /// The kind-name grammar, the one check both [`KindsBuilder::validate`] and
@@ -607,9 +597,17 @@ pub(crate) struct Registered {
     /// The free part of `policy.max_running`, when the kind sets one.
     pub(crate) running: Option<Arc<Semaphore>>,
     pub(crate) dispatch: Box<dyn Dispatch>,
-    /// Handles for every completed attempt, registered once the engine starts
-    /// under the installed recorder.
-    pub(crate) metrics: std::sync::OnceLock<crate::attempt::KindMetrics>,
+    /// Handles for every completed attempt. The engine registers them at start,
+    /// under the installed recorder; [`Self::metrics`] registers them on first
+    /// use for a registry that never started.
+    metrics: std::sync::OnceLock<crate::attempt::KindMetrics>,
+}
+
+impl Registered {
+    pub(crate) fn metrics(&self) -> &crate::attempt::KindMetrics {
+        self.metrics
+            .get_or_init(|| crate::attempt::KindMetrics::new(self.name))
+    }
 }
 
 pub(crate) type HandlerFuture =
@@ -748,18 +746,13 @@ mod tests {
 
     #[test]
     fn validate_policy_bounds() {
-        let attempts = "max_attempts must be between 1 and 25";
-        let timeout = "timeout must be between 1s and 1h";
         assert_eq!(
             refuse(Policy {
                 max_attempts: 0,
                 timeout: DEFAULT_TIMEOUT,
                 ..Policy::default()
             }),
-            KindError::InvalidPolicy {
-                kind: "sample",
-                reason: attempts,
-            }
+            KindError::InvalidMaxAttempts { kind: "sample" }
         );
         assert_eq!(
             refuse(Policy {
@@ -776,10 +769,7 @@ mod tests {
                 timeout: Duration::from_millis(999),
                 ..Policy::default()
             }),
-            KindError::InvalidPolicy {
-                kind: "sample",
-                reason: timeout,
-            }
+            KindError::InvalidTimeout { kind: "sample" }
         );
         assert_eq!(
             refuse(Policy {
