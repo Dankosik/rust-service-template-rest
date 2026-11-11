@@ -12,8 +12,7 @@ use secrecy::ExposeSecret;
 use tokio::sync::Semaphore;
 
 use crate::{
-    BearerToken, Failure, PreparationError, Principal, VerificationError, VerificationReason,
-    Verifier,
+    BearerToken, PreparationError, Principal, VerificationError, VerificationReason, Verifier,
     claims::{ClaimPolicy, VerifiedIntrospection, validate_introspection_claims},
     provider::{PROVIDER_TIMEOUT, ProviderClient},
 };
@@ -66,16 +65,6 @@ impl IntrospectionCacheOptions {
         }
         Ok(Self { capacity, ttl })
     }
-
-    #[must_use]
-    pub const fn capacity(self) -> usize {
-        self.capacity
-    }
-
-    #[must_use]
-    pub const fn ttl(self) -> Duration {
-        self.ttl
-    }
 }
 
 /// Prepares an introspection verifier. Install the metrics recorder first:
@@ -116,8 +105,17 @@ pub(crate) struct IntrospectionVerifier {
 /// introspection, and its [`Fill`] tag stops a waiter from passing retained
 /// evidence off as fresh provider trust.
 struct PositiveCache {
-    retained: Cache<[u8; 32], VerifiedIntrospection>,
-    fills: Cache<[u8; 32], Fill>,
+    retained: Cache<TokenDigest, VerifiedIntrospection>,
+    fills: Cache<TokenDigest, Fill>,
+}
+
+type TokenDigest = [u8; 32];
+
+fn token_digest(token: &BearerToken<'_>) -> TokenDigest {
+    let digest = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, token.as_bytes());
+    let mut key = [0_u8; 32];
+    key.copy_from_slice(digest.as_ref());
+    key
 }
 
 #[derive(Clone)]
@@ -172,10 +170,9 @@ impl IntrospectionVerifier {
         now: impl Fn() -> Result<u64, VerificationError>,
     ) -> Result<Principal, VerificationError> {
         context.check().map_err(|_| {
-            VerificationError::new(
-                Failure::Unavailable,
-                VerificationReason::Provider(crate::ProviderFailure::Timeout),
-            )
+            VerificationError::unavailable(VerificationReason::Provider(
+                crate::ProviderFailure::Timeout,
+            ))
         })?;
         let Some(cache) = &self.cache else {
             return self
@@ -183,9 +180,7 @@ impl IntrospectionVerifier {
                 .await?
                 .deliver(now()?);
         };
-        let digest = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, token.as_bytes());
-        let mut key = [0_u8; 32];
-        key.copy_from_slice(digest.as_ref());
+        let key = token_digest(token);
         loop {
             if let Some(value) = cache.retained.get(&key).await
                 && value.reusable_at(now()?)
@@ -229,9 +224,10 @@ impl IntrospectionVerifier {
         // Every path to the provider passes here: an unusable clock refuses
         // the call before it spends a permit or reaches the provider.
         now()?;
-        let _permit = self.permits.try_acquire().map_err(|_| {
-            VerificationError::new(Failure::Unavailable, VerificationReason::Capacity)
-        })?;
+        let _permit = self
+            .permits
+            .try_acquire()
+            .map_err(|_| VerificationError::unavailable(VerificationReason::Capacity))?;
         let response = self
             .provider
             .post_form_json(
@@ -243,7 +239,7 @@ impl IntrospectionVerifier {
             )
             .await
             .map_err(|failure| {
-                VerificationError::new(Failure::Unavailable, VerificationReason::Provider(failure))
+                VerificationError::unavailable(VerificationReason::Provider(failure))
             })?;
         validate_introspection_claims(&response, &self.policy, now()?, token.to_secret())
     }
@@ -260,10 +256,10 @@ struct Retention {
     ttl: Duration,
 }
 
-impl Expiry<[u8; 32], VerifiedIntrospection> for Retention {
+impl Expiry<TokenDigest, VerifiedIntrospection> for Retention {
     fn expire_after_create(
         &self,
-        _: &[u8; 32],
+        _: &TokenDigest,
         value: &VerifiedIntrospection,
         _: std::time::Instant,
     ) -> Option<Duration> {
@@ -272,7 +268,7 @@ impl Expiry<[u8; 32], VerifiedIntrospection> for Retention {
 
     fn expire_after_update(
         &self,
-        _: &[u8; 32],
+        _: &TokenDigest,
         value: &VerifiedIntrospection,
         _: std::time::Instant,
         _: Option<Duration>,
@@ -688,10 +684,9 @@ mod tests {
                 .unwrap_err();
             assert_eq!(
                 error,
-                VerificationError::new(
-                    Failure::Unavailable,
-                    VerificationReason::Provider(ProviderFailure::Status(code))
-                )
+                VerificationError::unavailable(VerificationReason::Provider(
+                    ProviderFailure::Status(code)
+                ))
             );
             assert_eq!(error.reason.label(), label);
         }
@@ -1019,9 +1014,7 @@ mod tests {
         let fixture = Fixture::new().await;
         let base = epoch_now();
         let token = parse_bearer([b"Bearer provenance".as_slice()]).unwrap();
-        let digest = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, token.as_bytes());
-        let mut key = [0_u8; 32];
-        key.copy_from_slice(digest.as_ref());
+        let key = super::token_digest(&token);
         for replacement in [false, true] {
             fixture.respond("200 OK", &active_response("old", base + 60));
             let verifier = fixture.verifier(Some(cache_options(1)));
@@ -1099,10 +1092,7 @@ mod tests {
                     .unwrap_err();
                 assert_eq!(
                     error,
-                    crate::VerificationError::new(
-                        Failure::Unavailable,
-                        crate::VerificationReason::Clock
-                    )
+                    crate::VerificationError::unavailable(crate::VerificationReason::Clock)
                 );
                 assert_eq!(fixture.calls(), before + usize::from(warmed));
             }
@@ -1247,8 +1237,8 @@ mod tests {
             (1024, Duration::from_secs(300)),
         ] {
             let options = IntrospectionCacheOptions::try_new(capacity, ttl).unwrap();
-            assert_eq!(options.capacity(), capacity);
-            assert_eq!(options.ttl(), ttl);
+            assert_eq!(options.capacity, capacity);
+            assert_eq!(options.ttl, ttl);
         }
     }
 

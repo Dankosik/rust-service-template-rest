@@ -239,6 +239,9 @@ fn install_metrics() -> Result<Metrics, BootstrapError> {
     Ok(Metrics::install(
         &[
             infra_http::HISTOGRAMS,
+            // template:begin authn:bootstrap-authn-histograms
+            infra_bearerauthn::HISTOGRAMS,
+            // template:end authn:bootstrap-authn-histograms
             // template:begin postgres:bootstrap-postgres-histograms
             infra_postgres::HISTOGRAMS,
             // template:end postgres:bootstrap-postgres-histograms

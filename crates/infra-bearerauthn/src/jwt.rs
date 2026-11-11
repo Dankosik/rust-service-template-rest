@@ -13,8 +13,8 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    BearerToken, EndpointUrl, Failure, IssuerUrl, PreparationError, PreparationPhase,
-    PreparationReason, Principal, ProviderFailure, VerificationError, VerificationReason, Verifier,
+    BearerToken, EndpointUrl, IssuerUrl, PreparationError, PreparationPhase, PreparationReason,
+    Principal, ProviderFailure, VerificationError, VerificationReason, Verifier,
     claims::{ClaimPolicy, validate_jwt_claims},
     provider::{Document, ProviderClient},
     refresh::{KeyStore, RefreshFailure, SignatureRefresh, fetch_key_set, run_refresh_worker},
@@ -22,11 +22,13 @@ use crate::{
 
 /// Discovery and the initial JWKS fetch share this budget.
 const STARTUP_BUDGET: Duration = Duration::from_secs(6);
+/// Bounds provider-supplied text that reaches an operator error; it is not
+/// part of the issuer grammar.
+const MAX_ECHOED_ISSUER_BYTES: usize = 256;
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TokenProfile {
     /// Accepts a token with no `typ` header, a generic JWT type, or an access-token type; `client_id` falls back to the `azp`, `appid`, and `cid` claims.
-    #[default]
     ResourceServer,
     /// Requires an access-token `typ` header and the RFC 9068 claims `sub`, `client_id`, `jti`, and `iat`.
     Rfc9068,
@@ -190,10 +192,9 @@ impl JwtVerifier {
                 Ok(key_set.verify(message, signature, kid, algorithm)?)
             }
             SignatureRefresh::NoNewerSet => Err(miss.into()),
-            SignatureRefresh::Unavailable => Err(VerificationError::new(
-                Failure::Unavailable,
-                VerificationReason::Refresh,
-            )),
+            SignatureRefresh::Unavailable => {
+                Err(VerificationError::unavailable(VerificationReason::Refresh))
+            }
         }
     }
 }
@@ -280,7 +281,9 @@ impl PreparationError {
     /// Discovery named another issuer. Both values are public issuer URLs; a
     /// discovered value outside the issuer grammar is not echoed.
     fn issuer_mismatch(configured: &IssuerUrl, discovered: &str) -> Self {
-        let discovered = if discovered.len() <= 256 && IssuerUrl::parse(discovered).is_ok() {
+        let discovered = if discovered.len() <= MAX_ECHOED_ISSUER_BYTES
+            && IssuerUrl::parse(discovered).is_ok()
+        {
             discovered.to_owned()
         } else {
             "<not an issuer URL>".to_owned()
@@ -416,12 +419,6 @@ struct RawJwks {
     keys: Vec<serde_json::Value>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum KeySetError {
-    Parse,
-    NoUsableKeys,
-}
-
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum KeyRejection {
     MalformedEntry,
@@ -446,8 +443,8 @@ impl KeyRejection {
 pub(crate) fn parse_key_set(
     bytes: &[u8],
     configured: &[JwtAlgorithm],
-) -> Result<KeySet, KeySetError> {
-    let raw: RawJwks = serde_json::from_slice(bytes).map_err(|_| KeySetError::Parse)?;
+) -> Result<KeySet, RefreshFailure> {
+    let raw: RawJwks = serde_json::from_slice(bytes).map_err(|_| RefreshFailure::Parse)?;
     let mut rejected = std::collections::BTreeMap::<KeyRejection, u64>::new();
     let mut keys = Vec::new();
     for value in raw.keys {
@@ -470,7 +467,7 @@ pub(crate) fn parse_key_set(
         metrics::counter!(KEY_REJECTIONS_METRIC, "reason" => reason.label()).increment(count);
     }
     if keys.is_empty() {
-        return Err(KeySetError::NoUsableKeys);
+        return Err(RefreshFailure::NoUsableKeys);
     }
     Ok(KeySet { keys })
 }
@@ -1212,11 +1209,11 @@ pub(crate) mod tests {
         }
         assert!(matches!(
             parse_key_set(br#"{"keys":false}"#, &[JwtAlgorithm::Rs256]),
-            Err(super::KeySetError::Parse)
+            Err(crate::refresh::RefreshFailure::Parse)
         ));
         assert!(matches!(
             parse_key_set(br#"{"keys":[]}"#, &[JwtAlgorithm::Rs256]),
-            Err(super::KeySetError::NoUsableKeys)
+            Err(crate::refresh::RefreshFailure::NoUsableKeys)
         ));
     }
 
@@ -2037,7 +2034,7 @@ pub(crate) mod tests {
                         &serde_json::to_vec(&serde_json::json!({"keys":entries})).unwrap(),
                         &[JwtAlgorithm::Rs256]
                     ),
-                    Err(super::KeySetError::NoUsableKeys)
+                    Err(crate::refresh::RefreshFailure::NoUsableKeys)
                 ));
             });
         });

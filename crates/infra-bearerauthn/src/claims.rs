@@ -306,8 +306,7 @@ pub(crate) struct VerifiedIntrospection {
 
 impl VerifiedIntrospection {
     pub(crate) fn reusable_at(&self, now: u64) -> bool {
-        now < self.principal.expires_at()
-            && check_lifetime(self.principal.expires_at(), self.not_before, now).is_ok()
+        now < self.principal.expires_at() && !not_yet_valid(self.not_before, now)
     }
 
     pub(crate) fn deliver(self, now: u64) -> Result<Principal, VerificationError> {
@@ -324,12 +323,7 @@ pub(crate) fn validate_introspection_claims(
     now: u64,
     access_token: secrecy::SecretString,
 ) -> Result<VerifiedIntrospection, VerificationError> {
-    let malformed = || {
-        VerificationError::new(
-            crate::Failure::Unavailable,
-            VerificationReason::MalformedClaims,
-        )
-    };
+    let malformed = || VerificationError::unavailable(VerificationReason::MalformedClaims);
     let invalid = VerificationError::invalid;
     // Keep the provider evidence intact, excluding only JSON boundary whitespace.
     // Envelope deserialization still validates the entire response before active.
@@ -356,9 +350,8 @@ pub(crate) fn validate_introspection_claims(
     let subject = non_empty(claims.sub);
     let client_id = non_empty(claims.client_id);
     require_identity(subject.as_deref(), client_id.as_deref())?;
-    let scopes = normalize_scopes(claims.scope.or(claims.scp)).map_err(|()| {
-        VerificationError::new(crate::Failure::Unavailable, VerificationReason::Scope)
-    })?;
+    let scopes = normalize_scopes(claims.scope.or(claims.scp))
+        .map_err(|()| VerificationError::unavailable(VerificationReason::Scope))?;
     let actor = claims
         .act
         .map(RawAct::into_actor)
@@ -386,10 +379,14 @@ fn check_lifetime(expiry: u64, not_before: Option<u64>, now: u64) -> Result<(), 
     if now > expiry.saturating_add(LEEWAY_SECONDS) {
         return Err(VerificationError::invalid(VerificationReason::Expired));
     }
-    if not_before.is_some_and(|not_before| not_before > now.saturating_add(LEEWAY_SECONDS)) {
+    if not_yet_valid(not_before, now) {
         return Err(VerificationError::invalid(VerificationReason::NotYetValid));
     }
     Ok(())
+}
+
+fn not_yet_valid(not_before: Option<u64>, now: u64) -> bool {
+    not_before.is_some_and(|not_before| not_before > now.saturating_add(LEEWAY_SECONDS))
 }
 
 fn require_identity(

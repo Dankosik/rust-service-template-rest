@@ -692,12 +692,9 @@ async fn authenticate(
         Ok(principal) => principal,
         Err(failure) => return reject(request, authentication_status(failure)).await,
     };
-    // `principal.scopes()` is sorted and deduplicated.
-    let granted = scopes.get(request.uri().path()).is_none_or(|required| {
-        required
-            .iter()
-            .all(|scope| principal.scopes().binary_search(scope).is_ok())
-    });
+    let granted = scopes
+        .get(request.uri().path())
+        .is_none_or(|required| principal.has_scopes(required));
     if !granted {
         let status = Failure::new(Code::Forbidden).into_status_as(
             tonic::Code::PermissionDenied,

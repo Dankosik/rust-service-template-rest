@@ -15,7 +15,7 @@ use tracing::warn;
 
 use crate::{
     EndpointUrl, JwtAlgorithm, PreparationReason,
-    jwt::{KeySet, KeySetError, parse_key_set},
+    jwt::{KeySet, parse_key_set},
     provider::{Document, ProviderClient, ProviderFailure},
 };
 
@@ -44,6 +44,7 @@ struct State {
     keys: Arc<KeySet>,
     /// Fetches asked for so far; each is a ticket that waiters compare against.
     requested: u64,
+    /// The latest finished ticket, successful or not.
     finished: u64,
     /// The latest ticket whose fetch installed a set; the startup set is 0. A
     /// waiter compares it with its own ticket because a later failure may
@@ -57,6 +58,10 @@ impl State {
     /// The ticket of the fetch asked for but not yet finished.
     fn pending(&self) -> Option<u64> {
         (self.requested > self.finished).then_some(self.requested)
+    }
+
+    fn last_fetch_failed(&self) -> bool {
+        self.succeeded != self.finished
     }
 
     fn start_fetch(&mut self) -> u64 {
@@ -125,7 +130,7 @@ impl KeyStore {
             } else if let Some(ticket) = state.pending() {
                 Admission::Join(ticket)
             } else if state.last_started.elapsed() < REFRESH_COOLDOWN {
-                Admission::Answer(if state.succeeded != state.finished {
+                Admission::Answer(if state.last_fetch_failed() {
                     SignatureRefresh::Unavailable
                 } else if Arc::ptr_eq(&state.keys, checked) {
                     SignatureRefresh::NoNewerSet
@@ -256,6 +261,7 @@ fn refresh_period() -> Duration {
 }
 
 fn refresh_period_for_sample(sample: Result<u16, aws_lc_rs::error::Unspecified>) -> Duration {
+    // A failed random sample only drops the spread; refresh keeps the full interval.
     let spread = MAX_REFRESH_SPREAD * u32::from(sample.unwrap_or(0)) / u32::from(u16::MAX);
     REFRESH_INTERVAL.saturating_sub(spread)
 }
@@ -272,16 +278,7 @@ pub(crate) async fn fetch_key_set(
     Ok(Arc::new(parse_key_set(&bytes, algorithms)?))
 }
 
-impl From<KeySetError> for RefreshFailure {
-    fn from(error: KeySetError) -> Self {
-        match error {
-            KeySetError::Parse => Self::Parse,
-            KeySetError::NoUsableKeys => Self::NoUsableKeys,
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RefreshFailure {
     Fetch(ProviderFailure),
     Parse,
