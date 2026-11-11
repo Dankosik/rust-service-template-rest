@@ -237,7 +237,7 @@ mod tests {
     use utoipa_axum::routes;
 
     use super::*;
-    use crate::problem::responses::ProtectedOperationProblemResponses;
+    use crate::authn::ProtectedOperationProblemResponses;
 
     const WIDGETS: &str = "/_test/widgets";
 

@@ -9,7 +9,7 @@
 //! Most of the chain is `tower-http`; the template-owned pieces and the
 //! contract decisions are recorded in `docs/architecture/http.md`.
 
-pub mod contract;
+mod contract;
 pub mod extract;
 pub mod problem;
 // template:begin inbound-webhooks:http-webhooks-module
@@ -27,7 +27,6 @@ mod harden;
 mod observe;
 mod probes;
 mod request_id;
-mod router;
 mod server;
 
 pub use context::{RequestContext, ResponseContext};
@@ -38,11 +37,11 @@ pub use observe::HISTOGRAMS;
 pub use authn::VerifiedPrincipal;
 // template:end authn:infra-http-authn-exports
 // template:begin request-budget:infra-http-request-deadline-export
-pub use harden::RequestDeadline;
+pub use context::RequestDeadline;
 // template:end request-budget:infra-http-request-deadline-export
+pub use probes::{liveness_router, router};
 pub use problem::{Code, InvalidParam, Problem};
 pub use request_id::REQUEST_ID_HEADER;
-pub use router::{liveness_router, router};
 pub use server::{
     AcceptFailure, Drained, HTTP2_CONNECTION_WINDOW, HTTP2_STREAM_WINDOW, Server, ServerError,
     ServerOptions,

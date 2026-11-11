@@ -36,12 +36,12 @@ use infra_bearerauthn::test_support::{FixtureTransport, prepare_introspection_wi
 use infra_bearerauthn::{
     EndpointUrl, IntrospectionCacheOptions, IntrospectionOptions, IssuerUrl, Verifier,
 };
+use infra_http::authn::ProtectedOperationProblemResponses;
 use infra_http::extract::{Json, Path};
 use infra_http::idempotency::{
     Activation, Composer, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Idempotency, Tx,
 };
 use infra_http::problem::SANITIZED_DETAIL;
-use infra_http::problem::responses::ProtectedOperationProblemResponses;
 use infra_http::{Code, HardenOptions, Problem, REQUEST_ID_HEADER, VerifiedPrincipal, harden};
 use infra_idempotency_store::Store;
 use infra_postgres::{Dsn, PgPool};
@@ -814,7 +814,7 @@ async fn until_free(request: impl Fn() -> TestRequest) -> (TestResponse, u64) {
     security(("bearerAuth" = ["widgets:write"])),
     responses(
         (status = 200, description = "verified", content_type = "text/plain", body = String),
-        infra_http::problem::responses::ProtectedOperationProblemResponses,
+        infra_http::authn::ProtectedOperationProblemResponses,
     )
 )]
 async fn authorized_without_idempotency(
@@ -863,7 +863,7 @@ async fn authorized_without_idempotency(
     ),
     responses(
         (status = 200, description = "granted", content_type = "text/plain", body = String),
-        infra_http::problem::responses::ProtectedOperationProblemResponses,
+        infra_http::authn::ProtectedOperationProblemResponses,
     )
 )]
 async fn scoped_alternatives(Extension(calls): Extension<Arc<AtomicUsize>>) -> &'static str {

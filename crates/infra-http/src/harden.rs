@@ -34,45 +34,11 @@ use tower_http::request_id::{PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::observe::{self, AccessLogOptions};
+use crate::probes::is_health_probe_route;
 #[cfg(test)]
 use crate::problem::SANITIZED_DETAIL;
 use crate::problem::{AT_CAPACITY_DETAIL, Code, Problem, sanitized_internal_error};
 use crate::request_id;
-use crate::router::is_health_probe_route;
-
-// template:begin request-budget:http-request-deadline
-/// Time [`RequestDeadline::attempt_end`] keeps back for the response.
-const RESPONSE_RESERVE: Duration = Duration::from_millis(100);
-
-/// The conservative deadline shared with request-scoped dependencies.
-///
-/// The opening middleware projects its exact cutoff here. Consumers may observe the instant but
-/// cannot introduce a second request budget.
-#[derive(Clone, Copy, Debug)]
-pub struct RequestDeadline(pub(crate) tokio::time::Instant);
-
-impl RequestDeadline {
-    pub(crate) fn from_deadline(deadline: operation_context::Deadline) -> Option<Self> {
-        deadline.instant().map(Self)
-    }
-
-    /// The existing absolute request deadline; observing it never extends the budget.
-    #[must_use]
-    pub const fn at(&self) -> tokio::time::Instant {
-        self.0
-    }
-
-    /// When a PostgreSQL attempt inside this budget must end: a fixed reserve
-    /// before the deadline, leaving time for the bounded in-memory response
-    /// after it. `None` once that point has passed.
-    #[must_use]
-    pub fn attempt_end(&self) -> Option<tokio::time::Instant> {
-        self.0
-            .checked_sub(RESPONSE_RESERVE)
-            .filter(|end| *end > tokio::time::Instant::now())
-    }
-}
-// template:end request-budget:http-request-deadline
 
 /// Requests shed because no in-flight permit freed within the request timeout.
 pub(crate) const SHED_REQUESTS_METRIC: &str = "http_server_shed_requests_total";

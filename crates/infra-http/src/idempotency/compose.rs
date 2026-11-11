@@ -26,7 +26,7 @@ use super::execute::{Attempt, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Outcome, Provena
 use super::identity::{self, KEY_GRAMMAR, MAX_KEY_BYTES};
 use super::openapi::{IdempotencyComponents, KEY_HEADER, REPLAYED_HEADER, REPLAYED_VALUE};
 use crate::authn::VerifiedPrincipal;
-use crate::harden::RequestDeadline;
+use crate::context::RequestDeadline;
 use crate::problem::{Code, Problem, body_too_large, body_unreadable, sanitized_internal_error};
 use utoipa_axum::router::UtoipaMethodRouter;
 

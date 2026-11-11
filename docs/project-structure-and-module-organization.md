@@ -35,7 +35,7 @@ Do not create a crate, module, or directory before its first real artifact.
 | The per-method caller table, gRPC admission and the outbound token binding | `crates/infra-grpc/src/service_auth.rs` and `Services::allow_callers`; the receiver's registration declares the rules, bootstrap installs the verifier |
 <!-- template:end service-auth:docs-structure-service-auth-placement -->
 <!-- template:begin request-budget:docs-structure-request-budget -->
-| Readonly inbound request deadline | `crates/infra-http/src/harden.rs`; exported as `infra_http::RequestDeadline` |
+| Readonly inbound request deadline | `crates/infra-http/src/context.rs`; exported as `infra_http::RequestDeadline` |
 <!-- template:end request-budget:docs-structure-request-budget -->
 <!-- template:begin http-idempotency:docs-structure-http-idempotency-placement -->
 | Inbound idempotency composition, key handling, and the executor seam | `crates/infra-http/src/idempotency/`; callers use `infra_http::idempotency::{Idempotency, Composer}` ([guide](guides/http-idempotency.md)) |

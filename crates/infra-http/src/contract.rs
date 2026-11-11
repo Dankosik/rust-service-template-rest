@@ -12,10 +12,10 @@ use utoipa::openapi::security::{HttpAuthScheme, SecurityScheme};
 use utoipa::openapi::{OpenApi, RefOr, path::Operation};
 use utoipa_axum::router::OpenApiRouter;
 
+use crate::probes::{is_health_probe_operation, is_health_probe_route};
 #[cfg(test)]
 use crate::problem::SANITIZED_DETAIL;
 use crate::problem::sanitized_internal_error;
-use crate::router::{is_health_probe_operation, is_health_probe_route};
 
 /// A closed finalization error naming the first operation that failed; no
 /// partially served contract is returned.
