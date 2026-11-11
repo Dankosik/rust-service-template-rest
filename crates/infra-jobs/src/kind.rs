@@ -94,7 +94,7 @@ impl fmt::Debug for JobId {
 
 /// Custody of one claimed attempt, assembled before the handler runs.
 pub(crate) struct Attempt {
-    pub(crate) id: JobId,
+    pub(crate) job_id: JobId,
     /// Attempts used, including this one.
     pub(crate) number: u16,
     pub(crate) generation: i64,
@@ -117,7 +117,7 @@ pub struct Job<K> {
 impl<K: JobKind> Job<K> {
     #[must_use]
     pub const fn id(&self) -> JobId {
-        self.attempt.id
+        self.attempt.job_id
     }
 
     /// Attempts used, including this one.
@@ -174,7 +174,10 @@ impl<K: JobKind> Job<K> {
     /// [`CompleteError::StaleClaim`] when this running claim no longer exists,
     /// or [`CompleteError::Database`] when the statement fails.
     pub async fn complete_in_tx(&self, tx: &mut Tx<'_>) -> Result<(), CompleteError> {
-        let complete = crate::attempt::complete(self.attempt.id.0, self.attempt.generation);
+        let complete = crate::attempt::complete_query(crate::attempt::ClaimFence {
+            job_id: self.attempt.job_id,
+            generation: self.attempt.generation,
+        });
         let affected = observed("complete job", complete.execute(&mut *tx))
             .await?
             .rows_affected();
@@ -195,7 +198,7 @@ impl<K: JobKind> fmt::Debug for Job<K> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Job")
-            .field("id", &self.attempt.id)
+            .field("id", &self.attempt.job_id)
             .field("kind", &K::NAME)
             .field("attempt", &self.attempt.number)
             .finish_non_exhaustive()
@@ -482,7 +485,7 @@ impl KindsBuilder {
             }
         }
         Ok(Kinds {
-            entries: self.entries,
+            entries: self.entries.into_iter().map(Arc::new).collect(),
         })
     }
 }
@@ -511,20 +514,20 @@ impl fmt::Debug for KindsBuilder {
 
 /// Checked kinds, as an [`Engine`](crate::Engine) claims them.
 pub struct Kinds {
-    entries: Vec<Registered>,
+    entries: Vec<Arc<Registered>>,
 }
 
 impl Kinds {
-    pub fn names(&self) -> impl Iterator<Item = &'static str> + '_ {
+    pub fn names(&self) -> impl Iterator<Item = &'static str> {
         self.entries.iter().map(|entry| entry.name)
     }
 
-    pub(crate) fn get(&self, kind: &str) -> Option<&Registered> {
+    pub(crate) fn get(&self, kind: &str) -> Option<&Arc<Registered>> {
         self.entries.iter().find(|entry| entry.name == kind)
     }
 
-    pub(crate) fn iter(&self) -> impl Iterator<Item = &Registered> + '_ {
-        self.entries.iter()
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &Registered> {
+        self.entries.iter().map(Arc::as_ref)
     }
 }
 
@@ -869,7 +872,7 @@ mod tests {
             .dispatch
             .prepare(
                 Attempt {
-                    id,
+                    job_id: id,
                     number: 3,
                     generation: 99,
                     attempt_deadline: deadline,
@@ -885,7 +888,7 @@ mod tests {
 
         let err = registered.dispatch.prepare(
             Attempt {
-                id,
+                job_id: id,
                 number: 1,
                 generation: 99,
                 attempt_deadline: Instant::now(),
@@ -901,7 +904,7 @@ mod tests {
     async fn job_debug_omits_payload() {
         let job = Job {
             attempt: Attempt {
-                id: job_id("01234567-89ab-cdef-fedc-ba9876543210"),
+                job_id: job_id("01234567-89ab-cdef-fedc-ba9876543210"),
                 number: 4,
                 generation: 99,
                 attempt_deadline: Instant::now(),

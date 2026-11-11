@@ -662,7 +662,7 @@ async fn e4_validation_failures_leave_the_transaction_usable(pool: PgPool) {
             )
             .await,
             "InvalidDelay",
-            |err| matches!(err, EnqueueError::InvalidDelay),
+            |err| matches!(err, EnqueueError::InvalidDelay(_)),
         );
         still_usable(tx).await;
         refused(

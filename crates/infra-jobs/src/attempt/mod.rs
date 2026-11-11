@@ -9,6 +9,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use futures_util::FutureExt as _;
+use metrics::Unit;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -19,7 +20,7 @@ use crate::state::FailureReason;
 
 pub(crate) use completion::Completions;
 use completion::complete_batched;
-pub(crate) use outcome::complete;
+pub(crate) use outcome::complete_query;
 use outcome::{Ended, Transition, Unacknowledged, Written, map_outcome, send_outcome, write_of};
 
 /// How long a cancelled or timed-out handler may keep running before [`drive`]
@@ -49,9 +50,14 @@ pub(crate) const ATTEMPT_DURATION_BUCKETS: &[f64] = &[
 ];
 
 pub(crate) fn describe_metrics() {
-    metrics::describe_gauge!(OWNED_ATTEMPTS_METRIC, "Attempt slots currently owned");
+    metrics::describe_gauge!(
+        OWNED_ATTEMPTS_METRIC,
+        Unit::Count,
+        "Attempt slots currently owned"
+    );
     metrics::describe_gauge!(
         COMPLETION_MEMBERSHIPS_METRIC,
+        Unit::Count,
         "Queued and in-flight completion entries currently owned"
     );
     // Register idle observations without resetting other engines' live gauge values.
@@ -59,16 +65,46 @@ pub(crate) fn describe_metrics() {
     metrics::gauge!(COMPLETION_MEMBERSHIPS_METRIC).increment(0.0);
     metrics::describe_counter!(
         ATTEMPTS_METRIC,
-        "Observed attempt dispositions, independent of queue-write acknowledgement"
+        Unit::Count,
+        "Observed attempt outcomes, independent of queue-write acknowledgement"
     );
     metrics::describe_histogram!(
         ATTEMPT_DURATION_METRIC,
+        Unit::Seconds,
         "Observed handler duration in seconds"
     );
     metrics::describe_counter!(
         PERSISTENCE_METRIC,
+        Unit::Count,
         "Queue outcome acknowledgement disposition"
     );
+}
+
+/// An outcome write's `jobs_persistence_total` disposition.
+#[derive(Clone, Copy)]
+enum Persistence {
+    Applied,
+    Unchanged,
+    /// Neither acknowledgement arrived; lease expiry recovers the row.
+    Unknown,
+}
+
+impl Persistence {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Applied => "applied",
+            Self::Unchanged => "unchanged",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+fn attempts_counter(kind: &'static str, outcome: &'static str) -> metrics::Counter {
+    metrics::counter!(ATTEMPTS_METRIC, "kind" => kind, "outcome" => outcome)
+}
+
+fn persistence_counter(kind: &'static str, persistence: Persistence) -> metrics::Counter {
+    metrics::counter!(PERSISTENCE_METRIC, "kind" => kind, "disposition" => persistence.label())
 }
 
 /// Metric handles of the completed-attempt path for one kind, registered
@@ -83,17 +119,9 @@ pub(crate) struct KindMetrics {
 impl KindMetrics {
     pub(crate) fn new(kind: &'static str) -> Self {
         Self {
-            completed: metrics::counter!(
-                ATTEMPTS_METRIC,
-                "kind" => kind,
-                "outcome" => Transition::Complete.label()
-            ),
+            completed: attempts_counter(kind, Transition::Complete.label()),
             duration: metrics::histogram!(ATTEMPT_DURATION_METRIC, "kind" => kind),
-            applied: metrics::counter!(
-                PERSISTENCE_METRIC,
-                "kind" => kind,
-                "disposition" => Written::Applied.label()
-            ),
+            applied: persistence_counter(kind, Persistence::Applied),
             queue_wait: metrics::histogram!(crate::claim::QUEUE_WAIT_METRIC, "kind" => kind),
         }
     }
@@ -131,10 +159,18 @@ impl Drop for MetricMembership {
 /// fences outcome writes travels beside it, only to the writes.
 #[derive(Debug)]
 pub(crate) struct AttemptId {
-    pub(crate) id: JobId,
+    pub(crate) job_id: JobId,
     pub(crate) kind: &'static str,
     /// Attempts used, including this one.
     pub(crate) number: u16,
+}
+
+/// The claim an outcome write matches: the job row, and the generation its
+/// claim took. A row a later claim took no longer matches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ClaimFence {
+    pub(crate) job_id: JobId,
+    pub(crate) generation: i64,
 }
 
 /// Claim-time exhaustion is observed only after its transaction is acknowledged.
@@ -154,33 +190,37 @@ fn observe_attempt(handles: Option<&KindMetrics>, attempt: &AttemptId, transitio
         Some(handles) if matches!(transition, Transition::Complete) => {
             handles.completed.increment(1);
         }
-        _ => metrics::counter!(ATTEMPTS_METRIC, "kind" => attempt.kind, "outcome" => transition.label())
-            .increment(1),
+        _ => attempts_counter(attempt.kind, transition.label()).increment(1),
     }
+    let outcome = transition.label();
     match transition {
         Transition::Complete => {
-            tracing::debug!(job.id = %attempt.id, job.kind = attempt.kind, job.attempt = attempt.number, "job_attempt_completed");
+            tracing::debug!(job.id = %attempt.job_id, job.kind = attempt.kind, job.attempt = attempt.number, outcome, "job_attempt_completed");
         }
         Transition::Snooze { summary, .. } => {
-            tracing::info!(job.id = %attempt.id, job.kind = attempt.kind, outcome = transition.label(), error = summary.as_str(), "job_attempt_finished");
+            tracing::info!(job.id = %attempt.job_id, job.kind = attempt.kind, job.attempt = attempt.number, outcome, error = error_field(summary), "job_attempt_finished");
         }
         Transition::Release => {
-            tracing::info!(job.id = %attempt.id, job.kind = attempt.kind, outcome = transition.label(), "job_attempt_finished");
+            tracing::info!(job.id = %attempt.job_id, job.kind = attempt.kind, job.attempt = attempt.number, outcome, "job_attempt_finished");
         }
         Transition::Retry { summary, .. } => {
-            tracing::info!(job.id = %attempt.id, job.kind = attempt.kind, job.attempt = attempt.number, error = summary.as_str(), "job_attempt_failed");
+            tracing::info!(job.id = %attempt.job_id, job.kind = attempt.kind, job.attempt = attempt.number, outcome, error = error_field(summary), "job_attempt_failed");
         }
         Transition::Fail { summary, .. } => {
-            tracing::warn!(job.id = %attempt.id, job.kind = attempt.kind, job.attempt = attempt.number, job.failure_reason = transition.label(), error = summary.as_str(), "job_failed");
+            tracing::warn!(job.id = %attempt.job_id, job.kind = attempt.kind, job.attempt = attempt.number, job.failure_reason = outcome, error = summary.as_str(), "job_failed");
         }
     }
+}
+
+/// A summary as an event's `error` field, absent when there is none.
+fn error_field(summary: &str) -> Option<&str> {
+    (!summary.is_empty()).then_some(summary)
 }
 
 /// The supervisor of one claimed attempt.
 ///
 /// It retires `guard` once the attempt's outcome is written or known to be
-/// uncertain. A claimed kind this engine does not register leaves the guard
-/// armed, so the engine fails instead of leaving the claim to its lease.
+/// uncertain.
 pub(crate) fn supervise(
     shared: Arc<Shared>,
     claimed: crate::claim::Claimed,
@@ -188,6 +228,7 @@ pub(crate) fn supervise(
     mut guard: crate::engine::SupervisorGuard,
 ) -> impl Future<Output = ()> + Send + 'static {
     let crate::claim::Claimed {
+        registered,
         attempt,
         generation,
         payload,
@@ -204,12 +245,9 @@ pub(crate) fn supervise(
         _kind: kind_slot,
     });
     async move {
-        let Some(registered) = shared.registry.get(attempt.kind) else {
-            return;
-        };
         run_attempt(
             &shared,
-            registered,
+            &registered,
             attempt,
             generation,
             payload,
@@ -230,7 +268,7 @@ fn attempt_span(attempt: &AttemptId) -> tracing::Span {
         otel.name = %format_args!("process {}", attempt.kind),
         otel.kind = "consumer",
         otel.status_code = tracing::field::Empty,
-        job.id = %attempt.id,
+        job.id = %attempt.job_id,
         job.kind = attempt.kind,
         job.attempt = u64::from(attempt.number),
         outcome = tracing::field::Empty,
@@ -268,7 +306,7 @@ async fn run_attempt(
     let prepared = prepare_handler(
         registered.dispatch.as_ref(),
         Attempt {
-            id: attempt.id,
+            job_id: attempt.job_id,
             number: attempt.number,
             generation,
             attempt_deadline,
@@ -342,7 +380,7 @@ fn observe_terminal(
     match (transition, written) {
         (_, Some(Written::Applied)) => observe_attempt(Some(handles), attempt, transition),
         (Transition::Fail { summary, .. }, _) => {
-            tracing::info!(job.id = %attempt.id, job.kind = attempt.kind, job.attempt = attempt.number, outcome = transition.label(), error = summary.as_str(), "job_attempt_failed");
+            tracing::info!(job.id = %attempt.job_id, job.kind = attempt.kind, job.attempt = attempt.number, outcome = transition.label(), error = error_field(summary), "job_attempt_failed");
         }
         _ => {}
     }
@@ -474,28 +512,21 @@ async fn persist(
         Operation::Record
     };
     let write = write_of(transition);
+    let fence = ClaimFence {
+        job_id: attempt.job_id,
+        generation,
+    };
     loop {
         if expired(shared, supervisor_deadline) {
             break;
         }
-        let sent = match write {
-            None => {
-                within(
-                    shared,
-                    supervisor_deadline,
-                    complete_batched(shared, attempt.id, generation, supervisor_deadline, slots),
-                )
-                .await
+        let sent = within(shared, supervisor_deadline, async {
+            match write {
+                None => complete_batched(shared, fence, supervisor_deadline, slots).await,
+                Some(write) => send_outcome(shared, fence, write, operation).await,
             }
-            Some(write) => {
-                within(
-                    shared,
-                    supervisor_deadline,
-                    send_outcome(shared, attempt.id, generation, write, operation),
-                )
-                .await
-            }
-        };
+        })
+        .await;
         match sent {
             None => break,
             Some(Ok(written)) => {
@@ -516,7 +547,6 @@ async fn persist(
     None
 }
 
-/// The attempt's queue transition was acknowledged.
 fn observe_acknowledged(
     shared: &Shared,
     handles: &KindMetrics,
@@ -526,14 +556,16 @@ fn observe_acknowledged(
     written: Written,
 ) {
     observe_recovery(shared, operation);
-    let disposition = written.label();
+    let persistence = written.persistence();
     match written {
         Written::Applied => handles.applied.increment(1),
-        Written::Unchanged => count_persistence(attempt.kind, disposition),
+        Written::Unchanged => persistence_counter(attempt.kind, persistence).increment(1),
     }
     tracing::debug!(
+        job.id = %attempt.job_id,
         job.kind = attempt.kind,
-        disposition,
+        job.attempt = attempt.number,
+        disposition = persistence.label(),
         "job_persistence_finished"
     );
     if written == Written::Applied && matches!(transition, Transition::Release) {
@@ -541,22 +573,16 @@ fn observe_acknowledged(
     }
 }
 
-fn count_persistence(kind: &'static str, disposition: &'static str) {
-    metrics::counter!(PERSISTENCE_METRIC, "kind" => kind, "disposition" => disposition)
-        .increment(1);
-}
-
 /// The attempt's queue transition is not known to have landed; lease expiry
 /// recovers the row.
 fn observe_uncertain(shared: &Shared, attempt: &AttemptId) {
     shared.counters.uncertain.fetch_add(1, Ordering::Relaxed);
-    // Neither [`Written`] acknowledgement exists, so this disposition has no
-    // [`Written::label`] value of its own.
-    let disposition = "unknown";
-    count_persistence(attempt.kind, disposition);
+    persistence_counter(attempt.kind, Persistence::Unknown).increment(1);
     tracing::warn!(
+        job.id = %attempt.job_id,
         job.kind = attempt.kind,
-        disposition,
+        job.attempt = attempt.number,
+        disposition = Persistence::Unknown.label(),
         "job_persistence_finished"
     );
 }
@@ -600,7 +626,7 @@ mod tests {
             .connect_lazy("postgres://localhost/unused")
             .unwrap();
         let attempt = || Attempt {
-            id: ID,
+            job_id: ID,
             number: 1,
             generation: 1,
             attempt_deadline: Instant::now() + Duration::from_secs(1),
@@ -701,12 +727,12 @@ mod tests {
                 Ended::Cancelled,
             ] {
                 let span = attempt_span(&AttemptId {
-                    id,
+                    job_id: id,
                     kind: "sample",
                     number: 3,
                 });
                 let attempt = AttemptId {
-                    id,
+                    job_id: id,
                     kind: "sample",
                     number: 3,
                 };

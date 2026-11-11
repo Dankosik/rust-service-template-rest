@@ -70,12 +70,9 @@ pub struct DrainEnd {
 ///
 /// A failure to `BEGIN` a transaction, or to commit one, reports as
 /// [`Self::Statement`] just like a failed statement, so a caller cannot tell
-/// the three apart. The engine's only writing transaction is the retention
-/// batch's delete of expired completed rows, and that delete is idempotent: a
-/// repeat removes whatever rows are left. An unknown commit is therefore safe
-/// to retry, and it is not proof that the write was absent — the batch may
-/// have deleted its rows before the commit outcome was lost, which changes
-/// only how many rows the next pass finds.
+/// the three apart. An unknown commit does not prove the write absent: the
+/// retention batch may have deleted its rows before the commit outcome was
+/// lost.
 #[derive(Debug, thiserror::Error)]
 pub enum OperationError {
     #[error("acquire")]
@@ -105,10 +102,10 @@ impl OperationError {
 /// vocabulary of their own. A `Transaction(TxError)` variant that preserved
 /// `is_commit_unknown` the way the operator's error does would be a public
 /// change, and it would buy the engine nothing: its only writing transaction
-/// is the retention batch's idempotent delete, where a retry after an unknown
-/// commit ends in the same state as a retry after a failed statement. The cost
-/// is honest and recorded on [`OperationError`]: an unknown commit here does
-/// not prove the write absent.
+/// is the retention batch's delete of expired completed rows, which is
+/// idempotent. A retry after an unknown commit removes whatever rows are left,
+/// the same state a retry after a failed statement reaches; only the next
+/// pass's row count differs.
 impl From<infra_postgres::TxError> for OperationError {
     fn from(error: infra_postgres::TxError) -> Self {
         match error {
@@ -133,14 +130,7 @@ impl Engine {
     /// never published as current. [`Self::start`] adds no peer.
     #[must_use]
     pub fn new(pool: PgPool, registry: Kinds, max_workers: NonZeroU32) -> Self {
-        Self::build(
-            pool,
-            registry,
-            max_workers,
-            uuid::Uuid::new_v4(),
-            Arc::default(),
-            /* owns_process_duties */ true,
-        )
+        Self::build(pool, registry, max_workers, Role::Owner)
     }
 
     /// A second engine of the same worker process on the same pool, with its
@@ -157,20 +147,15 @@ impl Engine {
             self.shared.pool.clone(),
             registry,
             max_workers,
-            self.shared.worker_id,
-            Arc::clone(&self.shared.peers),
-            /* owns_process_duties */ false,
+            Role::Beside(&self.shared),
         )
     }
 
-    fn build(
-        pool: PgPool,
-        registry: Kinds,
-        max_workers: NonZeroU32,
-        worker_id: uuid::Uuid,
-        peers: Arc<Mutex<Vec<Peer>>>,
-        owns_process_duties: bool,
-    ) -> Self {
+    fn build(pool: PgPool, registry: Kinds, max_workers: NonZeroU32, role: Role<'_>) -> Self {
+        let (worker_id, peers, owns_process_duties) = match role {
+            Role::Owner => (uuid::Uuid::new_v4(), Arc::default(), true),
+            Role::Beside(owner) => (owner.worker_id, Arc::clone(&owner.peers), false),
+        };
         let slots = usize::try_from(max_workers.get()).unwrap_or(usize::MAX);
         let wake = Arc::new(Notify::new());
         register_peer(&registry, &peers, &wake);
@@ -194,7 +179,7 @@ impl Engine {
         }
     }
 
-    pub fn kinds(&self) -> impl Iterator<Item = &'static str> + '_ {
+    pub fn kinds(&self) -> impl Iterator<Item = &'static str> {
         self.shared.registry.names()
     }
 
@@ -238,6 +223,7 @@ impl Engine {
         }
         metrics::describe_counter!(
             OPERATION_FAILURES_METRIC,
+            metrics::Unit::Count,
             "Failed worker database operations"
         );
         tracing::info!(worker.id = %self.shared.worker_id, "jobs_engine_starting");
@@ -320,7 +306,7 @@ impl Started {
     /// Resolves when one of these happens, logged as `jobs_engine_task_stopped`
     /// with the task that caused it:
     ///
-    /// - an attempt supervisor ends without retiring, an unregistered kind included;
+    /// - an attempt supervisor ends without retiring;
     /// - the claim loop, or the retention, listener, or sampling task this
     ///   engine started, ends before its cancellation;
     /// - any of those tasks panics, even while cancellation is in progress;
@@ -337,6 +323,14 @@ impl fmt::Debug for Started {
             .field("in_flight", &self.in_flight())
             .finish_non_exhaustive()
     }
+}
+
+/// Whether an engine owns the process-wide duties or serves beside the engine
+/// that does, sharing its worker id and peers.
+#[derive(Clone, Copy)]
+enum Role<'a> {
+    Owner,
+    Beside(&'a Shared),
 }
 
 /// The engine's own tasks. Each runs until its token is cancelled.
@@ -368,7 +362,7 @@ fn spawn_guarded(
     token: CancellationToken,
     failure: CancellationToken,
 ) {
-    let guard = Guard {
+    let guard = TaskGuard {
         task: run.label(),
         token: token.clone(),
         failure: failure.clone(),
@@ -399,7 +393,7 @@ pub(crate) struct SupervisorGuard {
     failure: CancellationToken,
     /// The attempt's job, named in the record: the guard drops outside the
     /// attempt span, so the span's fields do not reach it.
-    id: crate::kind::JobId,
+    job_id: crate::kind::JobId,
     kind: &'static str,
     retired: bool,
 }
@@ -408,13 +402,13 @@ impl SupervisorGuard {
     pub(crate) fn new(
         stop: CancellationToken,
         failure: CancellationToken,
-        id: crate::kind::JobId,
+        job_id: crate::kind::JobId,
         kind: &'static str,
     ) -> Self {
         Self {
             stop,
             failure,
-            id,
+            job_id,
             kind,
             retired: false,
         }
@@ -430,7 +424,7 @@ impl Drop for SupervisorGuard {
         if std::thread::panicking() || !self.retired {
             tracing::error!(
                 task = "attempt",
-                job.id = %self.id,
+                job.id = %self.job_id,
                 job.kind = self.kind,
                 panicked = std::thread::panicking(),
                 "jobs_engine_task_stopped"
@@ -449,13 +443,13 @@ impl Drop for SupervisorGuard {
 /// order the rest stops in. A supervised attempt takes the opposite route
 /// through [`SupervisorGuard`], which also stops claiming: the claim it was
 /// admitted under can no longer be settled.
-struct Guard {
+struct TaskGuard {
     task: &'static str,
     token: CancellationToken,
     failure: CancellationToken,
 }
 
-impl Drop for Guard {
+impl Drop for TaskGuard {
     fn drop(&mut self) {
         if std::thread::panicking() || !self.token.is_cancelled() {
             tracing::error!(
@@ -812,7 +806,7 @@ mod tests {
         let token = CancellationToken::new();
         token.cancel();
         let failure = CancellationToken::new();
-        let guard = Guard {
+        let guard = TaskGuard {
             task: "fixture",
             token: token.clone(),
             failure: failure.clone(),
@@ -825,7 +819,7 @@ mod tests {
         assert!(failure.is_cancelled());
 
         let normal_failure = CancellationToken::new();
-        drop(Guard {
+        drop(TaskGuard {
             task: "normal",
             token,
             failure: normal_failure.clone(),
@@ -858,7 +852,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn supervisor_custody_survives_unpolled_drop_abort_and_missing_registration() {
+    async fn supervisor_custody_survives_unpolled_drop_and_abort() {
         let gauges = Gauges::default();
         let _local = metrics::set_default_local_recorder(&gauges);
         let pool = sqlx::postgres::PgPoolOptions::new()
@@ -877,19 +871,17 @@ mod tests {
         });
         let engine = Engine::new(pool.clone(), kinds.validate().unwrap(), NonZeroU32::MIN);
         let tracker = TaskTracker::new();
-        for case in ["unpolled", "abort", "missing", "expired"] {
+        let registered = engine.shared.registry.get("ordinary").unwrap();
+        for case in ["unpolled", "abort", "expired"] {
             let stop = CancellationToken::new();
             let failure = CancellationToken::new();
             let future = crate::attempt::supervise(
                 Arc::clone(&engine.shared),
                 crate::claim::Claimed {
+                    registered: Arc::clone(registered),
                     attempt: crate::attempt::AttemptId {
-                        id: crate::JobId(uuid::Uuid::nil()),
-                        kind: if case == "missing" {
-                            "unregistered"
-                        } else {
-                            "ordinary"
-                        },
+                        job_id: crate::JobId(uuid::Uuid::nil()),
+                        kind: "ordinary",
                         number: 1,
                     },
                     generation: 1,
