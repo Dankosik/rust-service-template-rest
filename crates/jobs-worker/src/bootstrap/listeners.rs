@@ -7,14 +7,11 @@ use service_config::Config;
 
 use super::{READINESS_PROGRESS, WorkerError};
 use crate::background::Background;
-use crate::shutdown::Resources;
+use crate::shutdown::{Listeners, Resources};
 
-pub(super) async fn bind_listeners(
-    config: &Config,
-    metrics: &Metrics,
-    background: &Background,
-    resources: &mut Resources,
-) -> Result<(), WorkerError> {
+/// One probe per dependency that admission opened.
+pub(super) fn readiness_probes(resources: &Resources) -> Vec<Box<dyn Probe>> {
+    #[allow(unused_mut, reason = "retained profiles add their probes")]
     let mut probes: Vec<Box<dyn Probe>> = Vec::new();
     // template:begin jobs:worker-bootstrap-listener-jobs-probe
     probes.extend(super::postgres::probe(resources));
@@ -22,9 +19,16 @@ pub(super) async fn bind_listeners(
     // template:begin messaging:worker-bootstrap-listener-messaging-probe
     probes.extend(super::messaging::probe(resources));
     // template:end messaging:worker-bootstrap-listener-messaging-probe
-    let readiness = resources
-        .readiness
-        .insert(Readiness::new(probes, refresh_policy(config)));
+    probes
+}
+
+pub(super) async fn bind_listeners(
+    config: &Config,
+    metrics: &Metrics,
+    readiness: &Readiness,
+    background: &Background,
+    resources: &mut Resources,
+) -> Result<(), WorkerError> {
     let options = server_options(config);
     let routes = infra_http::finalize_public(infra_http::router())?.with_state(readiness.reader());
     let app = infra_http::harden(routes, &harden_options(config));
@@ -32,7 +36,7 @@ pub(super) async fn bind_listeners(
         .listeners
         .health
         .insert(Server::bind(config.http.addr, app, options).await?);
-    watch_listener("health_listener", health, background);
+    watch_listener(Listeners::HEALTH, health, background);
     tracing::info!(addr = %health.local_addr(), "http listener bound");
     if let Some(addr) = config.observability.metrics.addr {
         // Liveness is served here as well, as in the service, so one probe
@@ -42,7 +46,7 @@ pub(super) async fn bind_listeners(
             .listeners
             .diagnostics
             .insert(Server::bind(addr, routes, options).await?);
-        watch_listener("diagnostics_listener", diagnostics, background);
+        watch_listener(Listeners::DIAGNOSTICS, diagnostics, background);
         tracing::info!(addr = %diagnostics.local_addr(), "diagnostics listener bound");
     }
     Ok(())
@@ -108,7 +112,7 @@ fn harden_options(config: &Config) -> HardenOptions {
     }
 }
 
-fn refresh_policy(config: &Config) -> RefreshPolicy {
+pub(super) fn refresh_policy(config: &Config) -> RefreshPolicy {
     RefreshPolicy {
         interval: config.health.refresh_interval,
         probe_budget: config.health.probe_budget,

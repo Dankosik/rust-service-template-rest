@@ -18,7 +18,10 @@ pub(crate) struct WorkerArgs {
 #[derive(clap::Subcommand)]
 pub(crate) enum OperatorCommand {
     /// Inspect one job without exposing its payload or stored errors.
-    Inspect { id: String },
+    Inspect {
+        /// The job id, as shown by `failed` or `unhandled`.
+        id: String,
+    },
     /// Scan a bounded page for retained failed jobs.
     Failed {
         #[command(flatten)]
@@ -40,17 +43,22 @@ pub(crate) enum OperatorCommand {
 
 #[derive(clap::Args)]
 pub(crate) struct PageArgs {
+    /// Cursor from the previous page's `next_cursor`.
     #[arg(long)]
     pub(crate) after: Option<String>,
+    /// Rows to scan per page.
     #[arg(long, default_value_t = 100)]
     pub(crate) limit: u16,
 }
 
 #[derive(clap::Args)]
 pub(crate) struct RecoveryArgs {
+    /// The job id, as shown by `inspect`.
     pub(crate) id: String,
+    /// The job kind, as shown by `inspect`.
     #[arg(long)]
     pub(crate) kind: String,
+    /// The failed job's version from its `inspect` receipt.
     #[arg(long)]
     pub(crate) version: String,
 }

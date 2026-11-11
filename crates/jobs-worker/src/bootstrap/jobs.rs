@@ -4,7 +4,7 @@ use futures_util::FutureExt;
 use infra_jobs::{Engine, KindError, Kinds, KindsBuilder};
 use service_config::Config;
 
-use super::{Ended, RetainedCapabilities, WorkerError, pending_end};
+use super::{Ended, WorkerError, pending_end};
 use crate::background::Background;
 use crate::shutdown::Resources;
 use crate::signals::Signals;
@@ -25,17 +25,13 @@ pub(super) fn kind_names(registry: Option<&Kinds>) -> String {
 
 pub(super) async fn build_engines(
     config: &Config,
-    capabilities: &mut RetainedCapabilities,
+    jobs: Option<Kinds>,
     resources: &Resources,
 ) -> Result<Vec<Engine>, WorkerError> {
     let mut engines = Vec::new();
-    if let Some(registry) = capabilities.jobs.take() {
+    if let Some(registry) = jobs {
         let engine = Engine::new(
-            resources
-                .pool
-                .as_ref()
-                .ok_or(WorkerError::PostgresDisabled)?
-                .clone(),
+            super::postgres::admitted_pool(resources)?,
             registry,
             config.jobs.max_workers,
         );

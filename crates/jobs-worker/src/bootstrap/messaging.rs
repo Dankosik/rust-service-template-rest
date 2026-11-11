@@ -38,7 +38,7 @@ pub(super) fn consumes_messages(
 
 pub(super) async fn connect_messaging(
     config: &Config,
-    messages: &mut Option<MessagingRegistry>,
+    messages: Option<MessagingRegistry>,
     cancel: &CancellationToken,
     resources: &mut Resources,
 ) -> Result<Option<Consumer>, WorkerError> {
@@ -63,7 +63,7 @@ pub(super) async fn connect_messaging(
     let messaging = startup.admit().await?;
     let messaging = resources.messaging.insert(messaging);
     resources.messaging_startup = None;
-    if let Some(registry) = messages.take() {
+    if let Some(registry) = messages {
         Ok(Some(messaging.consumer(registry).await?))
     } else {
         Ok(None)

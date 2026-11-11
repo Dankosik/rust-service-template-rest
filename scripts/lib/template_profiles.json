@@ -1330,7 +1330,7 @@
       {"path": "crates/jobs-worker/src/bootstrap/mod.rs", "ids": ["worker-bootstrap-messaging-module", "worker-bootstrap-messaging-errors", "worker-bootstrap-prepared-consumer", "worker-bootstrap-prepared-consumer-value", "worker-bootstrap-start-admitted-consumer", "worker-bootstrap-pending-consumer", "worker-bootstrap-messaging-connect", "worker-bootstrap-registrations-messaging", "worker-bootstrap-register-messaging", "worker-bootstrap-retain-messaging", "worker-bootstrap-registrations-messaging-value", "worker-bootstrap-wait-messaging-failure"]},
       {"path": "crates/jobs-worker/src/bootstrap/listeners.rs", "ids": ["worker-bootstrap-listener-messaging-probe"]},
       {"path": "crates/jobs-worker/src/lib.rs", "ids": ["worker-registration-messaging"]},
-      {"path": "crates/jobs-worker/src/shutdown.rs", "ids": ["worker-shutdown-drain-has-messaging", "worker-shutdown-messaging-imports", "worker-shutdown-resources-messaging", "worker-shutdown-stop-messaging", "worker-shutdown-drain-messaging", "worker-shutdown-finish-messaging", "worker-shutdown-close-messaging", "worker-shutdown-drop-consumer"]},
+      {"path": "crates/jobs-worker/src/shutdown.rs", "ids": ["worker-shutdown-drain-has-messaging", "worker-shutdown-messaging-imports", "worker-shutdown-resources-messaging", "worker-shutdown-stop-messaging", "worker-shutdown-drain-messaging", "worker-shutdown-finish-messaging", "worker-shutdown-close-messaging", "worker-shutdown-close-messaging-fn", "worker-shutdown-drop-consumer"]},
       {"path": "env/config/local.toml", "ids": ["local-config"]},
       {"path": "env/docker-compose.yml", "ids": ["compose-nats-service"]},
       {"path": "README.md", "ids": ["docs-readme-messaging-profile"]},

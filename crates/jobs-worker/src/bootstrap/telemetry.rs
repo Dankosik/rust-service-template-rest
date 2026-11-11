@@ -14,7 +14,7 @@ pub(super) fn install_observability(
     config: &Config,
     identity: &str,
     resources: &mut Resources,
-) -> Result<Metrics, WorkerError> {
+) -> Result<(Metrics, ExporterState), WorkerError> {
     let tracer_provider = resources
         .tracer_provider
         .insert(install_tracer_provider(&tracing_options(config, identity))?);
@@ -26,6 +26,7 @@ pub(super) fn install_observability(
         },
         tracer_provider: Some(tracer_provider),
     })?);
+    let exporter_state = tracer_provider.exporter_state.clone();
     let metrics = Metrics::install(
         &[
             infra_http::HISTOGRAMS,
@@ -39,13 +40,8 @@ pub(super) fn install_observability(
         ]
         .concat(),
     )?;
-    metrics.record_trace_exporter(
-        resources
-            .tracer_provider
-            .as_ref()
-            .map(|provider| &provider.exporter_state),
-    );
-    Ok(metrics)
+    metrics.record_trace_exporter(Some(&exporter_state));
+    Ok((metrics, exporter_state))
 }
 
 pub(super) fn spawn_metrics_tasks(metrics: &Metrics, background: &Background) {
