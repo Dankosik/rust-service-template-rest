@@ -41,6 +41,11 @@ impl<'a> BearerToken<'a> {
 /// ASCII spaces; tabs, leading/trailing whitespace, control bytes, non-ASCII
 /// values, and any grammar outside RFC 6750 are malformed.
 ///
+// template:begin service-auth:authn-bearer-serviceauth-twin
+/// `infra-serviceauth`'s verifier applies the same grammar and must change
+/// with it; it cannot depend on this crate, which `AUTHN=none` removes.
+///
+// template:end service-auth:authn-bearer-serviceauth-twin
 /// # Errors
 ///
 /// Returns the fixed failure class for a missing or malformed bearer envelope.
