@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use infra_postgres::observed;
+use metrics::Unit;
 use sqlx::postgres::PgConnection;
 use tokio::sync::{MutexGuard, Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::time::{Instant, MissedTickBehavior};
@@ -15,7 +16,7 @@ use crate::engine::{
     CANCEL_MARGIN, LEASE_RESERVE, Operation, OperationError, POLL_INTERVAL, Shared, backstop,
     observe_failure, observe_recovery,
 };
-use crate::kind::JobId;
+use crate::kind::{JobId, Registered};
 use crate::trace_context::Carrier;
 
 /// Claim request duration through its database acknowledgement. No labels.
@@ -30,8 +31,8 @@ pub(crate) const QUEUE_WAIT_BUCKETS: &[f64] = &[
     1800.0, 3600.0, 10_800.0, 21_600.0, 43_200.0, 86_400.0,
 ];
 
-#[derive(Debug)]
 pub(crate) struct Claimed {
+    pub(crate) registered: Arc<Registered>,
     pub(crate) attempt: AttemptId,
     /// The claim's fence: every outcome write matches it.
     pub(crate) generation: i64,
@@ -81,10 +82,12 @@ impl Drop for KindSlot {
 pub(crate) fn describe_metrics() {
     metrics::describe_histogram!(
         CLAIM_DURATION_METRIC,
+        Unit::Seconds,
         "Claim request duration through acknowledgement"
     );
     metrics::describe_histogram!(
         QUEUE_WAIT_METRIC,
+        Unit::Seconds,
         "Time from a job's current not-before to its acknowledged claim"
     );
 }
@@ -250,10 +253,10 @@ async fn send_claim(shared: &Shared, requested: i64) -> ClaimRound {
 /// `state = 'pending'` and `state = 'running'` prove the partial
 /// `background_jobs_pending` and `background_jobs_running` predicates, so each
 /// scan reads its kind's own index. A bind or a computed state would forfeit
-/// that proof and leave a sequential scan. The fenced `complete` write in
-/// `attempt.rs` wants its primary key instead, so it says the equivalent
-/// `claim_expires_at IS NOT NULL`, which the table's CHECK makes equal to
-/// `state = 'running'`.
+/// that proof and leave a sequential scan. The fenced
+/// [`complete_query`](crate::attempt::complete_query) write wants its primary
+/// key instead, so it says the equivalent `claim_expires_at IS NOT NULL`, which
+/// the table's CHECK makes equal to `state = 'running'`.
 #[expect(
     clippy::too_many_lines,
     reason = "one statement, and its binds beside it"
@@ -473,6 +476,7 @@ fn dispatch_known(
                 attempt::record_exhausted(&attempt, error_summary.as_deref());
             }
             Drawn::Running {
+                registered,
                 attempt,
                 generation,
                 payload,
@@ -483,26 +487,25 @@ fn dispatch_known(
                 let deadline = local_deadline(sent, lease_offset);
                 let Some(slot) = slots.split(1) else {
                     tracing::error!(
-                        job.id = %attempt.id,
+                        job.id = %attempt.job_id,
                         job.kind = attempt.kind,
                         "job_claim_exceeded_slots"
                     );
                     break;
                 };
-                let registered = shared.registry.get(attempt.kind);
                 let kind_slot = registered
-                    .and_then(|registered| registered.running.as_ref())
+                    .running
+                    .as_ref()
                     .and_then(|running| KindSlot::take(running, &shared.wake));
-                if let Some(registered) = registered {
-                    registered.metrics().queue_wait.record(queue_wait.max(0.0));
-                }
+                registered.metrics().queue_wait.record(queue_wait.max(0.0));
                 let guard = crate::engine::SupervisorGuard::new(
                     stop.clone(),
                     failure.clone(),
-                    attempt.id,
+                    attempt.job_id,
                     attempt.kind,
                 );
                 let claimed = Claimed {
+                    registered,
                     attempt,
                     generation,
                     payload: payload.into_bytes(),
@@ -532,6 +535,7 @@ fn local_deadline(sent: Instant, lease_offset: Duration) -> Instant {
 
 enum Drawn {
     Running {
+        registered: Arc<Registered>,
         attempt: AttemptId,
         generation: i64,
         payload: String,
@@ -565,7 +569,7 @@ impl ClaimRow {
             return Err(decode_error("unknown job kind"));
         };
         let attempt = AttemptId {
-            id: JobId(self.id),
+            job_id: JobId(self.id),
             kind: registered.name,
             number: u16::try_from(self.attempts)
                 .map_err(|_| decode_error("attempt does not fit"))?,
@@ -580,12 +584,12 @@ impl ClaimRow {
             return Err(decode_error("running claim has no payload"));
         };
         Ok(Drawn::Running {
+            lease_offset: lease_offset(registered.policy.timeout),
+            registered: Arc::clone(registered),
             attempt,
             generation: self.claim_generation,
             payload,
-            trace: Carrier::from_stored(self.trace_parent.as_deref(), self.trace_state.as_deref())
-                .unwrap_or_default(),
-            lease_offset: lease_offset(registered.policy.timeout),
+            trace: Carrier::from_stored(self.trace_parent, self.trace_state),
             queue_wait: self.queue_wait_seconds,
         })
     }

@@ -7,9 +7,10 @@ use infra_postgres::observed;
 use tokio::time::Instant;
 
 use super::outcome::{Unacknowledged, Written};
-use super::{AttemptSlots, COMPLETION_MEMBERSHIPS_METRIC, MetricMembership, expired, within};
+use super::{
+    AttemptSlots, COMPLETION_MEMBERSHIPS_METRIC, ClaimFence, MetricMembership, expired, within,
+};
 use crate::engine::{Operation, OperationError, Shared, backstop, observe_failure};
-use crate::kind::JobId;
 
 type CompletionReply = Result<Written, Unacknowledged>;
 
@@ -27,8 +28,7 @@ pub(crate) struct Completions {
 }
 
 struct QueuedCompletion {
-    id: JobId,
-    generation: i64,
+    fence: ClaimFence,
     deadline: Instant,
     // Fields drop in declaration order: the membership retires before reply
     // closure can wake a waiter that immediately registers another completion.
@@ -55,8 +55,7 @@ impl QueuedCompletion {
 /// Once taken by the writer, the batch owns retirement instead.
 struct CompletionRegistration<'a> {
     completions: &'a Completions,
-    id: JobId,
-    generation: i64,
+    fence: ClaimFence,
 }
 
 impl Drop for CompletionRegistration<'_> {
@@ -65,7 +64,7 @@ impl Drop for CompletionRegistration<'_> {
             let mut queued = self.completions.lock_queue();
             queued
                 .iter()
-                .position(|entry| entry.id == self.id && entry.generation == self.generation)
+                .position(|entry| entry.fence == self.fence)
                 .map(|index| queued.swap_remove(index))
         };
         drop(retired);
@@ -75,8 +74,7 @@ impl Drop for CompletionRegistration<'_> {
 impl Completions {
     fn register(
         &self,
-        id: JobId,
-        generation: i64,
+        fence: ClaimFence,
         deadline: Instant,
         slots: &Arc<AttemptSlots>,
     ) -> (
@@ -86,12 +84,10 @@ impl Completions {
         let (reply, response) = tokio::sync::oneshot::channel();
         let registration = CompletionRegistration {
             completions: self,
-            id,
-            generation,
+            fence,
         };
         self.lock_queue().push(QueuedCompletion {
-            id,
-            generation,
+            fence,
             deadline,
             membership: MetricMembership::new(COMPLETION_MEMBERSHIPS_METRIC),
             slots: Arc::clone(slots),
@@ -156,15 +152,13 @@ impl Drop for CompletionBatch {
 
 pub(super) async fn complete_batched(
     shared: &Shared,
-    id: JobId,
-    generation: i64,
+    fence: ClaimFence,
     supervisor_deadline: Instant,
     slots: &Arc<AttemptSlots>,
 ) -> CompletionReply {
-    let (_registration, response) =
-        shared
-            .completions
-            .register(id, generation, supervisor_deadline, slots);
+    let (_registration, response) = shared
+        .completions
+        .register(fence, supervisor_deadline, slots);
     let writer = shared.completions.writer.lock().await;
     let batch = CompletionBatch::new(std::mem::take(&mut *shared.completions.lock_queue()));
     write_batch(shared, batch).await;
@@ -183,7 +177,7 @@ async fn write_batch(shared: &Shared, mut batch: CompletionBatch) {
         let (ids, generations): (Vec<_>, Vec<_>) = batch
             .queued
             .iter()
-            .map(|queued| (queued.id.0, queued.generation))
+            .map(|queued| (queued.fence.job_id.0, queued.fence.generation))
             .unzip();
         within(
             shared,
@@ -196,7 +190,7 @@ async fn write_batch(shared: &Shared, mut batch: CompletionBatch) {
                     return Err(OperationError::TimedOut);
                 }
                 // COMPLETE for every attempt queued while the previous batch was in
-                // flight, under the fence `outcome::complete` explains. Returns the 1-based
+                // flight, under the fence `complete_query` explains. Returns the 1-based
                 // position of each applied completion.
                 observed(
                     "complete jobs",
@@ -259,6 +253,7 @@ mod tests {
     use super::*;
     use crate::attempt::{OWNED_ATTEMPTS_METRIC, describe_metrics};
     use crate::gauge_recorder::Gauges;
+    use crate::kind::JobId;
 
     fn admitted(slots: &Arc<tokio::sync::Semaphore>) -> Arc<AttemptSlots> {
         Arc::new(AttemptSlots {
@@ -268,7 +263,12 @@ mod tests {
         })
     }
 
-    const ID: JobId = JobId(uuid::Uuid::nil());
+    const fn fence(generation: i64) -> ClaimFence {
+        ClaimFence {
+            job_id: JobId(uuid::Uuid::nil()),
+            generation,
+        }
+    }
 
     #[test]
     fn cancelled_queued_registration_retires_only_its_claim_generation() {
@@ -280,9 +280,9 @@ mod tests {
             let second = admitted(&capacity);
             let deadline = Instant::now() + Duration::from_secs(10);
             let (first_registration, mut first_reply) =
-                completions.register(ID, 1, deadline, &first);
+                completions.register(fence(1), deadline, &first);
             let (second_registration, mut second_reply) =
-                completions.register(ID, 2, deadline, &second);
+                completions.register(fence(2), deadline, &second);
             drop(first);
             drop(second);
             assert_eq!(capacity.available_permits(), 0);
@@ -347,8 +347,7 @@ mod tests {
                     for generation in 1..=4 {
                         let slots = admitted(&capacity);
                         let (registration, mut response) = completions.register(
-                            ID,
-                            generation,
+                            fence(generation),
                             Instant::now() + Duration::from_secs(10),
                             &slots,
                         );
@@ -375,7 +374,7 @@ mod tests {
                     assert_eq!(gauges.get(COMPLETION_MEMBERSHIPS_METRIC, None), 4.0);
 
                     if prune {
-                        batch.prune(|entry| entry.generation == 1);
+                        batch.prune(|entry| entry.fence.generation == 1);
                         assert!(matches!(
                             responses[0].try_recv(),
                             Err(tokio::sync::oneshot::error::TryRecvError::Empty)

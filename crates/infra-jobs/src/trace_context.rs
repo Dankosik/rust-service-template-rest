@@ -57,32 +57,29 @@ pub(crate) struct Carrier {
 }
 
 impl Carrier {
-    /// The stored pair without a refused `tracestate`, or `None` when
-    /// `traceparent` is refused.
-    pub(crate) fn from_stored(
-        trace_parent: Option<&str>,
-        trace_state: Option<&str>,
-    ) -> Option<Self> {
-        if trace_parent.is_some_and(|value| !is_allowed(value, TRACEPARENT_MAX_BYTES)) {
-            return None;
+    /// The stored pair without a refused `tracestate`, or two absent fields
+    /// when `traceparent` is refused.
+    pub(crate) fn from_stored(trace_parent: Option<String>, trace_state: Option<String>) -> Self {
+        if trace_parent
+            .as_deref()
+            .is_some_and(|value| !is_allowed(value, TRACEPARENT_MAX_BYTES))
+        {
+            return Self::default();
         }
         let trace_state = trace_state.filter(|value| {
             !value.is_empty()
                 && is_allowed(value, TRACESTATE_MAX_BYTES)
                 && TraceState::from_str(value).is_ok()
         });
-        Some(Self {
-            trace_parent: trace_parent.map(str::to_owned),
-            trace_state: trace_state.map(str::to_owned),
-        })
+        Self {
+            trace_parent,
+            trace_state,
+        }
     }
 
     /// The injector's pair with every present field allowed and bounded.
-    ///
-    /// A refused `traceparent` is stored as two absent fields.
     fn validated(self) -> Self {
-        let trace_state = self.trace_state.as_deref().map(truncated_state);
-        Self::from_stored(self.trace_parent.as_deref(), trace_state.as_deref()).unwrap_or_default()
+        Self::from_stored(self.trace_parent, self.trace_state.map(truncated_state))
     }
 }
 
@@ -118,9 +115,9 @@ impl Extractor for Carrier {
 
 /// `tracestate` within [`TRACESTATE_MAX_BYTES`]: members longer than
 /// [`TRACESTATE_LONG_MEMBER_BYTES`] go first, then members from the end.
-fn truncated_state(value: &str) -> String {
+fn truncated_state(value: String) -> String {
     if value.len() <= TRACESTATE_MAX_BYTES {
-        return value.to_owned();
+        return value;
     }
     let mut members: Vec<&str> = value
         .split(',')
@@ -158,7 +155,7 @@ mod tests {
 
     #[test]
     fn accepts_legacy_parent_only_context() {
-        let carrier = Carrier::from_stored(Some(PARENT), None).expect("legacy parent is allowed");
+        let carrier = Carrier::from_stored(Some(PARENT.to_owned()), None);
 
         assert_eq!(carrier.get(TRACEPARENT), Some(PARENT));
         assert_eq!(carrier.get(TRACESTATE), None);
@@ -167,7 +164,7 @@ mod tests {
 
     #[test]
     fn empty_tracestate_is_absent() {
-        let carrier = Carrier::from_stored(Some(PARENT), Some("")).expect("empty state is absent");
+        let carrier = Carrier::from_stored(Some(PARENT.to_owned()), Some(String::new()));
 
         assert_eq!(carrier.get(TRACESTATE), None);
     }
@@ -179,19 +176,22 @@ mod tests {
             "vendor=a\n".to_owned(),
             format!("vendor={}", "a".repeat(TRACESTATE_MAX_BYTES - 6)),
         ] {
-            let carrier = Carrier::from_stored(Some(PARENT), Some(&state)).expect("parent kept");
+            let carrier = Carrier::from_stored(Some(PARENT.to_owned()), Some(state));
             assert_eq!(carrier.get(TRACEPARENT), Some(PARENT));
             assert_eq!(carrier.get(TRACESTATE), None);
         }
     }
 
     #[test]
-    fn rejects_non_ascii_control_and_overbound_parents() {
-        assert!(Carrier::from_stored(Some("parent\n"), Some("vendor=a")).is_none());
-        assert!(Carrier::from_stored(Some("parenté"), None).is_none());
-        assert!(
-            Carrier::from_stored(Some(&"a".repeat(TRACEPARENT_MAX_BYTES + 1)), None,).is_none()
-        );
+    fn a_refused_parent_discards_the_pair() {
+        for (parent, state) in [
+            ("parent\n".to_owned(), Some("vendor=a".to_owned())),
+            ("parenté".to_owned(), None),
+            ("a".repeat(TRACEPARENT_MAX_BYTES + 1), None),
+        ] {
+            let carrier = Carrier::from_stored(Some(parent), state);
+            assert_eq!(carrier.keys(), Vec::<&str>::new());
+        }
     }
 
     #[test]

@@ -3,9 +3,9 @@
 use infra_postgres::observed;
 use sqlx::postgres::PgConnection;
 
-use super::AttemptId;
+use super::{AttemptId, ClaimFence, Persistence};
 use crate::engine::{Operation, OperationError, Shared, backstop, observe_failure};
-use crate::kind::{Disposition, JobError, JobId, MAX_ERROR_SUMMARY_BYTES, Policy};
+use crate::kind::{Disposition, JobError, MAX_ERROR_SUMMARY_BYTES, Policy};
 use crate::state::FailureReason;
 
 pub(super) enum Transition {
@@ -80,11 +80,10 @@ impl Written {
         }
     }
 
-    /// The acknowledgement's `jobs_persistence_total` disposition label.
-    pub(super) const fn label(self) -> &'static str {
+    pub(super) const fn persistence(self) -> Persistence {
         match self {
-            Self::Applied => "applied",
-            Self::Unchanged => "unchanged",
+            Self::Applied => Persistence::Applied,
+            Self::Unchanged => Persistence::Unchanged,
         }
     }
 }
@@ -127,8 +126,7 @@ pub(super) fn write_of(transition: &Transition) -> Option<Write<'_>> {
 
 pub(super) async fn send_outcome(
     shared: &Shared,
-    id: JobId,
-    generation: i64,
+    fence: ClaimFence,
     write: Write<'_>,
     operation: Operation,
 ) -> Result<Written, Unacknowledged> {
@@ -137,7 +135,7 @@ pub(super) async fn send_outcome(
         let mut connection = infra_postgres::acquire(&shared.pool, "record job outcome")
             .await
             .map_err(OperationError::Acquire)?;
-        execute(&mut connection, id, generation, write)
+        execute(&mut connection, fence, write)
             .await
             .map_err(OperationError::from)
     }))
@@ -152,11 +150,11 @@ pub(super) async fn send_outcome(
 /// write is [`complete_batched`](super::completion::complete_batched).
 async fn execute(
     connection: &mut PgConnection,
-    id: JobId,
-    generation: i64,
+    fence: ClaimFence,
     write: Write<'_>,
 ) -> Result<u64, sqlx::Error> {
-    let id = id.0;
+    let ClaimFence { job_id, generation } = fence;
+    let id = job_id.0;
     let (summary, query) = match write {
         Write::Retry {
             summary,
@@ -229,7 +227,7 @@ async fn execute(
         .rows_affected())
 }
 
-/// COMPLETE for one fenced claim.
+/// COMPLETE for one fenced claim, for the caller to execute.
 ///
 /// Every outcome write fences on `claim_expires_at IS NOT NULL`, which the
 /// table's CHECK makes equivalent to `state = 'running'`. A literal
@@ -237,16 +235,15 @@ async fn execute(
 /// and after ANALYZE saw few running rows the planner scans that whole index
 /// for the id, dead entries of every job claimed since the last VACUUM
 /// included. This predicate leaves the primary key as the only access path.
-pub(crate) fn complete(
-    id: uuid::Uuid,
-    generation: i64,
+pub(crate) fn complete_query(
+    fence: ClaimFence,
 ) -> sqlx::query::Query<'static, sqlx::Postgres, sqlx::postgres::PgArguments> {
     sqlx::query!(
         "UPDATE background_jobs \
          SET state = 'completed', finished_at = statement_timestamp(), claim_expires_at = NULL \
          WHERE id = $1 AND claim_generation = $2 AND claim_expires_at IS NOT NULL",
-        id,
-        generation,
+        fence.job_id.0,
+        fence.generation,
     )
 }
 
@@ -385,12 +382,13 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use crate::kind::JobId;
 
     const ID: JobId = JobId(uuid::Uuid::nil());
 
     fn outcome(ended: Ended, number: u16) -> Transition {
         let attempt = AttemptId {
-            id: ID,
+            job_id: ID,
             kind: "sample",
             number,
         };
