@@ -223,8 +223,8 @@ impl Endpoint {
     ///
     /// # Errors
     ///
-    /// Returns [`EndpointError::InvalidDestination`] when the destination cannot
-    /// be represented as an HTTP request URI.
+    /// Returns [`EndpointError::InvalidDestination`] when the destination is not
+    /// `http` or `https`, has no host, or carries credentials or a fragment.
     #[cfg(feature = "test-support")]
     pub fn with_client(
         destination: Url,
