@@ -48,8 +48,8 @@ use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
 use tracing_opentelemetry_instrumentation_sdk::{otel_trace_span, set_parent_or_fallback};
 
+use crate::probes::is_health_probe_route;
 use crate::problem::{Problem, body_too_large};
-use crate::router::is_health_probe_route;
 
 /// The response-head duration, labelled by `http_request_method`,
 /// `http_route` (the matched route template or `<unmatched>`), and

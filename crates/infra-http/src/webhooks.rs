@@ -14,13 +14,13 @@ use axum::response::{IntoResponse, Response};
 use http_body_util::{BodyExt, Limited};
 use infra_webhooks::inbound::{ReceiptOutcome, ReceiveError, Receiver};
 use infra_webhooks::protocol::{MAX_BODY_BYTES, MAX_MESSAGE_ID_BYTES};
-use utoipa::OpenApi;
+use utoipa::{IntoResponses, OpenApi, ToResponse};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
+use crate::context::RequestDeadline;
 use crate::extract::Path;
-use crate::harden::RequestDeadline;
-use crate::problem::responses::WebhookProblemResponses;
+use crate::problem::responses::{InternalServerError, ProblemComponents, RequestEntityTooLarge};
 use crate::problem::{
     Code, Problem, body_too_large, caused_by_length_limit, sanitized_internal_error,
 };
@@ -69,6 +69,48 @@ impl WebhookState {
     }
 }
 
+/// webhook endpoint is unknown
+#[derive(Debug, ToResponse)]
+#[response(content_type = "application/problem+json")]
+pub struct NotFound(pub Problem);
+
+/// webhook body, message identity, or signature evidence is unacceptable
+#[derive(Debug, ToResponse)]
+#[response(content_type = "application/problem+json")]
+pub struct WebhookRejected(pub Problem);
+
+/// durable webhook receipt storage is unavailable
+#[derive(Debug, ToResponse)]
+#[response(content_type = "application/problem+json")]
+pub struct ServiceUnavailable(pub Problem);
+
+/// The non-success webhook admission outcomes.  The route itself owns
+/// the signature requirement; OpenAPI's empty security array means only
+/// that bearer authentication is not the operation's authentication.
+#[derive(Debug, IntoResponses)]
+pub enum WebhookProblemResponses {
+    /// 400: the webhook was rejected.
+    #[response(status = 400)]
+    Rejected(#[ref_response] WebhookRejected),
+    /// 404: no such webhook endpoint.
+    #[response(status = 404)]
+    NotFound(#[ref_response] NotFound),
+    /// 413: the body exceeds the size limit.
+    #[response(status = 413)]
+    RequestEntityTooLarge(#[ref_response] RequestEntityTooLarge),
+    /// 500: unexpected internal failure.
+    #[response(status = 500)]
+    InternalServerError(#[ref_response] InternalServerError),
+    /// 503: durable receipt storage is unavailable.
+    #[response(status = 503)]
+    Unavailable(#[ref_response] ServiceUnavailable),
+}
+
+/// The webhook response family's components, registered by [`router`].
+#[derive(OpenApi)]
+#[openapi(components(responses(NotFound, WebhookRejected, ServiceUnavailable)))]
+struct WebhookComponents;
+
 /// The public webhook route with its annotated contract. The state is any
 /// type that hands out a [`WebhookState`]: the composition root keeps the
 /// receiver in its application state, and a route mounted without one does
@@ -84,8 +126,9 @@ where
         metrics::Unit::Count,
         "Inbound webhook deliveries by admission outcome."
     );
-    OpenApiRouter::with_openapi(crate::problem::responses::ProblemComponents::openapi())
-        .routes(routes!(receive))
+    let mut document = ProblemComponents::openapi();
+    document.merge(WebhookComponents::openapi());
+    OpenApiRouter::with_openapi(document).routes(routes!(receive))
 }
 
 /// Verify and atomically retain one inbound Standard Webhooks delivery.

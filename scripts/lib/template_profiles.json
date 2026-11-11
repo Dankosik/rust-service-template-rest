@@ -318,7 +318,7 @@
       {"path": "crates/infra-http/Cargo.toml", "ids": ["http-authn-dependency"]},
       {"path": "crates/infra-http/src/lib.rs", "ids": ["infra-http-authn-module", "infra-http-authn-exports"]},
       {"path": "crates/infra-http/src/contract.rs", "ids": ["http-contract-protected-scopes", "http-contract-protected-value"]},
-      {"path": "crates/infra-http/src/problem.rs", "ids": ["http-authentication-code-meta", "http-authentication-problem-responses", "http-authentication-problem-components"]},
+      {"path": "crates/infra-http/src/problem.rs", "ids": ["http-authentication-code-meta", "http-authentication-problem-components"]},
       {"path": "crates/service-failure/src/lib.rs", "ids": ["http-authentication-codes", "insufficient-scope-detail"]},
       {"path": "crates/infra-grpc/src/status.rs", "ids": ["grpc-authentication-status"]},
       {"path": "crates/service/Cargo.toml", "ids": ["service-authn-dependency"]},
@@ -1100,14 +1100,8 @@
   "request-budget": {
     "remove_when_unselected": [],
     "markers": [
-      {"path": "crates/infra-http/src/context.rs", "ids": ["http-request-deadline-projection"]},
+      {"path": "crates/infra-http/src/context.rs", "ids": ["http-request-deadline", "http-request-deadline-projection"]},
       {"path": "docs/operation-budgets.md", "ids": ["docs-operation-request-deadline"]},
-      {
-        "path": "crates/infra-http/src/harden.rs",
-        "ids": [
-          "http-request-deadline"
-        ]
-      },
       {
         "path": "crates/infra-http/src/harden/tests.rs",
         "ids": [
@@ -1675,9 +1669,7 @@
       {
         "path": "crates/infra-http/src/problem.rs",
         "ids": [
-          "http-webhook-code-meta",
-          "http-webhook-problem-responses",
-          "http-webhook-problem-components"
+          "http-webhook-code-meta"
         ]
       },
       {"path": "crates/service-failure/src/lib.rs", "ids": ["http-webhook-codes"]},

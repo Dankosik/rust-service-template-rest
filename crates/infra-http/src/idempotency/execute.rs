@@ -15,7 +15,7 @@ use tokio::time::Instant;
 
 use super::Tx;
 use super::stored::{self, Stored};
-use crate::harden::RequestDeadline;
+use crate::context::RequestDeadline;
 use crate::problem::{Code, Problem, sanitized_internal_error};
 
 /// Idempotent request outcomes at the HTTP idempotency boundary.
