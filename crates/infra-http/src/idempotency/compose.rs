@@ -20,16 +20,14 @@ use http_body_util::{BodyExt, Collected, Full};
 use infra_idempotency_store::Store;
 use utoipa::OpenApi as _;
 
+use super::caused_by_length_limit;
 use super::declaration::{self, CompositionError};
 use super::execute::{Attempt, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Outcome, Provenance};
 use super::identity::{self, KEY_GRAMMAR, MAX_KEY_BYTES};
 use super::openapi::{IdempotencyComponents, KEY_HEADER, REPLAYED_HEADER, REPLAYED_VALUE};
 use crate::authn::VerifiedPrincipal;
 use crate::context::RequestDeadline;
-use crate::problem::{
-    Code, Problem, body_too_large, body_unreadable, caused_by_length_limit,
-    sanitized_internal_error,
-};
+use crate::problem::{Code, Problem, body_too_large, body_unreadable, sanitized_internal_error};
 use utoipa_axum::router::UtoipaMethodRouter;
 
 const INVALID_KEY_DETAIL: &str = "Idempotency-Key is missing or invalid";

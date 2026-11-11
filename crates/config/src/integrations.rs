@@ -389,23 +389,10 @@ fn is_scope_token(scope: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn whitespace_only_private_key_is_refused() {
-        let config: OAuthConfig = toml::from_str(
-            "token_url = \"https://identity.example/token\"\n\
-             client_id = \"billing-service\"\n\
-             private_key = \"   \"\n\
-             key_id = \"key-1\"\n\
-             algorithm = \"ES256\"\n\
-             assertion_audience = \"https://identity.example\"\n",
-        )
-        .unwrap();
-        let err = config.validate("integrations.billing.oauth").unwrap_err();
-        assert_eq!(err.key, "integrations.billing.oauth.private_key");
-        assert_eq!(err.message, "cannot be empty");
-    }
-}
+mod tests;
 // template:end outbound-auth:config-integration-oauth-validation
+
+// template:begin grpc:config-integration-grpc-tests
+#[cfg(test)]
+mod grpc_tests;
+// template:end grpc:config-integration-grpc-tests

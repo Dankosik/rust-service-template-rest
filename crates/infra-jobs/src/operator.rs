@@ -19,7 +19,7 @@ pub use crate::state::{FailureReason, JobState};
 /// commit included, fits the same bound.
 pub const OPERATION_TIMEOUT: Duration = crate::engine::OPERATION_BACKSTOP;
 /// The bound on [`check_startup`], acquire and the session query included.
-pub const STARTUP_TIMEOUT: Duration = crate::maintenance::STARTUP_CHECK_BUDGET;
+pub const STARTUP_TIMEOUT: Duration = crate::session::STARTUP_CHECK_BUDGET;
 const MAX_PAGE_LIMIT: u16 = 500;
 const MAX_HANDLED_KINDS: usize = 1024;
 /// Every handled kind at its longest, separated by commas.
@@ -348,7 +348,7 @@ impl fmt::Debug for OperatorError {
 /// # Errors
 /// Refuses an unavailable, read-only, or incompatible session.
 pub async fn check_startup(pool: &PgPool) -> Result<(), StartupError> {
-    crate::maintenance::check_startup(pool).await
+    crate::session::check_startup(pool).await
 }
 
 struct SnapshotRow {
@@ -392,7 +392,7 @@ impl TryFrom<SnapshotRow> for JobSnapshot {
 
 /// Bound the caller's transaction with [`STATEMENT_TIMEOUT`].
 async fn apply_statement_timeout(tx: &mut Tx<'_>) -> Result<(), OperatorError> {
-    Ok(crate::maintenance::set_statement_timeout(tx, STATEMENT_TIMEOUT).await?)
+    Ok(crate::session::set_statement_timeout(tx, STATEMENT_TIMEOUT).await?)
 }
 
 /// The inspection projection, one row per job, followed by `$tail`: the

@@ -20,3 +20,13 @@ pub use compose::{Activation, Composer};
 pub use declaration::CompositionError;
 pub use execute::{HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Idempotency};
 pub use infra_postgres::Tx;
+
+/// Whether a body read failed at a length limit. axum boxes the transport
+/// limit's error into [`axum::Error`] when a request has no `Content-Length`,
+/// so the limit can sit anywhere in the source chain. The inbound-webhooks
+/// and http-idempotency profiles each keep a copy: a shared one in
+/// `problem.rs` is dead code in a projection that drops both.
+fn caused_by_length_limit(error: &(dyn std::error::Error + 'static)) -> bool {
+    std::iter::successors(Some(error), |&error| error.source())
+        .any(<dyn std::error::Error>::is::<http_body_util::LengthLimitError>)
+}
