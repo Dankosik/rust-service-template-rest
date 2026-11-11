@@ -478,12 +478,15 @@ OpenTelemetry environment stays a supported platform fallback:
   reads `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, then `OTEL_EXPORTER_OTLP_ENDPOINT`
   as the collector root. When neither holds a non-blank value the exporter
   stays disabled: spans still get trace ids for log correlation but nothing
-  is exported. A blank variable is vacant because the SDK would otherwise
-  fall back to `localhost:4318`.
-- When the typed endpoint selects the destination, an occupied
-  `OTEL_EXPORTER_OTLP_HEADERS` or `OTEL_EXPORTER_OTLP_TRACES_HEADERS` fails
-  startup: the SDK merges them over the typed headers, so one collector's
-  credential would reach another. Configure the credential through
+  is exported. A blank variable is vacant: the SDK would fall back to
+  `localhost:4318` for an empty one and fail to parse a blank one, so a
+  blank traces variable beside a general root gets that root's
+  `/v1/traces`.
+- When the typed endpoint selects the destination, an occupied header
+  variable that the SDK reads fails startup: the SDK merges it over the
+  typed headers, so one collector's credential would reach another. The SDK
+  reads `OTEL_EXPORTER_OTLP_TRACES_HEADERS` whenever it is set, even empty,
+  and `OTEL_EXPORTER_OTLP_HEADERS` only otherwise. Configure the credential through
   `APP__OBSERVABILITY__OTEL__EXPORTER__OTLP_HEADERS`; a malformed
   `name=value` entry there fails startup instead of being dropped.
 - The OTLP/HTTP exporter verifies the collector with the platform trust
@@ -505,8 +508,8 @@ OpenTelemetry environment stays a supported platform fallback:
   and resumable sessions require their own retirement policy; removal of a
   trusted certificate alone does not revoke them.
 - `OTEL_EXPORTER_OTLP_COMPRESSION` and `OTEL_EXPORTER_OTLP_TRACES_COMPRESSION`
-  select `gzip`; the default is uncompressed. Any other value fails the
-  exporter build and leaves the exporter `degraded`.
+  select `gzip` or `none`; the default is uncompressed. Any other value
+  fails the exporter build and leaves the exporter `degraded`.
 - When the platform supplies the endpoint, it also owns the matching standard
   credentials, trust material, and exporter tuning.
 - The sampler is always typed (`observability.otel.traces_sampler` and
@@ -523,7 +526,9 @@ construction, not receiver contact or delivery health.
 
 `otel_sdk_exporter_span_exported_total` counts spans in batches whose SDK exporter
 returned success or failure; failures have finite `error_type` values
-`timeout`, `already_shutdown`, or `internal_failure`. A successful SDK return
+`timeout`, `already_shutdown`, or `internal_failure`. The OTLP exporter and the
+provider report their own timeouts as internal failures, so a failure that took
+the whole export timeout or shutdown budget counts as `timeout`. A successful SDK return
 proves neither acceptance of every span nor parsing, persistence or queryability.
 The stock serial batch processor keeps the SDK's batch size of 512 and
 5-second scheduled delay, with a queue of 16384 spans instead of the SDK's 2048;

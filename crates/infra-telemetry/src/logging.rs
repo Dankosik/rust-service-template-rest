@@ -4,7 +4,7 @@
 //! (`EnvFilter` grammar), a JSON or text formatting layer, and, when a tracer provider
 //! exists, the OpenTelemetry layer that gives every span an OpenTelemetry context so
 //! JSON records carry `trace_id` and `span_id`. `log` records are bridged by
-//! `tracing-subscriber`'s `tracing-log` feature during `try_init`.
+//! `tracing-log`'s `LogTracer`, installed before the subscriber.
 //!
 //! The directive chooses the records. Spans at INFO and above exist under
 //! every directive, so a quieter `log.level` neither stops trace export nor
@@ -20,10 +20,9 @@ use crate::traces::TracerProviderHandle;
 use tracing::level_filters::LevelFilter;
 use tracing::subscriber::Interest;
 use tracing::{Event, Level, Metadata, Subscriber, span};
-use tracing_log::NormalizeEvent as _;
+use tracing_log::{AsLog as _, NormalizeEvent as _};
 use tracing_subscriber::filter::Targets;
 use tracing_subscriber::layer::{Context, SubscriberExt};
-use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer, Registry};
 
 /// Output format for the process logger, distinct from the configuration
@@ -55,6 +54,8 @@ pub enum LoggingError {
     },
     #[error("a global tracing subscriber is already installed")]
     AlreadyInstalled,
+    #[error("a global `log` logger is already installed")]
+    LogLoggerInstalled,
     #[error("the local logging worker could not start")]
     WorkerStart(#[source] std::io::Error),
 }
@@ -64,15 +65,19 @@ pub enum LoggingError {
 /// # Errors
 ///
 /// Returns [`LoggingError::Directive`] for an unparsable directive,
-/// [`LoggingError::WorkerStart`] when the writer thread cannot start, and
-/// [`LoggingError::AlreadyInstalled`] for a second installation in the same
-/// process.
+/// [`LoggingError::WorkerStart`] when the writer thread cannot start,
+/// [`LoggingError::AlreadyInstalled`] when a global subscriber exists, and
+/// [`LoggingError::LogLoggerInstalled`] when a `log` logger exists; on an
+/// error nothing is installed.
 #[expect(
     clippy::disallowed_methods,
     reason = "startup transfers the stdout handle to the owned writer thread; callbacks perform no sink IO"
 )]
 pub fn install_subscriber(options: &LoggingOptions<'_>) -> Result<LoggerGuard, LoggingError> {
     let (targets, filter) = directive_filters(options.level)?;
+    if tracing::dispatcher::has_been_set() {
+        return Err(LoggingError::AlreadyInstalled);
+    }
     // Source location, thread, and busy/idle timings would be added to every
     // span, sampled or not, at about 2% of a small request's instructions;
     // no dashboard or runbook reads them.
@@ -88,15 +93,24 @@ pub fn install_subscriber(options: &LoggingOptions<'_>) -> Result<LoggerGuard, L
     let registry = Registry::default();
     #[cfg(feature = "hotpath")]
     let registry = registry.with(hotpath::sqlx_tracing_layer());
-    registry
+    let subscriber = registry
         .with(targets)
         .with(filter)
         // template:begin object-storage:telemetry-sdk-log-cap-apply
         .with(sdk_log_cap(options.level))
         // template:end object-storage:telemetry-sdk-log-cap-apply
         .with(otel)
-        .with(format)
-        .try_init()
+        .with(format);
+    // `try_init` sets the subscriber before the `log` bridge, so a taken
+    // `log` slot would leave a subscriber whose writer this early return
+    // closes. The bridge goes first; until the subscriber follows, bridged
+    // records reach no subscriber, as before any installation.
+    let max_level = subscriber.max_level_hint().unwrap_or(LevelFilter::TRACE);
+    tracing_log::LogTracer::builder()
+        .with_max_level(max_level.as_log())
+        .init()
+        .map_err(|_| LoggingError::LogLoggerInstalled)?;
+    tracing::subscriber::set_global_default(subscriber)
         .map_err(|_| LoggingError::AlreadyInstalled)?;
     Ok(guard)
 }
@@ -247,10 +261,15 @@ impl<S: Subscriber, F: Layer<S>> Layer<S> for WithInfoSpans<F> {
 /// `EnvFilter` takes a shared lock on every span creation, enter, exit,
 /// record, and close to track span directives (`target[span{field}]`);
 /// `Targets` decides once per callsite. `Targets` reads an empty segment
-/// (`info,`) as `error` where `EnvFilter` skips it, so such a directive stays
-/// with `EnvFilter` too.
+/// (`info,`) as `error` where `EnvFilter` skips it, and an empty level
+/// (`app=`) as `error` where `EnvFilter` reads `trace`, so such a directive
+/// stays with `EnvFilter` too.
 fn static_targets(directive: &str) -> Option<Targets> {
-    if directive.contains('[') || directive.split(',').any(str::is_empty) {
+    if directive.contains('[')
+        || directive
+            .split(',')
+            .any(|segment| segment.is_empty() || segment.ends_with('='))
+    {
         return None;
     }
     directive.parse().ok()
@@ -660,7 +679,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn only_directives_without_span_filters_or_empty_segments_become_targets() {
+    fn only_directives_without_span_filters_or_empty_parts_become_targets() {
         for directive in [
             "info",
             "info,hyper=warn",
@@ -677,6 +696,8 @@ pub(crate) mod tests {
             "info,,hyper=warn",
             ",info",
             "info,[request]=debug",
+            "app=",
+            "info,app=",
         ] {
             assert!(static_targets(directive).is_none(), "{directive}");
         }

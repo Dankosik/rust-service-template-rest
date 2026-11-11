@@ -42,12 +42,13 @@ tokio = { workspace = true, features = ["rt", "time", "macros"] }
 tokio-util = { workspace = true }
 tokio-metrics = { workspace = true, features = ["rt", "metrics-rs-integration"] }
 tracing = { workspace = true, features = ["std", "attributes"] }
-tracing-log = { workspace = true, features = ["std"] }
+tracing-log = { workspace = true, features = ["std", "log-tracer"] }
 tracing-opentelemetry = { workspace = true, features = ["tracing-log"] }
 tracing-subscriber = { workspace = true, features = ["std", "fmt", "env-filter", "registry", "tracing-log", "ansi"] }
 
 [dev-dependencies]
 futures-util = { workspace = true, features = ["std"] }
+log = { workspace = true }
 tempfile = { workspace = true }
 # template:begin grpc:telemetry-tls-test-dependencies
 rcgen = { workspace = true, features = ["pem", "crypto", "aws_lc_rs"] }

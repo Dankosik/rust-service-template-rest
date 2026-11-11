@@ -152,7 +152,7 @@ fn a_finished_span_reaches_the_collector_with_the_typed_headers() {
     // A collector root: the exporter must post to `/v1/traces` under it.
     let mut options = options(&format!("http://{}", collector.addr));
     options.otlp_headers = Some(SecretString::from("x-tenant=t1"));
-    let handle = tracer_provider(&options, |_| false, &CollectorTrust::default())
+    let handle = tracer_provider(&options, |_| None, &CollectorTrust::default())
         .expect("the provider builds");
     assert_eq!(
         handle.exporter_state,
@@ -234,13 +234,13 @@ fn unusable_trust_material_degrades_the_exporter_and_names_the_variable() {
         ),
     ] {
         let error = span_exporter(
-            Endpoint::Typed("https://127.0.0.1:1"),
+            &Endpoint::Typed("https://127.0.0.1:1"),
             HashMap::new(),
             &trust,
         )
         .expect_err("unusable trust material prevents construction");
         assert!(error.to_string().starts_with(expected));
-        let handle = tracer_provider(&options("https://127.0.0.1:1"), |_| false, &trust)
+        let handle = tracer_provider(&options("https://127.0.0.1:1"), |_| None, &trust)
             .expect("unusable trust material is not a startup failure");
         match handle.exporter_state {
             ExporterState::Degraded { reason } => {
@@ -300,6 +300,7 @@ fn batch_handle(exporter: impl SpanExporter + 'static) -> TracerProviderHandle {
     let drain = Arc::default();
     let processor = sdktrace::BatchSpanProcessor::builder(ObservedExporter {
         inner: exporter,
+        timeout: export_timeout(),
         drain: Arc::clone(&drain),
     })
     .with_batch_config(
@@ -326,7 +327,7 @@ fn a_receiver_failure_only_poisons_the_drain_if_it_completes_after_shutdown_begi
             ("200 OK", Vec::new()),
         ]);
         let exporter = span_exporter(
-            Endpoint::Typed(&format!("http://{}/v1/traces", collector.addr)),
+            &Endpoint::Typed(&format!("http://{}/v1/traces", collector.addr)),
             HashMap::new(),
             &CollectorTrust::default(),
         )
@@ -400,7 +401,7 @@ fn an_exhausted_allowance_returns_before_the_receiver_is_released() {
     for allowance in [Duration::ZERO, SHUTDOWN_JOIN_SLACK] {
         let (collector, release, thread) = scripted_collector(vec![("200 OK", Vec::new())]);
         let exporter = span_exporter(
-            Endpoint::Typed(&format!("http://{}/v1/traces", collector.addr)),
+            &Endpoint::Typed(&format!("http://{}/v1/traces", collector.addr)),
             HashMap::new(),
             &CollectorTrust::default(),
         )
@@ -488,7 +489,7 @@ fn collector_diagnostics_cannot_escape_to_local_records_or_span_events() {
                         tracing::info!("ordinary_event");
                         let exporter = ObservedExporter {
                             inner: span_exporter(
-                                Endpoint::Typed(&format!(
+                                &Endpoint::Typed(&format!(
                                     "http://{}/v1/traces?token={URL_SECRET}",
                                     collector.addr
                                 )),
@@ -499,6 +500,7 @@ fn collector_diagnostics_cannot_escape_to_local_records_or_span_events() {
                                 &CollectorTrust::default(),
                             )
                             .unwrap(),
+                            timeout: export_timeout(),
                             drain: Arc::default(),
                         };
                         let result = exporter
@@ -525,11 +527,7 @@ fn collector_diagnostics_cannot_escape_to_local_records_or_span_events() {
                 let spans = spans.0.lock().unwrap();
                 assert_eq!(spans.len(), 1, "SDK diagnostics cannot create extra spans");
                 assert_eq!(spans[0].name, "ordinary_span");
-                assert_eq!(
-                    spans[0].events.len(),
-                    1,
-                    "only the application event is admitted"
-                );
+                assert_eq!(spans[0].events.len(), 1, "only the app event is admitted");
                 assert_eq!(spans[0].events[0].name, "ordinary_event");
                 let exported = format!("{spans:?}");
                 for secret in [

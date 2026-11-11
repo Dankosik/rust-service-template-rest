@@ -501,7 +501,7 @@ except step 1, which exits `2`.
 | 3 | `shutdown::validate_grace_budget(&config.http)` | `http.grace_period (..) must be >= http.drain_timeout (..) plus the 18.5s jobs worker teardown tail (cleanup, listeners, background join, dependency close, telemetry flush, SDK join slack, runtime shutdown)` |
 | 4 | Build the multi-thread runtime | `build tokio runtime: ...` |
 | 5 | Install `Signals` (SIGINT, then SIGTERM) | `install stop signal handlers: ...` |
-| 6 | Payload-free panic hook, then tracer provider with the worker identity, subscriber and recorder; the hook records the panic's file, line and column plus admitted correlation, never its payload or thread name | the telemetry errors, as in the service |
+| 6 | Tracer provider with the worker identity, subscriber and recorder, then the payload-free panic hook, which writes through the subscriber; the hook records the panic's file, line and column plus admitted correlation, never its payload or thread name | the telemetry errors, as in the service |
 | 7 | Register optional jobs and typed-message capabilities through `register(&mut registration)`, which fills `Registration::jobs` and `Registration::messages`; validate each nonempty registry. A composition with no retained capability refuses after configuration is loaded | `job kind registration failed: ...`; `job kinds are invalid: ...`; `typed message handlers are invalid: ...`; `no job kind or typed message handler is registered: register this service's retained capabilities in crates/jobs-worker/src/main.rs` |
 | 8 | `jobs_worker_starting` record; metrics upkeep and Tokio runtime metrics join the tracker | |
 | 9 | After registration, determine whether retained capabilities need PostgreSQL; validate `postgres.enabled` and mode-aware pool capacity, then admit the DSN/pool and migration history | `postgres.enabled must be true to run the jobs worker`; capacity, DSN, pool, or history refusal |
@@ -543,8 +543,9 @@ listener keeps answering, not ready, through the drain, and closes with the
 listeners after it.
 
 **Identity.** `{service_name}-jobs-worker`, from
-`observability.otel.service_name`, is the OpenTelemetry `service.name`, the
-tracer name, and the startup record's `service.name`. `application_name` is
+`observability.otel.service_name`, is the OpenTelemetry `service.name` and
+the startup record's `service.name`; the tracer is the `tracing` bridge's
+`infra-telemetry` scope. `application_name` is
 the longest prefix of the service name of at most 51 bytes that ends on a
 character boundary, followed by `-jobs-worker` (at most 63 bytes,
 PostgreSQL's limit). `service.instance.id`, version, commit, and environment

@@ -8,8 +8,9 @@
 //! When the typed endpoint selects the collector, ambient header variables
 //! are refused because the SDK would merge them into the typed request, so
 //! one collector's credential is never sent to another.
-//! `OTEL_EXPORTER_OTLP_COMPRESSION` and its traces variant select `gzip`;
-//! the default is uncompressed, as the specification has it.
+//! `OTEL_EXPORTER_OTLP_COMPRESSION` and its traces variant select `gzip`
+//! or `none`, and any other value degrades the exporter; the default is
+//! uncompressed, as the specification has it.
 //! The collector is verified with the platform trust store unless
 //! `OTEL_EXPORTER_OTLP_CERTIFICATE` names a PEM file of trusted
 //! certificates, which then are the only ones trusted;
@@ -29,8 +30,9 @@ use axum::http::{HeaderName, HeaderValue, Uri};
 use opentelemetry::trace::TracerProvider;
 use opentelemetry::{KeyValue, global};
 use opentelemetry_otlp::{
-    OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_EXPORTER_OTLP_HEADERS, OTEL_EXPORTER_OTLP_TIMEOUT,
-    OTEL_EXPORTER_OTLP_TIMEOUT_DEFAULT, OTEL_EXPORTER_OTLP_TRACES_ENDPOINT,
+    OTEL_EXPORTER_OTLP_COMPRESSION, OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_EXPORTER_OTLP_HEADERS,
+    OTEL_EXPORTER_OTLP_TIMEOUT, OTEL_EXPORTER_OTLP_TIMEOUT_DEFAULT,
+    OTEL_EXPORTER_OTLP_TRACES_COMPRESSION, OTEL_EXPORTER_OTLP_TRACES_ENDPOINT,
     OTEL_EXPORTER_OTLP_TRACES_HEADERS, OTEL_EXPORTER_OTLP_TRACES_TIMEOUT, WithExportConfig,
     WithHttpConfig,
 };
@@ -171,12 +173,6 @@ pub struct TracerProviderHandle {
     drain: Arc<Mutex<DrainObservation>>,
 }
 
-/// Header variables the SDK merges over typed headers.
-const AMBIENT_HEADER_VARS: &[&str] = &[
-    OTEL_EXPORTER_OTLP_HEADERS,
-    OTEL_EXPORTER_OTLP_TRACES_HEADERS,
-];
-
 /// Standard trust variables, each a path to a PEM file; the traces variant
 /// wins.
 const CERTIFICATE_VARS: [&str; 2] = [
@@ -190,11 +186,6 @@ const CLIENT_CERTIFICATE_VARS: [&str; 2] = [
 const CLIENT_KEY_VARS: [&str; 2] = [
     "OTEL_EXPORTER_OTLP_TRACES_CLIENT_KEY",
     "OTEL_EXPORTER_OTLP_CLIENT_KEY",
-];
-
-const AMBIENT_ENDPOINT_VARS: &[&str] = &[
-    OTEL_EXPORTER_OTLP_TRACES_ENDPOINT,
-    OTEL_EXPORTER_OTLP_ENDPOINT,
 ];
 
 /// Instrumentation scope of the `tracing` bridge; the service itself is the
@@ -227,7 +218,7 @@ pub fn install_tracer_provider(
     options: &TracingOptions,
 ) -> Result<TracerProviderHandle, TracingError> {
     let trust = CollectorTrust::from_env(|name| std::env::var_os(name));
-    let handle = tracer_provider(options, occupied_env, &trust)?;
+    let handle = tracer_provider(options, |name| std::env::var_os(name), &trust)?;
     global::set_text_map_propagator(TraceContextPropagator::new());
     global::set_tracer_provider(handle.provider.clone());
     Ok(handle)
@@ -235,10 +226,10 @@ pub fn install_tracer_provider(
 
 fn tracer_provider(
     options: &TracingOptions,
-    occupied: impl Fn(&str) -> bool,
+    env: impl Fn(&str) -> Option<OsString>,
     trust: &CollectorTrust,
 ) -> Result<TracerProviderHandle, TracingError> {
-    let endpoint = resolve_endpoint(options, &occupied)?;
+    let endpoint = resolve_endpoint(options, &env)?;
     let headers = match options.otlp_headers.as_ref() {
         Some(raw) => parse_headers(raw.expose_secret())?,
         None => HashMap::new(),
@@ -251,14 +242,15 @@ fn tracer_provider(
     let drain = Arc::new(Mutex::new(DrainObservation::default()));
     let exporter_state = match endpoint {
         None => ExporterState::Disabled,
-        Some(endpoint) => match span_exporter(endpoint, headers, trust) {
+        Some(endpoint) => match span_exporter(&endpoint, headers, trust) {
             Ok(span_exporter) => {
                 builder = builder.with_span_processor(
                     sdktrace::BatchSpanProcessor::builder(ObservedExporter {
                         inner: span_exporter,
+                        timeout: export_timeout(),
                         drain: Arc::clone(&drain),
                     })
-                    .with_batch_config(batch_config(&occupied))
+                    .with_batch_config(batch_config(&env))
                     .build(),
                 );
                 ExporterState::Initialized {
@@ -283,9 +275,12 @@ fn tracer_provider(
 }
 
 /// The SDK's batch defaults, with the larger queue unless the operator set one.
-fn batch_config(occupied: &impl Fn(&str) -> bool) -> sdktrace::BatchConfig {
+fn batch_config(env: &impl Fn(&str) -> Option<OsString>) -> sdktrace::BatchConfig {
     let config = sdktrace::BatchConfigBuilder::default();
-    if occupied(sdktrace::OTEL_BSP_MAX_QUEUE_SIZE) {
+    if env(sdktrace::OTEL_BSP_MAX_QUEUE_SIZE)
+        .and_then(non_blank)
+        .is_some()
+    {
         config
     } else {
         config.with_max_queue_size(SPAN_QUEUE_CAPACITY)
@@ -328,15 +323,18 @@ impl TracerProviderHandle {
                     .saturating_duration_since(tokio::time::Instant::now())
                     .saturating_sub(SHUTDOWN_JOIN_SLACK),
             );
-            provider.shutdown_with_timeout(budget)
+            let started = tokio::time::Instant::now();
+            let result = provider.shutdown_with_timeout(budget);
+            (result, started.elapsed(), budget)
         });
         let mut additional = if allowance <= SHUTDOWN_JOIN_SLACK {
             ProviderShutdownReasons::DEADLINE
         } else {
             match tokio::time::timeout_at(deadline, job).await {
-                Ok(Ok(Ok(()))) => ProviderShutdownReasons::default(),
-                Ok(Ok(Err(ref error))) => {
-                    ProviderShutdownReasons::PROVIDER_SHUTDOWN | sdk_error_reason(error)
+                Ok(Ok((Ok(()), _, _))) => ProviderShutdownReasons::default(),
+                Ok(Ok((Err(ref error), elapsed, budget))) => {
+                    ProviderShutdownReasons::PROVIDER_SHUTDOWN
+                        | SdkFailure::classify(error, elapsed, budget).reason()
                 }
                 Ok(Err(_)) => ProviderShutdownReasons::JOIN,
                 Err(_) => ProviderShutdownReasons::DEADLINE,
@@ -377,7 +375,8 @@ pub struct ProviderShutdownReasons(u32);
 
 impl ProviderShutdownReasons {
     /// An SDK operation during the drain (an export, or the exporter's or
-    /// provider's shutdown) reported a timeout.
+    /// provider's shutdown) reported a timeout or failed after its whole
+    /// budget.
     pub const SDK_TIMEOUT: Self = Self(1);
     /// An SDK operation during the drain found its target already shut down.
     pub const SDK_ALREADY_SHUTDOWN: Self = Self(1 << 1);
@@ -429,33 +428,54 @@ struct DrainObservation {
 }
 
 impl DrainObservation {
-    /// Records a failed `result` once draining, with `also` naming the operation.
-    fn latch(drain: &Mutex<Self>, result: &OTelSdkResult, also: ProviderShutdownReasons) {
+    /// Records a failure once draining, with `also` naming the operation.
+    fn latch(drain: &Mutex<Self>, failure: SdkFailure, also: ProviderShutdownReasons) {
         let mut drain = drain
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if drain.draining
-            && let Err(error) = result
-        {
-            drain.reasons |= also | sdk_error_reason(error);
+        if drain.draining {
+            drain.reasons |= also | failure.reason();
         }
     }
 }
 
-fn sdk_error_reason(error: &OTelSdkError) -> ProviderShutdownReasons {
-    match error {
-        OTelSdkError::Timeout(_) => ProviderShutdownReasons::SDK_TIMEOUT,
-        OTelSdkError::AlreadyShutdown => ProviderShutdownReasons::SDK_ALREADY_SHUTDOWN,
-        OTelSdkError::InternalFailure(_) => ProviderShutdownReasons::SDK_INTERNAL_FAILURE,
-    }
+/// The category of a failed SDK operation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SdkFailure {
+    Timeout,
+    AlreadyShutdown,
+    Internal,
 }
 
-/// The `error_type` label of [`TRACE_SPANS_EXPORTED_METRIC`].
-fn sdk_error_label(error: &OTelSdkError) -> &'static str {
-    match error {
-        OTelSdkError::Timeout(_) => "timeout",
-        OTelSdkError::AlreadyShutdown => "already_shutdown",
-        OTelSdkError::InternalFailure(_) => "internal_failure",
+impl SdkFailure {
+    /// The SDK's category, except that a failure after the whole `budget`
+    /// is a timeout: `opentelemetry-otlp` 0.33.1 returns a timed-out export
+    /// as `InternalFailure`, and `SdkTracerProvider::shutdown_with_timeout`
+    /// wraps its processor's `Timeout` in one.
+    fn classify(error: &OTelSdkError, elapsed: Duration, budget: Duration) -> Self {
+        match error {
+            OTelSdkError::Timeout(_) => Self::Timeout,
+            OTelSdkError::AlreadyShutdown => Self::AlreadyShutdown,
+            OTelSdkError::InternalFailure(_) if elapsed >= budget => Self::Timeout,
+            OTelSdkError::InternalFailure(_) => Self::Internal,
+        }
+    }
+
+    const fn reason(self) -> ProviderShutdownReasons {
+        match self {
+            Self::Timeout => ProviderShutdownReasons::SDK_TIMEOUT,
+            Self::AlreadyShutdown => ProviderShutdownReasons::SDK_ALREADY_SHUTDOWN,
+            Self::Internal => ProviderShutdownReasons::SDK_INTERNAL_FAILURE,
+        }
+    }
+
+    /// The `error_type` label of [`TRACE_SPANS_EXPORTED_METRIC`].
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Timeout => "timeout",
+            Self::AlreadyShutdown => "already_shutdown",
+            Self::Internal => "internal_failure",
+        }
     }
 }
 
@@ -466,52 +486,71 @@ pub(crate) fn describe_metrics() {
     );
 }
 
-/// A variable's value unless blank. The SDK ignores a blank endpoint and
-/// falls back to `localhost:4318`, so a blank variable is vacant.
+/// A variable's value unless blank.
 fn non_blank(value: OsString) -> Option<OsString> {
     (!value.to_string_lossy().trim().is_empty()).then_some(value)
 }
 
-fn occupied_env(name: &str) -> bool {
-    std::env::var_os(name).and_then(non_blank).is_some()
-}
-
 /// Where spans are exported.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Endpoint<'a> {
     /// The typed URL.
     Typed(&'a str),
     /// The SDK reads the standard endpoint variables itself.
     Environment,
+    /// The `OTEL_EXPORTER_OTLP_ENDPOINT` root, given to the SDK as its own
+    /// traces URL, because the SDK would read the blank traces variable
+    /// first and fail to parse it.
+    EnvironmentRoot(String),
 }
 
 impl Endpoint<'_> {
-    const fn source(self) -> EndpointSource {
+    const fn source(&self) -> EndpointSource {
         match self {
             Self::Typed(_) => EndpointSource::Typed,
-            Self::Environment => EndpointSource::Environment,
+            Self::Environment | Self::EnvironmentRoot(_) => EndpointSource::Environment,
         }
     }
 }
 
+/// A blank variable is vacant. The SDK falls back to `localhost:4318` for
+/// an empty one and fails on a blank one, so the decision is made here.
 fn resolve_endpoint(
     options: &TracingOptions,
-    occupied: impl Fn(&str) -> bool,
+    env: impl Fn(&str) -> Option<OsString>,
 ) -> Result<Option<Endpoint<'_>>, TracingError> {
     if let Some(endpoint) = options
         .otlp_endpoint
         .as_deref()
         .filter(|endpoint| !endpoint.trim().is_empty())
     {
-        if let Some(&name) = AMBIENT_HEADER_VARS.iter().find(|name| occupied(name)) {
+        // The SDK reads the traces header variable whenever it holds
+        // Unicode, even empty, and the general one only otherwise.
+        let name = if env(OTEL_EXPORTER_OTLP_TRACES_HEADERS)
+            .is_some_and(|value| value.to_str().is_some())
+        {
+            OTEL_EXPORTER_OTLP_TRACES_HEADERS
+        } else {
+            OTEL_EXPORTER_OTLP_HEADERS
+        };
+        if env(name).and_then(non_blank).is_some() {
             return Err(TracingError::AmbientCredential { name });
         }
         return Ok(Some(Endpoint::Typed(endpoint)));
     }
-    Ok(AMBIENT_ENDPOINT_VARS
-        .iter()
-        .any(|name| occupied(name))
-        .then_some(Endpoint::Environment))
+    let traces = env(OTEL_EXPORTER_OTLP_TRACES_ENDPOINT);
+    if traces.clone().and_then(non_blank).is_some() {
+        return Ok(Some(Endpoint::Environment));
+    }
+    let Some(root) = env(OTEL_EXPORTER_OTLP_ENDPOINT).and_then(non_blank) else {
+        return Ok(None);
+    };
+    if traces.is_none_or(|value| value.is_empty()) {
+        return Ok(Some(Endpoint::Environment));
+    }
+    Ok(Some(Endpoint::EnvironmentRoot(
+        root.to_string_lossy().into_owned(),
+    )))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -600,10 +639,12 @@ enum ExporterError {
     ClientThread(#[source] std::io::Error),
     #[error("the thread that builds the collector HTTP client panicked")]
     ClientThreadPanicked,
+    #[error("{variable} is neither `gzip` nor `none`")]
+    Compression { variable: &'static str },
 }
 
 fn span_exporter(
-    endpoint: Endpoint<'_>,
+    endpoint: &Endpoint<'_>,
     headers: HashMap<String, String>,
     trust: &CollectorTrust,
 ) -> Result<opentelemetry_otlp::SpanExporter, ExporterError> {
@@ -614,16 +655,46 @@ fn span_exporter(
         .with_http()
         .with_protocol(opentelemetry_otlp::Protocol::HttpBinary)
         .with_timeout(timeout);
-    if let Endpoint::Typed(endpoint) = endpoint {
-        builder = builder.with_endpoint(traces_url(endpoint));
+    match endpoint {
+        Endpoint::Typed(endpoint) => builder = builder.with_endpoint(traces_url(endpoint)),
+        Endpoint::EnvironmentRoot(root) => builder = builder.with_endpoint(root_traces_url(root)),
+        Endpoint::Environment => {}
     }
     if !headers.is_empty() {
         builder = builder.with_headers(headers);
+    }
+    if let Some(compression) = compression(|name| std::env::var_os(name))? {
+        builder = builder.with_compression(compression);
     }
     if let Some(client) = collector_client(trust, timeout)? {
         builder = builder.with_http_client(client);
     }
     Ok(builder.build()?)
+}
+
+/// The compression the standard variables select, read as the SDK reads
+/// them: the traces variable, then the general one, an empty value vacant.
+/// The SDK skips a value it cannot apply with a warning nobody sees, so such
+/// a value fails the build here instead.
+fn compression(
+    lookup: impl Fn(&str) -> Option<OsString>,
+) -> Result<Option<opentelemetry_otlp::Compression>, ExporterError> {
+    for variable in [
+        OTEL_EXPORTER_OTLP_TRACES_COMPRESSION,
+        OTEL_EXPORTER_OTLP_COMPRESSION,
+    ] {
+        let Some(value) = lookup(variable).filter(|value| !value.is_empty()) else {
+            continue;
+        };
+        return match value.to_str() {
+            Some(value) if value.eq_ignore_ascii_case("gzip") => {
+                Ok(Some(opentelemetry_otlp::Compression::Gzip))
+            }
+            Some(value) if value.eq_ignore_ascii_case("none") => Ok(None),
+            _ => Err(ExporterError::Compression { variable }),
+        };
+    }
+    Ok(None)
 }
 
 /// The exporter's HTTP client when a trust variable is set; `None` leaves
@@ -720,18 +791,22 @@ fn export_timeout() -> Duration {
 #[derive(Debug)]
 struct ObservedExporter<E> {
     inner: E,
+    /// The exporter's own timeout, which also bounds its retries.
+    timeout: Duration,
     drain: Arc<Mutex<DrainObservation>>,
 }
 
 impl<E: SpanExporter> SpanExporter for ObservedExporter<E> {
     async fn export(&self, batch: Vec<SpanData>) -> OTelSdkResult {
         let spans = u64::try_from(batch.len()).unwrap_or(u64::MAX);
+        let started = std::time::Instant::now();
         let result = self.inner.export(batch).await;
-        DrainObservation::latch(&self.drain, &result, ProviderShutdownReasons::default());
         match &result {
             Ok(()) => metrics::counter!(TRACE_SPANS_EXPORTED_METRIC).increment(spans),
             Err(error) => {
-                metrics::counter!(TRACE_SPANS_EXPORTED_METRIC, "error_type" => sdk_error_label(error))
+                let failure = SdkFailure::classify(error, started.elapsed(), self.timeout);
+                DrainObservation::latch(&self.drain, failure, ProviderShutdownReasons::default());
+                metrics::counter!(TRACE_SPANS_EXPORTED_METRIC, "error_type" => failure.label())
                     .increment(spans);
             }
         }
@@ -739,12 +814,15 @@ impl<E: SpanExporter> SpanExporter for ObservedExporter<E> {
     }
 
     fn shutdown_with_timeout(&self, timeout: Duration) -> OTelSdkResult {
+        let started = std::time::Instant::now();
         let result = self.inner.shutdown_with_timeout(timeout);
-        DrainObservation::latch(
-            &self.drain,
-            &result,
-            ProviderShutdownReasons::EXPORTER_SHUTDOWN,
-        );
+        if let Err(error) = &result {
+            DrainObservation::latch(
+                &self.drain,
+                SdkFailure::classify(error, started.elapsed(), timeout),
+                ProviderShutdownReasons::EXPORTER_SHUTDOWN,
+            );
+        }
         result
     }
 
@@ -767,6 +845,12 @@ fn traces_url(endpoint: &str) -> String {
         }
         _ => endpoint.to_owned(),
     }
+}
+
+/// The SDK's rule for `OTEL_EXPORTER_OTLP_ENDPOINT`: `/v1/traces` appended
+/// to the root as written.
+fn root_traces_url(root: &str) -> String {
+    format!("{}/v1/traces", root.strip_suffix('/').unwrap_or(root))
 }
 
 /// `key=value,key=value` into a map. Blank entries are skipped; any other
@@ -962,64 +1046,129 @@ mod tests {
 
     #[test]
     fn the_span_queue_is_larger_than_the_sdk_default_unless_the_operator_sets_one() {
-        assert!(format!("{:?}", batch_config(&|_| false)).contains("max_queue_size: 16384"));
+        assert!(format!("{:?}", batch_config(&env(&[]))).contains("max_queue_size: 16384"));
         assert!(
             format!(
                 "{:?}",
-                batch_config(&|name| name == "OTEL_BSP_MAX_QUEUE_SIZE")
+                batch_config(&env(&[("OTEL_BSP_MAX_QUEUE_SIZE", "2048")]))
             )
             .contains("max_queue_size: 2048")
         );
         assert!(std::mem::size_of::<SpanData>() * SPAN_QUEUE_CAPACITY <= 16 << 20);
     }
 
+    fn env<'a>(pairs: &'a [(&str, &str)]) -> impl Fn(&str) -> Option<OsString> + 'a {
+        move |name| {
+            pairs
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| OsString::from(value))
+        }
+    }
+
     #[test]
     fn typed_endpoint_wins_and_refuses_ambient_credentials() {
         let typed = options("http://collector:4318");
-        assert_eq!(
-            resolve_endpoint(&typed, |_| false).unwrap(),
-            Some(Endpoint::Typed("http://collector:4318"))
-        );
-        let err =
-            resolve_endpoint(&typed, |name| name == "OTEL_EXPORTER_OTLP_HEADERS").unwrap_err();
-        assert!(matches!(
-            err,
-            TracingError::AmbientCredential {
-                name: "OTEL_EXPORTER_OTLP_HEADERS"
-            }
-        ));
+        let collector = Some(Endpoint::Typed("http://collector:4318"));
+        assert_eq!(resolve_endpoint(&typed, env(&[])).unwrap(), collector);
+        for (pairs, refused) in [
+            (
+                &[(OTEL_EXPORTER_OTLP_HEADERS, "a=b")][..],
+                OTEL_EXPORTER_OTLP_HEADERS,
+            ),
+            (
+                &[(OTEL_EXPORTER_OTLP_TRACES_HEADERS, "a=b")][..],
+                OTEL_EXPORTER_OTLP_TRACES_HEADERS,
+            ),
+        ] {
+            assert!(
+                matches!(
+                    resolve_endpoint(&typed, env(pairs)),
+                    Err(TracingError::AmbientCredential { name }) if name == refused
+                ),
+                "{pairs:?}"
+            );
+        }
+        // A set traces header variable, even empty or blank, is the one the
+        // SDK reads, so the general one never reaches the typed collector.
+        for traces in ["", " "] {
+            assert_eq!(
+                resolve_endpoint(
+                    &typed,
+                    env(&[
+                        (OTEL_EXPORTER_OTLP_TRACES_HEADERS, traces),
+                        (OTEL_EXPORTER_OTLP_HEADERS, "a=b"),
+                    ])
+                )
+                .unwrap(),
+                collector
+            );
+        }
         // Trust variables are not read by the exporter, so they cannot carry
         // a credential to the typed collector.
         assert_eq!(
-            resolve_endpoint(&typed, |name| name == "OTEL_EXPORTER_OTLP_CERTIFICATE").unwrap(),
-            Some(Endpoint::Typed("http://collector:4318"))
+            resolve_endpoint(
+                &typed,
+                env(&[("OTEL_EXPORTER_OTLP_CERTIFICATE", "/ca.pem")])
+            )
+            .unwrap(),
+            collector
         );
         // Ambient endpoint variables are fine beside a typed endpoint; the
         // typed one wins inside the SDK.
         assert_eq!(
-            resolve_endpoint(&typed, |name| name == "OTEL_EXPORTER_OTLP_ENDPOINT").unwrap(),
-            Some(Endpoint::Typed("http://collector:4318"))
+            resolve_endpoint(
+                &typed,
+                env(&[(OTEL_EXPORTER_OTLP_ENDPOINT, "http://other")])
+            )
+            .unwrap(),
+            collector
         );
     }
 
     #[test]
     fn environment_endpoint_enables_export_and_nothing_disables_it() {
         let untyped = options("");
-        assert_eq!(resolve_endpoint(&untyped, |_| false).unwrap(), None);
+        let root = (OTEL_EXPORTER_OTLP_ENDPOINT, "http://collector:4318");
+        assert_eq!(resolve_endpoint(&untyped, env(&[])).unwrap(), None);
         assert_eq!(
-            resolve_endpoint(&untyped, |name| name == "OTEL_EXPORTER_OTLP_ENDPOINT").unwrap(),
+            resolve_endpoint(&untyped, env(&[root])).unwrap(),
             Some(Endpoint::Environment)
         );
         // A blank typed endpoint is vacant, so the environment's is used.
         assert_eq!(
-            resolve_endpoint(&options("  "), |name| name == "OTEL_EXPORTER_OTLP_ENDPOINT").unwrap(),
+            resolve_endpoint(&options("  "), env(&[root])).unwrap(),
             Some(Endpoint::Environment)
         );
         // Ambient credentials are the platform's business when the platform
         // also supplies the endpoint.
         assert_eq!(
-            resolve_endpoint(&untyped, |name| name.starts_with("OTEL_EXPORTER_OTLP_")).unwrap(),
+            resolve_endpoint(&untyped, env(&[root, (OTEL_EXPORTER_OTLP_HEADERS, "a=b")])).unwrap(),
             Some(Endpoint::Environment)
+        );
+        // The SDK would read a blank traces variable and fail, so the root is
+        // handed over; with no root a blank variable leaves export disabled.
+        assert_eq!(
+            resolve_endpoint(
+                &untyped,
+                env(&[(OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, " "), root])
+            )
+            .unwrap(),
+            Some(Endpoint::EnvironmentRoot(
+                "http://collector:4318".to_owned()
+            ))
+        );
+        assert_eq!(
+            resolve_endpoint(&untyped, env(&[(OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, " ")])).unwrap(),
+            None
+        );
+        assert_eq!(
+            root_traces_url("http://collector:4318/"),
+            "http://collector:4318/v1/traces"
+        );
+        assert_eq!(
+            root_traces_url("http://collector:4318/otlp"),
+            "http://collector:4318/otlp/v1/traces"
         );
     }
 
@@ -1107,7 +1256,7 @@ mod tests {
         // cannot drop reqwest's inner runtime. Nothing listens on :1, so
         // the accepted failure is a transport error, not collector delivery.
         let exporter = span_exporter(
-            Endpoint::Typed("https://127.0.0.1:1/v1/traces"),
+            &Endpoint::Typed("https://127.0.0.1:1/v1/traces"),
             HashMap::new(),
             &CollectorTrust::default(),
         )
@@ -1129,8 +1278,8 @@ mod tests {
 
     #[test]
     fn gzip_compression_is_available_to_the_exporter() {
-        // `OTEL_EXPORTER_OTLP_COMPRESSION=gzip` reaches the same check; without
-        // the `gzip-http` feature the build fails and tracing degrades.
+        // `compression` passes `gzip` programmatically; without the
+        // `gzip-http` feature the build fails and tracing degrades.
         use opentelemetry_otlp::WithHttpConfig as _;
 
         opentelemetry_otlp::SpanExporter::builder()
@@ -1138,6 +1287,38 @@ mod tests {
             .with_compression(opentelemetry_otlp::Compression::Gzip)
             .build()
             .expect("gzip must be a supported compression");
+    }
+
+    #[test]
+    fn compression_variables_select_gzip_or_none_and_refuse_the_rest() {
+        let traces = OTEL_EXPORTER_OTLP_TRACES_COMPRESSION;
+        let general = OTEL_EXPORTER_OTLP_COMPRESSION;
+
+        assert_eq!(compression(env(&[])).unwrap(), None);
+        assert_eq!(
+            compression(env(&[(general, "GZIP")])).unwrap(),
+            Some(opentelemetry_otlp::Compression::Gzip)
+        );
+        assert_eq!(
+            compression(env(&[(traces, "none"), (general, "gzip")])).unwrap(),
+            None
+        );
+        assert_eq!(
+            compression(env(&[(traces, ""), (general, "gzip")])).unwrap(),
+            Some(opentelemetry_otlp::Compression::Gzip)
+        );
+        for (pairs, refused) in [
+            (&[(general, "zstd")][..], general),
+            (&[(traces, "gzipp"), (general, "gzip")][..], traces),
+        ] {
+            assert!(
+                matches!(
+                    compression(env(pairs)),
+                    Err(ExporterError::Compression { variable }) if variable == refused
+                ),
+                "{pairs:?}"
+            );
+        }
     }
 
     #[derive(Debug)]
@@ -1171,26 +1352,39 @@ mod tests {
         };
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         metrics::with_local_recorder(&recorder, || {
-            let export = |exporter: Fixed, spans: usize| {
+            let export = |exporter: Fixed, timeout: Duration, spans: usize| {
                 let _ = ObservedExporter {
                     inner: exporter,
+                    timeout,
                     drain: Arc::default(),
                 }
                 .export((0..spans).map(|_| span()).collect())
                 .now_or_never()
                 .expect("the fixed exporter is ready");
             };
-            export(Fixed(|| Ok(())), 3);
-            export(Fixed(|| Err(OTelSdkError::Timeout(Duration::ZERO))), 2);
+            let budget = Duration::from_secs(60);
+            export(Fixed(|| Ok(())), budget, 3);
+            export(
+                Fixed(|| Err(OTelSdkError::Timeout(Duration::ZERO))),
+                budget,
+                2,
+            );
             export(
                 Fixed(|| Err(OTelSdkError::InternalFailure("refused".into()))),
+                budget,
                 1,
+            );
+            // The OTLP exporter reports its own timeout as an internal failure.
+            export(
+                Fixed(|| Err(OTelSdkError::InternalFailure("network error".into()))),
+                Duration::ZERO,
+                4,
             );
         });
         let rendered = recorder.handle().render();
         for series in [
             "otel_sdk_exporter_span_exported_total 3",
-            "otel_sdk_exporter_span_exported_total{error_type=\"timeout\"} 2",
+            "otel_sdk_exporter_span_exported_total{error_type=\"timeout\"} 6",
             "otel_sdk_exporter_span_exported_total{error_type=\"internal_failure\"} 1",
         ] {
             assert!(rendered.contains(series), "{series}: {rendered}");
