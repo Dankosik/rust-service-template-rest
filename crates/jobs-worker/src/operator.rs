@@ -17,7 +17,8 @@ use serde_json::{Value, json};
 use service_config::{LoadOptions, PostgresConfig, process_failure};
 
 use crate::cli::{OperatorCommand, RecoveryArgs};
-use crate::shutdown::{DEPENDENCY_CLOSE, Signals};
+use crate::shutdown::{DEPENDENCY_CLOSE, RUNTIME_SHUTDOWN_TIMEOUT};
+use crate::signals::Signals;
 
 pub(crate) enum Request {
     Inspect {
@@ -299,7 +300,7 @@ fn run_configured(config: &PostgresConfig, request: &Request) -> Report {
         return request.failed("runtime");
     };
     let report = runtime.block_on(serve(config, request));
-    runtime.shutdown_timeout(crate::RUNTIME_SHUTDOWN_TIMEOUT);
+    runtime.shutdown_timeout(RUNTIME_SHUTDOWN_TIMEOUT);
     report
 }
 

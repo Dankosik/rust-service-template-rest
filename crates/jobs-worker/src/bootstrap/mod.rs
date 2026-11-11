@@ -7,6 +7,7 @@
 // template:begin jobs:worker-bootstrap-jobs-module
 mod jobs;
 // template:end jobs:worker-bootstrap-jobs-module
+mod listeners;
 // template:begin messaging:worker-bootstrap-messaging-module
 mod messaging;
 // template:end messaging:worker-bootstrap-messaging-module
@@ -16,6 +17,7 @@ mod outbox;
 // template:begin jobs:worker-bootstrap-postgres-module
 pub(crate) mod postgres;
 // template:end jobs:worker-bootstrap-postgres-module
+mod telemetry;
 
 use std::panic::AssertUnwindSafe;
 use std::time::Duration;
@@ -23,15 +25,13 @@ use std::time::Duration;
 use futures_util::FutureExt;
 use tokio::time::Instant;
 
-use health::{Probe, Readiness, RefreshPolicy};
-use infra_http::{HardenOptions, Server, ServerOptions};
-use infra_telemetry::{
-    ExporterState, LoggingFormat, LoggingOptions, Metrics, TracingOptions, diagnostics_router,
-    install_panic_hook, install_subscriber, install_tracer_provider, runtime_metrics,
-};
-use service_config::{Config, LogFormat, TracesSampler};
+use health::Readiness;
+use infra_telemetry::install_panic_hook;
+use service_config::Config;
 
-use crate::shutdown::{self, Background, Resources, Signals};
+use crate::background::Background;
+use crate::shutdown::{self, Resources};
+use crate::signals::{SignalError, Signals};
 use crate::{BuildError, Register, Registration};
 
 const METRICS_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(10);
@@ -57,7 +57,7 @@ pub(crate) enum WorkerError {
     #[error("install stop signal handlers: {0}")]
     Signals(#[source] std::io::Error),
     #[error(transparent)]
-    SignalClosed(#[from] shutdown::SignalError),
+    SignalClosed(#[from] SignalError),
     #[error("worker lifecycle panicked; payload withheld")]
     Panicked,
     #[error("listener {0} stopped without a stop signal")]
@@ -223,7 +223,7 @@ async fn run_worker(
     wait_for_stop(resources, background, signals).await
 }
 
-fn signal_ended(result: Result<(), shutdown::SignalError>, background: &Background) -> Ended {
+fn signal_ended(result: Result<(), SignalError>, background: &Background) -> Ended {
     if let Some(task) = background.failure() {
         return Ended::Failure(WorkerError::BackgroundStopped(task));
     }
@@ -300,7 +300,7 @@ async fn prepare(
     resources: &mut Resources,
 ) -> Result<Prepared, WorkerError> {
     let identity = worker_identity(&config.observability.otel.service_name);
-    let metrics = install_observability(config, &identity, resources)?;
+    let metrics = telemetry::install_observability(config, &identity, resources)?;
     // Docker, containerd and systemd start processes with a soft limit of
     // 1024 open files under a much higher hard limit, keeping the low value
     // for `select(2)` callers. Nothing here calls `select`, so raise the
@@ -316,7 +316,7 @@ async fn prepare(
     install_panic_hook();
     let mut capabilities = register_capabilities(config, register, background)?;
     if let Some(provider) = resources.tracer_provider.as_ref() {
-        log_startup_record(
+        telemetry::log_startup_record(
             config,
             &identity,
             // template:begin jobs:worker-bootstrap-log-jobs-argument
@@ -325,7 +325,7 @@ async fn prepare(
             &provider.exporter_state,
         );
     }
-    spawn_metrics_tasks(&metrics, background);
+    telemetry::spawn_metrics_tasks(&metrics, background);
     // template:begin jobs:worker-bootstrap-admit-pool-call
     postgres::admit_pool(config, &capabilities, background, resources).await?;
     // template:end jobs:worker-bootstrap-admit-pool-call
@@ -344,14 +344,14 @@ async fn prepare(
     // template:begin jobs:worker-bootstrap-build-engines
     let engines = jobs::build_engines(config, &mut capabilities, resources).await?;
     // template:end jobs:worker-bootstrap-build-engines
-    bind_listeners(config, &metrics, background, resources).await?;
+    listeners::bind_listeners(config, &metrics, background, resources).await?;
     if let Some(readiness) = resources.readiness.as_ref() {
         readiness.refresh().await;
         readiness
             .reader()
             .verdict()
             .map_err(WorkerError::Admission)?;
-        start_progress(readiness, background)?;
+        listeners::start_progress(readiness, background)?;
     }
     Ok(Prepared {
         // template:begin jobs:worker-bootstrap-prepared-jobs-value
@@ -361,52 +361,6 @@ async fn prepare(
         consumer,
         // template:end messaging:worker-bootstrap-prepared-consumer-value
     })
-}
-
-fn refresh_policy(config: &Config) -> RefreshPolicy {
-    RefreshPolicy {
-        interval: config.health.refresh_interval,
-        probe_budget: config.health.probe_budget,
-        failure_threshold: config.health.failure_threshold,
-    }
-}
-
-fn install_observability(
-    config: &Config,
-    identity: &str,
-    resources: &mut Resources,
-) -> Result<Metrics, WorkerError> {
-    let tracer_provider = resources
-        .tracer_provider
-        .insert(install_tracer_provider(&tracing_options(config, identity))?);
-    resources.logger = Some(install_subscriber(&LoggingOptions {
-        level: &config.log.level,
-        format: match config.log.format {
-            LogFormat::Json => LoggingFormat::Json,
-            LogFormat::Text => LoggingFormat::Text,
-        },
-        tracer_provider: Some(tracer_provider),
-    })?);
-    let metrics = Metrics::install(
-        &[
-            infra_http::HISTOGRAMS,
-            // template:begin jobs:worker-bootstrap-jobs-histograms
-            infra_postgres::HISTOGRAMS,
-            infra_jobs::HISTOGRAMS,
-            // template:end jobs:worker-bootstrap-jobs-histograms
-            // template:begin outbound-http:worker-bootstrap-outbound-histogram
-            infra_outbound_http::HISTOGRAMS,
-            // template:end outbound-http:worker-bootstrap-outbound-histogram
-        ]
-        .concat(),
-    )?;
-    metrics.record_trace_exporter(
-        resources
-            .tracer_provider
-            .as_ref()
-            .map(|provider| &provider.exporter_state),
-    );
-    Ok(metrics)
 }
 
 struct RetainedCapabilities {
@@ -483,93 +437,6 @@ fn register_capabilities(
     })
 }
 
-fn spawn_metrics_tasks(metrics: &Metrics, background: &Background) {
-    background.spawn("metrics_upkeep", |cancel| metrics.clone().upkeep(cancel));
-    background.spawn("runtime_progress", |cancel| {
-        metrics.clone().runtime_progress(cancel)
-    });
-    background.spawn("runtime_metrics", |cancel| {
-        runtime_metrics(METRICS_MAINTENANCE_INTERVAL, cancel)
-    });
-}
-
-async fn bind_listeners(
-    config: &Config,
-    metrics: &Metrics,
-    background: &Background,
-    resources: &mut Resources,
-) -> Result<(), WorkerError> {
-    let mut probes: Vec<Box<dyn Probe>> = Vec::new();
-    // template:begin jobs:worker-bootstrap-listener-jobs-probe
-    probes.extend(postgres::probe(resources));
-    // template:end jobs:worker-bootstrap-listener-jobs-probe
-    // template:begin messaging:worker-bootstrap-listener-messaging-probe
-    probes.extend(messaging::probe(resources));
-    // template:end messaging:worker-bootstrap-listener-messaging-probe
-    let readiness = resources
-        .readiness
-        .insert(Readiness::new(probes, refresh_policy(config)));
-    let options = server_options(config);
-    let routes = infra_http::finalize_public(infra_http::router())?.with_state(readiness.reader());
-    let app = infra_http::harden(routes, &harden_options(config));
-    let health = resources
-        .listeners
-        .health
-        .insert(Server::bind(config.http.addr, app, options).await?);
-    watch_listener("health_listener", health, background);
-    tracing::info!(addr = %health.local_addr(), "http listener bound");
-    if let Some(addr) = config.observability.metrics.addr {
-        // Liveness is served here as well, as in the service, so one probe
-        // target fits both processes.
-        let routes = diagnostics_router(metrics.clone()).merge(infra_http::liveness_router());
-        let diagnostics = resources
-            .listeners
-            .diagnostics
-            .insert(Server::bind(addr, routes, options).await?);
-        watch_listener("diagnostics_listener", diagnostics, background);
-        tracing::info!(addr = %diagnostics.local_addr(), "diagnostics listener bound");
-    }
-    Ok(())
-}
-
-fn watch_listener(name: &'static str, server: &Server, background: &Background) {
-    let failure = server.accept_failure();
-    background.spawn(name, |cancel| async move {
-        tokio::select! {
-            biased;
-            failure = failure => tracing::error!(listener = name, ?failure, "listener_failed"),
-            () = cancel.cancelled() => {}
-        }
-    });
-}
-
-fn start_progress(readiness: &Readiness, background: &Background) -> Result<(), WorkerError> {
-    readiness.arm_progress().map_err(|error| {
-        if readiness.progress_loss().is_some() {
-            WorkerError::BackgroundStopped(READINESS_PROGRESS)
-        } else {
-            WorkerError::Admission(error)
-        }
-    })?;
-    let observed = readiness.clone();
-    let reporter = background.clone();
-    background.spawn(READINESS_PROGRESS, |cancel| async move {
-        if observed
-            .wait_for_progress_loss(cancel.clone())
-            .await
-            .is_some()
-        {
-            reporter.record_failure(READINESS_PROGRESS);
-            cancel.cancelled().await;
-        }
-    });
-    let readiness = readiness.clone();
-    background.spawn("readiness_refresher", |cancel| async move {
-        readiness.refresh_until(cancel).await;
-    });
-    Ok(())
-}
-
 /// [`Ended::Signal`] when a stop signal ended the wait. A terminal jobs,
 /// messaging, or background-task failure names its owner and takes the error
 /// exit after ordered cleanup.
@@ -598,88 +465,18 @@ async fn wait_for_stop(
     }
 }
 
-fn server_options(config: &Config) -> ServerOptions {
-    ServerOptions {
-        header_read_timeout: config.http.header_read_timeout,
-        max_header_bytes: usize::try_from(config.http.max_header_bytes.as_u64())
-            .unwrap_or(usize::MAX),
-        max_connections: config.http.connection_cap(),
-        max_connection_age: config.http.connection_age(),
-    }
-}
-
-fn harden_options(config: &Config) -> HardenOptions {
-    HardenOptions {
-        max_body_bytes: usize::try_from(config.http.max_body_bytes.as_u64()).unwrap_or(usize::MAX),
-        request_timeout: config.http.request_timeout,
-        max_in_flight: config.http.in_flight_cap(),
-        log_health_probes: config.http.access_log_health_probes,
-    }
-}
-
 const IDENTITY_SUFFIX: &str = "-jobs-worker";
 
 fn worker_identity(service_name: &str) -> String {
     format!("{service_name}{IDENTITY_SUFFIX}")
 }
 
-fn tracing_options(config: &Config, identity: &str) -> TracingOptions {
-    let otel = &config.observability.otel;
-    let sampler = match otel.traces_sampler {
-        TracesSampler::AlwaysOn => infra_telemetry::ResolvedSampler::AlwaysOn,
-        TracesSampler::AlwaysOff => infra_telemetry::ResolvedSampler::AlwaysOff,
-        TracesSampler::TraceIdRatio => {
-            infra_telemetry::ResolvedSampler::TraceIdRatio(otel.traces_sampler_arg)
-        }
-        TracesSampler::ParentBasedTraceIdRatio => {
-            infra_telemetry::ResolvedSampler::ParentBasedTraceIdRatio(otel.traces_sampler_arg)
-        }
-    };
-    TracingOptions {
-        service_name: identity.to_owned(),
-        service_version: config.app.version.clone(),
-        vcs_revision: config.app.commit.clone(),
-        instance_id: config.app.instance_id.clone(),
-        deployment_environment: config.app.env.clone(),
-        sampler,
-        otlp_endpoint: otel.exporter.otlp_endpoint.clone(),
-        otlp_headers: otel.exporter.otlp_headers.clone(),
-    }
-}
-
-fn log_startup_record(
-    config: &Config,
-    identity: &str,
-    // template:begin jobs:worker-bootstrap-log-jobs-parameter
-    registry: Option<&infra_jobs::Kinds>,
-    // template:end jobs:worker-bootstrap-log-jobs-parameter
-    exporter: &ExporterState,
-) {
-    exporter.log();
-    tracing::info!(
-        service.name = %identity,
-        app.env = %config.app.env,
-        app.version = %config.app.version,
-        app.commit = %config.app.commit,
-        runtime.worker_threads = tokio::runtime::Handle::current().metrics().num_workers(),
-        http.addr = %config.http.addr,
-        http.drain_timeout = ?config.http.drain_timeout,
-        http.grace_period = ?config.http.grace_period,
-        observability.metrics.addr = ?config.observability.metrics.addr,
-        // template:begin jobs:worker-bootstrap-log-jobs-fields
-        postgres.max_connections = config.postgres.max_connections.get(),
-        jobs.max_workers = config.jobs.max_workers.get(),
-        jobs.kinds = %jobs::kind_names(registry),
-        // template:end jobs:worker-bootstrap-log-jobs-fields
-        log.level = %config.log.level,
-        tracing.exporter = exporter.as_str(),
-        "jobs_worker_starting"
-    );
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
+
+    use super::{Config, WorkerError};
+    use crate::shutdown::validate_grace_budget;
 
     #[tokio::test(start_paused = true)]
     async fn progress_failure_prevents_admission_and_retains_tracker_custody() {
@@ -691,7 +488,7 @@ mod tests {
         let readiness = health::Readiness::new(Vec::new(), policy);
         readiness.refresh().await;
         let background = super::Background::new();
-        super::start_progress(&readiness, &background).unwrap();
+        super::listeners::start_progress(&readiness, &background).unwrap();
         let resources = super::Resources {
             readiness: Some(readiness),
             ..super::Resources::default()
@@ -773,9 +570,6 @@ mod tests {
             assert!(background.tracker.is_empty());
         }
     }
-
-    use super::{Config, WorkerError};
-    use crate::shutdown::validate_grace_budget;
 
     #[cfg(unix)]
     #[test]

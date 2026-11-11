@@ -8,7 +8,8 @@ use secrecy::ExposeSecret;
 use service_config::{Config, PostgresConfig, PostgresSessionBudgets};
 
 use super::{IDENTITY_SUFFIX, METRICS_MAINTENANCE_INTERVAL, RetainedCapabilities, WorkerError};
-use crate::shutdown::{Background, Resources};
+use crate::background::Background;
+use crate::shutdown::Resources;
 
 const POSTGRES_IDENTIFIER_LIMIT: usize = 63;
 

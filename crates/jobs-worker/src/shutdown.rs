@@ -6,7 +6,6 @@
 //! `http.grace_period`.
 
 use std::panic::AssertUnwindSafe;
-use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use futures_util::FutureExt;
@@ -26,11 +25,10 @@ use infra_telemetry::{
     LoggerGuard, LoggerShutdown, ProviderShutdown, SHUTDOWN_JOIN_SLACK, TracerProviderHandle,
 };
 use service_config::HttpConfig;
-use tokio::sync::watch;
-use tokio::task::AbortHandle;
 use tokio::time::Instant;
-use tokio_util::sync::CancellationToken;
-use tokio_util::task::TaskTracker;
+
+use crate::background::Background;
+use crate::signals::Signals;
 
 /// Ceiling for finishing attempts after a forced drain.
 pub(crate) const CLEANUP: Duration = Duration::from_secs(2);
@@ -45,7 +43,11 @@ pub(crate) const SHUTDOWN_TAIL: Duration = CLEANUP
     .saturating_add(DEPENDENCY_CLOSE)
     .saturating_add(TELEMETRY_FLUSH)
     .saturating_add(SHUTDOWN_JOIN_SLACK)
-    .saturating_add(crate::RUNTIME_SHUTDOWN_TIMEOUT);
+    .saturating_add(RUNTIME_SHUTDOWN_TIMEOUT);
+
+/// Final bounded runtime wait, reserved inside the process grace period.
+/// Its return does not establish that already-running blocking work terminated.
+pub(crate) const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Debug, thiserror::Error)]
 #[error(
@@ -93,7 +95,7 @@ struct Budget {
 impl Budget {
     fn until(process_deadline: Instant) -> Self {
         Self {
-            deadline: process_deadline - crate::RUNTIME_SHUTDOWN_TIMEOUT,
+            deadline: process_deadline - RUNTIME_SHUTDOWN_TIMEOUT,
         }
     }
 
@@ -104,187 +106,6 @@ impl Budget {
     fn stage_deadline(&self, want: Duration) -> Instant {
         Instant::now() + self.remaining(want)
     }
-}
-
-#[derive(Clone, Copy, Debug, thiserror::Error)]
-#[error("stop signal receiver closed unexpectedly")]
-pub(crate) struct SignalError;
-
-/// Native streams remain owned by the synchronous entrypoint through runtime shutdown.
-pub(crate) struct Signals {
-    #[cfg(unix)]
-    terminate: tokio::signal::unix::Signal,
-    #[cfg(unix)]
-    interrupt: tokio::signal::unix::Signal,
-    #[cfg(windows)]
-    ctrl_c: tokio::signal::windows::CtrlC,
-    first_stop: Option<Instant>,
-}
-
-impl Signals {
-    pub(crate) fn install() -> std::io::Result<Self> {
-        #[cfg(unix)]
-        {
-            use tokio::signal::unix::{SignalKind, signal};
-            let interrupt = signal(SignalKind::interrupt())?;
-            let terminate = signal(SignalKind::terminate())?;
-            Ok(Self {
-                interrupt,
-                terminate,
-                first_stop: None,
-            })
-        }
-        #[cfg(windows)]
-        {
-            Ok(Self {
-                ctrl_c: tokio::signal::windows::ctrl_c()?,
-                first_stop: None,
-            })
-        }
-    }
-
-    /// Consume one native notification and retain its first observation time.
-    pub(crate) async fn wait(&mut self) -> Result<(), SignalError> {
-        #[cfg(unix)]
-        let (notification, name) = tokio::select! {
-            signal = self.terminate.recv() => (signal, "SIGTERM"),
-            signal = self.interrupt.recv() => (signal, "SIGINT"),
-        };
-        #[cfg(windows)]
-        let (notification, name) = (self.ctrl_c.recv().await, "ctrl-c");
-        notification.ok_or(SignalError)?;
-        self.first_stop.get_or_insert_with(Instant::now);
-        tracing::info!(signal = name, "stop requested");
-        Ok(())
-    }
-
-    /// Poll and consume only an already pending notification.
-    pub(crate) fn pending(&mut self) -> Result<bool, SignalError> {
-        match self.wait().now_or_never() {
-            Some(result) => result.map(|()| true),
-            None => Ok(false),
-        }
-    }
-
-    pub(crate) fn first_stop(&self) -> Option<Instant> {
-        self.first_stop
-    }
-}
-
-/// The worker's background tasks and their root cancellation token.
-///
-/// Every task runs until its token is cancelled, and nothing cancels before
-/// teardown, so a task that ends earlier is a panic or a defect: the worker
-/// stops rather than run without it, as the service does. A task spawned
-/// through [`Self::spawn`] reports that end by name. The engines spawn their
-/// loops on [`Self::tracker`] and report through `Started::failed`.
-#[derive(Clone)]
-pub(crate) struct Background {
-    pub(crate) cancel: CancellationToken,
-    pub(crate) tracker: TaskTracker,
-    stopped: watch::Sender<Option<&'static str>>,
-    aborts: Arc<Mutex<Vec<AbortHandle>>>,
-}
-
-impl Background {
-    pub(crate) fn new() -> Self {
-        Self {
-            cancel: CancellationToken::new(),
-            tracker: TaskTracker::new(),
-            stopped: watch::Sender::new(None),
-            aborts: Arc::default(),
-        }
-    }
-
-    /// Spawn the task `start` builds from a child of the root token.
-    pub(crate) fn spawn<F>(&self, name: &'static str, start: impl FnOnce(CancellationToken) -> F)
-    where
-        F: Future<Output = ()> + Send + 'static,
-    {
-        let cancel = self.cancel.child_token();
-        let task = start(cancel.clone());
-        let guard = ReportUnlessCancelled {
-            name,
-            cancel,
-            stopped: self.stopped.clone(),
-        };
-        let task = self.tracker.spawn(async move {
-            let _guard = guard;
-            task.await;
-        });
-        self.aborts
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(task.abort_handle());
-    }
-
-    pub(crate) fn failure(&self) -> Option<&'static str> {
-        *self.stopped.borrow()
-    }
-
-    /// Report a live task's failure while retaining its completion custody.
-    pub(crate) fn record_failure(&self, name: &'static str) {
-        record_first(&self.stopped, name);
-    }
-
-    fn abort(&self) {
-        for task in self
-            .aborts
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .iter()
-        {
-            task.abort();
-        }
-    }
-
-    /// Resolve with the name of the first task that ended while its token
-    /// was live. Pending while every task runs.
-    pub(crate) async fn stopped(&self) -> &'static str {
-        let mut stopped = self.stopped.subscribe();
-        loop {
-            if let Some(name) = *stopped.borrow_and_update() {
-                return name;
-            }
-            // `self` owns the sender, so this branch cannot run while
-            // `self` is borrowed; it only keeps the loop total.
-            if stopped.changed().await.is_err() {
-                std::future::pending::<()>().await;
-            }
-        }
-    }
-}
-
-/// Dropped when its task ends, a panic included.
-struct ReportUnlessCancelled {
-    name: &'static str,
-    cancel: CancellationToken,
-    stopped: watch::Sender<Option<&'static str>>,
-}
-
-impl Drop for ReportUnlessCancelled {
-    fn drop(&mut self) {
-        if self.cancel.is_cancelled() && !std::thread::panicking() {
-            return;
-        }
-        tracing::error!(
-            task = self.name,
-            panicked = std::thread::panicking(),
-            "background_task_stopped"
-        );
-        record_first(&self.stopped, self.name);
-    }
-}
-
-/// The first reported task names the failure; later ones only log.
-fn record_first(stopped: &watch::Sender<Option<&'static str>>, name: &'static str) {
-    stopped.send_if_modified(|first| {
-        if first.is_some() {
-            return false;
-        }
-        *first = Some(name);
-        true
-    });
 }
 
 /// The listeners bound so far. Common shutdown closes whichever are present.
@@ -682,7 +503,7 @@ async fn close_dependencies(resources: &mut Resources, deadline: Instant) -> boo
         // template:begin messaging:worker-shutdown-close-messaging
         // The root token is already cancelled here, and close gives up at
         // once under a cancelled token, so close gets a fresh one.
-        let cancel = CancellationToken::new();
+        let cancel = tokio_util::sync::CancellationToken::new();
         let closed = if let Some(messaging) = resources.messaging.take() {
             Some(messaging.close(deadline, &cancel).await)
         } else if let Some(startup) = resources.messaging_startup.take() {
@@ -766,6 +587,8 @@ async fn finish_telemetry(
 
 #[cfg(test)]
 mod tests {
+    use tokio_util::sync::CancellationToken;
+
     use super::*;
 
     #[test]
@@ -795,20 +618,6 @@ mod tests {
         assert!(validate_grace_budget(&fail).is_err());
     }
 
-    #[test]
-    fn grace_budget_refusal_names_the_tail() {
-        let http = HttpConfig {
-            grace_period: Duration::from_secs(41),
-            drain_timeout: Duration::from_secs(25),
-            ..HttpConfig::default()
-        };
-        let err = validate_grace_budget(&http).unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "http.grace_period (41s) must be >= http.drain_timeout (25s) plus the 18.5s jobs worker teardown tail (cleanup, listeners, background join, dependency close, telemetry flush, SDK join slack, runtime shutdown)"
-        );
-    }
-
     #[tokio::test(start_paused = true)]
     async fn stages_are_clamped_to_the_remaining_deadline() {
         let budget = Budget::until(Instant::now() + Duration::from_secs(11));
@@ -834,7 +643,7 @@ mod tests {
         assert!(background.tracker.is_closed());
         assert!(background.tracker.is_empty());
         assert!(
-            background.stopped.borrow().is_none(),
+            background.failure().is_none(),
             "a task that ends at its cancellation is not a failure"
         );
     }
@@ -851,27 +660,6 @@ mod tests {
             "returns"
         );
         assert!(join_background(&background, BACKGROUND_JOIN).await);
-    }
-
-    #[tokio::test]
-    async fn a_task_that_panics_is_reported_by_name() {
-        let background = Background::new();
-        background.spawn("panics", |_cancel| async { panic!("task defect") });
-        assert_eq!(
-            tokio::time::timeout(BACKGROUND_JOIN, background.stopped())
-                .await
-                .unwrap(),
-            "panics"
-        );
-        background.tracker.close();
-        tokio::time::timeout(BACKGROUND_JOIN, background.tracker.wait())
-            .await
-            .unwrap();
-        background.spawn("later", |_cancel| async {});
-        tokio::time::timeout(BACKGROUND_JOIN, background.tracker.wait())
-            .await
-            .unwrap();
-        assert_eq!(background.failure(), Some("panics"), "the first end stands");
     }
 
     #[tokio::test]

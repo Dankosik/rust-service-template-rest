@@ -229,7 +229,7 @@
       "reason": "Service and worker independently own native stop receivers through final runtime shutdown, with root-local first-stop, signal-error and expedite policy (runtime-progress integration lifecycle composition). Keep only these duplicated receiver declarations and Unix install entry beside their owners; sharing them would introduce a cross-root dependency or new lifecycle abstraction solely for native scaffolding. Reconsider when an accepted shared signal lifecycle owner is needed for behavior beyond line reduction.",
       "occurrences": [
         {
-          "path": "crates/jobs-worker/src/shutdown.rs",
+          "path": "crates/jobs-worker/src/signals.rs",
           "original_lines": [
             110,
             127

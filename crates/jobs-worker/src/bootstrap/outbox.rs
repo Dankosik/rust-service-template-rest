@@ -75,8 +75,9 @@ impl RetainedCapabilities {
 mod tests {
     use service_config::Config;
 
+    use crate::background::Background;
     use crate::bootstrap::{RetainedCapabilities, WorkerError};
-    use crate::shutdown::{Background, Resources};
+    use crate::shutdown::Resources;
 
     #[tokio::test]
     async fn deferred_message_intent_refuses_missing_consumer_config_before_factory_runs() {

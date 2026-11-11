@@ -5,21 +5,23 @@
 //! [`Registration`]. The shipped binary supplies its retained profile
 //! registrations; a composition with no retained capability refuses after
 //! configuration is loaded. The synchronous startup phases and the one
-//! exit-code mapping live here, the asynchronous startup in `bootstrap`, and
-//! the staged teardown in `shutdown`. The full order is in
+//! exit-code mapping live here, the asynchronous startup in `bootstrap`, the
+//! stop signals in `signals`, worker-owned tasks in `background`, and the
+//! staged teardown in `shutdown`. The full order is in
 //! docs/architecture/runtime-lifecycle.md (section "Jobs worker").
 
+mod background;
 mod bootstrap;
 mod cli;
 // template:begin jobs:worker-operator-module
 mod operator;
 // template:end jobs:worker-operator-module
 mod shutdown;
+mod signals;
 
 use std::ffi::OsString;
 use std::fmt;
 use std::process::ExitCode;
-use std::time::Duration;
 
 use clap::Parser;
 use service_config::{BuildInfo, LoadOptions, process_failure};
@@ -42,7 +44,7 @@ pub struct Registration<'a> {
     postgres_messages: Option<PostgresMessages>,
     // template:end outbox:worker-registration-postgres-messages
     config: &'a service_config::Config,
-    background: &'a shutdown::Background,
+    background: &'a background::Background,
 }
 
 // template:begin outbox:worker-postgres-messages-factory
@@ -128,10 +130,6 @@ const BUILD_INFO: BuildInfo = BuildInfo::from_package_version(env!("CARGO_PKG_VE
 /// The process stopped on a signal but a stage voted degraded, including a forced drain.
 const EXIT_DEGRADED_SHUTDOWN: u8 = 3;
 
-/// Final bounded runtime wait, reserved inside the process grace period.
-/// Its return does not establish that already-running blocking work terminated.
-const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
-
 /// Parse flags, load configuration, run the worker, and map the result to an
 /// exit code. The first item of `args` is the program name, as in
 /// [`std::env::args_os`]. A composition with no retained capability refuses after
@@ -195,7 +193,7 @@ fn exit_code(result: &ProcessResult) -> u8 {
 
 /// Everything [`run`] does after flag parsing: configuration, the
 /// preconditions, the runtime, and [`bootstrap::serve`], with the runtime shut
-/// down within [`RUNTIME_SHUTDOWN_TIMEOUT`].
+/// down within [`shutdown::RUNTIME_SHUTDOWN_TIMEOUT`].
 fn start(
     options: &LoadOptions,
     register: Register<'_>,
@@ -216,12 +214,12 @@ fn start(
     let grace = config.http.grace_period;
     let signals = {
         let _entered = runtime.enter();
-        shutdown::Signals::install()
+        signals::Signals::install()
     };
     let mut signals = match signals {
         Ok(signals) => signals,
         Err(error) => {
-            runtime.shutdown_timeout(RUNTIME_SHUTDOWN_TIMEOUT);
+            runtime.shutdown_timeout(shutdown::RUNTIME_SHUTDOWN_TIMEOUT);
             let error = bootstrap::WorkerError::Signals(error);
             let _ = process_failure(&error);
             return Err(error);
@@ -239,7 +237,7 @@ fn start(
     .unwrap_or(Err(bootstrap::WorkerError::Panicked));
     let deadline = deadline.unwrap_or_else(|| shutdown::stop_deadline(signals.first_stop(), grace));
     runtime.shutdown_timeout(
-        RUNTIME_SHUTDOWN_TIMEOUT
+        shutdown::RUNTIME_SHUTDOWN_TIMEOUT
             .min(deadline.saturating_duration_since(tokio::time::Instant::now())),
     );
     // Native signal streams remain alive until the explicit runtime shutdown returns.
