@@ -19,7 +19,7 @@ use async_nats::jetstream::response::Response;
 use async_nats::jetstream::stream::RawMessage;
 use async_nats::{HeaderMap, HeaderName, HeaderValue};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use infra_messaging::wire::{DeadLetterRecord, restore_dead_letter};
+use infra_messaging::wire::{DeadLetterRecord, prefixed_digest_hex, restore_dead_letter};
 use infra_messaging::{
     BROKER_OPERATION_BUDGET, CloseOutcome, Credentials, Messaging, MessagingOptions,
     MessagingStartup, PreparedEvent, PublishError,
@@ -63,6 +63,8 @@ struct Record {
 
 impl Record {
     fn from_native(stream: String, message: RawMessage) -> Result<Self> {
+        // `STANDARD` accepts only canonical base64, so the accepted text is
+        // kept as it is; decoding checks it and feeds the digest.
         let payload = STANDARD
             .decode(&message.payload)
             .map_err(|_| "payload_encoding")?;
@@ -72,7 +74,7 @@ impl Record {
             stored_at: message.time.format(&Rfc3339).map_err(|_| "timestamp")?,
             subject: message.subject,
             headers_base64: message.headers.unwrap_or_default(),
-            payload_base64: STANDARD.encode(&payload),
+            payload_base64: message.payload,
             payload_sha256: digest(&payload),
         })
     }
@@ -118,11 +120,7 @@ fn stored_headers(encoded: &str) -> Result<HeaderMap> {
         let (name, value) = line.split_once(':').ok_or("header_line")?;
         let name: HeaderName = name.parse().map_err(|_| "header_name")?;
         let mut value = value.trim().to_owned();
-        while lines
-            .peek()
-            .is_some_and(|next| next.starts_with([' ', '\t']))
-        {
-            let continuation = lines.next().ok_or("header_line")?;
+        while let Some(continuation) = lines.next_if(|next| next.starts_with([' ', '\t'])) {
             value.push(' ');
             value.push_str(continuation.trim());
         }
@@ -261,13 +259,15 @@ impl Resources {
 }
 
 fn digest(bytes: &[u8]) -> String {
-    let mut hex = String::with_capacity(64);
-    for byte in Sha256::digest(bytes) {
-        const HEX: &[u8; 16] = b"0123456789abcdef";
-        hex.push(char::from(HEX[usize::from(byte >> 4)]));
-        hex.push(char::from(HEX[usize::from(byte & 15)]));
-    }
-    hex
+    prefixed_digest_hex("", &Sha256::digest(bytes))
+}
+
+/// How [`save`] places the written file.
+#[derive(Clone, Copy)]
+enum Persist {
+    /// Refuses to replace an existing file.
+    CreateNew,
+    Replace,
 }
 
 #[expect(
@@ -298,7 +298,7 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
     clippy::disallowed_types,
     reason = "finite CLI must fsync its private manifest and directory before broker dispatch"
 )]
-fn save(path: &Path, value: &impl Serialize, exclusive: bool) -> Result<()> {
+fn save(path: &Path, value: &impl Serialize, persist: Persist) -> Result<()> {
     let parent = path
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
@@ -307,11 +307,14 @@ fn save(path: &Path, value: &impl Serialize, exclusive: bool) -> Result<()> {
     serde_json::to_writer_pretty(&mut file, value).map_err(|_| "file_write")?;
     file.write_all(b"\n").map_err(|_| "file_write")?;
     file.as_file().sync_all().map_err(|_| "file_sync")?;
-    if exclusive {
-        file.persist_noclobber(path)
-            .map_err(|_| "selection_exists")?;
-    } else {
-        file.persist(path).map_err(|_| "file_replace")?;
+    match persist {
+        Persist::CreateNew => {
+            file.persist_noclobber(path)
+                .map_err(|_| "selection_exists")?;
+        }
+        Persist::Replace => {
+            file.persist(path).map_err(|_| "file_replace")?;
+        }
     }
     File::open(parent)
         .and_then(|directory| directory.sync_all())
@@ -361,7 +364,11 @@ async fn inspect(args: &[String], resources: &mut Resources) -> Result<()> {
     let Some(record) = fetch(client, &args[2], sequence).await? else {
         println!(
             "{}",
-            json!({"inspection": "missing", "publication": "not_attempted", "retirement": "absent"})
+            json!({
+                "inspection": "missing",
+                "publication": Publication::NotAttempted,
+                "retirement": Retirement::Absent,
+            })
         );
         return Ok(());
     };
@@ -376,15 +383,15 @@ async fn inspect(args: &[String], resources: &mut Resources) -> Result<()> {
         publication_id,
         record,
     };
-    save(Path::new(&args[4]), &selection, true)?;
+    save(Path::new(&args[4]), &selection, Persist::CreateNew)?;
     let mut report = json!({
         "inspection": inspection,
         "stream": selection.record.stream,
         "sequence": selection.record.sequence,
         "payload_sha256": selection.record.payload_sha256,
         "publication_id": selection.publication_id,
-        "publication": "not_attempted",
-        "retirement": "retained",
+        "publication": Publication::NotAttempted,
+        "retirement": Retirement::Retained,
     });
     if args.len() == 6 {
         report["payload_base64"] = json!(selection.record.payload_base64);
@@ -423,7 +430,7 @@ fn owned_connection(selection: &Selection, selection_hash: &str) -> Result<Conne
     reason = "finite CLI returns its explicit JSON publication state"
 )]
 fn finish(state_path: &Path, state: &State) -> Result<()> {
-    save(state_path, state, false)?;
+    save(state_path, state, Persist::Replace)?;
     println!("{}", serde_json::to_value(state).map_err(|_| "report")?);
     Ok(())
 }
@@ -478,7 +485,7 @@ async fn redrive(args: &[String], resources: &mut Resources, deadline: Instant) 
     // An earlier positive ACK is retained, but never skips the current identity
     // and lifecycle checks. Retrying ambiguity prepares exactly the same ID.
     if state.publication != Publication::Confirmed {
-        resources.startup = Some(
+        let startup = resources.startup.insert(
             Messaging::prepare(
                 MessagingOptions {
                     connection_name: "dlq-recovery-redrive".into(),
@@ -496,7 +503,6 @@ async fn redrive(args: &[String], resources: &mut Resources, deadline: Instant) 
             )
             .map_err(|_| "publisher_configuration")?,
         );
-        let startup = resources.startup.as_mut().ok_or("publisher_owner")?;
         let Ok(messaging) = startup.admit().await else {
             state.publication = Publication::Rejected;
             finish(&state_path, &state)?;
@@ -510,7 +516,7 @@ async fn redrive(args: &[String], resources: &mut Resources, deadline: Instant) 
         // `publish` would report `not_attempted` for a possible publication.
         state.publication = Publication::Ambiguous;
         state.ack = None;
-        save(&state_path, &state, false)?;
+        save(&state_path, &state, Persist::Replace)?;
         match producer
             .publish(&prepared, deadline, &CancellationToken::new())
             .await
@@ -526,7 +532,7 @@ async fn redrive(args: &[String], resources: &mut Resources, deadline: Instant) 
             Err(PublishError::Rejected) => state.publication = Publication::Rejected,
             Ok(_) | Err(PublishError::Ambiguous) => {}
         }
-        save(&state_path, &state, false)?;
+        save(&state_path, &state, Persist::Replace)?;
     }
     finish(&state_path, &state)?;
     Ok(())
@@ -557,7 +563,11 @@ async fn main() -> ExitCode {
     if let Err(reason) = result {
         eprintln!(
             "{}",
-            json!({"error": reason, "retirement": "refused", "publication": "consult_persisted_state"})
+            json!({
+                "error": reason,
+                "retirement": Retirement::Refused,
+                "publication": "consult_persisted_state",
+            })
         );
     }
     if !closed {
@@ -596,10 +606,19 @@ mod tests {
     fn selection_creation_is_exclusive_and_failed_replacement_keeps_original_bytes() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("selected.json");
-        save(&path, &json!({"logical_id": "original"}), true).unwrap();
+        save(
+            &path,
+            &json!({"logical_id": "original"}),
+            Persist::CreateNew,
+        )
+        .unwrap();
         let before = fs::read(&path).unwrap();
         assert_eq!(
-            save(&path, &json!({"logical_id": "different"}), true),
+            save(
+                &path,
+                &json!({"logical_id": "different"}),
+                Persist::CreateNew
+            ),
             Err("selection_exists")
         );
         assert_eq!(fs::read(&path).unwrap(), before);

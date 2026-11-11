@@ -12,10 +12,7 @@ use crate::error::EnvelopeError;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedEvent {
     pub(crate) subject: String,
-    /// The logical event identity consumers deduplicate by.
     pub(crate) message_id: String,
-    /// The identity the broker deduplicates this publication by. It equals
-    /// `message_id` except for a redrive, which publishes the same event again.
     pub(crate) publication_id: String,
     pub(crate) event_type: Cow<'static, str>,
     pub(crate) schema_version: u16,
@@ -44,33 +41,33 @@ impl PreparedEvent {
         subject: impl Into<String>,
         event: &Event<T>,
         max_payload_bytes: usize,
-    ) -> Result<Self, crate::MessagingError> {
+    ) -> Result<Self, EnvelopeError> {
         const {
             assert!(
                 T::SCHEMA_VERSION > 0,
                 "event schema version must be positive"
             );
             assert!(
-                crate::wire::valid_text(T::EVENT_TYPE),
+                crate::wire::valid_identity(T::EVENT_TYPE),
                 "event type must be 1 to IDENTITY_MAX_BYTES bytes without control characters"
             );
         }
         let subject = subject.into();
         if !crate::wire::valid_subject(&subject) {
-            return Err(EnvelopeError::Subject.into());
+            return Err(EnvelopeError::Subject);
         }
         let mut payload = PayloadWriter::new(max_payload_bytes);
         serde_json::to_writer(&mut payload, &event.payload)
             .map_err(|_| EnvelopeError::Serialization)?;
         if payload.total_bytes > max_payload_bytes {
-            return Err(EnvelopeError::PayloadTooLarge.into());
+            return Err(EnvelopeError::PayloadTooLarge);
         }
         let occurred_at = event.occurred_at.to_offset(time::UtcOffset::UTC);
         // The event type was checked at compile time and the publication ID
         // is the message ID, so only the ID and time need checking here.
-        crate::wire::validate_text(&event.id)?;
+        crate::wire::validate_identity(&event.id)?;
         if crate::wire::is_zero_time(occurred_at) {
-            return Err(EnvelopeError::Identity.into());
+            return Err(EnvelopeError::Identity);
         }
         // A caller can retry the retained payload without reformatting it; the
         // created-at text is derived from `occurred_at` when the envelope is
@@ -91,11 +88,14 @@ impl PreparedEvent {
     pub fn subject(&self) -> &str {
         &self.subject
     }
+    /// The logical event identity consumers deduplicate by.
     #[must_use]
     pub fn message_id(&self) -> &str {
         &self.message_id
     }
-    /// Identifier the broker uses to deduplicate this publication.
+    /// The identity the broker deduplicates this publication by. It equals
+    /// [`Self::message_id`] except for a redrive, which publishes the same
+    /// event again under a new publication identity.
     #[must_use]
     pub fn publication_id(&self) -> &str {
         &self.publication_id
@@ -188,7 +188,6 @@ mod tests {
 
     use super::{PayloadWriter, PreparedEvent};
     use crate::EnvelopeError;
-    use crate::MessagingError;
 
     #[derive(Serialize)]
     struct ExactPayload {
@@ -249,7 +248,7 @@ mod tests {
         assert_eq!(prepared.payload().as_ref(), expected.as_bytes());
         assert!(matches!(
             PreparedEvent::prepare("events.created", &event, expected.len() - 1),
-            Err(MessagingError::Envelope(EnvelopeError::PayloadTooLarge))
+            Err(EnvelopeError::PayloadTooLarge)
         ));
     }
 
@@ -318,7 +317,7 @@ mod tests {
             }
             let error = PreparedEvent::prepare(subject, &event, limit)
                 .expect_err("invalid event must be refused");
-            assert!(matches!(error, MessagingError::Envelope(actual) if actual == reason));
+            assert_eq!(error, reason);
             assert_eq!(event.payload.calls.get(), calls);
         }
         let event = event(StreamingPayload {

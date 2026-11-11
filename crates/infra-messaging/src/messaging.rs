@@ -22,12 +22,14 @@ use tokio_util::sync::CancellationToken;
 use crate::consumer::Consumer;
 use crate::credentials::{CredentialsFile, CredentialsFileError};
 use crate::error::MessagingError;
-use crate::producer::{Producer, PublishResult};
+use crate::producer::{Producer, PublishOutcome};
 use crate::registry::Registry;
 use crate::wire::{self, HEADER_LIMIT_BYTES};
 
 /// Bounds every broker round trip, inside any longer caller deadline.
 pub const BROKER_OPERATION_BUDGET: Duration = Duration::from_secs(5);
+/// One native publication window shared by source, outbox and dead-letter
+/// publication; its permits are `floor(window / envelope_limit)`.
 const PUBLICATION_WINDOW_BYTES: usize = 64 * 1024 * 1024;
 /// async-nats 0.50 caps its reconnect backoff at 4 s, reached from the
 /// thirteenth attempt (`connector.rs`).
@@ -235,7 +237,7 @@ pub(crate) struct Shared {
     pub(crate) startup_cancel: CancellationToken,
     draining: AtomicBool,
     failed: AtomicBool,
-    pub(crate) publish_metrics: Outcomes<PublishResult>,
+    pub(crate) publish_metrics: Outcomes<PublishOutcome>,
     pub(crate) publish_admission_refused: metrics::Counter,
     publish_work: PublishWork,
     /// Final event submission is separate from native runner completion.
@@ -262,8 +264,8 @@ impl Shared {
 pub(crate) struct DeadLetterTopology {
     pub(crate) stream: String,
     source_max_message_bytes: usize,
-    /// The dead-letter stream's own limit; zero or less means unlimited.
-    dead_letter_max_message_bytes: i32,
+    /// The dead-letter stream's own limit; `None` means unlimited.
+    dead_letter_max_message_bytes: Option<NonZeroUsize>,
 }
 
 impl DeadLetterTopology {
@@ -283,18 +285,30 @@ impl DeadLetterTopology {
             .map(|route| route.subject.len())
             .max()
             .ok_or_else(|| {
-                refusal_failure("dead_letter_stream", Refusal::TransferBounds, 0, None)
+                refusal_failure(
+                    "dead_letter_stream",
+                    Refusal::DeadLetterBoundsUnavailable,
+                    0,
+                    None,
+                )
             })?;
         let bounds = wire::dead_letter_bounds(
             self.source_max_message_bytes,
             subject_bytes,
             self.stream.len(),
         )
-        .ok_or_else(|| refusal_failure("dead_letter_stream", Refusal::TransferBounds, 0, None))?;
+        .ok_or_else(|| {
+            refusal_failure(
+                "dead_letter_stream",
+                Refusal::DeadLetterBoundsUnavailable,
+                0,
+                None,
+            )
+        })?;
         if bounds.headers > wire::NATIVE_HEADER_LIMIT_BYTES {
             return Err(refusal_failure(
                 "dead_letter_stream",
-                Refusal::TransferHeaderSize,
+                Refusal::DeadLetterHeaderSize,
                 bounds.headers,
                 i64::try_from(wire::NATIVE_HEADER_LIMIT_BYTES).ok(),
             ));
@@ -307,15 +321,15 @@ impl DeadLetterTopology {
                 i64::try_from(server_limit).ok(),
             ));
         }
-        if self.dead_letter_max_message_bytes > 0
-            && usize::try_from(self.dead_letter_max_message_bytes)
-                .is_ok_and(|limit| limit < bounds.total)
+        if let Some(limit) = self
+            .dead_letter_max_message_bytes
+            .filter(|limit| limit.get() < bounds.total)
         {
             return Err(refusal_failure(
                 "dead_letter_stream",
                 Refusal::StreamMessageSize,
                 bounds.total,
-                Some(i64::from(self.dead_letter_max_message_bytes)),
+                i64::try_from(limit.get()).ok(),
             ));
         }
         Ok(subject_bytes)
@@ -478,7 +492,7 @@ impl Messaging {
     /// the remaining startup budget cannot admit consumption.
     pub async fn consumer(&self, registry: Registry) -> Result<Consumer, MessagingError> {
         if self.shared.refuses_work() {
-            return Err(MessagingError::Draining);
+            return Err(MessagingError::Unavailable);
         }
         let admission = self
             .consumer
@@ -524,6 +538,8 @@ impl MessagingStartup {
         let deadline = self.deadline;
         let cancel = &self.cancel;
         describe_metrics();
+        crate::consumer::describe_metrics();
+        crate::credentials::describe_metrics();
         // The connection is retained before topology admission, so `close`
         // owns it when admission fails.
         let (client, closed_event) = match &mut self.connection {
@@ -536,6 +552,8 @@ impl MessagingStartup {
             .timeout(BROKER_OPERATION_BUDGET)
             .ack_timeout(BROKER_OPERATION_BUDGET)
             .max_ack_inflight(self.publication_permits)
+            // An exhausted window refuses at once as `Rejected` instead of
+            // queueing inside the adapter.
             .backpressure_on_inflight(false)
             .build(client.clone());
         let consumer = admit_topology(
@@ -623,7 +641,7 @@ async fn connect_client(
     let connect_deadline = within_operation_budget(deadline);
     let connect_budget = connect_deadline.saturating_duration_since(Instant::now());
     let random = async_nats::rustls::crypto::aws_lc_rs::default_provider().secure_random;
-    let mut connect = authenticated(options.credentials.as_ref(), deadline, cancel)
+    let mut connect = connect_options(options.credentials.as_ref(), deadline, cancel)
         .await?
         .name(&options.connection_name)
         .connection_timeout(BROKER_OPERATION_BUDGET)
@@ -704,7 +722,7 @@ impl MessagingProbe {
 }
 
 /// Client options that authenticate with the configured credential source.
-async fn authenticated(
+async fn connect_options(
     credentials: Option<&Credentials>,
     deadline: Instant,
     cancel: &CancellationToken,
@@ -893,7 +911,11 @@ async fn admit_topology(
         dead_letter: DeadLetterTopology {
             stream: dlq_name,
             source_max_message_bytes,
-            dead_letter_max_message_bytes: dlq.cached_info().config.max_message_size,
+            dead_letter_max_message_bytes: usize::try_from(
+                dlq.cached_info().config.max_message_size,
+            )
+            .ok()
+            .and_then(NonZeroUsize::new),
         },
     }))
 }
@@ -957,7 +979,7 @@ pub(crate) fn topology_failure(
     broker: Option<&async_nats::jetstream::Error>,
 ) -> MessagingError {
     let failure = match broker {
-        Some(broker) if matches!(broker.code(), 401 | 403) => MessagingError::Authentication,
+        Some(broker) if is_auth_refusal(broker) => MessagingError::Authentication,
         Some(_) => MessagingError::Topology,
         None => classify_topology(error),
     };
@@ -986,8 +1008,8 @@ enum Refusal {
     StreamMemoryStorage,
     StreamAsyncPersistence,
     StreamNoAck,
-    TransferBounds,
-    TransferHeaderSize,
+    DeadLetterBoundsUnavailable,
+    DeadLetterHeaderSize,
 }
 
 impl Refusal {
@@ -1004,8 +1026,8 @@ impl Refusal {
             Self::StreamMemoryStorage => "stream_memory_storage",
             Self::StreamAsyncPersistence => "stream_async_persistence",
             Self::StreamNoAck => "stream_no_ack",
-            Self::TransferBounds => "dead_letter_bounds_unavailable",
-            Self::TransferHeaderSize => "dead_letter_header_bytes",
+            Self::DeadLetterBoundsUnavailable => "dead_letter_bounds_unavailable",
+            Self::DeadLetterHeaderSize => "dead_letter_header_bytes",
         }
     }
 
@@ -1014,8 +1036,8 @@ impl Refusal {
             Self::ServerMaxPayload
             | Self::StreamMessageSizeUnset
             | Self::StreamMessageSize
-            | Self::TransferBounds
-            | Self::TransferHeaderSize => MessagingError::Bounds,
+            | Self::DeadLetterBoundsUnavailable
+            | Self::DeadLetterHeaderSize => MessagingError::Bounds,
             Self::ServerVersion
             | Self::JetStreamDisabled
             | Self::HeadersUnsupported
@@ -1086,6 +1108,12 @@ fn validate_server(client: &async_nats::Client, envelope_limit: usize) -> Result
     Ok(())
 }
 
+/// Whether the broker answered 401 or 403, which both mean the credentials
+/// were refused.
+fn is_auth_refusal(error: &async_nats::jetstream::Error) -> bool {
+    matches!(error.code(), 401 | 403)
+}
+
 fn classify_topology(error: &(dyn std::error::Error + 'static)) -> MessagingError {
     if let Some(error) = error.downcast_ref::<async_nats::jetstream::context::RequestError>() {
         match error.kind() {
@@ -1101,7 +1129,7 @@ fn classify_topology(error: &(dyn std::error::Error + 'static)) -> MessagingErro
         }
     }
     if let Some(error) = error.downcast_ref::<async_nats::jetstream::Error>()
-        && matches!(error.code(), 401 | 403)
+        && is_auth_refusal(error)
     {
         return MessagingError::Authentication;
     }
@@ -1187,8 +1215,8 @@ fn report_connection_event(event: &async_nats::Event) {
     }
 }
 
-/// Describes the adapter's metrics to the installed recorder. Repeating it is
-/// harmless.
+/// Describes the publication and connection metrics to the installed
+/// recorder. Repeating it is harmless.
 fn describe_metrics() {
     use metrics::{Unit, describe_counter, describe_gauge, describe_histogram};
 
@@ -1219,33 +1247,8 @@ fn describe_metrics() {
         "Time from publication start to its result"
     );
     describe_counter!(
-        "messaging_handler_total",
-        "Handled deliveries by event type and outcome"
-    );
-    describe_histogram!(
-        "messaging_handler_duration_seconds",
-        Unit::Seconds,
-        "Handler run time by event type and outcome"
-    );
-    describe_counter!(
-        "messaging_dead_letter_total",
-        "Dead-letter transfers by event type, reason and transfer outcome"
-    );
-    describe_counter!(
-        "messaging_settlement_failures_total",
-        "Unconfirmed source acknowledgements and failed redelivery requests"
-    );
-    describe_counter!(
-        "messaging_consumer_stream_errors_total",
-        "Recoverable pull-stream errors"
-    );
-    describe_counter!(
         "messaging_connection_events_total",
         "Broker connection events by result"
-    );
-    describe_counter!(
-        "messaging_credentials_file_challenges_total",
-        "Completed file-backed JWT/signature challenge preparations; not broker authentication."
     );
 }
 
@@ -1266,7 +1269,7 @@ pub(crate) mod tests {
 
     #[test]
     fn publish_results_are_listed_in_index_order() {
-        assert_all_in_index_order::<PublishResult>();
+        assert_all_in_index_order::<PublishOutcome>();
     }
 
     #[test]

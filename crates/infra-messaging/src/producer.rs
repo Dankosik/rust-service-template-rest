@@ -15,7 +15,7 @@ use crate::wire::{encode_prepared, validate_header_bytes};
 
 outcome_label! {
     /// How one publication ended.
-    pub(crate) enum PublishResult {
+    pub(crate) enum PublishOutcome {
         Acknowledged => "acknowledged",
         Rejected => "rejected",
         Ambiguous => "ambiguous",
@@ -58,9 +58,9 @@ impl Producer {
         );
         let result = self.dispatch(event, &span, deadline, cancel).await;
         let outcome = match &result {
-            Ok(_) => PublishResult::Acknowledged,
-            Err(PublishError::Rejected) => PublishResult::Rejected,
-            Err(PublishError::Ambiguous) => PublishResult::Ambiguous,
+            Ok(_) => PublishOutcome::Acknowledged,
+            Err(PublishError::Rejected) => PublishOutcome::Rejected,
+            Err(PublishError::Ambiguous) => PublishOutcome::Ambiguous,
         };
         let label = outcome.label();
         span.record("outcome", label);
