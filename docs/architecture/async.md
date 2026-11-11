@@ -75,10 +75,13 @@ kind names, while registration and enqueue retain typed runtime rejection.
 
 The trace carrier stores only `trace_context` (legacy traceparent) and
 `trace_state`. It allows only those keys, bounds them to 256 and 512 ASCII
-bytes respectively, rejects controls and malformed nonempty tracestate, and
-links a valid extracted remote span rather than making it the consumer parent.
-It stores no baggage. Parent-only legacy rows remain valid; malformed or
-overbound context leaves the attempt unlinked without failing the job.
+bytes respectively, and links a valid extracted remote span rather than
+making it the consumer parent. A captured tracestate over its bound loses
+whole members, longer ones first; a malformed or control-bearing tracestate is
+dropped alone, because W3C Trace Context forbids it from affecting
+traceparent. It stores no baggage. Parent-only legacy rows remain valid; a
+malformed or overbound traceparent leaves the attempt unlinked without
+failing the job.
 The attempt span keeps its `job.*` fields and takes no `messaging.*`
 attributes: the queue is a table of this service's own database, and the
 outbox attempt already contains the broker's `messaging.*` send span, so a
@@ -229,7 +232,7 @@ all values and then its database timestamp. A query or decode
 failure retains the last good values and timestamp; operation-failure telemetry
 still records the failure. `jobs_operation_failed` carries `sqlstate` or
 `cause`. Consumers reject timestamp zero or a timestamp older
-than 30 seconds. The two-second statement timeout is a time backstop, not a
+than two minutes; `JobsObservationStale` alerts on it. The two-second statement timeout is a time backstop, not a
 scan-size proof. Retention deletes completed rows older than 24 hours in
 500-row batches every minute, independent of registered kinds. Failed rows
 remain until explicit redrive or discard. Unknown kinds have no periodic

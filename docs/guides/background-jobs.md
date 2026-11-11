@@ -55,14 +55,18 @@ maximum of 36,500 days, and drops sub-microseconds. `unique_key` is an optional
 
 Before sending SQL, enqueue validates kind, key, delay, JSON size (256 KiB),
 and decoded NUL. It serializes once with `serde_json` and rejects a `\u0000`
-escape (a NUL character), which JSONB cannot store. Valid payload and key
+escape (a NUL character), which JSONB cannot store. It also decodes the JSON
+back as the kind and rejects it with `PayloadDoesNotDecode` when that fails,
+for example a non-finite float that serializes as `null`, so a job that no
+attempt could decode is never queued. Valid payload and key
 bind as text with explicit JSONB/text casts. Enqueue sends the insert and,
 for a job due at once, at most one [wake notification](#claims-deadlines-and-shutdown)
 per kind every 25 ms. UTF-8 is a schema precondition rather than a
 per-call check: the canonical migration requires a UTF-8 database,
 and the worker's startup check verifies it. The typed validation failures
 include `InvalidKind`, `InvalidUniqueKey`, `InvalidDelay`,
-`PayloadContainsNul`, `Serialize`, and `PayloadTooLarge`. Database errors
+`PayloadContainsNul`, `Serialize`, `PayloadDoesNotDecode`, and
+`PayloadTooLarge`. Database errors
 abort the caller transaction in the ordinary PostgreSQL way.
 
 Enqueue and `compare_live_payload` share the same preparation path. It retains
@@ -167,14 +171,6 @@ executes a working initialized service across an exact template update, preservi
 its business code and data. Its finite workload and reconciliation receipt keep
 queue outcomes separate from confirmed effects.
 <!-- template:end jobs-reference:docs-jobs-reading-reference -->
-
-`job.context()` returns an `operation_context::OperationContext` for calls
-to dependencies. It retains the attempt's existing fixed deadline and inherits
-its cancellation; obtaining another view never restarts the timeout.
-Cancelling this child context cannot cancel the attempt or a sibling view.
-The existing `job.deadline()` and `job.cancellation()` accessors keep their
-attempt authority, and the engine remains responsible for supervision and
-durable completion.
 
 `job.context()` returns an `operation_context::OperationContext` for calls
 to dependencies. It retains the attempt's existing fixed deadline and inherits
@@ -513,8 +509,11 @@ a normal later outcome may replace the summary, never the history entry. Pending
 
 New trace data stores bounded ASCII `trace_context` and `trace_state` only.
 The worker extracts through the installed propagator and creates a span link,
-never a remote parent. Empty trace-state is absent; malformed, overbound, or
-control-bearing context produces an unlinked attempt. No baggage is stored.
+never a remote parent. Empty trace-state is absent; a captured trace-state
+over 512 bytes loses whole members, longer ones first, as W3C Trace Context
+orders. A malformed or control-bearing trace-state is dropped alone; a
+malformed, overbound, or control-bearing trace-parent produces an unlinked
+attempt. No baggage is stored.
 Each attempt runs in one consumer span, exported as `process <kind>`, with
 `job.id`, `job.kind`, `job.attempt`, and the `outcome` that
 `jobs_attempts_total` counts. `retry`, `timeout`, `exhausted`, and `permanent`
@@ -526,7 +525,7 @@ listener:
 
 | Instrument | Labels | Meaning |
 | --- | --- | --- |
-| `jobs_attempts_total` | `kind`, `outcome` | Handler results as the worker observed them: `completed`, `retry`, `timeout`, `exhausted`, `permanent`, `snoozed`, `cancelled`. |
+| `jobs_attempts_total` | `kind`, `outcome` | Handler results as the worker observed them: `completed`, `retry`, `timeout`, `exhausted`, `permanent`, `snoozed`, `cancelled`; plus claim-time exhaustions. A terminal failure counts once, after its write applies; one whose write is not known to apply is logged as `job_attempt_failed` and counted by the lease rescue that fails or re-runs the row. |
 | `jobs_persistence_total` | `kind`, `disposition` | Outcome writes: `applied`; `unchanged`, an acknowledged zero-row write that makes no ownership attribution; `unknown`, left to lease expiry and logged at `warn`. |
 | `jobs_attempt_duration_seconds` | `kind` | Handler run time. |
 | `jobs_claim_duration_seconds` | none | Claim request duration through acknowledgement or failure. |
@@ -561,8 +560,9 @@ Unknown kinds require explicit operator inspection below, not metric labels.
 `jobs_observation_timestamp_seconds` share the same complete union sample.
 Startup publishes zero for every registered value and timestamp. Only a
 complete decoded sample publishes all values, then its database timestamp.
-SQL or decode failure retains all last-good values and the timestamp. Alerting
-requires a nonzero timestamp no older than 30 seconds. A successful empty queue
+SQL or decode failure retains all last-good values and the timestamp. A
+consumer treats a zero timestamp, or one older than two minutes, as no
+sample; the shipped `JobsObservationStale` alert fires on it. A successful empty queue
 reports zero values with a nonzero timestamp. The two-second sample timeout
 bounds elapsed time, not physical pages or dead tuples scanned.
 

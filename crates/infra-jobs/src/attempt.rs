@@ -36,7 +36,8 @@ const OWNED_ATTEMPTS_METRIC: &str = "jobs_owned_attempts";
 /// Queued plus in-flight completion entries. No labels.
 const COMPLETION_MEMBERSHIPS_METRIC: &str = "jobs_completion_memberships";
 
-/// Observed handler results and claim-time exhaustions. Labels `kind`, `outcome`.
+/// Observed handler results and claim-time exhaustions, a terminal failure
+/// once. Labels `kind`, `outcome`.
 pub(crate) const ATTEMPTS_METRIC: &str = "jobs_attempts_total";
 /// Queue-write acknowledgement, not attribution. Labels `kind`, `disposition`.
 pub(crate) const PERSISTENCE_METRIC: &str = "jobs_persistence_total";
@@ -239,29 +240,26 @@ pub(crate) fn record_exhausted(attempt: &AttemptId, summary: Option<&str>) {
             reason: FailureReason::Exhausted,
             summary: summary.unwrap_or("").to_owned(),
         },
-        None,
     );
 }
 
-fn observe_attempt(
-    handles: Option<&KindMetrics>,
-    attempt: &AttemptId,
-    transition: &Transition,
-    ran: Option<Duration>,
-) {
+fn record_duration(handles: Option<&KindMetrics>, attempt: &AttemptId, ran: Duration) {
+    match handles {
+        Some(handles) => handles.duration.record(ran.as_secs_f64()),
+        None => {
+            metrics::histogram!(ATTEMPT_DURATION_METRIC, "kind" => attempt.kind)
+                .record(ran.as_secs_f64());
+        }
+    }
+}
+
+fn observe_attempt(handles: Option<&KindMetrics>, attempt: &AttemptId, transition: &Transition) {
     match handles {
         Some(handles) if matches!(transition, Transition::Complete) => {
             handles.completed.increment(1);
         }
         _ => metrics::counter!(ATTEMPTS_METRIC, "kind" => attempt.kind, "outcome" => transition.label())
             .increment(1),
-    }
-    if let Some(ran) = ran {
-        match handles {
-            Some(handles) => handles.duration.record(ran.as_secs_f64()),
-            None => metrics::histogram!(ATTEMPT_DURATION_METRIC, "kind" => attempt.kind)
-                .record(ran.as_secs_f64()),
-        }
     }
     match transition {
         Transition::Complete => {
@@ -415,8 +413,18 @@ async fn run_attempt(
             .fetch_add(1, Ordering::Relaxed);
     }
     record_on_span(&tracing::Span::current(), &transition);
-    observe_attempt(registered.metrics.get(), &attempt, &transition, ran);
-    persist(
+    let handles = registered.metrics.get();
+    if let Some(ran) = ran {
+        record_duration(handles, &attempt, ran);
+    }
+    // A terminal failure counts only once its write applies. A row the write
+    // did not move is failed, re-run, or exhausted by its lease rescue, which
+    // counts it; counting it here too would count one job twice.
+    let terminal = matches!(transition, Transition::Fail { .. });
+    if !terminal {
+        observe_attempt(handles, &attempt, &transition);
+    }
+    let written = persist(
         shared,
         &attempt,
         generation,
@@ -425,6 +433,13 @@ async fn run_attempt(
         &slots,
     )
     .await;
+    if terminal {
+        if written == Some(Written::Applied) {
+            observe_attempt(handles, &attempt, &transition);
+        } else if let Transition::Fail { summary, .. } = &transition {
+            tracing::info!(job.id = %attempt.id, job.kind = attempt.kind, job.attempt = attempt.number, outcome = transition.label(), error = summary.as_str(), "job_attempt_failed");
+        }
+    }
 }
 
 fn prepare_handler(
@@ -575,7 +590,7 @@ async fn persist(
     transition: &Transition,
     supervisor_deadline: Instant,
     slots: &Arc<AttemptSlots>,
-) {
+) -> Option<Written> {
     let operation = if matches!(transition, Transition::Release) {
         Operation::Release
     } else {
@@ -608,7 +623,7 @@ async fn persist(
             None => break,
             Some(Ok(written)) => {
                 acknowledged(shared, attempt, transition, operation, written);
-                return;
+                return Some(written);
             }
             Some(Err(Observed)) => {}
         }
@@ -621,6 +636,7 @@ async fn persist(
         }
     }
     uncertain(shared, attempt);
+    None
 }
 
 /// The attempt's queue transition was acknowledged.

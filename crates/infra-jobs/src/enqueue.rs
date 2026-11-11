@@ -55,6 +55,10 @@ pub enum EnqueueError {
     PayloadContainsNul,
     #[error("payload could not be serialized as JSON")]
     Serialize(#[source] serde_json::Error),
+    /// The serialized JSON does not decode back as its kind, so every attempt
+    /// would fail. A non-finite float, which serializes as `null`, is one case.
+    #[error("payload does not decode back as its job kind")]
+    PayloadDoesNotDecode(#[source] serde_json::Error),
     #[error("payload is {bytes} bytes; the maximum is {MAX_PAYLOAD_BYTES}")]
     PayloadTooLarge { bytes: usize },
     /// The statement failed; the caller's transaction is aborted.
@@ -76,8 +80,7 @@ impl From<InvalidDelay> for EnqueueError {
 /// key, a live job of the same kind and key yields [`Enqueued::Duplicate`]
 /// and leaves the transaction usable. Under `REPEATABLE READ` or
 /// `SERIALIZABLE`, a holder written after the caller's snapshot fails the
-/// statement with `40001` instead; the uniqueness table in
-/// `docs/guides/background-jobs.md` gives every case.
+/// statement with `40001` instead.
 ///
 /// Serialization runs once and synchronously before database access. Retained
 /// JSON is bounded by [`MAX_PAYLOAD_BYTES`], while all successful output is
@@ -89,7 +92,8 @@ impl From<InvalidDelay> for EnqueueError {
 /// # Errors
 ///
 /// [`EnqueueError`] when the kind name, unique key, delay, or payload is
-/// refused, or when the statement fails.
+/// refused, including a payload whose JSON does not decode back as `K`, or
+/// when the statement fails.
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub async fn enqueue<K: JobKind>(
     tx: &mut Tx<'_>,
@@ -303,6 +307,7 @@ fn prepare<'a, K: JobKind>(
             error,
         )))
     })?;
+    serde_json::from_str::<K>(&payload).map_err(EnqueueError::PayloadDoesNotDecode)?;
     Ok(Prepared {
         payload,
         unique_key: options.unique_key,
@@ -455,6 +460,27 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, EnqueueError::InvalidKind("Bad Name")));
+    }
+
+    #[derive(Serialize, Deserialize)]
+    struct Reading {
+        value: f64,
+    }
+
+    impl JobKind for Reading {
+        const NAME: &'static str = "reading";
+    }
+
+    #[test]
+    fn a_payload_the_worker_cannot_decode_is_refused_before_sending() {
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let err = prepare(&Reading { value }, EnqueueOptions::default()).unwrap_err();
+            assert!(
+                matches!(err, EnqueueError::PayloadDoesNotDecode(_)),
+                "{value}"
+            );
+        }
+        assert!(prepare(&Reading { value: 1.5 }, EnqueueOptions::default()).is_ok());
     }
 
     #[test]

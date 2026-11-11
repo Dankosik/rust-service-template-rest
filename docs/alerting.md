@@ -192,6 +192,15 @@ Work for that kind is late. Check that workers run and claim
 whether attempts of that kind got slower (`jobs_attempt_duration_seconds`).
 Add workers when claims keep up with no failures but the age still grows.
 
+### JobsObservationStale
+
+A worker has published no successful queue sample for over two minutes, or
+none since it started. Its queue gauges keep their last values, so
+`JobsQueueBacklog` cannot see a backlog that grows there. Check
+`jobs_worker_operation_failures_total{operation="sample"}` and the
+`jobs_operation_failed` log for its `sqlstate` or `cause`; the sample has a
+two-second statement timeout.
+
 ### JobsDeadLettered
 
 Jobs failed permanently or exhausted their attempts, and stay failed until an

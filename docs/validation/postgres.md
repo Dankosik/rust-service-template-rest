@@ -231,7 +231,7 @@ it does not authorize a deployment.
 With the jobs pack retained, `ALLOW_HEAVY=1 make test-integration-db` also
 runs the jobs suite in `test/tests/jobs/`: `enqueue.rs` (atomicity through
 `in_tx`: a committed transaction enqueues, a rolled-back one does not;
-validation and database failure classes; every uniqueness row, including
+validation and database failure classes; every uniqueness case, including
 `40001` under `REPEATABLE READ`), `execution.rs` (claiming and exclusivity
 with two engines racing, retry scheduling, committed and rolled-back uncertain
 transactional COMPLETE through ordinary fenced retry, stop during a dispatched
