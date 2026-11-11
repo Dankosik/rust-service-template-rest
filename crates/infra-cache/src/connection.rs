@@ -25,17 +25,14 @@ pub(crate) const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
 /// Ceiling on one exchange over an established connection that no caller
 /// context bounds: the readiness probe and the password refresh.
 const CONNECTED_EXCHANGE_TIMEOUT: Duration = Duration::from_secs(5);
-/// Floor of the supervisor's exponential setup backoff.
-const MIN_DELAY: Duration = Duration::from_millis(100);
-/// Cap on setup backoff.
-const MAX_DELAY: Duration = Duration::from_secs(2);
+const SETUP_BACKOFF_MIN_DELAY: Duration = Duration::from_millis(100);
+const SETUP_BACKOFF_MAX_DELAY: Duration = Duration::from_secs(2);
 /// Minimum spacing between published generations, so a server that accepts
 /// and then drops every connection cannot drive a reconnect loop.
 const MIN_GENERATION_SPACING: Duration = Duration::from_secs(2);
-/// Factor of the supervisor's exponential setup backoff.
-const EXPONENT_BASE: f32 = 2.0;
+const SETUP_BACKOFF_FACTOR: f32 = 2.0;
 /// Bound one reconnect chain; the supervisor starts the next after a pause.
-const NUMBER_OF_RETRIES: usize = 6;
+const SETUP_BACKOFF_MAX_RETRIES: usize = 6;
 /// Spacing of the maintenance `PING` that finds a silently dead connection.
 const PING_INTERVAL: Duration = Duration::from_secs(2);
 const PASSWORD_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
@@ -86,35 +83,36 @@ struct Generation {
     retired: CancellationToken,
 }
 
-/// Includes admitted commands still waiting for a connection generation.
-struct Admission<'a> {
+/// Held from the slot claim until the command ends, including the wait for a
+/// connection generation.
+struct CommandSlot<'a> {
     _permit: SemaphorePermit<'a>,
     in_flight: &'a Gauge,
 }
 
-impl Drop for Admission<'_> {
+impl Drop for CommandSlot<'_> {
     fn drop(&mut self) {
         self.in_flight.decrement(1.0);
     }
 }
 
 /// An exchange that does not end in `Ok` or a delivered server error reply,
-/// including one dropped mid-flight, retires its generation before its
-/// admission is released, so no later command can read a reply it left on
-/// the connection.
+/// including one dropped mid-flight, retires its generation before its slot
+/// is released, so no later command can read a reply it left on the
+/// connection.
 struct Exchange<'a> {
     shared: &'a Shared,
     generation: Arc<Generation>,
-    _admission: Admission<'a>,
+    _slot: CommandSlot<'a>,
     keeps_generation: bool,
 }
 
 impl<'a> Exchange<'a> {
-    fn new(shared: &'a Shared, generation: Arc<Generation>, admission: Admission<'a>) -> Self {
+    fn new(shared: &'a Shared, generation: Arc<Generation>, slot: CommandSlot<'a>) -> Self {
         Self {
             shared,
             generation,
-            _admission: admission,
+            _slot: slot,
             keeps_generation: false,
         }
     }
@@ -278,7 +276,7 @@ impl Link {
         context: &OperationContext,
     ) -> Result<T, ErrorType> {
         context.check().map_err(|_| ErrorType::Timeout)?;
-        let admission = self.admit(&self.application_slots)?;
+        let slot = self.claim_slot(&self.application_slots)?;
         let generation = tokio::select! {
             biased;
             _ = context.wait_stopped() => return Err(ErrorType::Timeout),
@@ -286,61 +284,35 @@ impl Link {
         };
         // A stop seen only by the exchange would retire this healthy generation.
         context.check().map_err(|_| ErrorType::Timeout)?;
-        self.exchange_with_context(generation, admission, command, context)
-            .await
+        let exchange = Exchange::new(&self.shared, generation, slot);
+        let mut connection = exchange.generation.connection.clone();
+        tokio::select! {
+            biased;
+            _ = context.wait_stopped() => exchange.finish(Err(ErrorType::Timeout)),
+            () = exchange.generation.retired.cancelled() => exchange.finish(Err(ErrorType::Io)),
+            reply = command.query_async(&mut connection) => exchange.finish_reply(reply),
+        }
     }
 
     pub(crate) async fn probe(&self) -> Result<(), ErrorType> {
-        let admission = self.admit(&self.probe_slots)?;
+        let slot = self.claim_slot(&self.probe_slots)?;
         let generation = self.shared.acquire().await?;
-        self.exchange(
-            generation,
-            admission,
-            &redis::Cmd::ping(),
-            Instant::now() + CONNECTED_EXCHANGE_TIMEOUT,
-        )
-        .await
+        let deadline = Instant::now() + CONNECTED_EXCHANGE_TIMEOUT;
+        let exchange = Exchange::new(&self.shared, generation, slot);
+        let result = query_until(&exchange.generation, &redis::Cmd::ping(), deadline).await;
+        exchange.finish(result)
     }
 
-    fn admit<'a>(&'a self, slots: &'a Semaphore) -> Result<Admission<'a>, ErrorType> {
+    fn claim_slot<'a>(&'a self, slots: &'a Semaphore) -> Result<CommandSlot<'a>, ErrorType> {
         let permit = slots.try_acquire().map_err(|_| {
             self.admission_refused.increment(1);
             ErrorType::Other
         })?;
         self.commands_in_flight.increment(1.0);
-        Ok(Admission {
+        Ok(CommandSlot {
             _permit: permit,
             in_flight: &self.commands_in_flight,
         })
-    }
-
-    async fn exchange<T: redis::FromRedisValue>(
-        &self,
-        generation: Arc<Generation>,
-        admission: Admission<'_>,
-        command: &redis::Cmd,
-        deadline: Instant,
-    ) -> Result<T, ErrorType> {
-        let guard = Exchange::new(&self.shared, generation, admission);
-        let result = query_until(&guard.generation, command, deadline).await;
-        guard.finish(result)
-    }
-
-    async fn exchange_with_context<T: redis::FromRedisValue>(
-        &self,
-        generation: Arc<Generation>,
-        admission: Admission<'_>,
-        command: &redis::Cmd,
-        context: &OperationContext,
-    ) -> Result<T, ErrorType> {
-        let guard = Exchange::new(&self.shared, generation, admission);
-        let mut connection = guard.generation.connection.clone();
-        tokio::select! {
-            biased;
-            _ = context.wait_stopped() => guard.finish(Err(ErrorType::Timeout)),
-            () = guard.generation.retired.cancelled() => guard.finish(Err(ErrorType::Io)),
-            reply = command.query_async(&mut connection) => guard.finish_reply(reply),
-        }
     }
 }
 
@@ -366,15 +338,23 @@ fn register_link_metrics() -> LinkMetrics {
 }
 
 // Ensures a panic or unexpected exit cannot leave an apparently live cache.
-struct SupervisorExit(Arc<Shared>);
+struct SupervisorExit {
+    shared: Arc<Shared>,
+    server: ServerEndpoint,
+}
+
 impl Drop for SupervisorExit {
     fn drop(&mut self) {
         if std::thread::panicking() {
             // The process panic hook names the location, not that cache
             // recovery has stopped for the rest of the process.
-            tracing::error!("cache_supervisor_panicked");
+            tracing::error!(
+                server.address = %self.server.host,
+                server.port = self.server.port,
+                "cache_supervisor_panicked"
+            );
         }
-        self.0.close();
+        self.shared.close();
     }
 }
 
@@ -402,7 +382,10 @@ async fn supervise(
     password_file: Option<PasswordFile>,
     command_timeout: Duration,
 ) {
-    let _exit = SupervisorExit(shared.clone());
+    let _exit = SupervisorExit {
+        shared: shared.clone(),
+        server: server.clone(),
+    };
     run_supervisor(
         &shared,
         &server,
@@ -420,16 +403,16 @@ async fn run_supervisor(
     password_file: Option<&PasswordFile>,
     command_timeout: Duration,
 ) {
-    let retry = backon::ExponentialBuilder::default()
-        .with_min_delay(MIN_DELAY)
-        .with_max_delay(MAX_DELAY)
-        .with_factor(EXPONENT_BASE)
-        .with_max_times(NUMBER_OF_RETRIES)
+    let backoff_policy = backon::ExponentialBuilder::default()
+        .with_min_delay(SETUP_BACKOFF_MIN_DELAY)
+        .with_max_delay(SETUP_BACKOFF_MAX_DELAY)
+        .with_factor(SETUP_BACKOFF_FACTOR)
+        .with_max_times(SETUP_BACKOFF_MAX_RETRIES)
         .with_jitter();
-    let mut backoff = retry.build();
-    let mut next_connection = Instant::now();
+    let mut backoff = backoff_policy.build();
+    let mut next_attempt = Instant::now();
     loop {
-        sleep_until(next_connection).await;
+        sleep_until(next_attempt).await;
         if !shared.begin_attempt() {
             return;
         }
@@ -438,8 +421,8 @@ async fn run_supervisor(
                 if !shared.publish(generation.clone()) {
                     return;
                 }
-                next_connection = Instant::now() + MIN_GENERATION_SPACING;
-                backoff = retry.build();
+                next_attempt = Instant::now() + MIN_GENERATION_SPACING;
+                backoff = backoff_policy.build();
                 maintain(server, &generation, rotation, command_timeout).await;
                 shared.retire(&generation);
             }
@@ -457,11 +440,11 @@ async fn run_supervisor(
                     delay
                 } else {
                     // The chain is exhausted: pause, then start the next one.
-                    backoff = retry.build();
-                    MAX_DELAY
+                    backoff = backoff_policy.build();
+                    SETUP_BACKOFF_MAX_DELAY
                 };
                 // backon's jitter is additive after its cap; cap the final delay.
-                next_connection = Instant::now() + delay.min(MAX_DELAY);
+                next_attempt = Instant::now() + delay.min(SETUP_BACKOFF_MAX_DELAY);
             }
         }
     }
@@ -475,12 +458,12 @@ async fn setup_attempt<'a>(
     password_file: Option<&'a PasswordFile>,
 ) -> Result<(Arc<Generation>, Option<Rotation<'a>>), ErrorType> {
     let retired = CancellationToken::new();
-    let result = match timeout(
-        SETUP_TIMEOUT,
-        connect(server, client, password_file, retired.clone()),
-    )
-    .await
-    {
+    let setup = async {
+        let (client, rotation) = credentialed_client(server, client, password_file).await?;
+        let connection = connect(&client, retired.clone()).await?;
+        Ok((connection, rotation))
+    };
+    let result = match timeout(SETUP_TIMEOUT, setup).await {
         Err(_elapsed) => Err(ErrorType::Timeout),
         // The server disconnected the new connection before publication.
         Ok(Ok(_)) if retired.is_cancelled() => Err(ErrorType::Io),
@@ -497,38 +480,42 @@ async fn setup_attempt<'a>(
     })
 }
 
-/// The rotation is present exactly when a password file is.
-async fn connect<'a>(
+/// The admitted client, or one rebuilt with the password file's current
+/// content. The rotation is present exactly when a password file is.
+async fn credentialed_client<'a>(
     server: &ServerEndpoint,
     admitted: &redis::Client,
     password_file: Option<&'a PasswordFile>,
-    retired: CancellationToken,
-) -> Result<(MultiplexedConnection, Option<Rotation<'a>>), ErrorType> {
-    let (client, rotation) = match password_file {
-        Some(file) => {
-            // Not `auth`: an unreadable mount must not look like a revoked
-            // password, which an operator would answer by rotating the secret.
-            let password = file.read().await.map_err(|error| {
-                tracing::warn!(
-                    server.address = %server.host,
-                    server.port = server.port,
-                    %error,
-                    "cache_password_file_unreadable"
-                );
-                ErrorType::Other
-            })?;
-            let info = admitted.get_connection_info().clone();
-            let settings = info
-                .redis_settings()
-                .clone()
-                .set_username(file.username())
-                .set_password(&password);
-            let client = redis::Client::open(info.set_redis_settings(settings))
-                .map_err(|_| ErrorType::Other)?;
-            (client, Some(Rotation::new(file, password)))
-        }
-        None => (admitted.clone(), None),
+) -> Result<(redis::Client, Option<Rotation<'a>>), ErrorType> {
+    let Some(file) = password_file else {
+        return Ok((admitted.clone(), None));
     };
+    // Not `auth`: an unreadable mount must not look like a revoked
+    // password, which an operator would answer by rotating the secret.
+    let password = file.read().await.map_err(|error| {
+        tracing::warn!(
+            server.address = %server.host,
+            server.port = server.port,
+            %error,
+            "cache_password_file_unreadable"
+        );
+        ErrorType::Other
+    })?;
+    let info = admitted.get_connection_info().clone();
+    let settings = info
+        .redis_settings()
+        .clone()
+        .set_username(file.username())
+        .set_password(&password);
+    let client =
+        redis::Client::open(info.set_redis_settings(settings)).map_err(|_| ErrorType::Other)?;
+    Ok((client, Some(Rotation::new(file, password))))
+}
+
+async fn connect(
+    client: &redis::Client,
+    retired: CancellationToken,
+) -> Result<MultiplexedConnection, ErrorType> {
     // redis-rs defaults (500 ms response, 1 s connect) would cut the command
     // context and the setup bound short; those own every deadline here.
     let config = redis::AsyncConnectionConfig::new()
@@ -540,11 +527,10 @@ async fn connect<'a>(
             }
             Ok::<(), redis::aio::SendError>(())
         });
-    let connection = client
+    client
         .get_multiplexed_async_connection_with_config(&config)
         .await
-        .map_err(|error| observe::error_type(&error))?;
-    Ok((connection, rotation))
+        .map_err(|error| observe::error_type(&error))
 }
 
 /// Keeps `generation` checked until it must retire. The caller retires it

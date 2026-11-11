@@ -69,7 +69,7 @@ pub(crate) fn admit(options: CacheOptions) -> Result<Admitted, CacheError> {
         Some(certificates) => redis::Client::build_with_tls(info, certificates),
         None => redis::Client::open(info),
     }
-    .map_err(|_| CacheError::Client)?;
+    .map_err(|_| CacheError::ClientBuild)?;
     Ok(Admitted {
         server,
         client,

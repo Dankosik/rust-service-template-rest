@@ -3,7 +3,8 @@
 use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+
+use tokio::sync::Semaphore;
 
 use crate::CacheError;
 
@@ -12,8 +13,9 @@ const DEFAULT_USER: &str = "default";
 pub(crate) struct PasswordFile {
     path: PathBuf,
     username: String,
-    /// Set while a blocking read runs, including one whose caller stopped waiting.
-    reading: Arc<AtomicBool>,
+    /// One permit, held by a blocking read until it ends, including one whose
+    /// caller stopped waiting.
+    reading: Arc<Semaphore>,
 }
 
 impl std::fmt::Debug for PasswordFile {
@@ -40,7 +42,7 @@ impl PasswordFile {
                 .filter(|user| !user.is_empty())
                 .unwrap_or(DEFAULT_USER)
                 .into(),
-            reading: Arc::default(),
+            reading: Arc::new(Semaphore::new(1)),
         })
     }
 
@@ -53,15 +55,16 @@ impl PasswordFile {
     /// While that read runs, another fails at once as
     /// [`ErrorKind::ResourceBusy`] instead of starting a second.
     pub(crate) async fn read(&self) -> Result<String, CacheError> {
-        if self.reading.swap(true, Ordering::AcqRel) {
-            return Err(CacheError::PasswordFile {
-                kind: ErrorKind::ResourceBusy,
-            });
-        }
-        let finished = ReadFinished(self.reading.clone());
+        let permit =
+            self.reading
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| CacheError::PasswordFile {
+                    kind: ErrorKind::ResourceBusy,
+                })?;
         let path = self.path.clone();
         let content = tokio::task::spawn_blocking(move || {
-            let _finished = finished;
+            let _permit = permit;
             read_password_file(&path)
         })
         .await
@@ -70,15 +73,6 @@ impl PasswordFile {
         })?
         .map_err(|error| CacheError::PasswordFile { kind: error.kind() })?;
         password_from(content)
-    }
-}
-
-/// Clears the in-flight mark when the blocking read ends, panics included.
-struct ReadFinished(Arc<AtomicBool>);
-
-impl Drop for ReadFinished {
-    fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
     }
 }
 
