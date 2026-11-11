@@ -14,7 +14,7 @@ use crate::kind::{self, InvalidDelay, JobId, JobKind, checked_delay_micros};
 use crate::trace_context;
 
 pub const MAX_PAYLOAD_BYTES: usize = 262_144;
-pub(crate) const MAX_UNIQUE_KEY_BYTES: usize = 255;
+const MAX_UNIQUE_KEY_BYTES: usize = 255;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct EnqueueOptions<'a> {
@@ -64,7 +64,7 @@ pub enum EnqueueError {
     /// The statement failed; the caller's transaction is aborted.
     ///
     /// Its SQLSTATE is [`infra_postgres::sqlstate`].
-    #[error("the enqueue statement failed")]
+    #[error("the jobs statement failed")]
     Database(#[source] sqlx::Error),
 }
 
@@ -103,6 +103,10 @@ pub async fn enqueue<K: JobKind>(
     let prepared = prepare(payload, options)?;
     let trace = trace_context::capture();
     let id = JobId::new_v7();
+    // The conflict target, its WHERE, `COLLATE "C"`, and the state literals
+    // repeat the partial unique index `background_jobs_live_unique_key` word
+    // for word: PostgreSQL infers the arbiter index only from a match, and
+    // `compare_live_payload` must find the row that index holds.
     let row = observed(
         "enqueue job",
         sqlx::query!(
@@ -168,6 +172,8 @@ pub async fn compare_live_payload<K: JobKind>(
             unique_key: Some(unique_key),
         },
     )?;
+    // Matches `background_jobs_live_unique_key` as the insert in [`enqueue`]
+    // does, so it reads the same live holder.
     let same = observed(
         "compare job payload",
         sqlx::query_scalar!(
@@ -222,12 +228,8 @@ fn take_wake_slot(kind: &'static str, now: Instant) -> bool {
         Entry::Occupied(entry) if now.saturating_duration_since(*entry.get()) < WAKE_INTERVAL => {
             false
         }
-        Entry::Occupied(mut entry) => {
-            entry.insert(now);
-            true
-        }
-        Entry::Vacant(entry) => {
-            entry.insert(now);
+        entry => {
+            entry.and_modify(|at| *at = now).or_insert(now);
             true
         }
     }

@@ -38,12 +38,12 @@ const COMPLETION_MEMBERSHIPS_METRIC: &str = "jobs_completion_memberships";
 
 /// Observed handler results and claim-time exhaustions, a terminal failure
 /// once. Labels `kind`, `outcome`.
-pub(crate) const ATTEMPTS_METRIC: &str = "jobs_attempts_total";
+const ATTEMPTS_METRIC: &str = "jobs_attempts_total";
 /// Queue-write acknowledgement, not attribution. Labels `kind`, `disposition`.
-pub(crate) const PERSISTENCE_METRIC: &str = "jobs_persistence_total";
+const PERSISTENCE_METRIC: &str = "jobs_persistence_total";
 /// Handler run time. Label `kind`.
 pub const ATTEMPT_DURATION_METRIC: &str = "jobs_attempt_duration_seconds";
-pub const ATTEMPT_DURATION_BUCKETS: &[f64] = &[
+pub(crate) const ATTEMPT_DURATION_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0,
     1800.0, 3600.0,
 ];
@@ -53,8 +53,7 @@ enum Transition {
     Retry {
         summary: String,
         base_micros: f64,
-        floor_micros: i64,
-        timed_out: bool,
+        cause: RetryCause,
     },
     Fail {
         reason: FailureReason,
@@ -72,7 +71,8 @@ impl Transition {
         match self {
             Self::Complete => "completed",
             Self::Retry {
-                timed_out: true, ..
+                cause: RetryCause::Timeout,
+                ..
             } => "timeout",
             Self::Retry { .. } => "retry",
             Self::Fail { reason, .. } => reason.as_str(),
@@ -133,7 +133,7 @@ impl Written {
 /// observation: its writer already counted and logged the failure, or its
 /// batch ended without an answer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Observed;
+struct Unacknowledged;
 
 pub(crate) fn describe_metrics() {
     metrics::describe_gauge!(OWNED_ATTEMPTS_METRIC, "Attempt slots currently owned");
@@ -159,7 +159,7 @@ pub(crate) fn describe_metrics() {
 }
 
 /// Metric handles of the completed-attempt path for one kind, registered
-/// once at engine start instead of looked up by name for every attempt.
+/// once instead of looked up by name for every attempt.
 pub(crate) struct KindMetrics {
     completed: metrics::Counter,
     duration: metrics::Histogram,
@@ -184,13 +184,6 @@ impl KindMetrics {
             queue_wait: metrics::histogram!(crate::claim::QUEUE_WAIT_METRIC, "kind" => kind),
         }
     }
-}
-
-pub(crate) fn kind_metrics<'a>(shared: &'a Shared, kind: &str) -> Option<&'a KindMetrics> {
-    shared
-        .registry
-        .get(kind)
-        .and_then(|registered| registered.metrics.get())
 }
 
 /// Admission stays occupied until both the supervisor and its bookkeeping retire.
@@ -243,16 +236,6 @@ pub(crate) fn record_exhausted(attempt: &AttemptId, summary: Option<&str>) {
     );
 }
 
-fn record_duration(handles: Option<&KindMetrics>, attempt: &AttemptId, ran: Duration) {
-    match handles {
-        Some(handles) => handles.duration.record(ran.as_secs_f64()),
-        None => {
-            metrics::histogram!(ATTEMPT_DURATION_METRIC, "kind" => attempt.kind)
-                .record(ran.as_secs_f64());
-        }
-    }
-}
-
 fn observe_attempt(handles: Option<&KindMetrics>, attempt: &AttemptId, transition: &Transition) {
     match handles {
         Some(handles) if matches!(transition, Transition::Complete) => {
@@ -295,15 +278,13 @@ pub(crate) fn supervise(
         attempt,
         generation,
         payload,
-        trace_parent,
-        trace_state,
+        trace,
         slot,
         kind_slot,
     } = claimed;
-    let span = attempt_span(attempt.id, attempt.kind, attempt.number);
-    crate::trace_context::link(&span, trace_parent.as_deref(), trace_state.as_deref());
-    drop(trace_parent);
-    drop(trace_state);
+    let span = attempt_span(&attempt);
+    crate::trace_context::link(&span, &trace);
+    drop(trace);
     let slots = Arc::new(AttemptSlots {
         _membership: MetricMembership::new(OWNED_ATTEMPTS_METRIC),
         _global: slot,
@@ -330,15 +311,15 @@ pub(crate) fn supervise(
 
 /// One span per attempt, named `process <kind>` in an exported trace. The
 /// kind set is the registered one, so the name stays low-cardinality.
-fn attempt_span(id: JobId, kind: &'static str, attempt: u16) -> tracing::Span {
+fn attempt_span(attempt: &AttemptId) -> tracing::Span {
     tracing::info_span!(
         "job_attempt",
-        otel.name = %format_args!("process {kind}"),
+        otel.name = %format_args!("process {}", attempt.kind),
         otel.kind = "consumer",
         otel.status_code = tracing::field::Empty,
-        job.id = %id,
-        job.kind = kind,
-        job.attempt = u64::from(attempt),
+        job.id = %attempt.id,
+        job.kind = attempt.kind,
+        job.attempt = u64::from(attempt.number),
         outcome = tracing::field::Empty,
     )
 }
@@ -365,7 +346,7 @@ async fn run_attempt(
     slots: Arc<AttemptSlots>,
 ) {
     if expired(shared, supervisor_deadline) {
-        uncertain(shared, &attempt);
+        observe_uncertain(shared, &attempt);
         return;
     }
     let policy = registered.policy;
@@ -397,13 +378,13 @@ async fn run_attempt(
             )
             .await
             else {
-                uncertain(shared, &attempt);
+                observe_uncertain(shared, &attempt);
                 return;
             };
             (ended, Some(started.elapsed()))
         }
     };
-    let transition = map_outcome(attempt.kind, attempt.number, policy, ended);
+    let transition = map_outcome(&attempt, policy, ended);
     if matches!(transition, Transition::Release) {
         shared.counters.cancelled.fetch_add(1, Ordering::Relaxed);
     } else {
@@ -413,19 +394,17 @@ async fn run_attempt(
             .fetch_add(1, Ordering::Relaxed);
     }
     record_on_span(&tracing::Span::current(), &transition);
-    let handles = registered.metrics.get();
+    let handles = registered.metrics();
     if let Some(ran) = ran {
-        record_duration(handles, &attempt, ran);
+        handles.duration.record(ran.as_secs_f64());
     }
-    // A terminal failure counts only once its write applies. A row the write
-    // did not move is failed, re-run, or exhausted by its lease rescue, which
-    // counts it; counting it here too would count one job twice.
     let terminal = matches!(transition, Transition::Fail { .. });
     if !terminal {
-        observe_attempt(handles, &attempt, &transition);
+        observe_attempt(Some(handles), &attempt, &transition);
     }
     let written = persist(
         shared,
+        handles,
         &attempt,
         generation,
         &transition,
@@ -434,11 +413,25 @@ async fn run_attempt(
     )
     .await;
     if terminal {
-        if written == Some(Written::Applied) {
-            observe_attempt(handles, &attempt, &transition);
-        } else if let Transition::Fail { summary, .. } = &transition {
+        observe_terminal(handles, &attempt, &transition, written);
+    }
+}
+
+/// A terminal failure counts only once its write applies. A row the write did
+/// not move is failed, re-run, or exhausted by its lease rescue, which counts
+/// it; counting it here too would count one job twice.
+fn observe_terminal(
+    handles: &KindMetrics,
+    attempt: &AttemptId,
+    transition: &Transition,
+    written: Option<Written>,
+) {
+    match (transition, written) {
+        (_, Some(Written::Applied)) => observe_attempt(Some(handles), attempt, transition),
+        (Transition::Fail { summary, .. }, _) => {
             tracing::info!(job.id = %attempt.id, job.kind = attempt.kind, job.attempt = attempt.number, outcome = transition.label(), error = summary.as_str(), "job_attempt_failed");
         }
+        _ => {}
     }
 }
 
@@ -459,13 +452,13 @@ async fn within<T>(shared: &Shared, until: Instant, future: impl Future<Output =
     tokio::select! {
         biased;
         value = future => Some(value),
-        () = shared.cleanup_ended() => None,
+        () = shared.cleanup.ended() => None,
         () = tokio::time::sleep_until(until) => None,
     }
 }
 
 fn expired(shared: &Shared, until: Instant) -> bool {
-    Instant::now() >= until || shared.cleanup_has_ended()
+    Instant::now() >= until || shared.cleanup.has_ended()
 }
 
 /// `base + wait`, capped at `limit`: the latest instant a local wait may reach.
@@ -517,7 +510,7 @@ async fn drive(
         let reason = tokio::select! {
             biased;
             result = &mut run => return Some(ended_from(result)),
-            () = shared.force.cancelled() => Ended::Cancelled,
+            () = shared.cleanup.forced() => Ended::Cancelled,
             () = tokio::time::sleep_until(attempt_deadline) => Ended::Timeout,
         };
         cancel.cancel();
@@ -565,12 +558,11 @@ fn write_of(transition: &Transition) -> Option<Write<'_>> {
         Transition::Retry {
             summary,
             base_micros,
-            floor_micros,
-            ..
+            cause,
         } => Write::Retry {
             summary,
             base_micros: *base_micros,
-            floor_micros: *floor_micros,
+            floor_micros: cause.floor_micros(),
         },
         Transition::Snooze { delay_micros, .. } => Write::Snooze {
             delay_micros: *delay_micros,
@@ -585,6 +577,7 @@ fn write_of(transition: &Transition) -> Option<Write<'_>> {
 
 async fn persist(
     shared: &Shared,
+    handles: &KindMetrics,
     attempt: &AttemptId,
     generation: i64,
     transition: &Transition,
@@ -622,10 +615,10 @@ async fn persist(
         match sent {
             None => break,
             Some(Ok(written)) => {
-                acknowledged(shared, attempt, transition, operation, written);
+                observe_acknowledged(shared, handles, attempt, transition, operation, written);
                 return Some(written);
             }
-            Some(Err(Observed)) => {}
+            Some(Err(Unacknowledged)) => {}
         }
         let until = clamped_deadline(Instant::now(), RECORD_RETRY_INTERVAL, supervisor_deadline);
         if within(shared, supervisor_deadline, tokio::time::sleep_until(until))
@@ -635,13 +628,14 @@ async fn persist(
             break;
         }
     }
-    uncertain(shared, attempt);
+    observe_uncertain(shared, attempt);
     None
 }
 
 /// The attempt's queue transition was acknowledged.
-fn acknowledged(
+fn observe_acknowledged(
     shared: &Shared,
+    handles: &KindMetrics,
     attempt: &AttemptId,
     transition: &Transition,
     operation: Operation,
@@ -649,9 +643,9 @@ fn acknowledged(
 ) {
     observe_recovery(shared, operation);
     let disposition = written.label();
-    match kind_metrics(shared, attempt.kind) {
-        Some(handles) if written == Written::Applied => handles.applied.increment(1),
-        _ => count_persistence(attempt.kind, disposition),
+    match written {
+        Written::Applied => handles.applied.increment(1),
+        Written::Unchanged => count_persistence(attempt.kind, disposition),
     }
     tracing::debug!(
         job.kind = attempt.kind,
@@ -670,7 +664,7 @@ fn count_persistence(kind: &'static str, disposition: &'static str) {
 
 /// The attempt's queue transition is not known to have landed; lease expiry
 /// recovers the row.
-fn uncertain(shared: &Shared, attempt: &AttemptId) {
+fn observe_uncertain(shared: &Shared, attempt: &AttemptId) {
     shared.counters.uncertain.fetch_add(1, Ordering::Relaxed);
     // Neither [`Written`] acknowledgement exists, so this disposition has no
     // [`Written::label`] value of its own.
@@ -683,7 +677,7 @@ fn uncertain(shared: &Shared, attempt: &AttemptId) {
     );
 }
 
-type CompletionReply = Result<Written, Observed>;
+type CompletionReply = Result<Written, Unacknowledged>;
 
 /// Completions waiting for the next batch, and the one batch in flight.
 ///
@@ -841,7 +835,7 @@ async fn complete_batched(
     let batch = CompletionBatch::new(std::mem::take(&mut *shared.completions.lock_queue()));
     write_batch(shared, batch).await;
     drop(writer);
-    response.await.unwrap_or(Err(Observed))
+    response.await.unwrap_or(Err(Unacknowledged))
 }
 
 async fn write_batch(shared: &Shared, mut batch: CompletionBatch) {
@@ -901,7 +895,7 @@ async fn write_batch(shared: &Shared, mut batch: CompletionBatch) {
         Some(Err(error)) => {
             observe_failure(shared, Operation::Record, &error);
             drop(error);
-            let results = vec![Err(Observed); batch.queued.len()];
+            let results = vec![Err(Unacknowledged); batch.queued.len()];
             batch.finish(results);
         }
         None => {}
@@ -929,7 +923,7 @@ async fn send_outcome(
     generation: i64,
     write: Write<'_>,
     operation: Operation,
-) -> Result<Written, Observed> {
+) -> Result<Written, Unacknowledged> {
     // An sqlx statement future is about 16 KiB; box it once so the supervisor stays small.
     let result = backstop(Box::pin(async {
         let mut connection = infra_postgres::acquire(&shared.pool, "record job outcome")
@@ -942,7 +936,7 @@ async fn send_outcome(
     .await;
     result.map(Written::from_rows).map_err(|error| {
         observe_failure(shared, operation, &error);
-        Observed
+        Unacknowledged
     })
 }
 
@@ -1057,7 +1051,8 @@ enum Ended {
     Cancelled,
 }
 
-fn map_outcome(kind: &'static str, attempt: u16, policy: Policy, ended: Ended) -> Transition {
+fn map_outcome(attempt: &AttemptId, policy: Policy, ended: Ended) -> Transition {
+    let number = attempt.number;
     match ended {
         Ended::Success => Transition::Complete,
         Ended::Cancelled => Transition::Release,
@@ -1071,24 +1066,24 @@ fn map_outcome(kind: &'static str, attempt: u16, policy: Policy, ended: Ended) -
                 summary: sanitize_summary(&error.summary),
             },
             Disposition::RetryAfterAtLeast { floor_micros } => retry_or_exhaust(
-                attempt,
+                number,
                 policy,
                 &error.summary,
                 RetryCause::Failure { floor_micros },
             ),
             Disposition::Retry => {
-                retry_or_exhaust(attempt, policy, &error.summary, RetryCause::FAILURE)
+                retry_or_exhaust(number, policy, &error.summary, RetryCause::FAILURE)
             }
         },
-        Ended::Panic => retry_or_exhaust(attempt, policy, "handler panicked", RetryCause::FAILURE),
+        Ended::Panic => retry_or_exhaust(number, policy, "handler panicked", RetryCause::FAILURE),
         Ended::Payload(error) => retry_or_exhaust(
-            attempt,
+            number,
             policy,
-            &payload_summary(kind, &error),
+            &payload_summary(attempt.kind, &error),
             RetryCause::FAILURE,
         ),
         Ended::Timeout => retry_or_exhaust(
-            attempt,
+            number,
             policy,
             &format!(
                 "attempt timed out after {}",
@@ -1100,7 +1095,7 @@ fn map_outcome(kind: &'static str, attempt: u16, policy: Policy, ended: Ended) -
 }
 
 /// Why an attempt spent its unit without completing.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RetryCause {
     /// The handler failed; the next attempt waits at least `floor_micros`.
     Failure { floor_micros: i64 },
@@ -1110,6 +1105,14 @@ enum RetryCause {
 
 impl RetryCause {
     const FAILURE: Self = Self::Failure { floor_micros: 0 };
+
+    /// The least delay before the next attempt; a timeout sets none.
+    const fn floor_micros(self) -> i64 {
+        match self {
+            Self::Failure { floor_micros } => floor_micros,
+            Self::Timeout => 0,
+        }
+    }
 }
 
 /// Retry with backoff, or fail as exhausted once the attempt budget is spent.
@@ -1117,23 +1120,18 @@ impl RetryCause {
 /// The nominal delay after attempt `n` is `n^4` seconds: 1 s, 16 s, 81 s, and
 /// so on. The retry statement in [`execute`] jitters it by ±10% and raises it
 /// to the cause's floor.
-fn retry_or_exhaust(attempt: u16, policy: Policy, text: &str, cause: RetryCause) -> Transition {
+fn retry_or_exhaust(number: u16, policy: Policy, text: &str, cause: RetryCause) -> Transition {
     let summary = sanitize_summary(text);
-    if attempt >= policy.max_attempts {
+    if number >= policy.max_attempts {
         return Transition::Fail {
             reason: FailureReason::Exhausted,
             summary,
         };
     }
-    let (floor_micros, timed_out) = match cause {
-        RetryCause::Failure { floor_micros } => (floor_micros, false),
-        RetryCause::Timeout => (0, true),
-    };
     Transition::Retry {
         summary,
-        base_micros: f64::from(attempt).powi(4) * 1_000_000.0,
-        floor_micros,
-        timed_out,
+        base_micros: f64::from(number).powi(4) * 1_000_000.0,
+        cause,
     }
 }
 
@@ -1254,7 +1252,7 @@ mod tests {
             for result in [
                 Some(Ok(Written::Applied)),
                 Some(Ok(Written::Unchanged)),
-                Some(Err(Observed)),
+                Some(Err(Unacknowledged)),
                 None,
             ] {
                 for prune in [false, true] {
@@ -1332,8 +1330,13 @@ mod tests {
         });
     }
 
-    fn outcome(ended: Ended, attempt: u16) -> Transition {
-        map_outcome("sample", attempt, Policy::default(), ended)
+    fn outcome(ended: Ended, number: u16) -> Transition {
+        let attempt = AttemptId {
+            id: ID,
+            kind: "sample",
+            number,
+        };
+        map_outcome(&attempt, Policy::default(), ended)
     }
 
     #[derive(serde::Serialize)]
@@ -1411,8 +1414,9 @@ mod tests {
             ),
             Transition::Retry {
                 base_micros,
-                floor_micros: 2_000_000,
-                timed_out: false,
+                cause: RetryCause::Failure {
+                    floor_micros: 2_000_000
+                },
                 ..
             } if base_micros == 1_000_000.0
         ));
@@ -1425,8 +1429,9 @@ mod tests {
             ),
             Transition::Retry {
                 base_micros,
-                floor_micros: 2_000_000,
-                timed_out: false,
+                cause: RetryCause::Failure {
+                    floor_micros: 2_000_000
+                },
                 ..
             } if base_micros == 81_000_000.0
         ));
@@ -1448,15 +1453,14 @@ mod tests {
             outcome(Ended::Panic, 1),
             Transition::Retry {
                 ref summary,
-                timed_out: false,
-                floor_micros: 0,
+                cause: RetryCause::FAILURE,
                 ..
             } if summary == "handler panicked"
         ));
         assert!(matches!(
             outcome(Ended::Timeout, 1),
             Transition::Retry {
-                timed_out: true,
+                cause: RetryCause::Timeout,
                 ..
             }
         ));
@@ -1508,8 +1512,9 @@ mod tests {
         let retry = Transition::Retry {
             summary: "retry me".to_owned(),
             base_micros: 81_000_000.0,
-            floor_micros: 2_000_000,
-            timed_out: true,
+            cause: RetryCause::Failure {
+                floor_micros: 2_000_000,
+            },
         };
         assert!(matches!(
             write_of(&retry),
@@ -1594,7 +1599,11 @@ mod tests {
                 Ended::Error(JobError::permanent("stop")),
                 Ended::Cancelled,
             ] {
-                let span = attempt_span(id, "sample", 3);
+                let span = attempt_span(&AttemptId {
+                    id,
+                    kind: "sample",
+                    number: 3,
+                });
                 record_on_span(&span, &outcome(ended, 3));
             }
         });
