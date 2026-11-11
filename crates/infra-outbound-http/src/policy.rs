@@ -1,23 +1,12 @@
 use std::fmt;
 
 use bytes::Bytes;
-use http::{HeaderValue, Method, Request, Version, header, uri::Scheme};
+use http::{HeaderValue, Method, Request, Uri, Version, header, uri::Scheme};
 #[cfg(feature = "test-support")]
 use url::Host;
 use url::Url;
 
-use crate::{BuildError, Error, Limits, MAX_RESPONSE_HEADER_COUNT};
-
-pub(crate) fn validate_limits(limits: &Limits) -> Result<(), BuildError> {
-    if limits.operation_timeout.is_zero()
-        || limits.response_header_count == 0
-        || limits.response_header_count > MAX_RESPONSE_HEADER_COUNT
-        || limits.response_body_bytes == 0
-    {
-        return Err(BuildError::InvalidLimits);
-    }
-    Ok(())
-}
+use crate::{BuildError, Error};
 
 /// The configured origin in the form an absolute request URI is compared
 /// against: scheme, serialized host, and effective port.
@@ -66,6 +55,18 @@ impl Origin {
     pub(crate) fn is_https(&self) -> bool {
         self.scheme == Scheme::HTTPS
     }
+
+    /// Whether `uri` names this origin: the same scheme, no userinfo, the
+    /// host ASCII case-insensitively, and the port, defaulted by scheme.
+    fn admits(&self, uri: &Uri) -> bool {
+        let default_port = if self.is_https() { 443 } else { 80 };
+        uri.scheme() == Some(&self.scheme)
+            && uri.authority().is_some_and(|authority| {
+                !authority.as_str().contains('@')
+                    && authority.host().eq_ignore_ascii_case(&self.host)
+                    && authority.port_u16().unwrap_or(default_port) == self.port
+            })
+    }
 }
 
 impl fmt::Debug for Origin {
@@ -107,16 +108,7 @@ pub(crate) fn admit_request(
     origin: &Origin,
     mut request: Request<Bytes>,
 ) -> Result<Request<Bytes>, Error> {
-    let uri = request.uri();
-    let default_port = if origin.is_https() { 443 } else { 80 };
-    let admitted = !request.headers().contains_key(header::HOST)
-        && uri.scheme() == Some(&origin.scheme)
-        && uri.authority().is_some_and(|authority| {
-            !authority.as_str().contains('@')
-                && authority.host().eq_ignore_ascii_case(&origin.host)
-                && authority.port_u16().unwrap_or(default_port) == origin.port
-        });
-    if !admitted {
+    if request.headers().contains_key(header::HOST) || !origin.admits(request.uri()) {
         return Err(Error::InvalidTarget);
     }
     // Hyper connects before it refuses a version it cannot send.

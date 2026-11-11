@@ -45,6 +45,19 @@ pub struct Limits {
     pub response_body_bytes: usize,
 }
 
+impl Limits {
+    pub(crate) fn validate(&self) -> Result<(), BuildError> {
+        if self.operation_timeout.is_zero()
+            || self.response_header_count == 0
+            || self.response_header_count > MAX_RESPONSE_HEADER_COUNT
+            || self.response_body_bytes == 0
+        {
+            return Err(BuildError::InvalidLimits);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
     /// The origin URL is not admitted: see [`Client::try_new`].
@@ -139,7 +152,7 @@ impl Client {
     /// host, or a URL with userinfo, and
     /// [`BuildError::Tls`] when the platform verifier cannot be built.
     pub fn try_new(origin: &Url, limits: Limits) -> Result<Self, BuildError> {
-        policy::validate_limits(&limits)?;
+        limits.validate()?;
         let origin = policy::admit_origin(origin)?;
         Ok(Self::from_origin(
             origin,
@@ -185,7 +198,7 @@ impl Client {
     /// `http` URL whose host is a literal loopback IP address.
     #[cfg(feature = "test-support")]
     pub fn try_new_for_test_http(origin: &Url, limits: Limits) -> Result<Self, BuildError> {
-        policy::validate_limits(&limits)?;
+        limits.validate()?;
         let origin = policy::admit_test_http_origin(origin)?;
         Ok(Self::from_origin(
             origin,
@@ -248,12 +261,16 @@ impl Client {
         mut request: Request<Bytes>,
         context: &OperationContext,
     ) -> Result<Response<Bytes>, Error> {
-        let context = self.begin_operation(context);
+        let operation = self.begin_operation(context);
         let request_context = request
             .extensions_mut()
             .remove::<OperationContext>()
             .unwrap_or_else(OperationContext::unbounded);
-        check_contexts(&context, &request_context)?;
+        let stops = StopScopes {
+            operation: &operation,
+            request: &request_context,
+        };
+        stops.check()?;
         let mut request = policy::admit_request(&self.origin, request)?;
 
         let template = request.extensions_mut().remove::<UrlTemplate>();
@@ -266,9 +283,9 @@ impl Client {
         // check and spend the same budget. Terminal observation can delay
         // return but cannot reopen this decision.
         let result = self
-            .exchange(request, &context, &request_context, &mut attempt)
+            .exchange(request, &stops, &mut attempt)
             .await
-            .and_then(|response| check_contexts(&context, &request_context).map(|()| response));
+            .and_then(|response| stops.check().map(|()| response));
         attempt.finish(&result);
         result
     }
@@ -276,13 +293,12 @@ impl Client {
     async fn exchange(
         &self,
         request: Request<Bytes>,
-        context: &OperationContext,
-        request_context: &OperationContext,
+        stops: &StopScopes<'_>,
         attempt: &mut observe::Attempt,
     ) -> Result<Response<Bytes>, Error> {
         let span = attempt.span();
         let exchange = async {
-            check_contexts(context, request_context)?;
+            stops.check()?;
             let response = self
                 .transport
                 .request(request.map(Full::new))
@@ -291,7 +307,7 @@ impl Client {
                     source: Box::new(source),
                 })?;
             attempt.record_status(response.status());
-            check_contexts(context, request_context)?;
+            stops.check()?;
             let body_limit = self.limits.response_body_bytes;
             if hyper::body::Body::size_hint(response.body())
                 .exact()
@@ -301,38 +317,60 @@ impl Client {
             }
 
             let (parts, body) = response.into_parts();
-            let mut body = Limited::new(body, body_limit);
-            let mut collected = Vec::new();
-            loop {
-                check_contexts(context, request_context)?;
-                let Some(frame) = body.frame().await else {
-                    break;
-                };
-                if let Ok(data) = frame.map_err(map_body_error)?.into_data() {
-                    append_within(&mut collected, &data, body_limit);
-                }
-                // A frame's `Bytes` can share a large read buffer, so each frame
-                // is dropped here, before the next poll.
-            }
-            Ok(Response::from_parts(parts, Bytes::from(collected)))
+            let body = collect_body(body, body_limit, stops).await?;
+            Ok(Response::from_parts(parts, body))
         };
         tokio::select! {
             biased;
-            stopped = context.wait_stopped() => Err(stopped_error(stopped)),
-            stopped = request_context.wait_stopped() => Err(stopped_error(stopped)),
+            error = stops.stopped() => Err(error),
             result = exchange.instrument(span) => result,
         }
     }
 }
 
-fn check_contexts(
-    context: &OperationContext,
-    request_context: &OperationContext,
-) -> Result<(), Error> {
-    context
-        .check()
-        .and_then(|()| request_context.check())
-        .map_err(stopped_error)
+/// The scopes that can stop an exchange: the client's operation and the
+/// caller's request extension. The operation's stop wins over the request's.
+struct StopScopes<'a> {
+    operation: &'a OperationContext,
+    request: &'a OperationContext,
+}
+
+impl StopScopes<'_> {
+    fn check(&self) -> Result<(), Error> {
+        self.operation
+            .check()
+            .and_then(|()| self.request.check())
+            .map_err(stopped_error)
+    }
+
+    async fn stopped(&self) -> Error {
+        tokio::select! {
+            biased;
+            stopped = self.operation.wait_stopped() => stopped_error(stopped),
+            stopped = self.request.wait_stopped() => stopped_error(stopped),
+        }
+    }
+}
+
+async fn collect_body(
+    body: hyper::body::Incoming,
+    limit: usize,
+    stops: &StopScopes<'_>,
+) -> Result<Bytes, Error> {
+    let mut body = Limited::new(body, limit);
+    let mut collected = Vec::new();
+    loop {
+        stops.check()?;
+        let Some(frame) = body.frame().await else {
+            break;
+        };
+        if let Ok(data) = frame.map_err(map_body_error)?.into_data() {
+            append_within(&mut collected, &data, limit);
+        }
+        // A frame's `Bytes` can share a large read buffer, so each frame
+        // is dropped here, before the next poll.
+    }
+    Ok(Bytes::from(collected))
 }
 
 fn stopped_error(stopped: Stopped) -> Error {

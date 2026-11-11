@@ -67,6 +67,17 @@ enum Outcome {
 }
 
 impl Outcome {
+    /// A cancelled caller is not a provider failure, as a dropped attempt.
+    fn of(error: &Error) -> Self {
+        match error {
+            Error::Cancelled => Self::Cancelled,
+            Error::InvalidTarget => Self::Failed("invalid_target"),
+            Error::Timeout => Self::Failed("timeout"),
+            Error::ResponseBodyTooLarge => Self::Failed("response_body_too_large"),
+            Error::Transport { source } => Self::Failed(transport_error_type(&**source)),
+        }
+    }
+
     fn as_str(self) -> &'static str {
         match self {
             Self::Response => "response",
@@ -79,7 +90,9 @@ impl Outcome {
 /// One polled outbound attempt. The guard retains only bounded configured
 /// identity, the caller's static template, and outcome state, never caller
 /// request data or transport errors.
-/// A transport failure's cause is logged once, when the attempt finishes.
+///
+/// [`Attempt::finish`] borrows the result and logs a transport failure's
+/// causes once; the guard itself keeps none.
 pub(crate) struct Attempt {
     started: Instant,
     method: &'static str,
@@ -137,28 +150,25 @@ impl Attempt {
 
     pub(crate) fn finish<T>(mut self, result: &Result<T, Error>) {
         self.finalized = true;
-        match result {
-            Ok(_) => self.emit(Outcome::Response),
-            // A cancelled caller is not a provider failure, as a dropped attempt.
-            Err(Error::Cancelled) => self.emit(Outcome::Cancelled),
-            Err(error) => {
-                self.emit(Outcome::Failed(error_type(error)));
-                // Adapters map this error to their own closed outcome and
-                // drop its source, so the client span is where it is told.
-                if let Error::Transport { source } = error {
-                    self.span.in_scope(|| {
-                        tracing::warn!(
-                            error = %Causes(&**source),
-                            "outbound_http_transport_failed"
-                        );
-                    });
-                }
-            }
+        self.emit(
+            result
+                .as_ref()
+                .map_or_else(Outcome::of, |_| Outcome::Response),
+        );
+        // Adapters map this error to their own closed outcome and drop its
+        // source, so the client span is where it is told.
+        if let Err(Error::Transport { source }) = result {
+            self.span.in_scope(|| {
+                tracing::warn!(
+                    error = %Causes(&**source),
+                    "outbound_http_transport_failed"
+                );
+            });
         }
     }
 
     fn emit(&self, outcome: Outcome) {
-        let status = self
+        let status_label = self
             .status
             .map(|status| SharedString::from(Arc::<str>::from(status.as_str())));
         // An HTTP error status is its own `error.type`, sharing the status label.
@@ -166,7 +176,7 @@ impl Attempt {
             Outcome::Response => self
                 .status
                 .filter(|status| is_error_status(*status))
-                .and(status.clone()),
+                .and(status_label.clone()),
             Outcome::Failed(class) => Some(SharedString::from(class)),
             Outcome::Cancelled => None,
         };
@@ -181,7 +191,7 @@ impl Attempt {
         describe_histogram();
         metrics::histogram!(
             REQUEST_DURATION_METRIC,
-            self.labels(outcome, status, error_type)
+            self.labels(outcome, status_label, error_type)
         )
         .record(self.started.elapsed().as_secs_f64());
     }
@@ -189,12 +199,12 @@ impl Attempt {
     fn labels(
         &self,
         outcome: Outcome,
-        status: Option<SharedString>,
+        status_label: Option<SharedString>,
         error_type: Option<SharedString>,
     ) -> Vec<Label> {
         let mut labels = Vec::with_capacity(
             4 + usize::from(self.template.is_some())
-                + usize::from(status.is_some())
+                + usize::from(status_label.is_some())
                 + usize::from(error_type.is_some()),
         );
         labels.extend([
@@ -206,8 +216,8 @@ impl Attempt {
         if let Some(template) = self.template {
             labels.push(Label::new("url.template", template));
         }
-        if let Some(status) = status {
-            labels.push(Label::new("http.response.status_code", status));
+        if let Some(status_label) = status_label {
+            labels.push(Label::new("http.response.status_code", status_label));
         }
         if let Some(error_type) = error_type {
             labels.push(Label::new("error.type", error_type));
@@ -278,16 +288,6 @@ impl fmt::Display for SpanName {
 
 fn is_error_status(status: StatusCode) -> bool {
     status.is_client_error() || status.is_server_error() || status.as_u16() >= 600
-}
-
-fn error_type(error: &Error) -> &'static str {
-    match error {
-        Error::InvalidTarget => "invalid_target",
-        Error::Timeout => "timeout",
-        Error::Cancelled => "cancelled",
-        Error::ResponseBodyTooLarge => "response_body_too_large",
-        Error::Transport { source } => transport_error_type(&**source),
-    }
 }
 
 /// The class of a transport failure, read from the typed causes the libraries

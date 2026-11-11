@@ -108,9 +108,6 @@ fn limits_must_be_positive_and_bounded() {
     for mutate in mutations {
         let mut invalid = limits();
         mutate(&mut invalid);
-        assert!(matches!(
-            policy::validate_limits(&invalid),
-            Err(BuildError::InvalidLimits)
-        ));
+        assert!(matches!(invalid.validate(), Err(BuildError::InvalidLimits)));
     }
 }
