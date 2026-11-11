@@ -195,15 +195,12 @@ fn stopped_response(stopped: Stopped) -> Response {
     }
 }
 
-/// At least one alternative's scopes must all be present in the sorted,
-/// deduplicated `principal.scopes()`; an alternative with no scopes is any
-/// authenticated caller.
+/// At least one alternative's scopes must all be granted; an alternative with
+/// no scopes is any authenticated caller.
 fn grants_any(alternatives: &[Box<[String]>], principal: &Principal) -> bool {
-    alternatives.iter().any(|scopes| {
-        scopes
-            .iter()
-            .all(|scope| principal.scopes().binary_search(scope).is_ok())
-    })
+    alternatives
+        .iter()
+        .any(|scopes| principal.has_scopes(scopes))
 }
 
 fn insufficient_scope_response() -> Response {

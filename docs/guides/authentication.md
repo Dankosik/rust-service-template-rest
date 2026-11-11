@@ -7,7 +7,8 @@ keeps a public-only service provider-free. A document with an effectively protec
 operation cannot start in that mode.
 
 Authentication verifies caller identity and exposes the sealed principal's
-issuer, subject, client ID, `scopes()` and `expires_at()`. Its immutable
+issuer, subject, client ID, `scopes()`, `has_scopes(required)` and
+`expires_at()`. Its immutable
 `claims<T>()` accessor deserializes the same verified JSON payload into an
 application type, with a sanitized `ClaimAccessError` on incompatible shape.
 Custom duplicate members use last-member semantics; duplicates of a claim the
@@ -369,8 +370,8 @@ exchange took, with an `operation` label of `discovery`, `jwks` or
 `introspection` and an `outcome` label of `success`, `cancelled` or one closed
 failure class: `provider_timeout`, `provider_connect`, `provider_status_4xx`,
 `provider_status_5xx`, `provider_status_other`, `provider_media_type`,
-`provider_too_large` or `provider_transfer`. It uses the default histogram
-buckets. Each exchange also runs in an `authn_provider` client span, exported
+`provider_too_large` or `provider_transfer`. `infra_bearerauthn::HISTOGRAMS`
+registers its buckets, which equal the recorder's default buckets. Each exchange also runs in an `authn_provider` client span, exported
 under its method name, that carries the operation, the provider host and port,
 the status of a successful or status-refused response and, when the exchange
 failed, the same class as `error.type`; never a path, query or credential. An introspection span is a child of the
@@ -396,9 +397,8 @@ connect releases the exchange as `provider_timeout`, and later exchanges can
 redial through the same client. Authentication maps this failure to unavailable
 trust while the outer request is still live.
 
-`Verifier::authenticate_with_context(authorization, transport, &context)` and
-`Verifier::verify_with_context(&token, &context)` accept an
-`operation_context::OperationContext`. They check it before preparation, while
+`Verifier::authenticate_with_context(authorization, transport, &context)`
+accepts an `operation_context::OperationContext`. It checks it before preparation, while
 waiting, and before reporting either success or credential failure. A stopped
 caller receives `Failure::Unavailable`; the transport maps an expired original
 opening context to its timeout response before considering that result. Explicit
