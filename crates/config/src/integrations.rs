@@ -39,7 +39,7 @@ pub struct IntegrationConfig {
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GrpcClientConfig {
-    /// Tonic endpoint input, admitted by the transport before a channel exists.
+    /// `http` or `https` URI, admitted by the transport before a channel exists.
     #[serde(default)]
     pub destination: String,
     /// Explicit client security mode; required.

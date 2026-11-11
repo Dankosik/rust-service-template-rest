@@ -2242,6 +2242,26 @@ async fn mtls_refuses_a_client_without_a_trusted_certificate() {
 }
 
 #[test]
+fn server_tls_refuses_a_chain_entry_that_is_not_a_certificate() {
+    let pki = Pki::new(&["localhost"]);
+    let key = SecretString::from(pem(&pki.server_key));
+    let garbage =
+        "-----BEGIN CERTIFICATE-----\nbm90IGEgY2VydGlmaWNhdGU=\n-----END CERTIFICATE-----\n";
+    let leaf = pem(&pki.server_certificate);
+    for chain in [format!("{leaf}{garbage}"), format!("{garbage}{leaf}")] {
+        assert_eq!(
+            server_tls_config(ServerTlsMaterial {
+                certificate_pem: &chain,
+                private_key_pem: &key,
+                client_ca_pem: None,
+            })
+            .unwrap_err(),
+            Error::InvalidCertificate
+        );
+    }
+}
+
+#[test]
 fn a_destination_scheme_that_disagrees_with_security_is_rejected() {
     let tls = ClientSecurity::Tls(ClientTlsMaterial::default());
     assert_eq!(
