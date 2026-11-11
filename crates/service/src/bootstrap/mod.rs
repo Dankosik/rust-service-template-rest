@@ -128,7 +128,7 @@ pub(crate) enum BootstrapError {
         endpoint: String,
         key: String,
         #[source]
-        source: infra_webhooks::protocol::ProtocolError,
+        source: infra_webhooks::protocol::InvalidKey,
     },
     // template:end inbound-webhooks:bootstrap-webhooks-errors
     #[error(transparent)]

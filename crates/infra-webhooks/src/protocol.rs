@@ -16,7 +16,7 @@ use http::{HeaderMap, HeaderValue};
 
 /// The fixed maximum raw webhook body accepted by either direction.
 pub const MAX_BODY_BYTES: usize = 128 * 1024;
-const TIMESTAMP_TOLERANCE_SECONDS: i128 = 300;
+const TIMESTAMP_TOLERANCE_SECONDS: u64 = 300;
 const SIGNATURE_PREFIX: &str = "v1,";
 const MIN_KEY_BYTES: usize = 24;
 const MAX_KEY_BYTES: usize = 64;
@@ -36,15 +36,12 @@ impl SigningKey {
     ///
     /// # Errors
     ///
-    /// Returns [`ProtocolError::InvalidKey`] when the value is not standard
-    /// base64 or decodes to fewer than 24 or more than 64 bytes.
-    pub fn from_encoded(encoded: &str) -> Result<Self, ProtocolError> {
+    /// Returns [`InvalidKey`] for a malformed secret.
+    pub fn from_encoded(encoded: &str) -> Result<Self, InvalidKey> {
         let encoded = encoded.strip_prefix("whsec_").unwrap_or(encoded);
-        let decoded = STANDARD
-            .decode(encoded)
-            .map_err(|_| ProtocolError::InvalidKey)?;
+        let decoded = STANDARD.decode(encoded).map_err(|_| InvalidKey)?;
         if !(MIN_KEY_BYTES..=MAX_KEY_BYTES).contains(&decoded.len()) {
-            return Err(ProtocolError::InvalidKey);
+            return Err(InvalidKey);
         }
         Ok(Self(hmac::Key::new(hmac::HMAC_SHA256, &decoded)))
     }
@@ -77,9 +74,8 @@ impl KeyRing {
     ///
     /// # Errors
     ///
-    /// Returns [`ProtocolError::InvalidKey`] when either supplied secret is
-    /// malformed or outside the 24–64 byte range.
-    pub fn from_encoded(active: &str, previous: Option<&str>) -> Result<Self, ProtocolError> {
+    /// Returns [`InvalidKey`] when either supplied secret is malformed.
+    pub fn from_encoded(active: &str, previous: Option<&str>) -> Result<Self, InvalidKey> {
         let active = SigningKey::from_encoded(active)?;
         let previous = previous.map(SigningKey::from_encoded).transpose()?;
         Ok(Self::new(active, previous))
@@ -181,12 +177,14 @@ impl VerifiedMessage {
     }
 }
 
-/// Closed reasons for key construction or webhook verification failure.
+/// The configured key is not standard base64, or does not decode to 24–64 bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("webhook signing key is invalid")]
+pub struct InvalidKey;
+
+/// Closed reasons for webhook framing or verification failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ProtocolError {
-    /// The configured key is not decodable Standard Webhooks base64, or is outside 24–64 bytes.
-    #[error("webhook signing key is invalid")]
-    InvalidKey,
     #[error("webhook body exceeds the maximum size")]
     BodyTooLarge,
     #[error("webhook signature evidence is incomplete")]
@@ -210,7 +208,6 @@ impl ProtocolError {
     #[must_use]
     pub const fn reason(self) -> &'static str {
         match self {
-            Self::InvalidKey => "invalid_key",
             Self::BodyTooLarge => "body_too_large",
             Self::MissingHeader => "missing_header",
             Self::ConflictingHeader => "conflicting_header",
@@ -222,7 +219,7 @@ impl ProtocolError {
     }
 }
 
-fn ensure_body_size(body: &[u8]) -> Result<(), ProtocolError> {
+pub(crate) fn ensure_body_size(body: &[u8]) -> Result<(), ProtocolError> {
     (body.len() <= MAX_BODY_BYTES)
         .then_some(())
         .ok_or(ProtocolError::BodyTooLarge)
@@ -240,12 +237,19 @@ fn unambiguous_header<'a>(
     Ok(first)
 }
 
+/// The length bound every message identity meets, signed or not.
+pub(crate) fn ensure_message_id_len(message_id: &[u8]) -> Result<(), ProtocolError> {
+    (!message_id.is_empty() && message_id.len() <= MAX_MESSAGE_ID_BYTES)
+        .then_some(())
+        .ok_or(ProtocolError::InvalidMessageId)
+}
+
+/// A signed identity also excludes the `.` that delimits the signed content.
 fn ensure_message_id(message_id: &[u8]) -> Result<(), ProtocolError> {
-    (!message_id.is_empty()
-        && message_id.len() <= MAX_MESSAGE_ID_BYTES
-        && !message_id.contains(&b'.'))
-    .then_some(())
-    .ok_or(ProtocolError::InvalidMessageId)
+    ensure_message_id_len(message_id)?;
+    (!message_id.contains(&b'.'))
+        .then_some(())
+        .ok_or(ProtocolError::InvalidMessageId)
 }
 
 fn parse_timestamp(value: &HeaderValue) -> Result<i64, ProtocolError> {
@@ -257,11 +261,13 @@ fn parse_timestamp(value: &HeaderValue) -> Result<i64, ProtocolError> {
 }
 
 fn ensure_timestamp_window(timestamp: i64, now: SystemTime) -> Result<(), ProtocolError> {
+    // i128 holds the distance between any i64 timestamp and a clock before or
+    // after the epoch without overflow.
     let now = match now.duration_since(UNIX_EPOCH) {
         Ok(duration) => i128::from(duration.as_secs()),
         Err(error) => -i128::from(error.duration().as_secs()),
     };
-    (i128::from(timestamp).abs_diff(now) <= TIMESTAMP_TOLERANCE_SECONDS as u128)
+    (i128::from(timestamp).abs_diff(now) <= u128::from(TIMESTAMP_TOLERANCE_SECONDS))
         .then_some(())
         .ok_or(ProtocolError::TimestampOutOfWindow)
 }

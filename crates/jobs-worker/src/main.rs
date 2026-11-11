@@ -26,7 +26,7 @@ enum RegistrationError {
     OutboundKey {
         endpoint: String,
         #[source]
-        source: infra_webhooks::protocol::ProtocolError,
+        source: infra_webhooks::protocol::InvalidKey,
     },
     #[error("outbound webhook endpoint {endpoint} cannot be built: {source}")]
     OutboundEndpoint {

@@ -29,7 +29,7 @@ use serde_with::{SerializeAs, serde_as};
 use sqlx::postgres::PgPool;
 use tokio::time::Instant;
 
-use crate::protocol::{KeyRing, MAX_BODY_BYTES, MAX_MESSAGE_ID_BYTES, ProtocolError};
+use crate::protocol::{KeyRing, ProtocolError, ensure_body_size, ensure_message_id_len};
 
 pub use maintenance::{CLEANUP_REMOVED_METRIC, CLEANUP_RUNS_METRIC, CleanupError};
 pub use processing::{Consumer, Consumers, DuplicateConsumer, MissingConsumer, Processor};
@@ -68,8 +68,9 @@ pub enum ReceiveError {
 
 /// Why a [`Verifier`] refused a delivery.
 ///
-/// The reason is a static label from a small closed set, safe as a log field
-/// and a metric label. It never carries request, signature, or key bytes.
+/// The type guarantees only a `'static` label. The label becomes a log field
+/// and a metric label, so a [`Verifier`] keeps its own set of reasons small and
+/// `snake_case`, and never builds one from request, signature, or key bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rejection(&'static str);
 
@@ -86,6 +87,8 @@ impl Rejection {
     }
 }
 
+const PAYLOAD_TOO_LARGE: Rejection = Rejection::new("payload_too_large");
+
 impl From<ProtocolError> for Rejection {
     fn from(error: ProtocolError) -> Self {
         Self(error.reason())
@@ -99,7 +102,7 @@ impl From<ProtocolError> for Rejection {
 /// receipt, deduplication, and processing path.
 pub trait Verifier: Send + Sync + 'static {
     /// Authenticate one delivery and return its message identity: the
-    /// provider's stable ID for this message, 1 to [`MAX_MESSAGE_ID_BYTES`]
+    /// provider's stable ID for this message, 1 to [`MAX_MESSAGE_ID_BYTES`](crate::protocol::MAX_MESSAGE_ID_BYTES)
     /// bytes, equal on every redelivery. `body` is the raw request body and
     /// `now` the admission time for replay windows.
     ///
@@ -163,8 +166,8 @@ impl Receiver {
     /// # Errors
     ///
     /// Returns a closed rejection for an unknown endpoint, refused evidence, a
-    /// body over [`MAX_BODY_BYTES`], a message identity outside 1 to
-    /// [`MAX_MESSAGE_ID_BYTES`] bytes, or a delivery too large to retain, or
+    /// body over [`MAX_BODY_BYTES`](crate::protocol::MAX_BODY_BYTES), a message identity outside 1 to
+    /// [`MAX_MESSAGE_ID_BYTES`](crate::protocol::MAX_MESSAGE_ID_BYTES) bytes, or a delivery too large to retain, or
     /// unavailable when receipt ownership could not be acknowledged.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub async fn receive(
@@ -223,11 +226,7 @@ impl Receiver {
         let Some(verifier) = self.endpoints.get(endpoint_id) else {
             return Err(ReceiveError::UnknownEndpoint);
         };
-        // Checked here as well as in `KeyRing::verify`, so the bound holds
-        // for every verifier, not only the Standard Webhooks one.
-        let message_id = bounded_body(body.as_ref())
-            .and_then(|()| verifier.authenticate(headers, body.as_ref(), now))
-            .and_then(bounded_message_id)
+        let message_id = admit(verifier.as_ref(), headers, body.as_ref(), now)
             .map_err(|rejection| rejected(endpoint_id, rejection))?;
         let content_type = headers.get(CONTENT_TYPE).map(HeaderValue::as_bytes);
         in_tx_until(
@@ -251,7 +250,8 @@ impl Receiver {
                 if inserted.is_none() {
                     return Ok(ReceiptOutcome::Duplicate);
                 }
-                let incoming = Incoming::new(endpoint_id, message_id.as_ref(), content_type, body);
+                let incoming =
+                    Incoming::new(endpoint_id, message_id, content_type, body.into_bytes());
                 match enqueue(tx, &incoming, EnqueueOptions::default()).await {
                     Ok(Enqueued::Created(_)) => Ok(ReceiptOutcome::Accepted),
                     Ok(Enqueued::Duplicate) => Err(ReceiptFailure::UnexpectedDuplicate),
@@ -266,19 +266,9 @@ impl Receiver {
             },
         )
         .await
-        .map_err(|error| {
-            if matches!(error, ReceiptFailure::PayloadTooLarge) {
-                return rejected(endpoint_id, Rejection::new("payload_too_large"));
-            }
-            let driver = error.driver();
-            tracing::warn!(
-                webhook.endpoint = endpoint_id,
-                webhook.reason = error.reason(),
-                sqlstate = driver.and_then(sqlstate).as_deref(),
-                cause = driver.map(failure_cause),
-                "webhook_receipt_unavailable"
-            );
-            ReceiveError::Unavailable
+        .map_err(|error| match error {
+            ReceiptFailure::PayloadTooLarge => rejected(endpoint_id, PAYLOAD_TOO_LARGE),
+            error => receipt_unavailable(endpoint_id, &error),
         })
     }
 }
@@ -312,8 +302,8 @@ impl ReceiptFailure {
     const fn reason(&self) -> &'static str {
         match self {
             Self::UnexpectedDuplicate => "integrity",
-            Self::PayloadTooLarge => "payload_too_large",
             Self::Transaction(TxError::CommitUnknown(_)) => "commit_unknown",
+            Self::PayloadTooLarge => PAYLOAD_TOO_LARGE.reason(),
             Self::Query(_) | Self::Enqueue(_) | Self::Transaction(_) => "unavailable",
         }
     }
@@ -336,24 +326,49 @@ fn rejected(endpoint_id: &str, rejection: Rejection) -> ReceiveError {
     ReceiveError::Rejected(rejection)
 }
 
-fn bounded_body(body: &[u8]) -> Result<(), Rejection> {
-    if body.len() > MAX_BODY_BYTES {
-        return Err(ProtocolError::BodyTooLarge.into());
-    }
-    Ok(())
+/// Log a receipt the store could not acknowledge, with bounded fields only.
+fn receipt_unavailable(endpoint_id: &str, error: &ReceiptFailure) -> ReceiveError {
+    let driver = error.driver();
+    tracing::warn!(
+        webhook.endpoint = endpoint_id,
+        webhook.reason = error.reason(),
+        sqlstate = driver.and_then(sqlstate).as_deref(),
+        cause = driver.map(failure_cause),
+        "webhook_receipt_unavailable"
+    );
+    ReceiveError::Unavailable
 }
 
-/// The receipt key is indexed, so a verifier's identity is bounded here.
-fn bounded_message_id(message_id: Bytes) -> Result<Bytes, Rejection> {
-    if message_id.is_empty() || message_id.len() > MAX_MESSAGE_ID_BYTES {
-        return Err(ProtocolError::InvalidMessageId.into());
-    }
+/// Authenticate a delivery and return its message identity.
+///
+/// Both bounds are checked here as well as in [`KeyRing::verify`], so they
+/// hold for every verifier; the identity bound protects the indexed receipt
+/// key. The signed-content `.` rule stays with Standard Webhooks.
+fn admit(
+    verifier: &dyn Verifier,
+    headers: &HeaderMap,
+    body: &[u8],
+    now: SystemTime,
+) -> Result<Bytes, Rejection> {
+    ensure_body_size(body)?;
+    let message_id = verifier.authenticate(headers, body, now)?;
+    ensure_message_id_len(&message_id)?;
     Ok(message_id)
 }
 
 enum ReceiveBody<'a> {
     Borrowed(&'a [u8]),
     Owned(Bytes),
+}
+
+impl ReceiveBody<'_> {
+    /// Copy a borrowed body only here, after its receipt won admission.
+    fn into_bytes(self) -> Bytes {
+        match self {
+            Self::Borrowed(body) => Bytes::copy_from_slice(body),
+            Self::Owned(body) => body,
+        }
+    }
 }
 
 impl AsRef<[u8]> for ReceiveBody<'_> {
@@ -377,7 +392,7 @@ pub struct Incoming {
     version: u8,
     endpoint_id: String,
     #[serde_as(serialize_as = "StreamingBase64", deserialize_as = "Base64")]
-    message_id: Vec<u8>,
+    message_id: Bytes,
     #[serde_as(
         serialize_as = "Option<StreamingBase64>",
         deserialize_as = "Option<Base64>"
@@ -402,21 +417,13 @@ const fn incoming_version() -> u8 {
 
 impl Incoming {
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    fn new(
-        endpoint_id: &str,
-        message_id: &[u8],
-        content_type: Option<&[u8]>,
-        body: ReceiveBody<'_>,
-    ) -> Self {
+    fn new(endpoint_id: &str, message_id: Bytes, content_type: Option<&[u8]>, body: Bytes) -> Self {
         Self {
             version: incoming_version(),
             endpoint_id: endpoint_id.to_owned(),
-            message_id: message_id.to_vec(),
+            message_id,
             content_type: content_type.map(ToOwned::to_owned),
-            body: match body {
-                ReceiveBody::Borrowed(body) => Bytes::copy_from_slice(body),
-                ReceiveBody::Owned(body) => body,
-            },
+            body,
         }
     }
 
@@ -464,6 +471,7 @@ const _: () = infra_jobs::assert_valid_kind_name(Incoming::NAME);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::MAX_BODY_BYTES;
 
     #[tokio::test]
     async fn a_body_over_the_bound_is_rejected_before_any_verifier_or_write() {
