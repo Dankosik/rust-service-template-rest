@@ -10,7 +10,7 @@ use axum::response::Response;
 use bytes::Bytes;
 use http_body_util::BodyExt as _;
 use prost::Message as _;
-use service_failure::{AT_CAPACITY_DETAIL, AT_CAPACITY_RETRY_AFTER, Code};
+use service_failure::{AT_CAPACITY_DETAIL, AT_CAPACITY_RETRY_AFTER};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tonic::server::NamedService as _;
 
@@ -58,7 +58,7 @@ pub struct Services {
     reflection: bool,
     // template:begin authn:grpc-services-scopes-field
     /// Scopes a verified principal needs for a method, keyed by request path.
-    scopes: std::collections::HashMap<String, Box<[String]>>,
+    scopes: HashMap<String, Box<[String]>>,
     // template:end authn:grpc-services-scopes-field
     // template:begin service-auth:grpc-services-callers-field
     /// Callers admitted to a method, keyed by request path.
@@ -231,10 +231,10 @@ impl Services {
     /// has one.
     pub fn require_scopes(&mut self, path: &str, scopes: &[&str]) -> Result<(), Error> {
         if !self.is_registered_method(path) {
-            return Err(Error::UnregisteredMethodPath);
+            return Err(Error::UnregisteredMethodPath(path.to_owned()));
         }
         if self.scopes.contains_key(path) {
-            return Err(Error::DuplicateScopeRequirement);
+            return Err(Error::DuplicateScopeRequirement(path.to_owned()));
         }
         let scopes = scopes.iter().map(|&scope| scope.to_owned()).collect();
         self.scopes.insert(path.to_owned(), scopes);
@@ -262,17 +262,17 @@ impl Services {
     pub fn allow_callers(&mut self, path: &str, callers: &[&str]) -> Result<(), Error> {
         let reflection = self.reflection && crate::REFLECTION_PATHS.contains(&path);
         if !(self.is_registered_method(path) || reflection) {
-            return Err(Error::UnregisteredCallerRule);
+            return Err(Error::UnregisteredCallerRule(path.to_owned()));
         }
         if self.caller_rules.contains_key(path) {
-            return Err(Error::DuplicateCallerRule);
+            return Err(Error::DuplicateCallerRule(path.to_owned()));
         }
         let mut names: Vec<infra_serviceauth::CallerName> = Vec::with_capacity(callers.len());
         for caller in callers {
             let name = infra_serviceauth::CallerName::parse(caller)
-                .map_err(|_| Error::InvalidCallerRule)?;
+                .map_err(|_| Error::InvalidCallerRule(path.to_owned()))?;
             if names.contains(&name) {
-                return Err(Error::InvalidCallerRule);
+                return Err(Error::InvalidCallerRule(path.to_owned()));
             }
             names.push(name);
         }
@@ -370,7 +370,10 @@ pub fn router(
         crate::observe::register_shed();
         let permits = Arc::new(Semaphore::new(limit.get() as usize));
         business = business.layer(axum::middleware::from_fn_with_state(
-            AdmissionLimit::new(permits, limits.max_admission_wait),
+            AdmissionLimit {
+                permits,
+                max_wait: limits.max_admission_wait,
+            },
             admit_business_call,
         ));
     }
@@ -384,25 +387,31 @@ pub fn router(
     // template:end service-auth:grpc-router-admit-callers
     // template:begin authn:grpc-router-authenticate
     let scopes = Arc::new(services.scopes);
-    let business = match verifier {
+    let business = if service_tokens {
         // A service token names a caller and carries no scope, so a declared
         // requirement could only be dropped.
-        _ if service_tokens && !scopes.is_empty() => {
+        if !scopes.is_empty() {
             return Err(Error::ScopesWithServiceTokens);
         }
-        _ if service_tokens => business,
-        Some(verifier) => business.layer(axum::middleware::from_fn(move |request, next| {
-            let verifier = verifier.clone();
-            let scopes = Arc::clone(&scopes);
-            async move { authenticate(verifier, scopes, request, next).await }
-        })),
-        None => return Err(Error::UnauthenticatedBusinessCalls),
+        business
+    } else {
+        match verifier {
+            Some(verifier) => business.layer(axum::middleware::from_fn(move |request, next| {
+                let verifier = verifier.clone();
+                let scopes = Arc::clone(&scopes);
+                async move { authenticate(verifier, scopes, request, next).await }
+            })),
+            None => return Err(Error::UnauthenticatedBusinessCalls),
+        }
     };
     // template:end authn:grpc-router-authenticate
     let business = if let Some(limit) = limits.max_in_flight {
         let openings = Arc::new(Semaphore::new(limit.get() as usize));
         business.layer(axum::middleware::from_fn_with_state(
-            AdmissionLimit::new(openings, limits.max_admission_wait),
+            AdmissionLimit {
+                permits: openings,
+                max_wait: limits.max_admission_wait,
+            },
             admit_opening,
         ))
     } else {
@@ -413,7 +422,7 @@ pub fn router(
         opening,
     ));
     Ok(with_health(business, readiness, &services.names).layer(
-        axum::middleware::from_fn_with_state(Arc::new(series), crate::observe::observe),
+        axum::middleware::from_fn_with_state(series, crate::observe::observe),
     ))
 }
 
@@ -430,6 +439,8 @@ pub fn server_options(limits: Limits) -> infra_http::ServerOptions {
 }
 
 pub(crate) const GRPC_TIMEOUT: http::HeaderName = http::HeaderName::from_static("grpc-timeout");
+/// Most digits a `grpc-timeout` value carries before its unit.
+pub(crate) const MAX_TIMEOUT_DIGITS: usize = 8;
 
 /// Splits a request path `/{service}/{method}` whose parts are non-empty and
 /// whose method holds no further `/`.
@@ -463,7 +474,8 @@ pub fn metadata_grpc_timeout(metadata: &tonic::metadata::MetadataMap) -> Option<
 }
 
 fn parse_grpc_timeout(value: &[u8]) -> Option<Duration> {
-    if value.is_empty() || value.len() > 9 {
+    // The unit follows the digits.
+    if value.is_empty() || value.len() > MAX_TIMEOUT_DIGITS + 1 {
         return None;
     }
     let (&unit, digits) = value.split_last()?;
@@ -511,6 +523,10 @@ impl ResponseContext {
     pub const fn operation(&self) -> &operation_context::OperationContext {
         &self.0
     }
+
+    pub(crate) fn into_operation(self) -> operation_context::OperationContext {
+        self.0
+    }
 }
 
 /// Bounds opening from before authentication while preserving a separate
@@ -548,17 +564,19 @@ async fn opening(State(cap): State<Duration>, mut request: Request, next: Next) 
     response
 }
 
+/// The opening context the [`opening`] layer puts on every business call
+/// before any layer inside it runs; `None` only if that layer is missing.
+pub(crate) fn opening_context(request: &Request) -> Option<&operation_context::OperationContext> {
+    request
+        .extensions()
+        .get::<operation_context::OperationContext>()
+}
+
 /// A concurrency bound and how long a call over it may wait.
 #[derive(Clone)]
 struct AdmissionLimit {
     permits: Arc<Semaphore>,
     max_wait: Duration,
-}
-
-impl AdmissionLimit {
-    const fn new(permits: Arc<Semaphore>, max_wait: Duration) -> Self {
-        Self { permits, max_wait }
-    }
 }
 
 /// Admission before authentication. Only the opening future owns this permit;
@@ -597,9 +615,7 @@ async fn admit_business_call(
 /// with `DEADLINE_EXCEEDED`, which a client does not retry, and the refusal
 /// would never be sent.
 fn patience(request: &Request, max_wait: Duration) -> Duration {
-    request
-        .extensions()
-        .get::<operation_context::OperationContext>()
+    opening_context(request)
         .and_then(operation_context::OperationContext::remaining)
         .unwrap_or_default()
         .saturating_sub(REJECT_DRAIN)
@@ -632,7 +648,7 @@ async fn acquire(permits: Arc<Semaphore>, patience: Duration) -> Option<OwnedSem
 /// without a delay adds no load, carrying the same catalog identity as HTTP's
 /// shed answer. `RetryInfo` gives a client that honors it the delay.
 fn at_capacity() -> tonic::Status {
-    Failure::new(Code::ServiceUnavailable)
+    Failure::new(service_failure::Code::ServiceUnavailable)
         .retry_after(AT_CAPACITY_RETRY_AFTER)
         .into_status_as(tonic::Code::ResourceExhausted, AT_CAPACITY_DETAIL)
 }
@@ -666,7 +682,7 @@ pub(crate) async fn reject(request: Request, status: tonic::Status) -> Response 
 // template:begin authn:grpc-authenticate
 async fn authenticate(
     verifier: infra_bearerauthn::Verifier,
-    scopes: Arc<std::collections::HashMap<String, Box<[String]>>>,
+    scopes: Arc<HashMap<String, Box<[String]>>>,
     mut request: Request,
     next: Next,
 ) -> Response {
@@ -675,11 +691,7 @@ async fn authenticate(
         .get_all(http::header::AUTHORIZATION)
         .iter()
         .map(http::HeaderValue::as_bytes);
-    let Some(context) = request
-        .extensions()
-        .get::<operation_context::OperationContext>()
-        .cloned()
-    else {
+    let Some(context) = opening_context(&request).cloned() else {
         return crate::status::internal_status().into_http();
     };
     let result = verifier
@@ -696,7 +708,7 @@ async fn authenticate(
         .get(request.uri().path())
         .is_none_or(|required| principal.has_scopes(required));
     if !granted {
-        let status = Failure::new(Code::Forbidden).into_status_as(
+        let status = Failure::new(service_failure::Code::Forbidden).into_status_as(
             tonic::Code::PermissionDenied,
             service_failure::INSUFFICIENT_SCOPE_DETAIL,
         );
@@ -712,10 +724,10 @@ async fn authenticate(
 
 fn authentication_status(failure: infra_bearerauthn::Failure) -> tonic::Status {
     Failure::new(match failure {
-        infra_bearerauthn::Failure::Missing => Code::AuthenticationRequired,
-        infra_bearerauthn::Failure::Malformed => Code::AuthenticationMalformed,
-        infra_bearerauthn::Failure::Invalid => Code::AuthenticationInvalid,
-        infra_bearerauthn::Failure::Unavailable => Code::AuthenticationUnavailable,
+        infra_bearerauthn::Failure::Missing => service_failure::Code::AuthenticationRequired,
+        infra_bearerauthn::Failure::Malformed => service_failure::Code::AuthenticationMalformed,
+        infra_bearerauthn::Failure::Invalid => service_failure::Code::AuthenticationInvalid,
+        infra_bearerauthn::Failure::Unavailable => service_failure::Code::AuthenticationUnavailable,
     })
     .into()
 }

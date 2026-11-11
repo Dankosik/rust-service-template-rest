@@ -75,11 +75,9 @@ pub(crate) fn tls(grpc: &GrpcConfig) -> Result<Option<Arc<ServerConfig>>, Valida
         .map(Some)
         .map_err(|error| {
             let key = match error {
-                infra_grpc::Error::InvalidCertificate => "grpc.certificate",
-                infra_grpc::Error::InvalidPrivateKey => "grpc.private_key",
-                infra_grpc::Error::InvalidCaCertificate => "grpc.client_ca",
-                // `server_tls_config` returns only the three TLS variants above.
-                _ => "grpc",
+                infra_grpc::TlsMaterialError::InvalidCertificate => "grpc.certificate",
+                infra_grpc::TlsMaterialError::InvalidPrivateKey => "grpc.private_key",
+                infra_grpc::TlsMaterialError::InvalidCaCertificate => "grpc.client_ca",
             };
             ValidationError::new(key, error.to_string())
         })

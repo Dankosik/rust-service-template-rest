@@ -525,7 +525,7 @@ fn caller_rules_name_registered_methods_once_with_valid_callers() {
         .unwrap();
     assert_eq!(
         services.allow_callers(&format!("{ECHO}/Unary"), &["orders"]),
-        Err(Error::UnregisteredCallerRule),
+        Err(Error::UnregisteredCallerRule(format!("{ECHO}/Unary"))),
         "before the service is added"
     );
     services
@@ -540,14 +540,14 @@ fn caller_rules_name_registered_methods_once_with_valid_callers() {
     ] {
         assert_eq!(
             services.allow_callers(path, &["orders"]),
-            Err(Error::UnregisteredCallerRule),
+            Err(Error::UnregisteredCallerRule(path.to_owned())),
             "{path}"
         );
     }
     for callers in [&["Orders"][..], &["orders", "orders"], &["a b"]] {
         assert_eq!(
             services.allow_callers(&format!("{ECHO}/Unary"), callers),
-            Err(Error::InvalidCallerRule),
+            Err(Error::InvalidCallerRule(format!("{ECHO}/Unary"))),
             "{callers:?}"
         );
     }
@@ -556,7 +556,7 @@ fn caller_rules_name_registered_methods_once_with_valid_callers() {
         .unwrap();
     assert_eq!(
         services.allow_callers(&format!("{ECHO}/Unary"), &["orders"]),
-        Err(Error::DuplicateCallerRule)
+        Err(Error::DuplicateCallerRule(format!("{ECHO}/Unary")))
     );
 }
 

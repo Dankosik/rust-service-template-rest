@@ -107,7 +107,7 @@ fn register(
 reflection's two paths once `add_reflection()` was called. Another path is
 `Error::UnregisteredCallerRule`, a second rule for a path
 `Error::DuplicateCallerRule`, and an ill-formed or repeated caller name
-`Error::InvalidCallerRule`; an empty list admits nobody. With
+`Error::InvalidCallerRule`, each naming the path; an empty list admits nobody. With
 `mode = "jwt"`, bootstrap calls `services.authenticate_callers(verifier)`.
 Once a verifier is set or any rule is declared, every method of every added
 service, reflection included, needs a rule: `router` refuses with
