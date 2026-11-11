@@ -207,6 +207,18 @@ impl Store {
     where
         W: AsyncFnOnce(&mut Tx<'_>) -> Result<(Record, C), R>,
     {
+        // PostgreSQL `text` cannot hold U+0000, so the success record of such a
+        // caller can never be written. Refusing before the transaction keeps
+        // the work from running only to be rolled back on every attempt.
+        if caller.issuer.contains('\0') || caller.value.contains('\0') {
+            tracing::warn!(
+                phase = "caller_identity",
+                failure_class = %AttemptError::Internal,
+                cause = "unstorable_caller",
+                "http_idempotency_store_failed"
+            );
+            return Err(AttemptError::Internal);
+        }
         let work_in_tx = async |tx: &mut Tx<'_>| -> Result<C, Stop<R>> {
             if let Some(decision) = arbitrate(tx, scope, fingerprint).await? {
                 return Err(Stop::Decided(decision));
@@ -242,7 +254,7 @@ enum Decision {
     InProgress,
 }
 
-/// Steps 1 and 2: `None` when the work may run.
+/// Steps 1 and 2: [`None`] when the work may run.
 async fn arbitrate(
     tx: &mut Tx<'_>,
     scope: &ScopeKey,
@@ -403,8 +415,8 @@ async fn write(
     }
 }
 
-/// Why the transaction ends without a commit. The provider commits on `Ok`
-/// and rolls back on `Err`, so both reasons leave the closure as its error.
+/// Why the transaction ends without a commit. The provider commits on [`Ok`]
+/// and rolls back on [`Err`], so both reasons leave the closure as its error.
 enum Stop<R> {
     /// Arbitration decided without running the work.
     Decided(Decision),
@@ -485,6 +497,39 @@ mod tests {
             classify_tx(&TxError::Begin(sqlx::Error::WorkerCrashed)),
             AttemptError::Internal
         );
+    }
+
+    #[tokio::test]
+    async fn a_caller_with_a_nul_is_refused_before_the_work_runs() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/unused")
+            .unwrap();
+        let store = Store::new(pool.clone(), Duration::from_secs(60));
+        for (issuer, value) in [
+            ("https://issuer.example", "sub\0ject"),
+            ("iss\0uer", "subject"),
+        ] {
+            let caller = CallerIdentity {
+                issuer: issuer.into(),
+                kind: CallerKind::Subject,
+                value: value.into(),
+            };
+            let mut ran = false;
+            let attempted = store
+                .attempt(
+                    &ScopeKey::from_digest([0; 32]),
+                    &caller,
+                    &[0; 32],
+                    async |_: &mut Tx<'_>| -> Result<(Record, ()), ()> {
+                        ran = true;
+                        Err(())
+                    },
+                )
+                .await;
+            assert!(matches!(attempted, Err(AttemptError::Internal)));
+            assert!(!ran);
+        }
+        pool.close().await;
     }
 
     #[test]

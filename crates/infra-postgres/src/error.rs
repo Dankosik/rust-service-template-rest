@@ -20,7 +20,8 @@ pub fn sqlstate(err: &sqlx::Error) -> Option<Cow<'_, str>> {
 /// meet. With a valid SQLSTATE: a lost connection (class `08`), exhausted
 /// resources (class `53`), a serialization failure, deadlock, or uncertain
 /// statement completion (`40001`, `40P01`, `40003`), a server shutting down or
-/// starting (`57P01`, `57P02`, `57P03`), a cancelled statement (`57014`), or a
+/// starting (`57P01`, `57P02`, `57P03`), a cancelled statement (`57014`), a
+/// session the server ended for idling in a transaction (`25P03`), or a
 /// read-only session (`25006`). Without one: a pool that timed out or closed,
 /// or a failed socket or TLS session.
 #[must_use]
@@ -31,7 +32,15 @@ pub fn transient(err: &sqlx::Error) -> bool {
                 || code.starts_with("53")
                 || matches!(
                     code.as_ref(),
-                    "40001" | "40003" | "40P01" | "57P01" | "57P02" | "57P03" | "57014" | "25006"
+                    "40001"
+                        | "40003"
+                        | "40P01"
+                        | "57P01"
+                        | "57P02"
+                        | "57P03"
+                        | "57014"
+                        | "25P03"
+                        | "25006"
                 )
         }
         None => matches!(
@@ -72,6 +81,7 @@ pub(crate) mod tests {
         assert!(transient(&database("40003")));
         assert!(transient(&database("08006")));
         assert!(transient(&database("57014")));
+        assert!(transient(&database("25P03")));
         assert!(transient(&sqlx::Error::PoolTimedOut));
         assert!(!transient(&database("25P02")));
         assert!(!transient(&sqlx::Error::Protocol("driver misuse".into())));
