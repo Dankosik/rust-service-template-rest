@@ -62,6 +62,8 @@ mod cli;
 mod de;
 mod load;
 mod secret_policy;
+#[cfg(test)]
+mod test_support;
 mod validate;
 
 use serde::Deserialize;
