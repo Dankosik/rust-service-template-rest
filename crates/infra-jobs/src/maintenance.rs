@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use infra_postgres::{
     Cleanup, CleanupPass, CleanupSchedule, MAINTENANCE_OBSERVATION_INTERVAL, MaintenanceFailure,
-    MaintenanceObserver, MaintenancePopulation, PopulationSample, in_observation_tx, in_tx,
+    MaintenanceObserver, MaintenancePopulation, PopulationSample, Tx, in_observation_tx, in_tx,
     observed,
 };
 use sqlx::PgPool;
@@ -17,19 +17,42 @@ use crate::engine::{
 };
 
 /// Gauge of live jobs. Labels `kind`, `state` (`available`, `scheduled`, `running`).
-pub(crate) const LIVE_JOBS_METRIC: &str = "jobs_live_jobs";
+const LIVE_JOBS_METRIC: &str = "jobs_live_jobs";
 /// Gauge of retained failed jobs. Label `kind`.
 pub(crate) const FAILED_JOBS_METRIC: &str = "jobs_failed_jobs";
 /// Age of the oldest available job. Label `kind`. Zero when none.
-pub(crate) const OLDEST_AVAILABLE_AGE_METRIC: &str = "jobs_oldest_available_age_seconds";
+const OLDEST_AVAILABLE_AGE_METRIC: &str = "jobs_oldest_available_age_seconds";
 /// Database timestamp of the last successful observation.
 pub(crate) const OBSERVATION_TIMESTAMP_METRIC: &str = "jobs_observation_timestamp_seconds";
-pub(crate) const RETAIN_COMPLETED_FOR: Duration = Duration::from_hours(24);
-pub(crate) const RETENTION_BATCH_ROWS: i64 = 500;
-pub(crate) const SAMPLE_INTERVAL: Duration = Duration::from_secs(10);
-pub(crate) const LIVE_JOBS_SAMPLE_CAP: i64 = 1_000;
+const RETAIN_COMPLETED_FOR: Duration = Duration::from_hours(24);
+const RETENTION_BATCH_ROWS: u32 = 500;
+/// The hang guard on one retention batch: a slow batch is waited for.
+const RETENTION_STATEMENT_TIMEOUT: &str = "5s";
+const SAMPLE_INTERVAL: Duration = Duration::from_secs(10);
+const LIVE_JOBS_SAMPLE_CAP: i64 = 1_000;
+/// The statement bound of one registered-kind sample.
+const SAMPLE_STATEMENT_TIMEOUT: &str = "2000ms";
 pub(crate) const STARTUP_CHECK_BUDGET: Duration = Duration::from_secs(5);
-/// Check UTF8, READ COMMITTED and writability, bounded to 5 s.
+
+/// Bound every later statement of `tx` by `timeout`, in PostgreSQL interval
+/// syntax. `set_config(..., is_local = true)` lasts until the transaction
+/// ends, so PostgreSQL restores the session timeout itself on commit,
+/// rollback, or a dropped connection.
+pub(crate) async fn set_statement_timeout(
+    tx: &mut Tx<'_>,
+    timeout: &'static str,
+) -> Result<(), sqlx::Error> {
+    observed(
+        "set statement timeout",
+        sqlx::query!("SELECT set_config('statement_timeout', $1, true)", timeout)
+            .fetch_one(&mut *tx),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Check UTF8, READ COMMITTED and writability, bounded by
+/// [`STARTUP_CHECK_BUDGET`].
 ///
 /// # Errors
 ///
@@ -81,7 +104,8 @@ pub(crate) async fn check_startup(pool: &PgPool) -> Result<(), StartupError> {
     Ok(())
 }
 
-/// Delete expired completed jobs in batches of 500 and return how many were deleted.
+/// Delete expired completed jobs in batches of [`RETENTION_BATCH_ROWS`] and
+/// return how many were deleted.
 ///
 /// Batches run until one is short. The first batch error is returned; earlier
 /// batches stay committed. Failed jobs remain until recovery. A short batch
@@ -108,7 +132,6 @@ async fn remove_expired_with_cancel(
 ) -> Result<(u64, PassEnd), OperationError> {
     let mut pass = CleanupPass::start(Cleanup::Jobs);
     let mut removed = 0u64;
-    let limit = u64::try_from(RETENTION_BATCH_ROWS).unwrap_or(0);
     loop {
         if cancel.is_some_and(CancellationToken::is_cancelled) {
             return Ok((removed, PassEnd::Cancelled));
@@ -118,7 +141,7 @@ async fn remove_expired_with_cancel(
             .inspect_err(|_| pass.failed())?;
         pass.committed(batch);
         removed = removed.saturating_add(batch);
-        if batch < limit {
+        if batch < u64::from(RETENTION_BATCH_ROWS) {
             pass.completed();
             return Ok((removed, PassEnd::Finished));
         }
@@ -287,11 +310,7 @@ pub(crate) fn init_metrics(kinds: &[&'static str]) {
 }
 
 pub(crate) fn init_kind_metrics(kind: &'static str) {
-    set_live(kind, "available", 0);
-    set_live(kind, "scheduled", 0);
-    set_live(kind, "running", 0);
-    metrics::gauge!(FAILED_JOBS_METRIC, "kind" => kind).set(0.0);
-    metrics::gauge!(OLDEST_AVAILABLE_AGE_METRIC, "kind" => kind).set(0.0);
+    publish_kind(kind, 0, 0, 0, 0, 0.0);
 }
 
 pub(crate) fn invalidate_sample() {
@@ -302,15 +321,7 @@ async fn delete_batch(shared: &Shared) -> Result<u64, OperationError> {
     let _turn = shared.statement_turn.lock().await;
     backstop(async {
         in_tx(&shared.pool, async |tx| -> Result<u64, OperationError> {
-            // `SET LOCAL` lasts until the transaction ends, so PostgreSQL restores the
-            // session timeout itself on commit, rollback, or a dropped connection.
-            // A hang guard, not a pace: a slow batch is waited for.
-            observed(
-                "set statement timeout",
-                sqlx::query!("SELECT set_config('statement_timeout', $1, true)", "5s")
-                    .fetch_one(&mut *tx),
-            )
-            .await?;
+            set_statement_timeout(tx, RETENTION_STATEMENT_TIMEOUT).await?;
             // The state stays a literal: a bound state cannot prove the partial
             // `background_jobs_terminal` predicate, so a generic plan would
             // scan the table.
@@ -323,7 +334,7 @@ async fn delete_batch(shared: &Shared) -> Result<u64, OperationError> {
                      LIMIT $2 \
                      FOR UPDATE SKIP LOCKED))",
                 RETAIN_COMPLETED_FOR as _,
-                RETENTION_BATCH_ROWS,
+                i64::from(RETENTION_BATCH_ROWS),
             );
             Ok(observed("delete finished jobs", delete.execute(&mut *tx))
                 .await?
@@ -339,11 +350,7 @@ async fn sample_once(shared: &Shared) -> Result<Sample, OperationError> {
     let kinds = shared.registered_kinds();
     backstop(async {
         in_tx(&shared.pool, async |tx| -> Result<Sample, OperationError> {
-            observed(
-                "set statement timeout",
-                sqlx::query!("SET LOCAL statement_timeout = '2000ms'").execute(&mut *tx),
-            )
-            .await?;
+            set_statement_timeout(tx, SAMPLE_STATEMENT_TIMEOUT).await?;
             let rows = observed(
                 "sample jobs",
                 sqlx::query_as!(
@@ -459,27 +466,44 @@ fn decode_sample(rows: Vec<SampleRow>, kinds: Vec<&'static str>) -> Result<Sampl
 
 fn publish_sample(sample: &Sample) {
     for row in &sample.rows {
-        set_live(&row.kind, "available", row.available);
-        set_live(&row.kind, "scheduled", row.scheduled);
-        set_live(&row.kind, "running", row.running);
-        #[expect(
-            clippy::cast_precision_loss,
-            reason = "a metric gauge is f64; counts stay far below 2^52"
-        )]
-        let failed = row.failed as f64;
-        metrics::gauge!(FAILED_JOBS_METRIC, "kind" => row.kind.clone()).set(failed);
-        metrics::gauge!(OLDEST_AVAILABLE_AGE_METRIC, "kind" => row.kind.clone())
-            .set(row.oldest_available_seconds);
+        publish_kind(
+            &row.kind,
+            row.available,
+            row.scheduled,
+            row.running,
+            row.failed,
+            row.oldest_available_seconds,
+        );
     }
     metrics::gauge!(OBSERVATION_TIMESTAMP_METRIC).set(sample.observed_at);
 }
 
-fn set_live(kind: &str, state: &'static str, count: i64) {
-    let kind = kind.to_owned();
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "a metric gauge is f64; counts stay far below 2^52"
-    )]
-    let value = count as f64;
-    metrics::gauge!(LIVE_JOBS_METRIC, "kind" => kind, "state" => state).set(value);
+/// Every per-kind series a sample sets, the one list registration zeroes too.
+fn publish_kind(
+    kind: &str,
+    available: i64,
+    scheduled: i64,
+    running: i64,
+    failed: i64,
+    oldest_available_seconds: f64,
+) {
+    for (state, count) in [
+        ("available", available),
+        ("scheduled", scheduled),
+        ("running", running),
+    ] {
+        metrics::gauge!(LIVE_JOBS_METRIC, "kind" => kind.to_owned(), "state" => state)
+            .set(gauge_count(count));
+    }
+    metrics::gauge!(FAILED_JOBS_METRIC, "kind" => kind.to_owned()).set(gauge_count(failed));
+    metrics::gauge!(OLDEST_AVAILABLE_AGE_METRIC, "kind" => kind.to_owned())
+        .set(oldest_available_seconds);
+}
+
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "a metric gauge is f64; counts stay far below 2^52"
+)]
+fn gauge_count(count: i64) -> f64 {
+    count as f64
 }

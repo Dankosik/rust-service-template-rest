@@ -31,7 +31,7 @@ pub(crate) const RECORD_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 /// Client bound around one engine statement: acquire and statement acknowledgement.
 pub(crate) const OPERATION_BACKSTOP: Duration = Duration::from_secs(12);
 /// Counter of failed engine statements. Label `operation`.
-pub(crate) const OPERATION_FAILURES_METRIC: &str = "jobs_worker_operation_failures_total";
+const OPERATION_FAILURES_METRIC: &str = "jobs_worker_operation_failures_total";
 
 /// A worker's job engine: one kind set, its attempt slots, and its claim loop.
 ///
@@ -94,7 +94,7 @@ pub enum OperationError {
     Acquire(#[source] sqlx::Error),
     /// The statement failed, or a returned row did not decode.
     #[error("statement")]
-    Statement(#[source] sqlx::Error),
+    Statement(#[from] sqlx::Error),
     #[error("timed out")]
     TimedOut,
 }
@@ -129,12 +129,6 @@ impl From<infra_postgres::TxError> for OperationError {
             | infra_postgres::TxError::CommitFailed(error)
             | infra_postgres::TxError::CommitUnknown(error) => Self::Statement(error),
         }
-    }
-}
-
-impl From<sqlx::Error> for OperationError {
-    fn from(error: sqlx::Error) -> Self {
-        Self::Statement(error)
     }
 }
 
@@ -200,11 +194,10 @@ impl Engine {
                 max_workers,
                 slots: Arc::new(Semaphore::new(slots)),
                 statement_turn: tokio::sync::Mutex::new(()),
-                force: CancellationToken::new(),
-                cleanup_deadline: OnceLock::new(),
+                cleanup: ForcedCleanup::default(),
                 counters: Counters::default(),
                 attempt_tracker: TaskTracker::new(),
-                failing: Failing::new(),
+                failing: Failing::default(),
                 completions: crate::attempt::Completions::default(),
                 wake,
                 peers,
@@ -249,9 +242,7 @@ impl Engine {
     pub fn start(self, tracker: &TaskTracker, cancel: &CancellationToken) -> Started {
         crate::attempt::describe_metrics();
         for registered in self.shared.registry.iter() {
-            let _ = registered
-                .metrics
-                .set(crate::attempt::KindMetrics::new(registered.name));
+            registered.metrics();
         }
         claim::describe_metrics();
         if self.shared.owns_process_duties {
@@ -322,17 +313,11 @@ impl Started {
     #[must_use]
     pub async fn cancel_and_finish(&self, budget: Duration) -> DrainEnd {
         self.stop_claiming();
-        // Fixed before `force` fires: a supervisor that sees the cancellation
-        // also sees the deadline.
-        self.shared.cleanup_deadline.get_or_init(|| {
-            let now = Instant::now();
-            now.checked_add(budget).unwrap_or(now + NO_CLEANUP_DEADLINE)
-        });
-        self.shared.force.cancel();
+        self.shared.cleanup.begin(budget);
         let timed_out = tokio::select! {
             biased;
             () = self.drained() => false,
-            () = self.shared.cleanup_ended() => true,
+            () = self.shared.cleanup.ended() => true,
         };
         let counters = &self.shared.counters;
         DrainEnd {
@@ -424,14 +409,25 @@ fn spawn_guarded(
 pub(crate) struct SupervisorGuard {
     stop: CancellationToken,
     failure: CancellationToken,
+    /// The attempt's job, named in the record: the guard drops outside the
+    /// attempt span, so the span's fields do not reach it.
+    id: crate::kind::JobId,
+    kind: &'static str,
     retired: bool,
 }
 
 impl SupervisorGuard {
-    pub(crate) fn new(stop: CancellationToken, failure: CancellationToken) -> Self {
+    pub(crate) fn new(
+        stop: CancellationToken,
+        failure: CancellationToken,
+        id: crate::kind::JobId,
+        kind: &'static str,
+    ) -> Self {
         Self {
             stop,
             failure,
+            id,
+            kind,
             retired: false,
         }
     }
@@ -446,6 +442,8 @@ impl Drop for SupervisorGuard {
         if std::thread::panicking() || !self.retired {
             tracing::error!(
                 task = "attempt",
+                job.id = %self.id,
+                job.kind = self.kind,
                 panicked = std::thread::panicking(),
                 "jobs_engine_task_stopped"
             );
@@ -486,7 +484,7 @@ impl Drop for Guard {
 const NO_CLEANUP_DEADLINE: Duration = Duration::from_hours(24 * 365);
 
 /// One engine as the process's listener and sampler see it.
-pub(crate) struct Peer {
+struct Peer {
     kinds: Vec<&'static str>,
     wake: Arc<Notify>,
 }
@@ -539,19 +537,17 @@ pub(crate) struct Shared {
     pub(crate) worker_id: uuid::Uuid,
     pub(crate) pool: PgPool,
     pub(crate) registry: Kinds,
-    pub(crate) max_workers: NonZeroU32,
+    max_workers: NonZeroU32,
     pub(crate) slots: Arc<Semaphore>,
     /// Held by the engine's own statements (claim, retention, sampling) while
     /// they use a pooled connection, so they take one connection between them:
     /// the pool budget is `jobs.max_workers + 2`, one connection per attempt
     /// slot plus this one and readiness (`docs/guides/background-jobs.md`).
     pub(crate) statement_turn: tokio::sync::Mutex<()>,
-    pub(crate) force: CancellationToken,
-    /// When supervisors stop waiting, set by the first forced cleanup.
-    cleanup_deadline: OnceLock<Instant>,
+    pub(crate) cleanup: ForcedCleanup,
     pub(crate) counters: Counters,
     pub(crate) attempt_tracker: TaskTracker,
-    pub(crate) failing: Failing,
+    failing: Failing,
     pub(crate) completions: crate::attempt::Completions,
     /// Set when a due job of a registered kind was committed.
     pub(crate) wake: Arc<Notify>,
@@ -577,22 +573,6 @@ impl Shared {
         true
     }
 
-    /// Resolves once the budget of a forced cleanup is spent; pending until
-    /// a cleanup is forced.
-    pub(crate) async fn cleanup_ended(&self) {
-        self.force.cancelled().await;
-        match self.cleanup_deadline.get() {
-            Some(deadline) => tokio::time::sleep_until(*deadline).await,
-            None => std::future::pending().await,
-        }
-    }
-
-    pub(crate) fn cleanup_has_ended(&self) -> bool {
-        self.cleanup_deadline
-            .get()
-            .is_some_and(|deadline| Instant::now() >= *deadline)
-    }
-
     /// Wake every engine of this process that registers `kind`, or all of
     /// them when `kind` is `None`.
     pub(crate) fn wake_peers(&self, kind: Option<&str>) {
@@ -611,6 +591,50 @@ impl fmt::Debug for Shared {
             .field("max_workers", &self.max_workers)
             .field("in_flight", &self.attempt_tracker.len())
             .finish_non_exhaustive()
+    }
+}
+
+/// A forced cleanup: the token supervisors cancel their handlers on, and the
+/// deadline they stop waiting at.
+///
+/// [`Self::begin`] fixes the deadline before it fires the token, so a
+/// supervisor that sees the cancellation also sees the deadline.
+#[derive(Default)]
+pub(crate) struct ForcedCleanup {
+    force: CancellationToken,
+    deadline: OnceLock<Instant>,
+}
+
+impl ForcedCleanup {
+    /// The first call fixes the deadline at `budget` from now; a later call
+    /// keeps it.
+    fn begin(&self, budget: Duration) {
+        self.deadline.get_or_init(|| {
+            let now = Instant::now();
+            now.checked_add(budget).unwrap_or(now + NO_CLEANUP_DEADLINE)
+        });
+        self.force.cancel();
+    }
+
+    /// Resolves once a cleanup is forced.
+    pub(crate) async fn forced(&self) {
+        self.force.cancelled().await;
+    }
+
+    /// Resolves once the budget of a forced cleanup is spent; pending until
+    /// a cleanup is forced.
+    pub(crate) async fn ended(&self) {
+        self.force.cancelled().await;
+        match self.deadline.get() {
+            Some(deadline) => tokio::time::sleep_until(*deadline).await,
+            None => std::future::pending().await,
+        }
+    }
+
+    pub(crate) fn has_ended(&self) -> bool {
+        self.deadline
+            .get()
+            .is_some_and(|deadline| Instant::now() >= *deadline)
     }
 }
 
@@ -648,7 +672,8 @@ impl Operation {
 }
 
 /// One flag per [`Operation`]: set after the first failure, clear after recovery.
-pub(crate) struct Failing {
+#[derive(Default)]
+struct Failing {
     claim: AtomicBool,
     record: AtomicBool,
     release: AtomicBool,
@@ -658,17 +683,6 @@ pub(crate) struct Failing {
 }
 
 impl Failing {
-    const fn new() -> Self {
-        Self {
-            claim: AtomicBool::new(false),
-            record: AtomicBool::new(false),
-            release: AtomicBool::new(false),
-            retention: AtomicBool::new(false),
-            sample: AtomicBool::new(false),
-            listen: AtomicBool::new(false),
-        }
-    }
-
     fn flag(&self, operation: Operation) -> &AtomicBool {
         match operation {
             Operation::Claim => &self.claim,
@@ -946,8 +960,7 @@ pub(super) mod tests {
                     },
                     generation: 1,
                     payload: b"null".to_vec(),
-                    trace_parent: None,
-                    trace_state: None,
+                    trace: crate::trace_context::Carrier::default(),
                     slot: Arc::clone(&engine.shared.slots)
                         .try_acquire_owned()
                         .unwrap(),
@@ -959,7 +972,12 @@ pub(super) mod tests {
                     } else {
                         Duration::from_secs(10)
                     },
-                SupervisorGuard::new(stop.clone(), failure.clone()),
+                SupervisorGuard::new(
+                    stop.clone(),
+                    failure.clone(),
+                    crate::JobId(uuid::Uuid::nil()),
+                    "ordinary",
+                ),
             );
             assert_eq!(gauges.get("jobs_owned_attempts", None), 1.0, "{case}");
             if case == "unpolled" {
@@ -1001,7 +1019,12 @@ pub(super) mod tests {
     fn supervisor_panic_after_retirement_still_stops_its_start() {
         let stop = CancellationToken::new();
         let failure = CancellationToken::new();
-        let guard = SupervisorGuard::new(stop.clone(), failure.clone());
+        let guard = SupervisorGuard::new(
+            stop.clone(),
+            failure.clone(),
+            crate::JobId(uuid::Uuid::nil()),
+            "ordinary",
+        );
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
             let mut guard = guard;
             guard.retire();

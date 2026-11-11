@@ -276,25 +276,23 @@ pub enum InspectionResult {
 /// A provisional redrive. Only an acknowledged caller commit establishes it.
 #[derive(Debug)]
 pub struct Redriven {
-    pub target: RecoveryTarget,
     /// The claim generation of the new cycle, as a decimal string.
     pub new_version: String,
 }
-/// A provisional discard. Only an acknowledged caller commit establishes deletion.
-#[derive(Debug)]
-pub struct Discarded {
-    pub target: RecoveryTarget,
-}
 
 /// Recovery refusal or database failure. Formatting deliberately omits raw causes.
+///
+/// No variant carries `#[error]`, so thiserror derives only `source` and the
+/// `From` conversions; the hand-written [`fmt::Display`] keeps causes out.
+#[derive(thiserror::Error)]
 pub enum OperatorError {
     Missing,
     /// The job no longer matches the target's kind, version, or failed state.
     Stale,
     /// A live job with the same unique key blocks the redrive.
     Conflict,
-    Database(sqlx::Error),
-    Transaction(TxError),
+    Database(#[from] sqlx::Error),
+    Transaction(#[from] TxError),
     InvalidStoredState,
 }
 
@@ -342,25 +340,6 @@ impl fmt::Display for OperatorError {
 impl fmt::Debug for OperatorError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(self, f)
-    }
-}
-impl std::error::Error for OperatorError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Database(error) => Some(error),
-            Self::Transaction(error) => Some(error),
-            _ => None,
-        }
-    }
-}
-impl From<sqlx::Error> for OperatorError {
-    fn from(error: sqlx::Error) -> Self {
-        Self::Database(error)
-    }
-}
-impl From<TxError> for OperatorError {
-    fn from(error: TxError) -> Self {
-        Self::Transaction(error)
     }
 }
 
@@ -411,19 +390,27 @@ impl TryFrom<SnapshotRow> for JobSnapshot {
     }
 }
 
-/// Bound the caller's transaction with [`STATEMENT_TIMEOUT`], which PostgreSQL
-/// restores on commit, rollback, or a dropped connection.
+/// Bound the caller's transaction with [`STATEMENT_TIMEOUT`].
 async fn apply_statement_timeout(tx: &mut Tx<'_>) -> Result<(), OperatorError> {
-    observed(
-        "set statement timeout",
-        sqlx::query!(
-            "SELECT set_config('statement_timeout', $1, true)",
-            STATEMENT_TIMEOUT
+    Ok(crate::maintenance::set_statement_timeout(tx, STATEMENT_TIMEOUT).await?)
+}
+
+/// The inspection projection, one row per job, followed by `$tail`: the
+/// `FROM background_jobs` filter of one selection and its binds.
+macro_rules! snapshot_query {
+    ($tail:tt $(, $arg:expr)*) => {
+        sqlx::query_as!(
+            SnapshotRow,
+            r#"SELECT id, kind, state, claim_generation::text AS "version!", attempts, failure_reason,
+        to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "created_at!",
+        to_char(not_before AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "not_before!",
+        to_char(claim_expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "claim_expires_at?",
+        to_char(finished_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "finished_at?",
+        jsonb_array_length(recovery_history) AS "recovery_count!"
+        FROM background_jobs "# + $tail
+            $(, $arg)*
         )
-        .fetch_one(&mut *tx),
-    )
-    .await?;
-    Ok(())
+    };
 }
 
 /// Observe safe columns with a two-second statement backstop inside the caller's
@@ -441,15 +428,12 @@ pub async fn inspect(
     ).fetch_one(&mut *tx)).await?;
     match &inspection.0 {
         Selection::One(id) => {
-            let item = observed("inspect jobs", sqlx::query_as!(SnapshotRow,
-r#"SELECT id, kind, state, claim_generation::text AS "version!", attempts, failure_reason,
-        to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "created_at!",
-        to_char(not_before AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "not_before!",
-        to_char(claim_expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "claim_expires_at?",
-        to_char(finished_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "finished_at?",
-        jsonb_array_length(recovery_history) AS "recovery_count!"
-        FROM background_jobs WHERE id = $1"#, id.0).fetch_optional(&mut *tx)).await?
-                .map(JobSnapshot::try_from).transpose()?;
+            let row = observed(
+                "inspect jobs",
+                snapshot_query!("WHERE id = $1", id.0).fetch_optional(&mut *tx),
+            )
+            .await?;
+            let item = row.map(JobSnapshot::try_from).transpose()?;
             Ok(InspectionResult::One { observed_at, item })
         }
         Selection::Page {
@@ -460,14 +444,16 @@ r#"SELECT id, kind, state, claim_generation::text AS "version!", attempts, failu
             // Enqueue never generates the nil UUID and a cursor never holds
             // it, so the first page starts after nil.
             let after = after.map_or(uuid::Uuid::nil(), |id| id.0);
-            let rows = observed("inspect jobs", sqlx::query_as!(SnapshotRow,
-r#"SELECT id, kind, state, claim_generation::text AS "version!", attempts, failure_reason,
-        to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "created_at!",
-        to_char(not_before AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "not_before!",
-        to_char(claim_expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "claim_expires_at?",
-        to_char(finished_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "finished_at?",
-        jsonb_array_length(recovery_history) AS "recovery_count!"
-        FROM background_jobs WHERE id > $1 ORDER BY id LIMIT $2"#, after, i64::from(*limit)).fetch_all(&mut *tx)).await?;
+            let rows = observed(
+                "inspect jobs",
+                snapshot_query!(
+                    "WHERE id > $1 ORDER BY id LIMIT $2",
+                    after,
+                    i64::from(*limit)
+                )
+                .fetch_all(&mut *tx),
+            )
+            .await?;
             page_result(rows, *limit, filter, observed_at)
         }
     }
@@ -513,7 +499,7 @@ async fn lock_failed_job(tx: &mut Tx<'_>, target: &RecoveryTarget) -> Result<(),
     observed(
         "lock failed job",
         sqlx::query!(
-            "SELECT kind, state, claim_generation FROM background_jobs WHERE id = $1 FOR UPDATE",
+            "SELECT id FROM background_jobs WHERE id = $1 FOR UPDATE",
             target.id.0
         )
         .fetch_optional(&mut *tx),
@@ -572,17 +558,20 @@ pub async fn redrive(tx: &mut Tx<'_>, target: &RecoveryTarget) -> Result<Redrive
     .map_err(conflict_or_database)?
     .ok_or(OperatorError::Stale)?;
     Ok(Redriven {
-        target: target.clone(),
         new_version: row.version,
     })
 }
 
-/// Permanently abandon one exact failed cycle. An unpublished event may be lost.
-/// The result remains provisional until the caller's commit is acknowledged.
+/// Permanently abandon one exact failed cycle. The result remains provisional
+/// until the caller's commit is acknowledged.
+///
+/// A job that relays an event, such as an outbox relay job, takes that event
+/// with it: the operator must reconcile the event the discarded job would have
+/// published.
 ///
 /// # Errors
 /// Refuses missing/stale targets and propagates database failures.
-pub async fn discard(tx: &mut Tx<'_>, target: &RecoveryTarget) -> Result<Discarded, OperatorError> {
+pub async fn discard(tx: &mut Tx<'_>, target: &RecoveryTarget) -> Result<(), OperatorError> {
     lock_failed_job(tx, target).await?;
     let result = observed("discard failed job", sqlx::query!(
         "DELETE FROM background_jobs WHERE id = $1 AND kind = $2 AND claim_generation = $3 AND state = 'failed'",
@@ -591,9 +580,7 @@ pub async fn discard(tx: &mut Tx<'_>, target: &RecoveryTarget) -> Result<Discard
     if result.rows_affected() != 1 {
         return Err(OperatorError::Stale);
     }
-    Ok(Discarded {
-        target: target.clone(),
-    })
+    Ok(())
 }
 
 #[cfg(test)]

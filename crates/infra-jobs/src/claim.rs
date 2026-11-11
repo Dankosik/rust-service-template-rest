@@ -16,6 +16,7 @@ use crate::engine::{
     observe_failure, observe_recovery,
 };
 use crate::kind::JobId;
+use crate::trace_context::Carrier;
 
 /// Claim request duration through its database acknowledgement. No labels.
 pub const CLAIM_DURATION_METRIC: &str = "jobs_claim_duration_seconds";
@@ -35,8 +36,7 @@ pub(crate) struct Claimed {
     /// The claim's fence: every outcome write matches it.
     pub(crate) generation: i64,
     pub(crate) payload: Vec<u8>,
-    pub(crate) trace_parent: Option<String>,
-    pub(crate) trace_state: Option<String>,
+    pub(crate) trace: Carrier,
     pub(crate) slot: OwnedSemaphorePermit,
     pub(crate) kind_slot: Option<KindSlot>,
 }
@@ -296,13 +296,12 @@ async fn send_claim(shared: &Shared, requested: i64) -> ClaimRound {
         let mut connection = infra_postgres::acquire(&shared.pool, "claim jobs")
             .await
             .map_err(OperationError::Acquire)?;
-        let rows = claim(&mut connection, shared, requested).await?;
-        Ok((sent, rows))
+        Ok(claim(&mut connection, shared, requested).await?)
     })
     .await;
     metrics::histogram!(CLAIM_DURATION_METRIC).record(sent.elapsed().as_secs_f64());
     match result {
-        Ok((sent, rows)) => ClaimRound::Known { sent, rows },
+        Ok(rows) => ClaimRound::Known { sent, rows },
         Err(error) => ClaimRound::Failed(error),
     }
 }
@@ -477,7 +476,7 @@ fn policy_binds(registry: &crate::Kinds, requested: i64) -> PolicyBinds<'_> {
             .push(i16::try_from(registered.policy.max_attempts).unwrap_or(i16::MAX));
         binds
             .lease_offsets_micros
-            .push(lease_offset(registered.policy.timeout));
+            .push(saturating_micros(lease_offset(registered.policy.timeout)));
         binds
             .claim_limits
             .push(registered.running.as_ref().map_or(requested, |running| {
@@ -488,13 +487,12 @@ fn policy_binds(registry: &crate::Kinds, requested: i64) -> PolicyBinds<'_> {
 }
 
 /// The claim's lease past the statement timestamp, and past the send instant
-/// for the local deadline: the kind's timeout plus [`LEASE_RESERVE`], in whole
-/// microseconds.
+/// for the local deadline: the kind's timeout plus [`LEASE_RESERVE`].
 ///
 /// The statement and the local deadline share this offset, so the local
 /// deadline keeps its [`CANCEL_MARGIN`] lead over the database expiry.
-fn lease_offset(timeout: Duration) -> i64 {
-    saturating_micros(timeout).saturating_add(saturating_micros(LEASE_RESERVE))
+fn lease_offset(timeout: Duration) -> Duration {
+    timeout.saturating_add(LEASE_RESERVE)
 }
 
 fn saturating_micros(duration: Duration) -> i64 {
@@ -555,41 +553,45 @@ fn dispatch_known(
                 attempt,
                 generation,
                 payload,
-                trace_parent,
-                trace_state,
-                lease_offset_micros,
+                trace,
+                lease_offset,
                 queue_wait,
             } => {
-                let deadline = local_deadline(sent, lease_offset_micros);
+                let deadline = local_deadline(sent, lease_offset);
                 let Some(slot) = slots.split(1) else {
-                    tracing::error!(job.id = %attempt.id, "job_claim_exceeded_slots");
+                    tracing::error!(
+                        job.id = %attempt.id,
+                        job.kind = attempt.kind,
+                        "job_claim_exceeded_slots"
+                    );
                     break;
                 };
-                let kind = attempt.kind;
-                let kind_slot = shared
-                    .registry
-                    .get(kind)
+                let registered = shared.registry.get(attempt.kind);
+                let kind_slot = registered
                     .and_then(|registered| registered.running.as_ref())
                     .and_then(|running| KindSlot::take(running, &shared.wake));
+                if let Some(registered) = registered {
+                    registered.metrics().queue_wait.record(queue_wait.max(0.0));
+                }
+                let guard = crate::engine::SupervisorGuard::new(
+                    stop.clone(),
+                    failure.clone(),
+                    attempt.id,
+                    attempt.kind,
+                );
                 let claimed = Claimed {
                     attempt,
                     generation,
                     payload: payload.into_bytes(),
-                    trace_parent,
-                    trace_state,
+                    trace,
                     slot,
                     kind_slot,
                 };
-                match crate::attempt::kind_metrics(shared, kind) {
-                    Some(handles) => handles.queue_wait.record(queue_wait.max(0.0)),
-                    None => metrics::histogram!(QUEUE_WAIT_METRIC, "kind" => kind)
-                        .record(queue_wait.max(0.0)),
-                }
                 shared.attempt_tracker.spawn(attempt::supervise(
                     Arc::clone(shared),
                     claimed,
                     deadline,
-                    crate::engine::SupervisorGuard::new(stop.clone(), failure.clone()),
+                    guard,
                 ));
             }
         }
@@ -599,9 +601,8 @@ fn dispatch_known(
 /// The point this worker stops writing: the send instant plus the statement's
 /// own lease offset, [`CANCEL_MARGIN`] earlier than the database expiry another
 /// worker may rescue at.
-fn local_deadline(sent: Instant, lease_offset_micros: i64) -> Instant {
-    let offset = Duration::from_micros(u64::try_from(lease_offset_micros).unwrap_or(u64::MAX));
-    sent.checked_add(offset)
+fn local_deadline(sent: Instant, lease_offset: Duration) -> Instant {
+    sent.checked_add(lease_offset)
         .and_then(|deadline| deadline.checked_sub(CANCEL_MARGIN))
         .unwrap_or(sent)
 }
@@ -611,10 +612,9 @@ enum Drawn {
         attempt: AttemptId,
         generation: i64,
         payload: String,
-        trace_parent: Option<String>,
-        trace_state: Option<String>,
+        trace: Carrier,
         /// The lease past the send instant, the same value the statement bound.
-        lease_offset_micros: i64,
+        lease_offset: Duration,
         queue_wait: f64,
     },
     Exhausted {
@@ -660,9 +660,9 @@ impl ClaimRow {
             attempt,
             generation: self.claim_generation,
             payload,
-            trace_parent: self.trace_parent,
-            trace_state: self.trace_state,
-            lease_offset_micros: lease_offset(registered.policy.timeout),
+            trace: Carrier::from_stored(self.trace_parent.as_deref(), self.trace_state.as_deref())
+                .unwrap_or_default(),
+            lease_offset: lease_offset(registered.policy.timeout),
             queue_wait: self.queue_wait_seconds,
         })
     }
