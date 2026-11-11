@@ -532,12 +532,38 @@ mod tests {
         reason = "one process-wide metric registry must cover admission and terminal paths without a test-only reset"
     )]
     async fn client_observation_is_global_bounded_and_terminal_exactly_once() {
+        // The registry pins each series to the recorder current at its first
+        // use, so another test in this binary that starts a client call first
+        // (`client::tests`) leaves those series outside this test's recorder.
+        // nextest runs each test in its own process; `cargo test` shares one,
+        // so there the test runs again alone in a child process.
+        const OWN_PROCESS: &str = "INFRA_GRPC_CLIENT_OBSERVATION_OWN_PROCESS";
+        const WAIT: Duration = Duration::from_secs(5);
         #[expect(
             clippy::disallowed_types,
             reason = "native gRPC wire fixture uses the native path extractor; its handler retains runtime checks"
         )]
         type NativePath = axum::extract::Path<String>;
-        const WAIT: Duration = Duration::from_secs(5);
+        if std::env::var("NEXTEST_EXECUTION_MODE").as_deref() != Ok("process-per-test")
+            && std::env::var_os(OWN_PROCESS).is_none()
+        {
+            let name = format!(
+                "{}::client_observation_is_global_bounded_and_terminal_exactly_once",
+                module_path!().split_once("::").unwrap().1
+            );
+            let child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &name, "--test-threads=1"])
+                .env(OWN_PROCESS, "1")
+                .output()
+                .unwrap();
+            assert!(
+                child.status.success(),
+                "{}",
+                String::from_utf8_lossy(&child.stdout)
+            );
+            assert!(String::from_utf8_lossy(&child.stdout).contains("1 passed"));
+            return;
+        }
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
         let _recorder = metrics::set_default_local_recorder(&recorder);
