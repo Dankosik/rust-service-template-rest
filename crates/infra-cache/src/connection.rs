@@ -24,8 +24,11 @@ pub(crate) const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
 const CONNECTED_EXCHANGE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Floor of the supervisor's exponential setup backoff.
 const MIN_DELAY: Duration = Duration::from_millis(100);
-/// Cap on setup backoff and minimum spacing between published generations.
+/// Cap on setup backoff.
 const MAX_DELAY: Duration = Duration::from_secs(2);
+/// Minimum spacing between published generations, so a server that accepts
+/// and then drops every connection cannot drive a reconnect loop.
+const MIN_GENERATION_SPACING: Duration = Duration::from_secs(2);
 /// Factor of the supervisor's exponential setup backoff.
 const EXPONENT_BASE: f32 = 2.0;
 /// Bound one reconnect chain; the supervisor starts the next after a pause.
@@ -87,7 +90,7 @@ struct Generation {
 /// Includes admitted commands still waiting for a connection generation.
 struct Admission<'a> {
     _permit: SemaphorePermit<'a>,
-    in_flight: Gauge,
+    in_flight: &'a Gauge,
 }
 
 impl Drop for Admission<'_> {
@@ -253,6 +256,7 @@ impl Link {
         });
         let supervisor = tokio::spawn(supervise(
             shared.clone(),
+            server.clone(),
             client,
             password_file,
             command_timeout,
@@ -299,7 +303,7 @@ impl Link {
         .await
     }
 
-    fn admit<'a>(&self, slots: &'a Semaphore) -> Result<Admission<'a>, ErrorType> {
+    fn admit<'a>(&'a self, slots: &'a Semaphore) -> Result<Admission<'a>, ErrorType> {
         let permit = slots.try_acquire().map_err(|_| {
             self.admission_refused.increment(1);
             ErrorType::Other
@@ -307,7 +311,7 @@ impl Link {
         self.commands_in_flight.increment(1.0);
         Ok(Admission {
             _permit: permit,
-            in_flight: self.commands_in_flight.clone(),
+            in_flight: &self.commands_in_flight,
         })
     }
 
@@ -332,15 +336,11 @@ impl Link {
     ) -> Result<T, ErrorType> {
         let guard = Exchange::new(&self.shared, generation, admission);
         let mut connection = guard.generation.connection.clone();
-        let reply = tokio::select! {
+        tokio::select! {
             biased;
-            _ = context.wait_stopped() => Err(ErrorType::Timeout),
-            () = guard.generation.retired.cancelled() => Err(ErrorType::Io),
-            reply = command.query_async(&mut connection) => Ok(reply),
-        };
-        match reply {
-            Ok(reply) => guard.finish_reply(reply),
-            Err(error) => guard.finish(Err(error)),
+            _ = context.wait_stopped() => guard.finish(Err(ErrorType::Timeout)),
+            () = guard.generation.retired.cancelled() => guard.finish(Err(ErrorType::Io)),
+            reply = command.query_async(&mut connection) => guard.finish_reply(reply),
         }
     }
 }
@@ -418,16 +418,25 @@ async fn query_until<T: redis::FromRedisValue>(
 
 async fn supervise(
     shared: Arc<Shared>,
+    server: ServerEndpoint,
     client: redis::Client,
     password_file: Option<PasswordFile>,
     command_timeout: Duration,
 ) {
     let _exit = SupervisorExit(shared.clone());
-    run_supervisor(&shared, &client, password_file.as_ref(), command_timeout).await;
+    run_supervisor(
+        &shared,
+        &server,
+        &client,
+        password_file.as_ref(),
+        command_timeout,
+    )
+    .await;
 }
 
 async fn run_supervisor(
     shared: &Shared,
+    server: &ServerEndpoint,
     client: &redis::Client,
     password_file: Option<&PasswordFile>,
     command_timeout: Duration,
@@ -445,26 +454,33 @@ async fn run_supervisor(
         if !shared.begin_attempt() {
             return;
         }
-        match setup_attempt(client, password_file).await {
+        match setup_attempt(server, client, password_file).await {
             Ok((generation, rotation)) => {
                 if !shared.publish(generation.clone()) {
                     return;
                 }
-                next_connection = Instant::now() + MAX_DELAY;
+                next_connection = Instant::now() + MIN_GENERATION_SPACING;
                 backoff = retry.build();
-                maintain(&generation, rotation, command_timeout).await;
+                maintain(server, &generation, rotation, command_timeout).await;
                 shared.retire(&generation);
             }
             Err(error) => {
                 if !shared.record_failure(error) {
                     return;
                 }
-                tracing::warn!(error.type = error.label(), "cache_connection_failed");
-                let delay = backoff.next().unwrap_or_else(|| {
+                tracing::warn!(
+                    server.address = %server.host,
+                    server.port = server.port,
+                    error.type = error.label(),
+                    "cache_connection_failed"
+                );
+                let delay = if let Some(delay) = backoff.next() {
+                    delay
+                } else {
                     // The chain is exhausted: pause, then start the next one.
                     backoff = retry.build();
                     MAX_DELAY
-                });
+                };
                 // backon's jitter is additive after its cap; cap the final delay.
                 next_connection = Instant::now() + delay.min(MAX_DELAY);
             }
@@ -475,13 +491,14 @@ async fn run_supervisor(
 /// One bounded setup attempt. A connection the peer closes before publication
 /// is `Io`; the returned generation owns its retirement token.
 async fn setup_attempt<'a>(
+    server: &ServerEndpoint,
     client: &redis::Client,
     password_file: Option<&'a PasswordFile>,
 ) -> Result<(Arc<Generation>, Option<Rotation<'a>>), ErrorType> {
     let retired = CancellationToken::new();
     let result = match timeout(
         SETUP_TIMEOUT,
-        connect(client, password_file, retired.clone()),
+        connect(server, client, password_file, retired.clone()),
     )
     .await
     {
@@ -503,6 +520,7 @@ async fn setup_attempt<'a>(
 
 /// The rotation is present exactly when a password file is.
 async fn connect<'a>(
+    server: &ServerEndpoint,
     admitted: &redis::Client,
     password_file: Option<&'a PasswordFile>,
     retired: CancellationToken,
@@ -512,7 +530,12 @@ async fn connect<'a>(
             // Not `auth`: an unreadable mount must not look like a revoked
             // password, which an operator would answer by rotating the secret.
             let password = file.read().await.map_err(|error| {
-                tracing::warn!(%error, "cache_password_file_unreadable");
+                tracing::warn!(
+                    server.address = %server.host,
+                    server.port = server.port,
+                    %error,
+                    "cache_password_file_unreadable"
+                );
                 ErrorType::Other
             })?;
             let info = admitted.get_connection_info().clone();
@@ -548,6 +571,7 @@ async fn connect<'a>(
 /// Keeps `generation` checked until it must retire. The caller retires it
 /// when this returns.
 async fn maintain(
+    server: &ServerEndpoint,
     generation: &Generation,
     mut rotation: Option<Rotation<'_>>,
     command_timeout: Duration,
@@ -562,7 +586,7 @@ async fn maintain(
                 // A rejected AUTH must not add its duration to the next refresh.
                 next_refresh = Instant::now() + PASSWORD_REFRESH_INTERVAL;
                 if let Some(rotation) = rotation.as_mut()
-                    && rotation.refresh_within_bound(generation).await == Disposition::Retire
+                    && rotation.refresh_within_bound(server, generation).await == Disposition::Retire
                 {
                     return;
                 }
@@ -574,7 +598,12 @@ async fn maintain(
                 // their own budget ends.
                 let deadline = Instant::now() + command_timeout;
                 if let Err(error) = query_until::<()>(generation, &redis::Cmd::ping(), deadline).await {
-                    tracing::warn!(error.type = error.label(), "cache_ping_failed");
+                    tracing::warn!(
+                        server.address = %server.host,
+                        server.port = server.port,
+                        error.type = error.label(),
+                        "cache_ping_failed"
+                    );
                     return;
                 }
                 next_ping = Instant::now() + PING_INTERVAL;
@@ -642,7 +671,11 @@ impl<'a> Rotation<'a> {
 
     /// Runs one refresh under [`CONNECTED_EXCHANGE_TIMEOUT`] and records a
     /// completed outcome; a generation retired mid-refresh records nothing.
-    async fn refresh_within_bound(&mut self, generation: &Generation) -> Disposition {
+    async fn refresh_within_bound(
+        &mut self,
+        server: &ServerEndpoint,
+        generation: &Generation,
+    ) -> Disposition {
         let deadline = Instant::now() + CONNECTED_EXCHANGE_TIMEOUT;
         let outcome = tokio::select! {
             biased;
@@ -652,7 +685,7 @@ impl<'a> Rotation<'a> {
                 outcome.unwrap_or(RefreshOutcome::Failed(ErrorType::Timeout))
             }
         };
-        self.record(&outcome);
+        self.record(server, &outcome);
         outcome.disposition()
     }
 
@@ -686,20 +719,34 @@ impl<'a> Rotation<'a> {
         RefreshOutcome::AuthAccepted
     }
 
-    fn record(&mut self, outcome: &RefreshOutcome) {
+    fn record(&mut self, server: &ServerEndpoint, outcome: &RefreshOutcome) {
         let (label, reason) = outcome.labels();
         metrics::counter!(PASSWORD_REFRESHES_METRIC, "outcome" => label, "reason" => reason)
             .increment(1);
         match outcome {
             RefreshOutcome::ReadFailed(error) => {
                 if !std::mem::replace(&mut self.unreadable_logged, true) {
-                    tracing::warn!(%error, "cache_password_file_unreadable");
+                    tracing::warn!(
+                        server.address = %server.host,
+                        server.port = server.port,
+                        %error,
+                        "cache_password_file_unreadable"
+                    );
                 }
             }
             RefreshOutcome::Unchanged => {}
-            RefreshOutcome::AuthAccepted => tracing::info!("cache_password_reloaded"),
+            RefreshOutcome::AuthAccepted => tracing::info!(
+                server.address = %server.host,
+                server.port = server.port,
+                "cache_password_reloaded"
+            ),
             RefreshOutcome::AuthRefused | RefreshOutcome::Failed(_) => {
-                tracing::warn!(error.type = reason, "cache_password_refresh_failed");
+                tracing::warn!(
+                    server.address = %server.host,
+                    server.port = server.port,
+                    error.type = reason,
+                    "cache_password_refresh_failed"
+                );
             }
         }
     }
