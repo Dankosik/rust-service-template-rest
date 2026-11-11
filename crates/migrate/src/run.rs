@@ -1,9 +1,11 @@
 //! Applying pending migrations over one dedicated session.
 
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
-use infra_postgres::{Dsn, SessionOptions, connect_session, observed, to_runtime_param};
+use infra_postgres::{
+    ACQUIRE_TIMEOUT, Dsn, SessionOptions, connect_session, observed, sqlstate, to_runtime_param,
+};
 use sqlx::Connection;
 use sqlx::migrate::{Migrate, MigrateError, Migration, Migrator};
 use sqlx::postgres::PgConnection;
@@ -13,14 +15,13 @@ use crate::history::{PendingError, applied_history, pending};
 /// Session `statement_timeout` and `idle_in_transaction_session_timeout` of
 /// the migration connection. DDL on a large table legitimately runs longer
 /// than a request, and a statement that holds a table lock must not run for
-/// as long as [`RunOptions::deadline`] allows. A `-- no-transaction`
-/// migration is bounded by the remaining deadline instead.
-pub const STATEMENT_TIMEOUT: Duration = Duration::from_secs(120);
+/// as long as [`RunOptions::deadline`] allows. [`apply_outside_transaction`]
+/// lifts it.
+const STATEMENT_TIMEOUT: Duration = Duration::from_secs(120);
 /// Session `lock_timeout`, which also bounds the wait for the advisory
-/// session lock another migrator may hold. A `-- no-transaction` migration
-/// waits up to the remaining deadline instead: a concurrent build waits for
-/// every transaction older than itself and blocks no write while it does.
-pub const LOCK_TIMEOUT: Duration = Duration::from_secs(15);
+/// session lock another migrator may hold. [`apply_outside_transaction`]
+/// lifts it.
+const LOCK_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Budgets for one run. [`RunOptions::defaults`] is what the binary uses,
 /// with `postgres.migration_deadline`; tests shorten them to observe a
@@ -30,8 +31,6 @@ pub struct RunOptions<'a> {
     pub dsn: &'a Dsn,
     /// Reported as `application_name` for the migration session.
     pub application_name: &'a str,
-    /// Bound on establishing the migration connection, applied before `deadline` starts.
-    pub connect_timeout: Duration,
     /// Bound on lock, history, and every pending migration after a live
     /// session exists. Connect is not inside this value; a
     /// `-- no-transaction` migration receives the remaining deadline.
@@ -43,13 +42,12 @@ pub struct RunOptions<'a> {
 }
 
 impl<'a> RunOptions<'a> {
-    /// Options with the default connect timeout, [`STATEMENT_TIMEOUT`], and [`LOCK_TIMEOUT`], and the given application name and run deadline.
+    /// Options with the default session statement and lock timeouts, and the given application name and run deadline.
     #[must_use]
     pub const fn defaults(dsn: &'a Dsn, application_name: &'a str, deadline: Duration) -> Self {
         Self {
             dsn,
             application_name,
-            connect_timeout: infra_postgres::ACQUIRE_TIMEOUT,
             deadline,
             statement_timeout: STATEMENT_TIMEOUT,
             lock_timeout: LOCK_TIMEOUT,
@@ -121,8 +119,8 @@ impl RunError {
             Self::InvalidIndexes { .. } | Self::Migrate(MigrateError::ExecuteMigration(..)) => {
                 "execute"
             }
-            Self::Migrate(MigrateError::Execute(sqlx::Error::Database(db)))
-                if db.code().as_deref() == Some(LOCK_NOT_AVAILABLE) =>
+            Self::Migrate(MigrateError::Execute(err))
+                if sqlstate(err).as_deref() == Some(LOCK_NOT_AVAILABLE) =>
             {
                 "lock"
             }
@@ -184,26 +182,24 @@ pub async fn run(migrator: &Migrator, options: &RunOptions<'_>) -> Result<Report
             ("client_connection_check_interval", "1s"),
         ],
     };
-    let mut conn = tokio::time::timeout(
-        options.connect_timeout,
-        connect_session(options.dsn, &session),
-    )
-    .await
-    .map_err(|_| RunFailure {
-        error: RunError::ConnectTimeout(options.connect_timeout),
-        report: Report::default(),
-    })?
-    .map_err(|error| RunFailure {
-        error: RunError::Connect(error),
-        report: Report::default(),
-    })?;
-    let deadline = tokio::time::Instant::now() + options.deadline;
+    // The connect bound is applied before the run deadline starts.
+    let mut conn = tokio::time::timeout(ACQUIRE_TIMEOUT, connect_session(options.dsn, &session))
+        .await
+        .map_err(|_| RunFailure {
+            error: RunError::ConnectTimeout(ACQUIRE_TIMEOUT),
+            report: Report::default(),
+        })?
+        .map_err(|error| RunFailure {
+            error: RunError::Connect(error),
+            report: Report::default(),
+        })?;
+    let deadline_at = tokio::time::Instant::now() + options.deadline;
     // The run owns one progress snapshot shared with the timeout wrapper, so a
     // deadline still reports the migrations that committed before it fired.
     let progress = Mutex::new(Report::default());
     let report = match tokio::time::timeout_at(
-        deadline,
-        apply_pending(&mut conn, migrator, options, deadline, &progress),
+        deadline_at,
+        apply_pending(&mut conn, migrator, options, deadline_at, &progress),
     )
     .await
     {
@@ -230,8 +226,12 @@ pub async fn run(migrator: &Migrator, options: &RunOptions<'_>) -> Result<Report
 fn report_snapshot(progress: &Mutex<Report>) -> Report {
     progress
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .unwrap_or_else(PoisonError::into_inner)
         .clone()
+}
+
+fn record_progress(progress: &Mutex<Report>, report: &Report) {
+    *progress.lock().unwrap_or_else(PoisonError::into_inner) = report.clone();
 }
 
 /// The `sqlx migrate run` sequence over the [`Migrate`] trait.
@@ -242,7 +242,7 @@ async fn apply_pending(
     conn: &mut PgConnection,
     migrator: &Migrator,
     options: &RunOptions<'_>,
-    deadline: tokio::time::Instant,
+    deadline_at: tokio::time::Instant,
     progress: &Mutex<Report>,
 ) -> Result<Report, RunError> {
     conn.lock().await?;
@@ -252,9 +252,7 @@ async fn apply_pending(
         before: history.iter().map(|migration| migration.version).max(),
         applied: Vec::new(),
     };
-    *progress
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = report.clone();
+    record_progress(progress, &report);
     for migration in pending(migrator, &history)? {
         tracing::event!(
             target: "migrate_record",
@@ -264,7 +262,7 @@ async fn apply_pending(
             "migration_applying"
         );
         let elapsed = if migration.no_tx {
-            apply_outside_transaction(conn, &migrator.table_name, migration, options, deadline)
+            apply_outside_transaction(conn, &migrator.table_name, migration, options, deadline_at)
                 .await?
         } else {
             conn.apply(&migrator.table_name, migration).await?
@@ -277,9 +275,7 @@ async fn apply_pending(
             "migration_applied"
         );
         report.applied.push(migration.version);
-        *progress
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = report.clone();
+        record_progress(progress, &report);
     }
     conn.unlock().await?;
     Ok(report)
@@ -300,26 +296,16 @@ async fn apply_outside_transaction(
     table: &str,
     migration: &Migration,
     options: &RunOptions<'_>,
-    deadline: tokio::time::Instant,
+    deadline_at: tokio::time::Instant,
 ) -> Result<Duration, RunError> {
-    let invalid = observed(
-        "SELECT pg_index",
-        sqlx::query_scalar!(
-            // `relkind = 'i'` leaves out the index of a partitioned table,
-            // which is invalid by design until every partition is attached.
-            r#"SELECT c.oid::regclass::text AS "name!" FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE NOT i.indisvalid AND c.relkind = 'i' ORDER BY 1"#
-        )
-        .fetch_all(&mut *conn),
-    )
-    .await
-    .map_err(MigrateError::Execute)?;
+    let invalid = invalid_indexes(conn).await?;
     if !invalid.is_empty() {
         return Err(RunError::InvalidIndexes {
             version: migration.version,
             indexes: invalid.join(", "),
         });
     }
-    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    let remaining = deadline_at.saturating_duration_since(tokio::time::Instant::now());
     if remaining.is_zero() {
         return Err(RunError::Deadline(options.deadline));
     }
@@ -327,6 +313,20 @@ async fn apply_outside_transaction(
     let elapsed = conn.apply(table, migration).await?;
     set_session_timeouts(conn, options.statement_timeout, options.lock_timeout).await?;
     Ok(elapsed)
+}
+
+async fn invalid_indexes(conn: &mut PgConnection) -> Result<Vec<String>, MigrateError> {
+    observed(
+        "SELECT pg_index",
+        sqlx::query_scalar!(
+            // `relkind = 'i'` leaves out the index of a partitioned table,
+            // which is invalid by design until every partition is attached.
+            r#"SELECT c.oid::regclass::text AS "name!" FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE NOT i.indisvalid AND c.relkind = 'i' ORDER BY 1"#
+        )
+        .fetch_all(conn),
+    )
+    .await
+    .map_err(MigrateError::Execute)
 }
 
 async fn set_session_timeouts(
