@@ -115,10 +115,11 @@ successful AUTH reply and installation on a non-retired connection, and the
 third includes validation errors and repeated failures whose warning is
 suppressed. `cache_password_reloaded` remains at the `auth_accepted` boundary.
 A failed exchange is `outcome="refresh_failed"`, with a bounded reason: `auth`
-for authentication rejection, `timeout` for the shared read/AUTH budget or
-exchange timeout, `io` for transport or retired-generation failure, or
-`response`, `parse`, `other` for the remaining error classes. A timeout does
-not establish that AUTH was reached. Each completed maintenance step counts
+for authentication rejection, `timeout` for an AUTH exchange that outlives the
+shared read/AUTH budget, `io` for transport or retired-generation failure, or
+`response`, `parse`, `other` for the remaining error classes. A file read that
+outlives that budget is `read_failed`, not `timeout`, and keeps the socket. A
+timeout does not establish that AUTH was reached. Each completed maintenance step counts
 once; cancellation before completion records no success. Connection setup and
 profiles without a password file produce no activity in this family. Its nine
 possible series contain no credentials or per-instance labels and reset with
@@ -321,21 +322,26 @@ including rejected authentication, retry independently of user calls.
 
 TCP nodelay is on. Keepalive is 30 s, then 10 s, with 3 retries where the
 platform supports them. Linux `user_timeout` is 10 s. RESP3 disconnects,
-command errors (including `READONLY` or `OOM`), and timeouts after dispatch
-retire their connection generation immediately. Replacement dial eligibility
+transport, authentication and parse errors, `READONLY` replies, and timeouts
+after dispatch retire their connection generation immediately. Any other
+server error reply, such as `WRONGTYPE` or `OOM`, answers its own command and
+leaves the connection in use; `READONLY` retires so that recovery can reach a
+new primary behind the same endpoint. Replacement dial eligibility
 may wait until 2 s after that generation's publication. Late failures from an
 old generation cannot retire a successor. Waiting for a connection consumes
 the caller's command budget but does not cancel setup progress; a command is
 dispatched at most once.
 
 The supervisor also sends one PING every 2 s with response budget
-`min(command_timeout, 5 s)`. Refresh and PING never overlap or accumulate
+`command_timeout`. Replies are ordered, so a PING waits behind every command
+sent before it; a shorter budget would fail those commands before their own
+`command_timeout` ends. Refresh and PING never overlap or accumulate
 missed ticks; a due credential refresh has priority. A PING failure retires
 the generation even with no traffic, so unanswered slots from cancelled
 callers cannot remain forever. An application command or external probe that
-does not end in `Ok` (an error reply, a stop, or a drop after possible
-dispatch) synchronously retires that generation before releasing its
-admission slot. Peers on that generation can fail as `Unavailable`; normal
+does not end in `Ok` or in one of those server error replies (a retiring
+error, a stop, or a drop after possible dispatch) synchronously retires that
+generation before releasing its admission slot. Peers on that generation can fail as `Unavailable`; normal
 supervisor recovery still applies, and no command is replayed. Cancellation
 while only waiting for a connection releases its slot without retiring a
 generation. Context cancellation after dispatch follows the same retirement
@@ -397,10 +403,11 @@ The histogram is `cache_operation_duration_seconds`. Labels are `cache` (the
 namespace name), `operation` (`get`, `set`, or `delete`), and `outcome`
 (`hit`, `miss`, `ok`, `error`, `timeout`, or `cancelled`). A failed series
 (`error` or `timeout`) also carries `error_type` (`timeout`, `io`, `auth`,
-`response`, `parse`, or `other`; `response` is any server error reply,
-including `WRONGTYPE` and `OOM`), so the cause of an outage is visible
+`response`, `parse`, or `other`; `response` is a server error reply other
+than `WRONGPASS` or `NOAUTH`, which are `auth`, including `WRONGTYPE` and `OOM`), so the cause of an outage is visible
 without a trace or a debug log. Hit, miss, and error counts are the `_count`
-series. A dropped observed future records `cancelled`. Locally rejected TTLs
+series. A dropped observed future records `cancelled`, and so does an operation whose
+caller cancels its context; only an expired deadline records `timeout`. Locally rejected TTLs
 produce no operation metric or span.
 An application admission refusal records `error` with `error_type="other"`;
 an external probe refusal reports only `cache ping failed: other`.
@@ -438,8 +445,9 @@ request rate. Alert on the `error` and `timeout` outcomes of the histogram
 instead. `error.type` takes the same values as the `error_type` label; a TLS
 handshake failure, including a client certificate the server refuses,
 surfaces as `io`, and a `HELLO` refused with `WRONGPASS`
-or `NOAUTH`, or a password file that cannot be read when a connection
-opens, as `auth`. Setup, direct AUTH, maintenance PING, and command failures
+or `NOAUTH` as `auth`. A password file that cannot be read when a connection
+opens is `other`, with a `cache_password_file_unreadable` warning that names
+the I/O class, so an unreadable mount is not mistaken for a revoked password. Setup, direct AUTH, maintenance PING, and command failures
 retain only bounded error classification. Metrics, spans, and logs never carry
 keys, values, passwords, the DSN, or raw server text, including bridged
 dependency logs. `CacheError` Display follows the same rule.

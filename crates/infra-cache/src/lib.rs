@@ -47,7 +47,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use operation_context::OperationContext;
+use operation_context::{OperationContext, Stopped};
 use redis::{IntoConnectionInfo, SetExpiry, SetOptions};
 use secrecy::{ExposeSecret, SecretString};
 
@@ -486,14 +486,23 @@ impl CacheNamespace {
         );
         // One context cutoff includes preparation, connection wait, and exactly one dispatch.
         let reply = self.cache.link.command(&command, context).await;
+        // A caller's cancellation, such as a shutdown, is not a cache timeout,
+        // so it stays out of the `timeout` series operators alert on.
+        let stopped = context.stopped();
         match reply {
-            Ok(_) if operation.is_read() && context.stopped().is_some() => {
+            Ok(_) if operation.is_read() && stopped == Some(Stopped::Cancelled) => {
+                Err(guard.cancel())
+            }
+            Ok(_) if operation.is_read() && stopped.is_some() => {
                 Err(guard.fail(observe::ErrorType::Timeout))
             }
             // The terminal caller owns expiry of a confirmed mutation.
             Ok(value) => {
                 guard.succeed(outcome(&value));
                 Ok(value)
+            }
+            Err(observe::ErrorType::Timeout) if stopped == Some(Stopped::Cancelled) => {
+                Err(guard.cancel())
             }
             Err(error) => Err(guard.fail(error)),
         }
@@ -590,7 +599,12 @@ fn admit_address(
 )]
 fn read_root_ca(path: &Path) -> Result<Vec<u8>, CacheError> {
     let bytes = std::fs::read(path).map_err(|error| CacheError::CaFile { kind: error.kind() })?;
-    pem_certificates(&bytes, CacheError::InvalidCa)?;
+    // redis-rs adds the same certificates to a rustls root store when it
+    // builds the client, where a malformed one is only a generic build error.
+    let mut roots = rustls::RootCertStore::empty();
+    for certificate in pem_certificates(&bytes, CacheError::InvalidCa)? {
+        roots.add(certificate).map_err(|_| CacheError::InvalidCa)?;
+    }
     Ok(bytes)
 }
 
@@ -622,7 +636,12 @@ fn read_client_certificate(
         key,
         &rustls::crypto::aws_lc_rs::default_provider(),
     )
-    .map_err(|_| CacheError::InvalidClientKey)?;
+    .map_err(|error| match error {
+        // The key matched against a leaf that is not a parseable X.509
+        // certificate; the certificate, not the key, needs replacing.
+        rustls::Error::InvalidCertificate(_) => CacheError::InvalidClientCertificate,
+        _ => CacheError::InvalidClientKey,
+    })?;
     Ok(redis::ClientTlsConfig {
         client_cert,
         client_key,

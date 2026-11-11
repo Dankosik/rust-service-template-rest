@@ -654,7 +654,7 @@ canonical multiplexed connections, without waiting for network I/O. Setup and
 recovery advance without traffic. Each setup attempt is bounded at 5 s, with
 capped backoff and repeated retry chains. Generation identity fences retirement
 so late failures cannot remove a successor. A periodic PING every 2 s has a
-`min(command_timeout, 5 s)` response budget. Password refresh every 5 s shares
+`command_timeout` response budget. Password refresh every 5 s shares
 a 5 s read/direct-AUTH budget; rejected unchanged credentials remain retryable.
 
 Startup retains the lazy cache owner before running one probe check inside its

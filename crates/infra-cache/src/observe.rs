@@ -60,8 +60,9 @@ impl Operation {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ErrorType {
     /// The operation context stopped (its deadline, including
-    /// `command_timeout`, or caller cancellation), a setup or probe bound
-    /// elapsed, or the client reported a timeout.
+    /// `command_timeout`, or caller cancellation, which a namespace records
+    /// as `cancelled`), a setup or probe bound elapsed, or the client
+    /// reported a timeout.
     Timeout,
     Io,
     Auth,
@@ -244,6 +245,12 @@ impl<'a> OperationGuard<'a> {
 
     pub(crate) fn succeed(&mut self, outcome: Outcome) {
         self.finish(outcome);
+    }
+
+    /// The caller cancelled the operation context: no cause to record.
+    pub(crate) fn cancel(&mut self) -> Unavailable {
+        self.finish(Outcome::Cancelled);
+        Unavailable
     }
 
     pub(crate) fn fail(&mut self, error_type: ErrorType) -> Unavailable {
