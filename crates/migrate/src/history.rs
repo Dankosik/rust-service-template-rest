@@ -24,7 +24,8 @@ pub enum HistoryError {
     #[error("embedded migrations are pending")]
     Pending,
     /// An applied migration failed or changed, or the history holds an
-    /// unknown version inside the embedded range.
+    /// unknown version inside the embedded range. Two embedded migrations
+    /// sharing one version also land here.
     #[error("the migration history does not match the embedded migrations")]
     Mismatch,
     /// The history table exists in the database but is outside this
@@ -100,11 +101,14 @@ async fn history_table_exists_elsewhere(
     conn: &mut PgConnection,
     table: &str,
 ) -> Result<bool, MigrateError> {
-    let relation = table.rsplit('.').next().unwrap_or(table).trim_matches('"');
-    sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM pg_class WHERE relname = $1 AND relkind = 'r')",
+    let relation = table
+        .rsplit_once('.')
+        .map_or(table, |(_, name)| name)
+        .trim_matches('"');
+    sqlx::query_scalar!(
+        r#"SELECT EXISTS (SELECT 1 FROM pg_class WHERE relname = $1 AND relkind = 'r') AS "exists!""#,
+        relation
     )
-    .bind(relation)
     .fetch_one(conn)
     .await
     .map_err(MigrateError::Execute)
@@ -136,31 +140,30 @@ pub(crate) enum PendingError {
 /// version above the newest embedded one belongs to a later release and is
 /// admitted, as Flyway admits future migrations by default, so a rolled-back
 /// release still migrates and starts. Down migrations are skipped, as in
-/// `Migrator::run`; the embedded set rejects them separately.
+/// `Migrator::run`; the embedded set rejects them separately. Two embedded
+/// migrations sharing one version are [`PendingError::DuplicateVersion`]
+/// before any history is compared.
 pub(crate) fn pending<'m>(
     migrator: &'m Migrator,
     history: &[AppliedMigration],
 ) -> Result<Vec<&'m Migration>, PendingError> {
-    let mut previous = None;
-    for migration in migrator
+    let embedded: Vec<&Migration> = migrator
         .iter()
         .filter(|migration| !migration.migration_type.is_down_migration())
+        .collect();
+    if let Some(pair) = embedded
+        .windows(2)
+        .find(|pair| pair[0].version == pair[1].version)
     {
-        if previous == Some(migration.version) {
-            return Err(PendingError::DuplicateVersion(migration.version));
-        }
-        previous = Some(migration.version);
+        return Err(PendingError::DuplicateVersion(pair[1].version));
     }
-    let newest = migrator
-        .iter()
-        .filter(|migration| !migration.migration_type.is_down_migration())
-        .map(|migration| migration.version)
-        .max();
+    let newest = embedded.iter().map(|migration| migration.version).max();
     for applied in history {
-        match migrator.iter().find(|migration| {
-            migration.version == applied.version && !migration.migration_type.is_down_migration()
-        }) {
-            Some(embedded) if embedded.checksum != applied.checksum => {
+        match embedded
+            .iter()
+            .find(|migration| migration.version == applied.version)
+        {
+            Some(migration) if migration.checksum != applied.checksum => {
                 return Err(PendingError::Migrate(MigrateError::VersionMismatch(
                     applied.version,
                 )));
@@ -173,9 +176,8 @@ pub(crate) fn pending<'m>(
             _ => {}
         }
     }
-    Ok(migrator
-        .iter()
-        .filter(|migration| !migration.migration_type.is_down_migration())
+    Ok(embedded
+        .into_iter()
         .filter(|migration| {
             !history
                 .iter()

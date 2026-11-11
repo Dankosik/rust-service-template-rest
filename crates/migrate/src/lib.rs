@@ -9,13 +9,13 @@
 //! Both apply one history rule.
 //!
 //! A `-- no-transaction` migration carries what PostgreSQL refuses inside a
-//! transaction (`CREATE INDEX CONCURRENTLY`). Its statement is bounded by the
-//! remaining run deadline instead of the session `statement_timeout` and
-//! `lock_timeout`, and it is refused while the database holds an invalid
-//! index, which is what an interrupted concurrent build leaves behind.
+//! transaction (`CREATE INDEX CONCURRENTLY`). It runs under the remaining run
+//! deadline instead of the session timeouts and is refused while the database
+//! holds an invalid index.
 //!
 //! Forward-only by policy. The source rules the resolver does not enforce
-//! are a unit test over the embedded set, including unique versions.
+//! are a unit test over the embedded set, including unique versions, which
+//! every run and startup check also refuses.
 
 mod history;
 mod run;
@@ -23,7 +23,7 @@ mod run;
 use sqlx::migrate::Migrator;
 
 pub use history::{HISTORY_VERIFY_BUDGET, HistoryError, verify_history};
-pub use run::{LOCK_TIMEOUT, Report, RunError, RunFailure, RunOptions, STATEMENT_TIMEOUT, run};
+pub use run::{Report, RunError, RunFailure, RunOptions, run};
 
 pub static MIGRATOR: Migrator = sqlx::migrate!("../../migrations");
 
