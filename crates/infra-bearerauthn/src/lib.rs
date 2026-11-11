@@ -14,6 +14,9 @@ mod claims;
 // template:begin oidc-introspection:authn-introspection-module
 mod introspection;
 // template:end oidc-introspection:authn-introspection-module
+// template:begin oidc-jwt:authn-jwks-module
+mod jwks;
+// template:end oidc-jwt:authn-jwks-module
 // template:begin oidc-jwt:authn-jwt-module
 mod jwt;
 // template:end oidc-jwt:authn-jwt-module
@@ -21,6 +24,10 @@ mod provider;
 // template:begin oidc-jwt:authn-refresh-module
 mod refresh;
 // template:end oidc-jwt:authn-refresh-module
+// template:begin oidc-jwt:authn-jwt-test-metrics-module
+#[cfg(test)]
+mod test_metrics;
+// template:end oidc-jwt:authn-jwt-test-metrics-module
 
 #[cfg(test)]
 #[path = "../../../test/fixtures/tls.rs"]
@@ -36,7 +43,8 @@ pub use bearer::{BearerToken, parse_bearer};
 pub use introspection::{IntrospectionCacheOptions, IntrospectionOptions, prepare_introspection};
 // template:end oidc-introspection:authn-introspection-prepare-export
 // template:begin oidc-jwt:authn-jwt-prepare-export
-pub use jwt::{JwtAlgorithm, JwtOptions, RefreshTask, TokenProfile, prepare_jwt};
+pub use jwks::JwtAlgorithm;
+pub use jwt::{JwtOptions, RefreshTask, TokenProfile, prepare_jwt};
 // template:end oidc-jwt:authn-jwt-prepare-export
 pub use provider::{EndpointUrl, HISTOGRAMS, IssuerUrl, ProviderFailure};
 
