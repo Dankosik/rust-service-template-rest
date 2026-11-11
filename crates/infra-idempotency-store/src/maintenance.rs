@@ -52,7 +52,7 @@ enum CleanupDisposition {
     Cancelled,
 }
 
-struct CleanupResult {
+struct PassSummary {
     removed: u64,
     disposition: CleanupDisposition,
 }
@@ -137,12 +137,12 @@ impl Store {
     async fn cleanup_pass(
         &self,
         cancel: Option<&CancellationToken>,
-    ) -> Result<CleanupResult, CleanupError> {
+    ) -> Result<PassSummary, CleanupError> {
         let mut pass = CleanupPass::start(Cleanup::HttpIdempotency);
         let mut removed = 0;
         loop {
             if cancel.is_some_and(CancellationToken::is_cancelled) {
-                return Ok(CleanupResult {
+                return Ok(PassSummary {
                     removed,
                     disposition: CleanupDisposition::Cancelled,
                 });
@@ -156,7 +156,7 @@ impl Store {
             removed += deleted_rows;
             if deleted_rows < u64::from(CLEANUP_BATCH_ROWS) {
                 pass.completed();
-                return Ok(CleanupResult {
+                return Ok(PassSummary {
                     removed,
                     disposition: CleanupDisposition::Completed,
                 });

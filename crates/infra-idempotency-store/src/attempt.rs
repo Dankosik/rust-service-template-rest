@@ -211,13 +211,11 @@ impl Store {
         // caller can never be written. Refusing before the transaction keeps
         // the work from running only to be rolled back on every attempt.
         if caller.issuer.contains('\0') || caller.value.contains('\0') {
-            tracing::warn!(
-                phase = "caller_identity",
-                failure_class = %AttemptError::Internal,
-                cause = "unstorable_caller",
-                "http_idempotency_store_failed"
-            );
-            return Err(AttemptError::Internal);
+            return Err(refused(
+                "caller_identity",
+                AttemptError::Internal,
+                "unstorable_caller",
+            ));
         }
         let work_in_tx = async |tx: &mut Tx<'_>| -> Result<C, Stop<R>> {
             if let Some(decision) = arbitrate(tx, scope, fingerprint).await? {
@@ -230,11 +228,11 @@ impl Store {
             write(tx, scope, caller, fingerprint, &record, self.retention).await?;
             Ok(value)
         };
-        let committed = match deadline {
+        let outcome = match deadline {
             Some(deadline) => in_tx_until(&self.pool, deadline, READ_COMMITTED, work_in_tx).await,
             None => in_tx_with(&self.pool, READ_COMMITTED, work_in_tx).await,
         };
-        match committed {
+        match outcome {
             Ok(value) => Ok(Attempted::Committed(value)),
             Err(Stop::Decided(decision)) => Ok(match decision {
                 Decision::Replay(record) => Attempted::Replay(record),
@@ -283,29 +281,24 @@ async fn arbitrate(
     )
     .await
     .map_err(|err| read_failed(&err, "arbitrate"))?;
-    let (writable, acquired) = (row.writable, row.acquired);
     // The join yields a whole record or none of its columns.
-    let live = row
-        .fingerprint
-        .zip(row.status)
-        .zip(row.headers)
-        .map(|((stored, status), headers)| {
+    let live = match (row.fingerprint, row.status, row.headers) {
+        (Some(stored), Some(status), Some(headers)) => Some(
             decide_live(stored, status, headers, row.body, fingerprint)
-        })
-        .transpose()
-        .map_err(|err| read_failed(&err, "arbitrate"))?;
-    if !writable {
-        tracing::warn!(
-            phase = "writer_check",
-            failure_class = %AttemptError::Unavailable,
-            cause = "not_writable",
-            "http_idempotency_store_failed"
-        );
-        return Err(AttemptError::Unavailable);
+                .map_err(|err| read_failed(&err, "arbitrate"))?,
+        ),
+        _ => None,
+    };
+    if !row.writable {
+        return Err(refused(
+            "writer_check",
+            AttemptError::Unavailable,
+            "not_writable",
+        ));
     }
     match live {
         Some(decision) => Ok(Some(decision)),
-        None if !acquired => Ok(Some(Decision::InProgress)),
+        None if !row.acquired => Ok(Some(Decision::InProgress)),
         // Step 2. It must stay a statement of its own after step 1.
         None => observed(
             "read idempotency record",
@@ -321,17 +314,18 @@ async fn arbitrate(
             .fetch_optional(tx),
         )
         .await
-        .map_err(|err| read_failed(&err, "read_record"))?
-        .map(|row| {
-            decide_live(
-                row.fingerprint,
-                row.status,
-                row.headers,
-                row.body,
-                fingerprint,
-            )
+        .and_then(|row| {
+            row.map(|row| {
+                decide_live(
+                    row.fingerprint,
+                    row.status,
+                    row.headers,
+                    row.body,
+                    fingerprint,
+                )
+            })
+            .transpose()
         })
-        .transpose()
         .map_err(|err| read_failed(&err, "read_record")),
     }
 }
@@ -405,13 +399,11 @@ async fn write(
     if written.rows_affected() == 1 {
         Ok(())
     } else {
-        tracing::warn!(
-            phase = "write_record",
-            failure_class = %AttemptError::Internal,
-            cause = "record_not_written",
-            "http_idempotency_store_failed"
-        );
-        Err(AttemptError::Internal)
+        Err(refused(
+            "write_record",
+            AttemptError::Internal,
+            "record_not_written",
+        ))
     }
 }
 
@@ -465,6 +457,17 @@ fn failed(err: &sqlx::Error, phase: &'static str, class: AttemptError) -> Attemp
         failure_class = %class,
         sqlstate = sqlstate(err).as_deref(),
         cause = failure_cause(err),
+        "http_idempotency_store_failed"
+    );
+    class
+}
+
+/// Log a refusal that has no driver error, and return its class.
+fn refused(phase: &'static str, class: AttemptError, cause: &'static str) -> AttemptError {
+    tracing::warn!(
+        phase,
+        failure_class = %class,
+        cause,
         "http_idempotency_store_failed"
     );
     class
