@@ -25,7 +25,7 @@ use health::ReadinessReader;
 use crate::problem::responses::TransportProblemResponses;
 
 /// Route templates of the probes, served and documented from these constants;
-/// see [`crate::router::HEALTH_PROBE_ROUTES`] for their other effects.
+/// see [`crate::router::HEALTH_PROBES`] for their other effects.
 pub(crate) const LIVE_PATH: &str = "/health/live";
 pub(crate) const READY_PATH: &str = "/health/ready";
 pub(crate) const LIVE_OPERATION_ID: &str = "healthLive";

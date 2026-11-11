@@ -20,4 +20,3 @@ pub use compose::{Activation, Composer};
 pub use declaration::CompositionError;
 pub use execute::{HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Idempotency};
 pub use infra_postgres::Tx;
-pub use stored::{MAX_STORED_BODY_BYTES, MAX_STORED_HEADER_BYTES};

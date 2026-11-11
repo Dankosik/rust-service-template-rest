@@ -7,14 +7,16 @@ use axum::http::header::{
 };
 use axum::http::{HeaderName, HeaderValue, StatusCode};
 use axum::response::Response;
-use http_body_util::{BodyExt, LengthLimitError, Limited};
+use http_body_util::{BodyExt, Limited};
 use infra_idempotency_store::{HeaderPair, Record};
 
+use crate::problem::caused_by_length_limit;
+
 /// The largest success body the boundary stores and replays (1 MiB).
-pub const MAX_STORED_BODY_BYTES: usize = 1_048_576;
+const MAX_STORED_BODY_BYTES: usize = 1_048_576;
 
 /// The largest total of replayable header name and value bytes (8 KiB).
-pub const MAX_STORED_HEADER_BYTES: usize = 8_192;
+const MAX_STORED_HEADER_BYTES: usize = 8_192;
 
 /// The only headers the idempotency boundary stores and replays. This
 /// allow-list is what keeps `Idempotent-Replayed` out of storage: the marker
@@ -69,7 +71,7 @@ pub(super) async fn capture(response: Response) -> Result<Stored, Unstorable> {
         .collect()
         .await
         .map_err(|error| {
-            if error.is::<LengthLimitError>() {
+            if caused_by_length_limit(&*error) {
                 Unstorable::BodyLimit
             } else {
                 Unstorable::BodyStream
@@ -145,7 +147,7 @@ pub(super) fn decode(record: Record) -> Result<Stored, Undecodable> {
             // `capture` stores only the canonical allowlist spellings. Another
             // spelling is a record this boundary did not write and would replay
             // a duplicate of an allowlisted header.
-            if name.as_str() != pair.name || !is_replayable(&name) {
+            if name.as_str() != pair.name || !is_replayable_header_name(name.as_str()) {
                 return Err(Undecodable);
             }
             let value = HeaderValue::from_bytes(&pair.value).map_err(|_| Undecodable)?;
@@ -160,10 +162,6 @@ pub(super) fn decode(record: Record) -> Result<Stored, Undecodable> {
         headers,
         body: record.body,
     })
-}
-
-fn is_replayable(name: &HeaderName) -> bool {
-    is_replayable_header_name(name.as_str())
 }
 
 /// Whether a documented success header can be retained and replayed.

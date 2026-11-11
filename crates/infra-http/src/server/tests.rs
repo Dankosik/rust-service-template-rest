@@ -159,14 +159,13 @@ async fn cancelling_drain_forces_in_flight_connection_cleanup() {
 #[tokio::test]
 async fn accept_timeout_is_distinct_and_forces_connection_cleanup() {
     let (mut server, peer) = pending_request().await;
-    let accept = server.accept_loop.take().unwrap();
-    accept.abort();
-    assert!(accept.await.unwrap_err().is_cancelled());
     // Control the native acceptance owner independently of the real
     // open request: the deadline must include its unconfirmed join.
     let stalled = tokio::spawn(std::future::pending());
     let abort = stalled.abort_handle();
-    server.accept_loop = Some(stalled);
+    let accept = std::mem::replace(&mut server.accept_loop, stalled);
+    accept.abort();
+    assert!(accept.await.unwrap_err().is_cancelled());
     let result = tokio::time::timeout(
         Duration::from_secs(2),
         server.drain(Duration::from_millis(20)),
@@ -187,7 +186,7 @@ async fn accept_timeout_is_distinct_and_forces_connection_cleanup() {
 #[tokio::test]
 async fn accept_failure_stays_sticky_and_drain_preserves_it_while_cleaning_connections() {
     let (server, peer) = pending_request().await;
-    server.accept_loop.as_ref().unwrap().abort();
+    server.accept_loop.abort();
     let failure = tokio::time::timeout(Duration::from_secs(2), server.accept_failure())
         .await
         .unwrap();

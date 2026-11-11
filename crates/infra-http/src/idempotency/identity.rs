@@ -67,43 +67,42 @@ pub(super) fn decode_key<'a>(values: impl IntoIterator<Item = &'a [u8]>) -> Opti
 }
 
 /// Scope one decoded key to the verified caller.
-pub(super) fn scope_key(caller: &CallerIdentity, key: &[u8]) -> Option<ScopeKey> {
+pub(super) fn scope_key(caller: &CallerIdentity, key: &[u8]) -> ScopeKey {
     let mut hasher = Sha256::new();
     hasher.update(SCOPE_DOMAIN);
     hasher.update([0]);
-    frame(&mut hasher, caller.issuer.as_bytes())?;
+    frame(&mut hasher, caller.issuer.as_bytes());
     hasher.update([caller_tag(caller.kind)]);
-    frame(&mut hasher, caller.value.as_bytes())?;
-    frame(&mut hasher, key)?;
-    Some(ScopeKey::from_digest(hasher.finalize().into()))
+    frame(&mut hasher, caller.value.as_bytes());
+    frame(&mut hasher, key);
+    ScopeKey::from_digest(hasher.finalize().into())
 }
 
 /// Fingerprint exactly the client-visible request tuple that the seam owns.
 pub(super) fn request_fingerprint(
     method: &Method,
     uri: &Uri,
-    content_types: &[Vec<u8>],
+    content_types: &[&[u8]],
     body: &[u8],
-) -> Option<Digest> {
+) -> Digest {
     let mut hasher = Sha256::new();
     hasher.update(REQUEST_DOMAIN);
     hasher.update([0]);
-    frame(&mut hasher, method.as_str().as_bytes())?;
-    frame(&mut hasher, uri.path().as_bytes())?;
+    frame(&mut hasher, method.as_str().as_bytes());
+    frame(&mut hasher, uri.path().as_bytes());
     match uri.query() {
         Some(query) => {
             hasher.update([1]);
-            frame(&mut hasher, query.as_bytes())?;
+            frame(&mut hasher, query.as_bytes());
         }
         None => hasher.update([0]),
     }
-    let count = u64::try_from(content_types.len()).ok()?;
-    hasher.update(count.to_be_bytes());
+    hasher.update((content_types.len() as u64).to_be_bytes());
     for value in content_types {
-        frame(&mut hasher, value)?;
+        frame(&mut hasher, value);
     }
-    frame(&mut hasher, body)?;
-    Some(hasher.finalize().into())
+    frame(&mut hasher, body);
+    hasher.finalize().into()
 }
 
 fn trim_ows(value: &[u8]) -> &[u8] {
@@ -125,11 +124,9 @@ const fn caller_tag(kind: CallerKind) -> u8 {
     }
 }
 
-fn frame(hasher: &mut Sha256, bytes: &[u8]) -> Option<()> {
-    let length = u64::try_from(bytes.len()).ok()?;
-    hasher.update(length.to_be_bytes());
+fn frame(hasher: &mut Sha256, bytes: &[u8]) {
+    hasher.update((bytes.len() as u64).to_be_bytes());
     hasher.update(bytes);
-    Some(())
 }
 
 #[cfg(test)]
@@ -189,20 +186,18 @@ mod tests {
         .expect("verified caller");
         assert_eq!(
             scope_key(&caller, b"k-123"),
-            Some(ScopeKey::from_digest(decode_digest(
+            ScopeKey::from_digest(decode_digest(
                 "98df4043b9e795011fe4f84c3844bcfe9ade67032cc0044471d5097f7a30ad94"
-            )))
+            ))
         );
         assert_eq!(
             request_fingerprint(
                 &Method::POST,
                 &"/widgets/%2F?a=1&b=2".parse::<Uri>().expect("URI"),
-                &[b"application/json".to_vec()],
+                &[b"application/json".as_slice()],
                 br#"{"n":1}"#,
             ),
-            Some(decode_digest(
-                "2e4fb57a46095c45e886d290707bf645412366966bf10009314001fd087eb30b"
-            ))
+            decode_digest("2e4fb57a46095c45e886d290707bf645412366966bf10009314001fd087eb30b")
         );
     }
 
@@ -221,19 +216,34 @@ mod tests {
         );
         assert_ne!(
             baseline,
-            request_fingerprint(&Method::POST, &uri, &[Vec::new()], b"{}")
+            request_fingerprint(&Method::POST, &uri, &[b"".as_slice()], b"{}")
         );
         assert_ne!(
             baseline,
             request_fingerprint(&Method::POST, &uri, &[], b"{ }")
         );
         assert_ne!(
-            request_fingerprint(&Method::POST, &uri, &[b"a".to_vec(), b"b".to_vec()], b"{}"),
-            request_fingerprint(&Method::POST, &uri, &[b"b".to_vec(), b"a".to_vec()], b"{}")
+            request_fingerprint(
+                &Method::POST,
+                &uri,
+                &[b"a".as_slice(), b"b".as_slice()],
+                b"{}"
+            ),
+            request_fingerprint(
+                &Method::POST,
+                &uri,
+                &[b"b".as_slice(), b"a".as_slice()],
+                b"{}"
+            )
         );
         assert_ne!(
-            request_fingerprint(&Method::POST, &uri, &[b"ab".to_vec()], b"{}"),
-            request_fingerprint(&Method::POST, &uri, &[b"a".to_vec(), b"b".to_vec()], b"{}")
+            request_fingerprint(&Method::POST, &uri, &[b"ab".as_slice()], b"{}"),
+            request_fingerprint(
+                &Method::POST,
+                &uri,
+                &[b"a".as_slice(), b"b".as_slice()],
+                b"{}"
+            )
         );
     }
 }

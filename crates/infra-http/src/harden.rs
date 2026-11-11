@@ -41,6 +41,9 @@ use crate::request_id;
 use crate::router::is_health_probe_route;
 
 // template:begin request-budget:http-request-deadline
+/// Time [`RequestDeadline::attempt_end`] keeps back for the response.
+const RESPONSE_RESERVE: Duration = Duration::from_millis(100);
+
 /// The conservative deadline shared with request-scoped dependencies.
 ///
 /// The opening middleware projects its exact cutoff here. Consumers may observe the instant but
@@ -59,13 +62,13 @@ impl RequestDeadline {
         self.0
     }
 
-    /// When a PostgreSQL attempt inside this budget must end: 100 ms before
-    /// the deadline, leaving time for the bounded in-memory response after
-    /// it. `None` once that point has passed.
+    /// When a PostgreSQL attempt inside this budget must end: a fixed reserve
+    /// before the deadline, leaving time for the bounded in-memory response
+    /// after it. `None` once that point has passed.
     #[must_use]
     pub fn attempt_end(&self) -> Option<tokio::time::Instant> {
         self.0
-            .checked_sub(Duration::from_millis(100))
+            .checked_sub(RESPONSE_RESERVE)
             .filter(|end| *end > tokio::time::Instant::now())
     }
 }

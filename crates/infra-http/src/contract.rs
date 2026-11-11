@@ -93,6 +93,35 @@ pub(crate) enum Access {
     ),
 }
 
+/// One operation's access, after refusing a reserved probe template.
+fn compile_operation(
+    document: &OpenApi,
+    path: &str,
+    method: &'static str,
+    operation: &Operation,
+) -> Result<Access, FinalizeError> {
+    if is_health_probe_route(path)
+        && !(method == "GET" && is_health_probe_operation(path, operation.operation_id.as_deref()))
+    {
+        return Err(FinalizeError::ReservedProbeRoute {
+            path: path.to_owned(),
+            method,
+        });
+    }
+    Access::from_operation(document, operation).map_err(|fault| {
+        tracing::error!(
+            path,
+            method,
+            fault = fault.as_str(),
+            "http_contract_policy_rejected"
+        );
+        FinalizeError::InvalidPolicy {
+            path: path.to_owned(),
+            method,
+        }
+    })
+}
+
 /// The compiled access table, shared read-only by every request: axum clones
 /// middleware state per request, so the table sits behind an `Arc`.
 #[derive(Clone)]
@@ -118,30 +147,13 @@ impl Policy {
                 ("PATCH", &item.patch),
                 ("TRACE", &item.trace),
             ] {
-                if let Some(operation) = operation {
-                    if is_health_probe_route(&path)
-                        && !(method == "GET"
-                            && is_health_probe_operation(&path, operation.operation_id.as_deref()))
-                    {
-                        return Err(FinalizeError::ReservedProbeRoute {
-                            path: path.clone(),
-                            method,
-                        });
-                    }
-                    let access = Access::from_operation(document, operation).map_err(|fault| {
-                        tracing::error!(
-                            path,
-                            method,
-                            fault = fault.as_str(),
-                            "http_contract_policy_rejected"
-                        );
-                        FinalizeError::InvalidPolicy {
-                            path: path.clone(),
-                            method,
-                        }
-                    })?;
-                    methods.insert(method, access);
-                }
+                let Some(operation) = operation else {
+                    continue;
+                };
+                methods.insert(
+                    method,
+                    compile_operation(document, &path, method, operation)?,
+                );
             }
             table.insert(path, methods);
         }

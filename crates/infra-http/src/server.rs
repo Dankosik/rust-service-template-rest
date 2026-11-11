@@ -98,7 +98,7 @@ pub enum Drained {
 #[derive(Debug)]
 pub struct Server {
     local_addr: SocketAddr,
-    accept_loop: Option<JoinHandle<()>>,
+    accept_loop: JoinHandle<()>,
     accept_failure: watch::Receiver<Option<AcceptFailure>>,
     connection_shutdown: ConnectionShutdown,
     connections: TaskTracker,
@@ -114,7 +114,7 @@ struct ConnectionShutdown {
 }
 
 struct ReportAcceptFailure {
-    stop: CancellationToken,
+    finish: CancellationToken,
     failure: watch::Sender<Option<AcceptFailure>>,
 }
 
@@ -122,7 +122,7 @@ impl Drop for ReportAcceptFailure {
     fn drop(&mut self) {
         let failure = if std::thread::panicking() {
             Some(AcceptFailure::Panicked)
-        } else if !self.stop.is_cancelled() {
+        } else if !self.finish.is_cancelled() {
             Some(AcceptFailure::Ended)
         } else {
             None
@@ -176,11 +176,11 @@ impl Server {
                 match tokio::time::timeout(handshake_timeout, acceptor.accept(stream)).await {
                     Ok(Ok(tls_stream)) => Some(tls_stream),
                     Ok(Err(error)) => {
-                        tracing::debug!(?peer, %error, "tls handshake failed");
+                        tracing::debug!(?peer, %error, "http_tls_handshake_failed");
                         None
                     }
                     Err(_) => {
-                        tracing::debug!(?peer, "tls handshake timed out");
+                        tracing::debug!(?peer, "http_tls_handshake_timed_out");
                         None
                     }
                 }
@@ -231,20 +231,12 @@ impl Server {
         self.connection_shutdown.finish.cancel();
         // Keep the handle in self across await: dropping this waiter must
         // still abort acceptance rather than detach its task.
-        let accept_error = if let Some(accept_loop) = self.accept_loop.as_mut() {
-            if let Ok(joined) = timeout_at(deadline, accept_loop).await {
-                drop(self.accept_loop.take());
-                joined.err().map(ServerError::AcceptTask)
-            } else {
-                self.connection_shutdown.force.cancel();
-                if let Some(accept_loop) = &self.accept_loop {
-                    accept_loop.abort();
-                }
-                return Err(ServerError::AcceptTimeout);
-            }
-        } else {
-            None
+        let Ok(joined) = timeout_at(deadline, &mut self.accept_loop).await else {
+            self.connection_shutdown.force.cancel();
+            self.accept_loop.abort();
+            return Err(ServerError::AcceptTimeout);
         };
+        let accept_error = joined.err().map(ServerError::AcceptTask);
         // Close the tracker only after the join: the accept loop is the only
         // task that spawns connections into it.
         self.connections.close();
@@ -275,9 +267,7 @@ impl Drop for Server {
         // requests only; synchronous Drop cannot confirm task completion.
         self.connection_shutdown.finish.cancel();
         self.connection_shutdown.force.cancel();
-        if let Some(accept_loop) = self.accept_loop.take() {
-            accept_loop.abort();
-        }
+        self.accept_loop.abort();
     }
 }
 
@@ -364,9 +354,18 @@ where
         force: CancellationToken::new(),
     };
     let connections = TaskTracker::new();
+    metrics::describe_counter!(
+        CONNECTIONS_REFUSED_METRIC,
+        metrics::Unit::Count,
+        "Accepted connections closed without a response because the connection cap was reached."
+    );
+    if options.max_connections.is_some() {
+        // Published at zero, so a scrape tells "never refused" from "not exported".
+        metrics::counter!(CONNECTIONS_REFUSED_METRIC).increment(0);
+    }
     let (failure, accept_failure) = watch::channel(None);
     let guard = ReportAcceptFailure {
-        stop: connection_shutdown.finish.clone(),
+        finish: connection_shutdown.finish.clone(),
         failure,
     };
     let accept = accept_loop(
@@ -383,7 +382,7 @@ where
     });
     Ok(Server {
         local_addr,
-        accept_loop: Some(accept_loop),
+        accept_loop,
         accept_failure,
         connection_shutdown,
         connections,
@@ -402,7 +401,7 @@ async fn accept_loop<F, Fut, IO>(
     Fut: Future<Output = Option<IO>> + Send + 'static,
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    let stop = &connection_shutdown.finish;
+    let finish = &connection_shutdown.finish;
     let builder = connection_builder(options);
     let permits = options
         .max_connections
@@ -410,7 +409,7 @@ async fn accept_loop<F, Fut, IO>(
 
     loop {
         let accepted = tokio::select! {
-            () = stop.cancelled() => break,
+            () = finish.cancelled() => break,
             accepted = listener.accept() => accepted,
         };
         let (stream, peer) = match accepted {
@@ -418,9 +417,9 @@ async fn accept_loop<F, Fut, IO>(
             Err(err) => {
                 // Transient accept errors (EMFILE, ECONNABORTED) recover on
                 // their own; back off briefly instead of spinning.
-                tracing::warn!(error = %err, "accept failed");
+                tracing::warn!(error = %err, "http_accept_failed");
                 tokio::select! {
-                    () = stop.cancelled() => break,
+                    () = finish.cancelled() => break,
                     () = tokio::time::sleep(Duration::from_millis(50)) => {}
                 }
                 continue;
@@ -436,7 +435,7 @@ async fn accept_loop<F, Fut, IO>(
                 // gets no answer, while a shed request gets 503 with
                 // Retry-After.
                 metrics::counter!(CONNECTIONS_REFUSED_METRIC).increment(1);
-                tracing::debug!(%peer, "connection refused at the connection cap");
+                tracing::debug!(%peer, "http_connection_refused");
                 drop(stream);
                 continue;
             }
@@ -506,7 +505,7 @@ async fn serve_connection<F, Fut, IO>(
             }
         };
         if let Err(err) = ended {
-            tracing::debug!(%peer, error = %err, "connection ended with error");
+            tracing::debug!(%peer, error = %err, "http_connection_failed");
         }
     };
     tokio::select! {
@@ -535,8 +534,10 @@ async fn reached_age(max_connection_age: Option<Duration>) {
 /// `age` scaled by a factor drawn from 0.9 to 1.1. The draw is the standard
 /// library's randomly keyed hasher: enough to spread closes, not a secret.
 fn spread(age: Duration) -> Duration {
-    let draw = RandomState::new().build_hasher().finish() % 201;
-    let permille = 900 + u32::try_from(draw).unwrap_or(100);
+    /// Connection ages spread this many permille either way.
+    const AGE_SPREAD_PERMILLE: u32 = 100;
+    let draw = RandomState::new().build_hasher().finish() % u64::from(2 * AGE_SPREAD_PERMILLE + 1);
+    let permille = 1000 - AGE_SPREAD_PERMILLE + u32::try_from(draw).unwrap_or(AGE_SPREAD_PERMILLE);
     age.checked_mul(permille)
         .map_or(age, |scaled| scaled / 1000)
 }
