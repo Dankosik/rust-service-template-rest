@@ -14,8 +14,11 @@ use serde::Deserialize;
 
 use crate::HttpConfig;
 use crate::de::{blank_as_none, blank_secret_as_none};
-use crate::http::{connection_age_range, request_budget_fits_drain};
-use crate::validate::{ValidationError, duration_range, int_range};
+use crate::http::{
+    connection_age_range, connection_count_range, in_flight_range, request_budget_fits_drain,
+    request_timeout_range,
+};
+use crate::validate::{ValidationError, duration_range};
 
 /// Explicit security mode for a native gRPC server or client.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -98,6 +101,8 @@ impl Default for GrpcConfig {
     }
 }
 
+/// Leaves trust and credential inputs out of `Debug`, as
+/// `docs/configuration-source-policy.md` requires.
 impl fmt::Debug for GrpcConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("GrpcConfig")
@@ -197,31 +202,21 @@ impl GrpcConfig {
     }
 
     fn validate_limits(&self, http: &HttpConfig) -> Result<(), ValidationError> {
-        duration_range(
+        request_timeout_range("grpc.request_timeout", self.request_timeout)?;
+        request_budget_fits_drain(
             "grpc.request_timeout",
             self.request_timeout,
-            Duration::from_millis(100),
-            Duration::from_secs(600),
+            http.effective_drain_budget(),
+            "calls",
         )?;
-        request_budget_fits_drain("grpc.request_timeout", self.request_timeout, http, "calls")?;
-        int_range(
-            "grpc.max_in_flight",
-            u64::from(self.max_in_flight),
-            0,
-            100_000,
-        )?;
+        in_flight_range("grpc.max_in_flight", self.max_in_flight)?;
         duration_range(
             "grpc.admission_wait",
             self.admission_wait,
             Duration::ZERO,
             self.request_timeout,
         )?;
-        int_range(
-            "grpc.max_connections",
-            u64::from(self.max_connections),
-            0,
-            1_000_000,
-        )?;
+        connection_count_range("grpc.max_connections", self.max_connections)?;
         connection_age_range("grpc.max_connection_age", self.max_connection_age)
     }
 }

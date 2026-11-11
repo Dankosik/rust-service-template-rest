@@ -86,22 +86,21 @@ impl JobsConfig {
         postgres: &PostgresConfig,
         ordinary_jobs: bool,
     ) -> Result<(), ValidationError> {
+        /// One publication slot plus two management connections.
         const PUBLISHER_CONNECTIONS: u64 = 3;
-        let reserve = WORKER_MANAGEMENT_CONNECTIONS + PUBLISHER_CONNECTIONS;
-        let required = if ordinary_jobs {
-            u64::from(self.max_workers.get()) + reserve
+        let (required, formula) = if ordinary_jobs {
+            let reserve = WORKER_MANAGEMENT_CONNECTIONS + PUBLISHER_CONNECTIONS;
+            (
+                self.ordinary_pool_requirement() + PUBLISHER_CONNECTIONS,
+                format!("jobs.max_workers + {reserve}"),
+            )
         } else {
-            PUBLISHER_CONNECTIONS
+            (PUBLISHER_CONNECTIONS, PUBLISHER_CONNECTIONS.to_string())
         };
         if u64::from(postgres.max_connections.get()) < required {
-            let mode = if ordinary_jobs {
-                format!("jobs.max_workers + {reserve}")
-            } else {
-                required.to_string()
-            };
             return Err(ValidationError::new(
                 "postgres.max_connections",
-                format!("must be at least {mode} ({required}) for the outbox worker"),
+                format!("must be at least {formula} ({required}) for the outbox worker"),
             ));
         }
         Ok(())

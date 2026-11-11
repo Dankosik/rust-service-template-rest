@@ -15,47 +15,47 @@
 //! variable-name and file pre-scans and the secrets directory in [`load()`]
 //! add that the crate does not.
 
-pub mod app;
-pub mod health;
-pub mod http;
+mod app;
+mod health;
+mod http;
 // template:begin grpc:config-module
-pub mod grpc;
+mod grpc;
 // template:end grpc:config-module
-pub mod log;
-pub mod observability;
-pub mod runtime;
+mod log;
+mod observability;
+mod runtime;
 // template:begin messaging:config-module
-pub mod messaging;
+mod messaging;
 // template:end messaging:config-module
 // template:begin cache:config-module
-pub mod cache;
+mod cache;
 // template:end cache:config-module
 // template:begin object-storage:config-module
-pub mod object_storage;
+mod object_storage;
 // template:end object-storage:config-module
 // template:begin client-integrations:config-module
-pub mod integrations;
+mod integrations;
 // template:end client-integrations:config-module
 // template:begin authn:config-module
-pub mod authn;
+mod authn;
 // template:end authn:config-module
 // template:begin service-auth:config-service-auth-module
-pub mod service_auth;
+mod service_auth;
 // template:end service-auth:config-service-auth-module
 // template:begin postgres:config-module
-pub mod postgres;
+mod postgres;
 // template:end postgres:config-module
 // template:begin http-idempotency:config-http-idempotency-module
-pub mod http_idempotency;
+mod http_idempotency;
 // template:end http-idempotency:config-http-idempotency-module
 // template:begin inbound-webhooks:config-inbound-webhooks-module
-pub mod inbound_webhooks;
+mod inbound_webhooks;
 // template:end inbound-webhooks:config-inbound-webhooks-module
 // template:begin jobs:config-jobs-module
-pub mod jobs;
+mod jobs;
 // template:end jobs:config-jobs-module
 // template:begin webhooks:config-webhooks-module
-pub mod webhooks;
+mod webhooks;
 // template:end webhooks:config-webhooks-module
 
 mod cli;
@@ -92,7 +92,7 @@ pub use observability::{
 };
 pub use runtime::RuntimeConfig;
 // template:begin messaging:config-export
-pub use messaging::MessagingConfig;
+pub use messaging::{ConsumerKeys, MessagingConfig, MessagingCredentials};
 // template:end messaging:config-export
 // template:begin cache:config-export
 pub use cache::CacheConfig;

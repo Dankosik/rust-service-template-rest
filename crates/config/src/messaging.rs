@@ -4,7 +4,7 @@
 //! reconciles operator-owned streams.
 
 use std::num::NonZeroU32;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use bytesize::ByteSize;
 use secrecy::SecretString;
@@ -12,13 +12,16 @@ use serde::Deserialize;
 use url::Url;
 
 use crate::app::local_development_only;
-use crate::de::{VALUE_FREE, blank_as_none, blank_secret_as_none};
+use crate::de::{blank_as_none, blank_secret_as_none, value_free};
 use crate::validate::{ValidationError, int_range, non_blank};
 
-// Matches the encoded-header limit in infra-messaging's wire decoder.
-// The delivery bound covers payload and headers; metadata is budgeted separately.
+/// Header bytes one delivery may add to its payload: `HEADER_LIMIT_BYTES` of
+/// the `infra-messaging` wire decoder. Metadata is budgeted separately.
 const DELIVERY_OVERHEAD_BYTES: u64 = 8 * 1024;
-const MAX_RESIDENT_DELIVERY_BYTES: u64 = 64 * 1024 * 1024;
+/// Payload and header MiB held at once: `PUBLICATION_WINDOW_BYTES` of
+/// `infra-messaging`, so an admitted payload also fits one publication.
+const MAX_RESIDENT_DELIVERY_MIB: u64 = 64;
+const MAX_RESIDENT_DELIVERY_BYTES: u64 = MAX_RESIDENT_DELIVERY_MIB * 1024 * 1024;
 
 /// Optional `JetStream` connection and worker limits.
 #[expect(
@@ -121,9 +124,31 @@ impl MessagingConfig {
                 "is required for an active producer",
             ));
         }
-        self.required_credentials()?;
+        if self.credential_source()?.is_none() && !self.allow_unauthenticated {
+            return Err(ValidationError::new(
+                "messaging.credentials",
+                "one of messaging.credentials or messaging.credentials_file is required unless messaging.allow_unauthenticated = true",
+            ));
+        }
         self.required_source_stream()?;
         Ok(())
+    }
+
+    /// The credential source the client uses, if one is set.
+    ///
+    /// # Errors
+    ///
+    /// Returns `messaging.credentials_file` when both sources are set.
+    pub fn credential_source(&self) -> Result<Option<MessagingCredentials<'_>>, ValidationError> {
+        match (&self.credentials, &self.credentials_file) {
+            (Some(_), Some(_)) => Err(ValidationError::new(
+                "messaging.credentials_file",
+                "cannot be set together with messaging.credentials",
+            )),
+            (Some(inline), None) => Ok(Some(MessagingCredentials::Inline(inline))),
+            (None, Some(file)) => Ok(Some(MessagingCredentials::File(file))),
+            (None, None) => Ok(None),
+        }
     }
 
     /// The stream an active producer publishes to.
@@ -182,12 +207,7 @@ impl MessagingConfig {
             self.allow_unauthenticated,
             app_env,
         )?;
-        if self.credentials.is_some() && self.credentials_file.is_some() {
-            return Err(ValidationError::new(
-                "messaging.credentials_file",
-                "cannot be set together with messaging.credentials",
-            ));
-        }
+        self.credential_source()?;
         self.validate_urls()?;
 
         int_range(
@@ -196,44 +216,38 @@ impl MessagingConfig {
             1,
             MAX_RESIDENT_DELIVERY_BYTES - DELIVERY_OVERHEAD_BYTES,
         )?;
-        u64::from(self.consumer_concurrency.get())
-            .checked_mul(
-                self.max_payload_bytes
-                    .as_u64()
-                    .saturating_add(DELIVERY_OVERHEAD_BYTES),
-            )
-            .filter(|resident| *resident <= MAX_RESIDENT_DELIVERY_BYTES)
-            .ok_or_else(|| {
-                ValidationError::new(
-                    "messaging.consumer_concurrency",
-                    "with messaging.max_payload_bytes exceeds the 64 MiB resident delivery bound",
-                )
-            })?;
+        // The range above keeps the product far from overflow.
+        let resident = u64::from(self.consumer_concurrency.get())
+            * (self.max_payload_bytes.as_u64() + DELIVERY_OVERHEAD_BYTES);
+        if resident > MAX_RESIDENT_DELIVERY_BYTES {
+            return Err(ValidationError::new(
+                "messaging.consumer_concurrency",
+                format!(
+                    "with messaging.max_payload_bytes exceeds the {MAX_RESIDENT_DELIVERY_MIB} MiB resident delivery bound"
+                ),
+            ));
+        }
         Ok(())
     }
 
     fn validate_urls(&self) -> Result<(), ValidationError> {
         let mut plaintext = false;
-        for raw in &self.urls {
-            non_blank("messaging.urls", raw)?;
-            let url = Url::parse(raw).map_err(|_| {
-                ValidationError::new("messaging.urls", "must contain valid NATS URLs")
-            })?;
+        for (index, raw) in self.urls.iter().enumerate() {
+            // The key names the entry; a URL is never echoed.
+            let key = format!("messaging.urls[{index}]");
+            non_blank(&key, raw)?;
+            let url = Url::parse(raw)
+                .map_err(|_| ValidationError::new(key.clone(), "must be a valid NATS URL"))?;
             if url.host_str().is_none() || !url.username().is_empty() || url.password().is_some() {
                 return Err(ValidationError::new(
-                    "messaging.urls",
+                    key,
                     "must not contain userinfo and must name a host",
                 ));
             }
             match url.scheme() {
                 "tls" => {}
                 "nats" => plaintext = true,
-                _ => {
-                    return Err(ValidationError::new(
-                        "messaging.urls",
-                        "must use nats:// or tls://",
-                    ));
-                }
+                _ => return Err(ValidationError::new(key, "must use nats:// or tls://")),
             }
         }
         if plaintext && self.tls_first {
@@ -251,19 +265,15 @@ impl MessagingConfig {
 
         Ok(())
     }
+}
 
-    fn required_credentials(&self) -> Result<(), ValidationError> {
-        if self.credentials.is_none()
-            && self.credentials_file.is_none()
-            && !self.allow_unauthenticated
-        {
-            return Err(ValidationError::new(
-                "messaging.credentials",
-                "or messaging.credentials_file is required unless messaging.allow_unauthenticated = true",
-            ));
-        }
-        Ok(())
-    }
+/// One admitted NATS credential source.
+#[derive(Clone, Copy, Debug)]
+pub enum MessagingCredentials<'a> {
+    /// The environment-only `messaging.credentials` value.
+    Inline(&'a SecretString),
+    /// The file `messaging.credentials_file` names.
+    File(&'a Path),
 }
 
 /// The consumer keys [`MessagingConfig::required_consumer`] admitted.
@@ -295,11 +305,8 @@ where
         List(Vec<String>),
     }
 
-    let input = Input::deserialize(deserializer).map_err(|_| {
-        serde::de::Error::custom(format_args!(
-            "{VALUE_FREE}must be a list of strings or a comma-separated string"
-        ))
-    })?;
+    let input = Input::deserialize(deserializer)
+        .map_err(|_| value_free("must be a list of strings or a comma-separated string"))?;
     Ok(match input {
         Input::Text(value) => value.split(',').map(ToOwned::to_owned).collect(),
         Input::List(urls) => urls,
@@ -388,8 +395,8 @@ mod tests {
     #[test]
     fn rejects_url_userinfo_unknown_protocol_and_unapproved_plaintext() {
         for (url, key) in [
-            ("tls://user:password@nats.example:4222", "messaging.urls"),
-            ("https://nats.example:4222", "messaging.urls"),
+            ("tls://user:password@nats.example:4222", "messaging.urls[0]"),
+            ("https://nats.example:4222", "messaging.urls[0]"),
             ("nats://nats.example:4222", "messaging.allow_plaintext"),
         ] {
             let config = MessagingConfig {

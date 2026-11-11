@@ -58,14 +58,13 @@ pub enum TracesSampler {
 pub struct OtelConfig {
     /// `service.name` resource attribute.
     // template:begin postgres:otel-postgres-application-name-doc
-    /// It also supplies PostgreSQL `application_name` for pooled and migrator sessions.
+    /// It also supplies PostgreSQL `application_name` for pooled and migrator
+    /// sessions; a distinct database session label is not a configuration axis.
     // template:end postgres:otel-postgres-application-name-doc
     // template:begin jobs:otel-jobs-worker-identity-doc
     /// The jobs worker derives its own identity from it: `{name}-jobs-worker`.
     // template:end jobs:otel-jobs-worker-identity-doc
-    /// The initializer
-    /// rewrites this default for a derived service. A distinct database
-    /// session label is not a configuration axis.
+    /// The initializer rewrites this default for a derived service.
     pub service_name: String,
     /// Sampler that decides which traces are recorded.
     pub traces_sampler: TracesSampler,
@@ -102,14 +101,6 @@ pub struct OtelExporterConfig {
     /// Missing, empty, or whitespace-only is absent (`None`).
     #[serde(default, deserialize_with = "crate::de::blank_secret_as_none")]
     pub otlp_headers: Option<SecretString>,
-}
-
-impl OtelExporterConfig {
-    /// Whether a typed credential is configured.
-    #[must_use]
-    pub fn has_headers(&self) -> bool {
-        self.otlp_headers.is_some()
-    }
 }
 
 impl ObservabilityConfig {
@@ -188,7 +179,7 @@ mod tests {
         };
         let rendered = format!("{cfg:?}");
         assert!(!rendered.contains("topsecret"), "{rendered}");
-        assert!(cfg.has_headers());
+        assert!(cfg.otlp_headers.is_some());
     }
 
     #[test]

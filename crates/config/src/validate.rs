@@ -16,9 +16,9 @@ impl ValidationError {
     /// A violated rule for `key`. Composition roots use it for rules that
     /// depend on a transport constant this crate does not know.
     #[must_use]
-    pub fn new(key: &str, message: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
-            key: key.to_owned(),
+            key: key.into(),
             message: message.into(),
         }
     }
@@ -61,6 +61,25 @@ pub(crate) fn non_blank(key: &str, value: &str) -> Result<(), ValidationError> {
     Ok(())
 }
 
+/// Refuses a blank `value` for `key`, which `condition` requires.
+#[allow(
+    dead_code,
+    reason = "removing every authentication profile leaves the rule without a caller"
+)]
+pub(crate) fn required_when(
+    key: &str,
+    value: &str,
+    condition: &str,
+) -> Result<(), ValidationError> {
+    if value.trim().is_empty() {
+        return Err(ValidationError::new(
+            key,
+            format!("is required when {condition}"),
+        ));
+    }
+    Ok(())
+}
+
 /// One endpoint ID rule for outbound and inbound webhooks.
 #[allow(
     dead_code,
@@ -77,20 +96,6 @@ pub(crate) fn validate_endpoint_id(
         ));
     }
     Ok(())
-}
-
-/// Whether an `APP__` variable can address the key `name`. The loader
-/// lowercases a variable name, splits it on `__`, and reads each segment as
-/// a config-rs path identifier (lowercase ASCII letters, digits, `_`, `-`). A key
-/// outside that form never meets its environment counterpart: the file and
-/// the environment would name two entries.
-pub(crate) fn is_env_addressable(name: &str) -> bool {
-    !name.is_empty()
-        && name
-            .bytes()
-            .all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-'))
-        && !name.contains("__")
-        && !name.ends_with('_')
 }
 
 #[cfg(test)]
@@ -119,22 +124,6 @@ mod tests {
             Duration::from_secs(600),
         );
         assert_eq!(result.is_ok(), valid);
-    }
-
-    #[rstest::rstest]
-    #[case::word("partner", true)]
-    #[case::underscore("partner_v2", true)]
-    #[case::hyphen("partner-v2", true)]
-    #[case::leading_underscore("_partner", true)]
-    #[case::path_characters("partner/a", false)]
-    #[case::dot("partner.a", false)]
-    #[case::non_ascii("pärtner", false)]
-    #[case::empty("", false)]
-    #[case::uppercase("Partner", false)]
-    #[case::segment_separator("partner__v2", false)]
-    #[case::trailing_underscore("partner_", false)]
-    fn env_addressable_names(#[case] name: &str, #[case] addressable: bool) {
-        assert_eq!(is_env_addressable(name), addressable);
     }
 
     #[test]

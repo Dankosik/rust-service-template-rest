@@ -4,13 +4,23 @@ use std::net::SocketAddr;
 
 use secrecy::SecretString;
 use serde::Deserialize;
-use serde::de::{Error as _, Unexpected};
+use serde::de::Unexpected;
 
 /// Marks a decode message this crate wrote without the value it rejects, so
 /// the loader shows it as written. No variable holds NUL, so no supplied
 /// value can forge the mark: an environment variable cannot contain one, and
 /// the loader refuses a secrets-directory file that does.
 pub(crate) const VALUE_FREE: char = '\0';
+
+/// A decode error whose `message` names the expected form without the
+/// refused value, marked [`VALUE_FREE`] so the loader shows it as written.
+#[allow(
+    dead_code,
+    reason = "removing every profile with a value-free decoder leaves the constructor without a caller"
+)]
+pub(crate) fn value_free<E: serde::de::Error>(message: impl std::fmt::Display) -> E {
+    E::custom(format_args!("{VALUE_FREE}{message}"))
+}
 
 /// What a listen address must be, for the decode message.
 const LISTEN_ADDR: &str = "an IP address and port, or :port; hostnames are not resolved";
@@ -50,8 +60,7 @@ where
     D: serde::Deserializer<'de>,
 {
     let raw = String::deserialize(deserializer)?;
-    parse_listen_addr(&raw)
-        .ok_or_else(|| D::Error::invalid_value(Unexpected::Str(&raw), &LISTEN_ADDR))
+    parse_listen_addr(&raw).ok_or_else(|| invalid_listen_addr(&raw))
 }
 
 /// Listen address, or `None` when the value is missing, empty, or whitespace.
@@ -59,13 +68,13 @@ pub(crate) fn optional_listen_addr<'de, D>(deserializer: D) -> Result<Option<Soc
 where
     D: serde::Deserializer<'de>,
 {
-    let raw = Option::<String>::deserialize(deserializer)?;
-    match raw {
-        Some(value) if !value.trim().is_empty() => parse_listen_addr(&value)
-            .map(Some)
-            .ok_or_else(|| D::Error::invalid_value(Unexpected::Str(&value), &LISTEN_ADDR)),
-        _ => Ok(None),
-    }
+    blank_as_none::<_, String>(deserializer)?
+        .map(|value| parse_listen_addr(&value).ok_or_else(|| invalid_listen_addr(&value)))
+        .transpose()
+}
+
+fn invalid_listen_addr<E: serde::de::Error>(value: &str) -> E {
+    E::invalid_value(Unexpected::Str(value), &LISTEN_ADDR)
 }
 
 /// Parse an IP listen address: `ip:port`, or the Go-style `:port` meaning

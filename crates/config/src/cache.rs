@@ -118,7 +118,10 @@ impl CacheConfig {
         if self.is_active() && self.command_timeout * 2 > request_timeout {
             return Err(ValidationError::new(
                 "cache.command_timeout",
-                "must be at most half of http.request_timeout",
+                format!(
+                    "must be at most half of http.request_timeout ({})",
+                    humantime::format_duration(request_timeout / 2)
+                ),
             ));
         }
         Ok(())

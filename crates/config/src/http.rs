@@ -12,7 +12,7 @@ use crate::validate::{ValidationError, duration_range, int_range};
 /// Operator-facing floor for `http.max_header_bytes`. hyper refuses an HTTP/1
 /// read buffer below this size; the adapter still clamps independently so
 /// `Server::bind` cannot pass a smaller value even if validation was skipped.
-pub const MIN_HEADER_BYTES: u64 = 8 * 1024;
+pub(crate) const MIN_HEADER_BYTES: u64 = 8 * 1024;
 
 /// The `http` section: application listener address, request budgets, capacity bounds, and shutdown timing.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -135,7 +135,6 @@ impl HttpConfig {
     pub(crate) fn validate(&self) -> Result<(), ValidationError> {
         let second = Duration::from_secs(1);
         let ten_minutes = Duration::from_secs(600);
-        let hundred_ms = Duration::from_millis(100);
         duration_range("http.grace_period", self.grace_period, second, ten_minutes)?;
         duration_range(
             "http.drain_timeout",
@@ -155,26 +154,23 @@ impl HttpConfig {
         if self.readiness_propagation_delay >= self.drain_timeout {
             return Err(ValidationError::new(
                 "http.readiness_propagation_delay",
-                "must be less than http.drain_timeout",
+                format!(
+                    "must be less than http.drain_timeout ({})",
+                    humantime::format_duration(self.drain_timeout)
+                ),
             ));
         }
         duration_range(
             "http.header_read_timeout",
             self.header_read_timeout,
-            hundred_ms,
+            Duration::from_millis(100),
             Duration::from_secs(300),
         )?;
-        duration_range(
-            "http.request_timeout",
-            self.request_timeout,
-            hundred_ms,
-            ten_minutes,
-        )?;
-
+        request_timeout_range("http.request_timeout", self.request_timeout)?;
         request_budget_fits_drain(
             "http.request_timeout",
             self.request_timeout,
-            self,
+            self.effective_drain_budget(),
             "requests",
         )?;
 
@@ -190,18 +186,8 @@ impl HttpConfig {
             1,
             ByteSize::gib(1).as_u64(),
         )?;
-        int_range(
-            "http.max_in_flight",
-            u64::from(self.max_in_flight),
-            0,
-            100_000,
-        )?;
-        int_range(
-            "http.max_connections",
-            u64::from(self.max_connections),
-            0,
-            1_000_000,
-        )?;
+        in_flight_range("http.max_in_flight", self.max_in_flight)?;
+        connection_count_range("http.max_connections", self.max_connections)?;
         if self.max_connections != 0 && self.max_connections < self.max_in_flight {
             return Err(ValidationError::new(
                 "http.max_connections",
@@ -213,14 +199,13 @@ impl HttpConfig {
 }
 
 /// Both listeners share the drain `http` owns, so each listener's request
-/// budget must fit what is left of it after readiness propagation.
+/// budget must fit `drain`, what is left of it after readiness propagation.
 pub(crate) fn request_budget_fits_drain(
     key: &str,
     timeout: Duration,
-    http: &HttpConfig,
+    drain: Duration,
     subject: &str,
 ) -> Result<(), ValidationError> {
-    let drain = http.effective_drain_budget();
     if timeout > drain {
         return Err(ValidationError::new(
             key,
@@ -231,6 +216,26 @@ pub(crate) fn request_budget_fits_drain(
         ));
     }
     Ok(())
+}
+
+/// A listener's per-request or per-call budget.
+pub(crate) fn request_timeout_range(key: &str, value: Duration) -> Result<(), ValidationError> {
+    duration_range(
+        key,
+        value,
+        Duration::from_millis(100),
+        Duration::from_secs(600),
+    )
+}
+
+/// A listener's concurrent handler bound; zero turns shedding off.
+pub(crate) fn in_flight_range(key: &str, value: u32) -> Result<(), ValidationError> {
+    int_range(key, u64::from(value), 0, 100_000)
+}
+
+/// A listener's accepted-connection bound; zero accepts without one.
+pub(crate) fn connection_count_range(key: &str, value: u32) -> Result<(), ValidationError> {
+    int_range(key, u64::from(value), 0, 1_000_000)
 }
 
 /// A connection age is off at zero, or between one second and one day.

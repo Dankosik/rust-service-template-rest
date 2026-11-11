@@ -31,7 +31,7 @@ impl BuildInfo {
 /// a section accept its plaintext, unauthenticated, or emulator escape hatch;
 /// any other spelling, a production typo included, is refused them.
 #[must_use]
-pub fn is_local_development(env: &str) -> bool {
+pub(crate) fn is_local_development(env: &str) -> bool {
     matches!(env, "local" | "development")
 }
 
@@ -46,7 +46,10 @@ pub(crate) fn local_development_only(
     app_env: &str,
 ) -> Result<(), ValidationError> {
     if enabled && !is_local_development(app_env) {
-        return Err(ValidationError::new(key, "is local/development-only"));
+        return Err(ValidationError::new(
+            key,
+            format!("is local/development-only, but app.env is \"{app_env}\""),
+        ));
     }
     Ok(())
 }

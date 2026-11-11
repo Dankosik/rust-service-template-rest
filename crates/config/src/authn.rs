@@ -16,8 +16,8 @@ use serde::{Deserialize, Deserializer};
 // template:begin oidc-introspection:authn-occupied-secret-import
 use crate::de::blank_secret_as_none;
 // template:end oidc-introspection:authn-occupied-secret-import
-use crate::ValidationError;
-use crate::de::VALUE_FREE;
+use crate::de::value_free;
+use crate::validate::{ValidationError, required_when};
 
 /// Exact audiences accepted by an authentication profile.
 ///
@@ -30,11 +30,6 @@ impl Audiences {
     #[must_use]
     pub fn as_slice(&self) -> &[String] {
         &self.0
-    }
-
-    #[must_use]
-    pub fn into_inner(self) -> Vec<String> {
-        self.0
     }
 }
 
@@ -54,8 +49,7 @@ impl<'de> Deserialize<'de> for Audiences {
             Input::One(value) => vec![value],
             Input::Many(values) => values,
         };
-        Self::try_new(values)
-            .map_err(|message| serde::de::Error::custom(format_args!("{VALUE_FREE}{message}")))
+        Self::try_new(values).map_err(value_free)
     }
 }
 
@@ -174,6 +168,8 @@ pub enum AuthnConfig {
     // template:end oidc-introspection:authn-config-introspection-variant
 }
 
+/// Leaves trust and credential inputs out of `Debug`, as
+/// `docs/configuration-source-policy.md` requires.
 impl std::fmt::Debug for AuthnConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AuthnConfig")
@@ -279,7 +275,7 @@ impl AuthnConfig {
                 jwks_uri,
                 ..
             } => {
-                require_nonblank("authn.issuer", issuer, "oidc-jwt")?;
+                required_when("authn.issuer", issuer, "authn.mode = oidc-jwt")?;
                 if jwks_uri.as_deref().is_some_and(|uri| uri.trim().is_empty()) {
                     return Err(ValidationError::new(
                         "authn.jwks_uri",
@@ -302,16 +298,16 @@ impl AuthnConfig {
                 introspection_client_id,
                 ..
             } => {
-                require_nonblank("authn.issuer", issuer, "oidc-introspection")?;
-                require_nonblank(
+                required_when("authn.issuer", issuer, "authn.mode = oidc-introspection")?;
+                required_when(
                     "authn.introspection_endpoint",
                     introspection_endpoint,
-                    "oidc-introspection",
+                    "authn.mode = oidc-introspection",
                 )?;
-                require_nonblank(
+                required_when(
                     "authn.introspection_client_id",
                     introspection_client_id,
-                    "oidc-introspection",
+                    "authn.mode = oidc-introspection",
                 )?;
                 self.required_introspection_client_secret()?;
                 Ok(())
@@ -320,16 +316,6 @@ impl AuthnConfig {
             Self::None {} => Ok(()),
         }
     }
-}
-
-fn require_nonblank(key: &str, value: &str, mode: &str) -> Result<(), ValidationError> {
-    if value.trim().is_empty() {
-        return Err(ValidationError::new(
-            key,
-            format!("is required when authn.mode = {mode}"),
-        ));
-    }
-    Ok(())
 }
 
 #[cfg(test)]
