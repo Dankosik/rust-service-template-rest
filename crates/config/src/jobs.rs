@@ -1,9 +1,7 @@
 //! Jobs worker capacity and its PostgreSQL-only operator snapshot.
 //!
-//! Every binary validates it with the rest of the snapshot; only the
-//! `jobs-worker` binary uses it. The pool bound it implies is checked by
-//! the worker alone through [`JobsConfig::validate_pool_capacity`], as
-//! `http_idempotency.retention` is checked only where it is served.
+//! The full snapshot validates worker settings. The worker checks the
+//! implied pool bound through [`JobsConfig::validate_pool_capacity`].
 
 use std::num::NonZeroU32;
 
@@ -35,6 +33,7 @@ pub struct JobsConfig {
     /// The most attempts one worker process runs at once
     /// (`APP__JOBS__MAX_WORKERS`), between 1 and 500.
     /// `postgres.max_connections` bounds it further per deployment.
+    #[serde(deserialize_with = "crate::de::unsigned_count")]
     pub max_workers: NonZeroU32,
 }
 

@@ -1,6 +1,7 @@
 //! Serde adapters for field forms serde does not express directly.
 
 use std::net::SocketAddr;
+use std::str::FromStr;
 
 use secrecy::SecretString;
 use serde::Deserialize;
@@ -22,28 +23,49 @@ pub(crate) fn value_free<E: serde::de::Error>(message: impl std::fmt::Display) -
     E::custom(format_args!("{VALUE_FREE}{message}"))
 }
 
-pub(crate) fn unsigned_count<'de, D>(deserializer: D) -> Result<u32, D::Error>
+// Buffer the scalar kind before config-rs can coerce floats or booleans.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum CountInput<T> {
+    Integer(T),
+    Text(String),
+}
+
+impl<T: FromStr> CountInput<T> {
+    fn into_count<E: serde::de::Error>(self) -> Result<T, E> {
+        match self {
+            Self::Integer(value) => Ok(value),
+            Self::Text(value) => value.parse().map_err(|_| invalid_count()),
+        }
+    }
+}
+
+fn invalid_count<E: serde::de::Error>() -> E {
+    E::invalid_value(
+        Unexpected::Other("a malformed or out-of-range count"),
+        &"an integer",
+    )
+}
+
+pub(crate) fn unsigned_count<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + FromStr,
 {
-    // Buffer the scalar kind before config-rs can coerce floats or booleans.
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum Input {
-        Integer(u32),
-        Text(String),
-    }
+    CountInput::deserialize(deserializer)
+        .map_err(|_| invalid_count::<D::Error>())?
+        .into_count()
+}
 
-    let invalid = || {
-        serde::de::Error::invalid_value(
-            Unexpected::Other("a malformed or out-of-range count"),
-            &"an integer",
-        )
-    };
-    match Input::deserialize(deserializer).map_err(|_| invalid())? {
-        Input::Integer(value) => Ok(value),
-        Input::Text(value) => value.parse().map_err(|_| invalid()),
-    }
+pub(crate) fn optional_unsigned_count<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + FromStr,
+{
+    Option::<CountInput<T>>::deserialize(deserializer)
+        .map_err(|_| invalid_count::<D::Error>())?
+        .map(CountInput::into_count)
+        .transpose()
 }
 
 /// What a listen address must be, for the decode message.

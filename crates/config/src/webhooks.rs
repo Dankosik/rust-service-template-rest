@@ -24,6 +24,7 @@ pub struct WebhooksConfig {
     /// that answers slowly delays the worker's other job kinds for up to the
     /// 30-second attempt timeout per delivery. A value below
     /// `jobs.max_workers` keeps the difference for those kinds.
+    #[serde(deserialize_with = "crate::de::optional_unsigned_count")]
     pub max_concurrent_deliveries: Option<NonZeroU32>,
 }
 

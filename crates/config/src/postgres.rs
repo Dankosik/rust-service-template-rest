@@ -63,6 +63,7 @@ pub struct PostgresConfig {
     /// Upper bound on pooled connections. Size it from the database's
     /// `max_connections` divided across every instance and job that shares
     /// the database, not from the service's concurrency.
+    #[serde(deserialize_with = "crate::de::unsigned_count")]
     pub max_connections: NonZeroU32,
     /// Bound on one `migrate` run after it connected, and on each
     /// `-- no-transaction` migration in it. Raise it for the run that builds

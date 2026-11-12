@@ -76,6 +76,7 @@ pub struct MessagingConfig {
     #[serde(default, deserialize_with = "blank_as_none")]
     pub dlq_subject: Option<String>,
     /// Maximum deliveries held through handling and settlement.
+    #[serde(deserialize_with = "crate::de::unsigned_count")]
     pub consumer_concurrency: NonZeroU32,
 }
 
