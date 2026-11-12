@@ -73,7 +73,7 @@ async fn admission_refuses_unacknowledged_or_volatile_streams_for_the_publishing
             ))
             .await
             .expect_err("each publishing role requires ACKs and durable storage");
-            assert!(matches!(refused, infra_messaging::MessagingError::Topology));
+            std::assert_matches!(refused, infra_messaging::MessagingError::Topology);
             assert_eq!(
                 admission_refusals(&logged),
                 [(error_type.to_owned(), (1024 + 8192).to_string(), None)]
@@ -195,10 +195,7 @@ async fn consumer_admits_the_transfer_bound_and_refuses_one_byte_less_before_dur
         let (_guard, logged) = capture_logs();
         let consumer = messaging.consumer(registered).await;
         if short {
-            assert!(matches!(
-                consumer,
-                Err(infra_messaging::MessagingError::Bounds)
-            ));
+            std::assert_matches!(consumer, Err(infra_messaging::MessagingError::Bounds));
             assert_eq!(
                 admission_refusals(&logged),
                 [(
@@ -290,10 +287,10 @@ async fn unlimited_dlq_cannot_exceed_the_advertised_server_transfer_limit() {
         .register::<ExampleEvent, _, _>(|_, _| async { Ok(()) })
         .unwrap();
     let (_guard, logged) = capture_logs();
-    assert!(matches!(
+    std::assert_matches!(
         messaging.consumer(registered).await,
         Err(infra_messaging::MessagingError::Bounds)
-    ));
+    );
     assert_eq!(
         admission_refusals(&logged),
         [(
@@ -371,10 +368,7 @@ async fn selected_routes_without_handlers_obey_the_native_header_ceiling() {
         let (_guard, logged) = capture_logs();
         let admitted = messaging.consumer(registered).await;
         if selected && excess > 0 {
-            assert!(matches!(
-                admitted,
-                Err(infra_messaging::MessagingError::Bounds)
-            ));
+            std::assert_matches!(admitted, Err(infra_messaging::MessagingError::Bounds));
             assert_eq!(
                 admission_refusals(&logged),
                 [(
@@ -422,8 +416,9 @@ async fn admission_names_the_broker_limit_that_cannot_carry_one_delivery() {
     ))
     .await
     .expect_err("a delivery the server cannot carry is refused");
-    assert!(
-        matches!(refused, infra_messaging::MessagingError::Bounds),
+    std::assert_matches!(
+        refused,
+        infra_messaging::MessagingError::Bounds,
         "{refused:?}"
     );
 
@@ -447,8 +442,9 @@ async fn admission_names_the_broker_limit_that_cannot_carry_one_delivery() {
     ))
     .await
     .expect_err("a source stream without a message limit is refused");
-    assert!(
-        matches!(refused, infra_messaging::MessagingError::Bounds),
+    std::assert_matches!(
+        refused,
+        infra_messaging::MessagingError::Bounds,
         "{refused:?}"
     );
 
@@ -460,8 +456,9 @@ async fn admission_names_the_broker_limit_that_cannot_carry_one_delivery() {
     ))
     .await
     .expect_err("a source stream that admits a larger message is refused");
-    assert!(
-        matches!(refused, infra_messaging::MessagingError::Bounds),
+    std::assert_matches!(
+        refused,
+        infra_messaging::MessagingError::Bounds,
         "{refused:?}"
     );
 

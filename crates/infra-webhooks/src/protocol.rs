@@ -4,10 +4,7 @@
 //! framing, timestamp admission, and HMAC verification. It deliberately has
 //! no knowledge of endpoints, JSON, persistence, or HTTP routing.
 
-use std::{
-    fmt,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use aws_lc_rs::{constant_time, hmac};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -28,7 +25,8 @@ pub const MAX_MESSAGE_ID_BYTES: usize = 255;
 ///
 /// Construction accepts the Standard Webhooks base64 form, with its optional
 /// `whsec_` prefix. The encoded value is never retained or exposed.
-#[derive(Clone)]
+#[derive(Clone, derive_more::Debug)]
+#[debug("SigningKey([REDACTED])")]
 pub struct SigningKey(hmac::Key);
 
 impl SigningKey {
@@ -47,14 +45,9 @@ impl SigningKey {
     }
 }
 
-impl fmt::Debug for SigningKey {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("SigningKey([REDACTED])")
-    }
-}
-
 /// The active signing key and an optional predecessor used during rotation.
-#[derive(Clone)]
+#[derive(Clone, derive_more::Debug)]
+#[debug("KeyRing([REDACTED])")]
 pub struct KeyRing {
     active: SigningKey,
     previous: Option<SigningKey>,
@@ -148,12 +141,6 @@ impl KeyRing {
             });
         }
         Err(ProtocolError::InvalidSignature)
-    }
-}
-
-impl fmt::Debug for KeyRing {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("KeyRing([REDACTED])")
     }
 }
 

@@ -23,6 +23,6 @@ fn a_taken_log_logger_is_reported_and_installs_nothing() {
         tracer_provider: None,
     });
 
-    assert!(matches!(result, Err(LoggingError::LogLoggerInstalled)));
+    std::assert_matches!(result, Err(LoggingError::LogLoggerInstalled));
     assert!(!tracing::dispatcher::has_been_set());
 }

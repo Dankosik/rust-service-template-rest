@@ -4,7 +4,6 @@
 //! credential owner nor performs token or resource I/O.
 
 use std::collections::BTreeMap;
-use std::fmt;
 
 use secrecy::SecretString;
 use serde::Deserialize;
@@ -55,8 +54,8 @@ pub struct GrpcClientConfig {
     pub private_key: Option<SecretString>,
 }
 
-impl fmt::Debug for GrpcClientConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl std::fmt::Debug for GrpcClientConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("GrpcClientConfig")
             .field("destination", &self.destination)
             .field("security", &self.security)
@@ -70,8 +69,9 @@ impl fmt::Debug for GrpcClientConfig {
 ///
 /// A missing text key decodes empty and is refused by validation, which
 /// names the key; `algorithm` has no empty form and is refused when decoded.
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, derive_more::Debug)]
 #[serde(deny_unknown_fields)]
+#[debug("OAuthConfig {{ .. }}")]
 pub struct OAuthConfig {
     /// Fixed token endpoint, admitted before any adapter construction.
     #[serde(default)]
@@ -149,12 +149,6 @@ where
     }
 }
 
-impl fmt::Debug for OAuthConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("OAuthConfig").finish_non_exhaustive()
-    }
-}
-
 /// Client-assertion signing algorithm, decoded from its RFC 7518 identifier.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OAuthAlgorithm {
@@ -184,19 +178,14 @@ impl<'de> Deserialize<'de> for OAuthAlgorithm {
 }
 
 /// RFC 6749 scope tokens supplied as a list or an environment string.
-#[derive(Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq, derive_more::Debug)]
+#[debug("Scopes([REDACTED])")]
 pub struct Scopes(Vec<String>);
 
 impl Scopes {
     #[must_use]
     pub fn as_slice(&self) -> &[String] {
         &self.0
-    }
-}
-
-impl fmt::Debug for Scopes {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("Scopes([REDACTED])")
     }
 }
 

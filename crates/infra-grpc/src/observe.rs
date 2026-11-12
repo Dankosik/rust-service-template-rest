@@ -242,6 +242,8 @@ static CLIENT_SERIES: OnceLock<Arc<Series>> = OnceLock::new();
 ///
 /// A call resolves its handles once, when it starts, and records through
 /// them without another lookup.
+#[derive(derive_more::Debug)]
+#[debug("Series {{ .. }}")]
 pub(crate) struct Series {
     started_metric: &'static str,
     handled_metric: &'static str,
@@ -421,12 +423,6 @@ fn client_path<B>(request: &http::Request<B>) -> Option<&str> {
     let (service, rpc) = crate::protocol::split_method_path(path)?;
     let matches = service == method.service() && rpc == method.method();
     matches.then_some(path)
-}
-
-impl std::fmt::Debug for Series {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.debug_struct("Series").finish_non_exhaustive()
-    }
 }
 
 /// Splits `/package.Service/Method`; [`UNKNOWN_PATH`] and any other path

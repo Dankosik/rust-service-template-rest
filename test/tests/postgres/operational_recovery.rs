@@ -160,10 +160,7 @@ impl Instance {
                 let response = self.get("/health/ready").await;
                 let status = response.status();
                 let _ = response.bytes().await.unwrap();
-                assert!(matches!(
-                    status,
-                    StatusCode::OK | StatusCode::SERVICE_UNAVAILABLE
-                ));
+                std::assert_matches!(status, StatusCode::OK | StatusCode::SERVICE_UNAVAILABLE);
                 if (status == StatusCode::OK) == ready {
                     break;
                 }
@@ -181,14 +178,12 @@ impl Instance {
                 "instance {}: completed dependency failure {verdict:?}",
                 self.address
             );
-            assert!(
-                matches!(
-                    verdict,
-                    Err(health::NotReady::ProbeFailed {
-                        probe: "postgres",
-                        ..
-                    })
-                ),
+            std::assert_matches!(
+                verdict,
+                Err(health::NotReady::ProbeFailed {
+                    probe: "postgres",
+                    ..
+                }),
                 "{verdict:?}"
             );
         }

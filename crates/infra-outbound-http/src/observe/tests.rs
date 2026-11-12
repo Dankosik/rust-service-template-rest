@@ -79,12 +79,12 @@ async fn exercise_completed_attempts() {
     server.await.expect("999-status fixture joins");
 
     // Refused before I/O, so it is not an attempt.
-    assert!(matches!(
+    std::assert_matches!(
         client
             .execute(request_to("https://other.fixture.test/items"), deadline())
             .await,
         Err(Error::InvalidTarget)
-    ));
+    );
 
     let (address, server) = tls_server(
         &material,
@@ -100,7 +100,7 @@ async fn exercise_completed_attempts() {
     request
         .headers_mut()
         .insert("x-sentinel", "sentinel-value".parse().expect("header"));
-    assert!(matches!(
+    std::assert_matches!(
         fixture_client_with_limits(
             address,
             &material,
@@ -112,7 +112,7 @@ async fn exercise_completed_attempts() {
         .execute(request, deadline())
         .await,
         Err(Error::ResponseBodyTooLarge)
-    ));
+    );
     server.await.expect("body-limit fixture joins");
 }
 
@@ -313,7 +313,7 @@ fn observation_records_timeout_cancellation_and_polled_drop_once() {
                 let timed = fixture_client(address, &material)
                     .execute(request(), deadline())
                     .await;
-                assert!(matches!(timed, Err(Error::Timeout)));
+                std::assert_matches!(timed, Err(Error::Timeout));
                 server.abort();
                 assert!(
                     server
@@ -352,7 +352,7 @@ fn observation_records_timeout_cancellation_and_polled_drop_once() {
                     "stalled exchange completed unexpectedly"
                 );
                 context.cancel();
-                assert!(matches!(exchange.await, Err(Error::Cancelled)));
+                std::assert_matches!(exchange.await, Err(Error::Cancelled));
                 server.abort();
                 assert!(
                     server
@@ -440,7 +440,7 @@ async fn exercise_transport_failures() -> Vec<String> {
     };
     let root_cause = |result: Result<http::Response<Bytes>, Error>| {
         let error = result.expect_err("transport failure");
-        assert!(matches!(error, Error::Transport { .. }), "{error:?}");
+        std::assert_matches!(error, Error::Transport { .. }, "{error:?}");
         std::iter::successors(error.source(), |cause| (*cause).source())
             .last()
             .expect("transport source")

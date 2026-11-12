@@ -21,14 +21,8 @@ const STREAM_YIELD_THRESHOLD_BYTES: usize = 32 * 1024;
 ///
 /// `Outbound` is encoded and `Inbound` is decoded. Clients send requests and
 /// receive responses; servers use the opposite direction.
-#[derive(Debug, Clone)]
+#[derive_where::derive_where(Debug, Clone, Default)]
 pub struct ContractCodec<Outbound, Inbound>(PhantomData<(Outbound, Inbound)>);
-
-impl<Outbound, Inbound> Default for ContractCodec<Outbound, Inbound> {
-    fn default() -> Self {
-        Self(PhantomData)
-    }
-}
 
 impl<Outbound, Inbound> Codec for ContractCodec<Outbound, Inbound>
 where

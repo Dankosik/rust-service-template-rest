@@ -455,7 +455,7 @@ mod tests {
             },
         )
         .unwrap_err();
-        assert!(matches!(err, EnqueueError::InvalidKind("Bad Name")));
+        std::assert_matches!(err, EnqueueError::InvalidKind("Bad Name"));
     }
 
     #[derive(Serialize, Deserialize)]
@@ -471,10 +471,7 @@ mod tests {
     fn a_payload_the_worker_cannot_decode_is_refused_before_sending() {
         for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             let err = prepare(&Reading { value }, EnqueueOptions::default()).unwrap_err();
-            assert!(
-                matches!(err, EnqueueError::PayloadDoesNotDecode(_)),
-                "{value}"
-            );
+            std::assert_matches!(err, EnqueueError::PayloadDoesNotDecode(_), "{value}");
         }
         assert!(prepare(&Reading { value: 1.5 }, EnqueueOptions::default()).is_ok());
     }
@@ -492,7 +489,7 @@ mod tests {
         .unwrap();
         assert_eq!(prepared.unique_key, Some(accepted.as_str()));
 
-        assert!(matches!(
+        std::assert_matches!(
             prepare(
                 &widget(),
                 EnqueueOptions {
@@ -501,8 +498,8 @@ mod tests {
                 },
             ),
             Err(EnqueueError::InvalidUniqueKey)
-        ));
-        assert!(matches!(
+        );
+        std::assert_matches!(
             prepare(
                 &widget(),
                 EnqueueOptions {
@@ -511,10 +508,10 @@ mod tests {
                 },
             ),
             Err(EnqueueError::InvalidUniqueKey)
-        ));
+        );
         let crossing = format!("{}é", "a".repeat(254));
         assert_eq!(crossing.len(), 256);
-        assert!(matches!(
+        std::assert_matches!(
             prepare(
                 &widget(),
                 EnqueueOptions {
@@ -523,23 +520,21 @@ mod tests {
                 },
             ),
             Err(EnqueueError::InvalidUniqueKey)
-        ));
+        );
     }
 
     #[test]
     fn unique_key_rejects_control_characters() {
         for key in ["\n", "\u{0}", "\u{7f}", "\u{85}"] {
-            assert!(
-                matches!(
-                    prepare(
-                        &widget(),
-                        EnqueueOptions {
-                            delay: Duration::ZERO,
-                            unique_key: Some(key),
-                        },
-                    ),
-                    Err(EnqueueError::InvalidUniqueKey)
+            std::assert_matches!(
+                prepare(
+                    &widget(),
+                    EnqueueOptions {
+                        delay: Duration::ZERO,
+                        unique_key: Some(key),
+                    },
                 ),
+                Err(EnqueueError::InvalidUniqueKey),
                 "{key:?}"
             );
         }
@@ -557,7 +552,7 @@ mod tests {
             )
             .is_ok()
         );
-        assert!(matches!(
+        std::assert_matches!(
             prepare(
                 &widget(),
                 EnqueueOptions {
@@ -566,7 +561,7 @@ mod tests {
                 },
             ),
             Err(EnqueueError::InvalidDelay(InvalidDelay))
-        ));
+        );
     }
 
     #[test]
@@ -598,10 +593,10 @@ mod tests {
         for length in [MAX_PAYLOAD_BYTES - 1, MAX_PAYLOAD_BYTES * 8] {
             let too_big = Raw("a".repeat(length));
             let err = prepare(&too_big, EnqueueOptions::default()).unwrap_err();
-            assert!(matches!(
+            std::assert_matches!(
                 err,
                 EnqueueError::PayloadTooLarge { bytes } if bytes == length + 2
-            ));
+            );
         }
     }
 
@@ -632,11 +627,11 @@ mod tests {
             } else {
                 // Each encoded NUL string is eight bytes, plus one comma;
                 // the surrounding brackets replace the missing first comma.
-                assert!(matches!(
+                std::assert_matches!(
                     err,
                     EnqueueError::PayloadTooLarge { bytes }
                         if bytes == payload.elements * 9 + 1
-                ));
+                );
             }
             assert_eq!(payload.calls.load(Ordering::Relaxed), 1);
         }
@@ -669,21 +664,21 @@ mod tests {
 
     #[test]
     fn payload_rejects_decoded_nul_but_keeps_literal_backslash_u0000() {
-        assert!(matches!(
+        std::assert_matches!(
             prepare(&Duplicate, EnqueueOptions::default()),
             Err(EnqueueError::PayloadContainsNul)
-        ));
-        assert!(matches!(
+        );
+        std::assert_matches!(
             prepare(&Raw("\0".to_owned()), EnqueueOptions::default()),
             Err(EnqueueError::PayloadContainsNul)
-        ));
-        assert!(matches!(
+        );
+        std::assert_matches!(
             prepare(
                 &Keyed(BTreeMap::from([("\0".to_owned(), "value".to_owned())])),
                 EnqueueOptions::default(),
             ),
             Err(EnqueueError::PayloadContainsNul)
-        ));
+        );
         assert!(prepare(&Raw(r"\u0000".to_owned()), EnqueueOptions::default()).is_ok());
     }
 
@@ -702,6 +697,6 @@ mod tests {
     #[test]
     fn serialize_failure() {
         let err = prepare(&Refuse, EnqueueOptions::default()).unwrap_err();
-        assert!(matches!(err, EnqueueError::Serialize(_)));
+        std::assert_matches!(err, EnqueueError::Serialize(_));
     }
 }

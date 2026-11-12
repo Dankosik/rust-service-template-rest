@@ -1,3 +1,4 @@
+use std::assert_matches;
 use std::time::Duration;
 
 use super::*;
@@ -51,7 +52,7 @@ fn runtime_workers_load_from_the_environment_and_zero_names_its_key() {
         env(&[("APP__RUNTIME__WORKER_THREADS", "0")]),
     )
     .unwrap_err();
-    assert!(matches!(&err, Error::Deserialize(_)), "{err}");
+    assert_matches!(&err, Error::Deserialize(_), "{err}");
     assert!(err.to_string().contains("runtime.worker_threads"), "{err}");
 }
 
@@ -135,7 +136,7 @@ fn rejected_environment_values_are_not_echoed() {
         ] {
             let err = load_from(&LoadOptions::default(), BUILD, env(&[(name, value)])).unwrap_err();
             let rendered = err.to_string();
-            assert!(matches!(&err, Error::Deserialize(_)), "{name}: {rendered}");
+            assert_matches!(&err, Error::Deserialize(_), "{name}: {rendered}");
             assert!(
                 rendered.contains(&format!("for key `{key}` in the environment")),
                 "{name}: {rendered}"
@@ -228,10 +229,7 @@ fn file_keys_the_environment_cannot_name_are_refused() {
             env(&[]),
         )
         .unwrap_err();
-        assert!(
-            matches!(&err, Error::UnaddressableKey { key, .. } if key == expected),
-            "{contents}: {err}"
-        );
+        assert_matches!(&err, Error::UnaddressableKey { key, .. } if key == expected, "{contents}: {err}");
     }
 }
 
@@ -302,26 +300,26 @@ fn unknown_keys_fail_from_files_and_env() {
         config: Some(file),
         ..LoadOptions::default()
     };
-    assert!(matches!(
+    assert_matches!(
         load_from(&options, BUILD, env(&[])),
         Err(Error::Deserialize(_))
-    ));
-    assert!(matches!(
+    );
+    assert_matches!(
         load_from(
             &LoadOptions::default(),
             BUILD,
             env(&[("APP__HTTP__BOGUS", "1")])
         ),
         Err(Error::Deserialize(_))
-    ));
-    assert!(matches!(
+    );
+    assert_matches!(
         load_from(
             &LoadOptions::default(),
             BUILD,
             env(&[("APP__NOPE__X", "1")])
         ),
         Err(Error::Deserialize(_))
-    ));
+    );
 }
 
 #[test]
@@ -337,10 +335,7 @@ fn malformed_env_names_are_named() {
         "APP__HTTP__ADDR ",
     ] {
         let err = load_from(&LoadOptions::default(), BUILD, env(&[(name, "x")])).unwrap_err();
-        assert!(
-            matches!(&err, Error::MalformedEnvName { name: n } if n == name),
-            "{name}: {err}"
-        );
+        assert_matches!(&err, Error::MalformedEnvName { name: n } if n == name, "{name}: {err}");
     }
 }
 
@@ -352,7 +347,7 @@ fn empty_env_value_is_an_explicit_override() {
         env(&[("APP__HTTP__ADDR", "")]),
     )
     .unwrap_err();
-    assert!(matches!(err, Error::Deserialize(_)), "{err}");
+    assert_matches!(err, Error::Deserialize(_), "{err}");
     assert!(err.to_string().contains("http.addr"), "{err}");
 }
 
@@ -369,10 +364,7 @@ fn secrets_in_files_are_refused_and_empty_placeholders_allowed() {
         ..LoadOptions::default()
     };
     let err = load_from(&options, BUILD, env(&[])).unwrap_err();
-    assert!(
-        matches!(&err, Error::SecretInFile { key, .. } if key == "observability.otel.exporter.otlp_headers"),
-        "{err}"
-    );
+    assert_matches!(&err, Error::SecretInFile { key, .. } if key == "observability.otel.exporter.otlp_headers", "{err}");
 
     let placeholder = write(
         &dir,
@@ -407,10 +399,10 @@ fn missing_file_is_reported() {
         config: Some(PathBuf::from("/definitely/missing.toml")),
         ..LoadOptions::default()
     };
-    assert!(matches!(
+    assert_matches!(
         load_from(&options, BUILD, env(&[])),
         Err(Error::ReadFile { .. })
-    ));
+    );
 }
 
 #[test]
@@ -431,7 +423,7 @@ fn zero_counts_fail_to_deserialize() {
     ];
     for &(name, key) in cases {
         let err = load_from(&LoadOptions::default(), BUILD, env(&[(name, "0")])).unwrap_err();
-        assert!(matches!(err, Error::Deserialize(_)), "{name}: {err}");
+        assert_matches!(err, Error::Deserialize(_), "{name}: {err}");
         assert!(err.to_string().contains(key), "{name}: {err}");
     }
 }
@@ -456,7 +448,7 @@ fn drain_timeout_and_probe_budget_load_from_env() {
         ("APP__HEALTH__READINESS_TIMEOUT", "readiness_timeout"),
     ] {
         let legacy = load_from(&LoadOptions::default(), BUILD, env(&[(name, "22s")])).unwrap_err();
-        assert!(matches!(legacy, Error::Deserialize(_)), "{legacy}");
+        assert_matches!(legacy, Error::Deserialize(_), "{legacy}");
         assert!(legacy.to_string().contains(key), "{legacy}");
     }
 }
@@ -557,27 +549,24 @@ fn secrets_directory_failures_name_the_path_and_no_content() {
         secrets_dir: Some(PathBuf::from("/definitely/missing-secrets")),
         ..LoadOptions::default()
     };
-    assert!(matches!(
+    assert_matches!(
         load_from(&missing, BUILD, env(&[])),
         Err(Error::ReadSecretsDir { .. })
-    ));
+    );
 
     for name in ["APP__HTTP.ADDR", "APP__HTTP__ADDR__", "APP__"] {
         let dir = tempfile::tempdir().unwrap();
         let file = write(&dir, name, "127.0.0.1:7");
         let err = load_from(&with_secrets(&dir), BUILD, env(&[])).unwrap_err();
-        assert!(
-            matches!(&err, Error::MalformedSecretName { path } if *path == file),
-            "{name}: {err}"
-        );
+        assert_matches!(&err, Error::MalformedSecretName { path } if *path == file, "{name}: {err}");
     }
 
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir(dir.path().join("APP__HTTP__ADDR")).unwrap();
-    assert!(matches!(
+    assert_matches!(
         load_from(&with_secrets(&dir), BUILD, env(&[])),
         Err(Error::ReadSecret { .. })
-    ));
+    );
 
     // Not Unicode, and a NUL byte, which would let a value forge the
     // mark of a value-free message.
@@ -586,10 +575,7 @@ fn secrets_directory_failures_name_the_path_and_no_content() {
         let file = dir.path().join("APP__LOG__LEVEL");
         std::fs::write(&file, content).unwrap();
         let err = load_from(&with_secrets(&dir), BUILD, env(&[])).unwrap_err();
-        assert!(
-            matches!(&err, Error::ReadSecret { path, .. } if *path == file),
-            "{err}"
-        );
+        assert_matches!(&err, Error::ReadSecret { path, .. } if *path == file, "{err}");
         assert!(!err.to_string().contains("hunter2"), "{err}");
     }
 }
@@ -605,11 +591,8 @@ fn two_spellings_of_one_variable_are_refused() {
         ]),
     )
     .unwrap_err();
-    assert!(
-        matches!(&err, Error::AmbiguousName { name, other }
-            if name == "APP__http__addr" && other == "APP__HTTP__ADDR"),
-        "{err}"
-    );
+    assert_matches!(&err, Error::AmbiguousName { name, other }
+            if name == "APP__http__addr" && other == "APP__HTTP__ADDR", "{err}");
 }
 
 #[test]
@@ -641,10 +624,7 @@ fn variables_that_are_not_unicode_are_refused() {
         [(OsString::from("APP__LOG__LEVEL"), not_unicode("hunter2"))],
     )
     .unwrap_err();
-    assert!(
-        matches!(&err, Error::NonUnicodeEnvValue { name } if name == "APP__LOG__LEVEL"),
-        "{err}"
-    );
+    assert_matches!(&err, Error::NonUnicodeEnvValue { name } if name == "APP__LOG__LEVEL", "{err}");
     assert!(!err.to_string().contains("hunter2"), "{err}");
 
     let err = load_from(
@@ -653,7 +633,7 @@ fn variables_that_are_not_unicode_are_refused() {
         [(not_unicode("APP__LOG__LEVEL"), OsString::from("info"))],
     )
     .unwrap_err();
-    assert!(matches!(err, Error::MalformedEnvName { .. }), "{err}");
+    assert_matches!(err, Error::MalformedEnvName { .. }, "{err}");
 
     // A name outside the namespace is not read at all.
     load_from(

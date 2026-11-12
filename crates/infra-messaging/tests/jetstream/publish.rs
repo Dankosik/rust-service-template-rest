@@ -42,7 +42,7 @@ async fn publication_requires_expected_stream_ack_deduplicates_and_rejects_defin
         .producer()
         .publish(&rejected, &context(deadline(), &cancel))
         .await;
-    assert!(matches!(result, Err(PublishError::Rejected)));
+    std::assert_matches!(result, Err(PublishError::Rejected));
 
     close(messaging).await;
     fixture.cleanup().await;
@@ -63,13 +63,13 @@ async fn a_prepared_event_obeys_the_receiving_resources_payload_limit() {
     ))
     .await
     .expect("smaller receiving resource is admitted");
-    assert!(matches!(
+    std::assert_matches!(
         messaging
             .producer()
             .publish(&prepared, &context(deadline(), &cancel))
             .await,
         Err(PublishError::Rejected)
-    ));
+    );
     let mut source = fixture.jetstream.get_stream(&fixture.stream).await.unwrap();
     assert_eq!(source.info().await.unwrap().state.messages, 0);
     close(messaging).await;
@@ -139,7 +139,7 @@ async fn cancelled_publications_hold_the_shared_window_until_native_cleanup() {
         .expect("every admitted publication reaches the broker");
     cancel.cancel();
     while let Some(result) = publications.join_next().await {
-        assert!(matches!(result.unwrap(), Err(PublishError::Ambiguous)));
+        std::assert_matches!(result.unwrap(), Err(PublishError::Ambiguous));
     }
     let producer = messaging.producer();
     let healthy = CancellationToken::new();
@@ -149,7 +149,7 @@ async fn cancelled_publications_hold_the_shared_window_until_native_cleanup() {
     )
     .await
     .expect("a full shared window refuses without waiting");
-    assert!(matches!(refused, Err(PublishError::Rejected)));
+    std::assert_matches!(refused, Err(PublishError::Rejected));
     assert_eq!(observed.load(Ordering::SeqCst), capacity);
 
     timeout(Duration::from_secs(7), async {
@@ -199,7 +199,7 @@ async fn post_dispatch_lost_ack_is_ambiguous_and_same_identity_retries_as_duplic
             &context(Instant::now() + Duration::from_millis(250), &cancel),
         )
         .await;
-    assert!(matches!(result, Err(PublishError::Ambiguous)));
+    std::assert_matches!(result, Err(PublishError::Ambiguous));
 
     let mut source = fixture
         .jetstream

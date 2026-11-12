@@ -33,7 +33,7 @@ mod test_metrics;
 #[path = "../../../test/fixtures/tls.rs"]
 mod tls;
 
-use std::{fmt, sync::Arc};
+use std::sync::Arc;
 
 use operation_context::OperationContext;
 
@@ -271,7 +271,8 @@ impl SuccessCounters {
 
 /// A verified identity. Construction remains crate-private so callers cannot
 /// attach unverified request data as a principal.
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq, derive_more::Debug)]
+#[debug("Principal([VERIFIED_IDENTITY_REDACTED])")]
 pub struct Principal {
     identity: Arc<Identity>,
     // Keep expiry outside the shared allocation for the const accessor.
@@ -383,16 +384,11 @@ impl Principal {
     }
 }
 
-impl fmt::Debug for Principal {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("Principal([VERIFIED_IDENTITY_REDACTED])")
-    }
-}
-
 /// The current actor delegated to act on a subject's behalf (RFC 8693 §4.1).
 /// `may_act` is an authorization-server input, not receiver evidence, and is
 /// never exposed here.
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq, derive_more::Debug)]
+#[debug("Actor([REDACTED])")]
 pub struct Actor {
     subject: String,
     client_id: Option<String>,
@@ -411,12 +407,6 @@ impl Actor {
     #[must_use]
     pub fn client_id(&self) -> Option<&str> {
         self.client_id.as_deref()
-    }
-}
-
-impl fmt::Debug for Actor {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("Actor([REDACTED])")
     }
 }
 
@@ -441,12 +431,14 @@ impl Principal {
 pub mod test_support {
     use tokio_util::sync::CancellationToken;
 
-    use super::{Failure, fmt, provider};
+    use super::{Failure, provider};
 
     pub use crate::introspection::prepare_introspection_with_fixture;
 
     /// Fixture-only custody for a real verifier transport. It cannot construct
     /// a principal or bypass verification.
+    #[derive(derive_more::Debug)]
+    #[debug("FixtureTransport([REDACTED])")]
     pub struct FixtureTransport {
         provider: provider::ProviderClient,
     }
@@ -472,17 +464,12 @@ pub mod test_support {
             self.provider
         }
     }
-
-    impl fmt::Debug for FixtureTransport {
-        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            formatter.write_str("FixtureTransport([REDACTED])")
-        }
-    }
 }
 // template:end oidc-introspection:authn-introspection-test-support
 
 /// A prepared real authentication engine.
-#[derive(Clone)]
+#[derive(Clone, derive_more::Debug)]
+#[debug("Verifier([REDACTED])")]
 pub struct Verifier {
     engine: Engine,
     counters: Arc<SuccessCounters>,
@@ -565,11 +552,5 @@ impl Verifier {
         // A late failure is no more valid as credential evidence than late success.
         context.check().map_err(|_| Failure::Unavailable)?;
         record_verification(&self.counters, result)
-    }
-}
-
-impl fmt::Debug for Verifier {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("Verifier([REDACTED])")
     }
 }

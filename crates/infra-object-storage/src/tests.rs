@@ -1535,13 +1535,12 @@ async fn get_headers_and_body_spend_the_same_context_budget() {
     use operation_context::OperationContext;
 
     let stub = Stub::start_with_delay(Duration::from_millis(100), |_, _| {
-        let chunks = futures_util::stream::unfold(0, |index| async move {
-            if index == 4 {
-                return None;
+        let chunks = async_stream::stream! {
+            for _ in 0..4 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                yield Ok::<_, std::io::Error>(Bytes::from_static(b"x"));
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            Some((Ok::<_, std::io::Error>(Bytes::from_static(b"x")), index + 1))
-        });
+        };
         Response::builder()
             .header("content-length", "4")
             .body(Body::from_stream(chunks))

@@ -2,6 +2,7 @@ use super::*;
 use crate::LoadOptions;
 use crate::load::{Error, load_from};
 use crate::test_support::{BUILD, env, write};
+use std::assert_matches;
 
 /// A jwt-mode section with the required keys, then `extra` lines.
 fn jwt(extra: &str) -> ServiceAuthConfig {
@@ -130,10 +131,7 @@ fn service_auth_signing_key_in_a_file_is_refused() {
         env(&[]),
     )
     .unwrap_err();
-    assert!(
-        matches!(&err, Error::SecretInFile { key, .. } if key == "service_auth.private_key"),
-        "{err}"
-    );
+    assert_matches!(&err, Error::SecretInFile { key, .. } if key == "service_auth.private_key", "{err}");
 }
 
 #[test]
@@ -157,8 +155,5 @@ fn unauthenticated_grpc_outside_development_refuses_startup() {
         env(&[listener.as_slice(), production.as_slice()].concat()),
     )
     .unwrap_err();
-    assert!(
-        matches!(&err, Error::Validate(error) if error.key == "service_auth.mode"),
-        "{err}"
-    );
+    assert_matches!(&err, Error::Validate(error) if error.key == "service_auth.mode", "{err}");
 }

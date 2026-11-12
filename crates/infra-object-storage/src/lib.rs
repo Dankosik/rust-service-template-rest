@@ -185,19 +185,14 @@ impl ObjectMetadata {
 
 /// A presigned GET URL. It is a bearer credential until it expires: hand it
 /// only to its intended recipient and never log it. [`Debug`] redacts it.
-#[derive(Clone)]
+#[derive(Clone, derive_more::Debug)]
+#[debug("PresignedUrl([REDACTED])")]
 pub struct PresignedUrl(String);
 
 impl PresignedUrl {
     #[must_use]
     pub fn expose(&self) -> &str {
         &self.0
-    }
-}
-
-impl std::fmt::Debug for PresignedUrl {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("PresignedUrl([REDACTED])")
     }
 }
 

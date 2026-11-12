@@ -113,6 +113,7 @@ pub(crate) enum WorkerError {
 }
 
 /// How the running worker ended. A stop during startup counts as [`Self::Signal`].
+#[derive(Debug)]
 enum Ended {
     Signal,
     Failure(WorkerError),
@@ -504,20 +505,20 @@ mod tests {
                 .unwrap(),
             "readiness_progress"
         );
-        assert!(matches!(
+        std::assert_matches!(
             super::pending_failure(&resources, &background),
             Some(super::WorkerError::BackgroundStopped("readiness_progress"))
-        ));
+        );
         assert_eq!(
             background.tracker.len(),
             2,
             "the report retains both task lifetimes"
         );
         let ended = super::settle_end(&resources, &background, super::Ended::Signal);
-        assert!(matches!(
+        std::assert_matches!(
             ended,
             super::Ended::Failure(super::WorkerError::BackgroundStopped("readiness_progress"))
-        ));
+        );
         background.cancel.cancel();
         background.tracker.close();
         tokio::time::timeout(Duration::from_secs(1), background.tracker.wait())
@@ -649,11 +650,12 @@ mod tests {
                 )
                 .await
                 .unwrap();
-                assert!(matches!(ended, super::Ended::Signal));
+                std::assert_matches!(ended, super::Ended::Signal);
                 let first_stop = signals.first_stop();
                 assert!(first_stop.is_some());
-                assert!(
-                    matches!(signals.wait().now_or_never(), Some(Ok(()))),
+                std::assert_matches!(
+                    signals.wait().now_or_never(),
+                    Some(Ok(())),
                     "the queued second stop must remain available to expedite drain"
                 );
                 assert_eq!(
@@ -685,7 +687,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(matches!(result, Err(WorkerError::Panicked)), "{result:?}");
+        std::assert_matches!(result, Err(WorkerError::Panicked), "{result:?}");
         assert_eq!(observed_finish.now_or_never(), Some(Ok(())));
         assert!(
             deadline.is_some(),

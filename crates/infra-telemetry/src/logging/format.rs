@@ -373,7 +373,9 @@ fn escape(character: char, unit: &mut [u8; 6]) -> &[u8] {
         '\r' => b"\\r",
         '\t' => b"\\t",
         '\0'..='\u{1f}' => {
-            let [high, low] = hex_pair(character as u8);
+            let mut digits = const_hex::Buffer::<1, false>::new();
+            digits.format(&[character as u8]);
+            let [high, low] = *digits.as_byte_array::<2>();
             *unit = [b'\\', b'u', b'0', b'0', high, low];
             &unit[..]
         }
@@ -829,27 +831,20 @@ fn write_timestamp(line: &mut Bytes<MAX_RECORD_BYTES>) {
 }
 
 /// `key` with `bytes` as a quoted lowercase hex string.
-fn write_hex_field(
+fn write_hex_field<const N: usize>(
     line: &mut Bytes<MAX_RECORD_BYTES>,
     key: &str,
-    bytes: &[u8],
+    bytes: &[u8; N],
     format: LoggingFormat,
 ) {
     write_key(line, key, format);
     line.append(b"\"");
-    for &byte in bytes {
-        line.append(&hex_pair(byte));
-    }
+    line.append(
+        const_hex::Buffer::<N, false>::new()
+            .format(bytes)
+            .as_bytes(),
+    );
     line.append(b"\"");
-}
-
-/// The two lowercase hex digits of `byte`.
-fn hex_pair(byte: u8) -> [u8; 2] {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    [
-        DIGITS[usize::from(byte >> 4)],
-        DIGITS[usize::from(byte & 15)],
-    ]
 }
 
 #[cfg(test)]

@@ -2,6 +2,7 @@ use super::*;
 use crate::LoadOptions;
 use crate::load::{Error, load_from};
 use crate::test_support::{BUILD, env, write};
+use std::assert_matches;
 
 fn parse(toml: &str) -> Result<GrpcConfig, toml::de::Error> {
     toml::from_str(toml)
@@ -191,10 +192,7 @@ fn grpc_limits_load_from_the_environment_and_a_bad_one_names_its_key() {
         env(&[listener.as_slice(), over_drain.as_slice()].concat()),
     )
     .unwrap_err();
-    assert!(
-        matches!(&err, Error::Validate(error) if error.key == "grpc.request_timeout"),
-        "{err}"
-    );
+    assert_matches!(&err, Error::Validate(error) if error.key == "grpc.request_timeout", "{err}");
 }
 
 #[test]
@@ -230,8 +228,5 @@ fn grpc_private_key_is_environment_only_and_debug_is_redacted() {
         env(&[]),
     )
     .unwrap_err();
-    assert!(
-        matches!(&err, Error::SecretInFile { key, .. } if key == "grpc.private_key"),
-        "{err}"
-    );
+    assert_matches!(&err, Error::SecretInFile { key, .. } if key == "grpc.private_key", "{err}");
 }

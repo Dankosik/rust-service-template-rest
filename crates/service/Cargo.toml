@@ -42,6 +42,7 @@ futures-util = { workspace = true, features = ["std"] }
 hotpath = { workspace = true, optional = true }
 # `FromRef` for the application state; the transport stays in infra-http.
 axum = { workspace = true }
+derive_more = { workspace = true, features = ["debug"] }
 health = { workspace = true }
 infra-http = { workspace = true }
 tikv-jemallocator = { workspace = true }
@@ -88,6 +89,7 @@ utoipa = { workspace = true, features = ["macros", "yaml"] }
 utoipa-axum = { workspace = true }
 
 [dev-dependencies]
+similar = { workspace = true, features = ["text"] }
 # template:begin grpc:service-grpc-example-dependencies
 grpc-contracts = { workspace = true }
 service-failure = { workspace = true }

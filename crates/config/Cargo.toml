@@ -16,6 +16,9 @@ workspace = true
 bytesize = { workspace = true, features = ["serde"] }
 clap = { workspace = true, features = ["std", "derive", "help", "usage", "error-context"] }
 config = { workspace = true, features = ["toml"] }
+# template:begin outbound-auth:config-derive-more-dependency
+derive_more = { workspace = true, features = ["debug"] }
+# template:end outbound-auth:config-derive-more-dependency
 humantime = { workspace = true }
 humantime-serde = { workspace = true }
 secrecy = { workspace = true, features = ["serde"] }

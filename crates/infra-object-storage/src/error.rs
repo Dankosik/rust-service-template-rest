@@ -10,7 +10,7 @@ use operation_context::Stopped;
 /// Why an operation failed. Each variant tells the caller what it may do next.
 ///
 /// Display and Debug never contain a key, bucket, endpoint, URL, or provider text.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, enum_map::Enum, thiserror::Error)]
 pub enum ObjectStorageError {
     #[error("object not found")]
     NotFound,
@@ -46,13 +46,6 @@ pub enum ObjectStorageError {
 }
 
 impl ObjectStorageError {
-    pub(crate) const COUNT: usize = 8;
-
-    /// The cached histogram column.
-    pub(crate) fn column(self) -> usize {
-        self as usize
-    }
-
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::NotFound => "not_found",

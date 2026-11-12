@@ -233,7 +233,7 @@ mod fixture {
                     value: format!("meaning:{id}"),
                     fail: category == "failed",
                 };
-                assert!(matches!(
+                std::assert_matches!(
                     infra_jobs::enqueue(
                         tx,
                         &work,
@@ -244,7 +244,7 @@ mod fixture {
                     )
                     .await?,
                     infra_jobs::Enqueued::Created(_)
-                ));
+                );
             }
             Ok(())
         })

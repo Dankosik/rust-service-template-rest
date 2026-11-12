@@ -1,5 +1,4 @@
 use std::{
-    fmt,
     future::Future,
     sync::{Arc, Mutex, MutexGuard, PoisonError},
     time::Duration,
@@ -42,7 +41,8 @@ const REFRESH_RETRY: Duration = Duration::from_secs(30);
 /// verified user can [`require it`](crate::AuthenticatedClient::require_on_behalf_of),
 /// so a forgotten subject is an error and never a request made with the
 /// service's own authority.
-#[derive(Clone)]
+#[derive(Clone, derive_more::Debug)]
+#[debug("OnBehalfOf([REDACTED])")]
 pub struct OnBehalfOf(SecretString);
 
 impl OnBehalfOf {
@@ -52,21 +52,10 @@ impl OnBehalfOf {
     }
 }
 
-impl fmt::Debug for OnBehalfOf {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("OnBehalfOf([REDACTED])")
-    }
-}
-
 /// An idle, cloneable owner of one private credential tuple and its tokens.
-#[derive(Clone)]
+#[derive(Clone, derive_more::Debug)]
+#[debug("Credentials([REDACTED])")]
 pub struct Credentials(pub(crate) Arc<Owner>);
-
-impl fmt::Debug for Credentials {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("Credentials([REDACTED])")
-    }
-}
 
 pub(crate) struct Owner {
     pub(crate) inner: Arc<Inner>,
@@ -88,16 +77,12 @@ struct RefreshRequest {
 /// Drive [`Self::run`] while credentials are used and await its completion before
 /// dropping dependencies. Dropping this driver closes all surviving clients.
 #[must_use = "drive and await RefreshDriver::run for the integration lifetime"]
+#[derive(derive_more::Debug)]
+#[debug("RefreshDriver([REDACTED])")]
 pub struct RefreshDriver {
     inner: Arc<Inner>,
     requests: mpsc::Receiver<RefreshRequest>,
     owner_gone: oneshot::Receiver<()>,
-}
-
-impl fmt::Debug for RefreshDriver {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("RefreshDriver([REDACTED])")
-    }
 }
 
 impl RefreshDriver {

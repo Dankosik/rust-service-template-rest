@@ -61,11 +61,10 @@ async fn typed_handler_success_is_followed_by_confirmed_source_ack() {
         .expect("handler completion signal must remain connected");
     assert_eq!(observed, "event-consumer");
     wait_for_source_ack(&fixture).await;
-    assert!(
-        matches!(
+    std::assert_matches!(
             fixture.jetstream.get_stream(&fixture.stream).await.unwrap().get_raw_message(1).await,
             Err(error) if matches!(error.kind(), stream::RawMessageErrorKind::NoMessageFound)
-        ),
+        ,
         "WorkQueue retention removes the acknowledged source record"
     );
 
@@ -359,7 +358,7 @@ async fn drain_forces_unfinished_handler_shutdown_at_the_shared_deadline() {
         .expect("handler must begin before drain is requested");
 
     let outcome = handle.finish(Instant::now() + Duration::from_secs(1)).await;
-    assert!(matches!(outcome, Err(ConsumerError::DrainTimedOut)));
+    std::assert_matches!(outcome, Err(ConsumerError::DrainTimedOut));
     wait_for_source_unacked(&fixture).await;
 
     close(messaging).await;
@@ -391,10 +390,7 @@ async fn aborting_one_consumer_leaves_the_resource_serving() {
         .start(&cancel);
     handle.abort();
     let outcome = handle.finish(deadline()).await;
-    assert!(
-        matches!(outcome, Err(ConsumerError::DrainTimedOut)),
-        "{outcome:?}"
-    );
+    std::assert_matches!(outcome, Err(ConsumerError::DrainTimedOut), "{outcome:?}");
 
     let prepared = infra_messaging::PreparedEvent::prepare(
         fixture.subject.clone(),

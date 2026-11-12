@@ -1,8 +1,6 @@
 //! Concrete HTTP binding. The credential and cache remain in their private
 //! owner; [`AuthenticatedClient::execute`] documents the call contract.
 
-use std::fmt;
-
 use bytes::Bytes;
 use http::{Request, Response, StatusCode};
 use infra_outbound_http::Client;
@@ -14,17 +12,12 @@ use crate::{
     credentials::{AdmissionRefusal, acquisition_deadline, acquisition_stopped, take_subject},
 };
 
-#[derive(Clone)]
+#[derive(Clone, derive_more::Debug)]
+#[debug("AuthenticatedClient([REDACTED])")]
 pub struct AuthenticatedClient {
     credentials: Credentials,
     resource: Client,
     subject_required: bool,
-}
-
-impl fmt::Debug for AuthenticatedClient {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("AuthenticatedClient([REDACTED])")
-    }
 }
 
 impl Credentials {

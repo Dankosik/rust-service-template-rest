@@ -29,6 +29,25 @@ uses `tokio-util`, and the `service-failure` catalog is declared once by its
 | `rstest`, no default features | `service-config` and `service` dev-dependency: named parameterized cases for range checks, addresses and the OpenAPI security classifier. | Keep semantic expectations visible in each case. Do not build a fixture framework for simple values or hide lifecycle setup. |
 | `tikv-jemallocator` 0.7, no default features | `service` and `jobs-worker` binaries: the global allocator. | Only the long-running binaries. `migrate` and `openapi` run for seconds and keep the system allocator. Libraries never set an allocator. The image builder installs `make` because jemalloc builds with `configure` and `make`. |
 | `rlimit` 0.11, no default features | `service` and `jobs-worker` binaries: raise the open-file soft limit to the hard limit at startup. | See [Open-file limit](#open-file-limit). A failure is logged as `open_file_limit_unchanged` and startup continues. |
+| `derive_more` `debug`/`display` | Debug that prints a fixed string (`X([REDACTED])`, `X { .. }`) and one-field Display, through a struct-level `#[debug("...")]` or `#[display("...")]`. | A Debug that names selected fields stays hand-written: `#[debug(skip)]` is a denylist, so a field added later would print. |
+| `enum-map` 3.1, `derive` | Counters and histograms indexed by an enum in `infra-telemetry`, `infra-object-storage` and `infra-messaging`. | Replaces hand-kept `ALL`/`COUNT` tables and their ordering asserts. Statics stay const-initialised through `EnumMap::from_array`. Not for `tonic::Code` or the `codes!` catalog. |
+| `const-hex` 1.19 | Lowercase hex of digests in `infra-http`, `infra-messaging` and the log formatter. | Chosen over `hex` 0.4.3, unreleased since 2021. Hot paths encode into a stack buffer; output is a wire and storage contract and must stay lowercase. |
+| `derive-where` 1.7 | `Clone`, `Debug` and `Default` on generic gRPC types without bounds on their parameters. | Only where a std derive would add a bound the type does not need. |
+| `async-stream` 0.3 | The gRPC health `Watch` stream and test streams. | Not for per-row database streams or `Body` impls, which own polling budgets. |
+| `moka` `sync` | The verified-token memo in `infra-serviceauth`, bounded at 1024 entries. | The validity-window check stays in the verifier; the cache only bounds capacity. |
+| `similar` 2.7, `text` (dev) | The unified diff in the committed-OpenAPI test. | Kept at the 2.x line `insta` already resolves. |
+| std `assert_matches!` | Pattern assertions in tests, which print the value on failure. | Std since Rust 1.96; no crate. |
+
+Rejected after the same code search, 2026-11-12: `mime`, because
+`shared_rules::rfc9110::media_type_is` already owns the media-type check and
+`Mime::from_str` would refuse parameters that rule accepts; `tracing-test`,
+because it matches rendered text under one global subscriber and the capture
+fixtures assert structured fields, span records and background-task events;
+`tracing-capture` 0.1.0, unreleased since 2024-03 and pulling a second
+`itertools`; `headers` for Bearer and Retry-After, being looser than RFC 6750
+and unable to read a Retry-After value. Crates with no matching code
+(identifier, slug, phone, currency, HTML, User-Agent, CLI output, `sd-notify`,
+`rust-embed`) wait for a feature that needs them.
 
 The examples live with their owners in `crates/infra-http/src/harden/tests.rs`,
 `crates/config/src/validate.rs` and `crates/service/tests/openapi.rs`. Test-only

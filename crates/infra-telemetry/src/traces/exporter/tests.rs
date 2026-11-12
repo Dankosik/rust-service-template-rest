@@ -18,11 +18,10 @@ fn typed_endpoint_wins_and_refuses_ambient_credentials() {
             OTEL_EXPORTER_OTLP_TRACES_HEADERS,
         ),
     ] {
-        assert!(
-            matches!(
+        std::assert_matches!(
                 resolve_endpoint(&typed, env(pairs)),
                 Err(TracingError::AmbientCredential { name }) if name == refused
-            ),
+            ,
             "{pairs:?}"
         );
     }
@@ -159,8 +158,7 @@ fn malformed_header_entries_fail_by_position() {
         ("a=line\nbreak", 1),
     ] {
         let err = parse_headers(raw).unwrap_err();
-        assert!(
-            matches!(err, TracingError::InvalidHeader { position: p } if p == position),
+        std::assert_matches!(err, TracingError::InvalidHeader { position: p } if p == position,
             "{raw:?}: {err}"
         );
     }
@@ -250,11 +248,10 @@ fn compression_variables_select_gzip_or_none_and_refuse_the_rest() {
         (&[(general, "zstd")][..], general),
         (&[(traces, "gzipp"), (general, "gzip")][..], traces),
     ] {
-        assert!(
-            matches!(
+        std::assert_matches!(
                 compression(&env(pairs)),
                 Err(ExporterError::Compression { variable }) if variable == refused
-            ),
+            ,
             "{pairs:?}"
         );
     }

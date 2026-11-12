@@ -1,4 +1,5 @@
 use super::*;
+use std::assert_matches;
 
 /// The share arithmetic is `shared_rules::jitter`'s; this owner adds the
 /// unjittered fallback when the random source fails.
@@ -306,7 +307,7 @@ async fn a_dropped_refresh_driver_closes_cached_http_calls_before_dispatch() {
             .execute(fixture.request(), deadline)
             .await
             .unwrap_err();
-        assert!(matches!(error, Error::Acquisition(actual) if actual == expected));
+        assert_matches!(error, Error::Acquisition(actual) if actual == expected);
     }
     assert_eq!(fixture.token_requests().len(), token_requests);
     assert_eq!(fixture.resource_requests().len(), resource_requests);
@@ -433,10 +434,10 @@ async fn a_refresh_failure_survives_an_eligible_401_eviction() {
     let mut next = Box::pin(client.execute(fixture.request(), deadline(Duration::from_secs(10))));
     poll_pending(next.as_mut()).await;
     gate.add_permits(1);
-    assert!(matches!(
+    assert_matches!(
         next.await,
         Err(Error::Acquisition(AcquisitionError::Unavailable))
-    ));
+    );
     assert_eq!(fixture.token_requests().len(), 2);
     assert_eq!(fixture.resource_requests().len(), 2);
     fixture.finish().await;

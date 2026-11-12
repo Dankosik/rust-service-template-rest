@@ -254,7 +254,7 @@ mod idempotency_tests {
     fn test_only_idempotent_route_generates_the_served_contract() {
         let mut composer = Composer::inert();
         let contract = with_test_route(&mut composer).expect("test route composes");
-        assert!(matches!(composer.finish(), Activation::Unconfigured { .. }));
+        std::assert_matches!(composer.finish(), Activation::Unconfigured { .. });
         let document = serde_json::to_value(contract.get_openapi()).unwrap();
         let operation = &document["paths"]["/_test/idempotent"]["post"];
         assert!(operation.get("x-idempotent").is_none());
@@ -294,11 +294,11 @@ mod idempotency_tests {
     fn composing_the_test_route_adds_exactly_one_served_operation() {
         // The plain contract serves only what is composed into it: nothing,
         // so the boundary stays inactive, until an operation opts in.
-        assert!(matches!(finished(contract), Activation::Inactive));
-        assert!(matches!(
+        std::assert_matches!(finished(contract), Activation::Inactive);
+        std::assert_matches!(
             finished(with_test_route),
             Activation::Unconfigured { operations } if operations.get() == 1
-        ));
+        );
     }
 }
 // template:end http-idempotency:service-api-idempotent-test-route

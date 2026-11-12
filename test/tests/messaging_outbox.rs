@@ -439,7 +439,7 @@ async fn business_rollback_hides_intent_commit_publishes_exact_prepared_event(po
         Err(Step::Refused)
     })
     .await;
-    assert!(matches!(rollback, Err(Step::Refused)));
+    std::assert_matches!(rollback, Err(Step::Refused));
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM business_effects")
             .fetch_one(&business)
@@ -586,13 +586,13 @@ async fn live_event_identity_is_idempotent_only_for_equal_immutable_intent(pool:
             .expect("first immutable intent commits"),
         OutboxEnqueued::Created
     );
-    assert!(matches!(
+    std::assert_matches!(
         timeout(WAIT, second_task)
             .await
             .expect("conflicting transaction joins")
             .expect("conflicting task does not panic"),
         Err(Step::Outbox(OutboxEnqueueError::EventIdConflict))
-    ));
+    );
     assert_eq!(outbox_count(&jobs).await, 2);
 
     close_pools(&[&competing]).await;
@@ -1176,12 +1176,5 @@ async fn dedicated_publisher_progresses_while_real_inbound_webhook_processing_sl
 fn event_key(id: &str) -> String {
     use sha2::{Digest as _, Sha256};
 
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut key = String::with_capacity(70);
-    key.push_str("event-");
-    for byte in Sha256::digest(id.as_bytes()) {
-        key.push(char::from(HEX[usize::from(byte >> 4)]));
-        key.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    key
+    infra_messaging::wire::prefixed_digest_hex("event-", &Sha256::digest(id.as_bytes()))
 }

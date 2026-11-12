@@ -85,8 +85,7 @@ fn a_missing_root_ca_file_reports_only_the_io_kind() {
         Some(missing),
     ))
     .unwrap_err();
-    assert!(
-        matches!(err, CacheError::CaFile { kind } if kind == std::io::ErrorKind::NotFound),
+    std::assert_matches!(err, CacheError::CaFile { kind } if kind == std::io::ErrorKind::NotFound,
         "{err:?}"
     );
     assert!(!format!("{err} {err:?}").contains("secret"));
@@ -212,8 +211,7 @@ fn a_missing_client_certificate_or_key_file_reports_only_the_io_kind() {
         key.path().to_path_buf(),
     ))
     .unwrap_err();
-    assert!(
-        matches!(err, CacheError::ClientCertificateFile { kind } if kind == std::io::ErrorKind::NotFound),
+    std::assert_matches!(err, CacheError::ClientCertificateFile { kind } if kind == std::io::ErrorKind::NotFound,
         "{err:?}"
     );
     assert!(!format!("{err} {err:?}").contains("/no/such"), "{err:?}");
@@ -224,8 +222,7 @@ fn a_missing_client_certificate_or_key_file_reports_only_the_io_kind() {
         PathBuf::from("/no/such/client.key"),
     ))
     .unwrap_err();
-    assert!(
-        matches!(err, CacheError::ClientKeyFile { kind } if kind == std::io::ErrorKind::NotFound),
+    std::assert_matches!(err, CacheError::ClientKeyFile { kind } if kind == std::io::ErrorKind::NotFound,
         "{err:?}"
     );
     assert!(!format!("{err} {err:?}").contains("/no/such"), "{err:?}");
@@ -386,8 +383,7 @@ fn a_password_in_the_dsn_and_a_password_file_are_refused_together() {
 fn an_unreadable_or_empty_password_file_fails_admission() {
     let missing = PathBuf::from("/no/such/cache-password");
     let err = Cache::start(with_password_file("redis://127.0.0.1:6379", missing)).unwrap_err();
-    assert!(
-        matches!(err, CacheError::PasswordFile { kind } if kind == std::io::ErrorKind::NotFound),
+    std::assert_matches!(err, CacheError::PasswordFile { kind } if kind == std::io::ErrorKind::NotFound,
         "{err:?}"
     );
     assert!(!err.to_string().contains("/no/such"), "{err}");

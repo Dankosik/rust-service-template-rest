@@ -271,17 +271,14 @@ impl EchoService for Echo {
             }
             "flood" => {
                 let dropped = NotifyOnDrop(Arc::clone(&self.stream_dropped));
-                Box::pin(futures_util::stream::unfold(
-                    dropped,
-                    |dropped| async move {
-                        Some((
-                            Ok(ServerStreamResponse {
-                                message: "x".repeat(256 * 1024),
-                            }),
-                            dropped,
-                        ))
-                    },
-                ))
+                Box::pin(async_stream::stream! {
+                    let _dropped = dropped;
+                    loop {
+                        yield Ok(ServerStreamResponse {
+                            message: "x".repeat(256 * 1024),
+                        });
+                    }
+                })
             }
             "fail-after-first" => Box::pin(first.chain(futures_util::stream::iter([Err(
                 Failure::new(FailureCode::Conflict).into(),
@@ -302,21 +299,19 @@ impl EchoService for Echo {
         self.observe(&request, Seen::BidiStream);
         let input = request.into_inner();
         let dropped = NotifyOnDrop(Arc::clone(&self.stream_dropped));
-        Ok(Response::new(Box::pin(futures_util::stream::unfold(
-            (input, dropped),
-            |(mut input, dropped)| async move {
+        Ok(Response::new(Box::pin(async_stream::stream! {
+            let _dropped = dropped;
+            let mut input = input;
+            loop {
                 match input.message().await {
-                    Ok(Some(item)) => Some((
-                        Ok(BidiStreamResponse {
-                            message: item.message,
-                        }),
-                        (input, dropped),
-                    )),
-                    Ok(None) => None,
-                    Err(status) => Some((Err(status), (input, dropped))),
+                    Ok(Some(item)) => yield Ok(BidiStreamResponse {
+                        message: item.message,
+                    }),
+                    Ok(None) => break,
+                    Err(status) => yield Err(status),
                 }
-            },
-        ))))
+            }
+        })))
     }
 }
 
@@ -1603,15 +1598,14 @@ async fn duplex_progresses_before_request_eof_and_drop_stops_upload_and_recovers
     let mut client = fixture.echo_client();
     let (sender, receiver) = tokio::sync::mpsc::channel(1);
     let upload_dropped = Arc::new(Notify::new());
-    let upload = futures_util::stream::unfold(
-        (receiver, NotifyOnDrop(Arc::clone(&upload_dropped))),
-        |(mut receiver, dropped)| async move {
-            receiver
-                .recv()
-                .await
-                .map(|item| (item, (receiver, dropped)))
-        },
-    );
+    let dropped = NotifyOnDrop(Arc::clone(&upload_dropped));
+    let upload = async_stream::stream! {
+        let _dropped = dropped;
+        let mut receiver = receiver;
+        while let Some(item) = receiver.recv().await {
+            yield item;
+        }
+    };
     let mut response = timeout(WAIT, client.bidi_stream(request(upload)))
         .await
         .expect("duplex opens before upload EOF")

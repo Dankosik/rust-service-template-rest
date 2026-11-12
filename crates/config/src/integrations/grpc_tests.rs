@@ -1,6 +1,7 @@
 use crate::LoadOptions;
 use crate::load::{Error, load_from};
 use crate::test_support::{BUILD, env};
+use std::assert_matches;
 
 #[test]
 fn grpc_integration_environment_builds_a_lazy_client_tuple() {
@@ -56,8 +57,5 @@ fn grpc_integration_refuses_unpaired_mtls_material() {
         ]),
     )
     .unwrap_err();
-    assert!(
-        matches!(&err, Error::Validate(error) if error.key == "integrations.billing.grpc.certificate/integrations.billing.grpc.private_key"),
-        "{err}"
-    );
+    assert_matches!(&err, Error::Validate(error) if error.key == "integrations.billing.grpc.certificate/integrations.billing.grpc.private_key", "{err}");
 }

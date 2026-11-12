@@ -1,3 +1,4 @@
+use std::assert_matches;
 use std::num::NonZeroU32;
 
 use super::*;
@@ -378,10 +379,7 @@ fn messaging_urls_accept_a_file_list_and_refuse_other_shapes() {
             env(&[("APP__MESSAGING__URLS", blank)]),
         )
         .unwrap_err();
-        assert!(
-            matches!(&err, Error::Validate(error) if error.key == key),
-            "{err}"
-        );
+        assert_matches!(&err, Error::Validate(error) if error.key == key, "{err}");
     }
 }
 
@@ -424,20 +422,17 @@ fn messaging_credentials_in_a_file_are_refused() {
         env(&[]),
     )
     .unwrap_err();
-    assert!(
-        matches!(&err, Error::SecretInFile { key, .. } if key == "messaging.credentials"),
-        "{err}"
-    );
+    assert_matches!(&err, Error::SecretInFile { key, .. } if key == "messaging.credentials", "{err}");
 }
 
 #[test]
 fn messaging_unknown_environment_key_fails_loading() {
-    assert!(matches!(
+    assert_matches!(
         load_from(
             &LoadOptions::default(),
             BUILD,
             env(&[("APP__MESSAGING__UNKNOWN", "x")]),
         ),
         Err(Error::Deserialize(_))
-    ));
+    );
 }

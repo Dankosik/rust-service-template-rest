@@ -563,10 +563,10 @@ fn widget_contract(composer: &mut Composer) -> OpenApiRouter<WidgetState> {
 fn widget_contract_declares_supported_protected_security() {
     let mut composer = Composer::inert();
     let contract = widget_contract(&mut composer);
-    assert!(matches!(
+    std::assert_matches!(
         infra_http::finalize_public(contract).unwrap_err(),
         infra_http::FinalizeError::ProtectedOperation { .. },
-    ));
+    );
 }
 
 impl Mounted {
@@ -585,10 +585,7 @@ impl Mounted {
         let mut composer = Composer::new(Store::new(store_pool.clone(), RETENTION));
         let contract = widget_contract(&mut composer);
         let activation = composer.finish();
-        assert!(
-            matches!(activation, Activation::Active { .. }),
-            "{activation:?}"
-        );
+        std::assert_matches!(activation, Activation::Active { .. }, "{activation:?}");
         let routes = infra_http::authn::finalize(contract, provider.verifier())
             .expect("the mounted auth contract finalizes");
         // The two outer mounts intentionally share the same inner routes. The

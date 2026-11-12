@@ -1,3 +1,4 @@
+use std::assert_matches;
 use std::{
     convert::Infallible,
     future::{Future, poll_fn},
@@ -860,10 +861,6 @@ async fn a_client_requiring_a_subject_is_internal_without_one_before_any_io() {
 }
 
 #[tokio::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "one shared peer fixture covers the composed interval table without duplicated setup"
-)]
 async fn credentials_and_stream_spend_the_selected_resource_interval() {
     // The body is held independently by the peer: resetting the resource clock
     // after a cold credential wait would leave FullRpc alive at this checkpoint.
@@ -928,12 +925,9 @@ async fn credentials_and_stream_spend_the_selected_resource_interval() {
                     Poll::Ready(hyper::body::Body::poll_frame(Pin::new(&mut body), cx))
                 })
                 .await;
-                assert!(
-                    matches!(frame, Poll::Ready(Some(Ok(ref frame)))
+                assert_matches!(frame, Poll::Ready(Some(Ok(ref frame)))
                     if frame.trailers_ref().and_then(Status::from_header_map)
-                        .is_some_and(|status| status.code() == Code::DeadlineExceeded)),
-                    "{frame:?}"
-                );
+                        .is_some_and(|status| status.code() == Code::DeadlineExceeded), "{frame:?}");
             } else {
                 let mut frame = Box::pin(poll_fn(|cx| {
                     hyper::body::Body::poll_frame(Pin::new(&mut body), cx)
@@ -944,12 +938,9 @@ async fn credentials_and_stream_spend_the_selected_resource_interval() {
                     // ends relative to entry, including the credential wait.
                     super::advance(Duration::from_secs(7)).await;
                     let result = poll_fn(|cx| Poll::Ready(frame.as_mut().poll(cx))).await;
-                    assert!(
-                        matches!(result, Poll::Ready(Some(Ok(ref frame)))
+                    assert_matches!(result, Poll::Ready(Some(Ok(ref frame)))
                         if frame.trailers_ref().and_then(Status::from_header_map)
-                            .is_some_and(|status| status.code() == Code::DeadlineExceeded)),
-                        "{result:?}"
-                    );
+                            .is_some_and(|status| status.code() == Code::DeadlineExceeded), "{result:?}");
                 } else {
                     parent.cancel();
                     let frame = tokio::time::timeout(Duration::from_secs(1), frame)
@@ -1000,11 +991,8 @@ async fn resource_opening_ceiling_starts_before_credentials_without_caller_metad
         }
         super::advance(Duration::from_secs(2)).await;
         let result = poll_fn(|cx| Poll::Ready(call.as_mut().poll(cx))).await;
-        assert!(
-            matches!(result, Poll::Ready(Err(ref error))
-            if error.code() == Code::DeadlineExceeded),
-            "{result:?}"
-        );
+        assert_matches!(result, Poll::Ready(Err(ref error))
+            if error.code() == Code::DeadlineExceeded, "{result:?}");
         drop(call);
         assert_eq!(resource.calls(), 0);
         gate.add_permits(1);

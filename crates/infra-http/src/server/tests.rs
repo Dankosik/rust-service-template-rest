@@ -131,8 +131,9 @@ async fn assert_peer_closed(mut peer: TcpStream) {
     let mut response = Vec::new();
     let closed =
         tokio::time::timeout(Duration::from_secs(2), peer.read_to_end(&mut response)).await;
-    assert!(
-        matches!(closed, Ok(Ok(0) | Err(_))),
+    std::assert_matches!(
+        closed,
+        Ok(Ok(0) | Err(_)),
         "connection remained open: {closed:?}"
     );
     assert_eq!(response, [] as [u8; 0]);
@@ -174,7 +175,7 @@ async fn accept_timeout_is_distinct_and_forces_connection_cleanup() {
     )
     .await
     .unwrap();
-    assert!(matches!(result, Err(ServerError::AcceptTimeout)));
+    std::assert_matches!(result, Err(ServerError::AcceptTimeout));
     assert_peer_closed(peer).await;
     tokio::time::timeout(Duration::from_secs(2), async {
         while !abort.is_finished() {
@@ -202,7 +203,7 @@ async fn accept_failure_stays_sticky_and_drain_preserves_it_while_cleaning_conne
     // Fault observation leaves the native join for drain, while the
     // real open request still needs forced cleanup.
     let result = server.drain(Duration::from_millis(20)).await;
-    assert!(matches!(result, Err(ServerError::AcceptTask(error)) if error.is_cancelled()));
+    std::assert_matches!(result, Err(ServerError::AcceptTask(error)) if error.is_cancelled());
     assert_peer_closed(peer).await;
 }
 
@@ -234,8 +235,7 @@ async fn accept_panic_after_stop_is_still_observed() {
         AcceptFailure::Panicked
     );
     // Observing the fault does not consume acceptance's join outcome.
-    assert!(
-        matches!(server.drain(Duration::from_secs(1)).await, Err(ServerError::AcceptTask(error)) if error.is_panic())
+    std::assert_matches!(server.drain(Duration::from_secs(1)).await, Err(ServerError::AcceptTask(error)) if error.is_panic()
     );
     drop(peer);
 }
@@ -246,8 +246,9 @@ async fn silent_client_is_closed_after_the_header_timeout() {
     let mut silent = TcpStream::connect(server.local_addr()).await.unwrap();
     let mut buf = [0u8; 1];
     let closed = tokio::time::timeout(Duration::from_secs(2), silent.read(&mut buf)).await;
-    assert!(
-        matches!(closed, Ok(Ok(0))),
+    std::assert_matches!(
+        closed,
+        Ok(Ok(0)),
         "expected EOF from the server, got {closed:?}"
     );
     server.drain(Duration::from_secs(1)).await.unwrap();
@@ -262,8 +263,9 @@ async fn a_stalled_http2_preface_is_closed_after_the_header_timeout() {
     stalled.write_all(b"PRI * HTTP/2.0\r\n").await.unwrap();
     let mut buf = [0u8; 1];
     let closed = tokio::time::timeout(Duration::from_secs(2), stalled.read(&mut buf)).await;
-    assert!(
-        matches!(closed, Ok(Ok(0))),
+    std::assert_matches!(
+        closed,
+        Ok(Ok(0)),
         "expected EOF from the server, got {closed:?}"
     );
     server.drain(Duration::from_secs(1)).await.unwrap();
@@ -329,8 +331,9 @@ async fn drain_does_not_wait_for_a_connection_that_sent_nothing() {
     assert_eq!(drained, Drained::Complete);
     let mut buf = [0u8; 1];
     let closed = tokio::time::timeout(Duration::from_secs(2), silent.read(&mut buf)).await;
-    assert!(
-        matches!(closed, Ok(Ok(0))),
+    std::assert_matches!(
+        closed,
+        Ok(Ok(0)),
         "expected EOF from the server, got {closed:?}"
     );
 }
@@ -348,7 +351,7 @@ async fn oversized_header_is_431() {
     let text = String::from_utf8_lossy(&response);
     // hyper answers, then closes with unread request bytes pending, which
     // surfaces as EOF or a reset depending on timing.
-    assert!(matches!(outcome, Ok(Ok(_) | Err(_))), "{outcome:?}");
+    std::assert_matches!(outcome, Ok(Ok(_) | Err(_)), "{outcome:?}");
     assert!(
         text.starts_with("HTTP/1.1 431 "),
         "{}",
@@ -374,8 +377,9 @@ async fn connection_cap_refuses_the_excess() {
     let mut buf = Vec::new();
     let outcome = tokio::time::timeout(Duration::from_secs(2), second.read_to_end(&mut buf)).await;
     // Closed with unread bytes pending: EOF or a reset, never a response.
-    assert!(
-        matches!(outcome, Ok(Ok(0) | Err(_))),
+    std::assert_matches!(
+        outcome,
+        Ok(Ok(0) | Err(_)),
         "second connection should be closed: {outcome:?}"
     );
     assert!(
@@ -402,7 +406,7 @@ async fn a_connection_past_its_age_closes_once_idle_and_new_ones_are_served() {
     let mut response = Vec::new();
     let closed =
         tokio::time::timeout(Duration::from_secs(2), kept.read_to_end(&mut response)).await;
-    assert!(matches!(closed, Ok(Ok(_))), "{closed:?}");
+    std::assert_matches!(closed, Ok(Ok(_)), "{closed:?}");
     let text = String::from_utf8_lossy(&response);
     assert!(text.starts_with("HTTP/1.1 200 "), "{text}");
     assert!(text.ends_with("ok"), "{text}");
@@ -431,7 +435,7 @@ async fn bind_failure_is_reported() {
     let err = Server::bind(occupied.local_addr(), app(), options())
         .await
         .expect_err("second bind must fail");
-    assert!(matches!(err, ServerError::Bind { .. }), "{err}");
+    std::assert_matches!(err, ServerError::Bind { .. }, "{err}");
     occupied.drain(Duration::from_secs(1)).await.unwrap();
 }
 
@@ -502,8 +506,9 @@ async fn drain_does_not_wait_for_an_unfinished_tls_handshake() {
     drop(later);
     let mut buf = [0u8; 1];
     let closed = tokio::time::timeout(Duration::from_secs(2), stalled.read(&mut buf)).await;
-    assert!(
-        matches!(closed, Ok(Ok(0))),
+    std::assert_matches!(
+        closed,
+        Ok(Ok(0)),
         "expected EOF from the server, got {closed:?}"
     );
 }

@@ -806,6 +806,10 @@
         ]
       },
       {
+        "path": "crates/config/Cargo.toml",
+        "id": "config-derive-more-dependency"
+      },
+      {
         "path": "crates/config/src/integrations.rs",
         "ids": [
           "config-integration-oauth-url-import",

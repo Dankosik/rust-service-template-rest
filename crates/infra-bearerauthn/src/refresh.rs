@@ -29,10 +29,12 @@ const REFRESH_COOLDOWN: Duration = Duration::from_secs(30);
 const REFRESH_METRIC: &str = "authn_jwks_refreshes_total";
 const ACQUISITION_METRIC: &str = "authn_jwks_last_successful_acquisition_timestamp_seconds";
 
+#[derive(derive_more::Debug)]
 pub(crate) enum SignatureRefresh {
     /// A newer set than the one the token was checked against is installed:
     /// by a fetch that finished after the request, or by one that finished
     /// between that check and the request.
+    #[debug("Refreshed(..)")]
     Refreshed(Arc<KeySet>),
     /// The successful acquisition's cooldown prevents another fetch.
     NoNewerSet,
@@ -279,6 +281,7 @@ mod tests {
         test_metrics::Diagnostics,
     };
     use jsonwebtoken::Algorithm;
+    use std::assert_matches;
     use std::{
         future::Future,
         pin::Pin,
@@ -316,10 +319,10 @@ mod tests {
         let samples = diagnostics.acquisitions.lock().unwrap().clone();
         assert_eq!(samples.len(), 1);
         assert!((before.min(after)..=before.max(after)).contains(&samples[0]));
-        assert!(matches!(
+        assert_matches!(
             store.refresh_for_signature_miss(&keys).await,
             SignatureRefresh::NoNewerSet
-        ));
+        );
         assert_eq!(diagnostics.acquisitions.lock().unwrap().len(), 1);
 
         for failure in [
@@ -387,10 +390,10 @@ mod tests {
             .unwrap();
         assert_eq!(*diagnostics.acquisitions.lock().unwrap(), initial);
         assert!(Arc::ptr_eq(&store.current(), &keys));
-        assert!(matches!(
+        assert_matches!(
             store.refresh_for_signature_miss(&keys).await,
             SignatureRefresh::Unavailable
-        ));
+        );
     }
 
     fn key_set(kid: &str) -> Arc<KeySet> {
@@ -492,7 +495,7 @@ mod tests {
                     .is_pending()
             );
             finish_worker_fetch(worker.as_mut(), &store, period * 2 + 1).await;
-            assert!(matches!(unknown.await, SignatureRefresh::Unavailable));
+            assert_matches!(unknown.await, SignatureRefresh::Unavailable);
 
             let due = started + Duration::from_secs(901);
             tokio::time::advance(due - tokio::time::Instant::now()).await;
@@ -607,10 +610,10 @@ mod tests {
         assert!(keys.has_kid("new"));
         assert_eq!(store.pending(), None);
         // A token checked against the installed set is really unknown.
-        assert!(matches!(
+        assert_matches!(
             store.refresh_for_signature_miss(&keys).await,
             SignatureRefresh::NoNewerSet
-        ));
+        );
     }
 
     #[tokio::test]

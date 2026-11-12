@@ -489,13 +489,13 @@ mod tests {
             Route::new::<OrderCancelled>("orders.cancelled"),
         ])
         .unwrap();
-        assert!(matches!(
+        std::assert_matches!(
             registry.asyncapi("orders", "1"),
             Err(ContractError::Undocumented {
                 event_type: "order.cancelled",
                 schema_version: 1
             })
-        ));
+        );
     }
 
     mod other {
@@ -524,9 +524,9 @@ mod tests {
             Route::documented::<other::OrderShipped>("orders.shipped"),
         ])
         .unwrap();
-        assert!(matches!(
+        std::assert_matches!(
             registry.asyncapi("orders", "1"),
             Err(ContractError::SchemaName(name)) if name == "Line"
-        ));
+        );
     }
 }

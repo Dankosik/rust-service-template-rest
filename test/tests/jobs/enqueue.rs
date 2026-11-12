@@ -524,12 +524,13 @@ async fn e2_a_closure_error_after_enqueue_leaves_no_job(pool: PgPool) {
             EnqueueOptions::default(),
         )
         .await?;
-        assert!(matches!(enqueued, Enqueued::Created(_)));
+        std::assert_matches!(enqueued, Enqueued::Created(_));
         Err(AttemptError::Rejected)
     })
     .await;
-    assert!(
-        matches!(&result, Err(AttemptError::Rejected)),
+    std::assert_matches!(
+        &result,
+        Err(AttemptError::Rejected),
         "{}",
         result.as_ref().err().map(explain).unwrap_or_default()
     );
@@ -559,7 +560,7 @@ async fn e2_a_commit_the_server_rejects_leaves_no_job(pool: PgPool) {
             EnqueueOptions::default(),
         )
         .await?;
-        assert!(matches!(enqueued, Enqueued::Created(_)));
+        std::assert_matches!(enqueued, Enqueued::Created(_));
         sqlx::query("INSERT INTO staged (id, other) VALUES (1, 1), (2, 1)")
             .execute(&mut *tx)
             .await?;
@@ -722,8 +723,9 @@ async fn e4_a_missing_schema_returns_42p01_and_aborts_the_transaction(pool: PgPo
         Err(AttemptError::Rejected)
     })
     .await;
-    assert!(
-        matches!(&result, Err(AttemptError::Rejected)),
+    std::assert_matches!(
+        &result,
+        Err(AttemptError::Rejected),
         "{}",
         result.as_ref().err().map(explain).unwrap_or_default()
     );
@@ -762,8 +764,9 @@ async fn e4_a_read_only_transaction_returns_25006_and_writes_nothing(pool: PgPoo
         },
     )
     .await;
-    assert!(
-        matches!(&result, Err(AttemptError::Rejected)),
+    std::assert_matches!(
+        &result,
+        Err(AttemptError::Rejected),
         "{}",
         result.as_ref().err().map(explain).unwrap_or_default()
     );
@@ -854,7 +857,7 @@ async fn e6_any_isolation_writes_when_no_holder_and_a_key_is_per_kind(pool: PgPo
         let name = isolation_name(isolation);
         let free = format!("free-{name}");
         let created = write(&jobs, isolation, &Note { text: free.clone() }, Some(&free)).await;
-        assert!(matches!(created, Enqueued::Created(_)), "{isolation:?}");
+        std::assert_matches!(created, Enqueued::Created(_), "{isolation:?}");
         assert_eq!(rows_for_key(&jobs, Note::NAME, &free).await, 1);
 
         let shared = format!("shared-{name}");
@@ -868,8 +871,8 @@ async fn e6_any_isolation_writes_when_no_holder_and_a_key_is_per_kind(pool: PgPo
         )
         .await;
         let other = write(&jobs, isolation, &Other { n: 1 }, Some(&shared)).await;
-        assert!(matches!(note, Enqueued::Created(_)), "{isolation:?}");
-        assert!(matches!(other, Enqueued::Created(_)), "{isolation:?}");
+        std::assert_matches!(note, Enqueued::Created(_), "{isolation:?}");
+        std::assert_matches!(other, Enqueued::Created(_), "{isolation:?}");
         assert_eq!(rows_for_key(&jobs, Note::NAME, &shared).await, 1);
         assert_eq!(rows_for_key(&jobs, Other::NAME, &shared).await, 1);
 
@@ -892,8 +895,8 @@ async fn e6_any_isolation_writes_when_no_holder_and_a_key_is_per_kind(pool: PgPo
             None,
         )
         .await;
-        assert!(matches!(first, Enqueued::Created(_)), "{isolation:?}");
-        assert!(matches!(second, Enqueued::Created(_)), "{isolation:?}");
+        std::assert_matches!(first, Enqueued::Created(_), "{isolation:?}");
+        std::assert_matches!(second, Enqueued::Created(_), "{isolation:?}");
         assert_eq!(unkeyed(&jobs, Note::NAME).await, before + 2);
     }
     super::close_pools(&[&jobs]).await;
@@ -908,10 +911,7 @@ async fn e6_any_isolation_writes_beside_a_terminal_holder(pool: PgPool) {
             let key = format!("{state}-{}", isolation_name(isolation));
             insert_terminal(&jobs, &key, failed).await;
             let enqueued = write(&jobs, isolation, &Note { text: key.clone() }, Some(&key)).await;
-            assert!(
-                matches!(enqueued, Enqueued::Created(_)),
-                "{isolation:?} {state}"
-            );
+            std::assert_matches!(enqueued, Enqueued::Created(_), "{isolation:?} {state}");
             assert_eq!(
                 states_for_key(&jobs, &key).await,
                 vec![state.to_owned(), "pending".to_owned()]
@@ -947,7 +947,7 @@ async fn e6_repeatable_read_writes_when_a_live_holder_became_terminal_after_the_
         .await
         .expect("the caller joins")
         .expect("the enqueue commits");
-    assert!(matches!(enqueued, Enqueued::Created(_)));
+    std::assert_matches!(enqueued, Enqueued::Created(_));
     assert_eq!(
         states_for_key(&jobs, key).await,
         vec!["completed".to_owned(), "pending".to_owned()]
@@ -1074,7 +1074,7 @@ async fn e6_read_committed_inflight_insert_keeps_commit_and_rollback_oracles(poo
             assert_eq!(enqueued, Enqueued::Duplicate, "{label}");
             assert!(visible(&jobs, &held_id.to_string()).await, "{label}");
         } else {
-            assert!(matches!(held, Err(AttemptError::Rejected)), "{label}");
+            std::assert_matches!(held, Err(AttemptError::Rejected), "{label}");
             let id = created(enqueued);
             assert!(visible(&jobs, &id.to_string()).await, "{label}");
         }
@@ -1145,13 +1145,14 @@ async fn e6_snapshot_isolation_40001_when_a_live_job_is_inserted_after_the_snaps
         })
         .await
         .expect("the other transaction commits");
-        assert!(matches!(inserted, Enqueued::Created(_)), "{isolation:?}");
+        std::assert_matches!(inserted, Enqueued::Created(_), "{isolation:?}");
         go.notify_one();
         let result = super::bounded("the caller", caller)
             .await
             .expect("the caller joins");
-        assert!(
-            matches!(&result, Err(AttemptError::Rejected)),
+        std::assert_matches!(
+            &result,
+            Err(AttemptError::Rejected),
             "{isolation:?} {}",
             result.as_ref().err().map(explain).unwrap_or_default()
         );
@@ -1188,8 +1189,9 @@ async fn e6_repeatable_read_40001_when_a_claim_write_commits_after_the_snapshot(
     let result = super::bounded("the caller", caller)
         .await
         .expect("the caller joins");
-    assert!(
-        matches!(&result, Err(AttemptError::Rejected)),
+    std::assert_matches!(
+        &result,
+        Err(AttemptError::Rejected),
         "{}",
         result.as_ref().err().map(explain).unwrap_or_default()
     );
@@ -1241,8 +1243,9 @@ async fn e6_repeatable_read_inflight_claim_keeps_commit_and_rollback_oracles(poo
         )
         .await;
         if commits {
-            assert!(
-                matches!(&result, Err(AttemptError::Rejected)),
+            std::assert_matches!(
+                &result,
+                Err(AttemptError::Rejected),
                 "{label}: {}",
                 result.as_ref().err().map(explain).unwrap_or_default()
             );

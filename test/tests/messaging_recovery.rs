@@ -99,7 +99,7 @@ async fn durable_receipt_survives_restart_and_rejects_changed_meaning(pool: PgPo
         },
     ] {
         let error = effect::attempt(&restarted, &changed).await.unwrap_err();
-        assert!(matches!(error, EffectError::Conflict));
+        std::assert_matches!(error, EffectError::Conflict);
         assert_eq!(
             error.disposition(),
             infra_messaging::HandlerError::Permanent
@@ -111,10 +111,10 @@ async fn durable_receipt_survives_restart_and_rejects_changed_meaning(pool: PgPo
         "UPDATE recovery_effect_receipts SET event_type = 'recovery.counter.incremented', schema_version = 2",
     ] {
         sqlx::query(sql).execute(&pool).await.unwrap();
-        assert!(matches!(
+        std::assert_matches!(
             effect::attempt(&restarted, &original).await,
             Err(EffectError::Conflict)
-        ));
+        );
     }
     assert_eq!(value(&pool).await, 7);
     let receipts: i64 = sqlx::query_scalar("SELECT count(*) FROM recovery_effect_receipts")
@@ -139,10 +139,10 @@ async fn failed_mutation_and_caller_rollback_leave_no_receipt(pool: PgPool) {
             .unwrap(),
         Applied::First
     );
-    assert!(matches!(
+    std::assert_matches!(
         effect::attempt(&business, &event("overflow", 1)).await,
         Err(EffectError::Query(_))
-    ));
+    );
     let rolled_back = event("rollback", -1);
     let result = in_tx_with(
         &business,
@@ -156,7 +156,7 @@ async fn failed_mutation_and_caller_rollback_leave_no_receipt(pool: PgPool) {
         },
     )
     .await;
-    assert!(matches!(result, Err(EffectError::Unresolved)));
+    std::assert_matches!(result, Err(EffectError::Unresolved));
     assert_eq!(value(&pool).await, i64::MAX);
     let ids: Vec<String> =
         sqlx::query_scalar("SELECT logical_id FROM recovery_effect_receipts ORDER BY logical_id")
@@ -275,8 +275,9 @@ async fn unknown_commit_is_unresolved_until_later_same_identity_arbitration(pool
             .await
             .unwrap()
             .unwrap_err();
-        assert!(
-            matches!(error, EffectError::Transaction(TxError::CommitUnknown(_))),
+        std::assert_matches!(
+            error,
+            EffectError::Transaction(TxError::CommitUnknown(_)),
             "{error:?}"
         );
         assert_eq!(
@@ -352,10 +353,10 @@ async fn cancelled_arbitration_is_retryable_and_later_delivery_can_apply(pool: P
         Err(infra_messaging::HandlerError::Retryable)
     );
     release.send(()).unwrap();
-    assert!(matches!(
+    std::assert_matches!(
         timeout(WAIT, first).await.unwrap().unwrap(),
         Err(EffectError::Unresolved)
-    ));
+    );
     assert_eq!(
         effect::attempt(&business, &original).await.unwrap(),
         Applied::First

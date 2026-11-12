@@ -271,10 +271,7 @@ async fn direct_tls_first_admission_refuses_plaintext_even_when_it_is_allowed() 
         )
         .await
         .expect_err("TLS-first must reject plaintext before any dial");
-        assert!(matches!(
-            failure,
-            infra_messaging::MessagingError::Configuration(_)
-        ));
+        std::assert_matches!(failure, infra_messaging::MessagingError::Configuration(_));
     }
 }
 
@@ -677,7 +674,7 @@ async fn a_consumer_recovers_after_its_broker_connection_is_interrupted() {
     let contending = registry(&fixture)
         .prepare(&event("concurrent-silent-publication"), 1024)
         .unwrap();
-    assert!(matches!(
+    std::assert_matches!(
         messaging
             .producer()
             .publish(
@@ -686,7 +683,7 @@ async fn a_consumer_recovers_after_its_broker_connection_is_interrupted() {
             )
             .await,
         Err(PublishError::Ambiguous)
-    ));
+    );
     let after = registry(&fixture)
         .prepare(&event("after-outage"), 1024)
         .unwrap();

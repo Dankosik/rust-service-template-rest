@@ -202,6 +202,11 @@ sha2 = { version = "0.11.0", default-features = false }
 async-trait = { version = "0.1.92", default-features = false }
 serde_with = { version = "3.23.0", default-features = false }
 derive_more = { version = "2.1.1", default-features = false }
+derive-where = { version = "1.7.0", default-features = false }
+enum-map = { version = "3.1.0", default-features = false }
+const-hex = { version = "1.19.3", default-features = false }
+async-stream = { version = "0.3.6", default-features = false }
+similar = { version = "2.7.0", default-features = false }
 itertools = { version = "0.15.0", default-features = false }
 axum-extra = { version = "0.12.6", default-features = false }
 indexmap = { version = "2.14.2", default-features = false }

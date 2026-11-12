@@ -29,11 +29,9 @@ fn client_binds_one_https_origin() {
         "https://user@provider.example/",
         "data:text/plain,provider",
     ] {
-        assert!(
-            matches!(
-                Client::try_new(&url(origin), limits()),
-                Err(BuildError::InvalidOrigin)
-            ),
+        std::assert_matches!(
+            Client::try_new(&url(origin), limits()),
+            Err(BuildError::InvalidOrigin),
             "{origin} must be refused"
         );
     }
@@ -60,11 +58,9 @@ fn requests_must_name_the_configured_origin() {
         "/items",
         "*",
     ] {
-        assert!(
-            matches!(
-                policy::admit_request(&origin, request_to(refused)),
-                Err(Error::InvalidTarget)
-            ),
+        std::assert_matches!(
+            policy::admit_request(&origin, request_to(refused)),
+            Err(Error::InvalidTarget),
             "{refused} must be refused"
         );
     }
@@ -73,10 +69,10 @@ fn requests_must_name_the_configured_origin() {
         header::HOST,
         "other.fixture.test".parse().expect("host header"),
     );
-    assert!(matches!(
+    std::assert_matches!(
         policy::admit_request(&origin, with_host),
         Err(Error::InvalidTarget)
-    ));
+    );
 }
 
 #[test]
@@ -108,6 +104,6 @@ fn limits_must_be_positive_and_bounded() {
     for mutate in mutations {
         let mut invalid = limits();
         mutate(&mut invalid);
-        assert!(matches!(invalid.validate(), Err(BuildError::InvalidLimits)));
+        std::assert_matches!(invalid.validate(), Err(BuildError::InvalidLimits));
     }
 }

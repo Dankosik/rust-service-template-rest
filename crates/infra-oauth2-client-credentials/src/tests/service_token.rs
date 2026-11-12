@@ -1,4 +1,5 @@
 use super::*;
+use std::assert_matches;
 
 #[tokio::test]
 async fn zero_or_expired_during_acquisition_never_authorizes_dispatch() {
@@ -10,12 +11,12 @@ async fn zero_or_expired_during_acquisition_never_authorizes_dispatch() {
     let client = fixture
         .credentials(&[], None)
         .http(fixture.resource_client());
-    assert!(matches!(
+    assert_matches!(
         client
             .execute(fixture.request(), deadline(Duration::from_secs(10)))
             .await,
         Err(Error::Acquisition(AcquisitionError::InvalidResponse))
-    ));
+    );
     fixture.token_received().await;
     fixture.token_json(
         "200 OK",
@@ -33,10 +34,10 @@ async fn zero_or_expired_during_acquisition_never_authorizes_dispatch() {
     tokio::time::advance(Duration::from_secs(2)).await;
     tokio::time::resume();
     gate.add_permits(1);
-    assert!(matches!(
+    assert_matches!(
         operation.await,
         Err(Error::Acquisition(AcquisitionError::InvalidResponse))
-    ));
+    );
     assert!(fixture.resource_requests().is_empty());
     fixture.finish().await;
 }
@@ -129,7 +130,7 @@ async fn a_waiter_reuses_a_shared_failure_but_not_a_request_only_token() {
         for result in [leader, waiter] {
             match expected_error {
                 Some(expected) => {
-                    assert!(matches!(result, Err(Error::Acquisition(error)) if error == expected));
+                    assert_matches!(result, Err(Error::Acquisition(error)) if error == expected);
                 }
                 None => assert!(result.is_ok()),
             }
@@ -172,10 +173,10 @@ async fn cancelling_service_token_acquisition_allows_a_waiter_to_retry() {
         Box::pin(client.execute(fixture.request(), deadline(Duration::from_secs(10))));
     poll_pending(survivor.as_mut()).await;
     context.cancel();
-    assert!(matches!(
+    assert_matches!(
         leader.await,
         Err(Error::Acquisition(AcquisitionError::Cancelled))
-    ));
+    );
     tokio::select! { () = fixture.token_received() => {}, result = &mut survivor => panic!("replacement must be gated: {result:?}"), }
     gate.add_permits(2);
     survivor.await.unwrap();
@@ -204,10 +205,10 @@ async fn a_silent_token_fault_releases_admission_for_a_later_restored_call() {
     poll_pending(waiter.as_mut()).await;
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(1)).await;
-    assert!(matches!(
+    assert_matches!(
         leader.await,
         Err(Error::Acquisition(AcquisitionError::Timeout))
-    ));
+    );
     tokio::time::resume();
     tokio::select! { () = fixture.token_received() => {}, result = &mut waiter => panic!("replacement must be gated: {result:?}"), }
     gate.add_permits(2);
@@ -237,15 +238,15 @@ async fn a_provider_silent_past_the_fetch_bound_is_unavailable_until_the_failure
     poll_pending(waiter.as_mut()).await;
     tokio::time::pause();
     tokio::time::advance(FETCH_TIMEOUT).await;
-    assert!(matches!(
+    assert_matches!(
         leader.await,
         Err(Error::Acquisition(AcquisitionError::Unavailable))
-    ));
+    );
     tokio::time::resume();
-    assert!(matches!(
+    assert_matches!(
         waiter.await,
         Err(Error::Acquisition(AcquisitionError::Unavailable))
-    ));
+    );
     assert_eq!(fixture.token_requests().len(), 1);
     *fixture.state.token_gate.lock().unwrap() = None;
     advance(Duration::from_secs(1)).await;
@@ -275,10 +276,10 @@ async fn each_waiter_keeps_its_own_deadline_without_cancelling_the_leader() {
     poll_pending(short_waiter.as_mut()).await;
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(1)).await;
-    assert!(matches!(
+    assert_matches!(
         short_waiter.await,
         Err(Error::Acquisition(AcquisitionError::Timeout))
-    ));
+    );
     tokio::time::resume();
     gate.add_permits(1);
     leader.await.unwrap();

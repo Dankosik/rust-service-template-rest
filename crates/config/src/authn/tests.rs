@@ -2,6 +2,7 @@ use super::*;
 use crate::LoadOptions;
 use crate::load::load_from;
 use crate::test_support::{BUILD, env, write};
+use std::assert_matches;
 
 fn parse(toml: &str) -> Result<AuthnConfig, toml::de::Error> {
     toml::from_str(toml)
@@ -10,7 +11,7 @@ fn parse(toml: &str) -> Result<AuthnConfig, toml::de::Error> {
 #[test]
 fn omitted_section_defaults_to_inert_none() {
     let config = AuthnConfig::default();
-    assert!(matches!(config, AuthnConfig::None {}));
+    assert_matches!(config, AuthnConfig::None {});
     config.validate().unwrap();
 }
 
@@ -222,10 +223,7 @@ fn introspection_debug_redacts_trust_inputs_and_credentials() {
 
 #[test]
 fn modes_reject_foreign_provider_fields() {
-    assert!(matches!(
-        parse("mode = \"none\"\n").unwrap(),
-        AuthnConfig::None {}
-    ));
+    assert_matches!(parse("mode = \"none\"\n").unwrap(), AuthnConfig::None {});
     for source in [
         "mode = \"none\"\nissuer = \"issuer\"\n",
         "mode = \"oidc-jwt\"\nissuer = \"issuer\"\naudience = \"service\"\nintrospection_endpoint = \"endpoint\"\n",
@@ -388,10 +386,7 @@ fn introspection_secret_in_a_file_is_refused() {
         env(&[]),
     )
     .unwrap_err();
-    assert!(
-        matches!(&err, crate::load::Error::SecretInFile { key, .. } if key == "authn.introspection_client_secret"),
-        "{err}"
-    );
+    assert_matches!(&err, crate::load::Error::SecretInFile { key, .. } if key == "authn.introspection_client_secret", "{err}");
 }
 // template:end oidc-introspection:load-introspection-secret-file
 

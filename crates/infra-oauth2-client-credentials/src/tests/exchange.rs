@@ -1,4 +1,5 @@
 use super::*;
+use std::assert_matches;
 
 #[tokio::test]
 async fn an_exchanged_token_is_reused_per_subject_but_not_across_subjects() {
@@ -296,7 +297,7 @@ async fn provider_capacity_is_shared_across_grants_but_hits_and_waiters_do_not_c
     poll_pending(waiter.as_mut()).await;
     drop(waiter);
     for _ in 0..2 {
-        assert!(matches!(
+        assert_matches!(
             client
                 .execute(
                     fixture.on_behalf_of_request("refused"),
@@ -304,14 +305,14 @@ async fn provider_capacity_is_shared_across_grants_but_hits_and_waiters_do_not_c
                 )
                 .await,
             Err(Error::Acquisition(AcquisitionError::AtCapacity))
-        ));
+        );
     }
-    assert!(matches!(
+    assert_matches!(
         client
             .execute(fixture.on_behalf_of_request("expired"), Instant::now())
             .await,
         Err(Error::Acquisition(AcquisitionError::Timeout))
-    ));
+    );
     assert_eq!(fixture.token_requests().len(), 3);
     assert_eq!(fixture.resource_requests().len(), 1);
     client
@@ -364,20 +365,20 @@ async fn cancelling_an_exchange_releases_capacity_without_releasing_a_live_waite
     let mut waiter = Box::pin(client.execute(request, deadline(Duration::from_secs(10))));
     poll_pending(waiter.as_mut()).await;
     context.cancel();
-    assert!(matches!(
+    assert_matches!(
         waiter.await,
         Err(Error::Acquisition(AcquisitionError::Cancelled))
-    ));
-    assert!(matches!(
+    );
+    assert_matches!(
         client
             .execute(fixture.request(), deadline(Duration::from_secs(10)))
             .await,
         Err(Error::Acquisition(AcquisitionError::AtCapacity))
-    ));
-    assert!(matches!(
+    );
+    assert_matches!(
         client.execute(fixture.request(), Instant::now()).await,
         Err(Error::Acquisition(AcquisitionError::Timeout))
-    ));
+    );
     assert_eq!(fixture.token_requests().len(), 1);
     assert!(fixture.resource_requests().is_empty());
     drop(leader);
@@ -415,10 +416,10 @@ async fn a_waiter_restarts_the_exchange_its_leader_ran_out_of_budget_for() {
     poll_pending(waiter.as_mut()).await;
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(1)).await;
-    assert!(matches!(
+    assert_matches!(
         leader.await,
         Err(Error::Acquisition(AcquisitionError::Timeout))
-    ));
+    );
     tokio::time::resume();
     tokio::select! { () = fixture.token_received() => {}, result = &mut waiter => panic!("replacement must be gated: {result:?}"), }
     gate.add_permits(2);
@@ -497,10 +498,10 @@ async fn a_failed_exchange_is_not_cached() {
                 deadline(Duration::from_secs(10)),
             )
             .await;
-        assert!(matches!(
+        assert_matches!(
             result,
             Err(Error::Acquisition(AcquisitionError::Unavailable))
-        ));
+        );
     }
     assert_eq!(fixture.token_requests().len(), 2);
     fixture.finish().await;

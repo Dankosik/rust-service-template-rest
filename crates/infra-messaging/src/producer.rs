@@ -279,11 +279,6 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn publish_results_are_listed_in_index_order() {
-        crate::observe::assert_all_in_index_order::<PublishOutcome>();
-    }
-
     #[derive(serde::Serialize)]
     struct Created;
 
@@ -345,9 +340,9 @@ mod tests {
         );
         let stream = "s".repeat(8192 - fixed.len());
         assert!(source_message(&prepared, &tracing::Span::none(), &stream, 4).is_ok());
-        assert!(matches!(
+        std::assert_matches!(
             source_message(&prepared, &tracing::Span::none(), &(stream + "s"), 4),
             Err(PublishError::Rejected)
-        ));
+        );
     }
 }

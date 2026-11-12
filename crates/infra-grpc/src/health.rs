@@ -59,13 +59,13 @@ impl Health for Adapter {
 /// watchers never hold the listener drain. An unknown service is reported as
 /// `SERVICE_UNKNOWN` and the stream stays open, as the health protocol requires.
 fn watch(
-    reader: ReadinessReader,
+    mut reader: ReadinessReader,
     known: bool,
 ) -> impl futures_util::Stream<Item = Result<HealthCheckResponse, Status>> + Send {
-    futures_util::stream::unfold(Some((reader, None)), move |state| async move {
-        let (mut reader, sent) = state?;
+    async_stream::stream! {
+        let mut sent = None;
         loop {
-            // Drop the verdict before awaiting so it does not enlarge the stream state.
+            // Drop the verdict before awaiting so it is not held across the wait.
             let (status, draining) = {
                 let verdict = reader.verdict();
                 let status = if known {
@@ -76,14 +76,14 @@ fn watch(
                 (status, matches!(verdict, Err(NotReady::Draining)))
             };
             if sent != Some(status) {
-                let next = (!draining).then_some((reader, Some(status)));
-                return Some((Ok(response(status)), next));
+                sent = Some(status);
+                yield Ok(response(status));
             }
             if draining || reader.wait_for_verdict_event().await.is_err() {
-                return None;
+                break;
             }
         }
-    })
+    }
 }
 
 fn serving(verdict: &Result<(), NotReady>) -> ServingStatus {

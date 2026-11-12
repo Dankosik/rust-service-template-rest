@@ -1,3 +1,4 @@
+use std::assert_matches;
 use std::num::NonZeroU32;
 
 use super::*;
@@ -232,7 +233,7 @@ fn jobs_operator_keeps_postgres_validation_and_value_free_errors() {
     let options = LoadOptions::default();
     let unknown =
         load_jobs_operator_from(&options, env(&[("APP__POSTGRES__BOGUS", "1")])).unwrap_err();
-    assert!(matches!(unknown, Error::Deserialize(_)), "{unknown}");
+    assert_matches!(unknown, Error::Deserialize(_), "{unknown}");
     for (name, value, key) in [
         (
             "APP__POSTGRES__MAX_CONNECTIONS",
@@ -242,15 +243,12 @@ fn jobs_operator_keeps_postgres_validation_and_value_free_errors() {
         ("APP__POSTGRES__ENABLED", "true", "postgres.dsn"),
     ] {
         let error = load_jobs_operator_from(&options, env(&[(name, value)])).unwrap_err();
-        assert!(
-            matches!(&error, Error::Validate(error) if error.key == key),
-            "{error}"
-        );
+        assert_matches!(&error, Error::Validate(error) if error.key == key, "{error}");
     }
     let secret = "fixture-private-value";
     let error =
         load_jobs_operator_from(&options, env(&[("APP__POSTGRES__ENABLED", secret)])).unwrap_err();
-    assert!(matches!(error, Error::Deserialize(_)), "{error}");
+    assert_matches!(error, Error::Deserialize(_), "{error}");
     assert!(!error.to_string().contains(secret));
     assert!(!format!("{error:?}").contains(secret));
 }
@@ -271,7 +269,7 @@ fn jobs_operator_prescans_unrelated_sections() {
         env(&[]),
     )
     .unwrap_err();
-    assert!(matches!(error, Error::SecretInFile { .. }), "{error}");
+    assert_matches!(error, Error::SecretInFile { .. }, "{error}");
     assert!(!error.to_string().contains("fixture-private-value"));
 
     let unaddressable = write(&dir, "unaddressable.toml", "[Unrelated]\nvalue = 1\n");
@@ -283,14 +281,11 @@ fn jobs_operator_prescans_unrelated_sections() {
         env(&[]),
     )
     .unwrap_err();
-    assert!(matches!(error, Error::UnaddressableKey { .. }), "{error}");
+    assert_matches!(error, Error::UnaddressableKey { .. }, "{error}");
     let malformed = load_jobs_operator_from(
         &LoadOptions::default(),
         env(&[("APP__UNRELATED__", "fixture-private-value")]),
     )
     .unwrap_err();
-    assert!(
-        matches!(malformed, Error::MalformedEnvName { .. }),
-        "{malformed}"
-    );
+    assert_matches!(malformed, Error::MalformedEnvName { .. }, "{malformed}");
 }

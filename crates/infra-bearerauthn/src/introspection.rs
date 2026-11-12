@@ -1,7 +1,6 @@
 //! RFC 7662 opaque-token introspection.
 
 use std::{
-    fmt,
     num::NonZeroUsize,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -21,7 +20,8 @@ use crate::{
 const MAX_ENTRY_BYTES: usize = 64 * 1024;
 
 /// Bootstrap input for RFC 7662 token introspection.
-#[derive(Clone)]
+#[derive(Clone, derive_more::Debug)]
+#[debug("IntrospectionOptions([REDACTED])")]
 pub struct IntrospectionOptions {
     /// The issuer URL that a verified principal is attributed to.
     pub issuer: crate::IssuerUrl,
@@ -36,12 +36,6 @@ pub struct IntrospectionOptions {
     pub provider_concurrency: NonZeroUsize,
     /// Verified-response cache settings; `None` introspects every token.
     pub cache: Option<IntrospectionCacheOptions>,
-}
-
-impl fmt::Debug for IntrospectionOptions {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("IntrospectionOptions([REDACTED])")
-    }
 }
 
 /// Validated positive-result retention for one prepared introspection verifier.
@@ -90,6 +84,8 @@ pub fn prepare_introspection_with_fixture(
 
 /// A bounded provider client with optional positive retention for one
 /// immutable trust context.
+#[derive(derive_more::Debug)]
+#[debug("IntrospectionVerifier([REDACTED])")]
 pub(crate) struct IntrospectionVerifier {
     endpoint: crate::EndpointUrl,
     client_id: String,
@@ -242,12 +238,6 @@ impl IntrospectionVerifier {
                 VerificationError::unavailable(VerificationReason::Provider(failure))
             })?;
         validate_introspection_claims(&response, &self.policy, now()?, token.to_secret())
-    }
-}
-
-impl fmt::Debug for IntrospectionVerifier {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("IntrospectionVerifier([REDACTED])")
     }
 }
 

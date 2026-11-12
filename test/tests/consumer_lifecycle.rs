@@ -14,7 +14,6 @@
 )]
 
 use std::collections::BTreeSet;
-use std::fmt::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
@@ -280,12 +279,7 @@ fn required(name: &str) -> String {
 }
 
 fn digest(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut hex = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        write!(&mut hex, "{byte:02x}").expect("writing to a String cannot fail");
-    }
-    hex
+    infra_messaging::wire::prefixed_digest_hex("", &Sha256::digest(bytes))
 }
 
 fn wall_clock_ms() -> u128 {

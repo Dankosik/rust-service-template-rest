@@ -130,12 +130,12 @@ mod tests {
             messages: Some(registration.messages),
             postgres_messages: registration.postgres_messages,
         };
-        assert!(matches!(
+        std::assert_matches!(
             capabilities.activate_postgres_messages(&resources),
             Err(WorkerError::MessagingRegistry(
                 infra_messaging::RegistryError::Empty
             ))
-        ));
+        );
         let received = received.await.unwrap();
         pool.close().await;
         assert!(

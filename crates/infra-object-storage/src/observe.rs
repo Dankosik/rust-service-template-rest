@@ -7,6 +7,7 @@ use std::sync::OnceLock;
 use std::time::Instant;
 
 use aws_sdk_s3::operation::{RequestId, RequestIdExt};
+use enum_map::EnumMap;
 use metrics::{Histogram, Unit};
 use tracing::Span;
 
@@ -26,7 +27,7 @@ pub const OPERATION_DURATION_BUCKETS: &[f64] = &[
 pub const HISTOGRAMS: &[(&str, &[f64])] =
     &[(OPERATION_DURATION_METRIC, OPERATION_DURATION_BUCKETS)];
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, enum_map::Enum)]
 pub(crate) enum Operation {
     Put,
     Get,
@@ -37,8 +38,6 @@ pub(crate) enum Operation {
 }
 
 impl Operation {
-    const COUNT: usize = 6;
-
     fn label(self) -> &'static str {
         match self {
             Self::Put => "put",
@@ -77,7 +76,7 @@ impl Operation {
 }
 
 /// `ok`, `cancelled`, and every [`ObjectStorageError`] label.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, enum_map::Enum)]
 enum Outcome {
     Ok,
     Cancelled,
@@ -85,16 +84,6 @@ enum Outcome {
 }
 
 impl Outcome {
-    const COUNT: usize = 2 + ObjectStorageError::COUNT;
-
-    fn column(self) -> usize {
-        match self {
-            Self::Ok => 0,
-            Self::Cancelled => 1,
-            Self::Failure(error) => 2 + error.column(),
-        }
-    }
-
     fn label(self) -> &'static str {
         match self {
             Self::Ok => "ok",
@@ -107,25 +96,13 @@ impl Outcome {
 /// Histogram handles, registered on first use so the scrape shows only
 /// recorded series. A handle stays bound to the recorder of its first use;
 /// bootstrap installs the recorder before it builds the client.
-pub(crate) struct Histograms([[OnceLock<Histogram>; Outcome::COUNT]; Operation::COUNT]);
-
-impl Default for Histograms {
-    fn default() -> Self {
-        Self(std::array::from_fn(|_| {
-            std::array::from_fn(|_| OnceLock::new())
-        }))
-    }
-}
-
-impl std::fmt::Debug for Histograms {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.debug_struct("Histograms").finish_non_exhaustive()
-    }
-}
+#[derive(Default, derive_more::Debug)]
+#[debug("Histograms {{ .. }}")]
+pub(crate) struct Histograms(EnumMap<Operation, EnumMap<Outcome, OnceLock<Histogram>>>);
 
 impl Histograms {
     fn get(&self, operation: Operation, outcome: Outcome) -> &Histogram {
-        self.0[operation as usize][outcome.column()].get_or_init(|| {
+        self.0[operation][outcome].get_or_init(|| {
             metrics::histogram!(
                 OPERATION_DURATION_METRIC,
                 "operation" => operation.label(),
@@ -295,53 +272,17 @@ mod tests {
 
     use super::*;
 
-    /// `Histograms` is sized by the hand-kept `COUNT`s. A new variant fails
-    /// to compile here until it is listed, and the test then fails until its
-    /// `COUNT` and column follow.
     #[test]
-    fn every_series_has_its_own_cached_handle() {
-        use ObjectStorageError as E;
-        use Operation as O;
-        let operations = [O::Put, O::Get, O::Head, O::Delete, O::PresignGet, O::Probe];
-        let errors = [
-            E::NotFound,
-            E::AlreadyExists,
-            E::TooLarge,
-            E::Busy,
-            E::Unavailable,
-            E::Rejected,
-            E::OutcomeUnknown,
-            E::Integrity,
-        ];
-        match operations[0] {
-            O::Put | O::Get | O::Head | O::Delete | O::PresignGet | O::Probe => {}
-        }
-        match errors[0] {
-            E::NotFound
-            | E::AlreadyExists
-            | E::TooLarge
-            | E::Busy
-            | E::Unavailable
-            | E::Rejected
-            | E::OutcomeUnknown
-            | E::Integrity => {}
-        }
-        assert_eq!(operations.len(), Operation::COUNT);
-        assert_eq!(errors.len(), ObjectStorageError::COUNT);
-
-        let outcomes = [Outcome::Ok, Outcome::Cancelled]
-            .into_iter()
-            .chain(errors.map(Outcome::Failure));
-        let mut columns = HashSet::new();
+    fn every_outcome_has_its_own_label() {
+        let outcomes = EnumMap::<Outcome, ()>::default();
         let mut labels = HashSet::new();
-        for outcome in outcomes {
-            let (column, label) = (outcome.column(), outcome.label());
-            assert!(column < Outcome::COUNT, "{label} is outside the cache");
-            assert!(columns.insert(column), "{label} shares a column");
-            assert!(labels.insert(label), "{label} is used twice");
+        for (outcome, ()) in &outcomes {
+            assert!(
+                labels.insert(outcome.label()),
+                "{} is used twice",
+                outcome.label()
+            );
         }
-        let rows: HashSet<usize> = operations.map(|operation| operation as usize).into();
-        assert_eq!(rows.len(), Operation::COUNT);
-        assert!(rows.iter().all(|row| *row < Operation::COUNT));
+        assert_eq!(labels.len(), outcomes.len());
     }
 }

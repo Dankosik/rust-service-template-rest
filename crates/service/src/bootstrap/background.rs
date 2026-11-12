@@ -17,6 +17,8 @@ pub(crate) struct BackgroundFailure {
 ///
 /// Bootstrap lends this non-cloneable capability while registering adapters.
 /// It cannot change the root cancellation token, runtime or shutdown budget.
+#[derive(derive_more::Debug)]
+#[debug("BackgroundRegistration {{ .. }}")]
 pub struct BackgroundRegistration<'a> {
     pub(super) background: &'a mut Background,
 }
@@ -50,14 +52,6 @@ impl BackgroundRegistration<'_> {
         };
         let future = start(self.background.child_token(), reporter);
         self.background.spawn_fallible(name, future);
-    }
-}
-
-impl std::fmt::Debug for BackgroundRegistration<'_> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("BackgroundRegistration")
-            .finish_non_exhaustive()
     }
 }
 

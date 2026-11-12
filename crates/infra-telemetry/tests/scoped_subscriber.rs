@@ -15,8 +15,8 @@ fn a_dropped_scoped_subscriber_does_not_block_the_global_one() {
 
     let _guard = install_subscriber(&options).expect("first global install");
 
-    assert!(matches!(
+    std::assert_matches!(
         install_subscriber(&options),
         Err(LoggingError::AlreadyInstalled)
-    ));
+    );
 }

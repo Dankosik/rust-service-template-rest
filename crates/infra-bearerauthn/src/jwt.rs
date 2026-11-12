@@ -1,6 +1,6 @@
 //! OIDC discovery, startup trust, and JWS verification against admitted keys.
 
-use std::{fmt, future::Future, pin::Pin, sync::Arc, time::Duration};
+use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use jsonwebtoken::Header;
@@ -33,7 +33,8 @@ pub enum TokenProfile {
 }
 
 /// Bootstrap input for OIDC discovery and JWT verification.
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq, derive_more::Debug)]
+#[debug("JwtOptions([REDACTED])")]
 pub struct JwtOptions {
     pub issuer: IssuerUrl,
     /// Audiences of which a token must name at least one; non-empty, with no
@@ -47,28 +48,18 @@ pub struct JwtOptions {
     pub jwks_uri: Option<EndpointUrl>,
 }
 
-impl fmt::Debug for JwtOptions {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("JwtOptions([REDACTED])")
-    }
-}
-
 /// The unstarted future that keeps a JWT verifier's installed key set fresh.
 /// The caller must spawn it through its process tracker; until then, keys are
 /// never refreshed.
 pub type RefreshTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
+#[derive(derive_more::Debug)]
+#[debug("JwtVerifier(..)")]
 pub(crate) struct JwtVerifier {
     claim_policy: ClaimPolicy,
     token_profile: TokenProfile,
     algorithms: Vec<JwtAlgorithm>,
     key_store: Arc<KeyStore>,
-}
-
-impl fmt::Debug for JwtVerifier {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("JwtVerifier(..)")
-    }
 }
 
 impl JwtVerifier {
@@ -305,6 +296,7 @@ fn is_generic_jwt_type(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
     use std::sync::Arc;
 
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -487,13 +479,13 @@ mod tests {
             check(&verifier, &stale).await.unwrap_err(),
             VerificationReason::Signature
         );
-        assert!(matches!(
+        assert_matches!(
             verifier
                 .key_store
                 .refresh_for_signature_miss(&verifier.key_store.current())
                 .await,
             SignatureRefresh::NoNewerSet
-        ));
+        );
     }
 
     #[tokio::test(start_paused = true)]

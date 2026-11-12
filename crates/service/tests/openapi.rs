@@ -122,17 +122,14 @@ fn committed_document_matches_the_generator() {
     );
     let generated = String::from_utf8(output.stdout).expect("utf-8 document");
     if generated != COMMITTED {
-        let first_difference = generated
-            .lines()
-            .zip(COMMITTED.lines())
-            .position(|(generated, committed)| generated != committed)
-            .map_or_else(
-                || generated.lines().count().min(COMMITTED.lines().count()) + 1,
-                |index| index + 1,
-            );
+        let diff = similar::TextDiff::from_lines(COMMITTED, generated.as_str())
+            .unified_diff()
+            .context_radius(3)
+            .header("api/openapi/service.yaml", "generated")
+            .to_string();
         panic!(
-            "api/openapi/service.yaml differs from the generated document at line \
-             {first_difference}; run `make openapi-generate` and review the diff"
+            "api/openapi/service.yaml differs from the generated document; run \
+             `make openapi-generate` and review the diff:\n{diff}"
         );
     }
 }

@@ -93,8 +93,7 @@ mod tests {
     #[test]
     fn an_unconfigured_boundary_refuses_disabled_postgres_naming_the_key() {
         let refused = unconfigured(&Config::default());
-        assert!(
-            matches!(&refused, BootstrapError::Config(invalid) if invalid.key == "postgres.enabled"),
+        std::assert_matches!(&refused, BootstrapError::Config(invalid) if invalid.key == "postgres.enabled",
             "{refused:?}"
         );
     }
@@ -104,8 +103,7 @@ mod tests {
         let mut config = Config::default();
         config.postgres.enabled = true;
         let refused = unconfigured(&config);
-        assert!(
-            matches!(&refused, BootstrapError::Config(invalid) if invalid.key == "http_idempotency.retention"),
+        std::assert_matches!(&refused, BootstrapError::Config(invalid) if invalid.key == "http_idempotency.retention",
             "{refused:?}"
         );
     }
@@ -116,12 +114,10 @@ mod tests {
         config.postgres.enabled = true;
         config.http_idempotency.retention = Some(Duration::from_secs(3600));
         let refused = unconfigured(&config);
-        assert!(
-            matches!(
-                &refused,
-                BootstrapError::HttpIdempotencyStartup(
-                    infra_idempotency_store::StartupError::Unavailable
-                )
+        std::assert_matches!(
+            &refused,
+            BootstrapError::HttpIdempotencyStartup(
+                infra_idempotency_store::StartupError::Unavailable
             ),
             "{refused:?}"
         );

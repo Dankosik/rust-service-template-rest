@@ -657,7 +657,7 @@ mod tests {
 
         assert_eq!(span.name, "GET /items/{id}");
         assert_eq!(span.span_kind, opentelemetry::trace::SpanKind::Server);
-        assert!(matches!(span.status, Status::Error { .. }));
+        std::assert_matches!(span.status, Status::Error { .. });
         for KeyValue { key, value, .. } in [
             KeyValue::new("http.request.method", "GET"),
             KeyValue::new("http.route", "/items/{id}"),
@@ -692,7 +692,7 @@ mod tests {
         // No route template and a client error: the method alone names the
         // span, and a 404 is not a server failure.
         assert_eq!(span.name, "GET");
-        assert!(matches!(span.status, Status::Unset));
+        std::assert_matches!(span.status, Status::Unset);
         for absent in ["http.route", "user_agent.original", "error.type"] {
             assert_eq!(attribute(&span, absent), None, "{absent}");
         }

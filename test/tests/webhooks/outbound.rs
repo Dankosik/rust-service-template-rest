@@ -306,7 +306,7 @@ async fn caller_rollback_leaves_no_delivery(pool: PgPool) {
         Err(Step::Rejected)
     })
     .await;
-    assert!(matches!(&result, Err(Step::Rejected)), "{result:?}");
+    std::assert_matches!(&result, Err(Step::Rejected), "{result:?}");
     assert_eq!(job_count(&pool).await, 0);
     super::close_pools(&[&pool]).await;
 }

@@ -19,9 +19,11 @@ test-support = []
 [dependencies]
 aws-lc-rs = { workspace = true, features = ["alloc", "aws-lc-sys", "prebuilt-nasm"] }
 base64 = { workspace = true, features = ["alloc"] }
+derive_more = { workspace = true, features = ["debug", "display"] }
 http = { workspace = true, features = ["std"] }
 jsonwebtoken = { workspace = true, features = ["aws_lc_rs", "use_pem"] }
 metrics = { workspace = true }
+moka = { workspace = true, features = ["sync"] }
 secrecy = { workspace = true }
 serde = { workspace = true, features = ["std", "derive"] }
 serde_json = { workspace = true, features = ["std"] }

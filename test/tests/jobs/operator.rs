@@ -86,10 +86,10 @@ async fn redrive_preserves_identity_archives_each_cycle_and_rejects_old_versions
         &target.version().to_string(),
     )
     .unwrap();
-    assert!(matches!(
+    std::assert_matches!(
         in_tx(&jobs, async |tx| operator::discard(tx, &wrong_kind).await).await,
         Err(OperatorError::Stale)
-    ));
+    );
     let receipt = in_tx(&jobs, async |tx| operator::redrive(tx, &target).await)
         .await
         .expect("redrive commits");
@@ -156,7 +156,7 @@ async fn redrive_preserves_identity_archives_each_cycle_and_rejects_old_versions
         })
         .await
         .unwrap_err();
-        assert!(matches!(error, OperatorError::Stale));
+        std::assert_matches!(error, OperatorError::Stale);
     }
     let next =
         RecoveryTarget::try_new(&target.id().to_string(), KIND, &receipt.new_version).unwrap();
@@ -524,7 +524,7 @@ async fn concurrent_recovery_has_one_winner_after_the_row_lock(pool: PgPool) {
         )
         .await
         .unwrap_err();
-        assert!(matches!(error, OperatorError::Stale));
+        std::assert_matches!(error, OperatorError::Stale);
         let row = stored(&pool, &target).await;
         assert_eq!(row["state"], "pending");
         assert_eq!(row["recovery_history"].as_array().unwrap().len(), 1);
@@ -561,7 +561,7 @@ async fn concurrent_enqueue_owns_the_live_key_and_rolls_back_the_entire_redrive(
                 )
                 .await
                 .expect("the producer inserts a new live row");
-                assert!(matches!(result, Enqueued::Created(_)));
+                std::assert_matches!(result, Enqueued::Created(_));
                 ready.send(()).unwrap();
                 super::bounded("release enqueue", released).await.unwrap();
                 Ok::<_, OperatorError>(())
@@ -588,7 +588,7 @@ async fn concurrent_enqueue_owns_the_live_key_and_rolls_back_the_entire_redrive(
     )
     .await
     .unwrap_err();
-    assert!(matches!(error, OperatorError::Conflict));
+    std::assert_matches!(error, OperatorError::Conflict);
     assert!(!format!("{error:?}").contains(SECRET));
     assert_eq!(stored(&pool, &target).await, before);
     assert_eq!(super::job_count(&pool).await, 2);
@@ -623,7 +623,7 @@ async fn recovery_results_remain_provisional_until_commit_is_acknowledged(pool: 
         Err::<(), _>(OperatorError::Stale)
     })
     .await;
-    assert!(matches!(result, Err(OperatorError::Stale)));
+    std::assert_matches!(result, Err(OperatorError::Stale));
     // Acquiring from the same pool flushes the queued rollback before readback.
     assert_eq!(stored(&jobs, &target).await, before);
     for fault in [Fault::DropBeforeForward, Fault::ForwardThenDrop] {
@@ -786,9 +786,9 @@ async fn inspection_advances_over_nonmatches_and_returns_only_safe_lossless_fiel
             .unwrap();
     }
     let missing = Inspection::one(&Uuid::from_u128(5).to_string()).unwrap();
-    assert!(matches!(
+    std::assert_matches!(
         inspect(&jobs, &missing).await,
         InspectionResult::One { item: None, .. }
-    ));
+    );
     super::close_pools(&[&jobs]).await;
 }

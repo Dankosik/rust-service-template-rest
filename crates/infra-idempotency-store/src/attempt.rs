@@ -529,7 +529,7 @@ mod tests {
                     },
                 )
                 .await;
-            assert!(matches!(attempted, Err(AttemptError::Internal)));
+            std::assert_matches!(attempted, Err(AttemptError::Internal));
             assert!(!ran);
         }
         pool.close().await;

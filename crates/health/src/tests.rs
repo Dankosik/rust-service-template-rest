@@ -100,11 +100,9 @@ async fn healthy_instance_survives_blips_below_the_threshold() {
     readiness.refresh().await;
     assert_eq!(readiness.reader().verdict(), Ok(()), "2 of 3 failures");
     readiness.refresh().await;
-    assert!(
-        matches!(
-            readiness.reader().verdict(),
-            Err(NotReady::ProbeFailed { probe: "flaky", .. })
-        ),
+    std::assert_matches!(
+        readiness.reader().verdict(),
+        Err(NotReady::ProbeFailed { probe: "flaky", .. }),
         "3 of 3 failures flips"
     );
     flag.store(true, Ordering::Relaxed);
@@ -133,10 +131,7 @@ async fn failed_refresh_only_absorbs_a_previous_ready_that_is_fresh_at_completio
             readiness.refresh().await;
             let verdict = readiness.reader().verdict();
             if expired {
-                assert!(
-                    matches!(verdict, Err(NotReady::ProbeFailed { .. })),
-                    "{verdict:?}"
-                );
+                std::assert_matches!(verdict, Err(NotReady::ProbeFailed { .. }), "{verdict:?}");
                 readiness.refresh().await;
                 assert!(readiness.reader().verdict().is_err());
                 flag.store(true, Ordering::Relaxed);
@@ -174,20 +169,20 @@ async fn a_failed_round_starting_fresh_cannot_revive_readiness_after_expiry() {
     assert_eq!(readiness.reader().verdict(), Ok(()));
     flag.store(false, Ordering::Relaxed);
     readiness.refresh().await;
-    assert!(matches!(
+    std::assert_matches!(
         readiness.reader().verdict(),
         Err(NotReady::ProbeFailed { .. })
-    ));
+    );
 }
 
 #[tokio::test]
 async fn never_healthy_instance_fails_immediately() {
     let (readiness, _, _) = flaky(false);
     readiness.refresh().await;
-    assert!(matches!(
+    std::assert_matches!(
         readiness.reader().verdict(),
         Err(NotReady::ProbeFailed { .. })
-    ));
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -196,14 +191,12 @@ async fn a_hanging_probe_times_out_under_its_own_name() {
     let readiness = Readiness::new(vec![healthy, Box::new(Hanging)], policy());
     readiness.refresh().await;
     let verdict = readiness.reader().verdict();
-    assert!(
-        matches!(
-            verdict,
-            Err(NotReady::TimedOut {
-                probe: "hanging",
-                ..
-            })
-        ),
+    std::assert_matches!(
+        verdict,
+        Err(NotReady::TimedOut {
+            probe: "hanging",
+            ..
+        }),
         "{verdict:?}"
     );
 }
@@ -225,8 +218,9 @@ async fn a_verdict_nobody_refreshes_goes_stale() {
     assert_eq!(reader.verdict(), Ok(()));
 
     tokio::time::advance(policy().stale_after() + Duration::from_millis(1)).await;
-    assert!(
-        matches!(reader.verdict(), Err(NotReady::Stale { .. })),
+    std::assert_matches!(
+        reader.verdict(),
+        Err(NotReady::Stale { .. }),
         "{:?}",
         reader.verdict()
     );
@@ -237,10 +231,7 @@ async fn arming_uses_the_admitted_completion_and_refuses_failed_admission() {
     let (readiness, flag, _) = flaky(false);
     assert_eq!(readiness.arm_progress(), Err(NotReady::NotEvaluated));
     readiness.refresh().await;
-    assert!(matches!(
-        readiness.arm_progress(),
-        Err(NotReady::ProbeFailed { .. })
-    ));
+    std::assert_matches!(readiness.arm_progress(), Err(NotReady::ProbeFailed { .. }));
     assert!(readiness.progress_loss().is_none());
     flag.store(true, Ordering::Relaxed);
     readiness.refresh().await;
@@ -255,7 +246,7 @@ async fn arming_uses_the_admitted_completion_and_refuses_failed_admission() {
     let (late, _, _) = flaky(true);
     late.refresh().await;
     tokio::time::advance(policy().stale_after() + Duration::from_nanos(1)).await;
-    assert!(matches!(late.arm_progress(), Err(NotReady::Stale { .. })));
+    std::assert_matches!(late.arm_progress(), Err(NotReady::Stale { .. }));
     assert!(late.progress_loss().is_some());
 }
 
@@ -268,10 +259,7 @@ async fn armed_late_success_retains_the_gap_before_an_observer_can_run() {
     // No observer or reader sees the gap before this success publishes.
     readiness.refresh().await;
     let loss = readiness.progress_loss().expect("terminal completion gap");
-    assert!(matches!(
-        readiness.reader().verdict(),
-        Err(NotReady::Stale { .. })
-    ));
+    std::assert_matches!(readiness.reader().verdict(), Err(NotReady::Stale { .. }));
     readiness.refresh().await;
     assert_eq!(readiness.progress_loss(), Some(loss));
     assert_eq!(readiness.stop_progress(), Some(loss));
@@ -435,10 +423,7 @@ async fn refreshes_on_the_interval_and_stops_on_cancel() {
         tokio::time::advance(policy().interval).await;
         tokio::task::yield_now().await;
     }
-    assert!(matches!(
-        reader.verdict(),
-        Err(NotReady::ProbeFailed { .. })
-    ));
+    std::assert_matches!(reader.verdict(), Err(NotReady::ProbeFailed { .. }));
 
     cancel.cancel();
     tokio::time::timeout(Duration::from_secs(1), refresher)
@@ -545,14 +530,12 @@ async fn every_probe_is_checked_and_the_first_failure_in_registration_order_is_n
     );
     readiness.refresh().await;
     let verdict = readiness.reader().verdict();
-    assert!(
-        matches!(
-            verdict,
-            Err(NotReady::TimedOut {
-                probe: "hanging",
-                ..
-            })
-        ),
+    std::assert_matches!(
+        verdict,
+        Err(NotReady::TimedOut {
+            probe: "hanging",
+            ..
+        }),
         "{verdict:?}"
     );
     assert_eq!(healthy_calls.load(Ordering::Relaxed), 1);
@@ -762,10 +745,7 @@ fn completion_metrics_date_only_finished_checks_and_survive_stopped_refresh() {
                 "stopped refresh leaves a dated completion"
             );
             assert_sample(&handle.render(), "readiness_ready 1");
-            assert!(matches!(
-                readiness.reader().verdict(),
-                Err(NotReady::Stale { .. })
-            ));
+            std::assert_matches!(readiness.reader().verdict(), Err(NotReady::Stale { .. }));
             readiness.start_drain();
             assert_eq!(
                 timestamp().to_bits(),

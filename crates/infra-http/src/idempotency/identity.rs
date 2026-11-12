@@ -137,10 +137,7 @@ mod tests {
 
     fn decode_digest(hex: &str) -> Digest {
         let mut digest = [0; 32];
-        for (byte, pair) in digest.iter_mut().zip(hex.as_bytes().as_chunks::<2>().0) {
-            let text = std::str::from_utf8(pair).expect("ASCII hex pair");
-            *byte = u8::from_str_radix(text, 16).expect("hex digit");
-        }
+        const_hex::decode_to_slice(hex, &mut digest).expect("64 hex digits");
         digest
     }
 

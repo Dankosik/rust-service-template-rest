@@ -39,19 +39,19 @@ async fn loopback_mock_constructor_uses_the_bounded_client_path() {
 
 #[test]
 fn production_and_mock_constructors_keep_their_separate_admission_boundaries() {
-    assert!(matches!(
+    std::assert_matches!(
         Client::try_new(&Url::parse("http://127.0.0.1:8080").unwrap(), limits()),
         Err(BuildError::InvalidOrigin)
-    ));
+    );
     for base in [
         "http://localhost:8080",
         "http://10.0.0.1:8080",
         "https://127.0.0.1:8080",
         "http://user@127.0.0.1:8080",
     ] {
-        assert!(matches!(
+        std::assert_matches!(
             Client::try_new_for_test_http(&Url::parse(base).unwrap(), limits()),
             Err(BuildError::InvalidOrigin)
-        ));
+        );
     }
 }

@@ -312,14 +312,14 @@ mod tests {
             assert_eq!(gauges.get(OWNED_ATTEMPTS_METRIC, None), 1.0);
             assert_eq!(gauges.get(COMPLETION_MEMBERSHIPS_METRIC, None), 1.0);
             assert_eq!(completions.lock_queue().len(), 1);
-            assert!(matches!(
+            std::assert_matches!(
                 first_reply.try_recv(),
                 Err(tokio::sync::oneshot::error::TryRecvError::Closed)
-            ));
-            assert!(matches!(
+            );
+            std::assert_matches!(
                 second_reply.try_recv(),
                 Err(tokio::sync::oneshot::error::TryRecvError::Empty)
-            ));
+            );
             drop(second_registration);
             assert_eq!(capacity.available_permits(), 2);
             assert_eq!(gauges.get(OWNED_ATTEMPTS_METRIC, None), 0.0);
@@ -387,10 +387,10 @@ mod tests {
 
                     if prune {
                         batch.prune(|entry| entry.fence.generation == 1);
-                        assert!(matches!(
+                        std::assert_matches!(
                             responses[0].try_recv(),
                             Err(tokio::sync::oneshot::error::TryRecvError::Empty)
-                        ));
+                        );
                         assert_eq!(
                             observers[0].available_at_wake.load(Ordering::SeqCst),
                             usize::MAX,
@@ -413,10 +413,10 @@ mod tests {
                         assert_eq!(wake.available_at_wake.load(Ordering::SeqCst), 4);
                         match result.filter(|_| !prune || index != 0) {
                             Some(result) => assert_eq!(response.try_recv().unwrap(), result),
-                            None => assert!(matches!(
+                            None => std::assert_matches!(
                                 response.try_recv(),
                                 Err(tokio::sync::oneshot::error::TryRecvError::Closed)
-                            )),
+                            ),
                         }
                     }
                 }

@@ -473,11 +473,6 @@ mod tests {
     use super::*;
     use crate::registry::Route;
 
-    #[test]
-    fn handler_outcomes_are_listed_in_index_order() {
-        crate::observe::assert_all_in_index_order::<Outcome>();
-    }
-
     #[derive(serde::Deserialize)]
     struct Created;
 

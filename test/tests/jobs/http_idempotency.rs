@@ -194,7 +194,7 @@ async fn e3_a_replayed_attempt_enqueues_nothing(pool: PgPool) {
             async |tx: &mut Tx<'_>| -> Committing<()> {
                 runs.fetch_add(1, Ordering::SeqCst);
                 let enqueued = enqueue_widget(tx, WIDGET).await;
-                assert!(matches!(enqueued, Enqueued::Created(_)));
+                std::assert_matches!(enqueued, Enqueued::Created(_));
                 Ok(returned(record.clone()))
             },
         )
@@ -236,12 +236,12 @@ async fn e3_a_rolled_back_attempt_enqueues_nothing(pool: PgPool) {
             async |tx: &mut Tx<'_>| -> Committing<()> {
                 runs.fetch_add(1, Ordering::SeqCst);
                 let enqueued = enqueue_widget(tx, WIDGET).await;
-                assert!(matches!(enqueued, Enqueued::Created(_)), "{enqueued:?}");
+                std::assert_matches!(enqueued, Enqueued::Created(_), "{enqueued:?}");
                 Err(())
             },
         )
         .await;
-    assert!(matches!(outcome, Ok(Attempted::RolledBack(()))));
+    std::assert_matches!(outcome, Ok(Attempted::RolledBack(())));
     assert_eq!(runs.load(Ordering::SeqCst), 1);
     assert_eq!(super::job_count(&pool).await, 0);
     super::close_pools(&[&first.pool, &second.pool]).await;
@@ -286,7 +286,7 @@ async fn e3_an_in_progress_attempt_enqueues_nothing(pool: PgPool) {
                     },
                 )
                 .await;
-            assert!(matches!(refused, Ok(Attempted::InProgress)), "{refused:?}");
+            std::assert_matches!(refused, Ok(Attempted::InProgress), "{refused:?}");
             assert_eq!(runs.load(Ordering::SeqCst), 1);
             assert_eq!(super::job_count(&pool).await, 0);
             hold.release();
@@ -313,7 +313,7 @@ async fn e6_another_scope_gets_duplicate_and_still_commits(pool: PgPool) {
             &INPUT,
             async |tx: &mut Tx<'_>| -> Committing<()> {
                 let enqueued = enqueue_widget(tx, WIDGET).await;
-                assert!(matches!(enqueued, Enqueued::Created(_)));
+                std::assert_matches!(enqueued, Enqueued::Created(_));
                 Ok(returned(record.clone()))
             },
         )

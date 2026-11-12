@@ -24,6 +24,7 @@ workspace = true
 [dependencies]
 futures-util = { workspace = true, features = ["std", "async-await"] }
 clap = { workspace = true, features = ["std", "derive", "help", "usage", "error-context"] }
+derive_more = { workspace = true, features = ["debug"] }
 health = { workspace = true }
 infra-http = { workspace = true }
 # template:begin jobs:worker-jobs-dependencies
