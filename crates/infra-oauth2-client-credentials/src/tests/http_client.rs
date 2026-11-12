@@ -246,6 +246,47 @@ async fn resource_401_and_403_pass_through_and_only_401_evicts_the_token() {
 }
 
 #[tokio::test]
+async fn an_oversized_401_evicts_the_token_without_hiding_the_body_error() {
+    let fixture = Fixture::new().await;
+    let client = fixture.credentials(&[], None).http(
+        Client::try_new_for_test_http(
+            &fixture.origin,
+            infra_outbound_http::Limits {
+                response_body_bytes: 8,
+                ..TOKEN_LIMITS
+            },
+        )
+        .unwrap(),
+    );
+    let call = || client.execute(fixture.request(), deadline(Duration::from_secs(10)));
+    call().await.unwrap();
+    advance(EVICTION_MIN_AGE).await;
+    *fixture.state.resource_response.lock().unwrap() =
+        response("401 Unauthorized", b"oversized response");
+    assert_matches!(
+        call().await,
+        Err(Error::Resource(
+            infra_outbound_http::Error::ResponseBodyTooLarge
+        ))
+    );
+    assert_eq!(fixture.resource_requests().len(), 2);
+    assert_eq!(fixture.token_requests().len(), 1);
+
+    fixture.resource_status("200 OK");
+    fixture.token_json(
+        "200 OK",
+        &serde_json::json!({"access_token": "replacement", "token_type": "Bearer", "expires_in": 60}),
+    );
+    call().await.unwrap();
+    assert_eq!(fixture.token_requests().len(), 2);
+    assert_eq!(
+        fixture.resource_requests()[2].header("authorization"),
+        Some("Bearer replacement")
+    );
+    fixture.finish().await;
+}
+
+#[tokio::test]
 async fn a_resource_that_refuses_every_token_costs_one_token_request_per_eviction_age() {
     let fixture = Fixture::new().await;
     fixture.token_json(
