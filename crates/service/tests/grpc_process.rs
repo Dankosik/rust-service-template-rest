@@ -15,6 +15,9 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
+mod common;
+
+use common::poll_until;
 use grpc_contracts::example::v1::{UnaryRequest, echo_service_client::EchoServiceClient};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode, jwk::Jwk};
 use nix::sys::signal::{Signal, kill};
@@ -501,29 +504,6 @@ fn tls_material() -> (String, String) {
     (certificate.pem(), key.serialize_pem())
 }
 
-fn get_status(url: &str) -> Result<u16, ureq::Error> {
-    match ureq::get(url).call() {
-        Ok(response) => Ok(response.status().as_u16()),
-        Err(ureq::Error::StatusCode(status)) => Ok(status),
-        Err(error) => Err(error),
-    }
-}
-
-#[expect(
-    clippy::disallowed_methods,
-    reason = "synchronous fixture polling waits for owned child or thread completion within its existing timeout"
-)]
-fn poll_status(url: &str, expected: u16, within: Duration) -> bool {
-    let deadline = Instant::now() + within;
-    while Instant::now() < deadline {
-        if get_status(url).is_ok_and(|status| status == expected) {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    false
-}
-
 fn health_check(address: &str, certificate: String) -> Result<i32, tonic::Status> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -940,7 +920,7 @@ fn tls_health_and_http_share_the_example_sigterm_lifecycle() {
     let (http, diagnostics, grpc) = listener_addresses(&mut example);
     let ready = format!("http://{http}/health/ready");
     assert!(
-        poll_status(&ready, 200, Duration::from_secs(5)),
+        poll_until(&ready, 200, Duration::from_secs(5)),
         "HTTP readiness never became ready"
     );
     assert_eq!(
