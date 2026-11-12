@@ -94,7 +94,7 @@ pub use integrations::GrpcClientConfig;
 // template:begin inbound-webhooks:config-inbound-webhooks-export
 pub use inbound_webhooks::{InboundWebhookEndpointConfig, InboundWebhooksConfig};
 // template:end inbound-webhooks:config-inbound-webhooks-export
-pub use load::{ENV_PREFIX, Error, load};
+pub use load::{Error, load};
 pub use log::{LogConfig, LogFormat};
 pub use observability::{
     MetricsConfig, ObservabilityConfig, OtelConfig, OtelExporterConfig, TracesSampler,

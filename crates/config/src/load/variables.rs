@@ -55,7 +55,7 @@ pub(crate) fn is_env_addressable(name: &str) -> bool {
 
 /// One variable of a carrier, kept under the lowercased name config-rs reads.
 pub(super) struct Variable {
-    pub(super) spelled: String,
+    pub(super) original_name: String,
     /// The dotted key the variable sets, such as `http.addr`.
     pub(super) key: String,
     pub(super) value: String,
@@ -80,14 +80,14 @@ fn admit(variables: &mut Variables, name: &str, suffix: &str, value: String) -> 
     };
     // template:end authn:load-audience-list-alias
     let variable = Variable {
-        spelled: name.to_owned(),
+        original_name: name.to_owned(),
         key,
         value,
     };
     match variables.insert(name_key, variable) {
         Some(other) => Err(Error::AmbiguousName {
             name: name.to_owned(),
-            other: other.spelled,
+            other: other.original_name,
         }),
         None => Ok(()),
     }
@@ -103,7 +103,7 @@ pub(super) fn audience_list(variables: &Variables) -> Result<Option<Vec<String>>
     let name = variable_name(AUDIENCE_KEY).to_ascii_lowercase();
     let Some(variable) = variables.get(&name).filter(|variable| {
         variable
-            .spelled
+            .original_name
             .eq_ignore_ascii_case(&variable_name(AUDIENCE_LIST_ALIAS))
     }) else {
         return Ok(None);
@@ -111,7 +111,7 @@ pub(super) fn audience_list(variables: &Variables) -> Result<Option<Vec<String>>
     let invalid = || {
         Error::Deserialize(format!(
             "{} must be a TOML array of strings",
-            variable.spelled
+            variable.original_name
         ))
     };
     let value = toml::de::ValueDeserializer::parse(&variable.value).map_err(|_| invalid())?;
@@ -144,8 +144,8 @@ where
         for (end, _) in name.match_indices(ENV_SEPARATOR).skip(1) {
             if let Some(parent) = variables.get(&name[..end]) {
                 return Err(Error::OverlappingVariables {
-                    parent: parent.spelled.clone(),
-                    child: child.spelled.clone(),
+                    parent: parent.original_name.clone(),
+                    child: child.original_name.clone(),
                 });
             }
         }

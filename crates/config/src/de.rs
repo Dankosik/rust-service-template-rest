@@ -177,11 +177,11 @@ fn invalid_listen_addr<E: serde::de::Error>(value: &str) -> E {
 /// do DNS. Explicit IPv6 forms such as `[::1]:9000` are unchanged.
 fn parse_listen_addr(value: &str) -> Option<SocketAddr> {
     let trimmed = value.trim();
-    let candidate = match trimmed.strip_prefix(':') {
-        Some(port) => format!("0.0.0.0:{port}"),
-        None => trimmed.to_owned(),
-    };
-    candidate.parse().ok()
+    match trimmed.strip_prefix(':') {
+        Some(port) => format!("0.0.0.0:{port}").parse(),
+        None => trimmed.parse(),
+    }
+    .ok()
 }
 
 #[cfg(test)]
