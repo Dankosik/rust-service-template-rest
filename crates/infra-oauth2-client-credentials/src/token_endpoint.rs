@@ -82,23 +82,7 @@ impl TokenEndpoint {
         &self,
         deadline: Instant,
     ) -> Result<Token, AcquisitionError> {
-        let started = Instant::now();
-        let grant = Grant::ClientCredentials;
-        let mut metric = AttemptMetric::new(grant.metric_label(), deadline);
-        let result = tokio::time::timeout_at(deadline, async {
-            let _permit = self.admit_attempt(deadline)?;
-            self.request_token(grant, started, deadline).await
-        })
-        .await
-        .unwrap_or(Err(AcquisitionError::Timeout));
-        let result = if Instant::now() >= deadline {
-            Err(AcquisitionError::Timeout)
-        } else {
-            result
-        };
-
-        metric.finish(&result);
-        result
+        self.fetch_token(Grant::ClientCredentials, deadline).await
     }
 
     /// Performs one token-exchange request for `subject`, bounded by
@@ -111,16 +95,33 @@ impl TokenEndpoint {
         subject: &SecretString,
         deadline: Instant,
     ) -> Result<Arc<Token>, AcquisitionError> {
+        self.fetch_token(Grant::TokenExchange { subject }, deadline)
+            .await
+            .map(Arc::new)
+    }
+
+    async fn fetch_token(
+        &self,
+        grant: Grant<'_>,
+        deadline: Instant,
+    ) -> Result<Token, AcquisitionError> {
         let started = Instant::now();
-        let grant = Grant::TokenExchange { subject };
         let mut metric = AttemptMetric::new(grant.metric_label(), deadline);
-        let result = async {
+        let result = tokio::time::timeout_at(deadline, async {
             let _permit = self.admit_attempt(deadline)?;
             self.request_token(grant, started, deadline).await
-        }
-        .await;
+        })
+        .await
+        .unwrap_or(Err(AcquisitionError::Timeout));
+        // Synchronous decoding and token admission can finish after the timer's
+        // last poll.
+        let result = if Instant::now() >= deadline {
+            Err(AcquisitionError::Timeout)
+        } else {
+            result
+        };
         metric.finish(&result);
-        result.map(Arc::new)
+        result
     }
 
     fn admit_attempt(&self, deadline: Instant) -> Result<SemaphorePermit<'_>, AcquisitionError> {
