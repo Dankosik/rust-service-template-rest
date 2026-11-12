@@ -2,9 +2,12 @@
 //!
 //! Precedence, last wins: code defaults → `--config` file → `--config-overlay`
 //! files in order → `APP__SECTION__KEY` variables, read from the files of
-//! `--secrets-dir` and then from the environment. Unknown keys anywhere fail
-//! startup. Secret-like keys may carry a value only through a variable. Each
-//! section owns its type, defaults, and validation in one file.
+//! `--secrets-dir` and then from the environment. A later source may override
+//! individual keys in an earlier table. Replacing the table with a value
+//! fails startup, since it could hide unknown keys before decoding. Unknown
+//! keys anywhere fail startup. Secret-like keys may carry a value only
+//! through a variable. Each section owns its type, defaults, and validation
+//! in one file.
 //! [`Config::validate`] runs those section validators; a rule spanning
 //! two sections lives in the one that depends on the other. Rules that need
 //! process structure, such as the drain-plus-teardown tail against the grace

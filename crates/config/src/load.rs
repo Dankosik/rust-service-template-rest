@@ -1,6 +1,7 @@
 //! Build the snapshot from defaults, files, and the `APP__` variables: the
 //! secrets directory's files, then the process environment over them.
 
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -60,6 +61,11 @@ pub enum Error {
     /// One variable sets a scalar at a path another variable uses as a table.
     #[error("{parent} and {child} set overlapping keys: one key is inside the other")]
     OverlappingVariables { parent: String, child: String },
+    /// A later source would erase the keys in an earlier table.
+    #[error(
+        "{input} cannot replace configuration table `{key}` with a value. Override its keys individually"
+    )]
+    TableOverride { key: String, input: String },
     /// A config file could not be read.
     #[error("config file {}: {error}", path.display())]
     ReadFile {
@@ -109,9 +115,9 @@ impl From<ValidationError> for Error {
 ///
 /// Fails on malformed, ambiguous, or overlapping `APP__` names, a variable value
 /// that is not Unicode, an unreadable secrets directory, an unreadable or
-/// unparsable file, a file key no variable can address, a non-empty
-/// secret-like value in a config file, an unknown key anywhere, or a
-/// violated validation rule.
+/// unparsable file, a source replacing a table with a value, a file key no
+/// variable can address, a non-empty secret-like value in a config file, an
+/// unknown key anywhere, or a violated validation rule.
 pub fn load(options: &LoadOptions, build: BuildInfo) -> Result<Config, Error> {
     load_from(options, build, std::env::vars_os())
 }
@@ -209,8 +215,15 @@ where
         .unzip();
 
     let mut builder = config::Config::builder();
+    let mut table_keys = BTreeSet::new();
     for path in options.files() {
-        builder = builder.add_source(scan_file(path)?);
+        builder = builder.add_source(scan_file(path, &mut table_keys)?);
+    }
+    if let Some(key) = variable_keys.iter().find(|key| table_keys.contains(*key)) {
+        return Err(Error::TableOverride {
+            key: key.clone(),
+            input: variable_name(key),
+        });
     }
     let merged = builder
         .add_source(
@@ -270,7 +283,7 @@ impl config::Source for ScannedFile {
     clippy::disallowed_methods,
     reason = "pre-runtime configuration admission owns this file read; startup can wait on the filesystem"
 )]
-fn scan_file(path: &Path) -> Result<ScannedFile, Error> {
+fn scan_file(path: &Path, table_keys: &mut BTreeSet<String>) -> Result<ScannedFile, Error> {
     let text = std::fs::read_to_string(path).map_err(|error| Error::ReadFile {
         path: path.to_owned(),
         error,
@@ -291,10 +304,39 @@ fn scan_file(path: &Path) -> Result<ScannedFile, Error> {
             path: path.to_owned(),
         });
     }
+    if let Some(key) = first_table_override(&table, table_keys, &mut Vec::new()) {
+        return Err(Error::TableOverride {
+            key,
+            input: path.display().to_string(),
+        });
+    }
     Ok(ScannedFile {
         path: path.to_owned(),
         text,
     })
+}
+
+/// A scalar replacing a table can erase an unknown key before decoding sees it.
+fn first_table_override<'a>(
+    table: &'a toml::Table,
+    table_keys: &mut BTreeSet<String>,
+    path: &mut Vec<&'a str>,
+) -> Option<String> {
+    for (key, value) in table {
+        path.push(key);
+        let key = path.join(".");
+        let found = if let Some(nested) = value.as_table() {
+            table_keys.insert(key);
+            first_table_override(nested, table_keys, path)
+        } else {
+            table_keys.contains(&key).then_some(key)
+        };
+        path.pop();
+        if found.is_some() {
+            return found;
+        }
+    }
+    None
 }
 
 /// The first key, as a dotted path, that no `APP__` variable can name. A
