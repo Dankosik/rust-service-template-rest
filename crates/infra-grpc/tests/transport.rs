@@ -2244,7 +2244,7 @@ async fn mtls_refuses_a_client_without_a_trusted_certificate() {
 #[test]
 fn server_tls_refuses_a_chain_entry_that_is_not_a_certificate() {
     let pki = Pki::new(&["localhost"]);
-    let key = SecretString::from(pem(&pki.server_key));
+    let key = secrecy::SecretString::from(pem(&pki.server_key));
     let garbage =
         "-----BEGIN CERTIFICATE-----\nbm90IGEgY2VydGlmaWNhdGU=\n-----END CERTIFICATE-----\n";
     let leaf = pem(&pki.server_certificate);
