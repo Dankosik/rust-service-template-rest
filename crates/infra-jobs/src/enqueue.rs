@@ -58,8 +58,6 @@ pub enum EnqueueError {
     PayloadContainsNul,
     #[error("payload could not be serialized as JSON")]
     Serialize(#[source] serde_json::Error),
-    /// The serialized JSON does not decode back as its kind, so every attempt
-    /// would fail. A non-finite float, which serializes as `null`, is one case.
     #[error("payload does not decode back as its job kind")]
     PayloadDoesNotDecode(#[source] serde_json::Error),
     #[error("payload is {bytes} bytes; the maximum is {MAX_PAYLOAD_BYTES}")]
@@ -185,8 +183,9 @@ pub async fn enqueue<K: JobKind>(
 ///
 /// # Errors
 ///
-/// [`EnqueueError`] when the kind, key, or payload is refused, or when the
-/// locking statement fails.
+/// [`EnqueueError`] when the kind, key, or proposed payload is refused, when
+/// the locking statement fails, or when a legacy payload cannot be decoded
+/// or re-serialized. A legacy payload error leaves the transaction usable.
 pub async fn compare_live_payload<K: JobKind>(
     tx: &mut Tx<'_>,
     unique_key: &str,
@@ -222,15 +221,14 @@ pub async fn compare_live_payload<K: JobKind>(
     let same = if let Some(payload_text) = stored.payload_text {
         payload_text == prepared.payload
     } else {
-        stored.legacy_payload.as_deref().is_some_and(|legacy| {
-            let Ok(decoded) = serde_json::from_str::<K>(legacy) else {
-                return false;
-            };
-            let mut writer = PayloadWriter::default();
-            serde_json::to_writer(&mut writer, &decoded).is_ok()
-                && writer.total == prepared.payload.len()
-                && writer.retained == prepared.payload.as_bytes()
-        })
+        // The query projects the non-null JSONB payload here. Treat an absent
+        // projection as invalid JSON too.
+        let legacy = stored.legacy_payload.as_deref().unwrap_or_default();
+        let decoded =
+            serde_json::from_str::<K>(legacy).map_err(EnqueueError::PayloadDoesNotDecode)?;
+        let mut writer = PayloadWriter::default();
+        serde_json::to_writer(&mut writer, &decoded).map_err(EnqueueError::Serialize)?;
+        writer.total == prepared.payload.len() && writer.retained == prepared.payload.as_bytes()
     };
     Ok(if same {
         LivePayloadComparison::Same
