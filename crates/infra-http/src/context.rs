@@ -1,23 +1,20 @@
 //! Request opening and explicitly continuing response work have distinct lifetimes.
 
 use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::task::{Context, Poll};
 use std::time::Duration;
 
-use axum::body::{Body, Bytes};
 use axum::extract::{FromRequestParts, Request, State};
 use axum::http::header::CONNECTION;
 use axum::http::request::Parts;
 use axum::http::{HeaderValue, Version};
 use axum::middleware::Next;
 use axum::response::{IntoResponse as _, Response};
-use http_body::{Body as HttpBody, Frame, SizeHint};
+use http_body::Body as _;
 use operation_context::{Deadline, OperationContext, Stopped};
-use tokio_util::sync::DropGuard;
 
+use crate::body::hold_guard_until_end;
 use crate::problem::{Code, Problem, sanitized_internal_error};
 
 /// Fixed request-opening budget installed by the hardened chain.
@@ -144,13 +141,19 @@ impl<S: Send + Sync> FromRequestParts<S> for ResponseContext {
     reason = "the error is the extractor's axum rejection, a Response"
 )]
 pub(crate) fn extension<T: Clone + Send + Sync + 'static>(parts: &Parts) -> Result<T, Response> {
-    parts.extensions.get::<T>().cloned().ok_or_else(|| {
-        tracing::error!(
-            extractor = std::any::type_name::<T>(),
-            "http_extractor_wiring_failed"
-        );
-        sanitized_internal_error()
-    })
+    parts
+        .extensions
+        .get::<T>()
+        .cloned()
+        .ok_or_else(missing_extension::<T>)
+}
+
+pub(crate) fn missing_extension<T>() -> Response {
+    tracing::error!(
+        extractor = std::any::type_name::<T>(),
+        "http_extractor_wiring_failed"
+    );
+    sanitized_internal_error()
 }
 
 /// When the request reached admission. The opening budget counts from here, so
@@ -207,17 +210,7 @@ pub(crate) async fn opening(
     if let Some(reason) = context.operation.stopped() {
         return stopped_response(reason, upload_version());
     }
-    response.map(|body| {
-        if body.is_end_stream() {
-            drop(guard);
-            body
-        } else {
-            Body::new(CancelBody {
-                body,
-                guard: Some(guard),
-            })
-        }
-    })
+    response.map(|body| hold_guard_until_end(body, guard))
 }
 
 fn stopped_response(reason: Stopped, upload: Option<Version>) -> Response {
@@ -250,38 +243,10 @@ pub(crate) fn budget_expired_response() -> Response {
         .into_response()
 }
 
-struct CancelBody {
-    body: Body,
-    guard: Option<DropGuard>,
-}
-
-impl HttpBody for CancelBody {
-    type Data = Bytes;
-    type Error = axum::Error;
-
-    fn poll_frame(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
-        let this = self.get_mut();
-        let result = Pin::new(&mut this.body).poll_frame(cx);
-        if matches!(result, Poll::Ready(None | Some(Err(_)))) || this.body.is_end_stream() {
-            this.guard.take();
-        }
-        result
-    }
-
-    fn is_end_stream(&self) -> bool {
-        self.body.is_end_stream()
-    }
-    fn size_hint(&self) -> SizeHint {
-        self.body.size_hint()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::{Body, Bytes};
     use axum::routing::get;
     use http_body_util::BodyExt as _;
     use tower::ServiceExt as _;

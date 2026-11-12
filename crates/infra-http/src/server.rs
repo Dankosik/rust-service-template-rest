@@ -183,6 +183,11 @@ impl BoundListener {
     }
 
     // template:begin grpc:http-bound-listener-tls
+    /// Start accepting TLS connections on the current Tokio runtime.
+    ///
+    /// The handshake is bounded by [`ServerOptions::header_read_timeout`].
+    /// A handshake error, timeout, or drain closes the connection before any
+    /// request can be in flight.
     #[must_use]
     pub fn serve_tls(
         self,
@@ -236,29 +241,6 @@ impl Server {
     ) -> Result<Self, ServerError> {
         Ok(BoundListener::bind(addr).await?.serve(app, options))
     }
-
-    // template:begin grpc:http-server-tls
-    /// Bind `addr` and start accepting TLS connections on the current Tokio runtime.
-    ///
-    /// The handshake is bounded by [`ServerOptions::header_read_timeout`],
-    /// which also closes a client that never starts it. A handshake error or
-    /// timeout closes the connection without a response, and so does drain:
-    /// no request can be in flight before the handshake ends.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ServerError::Bind`] when the address cannot be bound.
-    pub async fn bind_tls(
-        addr: SocketAddr,
-        app: Router,
-        options: ServerOptions,
-        tls: Arc<rustls::ServerConfig>,
-    ) -> Result<Self, ServerError> {
-        Ok(BoundListener::bind(addr)
-            .await?
-            .serve_tls(app, options, tls))
-    }
-    // template:end grpc:http-server-tls
 
     /// The address the listener actually bound, including an OS-assigned port.
     #[must_use]

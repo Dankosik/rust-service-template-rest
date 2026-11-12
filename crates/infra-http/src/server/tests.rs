@@ -551,9 +551,11 @@ async fn drain_does_not_wait_for_an_unfinished_tls_handshake() {
     let (server_config, client_config) = localhost_tls(b"h2");
     let mut opts = options();
     opts.header_read_timeout = Duration::from_secs(30);
-    let server = Server::bind_tls(loopback(), app(), opts, Arc::new(server_config))
-        .await
-        .unwrap();
+    let server = BoundListener::bind(loopback()).await.unwrap().serve_tls(
+        app(),
+        opts,
+        Arc::new(server_config),
+    );
     let addr = server.local_addr();
     let mut stalled = TcpStream::connect(addr).await.unwrap();
     // The first byte of a handshake record: the handshake has begun and
@@ -586,9 +588,11 @@ async fn connection_age_closes_a_socket_still_waiting_for_tls() {
         max_connection_age: Some(Duration::from_millis(200)),
         ..options()
     };
-    let server = Server::bind_tls(loopback(), app(), options, Arc::new(server_config))
-        .await
-        .unwrap();
+    let server = BoundListener::bind(loopback()).await.unwrap().serve_tls(
+        app(),
+        options,
+        Arc::new(server_config),
+    );
     let mut client = TcpStream::connect(server.local_addr()).await.unwrap();
     let mut byte = [0];
     let closed = tokio::time::timeout(Duration::from_secs(2), client.read(&mut byte)).await;
@@ -606,9 +610,11 @@ async fn tls_listener_serves_http2() {
     let (server_config, client_config) = localhost_tls(b"h2");
     let mut opts = options();
     opts.header_read_timeout = Duration::from_secs(2);
-    let server = Server::bind_tls(loopback(), app(), opts, Arc::new(server_config))
-        .await
-        .unwrap();
+    let server = BoundListener::bind(loopback()).await.unwrap().serve_tls(
+        app(),
+        opts,
+        Arc::new(server_config),
+    );
     let addr = server.local_addr();
     let stream = TcpStream::connect(addr).await.unwrap();
     let tls = TlsConnector::from(Arc::new(client_config))
@@ -646,9 +652,11 @@ async fn tls_http1_origin_form_reports_https_in_the_server_span() {
         header_read_timeout: Duration::from_secs(2),
         ..options()
     };
-    let server = Server::bind_tls(loopback(), harden(app()), opts, Arc::new(server_config))
-        .await
-        .unwrap();
+    let server = BoundListener::bind(loopback()).await.unwrap().serve_tls(
+        harden(app()),
+        opts,
+        Arc::new(server_config),
+    );
     tokio::time::timeout(Duration::from_secs(2), async {
         let stream = TcpStream::connect(server.local_addr()).await.unwrap();
         let mut tls = TlsConnector::from(Arc::new(client_config))

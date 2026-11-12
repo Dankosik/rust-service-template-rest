@@ -27,19 +27,14 @@
 //! Matched health probe routes are skipped by route template, not raw path,
 //! so an unmatched request that merely looks like a probe is still logged.
 
-use std::pin::Pin;
 use std::sync::{Arc, PoisonError, RwLock};
-use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
-use axum::body::{Body, Bytes};
 use axum::extract::{MatchedPath, Request, State};
-use axum::http::header::CONTENT_LENGTH;
 use axum::http::{Method, StatusCode, Uri};
 use axum::middleware::Next;
-use axum::response::{IntoResponse as _, Response};
+use axum::response::Response;
 use foldhash::HashMap;
-use http_body::{Body as _, Frame, SizeHint};
 use metrics::{Gauge, Histogram, Label, SharedString};
 use opentelemetry::context::FutureExt as _;
 use shared_rules::otel_http::request_method;
@@ -49,9 +44,10 @@ use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
 use tracing_opentelemetry_instrumentation_sdk::{otel_trace_span, set_parent_or_fallback};
 
+use crate::body::hold_guard_until_end;
 use crate::harden::AdmissionShed;
 use crate::probes::is_health_probe_route;
-use crate::problem::Problem;
+use crate::problem::{Problem, complete_problem};
 use crate::request_id::REQUEST_ID_HEADER;
 use crate::server::ConnectionInfo;
 
@@ -203,7 +199,7 @@ pub(crate) async fn observe(
             .insert(REQUEST_ID_HEADER, id.header_value().clone());
         response.extensions_mut().insert(id.clone());
     }
-    active.until_body_ends(response)
+    response.map(|body| hold_guard_until_end(body, active))
 }
 
 struct Pending<'a> {
@@ -338,50 +334,6 @@ impl Active {
         gauge.increment(1);
         Self(gauge)
     }
-
-    fn until_body_ends(self, response: Response) -> Response {
-        if response.body().is_end_stream() {
-            return response;
-        }
-        response.map(|body| {
-            Body::new(ActiveBody {
-                inner: body,
-                active: Some(self),
-            })
-        })
-    }
-}
-
-/// A response body that holds its request's [`Active`] gauge and otherwise
-/// passes everything through, the size hint included, so a known length
-/// still becomes `Content-Length`.
-struct ActiveBody {
-    inner: Body,
-    active: Option<Active>,
-}
-
-impl http_body::Body for ActiveBody {
-    type Data = Bytes;
-    type Error = axum::Error;
-
-    fn poll_frame(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Frame<Bytes>, axum::Error>>> {
-        let frame = Pin::new(&mut self.inner).poll_frame(cx);
-        if matches!(frame, Poll::Ready(None | Some(Err(_)))) || self.inner.is_end_stream() {
-            self.active.take();
-        }
-        frame
-    }
-
-    fn is_end_stream(&self) -> bool {
-        http_body::Body::is_end_stream(&self.inner)
-    }
-
-    fn size_hint(&self) -> SizeHint {
-        http_body::Body::size_hint(&self.inner)
-    }
 }
 
 impl Drop for Active {
@@ -486,23 +438,6 @@ fn status_label(status: u16) -> &'static str {
     STATUS_CODES[usize::from(status - 100)].as_str()
 }
 
-/// Add the request id to the Problem body without replacing other responses.
-fn complete_problem(mut response: Response, request_id: Option<&str>) -> Response {
-    let Some(id) = request_id else {
-        return response;
-    };
-    let Some(problem) = response.extensions_mut().remove::<Problem>() else {
-        return response;
-    };
-    let problem = problem.with_request_id(id.to_owned());
-    // Only `Problem::into_response` attaches the extension, so status and
-    // headers (Allow, WWW-Authenticate, Retry-After) are already right.
-    *response.body_mut() = axum::Json(&problem).into_response().into_body();
-    response.headers_mut().remove(CONTENT_LENGTH);
-    response.extensions_mut().insert(problem);
-    response
-}
-
 fn suppresses_access_log(options: AccessLogOptions, method: &Method, route: &str) -> bool {
     !options.log_health_probes && method == Method::GET && is_health_probe_route(route)
 }
@@ -511,6 +446,7 @@ fn suppresses_access_log(options: AccessLogOptions, method: &Method, route: &str
 mod tests {
     use super::*;
 
+    use axum::body::Body;
     use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
 
     /// The labels of every duration series the snapshot holds, sorted: the

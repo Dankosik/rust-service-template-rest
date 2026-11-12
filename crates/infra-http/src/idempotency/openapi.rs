@@ -27,7 +27,6 @@ pub(super) const REPLAYED_VALUE: &str = "true";
 const UNQUOTED_KEY_EXAMPLE: &str = "retry-key/with=visible-ascii";
 const QUOTED_KEY_EXAMPLE: &str = "\"retry key with spaces\"";
 
-/// Construct the one generated `Idempotency-Key` parameter.
 pub(super) fn key_parameter() -> Parameter {
     Parameter::builder()
         .name(KEY_HEADER)
