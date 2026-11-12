@@ -17,7 +17,6 @@ const TRACESTATE_MAX_BYTES: usize = 512;
 /// `tracestate` must be truncated.
 const TRACESTATE_LONG_MEMBER_BYTES: usize = 128;
 
-/// Capture the current context with the installed text-map propagator.
 pub(crate) fn capture() -> Carrier {
     let mut carrier = Carrier::default();
     let context = tracing::Span::current().context();
@@ -77,7 +76,6 @@ impl Carrier {
         }
     }
 
-    /// The injector's pair with every present field allowed and bounded.
     fn validated(self) -> Self {
         Self::from_stored(self.trace_parent, self.trace_state.map(truncated_state))
     }

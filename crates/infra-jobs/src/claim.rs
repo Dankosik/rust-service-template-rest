@@ -1,6 +1,7 @@
 //! CLAIM and the claim loop.
 
 use std::num::NonZeroU32;
+use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -108,13 +109,13 @@ pub(crate) async fn run_claim_loop(
         match next {
             Next::Now => {}
             Next::Soon => {
-                if !cooldown(&stop, last_claim).await {
+                if cooldown(&stop, last_claim).await.is_break() {
                     return;
                 }
             }
             Next::Idle => {
-                if !await_tick(&shared, &stop, &mut ticker).await
-                    || !cooldown(&stop, last_claim).await
+                if await_tick(&shared, &stop, &mut ticker).await.is_break()
+                    || cooldown(&stop, last_claim).await.is_break()
                 {
                     return;
                 }
@@ -154,11 +155,11 @@ enum Next {
 /// The shortest gap between the starts of two claims that do not follow a full round.
 pub(crate) const CLAIM_COOLDOWN: Duration = Duration::from_millis(25);
 
-async fn cooldown(stop: &CancellationToken, last_claim: Instant) -> bool {
+async fn cooldown(stop: &CancellationToken, last_claim: Instant) -> ControlFlow<()> {
     tokio::select! {
         biased;
-        () = stop.cancelled() => false,
-        () = tokio::time::sleep_until(last_claim + CLAIM_COOLDOWN) => true,
+        () = stop.cancelled() => ControlFlow::Break(()),
+        () = tokio::time::sleep_until(last_claim + CLAIM_COOLDOWN) => ControlFlow::Continue(()),
     }
 }
 
@@ -166,14 +167,18 @@ async fn await_tick(
     shared: &Shared,
     stop: &CancellationToken,
     ticker: &mut tokio::time::Interval,
-) -> bool {
+) -> ControlFlow<()> {
     tokio::select! {
         biased;
-        () = stop.cancelled() => return false,
+        () = stop.cancelled() => return ControlFlow::Break(()),
         () = shared.claim_wake.notified() => ticker.reset(),
         _ = ticker.tick() => {}
     }
-    !stop.is_cancelled()
+    if stop.is_cancelled() {
+        ControlFlow::Break(())
+    } else {
+        ControlFlow::Continue(())
+    }
 }
 
 async fn take_slots(shared: &Shared, stop: &CancellationToken) -> Option<OwnedSemaphorePermit> {

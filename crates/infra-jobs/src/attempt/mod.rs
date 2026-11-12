@@ -22,13 +22,9 @@ use completion::complete_batched;
 pub(crate) use completion::{Completions, complete_query};
 use outcome::{Ended, Transition, Unacknowledged, Written, map_outcome, send_outcome, write_of};
 
-/// How long a cancelled or timed-out handler may keep running before [`drive`]
-/// stops waiting for it to join its own work.
-///
-/// This is a tuning value, not a protocol contract: a handler that needs longer
-/// than this window is abandoned with its future dropped, so nothing observable
-/// depends on the exact number. [`drive`] caps the resulting wait at the
-/// supervisor deadline, so grace never holds a claim past it.
+/// After cancellation, [`drive`] keeps a success received during this grace
+/// period. The supervisor deadline and forced-cleanup deadline can end the
+/// wait sooner.
 const COOPERATIVE_GRACE: Duration = Duration::from_millis(100);
 
 /// Attempt admission retained by supervisors or completion bookkeeping. No labels.
@@ -371,10 +367,12 @@ async fn run_attempt(
     if let Some(ran) = ran {
         handles.duration.record(ran.as_secs_f64());
     }
-    let terminal = matches!(transition, Transition::Fail { .. });
-    if !terminal {
+    let terminal_summary = if let Transition::Fail { summary, .. } = &transition {
+        Some(summary.as_str())
+    } else {
         observe_attempt(Some(handles), &attempt, &transition);
-    }
+        None
+    };
     let written = persist(
         shared,
         handles,
@@ -385,26 +383,14 @@ async fn run_attempt(
         &slots,
     )
     .await;
-    if terminal {
-        observe_terminal(handles, &attempt, &transition, written);
-    }
-}
-
-/// A terminal failure counts only once its write applies. A row the write did
-/// not move is failed, re-run, or exhausted by its lease rescue, which counts
-/// it; counting it here too would count one job twice.
-fn observe_terminal(
-    handles: &KindMetrics,
-    attempt: &AttemptId,
-    transition: &Transition,
-    written: Option<Written>,
-) {
-    match (transition, written) {
-        (_, Some(Written::Applied)) => observe_attempt(Some(handles), attempt, transition),
-        (Transition::Fail { summary, .. }, _) => {
+    if let Some(summary) = terminal_summary {
+        // Count a terminal failure only when its write applies. Otherwise a
+        // later attempt or lease rescue may count it.
+        if written == Some(Written::Applied) {
+            observe_attempt(Some(handles), &attempt, &transition);
+        } else {
             tracing::info!(job.id = %attempt.job_id, job.kind = attempt.kind, job.attempt = attempt.number, outcome = transition.label(), error = error_field(summary), "job_attempt_failed");
         }
-        _ => {}
     }
 }
 

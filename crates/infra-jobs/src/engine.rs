@@ -556,8 +556,7 @@ impl Drop for TaskGuard {
     }
 }
 
-/// Stands in for a cleanup budget too long to add to the clock.
-const NO_CLEANUP_DEADLINE: Duration = Duration::from_hours(24 * 365);
+const CLEANUP_OVERFLOW_FALLBACK: Duration = Duration::from_hours(24 * 365);
 
 pub(crate) struct Shared {
     pub(crate) worker_id: uuid::Uuid,
@@ -619,7 +618,7 @@ impl ForcedCleanup {
             let started_at = Instant::now();
             let deadline = started_at
                 .checked_add(budget)
-                .unwrap_or(started_at + NO_CLEANUP_DEADLINE);
+                .unwrap_or(started_at + CLEANUP_OVERFLOW_FALLBACK);
             CleanupWindow {
                 started_at,
                 deadline,
