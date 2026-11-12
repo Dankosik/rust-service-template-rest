@@ -177,7 +177,7 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
     if forced {
         degraded |= stage(
             "attempt_cleanup",
-            clean_up_attempts(&mut resources, budget.stage_deadline(ATTEMPT_CLEANUP)),
+            clean_up_after_forced_drain(&mut resources, budget.stage_deadline(ATTEMPT_CLEANUP)),
         )
         .await;
     }
@@ -341,7 +341,7 @@ async fn drain(
     }
 }
 
-async fn clean_up_attempts(resources: &mut Resources, deadline: Instant) -> bool {
+async fn clean_up_after_forced_drain(resources: &mut Resources, deadline: Instant) -> bool {
     let jobs = async {
         // template:begin jobs:worker-shutdown-finish-jobs
         futures_util::future::join_all(

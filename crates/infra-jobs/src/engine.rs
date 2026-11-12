@@ -95,7 +95,8 @@ impl OperationError {
     }
 }
 
-/// Collapses every transaction failure into [`OperationError::Statement`].
+/// Preserves [`OperationError::Acquire`] and maps begin and commit failures to
+/// [`OperationError::Statement`].
 ///
 /// `Begin`, `CommitFailed`, and `CommitUnknown` keep the driver error as the
 /// source and the `statement` label, with no variant, label, or metric
@@ -441,11 +442,9 @@ impl Drop for SupervisorGuard {
 /// Dropped when its task ends, a panic included: an end before the token
 /// was cancelled, or any panic during shutdown, fails the engine.
 ///
-/// It cancels only `failure`, not the claim stop: its tasks admit no attempts,
-/// so failing the process is enough and the worker's staged shutdown owns the
-/// order the rest stops in. A supervised attempt takes the opposite route
-/// through [`SupervisorGuard`], which also stops claiming: the claim it was
-/// admitted under can no longer be settled.
+/// The worker's staged shutdown owns the order in which work stops after this
+/// guard signals failure. [`SupervisorGuard`] also stops claiming when the
+/// attempt it guards can no longer settle its claim.
 struct TaskGuard {
     task: &'static str,
     token: CancellationToken,
