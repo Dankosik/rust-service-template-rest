@@ -105,7 +105,7 @@ impl Call {
     pub(crate) fn start<B>(series: &Arc<Series>, request: &http::Request<B>) -> Self {
         let started = Instant::now();
         let handles = series.handles(request);
-        let span = make_span(request, &handles.path, series.side());
+        let span = make_span(request, &handles, series.side());
         handles.started.increment(1);
         Self {
             handles,
@@ -151,18 +151,17 @@ impl Drop for Call {
     }
 }
 
-/// The RPC span with its OpenTelemetry attributes. `path` is the label path,
-/// so a path that is no known method names the span `unknown/unknown`.
-fn make_span<B>(request: &http::Request<B>, path: &str, side: Side) -> tracing::Span {
-    let (service, method) = service_and_method(path);
+/// The RPC span with its OpenTelemetry attributes, named after the label
+/// path's method: `unknown/unknown` for a path that is no known method.
+fn make_span<B>(request: &http::Request<B>, handles: &Handles, side: Side) -> tracing::Span {
     let span = otel_trace_span!(
         "GRPC request",
-        otel.name = format!("{service}/{method}"),
+        otel.name = &*handles.span_name,
         otel.kind = ?side.span_kind(),
     );
     span.set_attribute("rpc.system", "grpc");
-    span.set_attribute("rpc.service", service.to_owned());
-    span.set_attribute("rpc.method", method.to_owned());
+    span.set_attribute("rpc.service", Arc::clone(&handles.service));
+    span.set_attribute("rpc.method", Arc::clone(&handles.method));
     // Client destination identity is configured by the caller of our adapter;
     // inbound authority and User-Agent are untrusted request data.
     if matches!(side, Side::Client) {
@@ -270,6 +269,10 @@ enum Kind {
 struct Handles {
     /// The label path, [`UNKNOWN_PATH`] for `unknown`.
     path: Box<str>,
+    /// `service/method`, the span name.
+    span_name: Box<str>,
+    service: Arc<str>,
+    method: Arc<str>,
     handled_metric: &'static str,
     started: metrics::Counter,
     handling_seconds: metrics::Histogram,
@@ -374,8 +377,12 @@ impl Series {
     }
 
     fn register(&self, path: &str) -> Arc<Handles> {
+        let (service, method) = service_and_method(path);
         Arc::new(Handles {
             path: path.into(),
+            span_name: format!("{service}/{method}").into(),
+            service: service.into(),
+            method: method.into(),
             handled_metric: self.handled_metric,
             started: metrics::counter!(self.started_metric, call_labels(path)),
             handling_seconds: metrics::histogram!(self.handling_seconds_metric, call_labels(path)),
