@@ -98,6 +98,18 @@ where
         None => Variables::new(),
     };
     variables.extend(read_environment(environment)?);
+    for (name, child) in &variables {
+        // Skip the separator after APP. The remaining matches are the same
+        // segment boundaries the environment source uses to build dotted keys.
+        for (end, _) in name.match_indices(ENV_SEPARATOR).skip(1) {
+            if let Some(parent) = variables.get(&name[..end]) {
+                return Err(Error::OverlappingVariables {
+                    parent: parent.spelled.clone(),
+                    child: child.spelled.clone(),
+                });
+            }
+        }
+    }
     Ok(variables)
 }
 

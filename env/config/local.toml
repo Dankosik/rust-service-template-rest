@@ -27,7 +27,8 @@ format = "text"
 # worker_threads = 4
 
 [observability.otel.exporter]
-# Empty: spans get trace ids for log correlation but nothing is exported.
+# Empty uses the first nonblank value from OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+# then OTEL_EXPORTER_OTLP_ENDPOINT. With neither, trace IDs still correlate logs.
 # Point at a local collector to see traces, e.g. "http://127.0.0.1:4318".
 otlp_endpoint = ""
 otlp_headers = ""

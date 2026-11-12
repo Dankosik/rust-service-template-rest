@@ -1,9 +1,10 @@
-//! Batched COMPLETE writes: one statement for every completion queued while
-//! the previous batch was in flight.
+//! Batched COMPLETE writes for attempts that share a supervisor deadline.
 
-use std::sync::Arc;
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 use infra_postgres::observed;
+use tokio::sync::oneshot::{self, error::TryRecvError};
 use tokio::time::Instant;
 
 use super::outcome::{Unacknowledged, Written};
@@ -15,41 +16,59 @@ use crate::engine::{Operation, OperationError, Shared, backstop, observe_failure
 
 type CompletionReply = Result<Written, Unacknowledged>;
 
-/// Completions waiting for the next batch, and the one batch in flight.
-///
-/// The first waiter that holds `writer` writes every queued completion in one
-/// statement; completions queued meanwhile go in the next batch. A waiter
-/// whose completion another waiter wrote finds the queue empty and reads its
-/// answer. A batch whose writer was dropped answers nobody, and each of its
-/// waiters retries as after a failed statement.
 pub(crate) struct Completions {
-    queued: std::sync::Mutex<Vec<QueuedCompletion>>,
-    writer: tokio::sync::Mutex<()>,
+    groups: Mutex<BTreeMap<Instant, Weak<CompletionGroup>>>,
     pub(crate) memberships: MembershipGauge,
 }
 
 impl Default for Completions {
     fn default() -> Self {
         Self {
-            queued: std::sync::Mutex::default(),
-            writer: tokio::sync::Mutex::default(),
+            groups: Mutex::default(),
             memberships: MembershipGauge::new(COMPLETION_MEMBERSHIPS_METRIC),
         }
     }
 }
 
+impl Completions {
+    fn group(&self, deadline: Instant) -> Arc<CompletionGroup> {
+        let mut groups = self
+            .groups
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(group) = groups.get(&deadline).and_then(Weak::upgrade) {
+            return group;
+        }
+        groups.retain(|_, group| group.strong_count() != 0);
+        let group = Arc::new(CompletionGroup::default());
+        groups.insert(deadline, Arc::downgrade(&group));
+        group
+    }
+}
+
+/// One writer per deadline. No writer can hold another deadline's queue.
+#[derive(Default)]
+struct CompletionGroup {
+    queued: Mutex<Vec<QueuedCompletion>>,
+    writer: tokio::sync::Mutex<()>,
+}
+
+enum WriteTurn<'a> {
+    Write(tokio::sync::MutexGuard<'a, ()>),
+    Reply(CompletionReply),
+}
+
 struct QueuedCompletion {
     fence: ClaimFence,
-    deadline: Instant,
     // Fields drop in declaration order: the membership retires before reply
     // closure can wake a waiter that immediately registers another completion.
     membership: MetricMembership,
     slots: Arc<AttemptSlots>,
-    reply: tokio::sync::oneshot::Sender<CompletionReply>,
+    reply: oneshot::Sender<CompletionReply>,
 }
 
 impl QueuedCompletion {
-    fn retire(self) -> tokio::sync::oneshot::Sender<CompletionReply> {
+    fn retire(self) -> oneshot::Sender<CompletionReply> {
         let Self {
             membership,
             slots,
@@ -65,14 +84,14 @@ impl QueuedCompletion {
 /// Dropping a waiting supervisor removes only its own queued registration.
 /// Once taken by the writer, the batch owns retirement instead.
 struct CompletionRegistration<'a> {
-    completions: &'a Completions,
+    group: &'a CompletionGroup,
     fence: ClaimFence,
 }
 
 impl Drop for CompletionRegistration<'_> {
     fn drop(&mut self) {
         let retired = {
-            let mut queued = self.completions.lock_queue();
+            let mut queued = self.group.lock_queue();
             queued
                 .iter()
                 .position(|entry| entry.fence == self.fence)
@@ -82,25 +101,21 @@ impl Drop for CompletionRegistration<'_> {
     }
 }
 
-impl Completions {
+impl CompletionGroup {
     fn register(
         &self,
         fence: ClaimFence,
-        deadline: Instant,
         slots: &Arc<AttemptSlots>,
+        memberships: &MembershipGauge,
     ) -> (
         CompletionRegistration<'_>,
-        tokio::sync::oneshot::Receiver<CompletionReply>,
+        oneshot::Receiver<CompletionReply>,
     ) {
-        let (reply, response) = tokio::sync::oneshot::channel();
-        let registration = CompletionRegistration {
-            completions: self,
-            fence,
-        };
+        let (reply, response) = oneshot::channel();
+        let registration = CompletionRegistration { group: self, fence };
         let queued = QueuedCompletion {
             fence,
-            deadline,
-            membership: self.memberships.join(),
+            membership: memberships.join(),
             slots: Arc::clone(slots),
             reply,
         };
@@ -108,17 +123,34 @@ impl Completions {
         (registration, response)
     }
 
-    fn lock_queue(&self) -> std::sync::MutexGuard<'_, Vec<QueuedCompletion>> {
+    fn lock_queue(&self) -> MutexGuard<'_, Vec<QueuedCompletion>> {
         self.queued
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    async fn writer_or_reply(
+        &self,
+        response: &mut oneshot::Receiver<CompletionReply>,
+    ) -> WriteTurn<'_> {
+        let writer = tokio::select! {
+            biased;
+            reply = &mut *response => return WriteTurn::Reply(reply.unwrap_or(Err(Unacknowledged))),
+            writer = self.writer.lock() => writer,
+        };
+        // The previous writer may have sent our reply between the two polls.
+        match response.try_recv() {
+            Ok(reply) => WriteTurn::Reply(reply),
+            Err(TryRecvError::Closed) => WriteTurn::Reply(Err(Unacknowledged)),
+            Err(TryRecvError::Empty) => WriteTurn::Write(writer),
+        }
     }
 }
 
 /// Retire the entire batch before a reply or sender closure can wake a waiter.
 struct CompletionBatch {
     queued: Vec<QueuedCompletion>,
-    pruned_replies: Vec<tokio::sync::oneshot::Sender<CompletionReply>>,
+    pruned_replies: Vec<oneshot::Sender<CompletionReply>>,
 }
 
 impl CompletionBatch {
@@ -139,7 +171,7 @@ impl CompletionBatch {
         );
     }
 
-    fn retire(&mut self) -> Vec<tokio::sync::oneshot::Sender<CompletionReply>> {
+    fn retire(&mut self) -> Vec<oneshot::Sender<CompletionReply>> {
         std::mem::take(&mut self.queued)
             .into_iter()
             .map(QueuedCompletion::retire)
@@ -168,21 +200,24 @@ pub(super) async fn complete_batched(
     supervisor_deadline: Instant,
     slots: &Arc<AttemptSlots>,
 ) -> CompletionReply {
-    let (_registration, response) = shared
-        .completions
-        .register(fence, supervisor_deadline, slots);
-    let writer = shared.completions.writer.lock().await;
-    let batch = CompletionBatch::new(std::mem::take(&mut *shared.completions.lock_queue()));
-    write_batch(shared, batch).await;
+    let group = shared.completions.group(supervisor_deadline);
+    let (_registration, mut response) =
+        group.register(fence, slots, &shared.completions.memberships);
+    let writer = match group.writer_or_reply(&mut response).await {
+        WriteTurn::Write(writer) => writer,
+        WriteTurn::Reply(reply) => return reply,
+    };
+    let batch = CompletionBatch::new(std::mem::take(&mut *group.lock_queue()));
+    write_batch(shared, batch, supervisor_deadline).await;
     drop(writer);
     response.await.unwrap_or(Err(Unacknowledged))
 }
 
-async fn write_batch(shared: &Shared, mut batch: CompletionBatch) {
-    batch.prune(|entry| entry.reply.is_closed() || expired(shared, entry.deadline));
-    let Some(deadline) = batch.queued.iter().map(|entry| entry.deadline).min() else {
+async fn write_batch(shared: &Shared, mut batch: CompletionBatch, deadline: Instant) {
+    batch.prune(|entry| entry.reply.is_closed());
+    if batch.queued.is_empty() || expired(shared, deadline) {
         return;
-    };
+    }
     // The batch's bind arrays live in this scope so the statement future ends,
     // and its borrow of them with it, before any reply wakes a waiter.
     let result = {
@@ -282,6 +317,38 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn an_earlier_deadline_does_not_block_a_later_writer() {
+        let completions = Completions::default();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let earlier = completions.group(deadline);
+        let later = completions.group(deadline + Duration::from_millis(100));
+        let _earlier_writer = earlier.writer.lock().await;
+        let (_reply, mut response) = oneshot::channel();
+        let mut turn = std::pin::pin!(later.writer_or_reply(&mut response));
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(matches!(
+            turn.as_mut().poll(&mut context),
+            std::task::Poll::Ready(WriteTurn::Write(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_acknowledged_attempt_can_finish_while_a_writer_holds_the_turn() {
+        let group = CompletionGroup::default();
+        let writer = group.writer.lock().await;
+        let (reply, mut response) = oneshot::channel();
+        let mut turn = std::pin::pin!(group.writer_or_reply(&mut response));
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(turn.as_mut().poll(&mut context).is_pending());
+        reply.send(Ok(Written::Applied)).unwrap();
+        assert!(matches!(
+            turn.as_mut().poll(&mut context),
+            std::task::Poll::Ready(WriteTurn::Reply(Ok(Written::Applied)))
+        ));
+        drop(writer);
+    }
+
     #[test]
     fn cancelled_queued_registration_retires_only_its_claim_generation() {
         let gauges = Gauges::default();
@@ -291,10 +358,11 @@ mod tests {
             let first = admitted(&capacity);
             let second = admitted(&capacity);
             let deadline = Instant::now() + Duration::from_secs(10);
+            let group = completions.group(deadline);
             let (first_registration, mut first_reply) =
-                completions.register(fence(1), deadline, &first);
+                group.register(fence(1), &first, &completions.memberships);
             let (second_registration, mut second_reply) =
-                completions.register(fence(2), deadline, &second);
+                group.register(fence(2), &second, &completions.memberships);
             drop(first);
             drop(second);
             assert_eq!(capacity.available_permits(), 0);
@@ -311,7 +379,7 @@ mod tests {
             assert_eq!(capacity.available_permits(), 1);
             assert_eq!(gauges.get(OWNED_ATTEMPTS_METRIC, None), 1.0);
             assert_eq!(gauges.get(COMPLETION_MEMBERSHIPS_METRIC, None), 1.0);
-            assert_eq!(completions.lock_queue().len(), 1);
+            assert_eq!(group.lock_queue().len(), 1);
             std::assert_matches!(
                 first_reply.try_recv(),
                 Err(tokio::sync::oneshot::error::TryRecvError::Closed)
@@ -324,7 +392,7 @@ mod tests {
             assert_eq!(capacity.available_permits(), 2);
             assert_eq!(gauges.get(OWNED_ATTEMPTS_METRIC, None), 0.0);
             assert_eq!(gauges.get(COMPLETION_MEMBERSHIPS_METRIC, None), 0.0);
-            assert!(completions.lock_queue().is_empty());
+            assert!(group.lock_queue().is_empty());
         });
     }
 
@@ -352,17 +420,15 @@ mod tests {
             ] {
                 for prune in [false, true] {
                     let completions = Completions::default();
+                    let group = completions.group(Instant::now() + Duration::from_secs(10));
                     let capacity = Arc::new(tokio::sync::Semaphore::new(4));
                     let mut registrations = Vec::new();
                     let mut responses = Vec::new();
                     let mut observers = Vec::new();
                     for generation in 1..=4 {
                         let slots = admitted(&capacity);
-                        let (registration, mut response) = completions.register(
-                            fence(generation),
-                            Instant::now() + Duration::from_secs(10),
-                            &slots,
-                        );
+                        let (registration, mut response) =
+                            group.register(fence(generation), &slots, &completions.memberships);
                         let wake = Arc::new(ReplyWake {
                             capacity: Arc::clone(&capacity),
                             available_at_wake: std::sync::atomic::AtomicUsize::new(usize::MAX),
@@ -378,8 +444,7 @@ mod tests {
                         responses.push(response);
                         observers.push(wake);
                     }
-                    let mut batch =
-                        CompletionBatch::new(std::mem::take(&mut *completions.lock_queue()));
+                    let mut batch = CompletionBatch::new(std::mem::take(&mut *group.lock_queue()));
                     drop(registrations);
                     assert_eq!(capacity.available_permits(), 0, "batch retains admission");
                     assert_eq!(gauges.get(OWNED_ATTEMPTS_METRIC, None), 4.0);

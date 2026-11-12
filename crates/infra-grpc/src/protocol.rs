@@ -78,18 +78,6 @@ pub fn client_response_code<B>(response: &http::Response<B>) -> Option<tonic::Co
     header_status_code(response.headers()).or_else(|| http_status_code(response.status()))
 }
 
-/// The terminal code available before polling the body. An open stream
-/// without an initial `grpc-status` can still carry a status in its trailers.
-pub fn client_terminal_response_code<B: http_body::Body>(
-    response: &http::Response<B>,
-) -> Option<tonic::Code> {
-    if response.body().is_end_stream() {
-        client_response_code(response)
-    } else {
-        header_status_code(response.headers())
-    }
-}
-
 pub(crate) fn header_status_code(headers: &HeaderMap) -> Option<tonic::Code> {
     headers
         .get("grpc-status")

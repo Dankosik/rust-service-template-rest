@@ -205,7 +205,11 @@ impl ProviderClient {
     ) -> Result<Vec<u8>, ProviderFailure> {
         let require_json_content_type = false;
         Exchange::start(document.operation(), "GET", url)
-            .run(self.client.get(url.clone()), require_json_content_type)
+            .run(
+                self.client.get(url.clone()),
+                require_json_content_type,
+                None,
+            )
             .await
     }
     // template:end oidc-jwt:authn-provider-get-json
@@ -234,15 +238,9 @@ impl ProviderClient {
             )
             .body(form_body);
         context.check().map_err(|_| ProviderFailure::Timeout)?;
-        let request = request.timeout(context.remaining().unwrap_or(PROVIDER_TIMEOUT));
-        let require_json_content_type = true;
-        let exchange =
-            Exchange::start("introspection", "POST", url).run(request, require_json_content_type);
-        let result = tokio::select! {
-            biased;
-            _ = context.wait_stopped() => return Err(ProviderFailure::Timeout),
-            result = exchange => result,
-        };
+        let result = Exchange::start("introspection", "POST", url)
+            .run(request, true, Some(context))
+            .await;
         context.check().map_err(|_| ProviderFailure::Timeout)?;
         result
     }
@@ -308,10 +306,19 @@ impl Exchange {
         self,
         request: reqwest::RequestBuilder,
         require_json_content_type: bool,
+        context: Option<&operation_context::OperationContext>,
     ) -> Result<Vec<u8>, ProviderFailure> {
-        let result = receive(request, require_json_content_type)
-            .instrument(self.span.clone())
-            .await;
+        let receive = receive(request, require_json_content_type).instrument(self.span.clone());
+        let result = if let Some(context) = context {
+            tokio::select! {
+                biased;
+                _ = context.wait_stopped() => return Err(ProviderFailure::Timeout),
+                () = tokio::time::sleep(PROVIDER_TIMEOUT) => Err(ProviderFailure::Timeout),
+                result = receive => result,
+            }
+        } else {
+            receive.await
+        };
         self.finish(result.as_ref().err().copied());
         result
     }
@@ -698,7 +705,11 @@ mod tests {
         let started = tokio::time::Instant::now();
         let result = tokio::time::timeout(
             Duration::from_millis(2500),
-            Exchange::start("discovery", "GET", &url).run(client.client.get(url.clone()), false),
+            Exchange::start("discovery", "GET", &url).run(
+                client.client.get(url.clone()),
+                false,
+                None,
+            ),
         )
         .await
         .expect("the connection budget must expire before the three-second total");
@@ -708,7 +719,7 @@ mod tests {
 
         tokio::time::resume();
         let body = Exchange::start("discovery", "GET", &url)
-            .run(client.client.get(url.clone()), false)
+            .run(client.client.get(url.clone()), false, None)
             .await
             .unwrap();
         assert_eq!(body, b"{}");
@@ -752,14 +763,14 @@ mod tests {
         let url = Url::parse(&format!("https://{FIXTURE_HOST}/keys")).unwrap();
         assert_eq!(
             Exchange::start("jwks", "GET", &url)
-                .run(old_client.client.get(url.clone()), false)
+                .run(old_client.client.get(url.clone()), false, None)
                 .await
                 .unwrap(),
             b"{}"
         );
         assert_eq!(
             Exchange::start("jwks", "GET", &url)
-                .run(old_client.client.get(url.clone()), false)
+                .run(old_client.client.get(url.clone()), false, None)
                 .await,
             Err(ProviderFailure::Connect)
         );
@@ -772,7 +783,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             Exchange::start("jwks", "GET", &url)
-                .run(rebuilt_client.client.get(url.clone()), false)
+                .run(rebuilt_client.client.get(url.clone()), false, None)
                 .await
                 .unwrap(),
             b"{}"
@@ -924,7 +935,7 @@ mod tests {
         let url = fixture_url(address);
         let request = client.client.get(url.clone());
         let exchange = Exchange::start("discovery", "GET", &url);
-        let pending = tokio::spawn(exchange.run(request, false));
+        let pending = tokio::spawn(exchange.run(request, false, None));
         tokio::time::timeout(Duration::from_secs(1), received)
             .await
             .unwrap()
@@ -939,7 +950,7 @@ mod tests {
         tokio::time::resume();
 
         let body = Exchange::start("discovery", "GET", &url)
-            .run(client.client.get(url.clone()), false)
+            .run(client.client.get(url.clone()), false, None)
             .await
             .unwrap();
         assert_eq!(body, b"{}");

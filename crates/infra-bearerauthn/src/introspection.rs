@@ -1,19 +1,26 @@
 //! RFC 7662 opaque-token introspection.
 
 use std::{
+    collections::HashMap,
+    future::Future,
     num::NonZeroUsize,
+    sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use futures_util::{
+    FutureExt,
+    future::{BoxFuture, Shared, WeakShared},
+};
 use moka::{Expiry, future::Cache};
 use operation_context::OperationContext;
-use secrecy::ExposeSecret;
+use secrecy::{ExposeSecret, SecretString};
 use tokio::sync::Semaphore;
 
 use crate::{
     BearerToken, PreparationError, Principal, VerificationError, VerificationReason, Verifier,
     claims::{ClaimPolicy, VerifiedIntrospection, validate_introspection_claims},
-    provider::{PROVIDER_TIMEOUT, ProviderClient},
+    provider::ProviderClient,
 };
 
 /// The largest verified provider payload one cache entry retains.
@@ -96,16 +103,88 @@ pub(crate) struct IntrospectionVerifier {
     cache: Option<PositiveCache>,
 }
 
-/// `retained` is the only store later callers are served from. `fills` keeps
-/// nothing (zero TTL): it only coalesces concurrent misses into one
-/// introspection, and its [`Fill`] tag stops a waiter from passing retained
-/// evidence off as fresh provider trust.
 struct PositiveCache {
     retained: Cache<TokenDigest, VerifiedIntrospection>,
-    fills: Cache<TokenDigest, Fill>,
+    fills: Mutex<HashMap<TokenDigest, WeakShared<FillFuture>>>,
 }
 
 type TokenDigest = [u8; 32];
+type FillResult = Result<Fill, VerificationError>;
+type FillFuture = BoxFuture<'static, FillResult>;
+
+impl PositiveCache {
+    fn join_fill<F>(
+        &self,
+        key: TokenDigest,
+        start: impl FnOnce() -> F,
+    ) -> Result<FillWaiter<'_>, VerificationError>
+    where
+        F: Future<Output = FillResult> + Send + 'static,
+    {
+        let mut fills = self
+            .fills
+            .lock()
+            .map_err(|_| VerificationError::unavailable(VerificationReason::CacheState))?;
+        let shared = fills
+            .get(&key)
+            .and_then(WeakShared::upgrade)
+            .unwrap_or_else(|| {
+                let shared = start().boxed().shared();
+                if let Some(weak) = shared.downgrade() {
+                    fills.insert(key, weak);
+                }
+                shared
+            });
+        Ok(FillWaiter {
+            shared,
+            registration: FillRegistration { cache: self, key },
+        })
+    }
+}
+
+/// The index holds a weak reference. Any waiting caller can drive the same
+/// future, and the last departing caller drops it and releases its permit.
+struct FillWaiter<'a> {
+    // Drop the strong reference before cleaning up the weak index entry.
+    shared: Shared<FillFuture>,
+    registration: FillRegistration<'a>,
+}
+
+impl FillWaiter<'_> {
+    async fn wait(&self) -> FillResult {
+        let result = self.shared.clone().await;
+        self.registration.retire(&self.shared);
+        result
+    }
+}
+
+struct FillRegistration<'a> {
+    cache: &'a PositiveCache,
+    key: TokenDigest,
+}
+
+impl FillRegistration<'_> {
+    fn retire(&self, completed: &Shared<FillFuture>) {
+        if let Ok(mut fills) = self.cache.fills.lock()
+            && let Some(current) = fills.get(&self.key).and_then(WeakShared::upgrade)
+            && current.ptr_eq(completed)
+        {
+            fills.remove(&self.key);
+        }
+    }
+}
+
+impl Drop for FillRegistration<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut fills) = self.cache.fills.lock()
+            && fills
+                .get(&self.key)
+                .is_some_and(|fill| fill.upgrade().is_none())
+        {
+            fills.remove(&self.key);
+        }
+    }
+}
 
 fn token_digest(token: &BearerToken<'_>) -> TokenDigest {
     let digest = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, token.as_bytes());
@@ -124,12 +203,12 @@ impl IntrospectionVerifier {
     fn try_new(
         options: IntrospectionOptions,
         provider: ProviderClient,
-    ) -> Result<Self, PreparationError> {
+    ) -> Result<Arc<Self>, PreparationError> {
         let policy = ClaimPolicy::try_new(options.issuer.as_str().to_owned(), options.audiences)?;
         if options.provider_concurrency.get() > Semaphore::MAX_PERMITS {
             return Err(PreparationError::invalid_options());
         }
-        Ok(Self {
+        Ok(Arc::new(Self {
             endpoint: options.endpoint,
             client_id: options.client_id,
             client_secret: options.client_secret,
@@ -141,18 +220,15 @@ impl IntrospectionVerifier {
                     .max_capacity(cache.capacity as u64)
                     .expire_after(Retention { ttl: cache.ttl })
                     .build(),
-                fills: Cache::builder()
-                    .max_capacity(cache.capacity as u64)
-                    .time_to_live(Duration::ZERO)
-                    .build(),
+                fills: Mutex::default(),
             }),
-        })
+        }))
     }
 
     /// Rechecks retained calendar eligibility; concurrent misses share tagged
     /// evidence so a waiter cannot mistake retention for fresh provider trust.
     pub(crate) async fn verify(
-        &self,
+        self: &Arc<Self>,
         token: &BearerToken<'_>,
         context: &OperationContext,
     ) -> Result<Principal, VerificationError> {
@@ -160,10 +236,10 @@ impl IntrospectionVerifier {
     }
 
     async fn verify_with_now(
-        &self,
+        self: &Arc<Self>,
         token: &BearerToken<'_>,
         context: &OperationContext,
-        now: impl Fn() -> Result<u64, VerificationError>,
+        now: impl Fn() -> Result<u64, VerificationError> + Clone + Send + Sync + 'static,
     ) -> Result<Principal, VerificationError> {
         context.check().map_err(|_| {
             VerificationError::unavailable(VerificationReason::Provider(
@@ -172,7 +248,7 @@ impl IntrospectionVerifier {
         })?;
         let Some(cache) = &self.cache else {
             return self
-                .introspect(token, &context.child(PROVIDER_TIMEOUT), &now)
+                .introspect(token.to_secret(), context, &now)
                 .await?
                 .deliver(now()?);
         };
@@ -184,21 +260,26 @@ impl IntrospectionVerifier {
                 return Ok(value.principal);
             }
             let filled = cache
-                .fills
-                .try_get_with(key, async {
-                    if let Some(value) = cache.retained.get(&key).await
-                        && value.reusable_at(now()?)
-                    {
-                        return Ok::<_, VerificationError>(Fill::Retained(value));
+                .join_fill(key, || {
+                    let verifier = Arc::clone(self);
+                    let retained = cache.retained.clone();
+                    let now = now.clone();
+                    let token = token.to_secret();
+                    async move {
+                        if let Some(value) = retained.get(&key).await
+                            && value.reusable_at(now()?)
+                        {
+                            return Ok(Fill::Retained(value));
+                        }
+                        let value = verifier
+                            .introspect(token, &OperationContext::unbounded(), &now)
+                            .await?;
+                        retained.insert(key, value.clone()).await;
+                        Ok(Fill::Fresh(value))
                     }
-                    // Shared initialization never captures a caller's cancellation lineage.
-                    let provider_context = OperationContext::with_timeout(PROVIDER_TIMEOUT);
-                    let value = self.introspect(token, &provider_context, &now).await?;
-                    cache.retained.insert(key, value.clone()).await;
-                    Ok(Fill::Fresh(value))
-                })
-                .await
-                .map_err(|error| *error)?;
+                })?
+                .wait()
+                .await?;
             match filled {
                 Fill::Fresh(value) => return value.deliver(now()?),
                 Fill::Retained(value) if value.reusable_at(now()?) => {
@@ -213,7 +294,7 @@ impl IntrospectionVerifier {
 
     async fn introspect(
         &self,
-        token: &BearerToken<'_>,
+        token: SecretString,
         context: &OperationContext,
         now: &impl Fn() -> Result<u64, VerificationError>,
     ) -> Result<VerifiedIntrospection, VerificationError> {
@@ -230,14 +311,14 @@ impl IntrospectionVerifier {
                 self.endpoint.url(),
                 &self.client_id,
                 self.client_secret.expose_secret(),
-                form_body(token),
+                form_body(token.expose_secret()),
                 context,
             )
             .await
             .map_err(|failure| {
                 VerificationError::unavailable(VerificationReason::Provider(failure))
             })?;
-        validate_introspection_claims(&response, &self.policy, now()?, token.to_secret())
+        validate_introspection_claims(&response, &self.policy, now()?, token)
     }
 }
 
@@ -283,9 +364,9 @@ fn retention(principal: &Principal, ttl: Duration, now: SystemTime) -> Duration 
         .map_or(Duration::ZERO, |remaining| remaining.min(ttl))
 }
 
-fn form_body(token: &BearerToken<'_>) -> String {
+fn form_body(token: &str) -> String {
     url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("token", token.as_str())
+        .append_pair("token", token)
         .append_pair("token_type_hint", "access_token")
         .finish()
 }
@@ -320,6 +401,7 @@ mod tests {
         claims::{ClaimPolicy, validate_introspection_claims},
         parse_bearer,
         provider::{ProviderClient, fixture_acceptor, new_fixture_client},
+        test_metrics::Diagnostics,
     };
     use operation_context::OperationContext;
 
@@ -487,9 +569,7 @@ mod tests {
         }
 
         fn verifier(&self, cache: Option<IntrospectionCacheOptions>) -> Arc<IntrospectionVerifier> {
-            Arc::new(
-                IntrospectionVerifier::try_new(self.options(cache), self.provider.clone()).unwrap(),
-            )
+            IntrospectionVerifier::try_new(self.options(cache), self.provider.clone()).unwrap()
         }
 
         fn prepared(&self, cache: Option<IntrospectionCacheOptions>) -> crate::Verifier {
@@ -524,7 +604,7 @@ mod tests {
         IntrospectionCacheOptions::try_new(capacity, Duration::from_secs(30)).unwrap()
     }
     async fn verify(
-        verifier: &IntrospectionVerifier,
+        verifier: &Arc<IntrospectionVerifier>,
         value: &[u8],
     ) -> Result<crate::Principal, Failure> {
         let token = parse_bearer([value]).unwrap();
@@ -847,7 +927,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancelling_initializer_does_not_strand_surviving_requests() {
+    async fn cancelling_initializer_preserves_the_surviving_requests_exchange() {
         let fixture = Fixture::new().await;
         let verifier = fixture.prepared(Some(cache_options(2)));
         let gate = fixture.block_responses();
@@ -860,16 +940,62 @@ mod tests {
         context.cancel();
         assert_eq!(leader.as_mut().await, Err(Failure::Unavailable));
         drop(leader);
-        tokio::select! { () = fixture.received() => {}, result = &mut survivor => panic!("replacement response must be gated: {result:?}"), }
-        assert_eq!(fixture.calls(), 2);
-        gate.add_permits(2);
+        gate.add_permits(1);
         tokio::time::timeout(Duration::from_secs(5), survivor)
             .await
             .unwrap()
             .unwrap();
         verifier.verify(&token).await.unwrap();
-        assert_eq!(fixture.calls(), 2);
+        assert_eq!(fixture.calls(), 1);
         fixture.finish().await;
+    }
+
+    #[tokio::test]
+    async fn provider_deadline_is_distinct_from_caller_cancellation_in_exchange_telemetry() {
+        let diagnostics = Diagnostics::default();
+        let _recorder = metrics::set_default_local_recorder(&diagnostics);
+        let _dispatch = tracing::subscriber::set_default(diagnostics.clone());
+        let token = parse_bearer([b"Bearer slow".as_slice()]).unwrap();
+        for cache in [None, Some(cache_options(1))] {
+            let fixture = Fixture::new().await;
+            let verifier = fixture.prepared(cache);
+            let _gate = fixture.block_responses();
+            for (cancel, expected) in [(true, "cancelled"), (false, "provider_timeout")] {
+                let context = OperationContext::unbounded();
+                let mut verification = Box::pin(verifier.verify_with_context(&token, &context));
+                tokio::select! {
+                    () = fixture.received() => {},
+                    result = &mut verification => panic!("response must be gated: {result:?}"),
+                }
+                tokio::time::pause();
+                if cancel {
+                    context.cancel();
+                } else {
+                    tokio::time::advance(Duration::from_secs(3)).await;
+                }
+                assert_eq!(
+                    tokio::time::timeout(Duration::from_millis(100), verification)
+                        .await
+                        .unwrap(),
+                    Err(Failure::Unavailable)
+                );
+                tokio::time::resume();
+                let samples = std::mem::take(&mut *diagnostics.histograms.lock().unwrap());
+                assert_eq!(samples.len(), 1);
+                assert_eq!(samples[0].name(), "authn_provider_request_duration_seconds");
+                assert!(
+                    samples[0]
+                        .labels()
+                        .any(|label| { label.key() == "outcome" && label.value() == expected })
+                );
+                let spans = std::mem::take(&mut *diagnostics.spans.lock().unwrap());
+                assert!(spans.iter().any(|span| {
+                    span.contains("authn.operation=\"introspection\";")
+                        && span.contains(&format!("error.type=\"{expected}\";"))
+                }));
+            }
+            fixture.finish().await;
+        }
     }
 
     #[tokio::test]
@@ -954,14 +1080,14 @@ mod tests {
             response["nbf"] = not_before.into();
             fixture.respond("200 OK", &serde_json::to_vec(&response).unwrap());
             verifier
-                .verify_with_now(&token, &context, || Ok(base))
+                .verify_with_now(&token, &context, move || Ok(base))
                 .await
                 .unwrap();
             let before = fixture.calls();
             fixture.respond("503 Service Unavailable", b"{}");
             // Still physically retained: the changed calendar alone forces provider work.
             let error = verifier
-                .verify_with_now(&token, &context, || Ok(changed))
+                .verify_with_now(&token, &context, move || Ok(changed))
                 .await
                 .unwrap_err();
             assert_eq!(error.failure, Failure::Unavailable);
@@ -969,7 +1095,7 @@ mod tests {
             // Rejecting old evidence must not delete it or poison later valid clock samples.
             assert_eq!(
                 verifier
-                    .verify_with_now(&token, &context, || Ok(base))
+                    .verify_with_now(&token, &context, move || Ok(base))
                     .await
                     .unwrap()
                     .subject(),
@@ -979,7 +1105,7 @@ mod tests {
             fixture.respond("200 OK", &active_response("replacement", base + 900));
             assert_eq!(
                 verifier
-                    .verify_with_now(&token, &context, || Ok(changed))
+                    .verify_with_now(&token, &context, move || Ok(changed))
                     .await
                     .unwrap()
                     .subject(),
@@ -987,7 +1113,7 @@ mod tests {
             );
             assert_eq!(
                 verifier
-                    .verify_with_now(&token, &context, || Ok(changed))
+                    .verify_with_now(&token, &context, move || Ok(changed))
                     .await
                     .unwrap()
                     .subject(),
@@ -1009,21 +1135,26 @@ mod tests {
             fixture.respond("200 OK", &active_response("old", base + 60));
             let verifier = fixture.verifier(Some(cache_options(1)));
             verifier
-                .verify_with_now(&token, &context, || Ok(base))
+                .verify_with_now(&token, &context, move || Ok(base))
                 .await
                 .unwrap();
             let cache = verifier.cache.as_ref().unwrap();
             let old = cache.retained.get(&key).await.unwrap();
             let before = fixture.calls();
-            let gate = Semaphore::new(0);
-            // Hold native publication of retained evidence so a joined consumer
+            let gate = Arc::new(Semaphore::new(0));
+            let publication_gate = gate.clone();
+            // Hold publication of retained evidence so a joined consumer
             // resumes after a calendar step (and optionally a newer replacement).
-            let mut publication = Box::pin(cache.fills.try_get_with(key, async {
-                gate.acquire().await.unwrap().forget();
-                Ok::<_, crate::VerificationError>(super::Fill::Retained(old))
-            }));
+            let publication = cache
+                .join_fill(key, || async move {
+                    publication_gate.acquire().await.unwrap().forget();
+                    Ok(super::Fill::Retained(old))
+                })
+                .unwrap();
+            let mut publication = Box::pin(publication.wait());
             poll_pending(publication.as_mut()).await;
-            let mut waiter = Box::pin(verifier.verify_with_now(&token, &context, || Ok(base + 60)));
+            let mut waiter =
+                Box::pin(verifier.verify_with_now(&token, &context, move || Ok(base + 60)));
             poll_pending(waiter.as_mut()).await;
             if replacement {
                 let newer = validate_introspection_claims(
@@ -1072,7 +1203,7 @@ mod tests {
             for warmed in [false, true] {
                 if warmed {
                     verifier
-                        .verify_with_now(&token, &context, || Ok(100))
+                        .verify_with_now(&token, &context, move || Ok(100))
                         .await
                         .unwrap();
                 }
@@ -1088,7 +1219,7 @@ mod tests {
             }
             assert_eq!(
                 verifier
-                    .verify_with_now(&token, &context, || Ok(100))
+                    .verify_with_now(&token, &context, move || Ok(100))
                     .await
                     .unwrap()
                     .subject(),
@@ -1133,18 +1264,16 @@ mod tests {
             let verifier = fixture.verifier(Some(cache_options(1)));
             let gate = fixture.block_responses();
             let before = fixture.calls();
-            let clock = Mutex::new(Some(base));
-            let mut leader = Box::pin(verifier.verify_with_now(&token, &context, || Ok(base)));
+            let clock = Arc::new(Mutex::new(Some(base)));
+            let mut leader = Box::pin(verifier.verify_with_now(&token, &context, move || Ok(base)));
             tokio::select! { () = fixture.received() => {}, result = &mut leader => panic!("response must be gated: {result:?}"), }
-            let mut waiter =
-                Box::pin(verifier.verify_with_now(
-                    &token,
-                    &context,
-                    || match *clock.lock().unwrap() {
-                        Some(now) => Ok(now),
-                        None => crate::unix_time(UNIX_EPOCH - Duration::from_secs(1)),
-                    },
-                ));
+            let waiter_clock = clock.clone();
+            let mut waiter = Box::pin(verifier.verify_with_now(&token, &context, move || {
+                match *waiter_clock.lock().unwrap() {
+                    Some(now) => Ok(now),
+                    None => crate::unix_time(UNIX_EPOCH - Duration::from_secs(1)),
+                }
+            }));
             poll_pending(waiter.as_mut()).await;
             gate.add_permits(1);
             tokio::time::timeout(Duration::from_secs(5), leader)
@@ -1163,7 +1292,7 @@ mod tests {
             assert_eq!(fixture.calls(), before + 1);
             // A caller-local delivery rejection neither retries nor invalidates retention.
             verifier
-                .verify_with_now(&token, &context, || Ok(base))
+                .verify_with_now(&token, &context, move || Ok(base))
                 .await
                 .unwrap();
             assert_eq!(fixture.calls(), before + 1);
@@ -1184,20 +1313,20 @@ mod tests {
         ));
         let token = parse_bearer([b"Bearer replaced".as_slice()]).unwrap();
         verifier
-            .verify_with_now(&token, &context, || Ok(base))
+            .verify_with_now(&token, &context, move || Ok(base))
             .await
             .unwrap();
         tokio::time::sleep(Duration::from_millis(1200)).await;
         fixture.respond("200 OK", &active_response("new", base + 600));
         verifier
-            .verify_with_now(&token, &context, || Ok(base + 60))
+            .verify_with_now(&token, &context, move || Ok(base + 60))
             .await
             .unwrap();
         tokio::time::sleep(Duration::from_millis(1000)).await;
         fixture.respond("503 Service Unavailable", b"{}");
         assert_eq!(
             verifier
-                .verify_with_now(&token, &context, || Ok(base + 60))
+                .verify_with_now(&token, &context, move || Ok(base + 60))
                 .await
                 .unwrap()
                 .subject(),

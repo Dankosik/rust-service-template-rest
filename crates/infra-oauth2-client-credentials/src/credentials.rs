@@ -6,10 +6,7 @@ use std::{
 
 use http::{HeaderMap, Request, header::AUTHORIZATION};
 use infra_outbound_http::Client;
-use moka::{
-    Expiry,
-    ops::compute::{CompResult, Op},
-};
+use moka::Expiry;
 use operation_context::{Deadline, OperationContext, Stopped};
 use secrecy::{ExposeSecret as _, SecretString};
 use tokio::{
@@ -135,8 +132,10 @@ pub(crate) struct Inner {
     pub(crate) service_request: tokio::sync::Mutex<()>,
     /// Tokens exchanged on behalf of a verified subject. Moka lets concurrent
     /// misses for one subject share a single exchange.
-    pub(crate) exchanged: moka::future::Cache<SubjectKey, Arc<Token>>,
+    pub(crate) exchanged: moka::future::Cache<SubjectKey, ExchangeResult>,
 }
+
+type ExchangeResult = Result<Arc<Token>, AcquisitionError>;
 
 /// The SHA-256 digest of a subject's access token, keying its exchanged
 /// tokens. It has no `Debug`, so the digest never reaches a log.
@@ -186,41 +185,33 @@ struct CompletedFailure {
     until: Instant,
 }
 
-/// Which cache a dispatched token came from, so a resource 401 evicts the
-/// right entry without a second lookup.
-pub(crate) enum Acquired {
-    Service(Arc<Token>),
-    Exchanged { key: SubjectKey, token: Arc<Token> },
-}
-
-impl Acquired {
-    fn token(&self) -> &Arc<Token> {
-        match self {
-            Self::Service(token) | Self::Exchanged { token, .. } => token,
-        }
-    }
-}
-
-/// Reclaims memory only. A cache hit is used only when
-/// [`Token::is_reusable`] agrees against the Tokio clock, so this Expiry may
-/// freely use Moka's own real-time clock, unlike a decision that must move
-/// with `tokio::time::advance`.
+/// Moka publishes the result to concurrent waiters. Errors and request-only
+/// tokens expire immediately, and each reader checks reuse on the Tokio clock.
 struct ExchangedExpiry;
 
-impl Expiry<SubjectKey, Arc<Token>> for ExchangedExpiry {
+impl Expiry<SubjectKey, ExchangeResult> for ExchangedExpiry {
     fn expire_after_create(
         &self,
         _key: &SubjectKey,
-        token: &Arc<Token>,
+        result: &ExchangeResult,
         _current_time: std::time::Instant,
     ) -> Option<Duration> {
-        // Reclamation only; initializer freshness and explicit reuse checks
-        // decide whether each caller may use the returned token. A token
-        // without a lifetime expires at once: only its initializer uses it,
-        // as [`Credentials::exchange`] rules.
-        Some(token.reuse_until.map_or(Duration::ZERO, |until| {
-            until.saturating_duration_since(Instant::now())
-        }))
+        let now = Instant::now();
+        let until = result
+            .as_ref()
+            .ok()
+            .and_then(|token| token.reusable_until(now));
+        Some(until.map_or(Duration::ZERO, |until| until.saturating_duration_since(now)))
+    }
+
+    fn expire_after_update(
+        &self,
+        key: &SubjectKey,
+        result: &ExchangeResult,
+        current_time: std::time::Instant,
+        _duration_until_expiry: Option<Duration>,
+    ) -> Option<Duration> {
+        self.expire_after_create(key, result, current_time)
     }
 }
 
@@ -265,10 +256,12 @@ impl Credentials {
             service_request: tokio::sync::Mutex::new(()),
             exchanged: moka::future::Cache::builder()
                 .max_capacity(u64::from(EXCHANGE_CACHE_BYTES))
-                .weigher(move |_: &SubjectKey, token: &Arc<Token>| {
-                    u32::try_from(token.header.as_bytes().len())
-                        .unwrap_or(u32::MAX)
-                        .max(minimum_weight)
+                .weigher(move |_: &SubjectKey, result: &ExchangeResult| {
+                    result.as_ref().map_or(minimum_weight, |token| {
+                        u32::try_from(token.header.as_bytes().len())
+                            .unwrap_or(u32::MAX)
+                            .max(minimum_weight)
+                    })
                 })
                 .expire_after(ExchangedExpiry)
                 .build(),
@@ -312,25 +305,23 @@ impl Credentials {
 
     /// Inserts a sensitive Bearer header for the service token or, when
     /// `on_behalf_of` is set, a token exchanged for its subject. Returns what
-    /// was used, so a resource 401 can [`evict`](Self::evict_acquired)
-    /// exactly that token.
+    /// was used, so a resource can invalidate exactly that token.
     pub(crate) async fn authorize(
         &self,
         headers: &mut HeaderMap,
         on_behalf_of: Option<OnBehalfOf>,
         context: &OperationContext,
-    ) -> Result<Acquired, AcquisitionError> {
+    ) -> Result<Arc<Token>, AcquisitionError> {
         context.check().map_err(acquisition_stopped)?;
         let deadline = acquisition_deadline(context);
         self.check_admission(deadline)?;
         let acquisition = async {
             match on_behalf_of {
                 Some(OnBehalfOf(subject)) => {
-                    let key = SubjectKey::of(&subject);
-                    let token = self.exchange(key, &subject, deadline).await?;
-                    Ok(Acquired::Exchanged { key, token })
+                    self.exchange(SubjectKey::of(&subject), &subject, deadline)
+                        .await
                 }
-                None => self.service_token(deadline).await.map(Acquired::Service),
+                None => self.service_token(deadline).await,
             }
         };
         // Acquisition first: a cached token then never arms the deadline timer.
@@ -341,7 +332,7 @@ impl Credentials {
         };
         context.check().map_err(acquisition_stopped)?;
         let acquired = acquired?;
-        headers.insert(AUTHORIZATION, acquired.token().header.clone());
+        headers.insert(AUTHORIZATION, acquired.header.clone());
         Ok(acquired)
     }
 
@@ -432,56 +423,8 @@ impl Credentials {
         }
     }
 
-    /// Evicts the service token `used` unless a newer token already replaced
-    /// it.
-    fn evict_service_token(&self, used: &Arc<Token>) {
-        let mut cached = self.cached();
-        if cached
-            .service
-            .as_ref()
-            .is_some_and(|service| Arc::ptr_eq(&service.token, used))
-        {
-            cached.service = None;
-        }
-    }
-
     pub(crate) fn cached(&self) -> MutexGuard<'_, Cached> {
         self.0.inner.cached()
-    }
-
-    /// Evicts whichever token `acquired` used, from whichever cache it came
-    /// from, unless it is too young to evict or a newer token already
-    /// replaced it there.
-    pub(crate) async fn evict_acquired(&self, acquired: &Acquired) {
-        if !acquired.token().is_evictable(Instant::now()) {
-            return;
-        }
-        match acquired {
-            Acquired::Service(token) => self.evict_service_token(token),
-            Acquired::Exchanged { key, token } => self.evict_exchanged(*key, token).await,
-        }
-    }
-
-    /// Removes `used` only while it is still the entry the cache returns for
-    /// `key`, so a token another caller stored meanwhile survives. Each step
-    /// completes without I/O, so this wait needs no deadline.
-    async fn evict_exchanged(&self, key: SubjectKey, used: &Arc<Token>) {
-        let cache = &self.0.inner.exchanged;
-        let outcome = cache
-            .entry(key)
-            .and_compute_with(|current| {
-                let unchanged = current.is_some_and(|entry| Arc::ptr_eq(entry.value(), used));
-                std::future::ready(if unchanged { Op::Remove } else { Op::Nop })
-            })
-            .await;
-        // Moka decides on a snapshot but removes whatever the key holds then,
-        // and an insert by a missed caller does not wait for this step, so the
-        // removal can take a replacement stored in between: put it back.
-        if let CompResult::Removed(removed) = outcome
-            && !Arc::ptr_eq(removed.value(), used)
-        {
-            cache.entry(key).or_insert(removed.into_value()).await;
-        }
     }
 
     /// Returns a live exchanged token for `subject`, exchanging it when the
@@ -501,7 +444,7 @@ impl Credentials {
             self.check_admission(deadline)?;
             // A hit skips `entry`, which boxes the key in an `Arc`, and the
             // deadline timer that only a miss needs.
-            if let Some(token) = self.0.inner.exchanged.get(&key).await
+            if let Some(Ok(token)) = self.0.inner.exchanged.get(&key).await
                 && token.is_reusable(Instant::now())
             {
                 return Ok(token);
@@ -511,7 +454,6 @@ impl Credentials {
             if fresh || token.is_reusable(Instant::now()) {
                 return Ok(token);
             }
-            self.evict_exchanged(key, &token).await;
         }
     }
 
@@ -536,20 +478,27 @@ impl Credentials {
                 deadline,
             )
         };
-        let attempt = self.0.inner.exchanged.entry(key).or_try_insert_with(fetch);
+        // Conditional replacement uses the same Moka initializer for misses and
+        // rejected values. A late rejection never mutates a replacement's key.
+        let attempt = self
+            .0
+            .inner
+            .exchanged
+            .entry(key)
+            .or_insert_with_if(fetch, |result| {
+                !result
+                    .as_ref()
+                    .is_ok_and(|token| token.is_reusable(Instant::now()))
+            });
         tokio::select! {
             // Drop this caller's initializer before it can publish its own
             // deadline as a shared failure; a surviving waiter may take over.
             biased;
             () = tokio::time::sleep_until(deadline) => Err(AcquisitionError::Timeout),
-            result = attempt => match result {
-                Ok(entry) => {
-                    let fresh = entry.is_fresh();
-                    Ok((entry.into_value(), fresh))
-                }
-                Err(error) => Err(*error),
-            },
-
+            entry = attempt => {
+                let fresh = entry.is_fresh();
+                entry.into_value().map(|token| (token, fresh))
+            }
         }
     }
 }
@@ -601,12 +550,9 @@ impl Inner {
         if now >= request.deadline || self.completed_failure(now).is_some() {
             return;
         }
-        if !self
-            .cached()
-            .service
-            .as_ref()
-            .is_some_and(|service| Arc::ptr_eq(&service.token, &request.current))
-        {
+        if !self.cached().service.as_ref().is_some_and(|service| {
+            Arc::ptr_eq(&service.token, &request.current) && !service.token.is_rejected()
+        }) {
             return;
         }
         match self.endpoint.fetch_service_token(request.deadline).await {

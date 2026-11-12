@@ -49,10 +49,10 @@ impl AuthenticatedClient {
     /// Acquires credentials, injects Bearer, and spends the original deadline.
     /// A request carrying [`crate::OnBehalfOf`] in its extensions is sent with a
     /// token exchanged for that subject instead of the service token; the
-    /// extension is always removed before dispatch. Completed responses,
-    /// including 401 and 403, are returned without replay; a 401 evicts the
-    /// token it used once that token is at least 30 seconds old and no newer
-    /// token replaced it, so the next call may acquire anew.
+    /// extension is always removed before dispatch. Responses are never
+    /// replayed. On receiving a 401 status, the client stops reusing the token
+    /// it used if the token is at least 30 seconds old, even if reading the
+    /// response body fails.
     ///
     /// # Errors
     /// Rejects caller Authorization, or a missing subject this client
@@ -115,13 +115,13 @@ impl AuthenticatedClient {
         };
         check_request()?;
         let acquired = acquired?;
-        let response = self
-            .resource
-            .execute_with_context(request, &context)
-            .await?;
-        if response.status() == StatusCode::UNAUTHORIZED {
-            self.credentials.evict_acquired(&acquired).await;
-        }
-        Ok(response)
+        self.resource
+            .execute_with_response_status(request, &context, |status| {
+                if status == StatusCode::UNAUTHORIZED {
+                    acquired.reject();
+                }
+            })
+            .await
+            .map_err(Error::from)
     }
 }

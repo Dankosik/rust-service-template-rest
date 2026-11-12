@@ -41,7 +41,10 @@ pub(crate) struct ResponseCustody {
     /// The lifetime that stops the response; `None` starts no stop watcher.
     pub(crate) context: Option<OperationContext>,
     pub(crate) held: Held,
+    pub(crate) on_status: Option<ResponseStatusObserver>,
 }
+
+pub(crate) type ResponseStatusObserver = Box<dyn FnOnce(tonic::Code) + Send>;
 
 /// Guards a call keeps until its status is known. They drop in declaration
 /// order, after the response body and the call record: the admission
@@ -61,6 +64,7 @@ impl ResponseCustody {
     pub(crate) fn from_server_response<B>(response: &mut http::Response<B>) -> Self {
         let extensions = response.extensions_mut();
         Self {
+            on_status: None,
             context: extensions
                 .remove::<crate::ResponseContext>()
                 .map(crate::ResponseContext::into_operation),
@@ -130,6 +134,7 @@ fn header_catalog_code(headers: &HeaderMap) -> Option<service_failure::Code> {
 struct Outcome {
     code: tonic::Code,
     failure: Option<service_failure::Code>,
+    peer_status: bool,
 }
 
 impl Outcome {
@@ -137,12 +142,14 @@ impl Outcome {
         Self {
             code,
             failure: None,
+            peer_status: false,
         }
     }
 
     fn of_status(side: Side, status: &tonic::Status) -> Self {
         Self {
             code: status.code(),
+            peer_status: false,
             failure: match side {
                 Side::Server => crate::status::catalog_code(status),
                 Side::Client => None,
@@ -155,6 +162,7 @@ impl Outcome {
         let code = header_status_code(headers)?;
         Some(Self {
             code,
+            peer_status: true,
             failure: match side {
                 Side::Server => header_catalog_code(headers),
                 Side::Client => None,
@@ -183,6 +191,7 @@ struct OpenCall<B: Body> {
     fallback: Option<opentelemetry::Context>,
     waker: Option<Waker>,
     error_code: fn(&B::Error) -> tonic::Code,
+    on_status: Option<ResponseStatusObserver>,
 }
 
 /// Where a response stands. A locally generated status waits in `Trailers`
@@ -205,6 +214,11 @@ impl<B: Body> Completion<B> {
             call.failed(failure);
         }
         call.finish(self.outcome.code);
+        if self.outcome.peer_status
+            && let Some(on_status) = self.open.on_status
+        {
+            on_status(self.outcome.code);
+        }
         // Remaining fields, including feature destructors, drop outside the lock.
     }
 }
@@ -212,7 +226,7 @@ impl<B: Body> Completion<B> {
 struct State<B: Body> {
     phase: Phase<B>,
     side: Side,
-    missing_status: tonic::Code,
+    missing_status: Outcome,
 }
 
 impl<B: Body> State<B> {
@@ -257,8 +271,7 @@ impl<B: Body> State<B> {
         let outcome = match polled {
             Poll::Ready(Some(Ok(frame))) => {
                 let trailers = frame.trailers_ref()?;
-                Outcome::from_status_headers(self.side, trailers)
-                    .unwrap_or(Outcome::bare(self.missing_status))
+                Outcome::from_status_headers(self.side, trailers).unwrap_or(self.missing_status)
             }
             Poll::Ready(Some(Err(error))) => {
                 let Phase::Open(open) = &self.phase else {
@@ -266,7 +279,7 @@ impl<B: Body> State<B> {
                 };
                 Outcome::bare((open.error_code)(error))
             }
-            Poll::Ready(None) => Outcome::bare(self.missing_status),
+            Poll::Ready(None) => self.missing_status,
             Poll::Pending => return None,
         };
         self.close(Phase::Done, outcome)
@@ -326,9 +339,13 @@ where
         crate::observe::record_shed();
     }
     let missing_status = match side {
-        Side::Client => http_status_code(response.status()).unwrap_or(tonic::Code::Unknown),
-        Side::Server => tonic::Code::Unknown,
-    };
+        Side::Client => http_status_code(response.status()),
+        Side::Server => None,
+    }
+    .map_or(Outcome::bare(tonic::Code::Unknown), |code| Outcome {
+        peer_status: true,
+        ..Outcome::bare(code)
+    });
     response.map(|body| {
         ResponseBody::new(
             body,
@@ -353,7 +370,7 @@ where
         custody: ResponseCustody,
         error_code: fn(&B::Error) -> tonic::Code,
         initial: Option<Outcome>,
-        missing_status: tonic::Code,
+        missing_status: Outcome,
     ) -> Self {
         let ended = body.is_end_stream();
         let side = call.side();
@@ -368,6 +385,7 @@ where
                 fallback,
                 waker: None,
                 error_code,
+                on_status: custody.on_status,
             }),
             side,
             missing_status,
@@ -377,7 +395,7 @@ where
         } else if let Some(status) = state.stopped_status() {
             state.complete_with(&status)
         } else if ended {
-            state.close(Phase::Done, Outcome::bare(missing_status))
+            state.close(Phase::Done, missing_status)
         } else {
             None
         };
@@ -686,7 +704,7 @@ mod tests {
             custody,
             tonic::Status::code,
             None,
-            tonic::Code::Unknown,
+            Outcome::bare(tonic::Code::Unknown),
         )
     }
 
@@ -701,6 +719,7 @@ mod tests {
         let mut body = response(
             source,
             ResponseCustody {
+                on_status: None,
                 context: Some(OperationContext::new(None, child.clone())),
                 held: Held {
                     permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
@@ -747,6 +766,7 @@ mod tests {
         let mut body = response(
             source,
             ResponseCustody {
+                on_status: None,
                 context: Some(deadline_context()),
                 held: Held {
                     permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
@@ -810,6 +830,7 @@ mod tests {
         let mut body = response(
             source,
             ResponseCustody {
+                on_status: None,
                 context: Some(deadline_context()),
                 held: Held {
                     permit: Some(Arc::clone(&permits).try_acquire_owned().unwrap()),
@@ -849,6 +870,7 @@ mod tests {
         let mut body = response(
             source,
             ResponseCustody {
+                on_status: None,
                 context: Some(OperationContext::new(
                     Some(Deadline::new(Instant::now(), BUDGET)),
                     cancellation.clone(),
@@ -931,7 +953,7 @@ mod tests {
             ResponseCustody::default(),
             tonic::Status::code,
             None,
-            tonic::Code::Unknown,
+            Outcome::bare(tonic::Code::Unknown),
         );
         let ambient = opentelemetry::Context::current()
             .span()

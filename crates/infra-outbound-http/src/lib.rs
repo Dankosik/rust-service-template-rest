@@ -250,7 +250,7 @@ impl Client {
             Deadline::at(deadline)
                 .earlier(Deadline::new(Instant::now(), self.limits.operation_timeout)),
         );
-        self.execute_within(request, &operation).await
+        self.execute_within(request, &operation, |_| {}).await
     }
 
     /// Fixes the resource operation allowance before a composition begins
@@ -279,7 +279,24 @@ impl Client {
         request: Request<Bytes>,
         context: &OperationContext,
     ) -> Result<Response<Bytes>, Error> {
-        self.execute_within(request, &self.begin_operation(context))
+        self.execute_within(request, &self.begin_operation(context), |_| {})
+            .await
+    }
+
+    /// Like [`Self::execute_with_context`], with a synchronous callback when
+    /// response headers arrive. It runs once before body admission or reading,
+    /// so it may observe a status even if the exchange later fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::execute_with_context`].
+    pub async fn execute_with_response_status(
+        &self,
+        request: Request<Bytes>,
+        context: &OperationContext,
+        on_status: impl FnOnce(StatusCode) + Send,
+    ) -> Result<Response<Bytes>, Error> {
+        self.execute_within(request, &self.begin_operation(context), on_status)
             .await
     }
 
@@ -287,6 +304,7 @@ impl Client {
         &self,
         mut request: Request<Bytes>,
         operation: &OperationContext,
+        on_status: impl FnOnce(StatusCode) + Send,
     ) -> Result<Response<Bytes>, Error> {
         let request_context = request.extensions_mut().remove::<OperationContext>();
         let stops = StopScopes {
@@ -306,7 +324,7 @@ impl Client {
         // check and spend the same budget. Terminal observation can delay
         // return but cannot reopen this decision.
         let result = self
-            .exchange(request, &stops, &mut attempt)
+            .exchange(request, &stops, &mut attempt, on_status)
             .await
             .and_then(|response| stops.check().map(|()| response));
         attempt.finish(&result);
@@ -318,6 +336,7 @@ impl Client {
         request: Request<Bytes>,
         stops: &StopScopes<'_>,
         attempt: &mut observe::Attempt,
+        on_status: impl FnOnce(StatusCode) + Send,
     ) -> Result<Response<Bytes>, Error> {
         let span = attempt.span();
         let exchange = async {
@@ -330,6 +349,7 @@ impl Client {
                     source: Box::new(source),
                 })?;
             attempt.record_status(response.status());
+            on_status(response.status());
             stops.check()?;
             let body_limit = self.limits.response_body_bytes;
             if hyper::body::Body::size_hint(response.body())

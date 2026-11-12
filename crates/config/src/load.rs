@@ -57,6 +57,9 @@ pub enum Error {
         "{name} and {other} set the same key: a variable name is lowercased before it is split"
     )]
     AmbiguousName { name: String, other: String },
+    /// One variable sets a scalar at a path another variable uses as a table.
+    #[error("{parent} and {child} set overlapping keys: one key is inside the other")]
+    OverlappingVariables { parent: String, child: String },
     /// A config file could not be read.
     #[error("config file {}: {error}", path.display())]
     ReadFile {
@@ -104,7 +107,7 @@ impl From<ValidationError> for Error {
 ///
 /// # Errors
 ///
-/// Fails on a malformed or ambiguous `APP__` variable name, a variable value
+/// Fails on malformed, ambiguous, or overlapping `APP__` names, a variable value
 /// that is not Unicode, an unreadable secrets directory, an unreadable or
 /// unparsable file, a file key no variable can address, a non-empty
 /// secret-like value in a config file, an unknown key anywhere, or a
@@ -131,12 +134,12 @@ where
 }
 
 // template:begin postgres:load-migration
-/// Load only the sections the migration binary reads, so a migration run
-/// needs no other section's secrets and is not stopped by their rules.
+/// Load the sections the migration binary reads.
 ///
 /// # Errors
 ///
-/// Fails as [`load`] does, for the sections [`crate::MigrationConfig`] holds.
+/// Enforces the same variable, file, and secret rules as [`load`]. Only
+/// the sections in [`crate::MigrationConfig`] are decoded and validated.
 pub fn load_migration(
     options: &LoadOptions,
     build: BuildInfo,

@@ -93,7 +93,7 @@ impl TokenEndpoint {
     /// Performs one token-exchange request for `subject`, bounded by
     /// `deadline`, and records its outcome. Called only as the initializer
     /// of [`Credentials::exchanged_or_fetch`](crate::Credentials::exchanged_or_fetch)'s
-    /// `or_try_insert_with`, so it runs at most once per coalesced group of
+    /// `or_insert_with_if`, so it runs at most once per coalesced group of
     /// concurrent callers for one subject.
     pub(crate) async fn fetch_exchange(
         &self,

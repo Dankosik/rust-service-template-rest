@@ -261,7 +261,6 @@
       "crates/infra-bearerauthn/src/jwks.rs",
       "crates/infra-bearerauthn/src/jwt.rs",
       "crates/infra-bearerauthn/src/refresh.rs",
-      "crates/infra-bearerauthn/src/test_metrics.rs",
       "crates/infra-bearerauthn/tests/fixtures/authn-jwt-signing-key.der"
     ],
     "markers": [
@@ -272,7 +271,7 @@
       {"path": "crates/config/src/secret_policy.rs", "ids": ["secret-policy-token-profile-exception", "secret-policy-token-profile-vector"]},
       {"path": "crates/infra-bearerauthn/Cargo.toml", "ids": ["authn-jwt-dependency", "authn-jwt-dev-dependency"]},
       {"path": "crates/infra-bearerauthn/src/provider.rs", "ids": ["authn-provider-get-json", "authn-provider-document", "authn-provider-document-test-import", "authn-provider-tls-bounds-test", "authn-provider-issuer-url"]},
-      {"path": "crates/infra-bearerauthn/src/lib.rs", "ids": ["authn-jwks-module", "authn-jwt-module", "authn-refresh-module", "authn-jwt-test-metrics-module", "authn-jwt-prepare-export", "authn-jwt-preparation-phases", "authn-jwt-preparation-reasons", "authn-jwt-issuer-mismatch", "authn-jwt-issuer-mismatch-phase", "authn-jwt-issuer-mismatch-reason", "authn-jwt-reasons", "authn-jwt-reason-labels", "authn-jwt-engine", "authn-jwt-verifier", "authn-jwt-verify"]},
+      {"path": "crates/infra-bearerauthn/src/lib.rs", "ids": ["authn-jwks-module", "authn-jwt-module", "authn-refresh-module", "authn-jwt-prepare-export", "authn-jwt-preparation-phases", "authn-jwt-preparation-reasons", "authn-jwt-issuer-mismatch", "authn-jwt-issuer-mismatch-phase", "authn-jwt-issuer-mismatch-reason", "authn-jwt-reasons", "authn-jwt-reason-labels", "authn-jwt-engine", "authn-jwt-verifier", "authn-jwt-verify"]},
       {"path": "crates/service/src/bootstrap/authn.rs", "ids": ["bootstrap-prepare-auth-jwt", "bootstrap-auth-jwt-algorithm-import", "bootstrap-auth-jwt-algorithm-converter", "bootstrap-auth-jwt-key-test"]}
     ]
   },
@@ -281,7 +280,6 @@
       "crates/infra-bearerauthn/src/introspection.rs"
     ],
     "markers": [
-      {"path": "crates/infra-bearerauthn/src/bearer.rs", "ids": ["authn-bearer-as-str"]},
       {"path": "crates/infra-bearerauthn/src/claims.rs", "ids": ["authn-claims-introspection-envelope", "authn-claims-introspection-validation", "authn-claims-introspection-test-import", "authn-claims-introspection-shape-test", "authn-claims-introspection-missing-test", "authn-claims-scope-introspection-assertion"]},
       {"path": "crates/config/src/authn.rs", "ids": ["authn-nonzero-import", "authn-secrecy-import", "authn-occupied-secret-import", "authn-config-introspection-variant", "authn-default-provider-concurrency", "authn-config-introspection-validation", "authn-config-introspection-mode", "authn-required-introspection-secret"]},
       {"path": "crates/config/src/authn/tests.rs", "ids": ["authn-config-introspection-tests", "load-introspection-environment", "load-introspection-secret-file"]},
