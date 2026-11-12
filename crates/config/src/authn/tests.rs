@@ -378,6 +378,28 @@ fn audience_list_is_explicit_and_refuses_conflicting_or_invalid_input() {
 }
 
 #[test]
+fn introspection_environment_rejects_out_of_range_cache_settings() {
+    for (variable, value, expected_key) in [
+        ("APP__AUTHN__CACHE_CAPACITY", "0", "authn.cache_capacity"),
+        ("APP__AUTHN__CACHE_CAPACITY", "1025", "authn.cache_capacity"),
+        ("APP__AUTHN__CACHE_TTL", "999ms", "authn.cache_ttl"),
+        ("APP__AUTHN__CACHE_TTL", "301s", "authn.cache_ttl"),
+    ] {
+        let error = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            introspection_environment(&[(variable, value)]),
+        )
+        .unwrap_err();
+        assert_matches!(
+            &error,
+            crate::Error::Validate(error) if error.key == expected_key,
+            "{error}"
+        );
+    }
+}
+
+#[test]
 fn introspection_environment_rejects_invalid_scalar_overrides() {
     for (key, value) in [
         ("APP__AUTHN__CACHE_ENABLED", ""),

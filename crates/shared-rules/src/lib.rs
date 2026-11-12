@@ -24,6 +24,15 @@
 
 pub mod error_chain;
 pub mod jitter;
+// template:begin oidc-introspection:introspection-cache-ranges
+pub mod oidc_introspection {
+    use std::{ops::RangeInclusive, time::Duration};
+
+    pub const CACHE_CAPACITY: RangeInclusive<usize> = 1..=1024;
+    pub const CACHE_TTL: RangeInclusive<Duration> =
+        Duration::from_secs(1)..=Duration::from_secs(300);
+}
+// template:end oidc-introspection:introspection-cache-ranges
 pub mod otel_http;
 pub mod rfc6749;
 pub mod rfc6750;

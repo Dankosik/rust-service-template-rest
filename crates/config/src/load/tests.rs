@@ -254,6 +254,26 @@ fn file_keys_the_environment_cannot_name_are_refused() {
 }
 
 #[test]
+fn malformed_toml_reports_its_position_without_echoing_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let options = LoadOptions {
+        config: Some(write(
+            &dir,
+            "invalid.toml",
+            "[app]\nenv = \"fixture-value\" trailing\n",
+        )),
+        ..LoadOptions::default()
+    };
+    let error = load_from(&options, BUILD, env(&[])).unwrap_err();
+    let message = error.to_string();
+
+    assert_matches!(&error, Error::ParseFile { .. });
+    assert!(message.contains("invalid.toml: invalid TOML at byte"));
+    assert!(!message.contains("fixture-value"));
+    assert!(!format!("{error:?}").contains("fixture-value"));
+}
+
+#[test]
 fn a_replaced_file_does_not_change_the_admitted_source() {
     let dir = tempfile::tempdir().unwrap();
     let path = write(&dir, "base.toml", "[log]\nlevel = \"debug\"\n");
