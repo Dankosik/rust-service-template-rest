@@ -78,7 +78,6 @@ async fn permanent_failure_transfers_original_record_then_redrive_keeps_logical_
         .await
         .expect("Limits retention keeps the source after confirmed consumer ACK");
     let record = infra_messaging::wire::DeadLetterRecord {
-        subject: dead_letter.subject.to_string(),
         headers: dead_letter.headers.clone(),
         payload: dead_letter.payload.clone(),
         stream: fixture.dlq_stream.clone(),

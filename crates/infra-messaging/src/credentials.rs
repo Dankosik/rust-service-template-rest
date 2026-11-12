@@ -129,13 +129,12 @@ async fn read(path: &Path) -> Result<(String, nkeys::KeyPair), CredentialsFileEr
 /// layout `nsc` writes and the NATS clients read.
 fn parse(content: &str) -> Result<(String, nkeys::KeyPair), CredentialsFileError> {
     let lines: Vec<&str> = content.lines().map(str::trim).collect();
-    let mut values = lines.windows(3).filter_map(|window| {
-        let &[opening, value, closing] = window else {
-            return None;
-        };
-        (is_marker(opening) && !value.is_empty() && !is_marker(value) && is_marker(closing))
-            .then_some(value)
-    });
+    let mut values = lines
+        .array_windows::<3>()
+        .filter_map(|&[opening, value, closing]| {
+            (is_marker(opening) && !value.is_empty() && !is_marker(value) && is_marker(closing))
+                .then_some(value)
+        });
     let (Some(jwt), Some(seed)) = (values.next(), values.next()) else {
         return Err(CredentialsFileError::Malformed);
     };

@@ -255,7 +255,7 @@ impl Consumer {
             // Pull requests address a durable by name, not creation identity.
             // A replacement between successful full batches has no waiting
             // request to terminate, so verify identity before every new pull.
-            match durable_is_gone(&self.pull).await {
+            match durable_is_lost(&self.pull).await {
                 Ok(false) => {}
                 Ok(true) => return Err(ConsumerError::ConsumerLost),
                 Err(error) => {
@@ -291,7 +291,7 @@ impl Consumer {
                             Err(_) => "local_timeout",
                         };
                         pull_failed("batch_create", error_kind);
-                        if durable_confirmed_gone(&self.pull).await {
+                        if durable_confirmed_lost(&self.pull).await {
                             return Err(ConsumerError::ConsumerLost);
                         }
                         tokio::time::sleep(STREAM_ERROR_BACKOFF).await;
@@ -310,7 +310,7 @@ impl Consumer {
                 }
                 end @ (BatchEnd::Closed | BatchEnd::Failed(_)) => {
                     release(messages).await;
-                    if durable_confirmed_gone(&self.pull).await {
+                    if durable_confirmed_lost(&self.pull).await {
                         return Err(ConsumerError::ConsumerLost);
                     }
                     if let BatchEnd::Failed(error_kind) = end {
@@ -386,16 +386,15 @@ fn reaped(joined: Option<Result<(), JoinError>>) -> Result<(), ConsumerError> {
         .map_err(|_| ConsumerError::TaskEnded)
 }
 
-/// Whether the broker confirmed that the durable is gone; an unanswered
-/// lookup is not that confirmation.
-async fn durable_confirmed_gone(pull: &PullConsumer) -> bool {
-    matches!(durable_is_gone(pull).await, Ok(true))
+/// An unanswered lookup does not confirm loss of the admitted durable.
+async fn durable_confirmed_lost(pull: &PullConsumer) -> bool {
+    matches!(durable_is_lost(pull).await, Ok(true))
 }
 
 /// Whether the broker answers that the durable, or its stream, no longer
 /// exists, or was replaced with another creation or a push consumer.
 /// A failed or unanswered lookup is not that answer.
-async fn durable_is_gone(pull: &PullConsumer) -> Result<bool, ConsumerInfoError> {
+async fn durable_is_lost(pull: &PullConsumer) -> Result<bool, ConsumerInfoError> {
     match pull.get_info().await {
         Ok(info) => {
             Ok(info.created != pull.cached_info().created || info.config.deliver_subject.is_some())

@@ -20,6 +20,17 @@ pub struct PreparedEvent {
     payload: Bytes,
 }
 
+#[derive(Debug)]
+pub(crate) struct PreparedEventParts {
+    pub(crate) subject: String,
+    pub(crate) message_id: String,
+    pub(crate) publication_id: String,
+    pub(crate) event_type: String,
+    pub(crate) schema_version: u16,
+    pub(crate) occurred_at: OffsetDateTime,
+    pub(crate) payload: Bytes,
+}
+
 impl PreparedEvent {
     /// Serializes one typed occurrence without connecting to a broker.
     ///
@@ -82,15 +93,16 @@ impl PreparedEvent {
     /// five headers stay far below
     /// [`HEADER_LIMIT_BYTES`](crate::wire::HEADER_LIMIT_BYTES), a positive
     /// schema version, and a creation time that is set and can be formatted.
-    pub(crate) fn from_parts(
-        subject: String,
-        message_id: String,
-        publication_id: String,
-        event_type: String,
-        schema_version: u16,
-        occurred_at: OffsetDateTime,
-        payload: Bytes,
-    ) -> Result<Self, EnvelopeError> {
+    pub(crate) fn from_parts(parts: PreparedEventParts) -> Result<Self, EnvelopeError> {
+        let PreparedEventParts {
+            subject,
+            message_id,
+            publication_id,
+            event_type,
+            schema_version,
+            occurred_at,
+            payload,
+        } = parts;
         if !crate::wire::valid_subject(&subject) {
             return Err(EnvelopeError::Subject);
         }
