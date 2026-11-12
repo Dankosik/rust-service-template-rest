@@ -171,7 +171,7 @@ impl Engine {
                 max_workers,
                 slots: Arc::new(Semaphore::new(slots)),
                 statement_turn: tokio::sync::Mutex::new(()),
-                cleanup: ForcedCleanup::default(),
+                cleanup: Arc::default(),
                 counters: Counters::default(),
                 attempt_tracker: TaskTracker::new(),
                 failing: EnumMap::default(),
@@ -248,7 +248,7 @@ impl Engine {
         spawn(
             Run::Claim {
                 _peer: self.peer,
-                _close: CloseTracker(self.shared.attempt_tracker.clone()),
+                _close: CloseTracker(Arc::clone(&self.shared)),
             },
             stop.clone(),
         );
@@ -303,7 +303,7 @@ impl Started {
         self.shared.cleanup.begin(budget);
         let timed_out = tokio::select! {
             biased;
-            () = self.drained() => false,
+            () = self.drained() => self.shared.cleanup.finished_late(),
             () = self.shared.cleanup.ended() => true,
         };
         let counters = &self.shared.counters;
@@ -394,11 +394,12 @@ fn spawn_guarded(
     });
 }
 
-struct CloseTracker(TaskTracker);
+struct CloseTracker(Arc<Shared>);
 
 impl Drop for CloseTracker {
     fn drop(&mut self) {
-        self.0.close();
+        self.0.cleanup.record_exit();
+        self.0.attempt_tracker.close();
     }
 }
 
@@ -413,6 +414,7 @@ impl Drop for CloseTracker {
 /// [`Started::drained`] waits on, so the drain still waits for every other
 /// supervisor to end.
 pub(crate) struct SupervisorGuard {
+    cleanup: Arc<ForcedCleanup>,
     stop: CancellationToken,
     failure: CancellationToken,
     /// The attempt's job, named in the record: the guard drops outside the
@@ -424,12 +426,14 @@ pub(crate) struct SupervisorGuard {
 
 impl SupervisorGuard {
     pub(crate) fn new(
+        cleanup: Arc<ForcedCleanup>,
         stop: CancellationToken,
         failure: CancellationToken,
         job_id: crate::kind::JobId,
         kind: &'static str,
     ) -> Self {
         Self {
+            cleanup,
             stop,
             failure,
             job_id,
@@ -456,6 +460,8 @@ impl Drop for SupervisorGuard {
             self.failure.cancel();
             self.stop.cancel();
         }
+        // The tracked future drops its supervisor guard before its tracker token.
+        self.cleanup.record_exit();
     }
 }
 
@@ -590,7 +596,7 @@ pub(crate) struct Shared {
     /// the pool budget is `jobs.max_workers + 2`, one connection per attempt
     /// slot plus this one and readiness.
     pub(crate) statement_turn: tokio::sync::Mutex<()>,
-    pub(crate) cleanup: ForcedCleanup,
+    pub(crate) cleanup: Arc<ForcedCleanup>,
     pub(crate) counters: Counters,
     pub(crate) attempt_tracker: TaskTracker,
     /// Per operation: set after the first failure, clear after recovery.
@@ -654,6 +660,7 @@ impl fmt::Debug for Shared {
 pub(crate) struct ForcedCleanup {
     force: CancellationToken,
     deadline: OnceLock<Instant>,
+    last_exit: Mutex<Option<Instant>>,
 }
 
 impl ForcedCleanup {
@@ -686,6 +693,24 @@ impl ForcedCleanup {
         self.deadline
             .get()
             .is_some_and(|deadline| Instant::now() >= *deadline)
+    }
+
+    fn record_exit(&self) {
+        let mut last_exit = self
+            .last_exit
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *last_exit = Some(Instant::now());
+    }
+
+    fn finished_late(&self) -> bool {
+        let last_exit = self
+            .last_exit
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        last_exit
+            .zip(self.deadline.get().copied())
+            .is_some_and(|(exit, deadline)| exit > deadline)
     }
 }
 
@@ -783,6 +808,35 @@ mod tests {
 
     impl crate::JobKind for Publisher {
         const NAME: &'static str = "publisher";
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cleanup_reports_when_the_claim_loop_exited_even_if_the_waiter_resumes_later() {
+        let budget = Duration::from_secs(2);
+        for (exit_after, timed_out) in [(1, false), (3, true)] {
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgres://localhost/unused")
+                .unwrap();
+            let mut kinds = crate::KindsBuilder::new();
+            kinds.register(crate::Policy::default(), |_: crate::Job<Ordinary>| async {
+                Ok(())
+            });
+            let engine = Engine::new(pool, kinds.validate().unwrap(), NonZeroU32::MIN);
+            let claim_loop = CloseTracker(Arc::clone(&engine.shared));
+            let started = Started {
+                shared: engine.shared,
+                stop: CancellationToken::new(),
+                failure: CancellationToken::new(),
+            };
+            let mut finish = std::pin::pin!(started.cancel_and_finish(budget));
+            assert!(futures_util::poll!(finish.as_mut()).is_pending());
+            tokio::time::advance(Duration::from_secs(exit_after)).await;
+            drop(claim_loop);
+            tokio::time::advance(Duration::from_secs(2)).await;
+
+            assert_eq!(finish.await.timed_out, timed_out);
+            assert_eq!(started.cancel_and_finish(budget).await.timed_out, timed_out);
+        }
     }
 
     #[tokio::test]
@@ -1016,6 +1070,7 @@ mod tests {
                         Duration::from_secs(10)
                     },
                 SupervisorGuard::new(
+                    Arc::clone(&engine.shared.cleanup),
                     stop.clone(),
                     failure.clone(),
                     crate::JobId(uuid::Uuid::nil()),
@@ -1063,6 +1118,7 @@ mod tests {
         let stop = CancellationToken::new();
         let failure = CancellationToken::new();
         let guard = SupervisorGuard::new(
+            Arc::default(),
             stop.clone(),
             failure.clone(),
             crate::JobId(uuid::Uuid::nil()),

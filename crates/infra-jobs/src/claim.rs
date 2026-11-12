@@ -489,6 +489,7 @@ fn dispatch_known(
                     .and_then(|running| KindSlot::take(running, &shared.wake));
                 registered.metrics().queue_wait.record(queue_wait.max(0.0));
                 let guard = crate::engine::SupervisorGuard::new(
+                    Arc::clone(&shared.cleanup),
                     stop.clone(),
                     failure.clone(),
                     attempt.job_id,
