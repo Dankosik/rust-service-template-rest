@@ -22,9 +22,10 @@ use crate::{
 pub(crate) const REFRESH_INTERVAL: Duration = Duration::from_mins(15);
 /// Up to 10% earlier, so replicas started together do not fetch in lockstep.
 const MAX_REFRESH_SPREAD: Duration = Duration::from_secs(REFRESH_INTERVAL.as_secs() / 10);
-/// Tokens with made-up `kid` values are caller-controlled, so the cooldown
-/// bounds the provider load they cause to one fetch per process per 30 s
-/// while a real rotation is still picked up within that time.
+/// A caller can force a signature miss. Each verifier starts at most one
+/// request-triggered fetch per cooldown. A miss during cooldown can join a
+/// pending fetch. If none is pending, another miss after cooldown or the next
+/// periodic fetch can pick up the rotation.
 const REFRESH_COOLDOWN: Duration = Duration::from_secs(30);
 const REFRESH_METRIC: &str = "authn_jwks_refreshes_total";
 const ACQUISITION_METRIC: &str = "authn_jwks_last_successful_acquisition_timestamp_seconds";
@@ -74,7 +75,7 @@ impl State {
     }
 }
 
-/// How an unknown-key request is admitted under the watch write lock.
+/// How a signature miss is admitted under the watch write lock.
 enum Admission {
     Answer(SignatureRefresh),
     Join(u64),

@@ -1,13 +1,23 @@
 //! URL text as written, before a parser normalizes it.
 
-/// Whether the authority of `url` (the text between `://` and the first `/`,
-/// `?` or `#`) contains an `@`.
+/// Whether the written authority of `url` contains an `@`.
 ///
-/// `url::Url` drops an empty userinfo and reads `\` as a path separator, so a
-/// parsed URL can report no userinfo for an authority that holds an `@`.
+/// A WHATWG parser consumes leading slashes and backslashes for special
+/// network schemes and drops empty userinfo. The raw check also refuses
+/// an ambiguous backslash before an `@` within the written authority.
 #[must_use]
 pub fn authority_has_userinfo(url: &str) -> bool {
-    let Some((_, authority)) = url.split_once("://") else {
+    let Some((scheme, after_scheme)) = url.split_once(':') else {
+        return false;
+    };
+    let authority = if ["ftp", "http", "https", "ws", "wss"]
+        .iter()
+        .any(|special| scheme.eq_ignore_ascii_case(special))
+    {
+        after_scheme.trim_start_matches(['/', '\\'])
+    } else if let Some(authority) = after_scheme.strip_prefix("//") {
+        authority
+    } else {
         return false;
     };
     let authority_end = authority.find(['/', '?', '#']).unwrap_or(authority.len());
@@ -54,7 +64,10 @@ mod tests {
         for url in [
             "https://user:secret@identity.example/token",
             "https://@identity.example/token",
+            "HTTPS:///@identity.example/token",
+            r"https:\@identity.example/token",
             r"https://identity.example\@other.example/token",
+            "nats://@identity.example",
         ] {
             assert!(authority_has_userinfo(url), "{url}");
         }
@@ -64,6 +77,8 @@ mod tests {
     fn an_at_sign_after_the_authority_is_not_userinfo() {
         for url in [
             "https://identity.example/token@v1",
+            "https:///identity.example/token@v1",
+            "nats://identity.example/token@v1",
             "https://identity.example?subject=a@b",
             "https://identity.example#a@b",
             "identity.example@token",

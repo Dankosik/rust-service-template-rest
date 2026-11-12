@@ -42,18 +42,6 @@ pub(crate) enum SignatureVerificationError {
     BadSignature,
 }
 
-impl SignatureVerificationError {
-    /// A new `kid`, or a kid-less token during key rotation, can need keys the
-    /// installed set lacks (the go-oidc rule). A known `kid` with a bad
-    /// signature cannot.
-    pub(crate) fn may_need_new_keys(&self, kid: Option<&str>) -> bool {
-        match self {
-            Self::NoCandidate => true,
-            Self::BadSignature => kid.is_none(),
-        }
-    }
-}
-
 impl From<SignatureVerificationError> for VerificationError {
     fn from(error: SignatureVerificationError) -> Self {
         match error {
