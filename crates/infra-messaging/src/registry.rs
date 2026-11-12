@@ -297,7 +297,6 @@ impl Registry {
             .map(|entry| &entry.route.subject)
     }
 
-    /// Every registered route.
     pub(crate) fn routes(&self) -> impl Iterator<Item = &Route> {
         self.routes.values().map(|entry| &entry.route)
     }
