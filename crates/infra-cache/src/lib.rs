@@ -390,7 +390,7 @@ impl CacheNamespace {
         scope: &CommandScope,
     ) -> Result<Option<Vec<u8>>, Unavailable> {
         let operation = Operation::Get;
-        let command = self.keyed_command(operation, key, 0, 0);
+        let command = self.keyed_command(operation, key, ExtraCommandCapacity::default());
         self.run(scope, operation, command, |value: &Option<Vec<u8>>| {
             if value.is_some() {
                 Outcome::Hit
@@ -454,7 +454,14 @@ impl CacheNamespace {
         let options =
             SetOptions::default().with_expiration(SetExpiry::PX(milliseconds.cast_unsigned()));
         // Value, `PX`, and an expiry of at most 20 decimal digits (u64).
-        let mut command = self.keyed_command(operation, key, 3, value.len() + 2 + 20);
+        let mut command = self.keyed_command(
+            operation,
+            key,
+            ExtraCommandCapacity {
+                extra_args: 3,
+                extra_bytes: value.len() + 2 + 20,
+            },
+        );
         command.arg(value).arg(options);
         self.run(scope, operation, command, |(): &()| Outcome::Ok)
             .await
@@ -490,7 +497,7 @@ impl CacheNamespace {
 
     async fn delete_bounded(&self, key: &str, scope: &CommandScope) -> Result<(), Unavailable> {
         let operation = Operation::Delete;
-        let command = self.keyed_command(operation, key, 0, 0);
+        let command = self.keyed_command(operation, key, ExtraCommandCapacity::default());
         self.run(scope, operation, command, |(): &()| Outcome::Ok)
             .await
     }
@@ -537,27 +544,31 @@ impl CacheNamespace {
         }
     }
 
-    /// `operation` on the stored key, with room for `extra_args` more
-    /// arguments of `extra_bytes` payload. [`redis::Cmd`] reserves argument slots and
-    /// payload bytes, excluding RESP framing; reserving both avoids buffer growth.
+    /// Reserve both argument slots and payload bytes (excluding RESP framing)
+    /// to avoid growing either buffer when adding arguments.
     fn keyed_command(
         &self,
         operation: Operation,
         key: &str,
-        extra_args: usize,
-        extra_bytes: usize,
+        extra_capacity: ExtraCommandCapacity,
     ) -> redis::Cmd {
         let key = NamespacedKey {
             namespace: self.name,
             key,
         };
         let mut command = redis::Cmd::with_capacity(
-            2 + extra_args,
-            operation.redis_name().len() + key.len() + extra_bytes,
+            2 + extra_capacity.extra_args,
+            operation.redis_name().len() + key.len() + extra_capacity.extra_bytes,
         );
         command.arg(operation.redis_name()).arg(key);
         command
     }
+}
+
+#[derive(Clone, Copy, Default)]
+struct ExtraCommandCapacity {
+    extra_args: usize,
+    extra_bytes: usize,
 }
 
 fn valid_namespace(name: &str) -> bool {
