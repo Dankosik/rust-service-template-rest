@@ -19,7 +19,7 @@ use variables::collect_variables;
 pub(crate) use variables::{ADDRESSABLE_KEY_FORM, is_env_addressable, variable_name};
 
 /// Variable namespace. `APP__HTTP__ADDR` sets `http.addr`.
-pub const ENV_PREFIX: &str = "APP";
+const ENV_PREFIX: &str = "APP";
 const ENV_SEPARATOR: &str = "__";
 
 /// What a variable name must be, for the two errors that refuse one.
@@ -236,7 +236,7 @@ where
     {
         return Err(Error::TableOverride {
             key: variable.key.clone(),
-            input: variable.spelled.to_ascii_uppercase(),
+            input: variable.original_name.to_ascii_uppercase(),
         });
     }
     // template:begin authn:load-audience-list-decode
