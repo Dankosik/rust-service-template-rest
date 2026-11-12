@@ -38,7 +38,12 @@ fn app(options: &HardenOptions) -> Router {
         assert!(!armed, "boom {}", 42);
         "unreachable"
     };
-    let handler_4 = |body: String| async move { body };
+    let handler_4 = |body: Result<String, axum::extract::rejection::StringRejection>| async move {
+        match body {
+            Ok(body) => body.into_response(),
+            Err(rejection) => ([(RETRY_AFTER, "60")], rejection).into_response(),
+        }
+    };
     #[expect(
         clippy::disallowed_methods,
         reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
@@ -304,6 +309,7 @@ async fn declared_and_streamed_oversize_bodies_are_413_problems() {
         .unwrap();
     let response = app(&options()).oneshot(streamed).await.unwrap();
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(response.headers()[RETRY_AFTER], "60");
     assert_eq!(
         response.headers().get(CONTENT_TYPE).unwrap(),
         "application/problem+json"

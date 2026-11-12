@@ -22,7 +22,9 @@ use std::time::Duration;
 use axum::Router;
 use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, MatchedPath, Request, State};
-use axum::http::header::{CONTENT_LENGTH, X_CONTENT_TYPE_OPTIONS};
+use axum::http::header::{
+    CONTENT_ENCODING, CONTENT_LENGTH, TRAILER, TRANSFER_ENCODING, X_CONTENT_TYPE_OPTIONS,
+};
 use axum::http::{HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -154,13 +156,23 @@ async fn limit_body(State(max_bytes): State<usize>, request: Request, next: Next
             error
         }))
     });
-    let response = next.run(request).await;
+    let mut response = next.run(request).await;
     // Axum's raw extractors lose the cause when they render their 413.
     if response.status() == StatusCode::PAYLOAD_TOO_LARGE
         && overflowed.load(Ordering::Relaxed)
         && response.extensions().get::<Problem>().is_none()
     {
-        return body_too_large().into_response();
+        let (parts, body) = body_too_large().into_response().into_parts();
+        let headers = response.headers_mut();
+        for name in [CONTENT_ENCODING, CONTENT_LENGTH, TRAILER, TRANSFER_ENCODING] {
+            headers.remove(name);
+        }
+        for name in ["content-digest", "repr-digest", "digest", "content-md5"] {
+            headers.remove(name);
+        }
+        headers.extend(parts.headers);
+        response.extensions_mut().extend(parts.extensions);
+        *response.body_mut() = body;
     }
     response
 }
