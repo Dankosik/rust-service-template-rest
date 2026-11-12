@@ -204,31 +204,7 @@ async fn a_durable_replaced_before_the_next_pull_arrives_cannot_dispatch() {
         "$JS.API.CONSUMER.MSG.NEXT.{}.{}",
         fixture.stream, fixture.durable
     );
-    let intercepted_subject = pull_subject.clone();
-    let (intercepted, pull) = oneshot::channel();
-    let mut intercepted = Some(intercepted);
-    let mut pulls = 0;
-    let relay = AckDroppingRelay::start_filtering_requests(move |line, payload| {
-        let Ok(line) = std::str::from_utf8(line) else {
-            return false;
-        };
-        let mut fields = line.split_ascii_whitespace();
-        if fields.next() != Some("PUB") || fields.next() != Some(intercepted_subject.as_str()) {
-            return false;
-        }
-        pulls += 1;
-        if pulls != 2 {
-            return false;
-        }
-        let reply = fields.next().expect("pull request has a reply inbox");
-        intercepted
-            .take()
-            .expect("only one pull is intercepted")
-            .send((reply.to_owned(), Bytes::copy_from_slice(payload)))
-            .expect("test is waiting for the second pull");
-        true
-    })
-    .await;
+    let (relay, pull) = AckDroppingRelay::intercept_second_pull(pull_subject.clone()).await;
     let cancel = CancellationToken::new();
     let messaging = Box::pin(Messaging::connect(
         options_with_servers(
