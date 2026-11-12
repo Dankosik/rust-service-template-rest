@@ -3,9 +3,9 @@
 use std::time::Duration;
 
 use infra_postgres::{
-    Cleanup, CleanupPass, CleanupSchedule, MAINTENANCE_OBSERVATION_INTERVAL, MaintenanceFailure,
-    MaintenanceObserver, MaintenancePopulation, PopulationSample, TxError, failure_cause,
-    in_observation_tx, in_tx_with, observed, set_statement_timeout, sqlstate,
+    Cleanup, CleanupPass, MaintenanceFailure, PassEnd, PopulationSample, TxError, failure_cause,
+    in_observation_tx, in_tx_with, observed, run_scheduled_cleanup, set_statement_timeout,
+    sqlstate,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -46,15 +46,9 @@ pub enum CleanupError {
     Commit,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CleanupDisposition {
-    Completed,
-    Cancelled,
-}
-
 struct PassSummary {
     removed: u64,
-    disposition: CleanupDisposition,
+    end: PassEnd,
 }
 
 impl From<TxError> for CleanupError {
@@ -144,7 +138,7 @@ impl Store {
             if cancel.is_some_and(CancellationToken::is_cancelled) {
                 return Ok(PassSummary {
                     removed,
-                    disposition: CleanupDisposition::Cancelled,
+                    end: PassEnd::Cancelled,
                 });
             }
             let deleted_rows = self
@@ -158,7 +152,7 @@ impl Store {
                 pass.completed();
                 return Ok(PassSummary {
                     removed,
-                    disposition: CleanupDisposition::Completed,
+                    end: PassEnd::Completed,
                 });
             }
         }
@@ -206,9 +200,6 @@ impl Store {
     /// and changes neither readiness nor serving.
     /// Returns when `cancel` fires, dropping a run in flight.
     pub async fn run_cleanup(self, cancel: CancellationToken) {
-        if cancel.is_cancelled() {
-            return;
-        }
         metrics::describe_counter!(
             CLEANUP_RUNS_METRIC,
             metrics::Unit::Count,
@@ -219,48 +210,14 @@ impl Store {
             metrics::Unit::Count,
             "Expired idempotency records the cleanup deleted."
         );
-        let _ = Box::pin(cancel.run_until_cancelled(async {
-            tokio::join!(self.cleanup_loop(&cancel), self.observe_population(&cancel));
-        }))
+        run_scheduled_cleanup(
+            Cleanup::HttpIdempotency,
+            CLEANUP_RUNS_METRIC,
+            &cancel,
+            || async { self.cleanup_pass(Some(&cancel)).await.map(|pass| pass.end) },
+            || self.population(),
+        )
         .await;
-    }
-
-    async fn cleanup_loop(&self, cancel: &CancellationToken) {
-        let mut schedule = CleanupSchedule::new(Cleanup::HttpIdempotency);
-        loop {
-            if cancel.is_cancelled() {
-                return;
-            }
-            schedule.next().await;
-            if cancel.is_cancelled() {
-                return;
-            }
-            let outcome = match self.cleanup_pass(Some(cancel)).await {
-                Ok(result) => match result.disposition {
-                    CleanupDisposition::Cancelled => return,
-                    CleanupDisposition::Completed => "completed",
-                },
-                Err(_) => "failed",
-            };
-            metrics::counter!(CLEANUP_RUNS_METRIC, "outcome" => outcome).increment(1);
-        }
-    }
-
-    async fn observe_population(&self, cancel: &CancellationToken) {
-        if cancel.is_cancelled() {
-            return;
-        }
-        let mut observer = MaintenanceObserver::start(MaintenancePopulation::HttpIdempotency);
-        loop {
-            if cancel.is_cancelled() {
-                return;
-            }
-            observer.sample(self.population()).await;
-            if cancel.is_cancelled() {
-                return;
-            }
-            tokio::time::sleep(MAINTENANCE_OBSERVATION_INTERVAL).await;
-        }
     }
 
     async fn population(&self) -> Result<PopulationSample, MaintenanceFailure> {

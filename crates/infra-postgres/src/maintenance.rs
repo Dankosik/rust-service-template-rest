@@ -9,6 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use metrics::Unit;
 use sqlx::postgres::PgPool;
+use tokio_util::sync::CancellationToken;
 
 use crate::observe::observed;
 use crate::transaction::{Isolation, Tx, TxError, TxOptions, in_tx_with};
@@ -55,6 +56,69 @@ impl CleanupSchedule {
     }
 }
 
+/// How a cleanup pass that did not fail ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PassEnd {
+    Completed,
+    /// The pass saw the owner's cancellation between batches.
+    Cancelled,
+}
+
+/// Run `pass` on the [`CleanupSchedule`] and sample `cleanup`'s population
+/// with `sample`, both until `cancel` fires, which drops whichever is in
+/// flight. Each pass that ends without cancellation increments `runs_metric`
+/// by `outcome` (`completed` or `failed`); a failed pass waits for the next
+/// tick.
+pub async fn run_scheduled_cleanup<E, P, S>(
+    cleanup: Cleanup,
+    runs_metric: &'static str,
+    cancel: &CancellationToken,
+    // Not `AsyncFnMut`: the compiler cannot prove its futures `Send` for a
+    // spawned owner.
+    mut pass: impl FnMut() -> P,
+    mut sample: impl FnMut() -> S,
+) where
+    P: Future<Output = Result<PassEnd, E>>,
+    S: Future<Output = Result<PopulationSample, MaintenanceFailure>>,
+{
+    if cancel.is_cancelled() {
+        return;
+    }
+    // Started under the same check as the passes, so a cancelled owner never
+    // publishes an observer start.
+    let mut observer = MaintenanceObserver::start(cleanup.population());
+    let passes = async {
+        let mut schedule = CleanupSchedule::new(cleanup);
+        // `run_until_cancelled` polls these loops before the token, so each
+        // loop checks it before starting new work.
+        while !cancel.is_cancelled() {
+            schedule.next().await;
+            if cancel.is_cancelled() {
+                return;
+            }
+            let outcome = match pass().await {
+                Ok(PassEnd::Cancelled) => return,
+                Ok(PassEnd::Completed) => "completed",
+                Err(_) => "failed",
+            };
+            metrics::counter!(runs_metric, "outcome" => outcome).increment(1);
+        }
+    };
+    let observation = async {
+        while !cancel.is_cancelled() {
+            observer.sample(sample()).await;
+            if cancel.is_cancelled() {
+                return;
+            }
+            tokio::time::sleep(MAINTENANCE_OBSERVATION_INTERVAL).await;
+        }
+    };
+    let _ = Box::pin(cancel.run_until_cancelled(async {
+        tokio::join!(passes, observation);
+    }))
+    .await;
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MaintenancePopulation {
     Jobs,
@@ -96,6 +160,14 @@ impl Cleanup {
             Self::Jobs => "jobs",
             Self::HttpIdempotency => "http_idempotency",
             Self::WebhookReceipts => "webhook_receipts",
+        }
+    }
+
+    const fn population(self) -> MaintenancePopulation {
+        match self {
+            Self::Jobs => MaintenancePopulation::Jobs,
+            Self::HttpIdempotency => MaintenancePopulation::HttpIdempotency,
+            Self::WebhookReceipts => MaintenancePopulation::WebhookReceipts,
         }
     }
 }

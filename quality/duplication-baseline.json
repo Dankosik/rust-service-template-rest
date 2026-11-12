@@ -86,17 +86,17 @@
     {
       "id": "P2",
       "kind": "production",
-      "reason": "Cleanup transaction-error conversion and sanitized logging remain with independent idempotency and webhook owners. This narrowed admission retains only the unchanged mapping/log scaffolding; owner-specific result/disposition types are outside it. Reconsider when both cleanup owners deliberately share failure and reporting policy.",
+      "reason": "Cleanup transaction-error conversion and sanitized logging remain with independent idempotency and webhook owners. This narrowed admission retains only the unchanged mapping/log scaffolding; owner-specific pass results are outside it. Reconsider when both cleanup owners deliberately share failure and reporting policy.",
       "occurrences": [
         {
           "path": "crates/infra-idempotency-store/src/maintenance.rs",
           "original_lines": [
-            57,
-            78
+            51,
+            72
           ],
           "max_tokens": 144,
           "before": {
-            "text": "struct PassSummary {\n    removed: u64,\n    disposition: CleanupDisposition",
+            "text": "struct PassSummary {\n    removed: u64,\n    end: PassEnd",
             "boundary": false
           },
           "source": ",\n}\n\nimpl From<TxError> for CleanupError {\n    fn from(err: TxError) -> Self {\n        match &err {\n            TxError::Acquire(err) => cleanup_failed(err, Self::Acquire),\n            TxError::Begin(err) => cleanup_failed(err, Self::Begin),\n            TxError::CommitFailed(err) | TxError::CommitUnknown(err) => {\n                cleanup_failed(err, Self::Commit)\n            }\n        }\n    }\n}\n\n/// Log a failed cleanup batch with only bounded fields, never driver text,\n/// and return its class.\nfn cleanup_failed(err: &sqlx::Error, class: CleanupError) -> CleanupError {\n    tracing::warn!(\n        failure = %class,\n        sqlstate = sqlstate(err).as_deref(),\n        cause = failure_cause(err),",
@@ -108,8 +108,8 @@
         {
           "path": "crates/infra-webhooks/src/inbound/maintenance.rs",
           "original_lines": [
-            201,
-            222
+            158,
+            179
           ],
           "max_tokens": 144,
           "before": {
@@ -119,47 +119,6 @@
           "source": ",\n}\n\nimpl From<TxError> for CleanupError {\n    fn from(err: TxError) -> Self {\n        match &err {\n            TxError::Acquire(err) => cleanup_failed(err, Self::Acquire),\n            TxError::Begin(err) => cleanup_failed(err, Self::Begin),\n            TxError::CommitFailed(err) | TxError::CommitUnknown(err) => {\n                cleanup_failed(err, Self::Commit)\n            }\n        }\n    }\n}\n\n/// Log a failed cleanup batch with only bounded fields, never driver text,\n/// and return its class.\nfn cleanup_failed(err: &sqlx::Error, class: CleanupError) -> CleanupError {\n    tracing::warn!(\n        failure = %class,\n        sqlstate = sqlstate(err).as_deref(),\n        cause = failure_cause(err),",
           "after": {
             "text": "\n        \"webhook_receipt_cleanup_failed\"\n    );\n    class\n}\n\n#[cfg(test)]\nmod tests {\n    use super",
-            "boundary": false
-          }
-        }
-      ]
-    },
-    {
-      "id": "P3",
-      "kind": "production",
-      "reason": "Periodic cancellation-bound cleanup retains provider-owned statements, cadence and metrics. Reconsider when a shared lifecycle owner is required beyond line reduction.",
-      "occurrences": [
-        {
-          "path": "crates/infra-idempotency-store/src/maintenance.rs",
-          "original_lines": [
-            182,
-            197
-          ],
-          "max_tokens": 101,
-          "before": {
-            "text": "led token never polls the loop.\n        ",
-            "boundary": false
-          },
-          "source": "let _ = cancel\n            .run_until_cancelled(async {\n                let mut ticker = tokio::time::interval(CLEANUP_INTERVAL);\n                ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);\n                loop {\n                    ticker.tick().await;\n                    let outcome = match self.remove_expired().await {\n                        Ok(_) => \"completed\",\n                        Err(_) => \"failed\",\n                    };\n                    metrics::counter!(CLEANUP_RUNS_METRIC, \"outcome\" => outcome).increment(1);\n                }\n            })\n            .await;\n    }\n}",
-          "after": {
-            "text": "\n",
-            "boundary": true
-          }
-        },
-        {
-          "path": "crates/infra-webhooks/src/inbound.rs",
-          "original_lines": [
-            359,
-            374
-          ],
-          "max_tokens": 101,
-          "before": {
-            "text": "he cleanup deleted.\"\n        );\n        ",
-            "boundary": false
-          },
-          "source": "let _ = cancel\n            .run_until_cancelled(async {\n                let mut ticker = tokio::time::interval(CLEANUP_INTERVAL);\n                ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);\n                loop {\n                    ticker.tick().await;\n                    let outcome = match self.remove_expired().await {\n                        Ok(_) => \"completed\",\n                        Err(_) => \"failed\",\n                    };\n                    metrics::counter!(CLEANUP_RUNS_METRIC, \"outcome\" => outcome).increment(1);\n                }\n            })\n            .await;\n    }\n}",
-          "after": {
-            "text": "\n\nimpl fmt::Debug for Receiver {\n    fn ",
             "boundary": false
           }
         }
