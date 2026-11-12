@@ -15,13 +15,13 @@
     reason = "a broken fixture or setup fails the test"
 )]
 
-// template:begin http-idempotency-mounted:http-idempotency-mounted-module
 #[allow(
     dead_code,
-    reason = "the shared transport also supplies BEGIN and autocommit faults to other integration targets"
+    reason = "the shared transport also supplies faults to other integration targets"
 )]
 #[path = "../support/commit_proxy.rs"]
 mod commit_proxy;
+// template:begin http-idempotency-mounted:http-idempotency-mounted-module
 mod mounted;
 // template:end http-idempotency-mounted:http-idempotency-mounted-module
 
@@ -38,11 +38,13 @@ use infra_idempotency_store::{
     CallerKind, CleanupError, Digest, HeaderPair, Record, ScopeKey, StartupError, Store,
 };
 use infra_postgres::{Dsn, Isolation, PgPool, Tx};
-use integration_tests::{close_pools, dsn_for};
+use integration_tests::{DATABASE_URL, close_pools, dsn_for, url_for};
 use sqlx::Executor as _;
 use tokio::sync::Notify;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
+
+use commit_proxy::{CommitProxy, ReadyBoundary};
 
 /// What a test's work returns: `Ok` commits the record and hands it back.
 type Committing<R> = Result<(Record, Record), R>;
@@ -677,6 +679,57 @@ async fn p4_an_expired_record_is_not_replayed_and_is_replaced(pool: PgPool) {
     assert_eq!(work.runs(), 2);
     assert_eq!(count(&pool, EFFECTS).await, 2);
     close_pools(&[&pool_1, &pool_2]).await;
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn p4_an_expired_key_can_execute_while_a_replay_is_in_flight(pool: PgPool) {
+    create_effects(&pool).await;
+    let dsn = dsn_for(&pool).await;
+    assert_eq!(dsn.ssl_mode_name(), "disable", "the proxy frames plaintext");
+    let host = dsn.host().trim_matches(['[', ']']);
+    let address = bounded(
+        "resolve the database",
+        tokio::net::lookup_host((host, dsn.port())),
+    )
+    .await
+    .expect("the database address resolves")
+    .next()
+    .expect("the database has an address");
+    let proxy = CommitProxy::start(address).await;
+    let mut url = url_for(&pool, DATABASE_URL).await;
+    url.set_ip_host(proxy.address().ip()).expect("the proxy IP");
+    url.set_port(Some(proxy.address().port()))
+        .expect("the proxy port");
+    let proxied = Dsn::admit(url.as_str()).expect("the proxied DSN is admitted");
+    let replay_pool = template_pool(&proxied, 1).await;
+    let replaying = Store::new(replay_pool.clone(), RETENTION);
+    let (writer_pool, writer) = replica(&dsn).await;
+    let original = success(r#"{"id":1}"#);
+    let replacement = success(r#"{"id":2}"#);
+    let work = Work::default();
+
+    let seeded = execute(&writer, SCOPE, INPUT, &original, &work).await;
+    assert_eq!(committed(seeded), original);
+    // Hold the live read's completion while the server transaction stays open.
+    proxy.arm_ready_hold(ReadyBoundary::ExecuteSync);
+    let (replay, afresh) = bounded("replay across expiry", async {
+        tokio::join!(execute(&replaying, SCOPE, INPUT, &original, &work), async {
+            proxy.ready_held().await;
+            expire(&pool, SCOPE).await;
+            let outcome = execute(&writer, SCOPE, OTHER_INPUT, &replacement, &work).await;
+            proxy.release_ready();
+            outcome
+        })
+    })
+    .await;
+
+    assert_eq!(live(replay), Some(original));
+    assert_eq!(committed(afresh), replacement);
+    let retry = execute(&writer, SCOPE, OTHER_INPUT, &replacement, &work).await;
+    assert_eq!(live(retry), Some(replacement));
+    assert_eq!(count(&pool, EFFECTS).await, 2);
+    close_pools(&[&replay_pool, &writer_pool]).await;
+    proxy.shutdown().await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]

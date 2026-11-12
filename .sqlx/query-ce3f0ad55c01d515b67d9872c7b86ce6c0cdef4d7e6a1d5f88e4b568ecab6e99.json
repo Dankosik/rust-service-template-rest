@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT NOT pg_is_in_recovery() AND current_setting('transaction_read_only') = 'off' AS \"writable!\", pg_try_advisory_xact_lock($1) AS \"acquired!\", r.fingerprint AS \"fingerprint?: Digest\", r.status AS \"status?\", r.headers AS \"headers?: Vec<HeaderPair>\", CASE WHEN r.fingerprint = $3 THEN r.body END AS body FROM (VALUES (1)) AS one LEFT JOIN http_idempotency_records AS r ON r.scope_key = $2 AND r.expires_at > statement_timestamp()",
+  "query": "SELECT NOT pg_is_in_recovery() AND current_setting('transaction_read_only') = 'off' AS \"writable!\", CASE WHEN r.scope_key IS NULL THEN pg_try_advisory_xact_lock($1) ELSE FALSE END AS \"acquired!\", r.fingerprint AS \"fingerprint?: Digest\", r.status AS \"status?\", r.headers AS \"headers?: Vec<HeaderPair>\", CASE WHEN r.fingerprint = $3 THEN r.body END AS body FROM (VALUES (1)) AS one LEFT JOIN http_idempotency_records AS r ON r.scope_key = $2 AND r.expires_at > statement_timestamp()",
   "describe": {
     "columns": [
       {
@@ -94,5 +94,5 @@
       null
     ]
   },
-  "hash": "9316d26bd907308bc460e2d53d35161f308ba514bfaf3e24a7372ce714f3e08e"
+  "hash": "ce3f0ad55c01d515b67d9872c7b86ce6c0cdef4d7e6a1d5f88e4b568ecab6e99"
 }
