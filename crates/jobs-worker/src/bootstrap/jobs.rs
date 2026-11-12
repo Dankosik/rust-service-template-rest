@@ -18,9 +18,7 @@ pub(super) fn validate(kinds: KindsBuilder) -> Result<Option<Kinds>, WorkerError
 }
 
 pub(super) fn kind_names(registry: Option<&Kinds>) -> String {
-    registry
-        .map(|registry| registry.names().collect::<Vec<_>>().join(","))
-        .unwrap_or_default()
+    registry.map_or_default(|registry| registry.names().collect::<Vec<_>>().join(","))
 }
 
 pub(super) async fn build_engines(

@@ -130,7 +130,6 @@ const EXIT_DEGRADED_SHUTDOWN: u8 = 3;
 /// configuration is loaded. `--help` prints clap's help and exits 0; a flag
 /// error prints one generic usage line and exits 2. A failure is reported once.
 /// Later failures do not call [`std::process::exit`].
-#[must_use]
 pub fn run<I, R>(args: I, register: R) -> ExitCode
 where
     I: IntoIterator<Item = OsString>,

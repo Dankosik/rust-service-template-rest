@@ -43,7 +43,7 @@ impl SigningKey {
     ///
     /// Returns [`InvalidKey`] for a malformed secret.
     pub fn from_encoded(encoded: &str) -> Result<Self, InvalidKey> {
-        let encoded = encoded.strip_prefix("whsec_").unwrap_or(encoded);
+        let encoded = encoded.trim_prefix("whsec_");
         let decoded = STANDARD.decode(encoded).map_err(|_| InvalidKey)?;
         if !(MIN_KEY_BYTES..=MAX_KEY_BYTES).contains(&decoded.len()) {
             return Err(InvalidKey);

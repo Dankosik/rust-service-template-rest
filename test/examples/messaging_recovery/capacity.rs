@@ -1,10 +1,6 @@
 //! Bounded open-loop fixture ingress. This never publishes or consumes directly.
 
 use std::ffi::OsString;
-#[expect(
-    clippy::disallowed_types,
-    reason = "finite fixture owns its plan and observation files"
-)]
 use std::fs::{File, OpenOptions};
 use std::io::Write as _;
 use std::num::NonZeroU32;

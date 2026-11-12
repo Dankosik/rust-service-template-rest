@@ -360,7 +360,7 @@ async fn fetch_discovery(
 ) -> Result<Discovery, PreparationError> {
     let error = |reason| PreparationError::new(PreparationPhase::Discovery, reason);
     let path = issuer.url().path();
-    let path = path.strip_suffix('/').unwrap_or(path);
+    let path = path.trim_suffix('/');
     let mut openid = issuer.url().clone();
     openid.set_path(&format!("{path}/.well-known/openid-configuration"));
     let bytes = match provider
@@ -1427,7 +1427,7 @@ mod tests {
                     1
                 };
             } else if character == '"' {
-                in_string = !in_string;
+                in_string.toggle();
             } else if in_string && character.is_ascii_alphabetic() {
                 write!(escaped, "\\u{:04x}", u32::from(character)).unwrap();
                 continue;
