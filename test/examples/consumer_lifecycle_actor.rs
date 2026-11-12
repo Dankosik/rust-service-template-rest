@@ -32,7 +32,7 @@ mod fixture {
     use infra_messaging::{
         ConsumerOptions, HandlerError, Messaging, MessagingOptions, Registry, Route,
     };
-    use infra_postgres::{Dsn, Isolation, PgPool, PoolOptions, Tx, in_tx};
+    use infra_postgres::{Dsn, Isolation, PgPool, Tx, in_tx};
     use operation_context::{Deadline, OperationContext};
     use serde::{Deserialize, Serialize};
     use tokio::time::{Instant, timeout};
@@ -94,17 +94,13 @@ mod fixture {
     }
 
     async fn pool() -> PgPool {
-        infra_postgres::connect(
+        integration_tests::template_pool(
             &Dsn::admit(&std::env::var("DATABASE_URL").expect("synthetic database URL")).unwrap(),
-            &PoolOptions {
-                max_connections: NonZeroU32::new(3).unwrap(),
-                application_name: "consumer-lifecycle-fixture",
-                default_isolation: Isolation::ReadCommitted,
-                session_budgets: infra_postgres::SessionBudgets::Startup,
-            },
+            "consumer-lifecycle-fixture",
+            3,
+            Isolation::ReadCommitted,
         )
         .await
-        .expect("fixture pool")
     }
 
     async fn command() {

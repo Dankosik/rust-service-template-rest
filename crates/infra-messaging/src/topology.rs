@@ -408,25 +408,79 @@ fn is_auth_refusal(error: &async_nats::jetstream::Error) -> bool {
 }
 
 pub(crate) fn classify_topology(error: &(dyn std::error::Error + 'static)) -> MessagingError {
+    shared_rules::error_chain::causes(error)
+        .find_map(classify_cause)
+        .unwrap_or(MessagingError::Topology)
+}
+
+fn classify_cause(error: &(dyn std::error::Error + 'static)) -> Option<MessagingError> {
     if let Some(error) = error.downcast_ref::<async_nats::jetstream::context::RequestError>() {
         match error.kind() {
             async_nats::jetstream::context::RequestErrorKind::TimedOut => {
-                return MessagingError::TimedOut {
+                return Some(MessagingError::TimedOut {
                     budget: BROKER_OPERATION_BUDGET,
-                };
+                });
             }
             async_nats::jetstream::context::RequestErrorKind::InvalidSubject => {
-                return MessagingError::Configuration("broker subject is invalid");
+                return Some(MessagingError::Configuration("broker subject is invalid"));
             }
             _ => {}
         }
     }
-    if let Some(error) = error.downcast_ref::<async_nats::jetstream::Error>()
-        && is_auth_refusal(error)
-    {
-        return MessagingError::Authentication;
-    }
     error
-        .source()
-        .map_or(MessagingError::Topology, classify_topology)
+        .downcast_ref::<async_nats::jetstream::Error>()
+        .is_some_and(is_auth_refusal)
+        .then_some(MessagingError::Authentication)
+}
+
+#[cfg(test)]
+mod tests {
+    use async_nats::jetstream::context::{RequestError, RequestErrorKind};
+
+    use super::classify_topology;
+    use crate::error::MessagingError;
+
+    #[derive(Debug)]
+    struct Wrapper(Box<dyn std::error::Error + 'static>);
+
+    impl std::fmt::Display for Wrapper {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("stream lookup failed")
+        }
+    }
+
+    impl std::error::Error for Wrapper {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&*self.0)
+        }
+    }
+
+    #[test]
+    fn a_timed_out_request_is_found_at_any_depth() {
+        let direct = RequestError::new(RequestErrorKind::TimedOut);
+        let wrapped = Wrapper(Box::new(RequestError::new(RequestErrorKind::TimedOut)));
+        // `io::Error::source` skips the payload it wraps.
+        let in_io = Wrapper(Box::new(std::io::Error::other(RequestError::new(
+            RequestErrorKind::TimedOut,
+        ))));
+        for error in [
+            &direct as &(dyn std::error::Error + 'static),
+            &wrapped,
+            &in_io,
+        ] {
+            assert!(
+                matches!(classify_topology(error), MessagingError::TimedOut { .. }),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unrecognized_chain_is_a_topology_failure() {
+        let error = Wrapper(Box::new(RequestError::new(RequestErrorKind::Other)));
+        assert!(matches!(
+            classify_topology(&error),
+            MessagingError::Topology
+        ));
+    }
 }

@@ -244,7 +244,14 @@ fn read_stderr(child: &mut Child) -> String {
 }
 
 fn get(url: &str) -> Result<(u16, String), ureq::Error> {
-    match ureq::get(url).call() {
+    // Without a bound, a listener that accepts and never answers would hold
+    // `poll_until` past its deadline.
+    match ureq::get(url)
+        .config()
+        .timeout_global(Some(Duration::from_secs(3)))
+        .build()
+        .call()
+    {
         Ok(mut response) => {
             let status = response.status().as_u16();
             let body = response.body_mut().read_to_string().unwrap_or_default();

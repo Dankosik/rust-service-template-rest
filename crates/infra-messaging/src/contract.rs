@@ -151,7 +151,7 @@ fn message(
             "schemaFormat": "application/schema+json;version=draft-2020-12",
             "schema": {
                 "$schema": "https://json-schema.org/draft/2020-12/schema",
-                "$ref": format!("#/$defs/{}", payload.replace('~', "~0").replace('/', "~1")),
+                "$ref": format!("#/$defs/{}", shared_rules::rfc6901::escape(payload)),
                 "$defs": definitions,
             },
         },

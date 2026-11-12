@@ -120,12 +120,23 @@ impl ObservabilityConfig {
             ));
         }
         if let Some(endpoint) = self.otel.exporter.otlp_endpoint.as_deref() {
+            let key = "observability.otel.exporter.otlp_endpoint";
             let is_http_url = endpoint.starts_with("http://") || endpoint.starts_with("https://");
             if !is_http_url {
                 return Err(ValidationError::new(
-                    "observability.otel.exporter.otlp_endpoint",
+                    key,
                     "must be an http:// or https:// URL",
                 ));
+            }
+            if shared_rules::uri::has_whitespace_or_control(endpoint) {
+                return Err(ValidationError::new(
+                    key,
+                    "must not contain whitespace or controls",
+                ));
+            }
+            // RFC 9110 section 4.2.4: an http(s) URI carries no userinfo.
+            if shared_rules::uri::authority_has_userinfo(endpoint) {
+                return Err(ValidationError::new(key, "must not include userinfo"));
             }
         }
         Ok(())
@@ -208,5 +219,23 @@ mod tests {
         );
         cfg.otel.exporter.otlp_endpoint = Some("http://collector:4318".into());
         cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn otlp_endpoint_is_admitted_only_as_written() {
+        for endpoint in [
+            "http://collector:4318/v1\ttraces",
+            "http://collector\u{a0}:4318",
+            "http://user:secret@collector:4318",
+            "https://@collector:4318",
+        ] {
+            let mut cfg = ObservabilityConfig::default();
+            cfg.otel.exporter.otlp_endpoint = Some(endpoint.into());
+            assert_eq!(
+                cfg.validate().unwrap_err().key,
+                "observability.otel.exporter.otlp_endpoint",
+                "{endpoint:?}"
+            );
+        }
     }
 }
