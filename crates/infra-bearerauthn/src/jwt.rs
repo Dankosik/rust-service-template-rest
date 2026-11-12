@@ -154,12 +154,23 @@ impl JwtVerifier {
             }
             self.remembered.invalidate(bytes);
         }
+        let remembered = self.verify_uncached(token, &now).await?;
+        let principal = remembered.verified.principal.clone();
+        self.remembered.insert(bytes.into(), remembered);
+        Ok(principal)
+    }
+
+    async fn verify_uncached(
+        &self,
+        token: &BearerToken<'_>,
+        now: &impl Fn() -> Result<Duration, VerificationError>,
+    ) -> Result<Remembered, VerificationError> {
         let rfc7515::Compact {
             signing_input: message,
             header,
             payload,
             signature,
-        } = rfc7515::compact(bytes)
+        } = rfc7515::compact(token.as_bytes())
             .ok_or_else(|| VerificationError::invalid(VerificationReason::Header))?;
         let (header, algorithm) = self.admit_header(header)?;
         // Decode into bounded stack storage; admitted keys cap the signature size.
@@ -184,18 +195,13 @@ impl JwtVerifier {
             now.as_secs(),
             token.to_secret(),
         )?;
-        let principal = verified.principal.clone();
-        self.remembered.insert(
-            bytes.into(),
-            Remembered {
-                held_for: MAX_REMEMBERED_FOR
-                    .min(Duration::from_secs(principal.expires_at()).saturating_sub(now)),
-                sampled_at,
-                verified,
-                key_generation,
-            },
-        );
-        Ok(principal)
+        Ok(Remembered {
+            held_for: MAX_REMEMBERED_FOR
+                .min(Duration::from_secs(verified.principal.expires_at()).saturating_sub(now)),
+            sampled_at,
+            verified,
+            key_generation,
+        })
     }
 
     fn admit_header(&self, header: &[u8]) -> Result<(Header, JwtAlgorithm), VerificationError> {

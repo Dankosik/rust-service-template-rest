@@ -24,8 +24,7 @@ use crate::{
     provider::ProviderClient,
 };
 
-/// The largest verified provider payload one cache entry retains.
-const MAX_ENTRY_BYTES: usize = 64 * 1024;
+const MAX_RETAINED_PAYLOAD_BYTES: usize = 64 * 1024;
 
 /// Bootstrap input for RFC 7662 token introspection.
 #[derive(Clone, derive_more::Debug)]
@@ -348,7 +347,9 @@ impl Expiry<TokenDigest, VerifiedIntrospection> for Retention {
 /// The earlier of the configured TTL and token expiry, without leeway. Zero
 /// means the result is returned to its waiters but not retained.
 fn retention(principal: &Principal, ttl: Duration, now: SystemTime) -> Duration {
-    if now.duration_since(UNIX_EPOCH).is_err() || principal.payload_len() > MAX_ENTRY_BYTES {
+    if now.duration_since(UNIX_EPOCH).is_err()
+        || principal.payload_len() > MAX_RETAINED_PAYLOAD_BYTES
+    {
         return Duration::ZERO;
     }
     // An expiry beyond what `SystemTime` represents is simply far away.
@@ -390,8 +391,8 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        IntrospectionCacheOptions, IntrospectionOptions, IntrospectionVerifier, MAX_ENTRY_BYTES,
-        retention,
+        IntrospectionCacheOptions, IntrospectionOptions, IntrospectionVerifier,
+        MAX_RETAINED_PAYLOAD_BYTES, retention,
     };
     use crate::{
         EndpointUrl, Failure, IssuerUrl,
@@ -1402,8 +1403,8 @@ mod tests {
         .unwrap().principal;
         assert_eq!(retention(&unbounded, ttl, at(100_500)), ttl);
         for (length, expected) in [
-            (MAX_ENTRY_BYTES, Duration::from_millis(30_500)),
-            (MAX_ENTRY_BYTES + 1, Duration::ZERO),
+            (MAX_RETAINED_PAYLOAD_BYTES, Duration::from_millis(30_500)),
+            (MAX_RETAINED_PAYLOAD_BYTES + 1, Duration::ZERO),
         ] {
             let prefix = r#"{"active":true,"iss":"https://issuer.example","aud":"api","exp":131,"sub":"subject","custom":""#;
             let response = format!("{prefix}{}\"}}", "x".repeat(length - prefix.len() - 2));
