@@ -59,6 +59,7 @@ pub struct GrpcConfig {
     /// Independent bounds on business openings before authentication and calls
     /// through terminal status, shared by router clones. Either bound sheds with
     /// `RESOURCE_EXHAUSTED`. Zero disables both; health is outside both.
+    #[serde(deserialize_with = "crate::de::unsigned_count")]
     pub max_in_flight: u32,
     /// Longest a call over `max_in_flight` waits for a permit before it is
     /// refused; the call's own budget also bounds the wait. The default of one
@@ -69,6 +70,7 @@ pub struct GrpcConfig {
     pub admission_wait: Duration,
     /// Accepted connections at once. At the cap the accept loop closes the
     /// socket with no response. Zero accepts without a bound.
+    #[serde(deserialize_with = "crate::de::unsigned_count")]
     pub max_connections: u32,
     /// Age after which a connection gets GOAWAY, so its client reconnects
     /// and is balanced again; open calls on it finish. Each connection's age

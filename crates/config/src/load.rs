@@ -4,6 +4,7 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+use config::Format as _;
 use serde::de::DeserializeOwned;
 
 use crate::app::BuildInfo;
@@ -210,14 +211,7 @@ where
 
     let mut builder = config::Config::builder();
     for path in options.files() {
-        scan_file(path)?;
-        builder = builder.add_source(
-            // config-rs reads the path itself so its errors name the file; the
-            // pre-scan read above serves only the file rules.
-            config::File::from(path.to_path_buf())
-                .format(config::FileFormat::Toml)
-                .required(true),
-        );
+        builder = builder.add_source(scan_file(path)?);
     }
     let merged = builder
         .add_source(
@@ -241,13 +235,43 @@ where
         .map_err(|error| Error::Deserialize(describe_rejection(&error, &variable_keys, carrier)))
 }
 
-/// The rules a config file must meet before it is merged: every key is one
-/// a variable can also address, and no secret-like key carries a value.
+#[derive(Clone)]
+struct ScannedFile {
+    path: PathBuf,
+    text: String,
+}
+
+impl std::fmt::Debug for ScannedFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScannedFile")
+            .field("path", &self.path)
+            .finish_non_exhaustive()
+    }
+}
+
+impl config::Source for ScannedFile {
+    fn clone_into_box(&self) -> Box<dyn config::Source + Send + Sync> {
+        Box::new(self.clone())
+    }
+
+    fn collect(&self) -> Result<config::Map<String, config::Value>, config::ConfigError> {
+        let uri = self.path.to_string_lossy().into_owned();
+        let text = self.text.strip_prefix('\u{feff}').unwrap_or(&self.text);
+        config::FileFormat::Toml
+            .parse(Some(&uri), text)
+            .map_err(|cause| config::ConfigError::FileParse {
+                uri: Some(uri),
+                cause,
+            })
+    }
+}
+
+/// Retain the checked bytes so a file replacement cannot change what is merged.
 #[expect(
     clippy::disallowed_methods,
     reason = "pre-runtime configuration admission owns this file read; startup can wait on the filesystem"
 )]
-fn scan_file(path: &Path) -> Result<(), Error> {
+fn scan_file(path: &Path) -> Result<ScannedFile, Error> {
     let text = std::fs::read_to_string(path).map_err(|error| Error::ReadFile {
         path: path.to_owned(),
         error,
@@ -268,7 +292,10 @@ fn scan_file(path: &Path) -> Result<(), Error> {
             path: path.to_owned(),
         });
     }
-    Ok(())
+    Ok(ScannedFile {
+        path: path.to_owned(),
+        text,
+    })
 }
 
 /// The first key, as a dotted path, that no `APP__` variable can name. A

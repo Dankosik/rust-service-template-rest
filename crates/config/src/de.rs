@@ -14,12 +14,27 @@ pub(crate) const VALUE_FREE: char = '\0';
 
 /// A decode error whose `message` names the expected form without the
 /// refused value, marked [`VALUE_FREE`] so the loader shows it as written.
-#[allow(
-    dead_code,
-    reason = "removing every profile with a value-free decoder leaves the constructor without a caller"
-)]
 pub(crate) fn value_free<E: serde::de::Error>(message: impl std::fmt::Display) -> E {
     E::custom(format_args!("{VALUE_FREE}{message}"))
+}
+
+pub(crate) fn unsigned_count<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    // Buffer the scalar kind before config-rs can coerce floats or booleans.
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Input {
+        Integer(u32),
+        Text(String),
+    }
+
+    let invalid = || value_free("invalid value, expected an integer");
+    match Input::deserialize(deserializer).map_err(|_| invalid())? {
+        Input::Integer(value) => Ok(value),
+        Input::Text(value) => value.parse().map_err(|_| invalid()),
+    }
 }
 
 /// What a listen address must be, for the decode message.

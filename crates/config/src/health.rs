@@ -30,6 +30,7 @@ pub struct HealthConfig {
     /// first unready answer with no threshold of their own, so one slow
     /// round-trip must not evict an instance that is still serving.
     /// Admission and a never-ready instance report the first failure at once.
+    #[serde(deserialize_with = "crate::de::unsigned_count")]
     pub failure_threshold: u32,
 }
 
