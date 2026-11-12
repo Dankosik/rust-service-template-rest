@@ -194,7 +194,7 @@ impl Config {
         self.app.validate()?;
         self.http.validate()?;
         // template:begin grpc:config-validate
-        self.grpc.validate(&self.http)?;
+        self.grpc.validate(self.http.effective_drain_budget())?;
         // template:end grpc:config-validate
         // template:begin inbound-webhooks:config-inbound-webhooks-validate
         self.inbound_webhooks.validate(self.postgres.enabled)?;

@@ -12,7 +12,6 @@ use std::time::Duration;
 use secrecy::SecretString;
 use serde::Deserialize;
 
-use crate::HttpConfig;
 use crate::de::{blank_as_none, blank_secret_as_none};
 use crate::http::request_budget_fits_drain;
 use crate::listener_limits::{
@@ -185,24 +184,23 @@ impl GrpcConfig {
         }
     }
 
-    /// `http` owns the drain both listeners share.
-    pub(crate) fn validate(&self, http: &HttpConfig) -> Result<(), ValidationError> {
+    pub(crate) fn validate(&self, drain_budget: Duration) -> Result<(), ValidationError> {
         if !self.enabled {
             return Ok(());
         }
 
         self.required_addr()?;
-        self.validate_limits(http)?;
+        self.validate_limits(drain_budget)?;
         self.listener_security()?;
         Ok(())
     }
 
-    fn validate_limits(&self, http: &HttpConfig) -> Result<(), ValidationError> {
+    fn validate_limits(&self, drain_budget: Duration) -> Result<(), ValidationError> {
         request_timeout_range("grpc.request_timeout", self.request_timeout)?;
         request_budget_fits_drain(
             "grpc.request_timeout",
             self.request_timeout,
-            http.effective_drain_budget(),
+            drain_budget,
             "calls",
         )?;
         in_flight_range("grpc.max_in_flight", self.max_in_flight)?;

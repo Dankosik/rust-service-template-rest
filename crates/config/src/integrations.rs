@@ -14,6 +14,7 @@ use url::Url;
 use crate::ValidationError;
 // template:begin grpc:config-integration-grpc-import
 use crate::GrpcSecurity;
+use crate::validate::missing;
 // template:end grpc:config-integration-grpc-import
 
 /// One named integration's optional client input.
@@ -251,14 +252,21 @@ impl GrpcClientConfig {
                     }
                 }
             }
-            GrpcSecurity::Tls => {
-                if self.certificate.is_some() != self.private_key.is_some() {
-                    return Err(ValidationError::new(
-                        format!("{prefix}.certificate/{prefix}.private_key"),
-                        "must be configured together for mTLS",
+            GrpcSecurity::Tls => match (&self.certificate, &self.private_key) {
+                (Some(_), None) => {
+                    return Err(missing(
+                        &format!("{prefix}.private_key"),
+                        &format!("{prefix}.certificate is set"),
                     ));
                 }
-            }
+                (None, Some(_)) => {
+                    return Err(missing(
+                        &format!("{prefix}.certificate"),
+                        &format!("{prefix}.private_key is set"),
+                    ));
+                }
+                (Some(_), Some(_)) | (None, None) => {}
+            },
         }
         Ok(())
     }
