@@ -19,7 +19,9 @@ use async_nats::jetstream::response::Response;
 use async_nats::jetstream::stream::RawMessage;
 use async_nats::{HeaderMap, HeaderName, HeaderValue};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use infra_messaging::wire::{DeadLetterRecord, prefixed_digest_hex, restore_dead_letter};
+use infra_messaging::wire::{
+    DeadLetterRecord, EVENT_TYPE, MESSAGE_ID, prefixed_digest_hex, restore_dead_letter,
+};
 use infra_messaging::{
     BROKER_OPERATION_BUDGET, CloseOutcome, Credentials, Messaging, MessagingOptions,
     MessagingStartup, PreparedEvent, PublishError,
@@ -118,11 +120,23 @@ fn stored_headers(encoded: &str) -> Result<HeaderMap> {
             continue;
         }
         let (name, value) = line.split_once(':').ok_or("header_line")?;
+        let preserve_identity = matches!(name, MESSAGE_ID | EVENT_TYPE);
         let name: HeaderName = name.parse().map_err(|_| "header_name")?;
-        let mut value = value.trim().to_owned();
+        // Remove only the wire separator so restore can reject identity
+        // whitespace that the receiving NATS parser would otherwise trim.
+        let mut value = if preserve_identity {
+            value.strip_prefix(' ').unwrap_or(value)
+        } else {
+            value.trim()
+        }
+        .to_owned();
         while let Some(continuation) = lines.next_if(|next| next.starts_with([' ', '\t'])) {
-            value.push(' ');
-            value.push_str(continuation.trim());
+            if preserve_identity {
+                value.push_str(continuation);
+            } else {
+                value.push(' ');
+                value.push_str(continuation.trim());
+            }
         }
         let value: HeaderValue = value.parse().map_err(|_| "header_value")?;
         headers.append(name, value);
@@ -624,6 +638,35 @@ mod tests {
         assert_eq!(headers.get("Message-Id").unwrap().as_str(), "original");
         assert_eq!(headers.get_all("Message-Id").count(), 2);
         assert_eq!(headers.get("X-Note").unwrap().as_str(), "first second");
+    }
+
+    #[test]
+    fn raw_record_cannot_redrive_a_trimmed_identity() {
+        let payload = b"{}";
+        let mut record = Record {
+            stream: "DLQ".to_owned(),
+            sequence: 1,
+            stored_at: "2026-09-29T10:00:00Z".to_owned(),
+            subject: "orders.dlq".to_owned(),
+            headers_base64: String::new(),
+            payload_base64: STANDARD.encode(payload),
+            payload_sha256: digest(payload),
+        };
+        for (id, event_type, restorable) in [
+            ("event-1", "order.created", true),
+            (" event-1", "order.created", false),
+            ("event-1 ", "order.created", false),
+            ("event-1", "order.created ", false),
+        ] {
+            record.headers_base64 = STANDARD.encode(format!(
+                "NATS/1.0\r\nMessage-Id: {id}\r\nEvent-Type: {event_type}\r\nEvent-Schema: v2\r\nCreated-At: 2026-09-29T10:00:00Z\r\nOriginal-Subject: orders.created\r\n\r\n"
+            ));
+            if restorable {
+                assert_eq!(record.prepared().unwrap().message_id(), "event-1");
+            } else {
+                assert_eq!(record.prepared(), Err("unrestorable"));
+            }
+        }
     }
 
     #[test]

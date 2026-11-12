@@ -416,12 +416,18 @@ async fn run_handler(
 /// Confirms the consumer ACK. A lost request may redeliver; a lost reply may
 /// hide an already settled delivery. Neither proves the source was deleted.
 ///
-/// The confirmation travels through the client's shared request inbox under
-/// its `BROKER_OPERATION_BUDGET` request timeout; `Message::double_ack`
-/// subscribes and unsubscribes a new inbox per call.
+/// The shared inbox avoids per-ACK subscriptions. Bound queue admission too,
+/// since the client's response timer starts only after admission.
 async fn acknowledge(client: &async_nats::Client, source: &Message) {
     let confirmed = match source.reply.clone() {
-        Some(reply) => client.request(reply, AckKind::Ack.into()).await.is_ok(),
+        Some(reply) => matches!(
+            tokio::time::timeout(
+                BROKER_OPERATION_BUDGET,
+                client.request(reply, AckKind::Ack.into()),
+            )
+            .await,
+            Ok(Ok(_))
+        ),
         None => false,
     };
     if !confirmed {

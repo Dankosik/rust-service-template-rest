@@ -6,6 +6,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use futures_util::FutureExt as _;
 use health::{Probe, ProbeError};
 
+use crate::budget::BROKER_OPERATION_BUDGET;
+use crate::error::MessagingError;
 use crate::messaging::Shared;
 use crate::topology::{classify_topology, validate_server};
 
@@ -78,16 +80,20 @@ impl Probe for MessagingProbe {
     async fn check(&self) -> Result<(), ProbeError> {
         self.shared.publish_work.observe(&self.shared.jetstream);
         self.check_local_state()?;
-        self.shared
-            .jetstream
-            .get_stream(&self.shared.source_stream)
-            .await
-            .map_err(|error| {
-                let failure = classify_topology(&error);
-                tracing::warn!(reason = %failure, "messaging_readiness_probe_failed");
-                ProbeError::new("messaging source stream is unavailable")
-            })?;
-        self.check_local_state()
+        let stream = tokio::time::timeout(
+            BROKER_OPERATION_BUDGET,
+            self.shared.jetstream.get_stream(&self.shared.source_stream),
+        )
+        .await;
+        let failure = match stream {
+            Ok(Ok(_)) => return self.check_local_state(),
+            Ok(Err(error)) => classify_topology(&error),
+            Err(_) => MessagingError::TimedOut {
+                budget: BROKER_OPERATION_BUDGET,
+            },
+        };
+        tracing::warn!(reason = %failure, "messaging_readiness_probe_failed");
+        Err(ProbeError::new("messaging source stream is unavailable"))
     }
 }
 

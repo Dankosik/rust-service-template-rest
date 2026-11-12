@@ -48,7 +48,7 @@ impl PreparedEvent {
     ///
     /// # Errors
     /// Rejects an invalid subject, unserializable payload, payload beyond the
-    /// configured bound, an invalid identity or ID with surrounding whitespace,
+    /// configured bound, an invalid identity or one with surrounding whitespace,
     /// or an invalid creation time.
     pub fn prepare<T: EventPayload + Serialize>(
         subject: impl Into<String>,
@@ -75,11 +75,10 @@ impl PreparedEvent {
             return Err(EnvelopeError::PayloadTooLarge);
         }
         let occurred_at = event.occurred_at.to_offset(time::UtcOffset::UTC);
-        // The event type was checked at compile time and the publication ID
-        // is the message ID, so only the ID and time need checking here.
-        crate::wire::validate_identity(&event.id)?;
-        if event.id.trim() != event.id || crate::wire::is_zero_time(occurred_at) {
-            return Err(EnvelopeError::Identity);
+        crate::wire::validate_outbound_identity(&event.id)?;
+        crate::wire::validate_outbound_identity(key.event_type)?;
+        if crate::wire::is_zero_time(occurred_at) {
+            return Err(EnvelopeError::CreatedAtRequired);
         }
         // A caller can retry the retained payload without reformatting it; the
         // created-at text is derived from `occurred_at` when the envelope is
@@ -117,10 +116,13 @@ impl PreparedEvent {
         }
         let subject = Subject::from(subject);
         for value in [&message_id, &publication_id, &event_type] {
-            crate::wire::validate_identity(value)?;
+            crate::wire::validate_outbound_identity(value)?;
         }
-        if schema_version == 0 || crate::wire::is_zero_time(occurred_at) {
-            return Err(EnvelopeError::Identity);
+        if schema_version == 0 {
+            return Err(EnvelopeError::Schema);
+        }
+        if crate::wire::is_zero_time(occurred_at) {
+            return Err(EnvelopeError::CreatedAtRequired);
         }
         crate::wire::check_timestamp(occurred_at)?;
         Ok(Self {
@@ -358,7 +360,7 @@ mod tests {
                 false,
                 false,
                 true,
-                EnvelopeError::Identity,
+                EnvelopeError::CreatedAtRequired,
                 1,
             ),
         ] {
