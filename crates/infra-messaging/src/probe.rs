@@ -157,8 +157,14 @@ impl MessagingProbe {
         {
             return Err(ProbeError::new("messaging connection is unavailable"));
         }
-        validate_server(&self.shared.connection.client, self.shared.envelope_limit)
-            .map_err(|_| ProbeError::new("messaging server admission is unavailable"))
+        validate_server(&self.shared.connection.client, self.shared.envelope_limit).map_err(
+            |refusal| {
+                ProbeError::new(format!(
+                    "messaging server admission is unavailable ({})",
+                    refusal.error_type()
+                ))
+            },
+        )
     }
 }
 

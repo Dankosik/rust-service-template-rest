@@ -34,6 +34,10 @@ const RETRY_DELAYS: [Duration; 4] = [
 const MAX_DELIVERIES: usize = RETRY_DELAYS.len() + 1;
 /// Redelivery delay after a dead-letter publication fails.
 const SETTLEMENT_RETRY_DELAY: Duration = Duration::from_secs(30);
+const HANDLER_TOTAL: &str = "messaging_handler_total";
+const HANDLER_DURATION_SECONDS: &str = "messaging_handler_duration_seconds";
+const DEAD_LETTER_TOTAL: &str = "messaging_dead_letter_total";
+const SETTLEMENT_FAILURES_TOTAL: &str = "messaging_settlement_failures_total";
 
 /// Runs and settles the deliveries of one admitted consumer.
 #[derive(Debug)]
@@ -76,8 +80,8 @@ impl HandlerMetrics {
         let event = |event_type| EventMetrics {
             event_type,
             outcomes: Outcomes::register(
-                "messaging_handler_total",
-                "messaging_handler_duration_seconds",
+                HANDLER_TOTAL,
+                HANDLER_DURATION_SECONDS,
                 "outcome",
                 Some(event_type),
             ),
@@ -356,30 +360,32 @@ impl DeliveryHandler {
             Err(PublicationFailure::Rejected | PublicationFailure::SizeLimit) => "rejected",
         };
         metrics::counter!(
-            "messaging_dead_letter_total",
+            DEAD_LETTER_TOTAL,
             "event_type" => event_type,
             "reason" => reason,
             "outcome" => outcome
         )
         .increment(1);
-        if result.is_ok() {
+        let Err(failure) = result else {
             acknowledge(&self.shared.connection.client, source).await;
-        } else {
-            tracing::error!(
-                subject = source.subject.as_str(),
-                event_type,
-                reason,
-                outcome,
-                "messaging_dead_letter_transfer_failed"
-            );
-            if matches!(result, Err(PublicationFailure::SizeLimit)) {
-                return Err(ConsumerError::DeadLetterTooLarge {
-                    sequence: info.stream_sequence,
-                });
+            return Ok(());
+        };
+        tracing::error!(
+            subject = source.subject.as_str(),
+            event_type,
+            reason,
+            outcome,
+            "messaging_dead_letter_transfer_failed"
+        );
+        match failure {
+            PublicationFailure::SizeLimit => Err(ConsumerError::DeadLetterTooLarge {
+                sequence: info.stream_sequence,
+            }),
+            PublicationFailure::Rejected | PublicationFailure::Ambiguous => {
+                redeliver_after(source, SETTLEMENT_RETRY_DELAY).await;
+                Ok(())
             }
-            redeliver_after(source, SETTLEMENT_RETRY_DELAY).await;
         }
-        Ok(())
     }
 }
 
@@ -427,41 +433,47 @@ async fn run_handler(
 /// The shared inbox avoids per-ACK subscriptions. Bound queue admission too,
 /// since the client's response timer starts only after admission.
 async fn acknowledge(client: &async_nats::Client, source: &Message) {
-    let confirmed = match source.reply.clone() {
-        Some(reply) => matches!(
-            tokio::time::timeout(
-                BROKER_OPERATION_BUDGET,
-                client.request(reply, AckKind::Ack.into()),
-            )
-            .await,
-            Ok(Ok(_))
-        ),
-        None => false,
+    let error_type = if let Some(reply) = source.reply.clone() {
+        match tokio::time::timeout(
+            BROKER_OPERATION_BUDGET,
+            client.request(reply, AckKind::Ack.into()),
+        )
+        .await
+        {
+            Ok(Ok(_)) => return,
+            Ok(Err(_)) => "client_error",
+            Err(_) => "timeout",
+        }
+    } else {
+        "missing_reply"
     };
-    if !confirmed {
-        tracing::warn!(
-            subject = source.subject.as_str(),
-            "messaging_source_ack_unconfirmed"
-        );
-        metrics::counter!("messaging_settlement_failures_total", "operation" => "ack").increment(1);
-    }
+    tracing::warn!(
+        subject = source.subject.as_str(),
+        error.type = error_type,
+        "messaging_source_ack_unconfirmed"
+    );
+    metrics::counter!(SETTLEMENT_FAILURES_TOTAL, "operation" => "ack").increment(1);
 }
 
 /// Asks the broker to redeliver the source after `delay`; if that request is
 /// lost, ack wait redelivers it anyway.
 pub(super) async fn redeliver_after(source: &Message, delay: Duration) {
-    let requested = tokio::time::timeout(
+    let error_type = match tokio::time::timeout(
         BROKER_OPERATION_BUDGET,
         source.ack_with(AckKind::Nak(Some(delay))),
     )
-    .await;
-    if !matches!(requested, Ok(Ok(()))) {
-        tracing::warn!(
-            subject = source.subject.as_str(),
-            "messaging_redelivery_request_failed"
-        );
-        metrics::counter!("messaging_settlement_failures_total", "operation" => "nak").increment(1);
-    }
+    .await
+    {
+        Ok(Ok(())) => return,
+        Ok(Err(_)) => "client_error",
+        Err(_) => "timeout",
+    };
+    tracing::warn!(
+        subject = source.subject.as_str(),
+        error.type = error_type,
+        "messaging_redelivery_request_failed"
+    );
+    metrics::counter!(SETTLEMENT_FAILURES_TOTAL, "operation" => "nak").increment(1);
 }
 
 /// Describes the delivery metrics to the installed recorder. Repeating it is
@@ -470,20 +482,20 @@ pub(super) fn describe_metrics() {
     use metrics::{Unit, describe_counter, describe_histogram};
 
     describe_counter!(
-        "messaging_handler_total",
+        HANDLER_TOTAL,
         "Handled deliveries by event type and outcome"
     );
     describe_histogram!(
-        "messaging_handler_duration_seconds",
+        HANDLER_DURATION_SECONDS,
         Unit::Seconds,
         "Handler run time by event type and outcome"
     );
     describe_counter!(
-        "messaging_dead_letter_total",
+        DEAD_LETTER_TOTAL,
         "Dead-letter transfers by event type, reason and transfer outcome"
     );
     describe_counter!(
-        "messaging_settlement_failures_total",
+        SETTLEMENT_FAILURES_TOTAL,
         "Unconfirmed source acknowledgements and failed redelivery requests"
     );
 }

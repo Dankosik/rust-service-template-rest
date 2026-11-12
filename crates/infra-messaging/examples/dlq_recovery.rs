@@ -386,16 +386,22 @@ async fn fetch(client: async_nats::Client, stream: &str, sequence: u64) -> Resul
     reason = "finite CLI returns its explicit JSON inspection result"
 )]
 async fn inspect(args: &[String], resources: &mut Resources) -> Result<()> {
-    if !(args.len() == 5 || (args.len() == 6 && args[5] == "--payload")) {
-        return Err("usage_inspect_connection_stream_sequence_selection");
-    }
-    let config: Connection = read_json(Path::new(&args[1]))?;
-    let sequence: u64 = args[3].parse().map_err(|_| "sequence")?;
+    const USAGE: &str = "usage_inspect_connection_stream_sequence_selection";
+    let [_, connection, stream, sequence, selection_path, flags @ ..] = args else {
+        return Err(USAGE);
+    };
+    let include_payload = match flags {
+        [] => false,
+        [flag] if flag == "--payload" => true,
+        _ => return Err(USAGE),
+    };
+    let config: Connection = read_json(Path::new(connection))?;
+    let sequence: u64 = sequence.parse().map_err(|_| "sequence")?;
     if sequence == 0 {
         return Err("sequence");
     }
     let client = resources.connect(&config).await?;
-    let Some(record) = fetch(client, &args[2], sequence).await? else {
+    let Some(record) = fetch(client, stream, sequence).await? else {
         println!(
             "{}",
             json!({
@@ -417,7 +423,7 @@ async fn inspect(args: &[String], resources: &mut Resources) -> Result<()> {
         publication_id,
         record,
     };
-    save(Path::new(&args[4]), &selection, Persist::CreateNew)?;
+    save(Path::new(selection_path), &selection, Persist::CreateNew)?;
     let mut report = json!({
         "inspection": inspection,
         "stream": selection.record.stream,
@@ -427,7 +433,7 @@ async fn inspect(args: &[String], resources: &mut Resources) -> Result<()> {
         "publication": Publication::NotAttempted,
         "retirement": Retirement::Retained,
     });
-    if args.len() == 6 {
+    if include_payload {
         report["payload_base64"] = json!(selection.record.payload_base64);
     }
     println!("{report}");
@@ -496,10 +502,10 @@ fn read_state(path: &Path, selection_sha256: String) -> Result<State> {
 }
 
 async fn redrive(args: &[String], resources: &mut Resources, deadline: Instant) -> Result<()> {
-    if args.len() != 2 {
+    let [_, selection_path] = args else {
         return Err("usage_redrive_selection");
-    }
-    let path = Path::new(&args[1]);
+    };
+    let path = Path::new(selection_path);
     let bytes = read_file(path)?;
     let selection: Selection = serde_json::from_slice(&bytes).map_err(|_| "selection_format")?;
     let selection_hash = digest(&bytes);
