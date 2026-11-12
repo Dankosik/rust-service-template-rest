@@ -282,8 +282,8 @@ impl JobError {
     /// Use it for the dependency's own refusal, never for a failure of the job:
     /// a refunded attempt never exhausts, so a condition that does not clear
     /// shows only in `jobs_attempts_total{outcome="snoozed"}` and the queue's
-    /// age. A [`std::error::Error`] whose source chain holds the pool's acquire
-    /// timeout converts into this on its own.
+    /// age. A pool acquire timeout found by [`shared_rules::error_chain::causes`]
+    /// converts into this on its own.
     #[must_use]
     pub fn unavailable(error: impl fmt::Display) -> Self {
         Self {
@@ -301,9 +301,10 @@ impl JobError {
     }
 }
 
-/// A retryable failure whose summary is `error`'s text and its sources.
+/// A retryable failure whose summary is `error`'s text and its bounded
+/// [source chain](shared_rules::error_chain::sources).
 ///
-/// Retryable, except when `error` or one of its sources is
+/// Retryable, except when a cause within [`shared_rules::error_chain::causes`] is
 /// [`sqlx::Error::PoolTimedOut`]: waiting for a connection that did not come is
 /// the pool's capacity, not a fault of the job, so that conversion schedules a
 /// snooze instead (see [`JobError::unavailable`]).
@@ -344,16 +345,15 @@ fn pool_timed_out(error: &(dyn std::error::Error + 'static)) -> bool {
 /// belong to the caller, `sanitize_summary`.
 fn with_sources(error: &(dyn std::error::Error + 'static)) -> String {
     let mut summary = error.to_string();
-    let mut source = error.source();
-    while let Some(cause) = source
-        && summary.len() < MAX_ERROR_SUMMARY_BYTES
+    let mut sources = shared_rules::error_chain::sources(error);
+    while summary.len() < MAX_ERROR_SUMMARY_BYTES
+        && let Some(cause) = sources.next()
     {
         let text = cause.to_string();
         if !text.is_empty() && !summary.contains(&text) {
             summary.push_str(": ");
             summary.push_str(&text);
         }
-        source = cause.source();
     }
     summary
 }
@@ -628,6 +628,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use serde::{Deserialize, Serialize};
     use sqlx::postgres::PgPoolOptions;
     use tokio_util::sync::CancellationToken;
@@ -914,7 +916,26 @@ mod tests {
     }
 
     #[test]
-    fn a_pool_timeout_anywhere_in_the_chain_is_unavailable_not_a_failure() {
+    fn cyclic_error_source_remains_a_retryable_failure() {
+        #[derive(Debug, derive_more::Display)]
+        #[display("cyclic error")]
+        struct CyclicError(AtomicUsize);
+
+        impl std::error::Error for CyclicError {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                let calls = self.0.fetch_add(1, Ordering::Relaxed);
+                assert!(calls < 256, "walking the cycle did not stop");
+                Some(self)
+            }
+        }
+
+        let error = JobError::from(CyclicError(AtomicUsize::new(0)));
+        assert_eq!(error.disposition, Disposition::Retry);
+        assert_eq!(error.to_string(), "cyclic error");
+    }
+
+    #[test]
+    fn a_pool_timeout_in_the_chain_is_unavailable_not_a_failure() {
         let direct = JobError::from(sqlx::Error::PoolTimedOut);
         assert_eq!(
             direct.disposition,

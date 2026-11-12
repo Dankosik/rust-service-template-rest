@@ -4,8 +4,10 @@
 use std::error::Error;
 use std::fmt;
 
-/// `error`, then each error it was caused by, for a caller that looks for a
-/// cause of a given type.
+const MAX_CHAIN_ENTRIES: usize = 64;
+
+/// Up to 64 entries, starting with `error`, for a caller looking for a cause
+/// of a given type.
 ///
 /// A [`std::io::Error`] that wraps a custom error returns that error's source
 /// from `source()`, skipping the wrapped error itself; a TLS connector hands
@@ -15,7 +17,7 @@ use std::fmt;
 pub fn causes<'a>(
     error: &'a (dyn Error + 'static),
 ) -> impl Iterator<Item = &'a (dyn Error + 'static)> {
-    std::iter::successors(Some(error), |&error| {
+    bounded_chain(error, |error| {
         match error
             .downcast_ref::<std::io::Error>()
             .and_then(std::io::Error::get_ref)
@@ -26,16 +28,34 @@ pub fn causes<'a>(
     })
 }
 
-/// Displays an error followed by each of its sources, separated by `: `.
-///
-/// `std::error::Report` renders the same line once it is stable.
+/// Up to 63 sources of `error`, following [`Error::source`].
+pub fn sources<'a>(
+    error: &'a (dyn Error + 'static),
+) -> impl Iterator<Item = &'a (dyn Error + 'static)> {
+    bounded_chain(error, Error::source).skip(1)
+}
+
+fn bounded_chain<'a>(
+    error: &'a (dyn Error + 'static),
+    mut next: impl FnMut(&'a (dyn Error + 'static)) -> Option<&'a (dyn Error + 'static)>,
+) -> impl Iterator<Item = &'a (dyn Error + 'static)> {
+    let mut current = Some(error);
+    std::iter::once(error)
+        .chain(std::iter::from_fn(move || {
+            current = current.and_then(&mut next);
+            current
+        }))
+        .take(MAX_CHAIN_ENTRIES)
+}
+
+/// Displays up to 64 entries starting with the error, separated by `: `.
 #[derive(Clone, Copy, Debug)]
 pub struct DisplayErrorChain<'a>(pub &'a (dyn Error + 'static));
 
 impl fmt::Display for DisplayErrorChain<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "{}", self.0)?;
-        for cause in std::iter::successors(self.0.source(), |cause| (*cause).source()) {
+        for cause in sources(self.0) {
             write!(formatter, ": {cause}")?;
         }
         Ok(())
@@ -45,6 +65,7 @@ impl fmt::Display for DisplayErrorChain<'_> {
 #[cfg(test)]
 mod tests {
     use super::{DisplayErrorChain, causes};
+    use std::cell::Cell;
     use std::error::Error;
     use std::fmt;
     use std::io;
@@ -65,6 +86,37 @@ mod tests {
         fn source(&self) -> Option<&(dyn Error + 'static)> {
             self.source.as_deref().map(|source| source as _)
         }
+    }
+
+    #[derive(Debug)]
+    struct CyclicError(Cell<usize>);
+
+    impl fmt::Display for CyclicError {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("cyclic error")
+        }
+    }
+
+    impl Error for CyclicError {
+        fn source(&self) -> Option<&(dyn Error + 'static)> {
+            let calls = self.0.get();
+            assert!(calls < 128, "walking the cycle did not stop");
+            self.0.set(calls + 1);
+            Some(self)
+        }
+    }
+
+    #[test]
+    fn lookup_and_display_stop_on_a_cyclic_source() {
+        let error = CyclicError(Cell::new(0));
+        assert!(!causes(&error).any(<dyn Error>::is::<Layer>));
+
+        let error = CyclicError(Cell::new(0));
+        assert!(
+            DisplayErrorChain(&error)
+                .to_string()
+                .starts_with("cyclic error")
+        );
     }
 
     #[test]
