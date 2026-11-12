@@ -4,8 +4,10 @@
 //! framing, timestamp admission, and HMAC verification. It deliberately has
 //! no knowledge of endpoints, JSON, persistence, or HTTP routing.
 
+use std::fmt::Write as _;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use arrayvec::ArrayString;
 use aws_lc_rs::{constant_time, hmac};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bytes::Bytes;
@@ -17,6 +19,11 @@ const TIMESTAMP_TOLERANCE_SECONDS: u64 = 300;
 const SIGNATURE_PREFIX: &str = "v1,";
 const MIN_KEY_BYTES: usize = 24;
 const MAX_KEY_BYTES: usize = 64;
+const TAG_BYTES: usize = 32;
+/// A tag in padded Standard base64: four characters per started three bytes.
+const ENCODED_TAG_BYTES: usize = TAG_BYTES.div_ceil(3) * 4;
+/// `i64::MIN` in decimal, the longest canonical timestamp.
+const MAX_TIMESTAMP_TEXT_BYTES: usize = 20;
 
 /// The longest `webhook-id` accepted by verification.
 pub const MAX_MESSAGE_ID_BYTES: usize = 255;
@@ -92,12 +99,17 @@ impl KeyRing {
     ) -> Result<String, ProtocolError> {
         ensure_body_size(body)?;
         ensure_message_id(message_id)?;
-        let mut signatures = String::from(SIGNATURE_PREFIX);
-        signatures.push_str(&STANDARD.encode(tag(&self.active, message_id, timestamp, body)));
+        let candidate_bytes = SIGNATURE_PREFIX.len() + ENCODED_TAG_BYTES;
+        let mut signatures = String::with_capacity(2 * candidate_bytes + 1);
+        signatures.push_str(SIGNATURE_PREFIX);
+        STANDARD.encode_string(
+            tag(&self.active, message_id, timestamp, body),
+            &mut signatures,
+        );
         if let Some(previous) = &self.previous {
             signatures.push(' ');
             signatures.push_str(SIGNATURE_PREFIX);
-            signatures.push_str(&STANDARD.encode(tag(previous, message_id, timestamp, body)));
+            STANDARD.encode_string(tag(previous, message_id, timestamp, body), &mut signatures);
         }
         Ok(signatures)
     }
@@ -264,7 +276,10 @@ fn tag(key: &SigningKey, message_id: &[u8], timestamp: i64, body: &[u8]) -> hmac
     let mut context = hmac::Context::with_key(&key.0);
     context.update(message_id);
     context.update(b".");
-    context.update(timestamp.to_string().as_bytes());
+    let mut text = ArrayString::<MAX_TIMESTAMP_TEXT_BYTES>::new();
+    // The capacity holds every i64, so formatting cannot fail.
+    let _ = write!(text, "{timestamp}");
+    context.update(text.as_bytes());
     context.update(b".");
     context.update(body);
     context.sign()
@@ -579,6 +594,118 @@ mod tests {
                 ),
                 Err(ProtocolError::TimestampOutOfWindow)
             );
+        }
+    }
+
+    #[test]
+    fn refuses_unpadded_overpadded_and_non_canonical_candidates() {
+        let keys = KeyRing::from_encoded(UPSTREAM_KEY, None).unwrap();
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let accepted = |signature: &str| {
+            keys.verify(
+                &headers("msg_1", "1700000000", signature),
+                UPSTREAM_BODY,
+                now,
+            )
+            .is_ok()
+        };
+        let signature = keys
+            .signatures(b"msg_1", 1_700_000_000, UPSTREAM_BODY)
+            .unwrap();
+        assert!(accepted(&signature));
+        let encoded = signature.strip_suffix('=').unwrap();
+        assert!(!accepted(encoded), "missing padding");
+        assert!(!accepted(&format!("{encoded}==")), "extra padding");
+        // The last data character carries two trailing bits that must be zero.
+        let last = encoded.chars().last().unwrap();
+        let alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let at = alphabet.find(last).unwrap();
+        let sibling = alphabet.chars().nth(at ^ 1).unwrap();
+        let prefix = &encoded[..encoded.len() - 1];
+        assert!(!accepted(&format!("{prefix}{sibling}=")), "trailing bits");
+    }
+
+    mod signing_frame {
+        use proptest::prelude::*;
+
+        use super::*;
+
+        /// Bytes a header value carries and the signed frame admits: no
+        /// controls and no `.`.
+        fn message_id() -> impl Strategy<Value = Vec<u8>> {
+            proptest::collection::vec(
+                prop_oneof![0x20_u8..0x2e, 0x2f_u8..0x7f, 0x80_u8..=0xff],
+                1..=MAX_MESSAGE_ID_BYTES,
+            )
+        }
+
+        fn header_map(id: &[u8], timestamp: &[u8], signature: &[u8]) -> Option<HeaderMap> {
+            let mut headers = HeaderMap::new();
+            headers.insert("webhook-id", HeaderValue::from_bytes(id).ok()?);
+            headers.insert(
+                "webhook-timestamp",
+                HeaderValue::from_bytes(timestamp).ok()?,
+            );
+            headers.insert(
+                "webhook-signature",
+                HeaderValue::from_bytes(signature).ok()?,
+            );
+            Some(headers)
+        }
+
+        fn flip(bytes: &[u8], index: usize, mask: u8) -> Vec<u8> {
+            let mut changed = bytes.to_vec();
+            let index = index % changed.len();
+            changed[index] ^= mask;
+            changed
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(64))]
+
+            #[test]
+            fn verify_accepts_what_signatures_produced_and_refuses_any_single_byte_change(
+                id in message_id(),
+                now_seconds in 1_000_u64..4_000_000_000,
+                offset in -300_i64..=300,
+                body in proptest::collection::vec(any::<u8>(), 0..2048),
+                rotated in any::<bool>(),
+                index in any::<usize>(),
+                mask in 1_u8..=255,
+            ) {
+                let previous = rotated.then_some(ARBITRARY_BYTES_KEY);
+                let keys = KeyRing::from_encoded(UPSTREAM_KEY, previous).unwrap();
+                let now = UNIX_EPOCH + Duration::from_secs(now_seconds);
+                let timestamp = i64::try_from(now_seconds).unwrap() + offset;
+                let timestamp_text = timestamp.to_string().into_bytes();
+                let signature = keys.signatures(&id, timestamp, &body).unwrap().into_bytes();
+
+                let headers = header_map(&id, &timestamp_text, &signature).unwrap();
+                let verified = keys.verify(&headers, &body, now).unwrap();
+                prop_assert_eq!(verified.message_id().as_ref(), id.as_slice());
+                prop_assert_eq!(verified.timestamp(), timestamp);
+
+                if let Some(headers) = header_map(&flip(&id, index, mask), &timestamp_text, &signature) {
+                    prop_assert!(keys.verify(&headers, &body, now).is_err(), "id");
+                }
+                if let Some(headers) = header_map(&id, &flip(&timestamp_text, index, mask), &signature) {
+                    prop_assert!(keys.verify(&headers, &body, now).is_err(), "timestamp");
+                }
+                if !body.is_empty() {
+                    let headers = header_map(&id, &timestamp_text, &signature).unwrap();
+                    prop_assert!(
+                        keys.verify(&headers, &flip(&body, index, mask), now).is_err(),
+                        "body"
+                    );
+                }
+                // One candidate only, so every byte of it, its `v1,` prefix, its
+                // padding and its non-zero trailing bits included, must matter.
+                let single = KeyRing::from_encoded(UPSTREAM_KEY, None).unwrap();
+                let candidate = single.signatures(&id, timestamp, &body).unwrap().into_bytes();
+                if let Some(headers) = header_map(&id, &timestamp_text, &flip(&candidate, index, mask)) {
+                    prop_assert!(single.verify(&headers, &body, now).is_err(), "candidate");
+                }
+            }
         }
     }
 }

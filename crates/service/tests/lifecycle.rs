@@ -479,7 +479,6 @@ fn a_stop_signal_during_startup_ends_it_before_a_listener_is_bound() {
 #[test]
 fn a_stop_signal_reaches_startup_during_a_blocking_cache_password_file_read() {
     assert_stop_reaches_blocking_password_file(
-        "cache",
         "APP__CACHE__PASSWORD_FILE",
         &[
             ("APP__CACHE__DSN", "redis://127.0.0.1:1"),
@@ -497,25 +496,12 @@ fn a_stop_signal_reaches_startup_during_a_blocking_cache_password_file_read() {
     reason = "the postgres and cache profiles are optional; the fixture creates and removes its owned FIFO directory and waits briefly for startup to reach the blocking read"
 )]
 fn assert_stop_reaches_blocking_password_file(
-    case: &str,
     password_key: &'static str,
     extra: &[(&'static str, &'static str)],
 ) {
-    let directory = std::env::temp_dir().join(format!(
-        "service-blocking-startup-{case}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock after epoch")
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&directory).expect("create fixture directory");
-    let password_file = directory.join("password");
-    let made = Command::new("mkfifo")
-        .arg(&password_file)
-        .status()
-        .expect("run mkfifo");
-    assert!(made.success(), "mkfifo failed: {made:?}");
+    let directory = tempfile::tempdir().expect("create fixture directory");
+    let password_file = directory.path().join("password");
+    nix::unistd::mkfifo(&password_file, nix::sys::stat::Mode::S_IRWXU).expect("create FIFO");
 
     let mut env = vec![(
         password_key,
@@ -528,7 +514,6 @@ fn assert_stop_reaches_blocking_password_file(
     std::thread::sleep(Duration::from_millis(100));
     service.terminate();
     let (code, stderr) = service.wait();
-    let _ = std::fs::remove_dir_all(&directory);
     assert_eq!(code, Some(0), "stderr: {stderr}");
 }
 
@@ -537,7 +522,6 @@ fn assert_stop_reaches_blocking_password_file(
 #[test]
 fn a_stop_signal_reaches_startup_during_a_blocking_postgres_password_file_read() {
     assert_stop_reaches_blocking_password_file(
-        "postgres",
         "APP__POSTGRES__PASSWORD_FILE",
         &[
             ("APP__POSTGRES__ENABLED", "true"),
@@ -698,11 +682,14 @@ fn inert_inbound_webhook_route_rejects_unknown_endpoint_without_signature_work()
         .to_owned();
     service.await_record("service_ready");
 
-    let status = match ureq::post(&format!("http://{api}/webhooks/unknown")).send_empty() {
-        Ok(response) => response.status().as_u16(),
-        Err(ureq::Error::StatusCode(status)) => status,
-        Err(error) => panic!("webhook response: {error}"),
-    };
+    let status = ureq::post(&format!("http://{api}/webhooks/unknown"))
+        .config()
+        .http_status_as_error(false)
+        .build()
+        .send_empty()
+        .expect("webhook response")
+        .status()
+        .as_u16();
     assert_eq!(status, 404);
 
     service.terminate();

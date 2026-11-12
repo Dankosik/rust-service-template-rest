@@ -245,7 +245,7 @@ impl Credentials {
             options.audience,
             signer,
             admitted.permits,
-        );
+        )?;
         // Rounded down: moka admits an entry only while the total weight stays
         // within the limit, so a rounded-up weight would retain fewer subjects
         // than configured.

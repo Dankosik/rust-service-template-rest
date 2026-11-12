@@ -53,7 +53,12 @@ use rustls::{
 use secrecy::SecretString;
 // template:end authn:grpc-transport-test-auth-secret
 use service_failure::Code as FailureCode;
-use tokio::{io::AsyncReadExt as _, net::TcpStream, sync::Notify, time::timeout};
+use tokio::{
+    io::AsyncReadExt as _,
+    net::TcpStream,
+    sync::{Notify, watch},
+    time::timeout,
+};
 // template:begin authn:grpc-transport-test-auth-listener
 use tokio::net::TcpListener;
 // template:end authn:grpc-transport-test-auth-listener
@@ -107,48 +112,41 @@ struct SeenCall {
 }
 
 struct Hold {
-    release: Notify,
-    released: AtomicBool,
-    entered: AtomicUsize,
-    entered_notify: Notify,
+    entered: watch::Sender<usize>,
+    released: watch::Sender<bool>,
 }
 
 impl Hold {
     fn new() -> Self {
         Self {
-            release: Notify::new(),
-            released: AtomicBool::new(false),
-            entered: AtomicUsize::new(0),
-            entered_notify: Notify::new(),
+            entered: watch::Sender::new(0),
+            released: watch::Sender::new(false),
         }
     }
 
     async fn wait(&self) {
-        let notified = self.release.notified();
-        self.entered.fetch_add(1, Ordering::Release);
-        self.entered_notify.notify_waiters();
-        if !self.released.load(Ordering::Acquire) {
-            notified.await;
-        }
+        self.entered.send_modify(|entered| *entered += 1);
+        let _ = self
+            .released
+            .subscribe()
+            .wait_for(|released| *released)
+            .await;
     }
 
     async fn wait_for(&self, expected: usize) {
-        timeout(FILL, async {
-            loop {
-                let notified = self.entered_notify.notified();
-                if self.entered.load(Ordering::Acquire) >= expected {
-                    return;
-                }
-                notified.await;
-            }
-        })
+        timeout(
+            FILL,
+            self.entered
+                .subscribe()
+                .wait_for(|entered| *entered >= expected),
+        )
         .await
-        .expect("handlers enter");
+        .expect("handlers enter")
+        .expect("the hold outlives its waiters");
     }
 
     fn release(&self) {
-        self.released.store(true, Ordering::Release);
-        self.release.notify_waiters();
+        self.released.send_replace(true);
     }
 }
 
@@ -1907,13 +1905,13 @@ async fn raw_call(address: SocketAddr, path: &str) -> String {
 const ECHO_SERVICE_UNARY: &str = "/example.v1.EchoService/Unary";
 
 fn grpc_frame(message: &str) -> Vec<u8> {
-    let text = message.as_bytes();
-    let mut payload = Vec::with_capacity(2 + text.len());
-    payload.push(0x0a);
-    payload.push(u8::try_from(text.len()).unwrap());
-    payload.extend_from_slice(text);
-    let mut frame = Vec::with_capacity(5 + payload.len());
-    frame.push(0);
+    use prost::Message as _;
+
+    let payload = UnaryRequest {
+        message: message.to_owned(),
+    }
+    .encode_to_vec();
+    let mut frame = vec![0];
     frame.extend_from_slice(&u32::try_from(payload.len()).unwrap().to_be_bytes());
     frame.extend_from_slice(&payload);
     frame
@@ -2861,8 +2859,6 @@ struct ProviderFixture {
     silent: Arc<AtomicBool>,
     gate: Arc<Mutex<Option<Arc<Hold>>>>,
     calls: Arc<AtomicUsize>,
-    stop: Arc<AtomicBool>,
-    wake: Arc<Notify>,
     cancel: tokio_util::sync::CancellationToken,
     task: tokio::task::JoinHandle<()>,
 }
@@ -2870,8 +2866,6 @@ struct ProviderFixture {
 impl ProviderFixture {
     async fn stop(self) {
         self.cancel.cancel();
-        self.stop.store(true, Ordering::Release);
-        self.wake.notify_waiters();
         timeout(WAIT, self.task)
             .await
             .expect("provider stops")
@@ -2889,25 +2883,18 @@ async fn verifier_fixture() -> (Verifier, ProviderFixture) {
     let silent = Arc::new(AtomicBool::new(false));
     let gate: Arc<Mutex<Option<Arc<Hold>>>> = Arc::default();
     let calls = Arc::new(AtomicUsize::new(0));
-    let stop = Arc::new(AtomicBool::new(false));
-    let wake = Arc::new(Notify::new());
     let cancel = tokio_util::sync::CancellationToken::new();
     let task = tokio::spawn({
         let silent = Arc::clone(&silent);
         let gate = Arc::clone(&gate);
         let calls = Arc::clone(&calls);
-        let stop = Arc::clone(&stop);
-        let wake = Arc::clone(&wake);
+        let cancel = cancel.clone();
         async move {
             let mut connections = tokio::task::JoinSet::new();
             loop {
-                let notified = wake.notified();
-                if stop.load(Ordering::Acquire) {
-                    break;
-                }
                 let accepted = tokio::select! {
                     biased;
-                    () = notified => break,
+                    () = cancel.cancelled() => break,
                     joined = connections.join_next(), if !connections.is_empty() => {
                         joined.unwrap().expect("provider connection joins");
                         continue;
@@ -2957,8 +2944,6 @@ async fn verifier_fixture() -> (Verifier, ProviderFixture) {
             silent,
             gate,
             calls,
-            stop,
-            wake,
             cancel,
             task,
         },

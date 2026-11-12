@@ -181,12 +181,17 @@ opentelemetry = { version = "0.33.0", default-features = false }
 opentelemetry_sdk = { version = "0.33.0", default-features = false }
 opentelemetry-otlp = { version = "0.33.0", default-features = false }
 opentelemetry-semantic-conventions = { version = "0.33.0", default-features = false }
+# Tests decode captured OTLP export bodies with it; opentelemetry-otlp already resolves it.
+opentelemetry-proto = { version = "0.33.1", default-features = false }
 tracing-opentelemetry = { version = "0.34.0", default-features = false }
 axum-tracing-opentelemetry = { version = "0.42.1", default-features = false }
 tracing-opentelemetry-instrumentation-sdk = { version = "=0.42.1", default-features = false, features = ["http"] }
 metrics = { version = "0.24.6", default-features = false }
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 metrics-process = { version = "2.4.3", default-features = false }
+# Tests read registered metric keys through its `DebuggingRecorder`;
+# metrics-exporter-prometheus already resolves it.
+metrics-util = { version = "0.20.4", default-features = false }
 tokio-metrics = { version = "0.5.2", default-features = false }
 thiserror = { version = "2.0.20", default-features = false }
 # Shutdown reason sets in infra-telemetry.

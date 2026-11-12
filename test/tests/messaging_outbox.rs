@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 // template:begin inbound-webhooks:outbox-test-messaging-outbox-inbound-imports
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 // template:end inbound-webhooks:outbox-test-messaging-outbox-inbound-imports
 
 use async_nats::jetstream::{self, consumer, stream};
@@ -369,49 +369,19 @@ fn prepared(fixture: &Fixture, id: &str, value: &str) -> infra_messaging::Prepar
         .expect("fixture event prepares once")
 }
 
-#[derive(Debug)]
+#[derive(Debug, derive_more::From, derive_more::Display)]
 enum Step {
+    #[from(skip)]
+    #[display("caller refused the transaction")]
     Refused,
+    #[display("outbox: {_0}")]
     Outbox(OutboxEnqueueError),
+    #[display("jobs: {_0}")]
     Jobs(EnqueueError),
+    #[display("query: {_0}")]
     Query(sqlx::Error),
+    #[display("transaction: {_0}")]
     Transaction(TxError),
-}
-
-impl From<OutboxEnqueueError> for Step {
-    fn from(error: OutboxEnqueueError) -> Self {
-        Self::Outbox(error)
-    }
-}
-
-impl From<sqlx::Error> for Step {
-    fn from(error: sqlx::Error) -> Self {
-        Self::Query(error)
-    }
-}
-
-impl From<EnqueueError> for Step {
-    fn from(error: EnqueueError) -> Self {
-        Self::Jobs(error)
-    }
-}
-
-impl From<TxError> for Step {
-    fn from(error: TxError) -> Self {
-        Self::Transaction(error)
-    }
-}
-
-impl std::fmt::Display for Step {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Refused => formatter.write_str("caller refused the transaction"),
-            Self::Outbox(error) => write!(formatter, "outbox: {error}"),
-            Self::Jobs(error) => write!(formatter, "jobs: {error}"),
-            Self::Query(error) => write!(formatter, "query: {error}"),
-            Self::Transaction(error) => write!(formatter, "transaction: {error}"),
-        }
-    }
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -1040,12 +1010,7 @@ fn admission_deadline() -> Instant {
 }
 
 fn webhook_headers(message_id: &str, body: &[u8]) -> http::HeaderMap {
-    let timestamp: i64 = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock after epoch")
-        .as_secs()
-        .try_into()
-        .expect("timestamp fits i64");
+    let timestamp: i64 = time::OffsetDateTime::now_utc().unix_timestamp();
     let keys = KeyRing::from_encoded(WEBHOOK_KEY, None).expect("fixture key");
     let mut headers = http::HeaderMap::new();
     headers.insert(
@@ -1176,5 +1141,5 @@ async fn dedicated_publisher_progresses_while_real_inbound_webhook_processing_sl
 fn event_key(id: &str) -> String {
     use sha2::{Digest as _, Sha256};
 
-    infra_messaging::wire::prefixed_digest_hex("event-", &Sha256::digest(id.as_bytes()))
+    infra_messaging::wire::prefixed_digest_hex("event-", &Sha256::digest(id.as_bytes()).into())
 }

@@ -39,7 +39,7 @@ const PASSWORD_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const APPLICATION_SLOTS: usize = 256;
 
 /// Bounded cause of an unsuccessful cache exchange. Server text is never copied.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, enum_map::Enum)]
 pub(crate) enum ErrorType {
     /// The operation context stopped (its deadline, including
     /// `command_timeout`, or caller cancellation, which a namespace records

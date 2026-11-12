@@ -17,6 +17,7 @@ hotpath = ["dep:hotpath", "hotpath/hotpath"]
 [dependencies]
 operation-context = { workspace = true }
 derive_more = { workspace = true, features = ["debug", "display"] }
+enum-map = { workspace = true, features = ["derive"] }
 hotpath = { workspace = true, optional = true }
 futures-util = { workspace = true, features = ["std"] }
 humantime = { workspace = true }
@@ -35,5 +36,7 @@ tracing-opentelemetry = { workspace = true }
 uuid = { workspace = true, features = ["std", "v4", "v7"] }
 
 [dev-dependencies]
+proptest = { workspace = true, features = ["std"] }
+regex = { workspace = true, features = ["std", "unicode"] }
 serde = { workspace = true, features = ["derive"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util", "macros"] }

@@ -11,9 +11,9 @@ use sqlx::Row;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
-    task::JoinHandle,
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
+use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
 
 const CURRENT_KEY: &str = "whsec_QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=";
 const PREVIOUS_KEY: &str = "whsec_QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=";
@@ -189,32 +189,32 @@ async fn read_headers<S: tokio::io::AsyncRead + Unpin>(stream: &mut S) -> Vec<u8
     request
 }
 
-async fn reply_peer(
-    status: u16,
-) -> (
-    std::net::SocketAddr,
-    tokio::sync::oneshot::Receiver<Vec<u8>>,
-    JoinHandle<()>,
-) {
-    let listener = TcpListener::bind("127.0.0.1:0")
+async fn reply_peer(status: u16) -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(status))
+        .expect(1)
+        .mount(&server)
+        .await;
+    server
+}
+
+async fn only_request(server: &MockServer) -> wiremock::Request {
+    let mut requests = server
+        .received_requests()
         .await
-        .expect("fixture listener");
-    let address = listener.local_addr().expect("fixture address");
-    let (sent, captured) = tokio::sync::oneshot::channel();
-    let server = tokio::spawn(async move {
-        let (mut stream, _) = listener.accept().await.expect("fixture accepts connection");
-        let headers = read_headers(&mut stream).await;
-        sent.send(headers)
-            .expect("request capture remains available");
-        let response =
-            format!("HTTP/1.1 {status} fixture\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-        stream
-            .write_all(response.as_bytes())
-            .await
-            .expect("fixture writes response");
-        stream.shutdown().await.expect("fixture closes response");
-    });
-    (address, captured, server)
+        .expect("request recording is enabled");
+    assert_eq!(requests.len(), 1, "exactly one delivery reaches the peer");
+    requests.remove(0)
+}
+
+fn request_header<'a>(request: &'a wiremock::Request, name: &str) -> &'a str {
+    request
+        .headers
+        .get(name)
+        .unwrap_or_else(|| panic!("request contains {name}"))
+        .to_str()
+        .expect("header is ASCII")
 }
 
 fn header(headers: &[u8], name: &str) -> String {
@@ -319,12 +319,12 @@ async fn queued_statuses_retry_except_for_gone_and_complete_on_any_2xx(pool: PgP
         (410, "failed"),
         (204, "completed"),
     ] {
-        let (address, captured, peer) = reply_peer(status).await;
+        let peer = reply_peer(status).await;
         let configured = outbound(&["partner"]);
         let id = enqueue(&pool, &configured, "partner", b"{\"event\":\"status\"}").await;
         let running = RunningDispatcher::start(
             &pool,
-            dispatcher(&[("partner", "/events?source=queue")], address),
+            dispatcher(&[("partner", "/events?source=queue")], *peer.address()),
             1,
         );
 
@@ -371,16 +371,12 @@ async fn queued_statuses_retry_except_for_gone_and_complete_on_any_2xx(pool: PgP
             ),
             _ => unreachable!("fixed status table"),
         }
-        let request = super::bounded("fixture request capture", captured)
-            .await
-            .expect("fixture captures request");
-        assert!(
-            request.starts_with(b"POST /events?source=queue HTTP/1.1\r\n"),
+        let request = only_request(&peer).await;
+        assert_eq!(
+            (request.url.path(), request.url.query()),
+            ("/events", Some("source=queue")),
             "queued path and query reach the admitted receiver"
         );
-        super::bounded("fixture peer joins", peer)
-            .await
-            .expect("fixture succeeds");
         running.stop().await;
         if expected_state == "pending" {
             sqlx::query(
@@ -506,32 +502,28 @@ async fn legacy_job_uses_current_path_and_rotated_keys_despite_invalid_saved_rou
     .await
     .expect("obsolete routing values do not constrain the legacy common payload");
 
-    let (address, captured, peer) = reply_peer(200).await;
+    let peer = reply_peer(200).await;
     let running = RunningDispatcher::start(
         &pool,
-        dispatcher(&[("partner", "/current?binding=live")], address),
+        dispatcher(&[("partner", "/current?binding=live")], *peer.address()),
         1,
     );
     job_is(&pool, &id, "completed", 1).await;
-    let request = super::bounded("fixture request capture", captured)
-        .await
-        .expect("fixture captures request");
-    assert!(
-        request.starts_with(b"POST /current?binding=live HTTP/1.1\r\n"),
+    let request = only_request(&peer).await;
+    assert_eq!(
+        (request.url.path(), request.url.query()),
+        ("/current", Some("binding=live")),
         "current endpoint path replaces obsolete persisted routing"
     );
-    let timestamp = header(&request, "webhook-timestamp")
+    let timestamp = request_header(&request, "webhook-timestamp")
         .parse::<i64>()
         .expect("timestamp is an integer");
     let expected = KeyRing::from_encoded(CURRENT_KEY, Some(PREVIOUS_KEY))
         .expect("fixture keys")
         .signatures(id.as_bytes(), timestamp, body)
         .expect("signature framing");
-    assert_eq!(header(&request, "webhook-signature"), expected);
-    assert_eq!(request_body(&request), body);
-    super::bounded("fixture peer joins", peer)
-        .await
-        .expect("fixture succeeds");
+    assert_eq!(request_header(&request, "webhook-signature"), expected);
+    assert_eq!(request.body, body);
     running.stop().await;
     super::close_pools(&[&pool]).await;
 }

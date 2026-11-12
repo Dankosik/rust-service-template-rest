@@ -22,6 +22,10 @@ use grpc_contracts::example::v1::{UnaryRequest, echo_service_client::EchoService
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode, jwk::Jwk};
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
+use opentelemetry_proto::tonic::{
+    collector::trace::v1::ExportTraceServiceRequest, common::v1::any_value::Value, trace::v1::Span,
+};
+use prost::Message as _;
 use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa, KeyPair,
     KeyUsagePurpose,
@@ -292,6 +296,9 @@ impl Drop for Example {
 struct OidcFixture {
     runtime: tokio::runtime::Runtime,
     issuer: String,
+    // Owns the root file the child reads through `SSL_CERT_FILE`; the fixture
+    // outlives the child, and a failing test still removes it on drop.
+    _root_dir: tempfile::TempDir,
     root_path: PathBuf,
     root_certificate: CertificateDer<'static>,
     leaf_certificate: CertificateDer<'static>,
@@ -366,18 +373,13 @@ impl OidcFixture {
             clients,
         ));
 
-        let root_path = std::env::temp_dir().join(format!(
-            "grpc-oidc-root-{}-{}.pem",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system clock")
-                .as_nanos()
-        ));
+        let root_dir = tempfile::tempdir().expect("create OIDC root directory");
+        let root_path = root_dir.path().join("root.pem");
         std::fs::write(&root_path, root.pem()).expect("write OIDC root");
         Self {
             runtime,
             issuer,
+            _root_dir: root_dir,
             root_path,
             root_certificate: root.der().clone(),
             leaf_certificate: certificate.der().clone(),
@@ -415,19 +417,9 @@ impl OidcFixture {
             .expect("offline OIDC certificate verification against configured root");
     }
 
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
-    )]
     fn finish(self) {
-        let Self {
-            runtime,
-            root_path,
-            task,
-            ..
-        } = self;
+        let Self { runtime, task, .. } = self;
         runtime.block_on(task).expect("OIDC fixture task");
-        let _ = std::fs::remove_file(root_path);
     }
 }
 
@@ -667,6 +659,30 @@ impl Collector {
     }
 }
 
+fn exported_spans(bodies: &[Vec<u8>]) -> Vec<Span> {
+    bodies
+        .iter()
+        .flat_map(|body| {
+            ExportTraceServiceRequest::decode(body.as_slice())
+                .expect("OTLP trace request")
+                .resource_spans
+        })
+        .flat_map(|resource| resource.scope_spans)
+        .flat_map(|scope| scope.spans)
+        .collect()
+}
+
+fn attribute<'a>(span: &'a Span, key: &str) -> Option<&'a Value> {
+    span.attributes
+        .iter()
+        .find(|attribute| attribute.key == key)?
+        .value
+        .as_ref()?
+        .value
+        .as_ref()
+}
+
+/// Raw scan, kept for the checks that a private value appears in no byte.
 fn exported_contains(bodies: &[Vec<u8>], value: &[u8]) -> bool {
     bodies
         .iter()
@@ -786,28 +802,31 @@ fn assert_server_privacy_outputs(
             serde_json::from_str::<serde_json::Value>(line).expect("complete JSON records");
         }
     }
-    for witness in [
-        b"example.v1.EchoService/Unary".as_slice(),
-        b"rpc.grpc.status_code",
-        b"authn_verification_failed",
-        &[0x11; 16],
-        &[0x22; 8],
-    ] {
+    let spans = exported_spans(exported);
+    let unary = spans
+        .iter()
+        .filter(|span| span.name == "example.v1.EchoService/Unary")
+        .collect::<Vec<_>>();
+    assert!(!unary.is_empty(), "missing exported unary span: {spans:?}");
+    assert!(
+        unary
+            .iter()
+            .any(|span| span.trace_id == [0x11; 16] && span.parent_span_id == [0x22; 8]),
+        "no unary span continues the caller's trace: {unary:?}"
+    );
+    assert!(
+        spans.iter().any(|span| span
+            .events
+            .iter()
+            .any(|event| event.name == "authn_verification_failed")),
+        "missing exported authn refusal event"
+    );
+    // The actual successful and refused RPCs retain their numeric status.
+    for code in [0_i64, 16] {
         assert!(
-            exported_contains(exported, witness),
-            "missing exported request/correlation witness: {witness:?}"
-        );
-    }
-    // OTLP KeyValue("rpc.grpc.status_code", AnyValue.int_value):
-    // the actual successful and refused RPCs retain their numeric status.
-    for code in [0_u8, 16] {
-        let attribute = [
-            b"\x0a\x14rpc.grpc.status_code\x12\x02\x18".as_slice(),
-            &[code],
-        ]
-        .concat();
-        assert!(
-            exported_contains(exported, &attribute),
+            unary
+                .iter()
+                .any(|span| attribute(span, "rpc.grpc.status_code") == Some(&Value::IntValue(code))),
             "missing exported gRPC status {code}"
         );
     }
@@ -894,20 +913,31 @@ fn grpc_server_outputs_withhold_caller_identity_and_client_keeps_destination() {
         infra_telemetry::LoggerShutdown::Completed(_)
     );
     let client_exported = client_collector.finish(&oidc.runtime);
-    for witness in [
-        "example.v1.EchoService/Unary",
-        "server.address",
-        CLIENT_DESTINATION,
-        "server.port",
-        "user_agent.original",
-        CLIENT_AGENT,
-        "rpc.grpc.status_code",
-    ] {
-        assert!(
-            exported_contains(&client_exported, witness.as_bytes()),
-            "client destination/status missing: {witness}"
-        );
-    }
+    let client_spans = exported_spans(&client_exported);
+    let client_span = client_spans
+        .iter()
+        .find(|span| span.name == "example.v1.EchoService/Unary")
+        .unwrap_or_else(|| panic!("client span missing: {client_spans:?}"));
+    let text = |key: &str| match attribute(client_span, key) {
+        Some(Value::StringValue(value)) => Some(value.as_str()),
+        _ => None,
+    };
+    assert!(
+        text("server.address").is_some_and(|address| address.contains(CLIENT_DESTINATION)),
+        "client destination missing: {client_span:?}"
+    );
+    assert!(
+        matches!(
+            attribute(client_span, "server.port"),
+            Some(Value::IntValue(_))
+        ),
+        "client port missing: {client_span:?}"
+    );
+    assert_eq!(text("user_agent.original"), Some(CLIENT_AGENT));
+    assert!(
+        attribute(client_span, "rpc.grpc.status_code").is_some(),
+        "client status missing: {client_span:?}"
+    );
     oidc.finish();
 }
 

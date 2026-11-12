@@ -345,4 +345,53 @@ mod tests {
             assert_eq!(decode(invalid), Err(reason));
         }
     }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+
+        #[test]
+        fn a_replay_carries_the_status_body_and_only_the_allow_listed_headers(
+            status in 200_u16..300,
+            body in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..64),
+            headers in proptest::collection::vec(
+                (
+                    proptest::sample::select(vec![
+                        "content-type", "content-encoding", "content-language",
+                        "content-disposition", "location", "etag", "last-modified",
+                        "set-cookie", "authorization", "x-trace", "idempotent-replayed",
+                    ]),
+                    "[ -~]{1,24}",
+                ),
+                0..12,
+            ),
+        ) {
+            let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+            let pairs: Vec<(&str, &str)> =
+                headers.iter().map(|(name, value)| (*name, value.as_str())).collect();
+            let replay = runtime.block_on(async {
+                let captured = capture(response(status, &pairs, body.clone())).await.unwrap();
+                decode(captured.to_record().unwrap()).unwrap().into_response()
+            });
+
+            proptest::prop_assert_eq!(replay.status().as_u16(), status);
+            for name in replay.headers().keys() {
+                proptest::prop_assert!(is_replayable_header_name(name.as_str()), "{name}");
+            }
+            for name in REPLAYABLE {
+                let sent: Vec<_> = pairs
+                    .iter()
+                    .filter(|(sent, _)| *sent == name.as_str())
+                    .map(|(_, value)| value.as_bytes())
+                    .collect();
+                let replayed: Vec<_> =
+                    replay.headers().get_all(&name).iter().map(HeaderValue::as_bytes).collect();
+                proptest::prop_assert_eq!(replayed, sent, "{}", name);
+            }
+            let replayed_body = runtime
+                .block_on(replay.into_body().collect())
+                .unwrap()
+                .to_bytes();
+            proptest::prop_assert_eq!(replayed_body.as_ref(), body.as_slice());
+        }
+    }
 }

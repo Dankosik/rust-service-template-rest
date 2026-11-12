@@ -431,37 +431,30 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for AdvanceOnAttemptFi
     }
 }
 
-#[test]
-fn terminal_observation_preserves_the_timely_operation_result_once() {
+#[tokio::test]
+async fn terminal_observation_preserves_the_timely_operation_result_once() {
     use tracing_subscriber::layer::SubscriberExt as _;
 
     let recorder = observation_recorder();
     let diagnostics = SpanDiagnostics::default();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    metrics::with_local_recorder(&recorder, || {
-        tracing::subscriber::with_default(diagnostics.clone().with(AdvanceOnAttemptFinish), || {
-            let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
-            runtime.block_on(async {
-                let material = TlsMaterial::new(FIXTURE_HOST);
-                let (address, server) =
-                    tls_server(&material, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
-                let client = fixture_client(address, &material);
-                let end = deadline();
-                let response = client.execute(request(), end).await.unwrap();
-                assert_eq!(response.status(), http::StatusCode::OK);
-                assert!(Instant::now() > end, "terminal callback crossed the end");
-                // The response is complete. Retire remaining TLS teardown before
-                // the artificial clock jump can run the fixture's own timer.
-                server.abort();
-                if let Err(error) = server.await {
-                    assert!(error.is_cancelled());
-                }
-            });
-        });
-    });
+    let _recorder = metrics::set_default_local_recorder(&recorder);
+    let _subscriber =
+        tracing::subscriber::set_default(diagnostics.clone().with(AdvanceOnAttemptFinish));
+    let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let material = TlsMaterial::new(FIXTURE_HOST);
+    let (address, server) =
+        tls_server(&material, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
+    let client = fixture_client(address, &material);
+    let end = deadline();
+    let response = client.execute(request(), end).await.unwrap();
+    assert_eq!(response.status(), http::StatusCode::OK);
+    assert!(Instant::now() > end, "terminal callback crossed the end");
+    // The response is complete. Retire remaining TLS teardown before
+    // the artificial clock jump can run the fixture's own timer.
+    server.abort();
+    if let Err(error) = server.await {
+        assert!(error.is_cancelled());
+    }
     let scrape = recorder.handle().render();
     assert_eq!(recorded_count(&scrape, &[]), 1);
     assert_eq!(

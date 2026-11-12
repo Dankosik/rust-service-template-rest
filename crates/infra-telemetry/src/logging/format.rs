@@ -35,6 +35,9 @@ use tracing_subscriber::registry::LookupSpan;
 use super::LoggingFormat;
 use super::output::{DropReason, MAX_RECORD_BYTES, Output, Record};
 
+/// First allocation of a value buffer and an output line; both grow to their limit.
+const SCRATCH_CAPACITY: usize = 256;
+const LINE_CAPACITY: usize = 512;
 const MAX_EVENT_FIELDS: usize = 128;
 const MAX_SPAN_BYTES: usize = 4096;
 const MAX_SPAN_FIELDS: usize = 64;
@@ -122,31 +125,38 @@ impl Drop for FormatGuard {
     }
 }
 
-/// Fixed backing capacity also bounds escaped strings and `collect_str` streaming.
-struct Bytes<const N: usize> {
-    storage: Box<[u8; N]>,
-    len: usize,
+/// Grows with what is written; `limit` bounds it, escaped strings and
+/// `collect_str` streaming included.
+struct Bytes {
+    buf: Vec<u8>,
     limit: usize,
     failed: bool,
 }
 
-impl<const N: usize> Bytes<N> {
-    fn new(limit: usize) -> Self {
+impl Bytes {
+    fn new(limit: usize, capacity: usize) -> Self {
         Self {
-            storage: Box::new([0; N]),
-            len: 0,
+            buf: Vec::with_capacity(capacity),
             limit,
             failed: false,
         }
     }
 
+    fn len(&self) -> usize {
+        self.buf.len()
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        &self.buf
+    }
+
     fn room(&self) -> usize {
-        self.limit.saturating_sub(self.len)
+        self.limit.saturating_sub(self.buf.len())
     }
 
     /// Back to `mark`, clearing a failure written after it.
     fn rewind(&mut self, mark: usize) {
-        self.len = mark;
+        self.buf.truncate(mark);
         self.failed = false;
     }
 
@@ -155,8 +165,16 @@ impl<const N: usize> Bytes<N> {
             self.failed = true;
             return;
         }
-        self.storage[self.len..self.len + bytes.len()].copy_from_slice(bytes);
-        self.len += bytes.len();
+        let needed = self.buf.len() + bytes.len();
+        if needed > self.buf.capacity() {
+            // Doubling stops at the limit: a cached span keeps this buffer,
+            // and its memory bound is the limit, not the next power of two.
+            let capacity = needed
+                .max(self.buf.capacity().saturating_mul(2))
+                .min(self.limit);
+            self.buf.reserve_exact(capacity - self.buf.len());
+        }
+        self.buf.extend_from_slice(bytes);
     }
 
     fn json(&mut self, value: &(impl serde::Serialize + ?Sized)) {
@@ -166,7 +184,7 @@ impl<const N: usize> Bytes<N> {
     }
 }
 
-impl<const N: usize> io::Write for Bytes<N> {
+impl io::Write for Bytes {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         self.append(bytes);
         if self.failed {
@@ -180,7 +198,7 @@ impl<const N: usize> io::Write for Bytes<N> {
     }
 }
 
-impl<const N: usize> fmt::Write for Bytes<N> {
+impl fmt::Write for Bytes {
     fn write_str(&mut self, text: &str) -> fmt::Result {
         self.append(text.as_bytes());
         if self.failed { Err(fmt::Error) } else { Ok(()) }
@@ -195,7 +213,7 @@ struct Entry {
 }
 
 struct Scratch {
-    values: Bytes<MAX_RECORD_BYTES>,
+    values: Bytes,
     fields: ArrayVec<Entry, MAX_EVENT_FIELDS>,
     /// The record lacks something its call site gave: a value or field that did
     /// not fit, or the fields of a span with no cache.
@@ -205,7 +223,7 @@ struct Scratch {
 impl Scratch {
     fn new(value_limit: usize) -> Self {
         Self {
-            values: Bytes::new(value_limit),
+            values: Bytes::new(value_limit, SCRATCH_CAPACITY),
             fields: ArrayVec::new(),
             truncated: false,
         }
@@ -216,7 +234,7 @@ impl Scratch {
         self.fields.push(Entry {
             key,
             start,
-            end: self.values.len,
+            end: self.values.len(),
         });
     }
 
@@ -240,11 +258,11 @@ impl Scratch {
             self.stop();
             return;
         }
-        let start = self.values.len;
+        let start = self.values.len();
         self.values.json(value);
         if self.values.failed {
             // A partly written value is no value: the field stays out.
-            self.values.len = start;
+            self.values.buf.truncate(start);
             self.truncated = true;
             return;
         }
@@ -261,7 +279,7 @@ impl Scratch {
             self.stop();
             return;
         }
-        let start = self.values.len;
+        let start = self.values.len();
         self.values.append(b"\"");
         let mut quoted = Quoted {
             values: &mut self.values,
@@ -271,7 +289,7 @@ impl Scratch {
         let cut = quoted.cut;
         if written.is_err() && !cut {
             // The value's own formatting failed: the field stays out.
-            self.values.len = start;
+            self.values.buf.truncate(start);
             self.truncated = true;
             return;
         }
@@ -288,7 +306,7 @@ impl Scratch {
             self.stop();
             return;
         }
-        let start = self.values.len;
+        let start = self.values.len();
         self.values.append(&values[field.start..field.end]);
         if self.values.failed {
             self.truncated = true;
@@ -304,7 +322,7 @@ impl Scratch {
         if self.values.failed {
             return false;
         }
-        cache.values.len = 0;
+        cache.values.buf.clear();
         cache.fields.clear();
         let captured = self.fields.as_slice();
         for (index, field) in captured.iter().enumerate() {
@@ -317,14 +335,14 @@ impl Scratch {
             if cache.fields.is_full() {
                 return false;
             }
-            let start = cache.values.len;
+            let start = cache.values.len();
             cache
                 .values
-                .append(&self.values.storage[field.start..field.end]);
+                .append(&self.values.buf[field.start..field.end]);
             cache.fields.push(Entry {
                 key: field.key,
                 start,
-                end: cache.values.len,
+                end: cache.values.len(),
             });
         }
         !cache.values.failed
@@ -334,7 +352,7 @@ impl Scratch {
 /// The inside of a JSON string, escaped as `serde_json` escapes it, written
 /// until one byte short of the buffer's limit: the closing quote's.
 struct Quoted<'a> {
-    values: &'a mut Bytes<MAX_RECORD_BYTES>,
+    values: &'a mut Bytes,
     cut: bool,
 }
 
@@ -398,7 +416,7 @@ fn escape(byte: u8, unit: &mut [u8; 6]) -> &[u8] {
 }
 
 struct SpanFields {
-    values: Bytes<MAX_SPAN_BYTES>,
+    values: Bytes,
     fields: ArrayVec<Entry, MAX_SPAN_FIELDS>,
     _slot: Permit,
 }
@@ -502,11 +520,10 @@ impl FormatLayer {
     {
         // Keep allocation outside the write_record hotpath measurement.
         let mut scratch = Scratch::new(MAX_RECORD_BYTES);
-        let mut line = Bytes::new(MAX_RECORD_BYTES);
+        let mut line = Bytes::new(MAX_RECORD_BYTES, LINE_CAPACITY);
         self.write_record(event, ctx, &mut scratch, &mut line)?;
         Ok(Record {
-            bytes: line.storage,
-            len: line.len,
+            bytes: line.buf.into_boxed_slice(),
         })
     }
 
@@ -516,7 +533,7 @@ impl FormatLayer {
         event: &Event<'_>,
         ctx: &Context<'_, S>,
         scratch: &mut Scratch,
-        line: &mut Bytes<MAX_RECORD_BYTES>,
+        line: &mut Bytes,
     ) -> Result<(), DropReason>
     where
         S: Subscriber + for<'a> LookupSpan<'a>,
@@ -544,7 +561,7 @@ impl FormatLayer {
                     continue;
                 };
                 for field in &cached.fields {
-                    scratch.copy(*field, &cached.values.storage[..cached.values.len]);
+                    scratch.copy(*field, cached.values.as_slice());
                 }
                 if scratch.values.failed {
                     break;
@@ -577,7 +594,7 @@ impl FormatLayer {
         }
         write_body(
             line,
-            &scratch.values.storage[..scratch.values.len],
+            scratch.values.as_slice(),
             scratch.fields.as_mut_slice(),
             event_fields,
             scratch.truncated,
@@ -590,7 +607,7 @@ impl FormatLayer {
         }
     }
 
-    fn write_trace_context_fields(&self, id: &Id, line: &mut Bytes<MAX_RECORD_BYTES>) {
+    fn write_trace_context_fields(&self, id: &Id, line: &mut Bytes) {
         let Some(dispatch) = self.dispatch.get().and_then(WeakDispatch::upgrade) else {
             return;
         };
@@ -636,7 +653,7 @@ where
         });
         scratch.push("name", attrs.metadata().name(), MAX_SPAN_FIELDS);
         let mut cache = SpanFields {
-            values: Bytes::new(MAX_SPAN_BYTES),
+            values: Bytes::new(MAX_SPAN_BYTES, scratch.values.len()),
             fields: ArrayVec::new(),
             _slot: slot,
         };
@@ -676,7 +693,7 @@ where
                 .iter()
                 .any(|delta| delta.key == field.key)
             {
-                scratch.copy(*field, &cached.values.storage[..cached.values.len]);
+                scratch.copy(*field, cached.values.as_slice());
             }
         }
         if !scratch.compact_into(cached) {
@@ -703,7 +720,7 @@ where
 /// is written whole. One that does not is written again with room for the
 /// truncation marker, so the marker always fits.
 fn write_body(
-    line: &mut Bytes<MAX_RECORD_BYTES>,
+    line: &mut Bytes,
     values: &[u8],
     fields: &mut [Entry],
     event_fields: usize,
@@ -714,11 +731,11 @@ fn write_body(
     // A total ordering avoids stable-sort allocation while retaining capture order.
     event.sort_unstable_by_key(|field| (field.key, field.start));
     spans.sort_unstable_by_key(|field| (field.key, field.start));
-    let header = line.len;
+    let header = line.len();
     let mut truncated = truncated;
     if !write_fields(line, values, event, spans, truncated, format) && !truncated {
         truncated = true;
-        line.len = header;
+        line.rewind(header);
         // What fits is written; the marker says the rest is missing.
         write_fields(line, values, event, spans, truncated, format);
     }
@@ -729,7 +746,7 @@ fn write_body(
 /// Whether every field was written, within room for the record's tail: the
 /// event's, then its spans'.
 fn write_fields(
-    line: &mut Bytes<MAX_RECORD_BYTES>,
+    line: &mut Bytes,
     values: &[u8],
     event: &[Entry],
     spans: &[Entry],
@@ -767,7 +784,7 @@ enum Pass<'a> {
 /// when it is a string, and left out otherwise; every later field stays out.
 /// No key is left without its value.
 fn write_sorted(
-    line: &mut Bytes<MAX_RECORD_BYTES>,
+    line: &mut Bytes,
     values: &[u8],
     fields: &[Entry],
     pass: Pass<'_>,
@@ -788,7 +805,7 @@ fn write_sorted(
         if shadowed || RESERVED.contains(&field.key) {
             continue;
         }
-        let kept = line.len;
+        let kept = line.len();
         let value = &values[field.start..field.end];
         write_key(line, field.key, format);
         line.append(value);
@@ -810,7 +827,7 @@ fn write_sorted(
 /// As much of the JSON string `value`, quotes included, as the line has room
 /// for, closed. It is cut between characters and between escape sequences, so
 /// what is written is a valid string.
-fn write_cut_string(line: &mut Bytes<MAX_RECORD_BYTES>, value: &[u8]) {
+fn write_cut_string(line: &mut Bytes, value: &[u8]) {
     let inner = &value[1..value.len() - 1];
     let room = line.room().saturating_sub(2);
     let mut end = 0;
@@ -833,7 +850,7 @@ fn write_cut_string(line: &mut Bytes<MAX_RECORD_BYTES>, value: &[u8]) {
     line.append(b"\"");
 }
 
-fn write_key(line: &mut Bytes<MAX_RECORD_BYTES>, key: &str, format: LoggingFormat) {
+fn write_key(line: &mut Bytes, key: &str, format: LoggingFormat) {
     let (separator, assign) = match format {
         LoggingFormat::Json => (b",", b":"),
         LoggingFormat::Text => (b" ", b"="),
@@ -843,7 +860,7 @@ fn write_key(line: &mut Bytes<MAX_RECORD_BYTES>, key: &str, format: LoggingForma
     line.append(assign);
 }
 
-fn write_timestamp(line: &mut Bytes<MAX_RECORD_BYTES>) {
+fn write_timestamp(line: &mut Bytes) {
     // `humantime` panics before the Unix epoch and refuses years after 9999;
     // `tracing-subscriber`'s formatter writes the same RFC 3339 form there.
     let now = std::time::SystemTime::now();
@@ -857,7 +874,7 @@ fn write_timestamp(line: &mut Bytes<MAX_RECORD_BYTES>) {
 
 /// `key` with `bytes` as a quoted lowercase hex string.
 fn write_hex_field<const N: usize>(
-    line: &mut Bytes<MAX_RECORD_BYTES>,
+    line: &mut Bytes,
     key: &str,
     bytes: &[u8; N],
     format: LoggingFormat,

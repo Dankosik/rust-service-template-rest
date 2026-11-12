@@ -2138,6 +2138,7 @@ dependencies = [
  "futures-util",
  "metrics",
  "metrics-exporter-prometheus",
+ "proptest",
  "thiserror",
  "tokio",
  "tokio-util",
@@ -2538,6 +2539,7 @@ dependencies = [
  "aws-lc-rs",
  "base64 0.23.1",
  "derive_more",
+ "foldhash",
  "futures-util",
  "jsonwebtoken",
  "metrics",
@@ -2566,6 +2568,7 @@ dependencies = [
  "backon",
  "base64 0.23.1",
  "derive_more",
+ "enum-map",
  "health",
  "metrics",
  "metrics-exporter-prometheus",
@@ -2643,6 +2646,7 @@ dependencies = [
  "axum-test",
  "axum-tracing-opentelemetry",
  "const-hex",
+ "foldhash",
  "futures-util",
  "health",
  "hotpath",
@@ -2657,10 +2661,13 @@ dependencies = [
  "infra-webhooks",
  "itertools 0.15.0",
  "metrics",
+ "metrics-util",
  "opentelemetry",
  "opentelemetry_sdk",
  "operation-context",
+ "proptest",
  "rcgen",
+ "regex",
  "rustls",
  "secrecy",
  "serde",
@@ -2705,6 +2712,7 @@ name = "infra-jobs"
 version = "0.1.0"
 dependencies = [
  "derive_more",
+ "enum-map",
  "futures-util",
  "hotpath",
  "humantime",
@@ -2712,6 +2720,8 @@ dependencies = [
  "metrics",
  "opentelemetry",
  "operation-context",
+ "proptest",
+ "regex",
  "serde",
  "serde_json",
  "shared-rules",
@@ -2747,6 +2757,7 @@ dependencies = [
  "opentelemetry",
  "opentelemetry_sdk",
  "operation-context",
+ "proptest",
  "rcgen",
  "secrecy",
  "serde",
@@ -2891,12 +2902,15 @@ dependencies = [
  "aws-lc-rs",
  "base64 0.23.1",
  "derive_more",
+ "enum-map",
  "foldhash",
  "http",
  "jsonwebtoken",
  "metrics",
  "metrics-exporter-prometheus",
  "moka",
+ "proptest",
+ "regex",
  "secrecy",
  "serde",
  "serde_json",
@@ -2924,8 +2938,10 @@ dependencies = [
  "metrics-process",
  "opentelemetry",
  "opentelemetry-otlp",
+ "opentelemetry-proto",
  "opentelemetry-semantic-conventions",
  "opentelemetry_sdk",
+ "prost",
  "rcgen",
  "reqwest",
  "rustls",
@@ -2947,6 +2963,7 @@ dependencies = [
 name = "infra-webhooks"
 version = "0.1.0"
 dependencies = [
+ "arrayvec",
  "async-trait",
  "aws-lc-rs",
  "base64 0.23.1",
@@ -2960,6 +2977,8 @@ dependencies = [
  "infra-outbound-http",
  "infra-postgres",
  "metrics",
+ "metrics-util",
+ "proptest",
  "serde",
  "serde_json",
  "serde_with",
@@ -3495,7 +3514,9 @@ dependencies = [
  "crossbeam-epoch",
  "crossbeam-utils",
  "hashbrown 0.16.1",
+ "indexmap 2.14.2",
  "metrics",
+ "ordered-float",
  "quanta",
  "rand 0.9.5",
  "rand_xoshiro",
@@ -3828,6 +3849,15 @@ version = "0.1.0"
 dependencies = [
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "ordered-float"
+version = "5.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8c7c9e0d9b23589f26070720bac724174bfec1083e82f7854cdd0267518343c0"
+dependencies = [
+ "num-traits",
 ]
 
 [[package]]
@@ -5031,6 +5061,8 @@ dependencies = [
  "jsonwebtoken",
  "migrate",
  "nix",
+ "opentelemetry-proto",
+ "prost",
  "rcgen",
  "rlimit",
  "rstest",
@@ -5041,6 +5073,7 @@ dependencies = [
  "service-config",
  "service-failure",
  "similar",
+ "tempfile",
  "thiserror",
  "tikv-jemallocator",
  "time",

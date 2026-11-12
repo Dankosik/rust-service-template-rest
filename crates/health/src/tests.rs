@@ -1,5 +1,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
+use proptest::prelude::*;
+
 use super::*;
 
 struct Flaky {
@@ -363,36 +365,36 @@ async fn failed_and_timed_out_completed_rounds_keep_armed_progress_recoverable()
     }
 }
 
-#[test]
-fn terminal_progress_withdraws_the_gauge_and_logs_once_without_false_recovery() {
+#[tokio::test(start_paused = true)]
+async fn terminal_progress_withdraws_the_gauge_and_logs_once_without_false_recovery() {
     let events = Events::default();
     let _guard = tracing::subscriber::set_default(events.clone());
-    let scrape = scrape(async {
-        let (readiness, flag, _) = flaky(true);
+    let recorder = recorder();
+    let _recorder = metrics::set_default_local_recorder(&recorder);
+    let (readiness, flag, _) = flaky(true);
+    readiness.refresh().await;
+    readiness.arm_progress().unwrap();
+    flag.store(false, Ordering::Relaxed);
+    for _ in 0..3 {
         readiness.refresh().await;
-        readiness.arm_progress().unwrap();
-        flag.store(false, Ordering::Relaxed);
-        for _ in 0..3 {
-            readiness.refresh().await;
-        }
-        tokio::time::advance(policy().stale_after() + Duration::from_nanos(1)).await;
-        flag.store(true, Ordering::Relaxed);
-        readiness.refresh().await;
-        assert!(readiness.progress_loss().is_some());
-        let _ = readiness.stop_progress();
-        readiness.start_drain();
-        readiness.refresh().await;
-    });
-    assert_sample(&scrape, "readiness_ready 0");
-    let recorded = events.0.lock().unwrap();
+    }
+    tokio::time::advance(policy().stale_after() + Duration::from_nanos(1)).await;
+    flag.store(true, Ordering::Relaxed);
+    readiness.refresh().await;
+    assert!(readiness.progress_loss().is_some());
+    let _ = readiness.stop_progress();
+    readiness.start_drain();
+    readiness.refresh().await;
+    assert_sample(&recorder.handle().render(), "readiness_ready 0");
+    let logged = events.0.lock().unwrap();
     assert_eq!(
-        recorded
+        logged
             .iter()
             .filter(|event| *event == "readiness_progress_lost")
             .count(),
         1
     );
-    assert!(!recorded.iter().any(|event| event == "readiness_recovered"));
+    assert!(!logged.iter().any(|event| event == "readiness_recovered"));
 }
 
 #[tokio::test(start_paused = true)]
@@ -593,18 +595,8 @@ impl tracing::Subscriber for Events {
     fn exit(&self, _: &tracing::span::Id) {}
 }
 
-fn paused_runtime() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_time()
-        .start_paused(true)
-        .build()
-        .expect("test runtime")
-}
-
-fn scrape(test: impl Future<Output = ()>) -> String {
-    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-    metrics::with_local_recorder(&recorder, || paused_runtime().block_on(test));
-    recorder.handle().render()
+fn recorder() -> metrics_exporter_prometheus::PrometheusRecorder {
+    metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder()
 }
 
 #[track_caller]
@@ -612,18 +604,19 @@ fn assert_sample(scrape: &str, sample: &str) {
     assert!(scrape.lines().any(|line| line == sample), "{scrape}");
 }
 
-#[test]
-fn each_completed_check_is_counted_by_outcome() {
-    let scrape = scrape(async {
-        let (readiness, flag, _) = flaky(true);
-        readiness.refresh().await;
-        flag.store(false, Ordering::Relaxed);
-        readiness.refresh().await;
-        readiness.refresh().await;
-        Readiness::new(vec![Box::new(Hanging)], policy())
-            .refresh()
-            .await;
-    });
+#[tokio::test(start_paused = true)]
+async fn each_completed_check_is_counted_by_outcome() {
+    let recorder = recorder();
+    let _recorder = metrics::set_default_local_recorder(&recorder);
+    let (readiness, flag, _) = flaky(true);
+    readiness.refresh().await;
+    flag.store(false, Ordering::Relaxed);
+    readiness.refresh().await;
+    readiness.refresh().await;
+    Readiness::new(vec![Box::new(Hanging)], policy())
+        .refresh()
+        .await;
+    let scrape = recorder.handle().render();
 
     for (outcome, count) in [("ok", 1), ("failed", 2), ("timed_out", 1)] {
         assert_sample(
@@ -633,24 +626,25 @@ fn each_completed_check_is_counted_by_outcome() {
     }
 }
 
-#[test]
-fn each_probe_is_counted_by_its_own_outcome_in_every_check() {
-    let scrape = scrape(async {
-        let (healthy, _, _) = flaky_probe(true);
-        let readiness = Readiness::new(
-            vec![
-                healthy,
-                Box::new(Hanging),
-                Box::new(Slow {
-                    name: "slow",
-                    delay: Duration::ZERO,
-                }),
-            ],
-            policy(),
-        );
-        readiness.refresh().await;
-        readiness.refresh().await;
-    });
+#[tokio::test(start_paused = true)]
+async fn each_probe_is_counted_by_its_own_outcome_in_every_check() {
+    let recorder = recorder();
+    let _recorder = metrics::set_default_local_recorder(&recorder);
+    let (healthy, _, _) = flaky_probe(true);
+    let readiness = Readiness::new(
+        vec![
+            healthy,
+            Box::new(Hanging),
+            Box::new(Slow {
+                name: "slow",
+                delay: Duration::ZERO,
+            }),
+        ],
+        policy(),
+    );
+    readiness.refresh().await;
+    readiness.refresh().await;
+    let scrape = recorder.handle().render();
 
     for (probe, outcome) in [("flaky", "ok"), ("hanging", "timed_out"), ("slow", "ok")] {
         assert_sample(
@@ -662,55 +656,67 @@ fn each_probe_is_counted_by_its_own_outcome_in_every_check() {
     assert_sample(&scrape, "readiness_checks_total{outcome=\"timed_out\"} 2");
 }
 
-#[test]
-fn the_ready_gauge_is_the_published_verdict() {
-    let ready = |scrape: String| {
-        scrape
+#[tokio::test(start_paused = true)]
+async fn the_ready_gauge_is_the_published_verdict() {
+    // One recorder per scenario: each owner writes the same series.
+    let ready = |recorder: &metrics_exporter_prometheus::PrometheusRecorder| {
+        recorder
+            .handle()
+            .render()
             .lines()
             .find(|line| line.starts_with("readiness_ready "))
             .map(str::to_owned)
     };
-    let before_the_first_check = scrape(async {
+
+    let recorder_before = recorder();
+    {
+        let _recorder = metrics::set_default_local_recorder(&recorder_before);
         let _ = flaky(true);
-    });
+    }
     assert_eq!(
-        ready(before_the_first_check).as_deref(),
+        ready(&recorder_before).as_deref(),
         Some("readiness_ready 0")
     );
 
-    let absorbed_failure = scrape(async {
+    let absorbed_failure = recorder();
+    {
+        let _recorder = metrics::set_default_local_recorder(&absorbed_failure);
         let (readiness, flag, _) = flaky(true);
         readiness.refresh().await;
         flag.store(false, Ordering::Relaxed);
         readiness.refresh().await;
-    });
+    }
     assert_eq!(
-        ready(absorbed_failure).as_deref(),
+        ready(&absorbed_failure).as_deref(),
         Some("readiness_ready 1")
     );
 
-    let withdrawn = scrape(async {
+    let withdrawn = recorder();
+    {
+        let _recorder = metrics::set_default_local_recorder(&withdrawn);
         let (readiness, flag, _) = flaky(true);
         readiness.refresh().await;
         flag.store(false, Ordering::Relaxed);
         for _ in 0..3 {
             readiness.refresh().await;
         }
-    });
-    assert_eq!(ready(withdrawn).as_deref(), Some("readiness_ready 0"));
+    }
+    assert_eq!(ready(&withdrawn).as_deref(), Some("readiness_ready 0"));
 
-    let draining = scrape(async {
+    let draining = recorder();
+    {
+        let _recorder = metrics::set_default_local_recorder(&draining);
         let (readiness, _, _) = flaky(true);
         readiness.refresh().await;
         readiness.start_drain();
         // A check that passes during the drain does not bring it back.
         readiness.refresh().await;
-    });
-    assert_eq!(ready(draining).as_deref(), Some("readiness_ready 0"));
+    }
+    assert_eq!(ready(&draining).as_deref(), Some("readiness_ready 0"));
 }
 
-#[test]
-fn completion_metrics_date_only_finished_checks_and_survive_stopped_refresh() {
+#[tokio::test(start_paused = true)]
+async fn completion_metrics_date_only_finished_checks_and_survive_stopped_refresh() {
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
     let handle = recorder.handle();
     let timestamp = || {
@@ -722,89 +728,83 @@ fn completion_metrics_date_only_finished_checks_and_survive_stopped_refresh() {
             .parse::<f64>()
             .unwrap()
     };
-    metrics::with_local_recorder(&recorder, || {
-        paused_runtime().block_on(async {
-            let (readiness, flag, _) = flaky(true);
-            assert_eq!(timestamp(), 0.0);
-            assert_sample(&handle.render(), "readiness_stale_after_seconds 0.17");
-            let before = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs_f64();
-            readiness.refresh().await;
-            let completed = timestamp();
-            let after = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs_f64();
-            assert!((before..=after).contains(&completed));
-            tokio::time::advance(policy().stale_after() + Duration::from_millis(1)).await;
-            assert_eq!(
-                timestamp().to_bits(),
-                completed.to_bits(),
-                "stopped refresh leaves a dated completion"
-            );
-            assert_sample(&handle.render(), "readiness_ready 1");
-            std::assert_matches!(readiness.reader().verdict(), Err(NotReady::Stale { .. }));
-            readiness.start_drain();
-            assert_eq!(
-                timestamp().to_bits(),
-                completed.to_bits(),
-                "drain does not forge a completion"
-            );
-            flag.store(false, Ordering::Relaxed);
-            let before_failure = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs_f64();
-            readiness.refresh().await;
-            assert!(
-                timestamp() >= before_failure,
-                "failure during drain is still a completion"
-            );
-            assert_sample(&handle.render(), "readiness_ready 0");
+    let _recorder = metrics::set_default_local_recorder(&recorder);
+    let (readiness, flag, _) = flaky(true);
+    assert_eq!(timestamp(), 0.0);
+    assert_sample(&handle.render(), "readiness_stale_after_seconds 0.17");
+    let before = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64();
+    readiness.refresh().await;
+    let completed = timestamp();
+    let after = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64();
+    assert!((before..=after).contains(&completed));
+    tokio::time::advance(policy().stale_after() + Duration::from_millis(1)).await;
+    assert_eq!(
+        timestamp().to_bits(),
+        completed.to_bits(),
+        "stopped refresh leaves a dated completion"
+    );
+    assert_sample(&handle.render(), "readiness_ready 1");
+    std::assert_matches!(readiness.reader().verdict(), Err(NotReady::Stale { .. }));
+    readiness.start_drain();
+    assert_eq!(
+        timestamp().to_bits(),
+        completed.to_bits(),
+        "drain does not forge a completion"
+    );
+    flag.store(false, Ordering::Relaxed);
+    let before_failure = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64();
+    readiness.refresh().await;
+    assert!(
+        timestamp() >= before_failure,
+        "failure during drain is still a completion"
+    );
+    assert_sample(&handle.render(), "readiness_ready 0");
 
-            let hanging = Readiness::new(vec![Box::new(Hanging)], policy());
-            let cancel = CancellationToken::new();
-            let refresh = hanging.refresh_until(cancel.clone());
-            tokio::pin!(refresh);
-            std::future::poll_fn(|cx| {
-                assert!(refresh.as_mut().poll(cx).is_pending());
-                std::task::Poll::Ready(())
-            })
-            .await;
-            assert_eq!(timestamp(), 0.0, "in-flight is not completed");
-            cancel.cancel();
-            refresh.await;
-            assert_eq!(timestamp(), 0.0, "cancellation is not completed");
-            hanging.refresh().await;
-            assert!(timestamp() > 0.0, "a timed-out round is completed");
-        });
-    });
+    let hanging = Readiness::new(vec![Box::new(Hanging)], policy());
+    let cancel = CancellationToken::new();
+    let refresh = hanging.refresh_until(cancel.clone());
+    tokio::pin!(refresh);
+    std::future::poll_fn(|cx| {
+        assert!(refresh.as_mut().poll(cx).is_pending());
+        std::task::Poll::Ready(())
+    })
+    .await;
+    assert_eq!(timestamp(), 0.0, "in-flight is not completed");
+    cancel.cancel();
+    refresh.await;
+    assert_eq!(timestamp(), 0.0, "cancellation is not completed");
+    hanging.refresh().await;
+    assert!(timestamp() > 0.0, "a timed-out round is completed");
 }
 
-#[test]
-fn absorbed_failures_flips_and_a_late_refresh_are_logged() {
+#[tokio::test(start_paused = true)]
+async fn absorbed_failures_flips_and_a_late_refresh_are_logged() {
     let events = Events::default();
-    tracing::subscriber::with_default(events.clone(), || {
-        // Keep callsite interest independent of a sibling test's thread-local
-        // subscriber; tracing-core otherwise has a single-dispatcher fast path.
-        let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
-        paused_runtime().block_on(async {
-            let (readiness, flag, _) = flaky(true);
-            readiness.refresh().await;
-            flag.store(false, Ordering::Relaxed);
-            // Two absorbed failures, the flip, then a failure that is
-            // already published.
-            for _ in 0..4 {
-                readiness.refresh().await;
-            }
-            flag.store(true, Ordering::Relaxed);
-            readiness.refresh().await;
-            tokio::time::advance(policy().stale_after() + Duration::from_millis(1)).await;
-            readiness.refresh().await;
-        });
-    });
+    let _guard = tracing::subscriber::set_default(events.clone());
+    // Keep callsite interest independent of a sibling test's thread-local
+    // subscriber; tracing-core otherwise has a single-dispatcher fast path.
+    let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let (readiness, flag, _) = flaky(true);
+    readiness.refresh().await;
+    flag.store(false, Ordering::Relaxed);
+    // Two absorbed failures, the flip, then a failure that is
+    // already published.
+    for _ in 0..4 {
+        readiness.refresh().await;
+    }
+    flag.store(true, Ordering::Relaxed);
+    readiness.refresh().await;
+    tokio::time::advance(policy().stale_after() + Duration::from_millis(1)).await;
+    readiness.refresh().await;
 
     assert_eq!(
         *events.0.lock().unwrap(),
@@ -818,21 +818,18 @@ fn absorbed_failures_flips_and_a_late_refresh_are_logged() {
     );
 }
 
-#[test]
-fn a_draining_owner_logs_no_check_outcome() {
+#[tokio::test(start_paused = true)]
+async fn a_draining_owner_logs_no_check_outcome() {
     let events = Events::default();
-    tracing::subscriber::with_default(events.clone(), || {
-        let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
-        paused_runtime().block_on(async {
-            let (readiness, flag, _) = flaky(true);
-            readiness.refresh().await;
-            readiness.start_drain();
-            flag.store(false, Ordering::Relaxed);
-            for _ in 0..3 {
-                readiness.refresh().await;
-            }
-        });
-    });
+    let _guard = tracing::subscriber::set_default(events.clone());
+    let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let (readiness, flag, _) = flaky(true);
+    readiness.refresh().await;
+    readiness.start_drain();
+    flag.store(false, Ordering::Relaxed);
+    for _ in 0..3 {
+        readiness.refresh().await;
+    }
 
     assert!(events.0.lock().unwrap().is_empty(), "{:?}", events.0);
 }
@@ -914,3 +911,50 @@ async fn wait_for_verdict_event_reports_when_the_owner_is_dropped() {
     assert_eq!(reader.wait_for_verdict_event().await, Err(OwnerDropped));
 }
 // template:end grpc:health-changed-verdict-test
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    #[test]
+    fn the_failure_threshold_never_outlives_its_streak_or_a_stale_gap(
+        failure_threshold in 0_u32..6,
+        stale_after_ms in 1_u64..100,
+        steps in proptest::collection::vec((any::<bool>(), 0_u64..150), 1..40),
+    ) {
+        let stale_after = Duration::from_millis(stale_after_ms);
+        let origin = Instant::now();
+        let mut elapsed_ms = 0_u64;
+        let mut previous: Option<Check> = None;
+        // Model: the streak of failed rounds, whether the last published round
+        // was ready, and when it completed.
+        let mut streak = 0_u32;
+        let mut published: Option<(bool, u64)> = None;
+        for (succeeds, gap_ms) in steps {
+            elapsed_ms += gap_ms;
+            let at = origin + Duration::from_millis(elapsed_ms);
+            let observed = if succeeds { Ok(()) } else { Err(NotReady::NotEvaluated) };
+            let check =
+                apply_failure_threshold(previous.as_ref(), observed, failure_threshold, at, stale_after);
+
+            streak = if succeeds { 0 } else { streak + 1 };
+            let fresh_ready = published.is_some_and(|(ready, at_ms)| {
+                ready && elapsed_ms - at_ms <= stale_after_ms
+            });
+            let expect_ready = succeeds || (fresh_ready && streak < failure_threshold);
+
+            prop_assert_eq!(check.verdict.is_ok(), expect_ready);
+            prop_assert_eq!(check.consecutive_failures, streak);
+            if succeeds {
+                prop_assert_eq!(&check.verdict, &Ok(()));
+            }
+            if streak >= failure_threshold && !succeeds {
+                prop_assert!(check.verdict.is_err());
+            }
+            if gap_ms > stale_after_ms && !succeeds {
+                prop_assert!(check.verdict.is_err());
+            }
+            published = Some((expect_ready, elapsed_ms));
+            previous = Some(check);
+        }
+    }
+}

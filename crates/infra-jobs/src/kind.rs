@@ -567,6 +567,12 @@ pub(crate) const fn is_valid_kind_name(name: &str) -> bool {
 /// Use `const _: () = infra_jobs::assert_valid_kind_name(MyKind::NAME);`.
 /// Runtime registration and enqueue still validate names independently.
 ///
+/// A name outside the grammar fails the build:
+///
+/// ```compile_fail
+/// const _: () = infra_jobs::assert_valid_kind_name("Not.Valid");
+/// ```
+///
 /// # Panics
 /// Panics when `name` is outside the kind-name grammar.
 pub const fn assert_valid_kind_name(name: &str) {
@@ -681,6 +687,18 @@ mod tests {
         PgPoolOptions::new()
             .connect_lazy("postgres://localhost/unused")
             .unwrap()
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(256))]
+
+        #[test]
+        fn kind_name_check_matches_the_documented_pattern(
+            name in "[a-zA-Z0-9._ /é-]{0,70}|[a-z][a-z0-9._-]{0,63}",
+        ) {
+            let documented = regex::Regex::new(r"^[a-z][a-z0-9._-]{0,63}$").unwrap();
+            proptest::prop_assert_eq!(is_valid_kind_name(&name), documented.is_match(&name));
+        }
     }
 
     #[test]

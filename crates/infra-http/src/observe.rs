@@ -28,7 +28,7 @@
 //! so an unmatched request that merely looks like a probe is still logged.
 
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError, RwLock};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
@@ -37,8 +37,9 @@ use axum::extract::{MatchedPath, Request, State};
 use axum::http::{Method, StatusCode, Uri};
 use axum::middleware::Next;
 use axum::response::{IntoResponse as _, Response};
+use foldhash::HashMap;
 use http_body::{Frame, SizeHint};
-use metrics::{Label, SharedString};
+use metrics::{Gauge, Histogram, Label, SharedString};
 use opentelemetry::context::FutureExt as _;
 use shared_rules::otel_http::request_method;
 use tower_http::request_id::RequestId;
@@ -118,8 +119,25 @@ pub(crate) struct AccessLogOptions {
     pub(crate) log_health_probes: bool,
 }
 
+/// The middleware state: what the access log is told and the metric handles
+/// shared by every request through one [`harden`](crate::harden())ed router.
+#[derive(Clone, Debug)]
+pub(crate) struct Observer {
+    options: AccessLogOptions,
+    series: Arc<Series>,
+}
+
+impl Observer {
+    pub(crate) fn new(options: AccessLogOptions) -> Self {
+        Self {
+            options,
+            series: Arc::default(),
+        }
+    }
+}
+
 pub(crate) async fn observe(
-    State(options): State<AccessLogOptions>,
+    State(Observer { options, series }): State<Observer>,
     matched: Option<MatchedPath>,
     mut request: Request,
     next: Next,
@@ -138,9 +156,10 @@ pub(crate) async fn observe(
     let route = matched
         .as_ref()
         .map_or(UNMATCHED_ROUTE, MatchedPath::as_str);
-    let active = Active::start(request_method(method.as_str()));
+    let active = Active::start(&series, request_method(method.as_str()));
     let mut pending = Pending {
         options,
+        series: &series,
         method: &method,
         route,
         request_id,
@@ -178,6 +197,7 @@ pub(crate) async fn observe(
 
 struct Pending<'a> {
     options: AccessLogOptions,
+    series: &'a Series,
     method: &'a Method,
     route: &'a str,
     request_id: Option<&'a str>,
@@ -195,7 +215,7 @@ impl Pending<'_> {
 
     fn record(&self, status: StatusCode, problem_code: Option<&str>, termination: Option<&str>) {
         let elapsed = self.started.elapsed();
-        record_duration(
+        self.series.record_duration(
             request_method(self.method.as_str()),
             self.route,
             status,
@@ -294,25 +314,11 @@ fn update_span_from_response(span: &tracing::Span, status: StatusCode) {
     }
 }
 
-struct Active(metrics::Gauge);
+struct Active(Gauge);
 
 impl Active {
-    fn start(method: &'static str) -> Self {
-        // `metrics` keeps a static key only for literal label values; a
-        // runtime value allocates the label vector and its retained copy on
-        // every request. The arms repeat `request_method`'s values, and any
-        // value missing here still gets its own series through the last arm.
-        macro_rules! active_gauge {
-            ($($label:literal)*) => {
-                match method {
-                    $($label => metrics::gauge!(ACTIVE_REQUESTS_METRIC, "http_request_method" => $label),)*
-                    other => metrics::gauge!(ACTIVE_REQUESTS_METRIC, "http_request_method" => other),
-                }
-            };
-        }
-        let gauge = active_gauge!(
-            "OPTIONS" "GET" "POST" "PUT" "DELETE" "HEAD" "TRACE" "CONNECT" "PATCH" "QUERY" "_OTHER"
-        );
+    fn start(series: &Series, method: &'static str) -> Self {
+        let gauge = series.active_gauge(method);
         gauge.increment(1);
         Self(gauge)
     }
@@ -361,14 +367,81 @@ impl Drop for Active {
     }
 }
 
-#[cfg_attr(feature = "hotpath", hotpath::measure)]
-fn record_duration(method: &'static str, route: &str, status: StatusCode, elapsed: Duration) {
+/// One route's histograms by normalized method and status code.
+type RouteDurations = HashMap<(&'static str, u16), Histogram>;
+
+/// Metric handles by series, resolved on first use so a request neither
+/// rebuilds label strings nor looks its series up in the recorder. The keys
+/// are the router's route templates, [`UNMATCHED_ROUTE`], the normalized
+/// methods and the status codes the service answers with, so the table is
+/// bounded by the router and no caller-chosen value adds an entry.
+///
+/// A handle resolved while no recorder is installed stays a no-op; the
+/// composition root installs the recorder before the router serves.
+#[derive(Debug, Default)]
+struct Series {
+    active: RwLock<HashMap<&'static str, Gauge>>,
+    durations: RwLock<HashMap<Box<str>, RouteDurations>>,
+}
+
+impl Series {
+    fn active_gauge(&self, method: &'static str) -> Gauge {
+        let known = self
+            .active
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(method)
+            .cloned();
+        known.unwrap_or_else(|| {
+            self.active
+                .write()
+                .unwrap_or_else(PoisonError::into_inner)
+                .entry(method)
+                .or_insert_with(
+                    || metrics::gauge!(ACTIVE_REQUESTS_METRIC, "http_request_method" => method),
+                )
+                .clone()
+        })
+    }
+
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    fn record_duration(
+        &self,
+        method: &'static str,
+        route: &str,
+        status: StatusCode,
+        elapsed: Duration,
+    ) {
+        let status = status.as_u16();
+        let seconds = elapsed.as_secs_f64();
+        if let Some(histogram) = self
+            .durations
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(route)
+            .and_then(|statuses| statuses.get(&(method, status)))
+        {
+            histogram.record(seconds);
+            return;
+        }
+        self.durations
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(route.into())
+            .or_default()
+            .entry((method, status))
+            .or_insert_with(|| duration_histogram(method, route, status))
+            .record(seconds);
+    }
+}
+
+fn duration_histogram(method: &'static str, route: &str, status: u16) -> Histogram {
     let labels = vec![
         Label::new("http_request_method", method),
         Label::new("http_response_status_code", status_label(status)),
         Label::new("http_route", SharedString::from(Arc::<str>::from(route))),
     ];
-    metrics::histogram!(REQUEST_DURATION_METRIC, labels).record(elapsed.as_secs_f64());
+    metrics::histogram!(REQUEST_DURATION_METRIC, labels)
 }
 
 // Keep typed values at static addresses so their numeric text can be borrowed
@@ -386,8 +459,8 @@ static STATUS_CODES: [StatusCode; 900] = {
     codes
 };
 
-fn status_label(status: StatusCode) -> &'static str {
-    STATUS_CODES[usize::from(status.as_u16() - 100)].as_str()
+fn status_label(status: u16) -> &'static str {
+    STATUS_CODES[usize::from(status - 100)].as_str()
 }
 
 /// Complete every Problem the chain or a handler returns: a bare 413 from
@@ -421,51 +494,39 @@ fn suppresses_access_log(options: AccessLogOptions, method: &Method, route: &str
 mod tests {
     use super::*;
 
-    #[derive(Default)]
-    struct Histograms(std::sync::Mutex<Vec<metrics::Key>>);
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
 
-    impl metrics::Recorder for Histograms {
-        fn describe_counter(&self, _: metrics::KeyName, _: Option<metrics::Unit>, _: SharedString) {
-        }
+    /// The labels of every duration series the snapshot holds, sorted: the
+    /// snapshot lists its keys in no fixed order.
+    fn duration_series(snapshotter: &Snapshotter) -> Vec<Vec<(String, String)>> {
+        let mut series: Vec<_> = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter(|(key, ..)| key.key().name() == REQUEST_DURATION_METRIC)
+            .map(|(key, ..)| {
+                key.key()
+                    .labels()
+                    .map(|label| (label.key().to_owned(), label.value().to_owned()))
+                    .collect()
+            })
+            .collect();
+        series.sort();
+        series
+    }
 
-        fn describe_gauge(&self, _: metrics::KeyName, _: Option<metrics::Unit>, _: SharedString) {}
-
-        fn describe_histogram(
-            &self,
-            _: metrics::KeyName,
-            _: Option<metrics::Unit>,
-            _: SharedString,
-        ) {
-        }
-
-        fn register_counter(
-            &self,
-            _: &metrics::Key,
-            _: &metrics::Metadata<'_>,
-        ) -> metrics::Counter {
-            metrics::Counter::noop()
-        }
-
-        fn register_gauge(&self, _: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {
-            metrics::Gauge::noop()
-        }
-
-        fn register_histogram(
-            &self,
-            key: &metrics::Key,
-            _: &metrics::Metadata<'_>,
-        ) -> metrics::Histogram {
-            self.0.lock().unwrap().push(key.clone());
-            metrics::Histogram::noop()
-        }
+    fn pair(key: &str, value: &str) -> (String, String) {
+        (key.to_owned(), value.to_owned())
     }
 
     #[test]
     fn duration_metric_keeps_every_numeric_status_and_its_other_labels() {
-        let histograms = Histograms::default();
-        metrics::with_local_recorder(&histograms, || {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let series = Series::default();
+        metrics::with_local_recorder(&recorder, || {
             for code in 100..=999 {
-                record_duration(
+                series.record_duration(
                     "_OTHER",
                     UNMATCHED_ROUTE,
                     StatusCode::from_u16(code).unwrap(),
@@ -473,32 +534,96 @@ mod tests {
                 );
             }
         });
-        let keys = histograms.0.lock().unwrap();
-        assert_eq!(keys.len(), 900);
-        for (code, key) in (100..=999).zip(keys.iter()) {
-            assert_eq!(key.name(), REQUEST_DURATION_METRIC);
-            let labels: Vec<_> = key
-                .labels()
-                .map(|label| (label.key(), label.value()))
-                .collect();
-            let numeric = code.to_string();
-            assert_eq!(
-                labels,
-                [
-                    ("http_request_method", "_OTHER"),
-                    ("http_response_status_code", numeric.as_str()),
-                    ("http_route", "<unmatched>"),
+        let expected: Vec<_> = (100..=999)
+            .map(|code: u16| {
+                vec![
+                    pair("http_request_method", "_OTHER"),
+                    pair("http_response_status_code", &code.to_string()),
+                    pair("http_route", "<unmatched>"),
                 ]
-            );
-        }
+            })
+            .collect();
+        let mut expected = expected;
+        expected.sort();
+        assert_eq!(duration_series(&snapshotter), expected);
+    }
+
+    #[test]
+    fn repeated_answers_share_one_series_and_a_new_status_adds_its_own() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let series = Series::default();
+        metrics::with_local_recorder(&recorder, || {
+            for status in [StatusCode::OK, StatusCode::OK, StatusCode::NOT_FOUND] {
+                series.record_duration("GET", "/items/{id}", status, Duration::from_millis(1));
+            }
+        });
+        let samples: Vec<_> = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter_map(|(key, _, _, value)| match value {
+                DebugValue::Histogram(samples) => Some((
+                    key.key()
+                        .labels()
+                        .find(|label| label.key() == "http_response_status_code")
+                        .map(|label| label.value().to_owned()),
+                    samples.len(),
+                )),
+                _ => None,
+            })
+            .collect();
+        let mut samples = samples;
+        samples.sort();
+        assert_eq!(
+            samples,
+            [(Some("200".to_owned()), 2), (Some("404".to_owned()), 1)]
+        );
+    }
+
+    #[test]
+    fn an_active_gauge_appears_on_first_use_and_returns_to_zero() {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let series = Series::default();
+        metrics::with_local_recorder(&recorder, || {
+            assert_eq!(snapshotter.snapshot().into_vec().len(), 0);
+            let first = Active::start(&series, "GET");
+            let second = Active::start(&series, "GET");
+            drop((first, second));
+            // A snapshot resets the gauge it reads, so this is the only one.
+            assert_eq!(gauge_values(&snapshotter), [("GET".to_owned(), 0.0)]);
+        });
+    }
+
+    fn gauge_values(snapshotter: &Snapshotter) -> Vec<(String, f64)> {
+        snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter(|(key, ..)| key.key().name() == ACTIVE_REQUESTS_METRIC)
+            .filter_map(|(key, _, _, value)| match value {
+                DebugValue::Gauge(value) => Some((
+                    key.key()
+                        .labels()
+                        .next()
+                        .expect("method label")
+                        .value()
+                        .to_owned(),
+                    value.into_inner(),
+                )),
+                _ => None,
+            })
+            .collect()
     }
 
     #[tokio::test]
     async fn a_request_dropped_before_its_response_head_is_recorded_as_499() {
         use tower::ServiceExt as _;
 
-        let histograms = Histograms::default();
-        let _recorder = metrics::set_default_local_recorder(&histograms);
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _recorder = metrics::set_default_local_recorder(&recorder);
         let handler_1 = || std::future::pending::<&'static str>();
         #[expect(
             clippy::disallowed_methods,
@@ -519,22 +644,12 @@ mod tests {
         let abandoned = tokio::time::timeout(Duration::from_millis(10), app.oneshot(request)).await;
 
         assert!(abandoned.is_err());
-        let keys = histograms.0.lock().unwrap();
-        let recorded: Vec<Vec<(&str, &str)>> = keys
-            .iter()
-            .filter(|key| key.name() == REQUEST_DURATION_METRIC)
-            .map(|key| {
-                key.labels()
-                    .map(|label| (label.key(), label.value()))
-                    .collect()
-            })
-            .collect();
         assert_eq!(
-            recorded,
-            [[
-                ("http_request_method", "GET"),
-                ("http_response_status_code", "499"),
-                ("http_route", "/hang"),
+            duration_series(&snapshotter),
+            [vec![
+                pair("http_request_method", "GET"),
+                pair("http_response_status_code", "499"),
+                pair("http_route", "/hang"),
             ]]
         );
     }

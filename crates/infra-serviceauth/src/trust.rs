@@ -34,22 +34,15 @@ pub struct TrustError {
 }
 
 /// Where in the registry document a refusal applies.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, derive_more::Display)]
 enum Place {
+    #[display("")]
     Document,
+    #[display("caller {_0}: ")]
     Caller(ServiceName),
     /// A caller's key by its 1-based position in the caller's `keys`.
+    #[display("caller {_0} key {_1}: ")]
     Key(ServiceName, usize),
-}
-
-impl fmt::Display for Place {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Document => Ok(()),
-            Self::Caller(caller) => write!(formatter, "caller {caller}: "),
-            Self::Key(caller, position) => write!(formatter, "caller {caller} key {position}: "),
-        }
-    }
 }
 
 impl TrustError {

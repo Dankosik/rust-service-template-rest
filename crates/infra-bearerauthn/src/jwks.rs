@@ -1,6 +1,9 @@
 //! JWKS acquisition and key admission: the provider keys a JWT verifier trusts.
 
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 use aws_lc_rs::signature::{self, ParsedPublicKey, RsaParameters, RsaPublicKeyComponents};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -82,9 +85,21 @@ impl JwtKey {
 
 pub(crate) struct KeySet {
     keys: Vec<JwtKey>,
+    generation: u64,
 }
 
+/// Source of [`KeySet::generation`]; one counter for the process, so no two
+/// parsed sets ever share a value.
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(0);
+
 impl KeySet {
+    /// Names this parsed set, not its content: a refresh that fetches the
+    /// same keys installs a set with a new generation. A decision derived from
+    /// the keys stays valid exactly while the installed set has this value.
+    pub(crate) const fn generation(&self) -> u64 {
+        self.generation
+    }
+
     fn candidates<'a>(
         &'a self,
         kid: Option<&'a str>,
@@ -175,7 +190,10 @@ pub(crate) fn parse_key_set(
     if keys.is_empty() {
         return Err(KeySetFailure::NoUsableKeys);
     }
-    Ok(KeySet { keys })
+    Ok(KeySet {
+        keys,
+        generation: NEXT_GENERATION.fetch_add(1, Ordering::Relaxed),
+    })
 }
 
 fn admit_key(jwk: Jwk, configured: &[JwtAlgorithm]) -> Result<JwtKey, KeyRejection> {

@@ -27,6 +27,7 @@ derive_more = { workspace = true, features = ["debug"] }
 operation-context = { workspace = true }
 # template:begin oidc-jwt:authn-jwt-dependency
 base64 = { workspace = true, features = ["alloc"] }
+foldhash = { workspace = true, features = ["std"] }
 jsonwebtoken = { workspace = true, features = ["aws_lc_rs"] }
 # template:end oidc-jwt:authn-jwt-dependency
 aws-lc-rs = { workspace = true, features = ["alloc", "aws-lc-sys", "prebuilt-nasm"] }
@@ -35,16 +36,19 @@ reqwest = { workspace = true, features = ["rustls"] }
 # `Principal::access_token()` retains the presented bearer token as a secret
 # regardless of the selected engine, so this dependency is unconditional.
 secrecy = { workspace = true }
+# The JWT engine uses the `sync` cache and the introspection engine the
+# `future` one; a single entry serves both because a manifest has one key per
+# crate.
+moka = { workspace = true, features = ["future", "sync"] }
 # template:begin oidc-introspection:authn-secret-dependency
 futures-util = { workspace = true, features = ["std"] }
-moka = { workspace = true, features = ["future"] }
 # template:end oidc-introspection:authn-secret-dependency
 serde = { workspace = true, features = ["std", "derive"] }
-serde_json = { workspace = true, features = ["std", "raw_value"] }
+serde_json = { workspace = true, features = ["std"] }
 shared-rules = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true, features = ["std"] }
-tokio = { workspace = true, features = ["net", "rt", "sync", "time", "macros", "io-util"] }
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
 tokio-util = { workspace = true, features = ["rt"] }
 url = { workspace = true, features = ["std"] }
 
@@ -53,5 +57,5 @@ url = { workspace = true, features = ["std"] }
 proptest = { workspace = true, features = ["std"] }
 # template:end oidc-jwt:authn-jwt-dev-dependency
 rcgen = { workspace = true, features = ["aws_lc_rs"] }
-tokio = { workspace = true, features = ["test-util", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["io-util", "net", "rt-multi-thread", "test-util"] }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs", "tls12"] }

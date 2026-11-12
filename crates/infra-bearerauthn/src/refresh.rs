@@ -19,7 +19,7 @@ use crate::{
     provider::ProviderClient,
 };
 
-const REFRESH_INTERVAL: Duration = Duration::from_mins(15);
+pub(crate) const REFRESH_INTERVAL: Duration = Duration::from_mins(15);
 /// Up to 10% earlier, so replicas started together do not fetch in lockstep.
 const MAX_REFRESH_SPREAD: Duration = Duration::from_secs(REFRESH_INTERVAL.as_secs() / 10);
 /// Tokens with made-up `kid` values are caller-controlled, so the cooldown
@@ -115,6 +115,11 @@ impl KeyStore {
 
     pub(crate) fn current(&self) -> Arc<KeySet> {
         self.state.borrow().keys.clone()
+    }
+
+    /// The generation of the installed set, read without cloning it.
+    pub(crate) fn generation(&self) -> u64 {
+        self.state.borrow().keys.generation()
     }
 
     /// Returns a set installed since `checked`, otherwise joins the fetch in

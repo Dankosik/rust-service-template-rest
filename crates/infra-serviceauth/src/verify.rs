@@ -1,9 +1,14 @@
 //! Service token verification: one header and one payload parse, then the
 //! signature against the presenting caller's keys only.
 
-use std::{borrow::Cow, fmt, sync::Arc};
+use std::{
+    borrow::Cow,
+    fmt,
+    sync::{Arc, OnceLock},
+};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use enum_map::EnumMap;
 use moka::sync::Cache;
 use serde::{Deserialize, Deserializer, de};
 use shared_rules::{
@@ -39,7 +44,7 @@ pub enum Failure {
 }
 
 /// A closed reason for operators. Never derived from token contents.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, enum_map::Enum)]
 pub(crate) enum Reason {
     Missing,
     Malformed,
@@ -123,6 +128,9 @@ struct Inner {
     /// Registered once: a success is the hot path, and a registry lookup per
     /// call costs more than the increment.
     verified: metrics::Counter,
+    /// Registered on a reason's first refusal, so the exposition lists only
+    /// reasons that happened.
+    refused: EnumMap<Reason, OnceLock<metrics::Counter>>,
     /// Every check but the validity window depends only on the token's bytes
     /// and on the audience, type and registry fixed for the process, so a
     /// remembered token is decided by its window alone, as a full check would
@@ -161,6 +169,7 @@ impl Verifier {
             jwt_type,
             trust,
             verified: metrics::counter!(VERIFICATIONS_METRIC, "outcome" => "success", "reason" => "verified"),
+            refused: EnumMap::default(),
             // An accepted token is past use by `exp + LEEWAY_SECONDS`, at most
             // this long after it was remembered; the time bound lets expired
             // entries leave before the size bound refuses new ones.
@@ -201,7 +210,11 @@ impl Verifier {
                 Ok(caller)
             }
             Err(reason) => {
-                metrics::counter!(VERIFICATIONS_METRIC, "outcome" => "failure", "reason" => reason.label()).increment(1);
+                self.0.refused[reason]
+                    .get_or_init(|| {
+                        metrics::counter!(VERIFICATIONS_METRIC, "outcome" => "failure", "reason" => reason.label())
+                    })
+                    .increment(1);
                 tracing::debug!(reason = reason.label(), "service_auth_verification_failed");
                 Err(reason.failure())
             }

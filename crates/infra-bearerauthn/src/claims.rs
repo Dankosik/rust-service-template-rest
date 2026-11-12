@@ -178,6 +178,23 @@ struct ActiveClaims<'a> {
 // template:end oidc-introspection:authn-claims-introspection-envelope
 
 // template:begin oidc-jwt:authn-claims-jwt-validation
+/// A validated JWT principal with the one time claim, besides `exp`, that a
+/// later decision at another instant needs.
+#[derive(Clone, Debug)]
+pub(crate) struct VerifiedJwt {
+    pub(crate) principal: Principal,
+    not_before: Option<u64>,
+}
+
+impl VerifiedJwt {
+    /// The principal if `exp` and `nbf` admit this token at `now`, with the
+    /// same leeway and reasons as validating the payload at `now`.
+    pub(crate) fn deliver(&self, now: u64) -> Result<Principal, VerificationError> {
+        check_lifetime(self.principal.expires_at(), self.not_before, now)?;
+        Ok(self.principal.clone())
+    }
+}
+
 /// Validates a payload after signature verification. Required registered claims
 /// precede lifetime, issuer, and audience checks, preserving jsonwebtoken's order;
 /// identity, the selected token profile, and scopes follow.
@@ -187,7 +204,7 @@ pub(crate) fn validate_jwt_claims(
     token_profile: TokenProfile,
     now: u64,
     access_token: secrecy::SecretString,
-) -> Result<Principal, VerificationError> {
+) -> Result<VerifiedJwt, VerificationError> {
     let invalid = VerificationError::invalid;
     let payload =
         String::from_utf8(payload).map_err(|_| invalid(VerificationReason::MalformedClaims))?;
@@ -222,18 +239,21 @@ pub(crate) fn validate_jwt_claims(
         .map(|JsonObject(actor)| actor.into_actor())
         .transpose()
         .map_err(|()| invalid(VerificationReason::MalformedClaims))?;
-    Ok(Principal::new(
-        Identity {
-            issuer: policy.issuer.clone(),
-            subject,
-            client_id,
-            scopes,
-            payload,
-            access_token,
-            actor,
-        },
-        expiry,
-    ))
+    Ok(VerifiedJwt {
+        not_before: claims.nbf,
+        principal: Principal::new(
+            Identity {
+                issuer: policy.issuer.clone(),
+                subject,
+                client_id,
+                scopes,
+                payload,
+                access_token,
+                actor,
+            },
+            expiry,
+        ),
+    })
 }
 
 /// An RFC 7519 `NumericDate`: an unsigned integer, or a number with a
@@ -519,6 +539,7 @@ mod tests {
                 100,
                 access_token(),
             )
+            .map(|verified| verified.principal)
         };
         let principal = verify(serde_json::json!({
             "exp": 130, "sub": null, "client_id": "", "azp": "client", "cid": "other",
@@ -551,7 +572,7 @@ mod tests {
                 1000,
                 access_token(),
             )
-            .map(|principal| principal.expires_at())
+            .map(|verified| verified.principal.expires_at())
             .map_err(|error| error.reason)
         };
         for (extra, expected) in [
@@ -644,6 +665,7 @@ mod tests {
                 100,
                 access_token(),
             )
+            .map(|verified| verified.principal)
             .map_err(|error| error.reason)
         };
         assert!(verify(serde_json::json!({})).is_ok());
@@ -675,6 +697,7 @@ mod tests {
                 100,
                 access_token(),
             )
+            .map(|verified| verified.principal)
         };
         assert_actor_evidence(verify, Failure::Invalid);
     }
@@ -869,7 +892,7 @@ mod tests {
                     access_token(),
                 );
                 if let Some(expected) = &expected {
-                    assert_eq!(result.unwrap().scopes(), expected.as_slice());
+                    assert_eq!(result.unwrap().principal.scopes(), expected.as_slice());
                 } else {
                     assert_eq!(result.unwrap_err().failure, Failure::Invalid, "{extra}");
                 }
