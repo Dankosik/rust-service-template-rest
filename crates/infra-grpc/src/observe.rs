@@ -267,8 +267,6 @@ enum Kind {
 
 /// The series of one label path.
 struct Handles {
-    /// The label path, [`UNKNOWN_PATH`] for `unknown`.
-    path: Box<str>,
     /// `service/method`, the span name.
     span_name: Box<str>,
     service: Arc<str>,
@@ -379,13 +377,15 @@ impl Series {
     fn register(&self, path: &str) -> Arc<Handles> {
         let (service, method) = service_and_method(path);
         Arc::new(Handles {
-            path: path.into(),
             span_name: format!("{service}/{method}").into(),
             service: service.into(),
             method: method.into(),
             handled_metric: self.handled_metric,
-            started: metrics::counter!(self.started_metric, call_labels(path)),
-            handling_seconds: metrics::histogram!(self.handling_seconds_metric, call_labels(path)),
+            started: metrics::counter!(self.started_metric, call_labels(service, method)),
+            handling_seconds: metrics::histogram!(
+                self.handling_seconds_metric,
+                call_labels(service, method)
+            ),
             handled: Default::default(),
             failed: std::array::from_fn(|_| OnceLock::new()),
         })
@@ -397,7 +397,7 @@ impl Handles {
         self.handling_seconds.record(elapsed.as_secs_f64());
         self.handled[code as usize]
             .get_or_init(|| {
-                let mut labels = call_labels(&self.path);
+                let mut labels = call_labels(&self.service, &self.method);
                 labels.push(metrics::Label::new("grpc_code", code_name(code)));
                 metrics::counter!(self.handled_metric, labels)
             })
@@ -407,7 +407,7 @@ impl Handles {
     fn failed(&self, failure: service_failure::Code) {
         self.failed[failure as usize]
             .get_or_init(|| {
-                let mut labels = call_labels(&self.path);
+                let mut labels = call_labels(&self.service, &self.method);
                 labels.push(metrics::Label::new("failure_code", failure.as_str()));
                 metrics::counter!(SERVER_FAILURES, labels)
             })
@@ -438,9 +438,7 @@ fn service_and_method(path: &str) -> (&str, &str) {
     crate::protocol::split_method_path(path).unwrap_or(("unknown", "unknown"))
 }
 
-/// The `grpc_service` and `grpc_method` labels every series of `path` carries.
-fn call_labels(path: &str) -> Vec<metrics::Label> {
-    let (service, method) = service_and_method(path);
+fn call_labels(service: &str, method: &str) -> Vec<metrics::Label> {
     vec![
         metrics::Label::new("grpc_service", service.to_owned()),
         metrics::Label::new("grpc_method", method.to_owned()),
