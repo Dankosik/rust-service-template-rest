@@ -130,26 +130,13 @@ const fn default_provider_concurrency() -> std::num::NonZeroU32 {
     OAuthConfig::DEFAULT_PROVIDER_CONCURRENCY
 }
 
-// Buffer the scalar kind before decoding: config-rs otherwise coerces floats
-// and booleans to integers. Environment values arrive as strings.
 fn deserialize_provider_concurrency<'de, D>(
     deserializer: D,
 ) -> Result<std::num::NonZeroU32, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum Input {
-        Typed(std::num::NonZeroU32),
-        Text(String),
-    }
-
-    let invalid = || crate::de::value_free("must be an integer from 1 to 4294967295");
-    match Input::deserialize(deserializer).map_err(|_| invalid())? {
-        Input::Typed(value) => Ok(value),
-        Input::Text(value) => value.parse().map_err(|_| invalid()),
-    }
+    crate::de::deserialize_scalar(deserializer, "must be an integer from 1 to 4294967295")
 }
 
 /// Client-assertion signing algorithm, decoded from its RFC 7518 identifier.

@@ -23,6 +23,30 @@ pub(crate) fn value_free<E: serde::de::Error>(message: impl std::fmt::Display) -
     E::custom(format_args!("{VALUE_FREE}{message}"))
 }
 
+/// Buffer the scalar kind before config-rs can coerce it. Callers supply
+/// the value-free diagnostic for either a rejected kind or malformed text.
+#[allow(
+    dead_code,
+    reason = "removing OIDC introspection and outbound authentication leaves no caller"
+)]
+pub(crate) fn deserialize_scalar<'de, D, T>(deserializer: D, message: &str) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + FromStr,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Input<T> {
+        Typed(T),
+        Text(String),
+    }
+
+    match Input::<T>::deserialize(deserializer).map_err(|_| value_free(message))? {
+        Input::Typed(value) => Ok(value),
+        Input::Text(value) => value.parse().map_err(|_| value_free(message)),
+    }
+}
+
 // Buffer the scalar kind before config-rs can coerce floats or booleans.
 #[derive(Deserialize)]
 #[serde(untagged)]
