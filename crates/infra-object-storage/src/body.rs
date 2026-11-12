@@ -19,8 +19,7 @@ use http_body_util::BodyExt;
 use http_body_util::combinators::UnsyncBoxBody;
 use sync_wrapper::SyncWrapper;
 
-use crate::ObjectStorageError;
-use crate::error::Failure;
+use crate::error::{Failure, LocalFailure};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -41,15 +40,10 @@ pub struct PutBody {
 #[derive(Debug)]
 pub(crate) enum UploadSource {
     InMemory,
-    Streamed {
-        /// Set when the body did not match its declared length.
-        mismatch: Arc<AtomicBool>,
-    },
+    Streamed { mismatch: Arc<AtomicBool> },
 }
 
 impl UploadSource {
-    /// Whether a streamed body failed because it did not match its declared
-    /// length.
     pub(crate) fn mismatched(&self) -> bool {
         match self {
             Self::InMemory => false,
@@ -61,7 +55,7 @@ impl UploadSource {
 impl PutBody {
     /// A streamed body that must yield exactly `len` bytes. A body that
     /// yields more or fewer fails the put with
-    /// [`ObjectStorageError::Rejected`] instead of storing a truncated object.
+    /// [`crate::ObjectStorageError::Rejected`] instead of storing a truncated object.
     ///
     /// The caller owns finite source storage, frame sizes and concurrent uploads.
     /// Each custom [`Body::poll_frame`] call must do finite, trusted, nonblocking
@@ -73,7 +67,7 @@ impl PutBody {
         B: Body<Data = Bytes, Error = E> + Send + 'static,
         E: Into<BoxError> + 'static,
     {
-        let (body, mismatch) = ExactLength::new(len, body);
+        let (body, mismatch) = ExactLength::wrap_with_mismatch_flag(len, body);
         Self {
             len,
             stream: ByteStream::from_body_1_x(body),
@@ -98,17 +92,11 @@ impl PutBody {
             return Ok(self);
         }
         match self.stream.next().await {
-            Some(_) if self.source.mismatched() => Err(length_refusal()),
-            Some(_) => Err(Failure::new(ObjectStorageError::Rejected, "body")),
+            Some(_) if self.source.mismatched() => Err(LocalFailure::UploadLengthMismatch.into()),
+            Some(_) => Err(LocalFailure::UploadBody.into()),
             None => Ok(Self::from(Bytes::new())),
         }
     }
-}
-
-/// The classification for a streamed body that did not match its declared
-/// length.
-pub(crate) fn length_refusal() -> Failure {
-    Failure::new(ObjectStorageError::Rejected, "body_length")
 }
 
 /// In-memory bytes. The SDK can sign a checksum of them as a header.
@@ -149,7 +137,7 @@ struct ExactLength {
 }
 
 impl ExactLength {
-    fn new<B, E>(len: u64, body: B) -> (Self, Arc<AtomicBool>)
+    fn wrap_with_mismatch_flag<B, E>(len: u64, body: B) -> (Self, Arc<AtomicBool>)
     where
         B: Body<Data = Bytes, Error = E> + Send + 'static,
         E: Into<BoxError> + 'static,
@@ -288,7 +276,7 @@ mod tests {
 
     /// Poll the way hyper does: stop as soon as `len` bytes are through.
     fn send(len: u64, body: Frames) -> (Result<u64, ()>, bool) {
-        let (mut body, mismatch) = ExactLength::new(len, body);
+        let (mut body, mismatch) = ExactLength::wrap_with_mismatch_flag(len, body);
         let waker = std::task::Waker::noop();
         let mut context = Context::from_waker(waker);
         let mut sent = 0;
@@ -370,7 +358,7 @@ mod tests {
                 empty_tail: true,
                 polls: Arc::clone(&polls),
             };
-            let (mut body, mismatch) = ExactLength::new(len, source);
+            let (mut body, mismatch) = ExactLength::wrap_with_mismatch_flag(len, source);
             let wake = Arc::new(WakeFlag::default());
             let waker = Waker::from(Arc::clone(&wake));
             let mut context = Context::from_waker(&waker);
@@ -423,7 +411,7 @@ mod tests {
                 empty_tail: false,
                 polls: Arc::clone(&polls),
             };
-            let (mut body, mismatch) = ExactLength::new(len, source);
+            let (mut body, mismatch) = ExactLength::wrap_with_mismatch_flag(len, source);
             let wake = Arc::new(WakeFlag::default());
             let waker = Waker::from(Arc::clone(&wake));
             let mut context = Context::from_waker(&waker);
@@ -496,7 +484,7 @@ mod tests {
             Frame::data(Bytes::from_static(b"abcd")),
             Frame::trailers(trailers),
         ]));
-        let (mut body, mismatch) = ExactLength::new(4, body);
+        let (mut body, mismatch) = ExactLength::wrap_with_mismatch_flag(4, body);
         let waker = std::task::Waker::noop();
         let mut context = Context::from_waker(waker);
         let first = Pin::new(&mut body).poll_frame(&mut context);

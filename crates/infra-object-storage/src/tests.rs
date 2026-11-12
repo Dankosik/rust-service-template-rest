@@ -11,7 +11,7 @@ use bytes::Bytes;
 use http_body_util::BodyExt;
 use secrecy::SecretString;
 
-use crate::error::Failure;
+use crate::error::{Failure, LocalFailure};
 use crate::provider::{UploadChecksum, admit};
 use crate::{
     ConfigError, ContentType, CredentialSource, ObjectKey, ObjectStorage, ObjectStorageError,
@@ -1186,13 +1186,13 @@ async fn metrics_carry_only_operation_and_outcome() {
             .succeed();
         storage
             .start_observation(crate::observe::Operation::Head)
-            .fail(&Failure::new(ObjectStorageError::NotFound, "404"));
+            .fail(&Failure {
+                error: ObjectStorageError::NotFound,
+                error_type: "404".into(),
+            });
         storage
             .start_observation(crate::observe::Operation::Head)
-            .fail(&Failure::new(
-                ObjectStorageError::Integrity,
-                "content_length",
-            ));
+            .fail(&LocalFailure::ContentLength.into());
     });
     let rendered = handle.render();
     assert!(

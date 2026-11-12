@@ -22,6 +22,7 @@
 
 mod body;
 mod call;
+mod content_type;
 mod credentials;
 mod download;
 mod error;
@@ -50,11 +51,12 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 pub use self::body::PutBody;
 use self::call::{call_policy, within};
+pub use self::content_type::{ContentType, InvalidContentType};
 pub use self::credentials::CredentialSource;
 pub use self::download::Download;
-use self::error::{Call, Failure};
+use self::error::{Call, Failure, LocalFailure};
 pub use self::error::{ConfigError, ObjectStorageError};
-pub use self::key::{ContentType, InvalidContentType, InvalidObjectKey, ObjectKey};
+pub use self::key::{InvalidObjectKey, ObjectKey};
 pub use self::observe::{HISTOGRAMS, OPERATION_DURATION_BUCKETS, OPERATION_DURATION_METRIC};
 use self::observe::{Histograms, Operation, OperationGuard};
 pub use self::provider::Provider;
@@ -173,7 +175,7 @@ impl ObjectMetadata {
     ) -> Result<Self, Failure> {
         let size = content_length
             .and_then(|size| u64::try_from(size).ok())
-            .ok_or_else(|| Failure::new(ObjectStorageError::Integrity, "content_length"))?;
+            .ok_or_else(|| Failure::from(LocalFailure::ContentLength))?;
         Ok(Self {
             size,
             content_type: content_type.map(str::to_owned),
@@ -318,7 +320,7 @@ impl ObjectStorage {
     ) -> Result<(), ObjectStorageError> {
         let (context, mut guard) = self.begin(parent, Operation::Put)?;
         if body.len > self.inner.max_object_bytes {
-            return Err(guard.fail(&Failure::new(ObjectStorageError::TooLarge, "too_large")));
+            return Err(guard.fail(&LocalFailure::TooLarge.into()));
         }
         let _permit = self.admit(&mut guard)?;
         let body = within(&context, body.normalize_empty_stream())
@@ -372,7 +374,7 @@ impl ObjectStorage {
             // (`Rejected`), not the transport error or unknown outcome it
             // caused; see [`PutBody::stream`].
             Ok(Err(_)) | Err(_) if body.source.mismatched() => {
-                Err(guard.fail(&body::length_refusal()))
+                Err(guard.fail(&LocalFailure::UploadLengthMismatch.into()))
             }
             Ok(Err(sdk_error)) => Err(guard.fail(&error::from_sdk(call, &sdk_error))),
             Err(interrupted) => Err(interrupted.fail(&mut guard, call)),
@@ -603,12 +605,12 @@ impl ObjectStorage {
         let call = Call::Read;
         let (context, mut guard) = self.begin(parent, Operation::PresignGet)?;
         if !(PRESIGN_MIN..=PRESIGN_MAX).contains(&expires_in) {
-            return Err(guard.fail(&Failure::new(ObjectStorageError::Rejected, "expires_in")));
+            return Err(guard.fail(&LocalFailure::PresignExpiry.into()));
         }
         // `PRESIGN_MAX` is the SDK's one-week signing limit; the conversion is
         // a backstop for that limit, not a second input decision.
         let config = PresigningConfig::expires_in(expires_in)
-            .map_err(|_| guard.fail(&Failure::new(ObjectStorageError::Rejected, "expires_in")))?;
+            .map_err(|_| guard.fail(&LocalFailure::PresignExpiry.into()))?;
         let request = self
             .inner
             .client
@@ -626,10 +628,9 @@ impl ObjectStorage {
             // The URL must work alone. The SDK signs headers as headers, not
             // query parameters, so a header here (such as the expected bucket
             // owner, which is therefore not sent) would have to accompany it.
-            Ok(request) if request.headers().next().is_some() => Err(guard.fail(&Failure::new(
-                ObjectStorageError::Rejected,
-                "presigned_headers",
-            ))),
+            Ok(request) if request.headers().next().is_some() => {
+                Err(guard.fail(&LocalFailure::PresignedHeaders.into()))
+            }
             Ok(request) => {
                 let url = PresignedUrl(request.uri().to_owned());
                 Self::check(&context, &mut guard)?;
@@ -663,7 +664,7 @@ impl ObjectStorage {
     ) -> Result<OwnedSemaphorePermit, ObjectStorageError> {
         Arc::clone(&self.inner.admission)
             .try_acquire_owned()
-            .map_err(|_| guard.fail(&Failure::new(ObjectStorageError::Busy, "busy")))
+            .map_err(|_| guard.fail(&LocalFailure::Busy.into()))
     }
 
     /// Fix the complete operation cutoff before admission, preparation, or
@@ -708,7 +709,7 @@ fn download_metadata(
     max_object_bytes: u64,
 ) -> Result<ObjectMetadata, Failure> {
     if output.content_range().is_some() {
-        return Err(Failure::new(ObjectStorageError::Integrity, "content_range"));
+        return Err(LocalFailure::ContentRange.into());
     }
     let metadata = ObjectMetadata::from_response_fields(
         output.content_length(),
@@ -717,7 +718,7 @@ fn download_metadata(
         output.e_tag(),
     )?;
     if metadata.size > max_object_bytes {
-        return Err(Failure::new(ObjectStorageError::TooLarge, "too_large"));
+        return Err(LocalFailure::TooLarge.into());
     }
     Ok(metadata)
 }
@@ -734,7 +735,7 @@ fn https_client() -> SharedHttpClient {
 }
 
 /// `HeadBucket` probe named `object_storage`. Failure text carries only the
-/// bounded error type. It bypasses admission, so load never fails readiness.
+/// bounded error type. The probe bypasses the object-operation semaphore.
 /// It runs on the client's read policy with the full `operation_timeout`.
 #[derive(Clone, Debug)]
 pub struct BucketProbe {

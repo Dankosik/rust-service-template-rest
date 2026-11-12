@@ -62,7 +62,8 @@ impl Operation {
         }
     }
 
-    /// The S3 API operation, recorded as `rpc.method`.
+    /// The operation recorded as `rpc.method`. Presigning is named separately
+    /// from GET because it signs a request locally.
     fn method(self) -> &'static str {
         match self {
             Self::Put => "PutObject",
@@ -112,8 +113,8 @@ impl Histograms {
     }
 }
 
-/// One operation from admission to its outcome. Dropping it first records
-/// `cancelled`: in Rust a dropped future is the cancellation.
+/// Starts before admission so refusals are observed too. Dropping the guard
+/// before recording an outcome records `cancelled`.
 pub(crate) struct OperationGuard {
     started: Instant,
     operation: Operation,

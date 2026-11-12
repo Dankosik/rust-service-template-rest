@@ -127,34 +127,62 @@ enum FailureKind<'a> {
 pub(crate) struct Failure {
     pub(crate) error: ObjectStorageError,
     /// The provider's error code when it is a short identifier, otherwise the
-    /// HTTP status, the transport class, or a fixed local label (see
-    /// [`Failure::new`]). Never provider message text.
+    /// HTTP status, the transport class, or a fixed local label. Never
+    /// provider message text.
     pub(crate) error_type: Cow<'static, str>,
 }
 
 impl Failure {
-    /// A local cause with a static observation label: `too_large`, `busy`,
-    /// `expires_in`, `presigned_headers`, `content_range`, `body_length`,
-    /// `checksum`, `content_length`, or `body`; [`Failure::stopped`] adds
-    /// `timeout` and `cancelled`. `body` names two causes with different
-    /// errors: `Rejected` for a failed upload source, `Unavailable` for a
-    /// failed download body.
-    pub(crate) fn new(error: ObjectStorageError, error_type: &'static str) -> Self {
+    fn with_label(error: ObjectStorageError, error_type: &'static str) -> Self {
         Self {
             error,
             error_type: Cow::Borrowed(error_type),
         }
     }
 
-    /// The operation context stopped before the request could have been sent.
+    /// The stopped context maps to unavailable, including when a read has
+    /// already received headers or started streaming.
     pub(crate) fn stopped(stopped: Stopped) -> Self {
-        Self::new(ObjectStorageError::Unavailable, stop_label(stopped))
+        Self::with_label(ObjectStorageError::Unavailable, stop_label(stopped))
     }
 
     /// The operation context stopped after the request may have been sent:
     /// its reply is lost.
     pub(crate) fn stopped_after_send(call: Call, stopped: Stopped) -> Self {
-        Self::new(classify(call, FailureKind::Lost), stop_label(stopped))
+        Self::with_label(classify(call, FailureKind::Lost), stop_label(stopped))
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum LocalFailure {
+    Busy,
+    TooLarge,
+    UploadBody,
+    UploadLengthMismatch,
+    DownloadBody,
+    ContentLength,
+    ContentRange,
+    ChecksumMismatch,
+    PresignExpiry,
+    PresignedHeaders,
+}
+
+impl From<LocalFailure> for Failure {
+    fn from(cause: LocalFailure) -> Self {
+        use ObjectStorageError as E;
+        let (error, label) = match cause {
+            LocalFailure::Busy => (E::Busy, "busy"),
+            LocalFailure::TooLarge => (E::TooLarge, "too_large"),
+            LocalFailure::UploadBody => (E::Rejected, "body"),
+            LocalFailure::UploadLengthMismatch => (E::Rejected, "body_length"),
+            LocalFailure::DownloadBody => (E::Unavailable, "body"),
+            LocalFailure::ContentLength => (E::Integrity, "content_length"),
+            LocalFailure::ContentRange => (E::Integrity, "content_range"),
+            LocalFailure::ChecksumMismatch => (E::Integrity, "checksum"),
+            LocalFailure::PresignExpiry => (E::Rejected, "expires_in"),
+            LocalFailure::PresignedHeaders => (E::Rejected, "presigned_headers"),
+        };
+        Self::with_label(error, label)
     }
 }
 
@@ -219,7 +247,7 @@ fn classify(call: Call, kind: FailureKind<'_>) -> ObjectStorageError {
         FailureKind::NotSent => E::Rejected,
         FailureKind::NoCredentials => E::Unavailable,
         FailureKind::Lost => call.ambiguous(),
-        FailureKind::Status { status, code } => match (status_of_reply(status, code), code) {
+        FailureKind::Status { status, code } => match (classification_status(status, code), code) {
             // A missing bucket is configuration, not a missing object. S3
             // answers a delete of a missing key with 204, so a delete 404 is
             // the bucket too; a provider's `NoSuchKey` on delete never gets
@@ -244,7 +272,7 @@ fn classify(call: Call, kind: FailureKind<'_>) -> ObjectStorageError {
 /// 200 and an `<Error>` body when it fails after accepting the request, so a
 /// success status carries no cause: the code names it, and an unknown code is
 /// a server failure because the mutation may have applied.
-fn status_of_reply(status: u16, code: Option<&str>) -> u16 {
+fn classification_status(status: u16, code: Option<&str>) -> u16 {
     if !(200..300).contains(&status) {
         return status;
     }
