@@ -175,16 +175,16 @@ impl TokenEndpoint {
             .header(ACCEPT, "application/json")
             .body(Bytes::from(body))
             .map_err(|_| AcquisitionError::InvalidResponse)?;
-        let mut provider_unavailable = false;
+        let mut response_status = None;
         let context = OperationContext::from_deadline(Deadline::at(deadline));
         let response = self
             .http
             .execute_with_response_status(request, &context, |status| {
-                provider_unavailable =
-                    status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS;
+                response_status = Some(status);
             })
             .await;
-        if provider_unavailable
+        if let Some(status) = response_status
+            && !status.is_success()
             && matches!(
                 &response,
                 Ok(_)
@@ -192,7 +192,12 @@ impl TokenEndpoint {
                         | infra_outbound_http::Error::Transport { .. })
             )
         {
-            return Err(AcquisitionError::Unavailable);
+            if status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS {
+                return Err(AcquisitionError::Unavailable);
+            }
+            if response.is_err() {
+                return Err(AcquisitionError::Rejected(Rejection::Other));
+            }
         }
         let response = response.map_err(|error| map_transport_error(&error))?;
         decode_token_response(&response)
