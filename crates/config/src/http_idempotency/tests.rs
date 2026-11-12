@@ -58,20 +58,14 @@ fn unknown_keys_in_the_section_fail() {
 #[test]
 fn required_retention_names_postgres_enabled_first() {
     let config = HttpIdempotencyConfig::default();
-    let err = config
-        .required_retention(&PostgresConfig::default())
-        .unwrap_err();
+    let err = config.required_retention(false).unwrap_err();
     assert_eq!(err.key, "postgres.enabled");
 }
 
 #[test]
 fn required_retention_names_the_retention_once_postgres_is_enabled() {
     let config = HttpIdempotencyConfig::default();
-    let postgres = PostgresConfig {
-        enabled: true,
-        ..PostgresConfig::default()
-    };
-    let err = config.required_retention(&postgres).unwrap_err();
+    let err = config.required_retention(true).unwrap_err();
     assert_eq!(err.key, "http_idempotency.retention");
 }
 
@@ -80,12 +74,8 @@ fn required_retention_succeeds_once_both_are_set() {
     let config = HttpIdempotencyConfig {
         retention: Some(Duration::from_secs(3600)),
     };
-    let postgres = PostgresConfig {
-        enabled: true,
-        ..PostgresConfig::default()
-    };
     assert_eq!(
-        config.required_retention(&postgres).unwrap(),
+        config.required_retention(true).unwrap(),
         Duration::from_secs(3600)
     );
 }

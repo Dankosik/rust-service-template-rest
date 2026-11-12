@@ -37,7 +37,10 @@ pub(super) async fn activate(
 /// Why a served idempotent operation has no store: the configuration key
 /// that is missing, or an unavailable store when every key is set.
 fn unconfigured(config: &Config) -> BootstrapError {
-    match config.http_idempotency.required_retention(&config.postgres) {
+    match config
+        .http_idempotency
+        .required_retention(config.postgres.enabled)
+    {
         Err(invalid) => invalid.into(),
         Ok(_) => infra_idempotency_store::StartupError::Unavailable.into(),
     }
@@ -54,7 +57,7 @@ async fn start(
 ) -> Result<(), BootstrapError> {
     let retention = config
         .http_idempotency
-        .required_retention(&config.postgres)?;
+        .required_retention(config.postgres.enabled)?;
     store.check_startup().await?;
     background.spawn(
         "idempotency_cleanup",

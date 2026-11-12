@@ -282,7 +282,7 @@ fn env_parses_durations_sizes_numbers_and_enums() {
     assert_eq!(cfg.http.request_timeout, Duration::from_millis(500));
     assert_eq!(cfg.http.max_body_bytes, bytesize::ByteSize::mib(2));
     assert_eq!(cfg.http.max_in_flight, 12);
-    assert_eq!(cfg.http.connection_age(), Some(Duration::from_hours(1)));
+    assert_eq!(cfg.http.max_connection_age(), Some(Duration::from_hours(1)));
     assert!(cfg.http.access_log_health_probes);
     assert_eq!(cfg.log.format, LogFormat::Text);
     assert_eq!(

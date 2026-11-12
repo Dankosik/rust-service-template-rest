@@ -128,7 +128,7 @@ impl HttpConfig {
 
     /// Adapter form of `http.max_connection_age`: `None` means no age.
     #[must_use]
-    pub fn connection_age(&self) -> Option<Duration> {
+    pub fn max_connection_age(&self) -> Option<Duration> {
         (!self.max_connection_age.is_zero()).then_some(self.max_connection_age)
     }
 
@@ -265,13 +265,13 @@ mod tests {
 
     #[test]
     fn a_connection_age_is_off_at_zero_or_at_least_a_second() {
-        assert_eq!(HttpConfig::default().connection_age(), None);
+        assert_eq!(HttpConfig::default().max_connection_age(), None);
         let aged = HttpConfig {
             max_connection_age: Duration::from_mins(30),
             ..HttpConfig::default()
         };
         aged.validate().unwrap();
-        assert_eq!(aged.connection_age(), Some(Duration::from_mins(30)));
+        assert_eq!(aged.max_connection_age(), Some(Duration::from_mins(30)));
         let too_short = HttpConfig {
             max_connection_age: Duration::from_millis(500),
             ..HttpConfig::default()

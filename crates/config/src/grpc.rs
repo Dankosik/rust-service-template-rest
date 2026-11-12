@@ -139,7 +139,7 @@ impl GrpcConfig {
 
     /// Adapter form of `grpc.max_connection_age`: `None` means no age.
     #[must_use]
-    pub fn connection_age(&self) -> Option<Duration> {
+    pub fn max_connection_age(&self) -> Option<Duration> {
         (!self.max_connection_age.is_zero()).then_some(self.max_connection_age)
     }
 

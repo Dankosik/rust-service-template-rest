@@ -57,7 +57,12 @@ fn an_active_provider_needs_bucket_and_credentials() {
 fn providers_accept_only_their_own_keys() {
     let mut amazon = railway();
     amazon.provider = ObjectStorageProvider::AmazonS3;
-    assert_eq!(key_of(&amazon, "production"), "object_storage.endpoint");
+    let error = amazon.validate("production").unwrap_err();
+    assert_eq!(error.key, "object_storage.endpoint");
+    assert_eq!(
+        error.message,
+        "must be empty when object_storage.provider = amazon_s3"
+    );
     amazon.endpoint.clear();
     assert_eq!(key_of(&amazon, "production"), "object_storage.region");
     amazon.region = "eu-central-1".to_owned();
@@ -75,9 +80,11 @@ fn providers_accept_only_their_own_keys() {
     r2.region = "auto".to_owned();
     r2.validate("production").unwrap();
     r2.expected_bucket_owner = "123456789012".to_owned();
+    let error = r2.validate("production").unwrap_err();
+    assert_eq!(error.key, "object_storage.expected_bucket_owner");
     assert_eq!(
-        key_of(&r2, "production"),
-        "object_storage.expected_bucket_owner"
+        error.message,
+        "is accepted only when object_storage.provider = amazon_s3"
     );
 }
 
@@ -122,7 +129,12 @@ fn path_style_belongs_to_the_generic_provider() {
 
     let mut other = railway();
     other.path_style = true;
-    assert_eq!(key_of(&other, "production"), "object_storage.path_style");
+    let error = other.validate("production").unwrap_err();
+    assert_eq!(error.key, "object_storage.path_style");
+    assert_eq!(
+        error.message,
+        "must be false unless object_storage.provider = s3_compatible"
+    );
 }
 
 #[test]
