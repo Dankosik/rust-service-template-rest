@@ -346,6 +346,10 @@ const REJECT_DRAIN_BYTES: usize = 64 * 1024;
 /// the headers, so an immediate answer closes the stream while that DATA is
 /// in flight; h2 answers the late DATA with a stream reset, and after 1024
 /// such resets on one connection closes it, with every other call on it.
+#[allow(
+    dead_code,
+    reason = "only the optional bearer and service authentication profiles use the full drain"
+)]
 pub(crate) async fn reject(request: Request, status: tonic::Status) -> Response {
     reject_with_drain(request, status, REJECT_DRAIN).await
 }
