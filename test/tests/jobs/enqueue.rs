@@ -1313,6 +1313,29 @@ async fn e6_compare_live_payload_distinguishes_same_and_different_live_duplicate
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn compare_live_payload_reports_undecodable_legacy_holder(pool: PgPool) {
+    let jobs = open(&pool, 1).await;
+    let key = "legacy-compare";
+    insert_running(&jobs, key).await;
+
+    in_tx(&jobs, async |tx| -> Result<(), AttemptError> {
+        let proposed = Note {
+            text: "valid".to_owned(),
+        };
+        let result = duplicate_then_compare(tx, key, &proposed).await;
+        std::assert_matches!(
+            result,
+            Err(AttemptError::Enqueue(EnqueueError::PayloadDoesNotDecode(_)))
+        );
+        still_usable(tx).await;
+        Ok(())
+    })
+    .await
+    .expect("comparison failure leaves the transaction usable");
+    super::close_pools(&[&jobs]).await;
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn e6_compare_live_payload_keeps_the_live_key_locked_until_commit(pool: PgPool) {
     let jobs = open(&pool, 3).await;
     let key = "compare-lock".to_owned();
