@@ -93,7 +93,7 @@ impl NativeConnection {
     }
 
     // Completion at entry takes precedence over cancellation and deadline.
-    // A timed-out caller leaves requested termination owned by the native client.
+    // When the wait is interrupted, the native client owns the requested termination.
     pub(crate) async fn close(
         &self,
         deadline: Instant,
@@ -122,12 +122,12 @@ impl NativeConnection {
             }
         };
         let outcome = if cancel.is_cancelled() || Instant::now() >= deadline {
-            CloseOutcome::TimedOut
+            CloseOutcome::WaitInterrupted
         } else {
             tokio::select! {
                 biased;
-                () = cancel.cancelled() => CloseOutcome::TimedOut,
-                () = tokio::time::sleep_until(deadline) => CloseOutcome::TimedOut,
+                () = cancel.cancelled() => CloseOutcome::WaitInterrupted,
+                () = tokio::time::sleep_until(deadline) => CloseOutcome::WaitInterrupted,
                 result = drain => result,
             }
         };

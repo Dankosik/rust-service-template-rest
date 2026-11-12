@@ -175,8 +175,9 @@ impl PreparedEvent {
     }
 
     async fn outbox_metadata_bytes(&self) -> Result<usize, infra_jobs::EnqueueError> {
-        let mut total = infra_jobs::json_payload_len(&PublishDomainEvent::fixed_fields(self))
-            .map_err(infra_jobs::EnqueueError::Serialize)?;
+        let mut total =
+            infra_jobs::json_payload_len(&PublishDomainEvent::for_metadata_sizing(self))
+                .map_err(infra_jobs::EnqueueError::Serialize)?;
         let mut budget = PREFLIGHT_BYTES_PER_POLL;
         for field in self.outbox_text().fields() {
             let mut offset = 0;
@@ -189,7 +190,7 @@ impl PreparedEvent {
                     continue;
                 }
                 // Reuse serde's escaping over a bounded slice of the source.
-                // The fixed fields already contributed the string quotes.
+                // The sizing baseline already contributed the string quotes.
                 total += infra_jobs::json_payload_len(&field[offset..end])
                     .map_err(infra_jobs::EnqueueError::Serialize)?
                     - 2;
@@ -259,9 +260,9 @@ impl From<&PreparedEvent> for PublishDomainEvent {
 }
 
 impl PublishDomainEvent {
-    /// Only the fields whose serialized size does not depend on caller text.
-    /// Empty strings do not allocate, so the preflight never clones that text.
-    fn fixed_fields(event: &PreparedEvent) -> Self {
+    /// Empty strings keep the JSON keys and quotes in the preflight count
+    /// without cloning caller text or encoding the body.
+    fn for_metadata_sizing(event: &PreparedEvent) -> Self {
         Self::with_text(event, &OutboxText::default())
     }
 

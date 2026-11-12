@@ -159,7 +159,7 @@ pub enum CloseOutcome {
     Complete,
     /// Cancellation or the effective deadline ended the caller's wait.
     /// Native force-close was requested; completion has not been confirmed.
-    TimedOut,
+    WaitInterrupted,
     /// The client closing could not be confirmed.
     UnobservedClose,
 }
@@ -267,7 +267,7 @@ impl Messaging {
     /// A client already closed, with its final event observed, returns
     /// [`CloseOutcome::Complete`] even with cancellation or an elapsed deadline.
     /// Otherwise cancellation or expiry requests native force-close and returns
-    /// [`CloseOutcome::TimedOut`] without waiting for either observation. The
+    /// [`CloseOutcome::WaitInterrupted`] without waiting for either observation. The
     /// native client retains ownership of the requested termination.
     pub async fn close(self, deadline: Instant, cancel: &CancellationToken) -> CloseOutcome {
         self.shared.begin_drain();
