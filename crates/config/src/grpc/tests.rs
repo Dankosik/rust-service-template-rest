@@ -195,6 +195,25 @@ fn grpc_limits_load_from_the_environment_and_a_bad_one_names_its_key() {
     assert_matches!(&err, Error::Validate(error) if error.key == "grpc.request_timeout", "{err}");
 }
 
+#[rstest::rstest]
+#[case::in_flight("max_in_flight")]
+#[case::connections("max_connections")]
+fn grpc_limits_reject_negative_toml_floats(#[case] key: &str) {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write(&dir, "bad.toml", &format!("[grpc]\n{key} = -1.0\n"));
+    let err = load_from(
+        &LoadOptions {
+            config: Some(file),
+            ..LoadOptions::default()
+        },
+        BUILD,
+        env(&[]),
+    )
+    .unwrap_err();
+    assert!(matches!(&err, Error::Deserialize(_)), "{err}");
+    assert!(err.to_string().contains(&format!("grpc.{key}")), "{err}");
+}
+
 #[test]
 fn grpc_private_key_is_environment_only_and_debug_is_redacted() {
     let dir = tempfile::tempdir().unwrap();
