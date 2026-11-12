@@ -51,7 +51,8 @@ impl<'de> Deserialize<'de> for Audiences {
             Input::One(value) => vec![value],
             Input::Many(values) => values,
         };
-        Self::try_new(values).map_err(value_free)
+        Self::try_new(values)
+            .map_err(|message| value_free(format_args!("`authn.audience` {message}")))
     }
 }
 
@@ -213,7 +214,9 @@ where
                 JwtAlgorithm::deserialize(serde::de::value::StrDeserializer::new(value.trim()))
             })
             .collect::<Result<_, _>>()
-            .map_err(|_: D::Error| value_free("must contain only supported JWT algorithms")),
+            .map_err(|_: D::Error| {
+                value_free("`authn.algorithms` must contain only supported JWT algorithms")
+            }),
     }
 }
 // template:end oidc-jwt:authn-default-algorithms

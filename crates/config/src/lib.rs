@@ -4,11 +4,14 @@
 //! files in order → `APP__SECTION__KEY` variables, read from the files of
 //! `--secrets-dir` and then from the environment. A later source may override
 //! individual keys in an earlier table. Replacing the table with a value
-//! fails startup, since it could hide unknown keys before decoding. Unknown
-//! keys anywhere fail startup. Secret-like keys may carry a value only
-//! through a variable. Each section owns its type, defaults, and validation
-//! in one file.
-//! [`Config::validate`] runs those section validators; a rule spanning
+//! fails startup, since it could hide unknown keys before decoding. Secret-like
+//! keys may carry a value only through a variable.
+//!
+//! The full [`Config`] snapshot rejects unknown keys during decoding. The
+//! migration and jobs operator loaders apply the shared input rules, then
+//! ignore sections outside their own snapshots when decoding.
+//!
+//! [`Config::validate`] delegates to each section's validator. A rule spanning
 //! two sections lives in the one that depends on the other. Rules that need
 //! process structure, such as the drain-plus-teardown tail against the grace
 //! period, stay in the composition root.
@@ -20,6 +23,7 @@
 mod app;
 mod health;
 mod http;
+mod listener_limits;
 // template:begin grpc:config-module
 mod grpc;
 // template:end grpc:config-module
