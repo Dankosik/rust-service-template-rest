@@ -185,29 +185,31 @@ impl OperationGuard {
         self.span.record("otel.status_code", "ERROR");
         self.finish(Outcome::Failure(failure.error));
         let operation = self.operation.label();
-        self.span.in_scope(|| match failure.error {
-            ObjectStorageError::NotFound
-            | ObjectStorageError::AlreadyExists
-            | ObjectStorageError::TooLarge
-            | ObjectStorageError::Busy => tracing::debug!(
-                object_storage.operation = operation,
-                object_storage.outcome = failure.error.label(),
-                error.type = failure.error_type.as_ref(),
-                aws.request_id = self.request_id.as_deref(),
-                aws.extended_request_id = self.extended_request_id.as_deref(),
-                "object_storage_operation_failed"
-            ),
-            ObjectStorageError::Unavailable
-            | ObjectStorageError::Rejected
-            | ObjectStorageError::OutcomeUnknown
-            | ObjectStorageError::Integrity => tracing::warn!(
-                object_storage.operation = operation,
-                object_storage.outcome = failure.error.label(),
-                error.type = failure.error_type.as_ref(),
-                aws.request_id = self.request_id.as_deref(),
-                aws.extended_request_id = self.extended_request_id.as_deref(),
-                "object_storage_operation_failed"
-            ),
+        self.span.in_scope(|| {
+            macro_rules! emit_failure {
+                ($level:expr) => {
+                    tracing::event!(
+                        $level,
+                        object_storage.operation = operation,
+                        object_storage.outcome = failure.error.label(),
+                        error.type = failure.error_type.as_ref(),
+                        aws.request_id = self.request_id.as_deref(),
+                        aws.extended_request_id = self.extended_request_id.as_deref(),
+                        "object_storage_operation_failed"
+                    )
+                };
+            }
+
+            match failure.error {
+                ObjectStorageError::NotFound
+                | ObjectStorageError::AlreadyExists
+                | ObjectStorageError::TooLarge
+                | ObjectStorageError::Busy => emit_failure!(tracing::Level::DEBUG),
+                ObjectStorageError::Unavailable
+                | ObjectStorageError::Rejected
+                | ObjectStorageError::OutcomeUnknown
+                | ObjectStorageError::Integrity => emit_failure!(tracing::Level::WARN),
+            }
         });
         failure.error
     }
