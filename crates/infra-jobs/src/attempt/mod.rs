@@ -480,8 +480,9 @@ impl Drop for OwnedHandler {
     }
 }
 
-/// Inside the supervisor and cleanup bounds, a running handler's ready result
-/// wins over cancellation. After cancellation only success wins.
+/// Before the attempt deadline, a ready handler result wins over a drain
+/// request within the supervisor and cleanup bounds. After cancellation only
+/// success wins.
 async fn drive(
     cleanup: &ForcedCleanup,
     future: HandlerFuture,
@@ -501,10 +502,16 @@ async fn drive(
                 cancel.cancel();
                 return std::task::Poll::Ready(None);
             }
-            // Preparation can consume the attempt's budget before its first poll.
-            if std::mem::take(&mut first_poll) && now >= attempt_deadline {
-                cancel.cancel();
-                return std::task::Poll::Ready(Some(Ended::Timeout));
+            let first = std::mem::take(&mut first_poll);
+            if now >= attempt_deadline {
+                // Preparation can consume the attempt's budget before admission.
+                if first {
+                    cancel.cancel();
+                    return std::task::Poll::Ready(Some(Ended::Timeout));
+                }
+                // The cancellation branches supply the wakeup and reason. The
+                // handler may resume for cleanup only after its token fires.
+                return std::task::Poll::Pending;
             }
             run.as_mut().poll(cx).map(|result| Some(ended_from(result)))
         });
@@ -743,6 +750,33 @@ mod tests {
         std::assert_matches!(ended, Some(Ended::Timeout));
         assert!(cancel.is_cancelled());
         assert!(observed.await.is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_suspended_handler_observes_cancellation_on_resuming_after_its_attempt_deadline() {
+        let cleanup = ForcedCleanup::default();
+        let cancel = CancellationToken::new();
+        let handler_cancel = cancel.clone();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let (resume, suspended) = tokio::sync::oneshot::channel();
+        let (ran, observed) = tokio::sync::oneshot::channel();
+        let mut attempt = std::pin::pin!(drive(
+            &cleanup,
+            Box::pin(async move {
+                suspended.await.unwrap();
+                let _ = ran.send(handler_cancel.is_cancelled());
+                Err(JobError::retryable("handler stopped"))
+            }),
+            cancel,
+            deadline,
+            deadline + Duration::from_secs(5),
+        ));
+        assert!(futures_util::poll!(attempt.as_mut()).is_pending());
+        tokio::time::advance(Duration::from_secs(1)).await;
+        resume.send(()).unwrap();
+
+        std::assert_matches!(attempt.await, Some(Ended::Timeout));
+        assert!(observed.await.unwrap());
     }
 
     #[tokio::test(start_paused = true)]

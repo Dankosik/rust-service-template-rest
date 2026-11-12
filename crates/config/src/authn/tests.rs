@@ -401,25 +401,56 @@ fn introspection_environment_rejects_out_of_range_cache_settings() {
 
 #[test]
 fn introspection_environment_rejects_invalid_scalar_overrides() {
-    for (key, value) in [
-        ("APP__AUTHN__CACHE_ENABLED", ""),
-        ("APP__AUTHN__CACHE_ENABLED", "not-a-boolean"),
-        ("APP__AUTHN__CACHE_CAPACITY", ""),
-        ("APP__AUTHN__CACHE_CAPACITY", "-1"),
-        ("APP__AUTHN__CACHE_CAPACITY", "1.5"),
-        ("APP__AUTHN__PROVIDER_CONCURRENCY", ""),
-        ("APP__AUTHN__PROVIDER_CONCURRENCY", "0"),
-        ("APP__AUTHN__PROVIDER_CONCURRENCY", "4294967296"),
+    for (key, value, expected) in [
+        (
+            "APP__AUTHN__CACHE_ENABLED",
+            "",
+            "`authn.cache_enabled` must be true or false",
+        ),
+        (
+            "APP__AUTHN__CACHE_ENABLED",
+            "not-a-boolean",
+            "`authn.cache_enabled` must be true or false",
+        ),
+        (
+            "APP__AUTHN__CACHE_CAPACITY",
+            "",
+            "`authn.cache_capacity` must be an integer from 1 to 1024",
+        ),
+        (
+            "APP__AUTHN__CACHE_CAPACITY",
+            "-1",
+            "`authn.cache_capacity` must be an integer from 1 to 1024",
+        ),
+        (
+            "APP__AUTHN__CACHE_CAPACITY",
+            "1.5",
+            "`authn.cache_capacity` must be an integer from 1 to 1024",
+        ),
+        (
+            "APP__AUTHN__PROVIDER_CONCURRENCY",
+            "",
+            "`authn.provider_concurrency` must be an integer from 1 to 4294967295",
+        ),
+        (
+            "APP__AUTHN__PROVIDER_CONCURRENCY",
+            "0",
+            "`authn.provider_concurrency` must be an integer from 1 to 4294967295",
+        ),
+        (
+            "APP__AUTHN__PROVIDER_CONCURRENCY",
+            "4294967296",
+            "`authn.provider_concurrency` must be an integer from 1 to 4294967295",
+        ),
     ] {
-        assert!(
-            load_from(
-                &LoadOptions::default(),
-                BUILD,
-                introspection_environment(&[(key, value)]),
-            )
-            .is_err(),
-            "{key}={value}"
-        );
+        let rendered = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            introspection_environment(&[(key, value)]),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(rendered.contains(expected), "{key}={value}: {rendered}");
     }
 }
 // template:end oidc-introspection:load-introspection-environment

@@ -155,16 +155,16 @@ pub enum AuthnConfig {
         /// Immediate provider-exchange capacity. Missing uses 32.
         #[serde(
             default = "default_provider_concurrency",
-            deserialize_with = "deserialize_scalar"
+            deserialize_with = "deserialize_provider_concurrency"
         )]
         provider_concurrency: NonZeroU32,
         /// Reuse verified positive results until their fixed expiry. Default off.
-        #[serde(default, deserialize_with = "deserialize_scalar")]
+        #[serde(default, deserialize_with = "deserialize_cache_enabled")]
         cache_enabled: bool,
         /// Maximum retained results, from 1 through 1024. Missing uses 256.
         #[serde(
             default = "default_cache_capacity",
-            deserialize_with = "deserialize_scalar"
+            deserialize_with = "deserialize_cache_capacity"
         )]
         cache_capacity: usize,
         /// Maximum fixed retention, from 1s through 5m. Missing uses 30s.
@@ -233,14 +233,42 @@ const fn default_cache_ttl() -> Duration {
     Duration::from_secs(30)
 }
 
+fn deserialize_provider_concurrency<'de, D>(deserializer: D) -> Result<NonZeroU32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_scalar(
+        deserializer,
+        "`authn.provider_concurrency` must be an integer from 1 to 4294967295",
+    )
+}
+
+fn deserialize_cache_enabled<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_scalar(deserializer, "`authn.cache_enabled` must be true or false")
+}
+
+fn deserialize_cache_capacity<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_scalar(
+        deserializer,
+        "`authn.cache_capacity` must be an integer from 1 to 1024",
+    )
+}
+
 // The tagged enum buffers values before decoding fields, so config-rs cannot
 // coerce environment strings here. Adapt only these scalar fields; trust and
-// credential strings must retain their exact bytes.
-fn deserialize_scalar<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+// credential strings must retain their exact bytes. The buffer also hides the
+// field from config-rs, which reports the failure at `authn` alone, so
+// `invalid` names the field itself.
+fn deserialize_scalar<'de, D, T>(deserializer: D, invalid: &str) -> Result<T, D::Error>
 where
     D: Deserializer<'de>,
     T: Deserialize<'de> + std::str::FromStr,
-    T::Err: std::fmt::Display,
 {
     #[derive(Deserialize)]
     #[serde(untagged)]
@@ -249,9 +277,9 @@ where
         Text(String),
     }
 
-    match Input::<T>::deserialize(deserializer)? {
+    match Input::<T>::deserialize(deserializer).map_err(|_| value_free(invalid))? {
         Input::Typed(value) => Ok(value),
-        Input::Text(value) => value.parse().map_err(serde::de::Error::custom),
+        Input::Text(value) => value.parse().map_err(|_| value_free(invalid)),
     }
 }
 // template:end oidc-introspection:authn-default-provider-concurrency

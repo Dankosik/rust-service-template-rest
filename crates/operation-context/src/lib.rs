@@ -132,9 +132,17 @@ impl OperationContext {
     /// Derive once at operation admission; all later stages retain this child.
     #[must_use]
     pub fn child(&self, ceiling: Duration) -> Self {
-        let local = Deadline::new(Instant::now(), ceiling);
+        self.child_until(Deadline::new(Instant::now(), ceiling))
+    }
+
+    /// [`Self::child`] with a ceiling the caller keeps, to tell its own cutoff from the parent's.
+    #[must_use]
+    pub fn child_until(&self, ceiling: Deadline) -> Self {
         Self::new(
-            Some(self.deadline.map_or(local, |parent| parent.earlier(local))),
+            Some(
+                self.deadline
+                    .map_or(ceiling, |parent| parent.earlier(ceiling)),
+            ),
             self.cancellation.child_token(),
         )
     }
