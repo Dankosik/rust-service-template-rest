@@ -64,8 +64,9 @@ pub const STARTUP_TIMEOUT: Duration = connection::SETUP_TIMEOUT;
 /// Admission input. The DSN is secret; [`Debug`] redacts it.
 #[derive(Debug)]
 pub struct CacheOptions {
-    /// `redis://`, `rediss://`, `valkey://`, or `valkeys://` URL, password
-    /// included unless [`Self::password_file`] is set.
+    /// `redis://`, `rediss://`, `valkey://`, or `valkeys://` URL. Supply
+    /// the password here or through [`Self::password_file`]. If neither
+    /// supplies a password, [`Self::allow_unauthenticated`] must be set.
     pub dsn: SecretString,
     /// A file that holds the password alone, for a platform that rotates it
     /// by rewriting the file; its trailing line breaks are not part of the
