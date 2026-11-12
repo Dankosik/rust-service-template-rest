@@ -10,7 +10,7 @@ use tokio::time::Instant;
 use super::outcome::{Unacknowledged, Written};
 use super::{
     AttemptSlots, COMPLETION_MEMBERSHIPS_METRIC, ClaimFence, MembershipGauge, MetricMembership,
-    expired, within,
+    deadline_reached_or_cleanup_ended, within,
 };
 use crate::engine::{Operation, OperationError, Shared, backstop, observe_failure};
 
@@ -235,7 +235,7 @@ pub(super) async fn complete_batched(
 
 async fn write_batch(shared: &Shared, mut batch: CompletionBatch, deadline: Instant) {
     batch.prune(|entry| entry.reply.is_closed());
-    if batch.queued.is_empty() || expired(shared, deadline) {
+    if batch.queued.is_empty() || deadline_reached_or_cleanup_ended(&shared.cleanup, deadline) {
         return;
     }
     // The batch's bind arrays live in this scope so the statement future ends,
@@ -253,7 +253,7 @@ async fn write_batch(shared: &Shared, mut batch: CompletionBatch, deadline: Inst
                 let mut connection = infra_postgres::acquire(&shared.pool, "complete jobs batch")
                     .await
                     .map_err(OperationError::Acquire)?;
-                if expired(shared, deadline) {
+                if deadline_reached_or_cleanup_ended(&shared.cleanup, deadline) {
                     return Err(OperationError::TimedOut);
                 }
                 // COMPLETE for every attempt queued while the previous batch was in
