@@ -284,7 +284,7 @@ pub(crate) struct Identity {
     pub(crate) issuer: String,
     pub(crate) subject: Option<String>,
     pub(crate) client_id: Option<String>,
-    pub(crate) scopes: Vec<String>,
+    pub(crate) scopes: claims::Scopes,
     pub(crate) payload: String,
     pub(crate) access_token: secrecy::SecretString,
     pub(crate) actor: Option<Actor>,
@@ -295,13 +295,22 @@ pub(crate) struct Identity {
 impl PartialEq for Identity {
     fn eq(&self, other: &Self) -> bool {
         use secrecy::ExposeSecret;
-        self.issuer == other.issuer
-            && self.subject == other.subject
-            && self.client_id == other.client_id
-            && self.scopes == other.scopes
-            && self.payload == other.payload
-            && self.access_token.expose_secret() == other.access_token.expose_secret()
-            && self.actor == other.actor
+        let Self {
+            issuer,
+            subject,
+            client_id,
+            scopes,
+            payload,
+            access_token,
+            actor,
+        } = self;
+        issuer == &other.issuer
+            && subject == &other.subject
+            && client_id == &other.client_id
+            && scopes == &other.scopes
+            && payload == &other.payload
+            && access_token.expose_secret() == other.access_token.expose_secret()
+            && actor == &other.actor
     }
 }
 
@@ -349,17 +358,14 @@ impl Principal {
     /// The normalized, exact-case scopes from verified token evidence.
     #[must_use]
     pub fn scopes(&self) -> &[String] {
-        &self.identity.scopes
+        self.identity.scopes.as_slice()
     }
 
     /// True when every scope in `required` was granted; an empty `required`
     /// is any authenticated caller.
     #[must_use]
     pub fn has_scopes(&self, required: &[String]) -> bool {
-        // Engines store scopes sorted and deduplicated.
-        required
-            .iter()
-            .all(|scope| self.identity.scopes.binary_search(scope).is_ok())
+        self.identity.scopes.contains_all(required)
     }
 
     /// The verified `exp` claim as Unix time in seconds, without leeway.

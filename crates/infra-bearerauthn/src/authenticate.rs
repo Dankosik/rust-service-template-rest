@@ -119,7 +119,7 @@ impl Verifier {
         transport: Transport,
         context: &OperationContext,
     ) -> Result<Principal, Failure> {
-        let mut outcome = OutcomeGuard {
+        let outcome = OutcomeGuard {
             transport,
             recorded: false,
         };
@@ -129,21 +129,24 @@ impl Verifier {
             Err(failure) => Err(failure),
         };
         context.check().map_err(|_| Failure::Unavailable)?;
-        match &result {
-            Ok(_) => self.counters.transport.get(transport).increment(1),
-            Err(failure) => {
-                counter(transport, Outcome::Failure(*failure)).increment(1);
-            }
-        }
-        outcome.recorded = true;
+        outcome.finish(&self.counters.transport, &result);
         result
     }
 }
 
-/// Records `cancelled` on drop unless an outcome was recorded.
 struct OutcomeGuard {
     transport: Transport,
     recorded: bool,
+}
+
+impl OutcomeGuard {
+    fn finish(mut self, counters: &TransportSuccessCounters, result: &Result<Principal, Failure>) {
+        match result {
+            Ok(_) => counters.get(self.transport).increment(1),
+            Err(failure) => counter(self.transport, Outcome::Failure(*failure)).increment(1),
+        }
+        self.recorded = true;
+    }
 }
 
 impl Drop for OutcomeGuard {

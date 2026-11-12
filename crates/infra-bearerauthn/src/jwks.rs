@@ -177,7 +177,7 @@ pub(crate) fn parse_key_set(
 }
 
 fn admit_key(jwk: Jwk, configured: &[JwtAlgorithm]) -> Result<JwtKey, KeyRejection> {
-    if !signature_usage(&jwk) {
+    if !permits_signature_verification(&jwk) {
         return Err(KeyRejection::IncompatibleUsage);
     }
     let family = KeyFamily::from_jwk(&jwk).ok_or(KeyRejection::UnsupportedFamily)?;
@@ -210,7 +210,7 @@ fn admit_key(jwk: Jwk, configured: &[JwtAlgorithm]) -> Result<JwtKey, KeyRejecti
     })
 }
 
-fn signature_usage(jwk: &Jwk) -> bool {
+fn permits_signature_verification(jwk: &Jwk) -> bool {
     matches!(
         jwk.common.public_key_use,
         None | Some(PublicKeyUse::Signature)

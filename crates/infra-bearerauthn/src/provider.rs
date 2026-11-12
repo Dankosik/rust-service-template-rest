@@ -203,8 +203,9 @@ impl ProviderClient {
         url: &Url,
         document: Document,
     ) -> Result<Vec<u8>, ProviderFailure> {
+        let required_media_type = None;
         Exchange::start(document.operation(), "GET", url)
-            .run(self.client.get(url.clone()), None)
+            .run(self.client.get(url.clone()), required_media_type)
             .await
     }
     // template:end oidc-jwt:authn-provider-get-json
@@ -234,8 +235,9 @@ impl ProviderClient {
             .body(form_body);
         context.check().map_err(|_| ProviderFailure::Timeout)?;
         let request = request.timeout(context.remaining().unwrap_or(PROVIDER_TIMEOUT));
+        let required_media_type = Some("application/json");
         let exchange =
-            Exchange::start("introspection", "POST", url).run(request, Some("application/json"));
+            Exchange::start("introspection", "POST", url).run(request, required_media_type);
         let result = tokio::select! {
             biased;
             _ = context.wait_stopped() => return Err(ProviderFailure::Timeout),
