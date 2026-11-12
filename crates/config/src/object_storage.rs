@@ -75,9 +75,8 @@ pub struct ObjectStorageConfig {
     pub credentials: ObjectStorageCredentials,
     /// Access key id. Empty under `workload_identity`.
     pub access_key_id: String,
-    /// Secret access key. Environment only
-    /// (`APP__OBJECT_STORAGE__SECRET_ACCESS_KEY`); blank is absent. Absent
-    /// under `workload_identity`.
+    /// Set `APP__OBJECT_STORAGE__SECRET_ACCESS_KEY` in the environment or via
+    /// `--secrets-dir`. Blank is absent. Absent under `workload_identity`.
     #[serde(default, deserialize_with = "blank_secret_as_none")]
     pub secret_access_key: Option<SecretString>,
     /// Largest object a put may send or a get may return.

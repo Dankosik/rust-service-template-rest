@@ -22,8 +22,8 @@ use crate::validate::{ValidationError, duration_range, missing};
 pub struct CacheConfig {
     /// `redis://`, `rediss://`, `valkey://`, or `valkeys://`, password included
     /// unless `password_file` is set.
-    /// Environment only (`APP__CACHE__DSN`). Missing, empty, or whitespace-only
-    /// is absent (`None`).
+    /// Set `APP__CACHE__DSN` in the environment or via `--secrets-dir`.
+    /// Missing, empty, or whitespace-only is absent (`None`).
     #[serde(default, deserialize_with = "blank_secret_as_none")]
     pub dsn: Option<SecretString>,
     /// A file that holds the password alone, for a platform that rotates it

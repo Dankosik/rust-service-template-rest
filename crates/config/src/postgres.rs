@@ -47,8 +47,8 @@ pub struct PostgresConfig {
     /// readiness.
     pub enabled: bool,
     /// `postgres://user:password@host:port/database?sslmode=<mode>`.
-    /// Environment only (`APP__POSTGRES__DSN`). Missing, empty, or
-    /// whitespace-only is absent (`None`); `enabled` is a separate axis.
+    /// Set `APP__POSTGRES__DSN` in the environment or via `--secrets-dir`.
+    /// Missing, empty, or whitespace-only is absent (`None`).
     #[serde(default, deserialize_with = "blank_secret_as_none")]
     pub dsn: Option<SecretString>,
     /// A file that holds the password alone, for a platform that rotates it
@@ -66,7 +66,7 @@ pub struct PostgresConfig {
     pub max_connections: NonZeroU32,
     /// Bound on one `migrate` run after it connected, and on each
     /// `-- no-transaction` migration in it. Raise it for the run that builds
-    /// an index concurrently on a large table; the service ignores it.
+    /// an index concurrently on a large table. Only `migrate` checks the range.
     #[serde(with = "humantime_serde")]
     pub migration_deadline: Duration,
 }
@@ -105,14 +105,7 @@ impl PostgresConfig {
             u64::from(self.max_connections.get()),
             1,
             500,
-        )?;
-        duration_range(
-            "postgres.migration_deadline",
-            self.migration_deadline,
-            Duration::from_secs(1),
-            Duration::from_hours(24),
-        )?;
-        Ok(())
+        )
     }
 }
 
@@ -135,7 +128,13 @@ impl MigrationConfig {
         self.app.validate()?;
         self.log.validate()?;
         self.observability.validate()?;
-        self.postgres.validate()
+        self.postgres.validate()?;
+        duration_range(
+            "postgres.migration_deadline",
+            self.postgres.migration_deadline,
+            Duration::from_secs(1),
+            Duration::from_hours(24),
+        )
     }
 }
 
