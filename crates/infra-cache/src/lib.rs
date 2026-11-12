@@ -301,7 +301,7 @@ impl CacheNamespace {
     /// Returns [`Unavailable`] for a timeout, a stop, an unusable server, or a
     /// server error reply.
     pub async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, Unavailable> {
-        self.get_with_context(key, &OperationContext::unbounded())
+        self.get_bounded(key, &self.unbounded_command_context())
             .await
     }
 
@@ -316,10 +316,17 @@ impl CacheNamespace {
         key: &str,
         context: &OperationContext,
     ) -> Result<Option<Vec<u8>>, Unavailable> {
-        let context = self.command_context(context);
+        self.get_bounded(key, &self.command_context(context)).await
+    }
+
+    async fn get_bounded(
+        &self,
+        key: &str,
+        context: &OperationContext,
+    ) -> Result<Option<Vec<u8>>, Unavailable> {
         let operation = Operation::Get;
         let command = self.keyed_command(operation, key, 0, 0);
-        self.run(&context, operation, command, |value: &Option<Vec<u8>>| {
+        self.run(context, operation, command, |value: &Option<Vec<u8>>| {
             if value.is_some() {
                 Outcome::Hit
             } else {
@@ -342,7 +349,7 @@ impl CacheNamespace {
     /// absolute expiry overflows. A timed-out write may have landed and is
     /// never replayed.
     pub async fn set(&self, key: &str, value: &[u8], ttl: Duration) -> Result<(), SetError> {
-        self.set_with_context(key, value, ttl, &OperationContext::unbounded())
+        self.set_bounded(key, value, ttl, &self.unbounded_command_context())
             .await
     }
 
@@ -363,7 +370,17 @@ impl CacheNamespace {
         ttl: Duration,
         context: &OperationContext,
     ) -> Result<(), SetError> {
-        let context = self.command_context(context);
+        self.set_bounded(key, value, ttl, &self.command_context(context))
+            .await
+    }
+
+    async fn set_bounded(
+        &self,
+        key: &str,
+        value: &[u8],
+        ttl: Duration,
+        context: &OperationContext,
+    ) -> Result<(), SetError> {
         let milliseconds = i64::try_from(ttl.as_millis())
             .ok()
             .filter(|milliseconds| *milliseconds > 0)
@@ -374,7 +391,7 @@ impl CacheNamespace {
         // Value, `PX`, and an expiry of at most 20 decimal digits (u64).
         let mut command = self.keyed_command(operation, key, 3, value.len() + 2 + 20);
         command.arg(value).arg(options);
-        self.run(&context, operation, command, |(): &()| Outcome::Ok)
+        self.run(context, operation, command, |(): &()| Outcome::Ok)
             .await
             .map_err(SetError::Unavailable)
     }
@@ -386,7 +403,7 @@ impl CacheNamespace {
     /// Returns [`Unavailable`] for a timeout, a stop, an unusable server, or a
     /// server error reply.
     pub async fn delete(&self, key: &str) -> Result<(), Unavailable> {
-        self.delete_with_context(key, &OperationContext::unbounded())
+        self.delete_bounded(key, &self.unbounded_command_context())
             .await
     }
 
@@ -402,10 +419,18 @@ impl CacheNamespace {
         key: &str,
         context: &OperationContext,
     ) -> Result<(), Unavailable> {
-        let context = self.command_context(context);
+        self.delete_bounded(key, &self.command_context(context))
+            .await
+    }
+
+    async fn delete_bounded(
+        &self,
+        key: &str,
+        context: &OperationContext,
+    ) -> Result<(), Unavailable> {
         let operation = Operation::Delete;
         let command = self.keyed_command(operation, key, 0, 0);
-        self.run(&context, operation, command, |(): &()| Outcome::Ok)
+        self.run(context, operation, command, |(): &()| Outcome::Ok)
             .await
     }
 
@@ -413,6 +438,12 @@ impl CacheNamespace {
     /// public operation so preparation and dispatch share one cutoff.
     fn command_context(&self, context: &OperationContext) -> OperationContext {
         context.child(self.cache.command_timeout)
+    }
+
+    /// [`Self::command_context`] of an unbounded parent, without deriving a
+    /// child token that nothing could cancel.
+    fn unbounded_command_context(&self) -> OperationContext {
+        OperationContext::with_timeout(self.cache.command_timeout)
     }
 
     /// One observed command under the caller's already-bounded context.
