@@ -9,14 +9,14 @@ use jsonwebtoken::jwk::{
 };
 use serde::{Deserialize, Deserializer, de};
 
-use crate::{CallerName, InvalidCallerName, InvalidKeyId, KeyId};
+use crate::{InvalidKeyId, InvalidServiceName, KeyId, ServiceName};
 
 /// The callers a receiver trusts, read once from one JSON object whose
 /// members are caller names and whose values are JWK Sets (RFC 7517) of EC
 /// P-256 public signing keys. Every entry must be usable: a registry is
 /// operator input, and a skipped key would surface only as refused calls.
 pub struct TrustRegistry {
-    callers: BTreeMap<CallerName, Vec<TrustedKey>>,
+    callers: BTreeMap<ServiceName, Vec<TrustedKey>>,
 }
 
 pub(crate) struct TrustedKey {
@@ -37,9 +37,9 @@ pub struct TrustError {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Place {
     Document,
-    Caller(CallerName),
+    Caller(ServiceName),
     /// A caller's key by its 1-based position in the caller's `keys`.
-    Key(CallerName, usize),
+    Key(ServiceName, usize),
 }
 
 impl fmt::Display for Place {
@@ -77,7 +77,7 @@ impl TrustRegistry {
         })?;
         let entries = entries
             .0
-            .map_err(|repeated| match CallerName::parse(&repeated) {
+            .map_err(|repeated| match ServiceName::parse(&repeated) {
                 Ok(caller) => {
                     TrustError::new(Place::Caller(caller), "is repeated in the trust registry")
                 }
@@ -88,8 +88,8 @@ impl TrustRegistry {
         }
         let mut callers = BTreeMap::new();
         for (name, set) in entries {
-            let caller = CallerName::parse(&name)
-                .map_err(|_| TrustError::document(InvalidCallerName::MESSAGE))?;
+            let caller = ServiceName::parse(&name)
+                .map_err(|_| TrustError::document(InvalidServiceName::MESSAGE))?;
             let caller_error = |reason| TrustError::new(Place::Caller(caller.clone()), reason);
             let set = set
                 .0
@@ -119,15 +119,14 @@ impl TrustRegistry {
         self.callers.len()
     }
 
-    pub fn callers(&self) -> impl Iterator<Item = &CallerName> {
+    pub(crate) fn callers(&self) -> impl Iterator<Item = &ServiceName> {
         self.callers.keys()
     }
 
     /// The registered name and keys of a caller, by its spelling in `iss`.
-    pub(crate) fn caller(&self, name: &str) -> Option<(&CallerName, &[TrustedKey])> {
-        let name = CallerName::parse(name).ok()?;
+    pub(crate) fn caller(&self, name: &str) -> Option<(&ServiceName, &[TrustedKey])> {
         self.callers
-            .get_key_value(&name)
+            .get_key_value(name)
             .map(|(name, keys)| (name, keys.as_slice()))
     }
 }
@@ -308,7 +307,7 @@ mod tests {
         assert!(registry.caller("catalog").is_none());
         assert!(registry.caller("Orders").is_none());
         let verifier = crate::Verifier::new(
-            crate::CallerName::parse("catalog").unwrap(),
+            crate::ServiceName::parse("catalog").unwrap(),
             crate::JwtType::parse("example-svc+jwt").unwrap(),
             registry,
         );

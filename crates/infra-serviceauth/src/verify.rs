@@ -11,7 +11,7 @@ use shared_rules::{
     rfc7515,
 };
 
-use crate::{CallerName, JwtType, MAX_TOKEN_LIFETIME_SECONDS, TrustRegistry, unix_seconds};
+use crate::{JwtType, MAX_TOKEN_LIFETIME_SECONDS, ServiceName, TrustRegistry, unix_seconds};
 
 /// Allowance for the clock difference between caller and receiver.
 const LEEWAY_SECONDS: u64 = 30;
@@ -95,13 +95,13 @@ impl Reason {
 /// unverified request data can never pose as a caller.
 #[derive(Clone, Eq, PartialEq)]
 pub struct Caller {
-    name: CallerName,
+    name: ServiceName,
 }
 
 impl Caller {
     /// The caller's name as its trust registry entry spells it.
     #[must_use]
-    pub const fn name(&self) -> &CallerName {
+    pub const fn name(&self) -> &ServiceName {
         &self.name
     }
 }
@@ -117,7 +117,7 @@ impl fmt::Debug for Caller {
 pub struct Verifier(Arc<Inner>);
 
 struct Inner {
-    audience: CallerName,
+    audience: ServiceName,
     jwt_type: JwtType,
     trust: TrustRegistry,
     /// Registered once: a success is the hot path, and a registry lookup per
@@ -150,7 +150,7 @@ impl Verifier {
     /// installed later counts failures but never successes; bootstrap
     /// installs it first.
     #[must_use]
-    pub fn new(audience: CallerName, jwt_type: JwtType, trust: TrustRegistry) -> Self {
+    pub fn new(audience: ServiceName, jwt_type: JwtType, trust: TrustRegistry) -> Self {
         metrics::describe_counter!(
             VERIFICATIONS_METRIC,
             metrics::Unit::Count,
@@ -173,7 +173,7 @@ impl Verifier {
         }))
     }
 
-    pub fn callers(&self) -> impl Iterator<Item = &CallerName> {
+    pub fn callers(&self) -> impl Iterator<Item = &ServiceName> {
         self.0.trust.callers()
     }
 
@@ -470,7 +470,7 @@ mod tests {
             ]))
             .unwrap();
             let verifier = Verifier::new(
-                CallerName::parse("catalog").unwrap(),
+                ServiceName::parse("catalog").unwrap(),
                 JwtType::parse(TYPE).unwrap(),
                 trust,
             );
@@ -932,7 +932,7 @@ mod tests {
         let now = vector["now"].as_u64().unwrap();
         let verifier = |receiver: &str, jwt_type: &str| {
             Verifier::new(
-                CallerName::parse(receiver).unwrap(),
+                ServiceName::parse(receiver).unwrap(),
                 JwtType::parse(jwt_type).unwrap(),
                 TrustRegistry::parse(&vector["trust"].to_string()).unwrap(),
             )

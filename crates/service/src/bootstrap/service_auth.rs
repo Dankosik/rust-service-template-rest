@@ -1,7 +1,7 @@
 //! Service token verification and signing from the `service_auth` section.
 
 use infra_serviceauth::{
-    CallerName, JwtType, KeyId, SigningOptions, TokenSource, TrustRegistry, Verifier,
+    JwtType, KeyId, ServiceName, SigningOptions, TokenSource, TrustRegistry, Verifier,
 };
 use service_config::{Config, ServiceAuthConfig, ValidationError};
 
@@ -29,7 +29,7 @@ pub(super) fn prepare(config: &Config) -> Result<PreparedServiceAuth, Validation
     };
     let invalid =
         |key: &str, error: &dyn std::fmt::Display| ValidationError::new(key, error.to_string());
-    let name = CallerName::parse(name).map_err(|error| invalid("service_auth.name", &error))?;
+    let name = ServiceName::parse(name).map_err(|error| invalid("service_auth.name", &error))?;
     let jwt_type =
         JwtType::parse(jwt_type).map_err(|error| invalid("service_auth.jwt_type", &error))?;
     let trust =

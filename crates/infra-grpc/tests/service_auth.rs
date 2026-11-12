@@ -26,7 +26,7 @@ use health::{Readiness, RefreshPolicy};
 use infra_grpc::{Caller, ClientSecurity, Error, Limits, Services, server_options};
 use infra_http::Server;
 use infra_serviceauth::{
-    CallerName, JwtType, KeyId, SigningOptions, TokenSource, TrustRegistry, Verifier,
+    JwtType, KeyId, ServiceName, SigningOptions, TokenSource, TrustRegistry, Verifier,
     test_support::{TestKey, registry},
 };
 use opentelemetry::trace::TracerProvider as _;
@@ -119,7 +119,7 @@ impl Keys {
 
     fn verifier(&self) -> Verifier {
         Verifier::new(
-            CallerName::parse("catalog").unwrap(),
+            ServiceName::parse("catalog").unwrap(),
             JwtType::parse(TYPE).unwrap(),
             TrustRegistry::parse(&registry(&[
                 ("orders", &[&self.orders]),
@@ -334,7 +334,7 @@ async fn the_outbound_binding_signs_for_its_receiver_and_refuses_a_caller_author
     services.authenticate_callers(keys.verifier());
     let (server, address) = serve(services).await;
     let source = TokenSource::try_new(SigningOptions {
-        name: CallerName::parse("orders").unwrap(),
+        name: ServiceName::parse("orders").unwrap(),
         jwt_type: JwtType::parse(TYPE).unwrap(),
         key_id: KeyId::parse(keys.orders.kid()).unwrap(),
         private_key: keys.orders.pem().into(),

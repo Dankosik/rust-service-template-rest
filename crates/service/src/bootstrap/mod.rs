@@ -908,7 +908,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(status.code(), tonic::Code::Unauthenticated);
         let signing = infra_serviceauth::TokenSource::try_new(infra_serviceauth::SigningOptions {
-            name: infra_serviceauth::CallerName::parse("orders").unwrap(),
+            name: infra_serviceauth::ServiceName::parse("orders").unwrap(),
             jwt_type: infra_serviceauth::JwtType::parse("example-svc+jwt").unwrap(),
             key_id: infra_serviceauth::KeyId::parse(key.kid()).unwrap(),
             private_key: key.pem().into(),
