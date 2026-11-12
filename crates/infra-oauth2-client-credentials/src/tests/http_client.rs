@@ -193,6 +193,13 @@ async fn token_failures_are_sanitized_and_never_dispatch_the_resource() {
         assert!(!format!("{error:?}").contains("provider-secret-body"));
         assert!(!error.to_string().contains("provider-secret-body"));
     }
+    assert!(fixture.resource_requests().is_empty());
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn token_acquisition_stops_at_the_fetch_deadline_without_dispatching_the_resource() {
+    let fixture = Fixture::new().await;
     let gate = fixture.block_tokens();
     let client = fixture
         .credentials(&[], None)
