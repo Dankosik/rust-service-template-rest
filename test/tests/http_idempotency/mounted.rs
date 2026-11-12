@@ -89,6 +89,7 @@ const MAX_BODY_BYTES: usize = 2 * 1_048_576;
 /// The specified stored-body bound: 1 MiB.
 const STORED_BODY_BOUND: usize = 1_048_576;
 const RESERVED_NAME: &str = "reserved";
+const HANDLER_TIMEOUT_COLOR: &str = "handler-timeout";
 const KEY_DETAIL: &str = "Idempotency-Key is missing or invalid";
 const KEY_REASON: &str = concat!(
     "must be one Idempotency-Key field; An unquoted value is visible ASCII; ",
@@ -219,15 +220,25 @@ async fn create_widget(
     if !may_create(&principal) {
         return forbidden();
     }
-    idempotency
-        .execute(
+    let handler_timeout = input.color == HANDLER_TIMEOUT_COLOR;
+    let execution =
+        idempotency.execute(
             async |tx: &mut Tx<'_>| match widgets.create(tx, &input).await {
                 Ok(widget) => created_response(widget),
                 // Non-2xx: rolled back and returned unchanged.
                 Err(err) => err.into_problem().into_response(),
             },
-        )
-        .await
+        );
+    if handler_timeout {
+        return tokio::time::timeout(Duration::from_secs(1), execution)
+            .await
+            .unwrap_or_else(|_| {
+                Problem::new(Code::GatewayTimeout)
+                    .detail("widget handler deadline expired")
+                    .into_response()
+            });
+    }
+    execution.await
 }
 
 #[utoipa::path(
@@ -1655,12 +1666,33 @@ async fn p9_the_database_cutoff_answers_unavailable_and_the_same_key_recovers(po
     // The key is free once `PostgreSQL` ends the dropped transaction.
     let (retry, conflicts) = until_free(|| mounted.create(ALICE, "k-5", &input, "req-retry")).await;
     created(&retry, "req-retry");
+
+    // A handler can stop waiting before the store cutoff and answer with its own Problem.
+    let input = json!({"name": "gizmo", "color": HANDLER_TIMEOUT_COLOR});
+    mounted.hold.arm();
+    let pause_on_entry = async {
+        mounted.hold.entered().await;
+        tokio::time::pause();
+    };
+    let (abandoned, ()) = tokio::join!(
+        mounted.create(ALICE, "k-handler", &input, "req-abandoned"),
+        pause_on_entry
+    );
+    let body = problem(
+        &abandoned,
+        StatusCode::GATEWAY_TIMEOUT,
+        "gateway_timeout",
+        "req-abandoned",
+    );
+    assert_eq!(body["detail"], "widget handler deadline expired");
+    tokio::time::resume();
     assert_eq!(
         outcomes(&recorder),
         counts(&[
             ("unavailable", 1),
             ("in_progress", conflicts),
-            ("executed", 1)
+            ("executed", 1),
+            ("abandoned", 1)
         ])
     );
     assert_eq!(count(&pool, WIDGET_ROWS).await, 1);

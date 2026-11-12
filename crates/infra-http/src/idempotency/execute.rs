@@ -3,6 +3,7 @@
 use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use axum::extract::FromRequestParts;
@@ -80,6 +81,7 @@ pub(super) struct Attempt {
     pub(super) fingerprint: Digest,
     pub(super) operation_id: Arc<str>,
     pub(super) deadline: RequestDeadline,
+    pub(super) outcome: AttemptOutcome,
 }
 
 /// Private provenance sealed onto the successful response returned from the
@@ -89,7 +91,6 @@ pub(super) struct Attempt {
 pub(super) enum Provenance {
     Executed,
     Replayed,
-    Failed,
 }
 
 /// The extractor on an idempotent composed handler.
@@ -159,8 +160,12 @@ impl Idempotency {
             fingerprint,
             operation_id,
             deadline,
+            outcome,
         } = self.attempt;
-        let outcome = OutcomeGuard::new();
+        let guard = OutcomeGuard {
+            outcome: &outcome,
+            recorded: false,
+        };
         let attempted = match deadline.attempt_end() {
             None => Err(AttemptError::Unavailable),
             Some(attempt_end) => {
@@ -179,7 +184,7 @@ impl Idempotency {
             }
         };
         map_attempted(attempted, &scope, &operation_id)
-            .settle(deadline.at(), outcome)
+            .settle(deadline.at(), guard)
             .await
     }
 }
@@ -243,7 +248,7 @@ impl Answer {
         }
     }
 
-    async fn settle(self, deadline: Instant, guard: OutcomeGuard) -> Response {
+    async fn settle(self, deadline: Instant, guard: OutcomeGuard<'_>) -> Response {
         if self.yield_to_request_timeout && Instant::now() >= deadline {
             // Let the request deadline enforced by `context::opening` produce
             // the final 504 for an expired boundary failure: it drops this
@@ -252,11 +257,7 @@ impl Answer {
             return std::future::pending().await;
         }
         guard.record(self.outcome);
-        if self.response.status().is_success() {
-            self.response
-        } else {
-            mark_provenance(self.response, Provenance::Failed)
-        }
+        self.response
     }
 }
 
@@ -354,26 +355,35 @@ impl fmt::Display for ScopeDigest<'_> {
     }
 }
 
-/// Records exactly one outcome for every attempt that entered execute.
-struct OutcomeGuard {
+/// The route can answer a refusal after dropping the execution future. Share
+/// the recording state across both lifetimes so that refusal counts once.
+#[derive(Clone, Default)]
+pub(super) struct AttemptOutcome(Arc<AtomicBool>);
+
+impl AttemptOutcome {
+    pub(super) fn record(&self, outcome: Outcome) {
+        if !self.0.swap(true, Ordering::Relaxed) {
+            outcome.record();
+        }
+    }
+}
+
+struct OutcomeGuard<'a> {
+    outcome: &'a AttemptOutcome,
     recorded: bool,
 }
 
-impl OutcomeGuard {
-    const fn new() -> Self {
-        Self { recorded: false }
-    }
-
+impl OutcomeGuard<'_> {
     fn record(mut self, outcome: Outcome) {
-        outcome.record();
         self.recorded = true;
+        self.outcome.record(outcome);
     }
 }
 
-impl Drop for OutcomeGuard {
+impl Drop for OutcomeGuard<'_> {
     fn drop(&mut self) {
         if !self.recorded {
-            Outcome::Abandoned.record();
+            self.outcome.record(Outcome::Abandoned);
         }
     }
 }
@@ -415,6 +425,7 @@ mod tests {
                         budget,
                     )
                     .expect("the deadline fits"),
+                    outcome: AttemptOutcome::default(),
                 },
             };
             let response = idempotency

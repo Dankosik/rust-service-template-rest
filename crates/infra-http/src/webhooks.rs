@@ -26,8 +26,8 @@ use crate::problem::responses::{
 use crate::problem::{Code, Problem, body_too_large, sanitized_internal_error};
 
 /// Webhook ingress results. Label `outcome` is `accepted`, `duplicate`,
-/// `rejected`, `unavailable`, `deadline_exceeded`, or `unknown_endpoint`. A configured endpoint
-/// adds its operator-chosen ID as `endpoint`, and a rejection adds a static
+/// `rejected`, `unavailable`, `deadline_exceeded`, or `unknown_endpoint`.
+/// A configured endpoint adds its ID as `endpoint`, and a rejection adds a static
 /// `reason`: the receiver's, or `body_too_large` / `body_unreadable` when the
 /// body could not be read within its limit. A requested ID that matches no configured
 /// endpoint is caller-controlled and never becomes a label.
@@ -202,10 +202,8 @@ async fn receive(
         SystemTime::now(),
         attempt_end,
     );
-    let result = tokio::select! {
-        biased;
-        () = tokio::time::sleep_until(attempt_end) => return receipt_deadline_exceeded(&endpoint_id),
-        result = receipt => result,
+    let Ok(result) = tokio::time::timeout_at(attempt_end, receipt).await else {
+        return receipt_deadline_exceeded(&endpoint_id);
     };
     match result {
         Ok(outcome) => {
@@ -220,6 +218,11 @@ async fn receive(
         Err(ReceiveError::Rejected(rejection)) => {
             EndpointOutcome::Rejected(rejection.reason()).record(&endpoint_id);
             Problem::new(Code::WebhookRejected).into_response()
+        }
+        // The store's pool acquisition shares the same cutoff and can report
+        // its failure before the outer timeout is polled.
+        Err(ReceiveError::Unavailable) if tokio::time::Instant::now() >= attempt_end => {
+            receipt_deadline_exceeded(&endpoint_id)
         }
         Err(ReceiveError::Unavailable) => {
             EndpointOutcome::Unavailable.record(&endpoint_id);

@@ -22,7 +22,9 @@ use utoipa::OpenApi as _;
 
 use super::caused_by_length_limit;
 use super::declaration::{self, CompositionError};
-use super::execute::{Attempt, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Outcome, Provenance};
+use super::execute::{
+    Attempt, AttemptOutcome, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Outcome, Provenance,
+};
 use super::identity::{self, KEY_GRAMMAR, MAX_DECODED_KEY_BYTES};
 use super::openapi::{IdempotencyComponents, KEY_HEADER, REPLAYED_HEADER, REPLAYED_VALUE};
 use crate::authn::VerifiedPrincipal;
@@ -155,8 +157,12 @@ struct RouteState {
 async fn run_attempt(State(state): State<RouteState>, request: Request, next: Next) -> Response {
     let operation_id = Arc::clone(&state.operation_id);
     match capture_attempt(state, request).await {
-        ControlFlow::Continue(request) => {
-            seal_replay_metadata(next.run(request).await, &operation_id)
+        ControlFlow::Continue((request, outcome)) => {
+            let response = next.run(request).await;
+            if !response.status().is_success() {
+                outcome.record(Outcome::NotStored);
+            }
+            seal_replay_metadata(response, &operation_id)
         }
         ControlFlow::Break(refusal) => refusal,
     }
@@ -164,7 +170,10 @@ async fn run_attempt(State(state): State<RouteState>, request: Request, next: Ne
 
 /// Insert the [`Attempt`] the handler's extractor takes and restore the
 /// bounded body, or answer the refusal.
-async fn capture_attempt(state: RouteState, request: Request) -> ControlFlow<Response, Request> {
+async fn capture_attempt(
+    state: RouteState,
+    request: Request,
+) -> ControlFlow<Response, (Request, AttemptOutcome)> {
     let RouteState {
         store,
         operation_id,
@@ -218,6 +227,7 @@ async fn capture_attempt(state: RouteState, request: Request) -> ControlFlow<Res
         .map(HeaderValue::as_bytes)
         .collect::<Vec<_>>();
     let fingerprint = identity::request_fingerprint(&parts.method, uri, &content_types, &body);
+    let outcome = AttemptOutcome::default();
     parts.extensions.insert(Attempt {
         store,
         scope,
@@ -225,8 +235,12 @@ async fn capture_attempt(state: RouteState, request: Request) -> ControlFlow<Res
         fingerprint,
         operation_id,
         deadline,
+        outcome: outcome.clone(),
     });
-    ControlFlow::Continue(Request::from_parts(parts, restore_body(body, trailers)))
+    ControlFlow::Continue((
+        Request::from_parts(parts, restore_body(body, trailers)),
+        outcome,
+    ))
 }
 
 /// Read the bounded body whole, or answer the 413/400 refusal.
@@ -276,9 +290,6 @@ fn seal_replay_metadata(mut response: Response, operation_id: &str) -> Response 
     let provenance = response.extensions_mut().remove::<Provenance>();
     response.headers_mut().remove(REPLAYED_HEADER);
     if !response.status().is_success() {
-        if provenance.is_none() {
-            Outcome::NotStored.record();
-        }
         return response;
     }
     match provenance {
@@ -289,7 +300,7 @@ fn seal_replay_metadata(mut response: Response, operation_id: &str) -> Response 
                 .insert(REPLAYED_HEADER, HeaderValue::from_static(REPLAYED_VALUE));
             response
         }
-        Some(Provenance::Failed) | None => wiring_failure(operation_id, "seam_unused"),
+        None => wiring_failure(operation_id, "seam_unused"),
     }
 }
 
