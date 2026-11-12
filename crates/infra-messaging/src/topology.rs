@@ -24,6 +24,10 @@ use crate::wire;
 /// guide for the server requirements.
 const MIN_SERVER_VERSION: (i64, i64, i64) = (2, 12, 3);
 
+// NATS does not advertise max_control_line in INFO. Wildcard consumers use
+// the default 4 KiB control-line budget for subjects outside the registry.
+const WILDCARD_SUBJECT_BYTES: usize = 4 * 1024;
+
 /// A configured consumer, the dead-letter topology admitted for it, and the
 /// startup budget its durable creation still runs under.
 #[derive(Clone, Debug)]
@@ -44,10 +48,8 @@ pub(crate) struct DeadLetterTopology {
 }
 
 impl DeadLetterTopology {
-    /// Checks that a dead-letter transfer of any delivery on a route `filter`
-    /// selects fits the header, server and dead-letter stream limits.
-    ///
-    /// Returns the byte length of the longest selected route subject.
+    /// Admits the dead-letter transfer budget and returns the subject budget
+    /// shared by the transfer and the pull request.
     pub(crate) fn admit_routes(
         &self,
         registry: &Registry,
@@ -62,12 +64,15 @@ impl DeadLetterTopology {
                 None,
             )
         };
-        let subject_bytes = registry
-            .routes()
-            .filter(|route| wire::matches_filter(filter, &route.subject))
-            .map(|route| route.subject.len())
-            .max()
-            .ok_or_else(bounds_unavailable)?;
+        let subject_bytes = if filter.contains(['*', '>']) {
+            registry
+                .routes()
+                .filter(|route| wire::matches_filter(filter, &route.subject))
+                .map(|route| route.subject.len())
+                .fold(WILDCARD_SUBJECT_BYTES, usize::max)
+        } else {
+            filter.len()
+        };
         let bounds = wire::dead_letter_bounds(
             self.source_max_message_bytes,
             subject_bytes,

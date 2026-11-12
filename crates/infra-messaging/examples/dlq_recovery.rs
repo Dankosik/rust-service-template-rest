@@ -157,6 +157,15 @@ enum Publication {
     Confirmed,
 }
 
+impl Publication {
+    fn after_rejection(self) -> Self {
+        match self {
+            Self::NotAttempted | Self::Rejected => Self::Rejected,
+            Self::Ambiguous | Self::Confirmed => self,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum Retirement {
@@ -485,6 +494,7 @@ async fn redrive(args: &[String], resources: &mut Resources, deadline: Instant) 
     // An earlier positive ACK is retained, but never skips the current identity
     // and lifecycle checks. Retrying ambiguity prepares exactly the same ID.
     if state.publication != Publication::Confirmed {
+        let rejected = state.publication.after_rejection();
         let startup = resources.startup.insert(
             Messaging::prepare(
                 MessagingOptions {
@@ -504,7 +514,7 @@ async fn redrive(args: &[String], resources: &mut Resources, deadline: Instant) 
             .map_err(|_| "publisher_configuration")?,
         );
         let Ok(messaging) = startup.admit().await else {
-            state.publication = Publication::Rejected;
+            state.publication = rejected;
             finish(&state_path, &state)?;
             return Ok(());
         };
@@ -532,7 +542,7 @@ async fn redrive(args: &[String], resources: &mut Resources, deadline: Instant) 
                     duplicate: ack.duplicate,
                 });
             }
-            Err(PublishError::Rejected) => state.publication = Publication::Rejected,
+            Err(PublishError::Rejected) => state.publication = rejected,
             Ok(_) | Err(PublishError::Ambiguous) => {}
         }
         save(&state_path, &state, Persist::Replace)?;
@@ -591,6 +601,18 @@ mod tests {
     use std::fs;
 
     use super::*;
+
+    #[test]
+    fn a_rejected_retry_preserves_earlier_publication_uncertainty() {
+        std::assert_matches!(
+            Publication::Ambiguous.after_rejection(),
+            Publication::Ambiguous
+        );
+        std::assert_matches!(
+            Publication::NotAttempted.after_rejection(),
+            Publication::Rejected
+        );
+    }
 
     #[test]
     fn stored_headers_preserve_repeated_identity_values_and_continuations() {

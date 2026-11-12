@@ -212,9 +212,15 @@ lists (`failed`, `inspect`, `redrive`, `discard`).
 <!-- template:begin messaging:docs-alerting-messaging-runbooks -->
 ### MessagingDeadLettered
 
-Consumed events moved to the dead-letter stream: `reason` is `malformed`,
-`permanent` or `exhausted`. An `outcome` other than `accepted` means the
-dead-letter publication itself failed and the event is redelivered from the
-source. Fix the handler or the producer, then recover the exact DLQ records
-with the [`dlq_recovery` example](../crates/infra-messaging/examples/dlq_recovery.rs).
+The adapter attempted to move an event to the dead-letter stream. A
+`rejected` publication leaves the event in the source stream for redelivery.
+An `ambiguous` publication also leaves it for redelivery, and the DLQ may
+already contain a copy. Fix the handler or the producer, then recover the
+exact DLQ records with the [`dlq_recovery` example](../crates/infra-messaging/examples/dlq_recovery.rs).
+
+For wildcard consumers, keep source subjects within 4 KiB across publishers,
+subject mappings and stream imports. The adapter sizes pulls and DLQ
+transfers for the broker's default `max_control_line` and any longer
+registered subjects selected by the filter. Use a concrete filter when
+consuming longer subjects outside that registry.
 <!-- template:end messaging:docs-alerting-messaging-runbooks -->

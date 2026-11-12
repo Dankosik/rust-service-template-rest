@@ -33,10 +33,10 @@ It is a one-time fixture producer, not a runtime or CI dependency.
 | User A | `UDBCQIADO7SFCGGE5FNGOTL66SCF6F3FL6WWOT75R36TCLHAVKM6TACY` |
 | User B | `UDKZULILKPV3BALVMY6JQ63JRXETGP3E4EF4REATS2YFC43HLFIZPCXC` |
 
-The server image remains the digest-pinned NATS 2.15.0 image in
-[`env/docker-compose.yml`](../../docker-compose.yml). Its supported operator and
-memory-resolver shape is illustrated by the upstream
-[`operator.conf` fixture](https://github.com/nats-io/nats-server/blob/v2.15.0/test/configs/operator.conf).
+Use the digest-pinned NATS server image from
+[`env/docker-compose.yml`](../../docker-compose.yml). The upstream
+[`operator.conf` fixture](https://github.com/nats-io/nats-server/blob/v2.15.2/test/configs/operator.conf)
+illustrates the operator and memory-resolver configuration.
 
 ## Regeneration
 
