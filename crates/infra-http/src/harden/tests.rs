@@ -210,19 +210,21 @@ async fn a_body_the_caller_stops_sending_is_a_408_problem_that_closes_the_connec
     assert_eq!(body_json(response).await["code"], "request_timeout");
 }
 
-#[derive(Clone)]
-struct RecoveryEvents(Arc<Mutex<Vec<String>>>);
+struct EventFields {
+    target: &'static str,
+    fields: Arc<Mutex<Vec<String>>>,
+}
 
-impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for RecoveryEvents {
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for EventFields {
     fn on_event(
         &self,
         event: &tracing::Event<'_>,
         _context: tracing_subscriber::layer::Context<'_, S>,
     ) {
-        if event.metadata().target() == module_path!().trim_end_matches("::tests") {
+        if event.metadata().target() == self.target {
             event.record(
                 &mut |field: &tracing::field::Field, value: &dyn std::fmt::Debug| {
-                    self.0
+                    self.fields
                         .lock()
                         .unwrap()
                         .push(format!("{}={value:?}", field.name()));
@@ -237,7 +239,10 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for RecoveryEvents {
 #[tokio::test]
 async fn panic_is_a_sanitized_500_problem() {
     let events = Arc::new(Mutex::new(Vec::new()));
-    let subscriber = tracing_subscriber::registry().with(RecoveryEvents(Arc::clone(&events)));
+    let subscriber = tracing_subscriber::registry().with(EventFields {
+        target: module_path!().trim_end_matches("::tests"),
+        fields: Arc::clone(&events),
+    });
     let response = app(&options())
         .oneshot(HttpRequest::get("/panic").body(Body::empty()).unwrap())
         .with_subscriber(subscriber)
@@ -417,10 +422,9 @@ async fn a_request_over_the_limit_waits_for_a_permit_and_is_served() {
     assert_eq!(served.status(), StatusCode::OK);
 }
 
-/// Admission alone: a full chain times the holder out first, so nothing
-/// else keeps the permit past the waiter's patience.
-#[tokio::test]
-async fn a_request_that_waits_out_its_patience_is_shed_with_retry_after() {
+/// Omit the opening deadline so the holder can outlive the waiter's patience.
+#[tokio::test(start_paused = true)]
+async fn a_request_that_waits_out_its_patience_is_shed_and_logged() {
     let started = Arc::new(tokio::sync::Notify::new());
     let gate = Arc::new(tokio::sync::Notify::new());
     let handler_1 = {
@@ -432,7 +436,7 @@ async fn a_request_that_waits_out_its_patience_is_shed_with_retry_after() {
             async move {
                 started.notify_one();
                 gate.notified().await;
-                "released"
+                Problem::new(Code::ServiceUnavailable)
             }
         }
     };
@@ -442,24 +446,39 @@ async fn a_request_that_waits_out_its_patience_is_shed_with_retry_after() {
     )]
     let routes = Router::new().route("/hold", get(handler_1));
     let patience = Duration::from_millis(100);
-    let app = routes.layer(middleware::from_fn_with_state(
-        Arc::new(Admission {
-            permits: Semaphore::new(1),
-            patience,
-        }),
-        admit,
-    ));
+    let app = routes
+        .layer(middleware::from_fn_with_state(
+            Arc::new(Admission {
+                permits: Semaphore::new(1),
+                patience,
+            }),
+            admit,
+        ))
+        .layer(middleware::from_fn_with_state(
+            AccessLogOptions {
+                log_health_probes: false,
+            },
+            observe::observe,
+        ));
+    let fields = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing::Dispatch::new(tracing_subscriber::registry().with(EventFields {
+        target: concat!(env!("CARGO_CRATE_NAME"), "::observe"),
+        fields: Arc::clone(&fields),
+    }));
 
     let holder = tokio::spawn({
         let app = app.clone();
-        async move { app.oneshot(request(Method::GET, "/hold")).await.unwrap() }
+        app.oneshot(request(Method::GET, "/hold"))
+            .with_subscriber(subscriber.clone())
     });
-    started.notified().await;
+    tokio::time::timeout(Duration::from_secs(1), started.notified())
+        .await
+        .unwrap();
 
     let waited = tokio::time::Instant::now();
     let shed = app
-        .clone()
         .oneshot(request(Method::GET, "/hold"))
+        .with_subscriber(subscriber)
         .await
         .unwrap();
     assert!(waited.elapsed() >= patience, "shed only after the wait");
@@ -469,8 +488,29 @@ async fn a_request_that_waits_out_its_patience_is_shed_with_retry_after() {
     assert_eq!(json["code"], "service_unavailable");
     assert_eq!(json["detail"], service_failure::AT_CAPACITY_DETAIL);
 
+    let shed_fields = std::mem::take(&mut *fields.lock().unwrap());
+    assert!(
+        shed_fields
+            .iter()
+            .any(|field| field == "message=http_request")
+    );
+    assert!(
+        shed_fields
+            .iter()
+            .any(|field| field == "termination=\"load_shed\"")
+    );
+
     gate.notify_one();
-    assert_eq!(holder.await.unwrap().status(), StatusCode::OK);
+    let unavailable = tokio::time::timeout(Duration::from_secs(1), holder)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body_json(unavailable).await["code"], "service_unavailable");
+    let fields = fields.lock().unwrap();
+    assert!(fields.iter().any(|field| field == "message=http_request"));
+    assert!(!fields.iter().any(|field| field.starts_with("termination=")));
 }
 
 #[tokio::test]

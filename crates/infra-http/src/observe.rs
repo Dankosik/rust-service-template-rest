@@ -48,6 +48,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
 use tracing_opentelemetry_instrumentation_sdk::{otel_trace_span, set_parent_or_fallback};
 
+use crate::harden::AdmissionShed;
 use crate::probes::is_health_probe_route;
 use crate::problem::{Problem, body_too_large};
 use crate::server::ConnectionInfo;
@@ -164,15 +165,12 @@ pub(crate) async fn observe(
     // gauge below follows the body's lifetime.
     let response = complete_problem(response, request_id);
     let status = response.status();
-    // problem_code separates the failures that share a status: a 503 is load
-    // shedding, a saturated pool, or a draining instance, and during an
-    // incident that distinction is the whole question. Bounded by the
-    // catalog.
-    let problem_code = response
-        .extensions()
+    let extensions = response.extensions();
+    let problem_code = extensions
         .get::<Problem>()
         .map(|problem| problem.code().as_str());
-    pending.answer(status, problem_code);
+    let termination = extensions.get::<AdmissionShed>().map(|_| "load_shed");
+    pending.answer(status, problem_code, termination);
     update_span_from_response(&span, status);
     active.until_body_ends(response)
 }
@@ -189,9 +187,14 @@ struct Pending<'a> {
 }
 
 impl Pending<'_> {
-    fn answer(&mut self, status: StatusCode, problem_code: Option<&str>) {
+    fn answer(
+        &mut self,
+        status: StatusCode,
+        problem_code: Option<&str>,
+        termination: Option<&str>,
+    ) {
         self.answered = true;
-        self.record(status, problem_code, None);
+        self.record(status, problem_code, termination);
     }
 
     fn record(&self, status: StatusCode, problem_code: Option<&str>, termination: Option<&str>) {
