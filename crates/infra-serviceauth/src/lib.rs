@@ -13,7 +13,7 @@ mod verify;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 
-use std::sync::Arc;
+use std::{borrow::Borrow, sync::Arc};
 
 use shared_rules::rfc7515;
 
@@ -38,24 +38,24 @@ fn unix_seconds() -> Option<u64> {
 #[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd, derive_more::Debug, derive_more::Display)]
 #[debug("{_0:?}")]
 #[display("{_0}")]
-pub struct CallerName(Arc<str>);
+pub struct ServiceName(Arc<str>);
 
-/// A name outside the caller-name grammar. It never echoes the input.
+/// A name outside the service-name grammar. It never echoes the input.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("{}", Self::MESSAGE)]
-pub struct InvalidCallerName;
+pub struct InvalidServiceName;
 
-impl InvalidCallerName {
+impl InvalidServiceName {
     /// The grammar's one wording, shared with the trust registry's refusal.
     pub(crate) const MESSAGE: &str = "a caller name is 1 to 63 lowercase letters, digits and hyphens, not starting or ending with a hyphen";
 }
 
-impl CallerName {
-    /// Admits a caller name.
+impl ServiceName {
+    /// Admits a service name.
     ///
     /// # Errors
-    /// Returns [`InvalidCallerName`] outside the grammar.
-    pub fn parse(value: &str) -> Result<Self, InvalidCallerName> {
+    /// Returns [`InvalidServiceName`] outside the grammar.
+    pub fn parse(value: &str) -> Result<Self, InvalidServiceName> {
         let bytes = value.as_bytes();
         let label = |byte: &u8| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-';
         if (1..=63).contains(&bytes.len())
@@ -65,7 +65,7 @@ impl CallerName {
         {
             Ok(Self(Arc::from(value)))
         } else {
-            Err(InvalidCallerName)
+            Err(InvalidServiceName)
         }
     }
 
@@ -75,8 +75,14 @@ impl CallerName {
     }
 }
 
-impl From<CallerName> for Arc<str> {
-    fn from(name: CallerName) -> Self {
+impl Borrow<str> for ServiceName {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl From<ServiceName> for Arc<str> {
+    fn from(name: ServiceName) -> Self {
         name.0
     }
 }
@@ -167,7 +173,7 @@ mod tests {
     #[test]
     fn caller_names_are_rfc1123_labels() {
         for name in ["a", "orders", "inventory", "a1-b2", &"x".repeat(63)] {
-            assert_eq!(CallerName::parse(name).unwrap().as_str(), name);
+            assert_eq!(ServiceName::parse(name).unwrap().as_str(), name);
         }
         for name in [
             "",
@@ -180,7 +186,11 @@ mod tests {
             &"x".repeat(64),
             "é",
         ] {
-            assert_eq!(CallerName::parse(name), Err(InvalidCallerName), "{name:?}");
+            assert_eq!(
+                ServiceName::parse(name),
+                Err(InvalidServiceName),
+                "{name:?}"
+            );
         }
     }
 

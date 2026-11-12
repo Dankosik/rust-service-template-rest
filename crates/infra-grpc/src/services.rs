@@ -29,7 +29,7 @@ pub struct Services {
     // template:end authn:grpc-services-scopes-field
     // template:begin service-auth:grpc-services-callers-field
     /// Callers admitted to a method, keyed by request path.
-    caller_rules: HashMap<String, Box<[infra_serviceauth::CallerName]>>,
+    caller_rules: HashMap<String, Box<[infra_serviceauth::ServiceName]>>,
     /// Verifies the service token of each business call, when set.
     caller_verifier: Option<infra_serviceauth::Verifier>,
     // template:end service-auth:grpc-services-callers-field
@@ -234,9 +234,9 @@ impl Services {
         if self.caller_rules.contains_key(path) {
             return Err(Error::DuplicateCallerRule(path.to_owned()));
         }
-        let mut names: Vec<infra_serviceauth::CallerName> = Vec::with_capacity(callers.len());
+        let mut names: Vec<infra_serviceauth::ServiceName> = Vec::with_capacity(callers.len());
         for caller in callers {
-            let name = infra_serviceauth::CallerName::parse(caller)
+            let name = infra_serviceauth::ServiceName::parse(caller)
                 .map_err(|_| Error::InvalidCallerRule(path.to_owned()))?;
             if names.contains(&name) {
                 return Err(Error::InvalidCallerRule(path.to_owned()));

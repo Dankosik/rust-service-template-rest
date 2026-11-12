@@ -11,7 +11,7 @@ use axum::middleware::Next;
 use axum::response::Response;
 use foldhash::HashMap;
 use http::header::AUTHORIZATION;
-use infra_serviceauth::{Caller, CallerName, ReceiverTokens, Verifier};
+use infra_serviceauth::{Caller, ReceiverTokens, ServiceName, Verifier};
 use tonic::body::Body;
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 
@@ -33,9 +33,9 @@ const NOT_ADMITTED_DETAIL: &str = "the verified caller is not admitted to this m
 /// verifier that names each call's caller.
 pub(crate) struct CallerAdmission {
     verifier: Option<Verifier>,
-    caller_rules: HashMap<String, Box<[CallerName]>>,
+    caller_rules: HashMap<String, Box<[ServiceName]>>,
     /// Registered once per trusted caller: an admission is the hot path.
-    outcomes: HashMap<CallerName, Outcomes>,
+    outcomes: HashMap<ServiceName, Outcomes>,
 }
 
 /// One trusted caller's [`SERVICE_AUTH_CALLS_METRIC`] series.
@@ -47,7 +47,7 @@ struct Outcomes {
 impl CallerAdmission {
     pub(crate) fn new(
         verifier: Option<Verifier>,
-        caller_rules: HashMap<String, Box<[CallerName]>>,
+        caller_rules: HashMap<String, Box<[ServiceName]>>,
     ) -> Self {
         metrics::describe_counter!(
             SERVICE_AUTH_CALLS_METRIC,

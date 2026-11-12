@@ -10,7 +10,7 @@ use http::HeaderValue;
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use secrecy::{ExposeSecret as _, SecretString};
 
-use crate::{CallerName, JwtType, KeyId, MAX_TOKEN_LIFETIME_SECONDS, unix_seconds};
+use crate::{JwtType, KeyId, MAX_TOKEN_LIFETIME_SECONDS, ServiceName, unix_seconds};
 
 /// A handle reuses its token while it is younger than this, so every token it
 /// sends has more than half its lifetime left by this service's clock.
@@ -19,7 +19,7 @@ const REUSE_SECONDS: u64 = MAX_TOKEN_LIFETIME_SECONDS / 2;
 /// This service's signing identity, from its configuration snapshot.
 #[derive(Clone)]
 pub struct SigningOptions {
-    pub name: CallerName,
+    pub name: ServiceName,
     pub jwt_type: JwtType,
     /// The `kid` under which receivers' trust registries hold the public key.
     pub key_id: KeyId,
@@ -120,7 +120,7 @@ impl TokenSource {
     /// caller grammar and [`SigningError::NoSigningKey`] when this service
     /// verifies callers but was given no signing key.
     pub fn receiver(&self, receiver: &str) -> Result<ReceiverTokens, SigningError> {
-        let audience = CallerName::parse(receiver).map_err(|_| SigningError::InvalidReceiver)?;
+        let audience = ServiceName::parse(receiver).map_err(|_| SigningError::InvalidReceiver)?;
         let signer = match &self.0 {
             Signing::Disabled => None,
             Signing::WithoutKey => return Err(SigningError::NoSigningKey),
@@ -138,7 +138,7 @@ impl TokenSource {
 #[derive(Clone)]
 pub struct ReceiverTokens {
     signer: Option<Arc<Signer>>,
-    audience: CallerName,
+    audience: ServiceName,
     cached: Arc<Mutex<Option<Cached>>>,
 }
 
@@ -195,7 +195,7 @@ impl ReceiverTokens {
 struct Signer {
     key: EncodingKey,
     header: Header,
-    name: CallerName,
+    name: ServiceName,
 }
 
 #[derive(serde::Serialize)]
@@ -234,7 +234,7 @@ mod tests {
 
     fn options(key: &TestKey) -> SigningOptions {
         SigningOptions {
-            name: CallerName::parse("orders").unwrap(),
+            name: ServiceName::parse("orders").unwrap(),
             jwt_type: JwtType::parse("example-svc+jwt").unwrap(),
             key_id: KeyId::parse(key.kid()).unwrap(),
             private_key: key.pem().into(),
@@ -281,7 +281,7 @@ mod tests {
         assert_eq!(claims["exp"], NOW + 60);
         assert_eq!(claims.as_object().unwrap().len(), 5, "{claims}");
         let verifier = Verifier::new(
-            CallerName::parse("catalog").unwrap(),
+            ServiceName::parse("catalog").unwrap(),
             JwtType::parse("example-svc+jwt").unwrap(),
             TrustRegistry::parse(&registry(&[("orders", &[&key])])).unwrap(),
         );
@@ -295,7 +295,7 @@ mod tests {
         );
         // A receiver verifies only tokens addressed to it.
         let other = Verifier::new(
-            CallerName::parse("billing").unwrap(),
+            ServiceName::parse("billing").unwrap(),
             JwtType::parse("example-svc+jwt").unwrap(),
             TrustRegistry::parse(&registry(&[("orders", &[&key])])).unwrap(),
         );
