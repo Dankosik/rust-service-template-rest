@@ -29,10 +29,6 @@ const RETAINED_HEADERS: [HeaderName; 6] = [
     crate::trace::TRACEPARENT,
     crate::trace::TRACESTATE,
 ];
-// The client also accepts bare LF and a missing final newline. Re-encoding
-// can add one CR and one separator space per retained line, a CR on the
-// version line, a final blank CRLF, and the last missing LF.
-const HEADER_REENCODING_RESERVE: usize = RETAINED_HEADERS.len() * 2 + 4;
 
 outcome_label! {
     /// Why a delivery moved to the dead-letter stream; the `Dead-Letter-Reason`
@@ -74,8 +70,11 @@ pub(crate) fn dead_letter_bounds(
     .try_fold(identity_bytes, |bytes, (name, value_bytes)| {
         bytes.checked_add(checked_header_line_bytes(name, value_bytes)?)
     })?;
-    let framed_source =
-        source_bytes.checked_add(HEADER_REENCODING_RESERVE.max(HEADER_PREAMBLE_BYTES))?;
+    // The client accepts bare LF and a missing final newline. Re-encoding can
+    // add one CR and one space per retained line, a CR on the version line,
+    // a final blank CRLF, and the last missing LF.
+    let framing_reserve = HEADER_PREAMBLE_BYTES.max(RETAINED_HEADERS.len() * 2 + 4);
+    let framed_source = source_bytes.checked_add(framing_reserve)?;
     Some(DeadLetterBounds {
         total: framed_source.checked_add(additions)?,
         headers: framed_source
