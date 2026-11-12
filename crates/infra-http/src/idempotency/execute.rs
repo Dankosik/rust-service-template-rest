@@ -45,24 +45,30 @@ pub(super) enum Outcome {
 }
 
 impl Outcome {
-    const fn label(self) -> &'static str {
-        match self {
-            Self::InvalidKey => "invalid_key",
-            Self::Unavailable => "unavailable",
-            Self::InProgress => "in_progress",
-            Self::KeyMismatch => "key_mismatch",
-            Self::Replayed => "replayed",
-            Self::Integrity => "integrity",
-            Self::Internal => "internal",
-            Self::Executed => "executed",
-            Self::Unstorable => "unstorable",
-            Self::NotStored => "not_stored",
-            Self::Abandoned => "abandoned",
-        }
-    }
-
     pub(super) fn record(self) {
-        metrics::counter!(HTTP_IDEMPOTENCY_OUTCOMES_METRIC, "outcome" => self.label()).increment(1);
+        // Literal label values let `metrics` keep a static key; a runtime
+        // value allocates the label vector and its retained copy per call.
+        macro_rules! outcomes {
+            ($($variant:ident => $label:literal),* $(,)?) => {
+                match self {
+                    $(Self::$variant => metrics::counter!(HTTP_IDEMPOTENCY_OUTCOMES_METRIC, "outcome" => $label),)*
+                }
+            };
+        }
+        let counter = outcomes!(
+            InvalidKey => "invalid_key",
+            Unavailable => "unavailable",
+            InProgress => "in_progress",
+            KeyMismatch => "key_mismatch",
+            Replayed => "replayed",
+            Integrity => "integrity",
+            Internal => "internal",
+            Executed => "executed",
+            Unstorable => "unstorable",
+            NotStored => "not_stored",
+            Abandoned => "abandoned",
+        );
+        counter.increment(1);
     }
 }
 
