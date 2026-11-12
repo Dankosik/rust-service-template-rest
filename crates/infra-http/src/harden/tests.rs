@@ -308,7 +308,14 @@ async fn handler_413_keeps_retry_after_when_converted_to_problem() {
     let handler = || async {
         (
             StatusCode::PAYLOAD_TOO_LARGE,
-            [(RETRY_AFTER, "60"), (CONTENT_LENGTH, "4")],
+            [
+                ("retry-after", "60"),
+                ("content-length", "4"),
+                (
+                    "content-digest",
+                    "sha-256=:cW7Ku0WsaoigSTmP3i09UiXG3TEhrpu8WvRX60uvBWo=:",
+                ),
+            ],
             "wait",
         )
     };
@@ -324,6 +331,7 @@ async fn handler_413_keeps_retry_after_when_converted_to_problem() {
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     assert_eq!(response.headers()[RETRY_AFTER], "60");
     assert_eq!(response.headers()[CONTENT_TYPE], "application/problem+json");
+    assert!(!response.headers().contains_key("content-digest"));
     let length = response.headers().get(CONTENT_LENGTH).cloned();
     let body = response.into_body().collect().await.unwrap().to_bytes();
     if let Some(length) = length {

@@ -407,6 +407,9 @@ fn complete_problem(mut response: Response, request_id: Option<&str>) -> Respons
         for name in [CONTENT_ENCODING, CONTENT_LENGTH, TRAILER, TRANSFER_ENCODING] {
             headers.remove(name);
         }
+        for name in ["content-digest", "repr-digest", "digest", "content-md5"] {
+            headers.remove(name);
+        }
         headers.extend(parts.headers);
         response.extensions_mut().extend(parts.extensions);
         *response.body_mut() = body;
