@@ -121,7 +121,7 @@ async fn run_kind_sampling(shared: &Shared, cancel: &CancellationToken) {
         }
         match sample_once(shared).await {
             Ok(Some(sample)) => {
-                if shared.publish_for_kinds(&sample.kinds, || publish_sample(&sample)) {
+                if shared.publish_if_current(&sample.revision, || publish_sample(&sample)) {
                     observe_recovery(shared, Operation::Sample);
                 }
             }
@@ -283,7 +283,7 @@ async fn delete_batch(shared: &Shared) -> Result<u64, OperationError> {
 
 async fn sample_once(shared: &Shared) -> Result<Option<Sample>, OperationError> {
     let _turn = shared.statement_turn.lock().await;
-    let kinds = shared.registered_kinds();
+    let (kinds, revision) = shared.sampling_kinds();
     if kinds.is_empty() {
         return Ok(None);
     }
@@ -367,7 +367,7 @@ async fn sample_once(shared: &Shared) -> Result<Option<Sample>, OperationError> 
                 .fetch_all(&mut *tx),
             )
             .await?;
-            decode_sample(rows, kinds)
+            decode_sample(rows, revision)
         })
         .await
     })
@@ -408,19 +408,19 @@ struct KindDepths {
 }
 
 struct Sample {
-    kinds: Vec<&'static str>,
+    revision: Arc<()>,
     rows: Vec<SampleRow>,
     observed_at: f64,
 }
 
-fn decode_sample(rows: Vec<SampleRow>, kinds: Vec<&'static str>) -> Result<Sample, OperationError> {
+fn decode_sample(rows: Vec<SampleRow>, revision: Arc<()>) -> Result<Sample, OperationError> {
     let Some(observed_at) = rows.first().map(|row| row.observed_at) else {
         return Err(OperationError::Statement(sqlx::Error::Decode(
             "jobs sample returned no rows".into(),
         )));
     };
     Ok(Sample {
-        kinds,
+        revision,
         rows,
         observed_at,
     })
