@@ -1205,6 +1205,31 @@ async fn listening_pid(pool: &PgPool) -> Option<i32> {
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn x2_listener_shutdown_joins_while_postgres_is_silent(pool: PgPool) {
+    let (proxy, worker) = proxied_pool(&pool, 1).await;
+    let run = start(&worker, probe_registry(2, DEFAULT_TIMEOUT), 1);
+    until("the wake listener subscribes", super::WAIT, || {
+        listening_pid(&worker)
+    })
+    .await;
+    run.started.stop_claiming();
+    super::bounded("the engine drains", run.started.drained()).await;
+    proxy.arm_autocommit(Fault::ForwardThenSilence, "UNLISTEN *");
+
+    run.cancel.cancel();
+    run.tracker.close();
+    proxy.silenced().await;
+    let joined = tokio::time::timeout(Duration::from_secs(2), run.tracker.wait()).await;
+
+    proxy.shutdown().await;
+    super::close_pools(&[&worker]).await;
+    assert!(
+        joined.is_ok(),
+        "shutdown joined with the relay still silent"
+    );
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn x2_a_lost_listener_reconnects_with_the_pools_rotated_password(pool: PgPool) {
     // Roles are cluster-wide; the tail of the per-test database name keeps
     // this one apart and inside PostgreSQL's 63-byte identifier limit.

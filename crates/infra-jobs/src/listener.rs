@@ -1,12 +1,16 @@
 //! The `LISTEN` connection that wakes claim loops when enqueue commits a due job.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use sqlx::postgres::{PgListener, PgPool, PgPoolOptions};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::engine::{Operation, POLL_INTERVAL, Shared, observe_failure, observe_recovery};
+
+/// Leave room in the worker's background join budget for the other tasks.
+const LISTENER_CLOSE_BUDGET: Duration = Duration::from_secs(1);
 
 /// Wake the claim loop of every engine in this process that registers the
 /// kind of a due job enqueue committed.
@@ -17,7 +21,14 @@ use crate::engine::{Operation, POLL_INTERVAL, Shared, observe_failure, observe_r
 pub(crate) async fn run_listener(shared: Arc<Shared>, cancel: CancellationToken) {
     let pool = listener_pool(&shared.pool);
     let _ = Box::pin(cancel.run_until_cancelled(listen(&shared, &pool))).await;
-    pool.close().await;
+    // SQLx returns the connection from a detached UNLISTEN. A silent peer can
+    // leave that cleanup pending even after the listener's own task ends.
+    if tokio::time::timeout(LISTENER_CLOSE_BUDGET, pool.close())
+        .await
+        .is_err()
+    {
+        tracing::warn!("jobs_listener_close_unconfirmed");
+    }
 }
 
 fn listener_pool(engine_pool: &PgPool) -> PgPool {
