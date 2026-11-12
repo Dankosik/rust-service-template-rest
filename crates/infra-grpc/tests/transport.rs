@@ -996,6 +996,25 @@ fn opening_request(
         .unwrap()
 }
 
+async fn reject_with_pending_upload(app: &axum::Router) -> Status {
+    use tower::ServiceExt as _;
+
+    tokio::time::pause();
+    let mut request = opening_request(UNARY_PATH, None, "draining");
+    request
+        .headers_mut()
+        .insert("grpc-timeout", "50m".parse().unwrap());
+    *request.body_mut() = axum::body::Body::from_stream(futures_util::stream::pending::<
+        Result<bytes::Bytes, std::convert::Infallible>,
+    >());
+    let mut pending = Box::pin(app.clone().oneshot(request));
+    assert!(futures_util::poll!(pending.as_mut()).is_pending());
+    tokio::time::advance(Duration::from_millis(50)).await;
+    let response = pending.await.unwrap();
+    tokio::time::resume();
+    Status::from_header_map(response.headers()).unwrap()
+}
+
 #[tokio::test]
 async fn opening_admission_counts_auth_followers_and_recovers_after_cancellation() {
     use tower::ServiceExt as _;
@@ -1063,21 +1082,8 @@ async fn opening_admission_counts_auth_followers_and_recovers_after_cancellation
         assert!(Status::from_header_map(response.headers()).is_none());
     }
     // A deadline that cuts the refusal drain short is also counted only as a deadline.
-    tokio::time::pause();
-    let mut draining = opening_request(UNARY_PATH, None, "draining");
-    draining
-        .headers_mut()
-        .insert("grpc-timeout", "50m".parse().unwrap());
-    *draining.body_mut() = axum::body::Body::from_stream(futures_util::stream::pending::<
-        Result<bytes::Bytes, std::convert::Infallible>,
-    >());
-    let mut draining = Box::pin(app.clone().oneshot(draining));
-    assert!(futures_util::poll!(draining.as_mut()).is_pending());
-    tokio::time::advance(Duration::from_millis(50)).await;
-    let response = draining.await.unwrap();
-    tokio::time::resume();
     assert_eq!(
-        Status::from_header_map(response.headers()).unwrap().code(),
+        reject_with_pending_upload(&app).await.code(),
         Code::DeadlineExceeded
     );
     assert!(
