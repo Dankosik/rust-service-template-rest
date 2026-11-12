@@ -379,19 +379,42 @@ pub(crate) enum TransactionOutcome {
     Cancelled,
 }
 
-impl TransactionOutcome {
-    pub(crate) const fn label(self) -> &'static str {
-        match self {
-            Self::Committed => "committed",
-            Self::RolledBack => "rolled_back",
-            Self::AcquireFailed => "acquire_failed",
-            Self::BeginFailed => "begin_failed",
-            Self::CommitFailed => "commit_failed",
-            Self::CommitUnknown => "commit_unknown",
-            Self::Cancelled => "cancelled",
-        }
-    }
+// One table feeds both the span label and the histogram so each value has a
+// single spelling. `metrics` keeps a static key only for literal label
+// values; a runtime value allocates the label vector and its retained copy on
+// every transaction.
+macro_rules! transaction_outcomes {
+    ($($variant:ident => $label:literal),* $(,)?) => {
+        impl TransactionOutcome {
+            pub(crate) const fn label(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $label,)*
+                }
+            }
 
+            fn duration_histogram(self) -> metrics::Histogram {
+                match self {
+                    $(Self::$variant => metrics::histogram!(
+                        TRANSACTION_DURATION_METRIC,
+                        "outcome" => $label
+                    ),)*
+                }
+            }
+        }
+    };
+}
+
+transaction_outcomes!(
+    Committed => "committed",
+    RolledBack => "rolled_back",
+    AcquireFailed => "acquire_failed",
+    BeginFailed => "begin_failed",
+    CommitFailed => "commit_failed",
+    CommitUnknown => "commit_unknown",
+    Cancelled => "cancelled",
+);
+
+impl TransactionOutcome {
     const fn of(error: &TxError) -> Self {
         match error {
             TxError::Acquire(_) => Self::AcquireFailed,
@@ -469,7 +492,8 @@ impl Drop for TransactionObservation {
     fn drop(&mut self) {
         self.span
             .record("postgres.transaction.outcome", self.outcome.label());
-        metrics::histogram!(TRANSACTION_DURATION_METRIC, "outcome" => self.outcome.label())
+        self.outcome
+            .duration_histogram()
             .record(self.started.elapsed().as_secs_f64());
     }
 }
