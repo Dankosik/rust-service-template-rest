@@ -283,6 +283,10 @@ async fn a_slow_command_survives_an_overlapping_readiness_probe() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "finite writes simulate password rotation in the fixture"
+)]
 async fn a_slow_command_survives_overlapping_password_rotation() {
     let server = FakeServer::start().await;
     let initial = ephemeral_password();
