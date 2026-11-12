@@ -294,10 +294,10 @@ impl PreparedCall {
         self.send_inner(|_| Ok(()), None).await
     }
 
-    /// Like [`Self::send`], with a synchronous callback for the peer status.
-    /// It runs once when the status is observed, either at response headers
-    /// or when the caller polls the stream to its end. Locally generated
-    /// failures and abandoned bodies without an observed status skip it.
+    /// Like [`Self::send`], with a synchronous callback for the response status.
+    /// It runs once for the gRPC status in the response headers or trailers.
+    /// If the body ends without one, a non-200 HTTP status supplies the code.
+    /// Local failures and bodies abandoned before a status is available skip it.
     ///
     /// # Errors
     ///
