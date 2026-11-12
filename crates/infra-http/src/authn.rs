@@ -96,7 +96,7 @@ where
     ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
         std::future::ready(
             Self::from_extensions(&parts.extensions)
-                .ok_or_else(crate::context::missing_extension::<Principal>),
+                .ok_or_else(crate::context::missing_extension::<Self>),
         )
     }
 }
