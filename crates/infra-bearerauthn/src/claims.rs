@@ -31,6 +31,20 @@ impl ClaimPolicy {
         }
         Ok(Self { issuer, audiences })
     }
+
+    fn check_issuer_and_audience(
+        &self,
+        issuer: &str,
+        audience: &Values<'_>,
+    ) -> Result<(), VerificationError> {
+        if issuer != self.issuer {
+            return Err(VerificationError::invalid(VerificationReason::Issuer));
+        }
+        if !audience.contains_any(&self.audiences) {
+            return Err(VerificationError::invalid(VerificationReason::Audience));
+        }
+        Ok(())
+    }
 }
 
 /// A claim holding one string or an array of strings: `aud`, and `scope` or
@@ -116,7 +130,7 @@ impl Values<'_> {
 
 // template:begin oidc-jwt:authn-claims-jwt-type
 #[derive(Deserialize)]
-pub(crate) struct JwtClaims<'a> {
+struct JwtClaims<'a> {
     #[serde(borrow)]
     iss: Option<Cow<'a, str>>,
     #[serde(borrow)]
@@ -214,7 +228,8 @@ pub(crate) fn validate_jwt_claims(
     else {
         return Err(invalid(VerificationReason::MissingClaim));
     };
-    check_registered_claims(&issuer, &audience, expiry, claims.nbf, policy, now)?;
+    check_lifetime(expiry, claims.nbf, now)?;
+    policy.check_issuer_and_audience(&issuer, &audience)?;
     let subject = non_empty(claims.sub);
     // Resource-server identity accepts aliases; RFC 9068 requires `client_id` itself.
     let standard_client_id = non_empty(claims.client_id);
@@ -286,25 +301,6 @@ fn present_numeric_date<'de, D: serde::Deserializer<'de>>(
 ) -> Result<Option<u64>, D::Error> {
     NumericDate::deserialize(deserializer).map(|date| Some(date.0))
 }
-
-/// JWT registered-claim order: lifetime first, then issuer and audience.
-fn check_registered_claims(
-    issuer: &str,
-    audience: &Values<'_>,
-    expiry: u64,
-    not_before: Option<u64>,
-    policy: &ClaimPolicy,
-    now: u64,
-) -> Result<(), VerificationError> {
-    check_lifetime(expiry, not_before, now)?;
-    if issuer != policy.issuer {
-        return Err(VerificationError::invalid(VerificationReason::Issuer));
-    }
-    if !audience.contains_any(&policy.audiences) {
-        return Err(VerificationError::invalid(VerificationReason::Audience));
-    }
-    Ok(())
-}
 // template:end oidc-jwt:authn-claims-jwt-validation
 
 // template:begin oidc-introspection:authn-claims-introspection-validation
@@ -352,12 +348,7 @@ pub(crate) fn validate_introspection_claims(
     let (Some(issuer), Some(audience), Some(expiry)) = (claims.iss, claims.aud, claims.exp) else {
         return Err(invalid(VerificationReason::MissingClaim));
     };
-    if issuer != policy.issuer {
-        return Err(invalid(VerificationReason::Issuer));
-    }
-    if !audience.contains_any(&policy.audiences) {
-        return Err(invalid(VerificationReason::Audience));
-    }
+    policy.check_issuer_and_audience(&issuer, &audience)?;
     check_lifetime(expiry, claims.nbf, now)?;
     let subject = non_empty(claims.sub);
     let client_id = non_empty(claims.client_id);

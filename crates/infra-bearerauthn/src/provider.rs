@@ -205,13 +205,10 @@ impl ProviderClient {
         document: Document,
         deadline: Option<tokio::time::Instant>,
     ) -> Result<Vec<u8>, ProviderFailure> {
-        let require_json_content_type = false;
         Exchange::start(document.operation(), "GET", url)
             .run(
                 self.client.get(url.clone()),
-                require_json_content_type,
-                None,
-                deadline,
+                ExchangeMode::Document { deadline },
             )
             .await
     }
@@ -242,7 +239,7 @@ impl ProviderClient {
             .body(form_body);
         context.check().map_err(|_| ProviderFailure::Timeout)?;
         let result = Exchange::start("introspection", "POST", url)
-            .run(request, true, Some(context), None)
+            .run(request, ExchangeMode::Introspection(context))
             .await;
         context.check().map_err(|_| ProviderFailure::Timeout)?;
         result
@@ -272,6 +269,21 @@ impl Document {
     }
 }
 // template:end oidc-jwt:authn-provider-document
+
+enum ExchangeMode<'a> {
+    #[allow(
+        dead_code,
+        reason = "the introspection-only profile removes document requests"
+    )]
+    Document {
+        deadline: Option<tokio::time::Instant>,
+    },
+    #[allow(
+        dead_code,
+        reason = "the JWT-only profile removes introspection requests"
+    )]
+    Introspection(&'a operation_context::OperationContext),
+}
 
 /// One provider exchange: its client span and its duration sample. Only the
 /// configured host and port are recorded, never a path, query or credential.
@@ -308,24 +320,25 @@ impl Exchange {
     async fn run(
         self,
         request: reqwest::RequestBuilder,
-        require_json_content_type: bool,
-        context: Option<&operation_context::OperationContext>,
-        deadline: Option<tokio::time::Instant>,
+        mode: ExchangeMode<'_>,
     ) -> Result<Vec<u8>, ProviderFailure> {
+        let require_json_content_type = matches!(mode, ExchangeMode::Introspection(_));
         let receive = receive(request, require_json_content_type).instrument(self.span.clone());
-        let result = if let Some(context) = context {
-            tokio::select! {
-                biased;
-                _ = context.wait_stopped() => return Err(ProviderFailure::Timeout),
-                () = tokio::time::sleep(PROVIDER_TIMEOUT) => Err(ProviderFailure::Timeout),
-                result = receive => result,
+        let result = match mode {
+            ExchangeMode::Introspection(context) => {
+                tokio::select! {
+                    biased;
+                    _ = context.wait_stopped() => return Err(ProviderFailure::Timeout),
+                    () = tokio::time::sleep(PROVIDER_TIMEOUT) => Err(ProviderFailure::Timeout),
+                    result = receive => result,
+                }
             }
-        } else if let Some(deadline) = deadline {
-            tokio::time::timeout_at(deadline, receive)
+            ExchangeMode::Document {
+                deadline: Some(deadline),
+            } => tokio::time::timeout_at(deadline, receive)
                 .await
-                .unwrap_or(Err(ProviderFailure::Timeout))
-        } else {
-            receive.await
+                .unwrap_or(Err(ProviderFailure::Timeout)),
+            ExchangeMode::Document { deadline: None } => receive.await,
         };
         self.finish(result.as_ref().err().copied());
         result
@@ -538,8 +551,8 @@ mod tests {
     use super::Document;
     // template:end oidc-jwt:authn-provider-document-test-import
     use super::{
-        EndpointUrl, Exchange, IssuerUrl, ProviderClient, ProviderFailure, client_builder,
-        fixture_acceptor, new_fixture_client,
+        EndpointUrl, Exchange, ExchangeMode, IssuerUrl, ProviderClient, ProviderFailure,
+        client_builder, fixture_acceptor, new_fixture_client,
     };
 
     const FIXTURE_HOST: &str = "authn.fixture.test";
@@ -715,9 +728,7 @@ mod tests {
             Duration::from_millis(2500),
             Exchange::start("discovery", "GET", &url).run(
                 client.client.get(url.clone()),
-                false,
-                None,
-                None,
+                ExchangeMode::Document { deadline: None },
             ),
         )
         .await
@@ -728,7 +739,10 @@ mod tests {
 
         tokio::time::resume();
         let body = Exchange::start("discovery", "GET", &url)
-            .run(client.client.get(url.clone()), false, None, None)
+            .run(
+                client.client.get(url.clone()),
+                ExchangeMode::Document { deadline: None },
+            )
             .await
             .unwrap();
         assert_eq!(body, b"{}");
@@ -772,14 +786,20 @@ mod tests {
         let url = Url::parse(&format!("https://{FIXTURE_HOST}/keys")).unwrap();
         assert_eq!(
             Exchange::start("jwks", "GET", &url)
-                .run(old_client.client.get(url.clone()), false, None, None)
+                .run(
+                    old_client.client.get(url.clone()),
+                    ExchangeMode::Document { deadline: None }
+                )
                 .await
                 .unwrap(),
             b"{}"
         );
         assert_eq!(
             Exchange::start("jwks", "GET", &url)
-                .run(old_client.client.get(url.clone()), false, None, None)
+                .run(
+                    old_client.client.get(url.clone()),
+                    ExchangeMode::Document { deadline: None }
+                )
                 .await,
             Err(ProviderFailure::Connect)
         );
@@ -792,7 +812,10 @@ mod tests {
         .unwrap();
         assert_eq!(
             Exchange::start("jwks", "GET", &url)
-                .run(rebuilt_client.client.get(url.clone()), false, None, None)
+                .run(
+                    rebuilt_client.client.get(url.clone()),
+                    ExchangeMode::Document { deadline: None }
+                )
                 .await
                 .unwrap(),
             b"{}"
@@ -944,7 +967,8 @@ mod tests {
         let url = fixture_url(address);
         let request = client.client.get(url.clone());
         let exchange = Exchange::start("discovery", "GET", &url);
-        let pending = tokio::spawn(exchange.run(request, false, None, None));
+        let pending =
+            tokio::spawn(exchange.run(request, ExchangeMode::Document { deadline: None }));
         tokio::time::timeout(Duration::from_secs(1), received)
             .await
             .unwrap()
@@ -959,7 +983,10 @@ mod tests {
         tokio::time::resume();
 
         let body = Exchange::start("discovery", "GET", &url)
-            .run(client.client.get(url.clone()), false, None, None)
+            .run(
+                client.client.get(url.clone()),
+                ExchangeMode::Document { deadline: None },
+            )
             .await
             .unwrap();
         assert_eq!(body, b"{}");
