@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use backon::BackoffBuilder;
 use metrics::{Counter, Gauge};
-use operation_context::{Deadline, OperationContext};
+use operation_context::{Deadline, OperationContext, Stopped};
 use redis::aio::MultiplexedConnection;
 use tokio::sync::{Notify, Semaphore, SemaphorePermit};
 use tokio::task::AbortHandle;
@@ -44,10 +44,7 @@ const PIPELINE_BUFFER_SIZE: usize = APPLICATION_SLOTS + PROBE_SLOTS + 1;
 /// Bounded cause of an unsuccessful cache exchange. Server text is never copied.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, enum_map::Enum)]
 pub(crate) enum ErrorType {
-    /// The operation context stopped (its deadline, including
-    /// `command_timeout`, or caller cancellation, which a namespace records
-    /// as `cancelled`), a setup or probe bound elapsed, or the client
-    /// reported a timeout.
+    /// A deadline or setup or probe bound elapsed, or the client reported a timeout.
     Timeout,
     /// A transport failure, a closed link, or a connection generation that
     /// retired under the command.
@@ -62,6 +59,17 @@ pub(crate) enum ErrorType {
     /// password file, a client that could not be rebuilt, or any other
     /// redis-rs error kind.
     Other,
+}
+
+pub(crate) enum CommandError {
+    Stopped(Stopped),
+    Failed(ErrorType),
+}
+
+impl From<ErrorType> for CommandError {
+    fn from(error: ErrorType) -> Self {
+        Self::Failed(error)
+    }
 }
 
 impl ErrorType {
@@ -338,17 +346,17 @@ impl Link {
         &self,
         command: &redis::Cmd,
         context: &OperationContext,
-    ) -> Result<T, ErrorType> {
-        context.check().map_err(|_| ErrorType::Timeout)?;
+    ) -> Result<T, CommandError> {
+        context.check().map_err(CommandError::Stopped)?;
         let slot = self.claim_slot(&self.application_slots)?;
         // Acquisition first: a connected link then never arms the deadline timer.
         let generation = tokio::select! {
             biased;
             result = self.shared.acquire() => result,
-            _ = context.wait_stopped() => return Err(ErrorType::Timeout),
+            stopped = context.wait_stopped() => return Err(CommandError::Stopped(stopped)),
         };
         // Acquisition may have completed at the caller's cutoff.
-        context.check().map_err(|_| ErrorType::Timeout)?;
+        context.check().map_err(CommandError::Stopped)?;
         let generation = generation?;
         let query = async {
             // Yield before arming retirement. The driver has room for every
@@ -361,21 +369,24 @@ impl Link {
         };
         tokio::select! {
             biased;
-            _ = context.wait_stopped() => Err(ErrorType::Timeout),
-            () = generation.retired.cancelled() => Err(ErrorType::Io),
-            reply = query => reply,
+            stopped = context.wait_stopped() => Err(CommandError::Stopped(stopped)),
+            () = generation.retired.cancelled() => Err(ErrorType::Io.into()),
+            reply = query => reply.map_err(CommandError::from),
         }
     }
 
     pub(crate) async fn probe(&self, command_timeout: Duration) -> Result<(), ErrorType> {
         let slot = self.claim_slot(&self.probe_slots)?;
         let generation = self.shared.acquire().await?;
+        // The first PING poll must reach the driver before cancellation can retire it.
+        tokio::task::consume_budget().await;
         let deadline = Deadline::new(
             Instant::now(),
             command_timeout.max(CONNECTED_PROBE_MIN_BUDGET),
         );
         let mut exchange = Exchange::new(&self.shared, &generation, slot);
-        let (result, disposition) = ping_until(&generation, deadline).await;
+        let (result, disposition) =
+            tokio::task::unconstrained(ping_until(&generation, deadline)).await;
         exchange.keeps_generation = disposition == Disposition::Keep;
         result
     }

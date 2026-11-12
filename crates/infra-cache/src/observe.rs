@@ -3,6 +3,7 @@ use std::time::Instant;
 
 use enum_map::EnumMap;
 use metrics::{Histogram, Unit};
+use operation_context::Stopped;
 use tracing::Span;
 
 use crate::connection::ErrorType;
@@ -149,10 +150,14 @@ impl<'a> OperationGuard<'a> {
         self.finish(outcome);
     }
 
-    /// The caller cancelled the operation context: no cause to record.
-    pub(crate) fn cancel(mut self) -> Unavailable {
-        self.finish(Outcome::Cancelled);
-        Unavailable
+    pub(crate) fn stop(mut self, stopped: Stopped) -> Unavailable {
+        match stopped {
+            Stopped::Deadline => self.fail(ErrorType::Timeout),
+            Stopped::Cancelled => {
+                self.finish(Outcome::Cancelled);
+                Unavailable
+            }
+        }
     }
 
     pub(crate) fn fail(mut self, error_type: ErrorType) -> Unavailable {

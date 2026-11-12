@@ -7,7 +7,7 @@ use std::task::{Context, Poll, Waker};
 use aws_sdk_s3::primitives::{ByteStream, ByteStreamError};
 use bytes::Bytes;
 use http_body::{Frame, SizeHint};
-use operation_context::OperationContext;
+use operation_context::{OperationContext, Stopped};
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::task::JoinHandle;
 
@@ -254,21 +254,33 @@ struct TimerExit(Weak<Mutex<State>>);
 impl Drop for TimerExit {
     fn drop(&mut self) {
         if let Some(shared) = self.0.upgrade() {
-            terminate(&shared, Outcome::Failure(LocalFailure::DownloadBody.into()));
+            terminate(
+                &shared,
+                Termination::Fallback(Outcome::Failure(LocalFailure::DownloadBody.into())),
+            );
         }
     }
 }
 
-fn terminate(shared: &Mutex<State>, outcome: Outcome) {
+enum Termination {
+    Stopped(Stopped),
+    Fallback(Outcome),
+}
+
+fn terminate(shared: &Mutex<State>, termination: Termination) {
     let completion = {
         let mut state = lock(shared);
-        let stopped = match &state.status {
-            Status::Open(resources) => resources.context.stopped(),
-            Status::Succeeded | Status::Failed(_) => return,
+        let Status::Open(resources) = &state.status else {
+            return;
         };
-        let outcome = stopped.map_or(outcome, |stopped| {
-            Outcome::Failure(Failure::stopped(stopped))
-        });
+        let outcome = match termination {
+            Termination::Stopped(stopped) => Outcome::Failure(Failure::stopped(stopped)),
+            Termination::Fallback(outcome) => {
+                resources.context.stopped().map_or(outcome, |stopped| {
+                    Outcome::Failure(Failure::stopped(stopped))
+                })
+            }
+        };
         state.close(outcome)
     };
     if let Some(completion) = completion {
@@ -300,7 +312,7 @@ impl Download {
         let timer = tokio::spawn(async move {
             let stopped = timer_context.wait_stopped().await;
             if let Some(shared) = exit.0.upgrade() {
-                terminate(&shared, Outcome::Failure(Failure::stopped(stopped)));
+                terminate(&shared, Termination::Stopped(stopped));
             }
         });
         Self {
@@ -343,7 +355,7 @@ impl Download {
             let (result, completion) = match polled {
                 Ok(result) => result,
                 Err(panic) => {
-                    terminate(&self.shared, Outcome::Cancelled);
+                    terminate(&self.shared, Termination::Fallback(Outcome::Cancelled));
                     self.timer.abort();
                     std::panic::resume_unwind(panic);
                 }
@@ -380,7 +392,7 @@ impl Download {
 
 impl Drop for Download {
     fn drop(&mut self) {
-        terminate(&self.shared, Outcome::Cancelled);
+        terminate(&self.shared, Termination::Fallback(Outcome::Cancelled));
         self.timer.abort();
     }
 }

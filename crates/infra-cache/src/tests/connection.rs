@@ -843,7 +843,8 @@ async fn stopped_contexts_dispatch_no_commands_or_retire_shared_connection() {
 }
 
 #[tokio::test]
-async fn dropping_a_command_that_yields_before_dispatch_keeps_the_connection() {
+async fn dropping_a_command_or_probe_before_dispatch_keeps_the_connection() {
+    use health::Probe;
     use tokio::task::coop::{consume_budget, has_budget_remaining};
 
     let server = FakeServer::start().await;
@@ -853,6 +854,7 @@ async fn dropping_a_command_that_yields_before_dispatch_keeps_the_connection() {
     })
     .expect("start cache");
     let namespace = cache.namespace("yield_before_send");
+    let probe = cache.probe();
     assert_eq!(namespace.get("ready").await, Ok(None));
     let connections = server.connections();
 
@@ -863,6 +865,10 @@ async fn dropping_a_command_that_yields_before_dispatch_keeps_the_connection() {
         {
             let stopped = namespace.get("stopped");
             tokio::pin!(stopped);
+            assert!(poll_once(stopped.as_mut()).await.is_pending());
+        }
+        {
+            let mut stopped = probe.check();
             assert!(poll_once(stopped.as_mut()).await.is_pending());
         }
         assert_eq!(namespace.get("live").await, Ok(None));
