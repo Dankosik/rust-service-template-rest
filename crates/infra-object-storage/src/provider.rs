@@ -183,6 +183,7 @@ pub(crate) fn admit(provider: &Provider, bucket: &str) -> Result<Admitted, Confi
     }
 }
 
+#[derive(Clone, Copy)]
 enum OriginScheme {
     HttpsOnly,
     HttpOrHttps,
