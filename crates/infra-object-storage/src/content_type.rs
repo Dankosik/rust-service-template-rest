@@ -12,8 +12,6 @@ pub struct ContentType(String);
 pub struct InvalidContentType;
 
 impl ContentType {
-    /// Admit a content type before any request carries it.
-    ///
     /// # Errors
     ///
     /// Returns [`InvalidContentType`] for a blank value, one over 1024 bytes,

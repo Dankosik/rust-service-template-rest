@@ -33,24 +33,23 @@ pub(crate) fn call_policy(
     remaining: Duration,
     ceiling: Duration,
 ) -> (TimeoutConfig, RetryConfig) {
-    let attempt = match call {
-        Call::Read => remaining.min(ceiling / READ_ATTEMPT_SHARE),
-        Call::UnconditionalMutation | Call::CreateOnly => remaining,
+    let (attempt_timeout, retry_config) = match call {
+        Call::Read => (
+            remaining.min(ceiling / READ_ATTEMPT_SHARE),
+            RetryConfig::standard()
+                .with_max_attempts(MAX_ATTEMPTS)
+                .with_max_backoff(MAX_BACKOFF),
+        ),
+        Call::UnconditionalMutation | Call::CreateOnly => {
+            (remaining, RetryConfig::standard().with_max_attempts(1))
+        }
     };
     let timeout = TimeoutConfig::builder()
         .operation_timeout(remaining)
-        .operation_attempt_timeout(attempt)
-        .connect_timeout(CONNECT_TIMEOUT.min(attempt))
+        .operation_attempt_timeout(attempt_timeout)
+        .connect_timeout(CONNECT_TIMEOUT.min(attempt_timeout))
         .build();
-    let retry = match call {
-        Call::Read => RetryConfig::standard()
-            .with_max_attempts(MAX_ATTEMPTS)
-            .with_max_backoff(MAX_BACKOFF),
-        Call::UnconditionalMutation | Call::CreateOnly => {
-            RetryConfig::standard().with_max_attempts(1)
-        }
-    };
-    (timeout, retry)
+    (timeout, retry_config)
 }
 
 /// Poll only while a context is live. A definitive mutation result from a
