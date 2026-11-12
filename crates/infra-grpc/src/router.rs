@@ -304,10 +304,13 @@ async fn acquire(permits: Arc<Semaphore>, patience: Duration) -> Option<OwnedSem
     }
     if !patience.is_zero() {
         let waiting = crate::observe::AdmissionWaiting::start();
+        let started = tokio::time::Instant::now();
         let permit = tokio::time::timeout(patience, permits.acquire_owned())
             .await
             .ok()
-            .and_then(Result::ok);
+            .and_then(Result::ok)
+            // Tokio's timeout can return a ready permit after the wait budget.
+            .filter(|_| started.elapsed() < patience);
         drop(waiting);
         if permit.is_some() {
             return permit;
@@ -373,6 +376,24 @@ async fn reject_with_drain(request: Request, status: tonic::Status, drain: Durat
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn a_permit_freed_after_the_admission_wait_is_refused() {
+        use std::task::{Context, Waker};
+
+        let permits = Arc::new(Semaphore::new(1));
+        let holder = permits.try_acquire().unwrap();
+        let patience = Duration::from_secs(1);
+        let mut waiting = std::pin::pin!(acquire(Arc::clone(&permits), patience));
+        let cx = &mut Context::from_waker(Waker::noop());
+        assert!(waiting.as_mut().poll(cx).is_pending());
+
+        tokio::time::advance(patience + Duration::from_millis(1)).await;
+        drop(holder);
+
+        assert!(waiting.await.is_none());
+        assert_eq!(permits.available_permits(), 1);
+    }
 
     #[tokio::test]
     async fn a_rejected_call_reads_at_most_one_frame_past_64_kib() {

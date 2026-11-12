@@ -68,7 +68,8 @@ pub struct HttpConfig {
     /// hyper-native 431 before the router, not a Problem. HTTP/2 applies the
     /// same number as uncompressed header-list size.
     pub max_header_bytes: ByteSize,
-    /// Request body ceiling; overflow answers 413.
+    /// A declared request body length above this ceiling answers 413.
+    /// Streaming bodies are checked as handlers or extractors read them.
     pub max_body_bytes: ByteSize,
     /// Concurrent handler executions before shedding with 503. Zero disables
     /// shedding; [`Self::in_flight_cap`] gives the adapter form.

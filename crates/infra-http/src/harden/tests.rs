@@ -443,6 +443,31 @@ async fn a_request_over_the_limit_waits_for_a_permit_and_is_served() {
     assert_eq!(served.status(), StatusCode::OK);
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_request_is_shed_when_a_permit_frees_after_its_wait_budget() {
+    use std::task::{Context, Waker};
+
+    let started = Arc::new(AtomicUsize::new(0));
+    let routes = holding_routes(started.clone(), Arc::new(tokio::sync::Notify::new()));
+    let mut options = options();
+    options.max_in_flight = NonZeroU32::new(1);
+    let app = harden(routes, &options);
+    let mut holder = std::pin::pin!(app.clone().oneshot(request(Method::GET, "/hold")));
+    let mut waiting = std::pin::pin!(app.oneshot(request(Method::GET, "/hold")));
+    let cx = &mut Context::from_waker(Waker::noop());
+    assert!(holder.as_mut().poll(cx).is_pending());
+    assert!(waiting.as_mut().poll(cx).is_pending());
+    assert_eq!(started.load(Ordering::SeqCst), 1);
+
+    tokio::time::advance(options.request_timeout + Duration::from_millis(1)).await;
+    assert_eq!(holder.await.unwrap().status(), StatusCode::GATEWAY_TIMEOUT);
+
+    let shed = waiting.await.unwrap();
+    assert_eq!(shed.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(shed.headers()[RETRY_AFTER], "1");
+    assert_eq!(started.load(Ordering::SeqCst), 1);
+}
+
 /// Omit the opening deadline so the holder can outlive the waiter's patience.
 #[tokio::test(start_paused = true)]
 async fn a_request_that_waits_out_its_patience_is_shed_and_logged() {

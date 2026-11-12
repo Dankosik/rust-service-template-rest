@@ -55,8 +55,9 @@ struct Admission {
 
 #[derive(Clone, Debug)]
 pub struct HardenOptions {
-    /// Request body ceiling; overflow answers 413. Applied both to the
-    /// transport stream and to axum's extractor `DefaultBodyLimit`;
+    /// A declared length above this ceiling answers 413 before the handler.
+    /// Streaming bodies are checked as they are read. The ceiling applies
+    /// both to the transport stream and to axum's extractor `DefaultBodyLimit`;
     /// axum's own default is independent, so omitting the extractor layer
     /// would keep a different ceiling than `http.max_body_bytes`.
     pub max_body_bytes: usize,
@@ -204,10 +205,12 @@ async fn admit(
         permit
     } else {
         let waited = tokio::time::timeout(admission.patience, admission.permits.acquire()).await;
-        metrics::histogram!(observe::ADMISSION_WAIT_METRIC).record(arrived.elapsed().as_secs_f64());
+        let elapsed = arrived.elapsed();
+        metrics::histogram!(observe::ADMISSION_WAIT_METRIC).record(elapsed.as_secs_f64());
+        // Tokio's timeout can return a ready permit after the wait budget.
         match waited {
-            Ok(Ok(permit)) => permit,
-            Ok(Err(_)) | Err(_) => return shed_response(),
+            Ok(Ok(permit)) if elapsed < admission.patience => permit,
+            _ => return shed_response(),
         }
     };
     request
