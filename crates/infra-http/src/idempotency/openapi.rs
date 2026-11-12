@@ -102,9 +102,10 @@ pub(super) fn response_family() -> BTreeMap<String, RefOr<Response>> {
     .collect()
 }
 
-/// Whether the normal protected-operation declaration in this slot can be
-/// replaced by the richer generated idempotency response.
-pub(super) fn replaces_protected_response(status: &str, response: &RefOr<Response>) -> bool {
+pub(super) fn can_replace_with_idempotency_response(
+    status: &str,
+    response: &RefOr<Response>,
+) -> bool {
     if status == http_status(Code::AuthenticationMalformed).as_str() {
         response == &component::<AuthenticationMalformed>()
             || response == &component::<responses::BadRequest>()

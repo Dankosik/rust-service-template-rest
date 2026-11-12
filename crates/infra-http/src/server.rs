@@ -18,6 +18,7 @@ use axum::{Extension, Router};
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto;
 use hyper_util::service::TowerToHyperService;
+use shared_rules::hyper::HTTP1_MIN_READ_BUFFER_BYTES;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Semaphore, watch};
 use tokio::time::{Instant, timeout_at};
@@ -337,11 +338,6 @@ impl Drop for Server {
     }
 }
 
-/// hyper refuses an HTTP/1 read buffer below this size (builder panic
-/// minimum). Config admission rejects the same floor so operators never see
-/// a silent raise; this clamp still protects `Server::bind` when validation
-/// did not run.
-const HYPER_MIN_HEADER_BUF: usize = 8 * 1024;
 /// Template HTTP/2 PING cadence. Independent of `header_read_timeout`,
 /// which is the HTTP/1 idle bound.
 const HTTP2_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(20);
@@ -380,7 +376,12 @@ fn connection_builder(options: ServerOptions) -> auto::Builder<TokioExecutor> {
         // `axum::serve` sets none, which is why it cannot bound header reads.
         .timer(TokioTimer::new())
         .header_read_timeout(options.header_read_timeout)
-        .max_buf_size(options.max_header_bytes.max(HYPER_MIN_HEADER_BUF))
+        // Direct callers can bypass configuration validation.
+        .max_buf_size(
+            options
+                .max_header_bytes
+                .max(usize::from(HTTP1_MIN_READ_BUFFER_BYTES)),
+        )
         .keep_alive(true);
     builder
         .http2()

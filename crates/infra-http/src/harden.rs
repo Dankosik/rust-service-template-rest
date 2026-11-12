@@ -38,7 +38,7 @@ use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::request_id::SetRequestIdLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
 
-use crate::observe::{self, AccessLogOptions, Observer};
+use crate::observe::{self, Observer};
 use crate::probes::is_health_probe_route;
 #[cfg(test)]
 use crate::problem::SANITIZED_DETAIL;
@@ -107,9 +107,7 @@ pub fn harden(routes: Router, options: &HardenOptions) -> Router {
         // Outside opening enforcement, so every Problem is completed before it is
         // counted and logged.
         .layer(middleware::from_fn_with_state(
-            Observer::new(AccessLogOptions {
-                log_health_probes: options.log_health_probes,
-            }),
+            Observer::new(options.log_health_probes),
             observe::observe,
         ))
         .layer(OtelInResponseLayer)
@@ -163,19 +161,23 @@ async fn limit_body(State(max_bytes): State<usize>, request: Request, next: Next
         && overflowed.load(Ordering::Relaxed)
         && response.extensions().get::<Problem>().is_none()
     {
-        let (parts, body) = body_too_large().into_response().into_parts();
-        let headers = response.headers_mut();
-        for name in [CONTENT_ENCODING, CONTENT_LENGTH, TRAILER, TRANSFER_ENCODING] {
-            headers.remove(name);
-        }
-        for name in ["content-digest", "repr-digest", "digest", "content-md5"] {
-            headers.remove(name);
-        }
-        headers.extend(parts.headers);
-        response.extensions_mut().extend(parts.extensions);
-        *response.body_mut() = body;
+        normalize_overflow_response(&mut response);
     }
     response
+}
+
+fn normalize_overflow_response(response: &mut Response) {
+    let (parts, body) = body_too_large().into_response().into_parts();
+    let headers = response.headers_mut();
+    for name in [CONTENT_ENCODING, CONTENT_LENGTH, TRAILER, TRANSFER_ENCODING] {
+        headers.remove(name);
+    }
+    for name in ["content-digest", "repr-digest", "digest", "content-md5"] {
+        headers.remove(name);
+    }
+    headers.extend(parts.headers);
+    response.extensions_mut().extend(parts.extensions);
+    *response.body_mut() = body;
 }
 
 /// Admit a request once an in-flight permit is free. A request over the bound
