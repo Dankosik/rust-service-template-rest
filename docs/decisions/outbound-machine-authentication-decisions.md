@@ -131,8 +131,10 @@ work state, so it cannot retain the final external owner. It runs with the
 integration's existing shutdown future and its completion is awaited in the
 existing background-join phase before dependencies drop. Final external-owner
 loss also completes it; dropping the driver while a client survives terminally
-closes that client. A fresh call then reports `Timeout` for an elapsed deadline
-or `Unavailable` otherwise, before cache or I/O.
+closes that client. A fresh call reports its elapsed deadline or cancellation
+before reporting credentials unavailable. Both the operation context and the
+request extension count, so a caller can distinguish an already stopped
+request from a credential failure that might warrant a retry.
 
 One service-token acquisition runs at a time. A reusable cache hit returns
 without waiting and takes precedence over a completed-failure record; otherwise

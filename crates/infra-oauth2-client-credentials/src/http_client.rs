@@ -98,7 +98,7 @@ impl AuthenticatedClient {
             }
         };
         self.credentials
-            .check_lifecycle(acquisition_deadline(&context))?;
+            .check_lifecycle(acquisition_deadline(&context, request_context.as_ref()))?;
         let on_behalf_of =
             admit_request_subject(&mut request, self.subject_required).map_err(|refusal| {
                 match refusal {

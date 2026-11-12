@@ -78,7 +78,7 @@ impl Service<Request<Body>> for AuthenticatedClient {
         let context = prepared.opening_context().clone();
         let precheck = self
             .credentials
-            .check_lifecycle(acquisition_deadline(&context))
+            .check_lifecycle(acquisition_deadline(&context, None))
             .map_err(acquisition_status)
             .and_then(|()| admission.map_err(admission_status));
         let on_behalf_of = match precheck {

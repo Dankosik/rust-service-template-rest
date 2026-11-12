@@ -282,16 +282,13 @@ impl Credentials {
         ))
     }
 
-    /// Reports the credentials unavailable once the refresh driver has stopped.
-    /// The sender also closes when the final owner drops, and
-    /// [`RefreshDriver::run`] prioritizes that release signal over queued work.
     pub(crate) fn check_lifecycle(
         &self,
         deadline: AcquisitionDeadline<'_>,
     ) -> Result<(), AcquisitionError> {
         if self.0.refresh_requests.is_closed() {
             return Err(deadline
-                .expired_error()
+                .stopped_error()
                 .unwrap_or(AcquisitionError::Unavailable));
         }
         Ok(())
@@ -315,10 +312,7 @@ impl Credentials {
         request_context: Option<&OperationContext>,
     ) -> Result<Arc<Token>, AcquisitionError> {
         context.check().map_err(acquisition_stopped)?;
-        let deadline = AcquisitionDeadline {
-            request_context,
-            ..acquisition_deadline(context)
-        };
+        let deadline = acquisition_deadline(context, request_context);
         self.check_admission(deadline)?;
         let acquisition = async {
             match on_behalf_of {
@@ -658,7 +652,10 @@ impl AcquisitionDeadline<'_> {
     }
 }
 
-pub(crate) fn acquisition_deadline(context: &OperationContext) -> AcquisitionDeadline<'_> {
+pub(crate) fn acquisition_deadline<'a>(
+    context: &'a OperationContext,
+    request_context: Option<&'a OperationContext>,
+) -> AcquisitionDeadline<'a> {
     // Keep acquisition bounded when the resource deadline cannot be expressed
     // as an Instant. That fallback belongs to the adapter.
     let (cutoff, expiry) = match context.deadline().and_then(Deadline::instant) {
@@ -672,7 +669,7 @@ pub(crate) fn acquisition_deadline(context: &OperationContext) -> AcquisitionDea
         cutoff,
         expiry,
         context: Some(context),
-        request_context: None,
+        request_context,
     }
 }
 
