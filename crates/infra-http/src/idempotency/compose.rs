@@ -19,13 +19,13 @@ use http_body_util::{BodyExt, Collected, Full};
 use infra_idempotency_store::Store;
 use utoipa::OpenApi as _;
 
-use super::caused_by_length_limit;
 use super::declaration::{self, CompositionError};
 use super::execute::{
     Attempt, AttemptOutcome, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Outcome, Provenance,
 };
 use super::identity::{self, KEY_GRAMMAR, MAX_DECODED_KEY_BYTES};
-use super::openapi::{IdempotencyComponents, KEY_HEADER, REPLAYED_HEADER, REPLAYED_VALUE};
+use super::openapi::IdempotencyComponents;
+use super::{KEY_HEADER, REPLAYED_HEADER, REPLAYED_VALUE, caused_by_length_limit};
 use crate::authn::VerifiedPrincipal;
 use crate::context::{RequestContext, RequestDeadline, read_body};
 use crate::problem::{Code, Problem, body_too_large, body_unreadable, sanitized_internal_error};

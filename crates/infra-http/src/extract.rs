@@ -101,7 +101,10 @@ where
     fn into_response(self) -> Response {
         let Ok(body) = serde_json::to_vec(&self.0) else {
             // serde's message can quote the value, so it stays out of the log.
-            tracing::error!("http_response_serialization_failed");
+            tracing::error!(
+                response_type = std::any::type_name::<T>(),
+                "http_response_serialization_failed"
+            );
             return sanitized_problem().into_response();
         };
         (

@@ -8,10 +8,9 @@ use utoipa::openapi::response::Response;
 
 use crate::contract::fixed_path_operations;
 
-use super::openapi::{
-    KEY_HEADER, key_parameter, replaces_protected_response, replay_header, response_family,
-};
+use super::openapi::{key_parameter, replaces_protected_response, replay_header, response_family};
 use super::stored;
+use super::{KEY_HEADER, REPLAYED_HEADER};
 
 const SUPPORTED_IDEMPOTENCY_METHODS: [&str; 4] = ["POST", "PUT", "PATCH", "DELETE"];
 
@@ -51,18 +50,20 @@ enum Rule {
         "request parameters must be inline and header parameters must have valid HTTP field names"
     )]
     FingerprintParameter,
-    #[error("an idempotent operation must not declare a 1xx or 3xx response")]
-    InformationalOrRedirectResponse,
+    #[error("an idempotent operation must not declare informational or redirect response {status}")]
+    InformationalOrRedirectResponse { status: String },
     #[error("an idempotent operation must declare a 2xx response")]
     NoSuccess,
     #[error("response {status} may declare only replayable headers: {name} cannot be replayed")]
     UnreplayableHeader { status: String, name: String },
-    #[error("each 2xx response must be inline so its replay metadata can be checked")]
-    ReferencedSuccess,
+    #[error("response {status} must be inline so its replay metadata can be checked")]
+    ReferencedSuccess { status: String },
     #[error("response {status} conflicts with the idempotency response family")]
     ProblemResponseConflict { status: String },
-    #[error("Idempotent-Replayed is reserved for exact generated replay metadata")]
-    ReplayHeader,
+    #[error(
+        "response {status}: Idempotent-Replayed is reserved for exact generated replay metadata"
+    )]
+    ReplayHeader { status: String },
 }
 
 #[derive(Debug)]
@@ -193,13 +194,20 @@ fn prepare_success_responses(
             Some(b'1' | b'3') => {
                 return Err(CompositionError::new(
                     operation_id,
-                    Rule::InformationalOrRedirectResponse,
+                    Rule::InformationalOrRedirectResponse {
+                        status: status.clone(),
+                    },
                 ));
             }
             Some(b'2') => {
                 success = true;
                 let RefOr::T(response) = response else {
-                    return Err(CompositionError::new(operation_id, Rule::ReferencedSuccess));
+                    return Err(CompositionError::new(
+                        operation_id,
+                        Rule::ReferencedSuccess {
+                            status: status.clone(),
+                        },
+                    ));
                 };
                 prepare_success_headers(response, operation_id, status)?;
             }
@@ -220,19 +228,25 @@ fn prepare_success_headers(
     let mut replay_headers = response
         .headers
         .iter()
-        .filter(|(name, _)| name.eq_ignore_ascii_case(super::openapi::REPLAYED_HEADER));
+        .filter(|(name, _)| name.eq_ignore_ascii_case(REPLAYED_HEADER));
     match (replay_headers.next(), replay_headers.next()) {
         (None, None) => {
             response
                 .headers
-                .insert(super::openapi::REPLAYED_HEADER.to_owned(), replay_header());
+                .insert(REPLAYED_HEADER.to_owned(), replay_header());
         }
         (Some((_, header)), None) if header == &replay_header() => {}
-        _ => return Err(CompositionError::new(operation_id, Rule::ReplayHeader)),
+        _ => {
+            return Err(CompositionError::new(
+                operation_id,
+                Rule::ReplayHeader {
+                    status: status.to_owned(),
+                },
+            ));
+        }
     }
     if let Some(name) = response.headers.keys().find(|name| {
-        !name.eq_ignore_ascii_case(super::openapi::REPLAYED_HEADER)
-            && !stored::is_replayable_header_name(name)
+        !name.eq_ignore_ascii_case(REPLAYED_HEADER) && !stored::is_replayable_header_name(name)
     }) {
         return Err(CompositionError::new(
             operation_id,
@@ -384,8 +398,7 @@ mod tests {
             panic!("inline success");
         };
         assert_eq!(
-            serde_json::to_value(&response.headers[super::super::openapi::REPLAYED_HEADER])
-                .expect("header"),
+            serde_json::to_value(&response.headers[REPLAYED_HEADER]).expect("header"),
             serde_json::json!({
                 "description": "present with the string `true` only when this response replays a stored idempotent success",
                 "schema": { "type": "string", "enum": ["true"] }
@@ -429,8 +442,27 @@ mod tests {
                 utoipa::openapi::Ref::from_response_name("Created").into(),
             );
         assert_eq!(
-            prepare(&mut referenced).unwrap_err().rule(),
-            &Rule::ReferencedSuccess
+            prepare(&mut referenced).unwrap_err().to_string(),
+            "idempotent route composition is invalid: infraHttpTestCreateWidget: response 201 must be inline so its replay metadata can be checked"
+        );
+
+        let (_, mut redirect, _): UtoipaMethodRouter = route();
+        redirect
+            .paths
+            .get_mut(WIDGETS)
+            .expect("path")
+            .post
+            .as_mut()
+            .expect("post")
+            .responses
+            .responses
+            .insert(
+                "304".to_owned(),
+                utoipa::openapi::Ref::from_response_name("NotModified").into(),
+            );
+        assert_eq!(
+            prepare(&mut redirect).unwrap_err().to_string(),
+            "idempotent route composition is invalid: infraHttpTestCreateWidget: an idempotent operation must not declare informational or redirect response 304"
         );
     }
 
@@ -474,12 +506,12 @@ mod tests {
             panic!("inline success");
         };
         response.headers.insert(
-            super::super::openapi::REPLAYED_HEADER.to_owned(),
+            REPLAYED_HEADER.to_owned(),
             RefOr::T(utoipa::openapi::header::Header::default()),
         );
         assert_eq!(
-            prepare(&mut conflicting).unwrap_err().rule(),
-            &Rule::ReplayHeader
+            prepare(&mut conflicting).unwrap_err().to_string(),
+            "idempotent route composition is invalid: infraHttpTestCreateWidget: response 201: Idempotent-Replayed is reserved for exact generated replay metadata"
         );
 
         let (_, mut unsupported, _): UtoipaMethodRouter = route();

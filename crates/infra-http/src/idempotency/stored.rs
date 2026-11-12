@@ -30,7 +30,7 @@ const REPLAYABLE: [HeaderName; 7] = [
 
 /// A captured success: what the first response and every replay carry.
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
-pub(super) struct Stored {
+pub(super) struct ReplayableResponse {
     status: StatusCode,
     headers: Vec<(HeaderName, HeaderValue)>,
     body: Bytes,
@@ -78,7 +78,7 @@ impl Undecodable {
     }
 }
 
-pub(super) async fn capture(response: Response) -> Result<Stored, Unstorable> {
+pub(super) async fn capture(response: Response) -> Result<ReplayableResponse, Unstorable> {
     let (parts, body) = response.into_parts();
     if !parts.status.is_success() {
         return Err(Unstorable::Status);
@@ -107,14 +107,14 @@ pub(super) async fn capture(response: Response) -> Result<Stored, Unstorable> {
     if header_bytes(&headers) > MAX_TOTAL_STORED_HEADER_BYTES {
         return Err(Unstorable::HeaderLimit);
     }
-    Ok(Stored {
+    Ok(ReplayableResponse {
         status: parts.status,
         headers,
         body,
     })
 }
 
-impl Stored {
+impl ReplayableResponse {
     pub(super) fn to_record(&self) -> Record {
         let headers = self
             .headers
@@ -133,7 +133,7 @@ impl Stored {
             status,
             headers,
             // Share the captured bytes with persistence without copying the body
-            // that Stored retains for the first response.
+            // retained for the first response.
             body: self.body.clone(),
         }
     }
@@ -150,7 +150,7 @@ impl Stored {
 }
 
 /// Validate a database record before replaying it.
-pub(super) fn decode(record: Record) -> Result<Stored, Undecodable> {
+pub(super) fn decode(record: Record) -> Result<ReplayableResponse, Undecodable> {
     if record.body.len() > MAX_STORED_BODY_BYTES {
         return Err(Undecodable::BodyLimit);
     }
@@ -179,7 +179,7 @@ pub(super) fn decode(record: Record) -> Result<Stored, Undecodable> {
     if header_bytes(&headers) > MAX_TOTAL_STORED_HEADER_BYTES {
         return Err(Undecodable::HeaderLimit);
     }
-    Ok(Stored {
+    Ok(ReplayableResponse {
         status,
         headers,
         body: record.body,

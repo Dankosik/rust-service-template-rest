@@ -14,15 +14,9 @@ use utoipa::openapi::{Ref, RefOr, Required};
 use utoipa::{OpenApi, ToResponse};
 
 use super::identity::{KEY_GRAMMAR, MAX_DECODED_KEY_BYTES};
+use super::{KEY_HEADER, REPLAYED_HEADER, REPLAYED_VALUE};
 use crate::authn::{AuthenticationMalformed, AuthenticationUnavailable};
 use crate::problem::{Code, Problem, http_status, responses};
-
-/// The key's header parameter name.
-pub(super) const KEY_HEADER: &str = "Idempotency-Key";
-/// The response-only marker generated from sealed replay provenance.
-pub(super) const REPLAYED_HEADER: &str = "Idempotent-Replayed";
-/// The only wire value of the replay marker.
-pub(super) const REPLAYED_VALUE: &str = "true";
 
 const UNQUOTED_KEY_EXAMPLE: &str = "retry-key/with=visible-ascii";
 const QUOTED_KEY_EXAMPLE: &str = "\"retry key with spaces\"";

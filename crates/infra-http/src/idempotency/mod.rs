@@ -27,6 +27,10 @@ pub use execute::{HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Idempotency};
 pub use infra_postgres::Tx;
 pub(crate) use openapi::declares_replay;
 
+const KEY_HEADER: &str = "Idempotency-Key";
+const REPLAYED_HEADER: &str = "Idempotent-Replayed";
+const REPLAYED_VALUE: &str = "true";
+
 /// Whether a body read failed at a length limit. axum boxes the transport
 /// limit's error into [`axum::Error`] when a request has no `Content-Length`,
 /// so the limit can sit anywhere in the source chain. The inbound-webhooks
