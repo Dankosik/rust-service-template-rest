@@ -344,7 +344,7 @@ async fn run_attempt(
         Ok(future) => {
             let started = Instant::now();
             let Some(ended) = drive(
-                shared,
+                &shared.cleanup,
                 future,
                 cancel,
                 attempt_deadline,
@@ -480,16 +480,26 @@ impl Drop for OwnedHandler {
     }
 }
 
-/// Poll a ready result before cancellation; it wins as is. After cancellation
-/// only success wins (see [`ended_after_cancel`]).
+/// Once a handler has started, a ready result wins over cancellation. After
+/// cancellation only success wins (see [`ended_after_cancel`]).
 async fn drive(
-    shared: &Shared,
+    cleanup: &ForcedCleanup,
     future: HandlerFuture,
     cancel: CancellationToken,
     attempt_deadline: Instant,
     supervisor_deadline: Instant,
 ) -> Option<Ended> {
     let mut handler = OwnedHandler(Some(future));
+    // Preparation can consume the attempt's budget before the first handler poll.
+    let now = Instant::now();
+    if now >= supervisor_deadline || cleanup.has_ended() {
+        cancel.cancel();
+        return None;
+    }
+    if now >= attempt_deadline {
+        cancel.cancel();
+        return Some(Ended::Timeout);
+    }
     let reason = {
         // Borrow through the poll boundary; the owner contains destruction as well.
         let mut run =
@@ -497,18 +507,18 @@ async fn drive(
         let reason = tokio::select! {
             biased;
             result = &mut run => return Some(ended_from(result)),
-            () = shared.cleanup.forced() => Ended::Cancelled,
+            () = cleanup.forced() => Ended::Cancelled,
             () = tokio::time::sleep_until(attempt_deadline) => Ended::Timeout,
         };
         cancel.cancel();
         let grace = clamped_deadline(Instant::now(), COOPERATIVE_GRACE, supervisor_deadline);
-        if let Some(result) = within(&shared.cleanup, grace, &mut run).await {
+        if let Some(result) = within(cleanup, grace, &mut run).await {
             return Some(ended_after_cancel(&result, reason));
         }
         reason
     };
     handler.destroy();
-    (!expired(shared, supervisor_deadline)).then_some(reason)
+    (Instant::now() < supervisor_deadline && !cleanup.has_ended()).then_some(reason)
 }
 
 /// A result that joins after the supervisor cancelled the handler. Success
@@ -705,6 +715,30 @@ mod tests {
             limit,
             "an overflowing sum takes the limit"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_expired_attempt_does_not_start_its_handler() {
+        let cancel = CancellationToken::new();
+        let (ran, observed) = tokio::sync::oneshot::channel();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        tokio::time::advance(Duration::from_secs(1)).await;
+
+        let ended = drive(
+            &ForcedCleanup::default(),
+            Box::pin(async move {
+                let _ = ran.send(());
+                Ok(())
+            }),
+            cancel.clone(),
+            deadline,
+            deadline + Duration::from_secs(5),
+        )
+        .await;
+
+        std::assert_matches!(ended, Some(Ended::Timeout));
+        assert!(cancel.is_cancelled());
+        assert!(observed.await.is_err());
     }
 
     #[tokio::test(start_paused = true)]
