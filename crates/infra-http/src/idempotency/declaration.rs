@@ -343,6 +343,7 @@ mod tests {
             let mut document = serde_json::json!({
                 "openapi": "3.1.0",
                 "info": {"title": "idempotency fixture", "version": "1"},
+                "paths": {},
                 "components": {
                     "securitySchemes": {"bearerAuth": {"type": "http", "scheme": "bearer"}}
                 }
