@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use redis::IntoConnectionInfo;
 use secrecy::ExposeSecret;
+use socket2::{Domain, Protocol, Socket, Type};
 
 use crate::credentials::PasswordFile;
 use crate::{CacheError, CacheOptions, ClientCertificate, ServerEndpoint};
@@ -75,6 +76,18 @@ pub(crate) fn admit(options: CacheOptions) -> Result<Admitted, CacheError> {
         client,
         password_file,
     })
+}
+
+pub(crate) fn check_io_driver() -> Result<(), CacheError> {
+    let io_error = |error: std::io::Error| CacheError::IoDriverCheck { kind: error.kind() };
+    let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).map_err(io_error)?;
+    socket.set_nonblocking(true).map_err(io_error)?;
+    // Tokio exposes a missing I/O driver as a panic on registration. An
+    // unconnected socket exercises that path without binding or dialing.
+    std::panic::catch_unwind(|| tokio::net::TcpStream::from_std(socket.into()))
+        .map_err(|_| CacheError::NoIoDriver)?
+        .map(drop)
+        .map_err(io_error)
 }
 
 fn admit_address(

@@ -203,7 +203,7 @@ pub(crate) fn describe() {
     metrics::describe_gauge!(
         COMMANDS_IN_FLIGHT_METRIC,
         Unit::Count,
-        "Admitted cache application and probe commands, including connection waits, until completion or retirement"
+        "Admitted cache application and probe commands, including connection waits, until their futures complete or are dropped"
     );
     metrics::describe_counter!(
         RETIREMENTS_METRIC,

@@ -325,6 +325,17 @@ fn a_tokio_runtime_without_timers_is_refused_at_startup() {
 }
 
 #[test]
+fn a_tokio_runtime_without_io_is_refused_at_startup() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("Tokio runtime with time");
+    let _entered = runtime.enter();
+    let err = Cache::start(options("redis://127.0.0.1:6379", true, true, None)).unwrap_err();
+    assert_eq!(err.to_string(), "cache requires the Tokio I/O driver");
+}
+
+#[test]
 fn options_debug_redacts_the_dsn() {
     let rendered = format!(
         "{:?}",

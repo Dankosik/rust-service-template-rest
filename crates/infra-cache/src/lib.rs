@@ -162,6 +162,10 @@ pub enum CacheError {
     NoRuntime,
     #[error("cache requires the Tokio time driver")]
     NoTimeDriver,
+    #[error("cache requires the Tokio I/O driver")]
+    NoIoDriver,
+    #[error("cache could not check the Tokio I/O driver ({kind})")]
+    IoDriverCheck { kind: std::io::ErrorKind },
     #[error("cache client could not be built")]
     ClientBuild,
 }
@@ -215,7 +219,7 @@ pub struct Cache {
 impl Cache {
     /// Admit the DSN and build the connection without waiting for the network.
     ///
-    /// Must be called from a Tokio runtime with the time driver enabled.
+    /// Must be called from a Tokio runtime with the time and I/O drivers enabled.
     /// It reads the password, root CA, and client certificate files synchronously,
     /// so an async caller runs it on the blocking pool with the runtime entered.
     /// The background task drives the dial. Commands and the probe report an outage.
@@ -227,8 +231,9 @@ impl Cache {
     ///
     /// Returns [`CacheError`] when the DSN, address policy, password file, CA
     /// file, or client certificate is refused, when no Tokio runtime is
-    /// current, when the time driver is disabled in an unwinding build, or
-    /// when the client cannot be built. The message does not include the DSN.
+    /// current, when a required Tokio driver is disabled in an unwinding build,
+    /// when checking the I/O driver fails, or when the client cannot be built.
+    /// The message does not include the DSN.
     pub fn start(options: CacheOptions) -> Result<Self, CacheError> {
         let command_timeout = options.command_timeout;
         let Admitted {
@@ -242,6 +247,7 @@ impl Cache {
         // Tokio exposes a missing time driver as a panic at timer construction.
         std::panic::catch_unwind(|| drop(tokio::time::sleep(Duration::ZERO)))
             .map_err(|_| CacheError::NoTimeDriver)?;
+        admission::check_io_driver()?;
         observe::describe();
         Ok(Self {
             link: Arc::new(Link::start(server, client, password_file, command_timeout)),
