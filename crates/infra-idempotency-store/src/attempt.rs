@@ -282,8 +282,8 @@ async fn arbitrate(
     .map_err(|err| read_failed(&err, "arbitrate"))?;
     // The join yields a whole record or none of its columns.
     let live = match (row.fingerprint, row.status, row.headers) {
-        (Some(stored), Some(status), Some(headers)) => Some(
-            decide_live(stored, status, headers, row.body, fingerprint)
+        (Some(stored_fingerprint), Some(status), Some(headers)) => Some(
+            decide_live(stored_fingerprint, status, headers, row.body, fingerprint)
                 .map_err(|err| read_failed(&err, "arbitrate"))?,
         ),
         _ => None,
@@ -333,13 +333,13 @@ async fn arbitrate(
 /// the body only for an equal fingerprint, so a mismatch neither detoasts nor
 /// transfers it; a replay whose body is missing is a corrupt record.
 fn decide_live(
-    stored: Digest,
+    stored_fingerprint: Digest,
     status: i16,
     headers: Vec<HeaderPair>,
     body: Option<Vec<u8>>,
     fingerprint: &Digest,
 ) -> Result<Decision, sqlx::Error> {
-    if stored != *fingerprint {
+    if stored_fingerprint != *fingerprint {
         return Ok(Decision::Mismatch);
     }
     let body = body.ok_or_else(|| sqlx::Error::Decode("the stored body is null".into()))?;
@@ -353,9 +353,9 @@ fn decide_live(
 fn read_failed(err: &sqlx::Error, phase: &'static str) -> AttemptError {
     match err {
         sqlx::Error::ColumnDecode { .. } | sqlx::Error::Decode(_) => {
-            failed(err, "decode_record", AttemptError::Integrity)
+            failed(err, "decode_record", AttemptError::Integrity, None)
         }
-        _ => failed(err, phase, classify(err)),
+        _ => failed(err, phase, classify(err), None),
     }
 }
 
@@ -394,7 +394,7 @@ async fn write(
         .execute(tx),
     )
     .await
-    .map_err(|err| failed(&err, "write_record", classify(&err)))?;
+    .map_err(|err| failed(&err, "write_record", classify(&err), None))?;
     if written.rows_affected() == 1 {
         Ok(())
     } else {
@@ -431,15 +431,16 @@ impl<R> From<TxError> for Stop<R> {
 }
 
 fn classify_tx(err: &TxError) -> AttemptError {
-    match err {
-        TxError::Acquire(err) => failed(err, "acquire", classify(err)),
-        TxError::Begin(err) => failed(err, "begin", classify(err)),
-        TxError::CommitFailed(err) => failed(err, "commit", classify(err)),
+    let (phase, class, commit_outcome) = match err {
+        TxError::Acquire(err) => ("acquire", classify(err), None),
+        TxError::Begin(err) => ("begin", classify(err), None),
+        TxError::CommitFailed(err) => ("commit", classify(err), Some("commit_failed")),
         // The transaction owner could not establish rollback. Even a permanent
         // protocol fault may follow a successful COMMIT, so preserve uncertainty
         // and let the identical same-key retry reconcile the durable outcome.
-        TxError::CommitUnknown(err) => failed(err, "commit", AttemptError::Unavailable),
-    }
+        TxError::CommitUnknown(_) => ("commit", AttemptError::Unavailable, Some("commit_unknown")),
+    };
+    failed(err.driver(), phase, class, commit_outcome)
 }
 
 fn classify(err: &sqlx::Error) -> AttemptError {
@@ -452,10 +453,16 @@ fn classify(err: &sqlx::Error) -> AttemptError {
 
 /// Log a failure with only bounded fields, never driver text, and return its
 /// class.
-fn failed(err: &sqlx::Error, phase: &'static str, class: AttemptError) -> AttemptError {
+fn failed(
+    err: &sqlx::Error,
+    phase: &'static str,
+    class: AttemptError,
+    commit_outcome: Option<&'static str>,
+) -> AttemptError {
     tracing::warn!(
         phase,
         failure_class = %class,
+        commit_outcome,
         sqlstate = sqlstate(err).as_deref(),
         cause = failure_cause(err),
         "http_idempotency_store_failed"
