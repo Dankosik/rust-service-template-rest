@@ -6,6 +6,8 @@ use tonic_health::pb::health_check_response::ServingStatus;
 use tonic_health::pb::health_server::Health;
 use tonic_health::pb::{HealthCheckRequest, HealthCheckResponse};
 
+pub(crate) type HealthServer = tonic_health::pb::health_server::HealthServer<Adapter>;
+
 /// Readiness-backed standard health service.
 #[derive(Debug)]
 pub(crate) struct Adapter {
