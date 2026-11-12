@@ -595,6 +595,33 @@ fn two_spellings_of_one_variable_are_refused() {
             if name == "APP__http__addr" && other == "APP__HTTP__ADDR", "{err}");
 }
 
+#[rstest::rstest]
+#[case::environment_only(false)]
+#[case::across_carriers(true)]
+fn overlapping_variable_paths_are_refused(#[case] parent_from_secrets_dir: bool) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut options = LoadOptions {
+        config: Some(write(&dir, "base.toml", "[http]\nrequest_timeout = \"9s\"")),
+        ..LoadOptions::default()
+    };
+    let parent = ("APP__http", "sample-value");
+    let mut environment = vec![("APP__HTTP__ADDR", "127.0.0.1:8080")];
+    if parent_from_secrets_dir {
+        write(&dir, parent.0, parent.1);
+        options.secrets_dir = Some(dir.path().to_owned());
+    } else {
+        environment.push(parent);
+    }
+
+    let err = load_from(&options, BUILD, env(&environment)).unwrap_err();
+    let rendered = err.to_string();
+    assert!(
+        rendered.contains("APP__http and APP__HTTP__ADDR set overlapping keys"),
+        "{err}"
+    );
+    assert!(!rendered.contains(parent.1), "{err}");
+}
+
 #[test]
 fn the_environment_overrides_a_secret_file_spelled_in_another_case() {
     let dir = tempfile::tempdir().unwrap();
