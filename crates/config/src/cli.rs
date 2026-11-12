@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use clap::Parser;
 
-/// Command-line loader options every binary in this repository accepts.
+/// Command-line options for selecting configuration sources.
 #[derive(Clone, Debug, Default, Parser, PartialEq, Eq)]
 #[command(disable_version_flag = true)]
 pub struct LoadOptions {

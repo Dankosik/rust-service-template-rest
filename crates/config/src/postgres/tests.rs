@@ -50,6 +50,22 @@ fn pool_size_is_bounded() {
 }
 
 #[test]
+fn pool_size_rejects_fractional_toml() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write(&dir, "postgres.toml", "[postgres]\nmax_connections = 2.8\n");
+    let options = LoadOptions {
+        config: Some(file),
+        ..LoadOptions::default()
+    };
+    let err = load_from(&options, BUILD, env(&[])).unwrap_err();
+    assert_matches!(&err, Error::Deserialize(_), "{err}");
+    assert!(
+        err.to_string().contains("postgres.max_connections"),
+        "{err}"
+    );
+}
+
+#[test]
 fn only_migration_loading_enforces_the_deadline_range() {
     let options = LoadOptions::default();
     for deadline in ["0s", "25h"] {

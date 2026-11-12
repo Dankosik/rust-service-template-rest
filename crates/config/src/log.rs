@@ -38,17 +38,7 @@ impl Default for LogConfig {
 
 impl LogConfig {
     pub(crate) fn validate(&self) -> Result<(), ValidationError> {
-        non_blank("log.level", &self.level)?;
-        // The directive grammar is owned by tracing-subscriber; only its own
-        // parser can reject it, and the composition root does that before
-        // installing the subscriber. Here we reject the values that cannot
-        // be a directive at all.
-        if self.level.chars().any(char::is_whitespace) {
-            return Err(ValidationError::new(
-                "log.level",
-                "must be a filter directive without whitespace, for example `info` or `info,sqlx=warn`",
-            ));
-        }
-        Ok(())
+        // The subscriber's parser owns the directive grammar.
+        non_blank("log.level", &self.level)
     }
 }

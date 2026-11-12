@@ -213,16 +213,18 @@ fn oauth_exchange_cache_capacity_has_a_default_an_environment_form_and_a_range()
         let err = load(Some(rejected)).unwrap_err();
         assert_matches!(&err, Error::Validate(error) if error.key == "integrations.billing.oauth.exchange_cache_capacity" && error.message == format!("must be between 1 and 65536, got {rejected}"), "{err}");
     }
-    let err = load(Some("many")).unwrap_err();
-    assert_matches!(&err, Error::Deserialize(_), "{err}");
-    let rendered = err.to_string();
-    assert!(
-        rendered.contains(
-            "invalid value, expected an integer for key `integrations.billing.oauth.exchange_cache_capacity`"
-        ),
-        "{rendered}"
-    );
-    assert!(!rendered.contains("many"), "{rendered}");
+    for input in ["many", "yes"] {
+        let err = load(Some(input)).unwrap_err();
+        assert_matches!(&err, Error::Deserialize(_), "{err}");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains(
+                "invalid value, expected an integer for key `integrations.billing.oauth.exchange_cache_capacity`"
+            ),
+            "{rendered}"
+        );
+        assert!(!rendered.contains(input), "{rendered}");
+    }
 }
 
 fn load_oauth_provider_concurrency(

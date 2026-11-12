@@ -99,7 +99,10 @@ pub struct OAuthConfig {
     /// Optional OAuth audience parameter.
     pub audience: Option<String>,
     /// How many subjects keep a token exchanged on their behalf.
-    #[serde(default = "default_exchange_cache_capacity")]
+    #[serde(
+        default = "default_exchange_cache_capacity",
+        deserialize_with = "crate::de::unsigned_count"
+    )]
     pub exchange_cache_capacity: u32,
     /// Maximum simultaneous token acquisitions across both grant types.
     #[serde(

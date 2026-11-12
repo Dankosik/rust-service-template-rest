@@ -82,6 +82,7 @@ pub struct ObjectStorageConfig {
     /// Largest object a put may send or a get may return.
     pub max_object_bytes: ByteSize,
     /// Operations admitted at once; the excess is refused, not queued.
+    #[serde(deserialize_with = "crate::de::unsigned_count")]
     pub max_concurrency: u64,
     /// Bound for one call, retries included; GET covers the entire body
     /// through confirmed EOF from its original start.

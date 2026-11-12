@@ -11,6 +11,7 @@ pub struct RuntimeConfig {
     /// `NonZeroUsize` rejects zero while decoding, so no validation step.
     /// `APP__RUNTIME__WORKER_THREADS` is the override channel;
     /// `TOKIO_WORKER_THREADS` is not read.
+    #[serde(deserialize_with = "crate::de::optional_unsigned_count")]
     pub worker_threads: Option<NonZeroUsize>,
 }
 
