@@ -343,30 +343,47 @@ fn cleanup_releases_the_original_active_gauge_after_moving_threads() {
 const RUNS_METRIC: &str = "test_cleanup_runs_total";
 
 #[tokio::test(start_paused = true)]
-async fn scheduled_cleanup_counts_each_finished_pass_and_stops_at_a_cancelled_one() {
+async fn scheduled_cleanup_counts_a_timed_out_batch_and_runs_the_next_pass() {
     let recorder = PrometheusBuilder::new().build_recorder();
     let _recording = metrics::set_default_local_recorder(&recorder);
     let cancel = CancellationToken::new();
     let mut passes = 0;
 
-    run_scheduled_cleanup(
+    let cleanup = run_scheduled_cleanup(
         Cleanup::Jobs,
         RUNS_METRIC,
         &cancel,
         || {
             passes += 1;
-            std::future::ready(match passes {
-                1 => Err(()),
-                2 => Ok(PassEnd::Completed),
-                _ => {
-                    cancel.cancel();
-                    Ok(PassEnd::Cancelled)
+            let pass_number = passes;
+            let cancel = &cancel;
+            async move {
+                match pass_number {
+                    1 => {
+                        let mut pass = CleanupPass::start(Cleanup::Jobs);
+                        pass.run_batch(std::future::pending::<Result<u64, CleanupBatchTimeout>>())
+                            .await?;
+                        Ok::<_, CleanupBatchTimeout>(PassEnd::Completed)
+                    }
+                    2 => {
+                        let mut pass = CleanupPass::start(Cleanup::Jobs);
+                        pass.run_batch(std::future::ready(Ok::<_, CleanupBatchTimeout>(7)))
+                            .await?;
+                        pass.completed();
+                        Ok(PassEnd::Completed)
+                    }
+                    _ => {
+                        cancel.cancel();
+                        Ok(PassEnd::Cancelled)
+                    }
                 }
-            })
+            }
         },
         || std::future::ready(Err(MaintenanceFailure::Statement)),
-    )
-    .await;
+    );
+    tokio::time::timeout(Duration::from_secs(180), cleanup)
+        .await
+        .expect("the stalled batch must not stop later scheduled passes");
 
     assert_eq!(passes, 3);
     let scrape = recorder.handle().render();
@@ -383,6 +400,18 @@ async fn scheduled_cleanup_counts_each_finished_pass_and_stops_at_a_cancelled_on
         .filter(|line| line.starts_with(RUNS_METRIC))
         .count();
     assert_eq!(series, 2, "the cancelled pass is not counted: {scrape}");
+    assert!(
+        scrape.contains(r#"postgres_cleanup_passes_total{cleanup="jobs",outcome="failed"} 1"#),
+        "{scrape}"
+    );
+    assert!(
+        scrape.contains(r#"postgres_cleanup_committed_batches_total{cleanup="jobs"} 1"#),
+        "{scrape}"
+    );
+    assert!(
+        scrape.contains(r#"postgres_cleanup_removed_rows_total{cleanup="jobs"} 7"#),
+        "{scrape}"
+    );
 }
 
 #[tokio::test(start_paused = true)]

@@ -3,9 +3,9 @@
 use std::time::Duration;
 
 use infra_postgres::{
-    Cleanup, CleanupPass, MaintenanceFailure, PassEnd, PopulationSample, TxError, failure_cause,
-    in_observation_tx, in_tx_with, observed, run_scheduled_cleanup, set_statement_timeout,
-    sqlstate,
+    Cleanup, CleanupBatchTimeout, CleanupPass, MaintenanceFailure, PassEnd, PopulationSample,
+    TxError, failure_cause, in_observation_tx, in_tx_with, observed, run_scheduled_cleanup,
+    set_statement_timeout, sqlstate,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -44,6 +44,8 @@ pub enum CleanupError {
     /// The commit failed or its outcome is unknown.
     #[error("commit")]
     Commit,
+    #[error(transparent)]
+    TimedOut(#[from] CleanupBatchTimeout),
 }
 
 struct PassSummary {
@@ -116,14 +118,14 @@ impl Store {
 
     /// Delete expired records in batches of at most 500 until a batch
     /// deletes fewer. Return confirmed deletions, which do not certify that
-    /// the population is empty. Each batch is its
-    /// own `READ COMMITTED` transaction with a 5 s statement timeout, and
-    /// skips records a running attempt holds.
+    /// the population is empty. Each batch runs in its own `READ COMMITTED`
+    /// transaction and skips locked records.
     ///
     /// # Errors
     ///
     /// The failure class of the batch that failed, logged with a bounded
-    /// cause; earlier batches stay committed.
+    /// cause. Earlier batches stay committed. A timeout leaves the batch's
+    /// commit outcome unconfirmed.
     pub async fn remove_expired(&self) -> Result<u64, CleanupError> {
         self.cleanup_pass(None).await.map(|result| result.removed)
     }
@@ -141,11 +143,7 @@ impl Store {
                     end: PassEnd::Cancelled,
                 });
             }
-            let deleted_rows = self
-                .delete_expired_batch()
-                .await
-                .inspect_err(|_| pass.failed())?;
-            pass.committed(deleted_rows);
+            let deleted_rows = pass.run_batch(self.delete_expired_batch()).await?;
             metrics::counter!(CLEANUP_REMOVED_METRIC).increment(deleted_rows);
             removed += deleted_rows;
             if deleted_rows < u64::from(CLEANUP_BATCH_ROWS) {
@@ -164,8 +162,7 @@ impl Store {
             &self.pool,
             READ_COMMITTED,
             async |tx| -> Result<u64, CleanupError> {
-                // Bounds the batch on the server, so a batch whose client has
-                // gone still ends within 5 s.
+                // Bounds server execution even if the client stops waiting.
                 set_statement_timeout(tx, Duration::from_secs(5))
                     .await
                     .map_err(|err| cleanup_failed(&err, CleanupError::Statement))?;

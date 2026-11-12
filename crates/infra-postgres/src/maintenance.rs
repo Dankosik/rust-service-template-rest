@@ -33,6 +33,10 @@ const MAINTENANCE_OBSERVATION_BUDGET: Duration = Duration::from_secs(8);
 /// Delay between scheduled cleanup passes.
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 
+/// Matches the jobs retention backstop, with room for pool acquisition, the
+/// cleanup statement, and transaction acknowledgement.
+const CLEANUP_BATCH_BUDGET: Duration = Duration::from_secs(12);
+
 /// Cadence for the existing scheduled owner; direct cleanup calls do not use it.
 #[derive(Debug)]
 pub struct CleanupSchedule {
@@ -636,6 +640,12 @@ pub struct CleanupPass {
     removed_rows: u64,
 }
 
+/// A cleanup batch missed its client-side deadline. Its deletion may have
+/// committed, but the pass could not confirm it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("cleanup batch timed out")]
+pub struct CleanupBatchTimeout;
+
 impl CleanupPass {
     #[must_use]
     pub fn start(cleanup: Cleanup) -> Self {
@@ -654,6 +664,33 @@ impl CleanupPass {
             committed_batches: 0,
             removed_rows: 0,
         }
+    }
+
+    /// Bound one batch from connection acquisition through commit
+    /// acknowledgement so a lost reply cannot stall subsequent passes.
+    ///
+    /// # Errors
+    ///
+    /// Returns the batch's error or a converted [`CleanupBatchTimeout`].
+    pub async fn run_batch<E>(
+        &mut self,
+        batch: impl Future<Output = Result<u64, E>>,
+    ) -> Result<u64, E>
+    where
+        E: From<CleanupBatchTimeout>,
+    {
+        let rows = tokio::time::timeout(CLEANUP_BATCH_BUDGET, batch)
+            .await
+            .unwrap_or_else(|_| {
+                tracing::warn!(
+                    cleanup = self.cleanup.label(),
+                    "postgres_cleanup_batch_timed_out"
+                );
+                Err(CleanupBatchTimeout.into())
+            })
+            .inspect_err(|_| self.failed())?;
+        self.committed(rows);
+        Ok(rows)
     }
 
     /// Publish a known successful commit before the next wait in the pass.

@@ -3,8 +3,9 @@
 use std::time::Duration;
 
 use infra_postgres::{
-    Cleanup, CleanupPass, MaintenanceFailure, PassEnd, PopulationSample, TxError, failure_cause,
-    in_observation_tx, in_tx, observed, run_scheduled_cleanup, set_statement_timeout, sqlstate,
+    Cleanup, CleanupBatchTimeout, CleanupPass, MaintenanceFailure, PassEnd, PopulationSample,
+    TxError, failure_cause, in_observation_tx, in_tx, observed, run_scheduled_cleanup,
+    set_statement_timeout, sqlstate,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -34,15 +35,16 @@ pub const CLEANUP_REMOVED_METRIC: &str = "webhook_receipt_cleanup_removed_receip
 
 impl Receiver {
     /// Delete expired receipts in batches of at most 500, returning confirmed
-    /// progress after a short batch. Each batch is its own transaction with a
-    /// 5 s statement timeout and skips receipts another cleanup holds; an
-    /// admission's `ON CONFLICT DO NOTHING` locks no existing receipt.
+    /// progress after a short batch. Each batch is its own transaction and
+    /// skips receipts another cleanup holds. An admission's
+    /// `ON CONFLICT DO NOTHING` locks no existing receipt.
     /// Confirmed counts do not certify an empty expired population.
     ///
     /// # Errors
     ///
     /// The failure class of the batch that failed, logged with a bounded
-    /// cause; earlier batches stay committed.
+    /// cause. Earlier batches stay committed. A timeout leaves the batch's
+    /// commit outcome unconfirmed.
     pub async fn remove_expired(&self) -> Result<u64, CleanupError> {
         self.remove_expired_pass(&CancellationToken::new())
             .await
@@ -60,9 +62,7 @@ impl Receiver {
                 return Ok((removed, PassEnd::Cancelled));
             }
             let batch = in_tx(&self.pool, async |tx| -> Result<u64, CleanupError> {
-                // Bounds the batch on the server, so a batch whose client has
-                // gone still ends within 5 s. A hang guard, not a pace: a slow
-                // batch is waited for.
+                // Bounds server execution even if the client stops waiting.
                 set_statement_timeout(tx, Duration::from_secs(5))
                     .await
                     .map_err(|err| cleanup_failed(&err, CleanupError::Statement))?;
@@ -81,10 +81,8 @@ impl Receiver {
                 .await
                 .map_err(|err| cleanup_failed(&err, CleanupError::Statement))?;
                 Ok(deleted.rows_affected())
-            })
-            .await
-            .inspect_err(|_| pass.failed())?;
-            pass.committed(batch);
+            });
+            let batch = pass.run_batch(batch).await?;
             metrics::counter!(CLEANUP_REMOVED_METRIC).increment(batch);
             removed += batch;
             if batch < u64::from(CLEANUP_BATCH_ROWS) {
@@ -156,6 +154,8 @@ pub enum CleanupError {
     Statement,
     #[error("commit")]
     Commit,
+    #[error(transparent)]
+    TimedOut(#[from] CleanupBatchTimeout),
 }
 
 impl From<TxError> for CleanupError {
