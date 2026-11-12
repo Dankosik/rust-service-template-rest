@@ -155,6 +155,14 @@ async fn token_failures_are_sanitized_and_never_dispatch_the_resource() {
             AcquisitionError::Rejected(Rejection::Other),
         ),
         (
+            b"HTTP/1.1 400 Bad Request\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{".to_vec(),
+            AcquisitionError::Rejected(Rejection::Other),
+        ),
+        (
+            b"HTTP/1.1 400 Bad Request\r\ncontent-length: 1048577\r\nconnection: close\r\n\r\n".to_vec(),
+            AcquisitionError::Rejected(Rejection::Other),
+        ),
+        (
             json_response(
                 "200 OK",
                 &serde_json::json!({"access_token":"token", "token_type":"MAC", "expires_in":3600}),
