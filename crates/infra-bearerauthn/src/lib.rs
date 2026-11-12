@@ -35,6 +35,31 @@ use std::sync::Arc;
 
 use operation_context::OperationContext;
 
+struct JsonObject<T>(T);
+
+impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for JsonObject<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct ObjectVisitor<T>(std::marker::PhantomData<T>);
+
+        impl<'de, T: serde::Deserialize<'de>> serde::de::Visitor<'de> for ObjectVisitor<T> {
+            type Value = JsonObject<T>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a JSON object")
+            }
+
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                map: A,
+            ) -> Result<Self::Value, A::Error> {
+                T::deserialize(serde::de::value::MapAccessDeserializer::new(map)).map(JsonObject)
+            }
+        }
+
+        deserializer.deserialize_map(ObjectVisitor(std::marker::PhantomData))
+    }
+}
+
 pub use authenticate::{AUTHN_VERIFICATIONS_METRIC, Transport};
 pub use bearer::{BearerToken, parse_bearer};
 // template:begin oidc-introspection:authn-introspection-prepare-export

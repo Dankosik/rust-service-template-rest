@@ -10,10 +10,11 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    BearerToken, EndpointUrl, IssuerUrl, JwtAlgorithm, PreparationError, PreparationPhase,
-    PreparationReason, Principal, ProviderFailure, VerificationError, VerificationReason, Verifier,
+    BearerToken, EndpointUrl, IssuerUrl, JsonObject, JwtAlgorithm, PreparationError,
+    PreparationPhase, PreparationReason, Principal, ProviderFailure, VerificationError,
+    VerificationReason, Verifier,
     claims::{ClaimPolicy, validate_jwt_claims},
-    jwks::{KEY_REJECTIONS_METRIC, KeySetFailure, MAX_SIGNATURE_BYTES, fetch_key_set},
+    jwks::{KEY_REJECTIONS_METRIC, MAX_SIGNATURE_BYTES, fetch_key_set},
     provider::{Document, ProviderClient},
     refresh::{KeyStore, SignatureRefresh, run_refresh_worker},
 };
@@ -188,12 +189,13 @@ async fn prepare_with_provider(
         Some(jwks_uri) => jwks_uri,
         None => discover_jwks_uri(&provider, &options.issuer, startup_deadline).await?,
     };
-    let key_set = tokio::time::timeout_at(
-        startup_deadline,
-        fetch_key_set(&provider, &jwks_uri, &options.algorithms),
+    let key_set = fetch_key_set(
+        &provider,
+        &jwks_uri,
+        &options.algorithms,
+        Some(startup_deadline),
     )
     .await
-    .unwrap_or(Err(KeySetFailure::Fetch(ProviderFailure::Timeout)))
     .map_err(|failure| PreparationError::new(PreparationPhase::Jwks, failure.into()))?;
     let key_store = KeyStore::new(key_set);
     let verifier = JwtVerifier {
@@ -257,27 +259,23 @@ async fn fetch_discovery(
     let path = path.strip_suffix('/').unwrap_or(path);
     let mut openid = issuer.url().clone();
     openid.set_path(&format!("{path}/.well-known/openid-configuration"));
-    let bytes = match fetch_within(provider, &openid, Document::Discovery, deadline).await {
+    let bytes = match provider
+        .get_document(&openid, Document::Discovery, Some(deadline))
+        .await
+    {
         Err(ProviderFailure::Status(_)) => {
             let mut rfc8414 = issuer.url().clone();
             rfc8414.set_path(&format!("/.well-known/oauth-authorization-server{path}"));
-            fetch_within(provider, &rfc8414, Document::Discovery, deadline).await
+            provider
+                .get_document(&rfc8414, Document::Discovery, Some(deadline))
+                .await
         }
         result => result,
     }
     .map_err(|failure| error(PreparationReason::Fetch(failure)))?;
-    serde_json::from_slice(&bytes).map_err(|_| error(PreparationReason::Parse))
-}
-
-async fn fetch_within(
-    provider: &ProviderClient,
-    url: &url::Url,
-    document: Document,
-    deadline: Instant,
-) -> Result<Vec<u8>, ProviderFailure> {
-    tokio::time::timeout_at(deadline, provider.get_document(url, document))
-        .await
-        .unwrap_or(Err(ProviderFailure::Timeout))
+    serde_json::from_slice::<JsonObject<Discovery>>(&bytes)
+        .map(|JsonObject(discovery)| discovery)
+        .map_err(|_| error(PreparationReason::Parse))
 }
 
 #[derive(Deserialize)]
@@ -1555,8 +1553,10 @@ mod tests {
     }
 
     #[test]
-    fn a_dropped_provider_exchange_is_recorded_as_cancelled() {
-        use std::{future::Future, task::Poll};
+    fn provider_telemetry_distinguishes_startup_deadline_from_abandonment() {
+        use std::{future::Future, task::Poll, time::Duration};
+
+        use crate::ProviderFailure;
 
         let diagnostics = Diagnostics::default();
         let _registration_anchor =
@@ -1564,6 +1564,7 @@ mod tests {
         let dispatch = tracing::Dispatch::new(diagnostics.clone());
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
+            .start_paused(true)
             .build()
             .unwrap();
         metrics::with_local_recorder(&diagnostics, || {
@@ -1582,28 +1583,38 @@ mod tests {
                     .unwrap();
                     let url = format!("https://{FIXTURE_HOST}:{}/keys", address.port());
                     let url = url::Url::parse(&url).unwrap();
-                    let mut pending = Box::pin(provider.get_document(&url, Document::Jwks));
+                    let mut pending = Box::pin(provider.get_document(&url, Document::Jwks, None));
                     std::future::poll_fn(|cx| {
                         assert!(pending.as_mut().poll(cx).is_pending());
                         Poll::Ready(())
                     })
                     .await;
                     drop(pending);
+
+                    let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+                    assert_eq!(
+                        provider
+                            .get_document(&url, Document::Jwks, Some(deadline))
+                            .await,
+                        Err(ProviderFailure::Timeout)
+                    );
                 });
             });
         });
         let samples = diagnostics.histograms.lock().unwrap();
-        assert_eq!(samples.len(), 1);
-        assert!(
-            samples[0]
-                .labels()
-                .any(|label| label.key() == "outcome" && label.value() == "cancelled")
-        );
         let spans = diagnostics.spans.lock().unwrap();
-        assert!(
-            spans[0].ends_with("error.type=\"cancelled\";otel.status_code=\"ERROR\";"),
-            "{spans:?}"
-        );
+        assert_eq!(samples.len(), 2);
+        assert_eq!(spans.len(), 2);
+        for (index, outcome) in ["cancelled", "provider_timeout"].into_iter().enumerate() {
+            assert!(
+                samples[index]
+                    .labels()
+                    .any(|label| label.key() == "outcome" && label.value() == outcome)
+            );
+            assert!(spans[index].ends_with(&format!(
+                "error.type=\"{outcome}\";otel.status_code=\"ERROR\";"
+            )));
+        }
     }
 
     #[test]

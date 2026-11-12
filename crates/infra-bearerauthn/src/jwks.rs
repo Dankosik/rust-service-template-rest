@@ -11,7 +11,8 @@ use jsonwebtoken::{
 use serde::Deserialize;
 
 use crate::{
-    EndpointUrl, PreparationReason, ProviderFailure, VerificationError, VerificationReason,
+    EndpointUrl, JsonObject, PreparationReason, ProviderFailure, VerificationError,
+    VerificationReason,
     provider::{Document, ProviderClient},
 };
 
@@ -148,7 +149,8 @@ pub(crate) fn parse_key_set(
     bytes: &[u8],
     configured: &[JwtAlgorithm],
 ) -> Result<KeySet, KeySetFailure> {
-    let raw: RawJwks = serde_json::from_slice(bytes).map_err(|_| KeySetFailure::Parse)?;
+    let JsonObject(raw) =
+        serde_json::from_slice::<JsonObject<RawJwks>>(bytes).map_err(|_| KeySetFailure::Parse)?;
     let mut rejected = std::collections::BTreeMap::<KeyRejection, u64>::new();
     let mut keys = Vec::new();
     for value in raw.keys {
@@ -345,9 +347,10 @@ pub(crate) async fn fetch_key_set(
     provider: &ProviderClient,
     jwks_uri: &EndpointUrl,
     algorithms: &[JwtAlgorithm],
+    deadline: Option<tokio::time::Instant>,
 ) -> Result<Arc<KeySet>, KeySetFailure> {
     let bytes = provider
-        .get_document(jwks_uri.url(), Document::Jwks)
+        .get_document(jwks_uri.url(), Document::Jwks, deadline)
         .await
         .map_err(KeySetFailure::Fetch)?;
     Ok(Arc::new(parse_key_set(&bytes, algorithms)?))
