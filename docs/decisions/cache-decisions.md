@@ -38,7 +38,10 @@ retirement, then hand off to that queue without an intervening yield. A caller
 can cancel before handoff without withdrawing the connection. After handoff,
 an application command observes a ready reply before a context stop or
 disconnect notification because the reply has already answered its slot.
-Retirement bounds the lifetime of an unanswered slot. Recheck the handoff if
+On external drop, commands and probes poll a pending exchange once without
+waiting. A delivered reply can still preserve the connection, and an unanswered
+slot still causes retirement. The first poll must reach the driver so the drop
+poll cannot dispatch new work. Recheck the handoff if
 the driver adds a pre-enqueue wait or the number of producers changes.
 
 `infra-cache` retains redis 1.8.1 with `tokio-comp` and `tokio-rustls-comp`.
