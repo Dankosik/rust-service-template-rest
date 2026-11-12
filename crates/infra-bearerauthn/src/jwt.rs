@@ -420,8 +420,7 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        ClaimPolicy, Document, JwtAlgorithm, JwtVerifier, KeyStore, MAX_REMEMBERED,
-        MAX_REMEMBERED_FOR, TokenProfile,
+        ClaimPolicy, Document, JwtAlgorithm, JwtVerifier, KeyStore, MAX_REMEMBERED, TokenProfile,
     };
     use crate::{
         Failure, Transport, VerificationReason,
@@ -2112,10 +2111,7 @@ mod tests {
     async fn an_entry_is_held_no_longer_than_its_token_or_one_refresh_period() {
         let signing = ec_signing();
         let memo = ec_verifier(&signing, "k");
-        for (exp, held) in [
-            (1_060, Duration::from_millis(59_200)),
-            (1_000 + 10 * 86_400, MAX_REMEMBERED_FOR),
-        ] {
+        for (exp, ttl_millis) in [(1_060, 58_950), (1_000 + 10 * 86_400, 899_750)] {
             let token = ec_token(&signing, "k", &serde_json::json!({ "exp": exp }));
             let header = format!("Bearer {token}");
             let bearer = parse_bearer([header.as_bytes()]).unwrap();
@@ -2130,7 +2126,7 @@ mod tests {
                 &remembered,
                 remembered.sampled_at + insertion_delay,
             );
-            assert_eq!(ttl, Some(held - insertion_delay), "{exp}");
+            assert_eq!(ttl, Some(Duration::from_millis(ttl_millis)), "{exp}");
         }
     }
 }
