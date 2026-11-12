@@ -248,7 +248,14 @@ impl Consumer {
         tokio::select! {
             biased;
             () = force.cancelled() => Err(ConsumerError::DrainTimedOut),
-            result = self.consume(&mut deliveries, &stop, &force) => result,
+            result = async {
+                let result = self.consume(&mut deliveries, &stop, &force).await;
+                if matches!(result, Err(ConsumerError::DeadLetterTooLarge { .. })) {
+                    // Keep the first failure while admitted siblings settle.
+                    while deliveries.join_next().await.is_some() {}
+                }
+                result
+            } => result,
         }
     }
 
@@ -327,42 +334,41 @@ impl Consumer {
             };
             match self
                 .fill(&mut messages, deliveries, stop, force, slots)
-                .await?
+                .await
             {
-                BatchEnd::Filled => {
+                Ok(BatchEnd::Filled) => {
                     if retained {
                         reaped(deliveries.join_next().await)?;
                         retained = false;
                     }
                 }
-                BatchEnd::Stopped => {
+                Ok(end) => {
                     release(messages).await;
-                    break 'pulls;
-                }
-                BatchEnd::FirstMessageTooLarge => {
-                    release(messages).await;
+                    if matches!(end, BatchEnd::Stopped) {
+                        break 'pulls;
+                    }
                     if durable_confirmed_lost(&self.pull).await {
                         return Err(ConsumerError::ConsumerLost);
                     }
-                    pull_failed("batch_receive", MAX_BYTES_EXCEEDED);
-                    // Only a single-message pull can rule out a 409 caused by
-                    // records already allocated to the batch.
+                    let was_retained = retained;
+                    retained = matches!(end, BatchEnd::FirstMessageTooLarge);
                     if retained {
-                        return Err(ConsumerError::RetainedMessageTooLarge);
-                    }
-                    retained = true;
-                }
-                end @ (BatchEnd::Closed | BatchEnd::Failed { .. }) => {
-                    retained = false;
-                    release(messages).await;
-                    if durable_confirmed_lost(&self.pull).await {
-                        return Err(ConsumerError::ConsumerLost);
-                    }
-                    if let BatchEnd::Failed { phase, error_kind } = end {
+                        pull_failed("batch_receive", MAX_BYTES_EXCEEDED);
+                        // A multi-message pull may report 409 before already
+                        // allocated records reach this replica's subscription.
+                        if was_retained {
+                            return Err(ConsumerError::RetainedMessageTooLarge);
+                        }
+                    } else if let BatchEnd::Failed { phase, error_kind } = end {
                         pull_failed(phase, error_kind);
                         tokio::time::sleep(STREAM_ERROR_BACKOFF).await;
                     }
                 }
+                Err(error @ ConsumerError::DeadLetterTooLarge { .. }) => {
+                    let _ = tokio::time::timeout(BROKER_OPERATION_BUDGET, release(messages)).await;
+                    return Err(error);
+                }
+                Err(error) => return Err(error),
             }
         }
         while let Some(joined) = deliveries.join_next().await {
