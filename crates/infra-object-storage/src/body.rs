@@ -116,7 +116,6 @@ impl From<Vec<u8>> for PutBody {
     }
 }
 
-/// The body yielded more or fewer bytes than declared.
 #[derive(Debug, thiserror::Error)]
 #[error("upload body length differs from the declared length")]
 struct LengthMismatch;
