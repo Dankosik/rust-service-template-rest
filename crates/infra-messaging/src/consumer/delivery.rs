@@ -14,11 +14,12 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument as _;
 
+use super::ConsumerError;
 use crate::budget::BROKER_OPERATION_BUDGET;
 use crate::error::HandlerError;
 use crate::messaging::Shared;
 use crate::observe::{OutcomeLabel as _, Outcomes, outcome_label, record_span_outcome};
-use crate::producer::send_publication;
+use crate::producer::{PublicationFailure, send_publication};
 use crate::registry::{DispatchError, Registry};
 use crate::wire;
 
@@ -192,7 +193,11 @@ impl DeliveryHandler {
     /// metadata the attempt count and deterministic dead-letter identity are
     /// unavailable, so the delivery is logged and left unacknowledged for
     /// ack-wait redelivery.
-    pub(super) async fn handle(&self, message: Message, cancel: CancellationToken) {
+    pub(super) async fn handle(
+        &self,
+        message: Message,
+        cancel: CancellationToken,
+    ) -> Result<(), ConsumerError> {
         let Some((info, delivery_attempt)) = message.info().ok().and_then(|info| {
             let attempt = usize::try_from(info.delivered).ok()?;
             Some((info, attempt))
@@ -204,7 +209,7 @@ impl DeliveryHandler {
                 subject = message.subject.as_str(),
                 "messaging_delivery_metadata_missing"
             );
-            return;
+            return Ok(());
         };
         let empty = HeaderMap::new();
         let headers = message.headers.as_ref().unwrap_or(&empty);
@@ -262,7 +267,7 @@ impl DeliveryHandler {
             &cancel,
         )
         .instrument(span)
-        .await;
+        .await
     }
 
     /// Runs the typed handler inside the delivery span and settles the source.
@@ -274,7 +279,7 @@ impl DeliveryHandler {
         metrics: &EventMetrics,
         delivery_attempt: usize,
         cancel: &CancellationToken,
-    ) {
+    ) -> Result<(), ConsumerError> {
         let started = Instant::now();
         let outcome = run_handler(&self.registry, message.subject.as_ref(), envelope, cancel).await;
         metrics.outcomes.record(outcome, started.elapsed());
@@ -308,11 +313,13 @@ impl DeliveryHandler {
         match settlement(outcome, delivery_attempt) {
             Settlement::Acknowledge => acknowledge(&self.shared.connection.client, message).await,
             Settlement::DeadLetter(reason) => {
-                self.dead_letter(message, info, reason, event_type, cancel)
+                return self
+                    .dead_letter(message, info, reason, event_type, cancel)
                     .await;
             }
             Settlement::Redeliver(delay) => redeliver_after(message, delay).await,
         }
+        Ok(())
     }
 
     /// Copies the source to the dead-letter stream, then acknowledges it.
@@ -324,14 +331,15 @@ impl DeliveryHandler {
         reason: wire::DeadLetterReason,
         event_type: &'static str,
         cancel: &CancellationToken,
-    ) {
+    ) -> Result<(), ConsumerError> {
         let Some(message) = transfer_message(source, info, &self.dead_letter_stream, reason) else {
             tracing::error!(
                 subject = source.subject.as_str(),
                 reason = reason.label(),
                 "messaging_dead_letter_identity_unavailable"
             );
-            return redeliver_after(source, SETTLEMENT_RETRY_DELAY).await;
+            redeliver_after(source, SETTLEMENT_RETRY_DELAY).await;
+            return Ok(());
         };
         let reason = reason.label();
 
@@ -350,8 +358,8 @@ impl DeliveryHandler {
         .await;
         let outcome = match &result {
             Ok(_) => "accepted",
-            Err(crate::PublishError::Ambiguous) => "ambiguous",
-            Err(crate::PublishError::Rejected) => "rejected",
+            Err(PublicationFailure::Ambiguous) => "ambiguous",
+            Err(PublicationFailure::Rejected | PublicationFailure::SizeLimit) => "rejected",
         };
         metrics::counter!(
             "messaging_dead_letter_total",
@@ -370,8 +378,14 @@ impl DeliveryHandler {
                 outcome,
                 "messaging_dead_letter_transfer_failed"
             );
+            if matches!(result, Err(PublicationFailure::SizeLimit)) {
+                return Err(ConsumerError::DeadLetterTooLarge {
+                    sequence: info.stream_sequence,
+                });
+            }
             redeliver_after(source, SETTLEMENT_RETRY_DELAY).await;
         }
+        Ok(())
     }
 }
 

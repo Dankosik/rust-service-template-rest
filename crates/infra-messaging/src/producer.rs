@@ -134,6 +134,7 @@ impl Producer {
         )
         .instrument(span.clone())
         .await
+        .map_err(PublishError::from)
     }
 }
 
@@ -157,6 +158,22 @@ fn source_message(
         .payload(event.payload().clone()))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PublicationFailure {
+    Rejected,
+    SizeLimit,
+    Ambiguous,
+}
+
+impl From<PublicationFailure> for PublishError {
+    fn from(failure: PublicationFailure) -> Self {
+        match failure {
+            PublicationFailure::Rejected | PublicationFailure::SizeLimit => Self::Rejected,
+            PublicationFailure::Ambiguous => Self::Ambiguous,
+        }
+    }
+}
+
 /// Sends the finalized message unchanged and awaits its `JetStream` acknowledgement.
 /// The native client enforces broker size and shared publication admission.
 ///
@@ -168,7 +185,7 @@ pub(crate) async fn send_publication(
     subject: impl ToSubject,
     message: PublishMessage,
     context: &OperationContext,
-) -> Result<PublishAck, PublishError> {
+) -> Result<PublishAck, PublicationFailure> {
     // The caller's cancellation token is shared rather than given a child,
     // which would register with its parent on every publication.
     let local = Deadline::new(Instant::now(), BROKER_OPERATION_BUDGET);
@@ -181,7 +198,7 @@ pub(crate) async fn send_publication(
         context.cancellation().clone(),
     );
     if context.stopped().is_some() {
-        return Err(PublishError::Rejected);
+        return Err(PublicationFailure::Rejected);
     }
     let classify = |error: async_nats::jetstream::context::PublishError| {
         classify_publish(&error, &shared.publish_metrics.admission_refused)
@@ -204,7 +221,7 @@ pub(crate) async fn send_publication(
     // exchange, so a cancellation or timeout here may follow dispatch.
     tokio::select! {
         biased;
-        _ = context.wait_stopped() => Err(PublishError::Ambiguous),
+        _ = context.wait_stopped() => Err(PublicationFailure::Ambiguous),
         result = exchange => result,
     }
 }
@@ -215,47 +232,45 @@ pub(crate) async fn send_publication(
 fn classify_publish(
     error: &async_nats::jetstream::context::PublishError,
     admission_refused: &metrics::Counter,
-) -> PublishError {
+) -> PublicationFailure {
     match error.kind() {
         PublishErrorKind::StreamNotFound
         | PublishErrorKind::WrongLastMessageId
-        | PublishErrorKind::WrongLastSequence
-        | PublishErrorKind::MaxPayloadExceeded => PublishError::Rejected,
+        | PublishErrorKind::WrongLastSequence => PublicationFailure::Rejected,
+        PublishErrorKind::MaxPayloadExceeded => PublicationFailure::SizeLimit,
         PublishErrorKind::MaxAckPending => {
             admission_refused.increment(1);
-            PublishError::Rejected
+            PublicationFailure::Rejected
         }
         PublishErrorKind::Other => {
-            let refused = error
+            let code = error
                 .source()
                 .and_then(|source| source.downcast_ref::<async_nats::jetstream::Error>())
-                .is_some_and(|error| {
-                    matches!(
-                        error.error_code(),
-                        ErrorCode::BAD_REQUEST
-                            | ErrorCode::ACCOUNT_RESOURCES_EXCEEDED
-                            | ErrorCode::INSUFFICIENT_RESOURCES
-                            | ErrorCode::STORAGE_RESOURCES_EXCEEDED
-                            | ErrorCode::JETSTREAM_NOT_ENABLED
-                            | ErrorCode::JETSTREAM_NOT_ENABLED_FOR_ACCOUNT
-                            | ErrorCode::STREAM_MESSAGE_EXCEEDS_MAXIMUM
-                            | ErrorCode::STREAM_HEADER_EXCEEDS_MAXIMUM
-                            | ErrorCode::STREAM_NOT_MATCH
-                            | ErrorCode::STREAM_MISMATCH
-                            | ErrorCode::STREAM_LIMITS
-                            | ErrorCode::STREAM_STORE_FAILED
-                            | ErrorCode::STREAM_SEALED
-                            | ErrorCode::STREAM_WRONG_LAST_MESSAGE_ID
-                            | ErrorCode::STREAM_WRONG_LAST_SEQUENCE
-                    )
-                });
-            if refused {
-                PublishError::Rejected
-            } else {
-                PublishError::Ambiguous
+                .map(async_nats::jetstream::Error::error_code);
+            match code {
+                Some(
+                    ErrorCode::STREAM_MESSAGE_EXCEEDS_MAXIMUM
+                    | ErrorCode::STREAM_HEADER_EXCEEDS_MAXIMUM,
+                ) => PublicationFailure::SizeLimit,
+                Some(
+                    ErrorCode::BAD_REQUEST
+                    | ErrorCode::ACCOUNT_RESOURCES_EXCEEDED
+                    | ErrorCode::INSUFFICIENT_RESOURCES
+                    | ErrorCode::STORAGE_RESOURCES_EXCEEDED
+                    | ErrorCode::JETSTREAM_NOT_ENABLED
+                    | ErrorCode::JETSTREAM_NOT_ENABLED_FOR_ACCOUNT
+                    | ErrorCode::STREAM_NOT_MATCH
+                    | ErrorCode::STREAM_MISMATCH
+                    | ErrorCode::STREAM_LIMITS
+                    | ErrorCode::STREAM_STORE_FAILED
+                    | ErrorCode::STREAM_SEALED
+                    | ErrorCode::STREAM_WRONG_LAST_MESSAGE_ID
+                    | ErrorCode::STREAM_WRONG_LAST_SEQUENCE,
+                ) => PublicationFailure::Rejected,
+                _ => PublicationFailure::Ambiguous,
             }
         }
-        PublishErrorKind::TimedOut | PublishErrorKind::BrokenPipe => PublishError::Ambiguous,
+        PublishErrorKind::TimedOut | PublishErrorKind::BrokenPipe => PublicationFailure::Ambiguous,
     }
 }
 
@@ -310,7 +325,10 @@ mod tests {
             ] {
                 let error = async_nats::jetstream::context::PublishError::new(kind);
                 assert_eq!(
-                    matches!(classify_publish(&error, &refused), PublishError::Rejected),
+                    matches!(
+                        PublishError::from(classify_publish(&error, &refused)),
+                        PublishError::Rejected
+                    ),
                     rejected
                 );
             }

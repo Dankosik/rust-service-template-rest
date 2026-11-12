@@ -222,6 +222,11 @@ The adapter attempted to move an event to the dead-letter stream. A
 An `ambiguous` publication also leaves it for redelivery, and the DLQ may
 already contain a copy. Fix the handler or the producer, then recover the
 exact DLQ records with the [`dlq_recovery` example](../crates/infra-messaging/examples/dlq_recovery.rs).
+After lowering a source limit, older records can still need the previous DLQ
+capacity. If the consumer stops with a dead-letter size error, raise the DLQ
+or broker limit to fit the indicated source record and restart the consumer.
+If the record exceeds the retained-message pull limit, resolve it in the
+source stream before restarting.
 For malformed source messages, the transfer keeps the original payload and
 omits any retained identity or trace field that would exceed the source header
 budget. A DLQ record can therefore be inspectable even when it cannot be redriven.

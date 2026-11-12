@@ -463,33 +463,42 @@ async fn sixth_delivery_bypasses_the_handler_and_transfers_as_exhausted() {
     fixture.cleanup().await;
 }
 
-#[tokio::test]
-async fn oversized_source_message_is_dead_lettered_without_invoking_the_handler() {
-    let fixture = Fixture::create(true).await;
-    let cancel = CancellationToken::new();
-    let producer = Box::pin(Messaging::connect(
-        options(&fixture, None, 1024),
-        deadline(),
-        cancel.clone(),
-    ))
-    .await
-    .expect("fixture producer is admitted against the original source bound");
-    let oversized = registry(&fixture)
-        .prepare(&event_with_value("event-oversized", &"x".repeat(128)), 1024)
-        .expect("fixture event is valid for the original producer bound");
-    producer
-        .producer()
-        .publish(&oversized, &context(deadline(), &cancel))
-        .await
-        .expect("source retains the event before the operator shrinks its bound");
-    close(producer).await;
-
+async fn retain_record_before_shrinking_source(
+    fixture: &Fixture,
+    cancel: &CancellationToken,
+) -> infra_messaging::PreparedEvent {
     let source = fixture
         .jetstream
         .get_stream(&fixture.stream)
         .await
         .expect("fixture source is available for the operator update");
     let mut source_config = source.cached_info().config.clone();
+    source_config.max_message_size = 24 * 1024;
+    fixture
+        .jetstream
+        .update_stream(source_config.clone())
+        .await
+        .expect("the original stream limit fits the retained event");
+    let producer = Box::pin(Messaging::connect(
+        options(fixture, None, 16 * 1024),
+        deadline(),
+        cancel.clone(),
+    ))
+    .await
+    .expect("fixture producer is admitted against the original source bound");
+    let oversized = registry(fixture)
+        .prepare(
+            &event_with_value("event-oversized", &"x".repeat(12 * 1024)),
+            16 * 1024,
+        )
+        .expect("fixture event is valid for the original producer bound");
+    producer
+        .producer()
+        .publish(&oversized, &context(deadline(), cancel))
+        .await
+        .expect("source retains the event before the operator shrinks its bound");
+    close(producer).await;
+
     source_config.max_message_size = 32 + 8 * 1024;
     let updated = fixture
         .jetstream
@@ -497,7 +506,14 @@ async fn oversized_source_message_is_dead_lettered_without_invoking_the_handler(
         .await
         .expect("operator can shrink the stream limit without deleting retained records");
     assert_eq!(updated.state.messages, 1);
+    oversized
+}
 
+#[tokio::test]
+async fn oversized_source_message_is_dead_lettered_without_invoking_the_handler() {
+    let fixture = Fixture::create(true).await;
+    let cancel = CancellationToken::new();
+    let oversized = retain_record_before_shrinking_source(&fixture, &cancel).await;
     let messaging = Box::pin(Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 32),
         deadline(),
@@ -529,11 +545,85 @@ async fn oversized_source_message_is_dead_lettered_without_invoking_the_handler(
     );
     assert_eq!(handler_calls.load(Ordering::SeqCst), 0);
     wait_for_source_ack(&fixture).await;
+    let next = infra_messaging::PreparedEvent::prepare(
+        fixture.subject.clone(),
+        &event_with_value("event-after-oversized", "ok"),
+        32,
+    )
+    .expect("ordinary event fits the reduced limit");
+    let ack = messaging
+        .producer()
+        .publish(&next, &context(deadline(), &cancel))
+        .await
+        .expect("ordinary event publishes after the oversized record is settled");
+    wait_for_source_ack_at_least(&fixture, ack.sequence).await;
+    assert_eq!(handler_calls.load(Ordering::SeqCst), 1);
     handle
         .finish(deadline())
         .await
         .expect("an oversized delivery must not stop the consumer");
 
+    close(messaging).await;
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn oversized_dead_letter_stops_the_consumer_and_keeps_the_source_unacknowledged() {
+    let fixture = Fixture::create(true).await;
+    let cancel = CancellationToken::new();
+    let _oversized = retain_record_before_shrinking_source(&fixture, &cancel).await;
+    let dlq = fixture
+        .jetstream
+        .get_stream(&fixture.dlq_stream)
+        .await
+        .expect("fixture DLQ is available for the operator update");
+    let mut dlq_config = dlq.cached_info().config.clone();
+    dlq_config.max_message_size = 10 * 1024;
+    fixture
+        .jetstream
+        .update_stream(dlq_config)
+        .await
+        .expect("DLQ admits newly published source records after the limit reduction");
+    let messaging = Box::pin(Messaging::connect(
+        options(&fixture, Some(consumer_options(&fixture)), 8 * 1024),
+        deadline(),
+        cancel.clone(),
+    ))
+    .await
+    .expect("current stream limits satisfy admission");
+    let mut registry = registry(&fixture);
+    registry
+        .register::<ExampleEvent, _, _>(|_, _| async { Ok(()) })
+        .expect("fixture handler is registered");
+    let mut handle = messaging
+        .consumer(registry)
+        .await
+        .expect("current stream limits satisfy consumer admission")
+        .start(&cancel);
+
+    let failure = timeout(Duration::from_secs(5), handle.failed())
+        .await
+        .expect("a conclusively oversized DLQ transfer must surface a terminal failure");
+    assert!(matches!(
+        failure,
+        ConsumerError::DeadLetterTooLarge { sequence: 1 }
+    ));
+    assert!(matches!(
+        handle.finish(deadline()).await,
+        Err(ConsumerError::DeadLetterTooLarge { sequence: 1 })
+    ));
+    wait_for_source_unacked(&fixture).await;
+    assert_eq!(
+        fixture
+            .jetstream
+            .get_stream(&fixture.dlq_stream)
+            .await
+            .expect("fixture DLQ remains available")
+            .cached_info()
+            .state
+            .messages,
+        0,
+    );
     close(messaging).await;
     fixture.cleanup().await;
 }
