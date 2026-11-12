@@ -119,9 +119,8 @@ impl PostgresConfig {
 /// The sections the migration binary reads, from the same files and
 /// environment as [`crate::Config`].
 ///
-/// Every other section is ignored rather than decoded, so a migration run
-/// holds no other section's secrets and another section's mistake cannot
-/// stop it; the binaries that use those sections still refuse them at startup.
+/// Other sections are ignored during decoding. The shared input rules
+/// still apply to all files and variables passed to [`crate::load_migration`].
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct MigrationConfig {
