@@ -148,46 +148,49 @@ impl Drop for ReportAcceptFailure {
     }
 }
 
-impl Server {
-    /// Bind `addr` and start accepting on the current Tokio runtime.
-    ///
-    /// Returns once the listener is bound. Initialize request-visible state
-    /// before calling: the accept task can serve requests before this returns.
+/// A bound TCP socket whose accept task has not started.
+pub struct BoundListener {
+    listener: TcpListener,
+    local_addr: SocketAddr,
+}
+
+impl BoundListener {
+    /// Reserve the address before starting an accept task.
     ///
     /// # Errors
     ///
     /// Returns [`ServerError::Bind`] when the address cannot be bound.
-    pub async fn bind(
-        addr: SocketAddr,
-        app: Router,
-        options: ServerOptions,
-    ) -> Result<Self, ServerError> {
-        bind_listener(addr, app, options, |stream| async move {
-            Some((stream, "http"))
+    pub async fn bind(addr: SocketAddr) -> Result<Self, ServerError> {
+        let listener = TcpListener::bind(addr)
+            .await
+            .map_err(|source| ServerError::Bind { addr, source })?;
+        let local_addr = listener
+            .local_addr()
+            .map_err(|source| ServerError::Bind { addr, source })?;
+        Ok(Self {
+            listener,
+            local_addr,
         })
-        .await
     }
 
-    // template:begin grpc:http-server-tls
-    /// Bind `addr` and start accepting TLS connections on the current Tokio runtime.
-    ///
-    /// The handshake is bounded by [`ServerOptions::header_read_timeout`],
-    /// which also closes a client that never starts it. A handshake error or
-    /// timeout closes the connection without a response, and so does drain:
-    /// no request can be in flight before the handshake ends.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ServerError::Bind`] when the address cannot be bound.
-    pub async fn bind_tls(
-        addr: SocketAddr,
+    #[must_use]
+    pub fn serve(self, app: Router, options: ServerOptions) -> Server {
+        serve_listener(self, app, options, |stream| async move {
+            Some((stream, "http"))
+        })
+    }
+
+    // template:begin grpc:http-bound-listener-tls
+    #[must_use]
+    pub fn serve_tls(
+        self,
         app: Router,
         options: ServerOptions,
         tls: Arc<rustls::ServerConfig>,
-    ) -> Result<Self, ServerError> {
+    ) -> Server {
         let acceptor = tokio_rustls::TlsAcceptor::from(tls);
         let handshake_timeout = options.header_read_timeout;
-        bind_listener(addr, app, options, move |stream| {
+        serve_listener(self, app, options, move |stream| {
             let acceptor = acceptor.clone();
             async move {
                 let peer = stream.peer_addr().ok();
@@ -211,7 +214,47 @@ impl Server {
                 }
             }
         })
-        .await
+    }
+    // template:end grpc:http-bound-listener-tls
+}
+
+impl Server {
+    /// Bind `addr` and start accepting on the current Tokio runtime.
+    ///
+    /// Returns once the listener is bound. Initialize request-visible state
+    /// before calling: the accept task can serve requests before this returns.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError::Bind`] when the address cannot be bound.
+    pub async fn bind(
+        addr: SocketAddr,
+        app: Router,
+        options: ServerOptions,
+    ) -> Result<Self, ServerError> {
+        Ok(BoundListener::bind(addr).await?.serve(app, options))
+    }
+
+    // template:begin grpc:http-server-tls
+    /// Bind `addr` and start accepting TLS connections on the current Tokio runtime.
+    ///
+    /// The handshake is bounded by [`ServerOptions::header_read_timeout`],
+    /// which also closes a client that never starts it. A handshake error or
+    /// timeout closes the connection without a response, and so does drain:
+    /// no request can be in flight before the handshake ends.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError::Bind`] when the address cannot be bound.
+    pub async fn bind_tls(
+        addr: SocketAddr,
+        app: Router,
+        options: ServerOptions,
+        tls: Arc<rustls::ServerConfig>,
+    ) -> Result<Self, ServerError> {
+        Ok(BoundListener::bind(addr)
+            .await?
+            .serve_tls(app, options, tls))
     }
     // template:end grpc:http-server-tls
 
@@ -357,23 +400,21 @@ fn connection_builder(options: ServerOptions) -> auto::Builder<TokioExecutor> {
 }
 
 // A failed preparation closes the connection before hyper owns it.
-async fn bind_listener<F, Fut, IO>(
-    addr: SocketAddr,
+fn serve_listener<F, Fut, IO>(
+    bound: BoundListener,
     app: Router,
     options: ServerOptions,
     prepare_io: F,
-) -> Result<Server, ServerError>
+) -> Server
 where
     F: Fn(TcpStream) -> Fut + Clone + Send + 'static,
     Fut: Future<Output = Option<(IO, &'static str)>> + Send + 'static,
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    let listener = TcpListener::bind(addr)
-        .await
-        .map_err(|source| ServerError::Bind { addr, source })?;
-    let local_addr = listener
-        .local_addr()
-        .map_err(|source| ServerError::Bind { addr, source })?;
+    let BoundListener {
+        listener,
+        local_addr,
+    } = bound;
     let connection_shutdown = ConnectionShutdown {
         finish: CancellationToken::new(),
         force: CancellationToken::new(),
@@ -405,13 +446,13 @@ where
         let _guard = guard;
         accept.await;
     }));
-    Ok(Server {
+    Server {
         local_addr,
         accept_loop,
         accept_failure,
         connection_shutdown,
         connections,
-    })
+    }
 }
 
 async fn accept_loop<F, Fut, IO>(

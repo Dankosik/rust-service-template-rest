@@ -17,6 +17,37 @@ fn omitted_section_defaults_to_inert_none() {
 
 // template:begin oidc-jwt:authn-config-jwt-tests
 #[test]
+fn jwt_loads_algorithm_and_audience_lists_from_variables() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = write(
+        &dir,
+        "authn.toml",
+        "[authn]\nmode = \"oidc-jwt\"\nissuer = \"issuer\"\naudience = [\"base\"]\nalgorithms = [\"RS256\"]\n",
+    );
+    write(&dir, "APP__AUTHN__AUDIENCE", "mounted");
+    let options = LoadOptions {
+        config: Some(config),
+        secrets_dir: Some(dir.path().to_owned()),
+        ..LoadOptions::default()
+    };
+    let environment = env(&[
+        ("APP__AUTHN__ALGORITHMS", "ES256, EdDSA"),
+        ("APP__AUTHN__AUDIENCES", r#"["api-a", " api-b ", "api-a"]"#),
+    ]);
+    let config = load_from(&options, BUILD, environment).unwrap();
+    let AuthnConfig::OidcJwt {
+        audience,
+        algorithms,
+        ..
+    } = config.authn
+    else {
+        panic!("expected OIDC JWT configuration");
+    };
+    assert_eq!(audience.as_slice(), ["api-a", " api-b "]);
+    assert_eq!(algorithms, [JwtAlgorithm::Es256, JwtAlgorithm::EdDsa]);
+}
+
+#[test]
 fn jwt_normalizes_scalar_or_list_audiences_without_changing_values() {
     let scalar = parse(
         r#"
@@ -309,6 +340,41 @@ fn introspection_environment_decodes_and_redacts_the_secret() {
         );
         assert!(!format!("{cfg:?}").contains("000042"));
     }
+}
+
+#[test]
+fn audience_list_is_explicit_and_refuses_conflicting_or_invalid_input() {
+    let options = LoadOptions::default();
+    let literal = r#"["api-a", "api-b"]"#;
+    let mut environment = introspection_environment(&[]);
+    let single = environment
+        .iter_mut()
+        .find(|(name, _)| name == "APP__AUTHN__AUDIENCE")
+        .unwrap();
+    single.1 = literal.to_owned();
+    let config = load_from(&options, BUILD, environment.clone()).unwrap();
+    let AuthnConfig::OidcIntrospection { audience, .. } = config.authn else {
+        panic!("expected OIDC introspection configuration");
+    };
+    assert_eq!(audience.as_slice(), [literal]);
+
+    environment.push(("APP__AUTHN__AUDIENCES".to_owned(), literal.to_owned()));
+    let error = load_from(&options, BUILD, environment.clone()).unwrap_err();
+    assert_matches!(error, crate::load::Error::AmbiguousName { .. });
+
+    environment.retain(|(name, _)| name != "APP__AUTHN__AUDIENCE");
+    let config = load_from(&options, BUILD, environment.clone()).unwrap();
+    let AuthnConfig::OidcIntrospection { audience, .. } = config.authn else {
+        panic!("expected OIDC introspection configuration");
+    };
+    assert_eq!(audience.as_slice(), ["api-a", "api-b"]);
+
+    environment.last_mut().unwrap().1 = "malformed-list".to_owned();
+    let error = load_from(&options, BUILD, environment)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("APP__AUTHN__AUDIENCES"), "{error}");
+    assert!(!error.contains("malformed-list"), "{error}");
 }
 
 #[test]
