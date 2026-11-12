@@ -14,7 +14,7 @@ use secrecy::SecretString;
 use serde::{Deserialize, Deserializer};
 
 // template:begin oidc-introspection:authn-occupied-secret-import
-use crate::de::blank_secret_as_none;
+use crate::de::{blank_secret_as_none, deserialize_scalar};
 // template:end oidc-introspection:authn-occupied-secret-import
 use crate::de::value_free;
 use crate::validate::{ValidationError, required_when};
@@ -233,6 +233,8 @@ const fn default_cache_ttl() -> Duration {
     Duration::from_secs(30)
 }
 
+// The tagged enum buffers field values, so config-rs reports failures at
+// `authn` alone. These messages name the rejected field.
 fn deserialize_provider_concurrency<'de, D>(deserializer: D) -> Result<NonZeroU32, D::Error>
 where
     D: Deserializer<'de>,
@@ -260,28 +262,6 @@ where
     )
 }
 
-// The tagged enum buffers values before decoding fields, so config-rs cannot
-// coerce environment strings here. Adapt only these scalar fields; trust and
-// credential strings must retain their exact bytes. The buffer also hides the
-// field from config-rs, which reports the failure at `authn` alone, so
-// `invalid` names the field itself.
-fn deserialize_scalar<'de, D, T>(deserializer: D, invalid: &str) -> Result<T, D::Error>
-where
-    D: Deserializer<'de>,
-    T: Deserialize<'de> + std::str::FromStr,
-{
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum Input<T> {
-        Typed(T),
-        Text(String),
-    }
-
-    match Input::<T>::deserialize(deserializer).map_err(|_| value_free(invalid))? {
-        Input::Typed(value) => Ok(value),
-        Input::Text(value) => value.parse().map_err(|_| value_free(invalid)),
-    }
-}
 // template:end oidc-introspection:authn-default-provider-concurrency
 
 impl AuthnConfig {
