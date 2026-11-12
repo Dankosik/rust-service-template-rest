@@ -231,7 +231,10 @@ impl IntrospectionVerifier {
         token: &BearerToken<'_>,
         context: &OperationContext,
     ) -> Result<Principal, VerificationError> {
-        self.verify_with_now(token, context, crate::unix_now).await
+        self.verify_with_now(token, context, || {
+            crate::unix_now().map(|now| now.as_secs())
+        })
+        .await
     }
 
     async fn verify_with_now(
@@ -1193,7 +1196,8 @@ mod tests {
         for options in [None, Some(cache_options(1))] {
             let verifier = fixture.verifier(options);
             let before = fixture.calls();
-            let unavailable = || crate::unix_time(UNIX_EPOCH - Duration::from_secs(1));
+            let unavailable =
+                || crate::unix_time(UNIX_EPOCH - Duration::from_secs(1)).map(|now| now.as_secs());
             for warmed in [false, true] {
                 if warmed {
                     verifier
@@ -1265,7 +1269,8 @@ mod tests {
             let mut waiter = Box::pin(verifier.verify_with_now(&token, &context, move || {
                 match *waiter_clock.lock().unwrap() {
                     Some(now) => Ok(now),
-                    None => crate::unix_time(UNIX_EPOCH - Duration::from_secs(1)),
+                    None => crate::unix_time(UNIX_EPOCH - Duration::from_secs(1))
+                        .map(|now| now.as_secs()),
                 }
             }));
             poll_pending(waiter.as_mut()).await;

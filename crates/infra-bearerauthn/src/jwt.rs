@@ -1,6 +1,11 @@
 //! OIDC discovery, startup trust, and JWS verification against admitted keys.
 
-use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::Arc,
+    time::{Duration, Instant as MonotonicInstant},
+};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use jsonwebtoken::Header;
@@ -26,8 +31,6 @@ const STARTUP_BUDGET: Duration = Duration::from_secs(6);
 const MAX_ECHOED_ISSUER_BYTES: usize = 256;
 /// Target entry count after cache maintenance.
 const MAX_REMEMBERED: u64 = 1024;
-/// An entry also leaves at its token's `exp`. A replaced key set strands its
-/// entries, so none outlives one refresh period.
 const MAX_REMEMBERED_FOR: Duration = REFRESH_INTERVAL;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -67,6 +70,7 @@ struct Remembered {
     /// [`KeySet::generation`](crate::jwks::KeySet::generation) of the set that
     /// verified the signature.
     key_generation: u64,
+    sampled_at: MonotonicInstant,
     held_for: Duration,
 }
 
@@ -77,9 +81,12 @@ impl Expiry<Box<[u8]>, Remembered> for RememberedExpiry {
         &self,
         _token: &Box<[u8]>,
         remembered: &Remembered,
-        _created_at: std::time::Instant,
+        created_at: MonotonicInstant,
     ) -> Option<Duration> {
-        Some(remembered.held_for)
+        // The wall-clock sample predates insertion. Spend that elapsed time
+        // from the retention budget rather than starting it over at insertion.
+        let elapsed = created_at.saturating_duration_since(remembered.sampled_at);
+        Some(remembered.held_for.saturating_sub(elapsed))
     }
 }
 
@@ -132,7 +139,7 @@ impl JwtVerifier {
     async fn verify_with_now(
         &self,
         token: &BearerToken<'_>,
-        now: impl Fn() -> Result<u64, VerificationError>,
+        now: impl Fn() -> Result<Duration, VerificationError>,
     ) -> Result<Principal, VerificationError> {
         let malformed = || VerificationError::invalid(VerificationReason::Header);
         let bytes = token.as_bytes();
@@ -140,7 +147,7 @@ impl JwtVerifier {
             // Verified against the set installed now, so the full path would
             // find the same signature valid on its first check.
             if remembered.key_generation == self.key_store.generation() {
-                let verified = remembered.verified.deliver(now()?);
+                let verified = remembered.verified.deliver(now()?.as_secs());
                 if matches!(&verified, Err(error) if error.reason == VerificationReason::Expired) {
                     self.remembered.invalidate(bytes);
                 }
@@ -189,21 +196,22 @@ impl JwtVerifier {
         let payload = URL_SAFE_NO_PAD
             .decode(payload)
             .map_err(|_| VerificationError::invalid(VerificationReason::MalformedClaims))?;
+        let sampled_at = MonotonicInstant::now();
         let now = now()?;
         let verified = validate_jwt_claims(
             payload,
             &self.claim_policy,
             self.token_profile,
-            now,
+            now.as_secs(),
             token.to_secret(),
         )?;
         let principal = verified.principal.clone();
         self.remembered.insert(
             bytes.into(),
             Remembered {
-                held_for: MAX_REMEMBERED_FOR.min(Duration::from_secs(
-                    principal.expires_at().saturating_sub(now),
-                )),
+                held_for: MAX_REMEMBERED_FOR
+                    .min(Duration::from_secs(principal.expires_at()).saturating_sub(now)),
+                sampled_at,
                 verified,
                 key_generation,
             },
@@ -254,7 +262,8 @@ pub async fn prepare_jwt(
     cancel: CancellationToken,
 ) -> Result<(Verifier, RefreshTask), PreparationError> {
     let startup_deadline = Instant::now() + STARTUP_BUDGET;
-    let provider = ProviderClient::try_new()?;
+    let provider = ProviderClient::try_new();
+    let provider = complete_startup_stage(startup_deadline, PreparationPhase::Client, provider)?;
     prepare_with_provider(options, provider, cancel, startup_deadline).await
 }
 
@@ -264,22 +273,22 @@ async fn prepare_with_provider(
     cancel: CancellationToken,
     startup_deadline: Instant,
 ) -> Result<(Verifier, RefreshTask), PreparationError> {
-    check_startup_deadline(startup_deadline, PreparationPhase::Client)?;
     metrics::describe_counter!(
         KEY_REJECTIONS_METRIC,
         "Rejected JWKS entries by closed reason"
     );
-    let claim_policy = ClaimPolicy::try_new(options.issuer.as_str().to_owned(), options.audiences)?;
-    if options.algorithms.is_empty() {
-        return Err(PreparationError::invalid_options());
-    }
-    check_startup_deadline(startup_deadline, PreparationPhase::Options)?;
+    let claim_policy = if options.algorithms.is_empty() {
+        Err(PreparationError::invalid_options())
+    } else {
+        ClaimPolicy::try_new(options.issuer.as_str().to_owned(), options.audiences)
+    };
+    let claim_policy =
+        complete_startup_stage(startup_deadline, PreparationPhase::Options, claim_policy)?;
     let jwks_uri = if let Some(jwks_uri) = options.jwks_uri {
         jwks_uri
     } else {
-        let uri = discover_jwks_uri(&provider, &options.issuer, startup_deadline).await?;
-        check_startup_deadline(startup_deadline, PreparationPhase::Discovery)?;
-        uri
+        let uri = discover_jwks_uri(&provider, &options.issuer, startup_deadline).await;
+        complete_startup_stage(startup_deadline, PreparationPhase::Discovery, uri)?
     };
     let key_set = fetch_key_set(
         &provider,
@@ -288,8 +297,8 @@ async fn prepare_with_provider(
         Some(startup_deadline),
     )
     .await
-    .map_err(|failure| PreparationError::new(PreparationPhase::Jwks, failure.into()))?;
-    check_startup_deadline(startup_deadline, PreparationPhase::Jwks)?;
+    .map_err(|failure| PreparationError::new(PreparationPhase::Jwks, failure.into()));
+    let key_set = complete_startup_stage(startup_deadline, PreparationPhase::Jwks, key_set)?;
     let key_store = KeyStore::new(key_set);
     let verifier = Verifier::jwt(JwtVerifier::new(
         claim_policy,
@@ -304,18 +313,22 @@ async fn prepare_with_provider(
         options.algorithms,
         cancel,
     ));
-    check_startup_deadline(startup_deadline, PreparationPhase::Jwks)?;
-    Ok((verifier, refresh_task))
+    complete_startup_stage(
+        startup_deadline,
+        PreparationPhase::Jwks,
+        Ok((verifier, refresh_task)),
+    )
 }
 
-fn check_startup_deadline(
+fn complete_startup_stage<T>(
     deadline: Instant,
     phase: PreparationPhase,
-) -> Result<(), PreparationError> {
+    result: Result<T, PreparationError>,
+) -> Result<T, PreparationError> {
     if Instant::now() >= deadline {
         return Err(PreparationError::new(phase, PreparationReason::Timeout));
     }
-    Ok(())
+    result
 }
 
 impl PreparationError {
@@ -407,8 +420,7 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        ClaimPolicy, Document, JwtAlgorithm, JwtVerifier, KeyStore, MAX_REMEMBERED,
-        MAX_REMEMBERED_FOR, TokenProfile,
+        ClaimPolicy, Document, JwtAlgorithm, JwtVerifier, KeyStore, MAX_REMEMBERED, TokenProfile,
     };
     use crate::{
         Failure, Transport, VerificationReason,
@@ -496,7 +508,12 @@ mod tests {
         assert_eq!(error.failure, Failure::Unavailable);
         assert_eq!(error.reason, VerificationReason::Clock);
         assert_eq!(error.reason.label(), "clock");
-        assert!(verifier.verify_with_now(&token, || Ok(100)).await.is_ok());
+        assert!(
+            verifier
+                .verify_with_now(&token, || Ok(Duration::from_secs(100)))
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]
@@ -988,6 +1005,26 @@ mod tests {
             crate::provider::new_fixture_client(FIXTURE_HOST, address, root, cancel.clone())
                 .unwrap();
         super::prepare_with_provider(options, provider, cancel, startup_deadline).await
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_expired_startup_budget_takes_precedence_over_a_stage_failure() {
+        use crate::{PreparationError, PreparationPhase, PreparationReason};
+        use tokio::time::{Instant, advance};
+
+        let deadline = Instant::now() + Duration::from_secs(6);
+        let stage = PreparationPhase::Jwks;
+        let parse_failure = PreparationError::new(stage, PreparationReason::Parse);
+        let complete = |result| super::complete_startup_stage(deadline, stage, result);
+        assert_eq!(
+            complete(Err(parse_failure.clone())),
+            Err(parse_failure.clone())
+        );
+
+        advance(Duration::from_secs(6)).await;
+        let timeout = PreparationError::new(stage, PreparationReason::Timeout);
+        assert_eq!(complete(Err(parse_failure)), Err(timeout.clone()));
+        assert_eq!(complete(Ok(())), Err(timeout));
     }
 
     #[tokio::test]
@@ -1866,7 +1903,7 @@ mod tests {
         let header = format!("Bearer {token}");
         let token = parse_bearer([header.as_bytes()]).unwrap();
         verifier
-            .verify_with_now(&token, || Ok(now))
+            .verify_with_now(&token, || Ok(Duration::from_secs(now)))
             .await
             .map_err(|error| error.reason)
     }
@@ -2074,14 +2111,22 @@ mod tests {
     async fn an_entry_is_held_no_longer_than_its_token_or_one_refresh_period() {
         let signing = ec_signing();
         let memo = ec_verifier(&signing, "k");
-        for (exp, held) in [
-            (1_060, Duration::from_secs(60)),
-            (1_000 + 10 * 86_400, MAX_REMEMBERED_FOR),
-        ] {
+        for (exp, ttl_millis) in [(1_060, 58_950), (1_000 + 10 * 86_400, 899_750)] {
             let token = ec_token(&signing, "k", &serde_json::json!({ "exp": exp }));
-            verify_at(&memo, &token, 1_000).await.unwrap();
+            let header = format!("Bearer {token}");
+            let bearer = parse_bearer([header.as_bytes()]).unwrap();
+            memo.verify_with_now(&bearer, || Ok(Duration::from_millis(1_000_800)))
+                .await
+                .unwrap();
             let remembered = memo.remembered.get(token.as_bytes()).unwrap();
-            assert_eq!(remembered.held_for, held, "{exp}");
+            let insertion_delay = Duration::from_millis(250);
+            let ttl = moka::Expiry::expire_after_create(
+                &super::RememberedExpiry,
+                &token.into_bytes().into_boxed_slice(),
+                &remembered,
+                remembered.sampled_at + insertion_delay,
+            );
+            assert_eq!(ttl, Some(Duration::from_millis(ttl_millis)), "{exp}");
         }
     }
 }
