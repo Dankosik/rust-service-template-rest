@@ -47,6 +47,7 @@ pub(super) async fn open(
         "postgres_metrics",
         infra_postgres::record_metrics_periodically(
             pool.clone(),
+            "postgres",
             METRICS_MAINTENANCE_INTERVAL,
             background.child_token(),
         ),

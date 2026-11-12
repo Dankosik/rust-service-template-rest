@@ -83,6 +83,7 @@ async fn open_pool(
     background.spawn("postgres_pool_metrics", |cancel| {
         infra_postgres::record_metrics_periodically(
             pool.clone(),
+            "postgres",
             METRICS_MAINTENANCE_INTERVAL,
             cancel,
         )
