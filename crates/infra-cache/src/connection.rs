@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use backon::BackoffBuilder;
 use metrics::{Counter, Gauge};
-use operation_context::OperationContext;
+use operation_context::{Deadline, OperationContext};
 use redis::aio::MultiplexedConnection;
 use tokio::sync::{Notify, Semaphore, SemaphorePermit};
 use tokio::task::AbortHandle;
@@ -158,24 +158,19 @@ impl Drop for CommandSlot<'_> {
 /// connection.
 struct Exchange<'a> {
     shared: &'a Shared,
-    generation: Arc<Generation>,
+    generation: &'a Arc<Generation>,
     _slot: CommandSlot<'a>,
     keeps_generation: bool,
 }
 
 impl<'a> Exchange<'a> {
-    fn new(shared: &'a Shared, generation: Arc<Generation>, slot: CommandSlot<'a>) -> Self {
+    fn new(shared: &'a Shared, generation: &'a Arc<Generation>, slot: CommandSlot<'a>) -> Self {
         Self {
             shared,
             generation,
             _slot: slot,
             keeps_generation: false,
         }
-    }
-
-    fn finish<T>(mut self, result: Result<T, ErrorType>) -> Result<T, ErrorType> {
-        self.keeps_generation = result.is_ok();
-        result
     }
 
     /// Ends on the command's own reply: `Ok`, or a server error reply that
@@ -200,7 +195,7 @@ fn reply_keeps_generation(error: &redis::RedisError) -> bool {
 impl Drop for Exchange<'_> {
     fn drop(&mut self) {
         if !self.keeps_generation {
-            self.shared.retire(&self.generation);
+            self.shared.retire(self.generation);
         }
         // Accounting and the permit drop only after retirement returns.
     }
@@ -350,25 +345,32 @@ impl Link {
             result = self.shared.acquire() => result,
             _ = context.wait_stopped() => return Err(ErrorType::Timeout),
         };
-        // A stop seen only by the exchange would retire this healthy generation.
+        // Acquisition may have completed at the caller's cutoff.
         context.check().map_err(|_| ErrorType::Timeout)?;
         let generation = generation?;
-        let exchange = Exchange::new(&self.shared, generation, slot);
-        let mut connection = exchange.generation.connection.clone();
+        let query = async {
+            // Arm retirement only when the command future starts polling.
+            let exchange = Exchange::new(&self.shared, &generation, slot);
+            let mut connection = generation.connection.clone();
+            exchange.finish_reply(command.query_async(&mut connection).await)
+        };
         tokio::select! {
             biased;
-            _ = context.wait_stopped() => exchange.finish(Err(ErrorType::Timeout)),
-            () = exchange.generation.retired.cancelled() => exchange.finish(Err(ErrorType::Io)),
-            reply = command.query_async(&mut connection) => exchange.finish_reply(reply),
+            _ = context.wait_stopped() => Err(ErrorType::Timeout),
+            () = generation.retired.cancelled() => Err(ErrorType::Io),
+            reply = query => reply,
         }
     }
 
     pub(crate) async fn probe(&self, command_timeout: Duration) -> Result<(), ErrorType> {
         let slot = self.claim_slot(&self.probe_slots)?;
         let generation = self.shared.acquire().await?;
-        let deadline = Instant::now() + command_timeout.max(CONNECTED_PROBE_MIN_BUDGET);
-        let mut exchange = Exchange::new(&self.shared, generation, slot);
-        let (result, disposition) = ping_until(&exchange.generation, deadline).await;
+        let deadline = Deadline::new(
+            Instant::now(),
+            command_timeout.max(CONNECTED_PROBE_MIN_BUDGET),
+        );
+        let mut exchange = Exchange::new(&self.shared, &generation, slot);
+        let (result, disposition) = ping_until(&generation, deadline).await;
         exchange.keeps_generation = disposition == Disposition::Keep;
         result
     }
@@ -431,21 +433,20 @@ impl Drop for SupervisorExit {
 async fn query_until(
     generation: &Generation,
     command: &redis::Cmd,
-    deadline: Instant,
+    deadline: Deadline,
 ) -> Result<redis::RedisResult<()>, ErrorType> {
     let mut connection = generation.connection.clone();
     tokio::select! {
         biased;
         () = generation.retired.cancelled() => Err(ErrorType::Io),
-        result = timeout_at(deadline, command.query_async(&mut connection)) => {
-            result.map_err(|_| ErrorType::Timeout)
-        }
+        reply = command.query_async(&mut connection) => Ok(reply),
+        () = deadline.wait() => Err(ErrorType::Timeout),
     }
 }
 
 async fn ping_until(
     generation: &Generation,
-    deadline: Instant,
+    deadline: Deadline,
 ) -> (Result<(), ErrorType>, Disposition) {
     match query_until(generation, &redis::Cmd::ping(), deadline).await {
         Ok(Ok(())) => (Ok(()), Disposition::Keep),
@@ -645,7 +646,7 @@ async fn maintain(
                 // sent before it. A budget shorter than `command_timeout`
                 // would retire the generation, and fail those commands, before
                 // their own budget ends.
-                let deadline = Instant::now() + command_timeout;
+                let deadline = Deadline::new(Instant::now(), command_timeout);
                 let (result, disposition) = ping_until(generation, deadline).await;
                 if let Err(error) = result {
                     tracing::warn!(
@@ -761,7 +762,11 @@ impl<'a> Rotation<'a> {
         let mut command = redis::cmd("AUTH");
         command.arg(self.file.username()).arg(&password);
         // File I/O must not consume the time owed to commands ahead of AUTH.
-        let deadline = read_deadline.max(Instant::now() + command_timeout);
+        let now = Instant::now();
+        let deadline = Deadline::new(
+            now,
+            command_timeout.max(read_deadline.saturating_duration_since(now)),
+        );
         let result = query_until(generation, &command, deadline)
             .await
             .and_then(|reply| reply.map_err(|error| error_type(&error)));

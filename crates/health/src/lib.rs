@@ -154,7 +154,8 @@ impl RefreshPolicy {
     /// How old a verdict may get before it is refused.
     ///
     /// `stale_after = probe_budget + period * 3` where
-    /// `period = interval.max(1ms).max(probe_budget)`. The leading
+    /// `period = interval.max(1ms).max(probe_budget)`, saturated to the maximum
+    /// duration. The leading
     /// `probe_budget` covers one in-flight check after the last stamp. The
     /// loop never runs faster than the timer resolution, and one check
     /// finishes before the next starts, so a probe budget above the interval
@@ -166,7 +167,7 @@ impl RefreshPolicy {
     #[must_use]
     pub fn stale_after(&self) -> Duration {
         let period = self.interval.max(MIN_INTERVAL).max(self.probe_budget);
-        self.probe_budget + period * 3
+        self.probe_budget.saturating_add(period.saturating_mul(3))
     }
 }
 
@@ -457,9 +458,10 @@ impl Readiness {
                     return Some(loss);
                 }
                 match state.progress {
-                    Progress::Armed => state.last_check.as_ref().map(|check| {
-                        check.at + self.policy.stale_after() + Duration::from_nanos(1)
-                    }),
+                    Progress::Armed => state
+                        .last_check
+                        .as_ref()
+                        .and_then(|check| stale_deadline(check.at, self.policy.stale_after())),
                     _ => None,
                 }
             };
@@ -573,31 +575,35 @@ impl Readiness {
                     self.refresh().await;
                 }
                 let interval = self.policy.interval.max(MIN_INTERVAL);
-                let mut ticker = tokio::time::interval_at(Instant::now() + interval, interval);
-                // Delay, not Burst: a late tick is skipped rather than fired in a
-                // catch-up burst that would pile probe work onto a recovering
-                // dependency.
-                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                loop {
-                    ticker.tick().await;
+                let mut next = timer_deadline(Instant::now(), interval);
+                while let Some(deadline) = next {
+                    tokio::time::sleep_until(deadline).await;
+                    // Space the next check from this tick, including after a delay.
+                    next = timer_deadline(Instant::now(), interval);
                     self.refresh().await;
                 }
+                // The next tick is beyond the clock's range. Remain cancellable.
+                std::future::pending::<()>().await;
             })
             .await;
     }
 
     async fn check_probes(&self) -> Result<(), NotReady> {
         let budget = self.policy.probe_budget;
-        let deadline = Instant::now() + budget;
+        let deadline = timer_deadline(Instant::now(), budget);
         let outcomes = join_all(self.probes.iter().map(|probe| async move {
             let probe_name = probe.name();
-            let outcome = match tokio::time::timeout_at(deadline, probe.check()).await {
-                Ok(Ok(())) => Ok(()),
-                Ok(Err(error)) => Err(NotReady::ProbeFailed {
+            let reply = match deadline {
+                Some(deadline) => tokio::time::timeout_at(deadline, probe.check()).await.ok(),
+                None => Some(probe.check().await),
+            };
+            let outcome = match reply {
+                Some(Ok(())) => Ok(()),
+                Some(Err(error)) => Err(NotReady::ProbeFailed {
                     probe: probe_name,
                     error,
                 }),
-                Err(_elapsed) => Err(NotReady::TimedOut {
+                None => Err(NotReady::TimedOut {
                     probe: probe_name,
                     budget,
                 }),
@@ -614,6 +620,21 @@ impl Readiness {
         .await;
         outcomes.into_iter().collect()
     }
+}
+
+fn stale_deadline(checked_at: Instant, stale_after: Duration) -> Option<Instant> {
+    // The verdict remains fresh at exactly stale_after.
+    timer_deadline(
+        checked_at,
+        stale_after.checked_add(Duration::from_nanos(1))?,
+    )
+}
+
+fn timer_deadline(start: Instant, delay: Duration) -> Option<Instant> {
+    let deadline = start.checked_add(delay)?;
+    // Tokio rounds deadlines up to milliseconds before registering the timer.
+    deadline.checked_add(Duration::from_millis(1))?;
+    Some(deadline)
 }
 
 /// Keep a fresh published ready verdict through failures below the threshold.
@@ -714,12 +735,11 @@ impl ReadinessReader {
         };
         // Each check crosses its stale edge once; after that only a
         // publication wakes the caller.
-        let stale_at = match checked_at {
-            // `verdict` refuses only an age strictly above `stale_after`.
-            Some(at) if self.stale_edge_for != Some(at) => {
-                at + self.stale_after + Duration::from_nanos(1)
-            }
-            _ => return self.rx.changed().await.map_err(|_| OwnerDropped),
+        let Some(stale_at) = checked_at
+            .filter(|at| self.stale_edge_for != Some(*at))
+            .and_then(|at| stale_deadline(at, self.stale_after))
+        else {
+            return self.rx.changed().await.map_err(|_| OwnerDropped);
         };
         match tokio::time::timeout_at(stale_at, self.rx.changed()).await {
             Ok(changed) => changed.map_err(|_| OwnerDropped),
