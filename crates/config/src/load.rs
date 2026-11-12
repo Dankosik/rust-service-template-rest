@@ -4,7 +4,6 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use config::Format as _;
 use serde::de::DeserializeOwned;
 
 use crate::app::BuildInfo;
@@ -257,12 +256,12 @@ impl config::Source for ScannedFile {
     fn collect(&self) -> Result<config::Map<String, config::Value>, config::ConfigError> {
         let uri = self.path.to_string_lossy().into_owned();
         let text = self.text.strip_prefix('\u{feff}').unwrap_or(&self.text);
-        config::FileFormat::Toml
-            .parse(Some(&uri), text)
-            .map_err(|cause| config::ConfigError::FileParse {
+        config::Format::parse(&config::FileFormat::Toml, Some(&uri), text).map_err(|cause| {
+            config::ConfigError::FileParse {
                 uri: Some(uri),
                 cause,
-            })
+            }
+        })
     }
 }
 
