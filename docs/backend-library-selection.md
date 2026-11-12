@@ -34,10 +34,10 @@ uses `tokio-util`, and the `service-failure` catalog is declared once by its
 | `const-hex` 1.19 | Lowercase hex of digests in `infra-http`, `infra-messaging` and the log formatter. | Chosen over `hex` 0.4.3, unreleased since 2021. Hot paths encode into a stack buffer; output is a wire and storage contract and must stay lowercase. |
 | `derive-where` 1.7 | `Clone`, `Debug` and `Default` on generic gRPC types without bounds on their parameters. | Only where a std derive would add a bound the type does not need. |
 | `async-stream` 0.3 | The gRPC health `Watch` stream and test streams. | Not for per-row database streams or `Body` impls, which own polling budgets. |
-| `moka` `sync` | The verified-token memos in `infra-serviceauth` and in the JWT engine of `infra-bearerauthn`, each bounded at 1024 entries. | The validity-window check stays in the verifier and runs on every hit; the cache only bounds capacity and time. See [Verified bearer JWT memo](#verified-bearer-jwt-memo). |
+| `moka` `sync` | Verified-token memos, with a target of 1024 entries per verifier. | Moka enforces capacity through best-effort eviction. The verifier checks the validity window on every hit. |
 | `similar` 2.7, `text` (dev) | The unified diff in the committed-OpenAPI test. | Kept at the 2.x line `insta` already resolves. |
 | std `assert_matches!` | Pattern assertions in tests, which print the value on failure. | Std since Rust 1.96; no crate. |
-| `foldhash` 0.2, `std` | The hasher of the verified-token memos in `infra-serviceauth` and `infra-bearerauthn` (`quality`), and of the per-call method tables in `infra-grpc`, the endpoint tables of inbound webhooks and the per-route metric handles of `infra-http` (`foldhash::HashMap`). | Only for keys the service admitted: a memo entry exists only after its signature verified, and server request paths are looked up in tables fixed at startup. The gRPC client admits validated method paths on first use into a bounded table. Measured on 2026-11-12 (Apple M-series, release, fat LTO, median of seven runs): hashing a 420-byte token 70.2 → 8.2 ns, a memo hit 105.5 → 43.6 ns, a 46-byte path lookup 8.9 → 3.5 ns. hashbrown already resolves it, so it adds no package. Digest-keyed caches such as introspection keep the default hasher; a 32-byte key saves a few nanoseconds beside a SHA-256 of the token. |
+| `foldhash` 0.2, `std` | The hasher of verified-token memos (`quality`), and of the per-call method tables in `infra-grpc`, the endpoint tables of inbound webhooks and the per-route metric handles of `infra-http` (`foldhash::HashMap`). | Only for keys the service admitted: a memo entry exists only after its signature verified, and server request paths are looked up in tables fixed at startup. The gRPC client admits validated method paths on first use into a bounded table. Measured on 2026-11-12 (Apple M-series, release, fat LTO, median of seven runs): hashing a 420-byte token 70.2 → 8.2 ns, a memo hit 105.5 → 43.6 ns, a 46-byte path lookup 8.9 → 3.5 ns. hashbrown already resolves it, so it adds no package. Digest-keyed caches such as introspection keep the default hasher; a 32-byte key saves a few nanoseconds beside a SHA-256 of the token. |
 | `arrayvec` 0.7 | The captured-field tables of the log formatter. | Replaces a sentinel-filled array and a separate count. A new table is no longer initialised in full: measured the same way, a span with two fields 405 → 335 ns to create and an event under one span 2,138 → 2,088 ns. The value buffer stays the local `Bytes`, whose writes are all-or-nothing; `ArrayVec`'s `io::Write` writes a prefix. `ArrayString` holds the decimal timestamp of a webhook signature. |
 | `metrics-util` 0.20, `debugging` (dev) | `DebuggingRecorder` in the `infra-http` and `infra-webhooks` tests that assert which series a route registers. | Replaces three hand-written recorders. A snapshot resets counters and gauges, so a test that reads a gauge repeatedly or asserts the order of increments keeps its own recorder (`infra-jobs`, `infra-bearerauthn`, the jobs wake test). Adds one test-only package, `ordered-float`. |
 | `opentelemetry-proto` 0.33 and `prost` (dev) | Tests decode captured OTLP export bodies into the generated trace messages: `infra-telemetry` and the gRPC process test of `service`. | Replaces hand-encoded protobuf tags and bare byte runs that could match anywhere in a body. A raw scan remains only where the point is that a private value appears nowhere. `opentelemetry-otlp` already resolves it, and it moves with the other OpenTelemetry pins. |
@@ -106,8 +106,6 @@ of the rounds follows each median.
 
 | Operation | Before | After |
 | --- | ---: | ---: |
-| Bearer JWT verified again, RS256 | 21.7 µs (9.8–42.2) | 216 ns (102–497) |
-| Bearer JWT verified again, ES256 | 100.0 µs (33.5–134.5) | 248 ns (91–494) |
 | HTTP request duration and active-request gauge recorded | 3,118 ns (1,487–5,039) | 515 ns (380–917) |
 | gRPC outcome of a rejected call that carries details | 1,430 ns (1,111–2,000) | 635 ns (504–739) |
 | Refused service token counted | 136 ns (89–145) | 2.6 ns (1.9–3.0) |
@@ -124,9 +122,6 @@ The log rows overlap at the edges of their ranges; the earlier run of the
 eight-thread case did not (0.75–1.10 M against 1.29–2.76 M). The webhook row
 gives the medians of three passes, in which the new code won 29 of 36 paired
 rounds. The event row counts instructions retired, which load does not move.
-The first verification of a bearer JWT now also stores it; that cost could not
-be separated from the noise (best round 9.8 µs before against 11.6 µs after
-for RS256, 33.5 µs against 33.2 µs for ES256).
 
 Measured and not adopted. Comparing a webhook signature as encoded text
 instead of decoded bytes: no gain (1,463–1,579 ns against 1,507–1,511 ns).
@@ -137,27 +132,28 @@ gain on error responses only. `<[u8]>::contains` as the only early exit of the
 NUL scan: 10–20% slower on payloads that contain escapes. `sleep_until` in
 `Deadline::wait`: a zero budget stayed pending on its first poll.
 
+<!-- template:begin oidc-jwt:docs-library-selection-bearer-jwt-memo -->
 ### Verified bearer JWT memo
 
-`JwtVerifier` in `infra-bearerauthn` remembers a bearer JWT only after its
-full verification succeeded, keyed by the token bytes. An entry holds the
-validated principal, the token's `nbf`, and the generation of the key set that
-verified the signature. Every parsed key set gets a process-unique generation;
-a hit counts only while the installed set has the entry's generation.
-Otherwise the entry is dropped and the token takes the full path, including
-the refresh for an unknown `kid`, so a key that left the JWKS stops admitting
-its tokens exactly as before. A refresh that fetches identical keys costs one
-full verification per remembered token. On every hit `exp`, `nbf` and the
-leeway are checked by the full path's own function and clock, and the caller
-records the same metrics and events as for a full verification. A refusal is
-never remembered. Bounds: 1024 entries, and per entry the shorter of the
-token's remaining time to `exp` and one JWKS refresh period of 15 minutes.
-The principal already kept the presented token, so the memo adds up to 1024
-more live tokens and no new kind of retention.
+| Operation | Before | After |
+| --- | ---: | ---: |
+| Bearer JWT verified again, RS256 | 21.7 µs (9.8–42.2) | 216 ns (102–497) |
+| Bearer JWT verified again, ES256 | 100.0 µs (33.5–134.5) | 248 ns (91–494) |
+
+The cost of storing a JWT on first verification was within measurement noise
+(best round 9.8 µs before against 11.6 µs after for RS256, 33.5 µs against
+33.2 µs for ES256).
+
+The memo trades retention of verified tokens for faster repeat verification.
+Moka targets 1024 entries per verifier with best-effort eviction. Each entry's
+retention is set to the shorter of the remaining time to `exp` and 15 minutes.
+Even a refresh with identical keys requires full verification again, so the
+verifier never relies on cached evidence from a retired key set.
 
 Reopen if most tokens are seen once, so that the insert on a miss outweighs
 the hits, or if anything besides the token, the installed key set and the
 clock starts to influence a verification.
+<!-- template:end oidc-jwt:docs-library-selection-bearer-jwt-memo -->
 
 ### Global allocator
 

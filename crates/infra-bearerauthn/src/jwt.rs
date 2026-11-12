@@ -24,7 +24,7 @@ const STARTUP_BUDGET: Duration = Duration::from_secs(6);
 /// Bounds provider-supplied text that reaches an operator error; it is not
 /// part of the issuer grammar.
 const MAX_ECHOED_ISSUER_BYTES: usize = 256;
-/// Most verified tokens remembered at once.
+/// Target entry count after cache maintenance.
 const MAX_REMEMBERED: u64 = 1024;
 /// An entry also leaves at its token's `exp`. A replaced key set strands its
 /// entries, so none outlives one refresh period.
@@ -211,9 +211,8 @@ impl JwtVerifier {
         Ok(principal)
     }
 
-    /// Checks the signature against the installed set and, when the token may
-    /// need keys that set lacks, once more against a newer set. Returns the
-    /// generation of the set that verified it.
+    /// A provider can replace a key under the same `kid`, so any signature
+    /// miss can need a newer set. The store limits refresh work across callers.
     async fn verify_signature(
         &self,
         message: &[u8],
@@ -224,8 +223,7 @@ impl JwtVerifier {
         let checked = self.key_store.current();
         let miss = match checked.verify(message, signature, kid, algorithm) {
             Ok(()) => return Ok(checked.generation()),
-            Err(miss) if miss.may_need_new_keys(kid) => miss,
-            Err(error) => return Err(error.into()),
+            Err(miss) => miss,
         };
         match self.key_store.refresh_for_signature_miss(&checked).await {
             SignatureRefresh::Refreshed(key_set) => {
@@ -644,35 +642,33 @@ mod tests {
         assert_eq!(principal.subject(), Some("subject"));
     }
 
-    #[tokio::test]
-    async fn a_known_kid_with_a_bad_signature_does_not_refresh() {
-        let verifier = verifier(
-            rsa_key_set("fixture", Some(Algorithm::RS256)),
-            &[JwtAlgorithm::Rs256],
-        );
+    #[tokio::test(start_paused = true)]
+    async fn a_signing_key_rotated_under_the_same_kid_is_picked_up_on_demand() {
+        use std::{future::Future, task::Poll};
+
+        let (installed, rotated) = (ec_signing(), ec_signing());
+        let verifier = ec_verifier(&installed, "stable");
         verifier.key_store.permit_unknown_refresh_for_test();
-        // Another token's signature is a real mismatch; flipping a base64
-        // character can land in padding bits and leave the signature valid.
-        let token = signed(
-            &rsa_signing(),
-            Algorithm::RS256,
-            Some("fixture"),
-            &serde_json::json!({}),
+        let token = ec_token(&rotated, "stable", &serde_json::json!({}));
+        let mut call = std::pin::pin!(verify_at(&verifier, &token, 1_000));
+        std::future::poll_fn(|cx| {
+            assert!(call.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        let ticket = verifier.key_store.pending().unwrap();
+        let replacement = key_set(
+            &[jwk(&rotated, Algorithm::ES256, Some("stable"), true)],
+            &[JwtAlgorithm::Es256],
         );
-        let other = signed(
-            &rsa_signing(),
-            Algorithm::RS256,
-            Some("fixture"),
-            &serde_json::json!({"x": 1}),
-        );
-        let (signed_part, _) = token.rsplit_once('.').unwrap();
-        let (_, other_signature) = other.rsplit_once('.').unwrap();
-        let token = format!("{signed_part}.{other_signature}");
+        verifier.key_store.finish(ticket, Ok(replacement));
+        assert_eq!(call.await.unwrap().subject(), Some("subject"));
+
+        let stale = ec_token(&installed, "stable", &serde_json::json!({}));
         assert_eq!(
-            check(&verifier, &token).await.unwrap_err(),
-            VerificationReason::Signature
+            verify_at(&verifier, &stale, 1_000).await,
+            Err(VerificationReason::Signature)
         );
-        assert_eq!(verifier.key_store.pending(), None);
     }
 
     #[tokio::test]

@@ -87,9 +87,10 @@ These look alike across crates but fail the membership test:
   input tells them apart. Reopen if a `jsonwebtoken` upgrade stops collecting
   unknown header members;
 - the parsed `username()` and `password()` checks beside
-  `uri::authority_has_userinfo`: `url::Url` finds userinfo in
-  `https:user@host` and `https:///user@host`, which the raw check does not
-  read, so the two checks complement each other and need the `url` crate;
+  `uri::authority_has_userinfo`: the raw check accounts for the leading
+  slashes and backslashes consumed by the WHATWG parser for special network
+  schemes. The parser can discard empty userinfo even after those separators.
+  Each URL owner still validates the parser's interpretation of credentials;
 - the HTTPS token-URL admissions of `config`, `infra-oauth2-client-credentials`
   and `infra-bearerauthn` past the shared raw checks: scheme, host and fragment
   come from `url::Url`, and each caller words its own errors;
