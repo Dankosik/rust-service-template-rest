@@ -53,9 +53,8 @@ impl ScopeKey {
     /// scope holds the lock and arbitration finds no live record for this
     /// scope. A live record still decides replay or mismatch.
     fn lock_key(&self) -> i64 {
-        let mut prefix = [0; 8];
-        prefix.copy_from_slice(&self.0[..8]);
-        i64::from_be_bytes(prefix)
+        let [b0, b1, b2, b3, b4, b5, b6, b7, ..] = self.0;
+        i64::from_be_bytes([b0, b1, b2, b3, b4, b5, b6, b7])
     }
 }
 
@@ -479,6 +478,17 @@ fn refused(phase: &'static str, class: AttemptError, cause: &'static str) -> Att
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_lock_key_is_the_digest_prefix_as_big_endian() {
+        let mut digest = [0xff; 32];
+        digest[..8].copy_from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
+        assert_eq!(
+            ScopeKey::from_digest(digest).lock_key(),
+            0x0102_0304_0506_0708
+        );
+        assert_eq!(ScopeKey::from_digest([0xff; 32]).lock_key(), -1);
+    }
 
     #[test]
     fn an_unknown_commit_is_unavailable_even_for_a_non_transient_fault() {

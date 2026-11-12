@@ -331,76 +331,84 @@ fn acquisition_counts(scrape: &str) -> Vec<(String, String, u64)> {
     counts
 }
 
-#[test]
-fn every_token_request_is_counted_once_under_its_grant_and_closed_outcome() {
+#[tokio::test]
+async fn every_token_request_is_counted_once_under_its_grant_and_closed_outcome() {
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-    metrics::with_local_recorder(&recorder, || {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(async {
-                let fixture = Fixture::new().await;
-                let client = || {
-                    fixture
-                        .prepare(Options { provider_concurrency: 1, ..fixture.options(&[], None) })
-                        .http(fixture.resource_client())
-                };
-                let far = || deadline(Duration::from_secs(10));
-                // One request, then a reuse that makes none.
-                let reused = client();
-                for _ in 0..2 {
-                    reused.execute(fixture.request(), far()).await.unwrap();
-                }
-                fixture.token_raw(response(
-                    "400 Bad Request",
-                    br#"{"error":"invalid_client"}"#,
-                ));
-                client()
-                    .execute(fixture.request(), far())
-                    .await
-                    .unwrap_err();
-                fixture.token_raw(response(
-                    "400 Bad Request",
-                    br#"{"error":"invalid_target"}"#,
-                ));
-                client()
-                    .execute(fixture.on_behalf_of_request("subject"), far())
-                    .await
-                    .unwrap_err();
-                let gate = fixture.block_tokens();
-                let timed = client();
-                let mut request = fixture.request();
-                request.extensions_mut().insert(OperationContext::with_timeout(Duration::from_secs(1)));
-                let mut timed = Box::pin(timed.execute(request, far()));
-                tokio::select! { () = fixture.token_received() => {}, result = &mut timed => panic!("response must be gated: {result:?}"), }
-                advance(Duration::from_secs(1)).await;
-                assert_matches!(timed.await, Err(Error::Acquisition(AcquisitionError::Timeout)));
-                let dropped = client();
-                let dropped_client = dropped;
-                let mut dropped = Box::pin(dropped_client.execute(fixture.request(), far()));
-                tokio::select! { () = fixture.token_received() => {}, result = &mut dropped => panic!("response must be gated: {result:?}"), }
-                let outbound_counts = || {
-                    let mut counts = recorder.handle().render().lines()
-                        .filter(|line| line.starts_with("http_client_request_duration_seconds_count"))
-                        .map(str::to_owned).collect::<Vec<_>>();
-                    counts.sort();
-                    counts
-                };
-                let before_capacity = outbound_counts();
-                assert_ne!(before_capacity, [] as [String; 0]);
-                assert_matches!(
-                    dropped_client.execute(fixture.on_behalf_of_request("at-capacity"), far()).await,
-                    Err(Error::Acquisition(AcquisitionError::AtCapacity)));
-                assert_eq!(outbound_counts(), before_capacity);
-                let mut waiter = Box::pin(dropped_client.execute(fixture.request(), far()));
-                poll_pending(waiter.as_mut()).await;
-                drop(waiter);
-                drop(dropped);
-                drop(gate);
-                fixture.finish().await;
-            });
-    });
+    let _recorder = metrics::set_default_local_recorder(&recorder);
+    let fixture = Fixture::new().await;
+    let client = || {
+        fixture
+            .prepare(Options {
+                provider_concurrency: 1,
+                ..fixture.options(&[], None)
+            })
+            .http(fixture.resource_client())
+    };
+    let far = || deadline(Duration::from_secs(10));
+    // One request, then a reuse that makes none.
+    let reused = client();
+    for _ in 0..2 {
+        reused.execute(fixture.request(), far()).await.unwrap();
+    }
+    fixture.token_raw(response(
+        "400 Bad Request",
+        br#"{"error":"invalid_client"}"#,
+    ));
+    client()
+        .execute(fixture.request(), far())
+        .await
+        .unwrap_err();
+    fixture.token_raw(response(
+        "400 Bad Request",
+        br#"{"error":"invalid_target"}"#,
+    ));
+    client()
+        .execute(fixture.on_behalf_of_request("subject"), far())
+        .await
+        .unwrap_err();
+    let gate = fixture.block_tokens();
+    let timed = client();
+    let mut request = fixture.request();
+    request
+        .extensions_mut()
+        .insert(OperationContext::with_timeout(Duration::from_secs(1)));
+    let mut timed = Box::pin(timed.execute(request, far()));
+    tokio::select! { () = fixture.token_received() => {}, result = &mut timed => panic!("response must be gated: {result:?}"), }
+    advance(Duration::from_secs(1)).await;
+    assert_matches!(
+        timed.await,
+        Err(Error::Acquisition(AcquisitionError::Timeout))
+    );
+    let dropped = client();
+    let dropped_client = dropped;
+    let mut dropped = Box::pin(dropped_client.execute(fixture.request(), far()));
+    tokio::select! { () = fixture.token_received() => {}, result = &mut dropped => panic!("response must be gated: {result:?}"), }
+    let outbound_counts = || {
+        let mut counts = recorder
+            .handle()
+            .render()
+            .lines()
+            .filter(|line| line.starts_with("http_client_request_duration_seconds_count"))
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        counts.sort();
+        counts
+    };
+    let before_capacity = outbound_counts();
+    assert_ne!(before_capacity, [] as [String; 0]);
+    assert_matches!(
+        dropped_client
+            .execute(fixture.on_behalf_of_request("at-capacity"), far())
+            .await,
+        Err(Error::Acquisition(AcquisitionError::AtCapacity))
+    );
+    assert_eq!(outbound_counts(), before_capacity);
+    let mut waiter = Box::pin(dropped_client.execute(fixture.request(), far()));
+    poll_pending(waiter.as_mut()).await;
+    drop(waiter);
+    drop(dropped);
+    drop(gate);
+    fixture.finish().await;
     let count = |grant: &str, outcome: &str| (grant.to_owned(), outcome.to_owned(), 1);
     assert_eq!(
         acquisition_counts(&recorder.handle().render()),

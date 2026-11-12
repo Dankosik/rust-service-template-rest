@@ -287,7 +287,7 @@ impl Cache {
 }
 
 /// The closed set of namespace operations.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, enum_map::Enum)]
 enum Operation {
     Get,
     Set,

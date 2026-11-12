@@ -157,6 +157,19 @@ impl Outcome {
         }
     }
 
+    /// The outcome of response headers. A server's own failure is taken from
+    /// the status tonic leaves in the extensions when it writes one, which
+    /// saves decoding it from the headers again.
+    fn from_response<B>(side: Side, response: &http::Response<B>) -> Option<Self> {
+        match (side, response.extensions().get::<tonic::Status>()) {
+            (Side::Server, Some(status)) => Some(Self {
+                peer_status: true,
+                ..Self::of_status(side, status)
+            }),
+            _ => Self::from_status_headers(side, response.headers()),
+        }
+    }
+
     /// Reads the outcome from trailers or the initial headers of a trailers-only answer.
     fn from_status_headers(side: Side, headers: &HeaderMap) -> Option<Self> {
         let code = header_status_code(headers)?;
@@ -173,6 +186,13 @@ impl Outcome {
 
 /// One poll of a response body.
 type Polled<E> = Poll<Option<Result<Frame<Bytes>, E>>>;
+
+fn store_waker(slot: &mut Option<Waker>, waker: &Waker) {
+    match slot {
+        Some(stored) => stored.clone_from(waker),
+        None => *slot = Some(waker.clone()),
+    }
+}
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -328,7 +348,7 @@ where
         let _ = status.add_header(response.headers_mut());
         Some(Outcome::of_status(side, &status))
     } else {
-        Outcome::from_status_headers(side, response.headers())
+        Outcome::from_response(side, &response)
     };
     if response
         .extensions_mut()
@@ -489,7 +509,7 @@ where
             let Phase::Open(open) = &mut state.phase else {
                 return state.take_terminal();
             };
-            open.waker = Some(context.waker().clone());
+            store_waker(&mut open.waker, context.waker());
             let polled = {
                 let resources = &mut open.resources;
                 let _span = resources.call.span().enter();
@@ -592,7 +612,7 @@ impl Body for Upload {
         context: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
         let mut state = lock(&self.0);
-        state.waker = Some(context.waker().clone());
+        store_waker(&mut state.waker, context.waker());
         let Some(body) = state.body.as_mut() else {
             return Poll::Ready(None);
         };

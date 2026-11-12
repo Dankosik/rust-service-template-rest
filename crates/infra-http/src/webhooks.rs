@@ -307,77 +307,29 @@ mod tests {
 
     use super::*;
 
-    /// Collects the key of every counter the route registers.
-    #[derive(Default)]
-    struct Keys(std::sync::Mutex<Vec<metrics::Key>>);
-
-    impl metrics::Recorder for Keys {
-        fn describe_counter(
-            &self,
-            _: metrics::KeyName,
-            _: Option<metrics::Unit>,
-            _: metrics::SharedString,
-        ) {
-        }
-
-        fn describe_gauge(
-            &self,
-            _: metrics::KeyName,
-            _: Option<metrics::Unit>,
-            _: metrics::SharedString,
-        ) {
-        }
-
-        fn describe_histogram(
-            &self,
-            _: metrics::KeyName,
-            _: Option<metrics::Unit>,
-            _: metrics::SharedString,
-        ) {
-        }
-
-        fn register_counter(
-            &self,
-            key: &metrics::Key,
-            _: &metrics::Metadata<'_>,
-        ) -> metrics::Counter {
-            self.0.lock().expect("keys").push(key.clone());
-            metrics::Counter::noop()
-        }
-
-        fn register_gauge(&self, _: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {
-            metrics::Gauge::noop()
-        }
-
-        fn register_histogram(
-            &self,
-            _: &metrics::Key,
-            _: &metrics::Metadata<'_>,
-        ) -> metrics::Histogram {
-            metrics::Histogram::noop()
-        }
-    }
-
     #[test]
     fn outcomes_label_a_configured_endpoint_and_never_an_unknown_one() {
-        let keys = Keys::default();
-        metrics::with_local_recorder(&keys, || {
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        metrics::with_local_recorder(&recorder, || {
             EndpointOutcome::Accepted.record("partner");
             EndpointOutcome::Rejected("invalid_signature").record("partner");
             let _ = unknown_endpoint();
         });
-        let labels: Vec<Vec<(String, String)>> = keys
-            .0
-            .lock()
-            .expect("keys")
-            .iter()
-            .map(|key| {
-                assert_eq!(key.name(), WEBHOOK_INGRESS_OUTCOMES_METRIC);
-                key.labels()
+        // The snapshot lists its keys in no fixed order.
+        let mut labels: Vec<Vec<(String, String)>> = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .map(|(key, ..)| {
+                assert_eq!(key.key().name(), WEBHOOK_INGRESS_OUTCOMES_METRIC);
+                key.key()
+                    .labels()
                     .map(|label| (label.key().to_owned(), label.value().to_owned()))
                     .collect()
             })
             .collect();
+        labels.sort();
         let pair = |key: &str, value: &str| (key.to_owned(), value.to_owned());
         assert_eq!(
             labels,

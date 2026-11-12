@@ -12,6 +12,11 @@ use std::sync::mpsc;
 
 use futures_util::FutureExt as _;
 use opentelemetry::trace::{Span as _, Tracer as _};
+use opentelemetry_proto::tonic::collector::trace::v1::{
+    ExportTracePartialSuccess, ExportTraceServiceRequest, ExportTraceServiceResponse,
+};
+use opentelemetry_proto::tonic::common::v1::any_value::Value;
+use prost::Message as _;
 
 use tracing_subscriber::layer::SubscriberExt as _;
 
@@ -38,10 +43,18 @@ impl Request {
             .map(|(_, value)| value.as_str())
     }
 
-    fn body_holds(&self, text: &str) -> bool {
-        self.body
-            .windows(text.len())
-            .any(|window| window == text.as_bytes())
+    fn export(&self) -> ExportTraceServiceRequest {
+        ExportTraceServiceRequest::decode(self.body.as_slice()).expect("OTLP trace export body")
+    }
+
+    fn span_names(&self) -> Vec<String> {
+        self.export()
+            .resource_spans
+            .into_iter()
+            .flat_map(|resource| resource.scope_spans)
+            .flat_map(|scope| scope.spans)
+            .map(|span| span.name)
+            .collect()
     }
 }
 
@@ -177,10 +190,29 @@ fn a_finished_span_reaches_the_collector_with_the_typed_headers() {
         Some("application/x-protobuf")
     );
     assert_eq!(request.header("x-tenant"), Some("t1"));
-    // Protobuf carries strings as their bytes.
-    assert!(request.body_holds("delivered span"), "the span name");
-    assert!(request.body_holds("svc"), "the service.name resource");
-    assert!(request.body_holds(INSTRUMENTATION_SCOPE), "the scope");
+    let export = request.export();
+    assert_eq!(request.span_names(), ["delivered span"]);
+    let [resource_spans] = export.resource_spans.as_slice() else {
+        panic!("one resource: {export:?}");
+    };
+    let service_name = resource_spans
+        .resource
+        .as_ref()
+        .and_then(|resource| {
+            resource
+                .attributes
+                .iter()
+                .find(|attribute| attribute.key == "service.name")
+        })
+        .and_then(|attribute| attribute.value.as_ref()?.value.as_ref());
+    assert_eq!(service_name, Some(&Value::StringValue("svc".to_owned())));
+    let [scope_spans] = resource_spans.scope_spans.as_slice() else {
+        panic!("one scope: {export:?}");
+    };
+    assert_eq!(
+        scope_spans.scope.as_ref().map(|scope| scope.name.as_str()),
+        Some(INSTRUMENTATION_SCOPE)
+    );
 }
 
 #[test]
@@ -333,7 +365,7 @@ fn a_receiver_failure_only_poisons_the_drain_if_it_completes_after_shutdown_begi
         .unwrap();
         let handle = batch_handle(exporter);
         handle.tracer().start("first batch").end();
-        assert!(collector.received().body_holds("first batch"));
+        assert_eq!(collector.received().span_names(), ["first batch"]);
         if !during_drain {
             release.send(()).unwrap();
             // FIFO control completion proves the earlier exporter call finished.
@@ -350,7 +382,7 @@ fn a_receiver_failure_only_poisons_the_drain_if_it_completes_after_shutdown_begi
             if during_drain {
                 release.send(()).unwrap();
             }
-            assert!(collector.received().body_holds("second batch"));
+            assert_eq!(collector.received().span_names(), ["second batch"]);
             release.send(()).unwrap();
             shutdown.await
         });
@@ -441,18 +473,13 @@ impl SpanExporter for CapturedSpans {
 }
 
 fn partial_success_response(message: &str) -> Vec<u8> {
-    // ExportTraceServiceResponse.partial_success (field 1) contains
-    // rejected_spans=1 (field 1), error_message=message (field 2).
-    let mut response = vec![
-        0x0a,
-        u8::try_from(message.len() + 4).unwrap(),
-        0x08,
-        1,
-        0x12,
-        u8::try_from(message.len()).unwrap(),
-    ];
-    response.extend_from_slice(message.as_bytes());
-    response
+    ExportTraceServiceResponse {
+        partial_success: Some(ExportTracePartialSuccess {
+            rejected_spans: 1,
+            error_message: message.to_owned(),
+        }),
+    }
+    .encode_to_vec()
 }
 
 #[test]

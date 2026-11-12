@@ -292,4 +292,22 @@ mod tests {
         reordered.append("x-region", HeaderValue::from_static("south"));
         assert_ne!(fingerprint(Some(&first)), fingerprint(Some(&reordered)));
     }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+
+        #[test]
+        fn an_admitted_key_round_trips_through_a_structured_field_string(
+            key in proptest::collection::vec(0x20_u8..=0x7e, 1..=MAX_DECODED_KEY_BYTES),
+        ) {
+            let key = String::from_utf8(key).unwrap();
+            let field = sfv::ItemSerializer::new()
+                .bare_item(sfv::StringRef::from_str(&key).unwrap())
+                .finish();
+            proptest::prop_assert_eq!(
+                decode_key([field.as_bytes()]),
+                Some(key.into_bytes())
+            );
+        }
+    }
 }

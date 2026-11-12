@@ -188,3 +188,21 @@ fn a_key_mismatched_with_its_algorithm_or_not_pem_is_refused_at_construction() {
         assert_eq!(error.key, "private_key");
     }
 }
+
+/// `Url` admits a path of any length; the request target an `http::Uri`
+/// carries is capped, so preparation refuses it under the token URL key
+/// instead of every attempt reporting an invalid provider response.
+#[test]
+fn a_token_url_longer_than_a_request_target_may_be_is_refused_at_preparation() {
+    let error = Credentials::prepare(Options {
+        token_url: format!("https://identity.example/{}", "a".repeat(70_000)),
+        private_key: SecretString::from(
+            KeyPair::generate_for(&PKCS_RSA_SHA256)
+                .unwrap()
+                .serialize_pem(),
+        ),
+        ..valid_options()
+    })
+    .unwrap_err();
+    assert_eq!(error.key, "token_url");
+}

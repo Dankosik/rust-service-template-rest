@@ -30,15 +30,20 @@ uses `tokio-util`, and the `service-failure` catalog is declared once by its
 | `tikv-jemallocator` 0.7, no default features | `service` and `jobs-worker` binaries: the global allocator. | Only the long-running binaries. `migrate` and `openapi` run for seconds and keep the system allocator. Libraries never set an allocator. The image builder installs `make` because jemalloc builds with `configure` and `make`. |
 | `rlimit` 0.11, no default features | `service` and `jobs-worker` binaries: raise the open-file soft limit to the hard limit at startup. | See [Open-file limit](#open-file-limit). A failure is logged as `open_file_limit_unchanged` and startup continues. |
 | `derive_more` `debug`/`display` | Debug that prints a fixed string (`X([REDACTED])`, `X { .. }`) and one-field Display, through a struct-level `#[debug("...")]` or `#[display("...")]`. | A Debug that names selected fields stays hand-written: `#[debug(skip)]` is a denylist, so a field added later would print. |
-| `enum-map` 3.1, `derive` | Counters and histograms indexed by an enum in `infra-telemetry`, `infra-object-storage` and `infra-messaging`. | Replaces hand-kept `ALL`/`COUNT` tables and their ordering asserts. Statics stay const-initialised through `EnumMap::from_array`. Not for `tonic::Code` or the `codes!` catalog. |
+| `enum-map` 3.1, `derive` | Counters and histograms indexed by an enum in `infra-telemetry`, `infra-object-storage`, `infra-messaging` and `infra-cache`; the per-operation failure flags of `infra-jobs`; the per-reason refusal counters of `infra-serviceauth`. | Replaces hand-kept `ALL`/`COUNT` tables, one field per variant and their ordering asserts. Statics stay const-initialised through `EnumMap::from_array`; handles registered on first use sit in `OnceLock` cells, so the scrape gains no zero-valued series. Not for `tonic::Code` or the `codes!` catalog. |
 | `const-hex` 1.19 | Lowercase hex of digests in `infra-http`, `infra-messaging` and the log formatter. | Chosen over `hex` 0.4.3, unreleased since 2021. Hot paths encode into a stack buffer; output is a wire and storage contract and must stay lowercase. |
 | `derive-where` 1.7 | `Clone`, `Debug` and `Default` on generic gRPC types without bounds on their parameters. | Only where a std derive would add a bound the type does not need. |
 | `async-stream` 0.3 | The gRPC health `Watch` stream and test streams. | Not for per-row database streams or `Body` impls, which own polling budgets. |
-| `moka` `sync` | The verified-token memo in `infra-serviceauth`, bounded at 1024 entries. | The validity-window check stays in the verifier; the cache only bounds capacity. |
+| `moka` `sync` | The verified-token memos in `infra-serviceauth` and in the JWT engine of `infra-bearerauthn`, each bounded at 1024 entries. | The validity-window check stays in the verifier and runs on every hit; the cache only bounds capacity and time. See [Verified bearer JWT memo](#verified-bearer-jwt-memo). |
 | `similar` 2.7, `text` (dev) | The unified diff in the committed-OpenAPI test. | Kept at the 2.x line `insta` already resolves. |
 | std `assert_matches!` | Pattern assertions in tests, which print the value on failure. | Std since Rust 1.96; no crate. |
-| `foldhash` 0.2, `std` | The hasher of the verified-token memo in `infra-serviceauth` (`quality`), and of the per-call method tables in `infra-grpc` and endpoint tables of inbound webhooks (`foldhash::HashMap`). | Only for keys the service admitted: a memo entry exists only after its signature verified, and server request paths are looked up in tables fixed at startup. The gRPC client admits validated method paths on first use into a bounded table. Measured on 2026-11-12 (Apple M-series, release, fat LTO, median of seven runs): hashing a 420-byte token 70.2 → 8.2 ns, a memo hit 105.5 → 43.6 ns, a 46-byte path lookup 8.9 → 3.5 ns. hashbrown already resolves it, so it adds no package. Digest-keyed caches such as introspection keep the default hasher; a 32-byte key saves a few nanoseconds beside a SHA-256 of the token. |
-| `arrayvec` 0.7 | The captured-field tables of the log formatter. | Replaces a sentinel-filled array and a separate count. A new table is no longer initialised in full: measured the same way, a span with two fields 405 → 335 ns to create and an event under one span 2,138 → 2,088 ns. The value buffer stays the local `Bytes`, whose writes are all-or-nothing; `ArrayVec`'s `io::Write` writes a prefix. |
+| `foldhash` 0.2, `std` | The hasher of the verified-token memos in `infra-serviceauth` and `infra-bearerauthn` (`quality`), and of the per-call method tables in `infra-grpc`, the endpoint tables of inbound webhooks and the per-route metric handles of `infra-http` (`foldhash::HashMap`). | Only for keys the service admitted: a memo entry exists only after its signature verified, and server request paths are looked up in tables fixed at startup. The gRPC client admits validated method paths on first use into a bounded table. Measured on 2026-11-12 (Apple M-series, release, fat LTO, median of seven runs): hashing a 420-byte token 70.2 → 8.2 ns, a memo hit 105.5 → 43.6 ns, a 46-byte path lookup 8.9 → 3.5 ns. hashbrown already resolves it, so it adds no package. Digest-keyed caches such as introspection keep the default hasher; a 32-byte key saves a few nanoseconds beside a SHA-256 of the token. |
+| `arrayvec` 0.7 | The captured-field tables of the log formatter. | Replaces a sentinel-filled array and a separate count. A new table is no longer initialised in full: measured the same way, a span with two fields 405 → 335 ns to create and an event under one span 2,138 → 2,088 ns. The value buffer stays the local `Bytes`, whose writes are all-or-nothing; `ArrayVec`'s `io::Write` writes a prefix. `ArrayString` holds the decimal timestamp of a webhook signature. |
+| `metrics-util` 0.20, `debugging` (dev) | `DebuggingRecorder` in the `infra-http` and `infra-webhooks` tests that assert which series a route registers. | Replaces three hand-written recorders. A snapshot resets counters and gauges, so a test that reads a gauge repeatedly or asserts the order of increments keeps its own recorder (`infra-jobs`, `infra-bearerauthn`, the jobs wake test). Adds one test-only package, `ordered-float`. |
+| `opentelemetry-proto` 0.33 and `prost` (dev) | Tests decode captured OTLP export bodies into the generated trace messages: `infra-telemetry` and the gRPC process test of `service`. | Replaces hand-encoded protobuf tags and bare byte runs that could match anywhere in a body. A raw scan remains only where the point is that a private value appears nowhere. `opentelemetry-otlp` already resolves it, and it moves with the other OpenTelemetry pins. |
+| tokio `watch::Receiver::wait_for`, tokio-util `AbortOnDropHandle` | The accept-failure and background-failure waits; the accept loop of `infra-http` and the consumer supervisor of `infra-messaging`. | Replace hand-written wait loops and `abort()` calls in `Drop`. `Deadline::wait` in `operation-context` keeps its expired-first loop: a timer alone leaves a zero budget pending on its first poll. |
+| `async_nats::Subject` | The subject of a route and of a prepared event in `infra-messaging`. | A publish no longer copies the subject three times; the bytes on the wire are the same. |
+| `proptest` with `regex` as the oracle (dev) | Property tests for hand-written grammars (request id, service name, key id, JWT type, job kind, message identity, schema label), the idempotency key and replay allow-list, the webhook signing frame and the readiness failure threshold. | 64 to 256 cases each. The oracle is the documented pattern or an independent model, never the implementation. |
 
 Rejected after the same code search, 2026-11-12: `mime`, because
 `shared_rules::rfc9110::is_json_content_type` owns the JSON media-type check
@@ -63,9 +68,96 @@ in test fixtures; `atoi`, `itoa` and `parking_lot`, with no measurable site;
 `base64-simd`, unreleased since 2023; `sonic-rs` and `simd-json`, which would
 replace the JSON contract rather than one mechanism.
 
+Rejected in the wide search of the same day (fourteen read-only passes over
+the code and the crate catalogs): `fastrand` for jitter, already decided in
+[Outbound machine authentication](decisions/outbound-machine-authentication-decisions.md);
+`parking_lot` for the 31 `unwrap_or_else(PoisonError::into_inner)` sites, a
+readability gain only (reopen when `std::sync::nonpoison` is stable; it is not
+on Rust 1.99); `wait-timeout`, which installs a process-wide `SIGCHLD` handler
+beside `tokio::process`; `tokio-test`, since `futures_util::poll!` covers
+polling once; `async-channel` for the log queue, two new packages for what an
+`RwLock` already removed; a `BufWriter` over stdout, which would delay log
+lines by the idle window and lose buffered lines on `SIGKILL`; `strum` for
+metric-label functions, whose text is a contract that differs from several
+variant names; `serde_with::OneOrMany` and `PickFirst` in configuration, whose
+errors can quote the value; `deranged` for configuration ranges, which would
+move a validation failure to a decode failure with other text; the async-nats
+`nuid` feature, a process-wide mutex with no measurement; `arc-swap` for the
+gRPC client label table, `atomic-take`, `rusty-fork`, `smart-default`,
+`nutype`, `httparse`, `pretty_assertions`, `simdutf8`, `dashmap`, `papaya`,
+`phf`, `smol_str` and `v_jsonescape`, with no site that pays for them;
+`prometheus-parse`, unreleased since 2023-12, and `openmetrics-parser`,
+LGPL-3.0; `recloser` and `failsafe`, whose clocks ignore `tokio::time::pause`.
+`cargo-hack`, `typos`, `cargo-pgo` and `cargo-about` are open: the first two
+add a gate to every pull request, the third needs a training workload the
+repository does not have, the fourth is a licence decision.
+
 The examples live with their owners in `crates/infra-http/src/harden/tests.rs`,
 `crates/config/src/validate.rs` and `crates/service/tests/openapi.rs`. Test-only
 libraries do not become normal dependencies of production crates.
+
+### Hot-path measurements of 2026-11-12
+
+Each change below was kept only after its own before-and-after measurement:
+Apple M-series, release, fat LTO, medians of seven to nine alternating rounds
+of two saved binaries. The workstation was building other crates throughout,
+so absolute values moved by a factor of two or more between rounds; the range
+of the rounds follows each median.
+
+| Operation | Before | After |
+| --- | ---: | ---: |
+| Bearer JWT verified again, RS256 | 21.7 µs (9.8–42.2) | 216 ns (102–497) |
+| Bearer JWT verified again, ES256 | 100.0 µs (33.5–134.5) | 248 ns (91–494) |
+| HTTP request duration and active-request gauge recorded | 3,118 ns (1,487–5,039) | 515 ns (380–917) |
+| gRPC outcome of a rejected call that carries details | 1,430 ns (1,111–2,000) | 635 ns (504–739) |
+| Refused service token counted | 136 ns (89–145) | 2.6 ns (1.9–3.0) |
+| Log span with two fields created | 1,054 ns (583–1,187) | 569 ns (209–770) |
+| Log event under one span formatted and submitted | 1,934 ns (1,802–2,415) | 1,163 ns (852–3,418) |
+| Log events per second from eight threads | 1.04 M (0.88–1.09 M) | 2.07 M (0.88–2.43 M) |
+| Log events per second from one thread | 0.89 M (0.73–1.04 M) | 0.94 M (0.29–1.18 M) |
+| Job payload scanned for a decoded NUL, 64 KiB without escapes | 29.9 µs | 5.6 µs |
+| Job payload scanned, 4 KiB with an escape every 8 bytes | 3.3 µs | 0.37 µs |
+| Webhook signature of a 1 KiB body | 1,338–1,364 ns | 1,177–1,214 ns |
+| Event prepared and its subject handed to the client | 5,860 instructions | 4,940 instructions |
+
+The log rows overlap at the edges of their ranges; the earlier run of the
+eight-thread case did not (0.75–1.10 M against 1.29–2.76 M). The webhook row
+gives the medians of three passes, in which the new code won 29 of 36 paired
+rounds. The event row counts instructions retired, which load does not move.
+The first verification of a bearer JWT now also stores it; that cost could not
+be separated from the noise (best round 9.8 µs before against 11.6 µs after
+for RS256, 33.5 µs against 33.2 µs for ES256).
+
+Measured and not adopted. Comparing a webhook signature as encoded text
+instead of decoded bytes: no gain (1,463–1,579 ns against 1,507–1,511 ns).
+Writing an error body once instead of twice: 2,649 → 1,481 ns for the two
+functions, but it needed the rendered body cached inside `Problem`, cleared by
+every setter, and the request id spliced into the JSON by byte position, for a
+gain on error responses only. `<[u8]>::contains` as the only early exit of the
+NUL scan: 10–20% slower on payloads that contain escapes. `sleep_until` in
+`Deadline::wait`: a zero budget stayed pending on its first poll.
+
+### Verified bearer JWT memo
+
+`JwtVerifier` in `infra-bearerauthn` remembers a bearer JWT only after its
+full verification succeeded, keyed by the token bytes. An entry holds the
+validated principal, the token's `nbf`, and the generation of the key set that
+verified the signature. Every parsed key set gets a process-unique generation;
+a hit counts only while the installed set has the entry's generation.
+Otherwise the entry is dropped and the token takes the full path, including
+the refresh for an unknown `kid`, so a key that left the JWKS stops admitting
+its tokens exactly as before. A refresh that fetches identical keys costs one
+full verification per remembered token. On every hit `exp`, `nbf` and the
+leeway are checked by the full path's own function and clock, and the caller
+records the same metrics and events as for a full verification. A refusal is
+never remembered. Bounds: 1024 entries, and per entry the shorter of the
+token's remaining time to `exp` and one JWKS refresh period of 15 minutes.
+The principal already kept the presented token, so the memo adds up to 1024
+more live tokens and no new kind of retention.
+
+Reopen if most tokens are seen once, so that the insert on a miss outweighs
+the hits, or if anything besides the token, the installed key set and the
+clock starts to influence a verification.
 
 ### Global allocator
 
@@ -181,7 +273,7 @@ validator API, placeholder endpoint or authentication mechanism.
 
 | Trigger | Preferred candidate | What must remain explicit |
 | --- | --- | --- |
-| Repeated custom serializers or a nonstandard external representation | [`serde_with`](https://docs.rs/serde_with/latest/serde_with/) adapters | The wire contract, unknown-field policy and OpenAPI shape. Do not replace working `humantime-serde` or `bytesize` merely for uniformity. It is now used for `Code` serialization and omission of optional `Problem` fields; the recipe suite also exercises nested adapters and PATCH states. |
+| Repeated custom serializers or a nonstandard external representation | [`serde_with`](https://docs.rs/serde_with/latest/serde_with/) adapters | The wire contract, unknown-field policy and OpenAPI shape. Do not replace working `humantime-serde` or `bytesize` merely for uniformity. It is now used for omission of optional `Problem` fields (`Code` serializes through its own `as_str`); the recipe suite also exercises nested adapters and PATCH states. |
 | PATCH distinguishes missing, null and a value | `serde_with::rust::double_option` with the documented `default` and omission attributes | Missing means unchanged, null means clear, and a value means set. Test all three states and schema agreement; do not collapse them into `Option<T>`. |
 | Repeated mechanical standard-trait implementations on newtypes | [`derive_more`](https://docs.rs/derive_more/latest/derive_more/), only the used derives | Preserve checked `TryFrom` construction. Do not generate `From<String>`, mutable dereferencing or setters that bypass a type's invariants. Keep `thiserror` for typed errors. |
 | A genuinely complex constructor with required and optional inputs | Evaluate [`bon`](https://docs.rs/bon/latest/bon/) first | Preserve construction invariants and the actual API. Simple struct literals and `Problem::new(code)` remain appropriate. Never generate independent setters for status/title/URI derived from `code`. |
@@ -221,7 +313,7 @@ rather than assuming any SeaORM release can share the current pool.
 | Distributed cache across replicas | `redis` 1.8.1 in `infra-cache`, default features off, only `tokio-comp` and `tokio-rustls-comp` | One owned supervisor over canonical multiplexed connections; no pool. Reuses `backon` and `tokio-util` for bounded recovery/cancellation. Composition or service adapters call the provider; features own keys, serialization, TTL, invalidation, and fallback. Independent Moka copies remain valid across multiple replicas when feature consistency permits. |
 <!-- template:end cache:docs-library-selection-cache -->
 <!-- template:begin object-storage:docs-library-selection-object-storage -->
-| S3-compatible object storage | `aws-sdk-s3` 1.150.0 in `infra-object-storage`, default features off, only `rt-tokio` and `default-https-client`, with `aws-smithy-http-client` (`rustls-aws-lc`) building the HTTPS client | One client per bucket, pinned `BehaviorVersion`, no multipart. `aws-config` 1.12.0 (default features off) supplies only the workload identity providers for Amazon S3, never the default chain. The feature owns keys and retention. |
+| S3-compatible object storage | `aws-sdk-s3` 1.151.0 in `infra-object-storage`, default features off, only `rt-tokio` and `default-https-client`, with `aws-smithy-http-client` (`rustls-aws-lc`) building the HTTPS client | One client per bucket, pinned `BehaviorVersion`, no multipart. `aws-config` 1.12.0 (default features off) supplies only the workload identity providers for Amazon S3, never the default chain. The feature owns keys and retention. |
 <!-- template:end object-storage:docs-library-selection-object-storage -->
 <!-- template:begin service-auth:docs-library-selection-service-auth -->
 | Caller-signed service tokens | `jsonwebtoken` 11.1.0 (`aws_lc_rs`, `use_pem`) for header and key types and for signing, `aws-lc-rs` for ES256 verification, in `infra-serviceauth` | One header and one payload parse per token, a parsed public key per admitted registry key, and no second crypto family. See [Service authentication decisions](decisions/service-authentication-decisions.md). |

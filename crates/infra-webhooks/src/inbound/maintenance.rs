@@ -141,12 +141,13 @@ impl Receiver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_metrics::CounterKeys;
+    use metrics_util::debugging::DebuggingRecorder;
 
     #[tokio::test]
     async fn a_cleanup_run_without_a_database_counts_as_failed_and_removes_nothing() {
-        let keys = CounterKeys::default();
-        let _local = metrics::set_default_local_recorder(&keys);
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let _local = metrics::set_default_local_recorder(&recorder);
         // Nothing listens on port 1, so every acquire ends at the pool's bound.
         let pool = sqlx::postgres::PgPoolOptions::new()
             .acquire_timeout(Duration::from_millis(50))
@@ -157,7 +158,8 @@ mod tests {
 
         let failed = async {
             loop {
-                let counted = keys.0.lock().expect("keys").iter().any(|key| {
+                let counted = snapshotter.snapshot().into_vec().iter().any(|(key, ..)| {
+                    let key = key.key();
                     key.name() == CLEANUP_RUNS_METRIC
                         && key
                             .labels()
@@ -176,11 +178,11 @@ mod tests {
             () = failed => {}
         }
         assert!(
-            keys.0
-                .lock()
-                .expect("keys")
+            snapshotter
+                .snapshot()
+                .into_vec()
                 .iter()
-                .all(|key| key.name() != CLEANUP_REMOVED_METRIC),
+                .all(|(key, ..)| key.key().name() != CLEANUP_REMOVED_METRIC),
             "a failed batch removed nothing"
         );
     }

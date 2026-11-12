@@ -211,7 +211,7 @@ fn record_id(
     hash.update(stored_at.as_bytes());
     hash.update([0]);
     hash.update(publication_id.as_bytes());
-    Ok(prefixed_digest_hex(prefix, &hash.finalize()))
+    Ok(prefixed_digest_hex(prefix, &hash.finalize().into()))
 }
 
 #[cfg(test)]

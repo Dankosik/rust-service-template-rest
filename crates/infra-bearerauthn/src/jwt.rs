@@ -4,6 +4,7 @@ use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use jsonwebtoken::Header;
+use moka::{Expiry, sync::Cache};
 use serde::Deserialize;
 use shared_rules::rfc7515;
 use tokio::time::Instant;
@@ -13,16 +14,21 @@ use crate::{
     BearerToken, EndpointUrl, IssuerUrl, JsonObject, JwtAlgorithm, PreparationError,
     PreparationPhase, PreparationReason, Principal, ProviderFailure, VerificationError,
     VerificationReason, Verifier,
-    claims::{ClaimPolicy, validate_jwt_claims},
+    claims::{ClaimPolicy, VerifiedJwt, validate_jwt_claims},
     jwks::{KEY_REJECTIONS_METRIC, MAX_SIGNATURE_BYTES, fetch_key_set},
     provider::{Document, ProviderClient},
-    refresh::{KeyStore, SignatureRefresh, run_refresh_worker},
+    refresh::{KeyStore, REFRESH_INTERVAL, SignatureRefresh, run_refresh_worker},
 };
 
 const STARTUP_BUDGET: Duration = Duration::from_secs(6);
 /// Bounds provider-supplied text that reaches an operator error; it is not
 /// part of the issuer grammar.
 const MAX_ECHOED_ISSUER_BYTES: usize = 256;
+/// Most verified tokens remembered at once.
+const MAX_REMEMBERED: u64 = 1024;
+/// An entry also leaves at its token's `exp`. A replaced key set strands its
+/// entries, so none outlives one refresh period.
+const MAX_REMEMBERED_FOR: Duration = REFRESH_INTERVAL;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TokenProfile {
@@ -53,13 +59,66 @@ pub struct JwtOptions {
 /// never refreshed.
 pub type RefreshTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
+/// A token whose signature a key set verified, and everything else its full
+/// verification decided from the token bytes alone.
+#[derive(Clone)]
+struct Remembered {
+    verified: VerifiedJwt,
+    /// [`KeySet::generation`](crate::jwks::KeySet::generation) of the set that
+    /// verified the signature.
+    key_generation: u64,
+    held_for: Duration,
+}
+
+struct RememberedExpiry;
+
+impl Expiry<Box<[u8]>, Remembered> for RememberedExpiry {
+    fn expire_after_create(
+        &self,
+        _token: &Box<[u8]>,
+        remembered: &Remembered,
+        _created_at: std::time::Instant,
+    ) -> Option<Duration> {
+        Some(remembered.held_for)
+    }
+}
+
 #[derive(derive_more::Debug)]
 #[debug("JwtVerifier(..)")]
 pub(crate) struct JwtVerifier {
+    // Claim policy, token profile and admitted algorithms never change after
+    // construction, so a verification depends on its token, the installed key
+    // set (`key_store`) and the clock alone.
     claim_policy: ClaimPolicy,
     token_profile: TokenProfile,
     algorithms: Vec<JwtAlgorithm>,
     key_store: Arc<KeyStore>,
+    /// Decides a token that already passed every check as a full verification
+    /// would: the signature part by the key set's generation, the lifetime
+    /// part by the clock, on every hit. Only a success is inserted, so a
+    /// caller cannot choose what it holds. It is not a replay cache. The
+    /// default `SipHash` over a whole token costs more than the rest of a hit.
+    remembered: Cache<Box<[u8]>, Remembered, foldhash::quality::RandomState>,
+}
+
+impl JwtVerifier {
+    fn new(
+        claim_policy: ClaimPolicy,
+        token_profile: TokenProfile,
+        algorithms: Vec<JwtAlgorithm>,
+        key_store: Arc<KeyStore>,
+    ) -> Self {
+        Self {
+            claim_policy,
+            token_profile,
+            algorithms,
+            key_store,
+            remembered: Cache::builder()
+                .max_capacity(MAX_REMEMBERED)
+                .expire_after(RememberedExpiry)
+                .build_with_hasher(foldhash::quality::RandomState::default()),
+        }
+    }
 }
 
 impl JwtVerifier {
@@ -77,6 +136,18 @@ impl JwtVerifier {
     ) -> Result<Principal, VerificationError> {
         let malformed = || VerificationError::invalid(VerificationReason::Header);
         let bytes = token.as_bytes();
+        if let Some(remembered) = self.remembered.get(bytes) {
+            // Verified against the set installed now, so the full path would
+            // find the same signature valid on its first check.
+            if remembered.key_generation == self.key_store.generation() {
+                let verified = remembered.verified.deliver(now()?);
+                if matches!(&verified, Err(error) if error.reason == VerificationReason::Expired) {
+                    self.remembered.invalidate(bytes);
+                }
+                return verified;
+            }
+            self.remembered.invalidate(bytes);
+        }
         let rfc7515::Compact {
             signing_input: message,
             header,
@@ -112,38 +183,54 @@ impl JwtVerifier {
             .decode_slice(signature, &mut signature_bytes)
             .map(|length| &signature_bytes[..length])
             .map_err(|_| VerificationError::invalid(VerificationReason::Signature))?;
-        self.verify_signature(message, signature, header.kid.as_deref(), algorithm)
+        let key_generation = self
+            .verify_signature(message, signature, header.kid.as_deref(), algorithm)
             .await?;
         let payload = URL_SAFE_NO_PAD
             .decode(payload)
             .map_err(|_| VerificationError::invalid(VerificationReason::MalformedClaims))?;
-        validate_jwt_claims(
+        let now = now()?;
+        let verified = validate_jwt_claims(
             payload,
             &self.claim_policy,
             self.token_profile,
-            now()?,
+            now,
             token.to_secret(),
-        )
+        )?;
+        let principal = verified.principal.clone();
+        self.remembered.insert(
+            bytes.into(),
+            Remembered {
+                held_for: MAX_REMEMBERED_FOR.min(Duration::from_secs(
+                    principal.expires_at().saturating_sub(now),
+                )),
+                verified,
+                key_generation,
+            },
+        );
+        Ok(principal)
     }
 
     /// Checks the signature against the installed set and, when the token may
-    /// need keys that set lacks, once more against a newer set.
+    /// need keys that set lacks, once more against a newer set. Returns the
+    /// generation of the set that verified it.
     async fn verify_signature(
         &self,
         message: &[u8],
         signature: &[u8],
         kid: Option<&str>,
         algorithm: JwtAlgorithm,
-    ) -> Result<(), VerificationError> {
+    ) -> Result<u64, VerificationError> {
         let checked = self.key_store.current();
         let miss = match checked.verify(message, signature, kid, algorithm) {
-            Ok(()) => return Ok(()),
+            Ok(()) => return Ok(checked.generation()),
             Err(miss) if miss.may_need_new_keys(kid) => miss,
             Err(error) => return Err(error.into()),
         };
         match self.key_store.refresh_for_signature_miss(&checked).await {
             SignatureRefresh::Refreshed(key_set) => {
-                Ok(key_set.verify(message, signature, kid, algorithm)?)
+                key_set.verify(message, signature, kid, algorithm)?;
+                Ok(key_set.generation())
             }
             SignatureRefresh::NoNewerSet => Err(miss.into()),
             SignatureRefresh::Unavailable => {
@@ -206,12 +293,12 @@ async fn prepare_with_provider(
     .map_err(|failure| PreparationError::new(PreparationPhase::Jwks, failure.into()))?;
     check_startup_deadline(startup_deadline, PreparationPhase::Jwks)?;
     let key_store = KeyStore::new(key_set);
-    let verifier = Verifier::jwt(JwtVerifier {
+    let verifier = Verifier::jwt(JwtVerifier::new(
         claim_policy,
-        token_profile: options.token_profile,
-        algorithms: options.algorithms.clone(),
-        key_store: key_store.clone(),
-    });
+        options.token_profile,
+        options.algorithms.clone(),
+        key_store.clone(),
+    ));
     let refresh_task: RefreshTask = Box::pin(run_refresh_worker(
         key_store,
         provider,
@@ -319,7 +406,12 @@ mod tests {
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use jsonwebtoken::{Algorithm, EncodingKey, Header, encode, jwk::Jwk};
 
-    use super::{ClaimPolicy, Document, JwtAlgorithm, JwtVerifier, KeyStore, TokenProfile};
+    use std::time::Duration;
+
+    use super::{
+        ClaimPolicy, Document, JwtAlgorithm, JwtVerifier, KeyStore, MAX_REMEMBERED,
+        MAX_REMEMBERED_FOR, TokenProfile,
+    };
     use crate::{
         Failure, Transport, VerificationReason,
         jwks::{
@@ -347,12 +439,12 @@ mod tests {
         let claim_policy =
             ClaimPolicy::try_new("https://issuer.example".to_owned(), vec!["api".to_owned()])
                 .unwrap();
-        JwtVerifier {
+        JwtVerifier::new(
             claim_policy,
-            token_profile: TokenProfile::ResourceServer,
-            algorithms: algorithms.to_vec(),
-            key_store: KeyStore::new(keys),
-        }
+            TokenProfile::ResourceServer,
+            algorithms.to_vec(),
+            KeyStore::new(keys),
+        )
     }
 
     fn signed(
@@ -1177,11 +1269,18 @@ mod tests {
             jsonwebtoken::decode::<StringIssuer>(token, &self.key, &self.validation).is_ok()
         }
 
-        /// A token outside the bearer grammar never reaches the verifier.
+        /// A token outside the bearer grammar never reaches the verifier. The
+        /// second verification of an accepted token is a memo hit and must
+        /// decide as the first did.
         async fn here(&self, token: &str) -> bool {
             let header = format!("Bearer {token}");
             match parse_bearer([header.as_bytes()]) {
-                Ok(token) => self.verifier.verify(&token).await.is_ok(),
+                Ok(token) => {
+                    let first = self.verifier.verify(&token).await;
+                    let second = self.verifier.verify(&token).await;
+                    assert_eq!(first.is_ok(), second.is_ok());
+                    first.is_ok()
+                }
                 Err(_) => false,
             }
         }
@@ -1739,6 +1838,254 @@ mod tests {
                         .labels()
                         .any(|label| label.key() == "failure" && label.value() == failure)
             }));
+        }
+    }
+
+    const EXP: u64 = 2_000;
+
+    fn ec_verifier(signing: &EncodingKey, kid: &str) -> JwtVerifier {
+        verifier(
+            key_set(
+                &[jwk(signing, Algorithm::ES256, Some(kid), true)],
+                &[JwtAlgorithm::Es256],
+            ),
+            &[JwtAlgorithm::Es256],
+        )
+    }
+
+    fn ec_token(signing: &EncodingKey, kid: &str, extra: &serde_json::Value) -> String {
+        let mut claims = serde_json::json!({"exp": EXP});
+        claims
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        signed(signing, Algorithm::ES256, Some(kid), &claims)
+    }
+
+    async fn verify_at(
+        verifier: &JwtVerifier,
+        token: &str,
+        now: u64,
+    ) -> Result<crate::Principal, VerificationReason> {
+        let header = format!("Bearer {token}");
+        let token = parse_bearer([header.as_bytes()]).unwrap();
+        verifier
+            .verify_with_now(&token, || Ok(now))
+            .await
+            .map_err(|error| error.reason)
+    }
+
+    fn remembered_count(verifier: &JwtVerifier) -> u64 {
+        verifier.remembered.run_pending_tasks();
+        verifier.remembered.entry_count()
+    }
+
+    #[tokio::test]
+    async fn a_remembered_token_yields_the_principal_of_a_full_verification() {
+        let signing = ec_signing();
+        let memo = ec_verifier(&signing, "k");
+        let token = ec_token(
+            &signing,
+            "k",
+            &serde_json::json!({"scope": "b a", "client_id": "client", "act": {"sub": "actor"}}),
+        );
+        let full = verify_at(&memo, &token, 1_000).await.unwrap();
+        assert_eq!(remembered_count(&memo), 1);
+        let hit = verify_at(&memo, &token, 1_000).await.unwrap();
+        let never_remembered = verify_at(&ec_verifier(&signing, "k"), &token, 1_000)
+            .await
+            .unwrap();
+        assert_eq!(hit, full);
+        assert_eq!(hit, never_remembered);
+        assert_eq!(hit.scopes(), ["a", "b"]);
+        assert_eq!(hit.expires_at(), EXP);
+    }
+
+    #[tokio::test]
+    async fn a_remembered_token_is_refused_by_the_clock_as_a_full_verification_refuses_it() {
+        let signing = ec_signing();
+        let memo = ec_verifier(&signing, "k");
+        let token = ec_token(&signing, "k", &serde_json::json!({"nbf": 1_000}));
+        verify_at(&memo, &token, 1_000).await.unwrap();
+        for (now, expected) in [
+            (970, Ok(())),
+            (969, Err(VerificationReason::NotYetValid)),
+            (EXP + 30, Ok(())),
+            (EXP + 31, Err(VerificationReason::Expired)),
+            (u64::MAX, Err(VerificationReason::Expired)),
+        ] {
+            let hit = verify_at(&memo, &token, now).await.map(|_| ());
+            let full = verify_at(&ec_verifier(&signing, "k"), &token, now)
+                .await
+                .map(|_| ());
+            assert_eq!(hit, expected, "{now}");
+            assert_eq!(hit, full, "{now}");
+        }
+        // Expiry drops the entry; a clock that steps back decides it afresh.
+        assert_eq!(remembered_count(&memo), 0);
+        assert!(verify_at(&memo, &token, 1_000).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_remembered_token_follows_the_clock_failure_of_a_full_verification() {
+        let signing = ec_signing();
+        let memo = ec_verifier(&signing, "k");
+        let token = ec_token(&signing, "k", &serde_json::json!({}));
+        let header = format!("Bearer {token}");
+        let bearer = parse_bearer([header.as_bytes()]).unwrap();
+        verify_at(&memo, &token, 1_000).await.unwrap();
+        let unavailable =
+            || crate::unix_time(std::time::UNIX_EPOCH - std::time::Duration::from_secs(1));
+        let error = memo
+            .verify_with_now(&bearer, unavailable)
+            .await
+            .unwrap_err();
+        assert_eq!(error.reason, VerificationReason::Clock);
+        assert!(verify_at(&memo, &token, 1_000).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_remembered_token_is_refused_once_its_key_leaves_the_installed_set() {
+        let (signing, other) = (ec_signing(), ec_signing());
+        let memo = ec_verifier(&signing, "k");
+        let token = ec_token(&signing, "k", &serde_json::json!({}));
+        verify_at(&memo, &token, 1_000).await.unwrap();
+        let replacement = key_set(
+            &[jwk(&other, Algorithm::ES256, Some("other"), true)],
+            &[JwtAlgorithm::Es256],
+        );
+        memo.key_store.finish(1, Ok(Arc::clone(&replacement)));
+        let fresh = verifier(replacement, &[JwtAlgorithm::Es256]);
+        let expected = verify_at(&fresh, &token, 1_000).await.unwrap_err();
+        assert_eq!(expected, VerificationReason::UnknownKey);
+        assert_eq!(verify_at(&memo, &token, 1_000).await.unwrap_err(), expected);
+        assert_eq!(remembered_count(&memo), 0);
+    }
+
+    #[tokio::test]
+    async fn a_remembered_token_is_refused_once_its_key_rotates_to_another_key_under_the_same_kid()
+    {
+        let (signing, other) = (ec_signing(), ec_signing());
+        let memo = ec_verifier(&signing, "k");
+        let token = ec_token(&signing, "k", &serde_json::json!({}));
+        verify_at(&memo, &token, 1_000).await.unwrap();
+        let replacement = key_set(
+            &[jwk(&other, Algorithm::ES256, Some("k"), true)],
+            &[JwtAlgorithm::Es256],
+        );
+        memo.key_store.finish(1, Ok(replacement));
+        assert_eq!(
+            verify_at(&memo, &token, 1_000).await.unwrap_err(),
+            VerificationReason::Signature
+        );
+        assert_eq!(remembered_count(&memo), 0);
+    }
+
+    #[tokio::test]
+    async fn a_refresh_that_keeps_the_key_makes_the_next_verification_a_full_one_that_remembers_again()
+     {
+        let signing = ec_signing();
+        let memo = ec_verifier(&signing, "k");
+        let token = ec_token(&signing, "k", &serde_json::json!({}));
+        let generation = |memo: &JwtVerifier| {
+            memo.remembered
+                .get(token.as_bytes())
+                .map(|remembered| remembered.key_generation)
+        };
+        verify_at(&memo, &token, 1_000).await.unwrap();
+        assert_eq!(generation(&memo), Some(memo.key_store.generation()));
+        let before = memo.key_store.generation();
+        memo.key_store.finish(
+            1,
+            Ok(key_set(
+                &[jwk(&signing, Algorithm::ES256, Some("k"), true)],
+                &[JwtAlgorithm::Es256],
+            )),
+        );
+        assert_ne!(before, memo.key_store.generation());
+        verify_at(&memo, &token, 1_000).await.unwrap();
+        assert_eq!(generation(&memo), Some(memo.key_store.generation()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_token_verified_after_a_refresh_is_remembered_under_the_refreshed_set() {
+        let (installed, rotated) = (ec_signing(), ec_signing());
+        let memo = Arc::new(ec_verifier(&installed, "old"));
+        memo.key_store.permit_unknown_refresh_for_test();
+        let token = ec_token(&rotated, "new", &serde_json::json!({}));
+        let call = tokio::spawn({
+            let (memo, token) = (Arc::clone(&memo), token.clone());
+            async move { verify_at(&memo, &token, 1_000).await.map(|_| ()) }
+        });
+        tokio::task::yield_now().await;
+        let rotated_set = key_set(
+            &[jwk(&rotated, Algorithm::ES256, Some("new"), true)],
+            &[JwtAlgorithm::Es256],
+        );
+        memo.key_store.finish(1, Ok(rotated_set));
+        assert_eq!(call.await.unwrap(), Ok(()));
+        let remembered = memo.remembered.get(token.as_bytes()).unwrap();
+        assert_eq!(remembered.key_generation, memo.key_store.generation());
+        // The unchanged set now verifies it without another refresh.
+        assert!(verify_at(&memo, &token, 1_000).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_refused_token_is_never_remembered() {
+        let signing = ec_signing();
+        let memo = ec_verifier(&signing, "k");
+        let good = ec_token(&signing, "k", &serde_json::json!({}));
+        let (message, signature) = good.rsplit_once('.').unwrap();
+        let tampered = format!("{message}.{}", signature.replacen(&signature[..2], "AA", 1));
+        let claim_refusals = [
+            ec_token(&signing, "k", &serde_json::json!({"aud": "other"})),
+            ec_token(
+                &signing,
+                "k",
+                &serde_json::json!({"iss": "https://other.example"}),
+            ),
+            ec_token(&signing, "k", &serde_json::json!({"nbf": EXP})),
+            ec_token(&signing, "k", &serde_json::json!({"exp": 10})),
+            ec_token(&signing, "k", &serde_json::json!({"sub": null})),
+            ec_token(&signing, "k", &serde_json::json!({"scope": "a\"b"})),
+        ];
+        for token in std::iter::once(&tampered).chain(&claim_refusals) {
+            for _ in 0..2 {
+                assert!(verify_at(&memo, token, 1_000).await.is_err());
+            }
+        }
+        assert_eq!(remembered_count(&memo), 0);
+        verify_at(&memo, &good, 1_000).await.unwrap();
+        assert_eq!(remembered_count(&memo), 1);
+    }
+
+    #[tokio::test]
+    async fn the_memo_never_holds_more_than_its_entry_bound() {
+        let signing = ec_signing();
+        let memo = ec_verifier(&signing, "k");
+        for index in 0..MAX_REMEMBERED + 200 {
+            let token = ec_token(
+                &signing,
+                "k",
+                &serde_json::json!({"jti": index.to_string()}),
+            );
+            verify_at(&memo, &token, 1_000).await.unwrap();
+        }
+        assert!(remembered_count(&memo) <= MAX_REMEMBERED);
+    }
+
+    #[tokio::test]
+    async fn an_entry_is_held_no_longer_than_its_token_or_one_refresh_period() {
+        let signing = ec_signing();
+        let memo = ec_verifier(&signing, "k");
+        for (exp, held) in [
+            (1_060, Duration::from_secs(60)),
+            (1_000 + 10 * 86_400, MAX_REMEMBERED_FOR),
+        ] {
+            let token = ec_token(&signing, "k", &serde_json::json!({ "exp": exp }));
+            verify_at(&memo, &token, 1_000).await.unwrap();
+            let remembered = memo.remembered.get(token.as_bytes()).unwrap();
+            assert_eq!(remembered.held_for, held, "{exp}");
         }
     }
 }

@@ -247,4 +247,68 @@ mod tests {
             assert_eq!(JwtType::parse(value), Err(InvalidJwtType), "{value:?}");
         }
     }
+
+    /// A value one grammar admits or refuses, judged by a regex written from
+    /// the grammar's doc comment instead of by the parser's own checks.
+    mod grammar {
+        use super::*;
+        use proptest::prelude::*;
+        use regex::Regex;
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(64))]
+
+            #[test]
+            fn service_names_match_the_rfc1123_label_regex(
+                value in prop_oneof![
+                    any::<String>(),
+                    "[a-z0-9-]{0,66}",
+                    "[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?",
+                ],
+            ) {
+                let label = Regex::new("^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$").unwrap();
+                let parsed = ServiceName::parse(&value);
+                prop_assert_eq!(parsed.is_ok(), label.is_match(&value));
+                if let Ok(name) = parsed {
+                    prop_assert_eq!(name.as_str(), value);
+                }
+            }
+
+            #[test]
+            fn key_ids_match_the_visible_ascii_regex(
+                value in prop_oneof![
+                    any::<String>(),
+                    "[!-~]{0,260}",
+                    "[!-~ \t\u{7f}\u{e9}]{0,8}",
+                ],
+            ) {
+                let visible = Regex::new("^[!-~]{1,256}$").unwrap();
+                let parsed = KeyId::parse(&value);
+                prop_assert_eq!(parsed.is_ok(), visible.is_match(&value));
+                if let Ok(kid) = parsed {
+                    prop_assert_eq!(kid.as_str(), value);
+                }
+            }
+
+            #[test]
+            fn token_types_match_the_restricted_name_regex(
+                value in prop_oneof![
+                    any::<String>(),
+                    "[A-Za-z0-9!#$&^_.+/-]{0,140}",
+                    "[aA][pP]{2}[a-zA-Z]{0,8}/[A-Za-z0-9!#$&^_.+-]{0,130}",
+                ],
+            ) {
+                let media_subtype = Regex::new(
+                    "^((?i-u:application)/)?[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}$",
+                )
+                .unwrap();
+                let parsed = JwtType::parse(&value);
+                prop_assert_eq!(parsed.is_ok(), media_subtype.is_match(&value));
+                if let Ok(typ) = parsed {
+                    let short = value.rsplit('/').next().unwrap();
+                    prop_assert_eq!(typ.as_str(), short.to_ascii_lowercase());
+                }
+            }
+        }
+    }
 }

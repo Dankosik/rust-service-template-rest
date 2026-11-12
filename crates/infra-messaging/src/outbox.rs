@@ -312,7 +312,7 @@ impl PublishDomainEvent {
 }
 
 fn event_key(message_id: &str) -> String {
-    prefixed_digest_hex("event-", &Sha256::digest(message_id.as_bytes()))
+    prefixed_digest_hex("event-", &Sha256::digest(message_id.as_bytes()).into())
 }
 
 /// Largest raw payload whose padded standard base64 fits the jobs limit next

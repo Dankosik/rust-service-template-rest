@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
+use enum_map::EnumMap;
 use sqlx::postgres::PgPool;
 use tokio::sync::{Notify, Semaphore};
 use tokio::time::Instant;
@@ -173,7 +174,7 @@ impl Engine {
                 cleanup: ForcedCleanup::default(),
                 counters: Counters::default(),
                 attempt_tracker: TaskTracker::new(),
-                failing: Failing::default(),
+                failing: EnumMap::default(),
                 completions: crate::attempt::Completions::default(),
                 owned_attempts: crate::attempt::MembershipGauge::owned_attempts(),
                 wake,
@@ -574,7 +575,8 @@ pub(crate) struct Shared {
     pub(crate) cleanup: ForcedCleanup,
     pub(crate) counters: Counters,
     pub(crate) attempt_tracker: TaskTracker,
-    failing: Failing,
+    /// Per operation: set after the first failure, clear after recovery.
+    failing: EnumMap<Operation, AtomicBool>,
     pub(crate) completions: crate::attempt::Completions,
     pub(crate) owned_attempts: crate::attempt::MembershipGauge,
     /// Set when a due job of a registered kind was committed.
@@ -678,7 +680,7 @@ pub(crate) struct Counters {
 }
 
 /// One engine statement. The label is [`Operation::as_str`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, enum_map::Enum)]
 pub(crate) enum Operation {
     Claim,
     Record,
@@ -702,34 +704,9 @@ impl Operation {
     }
 }
 
-/// One flag per [`Operation`]: set after the first failure, clear after recovery.
-#[derive(Default, derive_more::Debug)]
-#[debug("Failing {{ .. }}")]
-struct Failing {
-    claim: AtomicBool,
-    record: AtomicBool,
-    release: AtomicBool,
-    retention: AtomicBool,
-    sample: AtomicBool,
-    listen: AtomicBool,
-}
-
-impl Failing {
-    fn flag(&self, operation: Operation) -> &AtomicBool {
-        match operation {
-            Operation::Claim => &self.claim,
-            Operation::Record => &self.record,
-            Operation::Release => &self.release,
-            Operation::Retention => &self.retention,
-            Operation::Sample => &self.sample,
-            Operation::Listen => &self.listen,
-        }
-    }
-}
-
 pub(crate) fn observe_failure(shared: &Shared, operation: Operation, error: &OperationError) {
     metrics::counter!(OPERATION_FAILURES_METRIC, "operation" => operation.as_str()).increment(1);
-    if !shared.failing.flag(operation).swap(true, Ordering::SeqCst) {
+    if !shared.failing[operation].swap(true, Ordering::SeqCst) {
         log_operation_failure(operation, error);
     }
 }
@@ -755,7 +732,7 @@ fn log_operation_failure(operation: Operation, error: &OperationError) {
 }
 
 pub(crate) fn observe_recovery(shared: &Shared, operation: Operation) {
-    if shared.failing.flag(operation).swap(false, Ordering::SeqCst) {
+    if shared.failing[operation].swap(false, Ordering::SeqCst) {
         tracing::info!(operation = operation.as_str(), "jobs_operation_recovered");
     }
 }

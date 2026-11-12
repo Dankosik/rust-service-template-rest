@@ -96,4 +96,21 @@ mod tests {
             );
         }
     }
+
+    use proptest::strategy::Strategy as _;
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(128))]
+
+        #[test]
+        fn validity_is_the_documented_pattern(
+            value in proptest::prop_oneof![
+                proptest::collection::vec(proptest::prelude::any::<u8>(), 0..160),
+                "[A-Za-z0-9._~-]{0,140}".prop_map(String::into_bytes),
+            ],
+        ) {
+            let documented = regex::bytes::Regex::new(r"(?-u)^[A-Za-z0-9._~-]{1,128}$").unwrap();
+            proptest::prop_assert_eq!(is_valid(&value), documented.is_match(&value));
+        }
+    }
 }

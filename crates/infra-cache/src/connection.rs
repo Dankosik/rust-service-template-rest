@@ -42,7 +42,7 @@ const PROBE_SLOTS: usize = 1;
 const PIPELINE_BUFFER_SIZE: usize = APPLICATION_SLOTS + PROBE_SLOTS + 1;
 
 /// Bounded cause of an unsuccessful cache exchange. Server text is never copied.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, enum_map::Enum)]
 pub(crate) enum ErrorType {
     /// The operation context stopped (its deadline, including
     /// `command_timeout`, or caller cancellation, which a namespace records

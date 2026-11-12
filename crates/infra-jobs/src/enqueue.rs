@@ -322,9 +322,6 @@ fn prepare<'a, K: JobKind>(
             bytes: writer.total,
         });
     }
-    if contains_decoded_nul(&writer.retained) {
-        return Err(EnqueueError::PayloadContainsNul);
-    }
     // A successful serde_json serialization emits UTF-8; reuse its allocation.
     let payload = String::from_utf8(writer.retained).map_err(|error| {
         EnqueueError::Serialize(serde_json::Error::io(io::Error::new(
@@ -332,6 +329,9 @@ fn prepare<'a, K: JobKind>(
             error,
         )))
     })?;
+    if contains_decoded_nul(&payload) {
+        return Err(EnqueueError::PayloadContainsNul);
+    }
     serde_json::from_str::<K>(&payload).map_err(EnqueueError::PayloadDoesNotDecode)?;
     Ok(Prepared {
         payload,
@@ -349,7 +349,14 @@ fn is_valid_unique_key(key: &str) -> bool {
 /// A backslash always consumes its following escape byte. In the JSON text
 /// `\\u0000` (an escaped backslash, then `u0000`) the second backslash is
 /// consumed by the first, and its following `u0000` stays literal.
-fn contains_decoded_nul(payload: &[u8]) -> bool {
+fn contains_decoded_nul(payload: &str) -> bool {
+    // Any decoded NUL is spelled `\u0000`; the substring search is several
+    // times faster than the walk below, which then only runs for a payload
+    // that contains that text.
+    if !payload.contains(r"\u0000") {
+        return false;
+    }
+    let payload = payload.as_bytes();
     let mut index = 0;
     while index < payload.len() {
         if payload[index] == b'\\' {
@@ -373,7 +380,7 @@ mod tests {
 
     use super::{
         EnqueueError, EnqueueOptions, MAX_PAYLOAD_BYTES, MAX_UNIQUE_KEY_BYTES, PayloadWriter,
-        WAKE_INTERVAL, prepare, take_wake_slot,
+        WAKE_INTERVAL, contains_decoded_nul, prepare, take_wake_slot,
     };
     use crate::JobKind;
     use crate::kind::{InvalidDelay, MAX_DELAY, checked_delay_micros};
@@ -709,6 +716,24 @@ mod tests {
             Err(EnqueueError::PayloadContainsNul)
         );
         assert!(prepare(&Raw(r"\u0000".to_owned()), EnqueueOptions::default()).is_ok());
+    }
+
+    #[test]
+    fn a_backslash_consumes_the_byte_after_it_when_looking_for_a_decoded_nul() {
+        for (text, decoded) in [
+            (r"\u0000", true),
+            (r"x\u0000", true),
+            (r"\\u0000", false),
+            (r"\\\u0000", true),
+            (r"\n\u0000", true),
+            (r"\u000", false),
+            (r"abc\", false),
+            (r"\u0000\", true),
+            (r"\\u0000\", false),
+            ("", false),
+        ] {
+            assert_eq!(contains_decoded_nul(text), decoded, "{text}");
+        }
     }
 
     #[test]

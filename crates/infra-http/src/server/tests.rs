@@ -217,7 +217,10 @@ async fn accept_timeout_is_distinct_and_forces_connection_cleanup() {
     // open request: the deadline must include its unconfirmed join.
     let stalled = tokio::spawn(std::future::pending());
     let abort = stalled.abort_handle();
-    let accept = std::mem::replace(&mut server.accept_loop, stalled);
+    let accept = std::mem::replace(
+        &mut server.accept_loop,
+        tokio_util::task::AbortOnDropHandle::new(stalled),
+    );
     accept.abort();
     assert!(accept.await.unwrap_err().is_cancelled());
     let result = tokio::time::timeout(

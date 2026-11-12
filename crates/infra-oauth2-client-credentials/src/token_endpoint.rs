@@ -2,7 +2,7 @@ use std::{sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use http::{
-    Request, Response, StatusCode,
+    Request, Response, StatusCode, Uri,
     header::{ACCEPT, CONTENT_TYPE},
 };
 use infra_outbound_http::{Client, Limits};
@@ -15,7 +15,7 @@ use tokio::{
 };
 use url::Url;
 
-use crate::{AcquisitionError, Rejection, assertion::Signer, token::Token};
+use crate::{AcquisitionError, ConfigurationError, Rejection, assertion::Signer, token::Token};
 
 pub(crate) const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) const TOKEN_LIMITS: Limits = Limits {
@@ -33,6 +33,7 @@ const ACQUISITIONS_TOTAL: &str = "oauth2_token_acquisitions_total";
 /// signed, bounded, counted request per attempt, with no reuse of its own.
 pub(crate) struct TokenEndpoint {
     url: Url,
+    uri: Uri,
     http: Client,
     scopes: Vec<String>,
     audience: Option<String>,
@@ -48,19 +49,27 @@ impl TokenEndpoint {
         audience: Option<String>,
         signer: Signer,
         permits: usize,
-    ) -> Self {
+    ) -> Result<Self, ConfigurationError> {
+        let uri = url
+            .as_str()
+            .parse::<Uri>()
+            .map_err(|_| ConfigurationError {
+                key: "token_url",
+                reason: "must be a valid HTTPS URL",
+            })?;
         metrics::describe_counter!(
             ACQUISITIONS_TOTAL,
             "OAuth2 token attempts by grant and closed terminal outcome"
         );
-        Self {
+        Ok(Self {
             url,
+            uri,
             http,
             scopes,
             audience,
             signer,
             permits: Semaphore::new(permits),
-        }
+        })
     }
 
     pub(crate) fn host(&self) -> Option<&str> {
@@ -162,7 +171,7 @@ impl TokenEndpoint {
         let body = url::form_urlencoded::Serializer::new(String::new())
             .extend_pairs(fields)
             .finish();
-        let request = Request::post(self.url.as_str())
+        let request = Request::post(self.uri.clone())
             .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
             .header(ACCEPT, "application/json")
             .body(Bytes::from(body))

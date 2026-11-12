@@ -6,7 +6,9 @@
 //! lifecycle; the composition root in the `service` crate wires those
 //! together and assembles the full API document.
 //!
-//! Most of the chain is `tower-http`.
+//! The chain mixes `tower-http` layers (request id, response headers, panic
+//! recovery, body limit) with this crate's own middleware for observation,
+//! admission, the request deadline and request-id sanitizing.
 
 mod contract;
 pub mod extract;
