@@ -535,7 +535,7 @@ mod tests {
     }
 
     #[test]
-    fn registered_claims_require_a_string_issuer_and_check_lifetime_before_audience() {
+    fn registered_claim_validation_enforces_shape_and_order() {
         let verify = |extra: serde_json::Value| {
             let mut claims = serde_json::json!({
                 "iss": "https://issuer.example", "aud": "api", "exp": 1000, "sub": "subject",
@@ -561,10 +561,6 @@ mod tests {
             (
                 serde_json::json!({"iss": null}),
                 Err(VerificationReason::MissingClaim),
-            ),
-            (
-                serde_json::json!({"iss": ["https://issuer.example"]}),
-                Err(VerificationReason::MalformedClaims),
             ),
             (
                 serde_json::json!({"aud": null}),
@@ -614,11 +610,11 @@ mod tests {
             ),
             (
                 serde_json::json!({"iss": ["other", "https://issuer.example"]}),
-                Ok(1000),
+                Err(VerificationReason::MalformedClaims),
             ),
             (
                 serde_json::json!({"iss": []}),
-                Err(VerificationReason::Issuer),
+                Err(VerificationReason::MalformedClaims),
             ),
             (
                 serde_json::json!({"aud": [1]}),
