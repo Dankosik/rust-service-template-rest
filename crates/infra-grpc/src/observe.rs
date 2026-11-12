@@ -282,39 +282,28 @@ struct Handles {
 
 impl Series {
     pub(crate) fn server(methods: HashSet<Box<str>>) -> Arc<Self> {
-        Arc::new(Self::new(
-            SERVER_STARTED,
-            SERVER_HANDLED,
-            SERVER_HANDLING_SECONDS,
-            Kind::Server {
-                described: methods
-                    .into_iter()
-                    .map(|path| (path, OnceLock::new()))
-                    .collect(),
-            },
-        ))
+        Arc::new(Self::new(Kind::Server {
+            described: methods
+                .into_iter()
+                .map(|path| (path, OnceLock::new()))
+                .collect(),
+        }))
     }
 
     pub(crate) fn client() -> Arc<Self> {
         Arc::clone(CLIENT_SERIES.get_or_init(|| {
-            Arc::new(Self::new(
-                CLIENT_STARTED,
-                CLIENT_HANDLED,
-                CLIENT_HANDLING_SECONDS,
-                Kind::Client {
-                    admitted: RwLock::default(),
-                },
-            ))
+            Arc::new(Self::new(Kind::Client {
+                admitted: RwLock::default(),
+            }))
         }))
     }
 
-    fn new(
-        started_metric: &'static str,
-        handled_metric: &'static str,
-        handling_seconds_metric: &'static str,
-        kind: Kind,
-    ) -> Self {
+    fn new(kind: Kind) -> Self {
         describe();
+        let (started_metric, handled_metric, handling_seconds_metric) = match &kind {
+            Kind::Server { .. } => (SERVER_STARTED, SERVER_HANDLED, SERVER_HANDLING_SECONDS),
+            Kind::Client { .. } => (CLIENT_STARTED, CLIENT_HANDLED, CLIENT_HANDLING_SECONDS),
+        };
         Self {
             started_metric,
             handled_metric,
