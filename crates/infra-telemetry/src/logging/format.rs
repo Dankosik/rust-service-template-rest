@@ -200,7 +200,6 @@ const EMPTY: Entry = Entry {
 };
 
 struct Scratch {
-    line: Bytes<MAX_RECORD_BYTES>,
     values: Bytes<MAX_RECORD_BYTES>,
     fields: [Entry; MAX_EVENT_FIELDS],
     field_count: usize,
@@ -212,7 +211,6 @@ struct Scratch {
 impl Scratch {
     fn new(value_limit: usize) -> Self {
         Self {
-            line: Bytes::new(MAX_RECORD_BYTES),
             values: Bytes::new(value_limit),
             fields: [EMPTY; MAX_EVENT_FIELDS],
             field_count: 0,
@@ -485,6 +483,7 @@ impl FormatLayer {
         event: &Event<'_>,
         ctx: &Context<'_, S>,
         scratch: &mut Scratch,
+        line: &mut Bytes<MAX_RECORD_BYTES>,
     ) -> Result<(), DropReason>
     where
         S: Subscriber + for<'a> LookupSpan<'a>,
@@ -519,7 +518,6 @@ impl FormatLayer {
                 }
             }
         }
-        let line = &mut scratch.line;
         match self.format {
             LoggingFormat::Json => {
                 line.append(b"{\"level\":");
@@ -663,10 +661,11 @@ where
             return;
         };
         let mut scratch = Scratch::new(MAX_RECORD_BYTES);
-        match self.write_record(event, &ctx, &mut scratch) {
+        let mut line = Bytes::new(MAX_RECORD_BYTES);
+        match self.write_record(event, &ctx, &mut scratch, &mut line) {
             Ok(()) => self.output.submit(Record {
-                bytes: scratch.line.storage,
-                len: scratch.line.len,
+                bytes: line.storage,
+                len: line.len,
             }),
             Err(reason) => self.output.record_drop(reason),
         }
