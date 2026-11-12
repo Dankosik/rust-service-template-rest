@@ -189,13 +189,12 @@ async fn prepare_with_provider(
         return Err(PreparationError::invalid_options());
     }
     check_startup_deadline(startup_deadline, PreparationPhase::Options)?;
-    let jwks_uri = match options.jwks_uri {
-        Some(jwks_uri) => jwks_uri,
-        None => {
-            let uri = discover_jwks_uri(&provider, &options.issuer, startup_deadline).await?;
-            check_startup_deadline(startup_deadline, PreparationPhase::Discovery)?;
-            uri
-        }
+    let jwks_uri = if let Some(jwks_uri) = options.jwks_uri {
+        jwks_uri
+    } else {
+        let uri = discover_jwks_uri(&provider, &options.issuer, startup_deadline).await?;
+        check_startup_deadline(startup_deadline, PreparationPhase::Discovery)?;
+        uri
     };
     let key_set = fetch_key_set(
         &provider,
