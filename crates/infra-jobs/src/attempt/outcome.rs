@@ -377,10 +377,6 @@ fn payload_summary(kind: &str, error: &serde_json::Error) -> String {
 /// The final stored form of a summary: control characters become spaces, and
 /// the UTF-8 length stops at [`MAX_ERROR_SUMMARY_BYTES`] without splitting a
 /// character.
-///
-/// This is the one owner of the stored bound. Every summary this module writes
-/// passes here, and [`crate::kind`] appends its sources only while they stay
-/// below the same limit.
 fn sanitize_summary(text: &str) -> String {
     let mut sanitized = String::with_capacity(text.len().min(MAX_ERROR_SUMMARY_BYTES));
     for ch in text.chars() {
