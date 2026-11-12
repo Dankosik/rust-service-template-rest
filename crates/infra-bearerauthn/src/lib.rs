@@ -114,7 +114,8 @@ pub enum PreparationReason {
     // template:end oidc-jwt:authn-jwt-preparation-reasons
 }
 
-/// Only an issuer mismatch names values: the configured and discovered issuer URLs.
+/// An issuer mismatch includes the configured issuer and, when safe to echo,
+/// the discovered issuer.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum PreparationError {
     #[error("authentication preparation failed during {phase:?}: {reason:?}")]
@@ -357,21 +358,30 @@ enum Engine {
 }
 
 impl Verifier {
+    fn new(engine: Engine) -> Self {
+        let mode = match &engine {
+            // template:begin oidc-jwt:authn-jwt-engine-mode
+            Engine::Jwt(_) => "jwt",
+            // template:end oidc-jwt:authn-jwt-engine-mode
+            // template:begin oidc-introspection:authn-introspection-engine-mode
+            Engine::Introspection(_) => "introspection",
+            // template:end oidc-introspection:authn-introspection-engine-mode
+        };
+        Self {
+            engine,
+            counters: SuccessCounters::new(mode),
+        }
+    }
+
     // template:begin oidc-jwt:authn-jwt-verifier
     pub(crate) fn jwt(engine: jwt::JwtVerifier) -> Self {
-        Self {
-            engine: Engine::Jwt(Arc::new(engine)),
-            counters: SuccessCounters::new("jwt"),
-        }
+        Self::new(Engine::Jwt(Arc::new(engine)))
     }
     // template:end oidc-jwt:authn-jwt-verifier
 
     // template:begin oidc-introspection:authn-introspection-verifier
     pub(crate) fn introspection(engine: Arc<introspection::IntrospectionVerifier>) -> Self {
-        Self {
-            engine: Engine::Introspection(engine),
-            counters: SuccessCounters::new("introspection"),
-        }
+        Self::new(Engine::Introspection(engine))
     }
     // template:end oidc-introspection:authn-introspection-verifier
 

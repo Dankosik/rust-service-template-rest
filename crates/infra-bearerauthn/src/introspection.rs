@@ -344,8 +344,7 @@ impl Expiry<TokenDigest, VerifiedIntrospection> for Retention {
     }
 }
 
-/// The earlier of the configured TTL and token expiry, without leeway. Zero
-/// means the result is returned to its waiters but not retained.
+/// A fresh result can be delivered to its waiters even when its retention is zero.
 fn retention(principal: &Principal, ttl: Duration, now: SystemTime) -> Duration {
     if now.duration_since(UNIX_EPOCH).is_err()
         || principal.payload_len() > MAX_RETAINED_PAYLOAD_BYTES
