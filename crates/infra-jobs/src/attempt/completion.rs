@@ -1,4 +1,4 @@
-//! Batched COMPLETE writes for attempts that share a supervisor deadline.
+//! Completion writes for one fenced claim or a batch sharing a supervisor deadline.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
@@ -192,6 +192,26 @@ impl Drop for CompletionBatch {
     fn drop(&mut self) {
         drop(self.retire());
     }
+}
+
+/// COMPLETE for one fenced claim, for the caller to execute.
+///
+/// Every outcome write fences on `claim_expires_at IS NOT NULL`, which the
+/// table's CHECK makes equivalent to `state = 'running'`. A literal
+/// `state = 'running'` proves the partial `background_jobs_running` predicate,
+/// and after ANALYZE saw few running rows the planner scans that whole index
+/// for the id, dead entries of every job claimed since the last VACUUM
+/// included. This predicate leaves the primary key as the only access path.
+pub(crate) fn complete_query(
+    fence: ClaimFence,
+) -> sqlx::query::Query<'static, sqlx::Postgres, sqlx::postgres::PgArguments> {
+    sqlx::query!(
+        "UPDATE background_jobs \
+         SET state = 'completed', finished_at = statement_timestamp(), claim_expires_at = NULL \
+         WHERE id = $1 AND claim_generation = $2 AND claim_expires_at IS NOT NULL",
+        fence.job_id.0,
+        fence.generation,
+    )
 }
 
 pub(super) async fn complete_batched(

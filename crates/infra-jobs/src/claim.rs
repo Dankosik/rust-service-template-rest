@@ -55,8 +55,8 @@ pub(crate) struct KindSlot {
 impl KindSlot {
     /// The claim loop is the only taker and asked for no more than the free
     /// part, so a place is free for every row it drew.
-    fn take(running: &Arc<Semaphore>, wake: &Arc<Notify>) -> Option<Self> {
-        let permit = Arc::clone(running).try_acquire_owned().ok()?;
+    fn take(running_slots: &Arc<Semaphore>, wake: &Arc<Notify>) -> Option<Self> {
+        let permit = Arc::clone(running_slots).try_acquire_owned().ok()?;
         Some(Self {
             permit: Some(permit),
             wake: Arc::clone(wake),
@@ -260,6 +260,7 @@ async fn claim(
     requested: i64,
 ) -> Result<Vec<Drawn>, sqlx::Error> {
     let binds = policy_binds(&shared.registry, requested);
+    let rescued_summary = "lease expired; rescued";
     observed(
         "claim jobs",
         sqlx::query_as!(
@@ -337,14 +338,14 @@ async fn claim(
                  attempted_by = CASE WHEN picked.exhausted THEN job.attempted_by \
                                      ELSE $5 END, \
                  error_summary = CASE WHEN picked.rescued \
-                                      THEN 'lease expired; rescued' \
+                                      THEN $7::text \
                                       WHEN picked.exhausted \
                                       THEN COALESCE(job.error_summary, 'attempt budget spent') \
                                       ELSE job.error_summary END, \
                  errors = CASE WHEN picked.rescued \
                                THEN job.errors || jsonb_build_object( \
                                         'attempt', picked.attempts, 'at', statement_timestamp(), \
-                                        'error', 'lease expired; rescued') \
+                                        'error', $7::text) \
                                ELSE job.errors END, \
                  claim_generation = nextval('background_jobs_claim_generation') \
              FROM picked \
@@ -363,6 +364,7 @@ async fn claim(
             requested,
             shared.worker_id,
             &binds.claim_limits,
+            rescued_summary,
         )
         .try_map(|row| row.into_drawn(&shared.registry))
         .fetch_all(&mut *connection),
@@ -396,11 +398,14 @@ fn policy_binds(registry: &crate::Kinds, requested: i64) -> PolicyBinds<'_> {
         binds
             .lease_offsets_micros
             .push(saturating_micros(lease_offset(registered.policy.timeout)));
-        binds
-            .claim_limits
-            .push(registered.running.as_ref().map_or(requested, |running| {
-                requested.min(slot_count(running.available_permits()))
-            }));
+        binds.claim_limits.push(
+            registered
+                .running_slots
+                .as_ref()
+                .map_or(requested, |slots| {
+                    requested.min(slot_count(slots.available_permits()))
+                }),
+        );
     }
     binds
 }
@@ -487,9 +492,9 @@ fn dispatch_known(
                     break;
                 };
                 let kind_slot = registered
-                    .running
+                    .running_slots
                     .as_ref()
-                    .and_then(|running| KindSlot::take(running, &shared.claim_wake));
+                    .and_then(|slots| KindSlot::take(slots, &shared.claim_wake));
                 registered
                     .metrics()
                     .queue_wait

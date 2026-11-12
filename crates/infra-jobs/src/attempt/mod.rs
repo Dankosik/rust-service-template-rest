@@ -18,9 +18,8 @@ use crate::engine::{ForcedCleanup, Operation, RECORD_RETRY_INTERVAL, Shared, obs
 use crate::kind::{Attempt, HandlerFuture, JobError, JobId, Registered};
 use crate::state::FailureReason;
 
-pub(crate) use completion::Completions;
 use completion::complete_batched;
-pub(crate) use outcome::complete_query;
+pub(crate) use completion::{Completions, complete_query};
 use outcome::{Ended, Transition, Unacknowledged, Written, map_outcome, send_outcome, write_of};
 
 /// How long a cancelled or timed-out handler may keep running before [`drive`]
