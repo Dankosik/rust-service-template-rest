@@ -28,8 +28,8 @@ pub const HISTOGRAMS: &[(&str, &[f64])] = &[(REQUEST_DURATION_METRIC, REQUEST_DU
 /// `url.template`. Insert it as a request extension to tell one provider
 /// operation from another; the attempt's span is then named
 /// `{method} {template}` and both the span and the duration metric carry the
-/// template. It is a metric label, so it is a literal with placeholders and
-/// never a formatted path.
+/// template. Supply a static template with placeholders for variable path
+/// segments so requests for the same operation share a metric label.
 ///
 /// ```
 /// use infra_outbound_http::{Bytes, Request, UrlTemplate};
@@ -73,7 +73,7 @@ enum Outcome {
 
 impl Outcome {
     /// A cancelled caller is not a provider failure, as a dropped attempt.
-    fn of(error: &Error) -> Self {
+    fn from_error(error: &Error) -> Self {
         match error {
             Error::Cancelled => Self::Cancelled,
             Error::InvalidTarget => Self::Failed("invalid_target"),
@@ -158,7 +158,7 @@ impl Attempt {
         self.emit(
             result
                 .as_ref()
-                .map_or_else(Outcome::of, |_| Outcome::Response),
+                .map_or_else(Outcome::from_error, |_| Outcome::Response),
         );
         // Adapters map this error to their own closed outcome and drop its
         // source, so the client span is where it is told.
