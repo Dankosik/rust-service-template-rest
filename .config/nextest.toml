@@ -1,0 +1,10 @@
+# `make test`, `make test-package` and `make test-changed` read this file.
+# Container-backed suites run through `cargo test`, not nextest.
+
+[profile.default]
+# Every failure is reported in one run.
+fail-fast = false
+# A test that hangs is reported as SLOW after 60 s and terminated, with its
+# name in the log, after 5 periods. The slowest test in recent CI runs on
+# main took 31 s on two slots per core, and the whole suite 45 s.
+slow-timeout = { period = "60s", terminate-after = 5 }

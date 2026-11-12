@@ -32,7 +32,7 @@ Rust analysis ([Red main](#red-main)):
 | `quality-validation` | validation system | the classifier, affected-crate planner, validation-lock and `make verify` self-tests |
 | `security` | manifests, `deny.toml`, workflows; tool manifest and image on pull requests | cargo-deny (advisories, licenses, bans, sources); Dependency Review, fail on high, pull requests only; zizmor with the online audits |
 | `secrets` | every event except a schedule without a policy change | Gitleaks over the commits since the base; complete `HEAD` ancestry on tags, manual runs, selected schedules, and a push without a readable base |
-| `delivery` | shell, workflows, tool manifest, image, publication metadata | actionlint; ShellCheck over the changed scripts; `tools-check`; BuildKit Dockerfile checks; the publication metadata self-test |
+| `delivery` | shell, Python, workflows, tool manifest, image, publication metadata | actionlint; ShellCheck over the changed scripts; ruff over the Python scripts; `tools-check`; BuildKit Dockerfile checks; the publication metadata self-test |
 | `image` | Docker/image sources, the root `Cargo.toml` (release profile and workspace dependencies), and any selected profile image path | one local-default image: build, hardened lifecycle asserting `app.commit`, and Trivy for image changes; retained profile details below |
 | `docs` | Markdown, documentation, image-input policy/checker and Docker context controls | Railway watch forms agree and cover admitted image inputs; every relative link and `#fragment` resolves (lychee, offline, pinned container); no Rust toolchain |
 | `monitoring-rules` | rule files, their fixtures, the runner, tool pins and the shared routing owners | `promtool check rules` over every `env/monitoring/*.rules.yml` and `promtool test rules` over its `scripts/tests/<name>-rules.yml`; a rule file without fixtures fails |
@@ -385,9 +385,10 @@ later change reopens one only with new evidence.
 | Decision | Alternative rejected | Why |
 | --- | --- | --- |
 | `tools/versions.env`, `NAME=value` lines read by `make` (`include`), shell (`.`), and CI (`>> $GITHUB_ENV` after stripping comments) | `mise` with `mise.lock`; `cargo-run-bin`; a `tools/Cargo.toml` of tools as dependencies; `cargo-binstall` as a prerequisite | Cargo has no project-local tool table or checksum-verified binary distribution; a versions file needs no parser and no new prerequisite. `mise` reopens if the tool set outgrows Cargo + Go + Node + Docker |
-| Cargo tools built once per version with `cargo install --locked --root <git-common-dir>/tools/<crate>-<version>` as Make prerequisites; `taiki-e/install-action` (v2.87.14) in CI with `CI=true` resolving them from `PATH` | compiling in CI | the four tools cost about six minutes to compile (*verified*: cargo-shear 58 s, cargo-deny 121 s, zizmor 161 s), acceptable once per workstation, not per run |
+| Cargo tools built once per version with `cargo install --locked --root <git-common-dir>/tools/<crate>-<version>` as Make prerequisites; `taiki-e/install-action` (v2.88.0) in CI with `CI=true` resolving them from `PATH` | compiling in CI | the four tools cost about six minutes to compile (*verified*: cargo-shear 58 s, cargo-deny 121 s, zizmor 161 s), acceptable once per workstation, not per run |
 | `cargo-chef` and `cargo-auditable` as the upstream static (musl) release binaries, each archive checked against its release `.sha256` pinned per architecture; versions and digests are Dockerfile `ARG` defaults asserted equal to the manifest by `make tools-check` | `cargo install` in the builder; `cargo-binstall`; passing them as build arguments only | compiling both took 67 s of a 728 s cold build on a 4-vCPU host, and CI image builds start without a layer cache; binstall is one more tool whose fallbacks reach third-party builds and source compilation; Railway passes no build arguments |
 | Redocly through `npx`, oasdiff, Gitleaks, and actionlint through `go run <module>@v<version>` | binaries with checksum scripts | `npx` and the Go module checksum database already verify what they run; Go is a prerequisite for oasdiff anyway (`go run` of Gitleaks: 16 s cold, 1 s warm, *verified*) |
+| ruff through `uvx ruff@<version>` (`pipx run ruff==<version>` on CI runners) | a pip requirements file; a native binary download | one PyPI package at a pinned version, run per invocation like `npx`; `ruff.toml` selects defect rules only (syntax, undefined names, unused imports and variables, bugbear without `raise from` and `zip(strict=)`) and no formatter gate, because `make actionlint` turns pyflakes off and nothing else lints the scripts that decide what `make verify` and CI run |
 | ShellCheck, Trivy, and lychee as digest-pinned containers | native binaries | Haskell and Go binaries with no Cargo or Go module path; Docker is a prerequisite for image work |
 | Base images pinned once in the Dockerfile `FROM` lines, moved by Dependabot's `docker` ecosystem; the manifest does not repeat them | a manifest copy | one owner per pin; `make tools-check` asserts every `FROM` carries a digest and the rust tag equals the toolchain channel (*verified* that a drifted `ARG` default fails) |
 | The manifest is not Dependabot-managed; the weekly `dependency-drift` issue lists pins behind upstream | Renovate regex manager | deliberate bumps; a derived repository may add Renovate |
@@ -642,7 +643,8 @@ The initializer does not create linked Railway inputs or deployment resources.
 10. `GITHUB_ENV` accepts `NAME=value` lines only; strip the manifest's
     comments before appending it.
 11. actionlint's shellcheck and pyflakes integrations use the host's
-    binaries; `make actionlint` disables both so local and CI agree.
+    binaries; `make actionlint` disables both so local and CI agree;
+    `make shellcheck` and `make python-lint` run the pinned tools.
 12. A `while read … do [[ … ]] && …; done` loop returns the last test's
     status; under `set -e` a final non-matching path aborts the step. Use
     `if`.

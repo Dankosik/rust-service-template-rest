@@ -248,7 +248,8 @@ LOCK
 	printf 'include make/template.mk\n' >Makefile
 	printf '# Verification fixture\n' >README.md
 	printf '# Agent fixture\n' >AGENTS.md
-	: >scripts/check-skills.py
+	mkdir -p .agents/roles
+	: >.agents/roles/worker-agent.toml
 	: >.gitleaks.toml
 	: >scripts/ci/fixture.sh
 	git init -q
@@ -530,7 +531,7 @@ PY
 		output=$(ALLOW_FULL=1 bash "${script}" --plan --files scripts/ci/initializer-matrix.py)
 		grep -q '^  make template-init-check$' <<<"$(plan_section commands)"
 		grep -q '^  make template-init-artifacts ARTIFACT_GRAPHS=1,7,47,65$' <<<"$(plan_section ci-owned)"
-		output=$(bash "${script}" --files scripts/ci/initializer-matrix.py)
+		output=$(bash "${script}" --files scripts/tests/fixtures/template-profiles-b206.json)
 		grep -q '^verification not applicable locally: CI owns make template-init-check' <<<"${output}"
 		output=$(bash "${script}" --plan --files crates/infra-cache/src/lib.rs)
 		grep -q '^  make template-init-artifacts ARTIFACT_GRAPHS=65$' <<<"$(plan_section ci-owned)"
@@ -646,6 +647,10 @@ EOF
 	output=$(bash "${script}" --plan --files scripts/ci/removed.sh)
 	grep -q 'shell: no changed shell source remains' <<<"${output}"
 	if grep -q 'make shellcheck' <<<"${output}"; then return 1; fi
+
+	output=$(bash "${script}" --plan --files ruff.toml)
+	grep -q '^  make python-lint$' <<<"${output}"
+	[[ $(grep -c '^  make ' <<<"${output}") -eq 1 ]] || assert_failed
 
 	output=$(bash "${script}" --plan --files env/monitoring/service.rules.yml)
 	grep -q '^  make monitoring-rules$' <<<"${output}"
@@ -770,18 +775,18 @@ check-instructions:
 	@printf 'fixture skills check passed\n'
 MAKE
 	# Caller flags and legacy hints cannot authorize execution without a lease.
-	if output=$(VALIDATION_LOCK_HELD=1 VERIFY_FORCE=1 bash "${script}" --locked --files scripts/check-skills.py 2>&1); then
+	if output=$(VALIDATION_LOCK_HELD=1 VERIFY_FORCE=1 bash "${script}" --locked --files .agents/roles/worker-agent.toml 2>&1); then
 		echo "verify self-test accepted unauthenticated --locked" >&2
 		return 1
 	fi
 	if grep -q 'fixture skills check passed' <<<"${output}"; then return 1; fi
 	scratch=${fixture}/tmp
 	mkdir "${scratch}"
-	output=$(TMPDIR="${scratch}" VERIFY_FORCE=1 bash "${script}" --files scripts/check-skills.py)
+	output=$(TMPDIR="${scratch}" VERIFY_FORCE=1 bash "${script}" --files .agents/roles/worker-agent.toml)
 	grep -q 'fixture skills check passed' <<<"${output}"
 	grep -q '^result: pass$' <<<"${output}"
 	if grep -q 'reusing exact passing receipt' <<<"${output}"; then return 1; fi
-	output=$(TMPDIR="${scratch}" bash "${script}" --files scripts/check-skills.py)
+	output=$(TMPDIR="${scratch}" bash "${script}" --files .agents/roles/worker-agent.toml)
 	grep -q 'reusing exact passing receipt' <<<"${output}"
 	receipt_path=$(sed -n 's/^reusing exact passing receipt after lock admission: //p' <<<"${output}")
 
@@ -790,14 +795,14 @@ MAKE
 	# than the fixture's selected candidate, must invalidate the attempted pass.
 	mkdir -p .cargo
 	printf '[build]\ntarget-dir = "target-before"\n' >.cargo/config.toml
-	output=$(TMPDIR="${scratch}" VERIFY_FORCE=1 bash "${script}" --files scripts/check-skills.py)
+	output=$(TMPDIR="${scratch}" VERIFY_FORCE=1 bash "${script}" --files .agents/roles/worker-agent.toml)
 	grep -q '^result: pass$' <<<"${output}"
 	cat >Makefile <<'MAKE'
 check-instructions:
 	@printf '[build]\ntarget-dir = "target-after"\n' >.cargo/config.toml
 	@printf 'fixture context drift ran\n'
 MAKE
-	if output=$(TMPDIR="${scratch}" VERIFY_FORCE=1 bash "${script}" --files scripts/check-skills.py 2>&1); then
+	if output=$(TMPDIR="${scratch}" VERIFY_FORCE=1 bash "${script}" --files .agents/roles/worker-agent.toml 2>&1); then
 		echo "verify self-test accepted changed build context" >&2
 		return 1
 	fi
@@ -814,11 +819,11 @@ check-instructions:
 	@touch build-context-gate-ran
 MAKE
 	rm -f build-context-gate-ran
-	output=$(TMPDIR="${scratch}" VERIFY_FORCE=1 bash "${script}" --files scripts/check-skills.py)
+	output=$(TMPDIR="${scratch}" VERIFY_FORCE=1 bash "${script}" --files .agents/roles/worker-agent.toml)
 	grep -q '^result: pass$' <<<"${output}"
 	rm -f build-context-gate-ran
 	receipts_before=$(find .git/codex/verify -name '*.receipt' | wc -l)
-	if output=$(TMPDIR="${scratch}" BUILD_MIN_FREE_BYTES=999999999999999999 bash "${script}" --files scripts/check-skills.py 2>&1); then
+	if output=$(TMPDIR="${scratch}" BUILD_MIN_FREE_BYTES=999999999999999999 bash "${script}" --files .agents/roles/worker-agent.toml 2>&1); then
 		echo "verify self-test accepted an unmet free-space requirement" >&2
 		return 1
 	fi
@@ -834,7 +839,7 @@ MAKE
 	rm -f build-context-gate-ran
 	mkdir -p .cargo
 	printf '[build]\nbuild-dir = "{workspace-path-hash}"\n' >.cargo/config.toml
-	output=$(TMPDIR="${scratch}" bash "${script}" --files scripts/check-skills.py)
+	output=$(TMPDIR="${scratch}" bash "${script}" --files .agents/roles/worker-agent.toml)
 	grep -q 'verification completed with unknown build context; no passing receipt published' <<<"${output}"
 	if grep -q 'reusing exact passing receipt' <<<"${output}"; then return 1; fi
 	attempt_path=$(sed -n 's/^verification attempt: //p' <<<"${output}")
@@ -852,7 +857,7 @@ MAKE
 	# A receipt from the former publication protocol is not custody evidence.
 	sed '/^custody_protocol:/d' "${receipt_path}" >"${receipt_path}.legacy"
 	mv "${receipt_path}.legacy" "${receipt_path}"
-	output=$(TMPDIR="${scratch}" bash "${script}" --files scripts/check-skills.py)
+	output=$(TMPDIR="${scratch}" bash "${script}" --files .agents/roles/worker-agent.toml)
 	grep -q 'fixture skills check passed' <<<"${output}"
 	if grep -q 'reusing exact passing receipt' <<<"${output}"; then return 1; fi
 	# A compatible receipt does not erase pending work in valid inherited
@@ -878,7 +883,7 @@ SH
 	output=$(PATH="${fixture}/custody-tools:${caller_path}" VALIDATION_LOCK_DIR="${fixture}/reuse-pending.lock" VERIFY_FORCE='' bash scripts/ci/validation-lock.sh -- bash -c '
 		bash scripts/ci/validation-lock.sh --resource-register container "pending-${VALIDATION_LOCK_TOKEN:0:12}" >/dev/null
 		status=0
-		PATH="$2" bash "$1" --files scripts/check-skills.py || status=$?
+		PATH="$2" bash "$1" --files .agents/roles/worker-agent.toml || status=$?
 		printf "%s\n" "$status" >reuse-pending-status
 		exit "$status"
 	' _ "${script}" "${caller_path}" 2>&1) || custody_status=$?
@@ -887,7 +892,7 @@ SH
 	if grep -q 'reusing exact passing receipt' <<<"${output}"; then return 1; fi
 	[[ $(find .git/codex/verify -name '*.receipt' | wc -l) == "${receipts_before}" ]] || assert_failed
 	printf 'check-instructions:\n\t@exit 42\n' >Makefile
-	if output=$(TMPDIR="${scratch}" VERIFY_FORCE=1 bash "${script}" --files scripts/check-skills.py 2>&1); then
+	if output=$(TMPDIR="${scratch}" VERIFY_FORCE=1 bash "${script}" --files .agents/roles/worker-agent.toml 2>&1); then
 		echo "verify self-test accepted a failing gate" >&2
 		return 1
 	fi
@@ -906,7 +911,7 @@ check-instructions:
 	@printf 'local step ran\n'
 MAKE
 		: >make/source.mk
-		output=$(VERIFY_FORCE=1 bash "${script}" --files scripts/check-skills.py scripts/ci/initializer-matrix.py)
+		output=$(VERIFY_FORCE=1 bash "${script}" --files .agents/roles/worker-agent.toml scripts/tests/fixtures/template-profiles-b206.json)
 		grep -q 'local step ran' <<<"${output}"
 		grep -q '^status: partially_verified$' <<<"${output}"
 		grep -q '^ci_owned: make template-init-check;make template-init-artifacts ARTIFACT_GRAPHS=1,7,47,65$' <<<"${output}"
@@ -947,7 +952,7 @@ dockerfile-check:
 	@:
 MAKE
 	receipts_before=$(find .git/codex/verify -name '*.receipt' | wc -l)
-	if output=$(VERIFY_FORCE=1 bash "${script}" --files tools/versions.env scripts/check-skills.py .gitleaks.toml 2>&1); then
+	if output=$(VERIFY_FORCE=1 bash "${script}" --files tools/versions.env .agents/roles/worker-agent.toml .gitleaks.toml 2>&1); then
 		echo "verify self-test accepted a partially failed plan" >&2
 		return 1
 	fi
@@ -970,7 +975,7 @@ MAKE
 	[[ $(find .git/codex/verify -name '*.receipt' | wc -l) == "${receipts_before}" ]] || assert_failed
 	# An explicitly requested run still executes the entire plan; partial
 	# results never become automatic cross-candidate cache hits.
-	output=$(VERIFY_FORCE=1 bash "${script}" --files tools/versions.env scripts/check-skills.py .gitleaks.toml)
+	output=$(VERIFY_FORCE=1 bash "${script}" --files tools/versions.env .agents/roles/worker-agent.toml .gitleaks.toml)
 	attempt_path=$(sed -n 's/^verification attempt: //p' <<<"${output}")
 	grep -q '^attempt_state: passed$' "${attempt_path}"
 	[[ $(grep -c '^step_state: [0-9][0-9]* passed ' "${attempt_path}") == "${pending_step}" ]] || assert_failed
@@ -983,7 +988,7 @@ check-instructions:
 secret-scan:
 	@printf 'range scan since %s\n' "$(BASE_REF)"
 MAKE
-	output=$(REPOSITORY_CI=none VERIFY_FORCE=1 bash "${script}" --files scripts/check-skills.py)
+	output=$(REPOSITORY_CI=none VERIFY_FORCE=1 bash "${script}" --files .agents/roles/worker-agent.toml)
 	grep -q '^skills ALLOW_HEAVY=1 ALLOW_FULL=1 CI=$' <<<"${output}"
 	grep -q "^range scan since $(git rev-parse HEAD)\$" <<<"${output}"
 	grep -q '^ci_mode: none$' <<<"${output}"
@@ -995,10 +1000,10 @@ MAKE
 	# A step that mutates the selected candidate must not leave reusable success.
 	cat >Makefile <<'MAKE'
 check-instructions:
-	@printf 'changed during verification\n' >>scripts/check-skills.py
+	@printf 'changed during verification\n' >>.agents/roles/worker-agent.toml
 MAKE
 	receipts_before=$(find .git/codex/verify -name '*.receipt' | wc -l)
-	if output=$(VERIFY_FORCE=1 bash "${script}" --files scripts/check-skills.py 2>&1); then
+	if output=$(VERIFY_FORCE=1 bash "${script}" --files .agents/roles/worker-agent.toml 2>&1); then
 		echo "verify self-test accepted a candidate changed by a gate" >&2
 		return 1
 	fi
@@ -1010,7 +1015,7 @@ MAKE
 	# Seed a receipt for this exact post-mutation candidate before testing
 	# admission refusal on both execution and the reusable-receipt path.
 	printf 'check-instructions:\n\t@:\n' >Makefile
-	output=$(VERIFY_FORCE=1 bash "${script}" --files scripts/check-skills.py)
+	output=$(VERIFY_FORCE=1 bash "${script}" --files .agents/roles/worker-agent.toml)
 	grep -q '^result: pass$' <<<"${output}"
 	receipts_before=$(find .git/codex/verify -name '*.receipt' | wc -l)
 	# A caller cannot turn --locked or a legacy boolean into admission.
@@ -1018,14 +1023,14 @@ MAKE
 check-instructions:
 	@touch forged-gate-ran
 MAKE
-	if output=$(VALIDATION_LOCK_HELD=1 bash "${script}" --locked --files scripts/check-skills.py 2>&1); then
+	if output=$(VALIDATION_LOCK_HELD=1 bash "${script}" --locked --files .agents/roles/worker-agent.toml 2>&1); then
 		echo "verify self-test accepted forged nesting" >&2
 		return 1
 	fi
 	[[ ! -e forged-gate-ran ]] || assert_failed
 	grep -q 'requires verified inherited custody' <<<"${output}"
 	# Reuse also waits for admission: a forged identity cannot reuse a receipt.
-	if output=$(VALIDATION_LOCK_DOMAIN="${fixture}/validation.lock" VALIDATION_LOCK_TOKEN=forged bash "${script}" --files scripts/check-skills.py 2>&1); then
+	if output=$(VALIDATION_LOCK_DOMAIN="${fixture}/validation.lock" VALIDATION_LOCK_TOKEN=forged bash "${script}" --files .agents/roles/worker-agent.toml 2>&1); then
 		echo "verify self-test reused a receipt with invalid custody" >&2
 		return 1
 	fi
@@ -1039,7 +1044,7 @@ check-instructions:
 		"pending-$$(printf '%.12s' "$$VALIDATION_LOCK_TOKEN")" >pending-resource
 MAKE
 	custody_status=0
-	output=$(PATH="${fixture}/custody-tools:${PATH}" VALIDATION_LOCK_DIR="${fixture}/pending.lock" VERIFY_FORCE=1 bash scripts/ci/validation-lock.sh -- bash "${script}" --files scripts/check-skills.py 2>&1) || custody_status=$?
+	output=$(PATH="${fixture}/custody-tools:${PATH}" VALIDATION_LOCK_DIR="${fixture}/pending.lock" VERIFY_FORCE=1 bash scripts/ci/validation-lock.sh -- bash "${script}" --files .agents/roles/worker-agent.toml 2>&1) || custody_status=$?
 	[[ ${custody_status} == 74 ]] || assert_failed
 	attempt_path=$(sed -n 's/^verification attempt: //p' <<<"${output}")
 	grep -q '^step_state: 1 passed ' "${attempt_path}"
@@ -1052,7 +1057,7 @@ MAKE
 check-instructions:
 	@:
 MAKE
-	output=$(VERIFY_FORCE=1 bash scripts/ci/validation-lock.sh -- bash "${script}" --files scripts/check-skills.py)
+	output=$(VERIFY_FORCE=1 bash scripts/ci/validation-lock.sh -- bash "${script}" --files .agents/roles/worker-agent.toml)
 	attempt_path=$(sed -n 's/^verification attempt: //p' <<<"${output}")
 	grep -q '^attempt_state: pending_custody$' "${attempt_path}"
 	[[ $(find .git/codex/verify -name '*.receipt' | wc -l) == "${receipts_before}" ]] || assert_failed
@@ -1062,7 +1067,7 @@ MAKE
 check-instructions:
 	@kill -TERM "$$VERIFY_TEST_PID"
 MAKE
-	if output=$(VERIFY_FORCE=1 bash "${fixture}/scripts/ci/validation-lock.sh" -- bash -c 'export VERIFY_TEST_PID=$$; exec bash "$1" --locked --files scripts/check-skills.py' _ "${script}" 2>&1); then
+	if output=$(VERIFY_FORCE=1 bash "${fixture}/scripts/ci/validation-lock.sh" -- bash -c 'export VERIFY_TEST_PID=$$; exec bash "$1" --locked --files .agents/roles/worker-agent.toml' _ "${script}" 2>&1); then
 		echo "verify self-test accepted an interrupted attempt" >&2
 		return 1
 	fi
@@ -1360,6 +1365,7 @@ if is_true shell; then
 	shell_files=${shell_files% }
 	if [[ -n ${shell_files} ]]; then add_command shell "${shell_files}" "shell sources changed" "make shellcheck SHELL_FILES='${shell_files}'" docker false true; else add_na shell "no changed shell source remains"; fi
 fi
+if is_true python; then add_command make python-lint "Python source or its lint configuration changed" "make python-lint" cheap false false; fi
 if is_true agent_instructions; then add_command make check-instructions "agent instructions, skills, roles, or carriers changed" "make check-instructions" cheap false false; fi
 if is_true publication_metadata; then add_command make publish-image-metadata-check "publication naming or promotion changed" "make publish-image-metadata-check" cheap false false; fi
 if [[ ${ci_mode} == none ]]; then

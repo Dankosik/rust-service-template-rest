@@ -94,7 +94,7 @@ NEXTEST_PATH = $(if $(filter $(TOOLS_ROOT)/%,$(CARGO_NEXTEST)),env PATH="$(dir $
 # cores busy: on four slots the suite took 57 s, on eight 34-37 s (10-core
 # workstation, 2026-11-02).
 NEXTEST_TEST_THREADS ?= $(shell echo $$((2 * $$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2))))
-NEXTEST_RUN = $(NEXTEST_PATH) $(BUILD_CARGO) nextest run --no-fail-fast --no-tests=pass --test-threads=$(NEXTEST_TEST_THREADS) $(CARGO_FLAGS)
+NEXTEST_RUN = $(NEXTEST_PATH) $(BUILD_CARGO) nextest run --no-tests=pass --test-threads=$(NEXTEST_TEST_THREADS) $(CARGO_FLAGS)
 
 # Go tools resolve through the module checksum database; the first run
 # compiles and caches them.
@@ -102,6 +102,9 @@ REQUIRE_GO = @command -v go >/dev/null 2>&1 || { echo "$@ requires Go for $(1)" 
 GITLEAKS ?= go run github.com/zricethezav/gitleaks/v8@v$(GITLEAKS_VERSION)
 GITLEAKS_FLAGS := --no-banner --redact --verbose --exit-code 1 --config .gitleaks.toml
 ACTIONLINT ?= go run github.com/rhysd/actionlint/cmd/actionlint@v$(ACTIONLINT_VERSION)
+# Python tools run from PyPI at the pinned version: uv locally, pipx on CI
+# runners, which have it preinstalled.
+RUFF ?= $(if $(shell command -v uvx 2>/dev/null),uvx ruff@$(RUFF_VERSION),pipx run ruff==$(RUFF_VERSION))
 # Tracked and untracked shell scripts that exist in the worktree.
 SHELL_FILES = $(wildcard $(shell git ls-files --cached --others --exclude-standard -- '*.sh'))
 # Tracked and untracked Markdown files; `git ls-files` keeps target/ out.
@@ -118,7 +121,7 @@ TEMPLATE_STANDARD_TARGETS := help template-init build run test test-package test
 	agent-roles-sync agent-roles-check codex-agents-sync codex-agents-check \
 	claude-skills-sync claude-skills-check qwen-skills-sync qwen-skills-check \
 	openapi-generate openapi-check openapi-lint openapi-breaking openapi-breaking-since \
-	tools-check deny dependency-drift unused-deps secret-scan secret-scan-history actionlint zizmor shellcheck docs-check profiling-check \
+	tools-check deny dependency-drift unused-deps secret-scan secret-scan-history actionlint zizmor shellcheck python-lint docs-check profiling-check \
 	dockerfile-check runtime-image-build runtime-image-check container-security container-sbom \
 	publish-image-metadata-check compose-up compose-down test-integration-db sqlx-prepare sqlx-check test-integration-messaging test-integration-cache \
 	test-integration-object-storage test-object-storage-conformance test-integration-oauth integration-compile migration-check migration-history-self-test migration-validate \
@@ -267,9 +270,11 @@ test-changed: $(filter $(TOOLS_ROOT)/%,$(CARGO_NEXTEST)) ## Run the tests of the
 
 # cargo-mutants builds a copy of the workspace, so the run takes the shared
 # validation lock; `--in-place` would leave a mutated tree behind an interrupt.
-mutants: $(filter $(TOOLS_ROOT)/%,$(CARGO_MUTANTS)) ## List the mutations no test catches in PKG=<crate>; FILE=<path> narrows it to one source file
+# It runs the tests through nextest, as `make test` does, so a surviving mutant
+# means no test that `make test` runs fails.
+mutants: $(filter $(TOOLS_ROOT)/%,$(CARGO_MUTANTS) $(CARGO_NEXTEST)) ## List the mutations no test catches in PKG=<crate>; FILE=<path> narrows it to one source file
 	@test -n "$(PKG)" || { echo "mutants requires PKG=<crate name>" >&2; exit 2; }
-	$(VALIDATION_LOCK) $(CARGO_MUTANTS) mutants --package $(PKG) $(if $(FILE),--file $(FILE)) --cargo-arg=--locked --output target/mutants
+	$(VALIDATION_LOCK) $(NEXTEST_PATH) $(CARGO_MUTANTS) mutants --test-tool nextest --package $(PKG) $(if $(FILE),--file $(FILE)) --cargo-arg=--locked --output target/mutants
 
 native-transport-regressions: ## Locked serial native transport graph and regression receipt
 	$(VALIDATION_LOCK) python3 scripts/ci/native-transport-regressions.py
@@ -440,6 +445,12 @@ zizmor: $(filter $(TOOLS_ROOT)/%,$(ZIZMOR)) ## Audit GitHub Actions workflows fo
 shellcheck: ## ShellCheck every shell script through the pinned container
 	@test -n "$(SHELL_FILES)" || { echo "no shell scripts found; skipping ShellCheck"; exit 0; }; \
 	$(VALIDATION_LOCK) bash scripts/ci/validation-lock.sh --container-run -- docker run --rm --read-only --network none -v "$(CURDIR):/src:ro" -w /src "$(SHELLCHECK_IMAGE)" -x -- $(SHELL_FILES)
+
+# ruff.toml selects defect rules only (no formatter, no style rules) and
+# excludes vendor/.
+python-lint: ## Lint the Python scripts for defects with the pinned ruff
+	@command -v uvx >/dev/null 2>&1 || command -v pipx >/dev/null 2>&1 || { echo "$@ requires uv or pipx for ruff@$(RUFF_VERSION)" >&2; exit 2; }
+	$(RUFF) check --no-cache .
 
 # Offline on purpose: relative paths and #fragments are this repository's
 # contract; external URLs are not, and checking them would make the gate flaky.

@@ -26,7 +26,7 @@ names=(
 	# template:begin runtime-progress:classifier-runtime-progress-surface
 	runtime_progress
 	# template:end runtime-progress:classifier-runtime-progress-surface
-	github_workflows dependency_automation shell runtime_image publication_metadata secret_scanning
+	github_workflows dependency_automation shell python runtime_image publication_metadata secret_scanning
 	db_integration messaging_integration cache_integration object_storage_integration oauth_integration migrations
 	agent_instructions documentation validation_system module_initializer initializer_runtime initializer_artifacts no_validation_required
 )
@@ -288,7 +288,7 @@ classify() {
 		esac
 		# Every workspace build reads these two, as it reads the lockfile.
 		case "${file}" in
-		.sqlx/* | crates/*/.sqlx/* | .cargo/config.toml) mark cargo_dependencies ;;
+		.sqlx/* | crates/*/.sqlx/* | .cargo/config.toml | .config/nextest.toml) mark cargo_dependencies ;;
 		esac
 		# P9 mounts the seam and the authentication engine against a real
 		# database; retained only while the introspection-only fixture exists.
@@ -384,6 +384,11 @@ classify() {
 		case "${file}" in
 		*.sh) mark shell ;;
 		esac
+		# Vendored upstream Python stays archival source, outside this lint.
+		case "${file}" in
+		vendor/*) ;;
+		*.py | ruff.toml) mark python ;;
+		esac
 		case "${file}" in
 		.github/actions/publish-image/* | scripts/ci/publish-image-metadata.sh) mark publication_metadata ;;
 		esac
@@ -429,7 +434,7 @@ classify() {
 		crates/infra-bearerauthn/* | crates/infra-outbound-http/* | crates/infra-idempotency-store/* | crates/infra-webhooks/* | crates/infra-http/Cargo.toml | crates/infra-http/src/authn.rs | crates/infra-http/src/context.rs | crates/infra-http/src/idempotency/* | crates/infra-http/src/harden.rs | crates/infra-http/src/harden/* | crates/infra-http/src/lib.rs | crates/infra-http/src/problem.rs | crates/infra-http/src/webhooks.rs | \
 		crates/infra-postgres/* | crates/migrate/* | crates/infra-jobs/* | crates/jobs-worker/* | crates/domain-events/* | crates/infra-messaging/* | crates/infra-cache/* | \
 		crates/infra-object-storage/* | crates/operation-context/* | crates/shared-rules/* | crates/infra-telemetry/src/logging.rs | crates/infra-telemetry/src/logging/tests.rs | crates/service-failure/* | crates/infra-oauth2-client-credentials/* | \
-		test/* | migrations/* | .sqlx/* | .cargo/config.toml | scripts/ci/sqlx-prepare.sh)
+		test/* | migrations/* | .sqlx/* | .cargo/config.toml | .config/nextest.toml | scripts/ci/sqlx-prepare.sh)
 			mark module_initializer initializer_runtime
 			;;
 		# template:begin grpc:classifier-grpc-initializer
@@ -443,7 +448,7 @@ classify() {
 			;;
 		# template:end service-auth:classifier-service-auth-initializer
 		env/monitoring/*.rules.yml | scripts/tests/*-rules.yml | scripts/ci/monitoring-rules.sh | \
-		.jscpd.json | quality/*.json | scripts/ci/duplication-check.py | scripts/ci/architecture-check.py | scripts/tests/quality-checks.py | \
+		.jscpd.json | ruff.toml | quality/*.json | scripts/ci/duplication-check.py | scripts/ci/architecture-check.py | scripts/tests/quality-checks.py | \
 		.dockerignore | build/docker/Dockerfile | scripts/ci/image-inputs-check.py | scripts/tests/image-inputs-check.py | README.md | CONTRIBUTING.md | SECURITY.md | .gitleaks.toml | lychee.toml | \
 		.github/CODEOWNERS | .github/ISSUE_TEMPLATE/* | .github/dependabot.yml | \
 		.github/workflows/cd.yml | .github/actions/publish-image/action.yml | .github/actions/rust-toolchain/action.yml | \
@@ -775,6 +780,15 @@ HOOK
 	assert_case rustfmt.toml \
 		"lint_config" \
 		"cargo_dependencies rust_source"
+	assert_case ruff.toml \
+		"python" \
+		"rust_source shell lint_config"
+	assert_case scripts/tests/quality-checks.py \
+		"python" \
+		"rust_source shell"
+	assert_case .config/nextest.toml \
+		"cargo_dependencies" \
+		"rust_source python"
 	assert_case api/openapi/service.yaml \
 		"openapi" \
 		"rust_source documentation"

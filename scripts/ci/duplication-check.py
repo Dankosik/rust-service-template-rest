@@ -250,7 +250,7 @@ def envelopes(root, baseline):
                 # Mixed LF/CRLF files also preserve native byte coordinates.
                 raw = 0
                 for _ in range(offset):
-                    raw += 2 if data[raw:raw + 2] == b"\r\n" else 1
+                    raw += 2 if data[raw:raw + 2] == b"\r\n" else 1  # noqa: B023 - called within the iteration that binds `data`
                 return raw
             raw_a, raw_b = raw_offset(a), raw_offset(b)
             resolved.append((ident, index, path, raw_a, raw_b, ceiling))

@@ -390,7 +390,7 @@ def assert_append_only(repo: Path, base: str, resolved: str) -> None:
            if re.fullmatch(r"migrations/[0-9]+_.+\.sql", entry["path"])}
     maximum = max((int(Path(path).name.split("_", 1)[0]) for path in old), default=-1)
     versions: set[int] = set()
-    for path, entry in new.items():
+    for path in new:
         version = int(Path(path).name.split("_", 1)[0])
         if version in versions:
             raise state.Refusal("colliding migration versions require forward reconciliation")
