@@ -514,6 +514,13 @@ impl Credentials {
     ) -> Result<Arc<Token>, AcquisitionError> {
         loop {
             self.check_admission(deadline)?;
+            // A hit skips `entry`, which boxes the key in an `Arc`, and the
+            // deadline timer that only a miss needs.
+            if let Some(token) = self.0.inner.exchanged.get(&key).await
+                && token.is_reusable(Instant::now())
+            {
+                return Ok(token);
+            }
             let (token, fresh) = self.exchanged_or_fetch(key, subject, deadline).await?;
             // Only the initializer may use a newly acquired request-only token.
             if fresh || token.is_reusable(Instant::now()) {
