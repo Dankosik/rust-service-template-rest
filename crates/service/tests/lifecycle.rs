@@ -16,6 +16,9 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+mod common;
+
+use common::{get, poll_until};
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 
@@ -139,40 +142,6 @@ fn wait_child(child: &mut Child, budget: Duration) -> std::process::ExitStatus {
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-}
-
-fn get(url: &str) -> Result<(u16, String), ureq::Error> {
-    match ureq::get(url)
-        .config()
-        .timeout_global(Some(Duration::from_secs(3)))
-        .build()
-        .call()
-    {
-        Ok(mut response) => {
-            let status = response.status().as_u16();
-            let body = response.body_mut().read_to_string().unwrap_or_default();
-            Ok((status, body))
-        }
-        Err(ureq::Error::StatusCode(status)) => Ok((status, String::new())),
-        Err(err) => Err(err),
-    }
-}
-
-#[expect(
-    clippy::disallowed_methods,
-    reason = "synchronous fixture polling waits for owned child or thread completion within its existing timeout"
-)]
-fn poll_until(url: &str, want: u16, within: Duration) -> bool {
-    let deadline = Instant::now() + within;
-    while Instant::now() < deadline {
-        if let Ok((status, _)) = get(url)
-            && status == want
-        {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    false
 }
 
 #[test]
