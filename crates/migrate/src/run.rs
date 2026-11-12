@@ -241,6 +241,8 @@ fn record_progress(progress: &Mutex<Report>, report: &Report) {
 fn run_cutoff(budget: Duration) -> Result<tokio::time::Instant, RunFailure> {
     tokio::time::Instant::now()
         .checked_add(budget)
+        // Tokio rounds deadlines up to milliseconds before registering the timer.
+        .filter(|deadline| deadline.checked_add(Duration::from_millis(1)).is_some())
         .ok_or_else(|| RunFailure {
             error: RunError::InvalidDeadline(budget),
             report: Report::default(),

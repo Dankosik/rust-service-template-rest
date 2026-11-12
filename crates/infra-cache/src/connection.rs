@@ -436,23 +436,11 @@ async fn query_until(
     deadline: Deadline,
 ) -> Result<redis::RedisResult<()>, ErrorType> {
     let mut connection = generation.connection.clone();
-    let reply = async {
-        let query = command.query_async(&mut connection);
-        if let Some(cutoff) = deadline.instant() {
-            return timeout_at(cutoff, query)
-                .await
-                .map_err(|_| ErrorType::Timeout);
-        }
-        tokio::select! {
-            biased;
-            reply = query => Ok(reply),
-            () = deadline.wait() => Err(ErrorType::Timeout),
-        }
-    };
     tokio::select! {
         biased;
         () = generation.retired.cancelled() => Err(ErrorType::Io),
-        result = reply => result,
+        reply = command.query_async(&mut connection) => Ok(reply),
+        () = deadline.wait() => Err(ErrorType::Timeout),
     }
 }
 

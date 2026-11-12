@@ -575,11 +575,11 @@ impl Readiness {
                     self.refresh().await;
                 }
                 let interval = self.policy.interval.max(MIN_INTERVAL);
-                let mut next = Instant::now().checked_add(interval);
+                let mut next = timer_deadline(Instant::now(), interval);
                 while let Some(deadline) = next {
                     tokio::time::sleep_until(deadline).await;
                     // Space the next check from this tick, including after a delay.
-                    next = Instant::now().checked_add(interval);
+                    next = timer_deadline(Instant::now(), interval);
                     self.refresh().await;
                 }
                 // The next tick is beyond the clock's range. Remain cancellable.
@@ -590,7 +590,7 @@ impl Readiness {
 
     async fn check_probes(&self) -> Result<(), NotReady> {
         let budget = self.policy.probe_budget;
-        let deadline = Instant::now().checked_add(budget);
+        let deadline = timer_deadline(Instant::now(), budget);
         let outcomes = join_all(self.probes.iter().map(|probe| async move {
             let probe_name = probe.name();
             let reply = match deadline {
@@ -624,9 +624,17 @@ impl Readiness {
 
 fn stale_deadline(checked_at: Instant, stale_after: Duration) -> Option<Instant> {
     // The verdict remains fresh at exactly stale_after.
-    checked_at
-        .checked_add(stale_after)?
-        .checked_add(Duration::from_nanos(1))
+    timer_deadline(
+        checked_at,
+        stale_after.checked_add(Duration::from_nanos(1))?,
+    )
+}
+
+fn timer_deadline(start: Instant, delay: Duration) -> Option<Instant> {
+    let deadline = start.checked_add(delay)?;
+    // Tokio rounds deadlines up to milliseconds before registering the timer.
+    deadline.checked_add(Duration::from_millis(1))?;
+    Some(deadline)
 }
 
 /// Keep a fresh published ready verdict through failures below the threshold.
