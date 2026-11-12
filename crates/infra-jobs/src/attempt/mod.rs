@@ -515,11 +515,18 @@ async fn drive(
             }
             run.as_mut().poll(cx).map(|result| Some(ended_from(result)))
         });
-        let reason = tokio::select! {
+        tokio::select! {
             biased;
             ended = admitted => return ended,
-            () = cleanup.forced() => Ended::Cancelled,
-            () = tokio::time::sleep_until(attempt_deadline) => Ended::Timeout,
+            () = cleanup.forced() => {}
+            () = tokio::time::sleep_until(attempt_deadline) => {}
+        }
+        // Both signals can arrive between polls. Refund only when forced
+        // cleanup started before the attempt expired.
+        let reason = if cleanup.requested_before(attempt_deadline) {
+            Ended::Cancelled
+        } else {
+            Ended::Timeout
         };
         cancel.cancel();
         let grace = clamped_deadline(Instant::now(), COOPERATIVE_GRACE, supervisor_deadline);

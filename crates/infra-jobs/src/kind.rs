@@ -420,11 +420,9 @@ impl KindsBuilder {
         self.entries.push(Registered {
             name: K::NAME,
             policy,
-            running: policy.max_running.map(|limit| {
-                Arc::new(Semaphore::new(
-                    usize::try_from(limit.get()).unwrap_or(Semaphore::MAX_PERMITS),
-                ))
-            }),
+            running: policy
+                .max_running
+                .map(|limit| Arc::new(crate::claim::admission_slots(limit))),
             dispatch: Box::new(Typed {
                 handler: Arc::new(handler),
                 _kind: PhantomData,
