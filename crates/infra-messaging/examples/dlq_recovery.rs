@@ -148,7 +148,7 @@ struct Ack {
     duplicate: bool,
 }
 
-#[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum Publication {
     NotAttempted,
@@ -444,6 +444,27 @@ fn finish(state_path: &Path, state: &State) -> Result<()> {
     Ok(())
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "finite owned CLI distinguishes its existing publication journal before dispatch"
+)]
+fn read_state(path: &Path, selection_sha256: String) -> Result<State> {
+    if path.exists() {
+        let state: State = read_json(path)?;
+        if state.version != 1 || state.selection_sha256 != selection_sha256 {
+            return Err("state_identity");
+        }
+        return Ok(state);
+    }
+    Ok(State {
+        version: 1,
+        selection_sha256,
+        publication: Publication::NotAttempted,
+        retirement: Retirement::Retained,
+        ack: None,
+    })
+}
+
 async fn redrive(args: &[String], resources: &mut Resources, deadline: Instant) -> Result<()> {
     if args.len() != 2 {
         return Err("usage_redrive_selection");
@@ -461,25 +482,7 @@ async fn redrive(args: &[String], resources: &mut Resources, deadline: Instant) 
         return Err("selection_identity");
     }
     let state_path = path.with_extension("state.json");
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "finite owned CLI distinguishes its existing publication journal before dispatch"
-    )]
-    let mut state = if state_path.exists() {
-        let state: State = read_json(&state_path)?;
-        if state.version != 1 || state.selection_sha256 != selection_hash {
-            return Err("state_identity");
-        }
-        state
-    } else {
-        State {
-            version: 1,
-            selection_sha256: selection_hash,
-            publication: Publication::NotAttempted,
-            retirement: Retirement::Retained,
-            ack: None,
-        }
-    };
+    let mut state = read_state(&state_path, selection_hash)?;
     let client = resources.connect(&config).await?;
     let current = fetch(client, &selection.record.stream, selection.record.sequence).await?;
     if current.as_ref() != Some(&selection.record) {
