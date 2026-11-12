@@ -1,5 +1,6 @@
 //! CLAIM and the claim loop.
 
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -43,9 +44,8 @@ pub(crate) struct Claimed {
 
 /// One attempt's place under its kind's `max_running`.
 ///
-/// A full kind leaves the claim loop idle with free engine slots, so the
-/// release that frees a place in a full kind wakes the loop instead of
-/// leaving the kind's due jobs to the next poll.
+/// Wake on release because the claim loop can consume the last free place
+/// concurrently with it. The loop coalesces wakes and applies its cooldown.
 #[derive(Debug)]
 pub(crate) struct KindSlot {
     permit: Option<OwnedSemaphorePermit>,
@@ -69,13 +69,16 @@ impl Drop for KindSlot {
         let Some(permit) = self.permit.take() else {
             return;
         };
-        let was_full = permit.semaphore().available_permits() == 0;
         // Released before the wake, so the woken loop sees the free place.
         drop(permit);
-        if was_full {
-            self.wake.notify_one();
-        }
+        self.wake.notify_one();
     }
+}
+
+/// Tokio's permit limit can be smaller than a configured `u32` on 32-bit.
+pub(crate) fn admission_slots(limit: NonZeroU32) -> Semaphore {
+    let permits = usize::try_from(limit.get()).unwrap_or(Semaphore::MAX_PERMITS);
+    Semaphore::new(permits.min(Semaphore::MAX_PERMITS))
 }
 
 pub(crate) fn describe_metrics() {
@@ -594,7 +597,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn only_the_release_that_frees_a_full_kind_wakes_the_claim_loop() {
+    async fn every_kind_slot_release_notifies_the_claim_loop() {
         let running = Arc::new(Semaphore::new(2));
         let wake = Arc::new(Notify::new());
         let first = KindSlot::take(&running, &wake).expect("a free place");
@@ -608,13 +611,11 @@ mod tests {
             .await
             .expect("the release of a full kind wakes the loop");
 
-        // A place was already free: the loop saw it in its last claim.
+        // A concurrent claim can use the other free place before this release.
         drop(second);
         assert_eq!(running.available_permits(), 2);
-        assert!(
-            tokio::time::timeout(Duration::from_millis(20), wake.notified())
-                .await
-                .is_err()
-        );
+        tokio::time::timeout(Duration::from_secs(1), wake.notified())
+            .await
+            .expect("a release also wakes the loop when another place was free");
     }
 }

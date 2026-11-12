@@ -23,9 +23,8 @@ use crate::session::StartupError;
 pub const POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// Recovery reserve added to each kind's attempt timeout.
 ///
-/// Less the 2 s cancellation margin, it is the supervisor's window after the
-/// handler's timeout for writing the outcome: one 12 s statement bound and its
-/// 1 s retries fit in it.
+/// The cancellation margin and the time from sending the claim to starting
+/// the attempt reduce the time left to write its outcome after a timeout.
 pub const LEASE_RESERVE: Duration = Duration::from_secs(60);
 /// How far the worker's own cancellation leads the database expiry, so the
 /// supervisor stops writing before another worker can rescue the lease.
@@ -58,7 +57,7 @@ pub struct Started {
 pub struct DrainEnd {
     /// Handlers whose result (including panic/timeout) became known.
     pub known_results: usize,
-    /// Handlers joined with cancellation, eligible for a fenced release.
+    /// Attempts classified as cancelled, including handlers dropped after grace.
     pub cancelled: usize,
     /// Acknowledged one-row release writes.
     pub released: usize,
@@ -159,7 +158,6 @@ impl Engine {
             Role::Owner => (uuid::Uuid::new_v4(), Arc::default(), true),
             Role::Beside(owner) => (owner.worker_id, Arc::clone(&owner.peers), false),
         };
-        let slots = usize::try_from(max_workers.get()).unwrap_or(usize::MAX);
         let wake = Arc::new(Notify::new());
         let peer = PeerRegistration::new(&registry, &peers, &wake);
         Self {
@@ -169,7 +167,7 @@ impl Engine {
                 worker_id,
                 registry,
                 max_workers,
-                slots: Arc::new(Semaphore::new(slots)),
+                slots: Arc::new(claim::admission_slots(max_workers)),
                 statement_turn: tokio::sync::Mutex::new(()),
                 cleanup: ForcedCleanup::default(),
                 counters: Counters::default(),
@@ -726,20 +724,31 @@ impl fmt::Debug for Shared {
 #[derive(Default)]
 pub(crate) struct ForcedCleanup {
     force: CancellationToken,
-    deadline: OnceLock<Instant>,
+    window: OnceLock<CleanupWindow>,
     timed_out: OnceLock<bool>,
+}
+
+struct CleanupWindow {
+    started_at: Instant,
+    deadline: Instant,
 }
 
 impl ForcedCleanup {
     /// The first call fixes the deadline at `budget` from now; a later call
     /// keeps it.
     fn begin(&self, budget: Duration) -> Instant {
-        let deadline = *self.deadline.get_or_init(|| {
-            let now = Instant::now();
-            now.checked_add(budget).unwrap_or(now + NO_CLEANUP_DEADLINE)
+        let window = self.window.get_or_init(|| {
+            let started_at = Instant::now();
+            let deadline = started_at
+                .checked_add(budget)
+                .unwrap_or(started_at + NO_CLEANUP_DEADLINE);
+            CleanupWindow {
+                started_at,
+                deadline,
+            }
         });
         self.force.cancel();
-        deadline
+        window.deadline
     }
 
     /// Resolves once a cleanup is forced.
@@ -747,20 +756,26 @@ impl ForcedCleanup {
         self.force.cancelled().await;
     }
 
+    pub(crate) fn requested_before(&self, deadline: Instant) -> bool {
+        self.window
+            .get()
+            .is_some_and(|window| window.started_at < deadline)
+    }
+
     /// Resolves once the budget of a forced cleanup is spent; pending until
     /// a cleanup is forced.
     pub(crate) async fn ended(&self) {
         self.force.cancelled().await;
-        match self.deadline.get() {
-            Some(deadline) => tokio::time::sleep_until(*deadline).await,
+        match self.window.get() {
+            Some(window) => tokio::time::sleep_until(window.deadline).await,
             None => std::future::pending().await,
         }
     }
 
     pub(crate) fn has_ended(&self) -> bool {
-        self.deadline
+        self.window
             .get()
-            .is_some_and(|deadline| Instant::now() >= *deadline)
+            .is_some_and(|window| Instant::now() >= window.deadline)
     }
 }
 
@@ -858,6 +873,75 @@ mod tests {
 
     impl crate::JobKind for Publisher {
         const NAME: &'static str = "publisher";
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_suspended_attempt_keeps_the_first_stop_reason() {
+        for (force_before_timeout, expected) in [(true, (0, 1)), (false, (1, 0))] {
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgres://localhost/unused")
+                .unwrap();
+            pool.close().await;
+            let mut kinds = crate::KindsBuilder::new();
+            kinds.register(
+                crate::Policy {
+                    timeout: Duration::from_secs(1),
+                    max_attempts: 1,
+                    ..crate::Policy::default()
+                },
+                |job: crate::Job<Ordinary>| async move {
+                    job.cancellation().cancelled().await;
+                    Err(crate::JobError::retryable("handler stopped"))
+                },
+            );
+            let engine = Engine::new(pool, kinds.validate().unwrap(), NonZeroU32::MIN);
+            let shared = &engine.shared;
+            let job_id = crate::JobId(uuid::Uuid::nil());
+            let guard = SupervisorGuard::new(
+                Arc::clone(&shared.drain),
+                CancellationToken::new(),
+                CancellationToken::new(),
+                job_id,
+                "ordinary",
+            );
+            let claimed = claim::Claimed {
+                registered: Arc::clone(shared.registry.get("ordinary").unwrap()),
+                attempt: crate::attempt::AttemptId {
+                    job_id,
+                    kind: "ordinary",
+                    number: 1,
+                },
+                generation: 1,
+                payload: b"null".to_vec(),
+                trace: crate::trace_context::Carrier::default(),
+                slot: Arc::clone(&shared.slots).try_acquire_owned().unwrap(),
+                kind_slot: None,
+            };
+            let mut supervisor = std::pin::pin!(crate::attempt::supervise(
+                Arc::clone(shared),
+                claimed,
+                Instant::now() + Duration::from_secs(8),
+                guard,
+            ));
+            assert!(futures_util::poll!(supervisor.as_mut()).is_pending());
+            if !force_before_timeout {
+                tokio::time::advance(Duration::from_secs(2)).await;
+            }
+            let cleanup_deadline = shared.cleanup.begin(Duration::from_secs(4));
+            if force_before_timeout {
+                tokio::time::advance(Duration::from_secs(2)).await;
+            }
+            assert!(futures_util::poll!(supervisor.as_mut()).is_pending());
+            assert_eq!(
+                (
+                    shared.counters.known_results.load(Ordering::Relaxed),
+                    shared.counters.cancelled.load(Ordering::Relaxed),
+                ),
+                expected,
+            );
+            tokio::time::advance(cleanup_deadline.saturating_duration_since(Instant::now())).await;
+            supervisor.await;
+        }
     }
 
     #[tokio::test(start_paused = true)]
