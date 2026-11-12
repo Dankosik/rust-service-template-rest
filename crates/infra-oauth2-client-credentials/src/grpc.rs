@@ -15,7 +15,7 @@ use tower::Service;
 
 use crate::{
     AcquisitionError, Credentials,
-    credentials::{AdmissionRefusal, acquisition_deadline, take_subject},
+    credentials::{AdmissionRefusal, acquisition_deadline, admit_request_subject},
 };
 
 /// A cloneable governed gRPC client with private machine credentials.
@@ -72,7 +72,7 @@ impl Service<Request<Body>> for AuthenticatedClient {
     }
 
     fn call(&mut self, mut request: Request<Body>) -> Self::Future {
-        let admission = take_subject(&mut request, self.subject_required);
+        let admission = admit_request_subject(&mut request, self.subject_required);
         let mut prepared = self.resource.prepare_call(request);
         let context = prepared.opening_context().clone();
         let precheck = self

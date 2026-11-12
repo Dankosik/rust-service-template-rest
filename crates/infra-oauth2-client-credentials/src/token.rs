@@ -54,7 +54,11 @@ impl Token {
     }
 
     pub(crate) fn is_reusable(&self, now: Instant) -> bool {
-        self.reuse_until.is_some_and(|until| now < until)
+        self.reusable_until(now).is_some()
+    }
+
+    pub(crate) fn reusable_until(&self, now: Instant) -> Option<Instant> {
+        self.reuse_until.filter(|&until| now < until)
     }
 
     pub(crate) fn is_evictable(&self, now: Instant) -> bool {
