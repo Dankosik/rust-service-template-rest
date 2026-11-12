@@ -54,7 +54,7 @@ use secrecy::SecretString;
 
 use self::admission::Admitted;
 use self::connection::{CommandError, CommandScope, Link};
-pub use self::observe::{HISTOGRAMS, OPERATION_DURATION_BUCKETS, OPERATION_DURATION_METRIC};
+pub use self::observe::HISTOGRAMS;
 use self::observe::{NamespaceHistograms, OperationGuard, Outcome};
 
 /// Bound of one whole connection setup attempt. A startup check that waits
