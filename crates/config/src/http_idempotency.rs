@@ -13,7 +13,6 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use crate::de::blank_as_none;
-use crate::postgres::PostgresConfig;
 use crate::validate::{ValidationError, duration_range, required};
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -37,11 +36,8 @@ impl HttpIdempotencyConfig {
     /// Returns `postgres.enabled` (checked first) when PostgreSQL is
     /// disabled, or `http_idempotency.retention` when PostgreSQL is enabled
     /// but no retention is set.
-    pub fn required_retention(
-        &self,
-        postgres: &PostgresConfig,
-    ) -> Result<Duration, ValidationError> {
-        if !postgres.enabled {
+    pub fn required_retention(&self, postgres_enabled: bool) -> Result<Duration, ValidationError> {
+        if !postgres_enabled {
             return Err(ValidationError::new(
                 "postgres.enabled",
                 "must be true when an idempotent operation is served",

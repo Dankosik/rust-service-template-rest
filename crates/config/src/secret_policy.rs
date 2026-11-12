@@ -41,8 +41,7 @@ pub(crate) fn is_secret_like_key(key: &str) -> bool {
     })
 }
 
-/// Return the first secret-like key in `table` that carries a non-empty
-/// scalar value, as a dotted path.
+/// Return the dotted path of the first secret-like key with a non-empty leaf value.
 pub(crate) fn first_secret_like_key(table: &toml::Table) -> Option<String> {
     let mut path = Vec::new();
     find_secret(table, &mut path)
@@ -53,9 +52,9 @@ fn find_secret<'a>(table: &'a toml::Table, path: &mut Vec<&'a str>) -> Option<St
         path.push(key);
         let found = match value {
             toml::Value::Table(nested) => find_secret(nested, path),
-            scalar => {
+            leaf => {
                 let dotted = path.join(".");
-                (is_secret_like_key(&dotted) && has_non_empty_value(scalar)).then_some(dotted)
+                (is_secret_like_key(&dotted) && has_non_empty_leaf_value(leaf)).then_some(dotted)
             }
         };
         path.pop();
@@ -66,11 +65,10 @@ fn find_secret<'a>(table: &'a toml::Table, path: &mut Vec<&'a str>) -> Option<St
     None
 }
 
-fn has_non_empty_value(value: &toml::Value) -> bool {
+fn has_non_empty_leaf_value(value: &toml::Value) -> bool {
     match value {
         toml::Value::String(text) => !text.trim().is_empty(),
         toml::Value::Array(items) => !items.is_empty(),
-        toml::Value::Table(table) => !table.is_empty(),
         _ => true,
     }
 }

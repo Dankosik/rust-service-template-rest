@@ -162,11 +162,19 @@ impl ObjectStorageConfig {
         }
         let (endpoint_requirement, region_requirement, owner_requirement) = match self.provider {
             ObjectStorageProvider::None => return Ok(()),
-            ObjectStorageProvider::AmazonS3 => (Forbidden, Required, Required),
+            ObjectStorageProvider::AmazonS3 => (
+                Forbidden("must be empty when object_storage.provider = amazon_s3"),
+                Required,
+                Required,
+            ),
             ObjectStorageProvider::CloudflareR2
             | ObjectStorageProvider::Railway
             | ObjectStorageProvider::S3Compatible
-            | ObjectStorageProvider::Local => (Required, Optional, Forbidden),
+            | ObjectStorageProvider::Local => (
+                Required,
+                Optional,
+                Forbidden("is accepted only when object_storage.provider = amazon_s3"),
+            ),
         };
         endpoint_requirement.check("object_storage.endpoint", &self.endpoint)?;
         region_requirement.check("object_storage.region", &self.region)?;
@@ -177,7 +185,7 @@ impl ObjectStorageConfig {
         if self.path_style && self.provider != ObjectStorageProvider::S3Compatible {
             return Err(ValidationError::new(
                 "object_storage.path_style",
-                "is not accepted by the selected provider",
+                "must be false unless object_storage.provider = s3_compatible",
             ));
         }
         non_blank("object_storage.bucket", &self.bucket)?;
@@ -219,7 +227,7 @@ impl ObjectStorageConfig {
 enum FieldRequirement {
     Required,
     Optional,
-    Forbidden,
+    Forbidden(&'static str),
 }
 
 impl FieldRequirement {
@@ -227,11 +235,8 @@ impl FieldRequirement {
         match self {
             Self::Required => non_blank(key, value),
             Self::Optional => Ok(()),
-            Self::Forbidden if value.trim().is_empty() => Ok(()),
-            Self::Forbidden => Err(ValidationError::new(
-                key,
-                "is not accepted by the selected provider",
-            )),
+            Self::Forbidden(_) if value.trim().is_empty() => Ok(()),
+            Self::Forbidden(reason) => Err(ValidationError::new(key, reason)),
         }
     }
 }
