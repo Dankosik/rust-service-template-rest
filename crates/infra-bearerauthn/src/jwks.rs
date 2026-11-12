@@ -30,11 +30,6 @@ const MAX_RSA_MODULUS_BITS: usize = 8192;
 /// The largest signature an admitted key produces: RSA-8192.
 pub(crate) const MAX_SIGNATURE_BYTES: usize = MAX_RSA_MODULUS_BITS / 8;
 
-/// The SEC1 tag of an uncompressed elliptic-curve point.
-const SEC1_UNCOMPRESSED: u8 = 4;
-/// The byte length of one P-256 coordinate.
-const P256_COORDINATE_BYTES: usize = 32;
-
 pub(crate) const KEY_REJECTIONS_METRIC: &str = "authn_jwks_key_rejections_total";
 
 /// Why no installed key verified the signature.
@@ -330,11 +325,8 @@ fn key_material(parameters: &AlgorithmParameters) -> Option<KeyMaterial> {
         AlgorithmParameters::EllipticCurve(parameters) => {
             let x = URL_SAFE_NO_PAD.decode(&parameters.x).ok()?;
             let y = URL_SAFE_NO_PAD.decode(&parameters.y).ok()?;
-            if x.len() != P256_COORDINATE_BYTES || y.len() != P256_COORDINATE_BYTES {
-                return None;
-            }
             Some(KeyMaterial::Raw(
-                [[SEC1_UNCOMPRESSED].as_slice(), &x, &y].concat(),
+                shared_rules::rfc7518::p256_point(&x, &y)?.to_vec(),
             ))
         }
         AlgorithmParameters::OctetKeyPair(parameters) => Some(KeyMaterial::Raw(

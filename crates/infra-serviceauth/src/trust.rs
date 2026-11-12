@@ -279,16 +279,11 @@ fn admit(value: serde_json::Value) -> Result<TrustedKey, &'static str> {
     }
     let kid = common.key_id.as_deref().ok_or("has no kid")?;
     let kid = KeyId::parse(kid).map_err(|_| InvalidKeyId::MESSAGE)?;
-    let coordinate = |encoded: &str| {
-        URL_SAFE_NO_PAD
-            .decode(encoded)
-            .ok()
-            .filter(|bytes| bytes.len() == 32)
-    };
+    let coordinate = |encoded: &str| URL_SAFE_NO_PAD.decode(encoded).ok();
     let (Some(x), Some(y)) = (coordinate(&parameters.x), coordinate(&parameters.y)) else {
         return Err("has malformed coordinates");
     };
-    let point = [[4].as_slice(), &x, &y].concat();
+    let point = shared_rules::rfc7518::p256_point(&x, &y).ok_or("has malformed coordinates")?;
     let key = ParsedPublicKey::new(&ECDSA_P256_SHA256_FIXED, point)
         .map_err(|_| "is not a point on P-256")?;
     Ok(TrustedKey { kid, key })

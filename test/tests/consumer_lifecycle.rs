@@ -304,17 +304,13 @@ fn write_json(path: &Path, value: &Value) {
 }
 
 async fn connect(endpoint: &Endpoint) -> PgPool {
-    infra_postgres::connect(
+    integration_tests::template_pool(
         &infra_postgres::Dsn::admit(&endpoint.database).unwrap(),
-        &infra_postgres::PoolOptions {
-            max_connections: std::num::NonZeroU32::new(3).unwrap(),
-            application_name: "consumer-lifecycle-inspection",
-            default_isolation: infra_postgres::Isolation::ReadCommitted,
-            session_budgets: infra_postgres::SessionBudgets::Startup,
-        },
+        "consumer-lifecycle-inspection",
+        3,
+        infra_postgres::Isolation::ReadCommitted,
     )
     .await
-    .unwrap()
 }
 
 async fn state(pool: &PgPool, id: &str) -> String {

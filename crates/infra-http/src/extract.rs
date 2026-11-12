@@ -242,7 +242,7 @@ fn body_pointer(path: &serde_path_to_error::Path) -> Option<String> {
         match segment {
             Segment::Seq { index } => pointer.push_str(&index.to_string()),
             Segment::Map { key } | Segment::Enum { variant: key } => {
-                pointer.push_str(&key.replace('~', "~0").replace('/', "~1"));
+                pointer.push_str(&shared_rules::rfc6901::escape(key));
             }
             Segment::Unknown => return None,
         }
