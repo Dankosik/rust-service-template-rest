@@ -972,6 +972,48 @@ async fn cancelling_a_read_with_a_ready_reply_keeps_the_connection() {
     assert_eq!(server.connections(), 1);
 }
 
+#[tokio::test]
+async fn dropping_an_exchange_with_a_delivered_reply_keeps_the_connection() {
+    use health::Probe;
+
+    let server = FakeServer::start().await;
+    let cache = Cache::start(CacheOptions {
+        command_timeout: Duration::from_secs(2),
+        ..options(&format!("redis://{}", server.address), true, true, None)
+    })
+    .expect("start cache");
+    let namespace = cache.namespace("drop_ready_reply");
+    let probe = cache.probe();
+    assert_eq!(namespace.get("ready").await, Ok(None));
+
+    for check_probe in [false, true] {
+        let pings = server.command_count("PING", None);
+        {
+            let exchange = async {
+                if check_probe {
+                    probe.check().await.expect("PING would succeed");
+                } else {
+                    assert_eq!(namespace.get("discarded").await, Ok(None));
+                }
+            };
+            tokio::pin!(exchange);
+            assert!(poll_once(exchange.as_mut()).await.is_pending());
+            // The later GET's reply proves the FIFO driver delivered the earlier reply.
+            assert_eq!(namespace.get("fence").await, Ok(None));
+            if check_probe {
+                assert!(server.command_count("PING", None) > pings);
+            } else {
+                assert_eq!(
+                    server.command_count("GET", Some("drop_ready_reply:discarded")),
+                    1
+                );
+            }
+        }
+        assert_eq!(namespace.get("live").await, Ok(None));
+        assert_eq!(server.connections(), 1);
+    }
+}
+
 #[test]
 fn probe_reports_the_exit_of_a_supervisor_that_never_ran() {
     use health::Probe;
