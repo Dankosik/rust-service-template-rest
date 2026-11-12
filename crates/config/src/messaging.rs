@@ -120,11 +120,11 @@ impl MessagingConfig {
     ///
     /// Returns the first missing producer input or a security-policy error.
     pub fn validate_producer(&self, app_env: &str) -> Result<(), ValidationError> {
-        self.validate(app_env)?;
+        let credentials = self.validate(app_env)?;
         if !self.is_active() {
             return Err(missing("messaging.urls", PRODUCER_ACTIVE));
         }
-        if self.credential_source()?.is_none() && !self.allow_unauthenticated {
+        if credentials.is_none() && !self.allow_unauthenticated {
             return Err(ValidationError::new(
                 "messaging.credentials",
                 "one of messaging.credentials or messaging.credentials_file is required unless messaging.allow_unauthenticated = true",
@@ -171,7 +171,7 @@ impl MessagingConfig {
     /// Returns the first missing consumer input or a producer-policy error.
     pub fn validate_consumer(&self, app_env: &str) -> Result<(), ValidationError> {
         self.validate_producer(app_env)?;
-        self.required_consumer()?;
+        self.required_consumer_keys()?;
         Ok(())
     }
 
@@ -180,7 +180,7 @@ impl MessagingConfig {
     /// # Errors
     ///
     /// Returns the first missing consumer key.
-    pub fn required_consumer(&self) -> Result<ConsumerKeys<'_>, ValidationError> {
+    pub fn required_consumer_keys(&self) -> Result<ConsumerKeys<'_>, ValidationError> {
         Ok(ConsumerKeys {
             durable: required(
                 "messaging.consumer_durable",
@@ -200,14 +200,17 @@ impl MessagingConfig {
         })
     }
 
-    pub(crate) fn validate(&self, app_env: &str) -> Result<(), ValidationError> {
+    pub(crate) fn validate(
+        &self,
+        app_env: &str,
+    ) -> Result<Option<MessagingCredentials<'_>>, ValidationError> {
         local_development_only("messaging.allow_plaintext", self.allow_plaintext, app_env)?;
         local_development_only(
             "messaging.allow_unauthenticated",
             self.allow_unauthenticated,
             app_env,
         )?;
-        self.credential_source()?;
+        let credentials = self.credential_source()?;
         self.validate_urls()?;
 
         int_range(
@@ -230,7 +233,7 @@ impl MessagingConfig {
                 ),
             ));
         }
-        Ok(())
+        Ok(credentials)
     }
 
     fn validate_urls(&self) -> Result<(), ValidationError> {
@@ -289,7 +292,7 @@ pub enum MessagingCredentials<'a> {
     File(&'a Path),
 }
 
-/// The consumer keys [`MessagingConfig::required_consumer`] admitted.
+/// The consumer keys [`MessagingConfig::required_consumer_keys`] admitted.
 #[derive(Clone, Copy, Debug)]
 pub struct ConsumerKeys<'a> {
     pub durable: &'a str,

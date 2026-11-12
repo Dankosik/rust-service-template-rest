@@ -204,7 +204,7 @@ impl Config {
         self.runtime.validate()?;
         self.observability.validate()?;
         // template:begin messaging:config-validate
-        self.messaging.validate(&self.app.env)?;
+        let _ = self.messaging.validate(&self.app.env)?;
         // template:end messaging:config-validate
         // template:begin cache:config-validate
         self.cache
