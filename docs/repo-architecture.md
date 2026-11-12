@@ -42,7 +42,7 @@ the factual authority; read them for how something works.
 | `crates/shared-rules` | Pure, std-only rules that several crates apply identically; callers keep their policy and error mapping ([decisions](decisions/shared-rules-decisions.md)) |
 <!-- template:begin grpc:docs-architecture-grpc-source -->
 | `api/proto/`, `tools/grpc-codegen` | Committed prost/tonic contracts under `crates/grpc-contracts`, checked against the PR base |
-| `crates/infra-grpc` | Tonic routes on the shared listener, clients, health projection and server TLS |
+| `crates/infra-grpc` | Tonic routes on a separate socket served by `infra_http::Server`, clients, health projection and server TLS |
 <!-- template:end grpc:docs-architecture-grpc-source -->
 | `crates/service/src/bootstrap` | Startup order, the shutdown plan, exit codes |
 | `crates/<feature>` (none yet) | Behavior consumed by transports and future binaries |
