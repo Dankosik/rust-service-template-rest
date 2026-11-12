@@ -12,7 +12,8 @@ use crate::{Operation, ServerEndpoint, Unavailable};
 pub const OPERATION_DURATION_METRIC: &str = "cache_operation_duration_seconds";
 
 /// Buckets in seconds for [`OPERATION_DURATION_METRIC`]. A command that runs
-/// into a `command_timeout` above the top bucket lands only in `+Inf`.
+/// into a [`crate::CacheOptions::command_timeout`] above the top bucket lands
+/// only in `+Inf`.
 pub const OPERATION_DURATION_BUCKETS: &[f64] = &[
     0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 1.0,
 ];
