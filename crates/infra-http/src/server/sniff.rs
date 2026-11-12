@@ -46,6 +46,9 @@ impl<IO: AsyncRead + Unpin> AsyncRead for SniffDeadline<IO> {
         let Some((matched, deadline)) = this.undecided.as_mut() else {
             return Pin::new(&mut this.io).poll_read(cx, buf);
         };
+        if deadline.as_mut().poll(cx).is_ready() {
+            return Poll::Ready(Err(io::ErrorKind::TimedOut.into()));
+        }
         let filled = buf.filled().len();
         match Pin::new(&mut this.io).poll_read(cx, buf) {
             Poll::Ready(Ok(())) => {
@@ -60,11 +63,7 @@ impl<IO: AsyncRead + Unpin> AsyncRead for SniffDeadline<IO> {
                 }
                 Poll::Ready(Ok(()))
             }
-            Poll::Pending => deadline
-                .as_mut()
-                .poll(cx)
-                .map(|()| Err(io::ErrorKind::TimedOut.into())),
-            failed @ Poll::Ready(Err(_)) => failed,
+            other => other,
         }
     }
 }

@@ -25,14 +25,14 @@ pub enum FinalizeError {
     #[error(
         "HTTP contract finalization failed: {method} {path} is protected and requires enabled authentication"
     )]
-    ProtectedOperation { path: String, method: &'static str },
+    ProtectedOperation { path: String, method: String },
     /// An operation's effective security policy is unsupported or ambiguous.
     #[error(
         "HTTP contract finalization failed: {method} {path} has an unsupported or ambiguous effective security policy ({fault})"
     )]
     InvalidPolicy {
         path: String,
-        method: &'static str,
+        method: String,
         fault: &'static str,
     },
     /// A route template ending like a probe's is reserved for the probe
@@ -41,7 +41,7 @@ pub enum FinalizeError {
     #[error(
         "HTTP contract finalization failed: {method} {path} is not a health probe but its route ends like one"
     )]
-    ReservedProbeRoute { path: String, method: &'static str },
+    ReservedProbeRoute { path: String, method: String },
 }
 
 /// Finalize a document whose operations are all public.
@@ -59,7 +59,7 @@ where
     if let Some((path, method)) = policy.first_protected() {
         return Err(FinalizeError::ProtectedOperation {
             path: path.to_owned(),
-            method,
+            method: method.to_owned(),
         });
     }
     Ok(layer_routes(contract, |router| {
@@ -101,7 +101,7 @@ pub(crate) enum Access {
 fn compile_operation(
     document: &OpenApi,
     path: &str,
-    method: &'static str,
+    method: &str,
     operation: &Operation,
 ) -> Result<Access, FinalizeError> {
     if is_health_probe_route(path)
@@ -109,12 +109,12 @@ fn compile_operation(
     {
         return Err(FinalizeError::ReservedProbeRoute {
             path: path.to_owned(),
-            method,
+            method: method.to_owned(),
         });
     }
     Access::from_operation(document, operation).map_err(|fault| FinalizeError::InvalidPolicy {
         path: path.to_owned(),
-        method,
+        method: method.to_owned(),
         fault: fault.as_str(),
     })
 }
@@ -122,7 +122,7 @@ fn compile_operation(
 /// The compiled access table, shared read-only by every request: axum clones
 /// middleware state per request, so the table sits behind an `Arc`.
 #[derive(Clone)]
-pub(crate) struct Policy(Arc<BTreeMap<String, BTreeMap<&'static str, Access>>>);
+pub(crate) struct Policy(Arc<BTreeMap<String, BTreeMap<String, Access>>>);
 
 impl Policy {
     pub(crate) fn compile(document: &OpenApi) -> Result<Self, FinalizeError> {
@@ -134,7 +134,7 @@ impl Policy {
                 path.clone()
             };
             let mut methods = BTreeMap::new();
-            for (method, operation) in [
+            let fixed_operations = [
                 ("GET", &item.get),
                 ("PUT", &item.put),
                 ("POST", &item.post),
@@ -143,12 +143,30 @@ impl Policy {
                 ("HEAD", &item.head),
                 ("PATCH", &item.patch),
                 ("TRACE", &item.trace),
-            ] {
+                ("QUERY", &item.query),
+            ];
+            for (method, operation) in fixed_operations {
                 let Some(operation) = operation else {
                     continue;
                 };
                 methods.insert(
-                    method,
+                    method.to_owned(),
+                    compile_operation(document, &path, method, operation)?,
+                );
+            }
+            for (method, operation) in &item.additional_operations {
+                if fixed_operations
+                    .iter()
+                    .any(|(fixed, _)| *fixed == method.as_str())
+                {
+                    return Err(FinalizeError::InvalidPolicy {
+                        path,
+                        method: method.clone(),
+                        fault: "fixed_method_in_additional_operations",
+                    });
+                }
+                methods.insert(
+                    method.clone(),
                     compile_operation(document, &path, method, operation)?,
                 );
             }
@@ -157,12 +175,12 @@ impl Policy {
         Ok(Self(Arc::new(table)))
     }
 
-    fn first_protected(&self) -> Option<(&str, &'static str)> {
+    fn first_protected(&self) -> Option<(&str, &str)> {
         self.0.iter().find_map(|(path, methods)| {
             methods
                 .iter()
                 .find(|(_, access)| matches!(access, Access::Protected(..)))
-                .map(|(method, _)| (path.as_str(), *method))
+                .map(|(method, _)| (path.as_str(), method.as_str()))
         })
     }
 
@@ -320,17 +338,88 @@ mod tests {
         )
     }
 
+    #[tokio::test]
+    async fn public_query_and_additional_method_reach_the_registered_service() {
+        let document = serde_json::from_value(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "method fixture", "version": "1"},
+            "paths": {"/_test/method": {
+                "query": {"responses": {"200": {"description": "ok"}}},
+                "additionalOperations": {
+                    "COPY": {"responses": {"200": {"description": "ok"}}}
+                }
+            }}
+        }))
+        .expect("valid OpenAPI fixture");
+        let service = tower::service_fn(|request: axum::extract::Request| async move {
+            Ok::<_, std::convert::Infallible>(request.method().as_str().to_owned())
+        });
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "utoipa-axum 0.3 cannot register QUERY or extension methods with routes!"
+        )]
+        let app =
+            app(OpenApiRouter::with_openapi(document).route_service("/_test/method", service));
+
+        for method in ["QUERY", "COPY"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri("/_test/method")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{method}");
+            assert_eq!(
+                response
+                    .into_body()
+                    .collect()
+                    .await
+                    .unwrap()
+                    .to_bytes()
+                    .as_ref(),
+                method.as_bytes()
+            );
+        }
+    }
+
+    #[test]
+    fn additional_operations_cannot_redeclare_fixed_methods() {
+        let document = serde_json::from_value(serde_json::json!({
+            "openapi": "3.2.0",
+            "info": {"title": "method fixture", "version": "1"},
+            "paths": {"/_test/method": {
+                "additionalOperations": {
+                    "POST": {"responses": {"200": {"description": "ok"}}}
+                }
+            }}
+        }))
+        .expect("OpenAPI fixture");
+        assert_eq!(
+            finalize_public(OpenApiRouter::<()>::with_openapi(document)).map(|_| ()),
+            Err(FinalizeError::InvalidPolicy {
+                path: "/_test/method".to_owned(),
+                method: "POST".to_owned(),
+                fault: "fixed_method_in_additional_operations",
+            })
+        );
+    }
+
     fn protected() -> FinalizeError {
         FinalizeError::ProtectedOperation {
             path: "/_test/policy".to_owned(),
-            method: "GET",
+            method: "GET".to_owned(),
         }
     }
 
     fn invalid(fault: &'static str) -> FinalizeError {
         FinalizeError::InvalidPolicy {
             path: "/_test/policy".to_owned(),
-            method: "GET",
+            method: "GET".to_owned(),
             fault,
         }
     }
@@ -361,7 +450,7 @@ mod tests {
             } else {
                 Err(FinalizeError::ReservedProbeRoute {
                     path: path.to_owned(),
-                    method: if method == "get" { "GET" } else { "POST" },
+                    method: if method == "get" { "GET" } else { "POST" }.to_owned(),
                 })
             };
             assert_eq!(

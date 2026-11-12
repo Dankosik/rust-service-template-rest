@@ -344,6 +344,18 @@ async fn an_undecided_protocol_fails_reads_at_the_deadline() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn an_undecided_protocol_cannot_be_read_after_the_deadline() {
+    let timeout = Duration::from_secs(5);
+    let (mut client, server) = tokio::io::duplex(64);
+    let mut io = SniffDeadline::new(server, timeout);
+    tokio::time::advance(timeout).await;
+    client.write_all(HTTP2_PREFACE).await.unwrap();
+
+    let error = io.read(&mut [0; 64]).await.unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_decided_protocol_is_never_timed_out() {
     let cases: [&[&[u8]]; 4] = [
         // An HTTP/1 request line differs from the preface at once.
