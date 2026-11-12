@@ -155,10 +155,10 @@ impl Shared {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CloseOutcome {
-    /// The native client and the final connection event were observed.
+    /// Native termination and final connection event submission were observed.
     Complete,
-    /// The drain did not finish before `deadline`, or `cancel` was already
-    /// cancelled, so the client was force-closed.
+    /// Cancellation or the effective deadline ended the caller's wait.
+    /// Native force-close was requested; completion has not been confirmed.
     TimedOut,
     /// The client closing could not be confirmed.
     UnobservedClose,
@@ -261,13 +261,14 @@ impl Messaging {
         Consumer::admit(Arc::clone(&self.shared), admission, registry).await
     }
 
-    /// Drains and closes the connection, bounded by `deadline`, `cancel` and
-    /// one [`BROKER_OPERATION_BUDGET`].
+    /// Closes shared admission and waits for native termination and final
+    /// event submission, bounded by `deadline` and one [`BROKER_OPERATION_BUDGET`].
     ///
     /// A client already closed, with its final event observed, returns
-    /// [`CloseOutcome::Complete`]. Otherwise an already-cancelled `cancel`, or
-    /// a deadline that has passed, skips the drain, force-closes the native
-    /// client, and returns [`CloseOutcome::TimedOut`].
+    /// [`CloseOutcome::Complete`] even with cancellation or an elapsed deadline.
+    /// Otherwise cancellation or expiry requests native force-close and returns
+    /// [`CloseOutcome::TimedOut`] without waiting for either observation. The
+    /// native client retains ownership of the requested termination.
     pub async fn close(self, deadline: Instant, cancel: &CancellationToken) -> CloseOutcome {
         self.shared.begin_drain();
         self.shared.connection.close(deadline, cancel).await
@@ -345,12 +346,9 @@ impl MessagingStartup {
         Ok(messaging)
     }
 
-    /// Drains any retained native client and observes native and final-event completion.
-    ///
-    /// A client already closed, with its final event observed, returns
-    /// [`CloseOutcome::Complete`]. Otherwise an already-cancelled `cancel`, or
-    /// a deadline that has passed, skips the drain, force-closes the native
-    /// client, and returns [`CloseOutcome::TimedOut`].
+    /// Closes any retained native client with the observation and cancellation
+    /// guarantees of [`Messaging::close`]. An owner without a retained client
+    /// returns [`CloseOutcome::Complete`].
     pub async fn close(self, deadline: Instant, cancel: &CancellationToken) -> CloseOutcome {
         match self.phase {
             StartupPhase::Connected(connection) => connection.close(deadline, cancel).await,

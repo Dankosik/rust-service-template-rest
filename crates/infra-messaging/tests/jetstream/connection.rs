@@ -606,13 +606,79 @@ async fn cancelled_topology_admission_retains_the_native_client_until_closed() {
         }
     }
     drop(admission);
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let mut closing = Box::pin(startup.close(deadline(), &cancel));
     assert_eq!(
-        startup.close(deadline(), &CancellationToken::new()).await,
-        infra_messaging::CloseOutcome::Complete,
-        "the retained client must drain and deliver its native Closed notification"
+        futures_util::poll!(&mut closing),
+        std::task::Poll::Ready(infra_messaging::CloseOutcome::TimedOut),
+        "cancelled startup close must not wait for native termination"
     );
+    drop(closing);
     relay.join().await;
     fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn cancelled_close_returns_before_native_termination_and_termination_remains_owned() {
+    use std::task::Poll;
+
+    for cancel_at_entry in [false, true] {
+        let fixture = Fixture::create(false).await;
+        let (_capture, logged) = capture_logs();
+        let messaging = Box::pin(Messaging::connect(
+            options(&fixture, None, 1024),
+            deadline(),
+            CancellationToken::new(),
+        ))
+        .await
+        .unwrap();
+        let cancel = CancellationToken::new();
+        let mut closing = Box::pin(messaging.clone().close(deadline(), &cancel));
+        if !cancel_at_entry {
+            assert!(futures_util::poll!(&mut closing).is_pending());
+        }
+        cancel.cancel();
+        // The current-thread native runner cannot process force-close until
+        // this task yields, so this poll distinguishes the caller's wait.
+        assert_eq!(
+            futures_util::poll!(&mut closing),
+            Poll::Ready(infra_messaging::CloseOutcome::TimedOut)
+        );
+        drop(closing);
+        timeout(Duration::from_secs(3), async {
+            let mut cadence = tokio::time::interval(Duration::from_millis(10));
+            loop {
+                cadence.tick().await;
+                if logged.lock().unwrap().iter().any(|fields| {
+                    fields
+                        .iter()
+                        .any(|(key, value)| *key == "message" && value == "messaging_connection")
+                        && fields
+                            .iter()
+                            .any(|(key, value)| *key == "result" && value == "closed")
+                }) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("native termination emits its final event without another close request");
+        assert_eq!(
+            messaging
+                .clone()
+                .close(deadline(), &CancellationToken::new())
+                .await,
+            infra_messaging::CloseOutcome::Complete,
+            "native termination and its final event remain observable after cancellation"
+        );
+        assert_eq!(
+            messaging.close(Instant::now(), &cancel).await,
+            infra_messaging::CloseOutcome::Complete,
+            "both observations at entry take precedence over cancellation and expiry"
+        );
+        fixture.cleanup().await;
+    }
 }
 
 #[tokio::test]

@@ -22,6 +22,7 @@ hotpath = { workspace = true, optional = true }
 futures-util = { workspace = true, features = ["std"] }
 humantime = { workspace = true }
 infra-postgres = { workspace = true }
+json-payload = { workspace = true }
 metrics = { workspace = true }
 opentelemetry = { workspace = true, features = ["trace"] }
 serde = { workspace = true, features = ["std"] }

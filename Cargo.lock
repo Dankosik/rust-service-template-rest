@@ -2718,6 +2718,7 @@ dependencies = [
  "hotpath",
  "humantime",
  "infra-postgres",
+ "json-payload",
  "metrics",
  "opentelemetry",
  "operation-context",
@@ -2752,6 +2753,7 @@ dependencies = [
  "health",
  "infra-jobs",
  "infra-postgres",
+ "json-payload",
  "metrics",
  "metrics-exporter-prometheus",
  "nkeys",
@@ -3283,6 +3285,14 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "json-payload"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

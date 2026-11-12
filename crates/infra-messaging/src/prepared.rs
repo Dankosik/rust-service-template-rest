@@ -47,9 +47,10 @@ impl PreparedEvent {
     /// allocations. Bound the source before invoking this synchronous API.
     ///
     /// # Errors
-    /// Rejects an invalid subject, unserializable payload, payload beyond the
-    /// configured bound, an invalid identity or one with surrounding whitespace,
-    /// or an invalid creation time.
+    /// Rejects an invalid subject, unserializable payload or non-finite float,
+    /// payload beyond the configured byte bound or 127 nested JSON containers,
+    /// an invalid identity or one with surrounding whitespace, or an invalid
+    /// creation time.
     pub fn prepare<T: EventPayload + Serialize>(
         subject: impl Into<String>,
         event: &Event<T>,
@@ -69,10 +70,13 @@ impl PreparedEvent {
             return Err(EnvelopeError::Subject);
         }
         let mut payload = PayloadWriter::new(max_payload_bytes);
-        serde_json::to_writer(&mut payload, &event.payload)
+        json_payload::to_writer(&mut payload, &event.payload)
             .map_err(|_| EnvelopeError::Serialization)?;
         if payload.total_bytes > max_payload_bytes {
             return Err(EnvelopeError::PayloadTooLarge);
+        }
+        if !payload_depth_allowed(&payload.bytes) {
+            return Err(EnvelopeError::PayloadStructure);
         }
         let occurred_at = event.occurred_at.to_offset(time::UtcOffset::UTC);
         crate::wire::validate_outbound_identity(&event.id)?;
@@ -178,6 +182,36 @@ impl PreparedEvent {
     }
 }
 
+fn payload_depth_allowed(bytes: &[u8]) -> bool {
+    let mut depth = 0_usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for &byte in bytes {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+        } else {
+            match byte {
+                b'"' => in_string = true,
+                b'[' | b'{' => {
+                    depth += 1;
+                    if depth > 127 {
+                        return false;
+                    }
+                }
+                b']' | b'}' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+        }
+    }
+    true
+}
+
 // Keep accepting writes past the ceiling so a later serialization error still
 // takes precedence over the size refusal. Only the retained prefix is bounded.
 struct PayloadWriter {
@@ -247,6 +281,23 @@ mod tests {
         const SCHEMA_VERSION: u16 = 1;
     }
 
+    struct Counted<T> {
+        value: T,
+        calls: Cell<usize>,
+    }
+
+    impl<T> EventPayload for Counted<T> {
+        const EVENT_TYPE: &'static str = "example.created";
+        const SCHEMA_VERSION: u16 = 1;
+    }
+
+    impl<T: Serialize> Serialize for Counted<T> {
+        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            self.calls.set(self.calls.get() + 1);
+            self.value.serialize(serializer)
+        }
+    }
+
     struct StreamingPayload {
         calls: Cell<usize>,
         elements: usize,
@@ -296,6 +347,116 @@ mod tests {
             PreparedEvent::prepare("events.created", &event, expected.len() - 1),
             Err(EnvelopeError::PayloadTooLarge)
         );
+    }
+
+    #[test]
+    fn preparation_rejects_nested_non_finite_floats_before_size_without_losing_null() {
+        #[derive(Serialize)]
+        struct Numbers {
+            required: f64,
+            optional: Option<f32>,
+        }
+
+        for (required, optional) in [
+            (f64::NAN, None),
+            (f64::INFINITY, None),
+            (f64::NEG_INFINITY, None),
+            (0.0, Some(f32::NAN)),
+            (0.0, Some(f32::INFINITY)),
+            (0.0, Some(f32::NEG_INFINITY)),
+        ] {
+            let event = event(Counted {
+                value: vec![Numbers { required, optional }],
+                calls: Cell::new(0),
+            });
+            let error = PreparedEvent::prepare("events.created", &event, 0)
+                .expect_err("non-finite numbers cannot become publishable intent");
+            assert_eq!(error, EnvelopeError::Serialization);
+            assert_eq!(error.to_string(), "event payload cannot be serialized");
+            assert_eq!(event.payload.calls.get(), 1);
+        }
+
+        for (optional, expected) in [
+            (None, r#"[{"required":-0.0,"optional":null}]"#),
+            (Some(1.5), r#"[{"required":-0.0,"optional":1.5}]"#),
+        ] {
+            let event = event(Counted {
+                value: vec![Numbers {
+                    required: -0.0,
+                    optional,
+                }],
+                calls: Cell::new(0),
+            });
+            let prepared = PreparedEvent::prepare("events.created", &event, expected.len())
+                .expect("intentional null and finite numbers remain valid");
+            assert_eq!(prepared.payload().as_ref(), expected.as_bytes());
+            assert_eq!(event.payload.calls.get(), 1);
+        }
+    }
+
+    #[test]
+    fn preparation_depth_matches_the_typed_reader_and_ignores_string_delimiters() {
+        for depth in [0, 127, 128] {
+            for shape in 0..3 {
+                let mut value = serde_json::Value::String("[{}]\\\"\\".repeat(128));
+                for level in 0..depth {
+                    value = if shape == 0 || (shape == 2 && level % 2 == 0) {
+                        serde_json::Value::Array(vec![value])
+                    } else {
+                        serde_json::json!({"[\"\\]": value})
+                    };
+                }
+                let bytes = serde_json::to_vec(&value).expect("fixture serializes");
+                let readable = serde_json::from_slice::<serde_json::Value>(&bytes).is_ok();
+                assert_eq!(readable, depth <= 127);
+                let event = event(Counted {
+                    value,
+                    calls: Cell::new(0),
+                });
+                let prepared = PreparedEvent::prepare("events.created", &event, bytes.len());
+                if readable {
+                    assert_eq!(
+                        prepared
+                            .expect("readable depth prepares")
+                            .payload()
+                            .as_ref(),
+                        bytes
+                    );
+                } else {
+                    let error = prepared.expect_err("unreadable depth cannot be published");
+                    assert_eq!(error, EnvelopeError::PayloadStructure);
+                    assert_eq!(error.to_string(), "event payload structure is invalid");
+                }
+                assert_eq!(event.payload.calls.get(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn preparation_checks_depth_after_size_and_before_event_metadata() {
+        for (subject, limit, expected, calls) in [
+            ("events.*", 0, EnvelopeError::Subject, 0),
+            ("events.created", 0, EnvelopeError::PayloadTooLarge, 1),
+            ("events.created", 1024, EnvelopeError::PayloadStructure, 1),
+        ] {
+            let mut value = serde_json::Value::Null;
+            for _ in 0..128 {
+                value = serde_json::Value::Array(vec![value]);
+            }
+            let mut event = event(Counted {
+                value,
+                calls: Cell::new(0),
+            });
+            event.id.clear();
+            event.occurred_at = OffsetDateTime::from_unix_timestamp(-62_135_596_800)
+                .expect("Go zero time is representable")
+                .to_utc();
+            assert_eq!(
+                PreparedEvent::prepare(subject, &event, limit).expect_err("invalid event"),
+                expected
+            );
+            assert_eq!(event.payload.calls.get(), calls);
+        }
     }
 
     #[test]

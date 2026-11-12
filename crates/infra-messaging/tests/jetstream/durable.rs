@@ -365,3 +365,97 @@ async fn an_unanswered_identity_check_blocks_pulls_without_losing_the_consumer()
     relay.join().await;
     fixture.cleanup().await;
 }
+
+#[tokio::test]
+async fn drain_interrupts_identity_waits_and_joins_any_admitted_delivery() {
+    for admit_delivery in [false, true] {
+        let fixture = Fixture::create(false).await;
+        let refuse_info = Arc::new(AtomicBool::new(false));
+        let drop_info = Arc::clone(&refuse_info);
+        let stream = fixture.stream.clone();
+        let relay = AckDroppingRelay::start_filtering(move |payload| {
+            drop_info.load(Ordering::SeqCst)
+                && serde_json::from_slice::<serde_json::Value>(payload).is_ok_and(|info| {
+                    info.get("ack_floor").is_some() && info["stream_name"] == stream
+                })
+        })
+        .await;
+        let cancel = CancellationToken::new();
+        let messaging = Box::pin(Messaging::connect(
+            options_with_servers(
+                &fixture,
+                vec![relay.url.clone()],
+                Some(ConsumerOptions {
+                    concurrency: std::num::NonZeroUsize::new(2).unwrap(),
+                    ..consumer_options(&fixture)
+                }),
+                1024,
+            ),
+            deadline(),
+            cancel.clone(),
+        ))
+        .await
+        .unwrap();
+        let started = CancellationToken::new();
+        let settle = CancellationToken::new();
+        let mut registered = registry(&fixture);
+        registered
+            .register::<ExampleEvent, _, _>({
+                let started = started.clone();
+                let settle = settle.clone();
+                move |_, _| {
+                    started.cancel();
+                    let settle = settle.clone();
+                    async move {
+                        settle.cancelled().await;
+                        Ok(())
+                    }
+                }
+            })
+            .unwrap();
+        let consumer = messaging.consumer(registered).await.unwrap();
+        let prepared = registry(&fixture)
+            .prepare(&event("drain-with-info-withheld"), 1024)
+            .unwrap();
+        messaging
+            .producer()
+            .publish(&prepared, &context(deadline(), &cancel))
+            .await
+            .unwrap();
+        refuse_info.store(!admit_delivery, Ordering::SeqCst);
+        let mut handle = consumer.start(&cancel);
+        if admit_delivery {
+            timeout(Duration::from_secs(3), started.cancelled())
+                .await
+                .expect("one delivery starts before the remaining slot's admission stalls");
+            refuse_info.store(true, Ordering::SeqCst);
+        }
+        relay.wait_for_drop().await;
+        let mut finishing = Box::pin(handle.finish(Instant::now() + Duration::from_secs(1)));
+        if admit_delivery {
+            assert!(
+                futures_util::poll!(&mut finishing).is_pending(),
+                "drain must retain ownership of the admitted handler"
+            );
+            settle.cancel();
+        }
+        finishing
+            .await
+            .expect("an unanswered INFO must not spend the admitted delivery's drain window");
+        assert_eq!(started.is_cancelled(), admit_delivery);
+        let durable: consumer::PullConsumer = fixture
+            .jetstream
+            .get_consumer_from_stream(&fixture.durable, &fixture.stream)
+            .await
+            .unwrap();
+        assert_eq!(durable.cached_info().num_ack_pending, 0);
+        assert_eq!(
+            durable.cached_info().num_pending,
+            u64::from(!admit_delivery)
+        );
+        assert!(messaging.probe().check().await.is_ok());
+        close(messaging).await;
+        relay.join().await;
+        fixture.cleanup().await;
+    }
+}
