@@ -6,7 +6,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::time::Sleep;
+use tokio::time::{Instant, Sleep};
 
 /// The HTTP/2 connection preface, which hyper-util's protocol sniff compares
 /// the first bytes of a connection against.
@@ -46,7 +46,7 @@ impl<IO: AsyncRead + Unpin> AsyncRead for SniffDeadline<IO> {
         let Some((matched, deadline)) = this.undecided.as_mut() else {
             return Pin::new(&mut this.io).poll_read(cx, buf);
         };
-        if deadline.as_mut().poll(cx).is_ready() {
+        if Instant::now() >= deadline.deadline() {
             return Poll::Ready(Err(io::ErrorKind::TimedOut.into()));
         }
         let filled = buf.filled().len();
@@ -63,7 +63,11 @@ impl<IO: AsyncRead + Unpin> AsyncRead for SniffDeadline<IO> {
                 }
                 Poll::Ready(Ok(()))
             }
-            other => other,
+            Poll::Pending => deadline
+                .as_mut()
+                .poll(cx)
+                .map(|()| Err(io::ErrorKind::TimedOut.into())),
+            failed @ Poll::Ready(Err(_)) => failed,
         }
     }
 }
