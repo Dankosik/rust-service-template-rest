@@ -922,7 +922,7 @@
       {"path": "Cargo.toml", "ids": ["workspace-http-idempotency-store", "workspace-http-idempotency-digest"]},
       {"path": "crates/infra-http/Cargo.toml", "ids": ["http-idempotency-dependencies"]},
       {"path": "crates/infra-http/src/lib.rs", "ids": ["infra-http-idempotency-module"]},
-      {"path": "crates/infra-http/src/contract.rs", "ids": ["http-contract-idempotency-policy"]},
+      {"path": "crates/infra-http/src/contract.rs", "ids": ["http-contract-idempotency-policy", "http-contract-fixed-operations-export"]},
       {"path": "crates/infra-http/src/problem.rs", "ids": ["http-idempotency-code-meta"]},
       {"path": "crates/service-failure/src/lib.rs", "ids": ["http-idempotency-codes"]},
       {"path": "crates/infra-grpc/src/status.rs", "ids": ["grpc-idempotency-invalid-status", "grpc-idempotency-conflict-status", "grpc-idempotency-unavailable-status"]},

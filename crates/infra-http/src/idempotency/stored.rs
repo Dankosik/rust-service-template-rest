@@ -115,7 +115,7 @@ pub(super) async fn capture(response: Response) -> Result<Stored, Unstorable> {
 }
 
 impl Stored {
-    pub(super) fn to_record(&self) -> Result<Record, Unstorable> {
+    pub(super) fn to_record(&self) -> Record {
         let headers = self
             .headers
             .iter()
@@ -124,14 +124,18 @@ impl Stored {
                 value: value.as_bytes().to_vec(),
             })
             .collect();
-        let status = i16::try_from(self.status.as_u16()).map_err(|_| Unstorable::Status)?;
-        Ok(Record {
+        #[expect(
+            clippy::cast_possible_wrap,
+            reason = "StatusCode only represents 100 through 999"
+        )]
+        let status = self.status.as_u16() as i16;
+        Record {
             status,
             headers,
             // Share the captured bytes with persistence without copying the body
             // that Stored retains for the first response.
             body: self.body.clone(),
-        })
+        }
     }
 
     pub(super) fn into_response(self) -> Response {
@@ -237,7 +241,7 @@ mod tests {
         ))
         .await
         .expect("storable response");
-        let record = captured.to_record().expect("record");
+        let record = captured.to_record();
         assert_eq!(
             record.headers,
             vec![
@@ -370,7 +374,7 @@ mod tests {
                 headers.iter().map(|(name, value)| (*name, value.as_str())).collect();
             let replay = runtime.block_on(async {
                 let captured = capture(response(status, &pairs, body.clone())).await.unwrap();
-                decode(captured.to_record().unwrap()).unwrap().into_response()
+                decode(captured.to_record()).unwrap().into_response()
             });
 
             proptest::prop_assert_eq!(replay.status().as_u16(), status);

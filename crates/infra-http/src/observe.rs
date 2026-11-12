@@ -49,7 +49,7 @@ use crate::harden::AdmissionShed;
 use crate::probes::is_health_probe_route;
 use crate::problem::{Problem, complete_problem};
 use crate::request_id::REQUEST_ID_HEADER;
-use crate::server::ConnectionInfo;
+use crate::server::{ConnectionInfo, ListenerScheme};
 
 /// The response-head duration, labelled by `http_request_method`,
 /// `http_route` (the matched route template or `<unmatched>`), and
@@ -309,11 +309,12 @@ fn make_span(
 /// HTTP/1 origin-form targets carry no scheme. Use the listener's scheme
 /// when the request target omits it.
 fn url_scheme(uri: &Uri, connection: Option<&ConnectionInfo>) -> &'static str {
-    match uri.scheme_str() {
-        Some("https") => "https",
-        None => connection.map_or("http", |connection| connection.scheme),
-        _ => "http",
-    }
+    let scheme = match uri.scheme_str() {
+        Some("https") => ListenerScheme::Https,
+        None => connection.map_or(ListenerScheme::Http, |connection| connection.scheme),
+        Some(_) => ListenerScheme::Http,
+    };
+    scheme.as_str()
 }
 
 #[cfg_attr(feature = "hotpath", hotpath::measure)]

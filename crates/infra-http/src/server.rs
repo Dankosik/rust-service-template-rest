@@ -117,9 +117,24 @@ struct ConnectionShutdown {
     force: CancellationToken,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum ListenerScheme {
+    Http,
+    Https,
+}
+
+impl ListenerScheme {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Http => "http",
+            Self::Https => "https",
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct ConnectionInfo {
-    pub(crate) scheme: &'static str,
+    pub(crate) scheme: ListenerScheme,
     forced: Arc<AtomicBool>,
 }
 
@@ -178,7 +193,7 @@ impl BoundListener {
     #[must_use]
     pub fn serve(self, app: Router, options: ServerOptions) -> Server {
         serve_listener(self, app, options, |stream| async move {
-            Some((stream, "http"))
+            Some((stream, ListenerScheme::Http))
         })
     }
 
@@ -202,7 +217,7 @@ impl BoundListener {
             async move {
                 let peer = stream.peer_addr().ok();
                 match tokio::time::timeout(handshake_timeout, acceptor.accept(stream)).await {
-                    Ok(Ok(tls_stream)) => Some((tls_stream, "https")),
+                    Ok(Ok(tls_stream)) => Some((tls_stream, ListenerScheme::Https)),
                     Ok(Err(error)) => {
                         tracing::debug!(
                             peer = peer.map(tracing::field::display),
@@ -392,7 +407,7 @@ fn serve_listener<F, Fut, IO>(
 ) -> Server
 where
     F: Fn(TcpStream) -> Fut + Clone + Send + 'static,
-    Fut: Future<Output = Option<(IO, &'static str)>> + Send + 'static,
+    Fut: Future<Output = Option<(IO, ListenerScheme)>> + Send + 'static,
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let BoundListener {
@@ -448,7 +463,7 @@ async fn accept_loop<F, Fut, IO>(
     prepare_io: F,
 ) where
     F: Fn(TcpStream) -> Fut + Clone + Send + 'static,
-    Fut: Future<Output = Option<(IO, &'static str)>> + Send + 'static,
+    Fut: Future<Output = Option<(IO, ListenerScheme)>> + Send + 'static,
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let finish = &connection_shutdown.finish;
@@ -528,7 +543,7 @@ fn serve_connection<F, Fut, IO>(
 ) -> impl Future<Output = ()>
 where
     F: Fn(TcpStream) -> Fut,
-    Fut: Future<Output = Option<(IO, &'static str)>>,
+    Fut: Future<Output = Option<(IO, ListenerScheme)>>,
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let age_deadline = options

@@ -71,24 +71,37 @@ impl WebhookState {
 
 /// webhook endpoint is unknown
 #[derive(Debug, ToResponse)]
+#[expect(
+    dead_code,
+    reason = "The response body exists only for the OpenAPI derive"
+)]
 #[response(content_type = "application/problem+json")]
-pub struct NotFound(pub Problem);
+struct NotFound(Problem);
 
 /// webhook body, message identity, or signature evidence is unacceptable
 #[derive(Debug, ToResponse)]
+#[expect(
+    dead_code,
+    reason = "The response body exists only for the OpenAPI derive"
+)]
 #[response(content_type = "application/problem+json")]
-pub struct WebhookRejected(pub Problem);
+struct WebhookRejected(Problem);
 
 /// durable webhook receipt storage is unavailable
 #[derive(Debug, ToResponse)]
+#[expect(
+    dead_code,
+    reason = "The response body exists only for the OpenAPI derive"
+)]
 #[response(content_type = "application/problem+json")]
-pub struct ServiceUnavailable(pub Problem);
+struct ServiceUnavailable(Problem);
 
 /// The non-success webhook admission outcomes.  The route itself owns
 /// the signature requirement; OpenAPI's empty security array means only
 /// that bearer authentication is not the operation's authentication.
 #[derive(Debug, IntoResponses)]
-pub enum WebhookProblemResponses {
+#[expect(dead_code, reason = "The variants exist only for the OpenAPI derive")]
+enum WebhookProblemResponses {
     /// 400: the webhook was rejected.
     #[response(status = 400)]
     Rejected(#[ref_response] WebhookRejected),

@@ -203,7 +203,7 @@ async fn commit_candidate(
     }
     stored::capture(response)
         .await
-        .and_then(|stored| Ok((stored.to_record()?, stored)))
+        .map(|stored| (stored.to_record(), stored))
         .map_err(|unstorable| {
             tracing::warn!(
                 operation = operation_id,
