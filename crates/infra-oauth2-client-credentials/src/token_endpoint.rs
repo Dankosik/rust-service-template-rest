@@ -141,15 +141,7 @@ impl TokenEndpoint {
     ) -> Result<Token, AcquisitionError> {
         let assertion = self.signer.sign()?;
         let scope = joined_scopes(&self.scopes);
-        let mut fields = match grant {
-            Grant::ClientCredentials => vec![("grant_type", GRANT_CLIENT_CREDENTIALS)],
-            Grant::TokenExchange { subject } => vec![
-                ("grant_type", GRANT_TOKEN_EXCHANGE),
-                ("subject_token", subject.expose_secret()),
-                ("subject_token_type", TOKEN_TYPE_ACCESS_TOKEN),
-                ("requested_token_type", TOKEN_TYPE_ACCESS_TOKEN),
-            ],
-        };
+        let mut fields = grant.form_fields();
         if let Some(scope) = scope.as_deref() {
             fields.push(("scope", scope));
         }
@@ -188,12 +180,24 @@ impl TokenEndpoint {
 
 /// One token grant: what its request sends and how its answer is admitted.
 #[derive(Clone, Copy)]
-enum Grant<'a> {
+enum Grant<'subject> {
     ClientCredentials,
-    TokenExchange { subject: &'a SecretString },
+    TokenExchange { subject: &'subject SecretString },
 }
 
-impl Grant<'_> {
+impl<'subject> Grant<'subject> {
+    fn form_fields(self) -> Vec<(&'static str, &'subject str)> {
+        match self {
+            Self::ClientCredentials => vec![("grant_type", GRANT_CLIENT_CREDENTIALS)],
+            Self::TokenExchange { subject } => vec![
+                ("grant_type", GRANT_TOKEN_EXCHANGE),
+                ("subject_token", subject.expose_secret()),
+                ("subject_token_type", TOKEN_TYPE_ACCESS_TOKEN),
+                ("requested_token_type", TOKEN_TYPE_ACCESS_TOKEN),
+            ],
+        }
+    }
+
     /// The `grant` metric label; shorter than the URN token exchange sends as
     /// `grant_type`.
     fn metric_label(self) -> &'static str {

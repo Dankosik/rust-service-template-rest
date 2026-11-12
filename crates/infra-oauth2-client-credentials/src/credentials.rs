@@ -201,6 +201,13 @@ pub(crate) struct ServiceToken {
 }
 
 impl Cached {
+    fn completed_failure(&self, now: Instant) -> Option<AcquisitionError> {
+        self.failure
+            .as_ref()
+            .filter(|failure| now < failure.until)
+            .map(|failure| failure.error)
+    }
+
     /// Moves the next background attempt to at least `from + refresh_retry()`,
     /// without pulling an existing schedule earlier.
     fn defer_refresh(&mut self, from: Instant) {
@@ -424,14 +431,7 @@ impl Credentials {
     /// unless a failure or a queued attempt suppresses it. The caller holds
     /// the cached guard across the read and the send.
     fn schedule_refresh_ahead(&self, cached: &mut Cached, now: Instant, token: &Arc<Token>) {
-        if cached.refresh_pending {
-            return;
-        }
-        if cached
-            .failure
-            .as_ref()
-            .is_some_and(|failure| now < failure.until)
-        {
+        if cached.refresh_pending || cached.completed_failure(now).is_some() {
             return;
         }
         cached.defer_refresh(now);
@@ -575,11 +575,7 @@ impl Inner {
     }
 
     fn completed_failure(&self, now: Instant) -> Option<AcquisitionError> {
-        self.cached()
-            .failure
-            .as_ref()
-            .filter(|failure| now < failure.until)
-            .map(|failure| failure.error)
+        self.cached().completed_failure(now)
     }
 
     fn remember_failure(&self, error: AcquisitionError) {
