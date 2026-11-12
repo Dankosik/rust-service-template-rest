@@ -35,8 +35,14 @@ impl Token {
         requested_at: Instant,
         expires_in: Option<u64>,
     ) -> Result<Self, AcquisitionError> {
-        let mut header = HeaderValue::try_from(format!("Bearer {access_token}"))
-            .map_err(|_| AcquisitionError::InvalidResponse)?;
+        let value = format!("Bearer {access_token}");
+        // The parser treats leading spaces as scheme separators. Match the
+        // original token so provider whitespace is rejected rather than trimmed.
+        if shared_rules::rfc6750::token([value.as_bytes()]) != Ok(access_token) {
+            return Err(AcquisitionError::InvalidResponse);
+        }
+        let mut header =
+            HeaderValue::try_from(value).map_err(|_| AcquisitionError::InvalidResponse)?;
         header.set_sensitive(true);
         let reuse_until = match expires_in {
             None => None,

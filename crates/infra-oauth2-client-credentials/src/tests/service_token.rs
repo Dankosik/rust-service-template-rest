@@ -260,6 +260,41 @@ async fn a_provider_silent_past_the_fetch_bound_is_unavailable_until_the_failure
 }
 
 #[tokio::test]
+async fn the_fetch_cap_is_unavailable_with_an_unrepresentable_resource_deadline() {
+    let fixture = Fixture::new().await;
+    let resource = Client::try_new_for_test_http(
+        &fixture.origin,
+        infra_outbound_http::Limits {
+            operation_timeout: Duration::MAX,
+            ..TOKEN_LIMITS
+        },
+    )
+    .unwrap();
+    let client = fixture.credentials(&[], None).http(resource);
+    let context = OperationContext::unbounded();
+    let _gate = fixture.block_tokens();
+
+    for request in [fixture.request(), fixture.on_behalf_of_request("subject")] {
+        let mut operation = Box::pin(client.execute_with_context(request, &context));
+        tokio::select! {
+            () = fixture.token_received() => {}
+            result = &mut operation => panic!("response must be gated: {result:?}"),
+        }
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(5)).await;
+        assert_matches!(
+            operation.await,
+            Err(Error::Acquisition(AcquisitionError::Unavailable))
+        );
+        tokio::time::resume();
+    }
+
+    assert_eq!(fixture.token_requests().len(), 2);
+    assert!(fixture.resource_requests().is_empty());
+    fixture.finish().await;
+}
+
+#[tokio::test]
 async fn each_waiter_keeps_its_own_deadline_without_cancelling_the_leader() {
     let fixture = Fixture::new().await;
     let client = fixture

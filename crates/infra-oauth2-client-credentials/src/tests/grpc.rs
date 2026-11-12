@@ -33,7 +33,7 @@ use tower::{Service as _, service_fn};
 
 use secrecy::SecretString;
 
-use super::{Credentials, Fixture};
+use super::{AcquisitionDeadline, Credentials, Fixture, deadline};
 use crate::{AcquisitionError, OnBehalfOf, Rejection};
 
 #[derive(Clone)]
@@ -646,7 +646,9 @@ async fn a_reused_token_preserves_the_budget_remaining_at_transport_handoff() {
 
 async fn warm_and_age(credentials: &Credentials) {
     credentials
-        .service_token(Instant::now() + Duration::from_secs(10))
+        .service_token(AcquisitionDeadline::caller(deadline(Duration::from_secs(
+            10,
+        ))))
         .await
         .unwrap();
     super::advance(crate::token::EVICTION_MIN_AGE).await;
@@ -782,7 +784,9 @@ async fn a_late_rejection_does_not_evict_a_newer_cached_token() {
         &serde_json::json!({"access_token": "second", "token_type": "Bearer", "expires_in": 60}),
     );
     credentials
-        .service_token(Instant::now() + Duration::from_secs(10))
+        .service_token(AcquisitionDeadline::caller(deadline(Duration::from_secs(
+            10,
+        ))))
         .await
         .unwrap();
     resource.release();
@@ -939,7 +943,9 @@ async fn credentials_and_stream_spend_the_selected_resource_interval() {
             let credentials = tokens.credentials(&[], None);
             if cached {
                 credentials
-                    .service_token(Instant::now() + Duration::from_secs(10))
+                    .service_token(AcquisitionDeadline::caller(deadline(Duration::from_secs(
+                        10,
+                    ))))
                     .await
                     .unwrap();
             }

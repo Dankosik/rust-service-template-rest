@@ -19,7 +19,9 @@ use tokio::{sync::watch, task::JoinHandle, time::Instant};
 use url::Url;
 use uuid::Uuid;
 
-use super::{AcquisitionError, Algorithm, Credentials, Options, Rejection, TOKEN_LIMITS};
+use super::{
+    AcquisitionDeadline, AcquisitionError, Algorithm, Credentials, Options, Rejection, TOKEN_LIMITS,
+};
 use crate::{credentials::SubjectKey, options::Admitted};
 
 const KEY_ID: &str = "key-1";
@@ -307,8 +309,8 @@ fn audience_mapper(client_id: &str) -> serde_json::Value {
     })
 }
 
-fn deadline() -> Instant {
-    Instant::now() + Duration::from_secs(10)
+fn deadline() -> AcquisitionDeadline {
+    AcquisitionDeadline::caller(Instant::now() + Duration::from_secs(10))
 }
 
 /// The claims of an access token Keycloak returned over this direct

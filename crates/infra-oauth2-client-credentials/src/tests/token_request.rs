@@ -233,9 +233,10 @@ async fn exchange_without_the_access_token_issued_type_is_refused() {
 }
 
 #[tokio::test]
-async fn tokens_that_cannot_form_a_header_are_refused_before_resource_dispatch() {
+async fn malformed_bearer_tokens_are_refused_before_resource_dispatch() {
     let fixture = Fixture::new().await;
-    for token in ["", "control\u{7f}character"] {
+    let malformed = ["", "control\u{7f}character", "split token", " leading"];
+    for token in malformed {
         fixture.token_json(
             "200 OK",
             &serde_json::json!({"access_token": token, "token_type": "BEARER", "expires_in": 60}),
@@ -250,7 +251,7 @@ async fn tokens_that_cannot_form_a_header_are_refused_before_resource_dispatch()
             Err(Error::Acquisition(AcquisitionError::InvalidResponse))
         );
     }
-    assert_eq!(fixture.token_requests().len(), 2);
+    assert_eq!(fixture.token_requests().len(), malformed.len());
     assert!(fixture.resource_requests().is_empty());
     fixture.finish().await;
 }

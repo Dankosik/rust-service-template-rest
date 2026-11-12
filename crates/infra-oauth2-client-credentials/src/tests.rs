@@ -31,7 +31,7 @@ use url::Url;
 
 use crate::{
     AcquisitionError, Algorithm, Credentials, Error, OnBehalfOf, Options, RefreshDriver, Rejection,
-    credentials::Cached,
+    credentials::{AcquisitionDeadline, Cached},
     options::{Admitted, admitted_provider_concurrency},
     token::EVICTION_MIN_AGE,
     token_endpoint::{FETCH_TIMEOUT, TOKEN_LIMITS},

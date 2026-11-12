@@ -249,8 +249,7 @@ fn joined_scopes(scopes: &[String]) -> Option<String> {
     }
 }
 
-/// Admits a parsed response as a [`Token`]: the Bearer check and nonempty
-/// token shared by both grants. With `issued_token_type` set, a response is
+/// Admits a parsed response as a [`Token`]. With `issued_token_type` set, a response is
 /// admitted only when it reports that exact issued type (RFC 8693 section
 /// 2.2.1).
 fn token_from_response(
@@ -264,9 +263,6 @@ fn token_from_response(
     if let Some(expected) = issued_token_type
         && response.issued_token_type.as_deref() != Some(expected)
     {
-        return Err(AcquisitionError::InvalidResponse);
-    }
-    if response.access_token.is_empty() {
         return Err(AcquisitionError::InvalidResponse);
     }
     Token::bearer(&response.access_token, started, response.expires_in)
