@@ -12,7 +12,7 @@ resolver = "3"
 [dependencies]
 prost = "=0.14.4"
 prost-types = "=0.14.4"
-tonic-prost-build = "=0.14.8"
+tonic-prost-build = "=0.14.9"
 
 [lints.rust]
 unsafe_code = "forbid"
