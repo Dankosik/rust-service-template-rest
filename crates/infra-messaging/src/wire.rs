@@ -73,8 +73,10 @@ pub fn encode_prepared(event: &PreparedEvent) -> Result<HeaderMap, EnvelopeError
     headers.insert(header_name::MESSAGE_ID, event.message_id());
     headers.insert(header_name::EVENT_TYPE, event.event_type());
     headers.insert(header_name::EVENT_SCHEMA, event.schema_label());
-    let created_at = format_timestamp(event.occurred_at())?;
-    headers.insert(header_name::CREATED_AT, created_at.as_str());
+    headers.insert(
+        header_name::CREATED_AT,
+        format_timestamp(event.occurred_at())?,
+    );
     headers.insert(header_name::NATS_MSG_ID, event.publication_id());
     validate_header_bytes(&headers)?;
     Ok(headers)
@@ -306,6 +308,16 @@ pub(crate) fn format_timestamp(value: OffsetDateTime) -> Result<String, Envelope
     value
         .checked_to_offset(UtcOffset::UTC)
         .and_then(|value| value.format(&Rfc3339).ok())
+        .ok_or(EnvelopeError::CreatedAtOutOfRange)
+}
+
+/// Checks that [`format_timestamp`] accepts `value` without building the
+/// text.
+pub(crate) fn check_timestamp(value: OffsetDateTime) -> Result<(), EnvelopeError> {
+    value
+        .checked_to_offset(UtcOffset::UTC)
+        .and_then(|value| value.format_into(&mut std::io::sink(), &Rfc3339).ok())
+        .map(drop)
         .ok_or(EnvelopeError::CreatedAtOutOfRange)
 }
 
