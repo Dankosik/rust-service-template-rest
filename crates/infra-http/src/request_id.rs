@@ -1,8 +1,9 @@
 //! Request correlation.
 //!
-//! `SetRequestIdLayer` trusts the inbound header and any existing `RequestId`
-//! extension. Sanitize both before it establishes the ID that observation
-//! echoes in the response header and uses for Problem bodies and logs.
+//! [`SetRequestIdLayer`](tower_http::request_id::SetRequestIdLayer) trusts the
+//! inbound header and any existing [`RequestId`] extension. Sanitize both
+//! before it establishes the ID that observation echoes in the response header
+//! and uses for Problem bodies and logs.
 
 use axum::http::header::HeaderName;
 use axum::http::{HeaderValue, Request};
