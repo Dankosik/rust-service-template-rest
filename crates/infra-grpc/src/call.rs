@@ -146,6 +146,10 @@ fn http_status_code(status: http::StatusCode) -> Option<tonic::Code> {
 }
 
 fn header_catalog_code(headers: &HeaderMap) -> Option<service_failure::Code> {
+    // The catalog code travels only in the details, which tonic writes only
+    // when they are non-empty; without them its parse, which clones the whole
+    // map, is skipped on every successful call.
+    headers.get("grpc-status-details-bin")?;
     // Tonic's details decoder can panic on invalid base64; feature headers
     // cannot poison the terminal owner or skip its cleanup.
     std::panic::catch_unwind(|| tonic::Status::from_header_map(headers))
