@@ -669,92 +669,45 @@ async fn reliability_stalled_generations_recover_without_replaying_writes() {
 }
 
 #[tokio::test]
-async fn reliability_a_cancelled_probe_slot_is_retired() {
+async fn a_readiness_probe_abandoned_before_its_budget_keeps_the_connection() {
     use health::Probe;
-    use std::task::Poll;
 
     let server = FakeServer::start().await;
     let recorder = observation_recorder();
     let cache = metrics::with_local_recorder(&recorder, || {
         Cache::start(CacheOptions {
-            command_timeout: Duration::from_secs(30),
+            command_timeout: Duration::from_secs(10),
             ..options(&format!("redis://{}", server.address), true, true, None)
         })
         .expect("start cache")
     });
-    let namespace = cache.namespace("cancelled");
-    let probe = cache.probe();
+    let namespace = cache.namespace("abandoned_probe");
     assert_eq!(namespace.get("ready").await, Ok(None));
-    let old = server.stall_existing();
-    let late_key = "late";
-    let peer_key = "peer";
-    let mut late = Box::pin(namespace.get(late_key));
-    let mut peer = Box::pin(namespace.get(peer_key));
-    tokio::select! {
-        () = std::future::poll_fn(|context| {
-            assert!(late.as_mut().poll(context).is_pending());
-            assert!(peer.as_mut().poll(context).is_pending());
-            Poll::<()>::Pending
-        }) => unreachable!(),
-        () = server.wait_for(
-            Duration::from_secs(1),
-            "peers never reached established socket",
-            || server.command_count("GET", Some(&format!("cancelled:{late_key}"))) == 1
-                && server.command_count("GET", Some(&format!("cancelled:{peer_key}"))) == 1,
-        ) => {}
-    }
-    assert_work_metrics(&recorder, 2, 0, 0);
-    let before = server.command_count("PING", None);
-    let mut cancelled = Box::pin(probe.check());
-    tokio::select! {
-        result = &mut cancelled => panic!("silent command completed before cancellation: {result:?}"),
-        () = server.wait_for(
-            Duration::from_secs(1),
-            "cancelled command never reached established socket",
-            || server.command_count("PING", None) > before,
-        ) => {}
-    }
-    assert_work_metrics(&recorder, 3, 0, 0);
-    drop(cancelled);
-    assert_work_metrics(&recorder, 2, 0, 1);
-    // No yield after drop: peers already observe retirement, and reused
-    // capacity cannot dispatch another command on the old generation.
-    assert_eq!(
-        poll_once(peer.as_mut()).await,
-        Poll::Ready(Err(crate::Unavailable))
-    );
-    assert_work_metrics(&recorder, 1, 0, 1);
-    let mut replacement = Box::pin(namespace.get("replacement"));
-    assert!(poll_once(replacement.as_mut()).await.is_pending());
-    assert_work_metrics(&recorder, 2, 0, 1);
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(4), replacement)
-            .await
-            .expect("normal supervisor recovery"),
-        Ok(None)
-    );
-    assert_work_metrics(&recorder, 1, 0, 1);
-    assert!(server.connections() > old);
-    // This peer kept its old identity unpolled while the successor served
-    // a response. Its late failure must not withdraw that successor.
-    assert_eq!(
-        poll_once(late.as_mut()).await,
-        Poll::Ready(Err(crate::Unavailable))
-    );
-    assert_work_metrics(&recorder, 0, 0, 1);
-    assert_eq!(namespace.get("successor-after-old-failure").await, Ok(None));
-    server
-        .wait_for(
-            Duration::from_secs(1),
-            "old response slots survived",
-            || server.closed_through(old),
-        )
-        .await;
-    assert_eq!(server.active(), 1);
+    let connections = server.connections();
+    *server.observed.slow_get_delay.lock().expect("delay lock") = Duration::from_secs(3);
+    let probe = cache.probe();
+
+    // The outer deadline stands in for a readiness budget shorter than the
+    // probe's own; the fake server answers the PING only after the slow GET.
+    let (command, readiness) = tokio::join!(namespace.get("slow"), async {
+        server
+            .wait_for(
+                Duration::from_secs(1),
+                "slow GET did not reach the server",
+                || server.command_count("GET", Some("abandoned_probe:slow")) == 1,
+            )
+            .await;
+        tokio::time::timeout(Duration::from_millis(500), probe.check()).await
+    });
+    assert!(readiness.is_err(), "outer deadline must win: {readiness:?}");
+    assert_eq!(command, Ok(None));
+    assert_work_metrics(&recorder, 0, 0, 0);
+    assert_eq!(namespace.get("after").await, Ok(None));
+    assert_eq!(server.connections(), connections);
     probe
         .check()
         .await
-        .expect("healthy probe after cancellation");
+        .expect("healthy probe after abandonment");
 }
 
 /// A caller that gives up before the command ceiling, by its own shorter

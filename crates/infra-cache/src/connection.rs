@@ -200,8 +200,7 @@ struct Exchange<'a, F: Future> {
     _slot: CommandSlot<'a>,
     reply: Option<Pin<&'a mut F>>,
     keeps_generation: fn(&F::Output) -> bool,
-    /// `None` retires on any unanswered drop.
-    ceiling: Option<Deadline>,
+    ceiling: Deadline,
     retire: bool,
 }
 
@@ -212,7 +211,7 @@ impl<'a, F: Future> Exchange<'a, F> {
         slot: CommandSlot<'a>,
         reply: Pin<&'a mut F>,
         keeps_generation: fn(&F::Output) -> bool,
-        ceiling: Option<Deadline>,
+        ceiling: Deadline,
     ) -> Self {
         Self {
             shared,
@@ -264,8 +263,7 @@ impl<F: Future> Drop for Exchange<'_, F> {
         // A caller that stops before the ceiling says nothing about the
         // server. Its slot drains with the reply; a server that stopped
         // answering still meets a peer's ceiling or the maintenance PING.
-        let caller_abandoned =
-            self.reply.is_some() && self.ceiling.is_some_and(|ceiling| !ceiling.expired());
+        let caller_abandoned = self.reply.is_some() && !self.ceiling.expired();
         if self.retire && !caller_abandoned {
             self.shared.retire(self.generation);
         }
@@ -437,7 +435,7 @@ impl Link {
                 slot,
                 reply,
                 command_keeps_generation,
-                Some(scope.ceiling),
+                scope.ceiling,
             );
             let reply = poll_fn(|cx| exchange.poll_reply(cx)).await;
             drop(exchange);
@@ -467,23 +465,23 @@ impl Link {
         let reply = pin!(tokio::task::unconstrained(
             command.query_async(&mut connection)
         ));
+        let budget = command_timeout.max(CONNECTED_PROBE_MIN_BUDGET);
+        // The reply wait below starts its budget after handoff, so this
+        // ceiling has always passed when that wait times out. A startup or
+        // readiness deadline shorter than the budget leaves the connection.
+        let ceiling = Deadline::new(Instant::now(), budget);
         let mut exchange = Exchange::new(
             &self.shared,
             &generation,
             slot,
             reply,
             ping_keeps_generation,
-            None,
+            ceiling,
         );
         reply_until(
             &generation.retired,
             poll_fn(|cx| exchange.poll_reply(cx)),
-            || {
-                Deadline::new(
-                    Instant::now(),
-                    command_timeout.max(CONNECTED_PROBE_MIN_BUDGET),
-                )
-            },
+            || Deadline::new(Instant::now(), budget),
         )
         .await?
         .map_err(|error| error_type(&error))

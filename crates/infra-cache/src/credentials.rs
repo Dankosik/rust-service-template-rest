@@ -24,7 +24,7 @@ impl PasswordFile {
     /// Admission checks availability; every subsequent setup reads again.
     #[expect(
         clippy::disallowed_methods,
-        reason = "startup cache admission owns the initial password read; refresh uses async IO"
+        reason = "startup cache admission owns the initial password read; every later read runs on a blocking thread"
     )]
     pub(crate) fn admit(path: PathBuf, username: Option<&str>) -> Result<Self, CacheError> {
         let content = std::fs::read_to_string(&path)
