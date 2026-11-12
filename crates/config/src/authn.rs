@@ -326,8 +326,12 @@ impl AuthnConfig {
                 issuer,
                 introspection_endpoint,
                 introspection_client_id,
+                cache_capacity,
+                cache_ttl,
                 ..
             } => {
+                use shared_rules::oidc_introspection::{CACHE_CAPACITY, CACHE_TTL};
+
                 required_when("authn.issuer", issuer, "authn.mode = oidc-introspection")?;
                 required_when(
                     "authn.introspection_endpoint",
@@ -340,7 +344,18 @@ impl AuthnConfig {
                     "authn.mode = oidc-introspection",
                 )?;
                 self.required_introspection_client_secret()?;
-                Ok(())
+                crate::validate::int_range(
+                    "authn.cache_capacity",
+                    *cache_capacity as u64,
+                    *CACHE_CAPACITY.start() as u64,
+                    *CACHE_CAPACITY.end() as u64,
+                )?;
+                crate::validate::duration_range(
+                    "authn.cache_ttl",
+                    *cache_ttl,
+                    *CACHE_TTL.start(),
+                    *CACHE_TTL.end(),
+                )
             }
             // template:end oidc-introspection:authn-config-introspection-validation
             Self::None {} => Ok(()),

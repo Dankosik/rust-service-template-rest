@@ -70,7 +70,7 @@ pub enum Error {
         path: PathBuf,
         error: std::io::Error,
     },
-    /// A config file is not valid TOML.
+    /// A config file is not valid TOML. The diagnostic carries no input text.
     #[error("config file {}: {error}", path.display())]
     ParseFile {
         path: PathBuf,
@@ -306,9 +306,16 @@ fn scan_file(path: &Path, table_keys: &mut BTreeSet<String>) -> Result<ScannedFi
         path: path.to_owned(),
         error,
     })?;
-    let table: toml::Table = toml::from_str(&text).map_err(|error| Error::ParseFile {
-        path: path.to_owned(),
-        error,
+    let table: toml::Table = toml::from_str(&text).map_err(|error| {
+        // Parsing fails before secret admission, so keep only the location.
+        let message = match error.span() {
+            Some(span) => format!("invalid TOML at byte {}", span.start),
+            None => "invalid TOML".to_owned(),
+        };
+        Error::ParseFile {
+            path: path.to_owned(),
+            error: serde::de::Error::custom(message),
+        }
     })?;
     if let Some(key) = first_unaddressable_key(&table, &mut Vec::new()) {
         return Err(Error::UnaddressableKey {

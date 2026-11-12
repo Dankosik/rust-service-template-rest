@@ -15,6 +15,7 @@ use futures_util::{
 use moka::{Expiry, future::Cache};
 use operation_context::OperationContext;
 use secrecy::{ExposeSecret, SecretString};
+use shared_rules::oidc_introspection::{CACHE_CAPACITY, CACHE_TTL};
 use tokio::sync::Semaphore;
 
 use crate::{
@@ -59,9 +60,7 @@ impl IntrospectionCacheOptions {
     ///
     /// Returns [`PreparationError`] when either retention bound is invalid.
     pub fn try_new(capacity: usize, ttl: Duration) -> Result<Self, PreparationError> {
-        if !(1..=1024).contains(&capacity)
-            || !(Duration::from_secs(1)..=Duration::from_secs(300)).contains(&ttl)
-        {
+        if !CACHE_CAPACITY.contains(&capacity) || !CACHE_TTL.contains(&ttl) {
             return Err(PreparationError::invalid_options());
         }
         Ok(Self { capacity, ttl })

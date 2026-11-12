@@ -283,6 +283,7 @@
       "crates/infra-bearerauthn/src/introspection.rs"
     ],
     "markers": [
+      {"path": "crates/shared-rules/src/lib.rs", "ids": ["introspection-cache-ranges"]},
       {"path": "crates/infra-bearerauthn/src/claims.rs", "ids": ["authn-claims-introspection-envelope", "authn-claims-introspection-validation", "authn-claims-introspection-test-import", "authn-claims-introspection-shape-test", "authn-claims-introspection-missing-test", "authn-claims-scope-introspection-assertion"]},
       {"path": "crates/config/src/authn.rs", "ids": ["authn-nonzero-import", "authn-secrecy-import", "authn-occupied-secret-import", "authn-config-introspection-variant", "authn-default-provider-concurrency", "authn-config-introspection-validation", "authn-config-introspection-mode", "authn-required-introspection-secret"]},
       {"path": "crates/config/src/authn/tests.rs", "ids": ["authn-config-introspection-tests", "load-introspection-environment", "load-introspection-secret-file"]},
