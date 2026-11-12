@@ -493,7 +493,7 @@ impl Endpoint {
             .uri(self.destination.as_str())
             .header(header::CONTENT_TYPE, &delivery.content_type)
             .header("webhook-id", message_id)
-            .header("webhook-timestamp", timestamp.to_string())
+            .header("webhook-timestamp", HeaderValue::from(timestamp))
             .header("webhook-signature", signatures)
             .body(delivery.body.clone())
             .ok()
