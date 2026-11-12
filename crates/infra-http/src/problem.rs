@@ -295,6 +295,11 @@ pub mod responses {
     #[response(content_type = "application/problem+json")]
     pub struct InternalServerError(pub Problem);
 
+    /// the request budget was exhausted
+    #[derive(Debug, ToResponse)]
+    #[response(content_type = "application/problem+json")]
+    pub struct GatewayTimeout(pub Problem);
+
     /// The problem responses the OpenAPI document declares on every
     /// operation as shared transport answers. This is the Problem set every
     /// operation can name without colliding with probe-owned 503 `text/plain`.

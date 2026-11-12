@@ -101,7 +101,7 @@ impl Composer {
         metrics::describe_counter!(
             HTTP_IDEMPOTENCY_OUTCOMES_METRIC,
             metrics::Unit::Count,
-            "Outcomes of requests to idempotent operations, by outcome."
+            "Idempotency capture refusals, handler refusals, and execution outcomes."
         );
         let (schemas, mut paths, method_router) = routes;
         let operation_id = declaration::prepare(&mut paths)?;
@@ -276,6 +276,9 @@ fn seal_replay_metadata(mut response: Response, operation_id: &str) -> Response 
     let provenance = response.extensions_mut().remove::<Provenance>();
     response.headers_mut().remove(REPLAYED_HEADER);
     if !response.status().is_success() {
+        if provenance.is_none() {
+            Outcome::NotStored.record();
+        }
         return response;
     }
     match provenance {
@@ -286,7 +289,7 @@ fn seal_replay_metadata(mut response: Response, operation_id: &str) -> Response 
                 .insert(REPLAYED_HEADER, HeaderValue::from_static(REPLAYED_VALUE));
             response
         }
-        None => wiring_failure(operation_id, "seam_unused"),
+        Some(Provenance::Failed) | None => wiring_failure(operation_id, "seam_unused"),
     }
 }
 

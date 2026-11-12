@@ -14,6 +14,7 @@ use utoipa::{IntoResponses, ToResponse};
 use utoipa_axum::router::OpenApiRouter;
 
 use crate::contract::{Access, FinalizeError, Policy, layer_routes};
+pub use crate::problem::responses::GatewayTimeout;
 use crate::problem::{Code, Problem, sanitized_internal_error};
 
 /// A principal verified by the final authentication layer.
@@ -268,11 +269,6 @@ pub struct AuthenticationForbidden(pub Problem);
 #[derive(Debug, ToResponse)]
 #[response(content_type = "application/problem+json")]
 pub struct AuthenticationUnavailable(pub Problem);
-
-/// the enclosing request budget expired before a response committed
-#[derive(Debug, ToResponse)]
-#[response(content_type = "application/problem+json")]
-pub struct GatewayTimeout(pub Problem);
 
 /// Responses every protected operation declares in addition to its own
 /// success shape. 403 is never a verification failure: it answers a

@@ -1378,7 +1378,7 @@ async fn p9_a_success_replays_byte_for_byte_behind_current_authorization(pool: P
     assert_eq!(exact.as_bytes(), first.as_bytes());
 
     // Authorization runs on every attempt: the same caller through a revoked
-    // client is refused before any replay, and no outcome is recorded.
+    // client is refused before any replay and counted as not stored.
     let refused = mounted
         .create(ALICE_REVOKED, "k-1", &input, "req-refused")
         .await;
@@ -1386,7 +1386,12 @@ async fn p9_a_success_replays_byte_for_byte_behind_current_authorization(pool: P
     assert_eq!(body["detail"], "widget creation is not permitted");
     assert_eq!(
         outcomes(&recorder),
-        counts(&[("executed", 1), ("key_mismatch", 1), ("replayed", 1)])
+        counts(&[
+            ("executed", 1),
+            ("key_mismatch", 1),
+            ("replayed", 1),
+            ("not_stored", 1)
+        ])
     );
 
     // Another input under the same key is a mismatch, and the record stays.
@@ -1411,7 +1416,12 @@ async fn p9_a_success_replays_byte_for_byte_behind_current_authorization(pool: P
     assert_eq!(again.as_bytes(), first.as_bytes());
     assert_eq!(
         outcomes(&recorder),
-        counts(&[("executed", 2), ("replayed", 2), ("key_mismatch", 2)])
+        counts(&[
+            ("executed", 2),
+            ("replayed", 2),
+            ("key_mismatch", 2),
+            ("not_stored", 1)
+        ])
     );
     assert_eq!(count(&pool, WIDGET_ROWS).await, 2);
     mounted.finish().await;

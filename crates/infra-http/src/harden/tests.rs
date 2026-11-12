@@ -67,16 +67,24 @@ fn request(method: Method, uri: &str) -> HttpRequest<Body> {
 // template:begin request-budget:http-request-deadline-test
 #[tokio::test(start_paused = true)]
 async fn request_deadline_is_observable_without_restarting_the_budget() {
-    let options = options();
+    let options = HardenOptions {
+        request_timeout: Duration::from_millis(100),
+        ..options()
+    };
     let started = tokio::time::Instant::now();
     let expected = started + options.request_timeout;
     let handler_1 = move |axum::Extension(deadline): axum::Extension<crate::RequestDeadline>| async move {
         assert_eq!(deadline.at(), expected);
+        assert_eq!(
+            deadline.attempt_end(),
+            Some(started + Duration::from_millis(50))
+        );
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(deadline.at(), expected);
+        assert_eq!(deadline.attempt_end(), None);
         assert_eq!(
             deadline.at() - tokio::time::Instant::now(),
-            Duration::from_millis(150)
+            Duration::from_millis(50)
         );
         "within budget"
     };

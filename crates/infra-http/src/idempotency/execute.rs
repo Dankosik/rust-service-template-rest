@@ -89,6 +89,7 @@ pub(super) struct Attempt {
 pub(super) enum Provenance {
     Executed,
     Replayed,
+    Failed,
 }
 
 /// The extractor on an idempotent composed handler.
@@ -251,7 +252,11 @@ impl Answer {
             return std::future::pending().await;
         }
         guard.record(self.outcome);
-        self.response
+        if self.response.status().is_success() {
+            self.response
+        } else {
+            mark_provenance(self.response, Provenance::Failed)
+        }
     }
 }
 
@@ -391,7 +396,9 @@ mod tests {
 
         let pool = infra_postgres::PgPool::connect_lazy("postgres://localhost/unused")
             .expect("lazy pool does no I/O");
+        let budget = Duration::from_millis(200);
         for remaining in [Duration::from_millis(100), Duration::from_millis(99)] {
+            let origin = Instant::now() - (budget - remaining);
             let idempotency = Idempotency {
                 attempt: Attempt {
                     store: Store::new(pool.clone(), Duration::from_secs(60)),
@@ -403,7 +410,11 @@ mod tests {
                     },
                     fingerprint: [9; 32],
                     operation_id: "test".into(),
-                    deadline: RequestDeadline(Instant::now() + remaining),
+                    deadline: RequestDeadline::from_deadline(
+                        operation_context::Deadline::new(origin, budget),
+                        budget,
+                    )
+                    .expect("the deadline fits"),
                 },
             };
             let response = idempotency

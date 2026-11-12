@@ -3,7 +3,10 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::num::NonZeroU32;
 
 use axum::routing::get;
+use opentelemetry::trace::TracerProvider as _;
+use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tracing_subscriber::layer::SubscriberExt as _;
 
 use super::sniff::HTTP2_PREFACE;
 use super::*;
@@ -19,6 +22,36 @@ fn options() -> ServerOptions {
         max_connections: NonZeroU32::new(4),
         max_connection_age: None,
     }
+}
+
+fn harden(app: Router) -> Router {
+    crate::harden(
+        app,
+        &crate::HardenOptions {
+            max_body_bytes: 64,
+            request_timeout: Duration::from_secs(30),
+            max_in_flight: None,
+            log_health_probes: false,
+        },
+    )
+}
+
+fn capture_request_spans() -> (
+    tracing::subscriber::DefaultGuard,
+    SdkTracerProvider,
+    InMemorySpanExporter,
+) {
+    let exporter = InMemorySpanExporter::default();
+    let provider = SdkTracerProvider::builder()
+        .with_simple_exporter(exporter.clone())
+        .build();
+    let subscriber = tracing_subscriber::registry()
+        .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")));
+    (
+        tracing::subscriber::set_default(subscriber),
+        provider,
+        exporter,
+    )
 }
 
 fn app() -> Router {
@@ -90,6 +123,7 @@ async fn in_flight_request_finishes_during_drain() {
 
 #[tokio::test]
 async fn drain_budget_expiry_forces_an_in_flight_connection() {
+    let (_subscriber, _provider, exporter) = capture_request_spans();
     let (server, peer) = pending_request().await;
     let drained = server.drain(Duration::from_millis(50)).await.unwrap();
     assert_eq!(
@@ -99,6 +133,21 @@ async fn drain_budget_expiry_forces_an_in_flight_connection() {
         }
     );
     assert_peer_closed(peer).await;
+    let spans = exporter.get_finished_spans().unwrap();
+    let access = spans
+        .iter()
+        .flat_map(|span| span.events.iter())
+        .find(|event| event.name == "http_request")
+        .expect("the interrupted request has an access event");
+    assert!(
+        access
+            .attributes
+            .contains(&opentelemetry::KeyValue::new("status", "503"))
+    );
+    assert!(access.attributes.contains(&opentelemetry::KeyValue::new(
+        "termination",
+        "server_shutdown"
+    )));
 }
 
 async fn pending_request() -> (Server, TcpStream) {
@@ -116,7 +165,9 @@ async fn pending_request() -> (Server, TcpStream) {
         reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
     )]
     let app = Router::new().route("/pending", get(handler_1));
-    let server = Server::bind(loopback(), app, options()).await.unwrap();
+    let server = Server::bind(loopback(), harden(app), options())
+        .await
+        .unwrap();
     let mut peer = TcpStream::connect(server.local_addr()).await.unwrap();
     peer.write_all(b"GET /pending HTTP/1.1\r\nHost: localhost\r\n\r\n")
         .await
@@ -221,7 +272,7 @@ async fn accept_panic_after_stop_is_still_observed() {
     let marker = PanicOnClone(stop.clone());
     let server = bind_listener(loopback(), app(), options(), move |stream| {
         let _ = &marker;
-        async move { Some(stream) }
+        async move { Some((stream, "http")) }
     })
     .await
     .unwrap();
@@ -445,8 +496,8 @@ use rustls::{ClientConfig, RootCertStore, ServerConfig};
 use tokio_rustls::TlsConnector;
 
 /// A server and a client configuration for `localhost` under one fresh CA,
-/// both TLS 1.3 with `h2` as the only protocol.
-fn localhost_tls() -> (ServerConfig, ClientConfig) {
+/// both TLS 1.3 with the requested ALPN protocol.
+fn localhost_tls(alpn: &[u8]) -> (ServerConfig, ClientConfig) {
     use rcgen::{
         BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa,
         KeyPair, KeyUsagePurpose,
@@ -469,7 +520,7 @@ fn localhost_tls() -> (ServerConfig, ClientConfig) {
         .with_no_client_auth()
         .with_single_cert(vec![cert], key)
         .unwrap();
-    server.alpn_protocols = vec![b"h2".to_vec()];
+    server.alpn_protocols = vec![alpn.to_vec()];
     let mut roots = RootCertStore::empty();
     roots.add(issuer.der().clone()).unwrap();
     let mut client = ClientConfig::builder_with_provider(provider.into())
@@ -477,13 +528,13 @@ fn localhost_tls() -> (ServerConfig, ClientConfig) {
         .unwrap()
         .with_root_certificates(roots)
         .with_no_client_auth();
-    client.alpn_protocols = vec![b"h2".to_vec()];
+    client.alpn_protocols = vec![alpn.to_vec()];
     (server, client)
 }
 
 #[tokio::test]
 async fn drain_does_not_wait_for_an_unfinished_tls_handshake() {
-    let (server_config, client_config) = localhost_tls();
+    let (server_config, client_config) = localhost_tls(b"h2");
     let mut opts = options();
     opts.header_read_timeout = Duration::from_secs(30);
     let server = Server::bind_tls(loopback(), app(), opts, Arc::new(server_config))
@@ -517,7 +568,7 @@ async fn drain_does_not_wait_for_an_unfinished_tls_handshake() {
 async fn tls_listener_serves_http2() {
     use http_body_util::BodyExt as _;
 
-    let (server_config, client_config) = localhost_tls();
+    let (server_config, client_config) = localhost_tls(b"h2");
     let mut opts = options();
     opts.header_read_timeout = Duration::from_secs(2);
     let server = Server::bind_tls(loopback(), app(), opts, Arc::new(server_config))
@@ -550,5 +601,43 @@ async fn tls_listener_serves_http2() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(&body[..], b"ok");
     server.drain(Duration::from_secs(1)).await.unwrap();
+}
+
+#[tokio::test]
+async fn tls_http1_origin_form_reports_https_in_the_server_span() {
+    let (_subscriber, _provider, exporter) = capture_request_spans();
+    let (server_config, client_config) = localhost_tls(b"http/1.1");
+    let opts = ServerOptions {
+        header_read_timeout: Duration::from_secs(2),
+        ..options()
+    };
+    let server = Server::bind_tls(loopback(), harden(app()), opts, Arc::new(server_config))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        let stream = TcpStream::connect(server.local_addr()).await.unwrap();
+        let mut tls = TlsConnector::from(Arc::new(client_config))
+            .connect(ServerName::try_from("localhost").unwrap(), stream)
+            .await
+            .unwrap();
+        tls.write_all(b"GET /ok HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut status = [0; 12];
+        tls.read_exact(&mut status).await.unwrap();
+        assert_eq!(&status, b"HTTP/1.1 200");
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        server.drain(Duration::from_secs(1)).await.unwrap(),
+        Drained::Complete
+    );
+    let spans = exporter.get_finished_spans().unwrap();
+    let span = spans.iter().find(|span| span.name == "GET /ok").unwrap();
+    assert!(
+        span.attributes
+            .contains(&opentelemetry::KeyValue::new("url.scheme", "https"))
+    );
 }
 // template:end grpc:http-server-tls-test
