@@ -69,6 +69,7 @@ jobs:
       github_workflows: ${{ steps.surfaces.outputs.github_workflows }}
       dependency_automation: ${{ steps.surfaces.outputs.dependency_automation }}
       shell: ${{ steps.surfaces.outputs.shell }}
+      python: ${{ steps.surfaces.outputs.python }}
       runtime_image: ${{ steps.surfaces.outputs.runtime_image }}
       # template:begin runtime-progress:ci-runtime-progress-output
       runtime_progress: ${{ steps.surfaces.outputs.runtime_progress }}
@@ -607,6 +608,7 @@ jobs:
     if: >-
       !cancelled() && (
         needs.changes.outputs.shell == 'true' ||
+        needs.changes.outputs.python == 'true' ||
         needs.changes.outputs.github_workflows == 'true' ||
         needs.changes.outputs.tool_manifest == 'true' ||
         needs.changes.outputs.runtime_image == 'true' ||
@@ -646,6 +648,9 @@ jobs:
             files=$(bash ./scripts/ci/git-changed-paths.sh --diff "${BASE_SHA}" HEAD | while IFS= read -r file; do if [[ ${file} == *.sh && -f ${file} ]]; then printf '%s ' "${file}"; fi; done)
             bash ./scripts/ci/measure.sh delivery-shellcheck -- make shellcheck SHELL_FILES="${files% }"
           fi
+      - name: Python
+        if: needs.changes.outputs.python == 'true'
+        run: bash ./scripts/ci/measure.sh delivery-python -- make python-lint
       - name: Install pinned Cargo tools
         if: needs.changes.outputs.tool_manifest == 'true'
         uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
@@ -1384,6 +1389,7 @@ jobs:
         if: >-
           always() && (
             needs.changes.outputs.shell == 'true' ||
+            needs.changes.outputs.python == 'true' ||
             needs.changes.outputs.github_workflows == 'true' ||
             needs.changes.outputs.tool_manifest == 'true' ||
             needs.changes.outputs.runtime_image == 'true' ||

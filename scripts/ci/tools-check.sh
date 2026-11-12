@@ -4,8 +4,9 @@
 # reports its pinned version. Then the Dockerfile: its tool ARG defaults equal
 # the manifest (Railway passes no build arguments), every FROM image carries a
 # digest, and the builder tag's Rust version equals the rust-toolchain.toml
-# channel. Go and Node tools prove their pins when their targets run: `go run
-# <module>@v<version>` and `npx <package>@<version>` resolve nothing else.
+# channel. Go, Node and Python tools prove their pins when their targets run:
+# `go run <module>@v<version>`, `npx <package>@<version>` and `uvx
+# ruff@<version>` resolve nothing else.
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)

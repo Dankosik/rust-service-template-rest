@@ -1468,7 +1468,7 @@ def self_test(source: Path) -> None:
     _check_test_digest_projection(source, initializer)
     _check_tls_canary_projection(source, initializer)
     _check_workspace_dependency_projection(initializer)
-    exclusions = _validated_exclusions(initializer)
+    _validated_exclusions(initializer)
     with tempfile.TemporaryDirectory(prefix="template-profile-projections-link-") as temporary:
         link_root = Path(temporary)
         (link_root / "target").write_text("target\n", encoding="utf-8")
