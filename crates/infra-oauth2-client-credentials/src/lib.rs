@@ -12,6 +12,7 @@ mod credentials;
 mod error;
 mod http_client;
 mod options;
+mod request_admission;
 mod token;
 mod token_endpoint;
 

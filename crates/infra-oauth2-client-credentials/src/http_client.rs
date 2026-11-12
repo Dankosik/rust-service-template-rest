@@ -9,9 +9,8 @@ use tokio::time::Instant;
 
 use crate::{
     AcquisitionError, Credentials, Error,
-    credentials::{
-        AdmissionRefusal, acquisition_deadline, acquisition_stopped, admit_request_subject,
-    },
+    credentials::{acquisition_deadline, acquisition_stopped},
+    request_admission::{AdmissionRefusal, admit_request_subject},
 };
 
 #[derive(Clone, derive_more::Debug)]
@@ -141,7 +140,7 @@ impl AuthenticatedClient {
                 || acquired.check_expiry(Instant::now()).is_ok(),
                 |status| {
                     if status == StatusCode::UNAUTHORIZED {
-                        acquired.reject();
+                        acquired.reject_if_old_enough();
                     }
                 },
             )

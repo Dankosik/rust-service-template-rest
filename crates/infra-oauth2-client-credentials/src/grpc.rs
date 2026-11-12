@@ -16,7 +16,8 @@ use tower::Service;
 
 use crate::{
     AcquisitionError, Credentials,
-    credentials::{AdmissionRefusal, acquisition_deadline, admit_request_subject},
+    credentials::acquisition_deadline,
+    request_admission::{AdmissionRefusal, admit_request_subject},
 };
 
 /// A cloneable governed gRPC client with private machine credentials.
@@ -107,7 +108,7 @@ impl Service<Request<Body>> for AuthenticatedClient {
                         if code == Code::Unauthenticated
                             && let Some(token) = used.upgrade()
                         {
-                            token.reject();
+                            token.reject_if_old_enough();
                         }
                     },
                 )
