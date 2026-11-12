@@ -64,6 +64,15 @@ pub(super) enum Write<'a> {
     Release,
 }
 
+impl Write<'_> {
+    pub(super) const fn operation(self) -> Operation {
+        match self {
+            Self::Retry { .. } | Self::Snooze { .. } | Self::Fail { .. } => Operation::Record,
+            Self::Release => Operation::Release,
+        }
+    }
+}
+
 /// An acknowledged outcome write: whether it changed the job row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Written {
@@ -129,7 +138,6 @@ pub(super) async fn send_outcome(
     shared: &Shared,
     fence: ClaimFence,
     write: Write<'_>,
-    operation: Operation,
 ) -> Result<Written, Unacknowledged> {
     // An sqlx statement future is about 16 KiB; box it once so the supervisor stays small.
     let result = backstop(Box::pin(async {
@@ -142,7 +150,7 @@ pub(super) async fn send_outcome(
     }))
     .await;
     result.map(Written::from_rows).map_err(|error| {
-        observe_failure(shared, operation, &error);
+        observe_failure(shared, write.operation(), &error);
         Unacknowledged
     })
 }
