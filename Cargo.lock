@@ -2538,6 +2538,7 @@ dependencies = [
  "aws-lc-rs",
  "base64 0.23.1",
  "derive_more",
+ "futures-util",
  "jsonwebtoken",
  "metrics",
  "moka",

@@ -24,10 +24,8 @@ mod provider;
 // template:begin oidc-jwt:authn-refresh-module
 mod refresh;
 // template:end oidc-jwt:authn-refresh-module
-// template:begin oidc-jwt:authn-jwt-test-metrics-module
 #[cfg(test)]
 mod test_metrics;
-// template:end oidc-jwt:authn-jwt-test-metrics-module
 
 #[cfg(test)]
 #[path = "../../../test/fixtures/tls.rs"]
@@ -160,6 +158,7 @@ pub(crate) enum VerificationReason {
     Provider(ProviderFailure),
     Inactive,
     Capacity,
+    CacheState,
     // template:end oidc-introspection:authn-introspection-reasons
 }
 
@@ -186,6 +185,7 @@ impl VerificationReason {
             Self::Provider(failure) => failure.label(),
             Self::Inactive => "inactive",
             Self::Capacity => "capacity",
+            Self::CacheState => "introspection_cache_state",
             // template:end oidc-introspection:authn-introspection-reason-labels
         }
     }
@@ -502,9 +502,9 @@ impl Verifier {
     // template:end oidc-jwt:authn-jwt-verifier
 
     // template:begin oidc-introspection:authn-introspection-verifier
-    pub(crate) fn introspection(engine: introspection::IntrospectionVerifier) -> Self {
+    pub(crate) fn introspection(engine: Arc<introspection::IntrospectionVerifier>) -> Self {
         Self {
-            engine: Engine::Introspection(Arc::new(engine)),
+            engine: Engine::Introspection(engine),
             counters: SuccessCounters::new("introspection"),
         }
     }
@@ -526,7 +526,7 @@ impl Verifier {
     }
 
     /// Verifies a token while spending the caller's original operation budget.
-    /// Shared key refresh and cache initialization retain their own lifetimes.
+    /// A stopped caller leaves shared key refresh and other cache-fill waiters running.
     ///
     /// # Errors
     /// Returns [`Failure::Unavailable`] when the caller stops, including when
