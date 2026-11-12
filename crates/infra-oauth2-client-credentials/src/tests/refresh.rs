@@ -296,17 +296,27 @@ async fn a_dropped_refresh_driver_closes_cached_http_calls_before_dispatch() {
     let token_requests = fixture.token_requests().len();
     let resource_requests = fixture.resource_requests().len();
     drop(driver);
-    for (deadline, expected) in [
+    let cancelled = OperationContext::unbounded();
+    cancelled.cancel();
+    for (after, request_context, expected) in [
+        (Duration::from_secs(10), None, AcquisitionError::Unavailable),
+        (Duration::ZERO, None, AcquisitionError::Timeout),
         (
-            deadline(Duration::from_secs(10)),
-            AcquisitionError::Unavailable,
+            Duration::from_secs(10),
+            Some(OperationContext::with_timeout(Duration::ZERO)),
+            AcquisitionError::Timeout,
         ),
-        (Instant::now(), AcquisitionError::Timeout),
+        (
+            Duration::from_secs(10),
+            Some(cancelled),
+            AcquisitionError::Cancelled,
+        ),
     ] {
-        let error = client
-            .execute(fixture.request(), deadline)
-            .await
-            .unwrap_err();
+        let mut request = fixture.request();
+        if let Some(context) = request_context {
+            request.extensions_mut().insert(context);
+        }
+        let error = client.execute(request, deadline(after)).await.unwrap_err();
         assert_matches!(error, Error::Acquisition(actual) if actual == expected);
     }
     assert_eq!(fixture.token_requests().len(), token_requests);

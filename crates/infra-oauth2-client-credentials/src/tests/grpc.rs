@@ -529,19 +529,23 @@ async fn a_dropped_refresh_driver_closes_cached_grpc_calls_before_dispatch() {
     let token_requests = tokens.token_requests().len();
     let resource_calls = resource.calls();
     drop(driver);
-    for (after, expected) in [
-        (Duration::from_secs(10), Code::Unavailable),
-        (Duration::ZERO, Code::DeadlineExceeded),
+    let cancelled = OperationContext::unbounded();
+    cancelled.cancel();
+    for (after, request_context, expected) in [
+        (Duration::from_secs(10), None, Code::Unavailable),
+        (Duration::ZERO, None, Code::DeadlineExceeded),
+        (Duration::from_secs(10), Some(cancelled), Code::Cancelled),
     ] {
-        let error = client
-            .unary(rpc(
-                UnaryRequest {
-                    message: "closed".to_owned(),
-                },
-                after,
-            ))
-            .await
-            .unwrap_err();
+        let mut request = rpc(
+            UnaryRequest {
+                message: "closed".to_owned(),
+            },
+            after,
+        );
+        if let Some(context) = request_context {
+            request.extensions_mut().insert(context);
+        }
+        let error = client.unary(request).await.unwrap_err();
         assert_eq!(error.code(), expected);
     }
     assert_eq!(tokens.token_requests().len(), token_requests);
