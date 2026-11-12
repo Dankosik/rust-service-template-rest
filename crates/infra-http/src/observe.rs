@@ -140,7 +140,6 @@ pub(crate) async fn observe(
     next: Next,
 ) -> Response {
     let started = Instant::now();
-    let method = request.method().clone();
     // Own the accepted header while the request moves into the next service;
     // the borrowed string also remains available for response completion.
     let request_id = request.extensions().get::<RequestId>().cloned();
@@ -148,8 +147,11 @@ pub(crate) async fn observe(
         .as_ref()
         .and_then(|id| id.header_value().to_str().ok());
     let connection = request.extensions_mut().remove::<ConnectionInfo>();
+    let method = request.method();
+    let method_label = request_method(method.as_str());
     let span = make_span(
         &request,
+        method_label,
         matched.as_ref(),
         request_id_text,
         connection.as_ref(),
@@ -158,11 +160,12 @@ pub(crate) async fn observe(
     let route = matched
         .as_ref()
         .map_or(UNMATCHED_ROUTE, MatchedPath::as_str);
-    let active = Active::start(&series, request_method(method.as_str()));
+    let log_access = !suppresses_access_log(log_health_probes, method, route);
+    let active = Active::start(&series, method_label);
     let mut pending = Pending {
-        log_health_probes,
+        log_access,
         series: &series,
-        method: &method,
+        method_label,
         route,
         request_id: request_id_text,
         span: &span,
@@ -201,9 +204,9 @@ pub(crate) async fn observe(
 }
 
 struct Pending<'a> {
-    log_health_probes: bool,
+    log_access: bool,
     series: &'a Series,
-    method: &'a Method,
+    method_label: &'static str,
     route: &'a str,
     request_id: Option<&'a str>,
     span: &'a tracing::Span,
@@ -225,19 +228,15 @@ impl Pending<'_> {
 
     fn record(&self, status: StatusCode, problem_code: Option<&str>, termination: Option<&str>) {
         let elapsed = self.started.elapsed();
-        self.series.record_duration(
-            request_method(self.method.as_str()),
-            self.route,
-            status,
-            elapsed,
-        );
-        if suppresses_access_log(self.log_health_probes, self.method, self.route) {
+        self.series
+            .record_duration(self.method_label, self.route, status, elapsed);
+        if !self.log_access {
             return;
         }
         let duration_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
         self.span.in_scope(|| {
             tracing::info!(
-                method = request_method(self.method.as_str()),
+                method = self.method_label,
                 route = %self.route,
                 status = status.as_u16(),
                 duration_ms,
@@ -277,11 +276,11 @@ impl Drop for Pending<'_> {
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 fn make_span(
     request: &Request,
+    method: &'static str,
     matched: Option<&MatchedPath>,
     request_id: Option<&str>,
     connection: Option<&ConnectionInfo>,
 ) -> tracing::Span {
-    let method = request_method(request.method().as_str());
     let route = matched.map(MatchedPath::as_str);
     let span = otel_trace_span!(
         "HTTP request",
@@ -393,7 +392,7 @@ impl Series {
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .get(route)
-            .and_then(|statuses| statuses.get(&key))
+            .and_then(|route_durations| route_durations.get(&key))
         {
             histogram.record(seconds);
             return;
