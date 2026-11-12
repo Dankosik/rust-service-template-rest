@@ -205,7 +205,6 @@ struct GatedTrailers {
     release: Pin<Box<dyn Future<Output = ()> + Send>>,
     status: http::HeaderValue,
     finished: bool,
-    status: http::HeaderValue,
 }
 
 impl hyper::body::Body for GatedTrailers {
@@ -250,7 +249,6 @@ async fn route(request: HyperRequest<Incoming>, peer: Peer) -> HyperResponse<Bod
                 release: Box::pin(async move { peer.wait_to_answer().await }),
                 status,
                 finished: false,
-                status: http::HeaderValue::from_static("0"),
             }))
             .unwrap();
     }
