@@ -139,12 +139,12 @@ impl Store {
             CLEANUP_RUNS_METRIC,
             &cancel,
             || async { self.cleanup_pass(Some(&cancel)).await.map(|(_, end)| end) },
-            || self.population(),
+            || self.sample_expired_population(),
         )
         .await;
     }
 
-    async fn population(&self) -> Result<PopulationSample, MaintenanceFailure> {
+    async fn sample_expired_population(&self) -> Result<PopulationSample, MaintenanceFailure> {
         in_observation_tx(&self.pool, async |tx| {
             let sample = observed(
                 "observe expired idempotency records",
