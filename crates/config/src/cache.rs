@@ -73,7 +73,6 @@ impl Default for CacheConfig {
 }
 
 impl CacheConfig {
-    /// Whether a DSN is present. Shape is validated by `infra-cache`.
     #[must_use]
     fn is_active(&self) -> bool {
         self.dsn.is_some()

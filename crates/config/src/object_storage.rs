@@ -1,11 +1,14 @@
 //! Optional S3-compatible object storage: provider, bucket, credentials, and
 //! limits.
 //!
-//! The section is inert while `provider` is `none`. It owns which keys a
-//! provider and a credential source accept, the environment-only secret, the
-//! local-only emulator provider, and the ranges. The shape of each accepted value (endpoint
-//! origin, region, bucket name, owner account) is admitted by
-//! `infra-object-storage`, the crate that builds the client from it.
+//! With `provider = "none"`, startup skips provider-specific checks and client
+//! creation. It still checks the ranges for `max_object_bytes`,
+//! `max_concurrency`, and `operation_timeout`.
+//!
+//! This section owns which keys a provider and credential source accept, the
+//! environment-only secret, and the local-only emulator provider.
+//! `infra-object-storage` validates the shape of the endpoint origin, region,
+//! bucket name, and owner account when it builds the client.
 
 use std::time::Duration;
 
