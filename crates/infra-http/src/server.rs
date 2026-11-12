@@ -46,8 +46,8 @@ pub struct ServerOptions {
     /// Read-buffer ceiling for one request head. HTTP/1 overflow answers
     /// hyper-native 431 before the router (not a [`crate::Problem`]). hyper
     /// refuses an HTTP/1 buffer below 8 KiB, so a smaller value is raised to
-    /// 8 KiB for HTTP/1. HTTP/2 applies the value unchanged as the
-    /// uncompressed header-list size.
+    /// 8 KiB for HTTP/1. HTTP/2 applies it as the uncompressed header-list
+    /// size, capped at `u32::MAX`.
     pub max_header_bytes: usize,
     /// Accepted connections at once; `None` accepts without a bound.
     pub max_connections: Option<NonZeroU32>,

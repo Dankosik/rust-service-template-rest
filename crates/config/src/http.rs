@@ -59,9 +59,9 @@ pub struct HttpConfig {
     /// PING cadence.
     #[serde(with = "humantime_serde")]
     pub header_read_timeout: Duration,
-    /// Per-request handler budget. It is the only bound on how long one
-    /// request may hold a task and its pooled resources; body reads happen
-    /// inside it because extractors run inside the handler future.
+    /// Budget through the response head, including admission and request body
+    /// reads. Features that stream responses own the lifetime of their bodies
+    /// and any resources held after the response head.
     #[serde(with = "humantime_serde")]
     pub request_timeout: Duration,
     /// HTTP/1 read-buffer ceiling for one request head; overflow answers
