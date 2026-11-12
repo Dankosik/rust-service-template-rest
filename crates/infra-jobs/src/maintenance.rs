@@ -32,7 +32,7 @@ const RETENTION_STATEMENT_TIMEOUT: Duration = Duration::from_secs(5);
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(10);
 /// How long a population read waits for the engine's statement turn.
 const POPULATION_TURN_WAIT: Duration = Duration::from_secs(1);
-const LIVE_JOBS_SAMPLE_CAP: i64 = 1_000;
+const PER_KIND_STATE_SAMPLE_CAP: i64 = 1_000;
 /// The statement bound of one registered-kind sample.
 const SAMPLE_STATEMENT_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -358,7 +358,7 @@ async fn sample_once(shared: &Shared) -> Result<Sample, OperationError> {
                          LIMIT 1 \
                      ) AS oldest ON true",
                     &kinds as _,
-                    LIVE_JOBS_SAMPLE_CAP,
+                    PER_KIND_STATE_SAMPLE_CAP,
                 )
                 .fetch_all(&mut *tx),
             )

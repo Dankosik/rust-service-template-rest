@@ -171,7 +171,8 @@ impl PreparedEvent {
     }
 
     async fn outbox_metadata_bytes(&self) -> Result<usize, infra_jobs::EnqueueError> {
-        let mut total = json_len(&PublishDomainEvent::fixed_fields(self))?;
+        let mut total = infra_jobs::json_payload_len(&PublishDomainEvent::fixed_fields(self))
+            .map_err(infra_jobs::EnqueueError::Serialize)?;
         let mut budget = PREFLIGHT_BYTES_PER_POLL;
         for field in self.outbox_variable_fields() {
             let mut offset = 0;
@@ -185,7 +186,9 @@ impl PreparedEvent {
                 }
                 // Reuse serde's escaping over a bounded slice of the source.
                 // The fixed fields already contributed the string quotes.
-                total += json_len(&field[offset..end])? - 2;
+                total += infra_jobs::json_payload_len(&field[offset..end])
+                    .map_err(infra_jobs::EnqueueError::Serialize)?
+                    - 2;
                 budget -= end - offset;
                 offset = end;
             }
@@ -202,23 +205,6 @@ impl PreparedEvent {
             self.event_type(),
         ]
     }
-}
-
-/// Counts the bytes `value` serializes to as JSON without buffering them.
-fn json_len<T: Serialize + ?Sized>(value: &T) -> Result<usize, infra_jobs::EnqueueError> {
-    struct Count(usize);
-    impl std::io::Write for Count {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0 += bytes.len();
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    let mut count = Count(0);
-    serde_json::to_writer(&mut count, value).map_err(infra_jobs::EnqueueError::Serialize)?;
-    Ok(count.0)
 }
 
 struct Publisher {

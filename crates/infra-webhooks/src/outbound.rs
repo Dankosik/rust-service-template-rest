@@ -8,7 +8,6 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
     future::poll_fn,
-    io,
     num::NonZeroU32,
     task::Poll,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -18,7 +17,7 @@ use bytes::Bytes;
 use http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header};
 use infra_jobs::{
     EnqueueError, EnqueueOptions, Enqueued, Handler, Job, JobError, JobId, JobKind, KindsBuilder,
-    Policy,
+    Policy, json_payload_len,
 };
 use infra_outbound_http::{BuildError, Client, Error as HttpError, Limits};
 use infra_postgres::Tx;
@@ -163,29 +162,12 @@ async fn escaped_len(
         }
         let (fragment, tail) = rest.split_at(end);
         admit(fragment)?;
-        let mut escaped = ByteCount(0);
-        serde_json::to_writer(&mut escaped, fragment).map_err(serialize_failed)?;
         // The envelope already counts the quotes.
-        len += escaped.0 - 2;
+        len += json_payload_len(fragment).map_err(serialize_failed)? - 2;
         *budget -= end;
         rest = tail;
     }
     Ok(len)
-}
-
-/// A writer that keeps only the number of bytes written, so measuring the
-/// escaped form allocates nothing.
-struct ByteCount(usize);
-
-impl io::Write for ByteCount {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0 += buf.len();
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
 }
 
 /// Return `Pending` once after waking the task, so any executor polls again.
@@ -425,7 +407,13 @@ impl DeliveryFailure {
     }
 
     const fn is_permanent(self) -> bool {
-        matches!(self, Self::InvalidPayload | Self::EndpointGone)
+        match self {
+            Self::InvalidPayload | Self::EndpointGone => true,
+            Self::MissingEndpoint
+            | Self::ClockUnavailable
+            | Self::Status(_)
+            | Self::Exchange(_) => false,
+        }
     }
 
     const fn outcome(self) -> &'static str {

@@ -152,8 +152,6 @@ impl TokenEndpoint {
         token_from_response(&response, started, grant.expected_issued_type())
     }
 
-    /// Sends one `application/x-www-form-urlencoded` request to the token
-    /// endpoint through the bounded token client, shared by both grants.
     async fn post_form(
         &self,
         fields: &[(&str, &str)],

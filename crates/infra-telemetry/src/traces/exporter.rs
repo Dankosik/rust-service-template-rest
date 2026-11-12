@@ -49,12 +49,10 @@ pub(super) const CLIENT_KEY_VARS: [&str; 2] = [
     "OTEL_EXPORTER_OTLP_CLIENT_KEY",
 ];
 
-/// Whether a variable's value is empty or whitespace only.
 fn is_blank(value: &OsStr) -> bool {
     value.to_string_lossy().trim().is_empty()
 }
 
-/// A variable's value unless blank.
 fn non_blank(value: OsString) -> Option<OsString> {
     (!is_blank(&value)).then_some(value)
 }

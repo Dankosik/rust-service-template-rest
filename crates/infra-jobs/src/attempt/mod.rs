@@ -300,16 +300,14 @@ fn attempt_span(attempt: &AttemptId) -> tracing::Span {
     )
 }
 
-/// The attempt's `outcome`, the `jobs_attempts_total` label. An attempt that
-/// spent its unit on a failure is an error; a snooze or a release is not.
+/// The attempt span and `jobs_attempts_total` share the outcome label.
 fn record_on_span(span: &tracing::Span, transition: &Transition) {
     span.record("outcome", transition.label());
-    if matches!(
-        transition,
-        Transition::Retry { .. } | Transition::Fail { .. }
-    ) {
-        span.record("otel.status_code", "ERROR");
+    match transition {
+        Transition::Retry { .. } | Transition::Fail { .. } => {}
+        Transition::Complete | Transition::Snooze { .. } | Transition::Release => return,
     }
+    span.record("otel.status_code", "ERROR");
 }
 
 async fn run_attempt(
@@ -531,12 +529,8 @@ async fn persist(
     supervisor_deadline: Instant,
     slots: &Arc<AttemptSlots>,
 ) -> Option<Written> {
-    let operation = if matches!(transition, Transition::Release) {
-        Operation::Release
-    } else {
-        Operation::Record
-    };
     let write = write_of(transition);
+    let operation = write.map_or(Operation::Record, outcome::Write::operation);
     let fence = ClaimFence {
         job_id: attempt.job_id,
         generation,
@@ -548,14 +542,14 @@ async fn persist(
         let sent = within(shared, supervisor_deadline, async {
             match write {
                 None => complete_batched(shared, fence, supervisor_deadline, slots).await,
-                Some(write) => send_outcome(shared, fence, write, operation).await,
+                Some(write) => send_outcome(shared, fence, write).await,
             }
         })
         .await;
         match sent {
             None => break,
             Some(Ok(written)) => {
-                observe_acknowledged(shared, handles, attempt, transition, operation, written);
+                observe_acknowledged(shared, handles, attempt, operation, written);
                 return Some(written);
             }
             Some(Err(Unacknowledged)) => {}
@@ -576,7 +570,6 @@ fn observe_acknowledged(
     shared: &Shared,
     handles: &KindMetrics,
     attempt: &AttemptId,
-    transition: &Transition,
     operation: Operation,
     written: Written,
 ) {
@@ -593,7 +586,7 @@ fn observe_acknowledged(
         disposition = persistence.label(),
         "job_persistence_finished"
     );
-    if written == Written::Applied && matches!(transition, Transition::Release) {
+    if written == Written::Applied && operation == Operation::Release {
         shared.counters.released.fetch_add(1, Ordering::Relaxed);
     }
 }

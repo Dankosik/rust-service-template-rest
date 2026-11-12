@@ -32,7 +32,7 @@ use tokio::time::Instant;
 use crate::protocol::{KeyRing, ProtocolError, ensure_body_size, ensure_message_id_len};
 
 pub use maintenance::{CLEANUP_REMOVED_METRIC, CLEANUP_RUNS_METRIC, CleanupError};
-pub use processing::{Consumer, Consumers, DuplicateConsumer, MissingConsumer, Processor};
+pub use processing::{Consumer, Consumers, EndpointAlreadyBound, MissingConsumer, Processor};
 
 /// Re-exported so a consumer crate implements [`Consumer`] without its own
 /// `async-trait` dependency, as `tonic::async_trait` does for services.
@@ -290,7 +290,8 @@ enum ReceiptFailure {
     Enqueue(#[from] EnqueueError),
     #[error("webhook receipt transaction failed")]
     Transaction(#[from] TxError),
-    /// A receipt without a unique key cannot be a duplicate job.
+    /// The processing job uses no job deduplication key. The receipt's key
+    /// has already admitted this delivery.
     #[error("webhook receipt enqueue unexpectedly deduplicated")]
     UnexpectedDuplicate,
     #[error("webhook receipt payload exceeds the job payload bound")]
@@ -298,6 +299,14 @@ enum ReceiptFailure {
 }
 
 impl ReceiptFailure {
+    const fn stage(&self) -> &'static str {
+        match self {
+            Self::Query(_) => "insert_receipt",
+            Self::Enqueue(_) | Self::UnexpectedDuplicate | Self::PayloadTooLarge => "enqueue",
+            Self::Transaction(_) => "transaction",
+        }
+    }
+
     /// The static `webhook.reason` log label.
     const fn reason(&self) -> &'static str {
         match self {
@@ -332,6 +341,7 @@ fn receipt_unavailable(endpoint_id: &str, error: &ReceiptFailure) -> ReceiveErro
     tracing::warn!(
         webhook.endpoint = endpoint_id,
         webhook.reason = error.reason(),
+        webhook.stage = error.stage(),
         sqlstate = driver.and_then(sqlstate).as_deref(),
         cause = driver.map(failure_cause),
         "webhook_receipt_unavailable"

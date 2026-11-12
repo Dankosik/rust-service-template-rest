@@ -244,12 +244,7 @@ fn unusable_trust_material_degrades_the_exporter_and_names_the_variable() {
         assert!(error.to_string().starts_with(expected));
         let handle = tracer_provider(&options("https://127.0.0.1:1"), |_| None, &trust)
             .expect("unusable trust material is not a startup failure");
-        match handle.exporter_state {
-            ExporterState::Degraded { reason } => {
-                assert_eq!(reason, "exporter_build");
-            }
-            state => panic!("{expected}: {state:?}"),
-        }
+        assert_eq!(handle.exporter_state, ExporterState::Degraded, "{expected}");
     }
 }
 

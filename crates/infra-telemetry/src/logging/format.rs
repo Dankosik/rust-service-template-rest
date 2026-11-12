@@ -140,7 +140,6 @@ impl<const N: usize> Bytes<N> {
         }
     }
 
-    /// Bytes that still fit within the limit.
     fn room(&self) -> usize {
         self.limit.saturating_sub(self.len)
     }
@@ -493,6 +492,24 @@ impl FormatLayer {
         }
     }
 
+    fn format_record<S>(
+        &self,
+        event: &Event<'_>,
+        ctx: &Context<'_, S>,
+    ) -> Result<Record, DropReason>
+    where
+        S: Subscriber + for<'a> LookupSpan<'a>,
+    {
+        // Keep allocation outside the write_record hotpath measurement.
+        let mut scratch = Scratch::new(MAX_RECORD_BYTES);
+        let mut line = Bytes::new(MAX_RECORD_BYTES);
+        self.write_record(event, ctx, &mut scratch, &mut line)?;
+        Ok(Record {
+            bytes: line.storage,
+            len: line.len,
+        })
+    }
+
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn write_record<S>(
         &self,
@@ -553,7 +570,7 @@ impl FormatLayer {
             }
         }
         if let Some(span) = &span {
-            self.write_trace_ids(&span.id(), line);
+            self.write_trace_context_fields(&span.id(), line);
         }
         if line.failed {
             return Err(DropReason::Oversize);
@@ -573,7 +590,7 @@ impl FormatLayer {
         }
     }
 
-    fn write_trace_ids(&self, id: &Id, line: &mut Bytes<MAX_RECORD_BYTES>) {
+    fn write_trace_context_fields(&self, id: &Id, line: &mut Bytes<MAX_RECORD_BYTES>) {
         let Some(dispatch) = self.dispatch.get().and_then(WeakDispatch::upgrade) else {
             return;
         };
@@ -675,13 +692,8 @@ where
         let Some(_guard) = self.admit() else {
             return;
         };
-        let mut scratch = Scratch::new(MAX_RECORD_BYTES);
-        let mut line = Bytes::new(MAX_RECORD_BYTES);
-        match self.write_record(event, &ctx, &mut scratch, &mut line) {
-            Ok(()) => self.output.submit(Record {
-                bytes: line.storage,
-                len: line.len,
-            }),
+        match self.format_record(event, &ctx) {
+            Ok(record) => self.output.submit(record),
             Err(reason) => self.output.record_drop(reason),
         }
     }

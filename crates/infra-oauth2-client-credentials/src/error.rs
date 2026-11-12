@@ -48,21 +48,6 @@ impl AcquisitionError {
             Self::Assertion => "assertion",
         }
     }
-
-    /// Whether this outcome is a failure shared with other callers for
-    /// [`FAILURE_WINDOW`](crate::credentials::FAILURE_WINDOW). Local refusals
-    /// stay private to the caller that hit them.
-    pub(crate) fn is_shared_failure(self) -> bool {
-        match self {
-            Self::AtCapacity | Self::Cancelled | Self::Timeout => false,
-            Self::Transport
-            | Self::ResponseLimit
-            | Self::Unavailable
-            | Self::Rejected(_)
-            | Self::InvalidResponse
-            | Self::Assertion => true,
-        }
-    }
 }
 
 /// Why the provider refused a token request: its `error` code (RFC 6749
