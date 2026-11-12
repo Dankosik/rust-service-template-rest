@@ -102,13 +102,13 @@ jobs:
         with:
           persist-credentials: false
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
         with:
           languages: actions
           build-mode: none
           queries: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'security-extended' || 'security-and-quality' }}
       - name: Analyze
-        uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
 
   analyze-rust:
     needs: changes
@@ -133,7 +133,7 @@ jobs:
           rustup show active-toolchain
       - name: Initialize CodeQL
         id: init
-        uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
         with:
           languages: rust
           build-mode: none
@@ -158,7 +158,7 @@ jobs:
           restore-keys: codeql-rust-${{ runner.os }}-${{ runner.arch }}-${{ steps.init.outputs.codeql-version }}-
       - name: Analyze
         id: analyze
-        uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
         env:
           CODEQL_EXTRACTOR_RUST_OPTION_CARGO_TARGET_DIR: ${{ runner.temp }}/codeql-cargo-target
           # Test-only code ships nowhere (.github/codeql/rust.yml).
