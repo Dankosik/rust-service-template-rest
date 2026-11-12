@@ -2432,7 +2432,7 @@ fn conflicting_descriptors_for_the_same_service_are_rejected() {
         .find(|service| service.name() == "EchoService")
         .unwrap();
     echo.method.retain(|method| method.name() != "Unary");
-    let conflicting = descriptor.encode_to_vec().into_boxed_slice().leak();
+    let conflicting = Box::leak(descriptor.encode_to_vec().into_boxed_slice());
     assert_eq!(
         services.describe(conflicting),
         Err(Error::ConflictingServiceDescription(
