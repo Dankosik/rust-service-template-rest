@@ -31,7 +31,7 @@ use url::Url;
 
 use crate::{
     AcquisitionError, Algorithm, Credentials, Error, OnBehalfOf, Options, RefreshDriver, Rejection,
-    credentials::{AcquisitionDeadline, Cached},
+    credentials::{Cached, acquisition_deadline},
     options::{Admitted, admitted_provider_concurrency},
     token::EVICTION_MIN_AGE,
     token_endpoint::{FETCH_TIMEOUT, TOKEN_LIMITS},
@@ -411,6 +411,10 @@ fn exchange_response(access_token: &str) -> serde_json::Value {
 
 fn deadline(after: Duration) -> Instant {
     Instant::now() + after
+}
+
+fn token_context() -> OperationContext {
+    OperationContext::with_timeout(Duration::from_secs(10))
 }
 
 /// Moves the Tokio clock without waiting, leaving it running for socket I/O.
