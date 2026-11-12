@@ -23,6 +23,10 @@
 //! template profile carries that profile's marker, so it leaves with them.
 
 pub mod error_chain;
+pub mod hyper {
+    /// Hyper's HTTP/1 builder panics if its read buffer is configured below this size.
+    pub const HTTP1_MIN_READ_BUFFER_BYTES: u16 = 8 * 1024;
+}
 pub mod jitter;
 // template:begin oidc-introspection:introspection-cache-ranges
 pub mod oidc_introspection {

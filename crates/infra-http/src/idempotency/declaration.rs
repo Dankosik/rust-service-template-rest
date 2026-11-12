@@ -8,7 +8,9 @@ use utoipa::openapi::response::Response;
 
 use crate::contract::fixed_path_operations;
 
-use super::openapi::{key_parameter, replaces_protected_response, replay_header, response_family};
+use super::openapi::{
+    can_replace_with_idempotency_response, key_parameter, replay_header, response_family,
+};
 use super::stored;
 use super::{KEY_HEADER, REPLAYED_HEADER};
 
@@ -172,7 +174,7 @@ fn prepare_problem_responses(
     for (status, generated) in response_family() {
         if let Some(existing) = operation.responses.responses.get(&status)
             && existing != &generated
-            && !replaces_protected_response(&status, existing)
+            && !can_replace_with_idempotency_response(&status, existing)
         {
             return Err(CompositionError::new(
                 operation_id,

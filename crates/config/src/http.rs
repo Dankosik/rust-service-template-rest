@@ -6,17 +6,13 @@ use std::time::Duration;
 
 use bytesize::ByteSize;
 use serde::Deserialize;
+use shared_rules::hyper::HTTP1_MIN_READ_BUFFER_BYTES;
 
 use crate::listener_limits::{
     DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_IN_FLIGHT, DEFAULT_REQUEST_TIMEOUT, connection_age_range,
     connection_count_range, in_flight_range, request_timeout_range,
 };
 use crate::validate::{ValidationError, duration_range, int_range};
-
-/// Operator-facing floor for `http.max_header_bytes`. hyper refuses an HTTP/1
-/// read buffer below this size; the adapter still clamps independently so
-/// `Server::bind` cannot pass a smaller value even if validation was skipped.
-const MIN_HEADER_BYTES: u64 = 8 * 1024;
 
 /// The `http` section: application listener address, request budgets, capacity bounds, and shutdown timing.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -184,7 +180,7 @@ impl HttpConfig {
         int_range(
             "http.max_header_bytes",
             self.max_header_bytes.as_u64(),
-            MIN_HEADER_BYTES,
+            u64::from(HTTP1_MIN_READ_BUFFER_BYTES),
             ByteSize::mib(1).as_u64(),
         )?;
         int_range(

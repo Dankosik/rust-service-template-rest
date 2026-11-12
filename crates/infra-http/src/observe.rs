@@ -113,30 +113,28 @@ const CLIENT_CLOSED_REQUEST: StatusCode = match StatusCode::from_u16(499) {
     Err(_) => panic!("499 is a valid status code"),
 };
 
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct AccessLogOptions {
-    pub(crate) log_health_probes: bool,
-}
-
 /// The middleware state: what the access log is told and the metric handles
 /// shared by every request through one [`harden`](crate::harden())ed router.
 #[derive(Clone, Debug)]
 pub(crate) struct Observer {
-    options: AccessLogOptions,
+    log_health_probes: bool,
     series: Arc<Series>,
 }
 
 impl Observer {
-    pub(crate) fn new(options: AccessLogOptions) -> Self {
+    pub(crate) fn new(log_health_probes: bool) -> Self {
         Self {
-            options,
+            log_health_probes,
             series: Arc::default(),
         }
     }
 }
 
 pub(crate) async fn observe(
-    State(Observer { options, series }): State<Observer>,
+    State(Observer {
+        log_health_probes,
+        series,
+    }): State<Observer>,
     matched: Option<MatchedPath>,
     mut request: Request,
     next: Next,
@@ -162,7 +160,7 @@ pub(crate) async fn observe(
         .map_or(UNMATCHED_ROUTE, MatchedPath::as_str);
     let active = Active::start(&series, request_method(method.as_str()));
     let mut pending = Pending {
-        options,
+        log_health_probes,
         series: &series,
         method: &method,
         route,
@@ -203,7 +201,7 @@ pub(crate) async fn observe(
 }
 
 struct Pending<'a> {
-    options: AccessLogOptions,
+    log_health_probes: bool,
     series: &'a Series,
     method: &'a Method,
     route: &'a str,
@@ -233,7 +231,7 @@ impl Pending<'_> {
             status,
             elapsed,
         );
-        if suppresses_access_log(self.options, self.method, self.route) {
+        if suppresses_access_log(self.log_health_probes, self.method, self.route) {
             return;
         }
         let duration_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
@@ -388,14 +386,14 @@ impl Series {
         status: StatusCode,
         elapsed: Duration,
     ) {
-        let status = status.as_u16();
+        let key = (method, status.as_u16());
         let seconds = elapsed.as_secs_f64();
         if let Some(histogram) = self
             .durations
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .get(route)
-            .and_then(|statuses| statuses.get(&(method, status)))
+            .and_then(|statuses| statuses.get(&key))
         {
             histogram.record(seconds);
             return;
@@ -405,13 +403,13 @@ impl Series {
             .unwrap_or_else(PoisonError::into_inner)
             .entry(route.into())
             .or_default()
-            .entry((method, status))
+            .entry(key)
             .or_insert_with(|| duration_histogram(method, route, status))
             .record(seconds);
     }
 }
 
-fn duration_histogram(method: &'static str, route: &str, status: u16) -> Histogram {
+fn duration_histogram(method: &'static str, route: &str, status: StatusCode) -> Histogram {
     let labels = vec![
         Label::new("http_request_method", method),
         Label::new("http_response_status_code", status_label(status)),
@@ -435,12 +433,12 @@ static STATUS_CODES: [StatusCode; 900] = {
     codes
 };
 
-fn status_label(status: u16) -> &'static str {
-    STATUS_CODES[usize::from(status - 100)].as_str()
+fn status_label(status: StatusCode) -> &'static str {
+    STATUS_CODES[usize::from(status.as_u16() - 100)].as_str()
 }
 
-fn suppresses_access_log(options: AccessLogOptions, method: &Method, route: &str) -> bool {
-    !options.log_health_probes && method == Method::GET && is_health_probe_route(route)
+fn suppresses_access_log(log_health_probes: bool, method: &Method, route: &str) -> bool {
+    !log_health_probes && method == Method::GET && is_health_probe_route(route)
 }
 
 #[cfg(test)]
@@ -631,9 +629,7 @@ mod tests {
 
     #[test]
     fn probes_are_skipped_by_route_template_only() {
-        let quiet = AccessLogOptions {
-            log_health_probes: false,
-        };
+        let quiet = false;
         assert!(suppresses_access_log(quiet, &Method::GET, "/health/live"));
         assert!(suppresses_access_log(quiet, &Method::GET, "/health/ready"));
         assert!(suppresses_access_log(
@@ -643,9 +639,7 @@ mod tests {
         ));
         assert!(!suppresses_access_log(quiet, &Method::POST, "/health/live"));
         assert!(!suppresses_access_log(quiet, &Method::GET, UNMATCHED_ROUTE));
-        let verbose = AccessLogOptions {
-            log_health_probes: true,
-        };
+        let verbose = true;
         assert!(!suppresses_access_log(
             verbose,
             &Method::GET,

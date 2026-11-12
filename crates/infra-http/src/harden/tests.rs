@@ -598,9 +598,7 @@ async fn a_request_that_waits_out_its_patience_is_shed_and_logged() {
             admit,
         ))
         .layer(middleware::from_fn_with_state(
-            Observer::new(AccessLogOptions {
-                log_health_probes: false,
-            }),
+            Observer::new(false),
             observe::observe,
         ));
     let fields = Arc::new(Mutex::new(Vec::new()));
