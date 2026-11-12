@@ -45,7 +45,7 @@ const PULL_EXPIRY_GRACE: Duration = Duration::from_secs(2);
 /// Redelivery delay of a delivery returned unhandled at drain. It outlasts
 /// this replica's unsubscription, so the broker redelivers to another pull.
 const RELEASE_DELAY: Duration = Duration::from_secs(1);
-const MAX_BYTES_EXCEEDED: &str = "max_bytes_exceeded";
+const STREAM_ERRORS_TOTAL: &str = "messaging_consumer_stream_errors_total";
 
 /// NATS 2.15 counts the original subject and ACK reply in a pull's byte limit.
 /// V2 ACKs cover V1 too: prefix, domain, eight-byte account hash, stream,
@@ -287,12 +287,12 @@ impl Consumer {
             // Pull requests address a durable by name, not creation identity.
             // A replacement between successful full batches has no waiting
             // request to terminate, so verify identity before every new pull.
-            let identity = tokio::select! {
+            let loss_check = tokio::select! {
                 biased;
                 () = stop.cancelled() => break 'pulls,
-                identity = durable_is_lost(&self.pull) => identity,
+                loss_check = durable_is_lost(&self.pull) => loss_check,
             };
-            match identity {
+            match loss_check {
                 Ok(false) => {}
                 Ok(true) => return Err(ConsumerError::ConsumerLost),
                 Err(error) => {
@@ -370,7 +370,7 @@ impl Consumer {
                 Ok(
                     end @ (BatchEnd::Stopped
                     | BatchEnd::Closed
-                    | BatchEnd::FirstMessageTooLarge
+                    | BatchEnd::MaxBytesExceededBeforeFirstDelivery
                     | BatchEnd::Failed { .. }),
                 ) => {
                     release(messages, slots, stop).await;
@@ -389,9 +389,10 @@ impl Consumer {
                         break 'pulls;
                     }
                     let was_retrying_large_retained_record = retry_large_retained_record;
-                    retry_large_retained_record = matches!(end, BatchEnd::FirstMessageTooLarge);
+                    retry_large_retained_record =
+                        matches!(end, BatchEnd::MaxBytesExceededBeforeFirstDelivery);
                     if retry_large_retained_record {
-                        pull_failed("batch_receive", MAX_BYTES_EXCEEDED);
+                        pull_failed("batch_receive", BatchReceiveError::MaxBytesExceeded.label());
                         // A multi-message pull may report 409 before already
                         // allocated records reach this replica's subscription.
                         if was_retrying_large_retained_record {
@@ -463,15 +464,15 @@ impl Consumer {
                         if remaining == slots {
                             // The preflight INFO and the named pull are separate requests.
                             // Verify creation identity after this batch has delivered data.
-                            let identity = tokio::select! {
+                            let loss_check = tokio::select! {
                                 biased;
                                 () = stop.cancelled() => {
                                     release_message(&message, stop).await;
                                     return Ok(BatchEnd::Stopped);
                                 }
-                                identity = durable_is_lost(&self.pull) => identity,
+                                loss_check = durable_is_lost(&self.pull) => loss_check,
                             };
-                            match identity {
+                            match loss_check {
                                 Ok(false) => {}
                                 Ok(true) => return Err(ConsumerError::ConsumerLost),
                                 Err(error) => {
@@ -494,13 +495,13 @@ impl Consumer {
                     }
                     Ok(None) => return Ok(BatchEnd::Closed),
                     Ok(Some(Err(error))) => {
-                        let error_kind = batch_receive_error_kind(&error);
-                        if remaining == slots && error_kind == MAX_BYTES_EXCEEDED {
-                            return Ok(BatchEnd::FirstMessageTooLarge);
+                        let failure = classify_batch_receive_error(&error);
+                        if remaining == slots && matches!(failure, BatchReceiveError::MaxBytesExceeded) {
+                            return Ok(BatchEnd::MaxBytesExceededBeforeFirstDelivery);
                         }
                         return Ok(BatchEnd::Failed {
                             phase: "batch_receive",
-                            error_kind,
+                            error_kind: failure.label(),
                         });
                     }
                     Err(_) => return Ok(BatchEnd::Failed {
@@ -523,7 +524,7 @@ enum BatchEnd {
     Stopped,
     /// The batch ended before filling its slots.
     Closed,
-    FirstMessageTooLarge,
+    MaxBytesExceededBeforeFirstDelivery,
     /// The batch could not receive or verify a delivery.
     Failed {
         phase: &'static str,
@@ -592,12 +593,26 @@ fn batch_create_error_kind(kind: pull::BatchErrorKind) -> &'static str {
     }
 }
 
-fn batch_receive_error_kind(error: &async_nats::Error) -> &'static str {
+enum BatchReceiveError {
+    MaxBytesExceeded,
+    Other(&'static str),
+}
+
+impl BatchReceiveError {
+    const fn label(&self) -> &'static str {
+        match self {
+            Self::MaxBytesExceeded => "max_bytes_exceeded",
+            Self::Other(label) => label,
+        }
+    }
+}
+
+fn classify_batch_receive_error(error: &async_nats::Error) -> BatchReceiveError {
     let Some(error) = error.downcast_ref::<std::io::Error>() else {
-        return "other";
+        return BatchReceiveError::Other("other");
     };
     if error.kind() != std::io::ErrorKind::Other {
-        return "io_error";
+        return BatchReceiveError::Other("io_error");
     }
     // async-nats 0.50 Batch erases status/description into io::Error(Other).
     // Recognize only the pinned SDK format. The exact byte-limit status also
@@ -606,11 +621,13 @@ fn batch_receive_error_kind(error: &async_nats::Error) -> &'static str {
     let Some(status) =
         description.strip_prefix("error while processing messages from the stream: ")
     else {
-        return "io_error";
+        return BatchReceiveError::Other("io_error");
     };
-    match status {
+    let label = match status {
         "409, Some(\"Batch Completed\")" => "batch_completed",
-        "409, Some(\"Message Size Exceeds MaxBytes\")" => MAX_BYTES_EXCEEDED,
+        "409, Some(\"Message Size Exceeds MaxBytes\")" => {
+            return BatchReceiveError::MaxBytesExceeded;
+        }
         _ => match status.split_once(", ").map(|(code, _)| code) {
             Some("400") => "status_400",
             Some("403") => "status_403",
@@ -620,12 +637,13 @@ fn batch_receive_error_kind(error: &async_nats::Error) -> &'static str {
             Some("503") => "status_503",
             _ => "status_other",
         },
-    }
+    };
+    BatchReceiveError::Other(label)
 }
 
 fn pull_failed(phase: &'static str, error_type: &'static str) {
     tracing::warn!(phase, error.type = error_type, "messaging_pull_failed");
-    metrics::counter!("messaging_consumer_stream_errors_total").increment(1);
+    metrics::counter!(STREAM_ERRORS_TOTAL).increment(1);
 }
 
 // Missing or unsubmitted deliveries remain eligible for broker ack-wait
@@ -664,10 +682,7 @@ async fn release_message(message: &async_nats::jetstream::Message, stop: &Cancel
 pub(crate) fn describe_metrics() {
     use metrics::describe_counter;
 
-    describe_counter!(
-        "messaging_consumer_stream_errors_total",
-        "Recoverable pull-stream errors"
-    );
+    describe_counter!(STREAM_ERRORS_TOTAL, "Recoverable pull-stream errors");
     delivery::describe_metrics();
 }
 
@@ -787,15 +802,15 @@ mod tests {
             ("sentinel.provider.chosen", "io_error"),
         ] {
             let error: async_nats::Error = Box::new(std::io::Error::other(description));
-            assert_eq!(batch_receive_error_kind(&error), expected);
+            assert_eq!(classify_batch_receive_error(&error).label(), expected);
         }
         let error: async_nats::Error = Box::new(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "error while processing messages from the stream: 409, Some(\"Batch Completed\")",
         ));
-        assert_eq!(batch_receive_error_kind(&error), "io_error");
+        assert_eq!(classify_batch_receive_error(&error).label(), "io_error");
         let error: async_nats::Error = Box::new(std::fmt::Error);
-        assert_eq!(batch_receive_error_kind(&error), "other");
+        assert_eq!(classify_batch_receive_error(&error).label(), "other");
     }
 
     #[tokio::test(start_paused = true)]
