@@ -134,33 +134,35 @@ pub(crate) fn describe() {
     );
 }
 
-pub fn record_metrics(pool: &PgPool) {
+/// Record occupancy and capacity under a stable name unique to this pool in the recorder.
+pub fn record_metrics(pool: &PgPool, pool_name: &'static str) {
     let size = f64::from(pool.size());
     #[expect(
         clippy::cast_precision_loss,
         reason = "a metric gauge is f64; counts stay far below 2^52"
     )]
     let idle = pool.num_idle() as f64;
-    // Literal labels select the metrics facade's static-label fast path.
     metrics::gauge!(
         CONNECTION_COUNT_METRIC,
-        "db.client.connection.pool.name" => "postgres",
+        "db.client.connection.pool.name" => pool_name,
         "db.client.connection.state" => "idle"
     )
     .set(idle);
     metrics::gauge!(
         CONNECTION_COUNT_METRIC,
-        "db.client.connection.pool.name" => "postgres",
+        "db.client.connection.pool.name" => pool_name,
         "db.client.connection.state" => "used"
     )
     .set((size - idle).max(0.0));
-    metrics::gauge!(CONNECTION_MAX_METRIC, "db.client.connection.pool.name" => "postgres")
+    metrics::gauge!(CONNECTION_MAX_METRIC, "db.client.connection.pool.name" => pool_name)
         .set(f64::from(pool.options().get_max_connections()));
 }
 
+/// Observe one pool under the same naming contract as [`record_metrics`].
 /// A late tick shifts the schedule instead of bursting to catch up.
 pub async fn record_metrics_periodically(
     pool: PgPool,
+    pool_name: &'static str,
     interval: Duration,
     cancel: CancellationToken,
 ) {
@@ -170,7 +172,7 @@ pub async fn record_metrics_periodically(
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 ticker.tick().await;
-                record_metrics(&pool);
+                record_metrics(&pool, pool_name);
             }
         })
         .await;

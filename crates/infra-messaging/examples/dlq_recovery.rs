@@ -9,7 +9,7 @@
     reason = "the finite CLI owns bounded manifest files and durable fsync custody"
 )]
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -296,10 +296,18 @@ enum Persist {
 #[expect(
     clippy::disallowed_methods,
     clippy::disallowed_types,
-    reason = "finite owned CLI reads at most FILE_LIMIT bytes before decoding its manifest"
+    reason = "finite owned CLI opens its manifest for a bounded read"
 )]
 fn read_file(path: &Path) -> Result<Vec<u8>> {
     let file = File::open(path).map_err(|_| "file_read")?;
+    read_open_file(file)
+}
+
+#[expect(
+    clippy::disallowed_types,
+    reason = "finite owned CLI reads at most FILE_LIMIT plus one byte before decoding"
+)]
+fn read_open_file(file: File) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     file.take(FILE_LIMIT + 1)
         .read_to_end(&mut bytes)
@@ -333,7 +341,10 @@ fn save(path: &Path, value: &impl Serialize, persist: Persist) -> Result<()> {
     match persist {
         Persist::CreateNew => {
             file.persist_noclobber(path)
-                .map_err(|_| "selection_exists")?;
+                .map_err(|error| match error.error.kind() {
+                    ErrorKind::AlreadyExists => "selection_exists",
+                    _ => "selection_persist",
+                })?;
         }
         Persist::Replace => {
             file.persist(path).map_err(|_| "file_replace")?;
@@ -460,23 +471,28 @@ fn finish(state_path: &Path, state: &State) -> Result<()> {
 
 #[expect(
     clippy::disallowed_methods,
+    clippy::disallowed_types,
     reason = "finite owned CLI distinguishes its existing publication journal before dispatch"
 )]
 fn read_state(path: &Path, selection_sha256: String) -> Result<State> {
-    if path.exists() {
-        let state: State = read_json(path)?;
-        if state.version != 1 || state.selection_sha256 != selection_sha256 {
-            return Err("state_identity");
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return Ok(State {
+                version: 1,
+                selection_sha256,
+                publication: Publication::NotAttempted,
+                retirement: Retirement::Retained,
+                ack: None,
+            });
         }
-        return Ok(state);
+        Err(_) => return Err("file_read"),
+    };
+    let state: State = serde_json::from_slice(&read_open_file(file)?).map_err(|_| "file_format")?;
+    if state.version != 1 || state.selection_sha256 != selection_sha256 {
+        return Err("state_identity");
     }
-    Ok(State {
-        version: 1,
-        selection_sha256,
-        publication: Publication::NotAttempted,
-        retirement: Retirement::Retained,
-        ack: None,
-    })
+    Ok(state)
 }
 
 async fn redrive(args: &[String], resources: &mut Resources, deadline: Instant) -> Result<()> {
@@ -701,5 +717,24 @@ mod tests {
                 0o600
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn invalid_selection_destination_is_reported_as_a_persistence_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x".repeat(4096));
+        assert_eq!(
+            save(&path, &json!({}), Persist::CreateNew),
+            Err("selection_persist")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_inaccessible_journal_path_does_not_start_a_new_publication() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let path = file.path().join("selection.state.json");
+        assert!(matches!(read_state(&path, String::new()), Err("file_read")));
     }
 }
