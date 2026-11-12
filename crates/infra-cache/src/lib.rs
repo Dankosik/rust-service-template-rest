@@ -96,7 +96,7 @@ pub struct ClientCertificate {
     pub key_path: PathBuf,
 }
 
-/// Why admission refused to build a client. Display never includes the DSN,
+/// Local startup errors from [`Cache::start`]. Display never includes the DSN,
 /// a password, or Redis error text.
 ///
 /// The password-file variants also describe reads during connection setup and
@@ -219,12 +219,14 @@ pub struct Cache {
 }
 
 impl Cache {
-    /// Validate the options, build the client, and start connecting in the background.
+    /// Validate the options, build the client, and spawn the connection supervisor.
     ///
     /// Must be called from a Tokio runtime with the time and I/O drivers enabled.
     /// Configured password and TLS files are read synchronously, so an async
-    /// caller runs this on the blocking pool with the runtime entered. Commands
-    /// and the probe report an outage.
+    /// caller runs this on the blocking pool with the runtime entered.
+    ///
+    /// A returned handle may still be connecting. Commands and the [`CacheProbe`]
+    /// report connection failures through their results.
     ///
     /// Install the intended metrics recorder first: the connection's counter
     /// and gauge handles bind to the recorder current here.
@@ -243,13 +245,7 @@ impl Cache {
             client,
             password_file,
         } = admission::admit(options)?;
-        if tokio::runtime::Handle::try_current().is_err() {
-            return Err(CacheError::NoRuntime);
-        }
-        // Tokio exposes a missing time driver as a panic at timer construction.
-        std::panic::catch_unwind(|| drop(tokio::time::sleep(Duration::ZERO)))
-            .map_err(|_| CacheError::NoTimeDriver)?;
-        admission::check_io_driver()?;
+        admission::check_runtime()?;
         observe::describe();
         Ok(Self {
             link: Arc::new(Link::start(server, client, password_file, command_timeout)),

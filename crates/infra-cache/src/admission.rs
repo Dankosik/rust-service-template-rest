@@ -1,5 +1,4 @@
-//! Startup admission: the DSN, address policy, credentials, and TLS material
-//! are checked once, before any connection, and turned into a client.
+//! Startup admission for Redis client options and Tokio runtime requirements.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -78,7 +77,14 @@ pub(crate) fn admit(options: CacheOptions) -> Result<Admitted, CacheError> {
     })
 }
 
-pub(crate) fn check_io_driver() -> Result<(), CacheError> {
+pub(crate) fn check_runtime() -> Result<(), CacheError> {
+    if tokio::runtime::Handle::try_current().is_err() {
+        return Err(CacheError::NoRuntime);
+    }
+    // Tokio exposes a missing time driver as a panic at timer construction.
+    std::panic::catch_unwind(|| drop(tokio::time::sleep(Duration::ZERO)))
+        .map_err(|_| CacheError::NoTimeDriver)?;
+
     let io_error = |error: std::io::Error| CacheError::IoDriverCheck { kind: error.kind() };
     let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).map_err(io_error)?;
     socket.set_nonblocking(true).map_err(io_error)?;
