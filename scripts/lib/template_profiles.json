@@ -583,7 +583,6 @@
       {
         "path": "crates/infra-http/src/server.rs",
         "ids": [
-          "http-server-tls",
           "http-bound-listener-tls"
         ]
       },

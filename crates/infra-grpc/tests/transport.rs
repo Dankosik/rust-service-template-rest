@@ -40,7 +40,7 @@ use infra_grpc::{
     ClientIdentity, ClientSecurity, ClientTimeout, ClientTlsMaterial, ERROR_DOMAIN, Error, Failure,
     Limits, ServerTlsMaterial, Services, TlsMaterialError, server_options, server_tls_config,
 };
-use infra_http::{Drained, Server};
+use infra_http::{BoundListener, Drained, Server};
 use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa, KeyPair,
     KeyUsagePurpose,
@@ -425,9 +425,10 @@ impl Fixture {
                     client_ca_pem: mtls.then_some(ca.as_str()),
                 })
                 .expect("server TLS config");
-                Server::bind_tls(address, app, server_options(limits), config)
+                BoundListener::bind(address)
                     .await
                     .expect("tls listener binds")
+                    .serve_tls(app, server_options(limits), config)
             }
             None => Server::bind(address, app, server_options(limits))
                 .await

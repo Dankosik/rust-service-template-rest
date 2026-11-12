@@ -11,6 +11,7 @@
 //! request deadline, the transport body limit and request-id sanitizing.
 //! Axum's extractor limit uses the same body-size ceiling.
 
+mod body;
 mod contract;
 pub mod extract;
 pub mod problem;

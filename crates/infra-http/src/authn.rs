@@ -3,6 +3,7 @@
 
 use axum::Router;
 use axum::extract::{FromRequestParts, Request, State};
+use axum::http::Extensions;
 use axum::http::header::{AUTHORIZATION, WWW_AUTHENTICATE};
 use axum::http::request::Parts;
 use axum::middleware::{self, Next};
@@ -26,6 +27,10 @@ use crate::problem::{Code, Problem, sanitized_internal_error};
 pub struct VerifiedPrincipal(Principal);
 
 impl VerifiedPrincipal {
+    pub(crate) fn from_extensions(extensions: &Extensions) -> Option<Self> {
+        extensions.get::<Principal>().cloned().map(Self)
+    }
+
     #[must_use]
     pub fn issuer(&self) -> &str {
         self.0.issuer()
@@ -89,7 +94,10 @@ where
         parts: &mut Parts,
         _: &S,
     ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
-        std::future::ready(crate::context::extension::<Principal>(parts).map(Self))
+        std::future::ready(
+            Self::from_extensions(&parts.extensions)
+                .ok_or_else(crate::context::missing_extension::<Principal>),
+        )
     }
 }
 

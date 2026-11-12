@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use axum::RequestExt;
 use axum::body::{Body, Bytes};
-use axum::extract::{FromRequestParts, OriginalUri, Request, State};
+use axum::extract::{OriginalUri, Request, State};
 use axum::http::{HeaderName, HeaderValue};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -192,7 +192,7 @@ async fn capture_attempt(
     let Some(deadline) = parts.extensions.get::<RequestDeadline>().copied() else {
         return ControlFlow::Break(wiring_failure(&operation_id, "deadline_missing"));
     };
-    let Ok(principal) = VerifiedPrincipal::from_request_parts(&mut parts, &()).await else {
+    let Some(principal) = VerifiedPrincipal::from_extensions(&parts.extensions) else {
         return ControlFlow::Break(wiring_failure(&operation_id, "principal_missing"));
     };
     let Some(caller) = identity::caller_identity(

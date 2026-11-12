@@ -18,7 +18,7 @@
 
 use std::time::Duration;
 
-use axum::http::header::{CONTENT_TYPE, RETRY_AFTER};
+use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE, RETRY_AFTER};
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
@@ -174,7 +174,7 @@ impl Problem {
 
     /// Filled by problem completion; callers do not thread the id.
     #[must_use]
-    pub(crate) fn with_request_id(mut self, id: String) -> Self {
+    fn with_request_id(mut self, id: String) -> Self {
         self.request_id = Some(id);
         self
     }
@@ -221,6 +221,21 @@ impl IntoResponse for Problem {
         }
         response
     }
+}
+
+pub(crate) fn complete_problem(mut response: Response, request_id: Option<&str>) -> Response {
+    let Some(id) = request_id else {
+        return response;
+    };
+    let Some(problem) = response.extensions_mut().remove::<Problem>() else {
+        return response;
+    };
+    let problem = problem.with_request_id(id.to_owned());
+    // Keep the status and headers already set by the response's owner.
+    *response.body_mut() = axum::Json(&problem).into_response().into_body();
+    response.headers_mut().remove(CONTENT_LENGTH);
+    response.extensions_mut().insert(problem);
+    response
 }
 
 /// Whole seconds, rounded up and at least one.

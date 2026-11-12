@@ -11,7 +11,7 @@ use super::openapi::{
 };
 use super::stored;
 
-const IDEMPOTENT_METHODS: [&str; 4] = ["post", "put", "patch", "delete"];
+const SUPPORTED_IDEMPOTENCY_METHODS: [&str; 4] = ["post", "put", "patch", "delete"];
 
 /// A local authoring error on the one route carrier being composed.
 ///
@@ -113,7 +113,7 @@ pub(super) fn prepare(paths: &mut Paths) -> Result<PreparedOperation, Compositio
         .clone()
         .filter(|id| !id.is_empty())
         .ok_or_else(shape)?;
-    if !IDEMPOTENT_METHODS.contains(&method) {
+    if !SUPPORTED_IDEMPOTENCY_METHODS.contains(&method) {
         return Err(CompositionError::new(&operation_id, Rule::Method));
     }
 
