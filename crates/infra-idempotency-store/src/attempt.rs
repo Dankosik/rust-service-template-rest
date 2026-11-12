@@ -25,7 +25,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use infra_postgres::{
-    Tx, TxError, failure_cause, in_tx_until, in_tx_with, is_transient, observed, sqlstate,
+    Tx, TxError, failure_cause, in_tx_with, in_tx_with_acquire_deadline, is_transient, observed,
+    sqlstate,
 };
 
 use crate::{READ_COMMITTED, Store};
@@ -229,7 +230,9 @@ impl Store {
             Ok(value)
         };
         let outcome = match deadline {
-            Some(deadline) => in_tx_until(&self.pool, deadline, READ_COMMITTED, work_in_tx).await,
+            Some(deadline) => {
+                in_tx_with_acquire_deadline(&self.pool, deadline, READ_COMMITTED, work_in_tx).await
+            }
             None => in_tx_with(&self.pool, READ_COMMITTED, work_in_tx).await,
         };
         match outcome {

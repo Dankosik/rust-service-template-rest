@@ -339,7 +339,7 @@ async fn command(mut args: Arguments) -> Result<bool, ReceiverError> {
     }
     .await;
     let closed = infra_postgres::close(&pool, Duration::from_secs(5)).await;
-    if closed == infra_postgres::Closed::TimedOut {
+    if closed == infra_postgres::CloseOutcome::TimedOut {
         return Err("fixture pool close timed out".into());
     }
     result

@@ -1,8 +1,8 @@
 //! The transaction seam and the commit-outcome policy.
 //!
 //! A feature chooses the atomic boundary by calling [`in_tx`] with an async
-//! closure; the closure gets an opaque transaction capability, so it cannot
-//! commit or roll back on its own. `Ok` commits, `Err` rolls back.
+//! closure. The boundary owns commit and rollback. A closure borrowing the
+//! underlying connection must follow the restriction on [`Tx::connection`].
 //!
 //! The one thing a driver cannot hide is that `COMMIT` may have succeeded
 //! on the server after the client stopped hearing from it. [`TxError`]
@@ -25,7 +25,7 @@ use tracing::Instrument;
 
 use crate::error::sqlstate;
 use crate::observe::{self, TransactionObservation, TransactionOutcome, observed};
-use crate::pool::to_runtime_param;
+use crate::pool::{acquire, acquire_until, to_runtime_param};
 
 /// Why a transaction did not commit, split by what is known about the outcome.
 #[derive(Debug, thiserror::Error)]
@@ -49,7 +49,6 @@ pub enum TxError {
 }
 
 impl TxError {
-    /// The driver error behind every variant.
     #[must_use]
     pub const fn driver(&self) -> &sqlx::Error {
         match self {
@@ -295,7 +294,7 @@ where
 /// # Errors
 ///
 /// The closure's error, or a [`TxError`] converted into it.
-pub async fn in_tx_until<T, E, F>(
+pub async fn in_tx_with_acquire_deadline<T, E, F>(
     pool: &PgPool,
     deadline: tokio::time::Instant,
     options: TxOptions,
@@ -326,8 +325,8 @@ where
         // layout-query depth limits.
         let acquired = Box::pin(async {
             match deadline {
-                Some(deadline) => observe::acquire_until(pool, "transaction", deadline).await,
-                None => observe::acquire(pool, "transaction").await,
+                Some(deadline) => acquire_until(pool, "transaction", deadline).await,
+                None => acquire(pool, "transaction").await,
             }
         })
         .await;

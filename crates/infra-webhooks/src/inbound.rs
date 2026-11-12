@@ -21,7 +21,7 @@ use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue};
 use infra_jobs::{EnqueueError, EnqueueOptions, Enqueued, JobKind, enqueue};
 use infra_postgres::{
-    Isolation, TxError, TxOptions, failure_cause, in_tx_until, observed, sqlstate,
+    Isolation, TxError, TxOptions, failure_cause, in_tx_with_acquire_deadline, observed, sqlstate,
 };
 use serde::{Deserialize, Serialize, Serializer};
 use serde_with::base64::Base64;
@@ -229,7 +229,7 @@ impl Receiver {
         let message_id = admit(verifier.as_ref(), headers, body.as_ref(), now)
             .map_err(|rejection| rejected(endpoint_id, rejection))?;
         let content_type = headers.get(CONTENT_TYPE).map(HeaderValue::as_bytes);
-        in_tx_until(
+        in_tx_with_acquire_deadline(
             &self.pool,
             deadline,
             READ_COMMITTED,

@@ -9,7 +9,7 @@ use crate::observe::tests::Events;
 async fn a_read_past_the_budget_fails_the_attempt_and_keeps_the_last_sample() {
     let recorder = PrometheusBuilder::new().build_recorder();
     let _recording = metrics::set_default_local_recorder(&recorder);
-    let mut observer = MaintenanceObserver::start(MaintenancePopulation::Jobs);
+    let mut observer = MaintenanceObserver::start(MaintenancePopulation::Cleanup(Cleanup::Jobs));
     let observed_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("the test clock is after the epoch")
@@ -59,7 +59,8 @@ fn population_gauge(recorder: &metrics_exporter_prometheus::PrometheusRecorder, 
 fn population_failure_and_cancellation_retain_dated_success_until_recovery() {
     let recorder = PrometheusBuilder::new().build_recorder();
     metrics::with_local_recorder(&recorder, || {
-        let mut observer = MaintenanceObserver::start(MaintenancePopulation::Jobs);
+        let mut observer =
+            MaintenanceObserver::start(MaintenancePopulation::Cleanup(Cleanup::Jobs));
         assert!(population_gauge(&recorder, "present").is_nan());
         assert!(population_gauge(&recorder, "oldest_timestamp_seconds").is_nan());
         assert_eq!(
@@ -149,7 +150,8 @@ fn clock_inconsistency_never_replaces_a_valid_population_with_empty() {
     ] {
         let recorder = PrometheusBuilder::new().build_recorder();
         metrics::with_local_recorder(&recorder, || {
-            let mut observer = MaintenanceObserver::start(MaintenancePopulation::Jobs);
+            let mut observer =
+                MaintenanceObserver::start(MaintenancePopulation::Cleanup(Cleanup::Jobs));
             let base = tokio::time::Instant::now();
             let original = MaintenanceClock {
                 wall: Some(1000.0),

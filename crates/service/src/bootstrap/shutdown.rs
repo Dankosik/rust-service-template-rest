@@ -12,7 +12,7 @@ use infra_cache::Cache;
 use infra_object_storage::ObjectStorage;
 // template:end object-storage:service-shutdown-object-storage-imports
 // template:begin postgres:shutdown-imports
-use infra_postgres::{Closed, PgPool};
+use infra_postgres::{CloseOutcome, PgPool};
 // template:end postgres:shutdown-imports
 use infra_telemetry::{
     LoggerGuard, LoggerShutdown, ProviderShutdown, SHUTDOWN_JOIN_SLACK, TracerProviderHandle,
@@ -139,11 +139,11 @@ impl Dependencies {
                 )
                 .await
                 {
-                    Closed::Complete => {
+                    CloseOutcome::Complete => {
                         tracing::info!("postgres_pool_closed");
                         false
                     }
-                    Closed::TimedOut => {
+                    CloseOutcome::TimedOut => {
                         tracing::warn!("postgres pool outlived its close budget");
                         true
                     }
