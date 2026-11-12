@@ -7,7 +7,7 @@ bound, body types, and failure visibility) and 2026-10-02 (request
 identifiers, empty downloads, who may read a streamed download, the span's
 region, the emulator's bucket, key rotation, feature dependency direction,
 retained-buffer budgets, and checksum-validation limits).
-[Guide](../guides/object-storage.md) owns adoption and observable behavior. This record
+`crates/infra-object-storage` owns adoption and observable behavior. This record
 retains the accepted choices and their reopen conditions. The comparison
 behind them, including the Go sibling template's findings, was the stage's
 research synthesis (`specs/s3-object-storage/research/synthesis.md`), which

@@ -348,12 +348,14 @@ impl Credentials {
                 None => self.service_token(deadline).await.map(Acquired::Service),
             }
         };
+        // Acquisition first: a cached token then never arms the deadline timer.
         let acquired = tokio::select! {
             biased;
+            result = acquisition => result,
             stopped = context.wait_stopped() => return Err(acquisition_stopped(stopped)),
-            result = acquisition => result?,
         };
         context.check().map_err(acquisition_stopped)?;
+        let acquired = acquired?;
         headers.insert(AUTHORIZATION, acquired.token().header.clone());
         Ok(acquired)
     }
@@ -512,6 +514,13 @@ impl Credentials {
     ) -> Result<Arc<Token>, AcquisitionError> {
         loop {
             self.check_admission(deadline)?;
+            // A hit skips `entry`, which boxes the key in an `Arc`, and the
+            // deadline timer that only a miss needs.
+            if let Some(token) = self.0.inner.exchanged.get(&key).await
+                && token.is_reusable(Instant::now())
+            {
+                return Ok(token);
+            }
             let (token, fresh) = self.exchanged_or_fetch(key, subject, deadline).await?;
             // Only the initializer may use a newly acquired request-only token.
             if fresh || token.is_reusable(Instant::now()) {
@@ -726,7 +735,9 @@ pub(crate) fn refresh_spread(
 ) -> Duration {
     // Source failure discards the bytes and falls back to the unjittered
     // base: the maximum lead or the base retry interval.
-    window * u32::from(sample.unwrap_or(0)) / u32::from(u16::MAX)
+    sample.map_or(Duration::ZERO, |sample| {
+        shared_rules::jitter::share_of_window(window, sample)
+    })
 }
 
 fn refresh_retry() -> Duration {

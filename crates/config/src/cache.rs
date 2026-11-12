@@ -27,9 +27,10 @@ pub struct CacheConfig {
     #[serde(default, deserialize_with = "blank_secret_as_none")]
     pub dsn: Option<SecretString>,
     /// A file that holds the password alone, for a platform that rotates it
-    /// by rewriting the file. The DSN then carries no password, and the
-    /// running service follows the file. Missing, empty, or whitespace-only
-    /// is unset (`None`), the default.
+    /// by rewriting the file; its trailing line breaks are not part of the
+    /// password. The DSN then carries no password, and the running service
+    /// follows the file. Missing, empty, or whitespace-only is unset (`None`),
+    /// the default.
     #[serde(default, deserialize_with = "blank_as_none")]
     pub password_file: Option<PathBuf>,
     /// PEM root CA path for a private certificate. Missing, empty, or

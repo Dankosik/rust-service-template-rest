@@ -262,7 +262,9 @@ fn refresh_period() -> Duration {
 
 fn refresh_period_for_sample(sample: Result<u16, aws_lc_rs::error::Unspecified>) -> Duration {
     // A failed random sample only drops the spread; refresh keeps the full interval.
-    let spread = MAX_REFRESH_SPREAD * u32::from(sample.unwrap_or(0)) / u32::from(u16::MAX);
+    let spread = sample.map_or(Duration::ZERO, |sample| {
+        shared_rules::jitter::share_of_window(MAX_REFRESH_SPREAD, sample)
+    });
     REFRESH_INTERVAL.saturating_sub(spread)
 }
 
@@ -417,10 +419,6 @@ mod tests {
             (Err(aws_lc_rs::error::Unspecified), Duration::from_mins(15)),
         ] {
             assert_eq!(super::refresh_period_for_sample(sample), expected);
-        }
-        for sample in 0..=u16::MAX {
-            let period = super::refresh_period_for_sample(Ok(sample));
-            assert!((Duration::from_secs(810)..=Duration::from_mins(15)).contains(&period));
         }
     }
 

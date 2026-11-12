@@ -115,7 +115,7 @@ profile closure keeps normal crate tests local and selects CI's
 against Compose Valkey. It checks round trip, TTL expiry, probe success,
 unreachable and silent-server degradation, recovery, and TLS trust. It does
 not certify a deployed memory policy or the feature's key and invalidation
-rules. See the [cache guide](docs/guides/cache.md).
+rules.
 <!-- template:end cache:contributing-cache-proof -->
 
 <!-- template:begin object-storage:contributing-object-storage-proof -->
@@ -126,24 +126,17 @@ selects CI's `object_storage_integration` surface. That gate runs
 the round trip, create-only puts, a streamed upload with a trailing checksum,
 presigned GET expiry, rejected credentials, and the bucket probe. It does not
 certify a provider: `make test-object-storage-conformance PROVIDER=<provider>`
-records one live bucket's behavior and never runs in CI. See the
-[object storage guide](docs/guides/object-storage.md).
+records one live bucket's behavior and never runs in CI.
 <!-- template:end object-storage:contributing-object-storage-proof -->
 
 A change to an HTTP operation is made in the handler's `#[utoipa::path]`
 attributes and schema derives, then `make openapi-generate` rewrites
 `api/openapi/service.yaml`; commit the YAML with the change and review its
 diff as the contract change. `make test` fails on a stale copy.
-[HTTP Architecture](docs/architecture/http.md) has the full workflow, and
-[First Production Feature](docs/first-production-feature.md) walks a new
-feature crate from the business rule to the merged, documented, tested
-operation.
 
-Every make target, what it needs, and the guard variables are explained in
-[Commands](docs/build-test-and-development-commands.md); where a crate,
-module, file, or test belongs is decided by
-[Project Structure](docs/project-structure-and-module-organization.md), and
-[Repository Architecture](docs/repo-architecture.md) selects the leaf for a
+`make help` lists every make target; [`make/template.mk`](make/template.mk)
+explains what each needs and its guard variables.
+[Repository Architecture](docs/repo-architecture.md) holds the rules for a
 change that can move an ownership boundary.
 
 [AGENTS.md](AGENTS.md#validation-budget) owns the local stop rule. Missing
@@ -163,8 +156,9 @@ real defect still requires correction.
   progress, jobs reliability and CodeQL Rust proofs run after merge on `main`,
   and a failure there opens a `main-red` issue
   ([Red main](docs/ci-cd-production-ready.md#red-main)).
-- Update `docs/roadmap.md` when a stage completes or its scope changes, and
-  update other docs with behavior, contract, CI, or operational changes.
+- Code is the source of truth. Keep a document only for what code cannot
+  show (a decision's reason, an operator runbook, a policy), and update it in
+  the same change that alters that fact.
 - Configure required reviews and status checks with GitHub Rulesets or
   organization policy; require the `required` check from `ci.yml` and
   `codeql-required` from `codeql.yml`. Both accept a gate the changed

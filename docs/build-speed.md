@@ -80,8 +80,8 @@ exporter errors, missing or ambiguous evidence and changed identities retain
 custody. Deleting the gate or
 forcing an unlock can overlap live work. Legacy directory clients retain their
 old crash/cancel limitation and need a confirmed drain and upgrade for the
-new custody guarantee. See the [queue command guide](build-test-and-development-commands.md#shared-validation-queue)
-for status, nesting, compatibility and recovery details.
+new custody guarantee. `scripts/ci/validation-lock.py` owns status, nesting,
+compatibility and recovery.
 
 ## Workstation setup
 

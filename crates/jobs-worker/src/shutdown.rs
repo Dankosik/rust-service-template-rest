@@ -445,7 +445,7 @@ async fn close_diagnostics(server: Option<Server>, budget: Duration) -> bool {
     match server.drain(budget).await {
         Ok(Drained::Complete) => tracing::info!("diagnostics_stopped"),
         // Only a scrape that outlived the budget after the accept loop joined
-        // is exempt from the degraded vote (docs/architecture/runtime-lifecycle.md).
+        // is exempt from the degraded vote.
         Ok(Drained::TimedOut { .. }) => {
             tracing::warn!(
                 reason = "scrape_outlived_shutdown_budget",

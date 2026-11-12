@@ -2,8 +2,8 @@
 //!
 //! Two signals per retained table owner: how old its oldest eligible row is
 //! ([`MaintenanceObserver`]), and what each cleanup pass confirmed it removed
-//! ([`CleanupPass`]). The signal contract, clocks and alert examples are in
-//! `docs/guides/postgres-maintenance.md`.
+//! ([`CleanupPass`]). `env/monitoring/postgres-maintenance.rules.yml` holds
+//! the alert examples built on them.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 

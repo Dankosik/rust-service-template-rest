@@ -216,20 +216,31 @@ impl Shared {
     }
 
     async fn acquire(&self) -> Result<Arc<Generation>, ErrorType> {
+        // A connected link answers without touching the shared waiter list.
+        if let Some(settled) = self.settled() {
+            return settled;
+        }
         loop {
             // Register before examining state so publication cannot be missed.
             let changed = self.changed.notified();
             tokio::pin!(changed);
             changed.as_mut().enable();
-            match &*self.state() {
-                State::Closed => return Err(ErrorType::Io),
-                State::Connected(current) if !current.retired.is_cancelled() => {
-                    return Ok(current.clone());
-                }
-                State::SetupFailed(error) => return Err(*error),
-                State::Connected(_) | State::Connecting => {}
+            if let Some(settled) = self.settled() {
+                return settled;
             }
             changed.await;
+        }
+    }
+
+    /// Returns `None` while a command must wait for the next transition.
+    fn settled(&self) -> Option<Result<Arc<Generation>, ErrorType>> {
+        match &*self.state() {
+            State::Closed => Some(Err(ErrorType::Io)),
+            State::Connected(current) if !current.retired.is_cancelled() => {
+                Some(Ok(current.clone()))
+            }
+            State::SetupFailed(error) => Some(Err(*error)),
+            State::Connected(_) | State::Connecting => None,
         }
     }
 }
@@ -277,13 +288,15 @@ impl Link {
     ) -> Result<T, ErrorType> {
         context.check().map_err(|_| ErrorType::Timeout)?;
         let slot = self.claim_slot(&self.application_slots)?;
+        // Acquisition first: a connected link then never arms the deadline timer.
         let generation = tokio::select! {
             biased;
+            result = self.shared.acquire() => result,
             _ = context.wait_stopped() => return Err(ErrorType::Timeout),
-            result = self.shared.acquire() => result?,
         };
         // A stop seen only by the exchange would retire this healthy generation.
         context.check().map_err(|_| ErrorType::Timeout)?;
+        let generation = generation?;
         let exchange = Exchange::new(&self.shared, generation, slot);
         let mut connection = exchange.generation.connection.clone();
         tokio::select! {

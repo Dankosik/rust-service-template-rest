@@ -10,6 +10,10 @@ use std::{
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Deserializer, de};
+use shared_rules::{
+    rfc6750::{self, NoBearer},
+    rfc7515,
+};
 
 use crate::{CallerName, JwtType, MAX_TOKEN_LIFETIME_SECONDS, TrustRegistry, unix_seconds};
 
@@ -181,8 +185,12 @@ impl Verifier {
         &self,
         authorization: impl IntoIterator<Item = &'a [u8]>,
     ) -> Result<Caller, Failure> {
-        let result =
-            bearer(authorization.into_iter()).and_then(|token| self.verify_at(token, unix_now()?));
+        let result = rfc6750::token(authorization)
+            .map_err(|refusal| match refusal {
+                NoBearer::Missing => Reason::Missing,
+                NoBearer::Malformed => Reason::Malformed,
+            })
+            .and_then(|token| self.verify_at(token.as_bytes(), unix_now()?));
         match result {
             Ok(caller) => {
                 self.0.verified.increment(1);
@@ -245,8 +253,12 @@ impl Verifier {
     /// Every check of the contract at `now`; the caller and the token's
     /// validity window.
     fn verify_uncached(&self, token: &[u8], now: u64) -> Result<(Caller, Window), Reason> {
-        let (message, signature) = split_last_dot(token).ok_or(Reason::Header)?;
-        let (header, payload) = split_last_dot(message).ok_or(Reason::Header)?;
+        let rfc7515::Compact {
+            signing_input: message,
+            header,
+            payload,
+            signature,
+        } = rfc7515::compact(token).ok_or(Reason::Header)?;
         let header = URL_SAFE_NO_PAD.decode(header).map_err(|_| Reason::Header)?;
         // RFC 7515 section 5.2 requires UTF-8 for the whole header and payload;
         // `serde_json::from_slice` skips an ignored member's bytes unchecked.
@@ -327,45 +339,6 @@ impl Verifier {
     }
 }
 
-/// Exactly one `Authorization` value with an RFC 6750 `Bearer` credential:
-/// the scheme, one or more spaces, and a `b64token`. A foreign scheme is
-/// missing evidence and is never parsed.
-// template:begin authn:serviceauth-bearer-authn-twin
-///
-/// `infra-bearerauthn`'s `parse_bearer` applies the same grammar and must
-/// change with it; this crate cannot depend on that one, which `AUTHN=none`
-/// removes.
-// template:end authn:serviceauth-bearer-authn-twin
-fn bearer<'a>(mut values: impl Iterator<Item = &'a [u8]>) -> Result<&'a [u8], Reason> {
-    let value = values.next().ok_or(Reason::Missing)?;
-    if values.next().is_some() {
-        return Err(Reason::Malformed);
-    }
-    let (scheme, rest) = value.split_at(
-        value
-            .iter()
-            .position(|byte| *byte == b' ')
-            .unwrap_or(value.len()),
-    );
-    let tchar = |byte: &u8| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(byte);
-    if scheme.is_empty() || !scheme.iter().all(tchar) {
-        return Err(Reason::Malformed);
-    }
-    if !scheme.eq_ignore_ascii_case(b"Bearer") {
-        return Err(Reason::Missing);
-    }
-    let token = &rest[rest
-        .iter()
-        .position(|byte| *byte != b' ')
-        .unwrap_or(rest.len())..];
-    let padding = token.iter().rev().take_while(|byte| **byte == b'=').count();
-    let b64token = |byte: &u8| byte.is_ascii_alphanumeric() || b"-._~+/".contains(byte);
-    if token.len() == padding || !token[..token.len() - padding].iter().all(b64token) {
-        return Err(Reason::Malformed);
-    }
-    Ok(token)
-}
-
 /// When a verified token is valid: from the later of its `iat` and `nbf`
 /// to its `exp`, each widened by the clock allowance.
 #[derive(Clone, Copy)]
@@ -385,11 +358,6 @@ impl Window {
             Ok(())
         }
     }
-}
-
-fn split_last_dot(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
-    let dot = bytes.iter().rposition(|byte| *byte == b'.')?;
-    Some((&bytes[..dot], &bytes[dot + 1..]))
 }
 
 fn unix_now() -> Result<u64, Reason> {
@@ -450,10 +418,9 @@ impl Audience<'_> {
     }
 }
 
-/// An RFC 7519 `NumericDate`: an unsigned integer, or a finite non-negative
-/// number rounded to the nearest whole second. Rounding matches how
-/// `jsonwebtoken`, and so `infra-bearerauthn`, reads a fractional date; the
-/// half second it can move a bound is inside [`LEEWAY_SECONDS`].
+/// An RFC 7519 `NumericDate`: an unsigned integer, or a number with a
+/// fraction read by [`shared_rules::rfc7519::numeric_date_seconds`]. The half
+/// second its rounding can move a bound is inside [`LEEWAY_SECONDS`].
 struct NumericDate(u64);
 
 impl<'de> Deserialize<'de> for NumericDate {
@@ -467,18 +434,10 @@ impl<'de> Deserialize<'de> for NumericDate {
             fn visit_u64<E: de::Error>(self, value: u64) -> Result<Self::Value, E> {
                 Ok(NumericDate(value))
             }
-            #[expect(
-                clippy::cast_possible_truncation,
-                clippy::cast_sign_loss,
-                clippy::cast_precision_loss,
-                reason = "the range check above the cast bounds the value"
-            )]
             fn visit_f64<E: de::Error>(self, value: f64) -> Result<Self::Value, E> {
-                if value.is_finite() && value >= 0.0 && value < u64::MAX as f64 {
-                    Ok(NumericDate(value.round() as u64))
-                } else {
-                    Err(E::custom("NumericDate out of range"))
-                }
+                shared_rules::rfc7519::numeric_date_seconds(value)
+                    .map(NumericDate)
+                    .ok_or_else(|| E::custom("NumericDate out of range"))
             }
         }
         deserializer.deserialize_any(Visitor)
@@ -919,44 +878,6 @@ mod tests {
             Case::claims().to_string().as_bytes(),
         );
         assert_eq!(case.check(&not_utf8), Err(Reason::Header));
-    }
-
-    #[test]
-    fn the_envelope_distinguishes_missing_from_malformed() {
-        assert_eq!(bearer(std::iter::empty()), Err(Reason::Missing));
-        assert_eq!(
-            bearer([b"Basic abc".as_slice()].into_iter()),
-            Err(Reason::Missing)
-        );
-        assert_eq!(
-            bearer([b"bEaReR  a.b.c".as_slice()].into_iter()),
-            Ok(b"a.b.c".as_slice())
-        );
-        assert_eq!(
-            bearer([b"Bearer a.b=".as_slice()].into_iter()),
-            Ok(b"a.b=".as_slice())
-        );
-        for value in [
-            b"Bearer".as_slice(),
-            b"Bearer ",
-            b"Bearer a b",
-            b"Bearer a\tb",
-            b"Bearer a=b",
-            b" Bearer a",
-            b"Bearer a ",
-            b"B@d a",
-            b"Bearer \xff",
-        ] {
-            assert_eq!(
-                bearer([value].into_iter()),
-                Err(Reason::Malformed),
-                "{value:?}"
-            );
-        }
-        assert_eq!(
-            bearer([b"Bearer a".as_slice(), b"Bearer b".as_slice()].into_iter()),
-            Err(Reason::Malformed)
-        );
     }
 
     #[test]

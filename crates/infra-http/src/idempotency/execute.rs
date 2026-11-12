@@ -18,9 +18,8 @@ use super::stored::{self, Stored};
 use crate::context::RequestDeadline;
 use crate::problem::{Code, Problem, sanitized_internal_error};
 
-/// Idempotent request outcomes at the HTTP idempotency boundary. The
-/// [idempotency guide](https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/guides/http-idempotency.md#transaction-outcomes-and-replay)
-/// defines each `outcome` label and the ones to alert on.
+/// Idempotent request outcomes at the HTTP idempotency boundary, one
+/// `outcome` label per `Outcome` variant.
 pub const HTTP_IDEMPOTENCY_OUTCOMES_METRIC: &str = "http_idempotency_outcomes_total";
 
 const RETRY_AFTER_HINT: Duration = Duration::from_secs(1);
@@ -45,24 +44,30 @@ pub(super) enum Outcome {
 }
 
 impl Outcome {
-    const fn label(self) -> &'static str {
-        match self {
-            Self::InvalidKey => "invalid_key",
-            Self::Unavailable => "unavailable",
-            Self::InProgress => "in_progress",
-            Self::KeyMismatch => "key_mismatch",
-            Self::Replayed => "replayed",
-            Self::Integrity => "integrity",
-            Self::Internal => "internal",
-            Self::Executed => "executed",
-            Self::Unstorable => "unstorable",
-            Self::NotStored => "not_stored",
-            Self::Abandoned => "abandoned",
-        }
-    }
-
     pub(super) fn record(self) {
-        metrics::counter!(HTTP_IDEMPOTENCY_OUTCOMES_METRIC, "outcome" => self.label()).increment(1);
+        // Literal label values let `metrics` keep a static key; a runtime
+        // value allocates the label vector and its retained copy per call.
+        macro_rules! outcomes {
+            ($($variant:ident => $label:literal),* $(,)?) => {
+                match self {
+                    $(Self::$variant => metrics::counter!(HTTP_IDEMPOTENCY_OUTCOMES_METRIC, "outcome" => $label),)*
+                }
+            };
+        }
+        let counter = outcomes!(
+            InvalidKey => "invalid_key",
+            Unavailable => "unavailable",
+            InProgress => "in_progress",
+            KeyMismatch => "key_mismatch",
+            Replayed => "replayed",
+            Integrity => "integrity",
+            Internal => "internal",
+            Executed => "executed",
+            Unstorable => "unstorable",
+            NotStored => "not_stored",
+            Abandoned => "abandoned",
+        );
+        counter.increment(1);
     }
 }
 
@@ -141,8 +146,6 @@ impl Idempotency {
     /// Only effects issued through the supplied [`Tx`] share this guarantee.
     /// External effects are not covered, and work may run again on a retry
     /// after rollback. A timeout during COMMIT does not guarantee rollback.
-    /// See the [idempotency guide](https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/guides/http-idempotency.md#transaction-outcomes-and-replay)
-    /// for storage limits, transaction outcomes, and replay policy.
     pub async fn execute<W, R>(self, work: W) -> Response
     where
         W: AsyncFnOnce(&mut Tx<'_>) -> R,

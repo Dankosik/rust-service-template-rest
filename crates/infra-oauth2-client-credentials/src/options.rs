@@ -83,10 +83,11 @@ pub(crate) fn admitted_provider_concurrency(value: u32) -> Result<usize, Configu
 pub(crate) fn admit_options(options: &Options) -> Result<Admitted, ConfigurationError> {
     let permits = admitted_provider_concurrency(options.provider_concurrency)?;
     let error = |key, reason| Err(ConfigurationError { key, reason });
-    // The same rules, in the same words, as the typed configuration section in
-    // `crates/config/src/integrations.rs` (`validate_token_url`,
-    // `is_scope_token` and the `OAuthConfig` checks), which refuses a
-    // whitespace-only value as empty.
+    // `Options` can be built without the configuration loader, so it repeats
+    // the checks of the typed section in `crates/config/src/integrations.rs`
+    // (`validate_token_url` and the `OAuthConfig` checks) in the same words,
+    // a whitespace-only value counting as empty. Both take the scope-token and
+    // userinfo rules from `shared_rules`.
     if options.client_id.trim().is_empty() {
         return error("client_id", "must be nonempty");
     }
@@ -99,12 +100,11 @@ pub(crate) fn admit_options(options: &Options) -> Result<Admitted, Configuration
     if options.private_key.expose_secret().trim().is_empty() {
         return error("private_key", "must be nonempty");
     }
-    if options.scopes.iter().any(|scope| {
-        scope.is_empty()
-            || !scope
-                .bytes()
-                .all(|b| matches!(b, 0x21 | 0x23..=0x5b | 0x5d..=0x7e))
-    }) {
+    if !options
+        .scopes
+        .iter()
+        .all(|scope| shared_rules::rfc6749::is_scope_token(scope))
+    {
         return error("scopes", "must contain RFC 6749 scope tokens");
     }
     if options
@@ -137,7 +137,7 @@ pub(crate) fn admit_options(options: &Options) -> Result<Admitted, Configuration
     }
     if !endpoint.username().is_empty()
         || endpoint.password().is_some()
-        || raw_authority_has_userinfo(&options.token_url)
+        || shared_rules::uri::authority_has_userinfo(&options.token_url)
     {
         return error("token_url", "must not include userinfo");
     }
@@ -145,15 +145,4 @@ pub(crate) fn admit_options(options: &Options) -> Result<Admitted, Configuration
         return error("token_url", "must not include a fragment");
     }
     Ok(Admitted { endpoint, permits })
-}
-
-/// `Url` drops an empty userinfo and reads a backslash as a path separator,
-/// so the parsed URL alone admits an `@` that `raw_authority_has_userinfo`
-/// in `crates/config/src/integrations.rs` refuses too.
-fn raw_authority_has_userinfo(token_url: &str) -> bool {
-    let Some((_, authority)) = token_url.split_once("://") else {
-        return false;
-    };
-    let authority_end = authority.find(['/', '?', '#']).unwrap_or(authority.len());
-    authority[..authority_end].contains('@')
 }

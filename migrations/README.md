@@ -4,7 +4,7 @@ Forward-only SQL migrations for the PostgreSQL profile, embedded into the
 `migrate` binary by `crates/migrate` at compile time and applied by
 `sqlx::migrate::Migrator` under a session lock. A service's own migrations
 arrive with its first durable feature; with an empty set, the runner proves
-the empty-history path. Rationale: [Persistence Architecture](../docs/architecture/persistence.md).
+the empty-history path.
 
 <!-- template:begin http-idempotency:migrations-readme-http-idempotency -->
 The HTTP idempotency pack creates `http_idempotency_records` in
@@ -46,8 +46,7 @@ Apply both migrations and stop/replace every old retention owner before
 activating recovery or relying on retained-failure custody. New workers require
 their complete admitted history. Keep the additive schema on rollback and roll
 forward: an old binary restores failed deletion. Never clear recovery history
-or reset claim-generation sequences as a rollback step. See
-[upgrade and custody](../docs/guides/background-jobs.md#upgrade-and-custody).
+or reset claim-generation sequences as a rollback step.
 <!-- template:end jobs:migrations-readme-jobs -->
 
 Rules enforced by `cargo test -p migrate` over the embedded set and by

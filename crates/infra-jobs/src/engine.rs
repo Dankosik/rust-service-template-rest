@@ -172,6 +172,7 @@ impl Engine {
                 attempt_tracker: TaskTracker::new(),
                 failing: Failing::default(),
                 completions: crate::attempt::Completions::default(),
+                owned_attempts: crate::attempt::MembershipGauge::owned_attempts(),
                 wake,
                 peers,
                 owns_process_duties,
@@ -214,6 +215,8 @@ impl Engine {
     #[must_use]
     pub fn start(self, tracker: &TaskTracker, cancel: &CancellationToken) -> Started {
         crate::attempt::describe_metrics();
+        self.shared.owned_attempts.bind();
+        self.shared.completions.memberships.bind();
         for registered in self.shared.registry.iter() {
             registered.metrics();
         }
@@ -524,13 +527,14 @@ pub(crate) struct Shared {
     /// Held by the engine's own statements (claim, retention, sampling) while
     /// they use a pooled connection, so they take one connection between them:
     /// the pool budget is `jobs.max_workers + 2`, one connection per attempt
-    /// slot plus this one and readiness (`docs/guides/background-jobs.md`).
+    /// slot plus this one and readiness.
     pub(crate) statement_turn: tokio::sync::Mutex<()>,
     pub(crate) cleanup: ForcedCleanup,
     pub(crate) counters: Counters,
     pub(crate) attempt_tracker: TaskTracker,
     failing: Failing,
     pub(crate) completions: crate::attempt::Completions,
+    pub(crate) owned_attempts: crate::attempt::MembershipGauge,
     /// Set when a due job of a registered kind was committed.
     pub(crate) wake: Arc<Notify>,
     /// Every engine of this worker process, this one included.

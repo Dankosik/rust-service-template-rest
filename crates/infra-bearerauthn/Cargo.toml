@@ -39,6 +39,7 @@ moka = { workspace = true, features = ["future"] }
 # template:end oidc-introspection:authn-secret-dependency
 serde = { workspace = true, features = ["std", "derive"] }
 serde_json = { workspace = true, features = ["std", "raw_value"] }
+shared-rules = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true, features = ["std"] }
 tokio = { workspace = true, features = ["net", "rt", "sync", "time", "macros", "io-util"] }

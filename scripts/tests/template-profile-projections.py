@@ -590,7 +590,19 @@ def _project(source: Path, candidate: str, initializer, inputs, destination: Pat
         "crates/operation-context/Cargo.toml",
         "crates/operation-context/src/lib.rs",
         "crates/infra-http/src/context.rs",
-        "docs/operation-budgets.md",
+    ))
+    # infra-http always consumes it, so its workspace entry is never unused.
+    _assert_profile_output(initializer, nodes, "unconditional shared rules", (
+        "crates/shared-rules/Cargo.toml",
+        "crates/shared-rules/src/lib.rs",
+        "crates/shared-rules/src/error_chain.rs",
+        "crates/shared-rules/src/jitter.rs",
+        "crates/shared-rules/src/otel_http.rs",
+        "crates/shared-rules/src/rfc6749.rs",
+        "crates/shared-rules/src/rfc6750.rs",
+        "crates/shared-rules/src/rfc7515.rs",
+        "crates/shared-rules/src/rfc7519.rs",
+        "crates/shared-rules/src/secret_file.rs",
     ))
     return nodes
 

@@ -71,6 +71,12 @@ impl CallerName {
     }
 }
 
+impl From<CallerName> for Arc<str> {
+    fn from(name: CallerName) -> Self {
+        name.0
+    }
+}
+
 impl fmt::Debug for CallerName {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Debug::fmt(&*self.0, formatter)

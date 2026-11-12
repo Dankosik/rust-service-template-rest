@@ -1,6 +1,6 @@
 # Outbound HTTP decisions
 
-This page records the durable technical decisions behind the optional bounded outbound profile. The [adoption guide](../guides/outbound-http.md) owns normal usage, limits, and compatibility.
+This page records the durable technical decisions behind the optional bounded outbound profile. `crates/infra-outbound-http` owns normal usage, limits, and compatibility.
 
 ## Selected implementation
 

@@ -35,7 +35,7 @@ A merge-readiness or release claim also needs the CI evidence named in
 [CI/CD Production Readiness](../ci-cd-production-ready.md); local analyzers
 do not prove platform state.
 
-The [shared validation queue](../build-test-and-development-commands.md#shared-validation-queue)
+The shared validation queue (`scripts/ci/validation-lock.py`)
 owns generation admission, ordinary process scopes, native Docker resource
 custody, quarantine and reconciliation. Context-aware verification uses that
 same queue and does not introduce a second ticket or recovery protocol.

@@ -100,8 +100,7 @@ impl Default for GrpcConfig {
     }
 }
 
-/// Leaves trust and credential inputs out of `Debug`, as
-/// `docs/configuration-source-policy.md` requires.
+/// Leaves trust and credential inputs out of `Debug` so they never reach logs.
 impl fmt::Debug for GrpcConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("GrpcConfig")

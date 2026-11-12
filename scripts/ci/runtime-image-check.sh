@@ -3,7 +3,7 @@
 # container because the distroless base has no shell or curl: the service
 # starts under the hardened run flags, /health/ready answers, the startup
 # record carries the expected commit, and SIGTERM ends the process with exit
-# code 0 inside the 45 s grace budget (docs/configuration-source-policy.md).
+# code 0 inside the 45 s grace budget.
 # A final step takes its /jobs-worker expectation from the repository's jobs
 # selection: where the pack is retained, the image must carry the entrypoint
 # and it must refuse to start before any database I/O; otherwise the image

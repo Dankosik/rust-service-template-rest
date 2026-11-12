@@ -1,8 +1,8 @@
 # Rust Code / Ownership Design
 
 Use when crate, module, or file ownership is not mechanically forced by the
-crate graph, [Component Boundaries](../../architecture/boundaries.md), or
-[Project Structure](../../project-structure-and-module-organization.md). Own
+crate graph, [`quality/architecture.json`](../../../quality/architecture.json), or
+[Repository Architecture](../../repo-architecture.md). Own
 the exact responsibility map and inverse file map without writing
 implementation.
 

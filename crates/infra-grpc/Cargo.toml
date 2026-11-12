@@ -36,6 +36,7 @@ prost-types = { workspace = true, features = ["std"] }
 rustls = { workspace = true, features = ["std", "aws_lc_rs"] }
 secrecy = { workspace = true }
 service-failure = { workspace = true }
+shared-rules = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
 tonic = { workspace = true, features = ["router", "channel", "server", "codegen", "tls-aws-lc", "tls-native-roots"] }

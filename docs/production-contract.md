@@ -24,7 +24,7 @@ named where they are enforced and linked from each section.
 
 A dependency whose loss makes the instance unable to serve registers a
 readiness probe; every operation's deadline fits inside
-`http.request_timeout` ([Integration Boundaries](architecture/integration.md)).
+`http.request_timeout`.
 
 ## Capacity envelope
 
@@ -32,7 +32,7 @@ readiness probe; every operation's deadline fits inside
 - Service time, payload bounds, and expected concurrency: Unresolved. The
   template caps `http.max_in_flight`, `http.max_connections`,
   `http.max_body_bytes`, and `http.max_header_bytes`
-  ([runtime budgets](configuration-source-policy.md#runtime-budget-policy));
+  (`crates/config/src/http.rs`);
   a service raises them from measurements, not defaults.
 - First capacity ceiling and required headroom: Unresolved.
 - Database connections, worker concurrency, and queue-age objective: N/A for
@@ -50,11 +50,9 @@ readiness probe; every operation's deadline fits inside
 When a service retains or adopts a capability, accept its workload and resource
 scope alongside the capacity envelope above. These obligations supply no
 service-specific limits, fairness classes or measured capacity; unresolved
-business choices stay unresolved. The [configuration policy](configuration-source-policy.md),
-[integration boundaries](architecture/integration.md),
-[runtime lifecycle](architecture/runtime-lifecycle.md) and
-[persistence architecture](architecture/persistence.md) own the applicable
-runtime rules and links to retained capability guides.
+business choices stay unresolved. `crates/config`, the composition root in
+`crates/service/src/bootstrap`, and each retained capability crate own the
+applicable runtime rules.
 
 - HTTP ingress admission and its timer end at the handler's response head.
   A feature that streams a response owns body lifetime, slow-reader limits and
@@ -143,7 +141,7 @@ runtime rules and links to retained capability guides.
   image is rolled back by digest ([Railway Deployment Profile](railway-deployment-profile.md#rollback)).
 - Shutdown: the template exits `0` after a clean staged teardown, `3` when a
   stage overran, `1` on startup failure, inside the 45 s grace period
-  ([Runtime Lifecycle](architecture/runtime-lifecycle.md#exit-codes)); a
+  (`crates/service/src/bootstrap`); a
   platform grace shorter than that is a contract violation.
 - Reconciliation policy, missing-data disposition and authority to resume writes:
   Unresolved.
@@ -172,27 +170,3 @@ The service's recovery runbook must make this sequence concrete:
 5. Record observed recovery evidence. The service owner admits resumed writes
    only after its compatibility and reconciliation criteria pass; any unresolved
    store or custody mismatch keeps them fenced.
-
-The [persistence guide](architecture/persistence.md) owns PostgreSQL scope.
-<!-- template:begin messaging:docs-production-messaging-recovery -->
-The [messaging guide](guides/durable-messaging.md#dlq-restore-and-bounds) distinguishes
-source/DLQ snapshots and consumer state from DLQ redrive and broker identity custody.
-<!-- template:end messaging:docs-production-messaging-recovery -->
-<!-- template:begin jobs:docs-production-jobs-recovery -->
-Preserve the [jobs upgrade and custody gate](guides/background-jobs.md#upgrade-and-custody),
-including replacement of every old seven-day retention owner and invalidation of
-pre-restore recovery tokens.
-<!-- template:end jobs:docs-production-jobs-recovery -->
-<!-- template:begin object-storage:docs-production-object-storage-recovery -->
-The [object-storage guide](guides/object-storage.md#integrity) owns latest-key/version
-limits and expected content digests.
-<!-- template:end object-storage:docs-production-object-storage-recovery -->
-<!-- template:begin cache:docs-production-cache-recovery -->
-The [cache guide](guides/cache.md#operate-the-server) defaults to invalidation unless the
-service explicitly adopts authoritative cache custody.
-<!-- template:end cache:docs-production-cache-recovery -->
-
-<!-- template:begin source-template:docs-production-consumer-lifecycle -->
-The source template provides a finite synthetic [native recovery rehearsal](consumer-lifecycle-rehearsal.md)
-with historical actors, native archives and per-identity reconciliation.
-<!-- template:end source-template:docs-production-consumer-lifecycle -->

@@ -25,6 +25,7 @@ metrics = { workspace = true }
 secrecy = { workspace = true }
 serde = { workspace = true, features = ["std", "derive"] }
 serde_json = { workspace = true, features = ["std"] }
+shared-rules = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true, features = ["std"] }
 

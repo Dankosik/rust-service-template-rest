@@ -172,14 +172,12 @@ fn read_secrets_dir(dir: &Path) -> Result<Variables, Error> {
 /// A secret file's text as a variable value: NUL is refused, since the
 /// environment cannot carry it and `VALUE_FREE` relies on that; trailing line
 /// breaks end the value.
-fn secret_value(mut text: String) -> std::io::Result<String> {
+fn secret_value(text: String) -> std::io::Result<String> {
     if text.contains('\0') {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "the value contains a NUL byte, which no variable can hold",
         ));
     }
-    let value_len = text.trim_end_matches(['\r', '\n']).len();
-    text.truncate(value_len);
-    Ok(text)
+    Ok(shared_rules::secret_file::value(text))
 }

@@ -42,7 +42,7 @@ initializer writes the service name and repository into it.
   for every service of the environment, and preserves the key id and the
   signing key, which an operator sets per service and seals. A shared
   reference does not create the shared variable; set it before the first
-  deploy. [Service authentication](guides/service-authentication.md) owns the values.
+  deploy. `crates/config/src/service_auth.rs` owns the values.
 <!-- template:end service-auth:docs-railway-service-auth -->
 <!-- template:begin postgres:docs-railway-postgres-migrate -->
 - With the PostgreSQL profile the file enables it, preserves
@@ -53,8 +53,7 @@ initializer writes the service name and repository into it.
   replaces the running one. Railway gives a pre-deploy command no time limit of
   its own, so `preDeployTimeoutSeconds` (360) bounds it above the migrator's
   own bound: connect, `postgres.migration_deadline` (5 min) and cleanup.
-  Raise both together. The order is safe under the expand-then-contract rule in
-  [Persistence](architecture/persistence.md#migrations): the old deployment runs
+  Raise both together. The order is safe under the expand-then-contract migration rule: the old deployment runs
   against the new schema for the build-to-cutover window plus the overlap, and a
   rollback's older migrator admits the newer history.
 <!-- template:end postgres:docs-railway-postgres-migrate -->
@@ -174,8 +173,7 @@ other platforms do re-poll readiness and it costs 15 s of an idle container.
 
 ## Grace budget
 
-The [runtime budget policy](configuration-source-policy.md) owns the
-derivation: `http.drain_timeout` (`25s`, including the `15s` readiness
+`crates/config` owns the derivation: `http.drain_timeout` (`25s`, including the `15s` readiness
 propagation delay) plus the `18.5s` teardown tail (diagnostics, background
 join, dependency close, shared trace/logger cleanup, 0.5 s SDK join slack, and 1 s
 runtime shutdown) requires `43.5s`, and `http.grace_period` (`45s`) is the platform window that must cover it. The
@@ -194,7 +192,7 @@ Set `APP__RUNTIME__WORKER_THREADS` explicitly for each process, for example
 override a Railway replica's limit is the plan's (24 vCPU and 24 GB on two
 derived services in October 2026), and a service that left the key unset ran
 24 workers for an average load of 0.02 vCPU; one Tokio worker per visible core
-adds idle thread and memory overhead. The typed [runtime setting](configuration-source-policy.md#runtime)
+adds idle thread and memory overhead. The typed `runtime` setting (`crates/config/src/runtime.rs`)
 uses cgroup-aware available parallelism when unset and always sets the count
 on the runtime builder, so `TOKIO_WORKER_THREADS` is not read. Check the
 effective `runtime.worker_threads` in the process's startup record.
@@ -223,8 +221,7 @@ that implies; it is not proof of the previously accepted artifact.
 For image deployment, retain and verify the accepted immutable digest as the
 primary rollback identity. A mutable tag or old source commit cannot replace it.
 Pair either artifact with compatible configuration, including overlays, external
-references and secret custody; [unknown configuration fields](configuration-source-policy.md#source-of-truth)
-can make an older binary refuse startup.
+references and secret custody; unknown configuration fields can make an older binary refuse startup.
 
 Before rollback, establish the service's schema/data and event/job payload
 compatibility window under its [Production Contract](production-contract.md#operation-and-recovery).

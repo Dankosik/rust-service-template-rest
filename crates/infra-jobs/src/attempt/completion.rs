@@ -8,7 +8,8 @@ use tokio::time::Instant;
 
 use super::outcome::{Unacknowledged, Written};
 use super::{
-    AttemptSlots, COMPLETION_MEMBERSHIPS_METRIC, ClaimFence, MetricMembership, expired, within,
+    AttemptSlots, COMPLETION_MEMBERSHIPS_METRIC, ClaimFence, MembershipGauge, MetricMembership,
+    expired, within,
 };
 use crate::engine::{Operation, OperationError, Shared, backstop, observe_failure};
 
@@ -21,10 +22,20 @@ type CompletionReply = Result<Written, Unacknowledged>;
 /// whose completion another waiter wrote finds the queue empty and reads its
 /// answer. A batch whose writer was dropped answers nobody, and each of its
 /// waiters retries as after a failed statement.
-#[derive(Default)]
 pub(crate) struct Completions {
     queued: std::sync::Mutex<Vec<QueuedCompletion>>,
     writer: tokio::sync::Mutex<()>,
+    pub(crate) memberships: MembershipGauge,
+}
+
+impl Default for Completions {
+    fn default() -> Self {
+        Self {
+            queued: std::sync::Mutex::default(),
+            writer: tokio::sync::Mutex::default(),
+            memberships: MembershipGauge::new(COMPLETION_MEMBERSHIPS_METRIC),
+        }
+    }
 }
 
 struct QueuedCompletion {
@@ -86,13 +97,14 @@ impl Completions {
             completions: self,
             fence,
         };
-        self.lock_queue().push(QueuedCompletion {
+        let queued = QueuedCompletion {
             fence,
             deadline,
-            membership: MetricMembership::new(COMPLETION_MEMBERSHIPS_METRIC),
+            membership: self.memberships.join(),
             slots: Arc::clone(slots),
             reply,
-        });
+        };
+        self.lock_queue().push(queued);
         (registration, response)
     }
 
@@ -257,7 +269,7 @@ mod tests {
 
     fn admitted(slots: &Arc<tokio::sync::Semaphore>) -> Arc<AttemptSlots> {
         Arc::new(AttemptSlots {
-            _membership: MetricMembership::new(OWNED_ATTEMPTS_METRIC),
+            _membership: MembershipGauge::owned_attempts().join(),
             _global: Arc::clone(slots).try_acquire_owned().unwrap(),
             _kind: None,
         })

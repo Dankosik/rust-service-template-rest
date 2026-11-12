@@ -25,6 +25,7 @@ toml = { workspace = true, features = ["parse", "serde"] }
 # template:begin config-url:config-url-dependency
 url = { workspace = true, features = ["std"] }
 # template:end config-url:config-url-dependency
+shared-rules = { workspace = true }
 
 [build-dependencies]
 vergen-gitcl = { workspace = true }

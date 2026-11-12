@@ -7,8 +7,7 @@
 //! configuration is loaded. The synchronous startup phases and the one
 //! exit-code mapping live here, the asynchronous startup in `bootstrap`, the
 //! stop signals in `signals`, worker-owned tasks in `background`, and the
-//! staged teardown in `shutdown`. The full order is in
-//! docs/architecture/runtime-lifecycle.md (section "Jobs worker").
+//! staged teardown in `shutdown`.
 
 mod background;
 mod bootstrap;

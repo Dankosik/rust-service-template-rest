@@ -9,8 +9,8 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 pub(super) const MAX_RECORD_BYTES: usize = 16 * 1024;
-/// With [`MAX_RECORD_BYTES`] and the capture limits, part of the memory
-/// budget that `docs/configuration-source-policy.md` owns.
+/// With [`MAX_RECORD_BYTES`] and the capture limits, bounds the memory the
+/// log pipeline can hold.
 const QUEUE_RECORDS: usize = 512;
 /// The subscriber holds a sender until the process exits, so the channel
 /// never disconnects on shutdown; the worker polls the closed flag instead.

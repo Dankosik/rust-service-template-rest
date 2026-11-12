@@ -22,8 +22,7 @@ The check starts the container `--read-only --cap-drop=ALL
 (distroless has no shell or curl), asserts `app.commit` in the
 `service_starting` record, and requires exit `0` from `docker stop --time 45`.
 With the default configuration the stop takes about 15 s (the readiness
-propagation delay) inside the 45 s grace the
-[runtime budget policy](../configuration-source-policy.md) derives; a longer
+propagation delay) inside the 45 s grace that `crates/config` derives; a longer
 stop or a non-zero exit is the finding.
 <!-- template:begin worker:docs-containers-jobs-worker-check -->
 

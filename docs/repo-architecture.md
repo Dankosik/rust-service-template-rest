@@ -1,10 +1,9 @@
 # Repository Architecture
 
 This is the architecture front door for the service identified by
-`crates/service/Cargo.toml`. Select
-only the leaf whose pressure can change the current decision; code, the
-committed contract, tests, and crate documentation remain the final factual
-authority.
+`crates/service/Cargo.toml`. It records only the rules the code cannot state
+by itself. Code, the committed contract, tests, and crate documentation are
+the factual authority; read them for how something works.
 
 ## Global Invariants
 
@@ -21,7 +20,9 @@ authority.
    generated view does not become authority because it is easier to inspect.
 4. Optional profiles remain inert unless selected and fully wired; a partial
    capability is not a supported architecture. A crate, module, or directory
-   exists only with its first real artifact.
+   exists only with its first real artifact. `crates/shared-rules` is always
+   present: a module leaves with a profile only when every consumer belongs to
+   that profile, and otherwise stays as pure, dependency-free code.
 5. Trust, ingress and egress, dependency criticality, failure and recovery,
    and rollout choices are explicit at the boundary that enforces them: the
    hardened chain, the bounded server, the config validation, the readiness
@@ -35,12 +36,13 @@ authority.
 | --- | --- |
 | `#[utoipa::path]` annotations, `ToSchema`/`IntoResponses` derives, and the router merge in `crates/service/src/api.rs` | `api/openapi/service.yaml` (generated, committed, drift-tested), the served axum `Router` |
 | `crates/config/src/<section>.rs` (type, defaults, validation) | The immutable `Config` snapshot bootstrap and the adapters read |
-| `env/config/*.toml`, `APP__SECTION__KEY`, `--config`, `--config-overlay`, `--secrets-dir` | Inputs whose precedence and secret rules live in [Configuration Source Policy](configuration-source-policy.md) |
+| `env/config/*.toml`, `APP__SECTION__KEY`, `--config`, `--config-overlay`, `--secrets-dir` | Inputs whose precedence and secret rules `crates/config/src/load.rs` implements |
 | `crates/health` | The readiness verdict `/health/ready` serves and the drain flag teardown flips |
 | `crates/service-failure` | The closed catalog of failure codes; each transport owns its wire projection |
+| `crates/shared-rules` | Pure, std-only rules that several crates apply identically; callers keep their policy and error mapping ([decisions](decisions/shared-rules-decisions.md)) |
 <!-- template:begin grpc:docs-architecture-grpc-source -->
 | `api/proto/`, `tools/grpc-codegen` | Committed prost/tonic contracts under `crates/grpc-contracts`, checked against the PR base |
-| `crates/infra-grpc` | Tonic routes on the shared listener, clients, health projection and server TLS ([guide](guides/grpc.md)) |
+| `crates/infra-grpc` | Tonic routes on the shared listener, clients, health projection and server TLS |
 <!-- template:end grpc:docs-architecture-grpc-source -->
 | `crates/service/src/bootstrap` | Startup order, the shutdown plan, exit codes |
 | `crates/<feature>` (none yet) | Behavior consumed by transports and future binaries |
@@ -48,7 +50,7 @@ authority.
 
 <!-- template:begin postgres:docs-architecture-schema -->
 `migrations/*.sql` owns the PostgreSQL schema; `crates/migrate` embeds and applies
-it, and access code adapts to it ([Persistence](architecture/persistence.md)).
+it, and access code adapts to it.
 <!-- template:end postgres:docs-architecture-schema -->
 
 Concrete adapter wiring belongs in the composition root. Generated outputs
@@ -66,39 +68,15 @@ terms stay in their owning specification.
 The scaffold defines no service-specific terms. Add rows
 only for stable domain decisions.
 
-## Select One Leaf
+## Other Documents
 
 | Changed pressure | Load |
 | --- | --- |
-| Crate ownership, dependency direction, generated versus manual boundary, or composition root | [Component Boundaries](architecture/boundaries.md) |
-| HTTP contract, routing, middleware, exposure, or handler composition | [HTTP Architecture](architecture/http.md) |
-| Startup, readiness, drain, shutdown, exit codes, or process-resource lifetime | [Runtime Lifecycle](architecture/runtime-lifecycle.md) |
-| System neighbour, outbound provider, cross-service contract, or runtime evidence path | [Integration Boundaries](architecture/integration.md) |
-| PostgreSQL pool, repository, transaction, migration, query, or durable schema | [Persistence Architecture](architecture/persistence.md) |
-| Configuration source, precedence, secret input, telemetry environment, or runtime budget | [Configuration Source Policy](configuration-source-policy.md) |
-| File placement or the full repository tree | [Project Structure](project-structure-and-module-organization.md) |
+| Executable dependency direction between crates | [`quality/architecture.json`](../quality/architecture.json), checked by `make architecture-check` |
 | Proof or validation must be selected | [Validation Routing](validation-routing.md) |
-| Build, test, or generator command composition | [Commands](build-test-and-development-commands.md) and [`make/template.mk`](../make/template.mk) |
+| Build, test, or generator commands | `make help` and [`make/template.mk`](../make/template.mk) |
+| Choosing a library or a recorded library decision | [Backend Library Selection](backend-library-selection.md) and the records under `docs/decisions/` |
 | Delivery gates, the image, publication, and production readiness | [CI/CD Production Readiness](ci-cd-production-ready.md) |
 | Deployment policy for a derived service | [Railway Deployment Profile](railway-deployment-profile.md) |
-| The first feature on the scaffold | [First Production Feature](first-production-feature.md) |
 | What a service must decide before production | [Production Contract](production-contract.md) |
-<!-- template:begin jobs:docs-architecture-jobs-leaf -->
-| Durable background jobs: the job table, enqueue, claiming, the worker process | [Async Architecture](architecture/async.md) |
-<!-- template:end jobs:docs-architecture-jobs-leaf -->
-<!-- template:begin messaging:docs-architecture-messaging-leaf -->
-| Durable JetStream event transport, Go wire, consumer settlement, DLQ, or operator topology | [Durable JetStream messaging](guides/durable-messaging.md) and [Component Boundaries](architecture/boundaries.md) |
-<!-- template:end messaging:docs-architecture-messaging-leaf -->
-<!-- template:begin cache:docs-architecture-cache-leaf -->
-| Distributed cache, Valkey or Redis operation, or cache degradation | [Cache](guides/cache.md) and [Component Boundaries](architecture/boundaries.md) |
-<!-- template:end cache:docs-architecture-cache-leaf -->
-<!-- template:begin object-storage:docs-architecture-object-storage-leaf -->
-| Object storage, an S3-compatible provider, or bucket credentials | [Object storage](guides/object-storage.md) and [Component Boundaries](architecture/boundaries.md) |
-<!-- template:end object-storage:docs-architecture-object-storage-leaf -->
-<!-- template:begin service-auth:docs-architecture-service-auth-leaf -->
-| Service tokens between services: keys, the trust registry, the caller table, or outbound tokens | [Service authentication](guides/service-authentication.md) and [Component Boundaries](architecture/boundaries.md) |
-<!-- template:end service-auth:docs-architecture-service-auth-leaf -->
-
-Queue, job, outbox, and event architecture (`architecture/async.md`) exists
-only where a profile that owns it is retained; otherwise there is no owner to
-load. Load another leaf only for an independent changed pressure.
+| Alerts and their runbooks | [Alerting](alerting.md) |

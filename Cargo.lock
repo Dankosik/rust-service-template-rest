@@ -2483,6 +2483,7 @@ dependencies = [
  "secrecy",
  "serde",
  "serde_json",
+ "shared-rules",
  "thiserror",
  "tokio",
  "tokio-rustls",
@@ -2506,6 +2507,7 @@ dependencies = [
  "redis",
  "rustls",
  "secrecy",
+ "shared-rules",
  "socket2",
  "tempfile",
  "thiserror",
@@ -2546,6 +2548,7 @@ dependencies = [
  "secrecy",
  "serde_json",
  "service-failure",
+ "shared-rules",
  "thiserror",
  "tokio",
  "tokio-rustls",
@@ -2595,6 +2598,7 @@ dependencies = [
  "service-failure",
  "sfv",
  "sha2 0.11.1",
+ "shared-rules",
  "thiserror",
  "tokio",
  "tokio-rustls",
@@ -2671,6 +2675,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.1",
+ "shared-rules",
  "tempfile",
  "thiserror",
  "time",
@@ -2704,6 +2709,7 @@ dependencies = [
  "secrecy",
  "serde",
  "serde_json",
+ "shared-rules",
  "thiserror",
  "tokio",
  "tonic",
@@ -2765,6 +2771,7 @@ dependencies = [
  "rcgen",
  "rustls",
  "rustls-platform-verifier",
+ "shared-rules",
  "thiserror",
  "tokio",
  "tokio-rustls",
@@ -2786,6 +2793,7 @@ dependencies = [
  "log",
  "metrics",
  "metrics-exporter-prometheus",
+ "shared-rules",
  "sqlx",
  "thiserror",
  "tokio",
@@ -2807,6 +2815,7 @@ dependencies = [
  "secrecy",
  "serde",
  "serde_json",
+ "shared-rules",
  "thiserror",
  "tracing",
 ]
@@ -4965,6 +4974,7 @@ dependencies = [
  "rstest",
  "secrecy",
  "serde",
+ "shared-rules",
  "tempfile",
  "thiserror",
  "toml",
@@ -5042,6 +5052,10 @@ checksum = "f40ca3c46823713e0d4209592e8d6e826aa57e928f09752619fc696c499637f6"
 dependencies = [
  "lazy_static",
 ]
+
+[[package]]
+name = "shared-rules"
+version = "0.1.0"
 
 [[package]]
 name = "shlex"

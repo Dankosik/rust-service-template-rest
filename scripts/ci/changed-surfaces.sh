@@ -274,7 +274,7 @@ classify() {
 		esac
 		case "${file}" in
 		.jscpd.json | quality/duplication-baseline.json | scripts/ci/duplication-check.py) mark duplication ;;
-		quality/architecture.json | scripts/ci/architecture-check.py | docs/architecture/boundaries.md) mark architecture ;;
+		quality/architecture.json | scripts/ci/architecture-check.py) mark architecture ;;
 		esac
 		# Database-backed proof: the adapter, the runner, the test crate and
 		# its fixtures, the compose file, and the scripts that drive them.
@@ -428,7 +428,7 @@ classify() {
 		crates/config/src/* | crates/config/Cargo.toml | crates/service/src/* | crates/service/tests/* | crates/service/Cargo.toml | \
 		crates/infra-bearerauthn/* | crates/infra-outbound-http/* | crates/infra-idempotency-store/* | crates/infra-webhooks/* | crates/infra-http/Cargo.toml | crates/infra-http/src/authn.rs | crates/infra-http/src/context.rs | crates/infra-http/src/idempotency/* | crates/infra-http/src/harden.rs | crates/infra-http/src/harden/* | crates/infra-http/src/lib.rs | crates/infra-http/src/problem.rs | crates/infra-http/src/webhooks.rs | \
 		crates/infra-postgres/* | crates/migrate/* | crates/infra-jobs/* | crates/jobs-worker/* | crates/domain-events/* | crates/infra-messaging/* | crates/infra-cache/* | \
-		crates/infra-object-storage/* | crates/operation-context/* | crates/infra-telemetry/src/logging.rs | crates/infra-telemetry/src/logging/tests.rs | crates/service-failure/* | crates/infra-oauth2-client-credentials/* | \
+		crates/infra-object-storage/* | crates/operation-context/* | crates/shared-rules/* | crates/infra-telemetry/src/logging.rs | crates/infra-telemetry/src/logging/tests.rs | crates/service-failure/* | crates/infra-oauth2-client-credentials/* | \
 		test/* | migrations/* | .sqlx/* | .cargo/config.toml | scripts/ci/sqlx-prepare.sh)
 			mark module_initializer initializer_runtime
 			;;
@@ -451,11 +451,9 @@ classify() {
 		scripts/ci/validation-lock.sh | scripts/ci/validation-lock.py | scripts/tests/validation-lock-test.py | \
 		.agents/* | AGENTS.md | CLAUDE.md | QWEN.md | Grok.md | opencode.json | \
 		.claude/* | .codex/* | .cursor/* | .qwen/* | .grok/* | .opencode/* | \
-		docs/repo-architecture.md | docs/architecture/* | docs/configuration-source-policy.md | docs/production-contract.md | \
-		docs/first-production-feature.md | docs/project-structure-and-module-organization.md | \
-		docs/backend-library-selection.md | docs/backend-utility-recipes.md | \
-		docs/build-test-and-development-commands.md | docs/ci-cd-production-ready.md | docs/railway-deployment-profile.md | .railway/* | \
-		docs/validation/* | docs/template-sync.md | docs/template-upgrade.md | docs/guides/* | docs/decisions/* | docs/alerting.md)
+		docs/repo-architecture.md | docs/production-contract.md | docs/backend-library-selection.md | \
+		docs/ci-cd-production-ready.md | docs/railway-deployment-profile.md | .railway/* | \
+		docs/validation/* | docs/template-sync.md | docs/template-upgrade.md | docs/decisions/* | docs/alerting.md)
 			mark module_initializer
 			;;
 		esac; fi
@@ -585,7 +583,7 @@ HOOK
 	for file in .jscpd.json quality/duplication-baseline.json scripts/ci/duplication-check.py; do
 		assert_case "${file}" "duplication" "architecture"
 	done
-	for file in quality/architecture.json scripts/ci/architecture-check.py docs/architecture/boundaries.md; do
+	for file in quality/architecture.json scripts/ci/architecture-check.py; do
 		assert_case "${file}" "architecture" "duplication"
 	done
 	for file in Cargo.toml Cargo.lock crates/health/Cargo.toml rust-toolchain.toml make/template.mk make/source.mk scripts/ci/template-init-check.sh scripts/tests/template-profile-projections.py .github/workflows/ci.yml scripts/ci/changed-surfaces.sh scripts/ci/verify.sh tools/versions.env scripts/tests/quality-checks.py; do
@@ -611,7 +609,7 @@ HOOK
 	assert_case crates/config/build.rs \
 		"rust_source" \
 		"cargo_dependencies validation_system"
-	for file in crates/infra-bearerauthn/src/claims.rs crates/infra-http/src/authn.rs crates/infra-http/src/context.rs crates/operation-context/src/lib.rs; do
+	for file in crates/infra-bearerauthn/src/claims.rs crates/infra-http/src/authn.rs crates/infra-http/src/context.rs crates/operation-context/src/lib.rs crates/shared-rules/src/lib.rs; do
 		assert_case "${file}" \
 			"rust_source module_initializer initializer_runtime" \
 			"cargo_dependencies documentation db_integration"
@@ -738,27 +736,12 @@ HOOK
 			"cargo_dependencies module_initializer initializer_runtime" \
 			"rust_source documentation"
 	done
-	assert_case docs/guides/authentication.md \
-		"documentation module_initializer" \
-		"rust_source cargo_dependencies initializer_runtime"
-	assert_case docs/guides/outbound-http.md \
-		"documentation module_initializer" \
-		"rust_source cargo_dependencies initializer_runtime"
 	assert_case docs/decisions/outbound-http-decisions.md \
 		"documentation module_initializer" \
 		"rust_source cargo_dependencies initializer_runtime"
 	assert_case test/fixtures/tls.rs \
 		"rust_source module_initializer initializer_runtime db_integration" \
 		"cargo_dependencies documentation"
-	assert_case docs/guides/http-idempotency.md \
-		"documentation module_initializer" \
-		"rust_source cargo_dependencies initializer_runtime"
-	assert_case docs/guides/background-jobs.md \
-		"documentation module_initializer" \
-		"rust_source cargo_dependencies initializer_runtime"
-	assert_case docs/architecture/async.md \
-		"documentation module_initializer" \
-		"rust_source cargo_dependencies initializer_runtime"
 	assert_case crates/service/tests/lifecycle.rs \
 		"rust_source" \
 		"cargo_dependencies documentation"
@@ -966,10 +949,7 @@ HOOK
 	assert_case lychee.toml \
 		"documentation module_initializer" \
 		"agent_instructions rust_source cargo_dependencies initializer_runtime"
-	assert_case docs/roadmap.md \
-		"documentation" \
-		"agent_instructions"
-	assert_case specs/rust-skills/research/synthesis.md \
+	assert_case specs/example/spec.md \
 		"documentation" \
 		"agent_instructions"
 	assert_case .github/pull_request_template.md \

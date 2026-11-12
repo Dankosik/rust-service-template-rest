@@ -236,8 +236,8 @@ pub(crate) fn validate_jwt_claims(
     ))
 }
 
-/// An RFC 7519 `NumericDate`: an unsigned integer, or a finite non-negative
-/// number rounded to a whole second, as jsonwebtoken reads `exp` and `nbf`.
+/// An RFC 7519 `NumericDate`: an unsigned integer, or a number with a
+/// fraction read by [`shared_rules::rfc7519::numeric_date_seconds`].
 struct NumericDate(u64);
 
 impl<'de> Deserialize<'de> for NumericDate {
@@ -251,18 +251,10 @@ impl<'de> Deserialize<'de> for NumericDate {
             fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Self::Value, E> {
                 Ok(NumericDate(value))
             }
-            #[expect(
-                clippy::cast_possible_truncation,
-                clippy::cast_sign_loss,
-                clippy::cast_precision_loss,
-                reason = "only a finite value inside the u64 range reaches the casts"
-            )]
             fn visit_f64<E: serde::de::Error>(self, value: f64) -> Result<Self::Value, E> {
-                if value.is_finite() && value >= 0.0 && value < u64::MAX as f64 {
-                    Ok(NumericDate(value.round() as u64))
-                } else {
-                    Err(E::custom("NumericDate out of range"))
-                }
+                shared_rules::rfc7519::numeric_date_seconds(value)
+                    .map(NumericDate)
+                    .ok_or_else(|| E::custom("NumericDate out of range"))
             }
         }
         deserializer.deserialize_any(Visitor)
@@ -411,20 +403,15 @@ fn normalize_scopes(scope: Option<Values<'_>>) -> Result<Vec<String>, ()> {
         Some(Values::One(value)) => value.split(' ').map(ToOwned::to_owned).collect(),
         Some(Values::Many(values)) => values.into_iter().map(Cow::into_owned).collect(),
     };
-    if !values.iter().all(|value| is_scope_token(value)) {
+    if !values
+        .iter()
+        .all(|value| shared_rules::rfc6749::is_scope_token(value))
+    {
         return Err(());
     }
     values.sort_unstable();
     values.dedup();
     Ok(values)
-}
-
-/// RFC 6749 section 3.3: `scope-token = 1*( %x21 / %x23-5B / %x5D-7E )`.
-fn is_scope_token(value: &str) -> bool {
-    !value.is_empty()
-        && value.bytes().all(|byte| {
-            byte == b'!' || (b'#'..=b'[').contains(&byte) || (b']'..=b'~').contains(&byte)
-        })
 }
 
 #[cfg(test)]

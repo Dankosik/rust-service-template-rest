@@ -317,7 +317,12 @@ impl OAuthConfig {
                 "cannot be empty when configured",
             ));
         }
-        if self.scopes.0.iter().any(|scope| !is_scope_token(scope)) {
+        if self
+            .scopes
+            .0
+            .iter()
+            .any(|scope| !shared_rules::rfc6749::is_scope_token(scope))
+        {
             return Err(ValidationError::new(
                 format!("{prefix}.scopes"),
                 "must contain RFC 6749 scope tokens",
@@ -355,7 +360,7 @@ fn validate_token_url(key: &str, token_url: &str) -> Result<(), ValidationError>
     }
     if !url.username().is_empty()
         || url.password().is_some()
-        || raw_authority_has_userinfo(token_url)
+        || shared_rules::uri::authority_has_userinfo(token_url)
     {
         return Err(ValidationError::new(key, "must not include userinfo"));
     }
@@ -363,25 +368,6 @@ fn validate_token_url(key: &str, token_url: &str) -> Result<(), ValidationError>
         return Err(ValidationError::new(key, "must not include a fragment"));
     }
     Ok(())
-}
-
-// `Url` drops empty userinfo and treats backslashes as path separators, so
-// checking the original authority preserves information its accessors lose.
-fn raw_authority_has_userinfo(token_url: &str) -> bool {
-    let Some(authority) = token_url.split_once("://").map(|(_, authority)| authority) else {
-        return false;
-    };
-    let authority_end = authority.find(['/', '?', '#']).unwrap_or(authority.len());
-    authority[..authority_end].contains('@')
-}
-
-/// RFC 6749 §3.3 `scope-token = 1*NQCHAR`, where `NQCHAR` is
-/// `%x21 / %x23-5B / %x5D-7E`.
-fn is_scope_token(scope: &str) -> bool {
-    !scope.is_empty()
-        && scope
-            .bytes()
-            .all(|byte| matches!(byte, 0x21 | 0x23..=0x5b | 0x5d..=0x7e))
 }
 
 #[cfg(test)]
