@@ -523,8 +523,10 @@ impl ObjectStorage {
 
     /// # Errors
     ///
-    /// As [`Self::delete`]. A stop after the request has been polled is
-    /// `OutcomeUnknown`; recovery does not grant replay authority.
+    /// As [`Self::delete`]. A stop before the first request poll is `Unavailable`.
+    /// A stop that interrupts an already-polled request is `OutcomeUnknown`;
+    /// recovery does not grant replay authority. A definitive provider answer
+    /// from a poll that began live still applies if that poll crosses the cutoff.
     pub async fn delete_with_context(
         &self,
         key: &ObjectKey,
