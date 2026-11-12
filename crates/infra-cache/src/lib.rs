@@ -565,7 +565,7 @@ impl CacheNamespace {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 struct ExtraCommandCapacity {
     extra_args: usize,
     extra_bytes: usize,
