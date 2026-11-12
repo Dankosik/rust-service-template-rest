@@ -230,11 +230,13 @@ impl Client {
         request: Request<Bytes>,
         deadline: Instant,
     ) -> Result<Response<Bytes>, Error> {
-        self.execute_with_context(
-            request,
-            &OperationContext::from_deadline(Deadline::at(deadline)),
-        )
-        .await
+        // Built directly rather than through `begin_operation`: a parent made
+        // here could never be cancelled, so its child token is pure cost.
+        let operation = OperationContext::from_deadline(
+            Deadline::at(deadline)
+                .earlier(Deadline::new(Instant::now(), self.limits.operation_timeout)),
+        );
+        self.execute_within(request, &operation).await
     }
 
     /// Fixes the resource operation allowance before a composition begins
@@ -258,17 +260,22 @@ impl Client {
     /// Returns target, timeout, cancellation, response-size, or transport errors.
     pub async fn execute_with_context(
         &self,
-        mut request: Request<Bytes>,
+        request: Request<Bytes>,
         context: &OperationContext,
     ) -> Result<Response<Bytes>, Error> {
-        let operation = self.begin_operation(context);
-        let request_context = request
-            .extensions_mut()
-            .remove::<OperationContext>()
-            .unwrap_or_else(OperationContext::unbounded);
+        self.execute_within(request, &self.begin_operation(context))
+            .await
+    }
+
+    async fn execute_within(
+        &self,
+        mut request: Request<Bytes>,
+        operation: &OperationContext,
+    ) -> Result<Response<Bytes>, Error> {
+        let request_context = request.extensions_mut().remove::<OperationContext>();
         let stops = StopScopes {
-            operation: &operation,
-            request: &request_context,
+            operation,
+            request: request_context.as_ref(),
         };
         stops.check()?;
         let mut request = policy::admit_request(&self.origin, request)?;
@@ -332,22 +339,28 @@ impl Client {
 /// caller's request extension. The operation's stop wins over the request's.
 struct StopScopes<'a> {
     operation: &'a OperationContext,
-    request: &'a OperationContext,
+    request: Option<&'a OperationContext>,
 }
 
 impl StopScopes<'_> {
     fn check(&self) -> Result<(), Error> {
         self.operation
             .check()
-            .and_then(|()| self.request.check())
+            .and_then(|()| self.request.map_or(Ok(()), OperationContext::check))
             .map_err(stopped_error)
     }
 
     async fn stopped(&self) -> Error {
+        let request = async {
+            match self.request {
+                Some(request) => request.wait_stopped().await,
+                None => std::future::pending().await,
+            }
+        };
         tokio::select! {
             biased;
             stopped = self.operation.wait_stopped() => stopped_error(stopped),
-            stopped = self.request.wait_stopped() => stopped_error(stopped),
+            stopped = request => stopped_error(stopped),
         }
     }
 }

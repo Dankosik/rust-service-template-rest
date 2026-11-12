@@ -168,9 +168,7 @@ impl Attempt {
     }
 
     fn emit(&self, outcome: Outcome) {
-        let status_label = self
-            .status
-            .map(|status| SharedString::from(Arc::<str>::from(status.as_str())));
+        let status_label = self.status.map(status_label);
         // An HTTP error status is its own `error.type`, sharing the status label.
         let error_type = match outcome {
             Outcome::Response => self
@@ -288,6 +286,45 @@ impl fmt::Display for SpanName {
 
 fn is_error_status(status: StatusCode) -> bool {
     status.is_client_error() || status.is_server_error() || status.as_u16() >= 600
+}
+
+/// Every code `StatusCode` admits, 100 through 999, as three ASCII digits each.
+/// `StatusCode::as_str` borrows a table like this one only for `&self`, so a
+/// `'static` label would otherwise need an allocation per response.
+const STATUS_DIGITS: &str = {
+    const BYTES: [u8; 2700] = {
+        let mut digits = [0; 2700];
+        let mut offset = 0;
+        let mut hundreds = b'1';
+        while hundreds <= b'9' {
+            let mut tens = b'0';
+            while tens <= b'9' {
+                let mut ones = b'0';
+                while ones <= b'9' {
+                    digits[offset] = hundreds;
+                    digits[offset + 1] = tens;
+                    digits[offset + 2] = ones;
+                    offset += 3;
+                    ones += 1;
+                }
+                tens += 1;
+            }
+            hundreds += 1;
+        }
+        digits
+    };
+    match std::str::from_utf8(&BYTES) {
+        Ok(digits) => digits,
+        Err(_) => "",
+    }
+};
+
+fn status_label(status: StatusCode) -> SharedString {
+    let offset = usize::from(status.as_u16() - 100) * 3;
+    STATUS_DIGITS.get(offset..offset + 3).map_or_else(
+        || SharedString::from(Arc::<str>::from(status.as_str())),
+        SharedString::from,
+    )
 }
 
 /// The class of a transport failure, read from the typed causes the libraries

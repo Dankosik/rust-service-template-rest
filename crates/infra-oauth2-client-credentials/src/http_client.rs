@@ -89,11 +89,19 @@ impl AuthenticatedClient {
         context: &OperationContext,
     ) -> Result<Response<Bytes>, Error> {
         let context = self.resource.begin_operation(context);
-        let request_context = request
-            .extensions()
-            .get::<OperationContext>()
-            .cloned()
-            .unwrap_or_else(OperationContext::unbounded);
+        let request_context = request.extensions().get::<OperationContext>().cloned();
+        let check_request = || {
+            request_context
+                .as_ref()
+                .map_or(Ok(()), OperationContext::check)
+                .map_err(acquisition_stopped)
+        };
+        let request_stopped = async {
+            match &request_context {
+                Some(request_context) => request_context.wait_stopped().await,
+                None => std::future::pending().await,
+            }
+        };
         self.credentials
             .check_lifecycle(acquisition_deadline(&context))?;
         let on_behalf_of =
@@ -101,13 +109,13 @@ impl AuthenticatedClient {
                 AdmissionRefusal::AuthorizationConflict => Error::AuthorizationConflict,
                 AdmissionRefusal::SubjectRequired => Error::SubjectRequired,
             })?;
-        request_context.check().map_err(acquisition_stopped)?;
+        check_request()?;
         let acquired = tokio::select! {
             biased;
-            stopped = request_context.wait_stopped() => return Err(acquisition_stopped(stopped).into()),
+            stopped = request_stopped => return Err(acquisition_stopped(stopped).into()),
             result = self.credentials.authorize(request.headers_mut(), on_behalf_of, &context) => result?,
         };
-        request_context.check().map_err(acquisition_stopped)?;
+        check_request()?;
         let response = self
             .resource
             .execute_with_context(request, &context)

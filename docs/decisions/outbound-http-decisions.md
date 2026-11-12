@@ -83,6 +83,8 @@ The accepted changes at that revision, each measured alone before combination:
 
 Labels still reserve their final count, an error status shares one decimal string between its two labels, and static error types stay static, as recorded by the earlier allocation study (patch SHA-256 `d6f79888d5447405926a7752e6237c031b2fb82298b80ccd55f2ed81c3749472`).
 
+The 2026-11-12 performance review removed per-request work by reading, not measurement: the status label now borrows a static table of every code, and a request without an `OperationContext` extension, or one sent through `execute`, no longer creates a cancellation token that nothing can cancel. Each removes at least one allocation per exchange; the instruction and allocation figures above predate both and were not re-measured.
+
 Measured and rejected:
 
 - A per-client metric-handle cache: a further −5.7% on a short GET, but a handle binds to the recorder current at its first attempt, so an attempt before recorder installation, or inside a test's local recorder, would silently misroute that key for the client's lifetime.
