@@ -407,8 +407,10 @@ mod tests {
         let pool = infra_postgres::PgPool::connect_lazy("postgres://localhost/unused")
             .expect("lazy pool does no I/O");
         let budget = Duration::from_millis(200);
-        for remaining in [Duration::from_millis(100), Duration::from_millis(99)] {
-            let origin = Instant::now() - (budget - remaining);
+        for elapsed in [Duration::from_millis(100), Duration::from_millis(101)] {
+            let origin = Instant::now()
+                .checked_sub(elapsed)
+                .expect("the deadline origin fits");
             let idempotency = Idempotency {
                 attempt: Attempt {
                     store: Store::new(pool.clone(), Duration::from_secs(60)),
