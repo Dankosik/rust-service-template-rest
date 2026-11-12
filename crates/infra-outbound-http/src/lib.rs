@@ -96,6 +96,14 @@ pub enum Error {
 /// A reusable bounded client for one configured origin. Requests name
 /// absolute URLs on that origin; any other origin is refused before I/O.
 ///
+/// # Request preparation
+///
+/// The client rejects requests with a caller-supplied `Host` header and
+/// sets `Host` from the configured origin. It sends HTTP/1.1, removes
+/// `Transfer-Encoding`, and sets `Content-Length` to the buffered body length
+/// for nonempty bodies and for `POST`, `PUT`, and `PATCH`. For other empty
+/// requests it removes `Content-Length`. If `Accept` is absent, it adds `*/*`.
+///
 /// ```no_run
 /// use std::time::Duration;
 ///
@@ -193,9 +201,10 @@ impl Client {
     ///
     /// # Errors
     ///
-    /// Returns [`BuildError::InvalidLimits`] for invalid limits and
-    /// [`BuildError::InvalidOrigin`] unless `origin` is an
-    /// `http` URL whose host is a literal loopback IP address.
+    /// Returns [`BuildError::InvalidLimits`] for invalid limits,
+    /// [`BuildError::InvalidOrigin`] unless `origin` is an `http` URL with a
+    /// literal loopback IP address and no userinfo, and [`BuildError::Tls`]
+    /// when the platform verifier cannot be built.
     #[cfg(feature = "test-support")]
     pub fn try_new_for_test_http(origin: &Url, limits: Limits) -> Result<Self, BuildError> {
         limits.validate()?;
@@ -210,14 +219,19 @@ impl Client {
 
     /// Executes one complete buffered exchange before `deadline`.
     ///
+    /// The request follows the preparation rules on [`Client`].
+    ///
     /// An [`OperationContext`] request extension additionally bounds cancellation
     /// and cutoff. The end is fixed on execution entry at the earlier of `deadline` and
     /// entry plus [`Limits::operation_timeout`]. Admission, setup, DNS and
     /// complete buffered collection spend that same budget. At or after the
     /// end, no new transport dispatch or successful operation decision is allowed.
-    /// The result is fixed after the last await and full buffering, then observed
-    /// once and returned unchanged. Synchronous terminal observation callbacks
-    /// can delay physical return beyond the end.
+    ///
+    /// Attempt telemetry starts after the initial stop check and request
+    /// admission. Once started, a completed attempt records its result once
+    /// after the exchange returns. Success requires a fully buffered body and
+    /// a final stop check. Synchronous terminal observation callbacks can delay
+    /// return beyond the deadline without changing the result.
     /// Dropping this future ends the exchange; it does not undo a provider-side
     /// effect. A [`UrlTemplate`] request extension names the
     /// operation in the attempt's span and metric.
@@ -248,6 +262,8 @@ impl Client {
     }
 
     /// Executes one buffered exchange within the caller context and local ceiling.
+    ///
+    /// The request follows the preparation rules on [`Client`].
     ///
     /// An [`OperationContext`] request extension supplies an additional bound;
     /// neither supplied cancellation scope nor cutoff is discarded. Preparation,
