@@ -157,9 +157,10 @@ impl Idempotency {
             deadline,
         } = self.attempt;
         let outcome = OutcomeGuard::new();
-        let attempted = deadline
-            .within_attempt(|attempt_end| {
-                store.attempt_until(
+        let attempted = match deadline.attempt_end() {
+            None => Err(AttemptError::Unavailable),
+            Some(attempt_end) => {
+                let attempt = store.attempt_until(
                     &scope,
                     &caller,
                     &fingerprint,
@@ -167,10 +168,12 @@ impl Idempotency {
                     async |tx: &mut Tx<'_>| {
                         commit_candidate(work(tx).await.into_response(), &operation_id).await
                     },
-                )
-            })
-            .await
-            .unwrap_or(Err(AttemptError::Unavailable));
+                );
+                tokio::time::timeout_at(attempt_end, attempt)
+                    .await
+                    .unwrap_or(Err(AttemptError::Unavailable))
+            }
+        };
         map_attempted(attempted, &scope, &operation_id)
             .settle(deadline.at(), outcome)
             .await

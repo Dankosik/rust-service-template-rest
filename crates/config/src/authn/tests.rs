@@ -1,6 +1,6 @@
 use super::*;
 use crate::LoadOptions;
-use crate::load::{Error, load_from};
+use crate::load::load_from;
 use crate::test_support::{BUILD, env, write};
 
 fn parse(toml: &str) -> Result<AuthnConfig, toml::de::Error> {
@@ -389,7 +389,7 @@ fn introspection_secret_in_a_file_is_refused() {
     )
     .unwrap_err();
     assert!(
-        matches!(&err, Error::SecretInFile { key, .. } if key == "authn.introspection_client_secret"),
+        matches!(&err, crate::load::Error::SecretInFile { key, .. } if key == "authn.introspection_client_secret"),
         "{err}"
     );
 }

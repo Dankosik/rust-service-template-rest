@@ -78,17 +78,6 @@ impl RequestDeadline {
             .checked_sub(RESPONSE_RESERVE)
             .filter(|end| *end > tokio::time::Instant::now())
     }
-
-    /// Runs one attempt that must end at [`Self::attempt_end`], handing that
-    /// instant to the attempt too. `None` when no window is left or the attempt
-    /// overran it; the attempt is never started without a window.
-    pub(crate) async fn within_attempt<F: Future>(
-        &self,
-        attempt: impl FnOnce(tokio::time::Instant) -> F,
-    ) -> Option<F::Output> {
-        let end = self.attempt_end()?;
-        tokio::time::timeout_at(end, attempt(end)).await.ok()
-    }
 }
 // template:end request-budget:http-request-deadline
 
