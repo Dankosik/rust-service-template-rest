@@ -251,7 +251,7 @@ mod tests {
 
         #[test]
         fn an_admitted_key_round_trips_through_a_structured_field_string(
-            key in proptest::collection::vec(0x20_u8..=0x7e, 1..=MAX_KEY_BYTES),
+            key in proptest::collection::vec(0x20_u8..=0x7e, 1..=MAX_DECODED_KEY_BYTES),
         ) {
             let key = String::from_utf8(key).unwrap();
             let field = sfv::ItemSerializer::new()
