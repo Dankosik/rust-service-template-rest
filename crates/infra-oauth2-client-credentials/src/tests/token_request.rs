@@ -312,9 +312,59 @@ async fn invalid_service_and_exchanged_lifetimes_refuse_before_resource_dispatch
     fixture.finish().await;
 }
 
-struct CancelOnProviderRejection(OperationContext);
+#[tokio::test]
+async fn exchange_rejects_a_token_when_processing_crosses_the_attempt_deadline() {
+    let fixture = Fixture::new().await;
+    fixture.token_json("200 OK", &exchange_response("exchange-token"));
+    let resource = Client::try_new_for_test_http(
+        &fixture.origin,
+        infra_outbound_http::Limits {
+            operation_timeout: Duration::from_secs(20),
+            ..TOKEN_LIMITS
+        },
+    )
+    .unwrap();
+    let client = fixture.credentials(&[], None).http(resource);
+    let recorder = ObserveMetricRegistration(|key: &metrics::Key| {
+        if key.name() == infra_outbound_http::REQUEST_DURATION_METRIC
+            && key
+                .labels()
+                .any(|label| label.key() == "http.request.method" && label.value() == "POST")
+            && key
+                .labels()
+                .any(|label| label.key() == "outbound.outcome" && label.value() == "response")
+        {
+            // The transport has accepted the buffered response. Cross the
+            // attempt deadline before control returns to OAuth for decoding.
+            tokio::time::pause();
+            let mut advance = std::pin::pin!(tokio::time::advance(Duration::from_secs(5)));
+            let _ = advance
+                .as_mut()
+                .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()));
+            tokio::time::resume();
+        }
+    });
+    let observation = metrics::set_default_local_recorder(&recorder);
+    let result = client
+        .execute(
+            fixture.on_behalf_of_request("subject"),
+            deadline(Duration::from_secs(20)),
+        )
+        .await;
+    drop(observation);
 
-impl metrics::Recorder for CancelOnProviderRejection {
+    assert_matches!(
+        result,
+        Err(Error::Acquisition(AcquisitionError::Unavailable))
+    );
+    assert_eq!(fixture.token_requests().len(), 1);
+    assert!(fixture.resource_requests().is_empty());
+    fixture.finish().await;
+}
+
+struct ObserveMetricRegistration<F>(F);
+
+impl<F: Fn(&metrics::Key)> metrics::Recorder for ObserveMetricRegistration<F> {
     fn describe_counter(
         &self,
         _: metrics::KeyName,
@@ -340,13 +390,7 @@ impl metrics::Recorder for CancelOnProviderRejection {
     }
 
     fn register_counter(&self, key: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Counter {
-        if key.name() == "oauth2_token_acquisitions_total"
-            && key
-                .labels()
-                .any(|label| label.key() == "outcome" && label.value() == "invalid_client")
-        {
-            self.0.cancel();
-        }
+        (self.0)(key);
         metrics::Counter::noop()
     }
 
@@ -356,9 +400,10 @@ impl metrics::Recorder for CancelOnProviderRejection {
 
     fn register_histogram(
         &self,
-        _: &metrics::Key,
+        key: &metrics::Key,
         _: &metrics::Metadata<'_>,
     ) -> metrics::Histogram {
+        (self.0)(key);
         metrics::Histogram::noop()
     }
 }
@@ -387,7 +432,15 @@ async fn cancellation_at_provider_completion_leaves_a_live_caller_its_own_attemp
             } else {
                 &caller
             };
-            let recorder = CancelOnProviderRejection(caller.clone());
+            let recorder = ObserveMetricRegistration(|key: &metrics::Key| {
+                if key.name() == "oauth2_token_acquisitions_total"
+                    && key
+                        .labels()
+                        .any(|label| label.key() == "outcome" && label.value() == "invalid_client")
+                {
+                    caller.cancel();
+                }
+            });
             // The real provider response is already decoded when its terminal
             // counter registers, so cancellation arrives during acquisition polling.
             let _recorder = metrics::set_default_local_recorder(&recorder);
