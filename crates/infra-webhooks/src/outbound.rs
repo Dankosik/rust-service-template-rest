@@ -309,10 +309,16 @@ impl Handler<Delivery> for Dispatcher {
         let Some(request) = endpoint.signed_request(delivery, &message_id, timestamp) else {
             return Err(fail(endpoint_id, DeliveryFailure::InvalidPayload));
         };
+        let mut endpoint_gone = false;
         let response = endpoint
             .client
-            .execute_with_context(request, &job.context())
+            .execute_with_response_status(request, &job.context(), |status| {
+                endpoint_gone = status == StatusCode::GONE;
+            })
             .await;
+        if endpoint_gone && matches!(&response, Err(HttpError::ResponseBodyTooLarge)) {
+            return Err(fail(endpoint_id, DeliveryFailure::EndpointGone));
+        }
         classify_response(endpoint_id, response, SystemTime::now())
     }
 }
