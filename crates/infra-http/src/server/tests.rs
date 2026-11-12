@@ -276,7 +276,7 @@ async fn accept_panic_after_stop_is_still_observed() {
     let listener = BoundListener::bind(loopback()).await.unwrap();
     let server = serve_listener(listener, app(), options(), move |stream| {
         let _ = &marker;
-        async move { Some((stream, "http")) }
+        async move { Some((stream, ListenerScheme::Http)) }
     });
     stop.set(server.connection_shutdown.finish.clone()).unwrap();
     let failure = server.accept_failure();

@@ -6,28 +6,27 @@ use utoipa::openapi::RefOr;
 use utoipa::openapi::path::{Operation, Parameter, ParameterIn, PathItem, Paths};
 use utoipa::openapi::response::Response;
 
+use crate::contract::fixed_path_operations;
+
 use super::openapi::{
     KEY_HEADER, key_parameter, replaces_protected_response, replay_header, response_family,
 };
 use super::stored;
 
-const SUPPORTED_IDEMPOTENCY_METHODS: [&str; 4] = ["post", "put", "patch", "delete"];
+const SUPPORTED_IDEMPOTENCY_METHODS: [&str; 4] = ["POST", "PUT", "PATCH", "DELETE"];
 
 /// A local authoring error on the one route carrier being composed.
 ///
-/// The error names only the route or operation and fixed authoring rule, never
-/// request data. A caller must correct it before the service can assemble its
-/// routes.
+/// Diagnostic details come from route declarations, never request data.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("idempotent route composition is invalid: {subject}: {}", .rule.text())]
+#[error("idempotent route composition is invalid: {subject}: {rule}")]
 pub struct CompositionError {
-    /// The route path while no operationId is readable, otherwise the operationId.
     subject: String,
     rule: Rule,
 }
 
 impl CompositionError {
-    pub(super) fn new(subject: &str, rule: Rule) -> Self {
+    fn new(subject: &str, rule: Rule) -> Self {
         Self {
             subject: subject.to_owned(),
             rule,
@@ -35,54 +34,35 @@ impl CompositionError {
     }
 
     #[cfg(test)]
-    pub(super) const fn rule(&self) -> Rule {
-        self.rule
+    const fn rule(&self) -> &Rule {
+        &self.rule
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Rule {
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+enum Rule {
+    #[error("a composed route must be one path and one operation with a nonempty operationId")]
     Shape,
+    #[error("the method must be POST, PUT, PATCH, or DELETE")]
     Method,
+    #[error("Idempotency-Key must be absent or one byte-equal generated header parameter")]
     KeyParameter,
+    #[error(
+        "request parameters must be inline and header parameters must have valid HTTP field names"
+    )]
     FingerprintParameter,
-    NonSuccessStatus,
+    #[error("an idempotent operation must not declare a 1xx or 3xx response")]
+    InformationalOrRedirectResponse,
+    #[error("an idempotent operation must declare a 2xx response")]
     NoSuccess,
-    UnreplayableHeader,
+    #[error("response {status} may declare only replayable headers: {name} cannot be replayed")]
+    UnreplayableHeader { status: String, name: String },
+    #[error("each 2xx response must be inline so its replay metadata can be checked")]
     ReferencedSuccess,
-    ProblemResponses,
+    #[error("response {status} conflicts with the idempotency response family")]
+    ProblemResponseConflict { status: String },
+    #[error("Idempotent-Replayed is reserved for exact generated replay metadata")]
     ReplayHeader,
-}
-
-impl Rule {
-    const fn text(self) -> &'static str {
-        match self {
-            Self::Shape => {
-                "a composed route must be one path and one operation with a nonempty operationId"
-            }
-            Self::Method => "the method must be POST, PUT, PATCH, or DELETE",
-            Self::KeyParameter => {
-                "Idempotency-Key must be absent or one byte-equal generated header parameter"
-            }
-            Self::FingerprintParameter => {
-                "request parameters must be inline and header parameters must have valid HTTP field names"
-            }
-            Self::NonSuccessStatus => {
-                "an idempotent operation must not declare a 1xx or 3xx response"
-            }
-            Self::NoSuccess => "an idempotent operation must declare a 2xx response",
-            Self::UnreplayableHeader => "a 2xx response may declare only replayable headers",
-            Self::ReferencedSuccess => {
-                "each 2xx response must be inline so its replay metadata can be checked"
-            }
-            Self::ProblemResponses => {
-                "a generated response slot conflicts with the idempotency response family"
-            }
-            Self::ReplayHeader => {
-                "Idempotent-Replayed is reserved for exact generated replay metadata"
-            }
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -193,7 +173,10 @@ fn prepare_problem_responses(
             && existing != &generated
             && !replaces_protected_response(&status, existing)
         {
-            return Err(CompositionError::new(operation_id, Rule::ProblemResponses));
+            return Err(CompositionError::new(
+                operation_id,
+                Rule::ProblemResponseConflict { status },
+            ));
         }
         operation.responses.responses.insert(status, generated);
     }
@@ -208,14 +191,17 @@ fn prepare_success_responses(
     for (status, response) in &mut operation.responses.responses {
         match status.as_bytes().first() {
             Some(b'1' | b'3') => {
-                return Err(CompositionError::new(operation_id, Rule::NonSuccessStatus));
+                return Err(CompositionError::new(
+                    operation_id,
+                    Rule::InformationalOrRedirectResponse,
+                ));
             }
             Some(b'2') => {
                 success = true;
                 let RefOr::T(response) = response else {
                     return Err(CompositionError::new(operation_id, Rule::ReferencedSuccess));
                 };
-                prepare_success_headers(response, operation_id)?;
+                prepare_success_headers(response, operation_id, status)?;
             }
             _ => {}
         }
@@ -229,6 +215,7 @@ fn prepare_success_responses(
 fn prepare_success_headers(
     response: &mut Response,
     operation_id: &str,
+    status: &str,
 ) -> Result<(), CompositionError> {
     let mut replay_headers = response
         .headers
@@ -243,37 +230,30 @@ fn prepare_success_headers(
         (Some((_, header)), None) if header == &replay_header() => {}
         _ => return Err(CompositionError::new(operation_id, Rule::ReplayHeader)),
     }
-    if response.headers.keys().any(|name| {
+    if let Some(name) = response.headers.keys().find(|name| {
         !name.eq_ignore_ascii_case(super::openapi::REPLAYED_HEADER)
             && !stored::is_replayable_header_name(name)
     }) {
         return Err(CompositionError::new(
             operation_id,
-            Rule::UnreplayableHeader,
+            Rule::UnreplayableHeader {
+                status: status.to_owned(),
+                name: name.clone(),
+            },
         ));
     }
     Ok(())
 }
 
 fn one_operation_mut(item: &mut PathItem) -> Option<(&'static str, &mut Operation)> {
-    let mut operations = [
-        ("get", item.get.as_mut()),
-        ("put", item.put.as_mut()),
-        ("post", item.post.as_mut()),
-        ("delete", item.delete.as_mut()),
-        ("options", item.options.as_mut()),
-        ("head", item.head.as_mut()),
-        ("patch", item.patch.as_mut()),
-        ("trace", item.trace.as_mut()),
-        ("query", item.query.as_mut()),
-    ]
-    .into_iter()
-    .filter_map(|(method, operation)| operation.map(|operation| (method, operation)))
-    .chain(
-        item.additional_operations
-            .values_mut()
-            .map(|operation| ("additional", operation)),
-    );
+    let mut operations = fixed_path_operations!(item, as_mut)
+        .into_iter()
+        .filter_map(|(method, operation)| operation.map(|operation| (method, operation)))
+        .chain(
+            item.additional_operations
+                .values_mut()
+                .map(|operation| ("additional", operation)),
+        );
     let operation = operations.next()?;
     operations.next().is_none().then_some(operation)
 }
@@ -416,7 +396,7 @@ mod tests {
     #[test]
     fn preparation_rejects_unsupported_shape_and_successes() {
         let (_, mut unsupported, _): UtoipaMethodRouter = routes!(get_widget);
-        assert_eq!(prepare(&mut unsupported).unwrap_err().rule(), Rule::Method);
+        assert_eq!(prepare(&mut unsupported).unwrap_err().rule(), &Rule::Method);
 
         let (_, mut missing_success, _): UtoipaMethodRouter = route();
         missing_success
@@ -431,7 +411,7 @@ mod tests {
             .remove("201");
         assert_eq!(
             prepare(&mut missing_success).unwrap_err().rule(),
-            Rule::NoSuccess
+            &Rule::NoSuccess
         );
 
         let (_, mut referenced, _): UtoipaMethodRouter = route();
@@ -450,7 +430,30 @@ mod tests {
             );
         assert_eq!(
             prepare(&mut referenced).unwrap_err().rule(),
-            Rule::ReferencedSuccess
+            &Rule::ReferencedSuccess
+        );
+    }
+
+    #[test]
+    fn preparation_names_the_conflicting_response_slot() {
+        let (_, mut paths, _): UtoipaMethodRouter = route();
+        paths
+            .paths
+            .get_mut(WIDGETS)
+            .expect("path")
+            .post
+            .as_mut()
+            .expect("post")
+            .responses
+            .responses
+            .insert(
+                "409".to_owned(),
+                utoipa::openapi::Ref::from_response_name("Conflict").into(),
+            );
+
+        assert_eq!(
+            prepare(&mut paths).unwrap_err().to_string(),
+            "idempotent route composition is invalid: infraHttpTestCreateWidget: response 409 conflicts with the idempotency response family"
         );
     }
 
@@ -476,7 +479,7 @@ mod tests {
         );
         assert_eq!(
             prepare(&mut conflicting).unwrap_err().rule(),
-            Rule::ReplayHeader
+            &Rule::ReplayHeader
         );
 
         let (_, mut unsupported, _): UtoipaMethodRouter = route();
@@ -498,8 +501,8 @@ mod tests {
             RefOr::T(utoipa::openapi::header::Header::default()),
         );
         assert_eq!(
-            prepare(&mut unsupported).unwrap_err().rule(),
-            Rule::UnreplayableHeader
+            prepare(&mut unsupported).unwrap_err().to_string(),
+            "idempotent route composition is invalid: infraHttpTestCreateWidget: response 201 may declare only replayable headers: X-Trace cannot be replayed"
         );
     }
 }

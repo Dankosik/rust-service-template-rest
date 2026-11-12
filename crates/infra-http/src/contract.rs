@@ -132,6 +132,26 @@ fn compile_operation(
 #[derive(Clone)]
 pub(crate) struct Policy(Arc<BTreeMap<String, BTreeMap<String, Access>>>);
 
+macro_rules! fixed_path_operations {
+    ($item:ident, $borrow:ident) => {
+        [
+            ("GET", $item.get.$borrow()),
+            ("PUT", $item.put.$borrow()),
+            ("POST", $item.post.$borrow()),
+            ("DELETE", $item.delete.$borrow()),
+            ("OPTIONS", $item.options.$borrow()),
+            ("HEAD", $item.head.$borrow()),
+            ("PATCH", $item.patch.$borrow()),
+            ("TRACE", $item.trace.$borrow()),
+            ("QUERY", $item.query.$borrow()),
+        ]
+    };
+}
+
+// template:begin http-idempotency:http-contract-fixed-operations-export
+pub(super) use fixed_path_operations;
+// template:end http-idempotency:http-contract-fixed-operations-export
+
 impl Policy {
     pub(crate) fn compile(document: &OpenApi) -> Result<Self, FinalizeError> {
         let mut table = BTreeMap::new();
@@ -142,17 +162,7 @@ impl Policy {
                 path.clone()
             };
             let mut methods = BTreeMap::new();
-            let fixed_operations = [
-                ("GET", &item.get),
-                ("PUT", &item.put),
-                ("POST", &item.post),
-                ("DELETE", &item.delete),
-                ("OPTIONS", &item.options),
-                ("HEAD", &item.head),
-                ("PATCH", &item.patch),
-                ("TRACE", &item.trace),
-                ("QUERY", &item.query),
-            ];
+            let fixed_operations = fixed_path_operations!(item, as_ref);
             for (method, operation) in fixed_operations {
                 let Some(operation) = operation else {
                     continue;

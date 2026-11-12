@@ -35,10 +35,10 @@ use crate::problem::responses::{ProblemComponents, TransportProblemResponses};
 
 /// Route templates of the probes, served and documented from these constants;
 /// see [`HEALTH_PROBES`] for their other effects.
-pub(crate) const LIVE_PATH: &str = "/health/live";
-pub(crate) const READY_PATH: &str = "/health/ready";
-pub(crate) const LIVE_OPERATION_ID: &str = "healthLive";
-pub(crate) const READY_OPERATION_ID: &str = "healthReady";
+const LIVE_PATH: &str = "/health/live";
+const READY_PATH: &str = "/health/ready";
+const LIVE_OPERATION_ID: &str = "healthLive";
+const READY_OPERATION_ID: &str = "healthReady";
 
 /// Probe bodies: what the handler sends and what the contract shows as the
 /// example, from one constant each.
@@ -50,7 +50,7 @@ const NOT_READY_BODY: &str = "not ready";
 /// served without an access-log line unless enabled, and every request to one
 /// skips in-flight admission, so a saturated service still answers its
 /// platform probes.
-pub(crate) const HEALTH_PROBES: [(&str, &str); 2] = [
+const HEALTH_PROBES: [(&str, &str); 2] = [
     (LIVE_PATH, LIVE_OPERATION_ID),
     (READY_PATH, READY_OPERATION_ID),
 ];
@@ -125,7 +125,7 @@ pub fn liveness_router() -> axum::Router {
     )
 )]
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
-pub(crate) async fn live() -> (StatusCode, &'static str) {
+async fn live() -> (StatusCode, &'static str) {
     (StatusCode::OK, LIVE_BODY)
 }
 
@@ -147,7 +147,7 @@ pub(crate) async fn live() -> (StatusCode, &'static str) {
     )
 )]
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
-pub(crate) async fn ready(State(readiness): State<ReadinessReader>) -> (StatusCode, &'static str) {
+async fn ready(State(readiness): State<ReadinessReader>) -> (StatusCode, &'static str) {
     match readiness.verdict() {
         Ok(()) => (StatusCode::OK, READY_BODY),
         Err(_) => (StatusCode::SERVICE_UNAVAILABLE, NOT_READY_BODY),

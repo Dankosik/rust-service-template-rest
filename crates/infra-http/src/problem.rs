@@ -199,21 +199,20 @@ impl Problem {
 
 impl IntoResponse for Problem {
     fn into_response(self) -> Response {
-        let code = self.code;
         let retry_after = self.retry_after;
         // Problem contains only infallibly serializable strings and integers.
         // The extension lets the transport complete the body (request id) and
         // lets the access log read the code.
         let mut response = (
-            http_status(code),
+            http_status(self.code),
             [(
                 CONTENT_TYPE,
                 HeaderValue::from_static("application/problem+json"),
             )],
-            axum::Extension(self.clone()),
-            axum::Json(self),
+            axum::Json(&self),
         )
             .into_response();
+        response.extensions_mut().insert(self);
         if let Some(after) = retry_after {
             response
                 .headers_mut()
@@ -283,7 +282,7 @@ pub(crate) fn sanitized_internal_error() -> Response {
 /// `Problem`, whose code fixes the status. Their names are distinct from
 /// [`Code`] on purpose: `Code::BadRequest` is what a handler returns,
 /// `responses::BadRequest` is what the contract declares. A new status joins
-/// this module with its first operation; the set every operation declares is
+/// this module with its first operation; the shared transport set is
 /// [`responses::TransportProblemResponses`]. A response family owned by one
 /// optional pack lives with that pack's seam instead: `authn`, `webhooks`, and
 /// `idempotency`. Doc comments on the newtypes are the response descriptions
@@ -313,9 +312,8 @@ pub mod responses {
     #[response(content_type = "application/problem+json")]
     pub struct GatewayTimeout(pub Problem);
 
-    /// The problem responses the OpenAPI document declares on every
-    /// operation as shared transport answers. This is the Problem set every
-    /// operation can name without colliding with probe-owned 503 `text/plain`.
+    /// The shared transport answers operations can declare without colliding
+    /// with probe-owned 503 `text/plain`.
     /// The hardened chain also emits Problem 503/504/408/405 at runtime; those
     /// stay out of this group (ready already documents 503 as `text/plain`).
     /// Header overflow is hyper-native 431 before the router, not a
