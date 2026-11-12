@@ -72,18 +72,22 @@ pub(crate) fn set_grpc_timeout(headers: &mut HeaderMap, remaining: Duration) {
     }
 }
 
-/// The terminal code available before polling the body. HTTP fallback is
-/// safe only once the stream has ended, since trailers can carry a gRPC status.
-pub fn client_response_code<B: http_body::Body>(
+/// The code inferred from the response head. Without an initial `grpc-status`,
+/// the HTTP mapping is provisional until the stream ends.
+pub fn client_response_code<B>(response: &http::Response<B>) -> Option<tonic::Code> {
+    header_status_code(response.headers()).or_else(|| http_status_code(response.status()))
+}
+
+/// The terminal code available before polling the body. An open stream
+/// without an initial `grpc-status` can still carry a status in its trailers.
+pub fn client_terminal_response_code<B: http_body::Body>(
     response: &http::Response<B>,
 ) -> Option<tonic::Code> {
-    header_status_code(response.headers()).or_else(|| {
-        if response.body().is_end_stream() {
-            http_status_code(response.status())
-        } else {
-            None
-        }
-    })
+    if response.body().is_end_stream() {
+        client_response_code(response)
+    } else {
+        header_status_code(response.headers())
+    }
 }
 
 pub(crate) fn header_status_code(headers: &HeaderMap) -> Option<tonic::Code> {

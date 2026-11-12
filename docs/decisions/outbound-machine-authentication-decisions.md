@@ -341,8 +341,9 @@ publication is implied by template proof.
 <!-- template:begin outbound-auth-grpc:docs-oauth-grpc-decision -->
 The concrete gRPC binding stays inside `Credentials`. It injects one bearer,
 does not replay, and evicts only from the initial `UNAUTHENTICATED` status or
-HTTP 401 without `grpc-status`. An acquisition failure that may pass unchanged
-later (local `AtCapacity`, transport, provider 5xx or 429, a provider silent
+HTTP 401 when the response stream has ended without `grpc-status`. An
+acquisition failure that may pass unchanged later (local `AtCapacity`,
+transport, provider 5xx or 429, a provider silent
 past the five-second attempt) is `UNAVAILABLE`;
 the caller's expired deadline is `DEADLINE_EXCEEDED`; a caller or lifecycle
 cancellation is `CANCELLED`; a refusal, an unusable response, or an unsignable

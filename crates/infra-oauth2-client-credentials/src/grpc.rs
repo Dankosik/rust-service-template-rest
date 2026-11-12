@@ -47,7 +47,8 @@ impl Credentials {
     /// [`AuthenticatedClient::require_on_behalf_of`] is set. A caller-supplied
     /// `Authorization` header and a missing required subject are refused as
     /// `INTERNAL` before dispatch. A response carrying
-    /// `grpc-status: UNAUTHENTICATED`, or an ended HTTP 401 without `grpc-status`, evicts
+    /// `grpc-status: UNAUTHENTICATED`, or a complete HTTP 401 without
+    /// `grpc-status`, evicts
     /// the token that call used once it is old enough; completed responses are
     /// returned without replay. The service is always ready, and acquisition
     /// failures map to `DEADLINE_EXCEEDED`, `CANCELLED`, `UNAVAILABLE`, or
@@ -94,7 +95,7 @@ impl Service<Request<Body>> for AuthenticatedClient {
                 Err(error) => return Err(prepared.refuse(acquisition_status(error))),
             };
             let response = prepared.send().await?;
-            if infra_grpc::client_response_code(&response) == Some(Code::Unauthenticated) {
+            if infra_grpc::client_terminal_response_code(&response) == Some(Code::Unauthenticated) {
                 credentials.evict_acquired(&acquired).await;
             }
             Ok(response)
