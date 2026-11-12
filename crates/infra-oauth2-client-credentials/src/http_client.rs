@@ -9,7 +9,9 @@ use tokio::time::Instant;
 
 use crate::{
     Credentials, Error,
-    credentials::{AdmissionRefusal, acquisition_deadline, acquisition_stopped, take_subject},
+    credentials::{
+        AdmissionRefusal, acquisition_deadline, acquisition_stopped, admit_request_subject,
+    },
 };
 
 #[derive(Clone, derive_more::Debug)]
@@ -98,9 +100,11 @@ impl AuthenticatedClient {
         self.credentials
             .check_lifecycle(acquisition_deadline(&context))?;
         let on_behalf_of =
-            take_subject(&mut request, self.subject_required).map_err(|refusal| match refusal {
-                AdmissionRefusal::AuthorizationConflict => Error::AuthorizationConflict,
-                AdmissionRefusal::SubjectRequired => Error::SubjectRequired,
+            admit_request_subject(&mut request, self.subject_required).map_err(|refusal| {
+                match refusal {
+                    AdmissionRefusal::AuthorizationConflict => Error::AuthorizationConflict,
+                    AdmissionRefusal::SubjectRequired => Error::SubjectRequired,
+                }
             })?;
         check_request()?;
         // Authorization first: a cached token then never arms the deadline timer.

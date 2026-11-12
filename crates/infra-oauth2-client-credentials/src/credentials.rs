@@ -25,7 +25,7 @@ use crate::{
     token_endpoint::{FETCH_TIMEOUT, TOKEN_LIMITS, TokenEndpoint},
 };
 
-pub(crate) const FAILURE_WINDOW: Duration = Duration::from_secs(1);
+const FAILURE_WINDOW: Duration = Duration::from_secs(1);
 const EXCHANGE_CACHE_BYTES: u32 = 16 * 1024 * 1024;
 /// A reusable token is replaced in the background once at most this much, or a
 /// quarter, of its reuse remains, as Azure.Core refreshes five minutes early.
@@ -88,8 +88,8 @@ pub struct RefreshDriver {
 impl RefreshDriver {
     /// Runs refreshes inline until shutdown or final external-owner release.
     /// This method spawns no tasks; completion observes all owned refresh work.
-    /// Final owner release cancels a queued or in-flight refresh before the
-    /// remaining requests drain.
+    /// Final owner release cancels any in-flight refresh and discards queued
+    /// requests.
     pub async fn run(mut self, shutdown: impl Future<Output = ()>) {
         tokio::pin!(shutdown);
         loop {
@@ -165,7 +165,7 @@ pub(crate) struct Cached {
 }
 
 pub(crate) struct ServiceToken {
-    pub(crate) token: Arc<Token>,
+    token: Arc<Token>,
     /// When the next background refresh of this still reusable token may start.
     pub(crate) refresh_after: Instant,
 }
@@ -568,9 +568,7 @@ impl Inner {
     }
 
     fn remember_failure(&self, error: AcquisitionError) {
-        // Local refusals, capacity and cancellation, are not shared provider
-        // failures; `is_shared_failure` keeps the classification exhaustive.
-        if !error.is_shared_failure() {
+        if !is_cacheable_failure(error) {
             return;
         }
         self.cached().failure = Some(CompletedFailure {
@@ -583,9 +581,8 @@ impl Inner {
         let token = Arc::new(token);
         let mut cached = self.cached();
         cached.failure = None;
-        if token.is_reusable(Instant::now())
-            && let Some(refresh_after) = service_refresh_after(&token)
-        {
+        if let Some(reuse_until) = token.reusable_until(Instant::now()) {
+            let refresh_after = service_refresh_after(token.requested_at, reuse_until);
             cached.service = Some(ServiceToken {
                 token: token.clone(),
                 refresh_after,
@@ -629,6 +626,21 @@ impl Inner {
     }
 }
 
+/// Caller-local refusals stay private to the caller that hit them.
+fn is_cacheable_failure(error: AcquisitionError) -> bool {
+    match error {
+        AcquisitionError::AtCapacity | AcquisitionError::Cancelled | AcquisitionError::Timeout => {
+            false
+        }
+        AcquisitionError::Transport
+        | AcquisitionError::ResponseLimit
+        | AcquisitionError::Unavailable
+        | AcquisitionError::Rejected(_)
+        | AcquisitionError::InvalidResponse
+        | AcquisitionError::Assertion => true,
+    }
+}
+
 /// Why a binding refused a request before dispatch. Both are composition
 /// mistakes of this service, not refusals by its caller.
 #[derive(Clone, Copy)]
@@ -640,7 +652,7 @@ pub(crate) enum AdmissionRefusal {
 /// Removes the on-behalf-of subject before dispatch and applies the binding's
 /// admission policy. The extension is removed whether or not a subject is
 /// required, so it never reaches the resource.
-pub(crate) fn take_subject<B>(
+pub(crate) fn admit_request_subject<B>(
     request: &mut Request<B>,
     required: bool,
 ) -> Result<Option<OnBehalfOf>, AdmissionRefusal> {
@@ -698,11 +710,10 @@ pub(crate) fn acquisition_stopped(stopped: Stopped) -> AcquisitionError {
 /// The single sampled background-refresh instant for a reusable service token:
 /// the smaller of five minutes and a quarter of its reusable lifetime, with the
 /// lead reduced by at most one tenth.
-fn service_refresh_after(token: &Token) -> Option<Instant> {
-    let until = token.reuse_until?;
-    let maximum_lead = REFRESH_AHEAD.min(until.saturating_duration_since(token.requested_at) / 4);
+fn service_refresh_after(requested_at: Instant, reuse_until: Instant) -> Instant {
+    let maximum_lead = REFRESH_AHEAD.min(reuse_until.saturating_duration_since(requested_at) / 4);
     let lead = maximum_lead.saturating_sub(sampled_refresh_spread(maximum_lead / 10));
-    Some(until - lead)
+    reuse_until - lead
 }
 
 /// The window is at most 30 seconds (one tenth of the maximum refresh lead).

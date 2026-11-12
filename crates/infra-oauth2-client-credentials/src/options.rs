@@ -76,11 +76,7 @@ pub(crate) fn admitted_provider_concurrency(value: u32) -> Result<usize, Configu
 pub(crate) fn admit_options(options: &Options) -> Result<Admitted, ConfigurationError> {
     let permits = admitted_provider_concurrency(options.provider_concurrency)?;
     let error = |key, reason| Err(ConfigurationError { key, reason });
-    // `Options` can be built without the configuration loader, so it repeats
-    // the checks of the typed section in `crates/config/src/integrations.rs`
-    // (`validate_token_url` and the `OAuthConfig` checks) in the same words,
-    // a whitespace-only value counting as empty. Both take the scope-token and
-    // userinfo rules from `shared_rules`.
+    // Direct construction of `Options` bypasses the configuration loader.
     if options.client_id.trim().is_empty() {
         return error("client_id", "must be nonempty");
     }
