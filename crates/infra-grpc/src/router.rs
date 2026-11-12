@@ -141,7 +141,7 @@ pub fn router(
         Some(limits.request_timeout),
         opening,
     ));
-    Ok(with_health(business, readiness, &services.names).layer(
+    Ok(with_health(business, readiness, services.names).layer(
         axum::middleware::from_fn_with_state(series, crate::observe::observe),
     ))
 }
@@ -162,7 +162,7 @@ pub fn server_options(limits: Limits) -> infra_http::ServerOptions {
 fn with_health(
     router: axum::Router,
     readiness: ::health::ReadinessReader,
-    names: &BTreeSet<&'static str>,
+    names: BTreeSet<&'static str>,
 ) -> axum::Router {
     let health = HealthServer::new(crate::health::Adapter::new(readiness, names));
     #[expect(

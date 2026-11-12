@@ -368,7 +368,7 @@ where
         ..Outcome::bare(code)
     });
     response.map(|body| {
-        ResponseBody::new(
+        ResponseBody::start(
             body,
             call,
             fallback,
@@ -384,7 +384,7 @@ impl<B> ResponseBody<B>
 where
     B: Body<Data = Bytes> + Unpin + Send + 'static,
 {
-    fn new(
+    fn start(
         body: B,
         call: Call,
         fallback: Option<opentelemetry::Context>,
@@ -718,7 +718,7 @@ mod tests {
     where
         B: Body<Data = Bytes, Error = tonic::Status> + Unpin + Send + 'static,
     {
-        ResponseBody::new(
+        ResponseBody::start(
             body,
             call(),
             None,
@@ -967,7 +967,7 @@ mod tests {
         let call =
             tracing::subscriber::with_default(tracing::subscriber::NoSubscriber::default(), call);
         assert!(call.span().is_disabled());
-        let mut body = ResponseBody::new(
+        let mut body = ResponseBody::start(
             ContextBody(Arc::clone(&seen)),
             call,
             Some(fallback),
