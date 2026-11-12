@@ -279,7 +279,21 @@ struct Active(metrics::Gauge);
 
 impl Active {
     fn start(method: &'static str) -> Self {
-        let gauge = metrics::gauge!(ACTIVE_REQUESTS_METRIC, "http_request_method" => method);
+        // `metrics` keeps a static key only for literal label values; a
+        // runtime value allocates the label vector and its retained copy on
+        // every request. The arms repeat `method_label`'s values, and any
+        // value missing here still gets its own series through the last arm.
+        macro_rules! active_gauge {
+            ($($label:literal)*) => {
+                match method {
+                    $($label => metrics::gauge!(ACTIVE_REQUESTS_METRIC, "http_request_method" => $label),)*
+                    other => metrics::gauge!(ACTIVE_REQUESTS_METRIC, "http_request_method" => other),
+                }
+            };
+        }
+        let gauge = active_gauge!(
+            "OPTIONS" "GET" "POST" "PUT" "DELETE" "HEAD" "TRACE" "CONNECT" "PATCH" "QUERY" "_OTHER"
+        );
         gauge.increment(1);
         Self(gauge)
     }
