@@ -735,7 +735,9 @@ pub(crate) fn refresh_spread(
 ) -> Duration {
     // Source failure discards the bytes and falls back to the unjittered
     // base: the maximum lead or the base retry interval.
-    window * u32::from(sample.unwrap_or(0)) / u32::from(u16::MAX)
+    sample.map_or(Duration::ZERO, |sample| {
+        shared_rules::jitter::share_of_window(window, sample)
+    })
 }
 
 fn refresh_retry() -> Duration {

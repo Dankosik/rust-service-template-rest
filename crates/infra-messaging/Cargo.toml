@@ -59,6 +59,7 @@ opentelemetry = { workspace = true, features = ["trace"] }
 serde = { workspace = true, features = ["std", "derive"] }
 serde_json = { workspace = true, features = ["std"] }
 sha2 = { workspace = true }
+shared-rules = { workspace = true }
 thiserror = { workspace = true }
 time = { workspace = true, features = ["std", "formatting", "parsing"] }
 tokio = { workspace = true, features = ["fs", "rt", "macros", "sync", "time"] }

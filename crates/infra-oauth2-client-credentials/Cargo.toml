@@ -37,6 +37,7 @@ moka = { workspace = true, features = ["future"] }
 secrecy = { workspace = true }
 serde = { workspace = true, features = ["std", "derive"] }
 serde_json = { workspace = true, features = ["std"] }
+shared-rules = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "time", "sync", "macros"] }
 tracing = { workspace = true, features = ["std"] }

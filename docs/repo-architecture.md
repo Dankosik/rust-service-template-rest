@@ -20,7 +20,9 @@ the factual authority; read them for how something works.
    generated view does not become authority because it is easier to inspect.
 4. Optional profiles remain inert unless selected and fully wired; a partial
    capability is not a supported architecture. A crate, module, or directory
-   exists only with its first real artifact.
+   exists only with its first real artifact. `crates/shared-rules` is always
+   present: a module leaves with a profile only when every consumer belongs to
+   that profile, and otherwise stays as pure, dependency-free code.
 5. Trust, ingress and egress, dependency criticality, failure and recovery,
    and rollout choices are explicit at the boundary that enforces them: the
    hardened chain, the bounded server, the config validation, the readiness
@@ -37,6 +39,7 @@ the factual authority; read them for how something works.
 | `env/config/*.toml`, `APP__SECTION__KEY`, `--config`, `--config-overlay`, `--secrets-dir` | Inputs whose precedence and secret rules `crates/config/src/load.rs` implements |
 | `crates/health` | The readiness verdict `/health/ready` serves and the drain flag teardown flips |
 | `crates/service-failure` | The closed catalog of failure codes; each transport owns its wire projection |
+| `crates/shared-rules` | Pure, std-only rules that several crates apply identically; callers keep their policy and error mapping ([decisions](decisions/shared-rules-decisions.md)) |
 <!-- template:begin grpc:docs-architecture-grpc-source -->
 | `api/proto/`, `tools/grpc-codegen` | Committed prost/tonic contracts under `crates/grpc-contracts`, checked against the PR base |
 | `crates/infra-grpc` | Tonic routes on the shared listener, clients, health projection and server TLS |

@@ -411,20 +411,15 @@ fn normalize_scopes(scope: Option<Values<'_>>) -> Result<Vec<String>, ()> {
         Some(Values::One(value)) => value.split(' ').map(ToOwned::to_owned).collect(),
         Some(Values::Many(values)) => values.into_iter().map(Cow::into_owned).collect(),
     };
-    if !values.iter().all(|value| is_scope_token(value)) {
+    if !values
+        .iter()
+        .all(|value| shared_rules::rfc6749::is_scope_token(value))
+    {
         return Err(());
     }
     values.sort_unstable();
     values.dedup();
     Ok(values)
-}
-
-/// RFC 6749 section 3.3: `scope-token = 1*( %x21 / %x23-5B / %x5D-7E )`.
-fn is_scope_token(value: &str) -> bool {
-    !value.is_empty()
-        && value.bytes().all(|byte| {
-            byte == b'!' || (b'#'..=b'[').contains(&byte) || (b']'..=b'~').contains(&byte)
-        })
 }
 
 #[cfg(test)]

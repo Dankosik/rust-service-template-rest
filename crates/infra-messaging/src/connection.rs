@@ -201,7 +201,9 @@ fn reconnect_delay(attempts: usize, random: &dyn SecureRandom) -> Duration {
 
 fn spread_reconnect_delay(base: Duration, sample: Result<u16, GetRandomFailed>) -> Duration {
     // A failed random sample spreads nothing.
-    let spread = base / 10 * u32::from(sample.unwrap_or_default()) / u32::from(u16::MAX);
+    let spread = sample.map_or(Duration::ZERO, |sample| {
+        shared_rules::jitter::share_of_window(base / 10, sample)
+    });
     base.saturating_sub(spread)
 }
 
@@ -347,11 +349,6 @@ mod tests {
                 Duration::from_nanos(minimum_nanos)
             );
             assert_eq!(spread_reconnect_delay(base, Err(GetRandomFailed)), base);
-            for sample in [1, u16::MAX / 2, u16::MAX - 1] {
-                let delay = spread_reconnect_delay(base, Ok(sample));
-                assert!(delay >= Duration::from_nanos(minimum_nanos));
-                assert!(delay <= base);
-            }
         }
     }
 

@@ -4,6 +4,11 @@ use http::{HeaderMap, Method, StatusCode};
 use metrics::{Label, SharedString, Unit};
 use tracing::Span;
 
+use shared_rules::{
+    error_chain::Causes,
+    otel_http::{OTHER_METHOD, request_method},
+};
+
 use crate::{Error, policy::Origin};
 
 /// OpenTelemetry `http.client.request.duration`, in the recorder's
@@ -105,7 +110,7 @@ pub(crate) struct Attempt {
 
 impl Attempt {
     pub(crate) fn start(method: &Method, template: Option<UrlTemplate>, server: &Server) -> Self {
-        let method = bounded_method(method);
+        let method = request_method(method.as_str());
         let template = template.map(|UrlTemplate(template)| template);
         let span = tracing::info_span!(
             "outbound_http",
@@ -158,6 +163,10 @@ impl Attempt {
         // Adapters map this error to their own closed outcome and drop its
         // source, so the client span is where it is told.
         if let Err(Error::Transport { source }) = result {
+            // Hyper and hyper-util name only the failed step in their own
+            // text and keep the reason in `source()`. The walk follows
+            // `source()` rather than `next_cause`: an I/O error's own text
+            // already prints its payload.
             self.span.in_scope(|| {
                 tracing::warn!(
                     error = %Causes(&**source),
@@ -245,25 +254,6 @@ fn describe_histogram() {
     });
 }
 
-/// OpenTelemetry's `http.request.method` for a method it does not know.
-const OTHER_METHOD: &str = "_OTHER";
-
-fn bounded_method(method: &Method) -> &'static str {
-    match method.as_str() {
-        "GET" => "GET",
-        "HEAD" => "HEAD",
-        "POST" => "POST",
-        "PUT" => "PUT",
-        "DELETE" => "DELETE",
-        "CONNECT" => "CONNECT",
-        "OPTIONS" => "OPTIONS",
-        "TRACE" => "TRACE",
-        "PATCH" => "PATCH",
-        "QUERY" => "QUERY",
-        _ => OTHER_METHOD,
-    }
-}
-
 /// The OpenTelemetry HTTP client span name: `{method} {url.template}`, or the
 /// method alone without a template; `HTTP` stands for a method that is not a
 /// known one.
@@ -326,22 +316,6 @@ fn next_cause<'a>(error: &'a (dyn StdError + 'static)) -> Option<&'a (dyn StdErr
     {
         Some(payload) => Some(payload),
         None => error.source(),
-    }
-}
-
-/// An error and its sources on one line. Hyper and hyper-util name only the
-/// failed step in their own text and keep the reason in `source()`. The walk
-/// follows `source()` rather than [`next_cause`]: an I/O error's own text
-/// already prints its payload.
-struct Causes<'a>(&'a (dyn StdError + 'static));
-
-impl fmt::Display for Causes<'_> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{}", self.0)?;
-        for cause in std::iter::successors(self.0.source(), |cause| (*cause).source()) {
-            write!(formatter, ": {cause}")?;
-        }
-        Ok(())
     }
 }
 

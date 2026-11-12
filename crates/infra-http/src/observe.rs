@@ -42,6 +42,7 @@ use axum::response::{IntoResponse as _, Response};
 use http_body::{Frame, SizeHint};
 use metrics::{Label, SharedString};
 use opentelemetry::context::FutureExt as _;
+use shared_rules::otel_http::request_method;
 use tower_http::request_id::RequestId;
 use tracing::Instrument as _;
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
@@ -137,7 +138,7 @@ pub(crate) async fn observe(
     let route = matched
         .as_ref()
         .map_or(UNMATCHED_ROUTE, MatchedPath::as_str);
-    let active = Active::start(method_label(&method));
+    let active = Active::start(request_method(method.as_str()));
     let mut pending = Pending {
         options,
         method: &method,
@@ -195,14 +196,19 @@ impl Pending<'_> {
 
     fn record(&self, status: StatusCode, problem_code: Option<&str>) {
         let elapsed = self.started.elapsed();
-        record_duration(method_label(self.method), self.route, status, elapsed);
+        record_duration(
+            request_method(self.method.as_str()),
+            self.route,
+            status,
+            elapsed,
+        );
         if suppresses_access_log(self.options, self.method, self.route) {
             return;
         }
         let duration_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
         self.span.in_scope(|| {
             tracing::info!(
-                method = method_label(self.method),
+                method = request_method(self.method.as_str()),
                 route = %self.route,
                 status = status.as_u16(),
                 duration_ms,
@@ -231,7 +237,7 @@ fn make_span(
     matched: Option<&MatchedPath>,
     request_id: Option<&str>,
 ) -> tracing::Span {
-    let method = method_label(request.method());
+    let method = request_method(request.method().as_str());
     let route = matched.map(MatchedPath::as_str);
     let span = otel_trace_span!(
         "HTTP request",
@@ -281,7 +287,7 @@ impl Active {
     fn start(method: &'static str) -> Self {
         // `metrics` keeps a static key only for literal label values; a
         // runtime value allocates the label vector and its retained copy on
-        // every request. The arms repeat `method_label`'s values, and any
+        // every request. The arms repeat `request_method`'s values, and any
         // value missing here still gets its own series through the last arm.
         macro_rules! active_gauge {
             ($($label:literal)*) => {
@@ -369,25 +375,6 @@ static STATUS_CODES: [StatusCode; 900] = {
 
 fn status_label(status: StatusCode) -> &'static str {
     STATUS_CODES[usize::from(status.as_u16() - 100)].as_str()
-}
-
-/// The standard method name, or the conventions' `_OTHER` for an extension
-/// method, so a caller cannot create label values. `QUERY` is a known method
-/// of the conventions; `http` has no constant for it.
-fn method_label(method: &Method) -> &'static str {
-    match *method {
-        Method::OPTIONS => "OPTIONS",
-        Method::GET => "GET",
-        Method::POST => "POST",
-        Method::PUT => "PUT",
-        Method::DELETE => "DELETE",
-        Method::HEAD => "HEAD",
-        Method::TRACE => "TRACE",
-        Method::CONNECT => "CONNECT",
-        Method::PATCH => "PATCH",
-        _ if method.as_str() == "QUERY" => "QUERY",
-        _ => "_OTHER",
-    }
 }
 
 /// Complete every Problem the chain or a handler returns: a bare 413 from

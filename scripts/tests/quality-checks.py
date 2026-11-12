@@ -254,6 +254,27 @@ class Architecture(unittest.TestCase):
                 self.policy["members"][target]["allow_dependents"] = broken
                 self.assertTrue(any("architecture input" in error for error in self.verdict()))
 
+    def test_std_only_role_refuses_every_non_dev_dependency(self):
+        owner = "crates/shared-rules/Cargo.toml"
+        self.assertTrue(self.policy["roles"][self.policy["members"][owner]["role"]]["std_only"])
+        self.assertEqual([], self.verdict())
+        package = next(p for p in self.meta["packages"] if p["id"] == owner)
+        registry = {"name": "itoa", "kind": None, "optional": False,
+                    "source": "registry+https://github.com/rust-lang/crates.io-index"}
+        for dependency in (registry, dict(registry, kind="build"), dict(registry, optional=True)):
+            with self.subTest(dependency=dependency):
+                package["dependencies"] = [dependency]
+                self.assertTrue(any("forbids every non-dev dependency" in error for error in self.verdict()))
+        package["dependencies"] = [dict(registry, kind="dev")]
+        self.assertEqual([], self.verdict())
+        self.edge(owner, "crates/operation-context/Cargo.toml")
+        self.assertTrue(any("forbids every non-dev dependency" in error for error in self.verdict()))
+        package["dependencies"] = []
+        self.edge("crates/infra-postgres/Cargo.toml", owner)
+        self.assertTrue(any("shared-rules" in error for error in self.verdict()))
+        self.policy["roles"]["shared-rules"]["std_only"] = "yes"
+        self.assertTrue(any("architecture input" in error for error in self.verdict()))
+
 
 class Native(unittest.TestCase):
     def require_lint_policy(self, prefix):

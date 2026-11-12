@@ -23,6 +23,22 @@
         ]
       }
     },
+    "crates/shared-rules/Cargo.toml": {
+      "role": "shared-rules",
+      "allow_dependents": {
+        "reason": "Each listed crate applies a rule that another crate must apply identically, with no other common owner.",
+        "authority": "docs/decisions/shared-rules-decisions.md",
+        "members": [
+          "crates/config/Cargo.toml",
+          "crates/infra-bearerauthn/Cargo.toml",
+          "crates/infra-grpc/Cargo.toml",
+          "crates/infra-http/Cargo.toml",
+          "crates/infra-messaging/Cargo.toml",
+          "crates/infra-oauth2-client-credentials/Cargo.toml",
+          "crates/infra-outbound-http/Cargo.toml"
+        ]
+      }
+    },
     "crates/infra-bearerauthn/Cargo.toml": {"role": "bearer"},
     "crates/infra-serviceauth/Cargo.toml": {"role": "service-auth"},
     "crates/infra-cache/Cargo.toml": {"role": "health-provider"},
@@ -51,6 +67,7 @@
     "config": {"rule": "independent-config-leaf"},
     "health": {"rule": "independent-health-leaf"},
     "contract": {"rule": "independent-shared-contract"},
+    "shared-rules": {"rule": "std-only-shared-rules", "std_only": true},
     "bearer": {"rule": "independent-bearer-provider"},
     "service-auth": {"rule": "independent-service-token-provider"},
     "outbound-http": {"rule": "independent-outbound-http-provider"},
