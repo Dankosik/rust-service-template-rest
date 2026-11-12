@@ -174,6 +174,64 @@ async fn only_a_single_valid_inbound_request_id_is_echoed() {
 }
 
 #[tokio::test]
+async fn request_id_stays_consistent_when_other_layers_supply_ids() {
+    use tower_http::request_id::RequestId;
+
+    let handler = || async {
+        (
+            [(REQUEST_ID_HEADER, "handler-id")],
+            Problem::new(Code::BadRequest),
+        )
+    };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
+    )]
+    let routes = Router::new().route("/problem", get(handler));
+    let app = harden(routes, &options());
+    for (path, existing_id, status) in [
+        ("/problem", None, StatusCode::BAD_REQUEST),
+        ("/missing", Some("outer-id"), StatusCode::NOT_FOUND),
+    ] {
+        let mut request = request(Method::GET, path);
+        request
+            .headers_mut()
+            .insert(REQUEST_ID_HEADER, HeaderValue::from_static("client-id"));
+        if let Some(id) = existing_id {
+            request
+                .extensions_mut()
+                .insert(RequestId::new(HeaderValue::from_static(id)));
+        }
+        let fields = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(EventFields {
+            target: concat!(env!("CARGO_CRATE_NAME"), "::observe"),
+            fields: Arc::clone(&fields),
+        });
+        let response = app
+            .clone()
+            .oneshot(request)
+            .with_subscriber(subscriber)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status, "{path}");
+        assert_eq!(response.headers()[REQUEST_ID_HEADER], "client-id", "{path}");
+        assert_eq!(
+            body_json(response).await["request_id"],
+            "client-id",
+            "{path}"
+        );
+        assert!(
+            fields
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|field| field == "request_id=\"client-id\""),
+            "{path}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn not_found_and_method_not_allowed_are_problems_with_allow() {
     let server = TestServer::new(app(&options()));
     let response = server.get("/missing").await;

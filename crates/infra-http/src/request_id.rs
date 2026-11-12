@@ -1,8 +1,8 @@
 //! Request correlation.
 //!
-//! `tower_http::request_id` sets and propagates `X-Request-ID`, but trusts
-//! any inbound value verbatim. Require one valid field before that layer runs
-//! so the request headers, problem bodies, and logs share one correlation id.
+//! `SetRequestIdLayer` trusts the inbound header and any existing `RequestId`
+//! extension. Sanitize both before it establishes the ID that observation
+//! echoes in the response header and uses for Problem bodies and logs.
 
 use axum::http::header::HeaderName;
 use axum::http::{HeaderValue, Request};
@@ -38,7 +38,7 @@ impl MakeRequestId for MakeRequestUuid {
 }
 
 /// Keep exactly one inbound `X-Request-ID` matching `^[A-Za-z0-9._~-]{1,128}$`.
-pub(crate) fn strip_invalid<B>(mut request: Request<B>) -> Request<B> {
+pub(crate) fn sanitize<B>(mut request: Request<B>) -> Request<B> {
     let mut values = request.headers().get_all(&REQUEST_ID_HEADER).iter();
     let keep = values
         .next()
@@ -47,6 +47,7 @@ pub(crate) fn strip_invalid<B>(mut request: Request<B>) -> Request<B> {
     if !keep {
         request.headers_mut().remove(&REQUEST_ID_HEADER);
     }
+    request.extensions_mut().remove::<RequestId>();
     request
 }
 
@@ -68,7 +69,7 @@ mod tests {
     #[test]
     fn keeps_values_in_the_accepted_grammar() {
         for value in ["abc", "0123456789abcdef", "a.b_c~d-e", &"x".repeat(128)] {
-            let request = strip_invalid(with_header(value));
+            let request = sanitize(with_header(value));
             assert!(
                 request.headers().contains_key(&REQUEST_ID_HEADER),
                 "{value:?} should be kept"
@@ -88,7 +89,7 @@ mod tests {
             "\"quoted\"",
             &"x".repeat(129),
         ] {
-            let request = strip_invalid(with_header(value));
+            let request = sanitize(with_header(value));
             assert!(
                 !request.headers().contains_key(&REQUEST_ID_HEADER),
                 "{value:?} should be stripped"

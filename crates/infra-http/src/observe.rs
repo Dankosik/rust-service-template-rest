@@ -52,6 +52,7 @@ use tracing_opentelemetry_instrumentation_sdk::{otel_trace_span, set_parent_or_f
 use crate::harden::AdmissionShed;
 use crate::probes::is_health_probe_route;
 use crate::problem::Problem;
+use crate::request_id::REQUEST_ID_HEADER;
 use crate::server::ConnectionInfo;
 
 /// The response-head duration, labelled by `http_request_method`,
@@ -149,11 +150,16 @@ pub(crate) async fn observe(
     // Own the accepted header while the request moves into the next service;
     // the borrowed string also remains available for response completion.
     let request_id = request.extensions().get::<RequestId>().cloned();
-    let request_id = request_id
+    let request_id_text = request_id
         .as_ref()
         .and_then(|id| id.header_value().to_str().ok());
     let connection = request.extensions_mut().remove::<ConnectionInfo>();
-    let span = make_span(&request, matched.as_ref(), request_id, connection.as_ref());
+    let span = make_span(
+        &request,
+        matched.as_ref(),
+        request_id_text,
+        connection.as_ref(),
+    );
     let fallback = set_parent_or_fallback(&span, otel_http::extract_context(request.headers()));
     let route = matched
         .as_ref()
@@ -164,7 +170,7 @@ pub(crate) async fn observe(
         series: &series,
         method: &method,
         route,
-        request_id,
+        request_id: request_id_text,
         span: &span,
         started,
         answered: false,
@@ -182,7 +188,7 @@ pub(crate) async fn observe(
     // Complete the Problem before metrics and logging read the response head.
     // These observations do not wait for a streaming body; only the active
     // gauge below follows the body's lifetime.
-    let response = complete_problem(response, request_id);
+    let mut response = complete_problem(response, request_id_text);
     let status = response.status();
     let extensions = response.extensions();
     let problem_code = extensions
@@ -191,6 +197,12 @@ pub(crate) async fn observe(
     let termination = extensions.get::<AdmissionShed>().map(|_| "load_shed");
     pending.answer(status, problem_code, termination);
     update_span_from_response(&span, status);
+    if let Some(id) = &request_id {
+        response
+            .headers_mut()
+            .insert(REQUEST_ID_HEADER, id.header_value().clone());
+        response.extensions_mut().insert(id.clone());
+    }
     active.until_body_ends(response)
 }
 
