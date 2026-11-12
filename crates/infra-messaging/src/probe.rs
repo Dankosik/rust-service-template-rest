@@ -43,10 +43,10 @@ impl PublishWork {
         if slot > 0 {
             labels.push(metrics::Label::new("connection_slot", slot.to_string()));
         }
-        let in_flight = metrics::gauge!("messaging_publish_work_in_flight", &labels);
+        let in_flight = metrics::gauge!("messaging_publish_work_in_flight", labels.iter());
         let last_observed = metrics::gauge!(
             "messaging_publish_work_last_observed_timestamp_seconds",
-            &labels
+            labels.iter()
         );
         let capacity_gauge = metrics::gauge!("messaging_publish_capacity", labels);
         in_flight.set(f64::NAN);
