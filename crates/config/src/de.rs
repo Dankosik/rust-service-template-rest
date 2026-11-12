@@ -68,6 +68,31 @@ where
         .transpose()
 }
 
+// Buffer the scalar kind before config-rs coerces `true`, `yes`, or `off`
+// into 1.0 or 0.0.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RatioInput {
+    Number(f64),
+    Text(String),
+}
+
+fn invalid_ratio<E: serde::de::Error>() -> E {
+    E::invalid_value(Unexpected::Other("a malformed number"), &"a number")
+}
+
+/// A decimal number from a file number or environment text; booleans and
+/// words are refused rather than read as 1.0 or 0.0.
+pub(crate) fn ratio<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match RatioInput::deserialize(deserializer).map_err(|_| invalid_ratio::<D::Error>())? {
+        RatioInput::Number(value) => Ok(value),
+        RatioInput::Text(value) => value.trim().parse().map_err(|_| invalid_ratio()),
+    }
+}
+
 /// What a listen address must be, for the decode message.
 const LISTEN_ADDR_FORM: &str = "an IP address and port, or :port; hostnames are not resolved";
 
