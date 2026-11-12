@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use enum_map::EnumMap;
 use sqlx::postgres::PgPool;
-use tokio::sync::{Notify, Semaphore};
+use tokio::sync::{Notify, Semaphore, watch};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -171,9 +171,9 @@ impl Engine {
                 max_workers,
                 slots: Arc::new(Semaphore::new(slots)),
                 statement_turn: tokio::sync::Mutex::new(()),
-                cleanup: Arc::default(),
+                cleanup: ForcedCleanup::default(),
                 counters: Counters::default(),
-                attempt_tracker: TaskTracker::new(),
+                drain: Arc::default(),
                 failing: EnumMap::default(),
                 completions: crate::attempt::Completions::default(),
                 owned_attempts: crate::attempt::MembershipGauge::owned_attempts(),
@@ -248,7 +248,7 @@ impl Engine {
         spawn(
             Run::Claim {
                 _peer: self.peer,
-                _close: CloseTracker(Arc::clone(&self.shared)),
+                _exit: DrainParticipant::ClaimLoop(Arc::clone(&self.shared.drain)),
             },
             stop.clone(),
         );
@@ -284,12 +284,12 @@ impl Started {
     /// Attempts admitted and not yet recorded.
     #[must_use]
     pub fn in_flight(&self) -> usize {
-        self.shared.attempt_tracker.len()
+        self.shared.drain.in_flight()
     }
 
     /// Resolves once the claim loop has exited and every supervisor has ended.
     pub async fn drained(&self) {
-        self.shared.attempt_tracker.wait().await;
+        self.shared.drain.wait().await;
     }
 
     /// Cancel unfinished handlers and finish known outcomes inside `budget`.
@@ -300,12 +300,13 @@ impl Started {
     #[must_use]
     pub async fn cancel_and_finish(&self, budget: Duration) -> DrainEnd {
         self.stop_claiming();
-        self.shared.cleanup.begin(budget);
-        let timed_out = tokio::select! {
+        let deadline = self.shared.cleanup.begin(budget);
+        tokio::select! {
             biased;
-            () = self.drained() => self.shared.cleanup.finished_late(),
-            () = self.shared.cleanup.ended() => true,
-        };
+            () = self.drained() => {}
+            () = tokio::time::sleep_until(deadline) => {}
+        }
+        let timed_out = !self.shared.drain.completed_by(deadline);
         let counters = &self.shared.counters;
         DrainEnd {
             known_results: counters.known_results.load(Ordering::Relaxed),
@@ -351,7 +352,7 @@ enum Run {
     Claim {
         // Deregister the peer before releasing drain waiters, even before the first poll.
         _peer: PeerRegistration,
-        _close: CloseTracker,
+        _exit: DrainParticipant,
     },
     Retention,
     Listener,
@@ -394,12 +395,75 @@ fn spawn_guarded(
     });
 }
 
-struct CloseTracker(Arc<Shared>);
+#[derive(Default)]
+struct DrainState {
+    in_flight: usize,
+    claim_loop_exited: bool,
+    completed_at: Option<Instant>,
+}
 
-impl Drop for CloseTracker {
+pub(crate) struct AttemptDrain(watch::Sender<DrainState>);
+
+impl Default for AttemptDrain {
+    fn default() -> Self {
+        Self(watch::Sender::new(DrainState::default()))
+    }
+}
+
+impl AttemptDrain {
+    fn in_flight(&self) -> usize {
+        self.0.borrow().in_flight
+    }
+
+    fn completed_by(&self, deadline: Instant) -> bool {
+        self.0
+            .borrow()
+            .completed_at
+            .is_some_and(|at| at <= deadline)
+    }
+
+    async fn wait(&self) {
+        let mut receiver = self.0.subscribe();
+        drop(
+            receiver
+                .wait_for(|state| state.completed_at.is_some())
+                .await,
+        );
+    }
+
+    fn admit(&self) {
+        self.0.send_if_modified(|state| {
+            state.in_flight += 1;
+            false
+        });
+    }
+
+    fn finish(&self, retire: impl FnOnce(&mut DrainState)) {
+        // Publish the timestamp with the state change that completes the drain.
+        // Earlier exits update the count silently so only the last exit wakes waiters.
+        self.0.send_if_modified(|state| {
+            retire(state);
+            if state.claim_loop_exited && state.in_flight == 0 {
+                state.completed_at = Some(Instant::now());
+                true
+            } else {
+                false
+            }
+        });
+    }
+}
+
+enum DrainParticipant {
+    ClaimLoop(Arc<AttemptDrain>),
+    Supervisor(Arc<AttemptDrain>),
+}
+
+impl Drop for DrainParticipant {
     fn drop(&mut self) {
-        self.0.cleanup.record_exit();
-        self.0.attempt_tracker.close();
+        match self {
+            Self::ClaimLoop(drain) => drain.finish(|state| state.claim_loop_exited = true),
+            Self::Supervisor(drain) => drain.finish(|state| state.in_flight -= 1),
+        }
     }
 }
 
@@ -410,11 +474,8 @@ impl Drop for CloseTracker {
 /// claim-stop token of the engine that admitted the claim: an abnormal end, or
 /// an abort while the supervisor is still running, fails the engine through
 /// `failure` and stops new claim rounds through `stop`. The running round keeps
-/// its custody, and the claim loop's exit closes `attempt_tracker`, which
-/// [`Started::drained`] waits on, so the drain still waits for every other
-/// supervisor to end.
+/// its custody. [`Started::drained`] waits for the claim loop and all supervisors.
 pub(crate) struct SupervisorGuard {
-    cleanup: Arc<ForcedCleanup>,
     stop: CancellationToken,
     failure: CancellationToken,
     /// The attempt's job, named in the record: the guard drops outside the
@@ -422,23 +483,25 @@ pub(crate) struct SupervisorGuard {
     job_id: crate::kind::JobId,
     kind: &'static str,
     retired: bool,
+    _exit: DrainParticipant,
 }
 
 impl SupervisorGuard {
     pub(crate) fn new(
-        cleanup: Arc<ForcedCleanup>,
+        drain: Arc<AttemptDrain>,
         stop: CancellationToken,
         failure: CancellationToken,
         job_id: crate::kind::JobId,
         kind: &'static str,
     ) -> Self {
+        drain.admit();
         Self {
-            cleanup,
             stop,
             failure,
             job_id,
             kind,
             retired: false,
+            _exit: DrainParticipant::Supervisor(drain),
         }
     }
 
@@ -460,8 +523,6 @@ impl Drop for SupervisorGuard {
             self.failure.cancel();
             self.stop.cancel();
         }
-        // The tracked future drops its supervisor guard before its tracker token.
-        self.cleanup.record_exit();
     }
 }
 
@@ -596,9 +657,9 @@ pub(crate) struct Shared {
     /// the pool budget is `jobs.max_workers + 2`, one connection per attempt
     /// slot plus this one and readiness.
     pub(crate) statement_turn: tokio::sync::Mutex<()>,
-    pub(crate) cleanup: Arc<ForcedCleanup>,
+    pub(crate) cleanup: ForcedCleanup,
     pub(crate) counters: Counters,
-    pub(crate) attempt_tracker: TaskTracker,
+    pub(crate) drain: Arc<AttemptDrain>,
     /// Per operation: set after the first failure, clear after recovery.
     failing: EnumMap<Operation, AtomicBool>,
     pub(crate) completions: crate::attempt::Completions,
@@ -646,7 +707,7 @@ impl fmt::Debug for Shared {
         formatter
             .debug_struct("Shared")
             .field("max_workers", &self.max_workers)
-            .field("in_flight", &self.attempt_tracker.len())
+            .field("in_flight", &self.drain.in_flight())
             .finish_non_exhaustive()
     }
 }
@@ -660,18 +721,18 @@ impl fmt::Debug for Shared {
 pub(crate) struct ForcedCleanup {
     force: CancellationToken,
     deadline: OnceLock<Instant>,
-    last_exit: Mutex<Option<Instant>>,
 }
 
 impl ForcedCleanup {
     /// The first call fixes the deadline at `budget` from now; a later call
     /// keeps it.
-    fn begin(&self, budget: Duration) {
-        self.deadline.get_or_init(|| {
+    fn begin(&self, budget: Duration) -> Instant {
+        let deadline = *self.deadline.get_or_init(|| {
             let now = Instant::now();
             now.checked_add(budget).unwrap_or(now + NO_CLEANUP_DEADLINE)
         });
         self.force.cancel();
+        deadline
     }
 
     /// Resolves once a cleanup is forced.
@@ -693,24 +754,6 @@ impl ForcedCleanup {
         self.deadline
             .get()
             .is_some_and(|deadline| Instant::now() >= *deadline)
-    }
-
-    fn record_exit(&self) {
-        let mut last_exit = self
-            .last_exit
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *last_exit = Some(Instant::now());
-    }
-
-    fn finished_late(&self) -> bool {
-        let last_exit = self
-            .last_exit
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        last_exit
-            .zip(self.deadline.get().copied())
-            .is_some_and(|(exit, deadline)| exit > deadline)
     }
 }
 
@@ -811,7 +854,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn cleanup_reports_when_the_claim_loop_exited_even_if_the_waiter_resumes_later() {
+    async fn cleanup_reports_when_the_last_supervisor_exited_even_if_the_waiter_resumes_later() {
         let budget = Duration::from_secs(2);
         for (exit_after, timed_out) in [(1, false), (3, true)] {
             let pool = sqlx::postgres::PgPoolOptions::new()
@@ -822,16 +865,25 @@ mod tests {
                 Ok(())
             });
             let engine = Engine::new(pool, kinds.validate().unwrap(), NonZeroU32::MIN);
-            let claim_loop = CloseTracker(Arc::clone(&engine.shared));
+            let claim_loop = DrainParticipant::ClaimLoop(Arc::clone(&engine.shared.drain));
             let started = Started {
                 shared: engine.shared,
                 stop: CancellationToken::new(),
                 failure: CancellationToken::new(),
             };
+            let mut supervisor = SupervisorGuard::new(
+                Arc::clone(&started.shared.drain),
+                started.stop.clone(),
+                started.failure.clone(),
+                crate::JobId(uuid::Uuid::nil()),
+                "ordinary",
+            );
+            supervisor.retire();
+            drop(claim_loop);
             let mut finish = std::pin::pin!(started.cancel_and_finish(budget));
             assert!(futures_util::poll!(finish.as_mut()).is_pending());
             tokio::time::advance(Duration::from_secs(exit_after)).await;
-            drop(claim_loop);
+            drop(supervisor);
             tokio::time::advance(Duration::from_secs(2)).await;
 
             assert_eq!(finish.await.timed_out, timed_out);
@@ -1070,7 +1122,7 @@ mod tests {
                         Duration::from_secs(10)
                     },
                 SupervisorGuard::new(
-                    Arc::clone(&engine.shared.cleanup),
+                    Arc::clone(&engine.shared.drain),
                     stop.clone(),
                     failure.clone(),
                     crate::JobId(uuid::Uuid::nil()),
