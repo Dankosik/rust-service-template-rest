@@ -21,11 +21,8 @@ mod effect;
 
 use domain_events::Event;
 use effect::{Applied, EffectError, Increment};
-use infra_postgres::{
-    Dsn, Isolation, PgPool, PoolOptions, SessionBudgets, TxError, TxOptions, in_tx_with,
-};
+use infra_postgres::{Dsn, Isolation, PgPool, TxError, TxOptions, in_tx_with};
 use integration_tests::{DATABASE_URL, dsn_for, url_for};
-use std::num::NonZeroU32;
 use std::time::Duration;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
@@ -33,17 +30,8 @@ use tokio_util::sync::CancellationToken;
 const WAIT: Duration = Duration::from_secs(10);
 
 async fn pool_at(dsn: &Dsn) -> PgPool {
-    infra_postgres::connect(
-        dsn,
-        &PoolOptions {
-            max_connections: NonZeroU32::new(3).unwrap(),
-            application_name: "messaging-recovery-test",
-            default_isolation: Isolation::ReadCommitted,
-            session_budgets: SessionBudgets::Startup,
-        },
-    )
-    .await
-    .unwrap()
+    integration_tests::template_pool(dsn, "messaging-recovery-test", 3, Isolation::ReadCommitted)
+        .await
 }
 
 async fn schema(pool: &PgPool) {

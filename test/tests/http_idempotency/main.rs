@@ -27,7 +27,6 @@ mod mounted;
 
 use std::fmt::Write as _;
 use std::future::Future;
-use std::num::NonZeroU32;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
@@ -38,8 +37,8 @@ use infra_idempotency_store::{
     AttemptError, Attempted, CLEANUP_REMOVED_METRIC, CLEANUP_RUNS_METRIC, CallerIdentity,
     CallerKind, CleanupError, Digest, HeaderPair, Record, ScopeKey, StartupError, Store,
 };
-use infra_postgres::{Closed, Dsn, Isolation, PgPool, PoolOptions, Tx};
-use integration_tests::dsn_for;
+use infra_postgres::{Dsn, Isolation, PgPool, Tx};
+use integration_tests::{close_pools, dsn_for};
 use sqlx::Executor as _;
 use tokio::sync::Notify;
 use tokio::time::Instant;
@@ -60,7 +59,6 @@ const RETENTION: Duration = Duration::from_secs(3_600);
 const WAIT: Duration = Duration::from_secs(10);
 /// Pause between retries while a dropped attempt's transaction ends.
 const RETRY_PAUSE: Duration = Duration::from_millis(20);
-const CLOSE_BUDGET: Duration = Duration::from_secs(5);
 const CANCEL_BUDGET: Duration = Duration::from_secs(1);
 
 // Scope digests. The advisory lock key is a digest's first eight bytes, so
@@ -100,17 +98,7 @@ const INSERT_LIVE: &str = "INSERT INTO http_idempotency_records \
 
 /// The template pool on `dsn`: the service's session defaults and budgets.
 async fn template_pool(dsn: &Dsn, max_connections: u32) -> PgPool {
-    infra_postgres::connect(
-        dsn,
-        &PoolOptions {
-            max_connections: NonZeroU32::new(max_connections).expect("a pool size"),
-            application_name: APP,
-            default_isolation: Isolation::ServerDefault,
-            session_budgets: infra_postgres::SessionBudgets::Startup,
-        },
-    )
-    .await
-    .expect("the template pool connects")
+    integration_tests::template_pool(dsn, APP, max_connections, Isolation::ServerDefault).await
 }
 
 /// One replica: an independent template pool on the per-test database, and
@@ -118,15 +106,6 @@ async fn template_pool(dsn: &Dsn, max_connections: u32) -> PgPool {
 async fn replica(dsn: &Dsn) -> (PgPool, Store) {
     let pool = template_pool(dsn, 3).await;
     (pool.clone(), Store::new(pool, RETENTION))
-}
-
-async fn close(pools: &[&PgPool]) {
-    for pool in pools {
-        assert_eq!(
-            infra_postgres::close(pool, CLOSE_BUDGET).await,
-            Closed::Complete
-        );
-    }
 }
 
 /// Make every later session on the per-test database read-only by default;
@@ -403,7 +382,7 @@ async fn p1_a_held_key_refuses_duplicates_and_commits_one_effect(pool: PgPool) {
     }
     assert_eq!(work.runs(), 1);
     assert_eq!(count(&pool, EFFECTS).await, 1);
-    close(&[&pool_1, &pool_2]).await;
+    close_pools(&[&pool_1, &pool_2]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -446,7 +425,7 @@ async fn p1_a_record_committed_under_the_work_is_kept_and_the_work_rolls_back(po
     assert_eq!(live(decided), None);
     assert_eq!(records(&pool, SCOPE).await, 1);
     assert_eq!(work.runs(), 1);
-    close(&[&store_pool]).await;
+    close_pools(&[&store_pool]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -506,7 +485,7 @@ async fn p2_rolled_back_work_leaves_no_effect_or_record_and_the_retry_executes(p
     }
     assert_eq!(work.runs(), 6);
     assert_eq!(count(&pool, EFFECTS).await, 3);
-    close(&[&pool_1, &pool_2]).await;
+    close_pools(&[&pool_1, &pool_2]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -552,7 +531,7 @@ async fn p3_a_replay_returns_the_stored_bytes_and_other_scopes_are_independent(p
             "fixture-subject".to_owned()
         )
     );
-    close(&[&pool_1, &pool_2]).await;
+    close_pools(&[&pool_1, &pool_2]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -616,7 +595,7 @@ async fn p3_corrupt_columns_are_integrity_failures_even_for_a_mismatch(pool: PgP
     }
     assert_eq!(work.runs(), 1);
     assert_eq!(count(&pool, EFFECTS).await, 1);
-    close(&[&store_pool]).await;
+    close_pools(&[&store_pool]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -679,7 +658,7 @@ async fn p3_a_long_verified_caller_identity_commits_and_replays(pool: PgPool) {
     .await
     .expect("the stored caller identity");
     assert_eq!(stored, caller_value);
-    close(&[&store_pool]).await;
+    close_pools(&[&store_pool]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -704,7 +683,7 @@ async fn p4_an_expired_record_is_not_replayed_and_is_replaced(pool: PgPool) {
     assert_eq!(records(&pool, SCOPE).await, 1);
     assert_eq!(work.runs(), 2);
     assert_eq!(count(&pool, EFFECTS).await, 2);
-    close(&[&pool_1, &pool_2]).await;
+    close_pools(&[&pool_1, &pool_2]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -727,7 +706,7 @@ async fn p4_a_retention_with_a_sub_microsecond_part_writes_its_record(pool: PgPo
     .await
     .expect("the record's expiry");
     assert!(on_time, "the record lives for the retention");
-    close(&[&store_pool]).await;
+    close_pools(&[&store_pool]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -800,7 +779,7 @@ async fn p4_cleanup_drains_the_backlog_and_keeps_live_and_held_records(pool: PgP
     assert_eq!(count(&pool, LIVE_RECORDS).await, LIVE + 1);
     assert_eq!(work.runs(), 2);
     assert_eq!(count(&pool, EFFECTS).await, 2);
-    close(&[&pool_1, &pool_2]).await;
+    close_pools(&[&pool_1, &pool_2]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -881,7 +860,7 @@ async fn p4_cleanup_keeps_confirmed_progress_after_failure_and_counts_waiting_ca
         assert!(scrape.contains(line), "{line} missing from {scrape}");
     }
     assert!(!scrape.contains(CLEANUP_RUNS_METRIC), "no scheduler calls");
-    close(&[&store_pool]).await;
+    close_pools(&[&store_pool]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -927,7 +906,7 @@ async fn p4_the_cleanup_task_runs_at_once_and_returns_promptly_on_cancel(pool: P
         0,
         "idle cancellation creates no cleanup pass: {scrape}"
     );
-    close(&[&store_pool]).await;
+    close_pools(&[&store_pool]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -1029,7 +1008,7 @@ async fn p4_population_distinguishes_unknown_empty_and_locked_expired_records(po
         .await
         .expect("remove the fixture for the empty sample");
     }
-    close(&[&store_pool]).await;
+    close_pools(&[&store_pool]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -1056,7 +1035,7 @@ async fn p5_a_read_only_session_is_unavailable_even_with_a_live_record(pool: PgP
     assert_eq!(count(&pool, EFFECTS).await, 1);
     // Cleanup on that session fails in its statement and deletes nothing.
     assert_eq!(reader.remove_expired().await, Err(CleanupError::Statement));
-    close(&[&writer_pool, &reader_pool]).await;
+    close_pools(&[&writer_pool, &reader_pool]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -1097,7 +1076,7 @@ async fn p6_an_aborted_statement_is_internal_and_the_same_key_can_retry(pool: Pg
     let retry = execute(&store, SCOPE, INPUT, &record, &Work::default()).await;
     assert_eq!(committed(retry), record);
     assert_eq!(count(&pool, EFFECTS).await, 1);
-    close(&[&store_pool]).await;
+    close_pools(&[&store_pool]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -1127,7 +1106,7 @@ async fn p7_a_dropped_attempt_leaves_no_effect_and_frees_its_key(pool: PgPool) {
     assert_eq!(work.runs(), 2);
     assert_eq!(count(&pool, EFFECTS).await, 1);
     assert_eq!(records(&pool, SCOPE).await, 1);
-    close(&[&pool_1, &pool_2]).await;
+    close_pools(&[&pool_1, &pool_2]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -1140,5 +1119,5 @@ async fn p8_startup_admits_a_migrated_writer_and_refuses_a_read_only_session(poo
     make_read_only(&pool).await;
     let (reader_pool, reader) = replica(&dsn).await;
     assert_eq!(reader.check_startup().await, Err(StartupError::NotWritable));
-    close(&[&writer_pool, &reader_pool]).await;
+    close_pools(&[&writer_pool, &reader_pool]).await;
 }

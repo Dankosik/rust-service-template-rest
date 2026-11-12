@@ -19,9 +19,15 @@ pub mod reading_counter;
 pub mod reading_counter_receiver;
 // template:end jobs-reference:test-lib-reading-counter
 
-use infra_postgres::Dsn;
+use std::num::NonZeroU32;
+use std::time::Duration;
+
+use infra_postgres::{Closed, Dsn, Isolation, PoolOptions, SessionBudgets};
 use sqlx::PgPool;
 use url::Url;
+
+/// How long [`close_pools`] waits for each pool's connections to return.
+const CLOSE_BUDGET: Duration = Duration::from_secs(5);
 
 /// The environment variable `#[sqlx::test]` reads; the script that owns the
 /// compose lifecycle exports it in the admitted URL form.
@@ -78,4 +84,45 @@ pub async fn url_for(pool: &PgPool, variable: &str) -> Url {
     let mut url = Url::parse(&raw).unwrap_or_else(|_| panic!("{variable} is a URL"));
     url.set_path(&database);
     url
+}
+
+/// A pool on `dsn` opened the way the service opens its own: at most
+/// `max_connections` sessions named `application_name`, with `isolation` as
+/// the session default and the budgets set at startup.
+///
+/// # Panics
+///
+/// When `max_connections` is zero or the pool cannot connect.
+pub async fn template_pool(
+    dsn: &Dsn,
+    application_name: &str,
+    max_connections: u32,
+    isolation: Isolation,
+) -> PgPool {
+    infra_postgres::connect(
+        dsn,
+        &PoolOptions {
+            max_connections: NonZeroU32::new(max_connections).expect("a pool size"),
+            application_name,
+            default_isolation: isolation,
+            session_budgets: SessionBudgets::Startup,
+        },
+    )
+    .await
+    .expect("the template pool connects")
+}
+
+/// Closes each of `pools`.
+///
+/// # Panics
+///
+/// When a pool does not close completely within five seconds: a connection
+/// the test leaked would hide in a partial close.
+pub async fn close_pools(pools: &[&PgPool]) {
+    for pool in pools {
+        assert_eq!(
+            infra_postgres::close(pool, CLOSE_BUDGET).await,
+            Closed::Complete
+        );
+    }
 }

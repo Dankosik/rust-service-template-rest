@@ -79,17 +79,7 @@ impl tracing::Subscriber for PoolEvents {
 }
 
 async fn template_pool(dsn: &Dsn, max_connections: u32) -> PgPool {
-    infra_postgres::connect(
-        dsn,
-        &PoolOptions {
-            max_connections: NonZeroU32::new(max_connections).expect("pool size in tests"),
-            application_name: APP,
-            default_isolation: Isolation::ServerDefault,
-            session_budgets: SessionBudgets::Startup,
-        },
-    )
-    .await
-    .expect("pool connects")
+    integration_tests::template_pool(dsn, APP, max_connections, Isolation::ServerDefault).await
 }
 
 // The real database remains in the existing harness. Only its local TCP

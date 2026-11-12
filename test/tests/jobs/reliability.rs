@@ -86,7 +86,7 @@ async fn acceptance_commits_three_intents_once_or_rolls_them_all_back(pool: PgPo
             .unwrap(),
         Some(accepted)
     );
-    super::close(&[&admitted]).await;
+    super::close_pools(&[&admitted]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -171,7 +171,7 @@ async fn marker_arbitration_keeps_aggregate_atomic_and_returns_the_first_result(
         .await
         .unwrap();
     assert_eq!(counts(&pool).await, (0, 4, 4));
-    super::close(&[&admitted]).await;
+    super::close_pools(&[&admitted]).await;
 }
 
 async fn proxied_pool(pool: &PgPool) -> (CommitProxy, PgPool) {
@@ -219,7 +219,7 @@ async fn lost_commit_ack_requires_same_identity_readback_before_replay(pool: PgP
         if let Some(original) = readback {
             assert_eq!(accepted, original);
         }
-        super::close(&[&proxied]).await;
+        super::close_pools(&[&proxied]).await;
         proxy.shutdown().await;
     }
     assert_eq!(counts(&pool).await, (2, 0, 0));
@@ -240,6 +240,6 @@ async fn lost_commit_ack_requires_same_identity_readback_before_replay(pool: PgP
         Some(effect)
     );
     assert_eq!(counts(&pool).await, (2, 1, 1));
-    super::close(&[&proxied, &admitted]).await;
+    super::close_pools(&[&proxied, &admitted]).await;
     proxy.shutdown().await;
 }

@@ -28,7 +28,7 @@ use infra_messaging::outbox::{OutboxEnqueueError, OutboxEnqueued};
 use infra_messaging::{
     ConsumerOptions, HandlerError, Messaging, MessagingOptions, Registry, Route,
 };
-use infra_postgres::{Closed, Isolation, PgPool, PoolOptions, TxError, in_tx};
+use infra_postgres::{Isolation, PgPool, TxError, in_tx};
 use operation_context::{Deadline, OperationContext};
 // template:begin inbound-webhooks:outbox-test-messaging-outbox-inbound-imports-2
 use infra_jobs::{JobError, KindsBuilder, Policy};
@@ -37,7 +37,7 @@ use infra_webhooks::inbound::{
 };
 use infra_webhooks::protocol::KeyRing;
 // template:end inbound-webhooks:outbox-test-messaging-outbox-inbound-imports-2
-use integration_tests::dsn_for;
+use integration_tests::{close_pools, dsn_for};
 use sqlx::Row;
 use tokio::sync::Notify;
 use tokio::time::{Instant, timeout};
@@ -257,17 +257,13 @@ fn routes(fixture: &Fixture) -> Registry {
 }
 
 async fn template_pool(pool: &PgPool, max_connections: u32) -> PgPool {
-    infra_postgres::connect(
+    integration_tests::template_pool(
         &dsn_for(pool).await,
-        &PoolOptions {
-            max_connections: NonZeroU32::new(max_connections).expect("pool has capacity"),
-            application_name: APP,
-            default_isolation: Isolation::ReadCommitted,
-            session_budgets: infra_postgres::SessionBudgets::Startup,
-        },
+        APP,
+        max_connections,
+        Isolation::ReadCommitted,
     )
     .await
-    .expect("template engine pool connects")
 }
 
 struct EngineRun {
@@ -306,12 +302,7 @@ async fn finish(run: EngineRun, pools: &[&PgPool]) {
     timeout(WAIT, run.tracker.wait())
         .await
         .expect("engine background tasks join");
-    for pool in pools {
-        assert_eq!(
-            infra_postgres::close(pool, CLOSE_BUDGET).await,
-            Closed::Complete
-        );
-    }
+    close_pools(pools).await;
 }
 
 async fn close(messaging: Messaging) {
@@ -604,8 +595,8 @@ async fn live_event_identity_is_idempotent_only_for_equal_immutable_intent(pool:
     ));
     assert_eq!(outbox_count(&jobs).await, 2);
 
-    close_pool(&competing).await;
-    close_pool(&jobs).await;
+    close_pools(&[&competing]).await;
+    close_pools(&[&jobs]).await;
     fixture.cleanup().await;
 }
 
@@ -883,7 +874,7 @@ async fn durable_consumer_effect_dedupes_same_logical_id_after_broker_window(poo
         .await
         .expect("consumer drains");
     close(messaging).await;
-    close_pool(&effects).await;
+    close_pools(&[&effects]).await;
     fixture.cleanup().await;
 }
 
@@ -1028,7 +1019,7 @@ async fn committed_effect_after_lost_settlement(pool: PgPool, drop_request: bool
     );
     close(messaging).await;
     relay.join().await;
-    close_pool(&effects).await;
+    close_pools(&[&effects]).await;
     fixture.cleanup().await;
 }
 
@@ -1181,13 +1172,6 @@ async fn dedicated_publisher_progresses_while_real_inbound_webhook_processing_sl
     fixture.cleanup().await;
 }
 // template:end inbound-webhooks:outbox-test-messaging-outbox-webhook-capacity
-
-async fn close_pool(pool: &PgPool) {
-    assert_eq!(
-        infra_postgres::close(pool, CLOSE_BUDGET).await,
-        Closed::Complete
-    );
-}
 
 fn event_key(id: &str) -> String {
     use sha2::{Digest as _, Sha256};
