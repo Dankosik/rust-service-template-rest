@@ -396,16 +396,17 @@ async fn drain_interrupts_identity_waits_and_joins_any_admitted_delivery() {
         ))
         .await
         .unwrap();
-        let started = CancellationToken::new();
-        let settle = CancellationToken::new();
+        let started = [CancellationToken::new(), CancellationToken::new()];
+        let settle = [CancellationToken::new(), CancellationToken::new()];
         let mut registered = registry(&fixture);
         registered
             .register::<ExampleEvent, _, _>({
                 let started = started.clone();
                 let settle = settle.clone();
-                move |_, _| {
-                    started.cancel();
-                    let settle = settle.clone();
+                move |event, _| {
+                    let slot = usize::from(event.id == "drain-release-slot");
+                    started[slot].cancel();
+                    let settle = settle[slot].clone();
                     async move {
                         settle.cancelled().await;
                         Ok(())
@@ -414,21 +415,25 @@ async fn drain_interrupts_identity_waits_and_joins_any_admitted_delivery() {
             })
             .unwrap();
         let consumer = messaging.consumer(registered).await.unwrap();
-        let prepared = registry(&fixture)
-            .prepare(&event("drain-with-info-withheld"), 1024)
-            .unwrap();
-        messaging
-            .producer()
-            .publish(&prepared, &context(deadline(), &cancel))
-            .await
-            .unwrap();
+        let events = ["drain-with-info-withheld", "drain-release-slot"];
+        for id in &events[..=usize::from(admit_delivery)] {
+            let prepared = registry(&fixture).prepare(&event(id), 1024).unwrap();
+            messaging
+                .producer()
+                .publish(&prepared, &context(deadline(), &cancel))
+                .await
+                .unwrap();
+        }
         refuse_info.store(!admit_delivery, Ordering::SeqCst);
         let mut handle = consumer.start(&cancel);
         if admit_delivery {
-            timeout(Duration::from_secs(3), started.cancelled())
-                .await
-                .expect("one delivery starts before the remaining slot's admission stalls");
+            for started in &started {
+                timeout(Duration::from_secs(3), started.cancelled())
+                    .await
+                    .expect("both deliveries fill the pull before its next identity check");
+            }
             refuse_info.store(true, Ordering::SeqCst);
+            settle[1].cancel();
         }
         relay.wait_for_drop().await;
         let mut finishing = Box::pin(handle.finish(Instant::now() + Duration::from_secs(1)));
@@ -437,12 +442,14 @@ async fn drain_interrupts_identity_waits_and_joins_any_admitted_delivery() {
                 futures_util::poll!(&mut finishing).is_pending(),
                 "drain must retain ownership of the admitted handler"
             );
-            settle.cancel();
+            settle[0].cancel();
         }
         finishing
             .await
             .expect("an unanswered INFO must not spend the admitted delivery's drain window");
-        assert_eq!(started.is_cancelled(), admit_delivery);
+        for started in &started {
+            assert_eq!(started.is_cancelled(), admit_delivery);
+        }
         let durable: consumer::PullConsumer = fixture
             .jetstream
             .get_consumer_from_stream(&fixture.durable, &fixture.stream)
