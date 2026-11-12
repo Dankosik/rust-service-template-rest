@@ -173,6 +173,10 @@ impl Verifier {
         }))
     }
 
+    pub fn callers(&self) -> impl Iterator<Item = &ServiceName> {
+        self.0.trust.callers()
+    }
+
     /// Verifies the `Authorization` values of one call and names its caller.
     /// Records one outcome; a failure logs only its closed reason.
     ///

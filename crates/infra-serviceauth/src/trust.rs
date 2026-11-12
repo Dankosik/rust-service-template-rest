@@ -119,6 +119,10 @@ impl TrustRegistry {
         self.callers.len()
     }
 
+    pub(crate) fn callers(&self) -> impl Iterator<Item = &ServiceName> {
+        self.callers.keys()
+    }
+
     /// The registered name and keys of a caller, by its spelling in `iss`.
     pub(crate) fn caller(&self, name: &str) -> Option<(&ServiceName, &[TrustedKey])> {
         self.callers
