@@ -555,10 +555,11 @@ impl Verifier {
                 // template:end oidc-introspection:authn-introspection-verify
             }
         };
+        // Verification first: a ready engine then never arms the deadline timer.
         let result = tokio::select! {
             biased;
-            _ = context.wait_stopped() => return Err(Failure::Unavailable),
             result = verification => result,
+            _ = context.wait_stopped() => return Err(Failure::Unavailable),
         };
         // A ready synchronous engine may consume the remaining budget in one poll.
         // A late failure is no more valid as credential evidence than late success.
