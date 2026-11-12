@@ -23,7 +23,7 @@ pub use claim::{CLAIM_DURATION_METRIC, QUEUE_WAIT_METRIC};
 pub use engine::{DrainEnd, Engine, LEASE_RESERVE, OperationError, POLL_INTERVAL, Started};
 pub use enqueue::{
     EnqueueError, EnqueueOptions, Enqueued, LivePayloadComparison, MAX_PAYLOAD_BYTES,
-    compare_live_payload, enqueue,
+    compare_live_payload, enqueue, json_payload_len,
 };
 pub use kind::{
     CompleteError, DEFAULT_TIMEOUT, Handler, InvalidDelay, Job, JobError, JobId, JobKind,
