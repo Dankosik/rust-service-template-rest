@@ -365,7 +365,9 @@ async fn discover_jwks_uri(
 
 /// Requests OIDC discovery metadata. A provider that answers that location
 /// with a status other than 200 is asked for RFC 8414 metadata, whose
-/// well-known segment precedes the issuer path.
+/// well-known segment precedes the issuer path. When that location answers 404
+/// it does not exist, so the first status is the startup error's cause: an
+/// OIDC-only provider returning 503 must not be reported as a missing issuer.
 async fn fetch_discovery(
     provider: &ProviderClient,
     issuer: &IssuerUrl,
@@ -380,12 +382,16 @@ async fn fetch_discovery(
         .get_document(&openid, Document::Discovery, Some(deadline))
         .await
     {
-        Err(ProviderFailure::Status(_)) => {
+        Err(ProviderFailure::Status(first)) => {
             let mut rfc8414 = issuer.url().clone();
             rfc8414.set_path(&format!("/.well-known/oauth-authorization-server{path}"));
-            provider
+            match provider
                 .get_document(&rfc8414, Document::Discovery, Some(deadline))
                 .await
+            {
+                Err(ProviderFailure::Status(404)) => Err(ProviderFailure::Status(first)),
+                result => result,
+            }
         }
         result => result,
     }
@@ -966,6 +972,7 @@ mod tests {
                     let request = String::from_utf8(request).unwrap();
                     let target = request.split(' ').nth(1).unwrap().to_owned();
                     let response = match routes.iter().find(|(route, _)| *route == target) {
+                        Some((_, raw)) if raw.starts_with("HTTP/") => raw.clone(),
                         Some((_, body)) => {
                             let body = body.replace("PORT", &port);
                             format!(
@@ -1061,6 +1068,24 @@ mod tests {
         assert_eq!(
             error.reason(),
             PreparationReason::Fetch(ProviderFailure::Status(404))
+        );
+        assert_eq!(requested.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_failing_oidc_location_keeps_its_status_when_rfc8414_is_absent() {
+        use crate::{PreparationPhase, PreparationReason, ProviderFailure};
+        let (address, root, requested) = metadata_server(vec![(
+            "/tenant/.well-known/openid-configuration",
+            "HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                .to_owned(),
+        )])
+        .await;
+        let error = prepare(address, &root, None).await.err().unwrap();
+        assert_eq!(error.phase(), PreparationPhase::Discovery);
+        assert_eq!(
+            error.reason(),
+            PreparationReason::Fetch(ProviderFailure::Status(503))
         );
         assert_eq!(requested.lock().unwrap().len(), 2);
     }
@@ -1773,7 +1798,7 @@ mod tests {
     }
 
     #[test]
-    fn authentication_metrics_preserve_success_failure_and_cancellation_labels() {
+    fn authentication_metrics_preserve_success_failure_timeout_and_cancellation_labels() {
         use std::{future::Future, task::Poll};
 
         let diagnostics = Diagnostics::default();
@@ -1819,6 +1844,21 @@ mod tests {
                         .await,
                     Err(Failure::Malformed)
                 );
+                let expired = operation_context::OperationContext::with_timeout(Duration::ZERO);
+                assert_eq!(
+                    verifier
+                        .authenticate_with_context([header.as_bytes()], Transport::Grpc, &expired)
+                        .await,
+                    Err(Failure::Unavailable)
+                );
+                let cancelled = operation_context::OperationContext::unbounded();
+                cancelled.cancel();
+                assert_eq!(
+                    verifier
+                        .authenticate_with_context([header.as_bytes()], Transport::Grpc, &cancelled)
+                        .await,
+                    Err(Failure::Unavailable)
+                );
                 let mut pending =
                     Box::pin(verifier.authenticate([unknown_header.as_bytes()], Transport::Http));
                 std::future::poll_fn(|cx| {
@@ -1851,12 +1891,14 @@ mod tests {
             .iter()
             .filter(|(key, _)| key.name() == crate::AUTHN_VERIFICATIONS_METRIC)
             .collect::<Vec<_>>();
-        assert_eq!(outcomes.len(), 5);
+        assert_eq!(outcomes.len(), 7);
         for (transport, result, failure) in [
             ("http", "success", "none"),
             ("grpc", "success", "none"),
             ("http", "failure", "missing"),
             ("grpc", "failure", "malformed"),
+            ("grpc", "timeout", "timeout"),
+            ("grpc", "cancelled", "cancelled"),
             ("http", "cancelled", "cancelled"),
         ] {
             assert!(outcomes.iter().any(|(key, value)| {

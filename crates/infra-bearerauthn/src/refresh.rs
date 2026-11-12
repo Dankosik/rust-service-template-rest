@@ -26,6 +26,13 @@ const MAX_REFRESH_SPREAD: Duration = Duration::from_secs(REFRESH_INTERVAL.as_sec
 /// request-triggered fetch per cooldown. A miss during cooldown can join a
 /// pending fetch. If none is pending, another miss after cooldown or the next
 /// periodic fetch can pick up the rotation.
+///
+/// Cost: a cooldown miss cannot tell a forged `kid` from a freshly rotated one,
+/// so for up to this long after a fetch starts (startup included) a valid token
+/// signed with a new key gets a non-retryable 401 `invalid_token`. Answering
+/// 503 instead would let any caller turn forged `kid` values into unavailability
+/// signals and client retries; the rotation's own later traffic triggers the
+/// fetch once the cooldown ends.
 const REFRESH_COOLDOWN: Duration = Duration::from_secs(30);
 const REFRESH_METRIC: &str = "authn_jwks_refreshes_total";
 const ACQUISITION_METRIC: &str = "authn_jwks_last_successful_acquisition_timestamp_seconds";
