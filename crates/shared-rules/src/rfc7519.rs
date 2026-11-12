@@ -1,5 +1,14 @@
 //! JSON Web Token, RFC 7519.
 
+/// RFC 7519 §4.1.4 makes expiration exclusive. All arguments are in whole seconds.
+#[must_use]
+pub const fn is_expired(expiry: u64, now: u64, leeway: u64) -> bool {
+    match now.checked_sub(leeway) {
+        Some(earliest_now) => earliest_now >= expiry,
+        None => false,
+    }
+}
+
 /// A `NumericDate` (RFC 7519 §2) given as a JSON number with a fraction, in
 /// whole seconds: finite, not negative, and below `2^64`, rounded to the
 /// nearest second as `jsonwebtoken` reads `exp` and `nbf`. `None` for any

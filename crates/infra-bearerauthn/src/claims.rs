@@ -388,7 +388,7 @@ pub(crate) fn validate_introspection_claims(
 // template:end oidc-introspection:authn-claims-introspection-validation
 
 fn check_lifetime(expiry: u64, not_before: Option<u64>, now: u64) -> Result<(), VerificationError> {
-    if now > expiry.saturating_add(LEEWAY_SECONDS) {
+    if shared_rules::rfc7519::is_expired(expiry, now, LEEWAY_SECONDS) {
         return Err(VerificationError::invalid(VerificationReason::Expired));
     }
     if not_yet_valid(not_before, now) {
@@ -577,7 +577,7 @@ mod tests {
         for (extra, expected) in [
             (serde_json::json!({}), Ok(1000)),
             (serde_json::json!({"aud": ["other", "api"]}), Ok(1000)),
-            (serde_json::json!({"exp": 970, "nbf": 1030}), Ok(970)),
+            (serde_json::json!({"exp": 971, "nbf": 1030}), Ok(971)),
             (serde_json::json!({"nbf": 1030.4}), Ok(1000)),
             (
                 serde_json::json!({"iss": null}),
@@ -588,7 +588,7 @@ mod tests {
                 Err(VerificationReason::MissingClaim),
             ),
             (
-                serde_json::json!({"exp": 969}),
+                serde_json::json!({"exp": 970}),
                 Err(VerificationReason::Expired),
             ),
             (
@@ -828,7 +828,7 @@ mod tests {
             assert_eq!(reason(&response), Err((Failure::Invalid, expected)));
         }
         for (claim, value, expected) in [
-            ("exp", 69, VerificationReason::Expired),
+            ("exp", 70, VerificationReason::Expired),
             ("nbf", 131, VerificationReason::NotYetValid),
         ] {
             let mut response = complete.clone();
