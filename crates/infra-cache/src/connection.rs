@@ -424,10 +424,6 @@ impl Link {
         let generation = self.shared.acquire().await?;
         // The first PING poll must reach the driver before cancellation can retire it.
         tokio::task::consume_budget().await;
-        let deadline = Deadline::new(
-            Instant::now(),
-            command_timeout.max(CONNECTED_PROBE_MIN_BUDGET),
-        );
         let command = redis::Cmd::ping();
         let mut connection = generation.connection.clone();
         let reply = pin!(tokio::task::unconstrained(
@@ -440,12 +436,18 @@ impl Link {
             reply,
             ping_keeps_generation,
         );
-        tokio::select! {
-            biased;
-            () = generation.retired.cancelled() => Err(ErrorType::Io),
-            reply = poll_fn(|cx| exchange.poll_reply(cx)) => reply.map_err(|error| error_type(&error)),
-            () = deadline.wait() => Err(ErrorType::Timeout),
-        }
+        reply_until(
+            &generation.retired,
+            poll_fn(|cx| exchange.poll_reply(cx)),
+            || {
+                Deadline::new(
+                    Instant::now(),
+                    command_timeout.max(CONNECTED_PROBE_MIN_BUDGET),
+                )
+            },
+        )
+        .await?
+        .map_err(|error| error_type(&error))
     }
 
     fn claim_slot<'a>(&'a self, slots: &'a Semaphore) -> Result<CommandSlot<'a>, ErrorType> {
@@ -503,25 +505,41 @@ impl Drop for SupervisorExit {
     }
 }
 
+// The first reply poll can enqueue without yielding. Sample the deadline after
+// that poll so every command ahead in the queue has already started its budget.
+async fn reply_until<T>(
+    retired: &CancellationToken,
+    reply: impl Future<Output = T>,
+    deadline: impl FnOnce() -> Deadline,
+) -> Result<T, ErrorType> {
+    tokio::select! {
+        biased;
+        () = retired.cancelled() => Err(ErrorType::Io),
+        reply = reply => Ok(reply),
+        () = async { deadline().wait().await } => Err(ErrorType::Timeout),
+    }
+}
+
 async fn query_until(
     generation: &Generation,
     command: &redis::Cmd,
-    deadline: Deadline,
+    deadline: impl FnOnce() -> Deadline,
 ) -> Result<redis::RedisResult<()>, ErrorType> {
+    tokio::task::consume_budget().await;
     let mut connection = generation.connection.clone();
-    tokio::select! {
-        biased;
-        () = generation.retired.cancelled() => Err(ErrorType::Io),
-        reply = command.query_async(&mut connection) => Ok(reply),
-        () = deadline.wait() => Err(ErrorType::Timeout),
-    }
+    let reply = tokio::task::unconstrained(command.query_async(&mut connection));
+    reply_until(&generation.retired, reply, deadline).await
 }
 
 async fn ping_until(
     generation: &Generation,
-    deadline: Deadline,
+    command_timeout: Duration,
 ) -> (Result<(), ErrorType>, Disposition) {
-    match query_until(generation, &redis::Cmd::ping(), deadline).await {
+    match query_until(generation, &redis::Cmd::ping(), || {
+        Deadline::new(Instant::now(), command_timeout)
+    })
+    .await
+    {
         Ok(reply) => {
             let disposition = if ping_keeps_generation(&reply) {
                 Disposition::Keep
@@ -725,8 +743,7 @@ async fn maintain(
                 // sent before it. A budget shorter than `command_timeout`
                 // would retire the generation, and fail those commands, before
                 // their own budget ends.
-                let deadline = Deadline::new(Instant::now(), command_timeout);
-                let (result, disposition) = ping_until(generation, deadline).await;
+                let (result, disposition) = ping_until(generation, command_timeout).await;
                 if let Err(error) = result {
                     tracing::warn!(
                         server.address = %server.host,
@@ -841,14 +858,15 @@ impl<'a> Rotation<'a> {
         let mut command = redis::cmd("AUTH");
         command.arg(self.file.username()).arg(&password);
         // File I/O must not consume the time owed to commands ahead of AUTH.
-        let now = Instant::now();
-        let deadline = Deadline::new(
-            now,
-            command_timeout.max(read_deadline.saturating_duration_since(now)),
-        );
-        let result = query_until(generation, &command, deadline)
-            .await
-            .and_then(|reply| reply.map_err(|error| error_type(&error)));
+        let result = query_until(generation, &command, || {
+            let now = Instant::now();
+            Deadline::new(
+                now,
+                command_timeout.max(read_deadline.saturating_duration_since(now)),
+            )
+        })
+        .await
+        .and_then(|reply| reply.map_err(|error| error_type(&error)));
         match result {
             Ok(()) => {}
             Err(ErrorType::Auth) => return RefreshOutcome::AuthRefused,

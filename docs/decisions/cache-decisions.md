@@ -38,6 +38,9 @@ retirement, then hand off to that queue without an intervening yield. A caller
 can cancel before handoff without withdrawing the connection. After handoff,
 an application command observes a ready reply before a context stop or
 disconnect notification because the reply has already answered its slot.
+Both forms of PING and the refresh AUTH start their reply budget after their
+first query poll hands off to that queue. A command that enters ahead of them
+on another worker has already started its own budget by then.
 On external drop, commands and probes poll a pending exchange once without
 waiting. A delivered reply can still preserve the connection, and an unanswered
 slot still causes retirement. The first poll must reach the driver so the drop
