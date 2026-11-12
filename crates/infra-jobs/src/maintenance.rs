@@ -99,6 +99,34 @@ pub(crate) async fn run_retention(shared: Arc<Shared>, cancel: CancellationToken
     .await;
 }
 
+async fn delete_batch(shared: &Shared) -> Result<u64, OperationError> {
+    let _turn = shared.statement_turn.lock().await;
+    backstop(async {
+        in_tx(&shared.pool, async |tx| -> Result<u64, OperationError> {
+            set_statement_timeout(tx, RETENTION_STATEMENT_TIMEOUT).await?;
+            // The state stays a literal: a bound state cannot prove the partial
+            // `background_jobs_terminal` predicate, so a generic plan would
+            // scan the table.
+            let delete = sqlx::query!(
+                "DELETE FROM background_jobs \
+                 WHERE id = ANY (ARRAY( \
+                     SELECT id FROM background_jobs \
+                     WHERE state = 'completed' AND finished_at <= statement_timestamp() - $1::interval \
+                     ORDER BY finished_at \
+                     LIMIT $2 \
+                     FOR UPDATE SKIP LOCKED))",
+                RETAIN_COMPLETED_FOR as _,
+                i64::from(RETENTION_BATCH_ROWS),
+            );
+            Ok(observed("delete finished jobs", delete.execute(&mut *tx))
+                .await?
+                .rows_affected())
+        })
+        .await
+    })
+    .await
+}
+
 /// Independently poll registered-kind and global maintenance samples under
 /// the existing once-per-process owner, until `cancel` fires.
 pub(crate) async fn run_sampling(shared: Arc<Shared>, cancel: CancellationToken) {
@@ -254,34 +282,6 @@ pub(crate) fn reset_kind_metrics(kind: &'static str) {
 
 pub(crate) fn invalidate_sample() {
     metrics::gauge!(OBSERVATION_TIMESTAMP_METRIC).set(0.0);
-}
-
-async fn delete_batch(shared: &Shared) -> Result<u64, OperationError> {
-    let _turn = shared.statement_turn.lock().await;
-    backstop(async {
-        in_tx(&shared.pool, async |tx| -> Result<u64, OperationError> {
-            set_statement_timeout(tx, RETENTION_STATEMENT_TIMEOUT).await?;
-            // The state stays a literal: a bound state cannot prove the partial
-            // `background_jobs_terminal` predicate, so a generic plan would
-            // scan the table.
-            let delete = sqlx::query!(
-                "DELETE FROM background_jobs \
-                 WHERE id = ANY (ARRAY( \
-                     SELECT id FROM background_jobs \
-                     WHERE state = 'completed' AND finished_at <= statement_timestamp() - $1::interval \
-                     ORDER BY finished_at \
-                     LIMIT $2 \
-                     FOR UPDATE SKIP LOCKED))",
-                RETAIN_COMPLETED_FOR as _,
-                i64::from(RETENTION_BATCH_ROWS),
-            );
-            Ok(observed("delete finished jobs", delete.execute(&mut *tx))
-                .await?
-                .rows_affected())
-        })
-        .await
-    })
-    .await
 }
 
 async fn sample_once(shared: &Shared) -> Result<Option<Sample>, OperationError> {

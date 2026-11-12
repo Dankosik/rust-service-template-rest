@@ -51,8 +51,8 @@ pub(crate) fn link(span: &tracing::Span, carrier: &Carrier) {
 /// never links for want of a valid `traceparent`.
 #[derive(Debug, Default)]
 pub(crate) struct Carrier {
-    pub(crate) trace_parent: Option<String>,
-    pub(crate) trace_state: Option<String>,
+    trace_parent: Option<String>,
+    trace_state: Option<String>,
 }
 
 impl Carrier {
@@ -76,6 +76,14 @@ impl Carrier {
         }
     }
 
+    pub(crate) fn trace_parent(&self) -> Option<&str> {
+        self.trace_parent.as_deref()
+    }
+
+    pub(crate) fn trace_state(&self) -> Option<&str> {
+        self.trace_state.as_deref()
+    }
+
     fn validated(self) -> Self {
         Self::from_stored(self.trace_parent, self.trace_state.map(truncated_state))
     }
@@ -94,8 +102,8 @@ impl Injector for Carrier {
 impl Extractor for Carrier {
     fn get(&self, key: &str) -> Option<&str> {
         match key {
-            TRACEPARENT => self.trace_parent.as_deref(),
-            TRACESTATE => self.trace_state.as_deref(),
+            TRACEPARENT => self.trace_parent(),
+            TRACESTATE => self.trace_state(),
             _ => None,
         }
     }
