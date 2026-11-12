@@ -48,7 +48,7 @@ impl Credentials {
     /// `Authorization` header and a missing required subject are refused as
     /// `INTERNAL` before dispatch. A response carrying
     /// `grpc-status: UNAUTHENTICATED` in the initial headers or polled trailers,
-    /// or HTTP 401 without `grpc-status`, stops reuse of the token that call
+    /// or an HTTP 401 that ends without a `grpc-status`, stops reuse of the token that call
     /// used once it is at least 30 seconds old. Responses are never replayed.
     /// The service is always ready, and acquisition
     /// failures map to `DEADLINE_EXCEEDED`, `CANCELLED`, `UNAVAILABLE`, or

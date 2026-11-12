@@ -72,9 +72,8 @@ pub(crate) fn set_grpc_timeout(headers: &mut HeaderMap, remaining: Duration) {
     }
 }
 
-/// The code a gRPC client reads from a response before its body: `grpc-status`
-/// when the headers carry it, otherwise the HTTP status mapping. `None` for a
-/// `200` without one, whose code the trailers still carry.
+/// The code inferred from the response head. Without an initial `grpc-status`,
+/// the HTTP mapping is provisional until the stream ends.
 pub fn client_response_code<B>(response: &http::Response<B>) -> Option<tonic::Code> {
     header_status_code(response.headers()).or_else(|| http_status_code(response.status()))
 }

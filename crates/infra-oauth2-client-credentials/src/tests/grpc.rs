@@ -223,7 +223,11 @@ impl hyper::body::Body for GatedTrailers {
         }
         self.finished = true;
         let mut trailers = http::HeaderMap::new();
-        trailers.insert("grpc-status", self.status.clone());
+        if self.status.is_empty() {
+            trailers.insert("x-fixture-terminal", http::HeaderValue::from_static("done"));
+        } else {
+            trailers.insert("grpc-status", self.status.clone());
+        }
         Poll::Ready(Some(Ok(hyper::body::Frame::trailers(trailers))))
     }
 }
@@ -255,6 +259,15 @@ async fn route(request: HyperRequest<Incoming>, peer: Peer) -> HyperResponse<Bod
             .header("content-type", "application/grpc");
         if let Some(code) = request.headers().get("x-fixture-grpc-status") {
             response = response.header("grpc-status", code);
+        }
+        if let Some(code) = request.headers().get("x-fixture-grpc-trailer") {
+            return response
+                .body(Body::new(GatedTrailers {
+                    release: Box::pin(std::future::ready(())),
+                    finished: false,
+                    status: code.clone(),
+                }))
+                .unwrap();
         }
         return response.body(Body::empty()).unwrap();
     }
@@ -808,7 +821,24 @@ async fn a_late_rejection_does_not_evict_a_newer_cached_token() {
 async fn http_401_without_grpc_status_evicts_and_another_status_does_not() {
     let tokens = Fixture::new().await;
     let resource = Resource::new().await;
-    for (grpc_status, extra_fetches) in [(None, 1), (Some("7"), 0)] {
+    for (status_metadata, expected, extra_fetches) in [
+        (None, Code::Unauthenticated, 1),
+        (
+            Some(("x-fixture-grpc-trailer", "")),
+            Code::Unauthenticated,
+            1,
+        ),
+        (
+            Some(("x-fixture-grpc-status", "7")),
+            Code::PermissionDenied,
+            0,
+        ),
+        (
+            Some(("x-fixture-grpc-trailer", "7")),
+            Code::PermissionDenied,
+            0,
+        ),
+    ] {
         let credentials = tokens.credentials(&[], None);
         let before_tokens = tokens.token_requests().len();
         let before_calls = resource.calls();
@@ -818,10 +848,8 @@ async fn http_401_without_grpc_status_evicts_and_another_status_does_not() {
         request
             .metadata_mut()
             .insert("x-fixture-http-status", "401".parse().unwrap());
-        if let Some(status) = grpc_status {
-            request
-                .metadata_mut()
-                .insert("x-fixture-grpc-status", status.parse().unwrap());
+        if let Some((header, code)) = status_metadata {
+            request.metadata_mut().insert(header, code.parse().unwrap());
         }
         let error = tokio::time::timeout(
             Duration::from_secs(2),
@@ -830,9 +858,7 @@ async fn http_401_without_grpc_status_evicts_and_another_status_does_not() {
         .await
         .expect("http fixture completes")
         .unwrap_err();
-        if grpc_status == Some("7") {
-            assert_eq!(error.code(), Code::PermissionDenied);
-        }
+        assert_eq!(error.code(), expected);
         assert_eq!(tokens.token_requests().len(), before_tokens + 1);
         assert_eq!(resource.calls(), before_calls + 1);
         resource

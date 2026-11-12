@@ -142,7 +142,7 @@ pub fn router(
         business
     };
     let business = business.layer(axum::middleware::from_fn_with_state(
-        limits.request_timeout,
+        Some(limits.request_timeout),
         opening,
     ));
     Ok(with_health(business, readiness, &services.names).layer(
@@ -173,8 +173,12 @@ fn with_health(
         clippy::disallowed_methods,
         reason = "gRPC health registration belongs to the separate tonic listener"
     )]
-    let router = router.route_service(&format!("/{}/{{*rest}}", HealthServer::NAME), health);
-    router
+    let health =
+        axum::Router::new().route_service(&format!("/{}/{{*rest}}", HealthServer::NAME), health);
+    router.merge(health.layer(axum::middleware::from_fn_with_state(
+        None::<Duration>,
+        opening,
+    )))
 }
 
 /// Caller-owned lifetime for work continuing after the response headers: the
@@ -199,18 +203,22 @@ impl ResponseContext {
 /// Bounds opening from before authentication while preserving a separate
 /// caller lifetime. Once the opening context stops, that stop wins over any
 /// result produced after it, so every later layer checks it again.
-async fn opening(State(cap): State<Duration>, mut request: Request, next: Next) -> Response {
+async fn opening(
+    State(cap): State<Option<Duration>>,
+    mut request: Request,
+    next: Next,
+) -> Response {
     use operation_context::{Deadline, OperationContext};
     let origin = tokio::time::Instant::now();
     let caller = grpc_timeout(request.headers());
+    let budget = match (cap, caller) {
+        (Some(cap), Some(caller)) => cap.min(caller),
+        (Some(budget), None) | (None, Some(budget)) => budget,
+        (None, None) => return next.run(request).await,
+    };
     let cancellation = tokio_util::sync::CancellationToken::new();
-    let opening_context = OperationContext::new(
-        Some(Deadline::new(
-            origin,
-            caller.map_or(cap, |asked| asked.min(cap)),
-        )),
-        cancellation.clone(),
-    );
+    let opening_context =
+        OperationContext::new(Some(Deadline::new(origin, budget)), cancellation.clone());
     let response_context = ResponseContext(OperationContext::new(
         caller.map(|budget| Deadline::new(origin, budget)),
         cancellation.clone(),
@@ -255,7 +263,7 @@ async fn admit_opening(
 ) -> Response {
     let patience = patience(&request, limit.max_wait);
     let Some(_permit) = acquire(limit.permits, patience).await else {
-        return reject(request, at_capacity()).await;
+        return reject_at_capacity(request).await;
     };
     next.run(request).await
 }
@@ -269,7 +277,7 @@ async fn admit_business_call(
 ) -> Response {
     let patience = patience(&request, limit.max_wait);
     let Some(permit) = acquire(limit.permits, patience).await else {
-        return reject(request, at_capacity()).await;
+        return reject_at_capacity(request).await;
     };
     let mut response = next.run(request).await;
     response.extensions_mut().insert(Handoff::new(permit));
@@ -291,7 +299,7 @@ fn patience(request: &Request, max_wait: Duration) -> Duration {
 
 /// A permit, waited for up to `patience`. A call that waits is served once
 /// capacity frees; refusing it earlier would refuse work the process could
-/// still do. `None` is a refusal and the only thing the shed counter counts.
+/// still do.
 async fn acquire(permits: Arc<Semaphore>, patience: Duration) -> Option<OwnedSemaphorePermit> {
     if let Ok(permit) = Arc::clone(&permits).try_acquire_owned() {
         return Some(permit);
@@ -307,17 +315,22 @@ async fn acquire(permits: Arc<Semaphore>, patience: Duration) -> Option<OwnedSem
             return permit;
         }
     }
-    crate::observe::record_shed();
     None
 }
+
+#[derive(Clone)]
+pub(crate) struct Shed;
 
 /// The refusal: `RESOURCE_EXHAUSTED`, so a client that retries `UNAVAILABLE`
 /// without a delay adds no load, carrying the same catalog identity as HTTP's
 /// shed answer. `RetryInfo` gives a client that honors it the delay.
-fn at_capacity() -> tonic::Status {
-    Failure::new(service_failure::Code::ServiceUnavailable)
+async fn reject_at_capacity(request: Request) -> Response {
+    let status = Failure::new(service_failure::Code::ServiceUnavailable)
         .retry_after(AT_CAPACITY_RETRY_AFTER)
-        .into_status_as(tonic::Code::ResourceExhausted, AT_CAPACITY_DETAIL)
+        .into_status_as(tonic::Code::ResourceExhausted, AT_CAPACITY_DETAIL);
+    let mut response = reject(request, status).await;
+    response.extensions_mut().insert(Shed);
+    response
 }
 
 /// Longest wait for the rest of a rejected call's request body.

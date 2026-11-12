@@ -344,7 +344,8 @@ publication is implied by template proof.
 <!-- template:begin outbound-auth-grpc:docs-oauth-grpc-decision -->
 The concrete gRPC binding stays inside `Credentials`. The existing response
 owner reports `UNAUTHENTICATED` from initial headers or polled terminal
-trailers, and HTTP 401 when the initial headers omit `grpc-status`.
+trailers. An HTTP 401 only maps to `UNAUTHENTICATED` after the response ends
+without a `grpc-status`.
 The binding applies the same token reuse rule as HTTP without replay.
 An acquisition failure that may pass unchanged
 later (local `AtCapacity`, transport, provider 5xx or 429, a provider silent

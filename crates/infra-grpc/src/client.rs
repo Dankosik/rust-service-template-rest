@@ -296,7 +296,7 @@ impl PreparedCall {
 
     /// Like [`Self::send`], with a synchronous callback for the peer status.
     /// It runs once when the status is observed, either at response headers
-    /// or when the caller polls the terminal trailers. Locally generated
+    /// or when the caller polls the stream to its end. Locally generated
     /// failures and abandoned bodies without an observed status skip it.
     ///
     /// # Errors
