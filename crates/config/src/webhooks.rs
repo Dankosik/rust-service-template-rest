@@ -37,6 +37,8 @@ pub struct WebhookEndpointConfig {
     /// Environment-only key used for every new delivery.
     pub secret: SecretString,
     /// Optional environment-only predecessor retained during a key rotation.
+    /// Blank is absent.
+    #[serde(default, deserialize_with = "crate::de::blank_secret_as_none")]
     pub previous_secret: Option<SecretString>,
 }
 
@@ -46,10 +48,6 @@ impl WebhooksConfig {
             validate_endpoint_id("webhooks.endpoints", endpoint_id)?;
             let key = format!("webhooks.endpoints.{endpoint_id}.secret");
             non_blank(&key, endpoint.secret.expose_secret())?;
-            if let Some(previous_secret) = &endpoint.previous_secret {
-                let key = format!("webhooks.endpoints.{endpoint_id}.previous_secret");
-                non_blank(&key, previous_secret.expose_secret())?;
-            }
         }
         Ok(())
     }
