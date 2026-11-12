@@ -26,6 +26,7 @@ service-failure = { workspace = true }
 shared-rules = { workspace = true }
 serde_with = { workspace = true, features = ["std", "macros"] }
 axum = { workspace = true, features = ["http1", "tokio", "matched-path", "original-uri", "tower-log", "tracing", "json", "query"] }
+mime = { workspace = true }
 axum-tracing-opentelemetry = { workspace = true, features = ["tracing_level_info"] }
 health = { workspace = true }
 # template:begin inbound-webhooks:http-webhooks-dependency
