@@ -141,7 +141,6 @@ impl JwtVerifier {
         token: &BearerToken<'_>,
         now: impl Fn() -> Result<Duration, VerificationError>,
     ) -> Result<Principal, VerificationError> {
-        let malformed = || VerificationError::invalid(VerificationReason::Header);
         let bytes = token.as_bytes();
         if let Some(remembered) = self.remembered.get(bytes) {
             // Verified against the set installed now, so the full path would
@@ -160,29 +159,9 @@ impl JwtVerifier {
             header,
             payload,
             signature,
-        } = rfc7515::compact(bytes).ok_or_else(malformed)?;
-        let header = URL_SAFE_NO_PAD.decode(header).map_err(|_| malformed())?;
-        // jsonwebtoken's `Header` keeps the library's header admission rules.
-        let header: Header = serde_json::from_slice(&header).map_err(|_| malformed())?;
-        // RFC 7515 section 4.1.11: this verifier understands no critical extension.
-        if header.crit.as_ref().is_some_and(|crit| !crit.is_empty()) {
-            return Err(malformed());
-        }
-        let algorithm = JwtAlgorithm::from_jsonwebtoken(header.alg)
-            .filter(|algorithm| self.algorithms.contains(algorithm))
-            .ok_or_else(|| VerificationError::invalid(VerificationReason::Algorithm))?;
-        let typ = header.typ.as_deref();
-        let admitted_type = match self.token_profile {
-            TokenProfile::Rfc9068 => typ.is_some_and(is_access_token_type),
-            // An untyped or generic JWT may be an access token. One explicitly
-            // typed as another kind of JWT is not (RFC 8725 section 3.11).
-            TokenProfile::ResourceServer => {
-                typ.is_none_or(|typ| is_generic_jwt_type(typ) || is_access_token_type(typ))
-            }
-        };
-        if !admitted_type {
-            return Err(VerificationError::invalid(VerificationReason::Profile));
-        }
+        } = rfc7515::compact(bytes)
+            .ok_or_else(|| VerificationError::invalid(VerificationReason::Header))?;
+        let (header, algorithm) = self.admit_header(header)?;
         // Decode into bounded stack storage; admitted keys cap the signature size.
         // Keep `message` as the original encoded bytes that the issuer signed.
         let mut signature_bytes = [0_u8; MAX_SIGNATURE_BYTES];
@@ -217,6 +196,33 @@ impl JwtVerifier {
             },
         );
         Ok(principal)
+    }
+
+    fn admit_header(&self, header: &[u8]) -> Result<(Header, JwtAlgorithm), VerificationError> {
+        let malformed = || VerificationError::invalid(VerificationReason::Header);
+        let header = URL_SAFE_NO_PAD.decode(header).map_err(|_| malformed())?;
+        // jsonwebtoken's `Header` keeps the library's header admission rules.
+        let header: Header = serde_json::from_slice(&header).map_err(|_| malformed())?;
+        // RFC 7515 section 4.1.11: this verifier understands no critical extension.
+        if header.crit.as_ref().is_some_and(|crit| !crit.is_empty()) {
+            return Err(malformed());
+        }
+        let algorithm = JwtAlgorithm::from_jsonwebtoken(header.alg)
+            .filter(|algorithm| self.algorithms.contains(algorithm))
+            .ok_or_else(|| VerificationError::invalid(VerificationReason::Algorithm))?;
+        let typ = header.typ.as_deref();
+        let admitted_type = match self.token_profile {
+            TokenProfile::Rfc9068 => typ.is_some_and(is_access_token_type),
+            // An untyped or generic JWT may be an access token. One explicitly
+            // typed as another kind of JWT is not (RFC 8725 section 3.11).
+            TokenProfile::ResourceServer => {
+                typ.is_none_or(|typ| is_generic_jwt_type(typ) || is_access_token_type(typ))
+            }
+        };
+        if !admitted_type {
+            return Err(VerificationError::invalid(VerificationReason::Profile));
+        }
+        Ok((header, algorithm))
     }
 
     /// A provider can replace a key under the same `kid`, so any signature

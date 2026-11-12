@@ -42,7 +42,7 @@ pub(crate) enum SignatureRefresh {
     /// A newer set than the one the token was checked against is installed:
     /// by a fetch that finished after the request, or by one that finished
     /// between that check and the request.
-    #[debug("Refreshed(..)")]
+    #[debug("NewerSet(..)")]
     NewerSet(Arc<KeySet>),
     /// The last acquisition succeeded and left the caller's checked set installed.
     /// Another fetch is still blocked by the cooldown measured from refresh start.
