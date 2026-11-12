@@ -283,18 +283,17 @@ fn joined_scopes(scopes: &[String]) -> Option<String> {
     }
 }
 
-/// Admits a parsed response as a [`Token`]. With `issued_token_type` set, a response is
-/// admitted only when it reports that exact issued type (RFC 8693 section
-/// 2.2.1).
+/// When `expected_issued_token_type` is set, admission requires an exact
+/// match with the provider's issued type (RFC 8693 section 2.2.1).
 fn token_from_response(
     response: &TokenResponse,
     started: Instant,
-    issued_token_type: Option<&str>,
+    expected_issued_token_type: Option<&str>,
 ) -> Result<Token, AcquisitionError> {
     if !response.token_type.eq_ignore_ascii_case("bearer") {
         return Err(AcquisitionError::InvalidResponse);
     }
-    if let Some(expected) = issued_token_type
+    if let Some(expected) = expected_issued_token_type
         && response.issued_token_type.as_deref() != Some(expected)
     {
         return Err(AcquisitionError::InvalidResponse);

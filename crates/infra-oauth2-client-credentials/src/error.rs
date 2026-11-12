@@ -1,5 +1,10 @@
 use std::{borrow::Cow, fmt};
 
+use serde::{
+    Deserialize,
+    de::value::{Error as DeserializeError, StrDeserializer},
+};
+
 /// Safe admission failure identifying only the failed input and its static cause.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("OAuth2 {key}: {reason}")]
@@ -30,7 +35,7 @@ pub enum AcquisitionError {
     Rejected(Rejection),
     #[error("OAuth2 token response is invalid")]
     InvalidResponse,
-    #[error("OAuth2 client assertion could not be signed")]
+    #[error("OAuth2 client assertion could not be created")]
     Assertion,
 }
 
@@ -53,7 +58,8 @@ impl AcquisitionError {
 /// Why the provider refused a token request: its `error` code (RFC 6749
 /// section 5.2, RFC 8693 section 2.2.2) when it is one of the registered
 /// ones. The code is the only part of the provider's answer that is kept.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(field_identifier, rename_all = "snake_case")]
 pub enum Rejection {
     InvalidRequest,
     InvalidClient,
@@ -63,23 +69,13 @@ pub enum Rejection {
     InvalidScope,
     InvalidTarget,
     /// No `error` code, or one outside the registered set.
+    #[serde(other)]
     Other,
 }
 
 impl Rejection {
-    /// The registered variants, in the order their codes are documented.
-    const REGISTERED: [Self; 7] = [
-        Self::InvalidRequest,
-        Self::InvalidClient,
-        Self::InvalidGrant,
-        Self::UnauthorizedClient,
-        Self::UnsupportedGrantType,
-        Self::InvalidScope,
-        Self::InvalidTarget,
-    ];
-
     pub(crate) fn from_body(body: &[u8]) -> Self {
-        #[derive(serde::Deserialize)]
+        #[derive(Deserialize)]
         struct ErrorResponse<'a> {
             #[serde(borrow)]
             error: Cow<'a, str>,
@@ -87,9 +83,7 @@ impl Rejection {
         let Ok(response) = serde_json::from_slice::<ErrorResponse<'_>>(body) else {
             return Self::Other;
         };
-        Self::REGISTERED
-            .into_iter()
-            .find(|rejection| rejection.code() == Some(&*response.error))
+        Self::deserialize(StrDeserializer::<DeserializeError>::new(&response.error))
             .unwrap_or(Self::Other)
     }
 

@@ -660,21 +660,11 @@ fn is_cacheable_failure(error: AcquisitionError) -> bool {
 pub(crate) struct AcquisitionDeadline<'a> {
     cutoff: Instant,
     expiry: AcquisitionError,
-    context: Option<&'a OperationContext>,
+    context: &'a OperationContext,
     request_context: Option<&'a OperationContext>,
 }
 
 impl AcquisitionDeadline<'_> {
-    #[cfg(test)]
-    pub(crate) const fn caller(cutoff: Instant) -> Self {
-        Self {
-            cutoff,
-            expiry: AcquisitionError::Timeout,
-            context: None,
-            request_context: None,
-        }
-    }
-
     fn expired_error(self) -> Option<AcquisitionError> {
         (Instant::now() >= self.cutoff).then_some(self.expiry)
     }
@@ -683,7 +673,7 @@ impl AcquisitionDeadline<'_> {
         self.expired_error().or_else(|| {
             self.request_context
                 .and_then(OperationContext::stopped)
-                .or_else(|| self.context.and_then(OperationContext::stopped))
+                .or_else(|| self.context.stopped())
                 .map(acquisition_stopped)
         })
     }
@@ -705,7 +695,7 @@ pub(crate) fn acquisition_deadline<'a>(
     AcquisitionDeadline {
         cutoff,
         expiry,
-        context: Some(context),
+        context,
         request_context,
     }
 }
