@@ -16,7 +16,7 @@ use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
 use crate::Error;
 use crate::call::{Held, ResponseCustody, Side};
 use operation_context::{Deadline, OperationContext};
-use shared_rules::error_chain::Causes;
+use shared_rules::error_chain::DisplayErrorChain;
 use tokio::time::Instant;
 use tokio_util::sync::DropGuard;
 
@@ -411,7 +411,7 @@ fn transport_status(error: tonic::transport::Error) -> tonic::Status {
     }
     // Tonic's transport error prints only `transport error` and keeps the DNS,
     // TLS, connect or HTTP/2 reason in `source()`.
-    tracing::warn!(error = %Causes(error), "grpc_client_transport_failed");
+    tracing::warn!(error = %DisplayErrorChain(error), "grpc_client_transport_failed");
     tonic::Status::unavailable("transport unavailable")
 }
 
@@ -506,7 +506,7 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.to_string(), "transport error");
-        let logged = Causes(&error).to_string();
+        let logged = DisplayErrorChain(&error).to_string();
         assert!(logged.contains("Connection refused"), "{logged}");
     }
 

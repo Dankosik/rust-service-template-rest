@@ -121,7 +121,7 @@ impl JwtType {
     }
 
     fn admits(&self, typ: &str) -> bool {
-        rfc7515::typ_subtype(typ).is_some_and(|subtype| subtype.eq_ignore_ascii_case(&self.0))
+        rfc7515::typ_is(typ, &self.0)
     }
 }
 

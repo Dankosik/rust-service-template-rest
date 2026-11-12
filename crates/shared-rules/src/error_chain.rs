@@ -10,7 +10,7 @@ use std::fmt;
 /// A [`std::io::Error`] that wraps a custom error returns that error's source
 /// from `source()`, skipping the wrapped error itself; a TLS connector hands
 /// over a `rustls::Error` that way. This walk yields that payload before its sources.
-/// [`Causes`] keeps the plain `source()` chain, because an I/O error already
+/// [`DisplayErrorChain`] keeps the plain `source()` chain, because an I/O error already
 /// prints its payload's text.
 pub fn causes<'a>(
     error: &'a (dyn Error + 'static),
@@ -30,9 +30,9 @@ pub fn causes<'a>(
 ///
 /// `std::error::Report` renders the same line once it is stable.
 #[derive(Clone, Copy, Debug)]
-pub struct Causes<'a>(pub &'a (dyn Error + 'static));
+pub struct DisplayErrorChain<'a>(pub &'a (dyn Error + 'static));
 
-impl fmt::Display for Causes<'_> {
+impl fmt::Display for DisplayErrorChain<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "{}", self.0)?;
         for cause in std::iter::successors(self.0.source(), |cause| (*cause).source()) {
@@ -44,7 +44,7 @@ impl fmt::Display for Causes<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Causes, causes};
+    use super::{DisplayErrorChain, causes};
     use std::error::Error;
     use std::fmt;
     use std::io;
@@ -80,7 +80,7 @@ mod tests {
             })),
         };
         assert_eq!(
-            Causes(&error).to_string(),
+            DisplayErrorChain(&error).to_string(),
             "request failed: connection reset: broken pipe"
         );
     }
@@ -91,7 +91,7 @@ mod tests {
             message: "timed out",
             source: None,
         };
-        assert_eq!(Causes(&error).to_string(), "timed out");
+        assert_eq!(DisplayErrorChain(&error).to_string(), "timed out");
     }
 
     #[test]

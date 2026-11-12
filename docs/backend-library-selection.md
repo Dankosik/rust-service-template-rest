@@ -41,8 +41,8 @@ uses `tokio-util`, and the `service-failure` catalog is declared once by its
 | `arrayvec` 0.7 | The captured-field tables of the log formatter. | Replaces a sentinel-filled array and a separate count. A new table is no longer initialised in full: measured the same way, a span with two fields 405 → 335 ns to create and an event under one span 2,138 → 2,088 ns. The value buffer stays the local `Bytes`, whose writes are all-or-nothing; `ArrayVec`'s `io::Write` writes a prefix. |
 
 Rejected after the same code search, 2026-11-12: `mime`, because
-`shared_rules::rfc9110::media_type_is` already owns the media-type check and
-`Mime::from_str` would refuse parameters that rule accepts; `tracing-test`,
+`shared_rules::rfc9110::is_json_content_type` owns the JSON media-type check
+and `Mime::from_str` would refuse parameters that rule accepts; `tracing-test`,
 because it matches rendered text under one global subscriber and the capture
 fixtures assert structured fields, span records and background-task events;
 `tracing-capture` 0.1.0, unreleased since 2024-03 and pulling a second

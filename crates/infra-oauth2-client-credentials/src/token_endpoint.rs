@@ -226,7 +226,7 @@ fn decode_token_response(response: &Response<Bytes>) -> Result<TokenResponse, Ac
         let value = content_type
             .to_str()
             .map_err(|_| AcquisitionError::InvalidResponse)?;
-        if !shared_rules::rfc9110::media_type_is(value, "application/json") {
+        if !shared_rules::rfc9110::is_json_content_type(value) {
             return Err(AcquisitionError::InvalidResponse);
         }
     }

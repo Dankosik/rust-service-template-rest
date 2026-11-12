@@ -287,11 +287,11 @@ struct Discovery {
 }
 
 fn is_access_token_type(value: &str) -> bool {
-    rfc7515::typ_subtype(value).is_some_and(|subtype| subtype.eq_ignore_ascii_case("at+jwt"))
+    rfc7515::typ_is(value, "at+jwt")
 }
 
 fn is_generic_jwt_type(value: &str) -> bool {
-    rfc7515::typ_subtype(value).is_some_and(|subtype| subtype.eq_ignore_ascii_case("jwt"))
+    rfc7515::typ_is(value, "jwt")
 }
 
 #[cfg(test)]
