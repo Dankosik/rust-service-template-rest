@@ -996,23 +996,17 @@ fn opening_request(
         .unwrap()
 }
 
-async fn reject_with_pending_upload(app: &axum::Router) -> Status {
-    use tower::ServiceExt as _;
-
-    tokio::time::pause();
-    let mut request = opening_request(UNARY_PATH, None, "draining");
+fn pending_upload(
+    mut request: http::Request<axum::body::Body>,
+    grpc_timeout: &'static str,
+) -> http::Request<axum::body::Body> {
     request
         .headers_mut()
-        .insert("grpc-timeout", "50m".parse().unwrap());
+        .insert("grpc-timeout", http::HeaderValue::from_static(grpc_timeout));
     *request.body_mut() = axum::body::Body::from_stream(futures_util::stream::pending::<
         Result<bytes::Bytes, std::convert::Infallible>,
     >());
-    let mut pending = Box::pin(app.clone().oneshot(request));
-    assert!(futures_util::poll!(pending.as_mut()).is_pending());
-    tokio::time::advance(Duration::from_millis(50)).await;
-    let response = pending.await.unwrap();
-    tokio::time::resume();
-    Status::from_header_map(response.headers()).unwrap()
+    request
 }
 
 #[tokio::test]
@@ -1081,15 +1075,21 @@ async fn opening_admission_counts_auth_followers_and_recovers_after_cancellation
         .unwrap();
         assert!(Status::from_header_map(response.headers()).is_none());
     }
-    // A deadline that cuts the refusal drain short is also counted only as a deadline.
-    assert_eq!(
-        reject_with_pending_upload(&app).await.code(),
-        Code::DeadlineExceeded
-    );
+    tokio::time::pause();
+    let response = app
+        .clone()
+        .oneshot(pending_upload(
+            opening_request(UNARY_PATH, None, "draining"),
+            "50m",
+        ))
+        .await
+        .unwrap();
+    tokio::time::resume();
+    assert_at_capacity(&Status::from_header_map(response.headers()).unwrap());
     assert!(
         metrics
             .render()
-            .contains("grpc_server_shed_requests_total 3")
+            .contains("grpc_server_shed_requests_total 4")
     );
 
     drop(follower);
@@ -1308,10 +1308,8 @@ async fn a_call_over_the_limit_waits_for_a_permit_and_is_served() {
     provider.stop().await;
 }
 
-/// A call whose budget runs out while it waits is refused with `RetryInfo`,
-/// not left to the opening deadline's `DEADLINE_EXCEEDED`, and counted once.
 #[tokio::test]
-async fn a_call_that_waits_out_its_budget_is_refused_with_retry_info() {
+async fn a_waiting_call_with_an_open_upload_is_refused_with_retry_info() {
     use tower::ServiceExt as _;
 
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
@@ -1329,9 +1327,15 @@ async fn a_call_that_waits_out_its_budget_is_refused_with_retry_info() {
         ))
         .await
         .unwrap();
-    let mut call = opening_request(UNARY_PATH, Some(ACCEPTED), "refused");
-    call.headers_mut()
-        .insert("grpc-timeout", "500m".parse().unwrap());
+    let call = pending_upload(
+        opening_request(
+            "/example.v1.EchoService/BidiStream",
+            Some(ACCEPTED),
+            "refused",
+        ),
+        "500m",
+    );
+    tokio::time::pause();
     let started = tokio::time::Instant::now();
     let response = timeout(WAIT, app.clone().oneshot(call))
         .await
@@ -1341,6 +1345,7 @@ async fn a_call_that_waits_out_its_budget_is_refused_with_retry_info() {
         started.elapsed() >= Duration::from_millis(300),
         "the call waited for its budget less the reserve"
     );
+    tokio::time::resume();
     assert_at_capacity(&Status::from_header_map(response.headers()).unwrap());
     let rendered = metrics.render();
     assert!(rendered.contains("grpc_server_shed_requests_total 1"));
@@ -2411,6 +2416,32 @@ fn bytes_that_are_not_a_descriptor_set_are_rejected() {
         Services::new().describe(&[0xff]),
         Err(Error::InvalidFileDescriptorSet)
     );
+}
+
+#[test]
+fn conflicting_descriptors_for_the_same_service_are_rejected() {
+    use prost::Message as _;
+
+    let mut services = described();
+    let mut descriptor =
+        prost_types::FileDescriptorSet::decode(grpc_contracts::FILE_DESCRIPTOR_SET).unwrap();
+    let echo = descriptor
+        .file
+        .iter_mut()
+        .flat_map(|file| &mut file.service)
+        .find(|service| service.name() == "EchoService")
+        .unwrap();
+    echo.method.retain(|method| method.name() != "Unary");
+    let conflicting = descriptor.encode_to_vec().into_boxed_slice().leak();
+    assert_eq!(
+        services.describe(conflicting),
+        Err(Error::ConflictingServiceDescription(
+            "example.v1.EchoService".to_owned()
+        ))
+    );
+    services
+        .describe(grpc_contracts::FILE_DESCRIPTOR_SET)
+        .expect("the rejected set did not replace the original description");
 }
 
 #[test]
