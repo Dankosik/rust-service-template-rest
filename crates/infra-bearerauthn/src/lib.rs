@@ -239,14 +239,13 @@ impl VerificationError {
     }
 }
 
-/// Usable Unix time in seconds; clock failure cannot supply trust evidence.
-pub(crate) fn unix_now() -> Result<u64, VerificationError> {
+/// Usable time since the Unix epoch; clock failure cannot supply trust evidence.
+pub(crate) fn unix_now() -> Result<std::time::Duration, VerificationError> {
     unix_time(std::time::SystemTime::now())
 }
 
-fn unix_time(now: std::time::SystemTime) -> Result<u64, VerificationError> {
+fn unix_time(now: std::time::SystemTime) -> Result<std::time::Duration, VerificationError> {
     now.duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs())
         .map_err(|_| VerificationError::unavailable(VerificationReason::Clock))
 }
 
