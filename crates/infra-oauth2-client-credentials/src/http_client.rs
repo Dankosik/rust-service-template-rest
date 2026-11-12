@@ -8,7 +8,7 @@ use operation_context::{Deadline, OperationContext};
 use tokio::time::Instant;
 
 use crate::{
-    Credentials, Error,
+    AcquisitionError, Credentials, Error,
     credentials::{
         AdmissionRefusal, acquisition_deadline, acquisition_stopped, admit_request_subject,
     },
@@ -57,7 +57,8 @@ impl AuthenticatedClient {
     /// # Errors
     /// Rejects caller Authorization, or a missing subject this client
     /// [requires](Self::require_on_behalf_of), before I/O, acquisition failure
-    /// before resource dispatch, and otherwise preserves bounded resource
+    /// before resource dispatch (including a token that expired during request
+    /// preparation), and otherwise preserves bounded resource
     /// errors.
     pub async fn execute(
         &self,
@@ -127,12 +128,22 @@ impl AuthenticatedClient {
         check_request()?;
         let acquired = acquired?;
         self.resource
-            .execute_with_response_status(request, &context, |status| {
-                if status == StatusCode::UNAUTHORIZED {
-                    acquired.reject();
-                }
-            })
+            .execute_with_dispatch_check(
+                request,
+                &context,
+                || acquired.check_expiry(Instant::now()).is_ok(),
+                |status| {
+                    if status == StatusCode::UNAUTHORIZED {
+                        acquired.reject();
+                    }
+                },
+            )
             .await
-            .map_err(Error::from)
+            .map_err(|error| match error {
+                infra_outbound_http::Error::DispatchRefused => {
+                    AcquisitionError::InvalidResponse.into()
+                }
+                other => Error::from(other),
+            })
     }
 }

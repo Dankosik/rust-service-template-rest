@@ -198,8 +198,9 @@ one clock governs every expiry decision. A representable positive expiry
 is `acquisition_start + expires_in`; zero, already elapsed, and unrepresentable
 expiry are invalid. The reuse cutoff is `expiry - 10s`; a token already inside
 that margin serves only the request that fetched it. Omitted expiry is likewise
-request-only. Header injection rechecks the hard expiry because the token can
-age between admission and dispatch. A foreground miss never falls back to a prior token.
+request-only. Header injection and HTTP transport handoff recheck hard expiry
+because token acquisition and synchronous resource setup can spend the token's
+remaining lifetime. A foreground miss never falls back to a prior token.
 A background refresh that returns a request-only token keeps the current entry
 usable until its cutoff or rejection.
 

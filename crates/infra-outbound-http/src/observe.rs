@@ -77,6 +77,7 @@ impl Outcome {
         match error {
             Error::Cancelled => Self::Cancelled,
             Error::InvalidTarget => Self::Failed("invalid_target"),
+            Error::DispatchRefused => Self::Failed("dispatch_refused"),
             Error::Timeout => Self::Failed("timeout"),
             Error::ResponseBodyTooLarge => Self::Failed("response_body_too_large"),
             Error::Transport { source } => Self::Failed(transport_error_type(&**source)),

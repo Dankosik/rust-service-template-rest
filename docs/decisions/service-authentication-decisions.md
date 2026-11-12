@@ -25,6 +25,9 @@ platform tokens, alongside the authorization-server path. `crates/infra-servicea
 | S13: failures map to the catalog codes `UNAUTHORIZED` (`UNAUTHENTICATED`), `FORBIDDEN` (`PERMISSION_DENIED`) and `SERVICE_UNAVAILABLE` (a clock before the epoch). | The bearer `AUTHENTICATION_*` codes, which exist only with `AUTHN`; missing and invalid stay apart in the receiver's metrics and logs. | A caller cannot tell a missing token from an invalid one by the status. None. |
 | S14: the receiver remembers each token that passed every check, keyed by its exact bytes, with its caller and validity window, at most 1024 at once; a remembered token is admitted again without the signature check while `now` is inside that window widened by the allowance. Every check but the validity window, from the later of `iat` and `nbf` to `exp`, depends only on the token's bytes, and the audience, type and trust registry are fixed for the process (S8); the remembered window is checked on every call, so the outcome equals a full check even after the clock steps back. It refuses nothing for having been seen, so S5's no-replay-cache choice stands. | A full ES256 check on every call: about 26 µs on an Apple M5 core against about 70 ns for a remembered token, for a token the caller reuses for 30 seconds (S12). | A process-local map of up to 1024 tokens. Reopen if the trust registry or the audience can change at runtime, or tokens gain a revocation check. |
 
+The gRPC binding obtains the JWT after channel readiness so an unpolled call
+or a readiness wait cannot consume the token's usable lifetime before handoff.
+
 Template-wide effects of the profile: `infra_grpc::Error` is `Clone` but no
 longer `Copy` in every projection, since a missing rule names its method, and
 `router()` keeps a constant `service_tokens = false` where the profile is

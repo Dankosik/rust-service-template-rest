@@ -407,6 +407,41 @@ async fn setup_spends_the_fixed_parent_or_operation_end_before_dispatch() {
     }
 }
 
+#[tokio::test(start_paused = true)]
+async fn dispatch_can_be_refused_after_request_setup() {
+    use operation_context::OperationContext;
+    use tracing::instrument::WithSubscriber as _;
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    let material = TlsMaterial::new(FIXTURE_HOST);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = fixture_client_with_limits(listener.local_addr().unwrap(), &material, limits());
+    let subscriber =
+        tracing_subscriber::registry().with(AdvanceOnAttemptStart(Duration::from_secs(1)));
+    let credential_expiry = Instant::now() + Duration::from_secs(1);
+    let context = OperationContext::with_timeout(Duration::from_secs(5));
+    let mut observed_status = None;
+
+    let result = client
+        .execute_with_dispatch_check(
+            request(),
+            &context,
+            || Instant::now() < credential_expiry,
+            |status| observed_status = Some(status),
+        )
+        .with_subscriber(subscriber)
+        .await;
+
+    std::assert_matches!(result, Err(Error::DispatchRefused));
+    assert_eq!(observed_status, None);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), listener.accept())
+            .await
+            .is_err(),
+        "a refused dispatch must not start a connection"
+    );
+}
+
 // A terminal subscriber is allowed to spend time after the operation result
 // was fixed. That must not change the returned result or add a second sample.
 struct AdvanceOnAttemptFinish;

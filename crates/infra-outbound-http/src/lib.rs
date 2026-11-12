@@ -84,6 +84,8 @@ pub enum Error {
     /// A supplied [`OperationContext`] was cancelled before the exchange ended.
     #[error("outbound HTTP operation was cancelled")]
     Cancelled,
+    #[error("outbound HTTP dispatch was refused")]
+    DispatchRefused,
     #[error("outbound HTTP response body is too large")]
     ResponseBodyTooLarge,
     #[error("outbound HTTP transport failed")]
@@ -250,7 +252,8 @@ impl Client {
             Deadline::at(deadline)
                 .earlier(Deadline::new(Instant::now(), self.limits.operation_timeout)),
         );
-        self.execute_within(request, &operation, |_| {}).await
+        self.execute_within(request, &operation, || true, |_| {})
+            .await
     }
 
     /// Fixes the resource operation allowance before a composition begins
@@ -279,7 +282,7 @@ impl Client {
         request: Request<Bytes>,
         context: &OperationContext,
     ) -> Result<Response<Bytes>, Error> {
-        self.execute_within(request, &self.begin_operation(context), |_| {})
+        self.execute_with_response_status(request, context, |_| {})
             .await
     }
 
@@ -296,7 +299,24 @@ impl Client {
         context: &OperationContext,
         on_status: impl FnOnce(StatusCode) + Send,
     ) -> Result<Response<Bytes>, Error> {
-        self.execute_within(request, &self.begin_operation(context), on_status)
+        self.execute_with_dispatch_check(request, context, || true, on_status)
+            .await
+    }
+
+    /// Like [`Self::execute_with_response_status`], with a synchronous admission
+    /// check after request preparation and immediately before transport handoff.
+    ///
+    /// # Errors
+    /// Returns [`Error::DispatchRefused`] when the check returns `false`, or
+    /// the same errors as [`Self::execute_with_response_status`].
+    pub async fn execute_with_dispatch_check(
+        &self,
+        request: Request<Bytes>,
+        context: &OperationContext,
+        check: impl FnOnce() -> bool + Send,
+        on_status: impl FnOnce(StatusCode) + Send,
+    ) -> Result<Response<Bytes>, Error> {
+        self.execute_within(request, &self.begin_operation(context), check, on_status)
             .await
     }
 
@@ -304,6 +324,7 @@ impl Client {
         &self,
         mut request: Request<Bytes>,
         operation: &OperationContext,
+        check: impl FnOnce() -> bool + Send,
         on_status: impl FnOnce(StatusCode) + Send,
     ) -> Result<Response<Bytes>, Error> {
         let request_context = request.extensions_mut().remove::<OperationContext>();
@@ -324,7 +345,7 @@ impl Client {
         // check and spend the same budget. Terminal observation can delay
         // return but cannot reopen this decision.
         let result = self
-            .exchange(request, &stops, &mut attempt, on_status)
+            .exchange(request, &stops, &mut attempt, check, on_status)
             .await
             .and_then(|response| stops.check().map(|()| response));
         attempt.finish(&result);
@@ -336,11 +357,17 @@ impl Client {
         request: Request<Bytes>,
         stops: &StopScopes<'_>,
         attempt: &mut observe::Attempt,
+        check: impl FnOnce() -> bool + Send,
         on_status: impl FnOnce(StatusCode) + Send,
     ) -> Result<Response<Bytes>, Error> {
         let span = attempt.span();
         let exchange = async {
             stops.check()?;
+            let admitted = check();
+            stops.check()?;
+            if !admitted {
+                return Err(Error::DispatchRefused);
+            }
             let response = self
                 .transport
                 .request(request.map(Full::new))

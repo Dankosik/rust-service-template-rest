@@ -263,6 +263,7 @@ fn map_transport_error(error: &infra_outbound_http::Error) -> AcquisitionError {
         infra_outbound_http::Error::Cancelled => AcquisitionError::Cancelled,
         infra_outbound_http::Error::ResponseBodyTooLarge => AcquisitionError::ResponseLimit,
         infra_outbound_http::Error::InvalidTarget
+        | infra_outbound_http::Error::DispatchRefused
         | infra_outbound_http::Error::Transport { .. } => AcquisitionError::Transport,
     }
 }

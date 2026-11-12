@@ -470,7 +470,7 @@ const fn exchange_reason(error: &HttpError) -> &'static str {
         HttpError::Cancelled => "cancelled",
         HttpError::ResponseBodyTooLarge => "response_too_large",
         HttpError::Transport { .. } => "transport",
-        HttpError::InvalidTarget => "client",
+        HttpError::InvalidTarget | HttpError::DispatchRefused => "client",
     }
 }
 
