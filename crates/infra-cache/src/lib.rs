@@ -538,8 +538,8 @@ impl CacheNamespace {
 
 /// `PING` probe. The name is `cache`. Failure text is `cache ping failed: <error.type>` only.
 ///
-/// Acquisition uses the caller's startup/readiness budget. Once connected,
-/// PING has a fixed ceiling and ends if its generation retires.
+/// The caller's startup/readiness budget can cancel the probe. A PING that
+/// can finish normally gets enough time for commands already ahead of it.
 #[derive(Clone, Debug)]
 pub struct CacheProbe {
     cache: Cache,
@@ -552,9 +552,13 @@ impl health::Probe for CacheProbe {
     }
 
     async fn check(&self) -> Result<(), health::ProbeError> {
-        self.cache.link.probe().await.map_err(|error| {
-            health::ProbeError::new(format!("cache ping failed: {}", error.label()))
-        })
+        self.cache
+            .link
+            .probe(self.cache.command_timeout)
+            .await
+            .map_err(|error| {
+                health::ProbeError::new(format!("cache ping failed: {}", error.label()))
+            })
     }
 }
 
