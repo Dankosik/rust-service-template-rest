@@ -22,6 +22,7 @@ health = { workspace = true }
 # `sqlx::ConnectOptions` takes statement-log levels as `log::LevelFilter`.
 log = { workspace = true }
 metrics = { workspace = true }
+shared-rules = { workspace = true }
 # `macros` turns on the driver's offline support, which adds a method to
 # `sqlx::Executor`. `Tx` implements that trait, so the method set has to be
 # the same whichever workspace crates are built together.

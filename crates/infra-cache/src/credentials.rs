@@ -84,15 +84,10 @@ fn read_password_file(path: &std::path::Path) -> std::io::Result<String> {
     std::fs::read_to_string(path)
 }
 
-/// The password in a password file's content: the whole file, minus one
-/// trailing line break that editors and `echo` add.
-fn password_from(mut password: String) -> Result<String, CacheError> {
-    if password.ends_with('\n') {
-        password.pop();
-        if password.ends_with('\r') {
-            password.pop();
-        }
-    }
+/// The password in a password file's content: the file's secret value, which
+/// must not be empty.
+fn password_from(content: String) -> Result<String, CacheError> {
+    let password = shared_rules::secret_file::value(content);
     if password.is_empty() {
         return Err(CacheError::PasswordFileEmpty);
     }

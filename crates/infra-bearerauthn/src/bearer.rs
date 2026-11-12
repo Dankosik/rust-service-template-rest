@@ -2,6 +2,8 @@
 
 use std::fmt;
 
+use shared_rules::rfc6750::{self, NoBearer};
+
 use crate::Failure;
 
 /// The accepted bearer token text. Its contents are intentionally opaque and
@@ -34,18 +36,11 @@ impl<'a> BearerToken<'a> {
     }
 }
 
-/// Parses exactly one Authorization header value as a bearer envelope.
+/// Parses exactly one Authorization header value as a bearer envelope, by
+/// [`shared_rules::rfc6750::token`]: foreign schemes are missing Bearer
+/// evidence without credential parsing, and anything outside RFC 6750 is
+/// malformed.
 ///
-/// Foreign schemes are missing Bearer evidence without credential parsing.
-/// Bearer matching is ASCII case-insensitive. Its separator is one or more
-/// ASCII spaces; tabs, leading/trailing whitespace, control bytes, non-ASCII
-/// values, and any grammar outside RFC 6750 are malformed.
-///
-// template:begin service-auth:authn-bearer-serviceauth-twin
-/// `infra-serviceauth`'s verifier applies the same grammar and must change
-/// with it; it cannot depend on this crate, which `AUTHN=none` removes.
-///
-// template:end service-auth:authn-bearer-serviceauth-twin
 /// # Errors
 ///
 /// Returns the fixed failure class for a missing or malformed bearer envelope.
@@ -53,54 +48,11 @@ impl<'a> BearerToken<'a> {
 pub fn parse_bearer<'a>(
     headers: impl IntoIterator<Item = &'a [u8]>,
 ) -> Result<BearerToken<'a>, Failure> {
-    let mut headers = headers.into_iter();
-    let Some(header) = headers.next() else {
-        return Err(Failure::Missing);
-    };
-    if headers.next().is_some() {
-        return Err(Failure::Malformed);
+    match rfc6750::token(headers) {
+        Ok(text) => Ok(BearerToken { text }),
+        Err(NoBearer::Missing) => Err(Failure::Missing),
+        Err(NoBearer::Malformed) => Err(Failure::Malformed),
     }
-
-    let separator = header
-        .iter()
-        .position(|byte| *byte == b' ')
-        .unwrap_or(header.len());
-    let scheme = &header[..separator];
-    if scheme.is_empty() || !scheme.iter().all(|byte| is_tchar(*byte)) {
-        return Err(Failure::Malformed);
-    }
-    if !scheme.eq_ignore_ascii_case(b"Bearer") {
-        return Err(Failure::Missing);
-    }
-    let rest = &header[separator..];
-    let start = rest
-        .iter()
-        .position(|byte| *byte != b' ')
-        .unwrap_or(rest.len());
-    let credentials = &rest[start..];
-    if !valid_token(credentials) {
-        return Err(Failure::Malformed);
-    }
-    // The RFC 6750 token alphabet is ASCII, so this conversion cannot fail.
-    let text = std::str::from_utf8(credentials).map_err(|_| Failure::Malformed)?;
-    Ok(BearerToken { text })
-}
-
-fn is_tchar(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
-}
-
-/// RFC 6750 `b64token = 1*( ALPHA / DIGIT / "-" / "." / "_" / "~" / "+" / "/" ) *"="`.
-fn valid_token(token: &[u8]) -> bool {
-    let padding = token.iter().rev().take_while(|byte| **byte == b'=').count();
-    let value = &token[..token.len() - padding];
-    // A non-short-circuiting fold lets the compiler vectorize the class check.
-    !value.is_empty()
-        && value.iter().fold(true, |valid, byte| {
-            valid
-                & (byte.is_ascii_alphanumeric()
-                    | matches!(byte, b'-' | b'.' | b'_' | b'~' | b'+' | b'/'))
-        })
 }
 
 #[cfg(test)]
@@ -116,43 +68,21 @@ mod tests {
         assert_eq!(format!("{token:?}"), "BearerToken([REDACTED])");
     }
 
+    /// The grammar's cases are `shared_rules::rfc6750`'s; this crate maps its
+    /// two refusals onto distinct failure classes.
     #[test]
-    fn distinguishes_missing_from_malformed_envelopes() {
+    fn a_missing_envelope_is_not_a_malformed_one() {
         assert_eq!(parse_bearer(std::iter::empty()), Err(Failure::Missing));
-        for value in [
-            b" Bearer abc".as_slice(),
-            b"Bearer abc ".as_slice(),
-            b"Bearer\tabc".as_slice(),
-            b"Bearer \tabc".as_slice(),
-            b"Bearer \nabc".as_slice(),
-            b"Bearer ".as_slice(),
-            b"Bearer =".as_slice(),
-            b"Bearer ===".as_slice(),
-            b"Bearer ab=c".as_slice(),
-            b"Bearer abc\x7f".as_slice(),
-            b"Bearer \xff".as_slice(),
-        ] {
-            assert_eq!(parse_bearer([value]), Err(Failure::Malformed), "{value:?}");
-        }
         assert_eq!(
-            parse_bearer([b"Bearer one".as_slice(), b"Bearer two".as_slice()]),
+            parse_bearer([b"Basic abc".as_slice()]),
+            Err(Failure::Missing)
+        );
+        assert_eq!(
+            parse_bearer([b"Bearer ab=c".as_slice()]),
             Err(Failure::Malformed)
         );
-    }
-
-    #[test]
-    fn foreign_scheme_credentials_are_not_interpreted() {
-        for value in [
-            b"Basic abc".as_slice(),
-            b"Digest realm=\"api\", nonce=\"xyz\"",
-            b"Negotiate",
-            b"Digest realm=\"unterminated",
-            b"Basic abc\n",
-        ] {
-            assert_eq!(parse_bearer([value]), Err(Failure::Missing), "{value:?}");
-        }
         assert_eq!(
-            parse_bearer([b"B@d abc".as_slice()]),
+            parse_bearer([b"Bearer one".as_slice(), b"Bearer two".as_slice()]),
             Err(Failure::Malformed)
         );
     }
