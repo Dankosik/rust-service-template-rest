@@ -62,7 +62,7 @@ impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for JsonObject<T> 
 }
 
 pub use authenticate::{AUTHN_VERIFICATIONS_METRIC, Transport};
-pub use bearer::{BearerToken, parse_bearer};
+pub(crate) use bearer::{BearerToken, parse_bearer};
 // template:begin oidc-introspection:authn-introspection-prepare-export
 pub use introspection::{IntrospectionCacheOptions, IntrospectionOptions, prepare_introspection};
 // template:end oidc-introspection:authn-introspection-prepare-export
@@ -375,14 +375,23 @@ impl Verifier {
     }
     // template:end oidc-introspection:authn-introspection-verifier
 
-    /// Fixture-only: verifies under a fresh 3-second budget that is not linked
-    /// to any caller's deadline or cancellation. Production code has a caller
-    /// context and uses [`Verifier::authenticate_with_context`].
+    /// Verifies one fixture's Authorization value under a fresh 3-second budget,
+    /// without recording a transport outcome.
     ///
     /// # Errors
-    /// Returns [`Failure`] for invalid token evidence or an unavailable provider.
+    /// Returns [`Failure`] for missing or malformed bearer evidence, an invalid
+    /// token, or an unavailable provider.
+    #[cfg(feature = "test-support")]
+    pub async fn verify_fixture_authorization(
+        &self,
+        authorization: &[u8],
+    ) -> Result<Principal, Failure> {
+        let token = parse_bearer([authorization])?;
+        self.verify(&token).await
+    }
+
     #[cfg(any(test, feature = "test-support"))]
-    pub async fn verify(&self, token: &BearerToken<'_>) -> Result<Principal, Failure> {
+    async fn verify(&self, token: &BearerToken<'_>) -> Result<Principal, Failure> {
         self.verify_with_context(
             token,
             &OperationContext::with_timeout(provider::PROVIDER_TIMEOUT),

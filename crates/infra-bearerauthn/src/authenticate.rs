@@ -107,8 +107,9 @@ impl Verifier {
     /// Parses and verifies under the caller's original deadline and cancellation.
     /// A stopped caller is never counted as invalid credentials.
     ///
-    /// `authorization` is every `Authorization` value of the request; see
-    /// [`parse_bearer`] for how a second value or another scheme is classified.
+    /// Pass every `Authorization` value of the request. A second value is
+    /// [`Failure::Malformed`]. No value or a single value with a valid scheme
+    /// other than Bearer is [`Failure::Missing`].
     /// Records exactly one [`AUTHN_VERIFICATIONS_METRIC`] outcome labelled with
     /// `transport`: `timeout` when the context's deadline expires, `cancelled`
     /// when the context is cancelled or the caller drops the future, so an

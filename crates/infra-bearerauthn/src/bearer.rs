@@ -8,7 +8,7 @@ use crate::Failure;
 /// its debug form is redacted.
 #[derive(Eq, PartialEq, derive_more::Debug)]
 #[debug("BearerToken([REDACTED])")]
-pub struct BearerToken<'a> {
+pub(crate) struct BearerToken<'a> {
     text: &'a str,
 }
 
@@ -32,7 +32,7 @@ impl<'a> BearerToken<'a> {
 ///
 /// Returns the fixed failure class for a missing or malformed bearer envelope.
 /// The caller owns the ingress byte bound.
-pub fn parse_bearer<'a>(
+pub(crate) fn parse_bearer<'a>(
     headers: impl IntoIterator<Item = &'a [u8]>,
 ) -> Result<BearerToken<'a>, Failure> {
     match rfc6750::token(headers) {
