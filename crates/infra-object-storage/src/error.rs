@@ -294,6 +294,7 @@ pub(crate) fn is_checksum_mismatch(error: &(dyn std::error::Error + 'static)) ->
 
 #[cfg(test)]
 mod tests {
+    use super::Call::UnconditionalMutation as Unconditional;
     use super::{Call, FailureKind, ObjectStorageError, classify};
 
     #[test]
@@ -302,23 +303,15 @@ mod tests {
         let status = |status, code| FailureKind::Status { status, code };
         let cases = [
             (Call::Read, FailureKind::Lost, E::Unavailable),
-            (
-                Call::UnconditionalMutation,
-                FailureKind::Lost,
-                E::OutcomeUnknown,
-            ),
+            (Unconditional, FailureKind::Lost, E::OutcomeUnknown),
             (Call::CreateOnly, FailureKind::Lost, E::OutcomeUnknown),
-            (
-                Call::UnconditionalMutation,
-                FailureKind::NotSent,
-                E::Rejected,
-            ),
+            (Unconditional, FailureKind::NotSent, E::Rejected),
             (Call::Read, status(404, Some("NoSuchKey")), E::NotFound),
             (Call::Read, status(404, Some("NotFound")), E::NotFound),
             (Call::Read, status(404, None), E::NotFound),
             (Call::Read, status(404, Some("NoSuchBucket")), E::Rejected),
             (
-                Call::UnconditionalMutation,
+                Unconditional,
                 status(404, Some("NoSuchBucket")),
                 E::Rejected,
             ),
@@ -328,7 +321,7 @@ mod tests {
                 E::AlreadyExists,
             ),
             (
-                Call::UnconditionalMutation,
+                Unconditional,
                 status(412, Some("PreconditionFailed")),
                 E::Rejected,
             ),
@@ -338,17 +331,13 @@ mod tests {
                 E::Unavailable,
             ),
             (
-                Call::UnconditionalMutation,
+                Unconditional,
                 status(429, Some("TooManyRequests")),
                 E::Unavailable,
             ),
+            (Unconditional, status(503, Some("SlowDown")), E::Unavailable),
             (
-                Call::UnconditionalMutation,
-                status(503, Some("SlowDown")),
-                E::Unavailable,
-            ),
-            (
-                Call::UnconditionalMutation,
+                Unconditional,
                 status(500, Some("InternalError")),
                 E::OutcomeUnknown,
             ),
@@ -359,38 +348,30 @@ mod tests {
                 E::Unavailable,
             ),
             (Call::Read, status(403, Some("AccessDenied")), E::Rejected),
+            (Unconditional, status(400, Some("BadDigest")), E::Rejected),
             (
-                Call::UnconditionalMutation,
-                status(400, Some("BadDigest")),
-                E::Rejected,
-            ),
-            (
-                Call::UnconditionalMutation,
+                Unconditional,
                 status(403, Some("SignatureDoesNotMatch")),
                 E::Rejected,
             ),
             (
-                Call::UnconditionalMutation,
+                Unconditional,
                 status(400, Some("RequestTimeout")),
                 E::Unavailable,
             ),
             (
-                Call::UnconditionalMutation,
+                Unconditional,
                 status(501, Some("NotImplemented")),
                 E::Rejected,
             ),
             (Call::Read, status(501, Some("NotImplemented")), E::Rejected),
             // A 2xx reply with an error body is classified by its code.
             (
-                Call::UnconditionalMutation,
+                Unconditional,
                 status(200, Some("InternalError")),
                 E::OutcomeUnknown,
             ),
-            (
-                Call::UnconditionalMutation,
-                status(200, Some("SlowDown")),
-                E::Unavailable,
-            ),
+            (Unconditional, status(200, Some("SlowDown")), E::Unavailable),
             (
                 Call::CreateOnly,
                 status(200, Some("PreconditionFailed")),
@@ -401,13 +382,9 @@ mod tests {
                 status(200, Some("ConditionalRequestConflict")),
                 E::Unavailable,
             ),
+            (Unconditional, status(200, None), E::OutcomeUnknown),
             (
-                Call::UnconditionalMutation,
-                status(200, None),
-                E::OutcomeUnknown,
-            ),
-            (
-                Call::UnconditionalMutation,
+                Unconditional,
                 status(200, Some("NoSuchBucket")),
                 E::Rejected,
             ),
