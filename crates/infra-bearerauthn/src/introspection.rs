@@ -1236,11 +1236,11 @@ mod tests {
         let base = epoch_now();
         let token = parse_bearer([b"Bearer delayed".as_slice()]).unwrap();
         for (expiry, not_before, delivery, expected) in [
-            (base + 30, None, Some(base + 60), None),
+            (base + 30, None, Some(base + 59), None),
             (
                 base + 30,
                 None,
-                Some(base + 61),
+                Some(base + 60),
                 Some((Failure::Invalid, crate::VerificationReason::Expired)),
             ),
             (base + 600, Some(base), Some(base - 30), None),
