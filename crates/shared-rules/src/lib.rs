@@ -29,7 +29,6 @@ pub mod rfc6749;
 pub mod rfc6750;
 pub mod rfc7515;
 pub mod rfc7519;
+pub mod rfc9110;
 pub mod secret_file;
-// template:begin outbound-auth:shared-rules-uri
 pub mod uri;
-// template:end outbound-auth:shared-rules-uri
