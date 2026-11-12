@@ -37,6 +37,9 @@ const PING_INTERVAL: Duration = Duration::from_secs(2);
 const PASSWORD_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 /// Shared by every namespace, including commands waiting for a connection.
 const APPLICATION_SLOTS: usize = 256;
+const PROBE_SLOTS: usize = 1;
+// One additional producer runs maintenance PING and AUTH serially.
+const PIPELINE_BUFFER_SIZE: usize = APPLICATION_SLOTS + PROBE_SLOTS + 1;
 
 /// Bounded cause of an unsuccessful cache exchange. Server text is never copied.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -154,8 +157,7 @@ impl Drop for CommandSlot<'_> {
 
 /// An exchange that does not end in `Ok` or a delivered server error reply,
 /// including one dropped mid-flight, retires its generation before its slot
-/// is released, so no later command can read a reply it left on the
-/// connection.
+/// is released, bounding the lifetime of an unanswered driver slot.
 struct Exchange<'a> {
     shared: &'a Shared,
     generation: &'a Arc<Generation>,
@@ -325,7 +327,7 @@ impl Link {
             server,
             shared,
             application_slots: Semaphore::new(APPLICATION_SLOTS),
-            probe_slots: Semaphore::new(1),
+            probe_slots: Semaphore::new(PROBE_SLOTS),
             admission_refused,
             commands_in_flight,
             supervisor,
@@ -349,10 +351,13 @@ impl Link {
         context.check().map_err(|_| ErrorType::Timeout)?;
         let generation = generation?;
         let query = async {
-            // Arm retirement only when the command future starts polling.
+            // Yield before arming retirement. The driver has room for every
+            // admitted producer, so its first poll can enqueue without yielding.
+            tokio::task::consume_budget().await;
             let exchange = Exchange::new(&self.shared, &generation, slot);
             let mut connection = generation.connection.clone();
-            exchange.finish_reply(command.query_async(&mut connection).await)
+            let reply = tokio::task::unconstrained(command.query_async(&mut connection)).await;
+            exchange.finish_reply(reply)
         };
         tokio::select! {
             biased;
@@ -605,6 +610,7 @@ async fn connect(
     let config = redis::AsyncConnectionConfig::new()
         .set_response_timeout(None)
         .set_connection_timeout(None)
+        .set_pipeline_buffer_size(PIPELINE_BUFFER_SIZE)
         .set_push_sender(move |push: redis::PushInfo| {
             if push.kind == redis::PushKind::Disconnection {
                 retired.cancel();
