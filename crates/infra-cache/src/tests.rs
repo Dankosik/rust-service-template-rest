@@ -54,13 +54,13 @@ fn with_password_file(dsn: &str, password_file: PathBuf) -> CacheOptions {
 }
 
 fn observation_recorder() -> metrics_exporter_prometheus::PrometheusRecorder {
-    PrometheusBuilder::new()
-        .set_buckets_for_metric(
-            Matcher::Full(crate::OPERATION_DURATION_METRIC.to_owned()),
-            crate::OPERATION_DURATION_BUCKETS,
-        )
-        .expect("observation buckets are valid")
-        .build_recorder()
+    let mut builder = PrometheusBuilder::new();
+    for &(name, buckets) in crate::HISTOGRAMS {
+        builder = builder
+            .set_buckets_for_metric(Matcher::Full(name.to_owned()), buckets)
+            .expect("observation buckets are valid");
+    }
+    builder.build_recorder()
 }
 
 /// A server that refuses authentication until told otherwise and answers

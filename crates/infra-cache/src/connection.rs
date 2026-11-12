@@ -22,8 +22,8 @@ use crate::observe::{
     RETIREMENTS_METRIC,
 };
 
-/// Bounds one whole setup attempt: password read, dial, TLS, and `HELLO`. A
-/// hang guard, not a latency target: a slow but live server is waited for.
+/// Bounds one whole setup attempt: password read, dial, TLS, and `HELLO`.
+/// The same limit applies while the server is making progress.
 pub(crate) const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
 const CONNECTED_PROBE_MIN_BUDGET: Duration = Duration::from_secs(5);
 const PASSWORD_READ_TIMEOUT: Duration = Duration::from_secs(5);

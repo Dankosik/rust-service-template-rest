@@ -70,8 +70,6 @@ fn read_password_file(path: &Path) -> Result<String, CacheError> {
     std::fs::read_to_string(path).map_err(|error| CacheError::PasswordFile { kind: error.kind() })
 }
 
-/// The password in a password file's content: the file's secret value, which
-/// must not be empty.
 fn password_from(content: String) -> Result<String, CacheError> {
     let password = shared_rules::secret_file::value(content);
     if password.is_empty() {
