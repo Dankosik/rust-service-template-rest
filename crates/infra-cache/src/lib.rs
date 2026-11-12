@@ -48,12 +48,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use operation_context::{OperationContext, Stopped};
+use operation_context::OperationContext;
 use redis::{SetExpiry, SetOptions};
 use secrecy::SecretString;
 
 use self::admission::Admitted;
-use self::connection::{ErrorType, Link};
+use self::connection::{CommandError, Link};
 pub use self::observe::{HISTOGRAMS, OPERATION_DURATION_BUCKETS, OPERATION_DURATION_METRIC};
 use self::observe::{NamespaceHistograms, OperationGuard, Outcome};
 
@@ -500,25 +500,18 @@ impl CacheNamespace {
             &self.cache.link.server,
         );
         // One context cutoff includes preparation, connection wait, and exactly one dispatch.
-        let reply = self.cache.link.command(&command, context).await;
-        // A caller's cancellation, such as a shutdown, is not a cache timeout,
-        // so it stays out of the `timeout` series operators alert on.
-        let stopped = context.stopped();
-        let cancelled = stopped == Some(Stopped::Cancelled);
-        match reply {
-            Ok(_) if operation.is_read() && stopped.is_some() => Err(if cancelled {
-                guard.cancel()
-            } else {
-                guard.fail(ErrorType::Timeout)
-            }),
-            // A mutation the server confirmed stays a success after the context
-            // stopped; see `Operation::is_read`.
+        match self.cache.link.command(&command, context).await {
             Ok(value) => {
+                if operation.is_read()
+                    && let Some(stopped) = context.stopped()
+                {
+                    return Err(guard.stop(stopped));
+                }
                 guard.succeed(outcome(&value));
                 Ok(value)
             }
-            Err(ErrorType::Timeout) if cancelled => Err(guard.cancel()),
-            Err(error) => Err(guard.fail(error)),
+            Err(CommandError::Stopped(stopped)) => Err(guard.stop(stopped)),
+            Err(CommandError::Failed(error)) => Err(guard.fail(error)),
         }
     }
 
