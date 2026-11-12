@@ -3,9 +3,8 @@
 use std::time::Duration;
 
 use infra_postgres::{
-    Cleanup, CleanupBatchTimeout, CleanupPass, MaintenanceFailure, PassEnd, PopulationSample,
-    TxError, failure_cause, in_observation_tx, in_tx_with, observed, run_scheduled_cleanup,
-    set_statement_timeout, sqlstate,
+    Cleanup, CleanupError, CleanupPass, MaintenanceFailure, PassEnd, PopulationSample, Tx,
+    failure_cause, in_observation_tx, observed, run_scheduled_cleanup, sqlstate,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -31,50 +30,9 @@ pub enum StartupError {
     Unavailable,
 }
 
-/// The failure class of one cleanup run.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum CleanupError {
-    #[error("acquire")]
-    Acquire,
-    #[error("begin")]
-    Begin,
-    /// A statement failed, including the server's 5 s `statement_timeout`.
-    #[error("statement")]
-    Statement,
-    /// The commit failed or its outcome is unknown.
-    #[error("commit")]
-    Commit,
-    #[error(transparent)]
-    TimedOut(#[from] CleanupBatchTimeout),
-}
-
 struct PassSummary {
     removed: u64,
     end: PassEnd,
-}
-
-impl From<TxError> for CleanupError {
-    fn from(err: TxError) -> Self {
-        match &err {
-            TxError::Acquire(err) => cleanup_failed(err, Self::Acquire),
-            TxError::Begin(err) => cleanup_failed(err, Self::Begin),
-            TxError::CommitFailed(err) | TxError::CommitUnknown(err) => {
-                cleanup_failed(err, Self::Commit)
-            }
-        }
-    }
-}
-
-/// Log a failed cleanup batch with only bounded fields, never driver text,
-/// and return its class.
-fn cleanup_failed(err: &sqlx::Error, class: CleanupError) -> CleanupError {
-    tracing::warn!(
-        failure = %class,
-        sqlstate = sqlstate(err).as_deref(),
-        cause = failure_cause(err),
-        "http_idempotency_cleanup_failed"
-    );
-    class
 }
 
 impl Store {
@@ -143,7 +101,9 @@ impl Store {
                     end: PassEnd::Cancelled,
                 });
             }
-            let deleted_rows = pass.run_batch(self.delete_expired_batch()).await?;
+            let deleted_rows = pass
+                .run_batch(&self.pool, READ_COMMITTED, Self::delete_expired_batch)
+                .await?;
             metrics::counter!(CLEANUP_REMOVED_METRIC).increment(deleted_rows);
             removed += deleted_rows;
             if deleted_rows < u64::from(CLEANUP_BATCH_ROWS) {
@@ -156,39 +116,23 @@ impl Store {
         }
     }
 
-    /// One batch in its own transaction; returns the rows it deleted.
-    async fn delete_expired_batch(&self) -> Result<u64, CleanupError> {
-        in_tx_with(
-            &self.pool,
-            READ_COMMITTED,
-            async |tx| -> Result<u64, CleanupError> {
-                // Bounds server execution even if the client stops waiting.
-                set_statement_timeout(tx, Duration::from_secs(5))
-                    .await
-                    .map_err(|err| cleanup_failed(&err, CleanupError::Statement))?;
-                // One batch of at most `$1` expired records. It skips rows a
-                // running attempt holds, and re-checks expiry, so it never
-                // deletes a live record. The tuple locator is consumed under
-                // its row lock within this statement.
-                let deleted = observed(
-                    "delete expired idempotency records",
-                    sqlx::query!(
-                        "WITH batch AS ( \
+    async fn delete_expired_batch(tx: &mut Tx<'_>) -> Result<u64, sqlx::Error> {
+        // The tuple locator is consumed under its row lock within this statement.
+        let deleted = observed(
+            "delete expired idempotency records",
+            sqlx::query!(
+                "WITH batch AS ( \
                          SELECT ctid FROM http_idempotency_records \
                          WHERE expires_at <= statement_timestamp() \
                          ORDER BY expires_at LIMIT $1 FOR UPDATE SKIP LOCKED) \
                          DELETE FROM http_idempotency_records AS r USING batch \
                          WHERE r.ctid = batch.ctid AND r.expires_at <= statement_timestamp()",
-                        i64::from(CLEANUP_BATCH_ROWS),
-                    )
-                    .execute(&mut *tx),
-                )
-                .await
-                .map_err(|err| cleanup_failed(&err, CleanupError::Statement))?;
-                Ok(deleted.rows_affected())
-            },
+                i64::from(CLEANUP_BATCH_ROWS),
+            )
+            .execute(tx),
         )
-        .await
+        .await?;
+        Ok(deleted.rows_affected())
     }
 
     /// Periodic cleanup and independent population observation under one owner.

@@ -11,8 +11,9 @@ use metrics::Unit;
 use sqlx::postgres::PgPool;
 use tokio_util::sync::CancellationToken;
 
+use crate::error::{failure_cause, sqlstate};
 use crate::observe::observed;
-use crate::transaction::{Isolation, Tx, TxError, TxOptions, in_tx_with};
+use crate::transaction::{Isolation, Tx, TxError, TxOptions, in_tx_with, set_statement_timeout};
 
 /// The terminal duration of a cleanup pass, including every admitted wait.
 pub(crate) const CLEANUP_DURATION_METRIC: &str = "postgres_cleanup_pass_duration_seconds";
@@ -36,6 +37,7 @@ const CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 /// Matches the jobs retention backstop, with room for pool acquisition, the
 /// cleanup statement, and transaction acknowledgement.
 const CLEANUP_BATCH_BUDGET: Duration = Duration::from_secs(12);
+const CLEANUP_STATEMENT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Cadence for the existing scheduled owner; direct cleanup calls do not use it.
 #[derive(Debug)]
@@ -640,11 +642,49 @@ pub struct CleanupPass {
     removed_rows: u64,
 }
 
-/// A cleanup batch missed its client-side deadline. Its deletion may have
-/// committed, but the pass could not confirm it.
+/// The failure class of a cleanup batch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("cleanup batch timed out")]
-pub struct CleanupBatchTimeout;
+pub enum CleanupError {
+    #[error("acquire")]
+    Acquire,
+    #[error("begin")]
+    Begin,
+    #[error("statement")]
+    Statement,
+    /// The commit failed or its outcome is unknown.
+    #[error("commit")]
+    Commit,
+    /// The batch missed its client-side deadline and may have committed.
+    #[error("cleanup batch timed out")]
+    TimedOut,
+}
+
+struct BatchError {
+    class: CleanupError,
+    driver: sqlx::Error,
+}
+
+impl From<TxError> for BatchError {
+    fn from(error: TxError) -> Self {
+        let (class, driver) = match error {
+            TxError::Acquire(driver) => (CleanupError::Acquire, driver),
+            TxError::Begin(driver) => (CleanupError::Begin, driver),
+            TxError::CommitFailed(driver) | TxError::CommitUnknown(driver) => {
+                (CleanupError::Commit, driver)
+            }
+        };
+        Self { class, driver }
+    }
+}
+
+impl From<sqlx::Error> for BatchError {
+    fn from(driver: sqlx::Error) -> Self {
+        Self {
+            class: CleanupError::Statement,
+            driver,
+        }
+    }
+}
 
 impl CleanupPass {
     #[must_use]
@@ -666,31 +706,66 @@ impl CleanupPass {
         }
     }
 
-    /// Bound one batch from connection acquisition through commit
-    /// acknowledgement so a lost reply cannot stall subsequent passes.
+    /// Execute one cleanup transaction with a server statement timeout and
+    /// a client deadline from acquisition through commit acknowledgement.
     ///
     /// # Errors
     ///
-    /// Returns the batch's error or a converted [`CleanupBatchTimeout`].
-    pub async fn run_batch<E>(
+    /// Returns and logs the batch's failure class.
+    pub async fn run_batch<F>(
         &mut self,
-        batch: impl Future<Output = Result<u64, E>>,
-    ) -> Result<u64, E>
+        pool: &PgPool,
+        options: TxOptions,
+        delete: F,
+    ) -> Result<u64, CleanupError>
     where
-        E: From<CleanupBatchTimeout>,
+        F: AsyncFnOnce(&mut Tx<'_>) -> Result<u64, sqlx::Error>,
     {
-        let rows = tokio::time::timeout(CLEANUP_BATCH_BUDGET, batch)
-            .await
-            .unwrap_or_else(|_| {
+        self.await_batch(in_tx_with(
+            pool,
+            options,
+            async |tx| -> Result<u64, BatchError> {
+                // The server still bounds its statements if the client stops waiting.
+                set_statement_timeout(tx, CLEANUP_STATEMENT_TIMEOUT).await?;
+                delete(tx).await.map_err(BatchError::from)
+            },
+        ))
+        .await
+    }
+
+    async fn await_batch(
+        &mut self,
+        batch: impl Future<Output = Result<u64, BatchError>>,
+    ) -> Result<u64, CleanupError> {
+        let failure = match tokio::time::timeout(CLEANUP_BATCH_BUDGET, batch).await {
+            Ok(Ok(rows)) => {
+                self.committed(rows);
+                return Ok(rows);
+            }
+            Ok(Err(BatchError { class, driver })) => {
+                let message = match self.cleanup {
+                    Cleanup::HttpIdempotency => "http_idempotency_cleanup_failed",
+                    Cleanup::WebhookReceipts => "webhook_receipt_cleanup_failed",
+                    Cleanup::Jobs => "postgres_cleanup_batch_failed",
+                };
+                tracing::warn!(
+                    failure = %class,
+                    sqlstate = sqlstate(&driver).as_deref(),
+                    cause = failure_cause(&driver),
+                    "{message}"
+                );
+                class
+            }
+            Err(_) => {
                 tracing::warn!(
                     cleanup = self.cleanup.label(),
                     "postgres_cleanup_batch_timed_out"
                 );
-                Err(CleanupBatchTimeout.into())
-            })
-            .inspect_err(|_| self.failed())?;
-        self.committed(rows);
-        Ok(rows)
+                CleanupError::TimedOut
+            }
+        };
+        self.failed();
+        Err(failure)
     }
 
     /// Publish a known successful commit before the next wait in the pass.

@@ -25,7 +25,8 @@ use sqlx::postgres::PgPool;
 pub use attempt::{
     AttemptError, Attempted, CallerIdentity, CallerKind, Digest, HeaderPair, Record, ScopeKey,
 };
-pub use maintenance::{CLEANUP_REMOVED_METRIC, CLEANUP_RUNS_METRIC, CleanupError, StartupError};
+pub use infra_postgres::CleanupError;
+pub use maintenance::{CLEANUP_REMOVED_METRIC, CLEANUP_RUNS_METRIC, StartupError};
 
 /// Every transaction of the store names its isolation, because the server
 /// default may be stricter. Arbitration needs a new snapshot per statement
