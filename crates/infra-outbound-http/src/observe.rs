@@ -5,7 +5,7 @@ use metrics::{Label, SharedString, Unit};
 use tracing::Span;
 
 use shared_rules::{
-    error_chain::Causes,
+    error_chain::DisplayErrorChain,
     otel_http::{OTHER_METHOD, request_method},
 };
 
@@ -167,7 +167,7 @@ impl Attempt {
             // text and keep the reason in `source()`.
             self.span.in_scope(|| {
                 tracing::warn!(
-                    error = %Causes(&**source),
+                    error = %DisplayErrorChain(&**source),
                     "outbound_http_transport_failed"
                 );
             });

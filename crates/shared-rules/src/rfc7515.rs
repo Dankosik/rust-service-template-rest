@@ -32,9 +32,8 @@ fn split_last_dot(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
 
 /// The `application/` subtype a `typ` header value names, as written; `None`
 /// for a value under another top-level type. RFC 7515 §4.1.9 has a value
-/// without `/` read as if `application/` preceded it, and media type names
-/// ignore ASCII case, so callers compare the result with
-/// `eq_ignore_ascii_case`.
+/// without `/` read as if `application/` preceded it. Use [`typ_is`] to
+/// compare the subtype without regard to ASCII case.
 #[must_use]
 pub fn typ_subtype(typ: &str) -> Option<&str> {
     match typ.split_once('/') {
@@ -46,6 +45,11 @@ pub fn typ_subtype(typ: &str) -> Option<&str> {
         }
         Some(_) => None,
     }
+}
+
+#[must_use]
+pub fn typ_is(typ: &str, expected_subtype: &str) -> bool {
+    typ_subtype(typ).is_some_and(|subtype| subtype.eq_ignore_ascii_case(expected_subtype))
 }
 
 #[cfg(test)]

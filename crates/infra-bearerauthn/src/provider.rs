@@ -203,9 +203,9 @@ impl ProviderClient {
         url: &Url,
         document: Document,
     ) -> Result<Vec<u8>, ProviderFailure> {
-        let required_media_type = None;
+        let require_json_content_type = false;
         Exchange::start(document.operation(), "GET", url)
-            .run(self.client.get(url.clone()), required_media_type)
+            .run(self.client.get(url.clone()), require_json_content_type)
             .await
     }
     // template:end oidc-jwt:authn-provider-get-json
@@ -235,9 +235,9 @@ impl ProviderClient {
             .body(form_body);
         context.check().map_err(|_| ProviderFailure::Timeout)?;
         let request = request.timeout(context.remaining().unwrap_or(PROVIDER_TIMEOUT));
-        let required_media_type = Some("application/json");
+        let require_json_content_type = true;
         let exchange =
-            Exchange::start("introspection", "POST", url).run(request, required_media_type);
+            Exchange::start("introspection", "POST", url).run(request, require_json_content_type);
         let result = tokio::select! {
             biased;
             _ = context.wait_stopped() => return Err(ProviderFailure::Timeout),
@@ -307,9 +307,9 @@ impl Exchange {
     async fn run(
         self,
         request: reqwest::RequestBuilder,
-        required_media_type: Option<&'static str>,
+        require_json_content_type: bool,
     ) -> Result<Vec<u8>, ProviderFailure> {
-        let result = receive(request, required_media_type)
+        let result = receive(request, require_json_content_type)
             .instrument(self.span.clone())
             .await;
         self.finish(result.as_ref().err().copied());
@@ -352,14 +352,14 @@ impl Drop for Exchange {
 
 async fn receive(
     request: reqwest::RequestBuilder,
-    required_media_type: Option<&'static str>,
+    require_json_content_type: bool,
 ) -> Result<Vec<u8>, ProviderFailure> {
     let transport = |error| ProviderFailure::from_transport(&error);
     let mut response = request.send().await.map_err(transport)?;
     if response.status() != reqwest::StatusCode::OK {
         return Err(ProviderFailure::Status(response.status().as_u16()));
     }
-    if required_media_type.is_some_and(|media_type| !has_media_type(&response, media_type)) {
+    if require_json_content_type && !has_json_content_type(&response) {
         return Err(ProviderFailure::MediaType);
     }
     if response
@@ -466,12 +466,12 @@ impl reqwest::dns::Resolve for FixtureResolver {
     }
 }
 
-fn has_media_type(response: &reqwest::Response, expected: &str) -> bool {
+fn has_json_content_type(response: &reqwest::Response) -> bool {
     response
         .headers()
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| rfc9110::media_type_is(value, expected))
+        .is_some_and(rfc9110::is_json_content_type)
 }
 
 /// A TLS acceptor for `host` and the root certificate that trusts it.
@@ -698,7 +698,7 @@ mod tests {
         let started = tokio::time::Instant::now();
         let result = tokio::time::timeout(
             Duration::from_millis(2500),
-            Exchange::start("discovery", "GET", &url).run(client.client.get(url.clone()), None),
+            Exchange::start("discovery", "GET", &url).run(client.client.get(url.clone()), false),
         )
         .await
         .expect("the connection budget must expire before the three-second total");
@@ -708,7 +708,7 @@ mod tests {
 
         tokio::time::resume();
         let body = Exchange::start("discovery", "GET", &url)
-            .run(client.client.get(url.clone()), None)
+            .run(client.client.get(url.clone()), false)
             .await
             .unwrap();
         assert_eq!(body, b"{}");
@@ -752,14 +752,14 @@ mod tests {
         let url = Url::parse(&format!("https://{FIXTURE_HOST}/keys")).unwrap();
         assert_eq!(
             Exchange::start("jwks", "GET", &url)
-                .run(old_client.client.get(url.clone()), None)
+                .run(old_client.client.get(url.clone()), false)
                 .await
                 .unwrap(),
             b"{}"
         );
         assert_eq!(
             Exchange::start("jwks", "GET", &url)
-                .run(old_client.client.get(url.clone()), None)
+                .run(old_client.client.get(url.clone()), false)
                 .await,
             Err(ProviderFailure::Connect)
         );
@@ -772,7 +772,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             Exchange::start("jwks", "GET", &url)
-                .run(rebuilt_client.client.get(url.clone()), None)
+                .run(rebuilt_client.client.get(url.clone()), false)
                 .await
                 .unwrap(),
             b"{}"
@@ -924,7 +924,7 @@ mod tests {
         let url = fixture_url(address);
         let request = client.client.get(url.clone());
         let exchange = Exchange::start("discovery", "GET", &url);
-        let pending = tokio::spawn(exchange.run(request, None));
+        let pending = tokio::spawn(exchange.run(request, false));
         tokio::time::timeout(Duration::from_secs(1), received)
             .await
             .unwrap()
@@ -939,7 +939,7 @@ mod tests {
         tokio::time::resume();
 
         let body = Exchange::start("discovery", "GET", &url)
-            .run(client.client.get(url.clone()), None)
+            .run(client.client.get(url.clone()), false)
             .await
             .unwrap();
         assert_eq!(body, b"{}");
