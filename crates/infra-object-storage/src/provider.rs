@@ -129,7 +129,7 @@ pub(crate) fn admit(provider: &Provider, bucket: &str) -> Result<Admitted, Confi
             })
         }
         Provider::CloudflareR2 { endpoint } => {
-            let origin = origin(endpoint, false)?;
+            let origin = origin(endpoint, OriginScheme::HttpsOnly)?;
             if !origin.host_str().is_some_and(r2_host) || origin.port().is_some() {
                 return Err(ConfigError::Endpoint);
             }
@@ -144,7 +144,7 @@ pub(crate) fn admit(provider: &Provider, bucket: &str) -> Result<Admitted, Confi
             })
         }
         Provider::Railway { endpoint, region } => {
-            let origin = origin(endpoint, false)?;
+            let origin = origin(endpoint, OriginScheme::HttpsOnly)?;
             if origin.port().is_some() {
                 return Err(ConfigError::Endpoint);
             }
@@ -163,7 +163,7 @@ pub(crate) fn admit(provider: &Provider, bucket: &str) -> Result<Admitted, Confi
             region,
             path_style,
         } => Ok(Admitted {
-            endpoint: Some(serialize(&origin(endpoint, false)?)),
+            endpoint: Some(serialize(&origin(endpoint, OriginScheme::HttpsOnly)?)),
             region: signing_region(region, Some("us-east-1"))?,
             path_style: *path_style,
             expected_bucket_owner: None,
@@ -172,7 +172,7 @@ pub(crate) fn admit(provider: &Provider, bucket: &str) -> Result<Admitted, Confi
             workload_identity: false,
         }),
         Provider::Local { endpoint, region } => Ok(Admitted {
-            endpoint: Some(serialize(&origin(endpoint, true)?)),
+            endpoint: Some(serialize(&origin(endpoint, OriginScheme::HttpOrHttps)?)),
             region: signing_region(region, Some("us-east-1"))?,
             path_style: true,
             expected_bucket_owner: None,
@@ -183,16 +183,25 @@ pub(crate) fn admit(provider: &Provider, bucket: &str) -> Result<Admitted, Confi
     }
 }
 
+#[derive(Clone, Copy)]
+enum OriginScheme {
+    HttpsOnly,
+    HttpOrHttps,
+}
+
 /// A bare origin: scheme and host, an optional port, and nothing else, as
 /// written.
-fn origin(endpoint: &str, allow_plaintext: bool) -> Result<Url, ConfigError> {
+fn origin(endpoint: &str, scheme: OriginScheme) -> Result<Url, ConfigError> {
     if shared_rules::uri::has_whitespace_or_control(endpoint)
         || shared_rules::uri::authority_has_userinfo(endpoint)
     {
         return Err(ConfigError::Endpoint);
     }
     let url = Url::parse(endpoint).map_err(|_| ConfigError::Endpoint)?;
-    let scheme_allowed = url.scheme() == "https" || (allow_plaintext && url.scheme() == "http");
+    let scheme_allowed = match scheme {
+        OriginScheme::HttpsOnly => url.scheme() == "https",
+        OriginScheme::HttpOrHttps => matches!(url.scheme(), "http" | "https"),
+    };
     let bare = url.username().is_empty()
         && url.password().is_none()
         && url.path() == "/"

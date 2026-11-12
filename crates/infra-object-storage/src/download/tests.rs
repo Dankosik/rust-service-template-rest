@@ -8,6 +8,7 @@ use std::time::Duration;
 use http_body::Body as _;
 use http_body_util::BodyExt as _;
 use tokio::sync::{Semaphore, oneshot};
+use tokio::task::AbortHandle;
 use tokio::time::Instant;
 
 use super::*;
@@ -71,7 +72,7 @@ async fn collection_reserves_only_the_unread_tail() {
             download.next_chunk().await.unwrap().unwrap();
         }
         if read_chunks == 2 {
-            joined(download.timer.take().unwrap()).await;
+            joined(&mut download.timer).await;
             tokio::time::advance(Duration::from_secs(60)).await;
             assert_eq!(download.next_chunk().await.unwrap(), None);
             assert!(download.is_end_stream());
@@ -162,7 +163,7 @@ fn assert_download_failure(
     expected: ObjectStorageError,
     partial: bool,
     frames: bool,
-) -> (Download, Arc<AtomicUsize>, JoinHandle<()>) {
+) -> (Download, Arc<AtomicUsize>) {
     let drops = Arc::new(AtomicUsize::new(0));
     let admission = Arc::new(Semaphore::new(1));
     let metadata = ObjectMetadata {
@@ -206,8 +207,7 @@ fn assert_download_failure(
     assert_eq!(download.size_hint().lower(), 0);
     assert_eq!(download.size_hint().upper(), None);
     assert!(!download.is_end_stream());
-    let timer = download.timer.take().unwrap();
-    (download, drops, timer)
+    (download, drops)
 }
 
 #[tokio::test(start_paused = true)]
@@ -239,10 +239,10 @@ async fn retained_failed_download_releases_body_and_finishes_once() {
         for (chunk, error, expected, partial) in cases {
             let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
             let handle = recorder.handle();
-            let (mut download, drops, timer) = metrics::with_local_recorder(&recorder, || {
+            let (mut download, drops) = metrics::with_local_recorder(&recorder, || {
                 assert_download_failure(chunk, error, expected, partial, frames)
             });
-            joined(timer).await;
+            joined(&mut download.timer).await;
             tokio::time::advance(Duration::from_secs(60)).await;
             let mut context = Context::from_waker(Waker::noop());
             assert_eq!(
@@ -292,7 +292,7 @@ async fn stopped_context_releases_unpolled_custody_and_observes_once() {
         } else {
             tokio::time::advance(Duration::from_secs(2)).await;
         }
-        joined(download.timer.take().unwrap()).await;
+        joined(&mut download.timer).await;
         tokio::time::timeout(Duration::from_secs(1), body_dropped)
             .await
             .unwrap()
@@ -358,7 +358,7 @@ async fn a_provider_chunk_or_eof_at_the_original_cutoff_is_not_delivered() {
             Err(ObjectStorageError::Unavailable)
         );
         assert_eq!(admission.available_permits(), 1);
-        joined(download.timer.take().unwrap()).await;
+        joined(&mut download.timer).await;
     }
 }
 
@@ -432,11 +432,21 @@ fn body(chunk: Option<Bytes>) -> (LifecycleBody, oneshot::Receiver<()>) {
     )
 }
 
-async fn joined(timer: JoinHandle<()>) {
+async fn joined(timer: &mut JoinHandle<()>) {
     let result = tokio::time::timeout(Duration::from_secs(1), timer)
         .await
         .unwrap();
     assert!(result.is_ok() || result.unwrap_err().is_cancelled());
+}
+
+async fn wait_for_timer(completion: &AbortHandle) {
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !completion.is_finished() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap();
 }
 
 #[tokio::test(start_paused = true)]
@@ -463,7 +473,7 @@ async fn expiry_destroys_the_unpolled_body_and_withheld_chunk() {
             .is_pending()
     );
     tokio::time::advance(Duration::from_millis(20)).await;
-    joined(download.timer.take().unwrap()).await;
+    joined(&mut download.timer).await;
     tokio::time::timeout(Duration::from_secs(1), destroyed)
         .await
         .unwrap()
@@ -482,14 +492,14 @@ async fn empty_eof_and_pending_consumers_share_the_deadline() {
         let (body, destroyed) = body(None);
         let end = tokio::time::sleep(Duration::from_millis(20)).deadline();
         let (mut download, slots) = open(body, 0, end);
-        let timer = download.timer.take().unwrap();
+        let completion = download.timer.abort_handle();
         let result = match consumer {
             0 => download.next_chunk().await.map(|_| ()),
             1 => download.frame().await.unwrap().map(|_| ()),
             _ => download.into_bytes().await.map(|_| ()),
         };
         assert_eq!(result, Err(ObjectStorageError::Unavailable));
-        joined(timer).await;
+        wait_for_timer(&completion).await;
         tokio::time::timeout(Duration::from_secs(1), destroyed)
             .await
             .unwrap()
@@ -503,10 +513,9 @@ async fn unexpected_timer_abort_before_first_poll_fails_closed() {
     let (body, destroyed) = body(None);
     let end = tokio::time::sleep(Duration::from_secs(60)).deadline();
     let (mut download, slots) = open(body, 4, end);
-    let timer = download.timer.take().unwrap();
     // This task has not yielded since spawn: the exit guard must already exist.
-    timer.abort();
-    joined(timer).await;
+    download.timer.abort();
+    joined(&mut download.timer).await;
     tokio::time::timeout(Duration::from_secs(1), destroyed)
         .await
         .unwrap()
@@ -525,7 +534,7 @@ async fn drop_and_provider_panic_release_custody_before_timer_runs() {
         body.panic = panic;
         let end = tokio::time::sleep(Duration::from_secs(60)).deadline();
         let (mut download, slots) = open(body, 4, end);
-        let completion = download.timer.as_ref().unwrap().abort_handle();
+        let completion = download.timer.abort_handle();
         if panic {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 download.poll_chunk(&mut Context::from_waker(Waker::noop()))
@@ -537,21 +546,13 @@ async fn drop_and_provider_panic_release_custody_before_timer_runs() {
             );
             assert!(destroyed.try_recv().is_ok());
             assert_eq!(slots.available_permits(), 1);
-            if let Some(timer) = download.timer.take() {
-                joined(timer).await;
-            }
+            joined(&mut download.timer).await;
         } else {
             drop(download);
             assert!(destroyed.try_recv().is_ok());
             assert_eq!(slots.available_permits(), 1);
         }
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while !completion.is_finished() {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
+        wait_for_timer(&completion).await;
     }
 }
 
@@ -562,7 +563,6 @@ async fn ready_empty_frames_cooperate_with_the_deadline_timer() {
     body.empty_polls = Some(Arc::clone(&polls));
     let end = tokio::time::sleep(Duration::from_millis(20)).deadline();
     let (mut download, slots) = open(body, 4, end);
-    let timer = download.timer.take().unwrap();
     let progressed = Arc::new(AtomicBool::new(false));
     let progress = Arc::clone(&progressed);
     let other = tokio::spawn(async move {
@@ -581,7 +581,7 @@ async fn ready_empty_frames_cooperate_with_the_deadline_timer() {
         .unwrap()
         .unwrap();
     assert!(polls.load(Ordering::SeqCst) > 0);
-    joined(timer).await;
+    joined(&mut download.timer).await;
     tokio::time::timeout(Duration::from_secs(1), destroyed)
         .await
         .unwrap()
@@ -593,7 +593,6 @@ async fn partial_reads_spend_the_original_budget() {
     let (mut download, admission, eof) = download(Duration::from_secs(3));
     tokio::time::advance(Duration::from_secs(1)).await;
     assert_eq!(download.next_chunk().await.unwrap().unwrap(), "abc");
-    let timer = download.timer.take().unwrap();
     // A successful chunk must not start another three-second lifetime.
     tokio::time::advance(Duration::from_secs(2)).await;
     let _ = eof.send(());
@@ -602,5 +601,5 @@ async fn partial_reads_spend_the_original_budget() {
         Err(ObjectStorageError::Unavailable)
     );
     assert_eq!(admission.available_permits(), 1);
-    joined(timer).await;
+    joined(&mut download.timer).await;
 }

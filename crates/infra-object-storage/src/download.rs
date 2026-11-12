@@ -11,7 +11,7 @@ use operation_context::OperationContext;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::task::JoinHandle;
 
-use crate::error::Failure;
+use crate::error::{Failure, LocalFailure};
 use crate::observe::OperationGuard;
 use crate::{ObjectMetadata, ObjectStorageError, error};
 
@@ -37,7 +37,7 @@ use crate::{ObjectMetadata, ObjectStorageError, error};
 pub struct Download {
     metadata: ObjectMetadata,
     shared: Arc<Mutex<State>>,
-    timer: Option<JoinHandle<()>>,
+    timer: JoinHandle<()>,
 }
 
 #[derive(Debug)]
@@ -224,21 +224,17 @@ impl State {
                         resources.remaining = remaining;
                         (Poll::Ready(Ok(ReadStep::Chunk(Some(chunk)))), None)
                     }
-                    None => self.close_failed_with_item(
-                        Failure::new(ObjectStorageError::Integrity, "content_length"),
-                        Ok(chunk),
-                    ),
+                    None => {
+                        self.close_failed_with_item(LocalFailure::ContentLength.into(), Ok(chunk))
+                    }
                 }
             }
-            Poll::Ready(Some(Err(error))) if error::is_checksum_mismatch(&error) => self
-                .close_failed_with_item(
-                    Failure::new(ObjectStorageError::Integrity, "checksum"),
-                    Err(error),
-                ),
-            Poll::Ready(Some(Err(error))) => self.close_failed_with_item(
-                Failure::new(ObjectStorageError::Unavailable, "body"),
-                Err(error),
-            ),
+            Poll::Ready(Some(Err(error))) if error::is_checksum_mismatch(&error) => {
+                self.close_failed_with_item(LocalFailure::ChecksumMismatch.into(), Err(error))
+            }
+            Poll::Ready(Some(Err(error))) => {
+                self.close_failed_with_item(LocalFailure::DownloadBody.into(), Err(error))
+            }
             Poll::Ready(None) if resources.remaining == 0 => {
                 let chunk = resources.final_chunk.take();
                 (
@@ -246,10 +242,7 @@ impl State {
                     self.close(Outcome::Success),
                 )
             }
-            Poll::Ready(None) => self.close_failed(Failure::new(
-                ObjectStorageError::Integrity,
-                "content_length",
-            )),
+            Poll::Ready(None) => self.close_failed(LocalFailure::ContentLength.into()),
         }
     }
 }
@@ -261,10 +254,7 @@ struct TimerExit(Weak<Mutex<State>>);
 impl Drop for TimerExit {
     fn drop(&mut self) {
         if let Some(shared) = self.0.upgrade() {
-            terminate(
-                &shared,
-                Outcome::Failure(Failure::new(ObjectStorageError::Unavailable, "body")),
-            );
+            terminate(&shared, Outcome::Failure(LocalFailure::DownloadBody.into()));
         }
     }
 }
@@ -316,7 +306,7 @@ impl Download {
         Self {
             metadata,
             shared,
-            timer: Some(timer),
+            timer,
         }
     }
 
@@ -354,13 +344,13 @@ impl Download {
                 Ok(result) => result,
                 Err(panic) => {
                     terminate(&self.shared, Outcome::Cancelled);
-                    self.abort_timer();
+                    self.timer.abort();
                     std::panic::resume_unwind(panic);
                 }
             };
             if let Some(completion) = completion {
                 completion.finish();
-                self.abort_timer();
+                self.timer.abort();
             }
             match result {
                 Poll::Ready(Ok(ReadStep::Buffered)) => {}
@@ -369,12 +359,6 @@ impl Download {
                 Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
                 Poll::Pending => return Poll::Pending,
             }
-        }
-    }
-
-    fn abort_timer(&self) {
-        if let Some(timer) = &self.timer {
-            timer.abort();
         }
     }
 
@@ -397,7 +381,7 @@ impl Download {
 impl Drop for Download {
     fn drop(&mut self) {
         terminate(&self.shared, Outcome::Cancelled);
-        self.abort_timer();
+        self.timer.abort();
     }
 }
 
