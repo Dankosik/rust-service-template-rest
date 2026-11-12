@@ -591,8 +591,12 @@ async fn oversized_dead_letter_stops_the_consumer_and_keeps_the_source_unacknowl
     ))
     .await
     .expect("current stream limits satisfy admission");
+    let mut registry = registry(&fixture);
+    registry
+        .register::<ExampleEvent, _, _>(|_, _| async { Ok(()) })
+        .expect("fixture handler is registered");
     let mut handle = messaging
-        .consumer(registry(&fixture))
+        .consumer(registry)
         .await
         .expect("current stream limits satisfy consumer admission")
         .start(&cancel);
