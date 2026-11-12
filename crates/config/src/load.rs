@@ -84,7 +84,7 @@ pub enum Error {
         path: PathBuf,
     },
     /// A config file key that no `APP__` variable can address.
-    #[error("key `{key}` in config file {} cannot be set by an `{ENV_PREFIX}{ENV_SEPARATOR}` variable, whose name is lowercased and split on `{ENV_SEPARATOR}`; use {ADDRESSABLE_KEY_FORM}", path.display())]
+    #[error("key `{key}` in config file {} cannot be set by an `{ENV_PREFIX}{ENV_SEPARATOR}` variable; use {ADDRESSABLE_KEY_FORM} for table keys and keep them outside arrays", path.display())]
     UnaddressableKey {
         key: String,
         /// The config file that holds the key.
@@ -372,9 +372,13 @@ fn first_unaddressable_key<'a>(table: &'a toml::Table, path: &mut Vec<&'a str>) 
     for (key, value) in table {
         path.push(key);
         let found = if is_env_addressable(key) {
-            value
-                .as_table()
-                .and_then(|nested| first_unaddressable_key(nested, path))
+            match value {
+                toml::Value::Table(nested) => first_unaddressable_key(nested, path),
+                toml::Value::Array(_) => {
+                    first_key_in_array(value).map(|suffix| format!("{}{suffix}", path.join(".")))
+                }
+                _ => None,
+            }
         } else {
             Some(path.join("."))
         };
@@ -384,6 +388,18 @@ fn first_unaddressable_key<'a>(table: &'a toml::Table, path: &mut Vec<&'a str>) 
         }
     }
     None
+}
+
+/// An array has no index syntax in `APP__` names, and a later source can
+/// replace it wholesale before typed decoding sees any keys inside it.
+fn first_key_in_array(value: &toml::Value) -> Option<String> {
+    match value {
+        toml::Value::Array(items) => items.iter().enumerate().find_map(|(index, item)| {
+            first_key_in_array(item).map(|suffix| format!("[{index}]{suffix}"))
+        }),
+        toml::Value::Table(table) => table.keys().next().map(|key| format!(".{key}")),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
