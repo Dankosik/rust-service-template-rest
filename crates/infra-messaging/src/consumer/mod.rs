@@ -432,7 +432,11 @@ async fn durable_confirmed_lost(pull: &PullConsumer) -> bool {
 /// exists, or was replaced with another creation or a push consumer.
 /// A failed or unanswered lookup is not that answer.
 async fn durable_is_lost(pull: &PullConsumer) -> Result<bool, ConsumerInfoError> {
-    match pull.get_info().await {
+    // The native response timeout starts after the client's command queue admits the request.
+    let result = tokio::time::timeout(BROKER_OPERATION_BUDGET, pull.get_info())
+        .await
+        .map_err(|_| ConsumerInfoError::new(ConsumerInfoErrorKind::TimedOut))?;
+    match result {
         Ok(info) => {
             Ok(info.created != pull.cached_info().created || info.config.deliver_subject.is_some())
         }
