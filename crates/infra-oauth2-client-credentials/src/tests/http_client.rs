@@ -329,7 +329,9 @@ async fn a_late_401_does_not_evict_a_newer_token() {
     let client = credentials.http(fixture.resource_client());
     // Old enough that only its replacement keeps the late 401 from evicting.
     credentials
-        .service_token(Instant::now() + Duration::from_secs(10))
+        .service_token(AcquisitionDeadline::caller(deadline(Duration::from_secs(
+            10,
+        ))))
         .await
         .unwrap();
     advance(EVICTION_MIN_AGE).await;
@@ -344,7 +346,9 @@ async fn a_late_401_does_not_evict_a_newer_token() {
         &serde_json::json!({"access_token": "second", "token_type": "Bearer", "expires_in": 60}),
     );
     credentials
-        .service_token(Instant::now() + Duration::from_secs(10))
+        .service_token(AcquisitionDeadline::caller(deadline(Duration::from_secs(
+            10,
+        ))))
         .await
         .unwrap();
 
