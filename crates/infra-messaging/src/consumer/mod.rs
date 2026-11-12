@@ -292,16 +292,7 @@ impl Consumer {
                     continue;
                 }
             }
-            // Each unconsumed batch entry already owns a free slot. Completed
-            // tasks can only increase capacity while this request is alive.
-            let (slots, max_bytes) = if retained {
-                // A retained record may predate the current source limit.
-                // Allow a full-size record only after all other slots drain.
-                (1, self.retained_pull_bytes)
-            } else {
-                let slots = concurrency - deliveries.len();
-                (slots, slots * self.pull_delivery_bytes)
-            };
+            let (slots, max_bytes) = self.pull_budget(deliveries.len(), retained);
             let request = tokio::time::timeout(
                 BROKER_OPERATION_BUDGET,
                 self.pull
@@ -375,6 +366,17 @@ impl Consumer {
             reaped(Some(joined))?;
         }
         Ok(())
+    }
+
+    fn pull_budget(&self, active_deliveries: usize, retained: bool) -> (usize, usize) {
+        if retained {
+            // The caller drains every other slot before reserving a full-size
+            // delivery for a record that may predate the current source limit.
+            (1, self.retained_pull_bytes)
+        } else {
+            let slots = self.concurrency.get() - active_deliveries;
+            (slots, slots * self.pull_delivery_bytes)
+        }
     }
 
     /// Admits up to `slots` deliveries of one pull batch, reaping finished
