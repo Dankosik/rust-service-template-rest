@@ -15,14 +15,15 @@
 
 use std::error::Error as StdError;
 
+use axum::body::Bytes;
 use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
 use axum::extract::{FromRequest, FromRequestParts, RawPathParams, Request};
 use axum::http::header::CONTENT_TYPE;
 use axum::http::request::Parts;
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use serde::Serialize;
-use serde::de::DeserializeOwned;
+use serde::de::{DeserializeOwned, IgnoredAny};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_path_to_error::Segment;
 
 use crate::problem::{Code, Problem, body_too_large, body_unreadable, sanitized_problem};
@@ -60,12 +61,33 @@ where
 
     #[expect(
         clippy::disallowed_types,
-        reason = "this wrapper delegates to the native extractor and maps its rejection"
+        reason = "the native JSON decoder retains the deserialization path"
     )]
     async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
-        match axum::Json::<T>::from_request(request, state).await {
+        // Match axum's media-type check before collecting the bounded body.
+        let json_content_type = request
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()?.parse::<mime::Mime>().ok())
+            .is_some_and(|media_type| {
+                media_type.type_() == mime::APPLICATION
+                    && (media_type.subtype() == mime::JSON
+                        || media_type.suffix() == Some(mime::JSON))
+            });
+        if !json_content_type {
+            return Err(Problem::new(Code::UnsupportedMediaType).detail(BODY_MEDIA_TYPE_DETAIL));
+        }
+        let bytes =
+            Bytes::from_request(request, state)
+                .await
+                .map_err(|rejection| match rejection.status() {
+                    StatusCode::PAYLOAD_TOO_LARGE => body_too_large(),
+                    StatusCode::BAD_REQUEST => body_unreadable(),
+                    _ => wiring_failure("json"),
+                })?;
+        match axum::Json::<T>::from_bytes(&bytes) {
             Ok(axum::Json(value)) => Ok(Self(value)),
-            Err(rejection) => Err(json_problem(&rejection)),
+            Err(rejection) => Err(json_problem(&rejection, &bytes)),
         }
     }
 }
@@ -135,8 +157,12 @@ where
         reason = "this wrapper delegates to the native extractor and maps its rejection"
     )]
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        match axum::extract::Path::<T>::from_request_parts(parts, state).await {
-            Ok(axum::extract::Path(value)) => Ok(Self(value)),
+        match axum::extract::Path::<TrackedPath<T>>::from_request_parts(parts, state).await {
+            Ok(axum::extract::Path(TrackedPath(Ok(value)))) => Ok(Self(value)),
+            Ok(axum::extract::Path(TrackedPath(Err(issue)))) => {
+                let names = RawPathParams::from_request_parts(parts, state).await.ok();
+                Err(issue.problem(names.as_ref()))
+            }
             Err(rejection) => {
                 let names = RawPathParams::from_request_parts(parts, state).await.ok();
                 Err(path_problem(&rejection, names.as_ref()))
@@ -145,8 +171,16 @@ where
     }
 }
 
-fn json_problem(rejection: &JsonRejection) -> Problem {
+fn json_problem(rejection: &JsonRejection, bytes: &[u8]) -> Problem {
     match rejection {
+        // Axum checks the end of the document only after typed decoding
+        // succeeds. Check the entire document when that decoder stops early.
+        JsonRejection::JsonDataError(_)
+            if !std::str::from_utf8(bytes)
+                .is_ok_and(|text| serde_json::from_str::<IgnoredAny>(text).is_ok()) =>
+        {
+            Problem::new(Code::BadRequest).detail(BODY_SYNTAX_DETAIL)
+        }
         JsonRejection::JsonDataError(error) => with_param(
             Problem::new(Code::UnprocessableContent).detail(BODY_SCHEMA_DETAIL),
             failed_member::<serde_json::Error>(error).and_then(body_pointer),
@@ -154,15 +188,7 @@ fn json_problem(rejection: &JsonRejection) -> Problem {
         JsonRejection::JsonSyntaxError(_) => {
             Problem::new(Code::BadRequest).detail(BODY_SYNTAX_DETAIL)
         }
-        JsonRejection::MissingJsonContentType(_) => {
-            Problem::new(Code::UnsupportedMediaType).detail(BODY_MEDIA_TYPE_DETAIL)
-        }
-        // The body could not be buffered: over the limit, or a broken stream.
-        other => match other.status() {
-            StatusCode::PAYLOAD_TOO_LARGE => body_too_large(),
-            StatusCode::BAD_REQUEST => body_unreadable(),
-            _ => wiring_failure("json"),
-        },
+        _ => wiring_failure("json"),
     }
 }
 
@@ -198,6 +224,71 @@ fn path_problem(rejection: &PathRejection, names: Option<&RawPathParams>) -> Pro
         },
         _ => None,
     };
+    invalid_path(name)
+}
+
+struct TrackedPath<T>(Result<T, PathIssue>);
+
+enum PathIssue {
+    MissingField(String),
+    UnknownVariant(serde_path_to_error::Path),
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for TrackedPath<T> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let error = match serde_path_to_error::deserialize(deserializer) {
+            Ok(value) => return Ok(Self(Ok(value))),
+            Err(error) => error,
+        };
+        let message = error.inner().to_string();
+        // Serde's missing-field and unknown-variant hooks reach Axum as
+        // unstructured messages. Keep the original rejection for other errors.
+        if let Some(field) = message
+            .strip_prefix("missing field `")
+            .and_then(|field| field.strip_suffix('`'))
+            && error.path().iter().next().is_none()
+        {
+            return Ok(Self(Err(PathIssue::MissingField(field.to_owned()))));
+        }
+        if message.starts_with("unknown variant `") {
+            return Ok(Self(Err(PathIssue::UnknownVariant(error.path().clone()))));
+        }
+        Err(error.into_inner())
+    }
+}
+
+impl PathIssue {
+    fn problem(&self, params: Option<&RawPathParams>) -> Problem {
+        let Some(params) = params else {
+            return invalid_path(None);
+        };
+        match self {
+            Self::MissingField(field) if !params.iter().any(|(name, _)| name == field.as_str()) => {
+                wiring_failure("path")
+            }
+            Self::MissingField(_) => invalid_path(None),
+            Self::UnknownVariant(path) => {
+                let name = match path.iter().next() {
+                    Some(Segment::Map { key }) => params
+                        .iter()
+                        .find(|(name, _)| name == key.as_str())
+                        .map(|(name, _)| name),
+                    Some(Segment::Seq { index }) => params.iter().nth(*index).map(|(name, _)| name),
+                    _ => {
+                        let mut params = params.iter();
+                        params
+                            .next()
+                            .filter(|_| params.next().is_none())
+                            .map(|(name, _)| name)
+                    }
+                };
+                invalid_path(name)
+            }
+        }
+    }
+}
+
+fn invalid_path(name: Option<&str>) -> Problem {
     with_param(
         Problem::new(Code::BadRequest).detail(PATH_DETAIL),
         name.map(|name| format!("path.{name}")),
@@ -298,12 +389,31 @@ mod tests {
         limit: u32,
     }
 
+    #[derive(Deserialize)]
+    enum OrderState {
+        Open,
+        Closed,
+    }
+
+    #[derive(Deserialize)]
+    struct StatePath {
+        id: String,
+        state: OrderState,
+    }
+
     fn app() -> Router {
         let handler_1 = |Json(order): Json<Order>| async move { order.lines.len().to_string() };
         let handler_2 = |Query(_): Query<Page>| async { "page" };
         let handler_3 = |Path(_): Path<u32>| async { "order" };
         let handler_4 = |Path(_): Path<(u32, u32)>| async { "line" };
         let handler_5 = |Path(_): Path<(u32, u32)>| async { "unreachable" };
+        let state = |Path(_): Path<OrderState>| async { "state" };
+        let order_state = |Path(params): Path<StatePath>| async move {
+            match params.state {
+                OrderState::Open => params.id,
+                OrderState::Closed => String::new(),
+            }
+        };
         #[expect(
             clippy::disallowed_methods,
             reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
@@ -313,7 +423,10 @@ mod tests {
             .route("/orders", get(handler_2))
             .route("/orders/{id}", get(handler_3))
             .route("/orders/{id}/lines/{line}", get(handler_4))
-            .route("/miswired/{id}", get(handler_5));
+            .route("/miswired/{id}", get(handler_5))
+            .route("/miswired-struct/{id}", get(order_state))
+            .route("/states/{state}", get(state))
+            .route("/orders/{id}/states/{state}", get(order_state));
         harden(
             routes,
             &HardenOptions {
@@ -360,17 +473,21 @@ mod tests {
 
     #[tokio::test]
     async fn a_valid_body_reaches_the_handler() {
-        let response = app()
-            .oneshot(post_json(
-                r#"{"slug":"a","lines":[{"quantity":1},{"quantity":2}]}"#,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            response.into_body().collect().await.unwrap().to_bytes(),
-            "2"
-        );
+        for content_type in [
+            "application/json",
+            "application/vnd.orders+json; charset=utf-8",
+        ] {
+            let mut request = post_json(r#"{"slug":"a","lines":[{"quantity":1},{"quantity":2}]}"#);
+            request
+                .headers_mut()
+                .insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
+            let response = app().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response.into_body().collect().await.unwrap().to_bytes(),
+                "2"
+            );
+        }
     }
 
     #[tokio::test]
@@ -468,14 +585,17 @@ mod tests {
 
     #[tokio::test]
     async fn malformed_json_is_a_400() {
-        let response = app()
-            .oneshot(post_json(r#"{"slug": submitted-secret"#))
-            .await
-            .unwrap();
-        let body = problem(response, StatusCode::BAD_REQUEST, "bad_request").await;
-        assert_eq!(body["detail"], BODY_SYNTAX_DETAIL);
-        assert!(body.get("invalid_params").is_none());
-        assert!(!body.to_string().contains("submitted-secret"), "{body}");
+        for input in [
+            r#"{"slug": submitted-secret"#,
+            r#"{"slug":1,"lines":[]} ]"#,
+            r#"{"slug":1,"lines":[}"#,
+        ] {
+            let response = app().oneshot(post_json(input)).await.unwrap();
+            let body = problem(response, StatusCode::BAD_REQUEST, "bad_request").await;
+            assert_eq!(body["detail"], "request body is not valid JSON");
+            assert!(body.get("invalid_params").is_none());
+            assert!(!body.to_string().contains("submitted-secret"), "{body}");
+        }
     }
 
     #[tokio::test]
@@ -563,14 +683,29 @@ mod tests {
 
     #[tokio::test]
     async fn an_extractor_that_cannot_match_its_route_is_a_sanitized_500() {
-        let response = app().oneshot(get_uri("/miswired/7")).await.unwrap();
-        let body = problem(
-            response,
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal_error",
-        )
-        .await;
-        assert_eq!(body["detail"], SANITIZED_DETAIL);
+        for uri in ["/miswired/7", "/miswired-struct/7"] {
+            let response = app().oneshot(get_uri(uri)).await.unwrap();
+            let body = problem(
+                response,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+            )
+            .await;
+            assert_eq!(body["detail"], SANITIZED_DETAIL);
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unknown_enum_value_names_its_path_parameter() {
+        for uri in [
+            "/states/submitted-secret",
+            "/orders/submitted-secret/states/submitted-secret",
+        ] {
+            let response = app().oneshot(get_uri(uri)).await.unwrap();
+            let body = problem(response, StatusCode::BAD_REQUEST, "bad_request").await;
+            assert_eq!(body["invalid_params"][0]["name"], "path.state");
+            assert!(!body.to_string().contains("submitted-secret"), "{body}");
+        }
     }
 
     #[test]

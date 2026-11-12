@@ -2662,6 +2662,7 @@ dependencies = [
  "itertools 0.15.0",
  "metrics",
  "metrics-util",
+ "mime",
  "opentelemetry",
  "opentelemetry_sdk",
  "operation-context",
