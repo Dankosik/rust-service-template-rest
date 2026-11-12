@@ -29,8 +29,8 @@ pub(crate) struct Admitted {
     pub(crate) password_file: Option<PasswordFile>,
 }
 
-/// Checks `options` without touching the network. `command_timeout` is not
-/// admission input.
+/// Checks `options` without touching the network.
+/// [`CacheOptions::command_timeout`] is not admission input.
 pub(crate) fn admit(options: CacheOptions) -> Result<Admitted, CacheError> {
     let CacheOptions {
         dsn,

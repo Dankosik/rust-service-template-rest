@@ -138,7 +138,7 @@ enum State {
     Connecting,
     /// The published generation. The driver's disconnect push may cancel its
     /// `retired` token while the state still names it; [`Shared::acquire`]
-    /// refuses that token and the supervisor's `retire` moves the state.
+    /// refuses that token and the supervisor's [`Shared::retire`] moves the state.
     Connected(Arc<Generation>),
     /// Observable during backoff; the supervisor keeps retrying.
     SetupFailed(ErrorType),
@@ -166,13 +166,42 @@ impl Drop for CommandSlot<'_> {
     }
 }
 
-/// Retires an unanswered exchange before releasing its admission slot.
+/// A command's stop scope and the cache's own ceiling within it.
+pub(crate) struct CommandScope {
+    pub(crate) context: OperationContext,
+    ceiling: Deadline,
+}
+
+impl CommandScope {
+    /// `parent` under a `command_timeout` ceiling starting now.
+    pub(crate) fn under(parent: &OperationContext, command_timeout: Duration) -> Self {
+        let ceiling = Deadline::new(Instant::now(), command_timeout);
+        Self {
+            context: parent.child_until(ceiling),
+            ceiling,
+        }
+    }
+
+    /// Without a parent there is no child token for anything to cancel.
+    pub(crate) fn standalone(command_timeout: Duration) -> Self {
+        let ceiling = Deadline::new(Instant::now(), command_timeout);
+        Self {
+            context: OperationContext::from_deadline(ceiling),
+            ceiling,
+        }
+    }
+}
+
+/// Retires a failed exchange, or an unanswered one abandoned once its
+/// ceiling has passed, before releasing its admission slot.
 struct Exchange<'a, F: Future> {
     shared: &'a Shared,
     generation: &'a Arc<Generation>,
     _slot: CommandSlot<'a>,
     reply: Option<Pin<&'a mut F>>,
     keeps_generation: fn(&F::Output) -> bool,
+    /// `None` retires on any unanswered drop.
+    ceiling: Option<Deadline>,
     retire: bool,
 }
 
@@ -183,6 +212,7 @@ impl<'a, F: Future> Exchange<'a, F> {
         slot: CommandSlot<'a>,
         reply: Pin<&'a mut F>,
         keeps_generation: fn(&F::Output) -> bool,
+        ceiling: Option<Deadline>,
     ) -> Self {
         Self {
             shared,
@@ -190,6 +220,7 @@ impl<'a, F: Future> Exchange<'a, F> {
             _slot: slot,
             reply: Some(reply),
             keeps_generation,
+            ceiling,
             retire: false,
         }
     }
@@ -230,7 +261,12 @@ impl<F: Future> Drop for Exchange<'_, F> {
         if self.retire && self.reply.is_some() && !std::thread::panicking() {
             let _ = self.poll_reply(&mut Context::from_waker(Waker::noop()));
         }
-        if self.retire {
+        // A caller that stops before the ceiling says nothing about the
+        // server. Its slot drains with the reply; a server that stopped
+        // answering still meets a peer's ceiling or the maintenance PING.
+        let caller_abandoned =
+            self.reply.is_some() && self.ceiling.is_some_and(|ceiling| !ceiling.expired());
+        if self.retire && !caller_abandoned {
             self.shared.retire(self.generation);
         }
         // Accounting and the permit drop only after retirement returns.
@@ -369,8 +405,9 @@ impl Link {
     pub(crate) async fn command<T: redis::FromRedisValue>(
         &self,
         command: &redis::Cmd,
-        context: &OperationContext,
+        scope: &CommandScope,
     ) -> Result<T, CommandError> {
+        let context = &scope.context;
         context.check().map_err(CommandError::Stopped)?;
         let slot = self.claim_slot(&self.application_slots)?;
         // Acquisition first: a connected link then never arms the deadline timer.
@@ -400,6 +437,7 @@ impl Link {
                 slot,
                 reply,
                 command_keeps_generation,
+                Some(scope.ceiling),
             );
             let reply = poll_fn(|cx| exchange.poll_reply(cx)).await;
             drop(exchange);
@@ -410,7 +448,7 @@ impl Link {
             })
         };
         // A delivered reply has already cleared its slot. Observe it before
-        // stopping the wait so cancellation cannot retire an answered exchange.
+        // stopping the wait so a stop at the ceiling cannot retire an answered exchange.
         tokio::select! {
             biased;
             reply = query => reply,
@@ -435,6 +473,7 @@ impl Link {
             slot,
             reply,
             ping_keeps_generation,
+            None,
         );
         reply_until(
             &generation.retired,
@@ -631,7 +670,7 @@ async fn run_supervisor(
 }
 
 /// One bounded setup attempt. A connection the peer closes before publication
-/// is `Io`; the returned generation owns its retirement token.
+/// is [`ErrorType::Io`]; the returned generation owns its retirement token.
 async fn setup_attempt<'a>(
     server: &ServerEndpoint,
     client: &redis::Client,

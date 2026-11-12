@@ -53,7 +53,7 @@ use redis::{SetExpiry, SetOptions};
 use secrecy::SecretString;
 
 use self::admission::Admitted;
-use self::connection::{CommandError, Link};
+use self::connection::{CommandError, CommandScope, Link};
 pub use self::observe::{HISTOGRAMS, OPERATION_DURATION_BUCKETS, OPERATION_DURATION_METRIC};
 use self::observe::{NamespaceHistograms, OperationGuard, Outcome};
 
@@ -338,7 +338,7 @@ impl CacheNamespace {
     /// Returns [`Unavailable`] for a timeout, a stop, an unusable server, or a
     /// server error reply.
     pub async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, Unavailable> {
-        self.get_bounded(key, &self.standalone_command_context())
+        self.get_bounded(key, &self.standalone_command_scope())
             .await
     }
 
@@ -353,17 +353,17 @@ impl CacheNamespace {
         key: &str,
         context: &OperationContext,
     ) -> Result<Option<Vec<u8>>, Unavailable> {
-        self.get_bounded(key, &self.command_context(context)).await
+        self.get_bounded(key, &self.command_scope(context)).await
     }
 
     async fn get_bounded(
         &self,
         key: &str,
-        context: &OperationContext,
+        scope: &CommandScope,
     ) -> Result<Option<Vec<u8>>, Unavailable> {
         let operation = Operation::Get;
         let command = self.keyed_command(operation, key, 0, 0);
-        self.run(context, operation, command, |value: &Option<Vec<u8>>| {
+        self.run(scope, operation, command, |value: &Option<Vec<u8>>| {
             if value.is_some() {
                 Outcome::Hit
             } else {
@@ -386,7 +386,7 @@ impl CacheNamespace {
     /// absolute expiry overflows. A timed-out write may have landed and is
     /// never replayed.
     pub async fn set(&self, key: &str, value: &[u8], ttl: Duration) -> Result<(), SetError> {
-        self.set_bounded(key, value, ttl, &self.standalone_command_context())
+        self.set_bounded(key, value, ttl, &self.standalone_command_scope())
             .await
     }
 
@@ -407,7 +407,7 @@ impl CacheNamespace {
         ttl: Duration,
         context: &OperationContext,
     ) -> Result<(), SetError> {
-        self.set_bounded(key, value, ttl, &self.command_context(context))
+        self.set_bounded(key, value, ttl, &self.command_scope(context))
             .await
     }
 
@@ -416,7 +416,7 @@ impl CacheNamespace {
         key: &str,
         value: &[u8],
         ttl: Duration,
-        context: &OperationContext,
+        scope: &CommandScope,
     ) -> Result<(), SetError> {
         let milliseconds = i64::try_from(ttl.as_millis())
             .ok()
@@ -428,7 +428,7 @@ impl CacheNamespace {
         // Value, `PX`, and an expiry of at most 20 decimal digits (u64).
         let mut command = self.keyed_command(operation, key, 3, value.len() + 2 + 20);
         command.arg(value).arg(options);
-        self.run(context, operation, command, |(): &()| Outcome::Ok)
+        self.run(scope, operation, command, |(): &()| Outcome::Ok)
             .await
             .map_err(SetError::Unavailable)
     }
@@ -441,7 +441,7 @@ impl CacheNamespace {
     /// server error reply. A timed-out deletion may have landed and is
     /// never replayed.
     pub async fn delete(&self, key: &str) -> Result<(), Unavailable> {
-        self.delete_bounded(key, &self.standalone_command_context())
+        self.delete_bounded(key, &self.standalone_command_scope())
             .await
     }
 
@@ -457,38 +457,32 @@ impl CacheNamespace {
         key: &str,
         context: &OperationContext,
     ) -> Result<(), Unavailable> {
-        self.delete_bounded(key, &self.command_context(context))
-            .await
+        self.delete_bounded(key, &self.command_scope(context)).await
     }
 
-    async fn delete_bounded(
-        &self,
-        key: &str,
-        context: &OperationContext,
-    ) -> Result<(), Unavailable> {
+    async fn delete_bounded(&self, key: &str, scope: &CommandScope) -> Result<(), Unavailable> {
         let operation = Operation::Delete;
         let command = self.keyed_command(operation, key, 0, 0);
-        self.run(context, operation, command, |(): &()| Outcome::Ok)
+        self.run(scope, operation, command, |(): &()| Outcome::Ok)
             .await
     }
 
     /// The caller's context under this cache's command ceiling. Applied at the
     /// public operation so preparation and dispatch share one cutoff.
-    fn command_context(&self, context: &OperationContext) -> OperationContext {
-        context.child(self.cache.command_timeout)
+    fn command_scope(&self, context: &OperationContext) -> CommandScope {
+        CommandScope::under(context, self.cache.command_timeout)
     }
 
-    /// [`Self::command_context`] of an unbounded parent, without deriving a
-    /// child token that nothing could cancel.
-    fn standalone_command_context(&self) -> OperationContext {
-        OperationContext::with_timeout(self.cache.command_timeout)
+    /// [`Self::command_scope`] of an unbounded parent.
+    fn standalone_command_scope(&self) -> CommandScope {
+        CommandScope::standalone(self.cache.command_timeout)
     }
 
     /// One observed command under the caller's already-bounded context.
     /// `outcome` names a successful reply.
     async fn run<T: redis::FromRedisValue>(
         &self,
-        context: &OperationContext,
+        scope: &CommandScope,
         operation: Operation,
         command: redis::Cmd,
         outcome: fn(&T) -> Outcome,
@@ -500,10 +494,10 @@ impl CacheNamespace {
             &self.cache.link.server,
         );
         // One context cutoff includes preparation, connection wait, and exactly one dispatch.
-        match self.cache.link.command(&command, context).await {
+        match self.cache.link.command(&command, scope).await {
             Ok(value) => {
                 if operation.is_read()
-                    && let Some(stopped) = context.stopped()
+                    && let Some(stopped) = scope.context.stopped()
                 {
                     return Err(guard.stop(stopped));
                 }
@@ -516,7 +510,7 @@ impl CacheNamespace {
     }
 
     /// `operation` on the stored key, with room for `extra_args` more
-    /// arguments of `extra_bytes` payload. `Cmd` reserves argument slots and
+    /// arguments of `extra_bytes` payload. [`redis::Cmd`] reserves argument slots and
     /// payload bytes, excluding RESP framing; reserving both avoids buffer growth.
     fn keyed_command(
         &self,
@@ -575,7 +569,8 @@ fn valid_namespace(name: &str) -> bool {
 }
 
 /// Write the prefixed key as one Redis argument without a temporary String.
-/// Cmd's `write_arg_fmt` writes directly into its preallocated payload buffer.
+/// [`redis::Cmd`]'s [`write_arg_fmt`](redis::RedisWrite::write_arg_fmt) writes
+/// directly into its preallocated payload buffer.
 struct NamespacedKey<'a> {
     namespace: &'static str,
     key: &'a str,
