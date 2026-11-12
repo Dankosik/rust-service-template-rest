@@ -252,9 +252,7 @@ mod tests {
         Failure, Transport, VerificationReason,
         jwks::{
             KeySet,
-            tests::{
-                JWT_SIGNING_DER, ec_signing, ensure_crypto_provider, jwk, key_set, rsa_signing,
-            },
+            tests::{JWT_SIGNING_DER, ec_signing, jwk, key_set, rsa_signing},
         },
         parse_bearer,
         refresh::SignatureRefresh,
