@@ -24,9 +24,10 @@ use crate::registry::Registry;
 use crate::topology::{ConsumerAdmission, create_durable, get_stream_failure};
 use crate::wire;
 
-/// The broker redelivers an unsettled message after the handler budget and
-/// both settlement round trips.
+/// The broker redelivers an unsettled message after the batch identity check,
+/// handler budget and both settlement round trips.
 const ACK_WAIT: Duration = HANDLER_TIMEOUT
+    .saturating_add(BROKER_OPERATION_BUDGET)
     .saturating_add(BROKER_OPERATION_BUDGET)
     .saturating_add(BROKER_OPERATION_BUDGET)
     .saturating_add(Duration::from_secs(1));
@@ -308,13 +309,13 @@ impl Consumer {
                     release(messages).await;
                     break 'pulls;
                 }
-                end @ (BatchEnd::Closed | BatchEnd::Failed(_)) => {
+                end @ (BatchEnd::Closed | BatchEnd::Failed { .. }) => {
                     release(messages).await;
                     if durable_confirmed_lost(&self.pull).await {
                         return Err(ConsumerError::ConsumerLost);
                     }
-                    if let BatchEnd::Failed(error_kind) = end {
-                        pull_failed("batch_receive", error_kind);
+                    if let BatchEnd::Failed { phase, error_kind } = end {
+                        pull_failed(phase, error_kind);
                         tokio::time::sleep(STREAM_ERROR_BACKOFF).await;
                     }
                 }
@@ -348,6 +349,33 @@ impl Consumer {
                 joined = deliveries.join_next(), if !deliveries.is_empty() => reaped(joined)?,
                 next = tokio::time::timeout_at(expires, messages.next()) => match next {
                     Ok(Some(Ok(message))) => {
+                        if remaining == slots {
+                            // The preflight INFO and the named pull are separate requests.
+                            // Verify creation identity after this batch has delivered data.
+                            let identity = tokio::select! {
+                                biased;
+                                () = stop.cancelled() => {
+                                    redeliver_after(&message, RELEASE_DELAY).await;
+                                    return Ok(BatchEnd::Stopped);
+                                }
+                                identity = durable_is_lost(&self.pull) => identity,
+                            };
+                            match identity {
+                                Ok(false) => {}
+                                Ok(true) => return Err(ConsumerError::ConsumerLost),
+                                Err(error) => {
+                                    redeliver_after(&message, RELEASE_DELAY).await;
+                                    return Ok(BatchEnd::Failed {
+                                        phase: "consumer_info",
+                                        error_kind: consumer_info_error_kind(&error.kind()),
+                                    });
+                                }
+                            }
+                            if stop.is_cancelled() {
+                                redeliver_after(&message, RELEASE_DELAY).await;
+                                return Ok(BatchEnd::Stopped);
+                            }
+                        }
                         remaining -= 1;
                         let handler = Arc::clone(&self.handler);
                         let cancel = force.clone();
@@ -355,9 +383,15 @@ impl Consumer {
                     }
                     Ok(None) => return Ok(BatchEnd::Closed),
                     Ok(Some(Err(error))) => {
-                        return Ok(BatchEnd::Failed(batch_receive_error_kind(&error)));
+                        return Ok(BatchEnd::Failed {
+                            phase: "batch_receive",
+                            error_kind: batch_receive_error_kind(&error),
+                        });
                     }
-                    Err(_) => return Ok(BatchEnd::Failed("local_timeout")),
+                    Err(_) => return Ok(BatchEnd::Failed {
+                        phase: "batch_receive",
+                        error_kind: "local_timeout",
+                    }),
                 }
             }
         }
@@ -374,8 +408,11 @@ enum BatchEnd {
     Stopped,
     /// The batch ended before filling its slots.
     Closed,
-    /// The batch failed with this `error.type`.
-    Failed(&'static str),
+    /// The batch could not receive or verify a delivery.
+    Failed {
+        phase: &'static str,
+        error_kind: &'static str,
+    },
 }
 
 /// A delivery task that panicked or was cancelled ends the consumer.
@@ -395,7 +432,11 @@ async fn durable_confirmed_lost(pull: &PullConsumer) -> bool {
 /// exists, or was replaced with another creation or a push consumer.
 /// A failed or unanswered lookup is not that answer.
 async fn durable_is_lost(pull: &PullConsumer) -> Result<bool, ConsumerInfoError> {
-    match pull.get_info().await {
+    // The native response timeout starts after the client's command queue admits the request.
+    let result = tokio::time::timeout(BROKER_OPERATION_BUDGET, pull.get_info())
+        .await
+        .map_err(|_| ConsumerInfoError::new(ConsumerInfoErrorKind::TimedOut))?;
+    match result {
         Ok(info) => {
             Ok(info.created != pull.cached_info().created || info.config.deliver_subject.is_some())
         }

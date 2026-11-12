@@ -47,7 +47,8 @@ impl PreparedEvent {
     ///
     /// # Errors
     /// Rejects an invalid subject, unserializable payload, payload beyond the
-    /// configured bound, invalid identity, or an invalid creation time.
+    /// configured bound, an invalid identity or ID with surrounding whitespace,
+    /// or an invalid creation time.
     pub fn prepare<T: EventPayload + Serialize>(
         subject: impl Into<String>,
         event: &Event<T>,
@@ -68,7 +69,7 @@ impl PreparedEvent {
         // The event type was checked at compile time and the publication ID
         // is the message ID, so only the ID and time need checking here.
         crate::wire::validate_identity(&event.id)?;
-        if crate::wire::is_zero_time(occurred_at) {
+        if event.id.trim() != event.id || crate::wire::is_zero_time(occurred_at) {
             return Err(EnvelopeError::Identity);
         }
         // A caller can retry the retained payload without reformatting it; the
@@ -87,8 +88,7 @@ impl PreparedEvent {
         })
     }
 
-    /// Rebuilds an event from stored parts, checking everything
-    /// [`Self::prepare`] guarantees: a concrete subject, identities of at most
+    /// Rebuilds an event from stored parts, checking a concrete subject, identities of at most
     /// [`IDENTITY_MAX_BYTES`](crate::wire::IDENTITY_MAX_BYTES) bytes, so the
     /// five headers stay far below
     /// [`HEADER_LIMIT_BYTES`](crate::wire::HEADER_LIMIT_BYTES), a positive
@@ -280,6 +280,22 @@ mod tests {
             PreparedEvent::prepare("events.created", &event, expected.len() - 1),
             Err(EnvelopeError::PayloadTooLarge)
         );
+    }
+
+    #[test]
+    fn preparation_refuses_ids_that_nats_would_trim() {
+        let mut event = event(ExactPayload {
+            text: "sample",
+            amount: 1.0,
+            items: [true, false],
+        });
+        for id in [" event-id", "event-id ", "event-id\u{a0}"] {
+            event.id = id.to_owned();
+            std::assert_matches!(
+                PreparedEvent::prepare("events.created", &event, 1024),
+                Err(EnvelopeError::Identity)
+            );
+        }
     }
 
     #[test]

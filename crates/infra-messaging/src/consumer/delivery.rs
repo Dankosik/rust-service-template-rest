@@ -394,9 +394,12 @@ async fn run_handler(
         reason = context.wait_stopped() => return stopped(reason),
         result = AssertUnwindSafe(dispatch).catch_unwind() => result,
     };
+    // A final synchronous poll can cross the cutoff before returning Ready.
+    if let Some(reason) = context.stopped() {
+        return stopped(reason);
+    }
     match result {
-        // A final synchronous poll can cross the cutoff before returning Ready.
-        Ok(Ok(())) => context.stopped().map_or(Outcome::Success, stopped),
+        Ok(Ok(())) => Outcome::Success,
         Ok(Err(DispatchError::Handler(HandlerError::Permanent))) => Outcome::Permanent,
         Ok(Err(DispatchError::Handler(HandlerError::Retryable))) => Outcome::Retryable,
         Ok(Err(DispatchError::Unhandled)) => Outcome::Unhandled,
@@ -580,8 +583,12 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_stopped_handler_cannot_report_ready_success() {
-        for expected in ["timeout", "retryable"] {
+    async fn stopping_takes_precedence_over_the_handlers_final_result() {
+        for (expected, result) in [
+            ("timeout", Ok(())),
+            ("timeout", Err(HandlerError::Permanent)),
+            ("retryable", Ok(())),
+        ] {
             let mut registry =
                 Registry::try_new([Route::new::<Created>("orders.created")]).unwrap();
             registry
@@ -594,7 +601,7 @@ mod tests {
                     } else {
                         context.cancel();
                     }
-                    Ok(())
+                    result
                 })
                 .unwrap();
             let outcome = run_handler(

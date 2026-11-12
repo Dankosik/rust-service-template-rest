@@ -39,7 +39,7 @@ async fn consumer_reconciles_its_named_durable_without_stream_administration() {
     assert_eq!(actual.config.filter_subject, fixture.subject);
     assert_eq!(actual.config.max_deliver, -1);
     assert_eq!(actual.config.ack_policy, consumer::AckPolicy::Explicit);
-    assert_eq!(actual.config.ack_wait, Duration::from_secs(41));
+    assert_eq!(actual.config.ack_wait, Duration::from_secs(46));
     assert!(
         actual.config.max_ack_pending > 1,
         "the durable keeps the broker default instead of one replica's concurrency"
@@ -198,11 +198,21 @@ async fn deleting_a_durable_with_a_waiting_batch_stops_the_consumer() {
 }
 
 #[tokio::test]
-async fn a_durable_replaced_between_full_batches_stops_before_another_handler() {
+async fn a_durable_replaced_before_the_next_pull_arrives_cannot_dispatch() {
     let fixture = Fixture::create(false).await;
+    let pull_subject = format!(
+        "$JS.API.CONSUMER.MSG.NEXT.{}.{}",
+        fixture.stream, fixture.durable
+    );
+    let (relay, pull) = AckDroppingRelay::intercept_second_pull(pull_subject.clone()).await;
     let cancel = CancellationToken::new();
     let messaging = Box::pin(Messaging::connect(
-        options(&fixture, Some(consumer_options(&fixture)), 1024),
+        options_with_servers(
+            &fixture,
+            vec![relay.url.clone()],
+            Some(consumer_options(&fixture)),
+            1024,
+        ),
         deadline(),
         cancel.clone(),
     ))
@@ -216,29 +226,21 @@ async fn a_durable_replaced_between_full_batches_stops_before_another_handler() 
             .await
             .unwrap();
     }
-    let entered = Arc::new(Notify::new());
-    let release = CancellationToken::new();
     let calls = Arc::new(AtomicUsize::new(0));
     let mut registered = registry(&fixture);
     registered
         .register::<ExampleEvent, _, _>({
-            let entered = Arc::clone(&entered);
             let calls = Arc::clone(&calls);
-            let release = release.clone();
             move |_, _| {
                 calls.fetch_add(1, Ordering::SeqCst);
-                entered.notify_one();
-                let release = release.clone();
-                async move {
-                    release.cancelled().await;
-                    Ok(())
-                }
+                async { Ok(()) }
             }
         })
         .unwrap();
     let mut handle = messaging.consumer(registered).await.unwrap().start(&cancel);
-    timeout(Duration::from_secs(3), entered.notified())
+    let (reply, payload) = timeout(Duration::from_secs(5), pull)
         .await
+        .expect("the second pull passes the old durable's identity check")
         .unwrap();
     let source = fixture.jetstream.get_stream(&fixture.stream).await.unwrap();
     fixture
@@ -251,13 +253,18 @@ async fn a_durable_replaced_between_full_batches_stops_before_another_handler() 
             durable_name: Some(fixture.durable.clone()),
             filter_subject: fixture.subject.clone(),
             ack_policy: consumer::AckPolicy::Explicit,
-            ack_wait: Duration::from_secs(41),
+            ack_wait: Duration::from_secs(46),
             max_deliver: -1,
             ..Default::default()
         })
         .await
         .unwrap();
-    release.cancel();
+    fixture
+        .jetstream
+        .client()
+        .publish_with_reply(pull_subject, reply, payload)
+        .await
+        .expect("the replacement receives the old consumer's pull");
     std::assert_matches!(
         timeout(Duration::from_secs(10), handle.failed())
             .await
@@ -270,6 +277,7 @@ async fn a_durable_replaced_between_full_batches_stops_before_another_handler() 
         Err(ConsumerError::ConsumerLost)
     );
     close(messaging).await;
+    relay.join().await;
     fixture.cleanup().await;
 }
 

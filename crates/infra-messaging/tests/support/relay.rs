@@ -4,8 +4,10 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use bytes::Bytes;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
@@ -174,6 +176,40 @@ impl AckDroppingRelay {
         mut drop_reply: impl FnMut(&[u8]) -> bool + Send + 'static,
     ) -> Self {
         Self::start_with_filters(|_, _| false, move |_, payload| drop_reply(payload)).await
+    }
+
+    /// Withholds the second pull so the test can deliver it after replacing the durable.
+    pub(crate) async fn intercept_second_pull(
+        subject: String,
+    ) -> (Self, oneshot::Receiver<(String, Bytes)>) {
+        let (intercepted, pull) = oneshot::channel();
+        let mut intercepted = Some(intercepted);
+        let mut pulls = 0;
+        let relay = Self::start_with_filters(
+            move |line, payload| {
+                let Ok(line) = std::str::from_utf8(line) else {
+                    return false;
+                };
+                let mut fields = line.split_ascii_whitespace();
+                if fields.next() != Some("PUB") || fields.next() != Some(subject.as_str()) {
+                    return false;
+                }
+                pulls += 1;
+                if pulls != 2 {
+                    return false;
+                }
+                let reply = fields.next().expect("pull request has a reply inbox");
+                intercepted
+                    .take()
+                    .expect("only one pull is intercepted")
+                    .send((reply.to_owned(), Bytes::copy_from_slice(payload)))
+                    .expect("test is waiting for the second pull");
+                true
+            },
+            |_, _| false,
+        )
+        .await;
+        (relay, pull)
     }
 
     /// Withholds the first source +ACK request, or its broker confirmation.
