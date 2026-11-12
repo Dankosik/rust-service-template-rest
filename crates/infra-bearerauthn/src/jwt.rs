@@ -5,6 +5,7 @@ use std::{fmt, future::Future, pin::Pin, sync::Arc, time::Duration};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use jsonwebtoken::Header;
 use serde::Deserialize;
+use shared_rules::rfc7515;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -85,8 +86,12 @@ impl JwtVerifier {
     ) -> Result<Principal, VerificationError> {
         let malformed = || VerificationError::invalid(VerificationReason::Header);
         let bytes = token.as_bytes();
-        let (message, signature) = split_last_dot(bytes).ok_or_else(malformed)?;
-        let (header, payload) = split_last_dot(message).ok_or_else(malformed)?;
+        let rfc7515::Compact {
+            signing_input: message,
+            header,
+            payload,
+            signature,
+        } = rfc7515::compact(bytes).ok_or_else(malformed)?;
         let header = URL_SAFE_NO_PAD.decode(header).map_err(|_| malformed())?;
         // jsonwebtoken's `Header` keeps the library's header admission rules.
         let header: Header = serde_json::from_slice(&header).map_err(|_| malformed())?;
@@ -155,11 +160,6 @@ impl JwtVerifier {
             }
         }
     }
-}
-
-fn split_last_dot(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
-    let dot = bytes.iter().rposition(|byte| *byte == b'.')?;
-    Some((&bytes[..dot], &bytes[dot + 1..]))
 }
 
 /// Prepares initial trust before traffic admission and returns the one refresh

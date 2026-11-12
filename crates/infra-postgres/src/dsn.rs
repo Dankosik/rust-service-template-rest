@@ -98,8 +98,8 @@ impl Dsn {
 
     /// [`Dsn::admit`] with the password read from `password_file` when one
     /// is given (`postgres.password_file`). The URL must then carry no
-    /// password; the file holds the password alone, and one trailing line
-    /// break is not part of it.
+    /// password; the file holds the password alone, and its trailing line
+    /// breaks are not part of it.
     ///
     /// # Errors
     ///
@@ -221,15 +221,10 @@ fn read_password(path: &Path) -> Result<String, DsnError> {
     password_from(content)
 }
 
-/// The password in a password file's content: the whole file, minus one
-/// trailing line break that editors and `echo` add.
-pub(crate) fn password_from(mut password: String) -> Result<String, DsnError> {
-    if password.ends_with('\n') {
-        password.pop();
-        if password.ends_with('\r') {
-            password.pop();
-        }
-    }
+/// The password in a password file's content: the file's secret value, which
+/// must not be empty.
+pub(crate) fn password_from(content: String) -> Result<String, DsnError> {
+    let password = shared_rules::secret_file::value(content);
     if password.is_empty() {
         return Err(DsnError::PasswordFileEmpty);
     }
@@ -600,7 +595,7 @@ mod tests {
         assert_eq!(ipv6.password_file(), Some(file.as_path()));
         assert_eq!(ipv6.ssl_mode_name(), "verify-full");
 
-        // Only one trailing line break is dropped; the rest is the password.
+        // Trailing line breaks are dropped; spaces are part of the password.
         std::fs::write(&file, " p w \r\n").unwrap();
         assert_eq!(read_password(&file).unwrap(), " p w ");
         std::fs::remove_dir_all(&dir).unwrap();

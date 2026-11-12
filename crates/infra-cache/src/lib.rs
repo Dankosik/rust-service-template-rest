@@ -68,7 +68,8 @@ pub struct CacheOptions {
     /// included unless [`Self::password_file`] is set.
     pub dsn: SecretString,
     /// A file that holds the password alone, for a platform that rotates it
-    /// by rewriting the file. The DSN then carries no password.
+    /// by rewriting the file; its trailing line breaks are not part of the
+    /// password. The DSN then carries no password.
     pub password_file: Option<PathBuf>,
     /// PEM file of a private root CA. Absent uses the process trust store.
     pub root_ca_path: Option<PathBuf>,
