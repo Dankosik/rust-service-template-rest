@@ -36,7 +36,10 @@ impl Transition {
                 cause: RetryCause::Timeout,
                 ..
             } => "timeout",
-            Self::Retry { .. } => "retry",
+            Self::Retry {
+                cause: RetryCause::Failure { .. },
+                ..
+            } => "retry",
             Self::Fail { reason, .. } => reason.as_str(),
             Self::Snooze { .. } => "snoozed",
             Self::Release => "cancelled",
@@ -353,9 +356,7 @@ fn payload_summary(kind: &str, error: &serde_json::Error) -> String {
     )
 }
 
-/// The final stored form of a summary: control characters become spaces, and
-/// the UTF-8 length stops at [`MAX_ERROR_SUMMARY_BYTES`] without splitting a
-/// character.
+/// The final formatting step before an attempt summary is stored.
 fn sanitize_summary(text: &str) -> String {
     let mut sanitized = String::with_capacity(text.len().min(MAX_ERROR_SUMMARY_BYTES));
     for ch in text.chars() {

@@ -114,7 +114,9 @@ pub(crate) async fn run_claim_loop(
                 }
             }
             Next::Idle => {
-                if await_tick(&shared, &stop, &mut ticker).await.is_break()
+                if wait_for_wake_or_tick(&shared, &stop, &mut ticker)
+                    .await
+                    .is_break()
                     || cooldown(&stop, last_claim).await.is_break()
                 {
                     return;
@@ -163,7 +165,7 @@ async fn cooldown(stop: &CancellationToken, last_claim: Instant) -> ControlFlow<
     }
 }
 
-async fn await_tick(
+async fn wait_for_wake_or_tick(
     shared: &Shared,
     stop: &CancellationToken,
     ticker: &mut tokio::time::Interval,

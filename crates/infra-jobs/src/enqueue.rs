@@ -142,8 +142,8 @@ pub async fn enqueue<K: JobKind>(
             prepared.payload,
             prepared.unique_key,
             prepared.delay_micros,
-            trace.trace_parent.as_deref(),
-            trace.trace_state.as_deref(),
+            trace.trace_parent(),
+            trace.trace_state(),
             id.0,
         )
         .fetch_optional(&mut *tx),

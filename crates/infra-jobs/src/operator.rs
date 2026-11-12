@@ -247,7 +247,6 @@ pub struct JobSnapshot {
     pub attempts: i32,
     /// Why automatic execution stopped; set only for a failed job.
     pub failure_reason: Option<FailureReason>,
-    /// When the job was created.
     pub created_at: String,
     /// The earliest time the job may run.
     pub not_before: String,
