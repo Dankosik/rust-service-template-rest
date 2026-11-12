@@ -496,7 +496,7 @@ async fn legacy_job_uses_current_path_and_rotated_keys_despite_invalid_saved_rou
     let configured = outbound(&["partner"]);
     let id = enqueue(&pool, &configured, "partner", body).await;
     sqlx::query(
-        "UPDATE background_jobs SET payload = jsonb_build_object(\
+        "UPDATE background_jobs SET payload_text = NULL, payload = jsonb_build_object(\
             'version', 1, 'endpoint_id', 'partner', 'content_type', 'application/webhook+json', \
             'body', payload->'body', 'destination', 'not a URL', 'active_key', 5, 'previous_key', false \
          ) WHERE id::text = $1",
@@ -575,7 +575,7 @@ async fn missing_current_endpoint_spends_the_final_attempt_and_exhausts(pool: Pg
 async fn an_undecodable_payload_is_retried_not_failed_permanently(pool: PgPool) {
     let configured = outbound(&["partner"]);
     let id = enqueue(&pool, &configured, "partner", b"{}").await;
-    sqlx::query("UPDATE background_jobs SET payload = $2::jsonb WHERE id::text = $1")
+    sqlx::query("UPDATE background_jobs SET payload_text = $2 WHERE id::text = $1")
         .bind(&id)
         .bind(r#"{"endpoint_id":"partner","content_type":"application/json","body":"%%%"}"#)
         .execute(&pool)
