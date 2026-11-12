@@ -66,10 +66,11 @@ def _validate_policy(policy):
     for role, rule in roles.items():
         if not isinstance(rule, dict) or not isinstance(rule.get("rule"), str) or not rule["rule"].strip():
             raise ValueError(f"role {role} requires a named rule")
-        if set(rule) - {"rule", "allow_roles", "allow_members", "deny_roles", "test_only"}:
+        if set(rule) - {"rule", "allow_roles", "allow_members", "deny_roles", "test_only", "std_only"}:
             raise ValueError(f"unknown role policy fields for {role}")
-        if type(rule.get("test_only", False)) is not bool:
-            raise ValueError(f"role {role} requires boolean test_only")
+        for flag in ("test_only", "std_only"):
+            if type(rule.get(flag, False)) is not bool:
+                raise ValueError(f"role {role} requires boolean {flag}")
         for field in ("allow_roles", "deny_roles"):
             values = rule.get(field, [])
             if not isinstance(values, list) or any(not isinstance(v, str) or v not in roles for v in values):
@@ -163,6 +164,11 @@ def check(metadata, policy, root):
                     or any(dependency.get(key) is not None and not isinstance(dependency[key], str)
                            for key in ("rename", "target", "path", "source"))):
                 diagnostics.append(f"{label}: malformed-dependency-declaration")
+                continue
+            # Registry edges are otherwise outside this verdict; a std-only
+            # role refuses every non-dev edge, wherever it resolves.
+            if owner is not None and roles[owner["role"]].get("std_only", False) and dependency["kind"] != "dev":
+                diagnostics.append(f"{label}: {roles[owner['role']]['rule']} forbids every non-dev dependency")
                 continue
             local_path = dependency.get("path")
             if local_path is None:

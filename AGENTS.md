@@ -99,7 +99,9 @@ during the task.
 Reuse the current owner, repository pattern, standard library, and declared
 dependencies before adding machinery. Prefer the smallest coherent change that
 satisfies the accepted outcome, including prerequisite refactoring needed to
-preserve responsibility boundaries and keep each rule with one owner. Bound
+preserve responsibility boundaries and keep each rule with one owner;
+`crates/shared-rules` owns a rule that crates with no other common owner must
+apply identically, under the membership test in its crate documentation. Bound
 that refactoring to the accepted outcome. If it requires revisiting accepted
 scope or decisions, resolve that through the existing decision owner before the
 dependent implementation. A new abstraction, layer, configuration

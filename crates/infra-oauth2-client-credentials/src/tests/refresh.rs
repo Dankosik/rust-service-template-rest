@@ -1,10 +1,11 @@
 use super::*;
 
+/// The share arithmetic is `shared_rules::jitter`'s; this owner adds the
+/// unjittered fallback when the random source fails.
 #[test]
-fn refresh_spread_obeys_integer_endpoints_rounding_and_source_failure() {
+fn refresh_spread_spans_its_window_and_vanishes_on_source_failure() {
     for window in [
         Duration::ZERO,
-        Duration::from_nanos(1),
         Duration::from_secs(3),
         Duration::from_secs(30),
     ] {
@@ -21,18 +22,6 @@ fn refresh_spread_obeys_integer_endpoints_rounding_and_source_failure() {
             Duration::ZERO
         );
     }
-    assert_eq!(
-        crate::credentials::refresh_spread(Duration::from_nanos(1), Ok(32768)),
-        Duration::ZERO
-    );
-    assert_eq!(
-        crate::credentials::refresh_spread(Duration::from_secs(3), Ok(21845)),
-        Duration::from_secs(1)
-    );
-    assert_eq!(
-        crate::credentials::refresh_spread(Duration::from_secs(30), Ok(21845)),
-        Duration::from_secs(10)
-    );
 }
 
 /// Asserts that no token request arrives within a short real-time window.

@@ -33,6 +33,7 @@ rustls = { workspace = true, features = ["aws_lc_rs", "std", "tls12"] }
 rustls-platform-verifier = { workspace = true }
 tracing = { workspace = true, features = ["std"] }
 tracing-opentelemetry-instrumentation-sdk = { workspace = true }
+shared-rules = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "time"] }
 url = { workspace = true, features = ["std"] }

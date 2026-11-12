@@ -16,6 +16,7 @@ use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
 use crate::Error;
 use crate::call::{Held, ResponseCustody, Side};
 use operation_context::{Deadline, OperationContext};
+use shared_rules::error_chain::Causes;
 use tokio::time::Instant;
 use tokio_util::sync::DropGuard;
 
@@ -408,23 +409,10 @@ fn transport_status(error: tonic::transport::Error) -> tonic::Status {
     {
         return Side::Client.deadline();
     }
+    // Tonic's transport error prints only `transport error` and keeps the DNS,
+    // TLS, connect or HTTP/2 reason in `source()`.
     tracing::warn!(error = %Causes(error), "grpc_client_transport_failed");
     tonic::Status::unavailable("transport unavailable")
-}
-
-/// An error and its sources on one line. Tonic's transport error prints only
-/// `transport error` and keeps the DNS, TLS, connect or HTTP/2 reason in
-/// `source()`.
-struct Causes<'a>(&'a (dyn std::error::Error + 'static));
-
-impl std::fmt::Display for Causes<'_> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "{}", self.0)?;
-        for cause in std::iter::successors(self.0.source(), |cause| (*cause).source()) {
-            write!(formatter, ": {cause}")?;
-        }
-        Ok(())
-    }
 }
 
 #[cfg(test)]
