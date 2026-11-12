@@ -71,6 +71,36 @@ pub enum EnqueueError {
     Database(#[from] sqlx::Error),
 }
 
+/// Count the bytes `serde_json` emits without retaining the JSON. Preflights
+/// own their work budget and apply the size limit to the complete payload.
+///
+/// # Errors
+///
+/// Returns an error if serialization or byte counting fails.
+pub fn json_payload_len<T: serde::Serialize + ?Sized>(
+    value: &T,
+) -> Result<usize, serde_json::Error> {
+    struct ByteCount(usize);
+
+    impl Write for ByteCount {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0 = self
+                .0
+                .checked_add(bytes.len())
+                .ok_or_else(|| io::Error::other("serialized payload length overflow"))?;
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut count = ByteCount(0);
+    serde_json::to_writer(&mut count, value)?;
+    Ok(count.0)
+}
+
 /// Validation failures send nothing and leave the transaction usable. A
 /// [`EnqueueError::Database`] error means the caller's transaction is aborted;
 /// [`infra_postgres::sqlstate`] names why. With a unique

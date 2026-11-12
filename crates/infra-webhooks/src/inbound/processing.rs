@@ -49,15 +49,15 @@ impl Consumers {
     ///
     /// # Errors
     ///
-    /// Returns [`DuplicateConsumer`] when the endpoint already has a binding;
+    /// Returns [`EndpointAlreadyBound`] when the endpoint already has a binding;
     /// the first binding stays.
     pub fn bind(
         &mut self,
         endpoint_id: impl Into<String>,
         consumer: Arc<dyn Consumer>,
-    ) -> Result<(), DuplicateConsumer> {
+    ) -> Result<(), EndpointAlreadyBound> {
         match self.bindings.entry(endpoint_id.into()) {
-            Entry::Occupied(bound) => Err(DuplicateConsumer {
+            Entry::Occupied(bound) => Err(EndpointAlreadyBound {
                 endpoint_id: bound.key().clone(),
             }),
             Entry::Vacant(unbound) => {
@@ -93,7 +93,7 @@ impl Consumers {
 
 #[derive(Debug, thiserror::Error)]
 #[error("inbound webhook endpoint {endpoint_id} already has a consumer binding")]
-pub struct DuplicateConsumer {
+pub struct EndpointAlreadyBound {
     pub endpoint_id: String,
 }
 
