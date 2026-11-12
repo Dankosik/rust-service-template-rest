@@ -121,10 +121,12 @@ pub fn decode_envelope(
         return Err(EnvelopeError::HeadersTooLarge);
     }
     let message_id = required_value(found.message_id, MESSAGE_ID)?;
+    validate_identity(message_id)?;
     let event_type = required_value(found.event_type, EVENT_TYPE)?;
+    validate_identity(event_type)?;
     let schema = required_value(found.schema, EVENT_SCHEMA)?;
     let created_at = required_value(found.created_at, CREATED_AT)?;
-    let _publication_id = required_value(found.publication_id, NATS_MSG_ID)?;
+    validate_identity(required_value(found.publication_id, NATS_MSG_ID)?)?;
     let schema_version = parse_schema(schema)?;
     let occurred_at = parse_timestamp(created_at)?;
     if is_zero_time(occurred_at) {
@@ -210,9 +212,7 @@ fn required_value<'a>(
     value: Option<&'a str>,
     header: &'static str,
 ) -> Result<&'a str, EnvelopeError> {
-    let value = value.ok_or(EnvelopeError::MissingHeader(header))?;
-    validate_identity(value)?;
-    Ok(value)
+    value.ok_or(EnvelopeError::MissingHeader(header))
 }
 
 fn required_header<'a>(
@@ -240,8 +240,17 @@ fn parse_schema(value: &str) -> Result<u16, EnvelopeError> {
         .ok_or(EnvelopeError::Schema)
 }
 
-pub(crate) fn validate_identity(value: &str) -> Result<(), EnvelopeError> {
+fn validate_identity(value: &str) -> Result<(), EnvelopeError> {
     if !valid_identity(value) {
+        return Err(EnvelopeError::Identity);
+    }
+    Ok(())
+}
+
+/// The NATS reader trims surrounding whitespace before handing off a header.
+pub(crate) fn validate_outbound_identity(value: &str) -> Result<(), EnvelopeError> {
+    validate_identity(value)?;
+    if value.trim() != value {
         return Err(EnvelopeError::Identity);
     }
     Ok(())
@@ -321,6 +330,7 @@ pub(crate) fn check_timestamp(value: OffsetDateTime) -> Result<(), EnvelopeError
 }
 
 fn parse_timestamp(value: &str) -> Result<OffsetDateTime, EnvelopeError> {
+    validate_identity(value).map_err(|_| EnvelopeError::CreatedAtInvalid)?;
     OffsetDateTime::parse(value, &Rfc3339)
         .ok()
         .and_then(|value| value.checked_to_offset(UtcOffset::UTC))
@@ -412,5 +422,18 @@ mod tests {
         let mut headers = envelope_headers();
         headers.insert(header_name::EVENT_TYPE, "order\u{85}created");
         assert!(decode_envelope("orders.created", &headers, Bytes::new()).is_err());
+    }
+
+    #[test]
+    fn decode_names_the_invalid_schema_or_time() {
+        for (header, expected) in [
+            (header_name::EVENT_SCHEMA, EnvelopeError::Schema),
+            (header_name::CREATED_AT, EnvelopeError::CreatedAtInvalid),
+        ] {
+            let mut headers = envelope_headers();
+            headers.insert(header, "");
+            let error = decode_envelope("orders.created", &headers, Bytes::new()).unwrap_err();
+            assert_eq!(error, expected);
+        }
     }
 }

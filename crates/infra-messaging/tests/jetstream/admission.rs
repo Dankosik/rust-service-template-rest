@@ -192,11 +192,16 @@ fn transfer_additions(subject: &str, stream: &str) -> usize {
     format!("Message-Id: {id}\r\nNats-Msg-Id: {id}\r\nOriginal-Subject: {subject}\r\nDead-Letter-Reason: permanent\r\nNats-Expected-Stream: {stream}\r\n").len()
 }
 
+const HEADER_BLOCK_FRAMING_BYTES: usize = "NATS/1.0\r\n\r\n".len();
+
 #[tokio::test]
 async fn consumer_admits_the_transfer_bound_and_refuses_one_byte_less_before_durable_creation() {
     for short in [true, false] {
         let fixture = Fixture::create(false).await;
-        let required = 1024 + 8192 + transfer_additions(&fixture.subject, &fixture.dlq_stream);
+        let required = 1024
+            + 8192
+            + HEADER_BLOCK_FRAMING_BYTES
+            + transfer_additions(&fixture.subject, &fixture.dlq_stream);
         let mut config = fixture
             .jetstream
             .get_stream(&fixture.dlq_stream)
@@ -391,7 +396,10 @@ async fn unlimited_dlq_cannot_exceed_the_advertised_server_transfer_limit() {
         admission_refusals(&logged),
         [(
             "server_max_payload".to_owned(),
-            (server_limit + transfer_additions(&fixture.subject, &fixture.dlq_stream)).to_string(),
+            (server_limit
+                + HEADER_BLOCK_FRAMING_BYTES
+                + transfer_additions(&fixture.subject, &fixture.dlq_stream))
+            .to_string(),
             Some(server_limit.to_string())
         )]
     );
