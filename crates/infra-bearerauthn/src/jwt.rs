@@ -1398,7 +1398,7 @@ mod tests {
         }));
         let outcomes = counters
             .iter()
-            .filter(|(key, _)| key.name() == crate::AUTHN_VERIFICATIONS_METRIC)
+            .filter(|(key, _)| key.name() == crate::authenticate::AUTHN_VERIFICATIONS_METRIC)
             .collect::<Vec<_>>();
         assert_eq!(outcomes.len(), 7);
         for (transport, result, failure) in [

@@ -61,7 +61,7 @@ impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for JsonObject<T> 
     }
 }
 
-pub use authenticate::{AUTHN_VERIFICATIONS_METRIC, Transport};
+pub use authenticate::Transport;
 pub(crate) use bearer::{BearerToken, parse_bearer};
 // template:begin oidc-introspection:authn-introspection-prepare-export
 pub use introspection::{IntrospectionCacheOptions, IntrospectionOptions, prepare_introspection};

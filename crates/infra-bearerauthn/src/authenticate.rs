@@ -5,7 +5,7 @@ use operation_context::{OperationContext, Stopped};
 use crate::{Failure, Principal, Verifier, parse_bearer};
 
 /// Bearer-authentication outcomes at an inbound transport boundary.
-pub const AUTHN_VERIFICATIONS_METRIC: &str = "authn_verifications_total";
+pub(crate) const AUTHN_VERIFICATIONS_METRIC: &str = "authn_verifications_total";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Transport {
@@ -110,7 +110,7 @@ impl Verifier {
     /// Pass every `Authorization` value of the request. A second value is
     /// [`Failure::Malformed`]. No value or a single value with a valid scheme
     /// other than Bearer is [`Failure::Missing`].
-    /// Records exactly one [`AUTHN_VERIFICATIONS_METRIC`] outcome labelled with
+    /// Records exactly one `authn_verifications_total` outcome labelled with
     /// `transport`: `timeout` when the context's deadline expires, `cancelled`
     /// when the context is cancelled or the caller drops the future, so an
     /// operator can tell a slow provider from a departed client.
