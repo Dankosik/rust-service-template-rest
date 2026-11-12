@@ -23,7 +23,7 @@ use super::{
     AcquisitionError, Algorithm, Credentials, Options, Rejection, TOKEN_LIMITS,
     acquisition_deadline, token_context,
 };
-use crate::{credentials::SubjectKey, options::Admitted};
+use crate::options::Admitted;
 
 const KEY_ID: &str = "key-1";
 /// The audience client an exchanged token is addressed to.
@@ -357,9 +357,8 @@ async fn every_algorithm_authenticates_the_client_and_exchanges_a_subject_token(
         )
         .unwrap()
         .claims;
-        let key = SubjectKey::of(&subject);
         let exchanged = credentials
-            .exchange(key, &subject, acquisition_deadline(&token_context(), None))
+            .exchange(&subject, acquisition_deadline(&token_context(), None))
             .await
             .unwrap();
         let exchanged = claims(&exchanged);
@@ -401,10 +400,9 @@ async fn refusals_carry_the_error_code_keycloak_reports() {
     // RFC 8693 section 2.2.2 reports an unusable subject token as
     // `invalid_request`, so it is not distinguishable from a malformed form.
     let subject = SecretString::from("not-a-token");
-    let key = SubjectKey::of(&subject);
     assert_eq!(
         registered
-            .exchange(key, &subject, acquisition_deadline(&token_context(), None))
+            .exchange(&subject, acquisition_deadline(&token_context(), None))
             .await
             .unwrap_err(),
         AcquisitionError::Rejected(Rejection::InvalidRequest)

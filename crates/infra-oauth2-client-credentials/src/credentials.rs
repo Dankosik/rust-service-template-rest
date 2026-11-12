@@ -174,7 +174,7 @@ impl Drop for ExchangeLeader<'_> {
 pub(crate) struct SubjectKey([u8; 32]);
 
 impl SubjectKey {
-    pub(crate) fn of(subject: &SecretString) -> Self {
+    fn of(subject: &SecretString) -> Self {
         let digest = aws_lc_rs::digest::digest(
             &aws_lc_rs::digest::SHA256,
             subject.expose_secret().as_bytes(),
@@ -342,10 +342,7 @@ impl Credentials {
         self.check_admission(deadline)?;
         let acquisition = async {
             match on_behalf_of {
-                Some(OnBehalfOf(subject)) => {
-                    self.exchange(SubjectKey::of(&subject), &subject, deadline)
-                        .await
-                }
+                Some(OnBehalfOf(subject)) => self.exchange(&subject, deadline).await,
                 None => self.service_token(deadline).await,
             }
         };
@@ -465,10 +462,10 @@ impl Credentials {
     /// for different subjects run concurrently.
     pub(crate) async fn exchange(
         &self,
-        key: SubjectKey,
         subject: &SecretString,
         deadline: AcquisitionDeadline<'_>,
     ) -> Result<Arc<Token>, AcquisitionError> {
+        let key = SubjectKey::of(subject);
         self.check_admission(deadline)?;
         let result = if let Some(token) = self.0.inner.reusable_exchange(key).await {
             Ok(token)
