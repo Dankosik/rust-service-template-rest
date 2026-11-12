@@ -24,7 +24,7 @@ use crate::traces::{ExporterState, TRACE_EXPORTER_ACTIVE_METRIC};
 /// Buckets in seconds for a histogram no emitter registered, the Prometheus
 /// client default. Without buckets the exporter renders a summary, whose
 /// quantiles cannot be aggregated across replicas.
-pub const DEFAULT_BUCKETS: &[f64] = &[
+const DEFAULT_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
 ];
 
@@ -97,7 +97,7 @@ impl Progress {
         max_lag
     }
 
-    fn age(&self) -> f64 {
+    fn age_seconds(&self) -> f64 {
         let sample = *self
             .sample
             .lock()
@@ -120,8 +120,8 @@ pub struct Metrics {
 }
 
 impl Metrics {
-    /// Installs the process-global recorder; a histogram without a
-    /// `(metric, buckets)` entry gets [`DEFAULT_BUCKETS`].
+    /// Installs the process-global recorder. Histograms without a
+    /// `(metric, buckets)` entry get the Prometheus client default buckets.
     ///
     /// # Errors
     ///
@@ -151,8 +151,8 @@ impl Metrics {
         })
     }
 
-    /// Sets [`TRACE_EXPORTER_ACTIVE_METRIC`] from the exporter's startup
-    /// state; `None`, no tracer provider, is inactive.
+    /// Sets `service_startup_trace_exporter_active` from the exporter's startup
+    /// state. A missing tracer provider (`None`) counts as inactive.
     pub fn record_trace_exporter(&self, state: Option<&ExporterState>) {
         let initialized = matches!(state, Some(ExporterState::Initialized { .. }));
         metrics::gauge!(TRACE_EXPORTER_ACTIVE_METRIC).set(if initialized { 1.0 } else { 0.0 });
@@ -164,7 +164,7 @@ impl Metrics {
     pub fn render(&self) -> String {
         self.process.collect();
         crate::logging::publish_observations();
-        metrics::gauge!(SCHEDULER_AGE_METRIC).set(self.progress.age());
+        metrics::gauge!(SCHEDULER_AGE_METRIC).set(self.progress.age_seconds());
         self.handle.render()
     }
 
