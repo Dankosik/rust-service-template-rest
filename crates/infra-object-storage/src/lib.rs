@@ -460,8 +460,8 @@ impl ObjectStorage {
     ///
     /// `NotFound` when the key is absent; on a provider whose HEAD reply
     /// carries no error body (Amazon S3 among them), a missing bucket also
-    /// reads as `NotFound`. `Integrity` when the response has no size;
-    /// otherwise `Busy`, `Unavailable`, or `Rejected`.
+    /// reads as `NotFound`. `Integrity` when the response size is missing or
+    /// negative; otherwise `Busy`, `Unavailable`, or `Rejected`.
     pub async fn head(&self, key: &ObjectKey) -> Result<ObjectMetadata, ObjectStorageError> {
         self.head_with_context(key, &OperationContext::unbounded())
             .await
@@ -549,22 +549,9 @@ impl ObjectStorage {
             .await
             .map_err(|interrupted| interrupted.fail(&mut guard, call))?;
         guard.answered_by(&result);
-        match result {
-            Ok(_) => {
-                guard.succeed();
-                Ok(())
-            }
-            // S3 and R2 answer 204; a provider that answers `NoSuchKey` means
-            // the same thing.
-            Err(sdk_error)
-                if aws_sdk_s3::error::ProvideErrorMetadata::code(&sdk_error)
-                    == Some("NoSuchKey") =>
-            {
-                guard.succeed();
-                Ok(())
-            }
-            Err(sdk_error) => Err(guard.fail(&error::from_sdk(call, &sdk_error))),
-        }
+        error::interpret_delete_result(&result).map_err(|failure| guard.fail(&failure))?;
+        guard.succeed();
+        Ok(())
     }
 
     /// Presign a GET for `expires_in`, between 1 second and 7 days. This is a

@@ -5,6 +5,7 @@ use std::borrow::Cow;
 
 use aws_sdk_s3::config::http::HttpResponse;
 use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
+use aws_sdk_s3::operation::delete_object::{DeleteObjectError, DeleteObjectOutput};
 use operation_context::Stopped;
 
 /// Why an operation failed. Each variant tells the caller what it may do next.
@@ -196,6 +197,17 @@ fn stop_label(stopped: Stopped) -> &'static str {
 
 type SdkFailure<E> = SdkError<E, HttpResponse>;
 
+pub(crate) fn interpret_delete_result(
+    result: &Result<DeleteObjectOutput, SdkFailure<DeleteObjectError>>,
+) -> Result<(), Failure> {
+    match result {
+        Ok(_) => Ok(()),
+        // S3 and R2 answer 204 for an absent key. Some stores report NoSuchKey.
+        Err(error) if error.code() == Some("NoSuchKey") => Ok(()),
+        Err(error) => Err(from_sdk(Call::UnconditionalMutation, error)),
+    }
+}
+
 pub(crate) fn from_sdk<E>(call: Call, error: &SdkFailure<E>) -> Failure
 where
     E: ProvideErrorMetadata + std::error::Error + 'static,
@@ -249,10 +261,7 @@ fn classify(call: Call, kind: FailureKind<'_>) -> ObjectStorageError {
         FailureKind::NoCredentials => E::Unavailable,
         FailureKind::Lost => call.ambiguous(),
         FailureKind::Status { status, code } => match (classification_status(status, code), code) {
-            // A missing bucket is configuration, not a missing object. S3
-            // answers a delete of a missing key with 204, so a delete 404 is
-            // the bucket too; a provider's `NoSuchKey` on delete never gets
-            // here, because `delete_with_context` reports it as success.
+            // A missing bucket is a configuration failure even on a read.
             (_, Some("NoSuchBucket")) => E::Rejected,
             (404, _) if call == Call::Read => E::NotFound,
             (412, _) if call == Call::CreateOnly => E::AlreadyExists,
