@@ -22,6 +22,30 @@ pub(crate) fn value_free<E: serde::de::Error>(message: impl std::fmt::Display) -
     E::custom(format_args!("{VALUE_FREE}{message}"))
 }
 
+pub(crate) fn unsigned_count<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    // Buffer the scalar kind before config-rs can coerce floats or booleans.
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Input {
+        Integer(u32),
+        Text(String),
+    }
+
+    let invalid = || {
+        serde::de::Error::invalid_value(
+            Unexpected::Other("a malformed or out-of-range count"),
+            &"an integer",
+        )
+    };
+    match Input::deserialize(deserializer).map_err(|_| invalid())? {
+        Input::Integer(value) => Ok(value),
+        Input::Text(value) => value.parse().map_err(|_| invalid()),
+    }
+}
+
 /// What a listen address must be, for the decode message.
 const LISTEN_ADDR_FORM: &str = "an IP address and port, or :port; hostnames are not resolved";
 

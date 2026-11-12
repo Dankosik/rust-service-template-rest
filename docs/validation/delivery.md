@@ -8,6 +8,7 @@ diagnostic. Existing CI and publication gates keep their own admission scope.
 | Workflow syntax | `make actionlint` | `go run` of the pinned actionlint; the host shellcheck and pyflakes integrations are off so local and CI agree |
 | Workflow security | `make zizmor` | see [Security](security.md) |
 | Shell scripts | `make shellcheck` | every tracked `*.sh` through the pinned container; `SHELL_FILES='a.sh b.sh'` scopes it, which CI does on diff events |
+| Python scripts | `make python-lint` | `ruff check` at the pinned version (`uvx`, or `pipx` when uv is absent) with the defect rules in `ruff.toml`; no formatter gate |
 | Tool pins | `make tools-check` | manifest shape, image digests, each Cargo tool reports its pin, Dockerfile `ARG` defaults and `FROM` tag agree with `tools/versions.env` and `rust-toolchain.toml` |
 | Dockerfile | `make dockerfile-check` | BuildKit's built-in checks (`docker buildx build --check`) |
 | Publication naming and promotion | `make publish-image-metadata-check` | self-test of `scripts/ci/publish-image-metadata.sh`: both modes, refused SHAs and tags, a release tag that disagrees with the crate version, partial promotion receipts |

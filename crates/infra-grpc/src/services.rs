@@ -52,7 +52,8 @@ impl Services {
     /// # Errors
     ///
     /// Returns [`Error::InvalidFileDescriptorSet`] when the bytes do not
-    /// decode.
+    /// decode and [`Error::ConflictingServiceDescription`] when descriptions
+    /// disagree on a service's methods.
     pub fn describe(&mut self, encoded_file_descriptor_set: &'static [u8]) -> Result<(), Error> {
         self.learn(encoded_file_descriptor_set)?;
         self.descriptor_sets.push(encoded_file_descriptor_set);
@@ -62,20 +63,31 @@ impl Services {
     pub(crate) fn learn(&mut self, encoded_file_descriptor_set: &[u8]) -> Result<(), Error> {
         let set = prost_types::FileDescriptorSet::decode(encoded_file_descriptor_set)
             .map_err(|_| Error::InvalidFileDescriptorSet)?;
+        let mut described: HashMap<String, Vec<String>> = HashMap::default();
         for file in &set.file {
             for service in &file.service {
                 let name = match file.package() {
                     "" => service.name().to_owned(),
                     package => format!("{package}.{}", service.name()),
                 };
-                let methods = service
+                let methods: Vec<_> = service
                     .method
                     .iter()
                     .map(|method| method.name().to_owned())
                     .collect();
-                self.described.insert(name, methods);
+                if let Some(previous) = described.get(&name).or_else(|| self.described.get(&name)) {
+                    if previous != &methods
+                        && previous.iter().collect::<HashSet<_>>()
+                            != methods.iter().collect::<HashSet<_>>()
+                    {
+                        return Err(Error::ConflictingServiceDescription(name));
+                    }
+                } else {
+                    described.insert(name, methods);
+                }
             }
         }
+        self.described.extend(described);
         Ok(())
     }
 

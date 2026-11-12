@@ -4,7 +4,7 @@
 //! a persistent format: changing them changes identity against live records.
 //! Preserve the exact framing pinned by the scope/request test vectors.
 
-use axum::http::{Method, Uri};
+use axum::http::{HeaderMap, Method, Uri};
 use infra_idempotency_store::{CallerIdentity, CallerKind, Digest, ScopeKey};
 use sha2::{Digest as _, Sha256};
 
@@ -83,6 +83,7 @@ pub(super) fn request_fingerprint(
     uri: &Uri,
     content_types: &[&[u8]],
     body: &[u8],
+    trailers: Option<&HeaderMap>,
 ) -> Digest {
     let mut hasher = Sha256::new();
     hasher.update(REQUEST_DOMAIN);
@@ -101,6 +102,18 @@ pub(super) fn request_fingerprint(
         frame(&mut hasher, value);
     }
     frame(&mut hasher, body);
+    // An absent or empty trailer section keeps the persisted v1 fingerprint.
+    if let Some(trailers) = trailers.filter(|trailers| !trailers.is_empty()) {
+        hasher.update(b"trailers/v1\0");
+        let mut fields = trailers.iter().collect::<Vec<_>>();
+        // Stable sort removes ordering between field names while keeping the
+        // order of repeated values for each name.
+        fields.sort_by(|(left, _), (right, _)| left.as_str().cmp(right.as_str()));
+        for (name, value) in fields {
+            frame(&mut hasher, name.as_str().as_bytes());
+            frame(&mut hasher, value.as_bytes());
+        }
+    }
     hasher.finalize().into()
 }
 
@@ -195,6 +208,7 @@ mod tests {
                 &"/widgets/%2F?a=1&b=2".parse::<Uri>().expect("URI"),
                 &[b"application/json".as_slice()],
                 br#"{"n":1}"#,
+                None,
             ),
             decode_digest("2e4fb57a46095c45e886d290707bf645412366966bf10009314001fd087eb30b")
         );
@@ -203,47 +217,80 @@ mod tests {
     #[test]
     fn request_framing_preserves_absence_order_and_exact_bytes() {
         let uri: Uri = "/widgets".parse().expect("URI");
-        let baseline = request_fingerprint(&Method::POST, &uri, &[], b"{}");
+        let baseline = request_fingerprint(&Method::POST, &uri, &[], b"{}", None);
         assert_ne!(
             baseline,
             request_fingerprint(
                 &Method::POST,
                 &"/widgets?".parse().expect("URI"),
                 &[],
-                b"{}"
+                b"{}",
+                None,
             )
         );
         assert_ne!(
             baseline,
-            request_fingerprint(&Method::POST, &uri, &[b"".as_slice()], b"{}")
+            request_fingerprint(&Method::POST, &uri, &[b"".as_slice()], b"{}", None)
         );
         assert_ne!(
             baseline,
-            request_fingerprint(&Method::POST, &uri, &[], b"{ }")
+            request_fingerprint(&Method::POST, &uri, &[], b"{ }", None)
         );
         assert_ne!(
             request_fingerprint(
                 &Method::POST,
                 &uri,
                 &[b"a".as_slice(), b"b".as_slice()],
-                b"{}"
+                b"{}",
+                None,
             ),
             request_fingerprint(
                 &Method::POST,
                 &uri,
                 &[b"b".as_slice(), b"a".as_slice()],
-                b"{}"
+                b"{}",
+                None,
             )
         );
         assert_ne!(
-            request_fingerprint(&Method::POST, &uri, &[b"ab".as_slice()], b"{}"),
+            request_fingerprint(&Method::POST, &uri, &[b"ab".as_slice()], b"{}", None),
             request_fingerprint(
                 &Method::POST,
                 &uri,
                 &[b"a".as_slice(), b"b".as_slice()],
-                b"{}"
+                b"{}",
+                None,
             )
         );
+    }
+
+    #[test]
+    fn request_identity_distinguishes_trailer_values_but_ignores_field_name_order() {
+        use axum::http::HeaderValue;
+
+        let uri: Uri = "/widgets".parse().expect("URI");
+        let fingerprint = |trailers: Option<&HeaderMap>| {
+            request_fingerprint(&Method::POST, &uri, &[], b"{}", trailers)
+        };
+        let mut first = HeaderMap::new();
+        assert_eq!(fingerprint(None), fingerprint(Some(&first)));
+        first.append("x-region", HeaderValue::from_static("east"));
+        first.append("x-region", HeaderValue::from_static("west"));
+        first.append("x-note", HeaderValue::from_static("note"));
+        let mut reordered = HeaderMap::new();
+        reordered.append("x-note", HeaderValue::from_static("note"));
+        reordered.append("x-region", HeaderValue::from_static("east"));
+        reordered.append("x-region", HeaderValue::from_static("west"));
+        assert_eq!(fingerprint(Some(&first)), fingerprint(Some(&reordered)));
+        assert_ne!(fingerprint(None), fingerprint(Some(&first)));
+
+        reordered.insert("x-region", HeaderValue::from_static("west"));
+        reordered.append("x-region", HeaderValue::from_static("east"));
+        assert_ne!(fingerprint(Some(&first)), fingerprint(Some(&reordered)));
+
+        reordered.insert("x-region", HeaderValue::from_static("east"));
+        reordered.append("x-region", HeaderValue::from_static("south"));
+        assert_ne!(fingerprint(Some(&first)), fingerprint(Some(&reordered)));
     }
 
     proptest::proptest! {

@@ -1,0 +1,17 @@
+# Bug-finding Python lint for the validation scripts; `make python-lint`.
+# Defects only: no formatter gate and no style rules.
+line-length = 100
+# Vendored upstream sources are archival, not this service's code.
+extend-exclude = ["vendor"]
+
+[lint]
+# E4/E7/E9 import, statement and syntax errors; F pyflakes; B bugbear. B904
+# (`raise ... from`) and B905 (`zip(strict=)`) are left out: they ask for style rewrites.
+select = ["E4", "E7", "E9", "F", "B"]
+ignore = ["B904", "B905"]
+
+[lint.per-file-ignores]
+# Tests insert the script directory into sys.path before importing it, and
+# build closures inside `subTest` or retry loops that run before the next
+# iteration rebinds the variable.
+"scripts/tests/*.py" = ["E402", "B023"]

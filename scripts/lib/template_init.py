@@ -41,7 +41,6 @@ from template_state import (
     ToolFailure,
     admit_plan,
     atomic_write,
-    ensure_safe_destination,
     git,
     git_head,
     git_root,

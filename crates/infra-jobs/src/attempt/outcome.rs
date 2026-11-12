@@ -419,14 +419,14 @@ mod tests {
         std::assert_matches!(
             outcome(
                 Ended::Error(
-                    JobError::retry_after_at_least("at least", Duration::from_secs(2)).unwrap()
+                    JobError::retry_after_at_least("at least", Duration::new(2, 500)).unwrap()
                 ),
                 1,
             ),
             Transition::Retry {
                 base_micros,
                 cause: RetryCause::Failure {
-                    floor_micros: 2_000_000
+                    floor_micros: 2_000_001
                 },
                 ..
             } if base_micros == 1_000_000.0

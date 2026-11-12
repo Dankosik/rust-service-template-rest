@@ -303,6 +303,47 @@ async fn declared_and_streamed_oversize_bodies_are_413_problems() {
     assert_eq!(response.status(), StatusCode::OK);
 }
 
+#[tokio::test]
+async fn handler_413_keeps_retry_after_when_converted_to_problem() {
+    let handler = || async {
+        (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            [
+                ("retry-after", "60"),
+                ("content-length", "4"),
+                (
+                    "content-digest",
+                    "sha-256=:cW7Ku0WsaoigSTmP3i09UiXG3TEhrpu8WvRX60uvBWo=:",
+                ),
+            ],
+            "wait",
+        )
+    };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
+    )]
+    let routes = Router::new().route("/upload", post(handler));
+    let response = harden(routes, &options())
+        .oneshot(request(Method::POST, "/upload"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(response.headers()[RETRY_AFTER], "60");
+    assert_eq!(response.headers()[CONTENT_TYPE], "application/problem+json");
+    assert!(!response.headers().contains_key("content-digest"));
+    let length = response.headers().get(CONTENT_LENGTH).cloned();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    if let Some(length) = length {
+        assert_eq!(
+            length.to_str().unwrap().parse::<usize>().unwrap(),
+            body.len()
+        );
+    }
+    let problem: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(problem["code"], "request_entity_too_large");
+}
+
 fn futures_stream(
     text: String,
 ) -> impl futures_util::Stream<Item = Result<axum::body::Bytes, std::io::Error>> {

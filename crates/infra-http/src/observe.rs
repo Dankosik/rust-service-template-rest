@@ -34,6 +34,7 @@ use std::time::{Duration, Instant};
 
 use axum::body::{Body, Bytes};
 use axum::extract::{MatchedPath, Request, State};
+use axum::http::header::{CONTENT_ENCODING, CONTENT_LENGTH, TRAILER, TRANSFER_ENCODING};
 use axum::http::{Method, StatusCode, Uri};
 use axum::middleware::Next;
 use axum::response::{IntoResponse as _, Response};
@@ -470,7 +471,22 @@ fn complete_problem(mut response: Response, request_id: Option<&str>) -> Respons
     if response.status() == StatusCode::PAYLOAD_TOO_LARGE
         && response.extensions().get::<Problem>().is_none()
     {
-        response = body_too_large().into_response();
+        let mut problem = body_too_large();
+        if let Some(id) = request_id {
+            problem = problem.with_request_id(id.to_owned());
+        }
+        let (parts, body) = problem.into_response().into_parts();
+        let headers = response.headers_mut();
+        for name in [CONTENT_ENCODING, CONTENT_LENGTH, TRAILER, TRANSFER_ENCODING] {
+            headers.remove(name);
+        }
+        for name in ["content-digest", "repr-digest", "digest", "content-md5"] {
+            headers.remove(name);
+        }
+        headers.extend(parts.headers);
+        response.extensions_mut().extend(parts.extensions);
+        *response.body_mut() = body;
+        return response;
     }
     let Some(id) = request_id else {
         return response;
@@ -482,6 +498,7 @@ fn complete_problem(mut response: Response, request_id: Option<&str>) -> Respons
     // Only `Problem::into_response` attaches the extension, so status and
     // headers (Allow, WWW-Authenticate, Retry-After) are already right.
     *response.body_mut() = axum::Json(&problem).into_response().into_body();
+    response.headers_mut().remove(CONTENT_LENGTH);
     response.extensions_mut().insert(problem);
     response
 }

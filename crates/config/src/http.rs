@@ -72,10 +72,12 @@ pub struct HttpConfig {
     pub max_body_bytes: ByteSize,
     /// Concurrent handler executions before shedding with 503. Zero disables
     /// shedding; [`Self::in_flight_cap`] gives the adapter form.
+    #[serde(deserialize_with = "crate::de::unsigned_count")]
     pub max_in_flight: u32,
     /// Accepted connections at once. At the cap the accept loop closes the
     /// socket with no HTTP response. Zero accepts without a bound;
     /// [`Self::connection_cap`] gives the adapter form.
+    #[serde(deserialize_with = "crate::de::unsigned_count")]
     pub max_connections: u32,
     /// Age after which a connection is told to finish and close, so its
     /// client reconnects and is balanced again. Each connection's age is

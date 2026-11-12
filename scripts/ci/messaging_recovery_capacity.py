@@ -7,7 +7,6 @@ PubAck whose completion is unresolved stays in the retained/ambiguous set).
 
 from collections import Counter
 import csv
-from datetime import datetime, timezone
 import json
 import math
 import os

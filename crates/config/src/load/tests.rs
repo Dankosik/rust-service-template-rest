@@ -234,6 +234,63 @@ fn file_keys_the_environment_cannot_name_are_refused() {
 }
 
 #[test]
+fn a_replaced_file_does_not_change_the_admitted_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write(&dir, "base.toml", "[log]\nlevel = \"debug\"\n");
+    let source = scan_file(&path).unwrap();
+    write(&dir, "base.toml", "[log]\nlevel = \"info\"\n");
+
+    let merged = config::Config::builder()
+        .add_source(source)
+        .build()
+        .unwrap();
+    assert_eq!(merged.get_string("log.level").unwrap(), "debug");
+}
+
+#[rstest::rstest]
+#[case::http_requests("http", "max_in_flight", "-1.0")]
+#[case::http_connections("http", "max_connections", "false")]
+#[case::readiness("health", "failure_threshold", "0.7")]
+fn configuration_counts_reject_non_integer_toml(
+    #[case] section: &str,
+    #[case] key: &str,
+    #[case] input: &str,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write(&dir, "bad.toml", &format!("[{section}]\n{key} = {input}\n"));
+    let err = load_from(
+        &LoadOptions {
+            config: Some(file),
+            ..LoadOptions::default()
+        },
+        BUILD,
+        env(&[]),
+    )
+    .unwrap_err();
+    assert_matches!(&err, Error::Deserialize(_), "{err}");
+    assert!(
+        err.to_string().contains(&format!("{section}.{key}")),
+        "{err}"
+    );
+}
+
+#[test]
+fn only_numeric_zero_disables_the_http_in_flight_cap() {
+    let options = LoadOptions::default();
+    let err = load_from(
+        &options,
+        BUILD,
+        env(&[("APP__HTTP__MAX_IN_FLIGHT", "false")]),
+    )
+    .unwrap_err();
+    assert_matches!(&err, Error::Deserialize(_), "{err}");
+    assert!(err.to_string().contains("http.max_in_flight"), "{err}");
+
+    let cfg = load_from(&options, BUILD, env(&[("APP__HTTP__MAX_IN_FLIGHT", "0")])).unwrap();
+    assert_eq!(cfg.http.in_flight_cap(), None);
+}
+
+#[test]
 fn precedence_is_defaults_then_files_in_order_then_env() {
     let dir = tempfile::tempdir().unwrap();
     let base = write(

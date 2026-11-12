@@ -60,6 +60,11 @@ latest() {
 			."dist-tags".latest as $v
 			| "\($v) \((now - (.time[$v][:19] + "Z" | fromdateiso8601)) / 86400 | floor)"'
 		;;
+	pypi)
+		fetch "https://pypi.org/pypi/${package}/json" | jq -r '
+			.info.version as $v
+			| "\($v) \((now - (.releases[$v][0].upload_time_iso_8601[:19] + "Z" | fromdateiso8601)) / 86400 | floor)"'
+		;;
 	go)
 		fetch "https://proxy.golang.org/${package}/@latest" | jq -r '
 			"\(.Version | ltrimstr("v")) \((now - (.Time[:19] + "Z" | fromdateiso8601)) / 86400 | floor)"'
@@ -119,6 +124,7 @@ if [[ ${upstream} == true ]]; then
 		fi
 	done <<'EOF'
 CARGO_DENY_VERSION|crates|cargo-deny|
+CARGO_NEXTEST_VERSION|crates|cargo-nextest|
 CARGO_SHEAR_VERSION|crates|cargo-shear|
 ZIZMOR_VERSION|crates|zizmor|
 CARGO_MUTANTS_VERSION|crates|cargo-mutants|
@@ -129,6 +135,7 @@ CARGO_AUDITABLE_VERSION|crates|cargo-auditable|
 REDOCLY_CLI_VERSION|npm|@redocly/cli|
 JSCPD_VERSION|npm|jscpd|
 SQUAWK_CLI_VERSION|npm|squawk-cli|
+RUFF_VERSION|pypi|ruff|
 OASDIFF_VERSION|go|github.com/oasdiff/oasdiff|
 GITLEAKS_VERSION|go|github.com/zricethezav/gitleaks/v8|
 ACTIONLINT_VERSION|go|github.com/rhysd/actionlint|

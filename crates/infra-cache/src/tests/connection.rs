@@ -228,6 +228,35 @@ async fn a_slow_reply_within_command_timeout_survives_the_maintenance_ping() {
 }
 
 #[tokio::test]
+async fn a_large_command_timeout_keeps_probes_and_maintenance_usable() {
+    use health::Probe;
+
+    let server = FakeServer::start().await;
+    let cache = Cache::start(CacheOptions {
+        command_timeout: Duration::MAX,
+        ..options(&format!("redis://{}", server.address), true, true, None)
+    })
+    .expect("start cache");
+    let namespace = cache.namespace("large_budget");
+    let probe = cache.probe();
+    let limit = Duration::from_secs(5);
+    tokio::time::timeout(limit, probe.check())
+        .await
+        .expect("probe must complete")
+        .expect("probe must succeed");
+
+    server
+        .wait_for(limit, "maintenance must send its own PING", || {
+            server.command_count("PING", None) >= 2
+        })
+        .await;
+    assert_eq!(
+        tokio::time::timeout(limit, namespace.get("ready")).await,
+        Ok(Ok(None))
+    );
+}
+
+#[tokio::test]
 async fn ping_permission_denial_keeps_the_connection_usable() {
     use health::Probe;
     use std::sync::atomic::Ordering;

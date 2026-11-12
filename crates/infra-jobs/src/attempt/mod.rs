@@ -66,7 +66,7 @@ pub(crate) fn describe_metrics() {
     metrics::describe_counter!(
         ATTEMPTS_METRIC,
         Unit::Count,
-        "Observed attempt outcomes, independent of queue-write acknowledgement"
+        "Observed attempt outcomes. Terminal failures count only after an acknowledged write."
     );
     metrics::describe_histogram!(
         ATTEMPT_DURATION_METRIC,

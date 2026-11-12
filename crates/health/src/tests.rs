@@ -836,6 +836,36 @@ async fn a_draining_owner_logs_no_check_outcome() {
 
 // template:begin grpc:health-changed-verdict-test
 #[tokio::test(start_paused = true)]
+async fn an_unrepresentable_stale_edge_waits_for_publication_or_cancellation() {
+    let readiness = Readiness::new(
+        vec![],
+        RefreshPolicy {
+            interval: Duration::from_secs(4_000_000_000_000_000_000),
+            ..policy()
+        },
+    );
+    readiness.refresh().await;
+    assert_eq!(readiness.arm_progress(), Ok(()));
+
+    let cancel = CancellationToken::new();
+    let progress = readiness.wait_for_progress_loss(cancel.clone());
+    let mut reader = readiness.reader();
+    let publication = reader.wait_for_verdict_event();
+    tokio::pin!(progress, publication);
+    tokio::select! {
+        biased;
+        result = &mut progress => panic!("unexpected progress loss: {result:?}"),
+        result = &mut publication => panic!("unexpected publication: {result:?}"),
+        () = std::future::ready(()) => {},
+    }
+
+    cancel.cancel();
+    readiness.refresh().await;
+    assert!(progress.await.is_none());
+    assert_eq!(publication.await, Ok(()));
+}
+
+#[tokio::test(start_paused = true)]
 async fn wait_for_verdict_event_delivers_drain_once_then_waits_without_losing_drain() {
     let (readiness, _, calls) = flaky(true);
     readiness.refresh().await;

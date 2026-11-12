@@ -242,8 +242,8 @@ impl JobError {
 
     /// Retry no sooner than `delay`, spending this attempt.
     ///
-    /// The queue keeps its jittered backoff and uses this delay as a floor.
-    /// The floor never bypasses exhaustion.
+    /// The queue keeps its jittered backoff and rounds this floor up to a
+    /// whole microsecond for PostgreSQL. The floor never bypasses exhaustion.
     ///
     /// # Errors
     ///
@@ -252,10 +252,11 @@ impl JobError {
         error: impl fmt::Display,
         delay: Duration,
     ) -> Result<Self, InvalidDelay> {
+        let whole_micros = checked_delay_micros(delay)?;
+        let has_fraction = !delay.subsec_nanos().is_multiple_of(1_000);
+        let floor_micros = whole_micros + i64::from(has_fraction);
         Ok(Self {
-            disposition: Disposition::RetryAfterAtLeast {
-                floor_micros: checked_delay_micros(delay)?,
-            },
+            disposition: Disposition::RetryAfterAtLeast { floor_micros },
             summary: error.to_string(),
         })
     }

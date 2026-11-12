@@ -50,7 +50,9 @@ pub struct Limits {
 ///
 /// Returns [`Error::InvalidFileDescriptorSet`] when reflection was added and
 /// cannot serve the described sets and [`Error::DuplicateService`] when
-/// reflection collides with a registered service.
+/// reflection collides with a registered service. Returns
+/// [`Error::ConflictingServiceDescription`] when the descriptions of a
+/// built-in service disagree on its methods.
 // template:begin service-auth:grpc-router-caller-rule-errors-doc
 /// Returns [`Error::MissingCallerRule`] when a caller table is incomplete.
 // template:end service-auth:grpc-router-caller-rule-errors-doc
@@ -284,11 +286,7 @@ async fn admit_business_call(
     response
 }
 
-/// How long a call over its limit waits for a permit: at most `max_wait`, and
-/// its opening budget less [`REJECT_DRAIN`], the time the refusal needs to read
-/// the request body and answer. The opening deadline answers first otherwise,
-/// with `DEADLINE_EXCEEDED`, which a client does not retry, and the refusal
-/// would never be sent.
+/// Leave time within the opening budget to drain and return the refusal.
 fn patience(request: &Request, max_wait: Duration) -> Duration {
     opening_context(request)
         .and_then(operation_context::OperationContext::remaining)
@@ -328,7 +326,12 @@ async fn reject_at_capacity(request: Request) -> Response {
     let status = Failure::new(service_failure::Code::ServiceUnavailable)
         .retry_after(AT_CAPACITY_RETRY_AFTER)
         .into_status_as(tonic::Code::ResourceExhausted, AT_CAPACITY_DETAIL);
-    let mut response = reject(request, status).await;
+    // Leave part of the remaining budget to return the status even if
+    // the upload never finishes.
+    let drain = opening_context(&request)
+        .and_then(operation_context::OperationContext::remaining)
+        .map_or(REJECT_DRAIN, |remaining| REJECT_DRAIN.min(remaining / 2));
+    let mut response = reject_with_drain(request, status, drain).await;
     response.extensions_mut().insert(Shed);
     response
 }
@@ -343,9 +346,17 @@ const REJECT_DRAIN_BYTES: usize = 64 * 1024;
 /// the headers, so an immediate answer closes the stream while that DATA is
 /// in flight; h2 answers the late DATA with a stream reset, and after 1024
 /// such resets on one connection closes it, with every other call on it.
+#[allow(
+    dead_code,
+    reason = "only the optional bearer and service authentication profiles use the full drain"
+)]
 pub(crate) async fn reject(request: Request, status: tonic::Status) -> Response {
+    reject_with_drain(request, status, REJECT_DRAIN).await
+}
+
+async fn reject_with_drain(request: Request, status: tonic::Status, drain: Duration) -> Response {
     let mut body = request.into_body();
-    let _ = tokio::time::timeout(REJECT_DRAIN, async {
+    let _ = tokio::time::timeout(drain, async {
         let mut read = 0;
         while let Some(Ok(frame)) = body.frame().await {
             tokio::task::consume_budget().await;
