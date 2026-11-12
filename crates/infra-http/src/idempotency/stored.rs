@@ -12,11 +12,8 @@ use infra_idempotency_store::{HeaderPair, Record};
 
 use super::caused_by_length_limit;
 
-/// The largest success body the boundary stores and replays (1 MiB).
-const MAX_STORED_BODY_BYTES: usize = 1_048_576;
-
-/// The largest total of replayable header name and value bytes (8 KiB).
-const MAX_STORED_HEADER_BYTES: usize = 8_192;
+const MAX_STORED_BODY_BYTES: usize = 1024 * 1024;
+const MAX_TOTAL_STORED_HEADER_BYTES: usize = 8 * 1024;
 
 /// The only headers the idempotency boundary stores and replays. This
 /// allow-list is what keeps `Idempotent-Replayed` out of storage: the marker
@@ -107,7 +104,7 @@ pub(super) async fn capture(response: Response) -> Result<Stored, Unstorable> {
                 .map(move |value| (name.clone(), value.clone()))
         })
         .collect::<Vec<_>>();
-    if header_bytes(&headers) > MAX_STORED_HEADER_BYTES {
+    if header_bytes(&headers) > MAX_TOTAL_STORED_HEADER_BYTES {
         return Err(Unstorable::HeaderLimit);
     }
     Ok(Stored {
@@ -131,8 +128,8 @@ impl Stored {
         Ok(Record {
             status,
             headers,
-            // Share the captured Bytes with persistence while Stored retains
-            // the first response; cloning here must not copy up to 1 MiB.
+            // Share the captured bytes with persistence without copying the body
+            // that Stored retains for the first response.
             body: self.body.clone(),
         })
     }
@@ -175,7 +172,7 @@ pub(super) fn decode(record: Record) -> Result<Stored, Undecodable> {
             Ok((name, value))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    if header_bytes(&headers) > MAX_STORED_HEADER_BYTES {
+    if header_bytes(&headers) > MAX_TOTAL_STORED_HEADER_BYTES {
         return Err(Undecodable::HeaderLimit);
     }
     Ok(Stored {
@@ -286,7 +283,7 @@ mod tests {
             capture(response(409, &[], Body::empty())).await,
             Err(Unstorable::Status)
         );
-        let large = "x".repeat(MAX_STORED_HEADER_BYTES);
+        let large = "x".repeat(MAX_TOTAL_STORED_HEADER_BYTES);
         assert_eq!(
             capture(response(
                 200,

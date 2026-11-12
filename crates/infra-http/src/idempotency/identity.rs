@@ -8,8 +8,7 @@ use axum::http::{Method, Uri};
 use infra_idempotency_store::{CallerIdentity, CallerKind, Digest, ScopeKey};
 use sha2::{Digest as _, Sha256};
 
-/// The longest decoded key in bytes.
-pub(super) const MAX_KEY_BYTES: usize = 255;
+pub(super) const MAX_DECODED_KEY_BYTES: usize = 255;
 
 /// The accepted key grammar, shared by the generated parameter and the runtime
 /// rejection.
@@ -61,7 +60,7 @@ pub(super) fn decode_key<'a>(values: impl IntoIterator<Item = &'a [u8]>) -> Opti
     } else {
         return None;
     };
-    (1..=MAX_KEY_BYTES)
+    (1..=MAX_DECODED_KEY_BYTES)
         .contains(&decoded.len())
         .then_some(decoded)
 }
@@ -170,7 +169,10 @@ mod tests {
             decode_key([b"first".as_slice(), b"second".as_slice()]),
             None
         );
-        assert_eq!(decode_key([vec![b'a'; MAX_KEY_BYTES + 1].as_slice()]), None);
+        assert_eq!(
+            decode_key([vec![b'a'; MAX_DECODED_KEY_BYTES + 1].as_slice()]),
+            None
+        );
     }
 
     #[test]

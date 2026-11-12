@@ -23,7 +23,7 @@ use utoipa::OpenApi as _;
 use super::caused_by_length_limit;
 use super::declaration::{self, CompositionError};
 use super::execute::{Attempt, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Outcome, Provenance};
-use super::identity::{self, KEY_GRAMMAR, MAX_KEY_BYTES};
+use super::identity::{self, KEY_GRAMMAR, MAX_DECODED_KEY_BYTES};
 use super::openapi::{IdempotencyComponents, KEY_HEADER, REPLAYED_HEADER, REPLAYED_VALUE};
 use crate::authn::VerifiedPrincipal;
 use crate::context::RequestDeadline;
@@ -263,7 +263,7 @@ fn invalid_key() -> Response {
         .invalid_param(
             format!("header.{KEY_HEADER}"),
             format!(
-                "must be one Idempotency-Key field; {KEY_GRAMMAR} The decoded value must contain 1 to {MAX_KEY_BYTES} bytes"
+                "must be one Idempotency-Key field; {KEY_GRAMMAR} The decoded value must contain 1 to {MAX_DECODED_KEY_BYTES} bytes"
             ),
         )
         .into_response()
