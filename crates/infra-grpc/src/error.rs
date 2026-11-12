@@ -15,6 +15,8 @@ pub enum Error {
     InvalidClientTls,
     #[error("gRPC file descriptor set is invalid")]
     InvalidFileDescriptorSet,
+    #[error("gRPC descriptors disagree on the methods of service {0}")]
+    ConflictingServiceDescription(String),
     #[error("gRPC service {0} is registered twice")]
     DuplicateService(&'static str),
     #[error("gRPC service {0} is in no described file descriptor set")]
