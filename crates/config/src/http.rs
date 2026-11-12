@@ -44,8 +44,8 @@ pub struct HttpConfig {
     #[serde(with = "humantime_serde")]
     pub grace_period: Duration,
     /// Bound for the HTTP drain, including the readiness propagation delay
-    /// in front of it. Not the process SIGTERM-to-exit window (`grace_period`)
-    /// and not Tokio's leftover-task drop (`runtime.shutdown_timeout`).
+    /// in front of it. The process budgets Tokio shutdown separately from
+    /// this drain, within the SIGTERM-to-exit window (`grace_period`).
     #[serde(with = "humantime_serde")]
     pub drain_timeout: Duration,
     /// How long the listener keeps serving after readiness flips off, so a

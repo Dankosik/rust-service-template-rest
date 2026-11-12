@@ -249,7 +249,7 @@ fn file_keys_the_environment_cannot_name_are_refused() {
 fn a_replaced_file_does_not_change_the_admitted_source() {
     let dir = tempfile::tempdir().unwrap();
     let path = write(&dir, "base.toml", "[log]\nlevel = \"debug\"\n");
-    let source = scan_file(&path).unwrap();
+    let source = scan_file(&path, &mut BTreeSet::new()).unwrap();
     write(&dir, "base.toml", "[log]\nlevel = \"info\"\n");
 
     let merged = config::Config::builder()
@@ -330,6 +330,28 @@ fn precedence_is_defaults_then_files_in_order_then_env() {
         "base file survives"
     );
     assert_eq!(cfg.log.level, "debug");
+}
+
+#[test]
+fn an_overlay_cannot_erase_a_table_before_unknown_keys_are_checked() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = write(&dir, "base.toml", "[http]\nrequest_timout = \"10s\"");
+    let replace = write(&dir, "replace.toml", "http = \"temporary\"");
+    let restore = write(&dir, "restore.toml", "[http]\naddr = \":8080\"");
+    let options = LoadOptions {
+        config: Some(base),
+        config_overlay: vec![replace.clone(), restore],
+        ..LoadOptions::default()
+    };
+
+    let err = load_from(&options, BUILD, env(&[]))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("cannot replace configuration table `http`"),
+        "{err}"
+    );
+    assert!(err.contains(&*replace.to_string_lossy()), "{err}");
 }
 
 #[test]
