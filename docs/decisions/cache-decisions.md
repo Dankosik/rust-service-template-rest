@@ -32,6 +32,13 @@ Registry and maintenance evidence, fetched 2026-09-27: `redis` (redis-rs) 1.7.1,
 
 ## Resolved dependency graph
 
+The redis-rs queue covers all admitted producers on a generation. Application
+commands yield for Tokio scheduling before arming retirement, then hand off
+to that queue without an intervening yield. This keeps pre-dispatch cancellation
+from withdrawing a connection and preserves retirement for an unanswered
+command handed to the driver. Recheck the handoff if the driver adds a
+pre-enqueue wait or the number of producers changes.
+
 `infra-cache` retains redis 1.8.1 with `tokio-comp` and `tokio-rustls-comp`.
 The supervisor reuses the already declared and locked `backon` 1.6.0 (`std`),
 `tokio-util` (`rt`), and Tokio synchronization/macros. The obsolete

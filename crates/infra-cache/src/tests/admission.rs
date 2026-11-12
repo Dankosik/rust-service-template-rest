@@ -314,6 +314,17 @@ fn an_admitted_dsn_outside_a_runtime_is_refused() {
 }
 
 #[test]
+fn a_tokio_runtime_without_timers_is_refused_at_startup() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+        .expect("Tokio runtime with I/O");
+    let _entered = runtime.enter();
+    let err = Cache::start(options("redis://127.0.0.1:6379", true, true, None)).unwrap_err();
+    assert_eq!(err, CacheError::NoTimeDriver);
+}
+
+#[test]
 fn options_debug_redacts_the_dsn() {
     let rendered = format!(
         "{:?}",
