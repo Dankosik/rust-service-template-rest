@@ -2,11 +2,9 @@
 //!
 //! An attempt holds one explicit `READ COMMITTED` transaction:
 //!
-//! 1. One statement checks the writer, takes the scope's transaction-scoped
-//!    advisory lock without waiting, and reads a live record. A live record
-//!    decides whatever the lock returned: equal fingerprints replay, different
-//!    ones mismatch. No record and no lock means another attempt holds the
-//!    scope.
+//! 1. One statement checks the writer and reads a live record. Equal
+//!    fingerprints replay, and different ones mismatch. Only a miss tries
+//!    to take the scope's transaction-scoped advisory lock without waiting.
 //! 2. With the lock and no record, a second statement reads again.
 //! 3. Only a record still missing in step 2 runs the work, then writes the
 //!    success record in the same transaction.
@@ -55,9 +53,8 @@ impl ScopeKey {
     /// scope holds the lock and arbitration finds no live record for this
     /// scope. A live record still decides replay or mismatch.
     fn lock_key(&self) -> i64 {
-        let mut prefix = [0; 8];
-        prefix.copy_from_slice(&self.0[..8]);
-        i64::from_be_bytes(prefix)
+        let [b0, b1, b2, b3, b4, b5, b6, b7, ..] = self.0;
+        i64::from_be_bytes([b0, b1, b2, b3, b4, b5, b6, b7])
     }
 }
 
@@ -124,7 +121,7 @@ pub enum Attempted<C, R> {
     Replay(Record),
     /// A live record for a different request decided. The work did not run.
     Mismatch,
-    /// Another transaction holds the scope. The work did not run.
+    /// No live record was found and another transaction holds the lock key.
     InProgress,
 }
 
@@ -261,16 +258,16 @@ async fn arbitrate(
     scope: &ScopeKey,
     fingerprint: &Digest,
 ) -> Result<Option<Decision>, AttemptError> {
-    // Step 1. The lock is taken after the statement's snapshot, so a missing
-    // record with the lock still needs step 2. Advisory locks work on a
-    // standby too; a lock taken there ends with the refused transaction.
+    // Step 1. Advisory locks work on a standby too; a lock taken there ends
+    // with the refused transaction.
     let row = observed(
         "lock and read idempotency record",
         sqlx::query!(
             "SELECT \
              NOT pg_is_in_recovery() AND current_setting('transaction_read_only') = 'off' \
                  AS \"writable!\", \
-             pg_try_advisory_xact_lock($1) AS \"acquired!\", \
+             CASE WHEN r.scope_key IS NULL THEN pg_try_advisory_xact_lock($1) \
+                  ELSE FALSE END AS \"acquired!\", \
              r.fingerprint AS \"fingerprint?: Digest\", r.status AS \"status?\", \
              r.headers AS \"headers?: Vec<HeaderPair>\", \
              CASE WHEN r.fingerprint = $3 THEN r.body END AS body \
@@ -481,6 +478,17 @@ fn refused(phase: &'static str, class: AttemptError, cause: &'static str) -> Att
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_lock_key_is_the_digest_prefix_as_big_endian() {
+        let mut digest = [0xff; 32];
+        digest[..8].copy_from_slice(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
+        assert_eq!(
+            ScopeKey::from_digest(digest).lock_key(),
+            0x0102_0304_0506_0708
+        );
+        assert_eq!(ScopeKey::from_digest([0xff; 32]).lock_key(), -1);
+    }
 
     #[test]
     fn an_unknown_commit_is_unavailable_even_for_a_non_transient_fault() {

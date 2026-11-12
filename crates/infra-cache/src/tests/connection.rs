@@ -843,6 +843,41 @@ async fn stopped_contexts_dispatch_no_commands_or_retire_shared_connection() {
 }
 
 #[tokio::test]
+async fn dropping_a_command_that_yields_before_dispatch_keeps_the_connection() {
+    use tokio::task::coop::{consume_budget, has_budget_remaining};
+
+    let server = FakeServer::start().await;
+    let cache = Cache::start(CacheOptions {
+        command_timeout: Duration::from_secs(2),
+        ..options(&format!("redis://{}", server.address), true, true, None)
+    })
+    .expect("start cache");
+    let namespace = cache.namespace("yield_before_send");
+    assert_eq!(namespace.get("ready").await, Ok(None));
+    let connections = server.connections();
+
+    tokio::spawn(async move {
+        while has_budget_remaining() {
+            consume_budget().await;
+        }
+        {
+            let stopped = namespace.get("stopped");
+            tokio::pin!(stopped);
+            assert!(poll_once(stopped.as_mut()).await.is_pending());
+        }
+        assert_eq!(namespace.get("live").await, Ok(None));
+    })
+    .await
+    .expect("command task completes");
+
+    assert_eq!(server.connections(), connections);
+    assert_eq!(
+        server.command_count("GET", Some("yield_before_send:stopped")),
+        0
+    );
+}
+
+#[tokio::test]
 async fn caller_cutoff_bounds_connection_acquisition() {
     use operation_context::OperationContext;
 

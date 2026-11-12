@@ -137,8 +137,8 @@ pub async fn enqueue<K: JobKind>(
     let row = observed(
         "enqueue job",
         sqlx::query!(
-            "INSERT INTO background_jobs (id, kind, payload, unique_key, not_before, trace_context, trace_state) \
-             VALUES ($7, $1, $2::text::jsonb, $3::text COLLATE \"C\", \
+            "INSERT INTO background_jobs (id, kind, payload, payload_text, unique_key, not_before, trace_context, trace_state) \
+             VALUES ($7, $1, $2::text::jsonb, $2, $3::text COLLATE \"C\", \
                      statement_timestamp() + ($4::bigint * interval '1 microsecond'), $5, $6) \
              ON CONFLICT (kind, unique_key) WHERE unique_key IS NOT NULL AND state IN ('pending', 'running') \
              DO NOTHING \
@@ -178,6 +178,8 @@ pub async fn enqueue<K: JobKind>(
 /// kind, key, and payload. The selected row stays locked until the caller
 /// commits or rolls back `tx`; [`LivePayloadComparison::NoLongerLive`] means
 /// the caller must not treat the duplicate as accepted.
+/// Equality compares serialized job payloads byte for byte. A row from an
+/// older writer is compared by re-serializing what its handler would decode.
 /// Preparation has the same once-only serialization, late-error precedence
 /// and finite source, callback, concurrency and deadline duties as [`enqueue`].
 ///
@@ -199,10 +201,10 @@ pub async fn compare_live_payload<K: JobKind>(
     )?;
     // Matches `background_jobs_live_unique_key` as the insert in [`enqueue`]
     // does, so it reads the same live holder.
-    let same = observed(
+    let stored = observed(
         "compare job payload",
-        sqlx::query_scalar!(
-            "SELECT payload = $3::text::jsonb AS \"same!\" \
+        sqlx::query!(
+            "SELECT payload_text, CASE WHEN payload_text IS NULL THEN payload::text END AS legacy_payload \
              FROM background_jobs \
              WHERE kind = $1 \
                AND unique_key = $2::text COLLATE \"C\" \
@@ -210,15 +212,30 @@ pub async fn compare_live_payload<K: JobKind>(
              FOR UPDATE",
             K::NAME,
             prepared.unique_key,
-            prepared.payload,
         )
         .fetch_optional(&mut *tx),
     )
     .await?;
-    Ok(match same {
-        Some(true) => LivePayloadComparison::Same,
-        Some(false) => LivePayloadComparison::Different,
-        None => LivePayloadComparison::NoLongerLive,
+    let Some(stored) = stored else {
+        return Ok(LivePayloadComparison::NoLongerLive);
+    };
+    let same = if let Some(payload_text) = stored.payload_text {
+        payload_text == prepared.payload
+    } else {
+        stored.legacy_payload.as_deref().is_some_and(|legacy| {
+            let Ok(decoded) = serde_json::from_str::<K>(legacy) else {
+                return false;
+            };
+            let mut writer = PayloadWriter::default();
+            serde_json::to_writer(&mut writer, &decoded).is_ok()
+                && writer.total == prepared.payload.len()
+                && writer.retained == prepared.payload.as_bytes()
+        })
+    };
+    Ok(if same {
+        LivePayloadComparison::Same
+    } else {
+        LivePayloadComparison::Different
     })
 }
 
@@ -322,9 +339,6 @@ fn prepare<'a, K: JobKind>(
             bytes: writer.total,
         });
     }
-    if contains_decoded_nul(&writer.retained) {
-        return Err(EnqueueError::PayloadContainsNul);
-    }
     // A successful serde_json serialization emits UTF-8; reuse its allocation.
     let payload = String::from_utf8(writer.retained).map_err(|error| {
         EnqueueError::Serialize(serde_json::Error::io(io::Error::new(
@@ -332,6 +346,9 @@ fn prepare<'a, K: JobKind>(
             error,
         )))
     })?;
+    if contains_decoded_nul(&payload) {
+        return Err(EnqueueError::PayloadContainsNul);
+    }
     serde_json::from_str::<K>(&payload).map_err(EnqueueError::PayloadDoesNotDecode)?;
     Ok(Prepared {
         payload,
@@ -349,7 +366,14 @@ fn is_valid_unique_key(key: &str) -> bool {
 /// A backslash always consumes its following escape byte. In the JSON text
 /// `\\u0000` (an escaped backslash, then `u0000`) the second backslash is
 /// consumed by the first, and its following `u0000` stays literal.
-fn contains_decoded_nul(payload: &[u8]) -> bool {
+fn contains_decoded_nul(payload: &str) -> bool {
+    // Any decoded NUL is spelled `\u0000`; the substring search is several
+    // times faster than the walk below, which then only runs for a payload
+    // that contains that text.
+    if !payload.contains(r"\u0000") {
+        return false;
+    }
+    let payload = payload.as_bytes();
     let mut index = 0;
     while index < payload.len() {
         if payload[index] == b'\\' {
@@ -373,7 +397,7 @@ mod tests {
 
     use super::{
         EnqueueError, EnqueueOptions, MAX_PAYLOAD_BYTES, MAX_UNIQUE_KEY_BYTES, PayloadWriter,
-        WAKE_INTERVAL, prepare, take_wake_slot,
+        WAKE_INTERVAL, contains_decoded_nul, prepare, take_wake_slot,
     };
     use crate::JobKind;
     use crate::kind::{InvalidDelay, MAX_DELAY, checked_delay_micros};
@@ -709,6 +733,24 @@ mod tests {
             Err(EnqueueError::PayloadContainsNul)
         );
         assert!(prepare(&Raw(r"\u0000".to_owned()), EnqueueOptions::default()).is_ok());
+    }
+
+    #[test]
+    fn a_backslash_consumes_the_byte_after_it_when_looking_for_a_decoded_nul() {
+        for (text, decoded) in [
+            (r"\u0000", true),
+            (r"x\u0000", true),
+            (r"\\u0000", false),
+            (r"\\\u0000", true),
+            (r"\n\u0000", true),
+            (r"\u000", false),
+            (r"abc\", false),
+            (r"\u0000\", true),
+            (r"\\u0000\", false),
+            ("", false),
+        ] {
+            assert_eq!(contains_decoded_nul(text), decoded, "{text}");
+        }
     }
 
     #[test]

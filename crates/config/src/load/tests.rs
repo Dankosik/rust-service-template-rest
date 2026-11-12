@@ -57,6 +57,18 @@ fn runtime_workers_load_from_the_environment_and_zero_names_its_key() {
 }
 
 #[test]
+fn log_filter_keeps_spaces_in_a_span_field_value() {
+    let filter = "[postgres_statement{db.query.summary=complete jobs}]=debug";
+    let config = load_from(
+        &LoadOptions::default(),
+        BUILD,
+        env(&[("APP__LOG__LEVEL", filter)]),
+    )
+    .unwrap();
+    assert_eq!(config.log.level, filter);
+}
+
+#[test]
 fn shipped_local_configuration_loads_without_environment_overrides() {
     let cfg = load_from(
         &LoadOptions {
@@ -251,6 +263,7 @@ fn a_replaced_file_does_not_change_the_admitted_source() {
 #[case::http_requests("http", "max_in_flight", "-1.0")]
 #[case::http_connections("http", "max_connections", "false")]
 #[case::readiness("health", "failure_threshold", "0.7")]
+#[case::runtime_workers("runtime", "worker_threads", "true")]
 fn configuration_counts_reject_non_integer_toml(
     #[case] section: &str,
     #[case] key: &str,
@@ -463,7 +476,7 @@ fn missing_file_is_reported() {
 }
 
 #[test]
-fn zero_counts_fail_to_deserialize() {
+fn nonzero_counts_reject_zero_and_boolean_text() {
     let cases: &[(&str, &str)] = &[
         // template:begin postgres:load-zero-postgres-count
         ("APP__POSTGRES__MAX_CONNECTIONS", "postgres.max_connections"),
@@ -479,9 +492,11 @@ fn zero_counts_fail_to_deserialize() {
         // template:end messaging:load-zero-messaging-count
     ];
     for &(name, key) in cases {
-        let err = load_from(&LoadOptions::default(), BUILD, env(&[(name, "0")])).unwrap_err();
-        assert_matches!(err, Error::Deserialize(_), "{name}: {err}");
-        assert!(err.to_string().contains(key), "{name}: {err}");
+        for input in ["0", "yes"] {
+            let err = load_from(&LoadOptions::default(), BUILD, env(&[(name, input)])).unwrap_err();
+            assert_matches!(err, Error::Deserialize(_), "{name}: {err}");
+            assert!(err.to_string().contains(key), "{name}: {err}");
+        }
     }
 }
 

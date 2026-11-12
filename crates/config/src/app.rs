@@ -70,8 +70,8 @@ pub struct AppConfig {
     /// Replica identity published as `service.instance.id`.
     ///
     /// `None` (missing, empty, or whitespace-only wire value) is a vacant
-    /// replica id: the composition root fills the hostname (the pod name on
-    /// Kubernetes). Version and commit empty sentinels are replaced from
+    /// replica id: the telemetry resource builder fills the hostname (the pod
+    /// name on Kubernetes). Version and commit empty sentinels are replaced from
     /// [`BuildInfo`] before validation; this field is not. Without an
     /// instance identity every replica pushes the same resource and their
     /// cumulative counters collide into one series.

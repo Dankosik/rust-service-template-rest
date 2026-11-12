@@ -282,7 +282,7 @@ impl Resources {
 }
 
 fn digest(bytes: &[u8]) -> String {
-    prefixed_digest_hex("", &Sha256::digest(bytes))
+    prefixed_digest_hex("", &Sha256::digest(bytes).into())
 }
 
 /// How [`save`] places the written file.

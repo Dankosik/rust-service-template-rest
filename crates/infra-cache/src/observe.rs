@@ -1,6 +1,7 @@
 use std::sync::OnceLock;
 use std::time::Instant;
 
+use enum_map::EnumMap;
 use metrics::{Histogram, Unit};
 use tracing::Span;
 
@@ -34,7 +35,7 @@ fn operation_label(operation: Operation) -> &'static str {
 }
 
 /// How a command ended. Every variant is one series of an operation.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, enum_map::Enum)]
 pub(crate) enum Outcome {
     Hit,
     Miss,
@@ -65,43 +66,7 @@ impl Outcome {
 /// before it opens the cache.
 #[derive(Default, derive_more::Debug)]
 #[debug("NamespaceHistograms {{ .. }}")]
-pub(crate) struct NamespaceHistograms {
-    get: OutcomeHistograms,
-    set: OutcomeHistograms,
-    delete: OutcomeHistograms,
-}
-
-#[derive(Default)]
-struct OutcomeHistograms {
-    hit: OnceLock<Histogram>,
-    miss: OnceLock<Histogram>,
-    ok: OnceLock<Histogram>,
-    cancelled: OnceLock<Histogram>,
-    failed: ErrorHistograms,
-}
-
-#[derive(Default)]
-struct ErrorHistograms {
-    timeout: OnceLock<Histogram>,
-    io: OnceLock<Histogram>,
-    auth: OnceLock<Histogram>,
-    response: OnceLock<Histogram>,
-    parse: OnceLock<Histogram>,
-    other: OnceLock<Histogram>,
-}
-
-impl ErrorHistograms {
-    fn slot(&self, error_type: ErrorType) -> &OnceLock<Histogram> {
-        match error_type {
-            ErrorType::Timeout => &self.timeout,
-            ErrorType::Io => &self.io,
-            ErrorType::Auth => &self.auth,
-            ErrorType::Response => &self.response,
-            ErrorType::Parse => &self.parse,
-            ErrorType::Other => &self.other,
-        }
-    }
-}
+pub(crate) struct NamespaceHistograms(EnumMap<Operation, EnumMap<Outcome, OnceLock<Histogram>>>);
 
 impl NamespaceHistograms {
     fn histogram(
@@ -110,21 +75,11 @@ impl NamespaceHistograms {
         operation: Operation,
         outcome: Outcome,
     ) -> &Histogram {
-        let histograms = match operation {
-            Operation::Get => &self.get,
-            Operation::Set => &self.set,
-            Operation::Delete => &self.delete,
+        let error_label = match outcome {
+            Outcome::Failed(error_type) => Some(error_type.label()),
+            Outcome::Hit | Outcome::Miss | Outcome::Ok | Outcome::Cancelled => None,
         };
-        let (slot, error_label) = match outcome {
-            Outcome::Hit => (&histograms.hit, None),
-            Outcome::Miss => (&histograms.miss, None),
-            Outcome::Ok => (&histograms.ok, None),
-            Outcome::Cancelled => (&histograms.cancelled, None),
-            Outcome::Failed(error_type) => {
-                (histograms.failed.slot(error_type), Some(error_type.label()))
-            }
-        };
-        slot.get_or_init(|| {
+        self.0[operation][outcome].get_or_init(|| {
             // Only a failed series names its cause, so the cause is visible
             // without a trace or a debug log.
             if let Some(error_label) = error_label {
@@ -260,4 +215,29 @@ pub(crate) fn describe() {
         Unit::Count,
         "Periodic cache password file re-reads on an open connection, by outcome (unchanged, auth_accepted, read_failed, refresh_failed) and the reason of a refresh_failed"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::*;
+
+    #[test]
+    fn every_outcome_is_its_own_series() {
+        let outcomes = EnumMap::<Outcome, ()>::default();
+        let mut series = HashSet::new();
+        for (outcome, ()) in &outcomes {
+            let error_label = match outcome {
+                Outcome::Failed(error_type) => Some(error_type.label()),
+                _ => None,
+            };
+            assert!(
+                series.insert((outcome.label(), error_label)),
+                "{} {error_label:?} is used twice",
+                outcome.label()
+            );
+        }
+        assert_eq!(series.len(), outcomes.len());
+    }
 }

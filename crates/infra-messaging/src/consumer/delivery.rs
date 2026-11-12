@@ -341,8 +341,13 @@ impl DeliveryHandler {
             Some(Deadline::new(Instant::now(), BROKER_OPERATION_BUDGET)),
             cancel.clone(),
         );
-        let result =
-            send_publication(&self.shared, &self.dead_letter_subject, message, &context).await;
+        let result = send_publication(
+            &self.shared,
+            self.dead_letter_subject.clone(),
+            message,
+            &context,
+        )
+        .await;
         let outcome = match &result {
             Ok(_) => "accepted",
             Err(crate::PublishError::Ambiguous) => "ambiguous",

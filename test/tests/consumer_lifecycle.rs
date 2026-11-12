@@ -279,7 +279,7 @@ fn required(name: &str) -> String {
 }
 
 fn digest(bytes: &[u8]) -> String {
-    infra_messaging::wire::prefixed_digest_hex("", &Sha256::digest(bytes))
+    infra_messaging::wire::prefixed_digest_hex("", &Sha256::digest(bytes).into())
 }
 
 fn wall_clock_ms() -> u128 {

@@ -49,56 +49,49 @@ impl tracing::Subscriber for Events {
     fn exit(&self, _: &tracing::span::Id) {}
 }
 
-#[test]
-fn acquisition_reports_only_slow_success_and_native_timeout() {
+#[tokio::test]
+async fn acquisition_reports_only_slow_success_and_native_timeout() {
     let events = Events::new(tracing::Level::WARN);
     let started = Instant::now();
-    tracing::subscriber::with_default(events.clone(), || {
-        let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
-        tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .build()
-            .unwrap()
-            .block_on(async {
-                let budget = Duration::from_millis(2500);
-                assert_eq!(
-                    acquisition("fast", budget, async { Ok(7) }).await.unwrap(),
-                    7
-                );
-                assert_eq!(
-                    acquisition("slow", budget, async {
-                        tokio::time::sleep(Duration::from_millis(1050)).await;
-                        Ok(9)
-                    })
-                    .await
-                    .unwrap(),
-                    9
-                );
-                for error in [
-                    sqlx::Error::PoolTimedOut,
-                    sqlx::Error::PoolClosed,
-                    sqlx::Error::Protocol("private server detail".to_owned()),
-                ] {
-                    let expected = format!("{error:?}");
-                    let returned = acquisition("failed", budget, async { Err::<(), _>(error) })
-                        .await
-                        .unwrap_err();
-                    assert_eq!(format!("{returned:?}"), expected);
-                }
-                assert!(
-                    tokio::time::timeout(
-                        Duration::from_millis(1),
-                        acquisition(
-                            "cancelled",
-                            budget,
-                            std::future::pending::<Result<(), sqlx::Error>>()
-                        ),
-                    )
-                    .await
-                    .is_err()
-                );
-            });
-    });
+    let _subscriber = tracing::subscriber::set_default(events.clone());
+    let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let budget = Duration::from_millis(2500);
+    assert_eq!(
+        acquisition("fast", budget, async { Ok(7) }).await.unwrap(),
+        7
+    );
+    assert_eq!(
+        acquisition("slow", budget, async {
+            tokio::time::sleep(Duration::from_millis(1050)).await;
+            Ok(9)
+        })
+        .await
+        .unwrap(),
+        9
+    );
+    for error in [
+        sqlx::Error::PoolTimedOut,
+        sqlx::Error::PoolClosed,
+        sqlx::Error::Protocol("private server detail".to_owned()),
+    ] {
+        let expected = format!("{error:?}");
+        let returned = acquisition("failed", budget, async { Err::<(), _>(error) })
+            .await
+            .unwrap_err();
+        assert_eq!(format!("{returned:?}"), expected);
+    }
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(1),
+            acquisition(
+                "cancelled",
+                budget,
+                std::future::pending::<Result<(), sqlx::Error>>()
+            ),
+        )
+        .await
+        .is_err()
+    );
     let events = events.records.lock().unwrap();
     assert_eq!(events.len(), 2, "{events:?}");
     let slow = &events[0];
@@ -132,8 +125,8 @@ fn every_boundary_failure_has_its_own_outcome() {
     }
 }
 
-#[test]
-fn a_transaction_that_gets_no_connection_records_its_wait_and_its_outcome() {
+#[tokio::test]
+async fn a_transaction_that_gets_no_connection_records_its_wait_and_its_outcome() {
     let mut builder = PrometheusBuilder::new();
     for &(metric, buckets) in HISTOGRAMS {
         builder = builder
@@ -141,29 +134,22 @@ fn a_transaction_that_gets_no_connection_records_its_wait_and_its_outcome() {
             .expect("the buckets are valid");
     }
     let recorder = builder.build_recorder();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("test runtime");
-    metrics::with_local_recorder(&recorder, || {
-        describe();
-        runtime.block_on(async {
-            // Port 1 on loopback is refused at once; the pool retries
-            // until its acquire budget ends.
-            let dsn = Dsn::admit_with_environment(
-                "postgres://app:pw@127.0.0.1:1/app?sslmode=disable",
-                |_| false,
-            )
-            .expect("the dsn is admitted");
-            let pool = PgPoolOptions::new()
-                .acquire_timeout(Duration::from_millis(50))
-                .connect_lazy_with(dsn.connect_options());
-            let result: Result<(), TxError> = in_tx(&pool, async |_tx| Ok(())).await;
-            std::assert_matches!(result, Err(TxError::Acquire(_)), "{result:?}");
-        });
-        // A transaction dropped before it ended.
-        drop(TransactionObservation::start(Span::none()));
-    });
+    let _recorder = metrics::set_default_local_recorder(&recorder);
+    describe();
+    // Port 1 on loopback is refused at once; the pool retries
+    // until its acquire budget ends.
+    let dsn =
+        Dsn::admit_with_environment("postgres://app:pw@127.0.0.1:1/app?sslmode=disable", |_| {
+            false
+        })
+        .expect("the dsn is admitted");
+    let pool = PgPoolOptions::new()
+        .acquire_timeout(Duration::from_millis(50))
+        .connect_lazy_with(dsn.connect_options());
+    let result: Result<(), TxError> = in_tx(&pool, async |_tx| Ok(())).await;
+    std::assert_matches!(result, Err(TxError::Acquire(_)), "{result:?}");
+    // A transaction dropped before it ended.
+    drop(TransactionObservation::start(Span::none()));
     let scrape = recorder.handle().render();
     for line in [
         "db_client_connection_wait_time_seconds_count{db_client_connection_pool_name=\"postgres\"} 1",
@@ -177,64 +163,58 @@ fn a_transaction_that_gets_no_connection_records_its_wait_and_its_outcome() {
     assert!(!scrape.contains("pw"), "{scrape}");
 }
 
-#[test]
-fn acquire_until_waits_for_the_deadline_not_for_the_pool_timeout() {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("test runtime");
-    runtime.block_on(async {
-        // Port 1 on loopback is refused at once; the pool retries until its
-        // own acquire timeout ends and then reports `PoolTimedOut`.
-        let dsn = Dsn::admit_with_environment(
-            "postgres://app:pw@127.0.0.1:1/app?sslmode=disable",
-            |_| false,
-        )
+#[tokio::test]
+async fn acquire_until_waits_for_the_deadline_not_for_the_pool_timeout() {
+    // Port 1 on loopback is refused at once; the pool retries until its
+    // own acquire timeout ends and then reports `PoolTimedOut`.
+    let dsn =
+        Dsn::admit_with_environment("postgres://app:pw@127.0.0.1:1/app?sslmode=disable", |_| {
+            false
+        })
         .expect("the dsn is admitted");
-        let pool = PgPoolOptions::new()
-            .acquire_timeout(Duration::from_millis(50))
-            .connect_lazy_with(dsn.connect_options());
+    let pool = PgPoolOptions::new()
+        .acquire_timeout(Duration::from_millis(50))
+        .connect_lazy_with(dsn.connect_options());
 
-        let started = tokio::time::Instant::now();
-        let waited = acquire_until(&pool, "test", started + Duration::from_millis(400)).await;
-        std::assert_matches!(waited, Err(sqlx::Error::PoolTimedOut));
-        assert!(
-            started.elapsed() >= Duration::from_millis(400),
-            "the wait outlasts the pool's {:?} timeout: {:?}",
-            pool.options().get_acquire_timeout(),
-            started.elapsed()
-        );
+    let started = tokio::time::Instant::now();
+    let waited = acquire_until(&pool, "test", started + Duration::from_millis(400)).await;
+    std::assert_matches!(waited, Err(sqlx::Error::PoolTimedOut));
+    assert!(
+        started.elapsed() >= Duration::from_millis(400),
+        "the wait outlasts the pool's {:?} timeout: {:?}",
+        pool.options().get_acquire_timeout(),
+        started.elapsed()
+    );
 
-        // A deadline inside the pool's timeout wins over it.
-        let patient = PgPoolOptions::new()
-            .acquire_timeout(Duration::from_secs(30))
-            .connect_lazy_with(dsn.connect_options());
-        let started = tokio::time::Instant::now();
-        let cut = acquire_until(&patient, "test", started + Duration::from_millis(100)).await;
-        std::assert_matches!(cut, Err(sqlx::Error::PoolTimedOut));
-        assert!(
-            started.elapsed() < Duration::from_secs(5),
-            "{:?}",
-            started.elapsed()
-        );
+    // A deadline inside the pool's timeout wins over it.
+    let patient = PgPoolOptions::new()
+        .acquire_timeout(Duration::from_secs(30))
+        .connect_lazy_with(dsn.connect_options());
+    let started = tokio::time::Instant::now();
+    let cut = acquire_until(&patient, "test", started + Duration::from_millis(100)).await;
+    std::assert_matches!(cut, Err(sqlx::Error::PoolTimedOut));
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
 
-        let result: Result<(), TxError> = crate::in_tx_with_acquire_deadline(
-            &pool,
-            tokio::time::Instant::now() + Duration::from_millis(100),
-            crate::TxOptions::default(),
-            async |_tx| Ok(()),
-        )
-        .await;
-        std::assert_matches!(
-            result,
-            Err(TxError::Acquire(sqlx::Error::PoolTimedOut)),
-            "{result:?}"
-        );
-    });
+    let result: Result<(), TxError> = crate::in_tx_with_acquire_deadline(
+        &pool,
+        tokio::time::Instant::now() + Duration::from_millis(100),
+        crate::TxOptions::default(),
+        async |_tx| Ok(()),
+    )
+    .await;
+    std::assert_matches!(
+        result,
+        Err(TxError::Acquire(sqlx::Error::PoolTimedOut)),
+        "{result:?}"
+    );
 }
 
-#[test]
-fn a_statement_records_its_duration_by_summary_and_by_how_it_failed() {
+#[tokio::test]
+async fn a_statement_records_its_duration_by_summary_and_by_how_it_failed() {
     let recorder = PrometheusBuilder::new()
         .set_buckets_for_metric(
             Matcher::Full(OPERATION_DURATION_METRIC.to_owned()),
@@ -242,37 +222,30 @@ fn a_statement_records_its_duration_by_summary_and_by_how_it_failed() {
         )
         .expect("the buckets are valid")
         .build_recorder();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("test runtime");
-    metrics::with_local_recorder(&recorder, || {
-        runtime.block_on(async {
-            assert_eq!(observed("read widget", async { Ok(7) }).await.unwrap(), 7);
-            let rejected = observed("write widget", async {
-                Err::<(), _>(crate::error::tests::database("23505"))
-            })
-            .await;
-            assert_eq!(sqlstate(&rejected.unwrap_err()).as_deref(), Some("23505"));
-            let lost = observed("write widget", async {
-                Err::<(), _>(sqlx::Error::Io(std::io::Error::other(
-                    "reset by db.internal",
-                )))
-            })
-            .await;
-            assert!(lost.is_err());
-            // The caller stops waiting before the server answers.
-            let abandoned = tokio::time::timeout(
-                Duration::from_millis(1),
-                observed(
-                    "slow widget",
-                    std::future::pending::<Result<(), sqlx::Error>>(),
-                ),
-            )
-            .await;
-            assert!(abandoned.is_err());
-        });
-    });
+    let _recorder = metrics::set_default_local_recorder(&recorder);
+    assert_eq!(observed("read widget", async { Ok(7) }).await.unwrap(), 7);
+    let rejected = observed("write widget", async {
+        Err::<(), _>(crate::error::tests::database("23505"))
+    })
+    .await;
+    assert_eq!(sqlstate(&rejected.unwrap_err()).as_deref(), Some("23505"));
+    let lost = observed("write widget", async {
+        Err::<(), _>(sqlx::Error::Io(std::io::Error::other(
+            "reset by db.internal",
+        )))
+    })
+    .await;
+    assert!(lost.is_err());
+    // The caller stops waiting before the server answers.
+    let abandoned = tokio::time::timeout(
+        Duration::from_millis(1),
+        observed(
+            "slow widget",
+            std::future::pending::<Result<(), sqlx::Error>>(),
+        ),
+    )
+    .await;
+    assert!(abandoned.is_err());
     let scrape = recorder.handle().render();
     let series = |labels: &str| {
         format!(

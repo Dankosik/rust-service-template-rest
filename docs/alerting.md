@@ -91,16 +91,19 @@ version and datasource, while these series answer the same questions.
 
 ### HTTPErrorBudgetBurn
 
-Clients receive 5xx answers faster than the objective allows. `problem_code`
-in the `http_request` log events separates the causes that share a status:
-`service_unavailable` with the at-capacity detail is load shedding (see
-`http_server_shed_requests_total`) after a request waited `http.request_timeout`
-for a permit (see `http_server_admission_wait_seconds`), `gateway_timeout` is
-the request deadline (a caller that stopped sending its body gets `408
-request_timeout` instead and does not count here), and other codes name a
-failed dependency. An access log with `termination="server_shutdown"`
+Clients receive 5xx answers faster than the objective allows. In the
+`http_request` log, `termination="load_shed"` identifies a 503 sent after the
+request waited `http.request_timeout` for a permit. Check
+`http_server_shed_requests_total` and `http_server_admission_wait_seconds`
+for the frequency and duration of those waits. For an admitted webhook with
+`problem_code="service_unavailable"`, correlate by `request_id` with the
+`webhook_receipt_unavailable` warning to find the failed receipt stage.
+
+`problem_code="gateway_timeout"` identifies an exhausted request budget.
+A caller that stopped sending its body gets `408 request_timeout` and
+does not count here. An access log with `termination="server_shutdown"`
 records a forced shutdown before the response head as 503 for the SLO.
-The client received no HTTP status. Correlate by `http_route`:
+The client received no HTTP status. Correlate by `http_route`.
 
 ```promql
 sum by(http_route, http_response_status_code) (

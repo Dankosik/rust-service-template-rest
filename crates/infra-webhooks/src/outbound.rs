@@ -316,7 +316,12 @@ impl Handler<Delivery> for Dispatcher {
                 endpoint_gone = status == StatusCode::GONE;
             })
             .await;
-        if endpoint_gone && matches!(&response, Err(HttpError::ResponseBodyTooLarge)) {
+        if endpoint_gone
+            && matches!(
+                &response,
+                Err(HttpError::ResponseBodyTooLarge | HttpError::Transport { .. })
+            )
+        {
             return Err(fail(endpoint_id, DeliveryFailure::EndpointGone));
         }
         classify_response(endpoint_id, response, SystemTime::now())
@@ -603,7 +608,7 @@ fn unix_timestamp(now: SystemTime) -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_metrics::CounterKeys;
+    use metrics_util::debugging::DebuggingRecorder;
     use std::assert_matches;
     use std::time::{Duration, UNIX_EPOCH};
 
@@ -833,8 +838,9 @@ mod tests {
                 .body(bytes::Bytes::new())
                 .unwrap())
         };
-        let keys = CounterKeys::default();
-        metrics::with_local_recorder(&keys, || {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        metrics::with_local_recorder(&recorder, || {
             for exchange in [
                 response(204),
                 response(503),
@@ -844,12 +850,12 @@ mod tests {
                 let _ = super::classify_response("partner", exchange, UNIX_EPOCH);
             }
         });
-        let labels: Vec<Vec<(String, String)>> = keys
-            .0
-            .lock()
-            .expect("keys")
+        let labels: Vec<Vec<(String, String)>> = snapshotter
+            .snapshot()
+            .into_vec()
             .iter()
-            .map(|key| {
+            .map(|(key, ..)| {
+                let key = key.key();
                 assert_eq!(key.name(), super::WEBHOOK_DELIVERY_OUTCOMES_METRIC);
                 key.labels()
                     .map(|label| (label.key().to_owned(), label.value().to_owned()))

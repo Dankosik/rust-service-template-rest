@@ -1,8 +1,6 @@
 //! Fixed monotonic deadlines and cancellation lineage shared by operation owners.
 
-use std::future::{Future as _, pending, poll_fn};
-use std::pin::pin;
-use std::task::Poll;
+use std::future::pending;
 use std::time::Duration;
 
 use tokio::time::Instant;
@@ -63,6 +61,9 @@ impl Deadline {
     }
 
     pub async fn wait(self) {
+        // The check comes before any timer: timers have millisecond
+        // resolution, so `sleep_until` alone leaves a zero budget pending on
+        // its first poll.
         while !self.expired() {
             tokio::time::sleep(self.remaining().min(Duration::from_hours(24))).await;
         }
@@ -170,23 +171,20 @@ impl OperationContext {
                 None => pending().await,
             }
         };
-        let mut deadline = pin!(deadline);
-        let mut cancellation = pin!(self.cancellation.cancelled());
-        poll_fn(|cx| {
-            if deadline.as_mut().poll(cx).is_ready() {
-                Poll::Ready(Stopped::Deadline)
-            } else if cancellation.as_mut().poll(cx).is_ready() {
-                Poll::Ready(Stopped::Cancelled)
-            } else {
-                Poll::Pending
-            }
-        })
-        .await
+        tokio::select! {
+            biased;
+            () = deadline => Stopped::Deadline,
+            () = self.cancellation.cancelled() => Stopped::Cancelled,
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::future::{Future as _, poll_fn};
+    use std::pin::pin;
+    use std::task::Poll;
+
     use super::*;
 
     #[tokio::test(start_paused = true)]
@@ -201,6 +199,14 @@ mod tests {
         assert_eq!(child.remaining(), Some(Duration::from_secs(2)));
         tokio::time::advance(Duration::from_secs(2)).await;
         assert_eq!(child.wait_stopped().await, Stopped::Deadline);
+    }
+
+    #[tokio::test]
+    async fn a_spent_budget_is_reported_on_the_first_poll() {
+        let context = OperationContext::with_timeout(Duration::ZERO);
+        let mut stopped = pin!(context.wait_stopped());
+        let first = poll_fn(|cx| Poll::Ready(stopped.as_mut().poll(cx))).await;
+        assert_eq!(first, Poll::Ready(Stopped::Deadline));
     }
 
     #[tokio::test(start_paused = true)]

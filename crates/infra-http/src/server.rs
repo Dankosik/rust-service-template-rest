@@ -20,10 +20,9 @@ use hyper_util::server::conn::auto;
 use hyper_util::service::TowerToHyperService;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Semaphore, watch};
-use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout_at};
 use tokio_util::sync::CancellationToken;
-use tokio_util::task::TaskTracker;
+use tokio_util::task::{AbortOnDropHandle, TaskTracker};
 use tower::ServiceBuilder;
 
 mod sniff;
@@ -102,7 +101,7 @@ pub enum Drained {
 #[derive(Debug)]
 pub struct Server {
     local_addr: SocketAddr,
-    accept_loop: JoinHandle<()>,
+    accept_loop: AbortOnDropHandle<()>,
     accept_failure: watch::Receiver<Option<AcceptFailure>>,
     connection_shutdown: ConnectionShutdown,
     connections: TaskTracker,
@@ -230,13 +229,14 @@ impl Server {
     pub fn accept_failure(&self) -> impl Future<Output = AcceptFailure> + Send + 'static + use<> {
         let mut failure = self.accept_failure.clone();
         async move {
-            loop {
-                if let Some(failure) = *failure.borrow_and_update() {
-                    return failure;
-                }
-                if failure.changed().await.is_err() {
-                    return std::future::pending().await;
-                }
+            let seen = failure
+                .wait_for(Option::is_some)
+                .await
+                .ok()
+                .and_then(|seen| *seen);
+            match seen {
+                Some(failure) => failure,
+                None => std::future::pending().await,
             }
         }
     }
@@ -259,7 +259,6 @@ impl Server {
         // still abort acceptance rather than detach its task.
         let Ok(joined) = timeout_at(deadline, &mut self.accept_loop).await else {
             self.connection_shutdown.force.cancel();
-            self.accept_loop.abort();
             return Err(ServerError::AcceptTimeout);
         };
 
@@ -293,7 +292,6 @@ impl Drop for Server {
         // requests only; synchronous Drop cannot confirm task completion.
         self.connection_shutdown.finish.cancel();
         self.connection_shutdown.force.cancel();
-        self.accept_loop.abort();
     }
 }
 
@@ -403,10 +401,10 @@ where
         connections.clone(),
         prepare_io,
     );
-    let accept_loop = tokio::spawn(async move {
+    let accept_loop = AbortOnDropHandle::new(tokio::spawn(async move {
         let _guard = guard;
         accept.await;
-    });
+    }));
     Ok(Server {
         local_addr,
         accept_loop,

@@ -238,17 +238,15 @@ pub(super) enum JoinOutcome {
 pub(crate) async fn background_failure(
     receiver: &mut watch::Receiver<Option<BackgroundFailure>>,
 ) -> BackgroundFailure {
-    loop {
-        if let Some(failure) = *receiver.borrow_and_update() {
-            return failure;
-        }
-        if receiver.changed().await.is_err() {
-            return BackgroundFailure {
-                name: "background_owner",
-                panicked: false,
-            };
-        }
-    }
+    receiver
+        .wait_for(Option::is_some)
+        .await
+        .ok()
+        .and_then(|failure| *failure)
+        .unwrap_or(BackgroundFailure {
+            name: "background_owner",
+            panicked: false,
+        })
 }
 
 #[cfg(test)]

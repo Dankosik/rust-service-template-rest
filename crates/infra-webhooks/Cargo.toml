@@ -19,6 +19,7 @@ hotpath = ["dep:hotpath", "hotpath/hotpath", "infra-jobs/hotpath"]
 [dependencies]
 hotpath = { workspace = true, optional = true }
 aws-lc-rs = { workspace = true, features = ["alloc", "aws-lc-sys", "prebuilt-nasm"] }
+arrayvec = { workspace = true }
 base64 = { workspace = true, features = ["std"] }
 derive_more = { workspace = true, features = ["debug"] }
 bytes = { workspace = true, features = ["std"] }
@@ -46,4 +47,6 @@ tokio-util = { workspace = true }
 # template:end inbound-webhooks:webhooks-inbound-dependencies
 
 [dev-dependencies]
+metrics-util = { workspace = true, features = ["debugging"] }
+proptest = { workspace = true, features = ["std"] }
 tokio = { workspace = true, features = ["macros", "rt", "time"] }

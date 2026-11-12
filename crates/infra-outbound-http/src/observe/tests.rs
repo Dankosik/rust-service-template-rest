@@ -116,22 +116,16 @@ async fn exercise_completed_attempts() {
     server.await.expect("body-limit fixture joins");
 }
 
-#[test]
-fn observation_records_polled_attempts_once_without_request_data() {
+#[tokio::test]
+async fn observation_records_polled_attempts_once_without_request_data() {
     let recorder = observation_recorder();
     let diagnostics = SpanDiagnostics::default();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("test runtime");
-    metrics::with_local_recorder(&recorder, || {
-        tracing::subscriber::with_default(diagnostics.clone(), || {
-            // Keep callsite interest independent of a sibling test's thread-local
-            // subscriber; tracing-core 0.1.36 otherwise has a single-dispatcher fast path.
-            let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
-            runtime.block_on(exercise_completed_attempts());
-        });
-    });
+    let _recorder = metrics::set_default_local_recorder(&recorder);
+    let _subscriber = tracing::subscriber::set_default(diagnostics.clone());
+    // Keep callsite interest independent of a sibling test's thread-local
+    // subscriber; tracing-core 0.1.36 otherwise has a single-dispatcher fast path.
+    let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    exercise_completed_attempts().await;
 
     let scrape = recorder.handle().render();
     assert_eq!(
@@ -219,8 +213,8 @@ fn observation_records_polled_attempts_once_without_request_data() {
     }
 }
 
-#[test]
-fn url_template_names_the_operation_in_the_span_and_the_metric() {
+#[tokio::test]
+async fn url_template_names_the_operation_in_the_span_and_the_metric() {
     use opentelemetry::trace::TracerProvider as _;
     use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
     use tracing_subscriber::layer::SubscriberExt as _;
@@ -232,33 +226,25 @@ fn url_template_names_the_operation_in_the_span_and_the_metric() {
         .build();
     let subscriber = tracing_subscriber::registry()
         .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")));
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("test runtime");
-    metrics::with_local_recorder(&recorder, || {
-        tracing::subscriber::with_default(subscriber, || {
-            // See `observation_records_polled_attempts_once_without_request_data`.
-            let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
-            runtime.block_on(async {
-                let material = TlsMaterial::new(FIXTURE_HOST);
-                let (address, captured, server) = tls_server_capture(
-                    &material,
-                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n",
-                )
-                .await;
-                let mut request = request_to("https://provider.fixture.test/items/sentinel-path");
-                request.extensions_mut().insert(UrlTemplate("/items/{id}"));
-                fixture_client(address, &material)
-                    .execute(request, deadline())
-                    .await
-                    .expect("HTTP error statuses remain responses");
-                let wire = captured.await.expect("captured request");
-                assert!(wire.starts_with(b"GET /items/sentinel-path HTTP/1.1\r\n"));
-                server.await.expect("capture fixture server succeeds");
-            });
-        });
-    });
+    let _recorder = metrics::set_default_local_recorder(&recorder);
+    let _subscriber = tracing::subscriber::set_default(subscriber);
+    // See `observation_records_polled_attempts_once_without_request_data`.
+    let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let material = TlsMaterial::new(FIXTURE_HOST);
+    let (address, captured, server) = tls_server_capture(
+        &material,
+        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n",
+    )
+    .await;
+    let mut request = request_to("https://provider.fixture.test/items/sentinel-path");
+    request.extensions_mut().insert(UrlTemplate("/items/{id}"));
+    fixture_client(address, &material)
+        .execute(request, deadline())
+        .await
+        .expect("HTTP error statuses remain responses");
+    let wire = captured.await.expect("captured request");
+    assert!(wire.starts_with(b"GET /items/sentinel-path HTTP/1.1\r\n"));
+    server.await.expect("capture fixture server succeeds");
 
     let scrape = recorder.handle().render();
     assert_eq!(
@@ -292,77 +278,68 @@ fn url_template_names_the_operation_in_the_span_and_the_metric() {
     );
 }
 
-#[test]
-fn observation_records_timeout_cancellation_and_polled_drop_once() {
+#[tokio::test]
+async fn observation_records_timeout_cancellation_and_polled_drop_once() {
     let recorder = observation_recorder();
     let diagnostics = SpanDiagnostics::default();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("test runtime");
-    metrics::with_local_recorder(&recorder, || {
-        tracing::subscriber::with_default(diagnostics.clone(), || {
-            // Keep callsite interest independent of a sibling test's thread-local
-            // subscriber; tracing-core 0.1.36 otherwise has a single-dispatcher fast path.
-            let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
-            runtime.block_on(async {
-                let material = TlsMaterial::new(FIXTURE_HOST);
-                // The recorded 200 status proves the timeout struck after the
-                // response headers, while the body was pending.
-                let (address, server) = tls_server_stall_after_headers(&material).await;
-                let timed = fixture_client(address, &material)
-                    .execute(request(), deadline())
-                    .await;
-                std::assert_matches!(timed, Err(Error::Timeout));
-                server.abort();
-                assert!(
-                    server
-                        .await
-                        .expect_err("timeout fixture aborts")
-                        .is_cancelled()
-                );
+    let _recorder = metrics::set_default_local_recorder(&recorder);
+    let _subscriber = tracing::subscriber::set_default(diagnostics.clone());
+    // Keep callsite interest independent of a sibling test's thread-local
+    // subscriber; tracing-core 0.1.36 otherwise has a single-dispatcher fast path.
+    let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let material = TlsMaterial::new(FIXTURE_HOST);
+    // The recorded 200 status proves the timeout struck after the
+    // response headers, while the body was pending.
+    let (address, server) = tls_server_stall_after_headers(&material).await;
+    let timed = fixture_client(address, &material)
+        .execute(request(), deadline())
+        .await;
+    std::assert_matches!(timed, Err(Error::Timeout));
+    server.abort();
+    assert!(
+        server
+            .await
+            .expect_err("timeout fixture aborts")
+            .is_cancelled()
+    );
 
-                let (address, server) = tls_server_stall_after_headers(&material).await;
-                let client = fixture_client(address, &material);
-                let mut exchange = Box::pin(client.execute(request(), deadline()));
-                assert!(
-                    tokio::time::timeout(Duration::from_millis(200), &mut exchange)
-                        .await
-                        .is_err(),
-                    "stalled exchange completed unexpectedly"
-                );
-                drop(exchange);
-                server.abort();
-                assert!(
-                    server
-                        .await
-                        .expect_err("drop fixture aborts")
-                        .is_cancelled()
-                );
+    let (address, server) = tls_server_stall_after_headers(&material).await;
+    let client = fixture_client(address, &material);
+    let mut exchange = Box::pin(client.execute(request(), deadline()));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), &mut exchange)
+            .await
+            .is_err(),
+        "stalled exchange completed unexpectedly"
+    );
+    drop(exchange);
+    server.abort();
+    assert!(
+        server
+            .await
+            .expect_err("drop fixture aborts")
+            .is_cancelled()
+    );
 
-                let (address, server) = tls_server_stall_after_headers(&material).await;
-                let context =
-                    operation_context::OperationContext::with_timeout(Duration::from_secs(1));
-                let client = fixture_client(address, &material);
-                let mut exchange = Box::pin(client.execute_with_context(request(), &context));
-                assert!(
-                    tokio::time::timeout(Duration::from_millis(200), &mut exchange)
-                        .await
-                        .is_err(),
-                    "stalled exchange completed unexpectedly"
-                );
-                context.cancel();
-                std::assert_matches!(exchange.await, Err(Error::Cancelled));
-                server.abort();
-                assert!(
-                    server
-                        .await
-                        .expect_err("cancel fixture aborts")
-                        .is_cancelled()
-                );
-            });
-        });
-    });
+    let (address, server) = tls_server_stall_after_headers(&material).await;
+    let context = operation_context::OperationContext::with_timeout(Duration::from_secs(1));
+    let client = fixture_client(address, &material);
+    let mut exchange = Box::pin(client.execute_with_context(request(), &context));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), &mut exchange)
+            .await
+            .is_err(),
+        "stalled exchange completed unexpectedly"
+    );
+    context.cancel();
+    std::assert_matches!(exchange.await, Err(Error::Cancelled));
+    server.abort();
+    assert!(
+        server
+            .await
+            .expect_err("cancel fixture aborts")
+            .is_cancelled()
+    );
 
     let scrape = recorder.handle().render();
     assert_eq!(
@@ -492,24 +469,18 @@ async fn exercise_transport_failures() -> Vec<String> {
     roots
 }
 
-#[test]
-fn transport_failures_are_classed_and_their_cause_is_logged_in_the_client_span() {
+#[tokio::test]
+async fn transport_failures_are_classed_and_their_cause_is_logged_in_the_client_span() {
     use tracing_subscriber::layer::SubscriberExt as _;
 
     let recorder = observation_recorder();
     let diagnostics = EventDiagnostics::default();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("test runtime");
-    let roots = metrics::with_local_recorder(&recorder, || {
-        let subscriber = tracing_subscriber::registry().with(diagnostics.clone());
-        tracing::subscriber::with_default(subscriber, || {
-            // See `observation_records_polled_attempts_once_without_request_data`.
-            let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
-            runtime.block_on(exercise_transport_failures())
-        })
-    });
+    let _recorder = metrics::set_default_local_recorder(&recorder);
+    let _subscriber =
+        tracing::subscriber::set_default(tracing_subscriber::registry().with(diagnostics.clone()));
+    // See `observation_records_polled_attempts_once_without_request_data`.
+    let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let roots = exercise_transport_failures().await;
 
     let scrape = recorder.handle().render();
     for (class, after_headers) in [

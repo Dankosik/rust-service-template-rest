@@ -366,31 +366,24 @@ async fn probe_succeeds_against_valkey() {
     cache.probe().check().await.expect("cache ping");
 }
 
-#[test]
-fn an_unreachable_port_is_unavailable_within_the_command_bound() {
+#[tokio::test]
+async fn an_unreachable_port_is_unavailable_within_the_command_bound() {
     let recorder = observation_recorder();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("runtime");
-    metrics::with_local_recorder(&recorder, || {
-        runtime.block_on(async {
-            #[expect(
-                clippy::disallowed_methods,
-                clippy::disallowed_types,
-                reason = "this fixture briefly reserves a loopback port and closes it before testing refused connections"
-            )]
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("closed port");
-            let port = listener.local_addr().expect("port").port();
-            drop(listener);
-            let cache = connect_url(&format!("redis://127.0.0.1:{port}"), COMMAND_TIMEOUT);
-            let namespace = cache.namespace("down");
-            let started = Instant::now();
-            let err = namespace.get(&unique_key()).await.unwrap_err();
-            std::assert_matches!(err, Unavailable);
-            assert!(started.elapsed() < TIMEOUT_BOUND);
-        });
-    });
+    let _recorder = metrics::set_default_local_recorder(&recorder);
+    #[expect(
+        clippy::disallowed_methods,
+        clippy::disallowed_types,
+        reason = "this fixture briefly reserves a loopback port and closes it before testing refused connections"
+    )]
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("closed port");
+    let port = listener.local_addr().expect("port").port();
+    drop(listener);
+    let cache = connect_url(&format!("redis://127.0.0.1:{port}"), COMMAND_TIMEOUT);
+    let namespace = cache.namespace("down");
+    let started = Instant::now();
+    let err = namespace.get(&unique_key()).await.unwrap_err();
+    std::assert_matches!(err, Unavailable);
+    assert!(started.elapsed() < TIMEOUT_BOUND);
     let scrape = recorder.handle().render();
     assert!(
         scrape.contains("outcome=\"error\"") || scrape.contains("outcome=\"timeout\""),
@@ -398,36 +391,29 @@ fn an_unreachable_port_is_unavailable_within_the_command_bound() {
     );
 }
 
-#[test]
-fn a_silent_server_times_out_within_the_command_bound() {
+#[tokio::test]
+async fn a_silent_server_times_out_within_the_command_bound() {
     let recorder = observation_recorder();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("runtime");
-    metrics::with_local_recorder(&recorder, || {
-        runtime.block_on(async {
-            let listener = TcpListener::bind("127.0.0.1:0").await.expect("silent bind");
-            let port = listener.local_addr().expect("port").port();
+    let _recorder = metrics::set_default_local_recorder(&recorder);
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("silent bind");
+    let port = listener.local_addr().expect("port").port();
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
             tokio::spawn(async move {
-                loop {
-                    let Ok((stream, _)) = listener.accept().await else {
-                        break;
-                    };
-                    tokio::spawn(async move {
-                        let _stream = stream;
-                        std::future::pending::<()>().await;
-                    });
-                }
+                let _stream = stream;
+                std::future::pending::<()>().await;
             });
-            let cache = connect_url(&format!("redis://127.0.0.1:{port}"), COMMAND_TIMEOUT);
-            let namespace = cache.namespace("silent");
-            let started = Instant::now();
-            let err = namespace.get(&unique_key()).await.unwrap_err();
-            std::assert_matches!(err, Unavailable);
-            assert!(started.elapsed() < TIMEOUT_BOUND);
-        });
+        }
     });
+    let cache = connect_url(&format!("redis://127.0.0.1:{port}"), COMMAND_TIMEOUT);
+    let namespace = cache.namespace("silent");
+    let started = Instant::now();
+    let err = namespace.get(&unique_key()).await.unwrap_err();
+    std::assert_matches!(err, Unavailable);
+    assert!(started.elapsed() < TIMEOUT_BOUND);
     let scrape = recorder.handle().render();
     assert!(scrape.contains("outcome=\"timeout\""), "{scrape}");
 }

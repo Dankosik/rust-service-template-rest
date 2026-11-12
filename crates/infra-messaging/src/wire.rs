@@ -339,17 +339,10 @@ fn parse_timestamp(value: &str) -> Result<OffsetDateTime, EnvelopeError> {
 
 /// `prefix` followed by the lowercase hex of a SHA-256 digest.
 #[must_use]
-pub fn prefixed_digest_hex(prefix: &str, digest: &[u8]) -> String {
-    let mut id = String::with_capacity(prefix.len() + 2 * digest.len());
+pub fn prefixed_digest_hex(prefix: &str, digest: &[u8; 32]) -> String {
+    let mut id = String::with_capacity(prefix.len() + DIGEST_HEX_LEN);
     id.push_str(prefix);
-    let mut hex = [0_u8; DIGEST_HEX_LEN];
-    for chunk in digest.chunks(DIGEST_HEX_LEN / 2) {
-        // Each output slice is exactly twice its chunk, the only case
-        // `encode_to_str` refuses, so the `else` never runs.
-        if let Ok(text) = const_hex::encode_to_str(chunk, &mut hex[..2 * chunk.len()]) {
-            id.push_str(text);
-        }
-    }
+    id.push_str(const_hex::Buffer::<32>::new().format(digest));
     id
 }
 
@@ -374,6 +367,56 @@ mod tests {
         assert!(!valid_identity(""));
         assert!(valid_identity(&"x".repeat(256)));
         assert!(!valid_identity(&"x".repeat(257)));
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+
+        #[test]
+        fn identity_validity_is_non_empty_bounded_and_control_free(
+            text in proptest::prop_oneof![
+                proptest::prelude::any::<String>(),
+                "[a-z\\x00-\\x9f\\u{a0}-\\u{ff}]{0,300}",
+            ],
+        ) {
+            let expected = !text.is_empty()
+                && text.len() <= IDENTITY_MAX_BYTES
+                && !text.chars().any(char::is_control);
+            proptest::prop_assert_eq!(valid_identity(&text), expected);
+        }
+
+        #[test]
+        fn schema_parses_exactly_v_and_a_positive_decimal_that_fits(
+            text in proptest::prop_oneof![
+                proptest::prelude::any::<String>(),
+                "v?[0-9+\\-]{0,7}",
+            ],
+        ) {
+            let expected = text.strip_prefix('v').and_then(|digits| {
+                let well_formed = digits.bytes().all(|byte| byte.is_ascii_digit())
+                    && digits.bytes().next().is_some_and(|first| first != b'0');
+                if !well_formed {
+                    return None;
+                }
+                let value = digits.bytes().fold(0_u64, |value, byte| {
+                    (value * 10 + u64::from(byte - b'0')).min(u64::from(u16::MAX) + 1)
+                });
+                u16::try_from(value).ok()
+            });
+            proptest::prop_assert_eq!(parse_schema(&text).ok(), expected);
+        }
+
+        #[test]
+        fn digest_hex_is_the_prefix_and_lowercase_hex(
+            prefix in "[a-z-]{0,8}",
+            digest in proptest::prelude::any::<[u8; 32]>(),
+        ) {
+            let mut expected = prefix.clone();
+            for byte in digest {
+                let _ = std::fmt::Write::write_fmt(&mut expected, format_args!("{byte:02x}"));
+            }
+            proptest::prop_assert_eq!(prefixed_digest_hex(&prefix, &digest), expected);
+        }
     }
 
     pub(super) fn envelope_headers() -> HeaderMap {

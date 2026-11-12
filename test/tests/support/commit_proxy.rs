@@ -114,6 +114,7 @@ pub(crate) enum ReadyBoundary {
     Begin,
     Commit,
     Sync,
+    ExecuteSync,
 }
 
 #[derive(Debug)]
@@ -363,7 +364,7 @@ async fn relay(
                     let Ok(message) = message else {
                         return;
                     };
-                    let hold_ready = Frontend::claim_ready(&message, &ready_hold);
+                    let hold_ready = frontend.claim_ready(&message, &ready_hold);
                     match frontend.operation_fault(&message, &arming) {
                         Some(Fault::DropBeforeForward) => return,
                         Some(fault @ (Fault::ForwardThenDrop | Fault::ForwardThenCorruptReady | Fault::ForwardThenSilence)) => {
@@ -442,6 +443,7 @@ struct Frontend {
     statements: HashMap<Vec<u8>, Vec<u8>>,
     portals: HashMap<Vec<u8>, Vec<u8>>,
     matched: bool,
+    executed_since_sync: bool,
 }
 
 impl Frontend {
@@ -508,8 +510,16 @@ impl Frontend {
         Some(armed.fault)
     }
 
-    fn claim_ready(message: &[u8], hold: &ReadyHold) -> bool {
+    fn claim_ready(&mut self, message: &[u8], hold: &ReadyHold) -> bool {
+        if message.first() == Some(&b'E') {
+            self.executed_since_sync = true;
+        }
         if message.first() == Some(&b'S') {
+            if std::mem::take(&mut self.executed_since_sync)
+                && hold.claim(ReadyBoundary::ExecuteSync)
+            {
+                return true;
+            }
             return hold.claim(ReadyBoundary::Sync);
         }
         let Some(sql) = message

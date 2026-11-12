@@ -109,6 +109,8 @@ time = { workspace = true, features = ["std"] }
 # this profile and also uses rcgen and tokio-rustls.
 jsonwebtoken = { workspace = true, features = ["aws_lc_rs"] }
 tonic-health = { workspace = true }
+opentelemetry-proto = { workspace = true, features = ["gen-tonic-messages", "trace"] }
+prost = { workspace = true }
 rcgen = { workspace = true, features = ["pem", "crypto", "aws_lc_rs"] }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }
 # template:end grpc-jwt:service-grpc-jwt-test-dependencies
@@ -116,7 +118,8 @@ tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }
 infra-serviceauth = { workspace = true, features = ["test-support"] }
 # template:end service-auth:service-service-auth-test-dependency
 rstest = { workspace = true }
-nix = { workspace = true, features = ["signal"] }
+nix = { workspace = true, features = ["signal", "fs"] }
+tempfile = { workspace = true }
 tokio = { workspace = true, features = [
     "test-util", "io-util",
     # template:begin runtime-progress:service-runtime-progress-tokio-features

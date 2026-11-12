@@ -5,7 +5,7 @@ use std::cell::Cell;
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -33,8 +33,7 @@ pub(super) fn on_writer_thread() -> bool {
 }
 
 pub(super) struct Record {
-    pub(super) bytes: Box<[u8; MAX_RECORD_BYTES]>,
-    pub(super) len: usize,
+    pub(super) bytes: Box<[u8]>,
 }
 
 /// Why the logger rejected a record; a label of `telemetry_log_records_dropped_total`.
@@ -160,9 +159,9 @@ impl Counters {
 #[derive(Debug)]
 struct Shared {
     // No formatting, sink calls, or waits occur under this admission lock.
-    // `submit` holds it across its check and send, so once `close` returns
-    // no record is admitted.
-    closed: Mutex<bool>,
+    // `submit` holds a read guard across its check and send and `close` waits
+    // for the write guard, so once `close` returns no record is admitted.
+    closed: RwLock<bool>,
     drain: AtomicU32,
     counters: Counters,
 }
@@ -171,14 +170,14 @@ impl Shared {
     fn close(&self) {
         *self
             .closed
-            .lock()
+            .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
     }
 
     fn is_closed(&self) -> bool {
         *self
             .closed
-            .lock()
+            .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
@@ -222,7 +221,7 @@ impl Output {
             let closed = self
                 .shared
                 .closed
-                .lock()
+                .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             (!*closed).then(|| self.sender.try_send(record))
         };
@@ -336,7 +335,7 @@ impl Drop for LoggerGuard {
 
 pub(super) fn start<W: Write + Send + 'static>(writer: W) -> io::Result<(Output, LoggerGuard)> {
     let shared = Arc::new(Shared {
-        closed: Mutex::new(false),
+        closed: RwLock::new(false),
         drain: AtomicU32::new(0),
         counters: Counters::new(),
     });
@@ -405,7 +404,7 @@ fn write_records<W: Write>(mut writer: W, records: Receiver<Record>, shared: &Sh
             }
             torn = false;
         }
-        let written = write_line(&mut writer, &record.bytes[..record.len]);
+        let written = write_line(&mut writer, &record.bytes);
         if written != Written::Whole {
             shared.record_sink_error(SinkOperation::Write);
         }
@@ -472,16 +471,14 @@ pub(super) fn publish() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
     use std::sync::atomic::AtomicBool;
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(3);
 
     fn record(bytes: &[u8]) -> Record {
-        let mut storage = Box::new([0; MAX_RECORD_BYTES]);
-        storage[..bytes.len()].copy_from_slice(bytes);
         Record {
-            bytes: storage,
-            len: bytes.len(),
+            bytes: bytes.into(),
         }
     }
 
@@ -572,8 +569,7 @@ mod tests {
             .recv_timeout(TEST_TIMEOUT)
             .expect("writer entered sink");
 
-        // One in progress plus the accepted 512 queue slots. Every record owns
-        // the same fixed 16 KiB capacity, even when its logical length is small.
+        // One in progress plus the accepted 512 queue slots.
         for index in 0..512 {
             output.submit(record(format!("{index}\n").as_bytes()));
         }

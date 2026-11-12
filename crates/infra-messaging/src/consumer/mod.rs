@@ -12,9 +12,10 @@ use async_nats::jetstream::consumer::{AckPolicy, DeliverPolicy, PullConsumer, Re
 use async_nats::jetstream::context::{ConsumerInfoError, ConsumerInfoErrorKind};
 use futures_util::{FutureExt as _, StreamExt as _};
 use tokio::sync::watch;
-use tokio::task::{JoinError, JoinHandle, JoinSet};
+use tokio::task::{JoinError, JoinSet};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::AbortOnDropHandle;
 
 use self::delivery::{DeliveryHandler, HANDLER_TIMEOUT, redeliver_after};
 use crate::budget::{BROKER_OPERATION_BUDGET, bounded_operation};
@@ -106,7 +107,7 @@ pub struct ConsumerHandle {
 /// The consumer task, or its result once it was joined.
 #[derive(Debug)]
 enum Supervisor {
-    Running(JoinHandle<Result<(), ConsumerError>>),
+    Running(AbortOnDropHandle<Result<(), ConsumerError>>),
     Finished(Result<(), ConsumerError>),
 }
 
@@ -215,7 +216,7 @@ impl Consumer {
             stop,
             force,
             failure,
-            supervisor: Supervisor::Running(task),
+            supervisor: Supervisor::Running(AbortOnDropHandle::new(task)),
         }
     }
 
@@ -585,13 +586,11 @@ impl ConsumerHandle {
 
 impl Drop for ConsumerHandle {
     fn drop(&mut self) {
+        // Exhausted cleanup has no budget left to observe a join. Dropping the
+        // supervisor handle aborts the task, which drops its pipeline and
+        // aborts every delivery; runtime shutdown remains the final resource
+        // owner.
         self.abort();
-        if let Supervisor::Running(task) = &self.supervisor {
-            // Exhausted cleanup has no budget left to observe a join. Aborting
-            // the supervisor drops its pipeline, which aborts every delivery;
-            // runtime shutdown remains the final resource owner.
-            task.abort();
-        }
     }
 }
 
@@ -672,10 +671,10 @@ mod tests {
             stop: CancellationToken::new(),
             force: CancellationToken::new(),
             failure,
-            supervisor: Supervisor::Running(tokio::spawn(async {
+            supervisor: Supervisor::Running(AbortOnDropHandle::new(tokio::spawn(async {
                 let _ = released.await;
                 Ok(())
-            })),
+            }))),
         };
         let deadline = Instant::now() + Duration::from_secs(1);
         // The task deliberately cannot finish during drain. An unbounded join

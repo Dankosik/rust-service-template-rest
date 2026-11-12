@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{borrow::Cow, fmt};
 
 /// Safe admission failure identifying only the option and its static cause.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -80,15 +80,16 @@ impl Rejection {
 
     pub(crate) fn from_body(body: &[u8]) -> Self {
         #[derive(serde::Deserialize)]
-        struct ErrorResponse {
-            error: String,
+        struct ErrorResponse<'a> {
+            #[serde(borrow)]
+            error: Cow<'a, str>,
         }
-        let Ok(response) = serde_json::from_slice::<ErrorResponse>(body) else {
+        let Ok(response) = serde_json::from_slice::<ErrorResponse<'_>>(body) else {
             return Self::Other;
         };
         Self::REGISTERED
             .into_iter()
-            .find(|rejection| rejection.code() == Some(response.error.as_str()))
+            .find(|rejection| rejection.code() == Some(&*response.error))
             .unwrap_or(Self::Other)
     }
 

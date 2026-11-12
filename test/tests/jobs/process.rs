@@ -249,6 +249,7 @@ fn get(url: &str) -> Result<(u16, String), ureq::Error> {
     match ureq::get(url)
         .config()
         .timeout_global(Some(Duration::from_secs(3)))
+        .http_status_as_error(false)
         .build()
         .call()
     {
@@ -257,7 +258,6 @@ fn get(url: &str) -> Result<(u16, String), ureq::Error> {
             let body = response.body_mut().read_to_string().unwrap_or_default();
             Ok((status, body))
         }
-        Err(ureq::Error::StatusCode(status)) => Ok((status, String::new())),
         Err(err) => Err(err),
     }
 }

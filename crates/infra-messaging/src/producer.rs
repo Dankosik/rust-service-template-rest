@@ -1,6 +1,7 @@
 use std::error::Error as _;
 use std::sync::Arc;
 
+use async_nats::ToSubject;
 use async_nats::jetstream::ErrorCode;
 use async_nats::jetstream::context::PublishErrorKind;
 use async_nats::jetstream::message::PublishMessage;
@@ -125,9 +126,14 @@ impl Producer {
             &self.shared.source_stream,
             self.shared.max_payload_bytes,
         )?;
-        send_publication(&self.shared, event.subject(), message, context)
-            .instrument(span.clone())
-            .await
+        send_publication(
+            &self.shared,
+            event.subject_handle().clone(),
+            message,
+            context,
+        )
+        .instrument(span.clone())
+        .await
     }
 }
 
@@ -159,7 +165,7 @@ fn source_message(
 /// toward `messaging_publish_admission_refused_total`.
 pub(crate) async fn send_publication(
     shared: &Shared,
-    subject: &str,
+    subject: impl ToSubject,
     message: PublishMessage,
     context: &OperationContext,
 ) -> Result<PublishAck, PublishError> {
@@ -183,7 +189,7 @@ pub(crate) async fn send_publication(
     let exchange = async {
         let ack = shared
             .jetstream
-            .send_publish(subject.to_owned(), message)
+            .send_publish(subject, message)
             .await
             .map_err(classify)?
             .await

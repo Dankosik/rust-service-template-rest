@@ -68,7 +68,7 @@ pub(crate) const fn route_key<T: EventPayload>() -> RouteKey<'static> {
 #[derive(Clone)]
 pub struct Route {
     pub(crate) key: RouteKey<'static>,
-    pub(crate) subject: String,
+    pub(crate) subject: async_nats::Subject,
     pub(crate) schema: Option<PayloadSchema>,
 }
 
@@ -88,7 +88,7 @@ impl Route {
     pub fn new<T: EventPayload>(subject: impl Into<String>) -> Self {
         Self {
             key: route_key::<T>(),
-            subject: subject.into(),
+            subject: async_nats::Subject::from(subject.into()),
             schema: None,
         }
     }
@@ -269,7 +269,7 @@ impl Registry {
             event_type: T::EVENT_TYPE,
             schema_version: T::SCHEMA_VERSION,
         })?;
-        PreparedEvent::prepare(subject, event, max_payload_bytes)
+        PreparedEvent::prepare_routed(subject.clone(), event, max_payload_bytes)
     }
 
     /// Whether a handler is registered. Routes alone do not count: a
@@ -291,10 +291,10 @@ impl Registry {
         }
     }
 
-    fn subject_for<T: EventPayload>(&self) -> Option<&str> {
+    fn subject_for<T: EventPayload>(&self) -> Option<&async_nats::Subject> {
         self.routes
             .get(&route_key::<T>())
-            .map(|entry| entry.route.subject.as_str())
+            .map(|entry| &entry.route.subject)
     }
 
     /// Every registered route.
@@ -332,7 +332,7 @@ impl Registry {
                 event_type: &event_type,
                 schema_version,
             })
-            .filter(|entry| entry.route.subject == subject)
+            .filter(|entry| entry.route.subject.as_str() == subject)
             .and_then(|entry| entry.handler.as_ref())
             .ok_or(DispatchError::Unhandled)?;
         let run =

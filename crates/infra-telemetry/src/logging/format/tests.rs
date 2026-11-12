@@ -557,3 +557,14 @@ fn span_capacity(format: LoggingFormat) {
         "one rejected capture"
     );
 }
+
+#[test]
+fn a_buffer_reserves_no_more_than_its_limit() {
+    let mut bytes = Bytes::new(100, 8);
+    for _ in 0..40 {
+        bytes.append(b"abc");
+    }
+    assert_eq!(bytes.len(), 99);
+    assert!(bytes.failed);
+    assert!(bytes.buf.capacity() <= 100, "{}", bytes.buf.capacity());
+}

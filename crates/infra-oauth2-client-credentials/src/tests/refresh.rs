@@ -482,50 +482,43 @@ impl tracing::Subscriber for Events {
     fn exit(&self, _: &tracing::span::Id) {}
 }
 
-#[test]
-fn a_failed_background_refresh_is_logged_with_its_error_type() {
+#[tokio::test]
+async fn a_failed_background_refresh_is_logged_with_its_error_type() {
     let events = Events::default();
-    tracing::subscriber::with_default(events.clone(), || {
-        // Keep callsite interest independent of a sibling test's thread-local
-        // subscriber; tracing-core otherwise has a single-dispatcher fast path.
-        let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(async {
-                let fixture = Fixture::new().await;
-                fixture.token_json(
-                    "200 OK",
-                    &serde_json::json!({"access_token": "kept", "token_type": "Bearer", "expires_in": 3600}),
-                );
-                let client = fixture
-                    .credentials(&[], None)
-                    .http(fixture.resource_client());
-                client
-                    .execute(fixture.request(), deadline(Duration::from_secs(10)))
-                    .await
-                    .unwrap();
-                fixture.token_raw(response(
-                    "400 Bad Request",
-                    br#"{"error":"invalid_client","error_description":"provider-secret-body"}"#,
-                ));
-                advance(Duration::from_secs(3321)).await;
-                // The caller keeps its token; the refresh it starts fails alone.
-                client
-                    .execute(fixture.request(), deadline(Duration::from_secs(10)))
-                    .await
-                    .unwrap();
-                tokio::time::timeout(Duration::from_secs(2), async {
-                    while events.0.lock().unwrap().is_empty() {
-                        tokio::time::sleep(Duration::from_millis(1)).await;
-                    }
-                })
-                .await
-                .unwrap();
-                fixture.finish().await;
-            });
-    });
+    let _subscriber = tracing::subscriber::set_default(events.clone());
+    // Keep callsite interest independent of a sibling test's thread-local
+    // subscriber; tracing-core otherwise has a single-dispatcher fast path.
+    let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let fixture = Fixture::new().await;
+    fixture.token_json(
+        "200 OK",
+        &serde_json::json!({"access_token": "kept", "token_type": "Bearer", "expires_in": 3600}),
+    );
+    let client = fixture
+        .credentials(&[], None)
+        .http(fixture.resource_client());
+    client
+        .execute(fixture.request(), deadline(Duration::from_secs(10)))
+        .await
+        .unwrap();
+    fixture.token_raw(response(
+        "400 Bad Request",
+        br#"{"error":"invalid_client","error_description":"provider-secret-body"}"#,
+    ));
+    advance(Duration::from_secs(3321)).await;
+    // The caller keeps its token; the refresh it starts fails alone.
+    client
+        .execute(fixture.request(), deadline(Duration::from_secs(10)))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while events.0.lock().unwrap().is_empty() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap();
+    fixture.finish().await;
     assert_eq!(
         *events.0.lock().unwrap(),
         [
@@ -534,43 +527,73 @@ fn a_failed_background_refresh_is_logged_with_its_error_type() {
     );
 }
 
-#[test]
-fn capacity_refused_background_refresh_keeps_the_token_and_retry_spacing() {
+#[tokio::test]
+async fn capacity_refused_background_refresh_keeps_the_token_and_retry_spacing() {
     let events = Events::default();
-    tracing::subscriber::with_default(events.clone(), || {
-        let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
-        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
-            let fixture = Fixture::new().await;
-            fixture.token_json("200 OK", &serde_json::json!({"access_token":"kept", "token_type":"Bearer", "expires_in":3600}));
-            let credentials = fixture.prepare(Options { provider_concurrency: 1, ..fixture.options(&[], None) });
-            let client = credentials.http(fixture.resource_client());
-            client.execute(fixture.request(), deadline(Duration::from_secs(10))).await.unwrap();
-            advance(Duration::from_secs(3321)).await;
-            let gate = fixture.block_tokens();
-            let mut exchange = Box::pin(client.execute(fixture.on_behalf_of_request("active"), deadline(Duration::from_secs(10))));
-            tokio::select! { () = fixture.token_received() => {}, result = &mut exchange => panic!("exchange must be gated: {result:?}"), }
-            client.execute(fixture.request(), deadline(Duration::from_secs(10))).await.unwrap();
-            tokio::time::timeout(Duration::from_secs(2), async {
-                while events.0.lock().unwrap().is_empty() {
-                    tokio::task::yield_now().await;
-                }
-            }).await.unwrap();
-            assert_eq!(fixture.token_requests().len(), 2);
-            drop(exchange);
-            drop(gate);
-            *fixture.state.token_gate.lock().unwrap() = None;
-            client.execute(fixture.request(), deadline(Duration::from_secs(10))).await.unwrap();
-            assert_eq!(fixture.token_requests().len(), 2);
-            advance(Duration::from_secs(34)).await;
-            client.execute(fixture.request(), deadline(Duration::from_secs(10))).await.unwrap();
-            fixture.token_received().await;
-            let refresh = tokio::time::timeout(Duration::from_secs(2), credentials.0.inner.service_request.lock()).await.unwrap();
-            drop(refresh);
-            assert_eq!(fixture.token_requests().len(), 3);
-            assert!(fixture.resource_requests().iter().all(|request| request.header("authorization") == Some("Bearer kept")));
-            fixture.finish().await;
-        });
+    let _subscriber = tracing::subscriber::set_default(events.clone());
+    let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let fixture = Fixture::new().await;
+    fixture.token_json(
+        "200 OK",
+        &serde_json::json!({"access_token":"kept", "token_type":"Bearer", "expires_in":3600}),
+    );
+    let credentials = fixture.prepare(Options {
+        provider_concurrency: 1,
+        ..fixture.options(&[], None)
     });
+    let client = credentials.http(fixture.resource_client());
+    client
+        .execute(fixture.request(), deadline(Duration::from_secs(10)))
+        .await
+        .unwrap();
+    advance(Duration::from_secs(3321)).await;
+    let gate = fixture.block_tokens();
+    let mut exchange = Box::pin(client.execute(
+        fixture.on_behalf_of_request("active"),
+        deadline(Duration::from_secs(10)),
+    ));
+    tokio::select! { () = fixture.token_received() => {}, result = &mut exchange => panic!("exchange must be gated: {result:?}"), }
+    client
+        .execute(fixture.request(), deadline(Duration::from_secs(10)))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while events.0.lock().unwrap().is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(fixture.token_requests().len(), 2);
+    drop(exchange);
+    drop(gate);
+    *fixture.state.token_gate.lock().unwrap() = None;
+    client
+        .execute(fixture.request(), deadline(Duration::from_secs(10)))
+        .await
+        .unwrap();
+    assert_eq!(fixture.token_requests().len(), 2);
+    advance(Duration::from_secs(34)).await;
+    client
+        .execute(fixture.request(), deadline(Duration::from_secs(10)))
+        .await
+        .unwrap();
+    fixture.token_received().await;
+    let refresh = tokio::time::timeout(
+        Duration::from_secs(2),
+        credentials.0.inner.service_request.lock(),
+    )
+    .await
+    .unwrap();
+    drop(refresh);
+    assert_eq!(fixture.token_requests().len(), 3);
+    assert!(
+        fixture
+            .resource_requests()
+            .iter()
+            .all(|request| request.header("authorization") == Some("Bearer kept"))
+    );
+    fixture.finish().await;
     assert_eq!(
         *events.0.lock().unwrap(),
         [

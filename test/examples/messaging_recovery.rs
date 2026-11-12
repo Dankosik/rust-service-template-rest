@@ -20,7 +20,7 @@ use time::format_description::well_known::Rfc3339;
 type Error = jobs_worker::BuildError;
 
 fn payload_sha256(bytes: &[u8]) -> String {
-    infra_messaging::wire::prefixed_digest_hex("", &Sha256::digest(bytes))
+    infra_messaging::wire::prefixed_digest_hex("", &Sha256::digest(bytes).into())
 }
 
 #[expect(

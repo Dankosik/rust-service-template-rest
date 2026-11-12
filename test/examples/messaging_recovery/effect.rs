@@ -28,9 +28,11 @@ pub(super) enum Applied {
     Duplicate,
 }
 
-#[derive(Debug)]
+#[derive(Debug, derive_more::From, derive_more::Error)]
 pub(super) enum EffectError {
+    #[from(skip)]
     Conflict,
+    #[from(skip)]
     Unresolved,
     Query(sqlx::Error),
     Transaction(TxError),
@@ -45,28 +47,6 @@ impl std::fmt::Display for EffectError {
             Self::Transaction(TxError::CommitUnknown(_)) => "durable effect commit is unresolved",
             Self::Transaction(_) => "durable effect transaction failed",
         })
-    }
-}
-
-impl std::error::Error for EffectError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Query(error) => Some(error),
-            Self::Transaction(error) => Some(error),
-            Self::Conflict | Self::Unresolved => None,
-        }
-    }
-}
-
-impl From<sqlx::Error> for EffectError {
-    fn from(error: sqlx::Error) -> Self {
-        Self::Query(error)
-    }
-}
-
-impl From<TxError> for EffectError {
-    fn from(error: TxError) -> Self {
-        Self::Transaction(error)
     }
 }
 

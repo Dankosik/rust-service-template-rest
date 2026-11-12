@@ -104,6 +104,7 @@ pub enum PreparationReason {
     InvalidOption,
     // template:begin oidc-jwt:authn-jwt-preparation-reasons
     Fetch(ProviderFailure),
+    Timeout,
     /// A provider document could not be read.
     Parse,
     IssuerMismatch,

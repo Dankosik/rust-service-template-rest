@@ -117,9 +117,8 @@ impl Values<'_> {
 // template:begin oidc-jwt:authn-claims-jwt-type
 #[derive(Deserialize)]
 pub(crate) struct JwtClaims<'a> {
-    /// A string or, as jsonwebtoken reads it, an array naming the issuer.
     #[serde(borrow)]
-    iss: Option<Values<'a>>,
+    iss: Option<Cow<'a, str>>,
     #[serde(borrow)]
     aud: Option<Values<'a>>,
     exp: Option<NumericDate>,
@@ -178,6 +177,23 @@ struct ActiveClaims<'a> {
 // template:end oidc-introspection:authn-claims-introspection-envelope
 
 // template:begin oidc-jwt:authn-claims-jwt-validation
+/// A validated JWT principal with the one time claim, besides `exp`, that a
+/// later decision at another instant needs.
+#[derive(Clone, Debug)]
+pub(crate) struct VerifiedJwt {
+    pub(crate) principal: Principal,
+    not_before: Option<u64>,
+}
+
+impl VerifiedJwt {
+    /// The principal if `exp` and `nbf` admit this token at `now`, with the
+    /// same leeway and reasons as validating the payload at `now`.
+    pub(crate) fn deliver(&self, now: u64) -> Result<Principal, VerificationError> {
+        check_lifetime(self.principal.expires_at(), self.not_before, now)?;
+        Ok(self.principal.clone())
+    }
+}
+
 /// Validates a payload after signature verification. Required registered claims
 /// precede lifetime, issuer, and audience checks, preserving jsonwebtoken's order;
 /// identity, the selected token profile, and scopes follow.
@@ -187,7 +203,7 @@ pub(crate) fn validate_jwt_claims(
     token_profile: TokenProfile,
     now: u64,
     access_token: secrecy::SecretString,
-) -> Result<Principal, VerificationError> {
+) -> Result<VerifiedJwt, VerificationError> {
     let invalid = VerificationError::invalid;
     let payload =
         String::from_utf8(payload).map_err(|_| invalid(VerificationReason::MalformedClaims))?;
@@ -222,18 +238,21 @@ pub(crate) fn validate_jwt_claims(
         .map(|JsonObject(actor)| actor.into_actor())
         .transpose()
         .map_err(|()| invalid(VerificationReason::MalformedClaims))?;
-    Ok(Principal::new(
-        Identity {
-            issuer: policy.issuer.clone(),
-            subject,
-            client_id,
-            scopes,
-            payload,
-            access_token,
-            actor,
-        },
-        expiry,
-    ))
+    Ok(VerifiedJwt {
+        not_before: claims.nbf,
+        principal: Principal::new(
+            Identity {
+                issuer: policy.issuer.clone(),
+                subject,
+                client_id,
+                scopes,
+                payload,
+                access_token,
+                actor,
+            },
+            expiry,
+        ),
+    })
 }
 
 /// An RFC 7519 `NumericDate`: an unsigned integer, or a number with a
@@ -270,7 +289,7 @@ fn present_numeric_date<'de, D: serde::Deserializer<'de>>(
 
 /// JWT registered-claim order: lifetime first, then issuer and audience.
 fn check_registered_claims(
-    issuer: &Values<'_>,
+    issuer: &str,
     audience: &Values<'_>,
     expiry: u64,
     not_before: Option<u64>,
@@ -278,7 +297,7 @@ fn check_registered_claims(
     now: u64,
 ) -> Result<(), VerificationError> {
     check_lifetime(expiry, not_before, now)?;
-    if !issuer.contains_any(std::slice::from_ref(&policy.issuer)) {
+    if issuer != policy.issuer {
         return Err(VerificationError::invalid(VerificationReason::Issuer));
     }
     if !audience.contains_any(&policy.audiences) {
@@ -519,6 +538,7 @@ mod tests {
                 100,
                 access_token(),
             )
+            .map(|verified| verified.principal)
         };
         let principal = verify(serde_json::json!({
             "exp": 130, "sub": null, "client_id": "", "azp": "client", "cid": "other",
@@ -536,7 +556,7 @@ mod tests {
     }
 
     #[test]
-    fn registered_claims_follow_the_jsonwebtoken_rules_in_its_order() {
+    fn registered_claim_validation_enforces_shape_and_order() {
         let verify = |extra: serde_json::Value| {
             let mut claims = serde_json::json!({
                 "iss": "https://issuer.example", "aud": "api", "exp": 1000, "sub": "subject",
@@ -551,7 +571,7 @@ mod tests {
                 1000,
                 access_token(),
             )
-            .map(|principal| principal.expires_at())
+            .map(|verified| verified.principal.expires_at())
             .map_err(|error| error.reason)
         };
         for (extra, expected) in [
@@ -611,11 +631,11 @@ mod tests {
             ),
             (
                 serde_json::json!({"iss": ["other", "https://issuer.example"]}),
-                Ok(1000),
+                Err(VerificationReason::MalformedClaims),
             ),
             (
                 serde_json::json!({"iss": []}),
-                Err(VerificationReason::Issuer),
+                Err(VerificationReason::MalformedClaims),
             ),
             (
                 serde_json::json!({"aud": [1]}),
@@ -644,6 +664,7 @@ mod tests {
                 100,
                 access_token(),
             )
+            .map(|verified| verified.principal)
             .map_err(|error| error.reason)
         };
         assert!(verify(serde_json::json!({})).is_ok());
@@ -675,6 +696,7 @@ mod tests {
                 100,
                 access_token(),
             )
+            .map(|verified| verified.principal)
         };
         assert_actor_evidence(verify, Failure::Invalid);
     }
@@ -869,7 +891,7 @@ mod tests {
                     access_token(),
                 );
                 if let Some(expected) = &expected {
-                    assert_eq!(result.unwrap().scopes(), expected.as_slice());
+                    assert_eq!(result.unwrap().principal.scopes(), expected.as_slice());
                 } else {
                     assert_eq!(result.unwrap_err().failure, Failure::Invalid, "{extra}");
                 }

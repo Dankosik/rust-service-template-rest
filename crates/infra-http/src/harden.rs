@@ -33,7 +33,7 @@ use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::request_id::{PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
 
-use crate::observe::{self, AccessLogOptions};
+use crate::observe::{self, AccessLogOptions, Observer};
 use crate::probes::is_health_probe_route;
 #[cfg(test)]
 use crate::problem::SANITIZED_DETAIL;
@@ -101,9 +101,9 @@ pub fn harden(routes: Router, options: &HardenOptions) -> Router {
         // Outside opening enforcement, so every Problem is completed before it is
         // counted and logged.
         .layer(middleware::from_fn_with_state(
-            AccessLogOptions {
+            Observer::new(AccessLogOptions {
                 log_health_probes: options.log_health_probes,
-            },
+            }),
             observe::observe,
         ))
         .layer(OtelInResponseLayer)
@@ -165,12 +165,15 @@ async fn admit(
     next.run(request).await
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct AdmissionShed;
+
 fn shed_response() -> Response {
     metrics::counter!(observe::SHED_REQUESTS_METRIC).increment(1);
-    Problem::new(Code::ServiceUnavailable)
+    let problem = Problem::new(Code::ServiceUnavailable)
         .detail(service_failure::AT_CAPACITY_DETAIL)
-        .retry_after(service_failure::AT_CAPACITY_RETRY_AFTER)
-        .into_response()
+        .retry_after(service_failure::AT_CAPACITY_RETRY_AFTER);
+    (axum::Extension(AdmissionShed), problem).into_response()
 }
 
 /// A recovered panic becomes a sanitized 500 without recording its payload.

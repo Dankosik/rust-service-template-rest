@@ -287,14 +287,15 @@ pub async fn acquire_until(
         operation,
         deadline.saturating_duration_since(tokio::time::Instant::now()),
         async {
-            loop {
+            while tokio::time::Instant::now() < deadline {
                 match tokio::time::timeout_at(deadline, pool.acquire()).await {
-                    Err(_elapsed) => return Err(sqlx::Error::PoolTimedOut),
-                    Ok(Err(sqlx::Error::PoolTimedOut))
-                        if tokio::time::Instant::now() < deadline => {}
+                    Err(_elapsed) => break,
+                    Ok(Ok(_)) if tokio::time::Instant::now() >= deadline => break,
+                    Ok(Err(sqlx::Error::PoolTimedOut)) => {}
                     Ok(result) => return result,
                 }
             }
+            Err(sqlx::Error::PoolTimedOut)
         },
     )
     .await

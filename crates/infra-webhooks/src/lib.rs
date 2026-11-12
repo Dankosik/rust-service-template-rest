@@ -7,6 +7,3 @@ pub mod outbound;
 // template:begin inbound-webhooks:webhooks-inbound-module
 pub mod inbound;
 // template:end inbound-webhooks:webhooks-inbound-module
-
-#[cfg(test)]
-mod test_metrics;

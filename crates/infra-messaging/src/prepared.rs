@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::io::{self, Write};
 
+use async_nats::Subject;
 use bytes::Bytes;
 use domain_events::{Event, EventPayload};
 use serde::Serialize;
@@ -11,7 +12,7 @@ use crate::error::EnvelopeError;
 /// Serialized, routed event intent. Retrying never reserializes or reroutes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedEvent {
-    subject: String,
+    subject: Subject,
     message_id: String,
     publication_id: String,
     event_type: Cow<'static, str>,
@@ -54,8 +55,16 @@ impl PreparedEvent {
         event: &Event<T>,
         max_payload_bytes: usize,
     ) -> Result<Self, EnvelopeError> {
+        Self::prepare_routed(Subject::from(subject.into()), event, max_payload_bytes)
+    }
+
+    /// [`Self::prepare`] for a subject a route already owns, shared without a copy.
+    pub(crate) fn prepare_routed<T: EventPayload + Serialize>(
+        subject: Subject,
+        event: &Event<T>,
+        max_payload_bytes: usize,
+    ) -> Result<Self, EnvelopeError> {
         let key = crate::registry::route_key::<T>();
-        let subject = subject.into();
         if !crate::wire::valid_subject(&subject) {
             return Err(EnvelopeError::Subject);
         }
@@ -105,6 +114,7 @@ impl PreparedEvent {
         if !crate::wire::valid_subject(&subject) {
             return Err(EnvelopeError::Subject);
         }
+        let subject = Subject::from(subject);
         for value in [&message_id, &publication_id, &event_type] {
             crate::wire::validate_outbound_identity(value)?;
         }
@@ -127,6 +137,10 @@ impl PreparedEvent {
     }
     #[must_use]
     pub fn subject(&self) -> &str {
+        &self.subject
+    }
+    /// The subject as the client's reference-counted type.
+    pub(crate) fn subject_handle(&self) -> &Subject {
         &self.subject
     }
     /// The logical event identity consumers deduplicate by.

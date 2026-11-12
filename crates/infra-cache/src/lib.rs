@@ -160,6 +160,8 @@ pub enum CacheError {
     InvalidClientKey,
     #[error("cache requires a Tokio runtime")]
     NoRuntime,
+    #[error("cache requires the Tokio time driver")]
+    NoTimeDriver,
     #[error("cache client could not be built")]
     ClientBuild,
 }
@@ -213,12 +215,10 @@ pub struct Cache {
 impl Cache {
     /// Admit the DSN and build the connection without waiting for the network.
     ///
-    /// Must be called from a Tokio runtime. It reads the password, root CA,
-    /// and client certificate files synchronously, so an async caller runs it
-    /// on the blocking pool with the runtime entered. The connection is dialed in the
-    /// background from here on, so a server that is down now does not leave
-    /// the first calls to drive the dial; an outage is reported by the calls
-    /// and the probe, never by this function.
+    /// Must be called from a Tokio runtime with the time driver enabled.
+    /// It reads the password, root CA, and client certificate files synchronously,
+    /// so an async caller runs it on the blocking pool with the runtime entered.
+    /// The background task drives the dial. Commands and the probe report an outage.
     ///
     /// Install the intended metrics recorder first: the connection's counter
     /// and gauge handles bind to the recorder current here.
@@ -227,8 +227,8 @@ impl Cache {
     ///
     /// Returns [`CacheError`] when the DSN, address policy, password file, CA
     /// file, or client certificate is refused, when no Tokio runtime is
-    /// current, or when the client cannot be built. The message does not
-    /// include the DSN.
+    /// current, when the time driver is disabled in an unwinding build, or
+    /// when the client cannot be built. The message does not include the DSN.
     pub fn start(options: CacheOptions) -> Result<Self, CacheError> {
         let command_timeout = options.command_timeout;
         let Admitted {
@@ -239,6 +239,9 @@ impl Cache {
         if tokio::runtime::Handle::try_current().is_err() {
             return Err(CacheError::NoRuntime);
         }
+        // Tokio exposes a missing time driver as a panic at timer construction.
+        std::panic::catch_unwind(|| drop(tokio::time::sleep(Duration::ZERO)))
+            .map_err(|_| CacheError::NoTimeDriver)?;
         observe::describe();
         Ok(Self {
             link: Arc::new(Link::start(server, client, password_file, command_timeout)),
@@ -284,7 +287,7 @@ impl Cache {
 }
 
 /// The closed set of namespace operations.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, enum_map::Enum)]
 enum Operation {
     Get,
     Set,
