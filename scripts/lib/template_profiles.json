@@ -1405,7 +1405,6 @@
       {"path": "test/fixtures/messaging-recovery-compose.yml", "ids": ["recovery-compose-postgres", "recovery-compose-postgres-volume"]},
       {"path": "crates/infra-messaging/Cargo.toml", "ids": ["messaging-outbox-dependencies"]},
       {"path": "crates/infra-messaging/src/lib.rs", "ids": ["messaging-outbox-module"]},
-      {"path": "crates/infra-messaging/src/wire.rs", "ids": ["messaging-outbox-validate-prepared"]},
       {"path": "crates/config/src/jobs.rs", "ids": ["jobs-outbox-capacity"]},
       {"path": "crates/config/src/jobs/tests.rs", "ids": ["jobs-outbox-capacity-tests"]},
       {"path": "crates/jobs-worker/src/bootstrap/mod.rs", "ids": ["worker-bootstrap-outbox-module", "worker-bootstrap-outbox-kind-error", "worker-bootstrap-activate-postgres-messages", "worker-bootstrap-postgres-messages-field", "worker-bootstrap-postgres-messages-initial", "worker-bootstrap-outbox-registration", "worker-bootstrap-postgres-messages-value"]},

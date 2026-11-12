@@ -17,6 +17,7 @@ use futures_util::FutureExt as _;
 use health::Probe as _;
 use infra_messaging::{CloseOutcome, Credentials, Messaging, MessagingOptions, Registry, Route};
 use nkeys::KeyPair;
+use operation_context::{Deadline, OperationContext};
 use serde_json::json;
 use tokio::time::{Instant, timeout};
 use tokio_util::sync::CancellationToken;
@@ -79,6 +80,10 @@ fn unix_now() -> u64 {
 
 fn deadline() -> Instant {
     Instant::now() + Duration::from_secs(5)
+}
+
+fn context(cancel: &CancellationToken) -> OperationContext {
+    OperationContext::new(Some(Deadline::at(deadline())), cancel.clone())
 }
 
 #[derive(serde::Serialize)]
@@ -224,7 +229,7 @@ async fn rotation_scenario(
     let first = registry.prepare(&event("before-expiry"), 1024).unwrap();
     messaging
         .producer()
-        .publish(&first, deadline(), &cancel)
+        .publish(&first, &context(&cancel))
         .await
         .expect("old credentials must work before their native expiration");
 
@@ -254,7 +259,7 @@ async fn rotation_scenario(
         loop {
             if messaging
                 .producer()
-                .publish(&after, deadline(), &cancel)
+                .publish(&after, &context(&cancel))
                 .await
                 .is_ok()
             {

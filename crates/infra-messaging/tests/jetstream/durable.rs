@@ -211,7 +211,7 @@ async fn a_durable_replaced_between_full_batches_stops_before_another_handler() 
         let prepared = registry(&fixture).prepare(&event(id), 1024).unwrap();
         messaging
             .producer()
-            .publish(&prepared, deadline(), &cancel)
+            .publish(&prepared, &context(deadline(), &cancel))
             .await
             .unwrap();
     }
@@ -311,7 +311,7 @@ async fn an_unanswered_identity_check_blocks_pulls_without_losing_the_consumer()
         .unwrap();
     messaging
         .producer()
-        .publish(&prepared, deadline(), &cancel)
+        .publish(&prepared, &context(deadline(), &cancel))
         .await
         .unwrap();
     refuse_info.store(true, Ordering::SeqCst);

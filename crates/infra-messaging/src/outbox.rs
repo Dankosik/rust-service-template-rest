@@ -19,8 +19,9 @@ use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 
 use crate::Producer;
+use crate::error::EnvelopeError;
 use crate::prepared::PreparedEvent;
-use crate::wire::{prefixed_digest_hex, valid_subject, validate_prepared};
+use crate::wire::prefixed_digest_hex;
 
 const OUTBOX_KIND: &str = "publish_domain_event";
 const FORMAT_VERSION: u8 = 1;
@@ -61,6 +62,22 @@ pub enum OutboxEnqueueError {
     Jobs(#[from] infra_jobs::EnqueueError),
 }
 
+/// Why a stored outbox intent cannot be published. None of the reasons
+/// carries stored content.
+#[derive(Debug, thiserror::Error)]
+enum IntentError {
+    #[error("format version is not supported")]
+    FormatVersion,
+    #[error("occurrence time is out of range")]
+    Timestamp,
+    #[error("payload is not base64")]
+    Base64,
+    #[error("payload is not JSON")]
+    NotJson,
+    #[error(transparent)]
+    Envelope(#[from] EnvelopeError),
+}
+
 /// Register the sole outbox job kind for a dedicated one-slot publisher engine.
 ///
 /// The caller owns engine construction, pool admission, and lifecycle. This
@@ -69,7 +86,7 @@ pub enum OutboxEnqueueError {
 /// # Errors
 ///
 /// Returns a jobs registry error when the fixed kind or policy is invalid.
-pub fn registry(producer: Producer) -> Result<Kinds, infra_jobs::KindError> {
+pub fn kinds(producer: Producer) -> Result<Kinds, infra_jobs::KindError> {
     let mut kinds = KindsBuilder::new();
     kinds.register(POLICY, Publisher { producer });
     kinds.validate()
@@ -85,12 +102,11 @@ impl PreparedEvent {
     ///
     /// Returns the canonical jobs serialization error if immutable metadata
     /// cannot be represented as a jobs payload.
-    pub fn outbox_payload_limit(&self) -> Result<usize, OutboxEnqueueError> {
-        if self.subject.len() > infra_jobs::MAX_PAYLOAD_BYTES {
+    pub fn outbox_payload_limit(&self) -> Result<usize, infra_jobs::EnqueueError> {
+        if self.subject().len() > infra_jobs::MAX_PAYLOAD_BYTES {
             return Ok(0);
         }
         outbox_raw_capacity(&PublishDomainEvent::without_payload(self))
-            .map_err(OutboxEnqueueError::from)
     }
 
     /// Enqueues this immutable event inside the caller's already-open transaction.
@@ -132,17 +148,17 @@ impl PreparedEvent {
     async fn prepare_outbox_intent(&self) -> Result<PublishDomainEvent, OutboxEnqueueError> {
         // This cheap refusal preserves the raw-body error without scanning or
         // cloning a subject that cannot leave any encoded body capacity.
-        if self.subject.len() > infra_jobs::MAX_PAYLOAD_BYTES && !self.payload.is_empty() {
+        if self.subject().len() > infra_jobs::MAX_PAYLOAD_BYTES && !self.payload().is_empty() {
             return Err(OutboxEnqueueError::PayloadTooLarge {
-                bytes: self.payload.len(),
+                bytes: self.payload().len(),
                 max_bytes: 0,
             });
         }
         let overhead = self.outbox_metadata_bytes().await?;
         let max_bytes = raw_payload_capacity(overhead);
-        if self.payload.len() > max_bytes {
+        if self.payload().len() > max_bytes {
             return Err(OutboxEnqueueError::PayloadTooLarge {
-                bytes: self.payload.len(),
+                bytes: self.payload().len(),
                 max_bytes,
             });
         }
@@ -162,10 +178,7 @@ impl PreparedEvent {
         for field in self.outbox_variable_fields() {
             let mut offset = 0;
             while offset < field.len() {
-                let mut end = field.len().min(offset + budget);
-                while !field.is_char_boundary(end) {
-                    end -= 1;
-                }
+                let end = field.floor_char_boundary(offset + budget);
                 // The remaining budget is smaller than the next character.
                 if end == offset {
                     tokio::task::yield_now().await;
@@ -188,10 +201,10 @@ impl PreparedEvent {
     /// The caller-text fields whose serialized size depends on the event.
     fn outbox_variable_fields(&self) -> [&str; 4] {
         [
-            &self.subject,
-            &self.message_id,
-            &self.publication_id,
-            self.event_type.as_ref(),
+            self.subject(),
+            self.message_id(),
+            self.publication_id(),
+            self.event_type(),
         ]
     }
 }
@@ -202,15 +215,14 @@ struct Publisher {
 
 impl Handler<PublishDomainEvent> for Publisher {
     async fn run(&self, job: Job<PublishDomainEvent>) -> Result<(), JobError> {
-        let event = job
-            .payload()
-            .prepared()
-            .ok_or_else(|| JobError::permanent("outbox immutable intent is invalid"))?;
+        let event = job.payload().to_prepared().map_err(|error| {
+            JobError::permanent(format!("outbox immutable intent is invalid: {error}"))
+        })?;
         // A retry keeps the publication ID. The broker deduplicates it inside
         // the stream's duplicate window; consumers deduplicate by logical ID
         // beyond it.
         self.producer
-            .publish(&event, job.deadline(), &job.cancellation())
+            .publish(&event, &job.context())
             .await
             .map(|_| ())
             .map_err(JobError::retryable)
@@ -238,7 +250,7 @@ impl JobKind for PublishDomainEvent {
 impl From<&PreparedEvent> for PublishDomainEvent {
     fn from(event: &PreparedEvent) -> Self {
         Self {
-            payload_base64: STANDARD.encode(&event.payload),
+            payload_base64: STANDARD.encode(event.payload()),
             ..Self::without_payload(event)
         }
     }
@@ -266,39 +278,42 @@ impl PublishDomainEvent {
             message_id: message_id.to_owned(),
             publication_id: publication_id.to_owned(),
             event_type: event_type.to_owned(),
-            schema_version: event.schema_version,
-            occurred_at_unix_seconds: event.occurred_at.unix_timestamp(),
-            occurred_at_nanosecond: event.occurred_at.nanosecond(),
+            schema_version: event.schema_version(),
+            occurred_at_unix_seconds: event.occurred_at().unix_timestamp(),
+            occurred_at_nanosecond: event.occurred_at().nanosecond(),
             payload_base64: String::new(),
         }
     }
 }
 
 impl PublishDomainEvent {
-    fn prepared(&self) -> Option<PreparedEvent> {
-        if self.format_version != FORMAT_VERSION || !valid_subject(&self.subject) {
-            return None;
+    fn to_prepared(&self) -> Result<PreparedEvent, IntentError> {
+        if self.format_version != FORMAT_VERSION {
+            return Err(IntentError::FormatVersion);
         }
         let occurred_at = OffsetDateTime::from_unix_timestamp(self.occurred_at_unix_seconds)
-            .ok()?
-            .replace_nanosecond(self.occurred_at_nanosecond)
-            .ok()?;
-        let payload = Bytes::from(STANDARD.decode(&self.payload_base64).ok()?);
+            .ok()
+            .and_then(|time| time.replace_nanosecond(self.occurred_at_nanosecond).ok())
+            .ok_or(IntentError::Timestamp)?;
+        let payload = Bytes::from(
+            STANDARD
+                .decode(&self.payload_base64)
+                .map_err(|_| IntentError::Base64)?,
+        );
         // Reject a stored row whose payload is not JSON before dispatch;
         // corruption then becomes a permanent job failure instead of a
         // malformed stream event.
-        serde_json::from_slice::<serde::de::IgnoredAny>(&payload).ok()?;
-        let event = PreparedEvent {
-            subject: self.subject.clone(),
-            message_id: self.message_id.clone(),
-            publication_id: self.publication_id.clone(),
-            event_type: self.event_type.clone().into(),
-            schema_version: self.schema_version,
+        serde_json::from_slice::<serde::de::IgnoredAny>(&payload)
+            .map_err(|_| IntentError::NotJson)?;
+        Ok(PreparedEvent::from_parts(
+            self.subject.clone(),
+            self.message_id.clone(),
+            self.publication_id.clone(),
+            self.event_type.clone(),
+            self.schema_version,
             occurred_at,
             payload,
-        };
-        validate_prepared(&event).ok()?;
-        Some(event)
+        )?)
     }
 }
 
@@ -335,21 +350,47 @@ mod tests {
     use time::OffsetDateTime;
 
     use super::{
-        FORMAT_VERSION, OutboxEnqueueError, PREFLIGHT_BYTES_PER_POLL, PublishDomainEvent,
-        event_key, outbox_raw_capacity,
+        FORMAT_VERSION, IntentError, OutboxEnqueueError, PREFLIGHT_BYTES_PER_POLL,
+        PublishDomainEvent, event_key, outbox_raw_capacity,
     };
     use crate::prepared::PreparedEvent;
 
-    fn prepared(payload: Bytes) -> PreparedEvent {
-        PreparedEvent {
-            subject: "events.created".to_owned(),
-            message_id: "logical-id".to_owned(),
-            publication_id: "logical-id".to_owned(),
-            event_type: "example.created".into(),
-            schema_version: 1,
-            occurred_at: OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap(),
-            payload,
+    /// The stored parts of an event, as outbox storage keeps them.
+    struct Parts {
+        subject: String,
+        message_id: String,
+        publication_id: String,
+        event_type: String,
+        payload: Bytes,
+    }
+
+    impl Parts {
+        fn new(payload: Bytes) -> Self {
+            Self {
+                subject: "events.created".to_owned(),
+                message_id: "logical-id".to_owned(),
+                publication_id: "logical-id".to_owned(),
+                event_type: "example.created".to_owned(),
+                payload,
+            }
         }
+
+        fn event(&self) -> PreparedEvent {
+            PreparedEvent::from_parts(
+                self.subject.clone(),
+                self.message_id.clone(),
+                self.publication_id.clone(),
+                self.event_type.clone(),
+                1,
+                OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap(),
+                self.payload.clone(),
+            )
+            .expect("fixture parts are valid")
+        }
+    }
+
+    fn prepared(payload: Bytes) -> PreparedEvent {
+        Parts::new(payload).event()
     }
 
     #[test]
@@ -362,7 +403,9 @@ mod tests {
             stored.payload_base64,
             "eyJlc2NhcGVkIjoiXFxcXHUwMDAwIiwibiI6MS4wfQ=="
         );
-        let restored = stored.prepared().expect("stored immutable intent is valid");
+        let restored = stored
+            .to_prepared()
+            .expect("stored immutable intent is valid");
         assert_eq!(restored.payload(), event.payload());
         assert_eq!(restored.subject(), event.subject());
         assert_eq!(restored.message_id(), event.message_id());
@@ -374,7 +417,7 @@ mod tests {
         let mut stored = PublishDomainEvent::from(&prepared(Bytes::from_static(br"{}")));
         stored.payload_base64 = "not-base64".to_owned();
 
-        assert!(stored.prepared().is_none());
+        assert!(matches!(stored.to_prepared(), Err(IntentError::Base64)));
     }
 
     #[test]
@@ -387,11 +430,12 @@ mod tests {
 
     #[test]
     fn storage_preserves_distinct_redrive_publication_identity() {
-        let mut event = prepared(Bytes::from_static(br"{}"));
-        event.publication_id = "redrive-8e51b5a19b7924ce".to_owned();
+        let mut parts = Parts::new(Bytes::from_static(br"{}"));
+        parts.publication_id = "redrive-8e51b5a19b7924ce".to_owned();
+        let event = parts.event();
 
         let restored = PublishDomainEvent::from(&event)
-            .prepared()
+            .to_prepared()
             .expect("stored redrive intent is valid");
 
         assert_eq!(restored.message_id(), "logical-id");
@@ -423,15 +467,16 @@ mod tests {
 
     #[test]
     fn cooperative_preflight_preserves_escaped_metadata_and_the_exact_body_limit() {
-        let mut event = prepared(Bytes::new());
+        let mut parts = Parts::new(Bytes::new());
         // UTF-8 crosses a fragment boundary, and serde must count both short
         // escapes and six-byte control escapes without altering stored bytes.
-        event.subject = format!("{}é😀\\\"\n\u{0001}", "s".repeat(4095));
-        event.message_id = "logical-\"id\\".to_owned();
-        event.publication_id = "publication-😀".to_owned();
-        event.event_type = "example.\tcreated".into();
-        let limit = event.outbox_payload_limit().unwrap();
-        event.payload = Bytes::from(vec![b'x'; limit]);
+        parts.subject = format!("{}é😀\\\"\u{0001}", "s".repeat(4095));
+        parts.message_id = "logical-\"id\\".to_owned();
+        parts.publication_id = "publication-😀".to_owned();
+        parts.event_type = "example.\"created".to_owned();
+        let limit = parts.event().outbox_payload_limit().unwrap();
+        parts.payload = Bytes::from(vec![b'x'; limit]);
+        let event = parts.event();
         let expected = serde_json::to_vec(&PublishDomainEvent::from(&event)).unwrap();
 
         let (result, polls) = complete(event.prepare_outbox_intent());
@@ -439,7 +484,8 @@ mod tests {
         assert_eq!(serde_json::to_vec(&result.unwrap()).unwrap(), expected);
         assert!(expected.len() <= infra_jobs::MAX_PAYLOAD_BYTES);
 
-        event.payload = Bytes::from(vec![b'x'; limit + 1]);
+        parts.payload = Bytes::from(vec![b'x'; limit + 1]);
+        let event = parts.event();
         let (result, _) = complete(event.prepare_outbox_intent());
         assert!(matches!(
             result,
@@ -454,8 +500,9 @@ mod tests {
             "s".repeat(infra_jobs::MAX_PAYLOAD_BYTES + 1),
             "\"".repeat(infra_jobs::MAX_PAYLOAD_BYTES / 2),
         ] {
-            let mut event = prepared(Bytes::new());
-            event.subject = subject;
+            let mut parts = Parts::new(Bytes::new());
+            parts.subject = subject;
+            let event = parts.event();
             let expected = serde_json::to_vec(&PublishDomainEvent::from(&event))
                 .unwrap()
                 .len();
@@ -463,14 +510,15 @@ mod tests {
             assert_eq!(event.outbox_payload_limit().unwrap(), 0);
 
             let (result, polls) = complete(event.prepare_outbox_intent());
-            assert!(polls >= event.subject.len().div_ceil(PREFLIGHT_BYTES_PER_POLL));
+            assert!(polls >= event.subject().len().div_ceil(PREFLIGHT_BYTES_PER_POLL));
             assert!(matches!(
                 result,
                 Err(OutboxEnqueueError::Jobs(infra_jobs::EnqueueError::PayloadTooLarge { bytes }))
                     if bytes == expected
             ));
 
-            event.payload = Bytes::from_static(b"{}");
+            parts.payload = Bytes::from_static(b"{}");
+            let event = parts.event();
             let (result, polls) = complete(event.prepare_outbox_intent());
             assert!(matches!(
                 result,
@@ -479,7 +527,7 @@ mod tests {
                     max_bytes: 0
                 })
             ));
-            if event.subject.len() > infra_jobs::MAX_PAYLOAD_BYTES {
+            if event.subject().len() > infra_jobs::MAX_PAYLOAD_BYTES {
                 assert_eq!(polls, 1, "a nonempty body needs no oversized-subject scan");
             }
         }
@@ -487,15 +535,17 @@ mod tests {
 
     #[test]
     fn preflight_poll_budget_is_shared_across_metadata_fields() {
-        let mut event = prepared(Bytes::new());
-        event.subject = "s".repeat(3000);
-        event.message_id = "i".repeat(3000);
-        event.publication_id = "p".repeat(3000);
-        event.event_type = "e".repeat(3000).into();
+        // No field alone exceeds one poll's budget; together they do.
+        let mut parts = Parts::new(Bytes::new());
+        parts.subject = "s".repeat(PREFLIGHT_BYTES_PER_POLL - 100);
+        parts.message_id = "i".repeat(256);
+        parts.publication_id = "p".repeat(256);
+        parts.event_type = "e".repeat(256);
+        let fields = PREFLIGHT_BYTES_PER_POLL - 100 + 3 * 256;
 
-        let (result, polls) = complete(event.prepare_outbox_intent());
+        let (result, polls) = complete(parts.event().prepare_outbox_intent());
         assert!(result.is_ok());
-        assert!(polls >= 12000_usize.div_ceil(PREFLIGHT_BYTES_PER_POLL));
+        assert!(polls >= fields.div_ceil(PREFLIGHT_BYTES_PER_POLL));
     }
 
     #[derive(Default)]

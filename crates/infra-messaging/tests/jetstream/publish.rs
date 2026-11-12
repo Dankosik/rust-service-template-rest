@@ -20,12 +20,12 @@ async fn publication_requires_expected_stream_ack_deduplicates_and_rejects_defin
 
     let first = messaging
         .producer()
-        .publish(&prepared, deadline(), &cancel)
+        .publish(&prepared, &context(deadline(), &cancel))
         .await
         .expect("first publication receives a JetStream acknowledgment");
     let duplicate = messaging
         .producer()
-        .publish(&prepared, deadline(), &cancel)
+        .publish(&prepared, &context(deadline(), &cancel))
         .await
         .expect("retrying the same immutable publication identity is acknowledged");
 
@@ -40,7 +40,7 @@ async fn publication_requires_expected_stream_ack_deduplicates_and_rejects_defin
         .expect("second registered event is prepared");
     let result = messaging
         .producer()
-        .publish(&rejected, deadline(), &cancel)
+        .publish(&rejected, &context(deadline(), &cancel))
         .await;
     assert!(matches!(result, Err(PublishError::Rejected)));
 
@@ -66,7 +66,7 @@ async fn a_prepared_event_obeys_the_receiving_resources_payload_limit() {
     assert!(matches!(
         messaging
             .producer()
-            .publish(&prepared, deadline(), &cancel)
+            .publish(&prepared, &context(deadline(), &cancel))
             .await,
         Err(PublishError::Rejected)
     ));
@@ -83,7 +83,7 @@ async fn a_prepared_event_obeys_the_receiving_resources_payload_limit() {
     .unwrap();
     messaging
         .producer()
-        .publish(&prepared, deadline(), &cancel)
+        .publish(&prepared, &context(deadline(), &cancel))
         .await
         .expect("the exact payload boundary is admitted");
     close(messaging).await;
@@ -128,7 +128,11 @@ async fn cancelled_publications_hold_the_shared_window_until_native_cleanup() {
     let mut publications = tokio::task::JoinSet::new();
     for _ in 0..capacity {
         let (producer, prepared, cancel) = (messaging.producer(), prepared.clone(), cancel.clone());
-        publications.spawn(async move { producer.publish(&prepared, deadline(), &cancel).await });
+        publications.spawn(async move {
+            producer
+                .publish(&prepared, &context(deadline(), &cancel))
+                .await
+        });
     }
     timeout(Duration::from_secs(3), dispatched.notified())
         .await
@@ -141,7 +145,7 @@ async fn cancelled_publications_hold_the_shared_window_until_native_cleanup() {
     let healthy = CancellationToken::new();
     let refused = timeout(
         Duration::from_millis(250),
-        producer.publish(&prepared, deadline(), &healthy),
+        producer.publish(&prepared, &context(deadline(), &healthy)),
     )
     .await
     .expect("a full shared window refuses without waiting");
@@ -152,7 +156,10 @@ async fn cancelled_publications_hold_the_shared_window_until_native_cleanup() {
         let mut cadence = tokio::time::interval(Duration::from_millis(20));
         loop {
             cadence.tick().await;
-            match producer.publish(&prepared, deadline(), &healthy).await {
+            match producer
+                .publish(&prepared, &context(deadline(), &healthy))
+                .await
+            {
                 Ok(ack) => {
                     assert!(ack.duplicate);
                     break;
@@ -189,8 +196,7 @@ async fn post_dispatch_lost_ack_is_ambiguous_and_same_identity_retries_as_duplic
         .producer()
         .publish(
             &prepared,
-            Instant::now() + Duration::from_millis(250),
-            &cancel,
+            &context(Instant::now() + Duration::from_millis(250), &cancel),
         )
         .await;
     assert!(matches!(result, Err(PublishError::Ambiguous)));
@@ -227,7 +233,7 @@ async fn post_dispatch_lost_ack_is_ambiguous_and_same_identity_retries_as_duplic
     .expect("direct retry producer is admitted after relay shutdown");
     let acknowledgment = retry
         .producer()
-        .publish(&prepared, deadline(), &cancel)
+        .publish(&prepared, &context(deadline(), &cancel))
         .await
         .expect("retrying the same prepared identity receives a broker acknowledgment");
     assert!(acknowledgment.duplicate);

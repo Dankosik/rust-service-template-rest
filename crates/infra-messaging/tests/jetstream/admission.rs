@@ -135,8 +135,7 @@ async fn publisher_admits_explicit_default_persistence_without_a_dead_letter_str
             &registry(&fixture)
                 .prepare(&event("publisher-no-dlq"), 1024)
                 .unwrap(),
-            deadline(),
-            &CancellationToken::new(),
+            &context(deadline(), &CancellationToken::new()),
         )
         .await
         .unwrap();

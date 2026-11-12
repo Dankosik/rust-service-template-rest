@@ -36,25 +36,38 @@ pub(crate) enum DispatchError {
     Handler(HandlerError),
 }
 
-/// Event type and schema version. Every key comes from an [`EventPayload`]
-/// constant, so building one to look up a route does not allocate.
-pub(crate) type RouteKey = (&'static str, u16);
+/// Event type and schema version. Every registered key comes from an
+/// [`EventPayload`] constant, so building one to look up a route does not
+/// allocate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct RouteKey<'a> {
+    pub(crate) event_type: &'a str,
+    pub(crate) schema_version: u16,
+}
 
-/// The route key of a payload type; rejects version zero at compile time.
-const fn route_key<T: EventPayload>() -> RouteKey {
+/// The route key of a payload type; rejects an invalid event type and
+/// version zero at compile time.
+pub(crate) const fn route_key<T: EventPayload>() -> RouteKey<'static> {
     const {
         assert!(
             T::SCHEMA_VERSION > 0,
             "event schema version must be positive"
         );
+        assert!(
+            crate::wire::valid_identity(T::EVENT_TYPE),
+            "event type must be 1 to IDENTITY_MAX_BYTES bytes without control characters"
+        );
     }
-    (T::EVENT_TYPE, T::SCHEMA_VERSION)
+    RouteKey {
+        event_type: T::EVENT_TYPE,
+        schema_version: T::SCHEMA_VERSION,
+    }
 }
 
 /// Composition-owned subject routing for one typed event.
 #[derive(Clone)]
 pub struct Route {
-    pub(crate) key: RouteKey,
+    pub(crate) key: RouteKey<'static>,
     pub(crate) subject: String,
     pub(crate) schema: Option<PayloadSchema>,
 }
@@ -93,8 +106,11 @@ impl Route {
 
 #[derive(Debug, thiserror::Error)]
 pub enum RegistryError {
-    #[error("event route is invalid: {0}")]
-    InvalidRoute(&'static str),
+    #[error("route subject is invalid for {event_type} v{schema_version}")]
+    InvalidSubject {
+        event_type: String,
+        schema_version: u16,
+    },
     #[error("duplicate route for {event_type} v{schema_version}")]
     DuplicateRoute {
         event_type: String,
@@ -117,7 +133,7 @@ pub enum RegistryError {
 /// Typed routes and handlers registered before consumer admission.
 #[derive(Clone)]
 pub struct Registry {
-    routes: HashMap<RouteKey, RouteEntry>,
+    routes: HashMap<RouteKey<'static>, RouteEntry>,
 }
 
 /// What one route key carries: the route itself and its handler once registered.
@@ -161,18 +177,22 @@ impl Registry {
     /// Creates a registry with all composition-owned routes.
     ///
     /// # Errors
-    /// Rejects duplicate routes or invalid type, schema and subject declarations.
+    /// Rejects duplicate routes and invalid subjects.
     pub fn try_new(routes: impl IntoIterator<Item = Route>) -> Result<Self, RegistryError> {
         let mut mapped = HashMap::default();
         for route in routes {
-            if crate::wire::validate_identity(route.key.0).is_err() {
-                return Err(RegistryError::InvalidRoute("event type is invalid"));
-            }
+            let key @ RouteKey {
+                event_type,
+                schema_version,
+            } = route.key;
+            // The subject itself stays out of the error: an invalid one can
+            // hold a line break.
             if !valid_subject(&route.subject) {
-                return Err(RegistryError::InvalidRoute("subject is invalid"));
+                return Err(RegistryError::InvalidSubject {
+                    event_type: event_type.to_owned(),
+                    schema_version,
+                });
             }
-            let (event_type, schema_version) = route.key;
-            let key = route.key;
             let entry = RouteEntry {
                 route,
                 handler: None,
@@ -187,8 +207,9 @@ impl Registry {
         Ok(Self { routes: mapped })
     }
 
-    /// Registers a typed handler with its fixed delivery deadline and cancellation.
-    /// Broker metadata stays outside feature code.
+    /// Registers a typed handler. It receives the event and an
+    /// [`OperationContext`] carrying the fixed delivery deadline and
+    /// cancellation; broker metadata stays outside feature code.
     ///
     /// # Errors
     /// Rejects missing routes and a second handler for the same event version.
@@ -251,7 +272,7 @@ impl Registry {
     ///
     /// # Errors
     /// Returns `Empty` when no handler has been registered.
-    pub fn validate_consumer(&self) -> Result<(), RegistryError> {
+    pub fn require_handlers(&self) -> Result<(), RegistryError> {
         if self.has_handlers() {
             Ok(())
         } else {
@@ -259,7 +280,7 @@ impl Registry {
         }
     }
 
-    pub(crate) fn subject_for<T: EventPayload>(&self) -> Option<&str> {
+    fn subject_for<T: EventPayload>(&self) -> Option<&str> {
         self.routes
             .get(&route_key::<T>())
             .map(|entry| entry.route.subject.as_str())
@@ -272,7 +293,7 @@ impl Registry {
 
     /// Every route with a registered handler. A route without one is one
     /// this process only publishes to.
-    pub(crate) fn handled(&self) -> impl Iterator<Item = &Route> {
+    pub(crate) fn handled_routes(&self) -> impl Iterator<Item = &Route> {
         self.routes
             .values()
             .filter(|entry| entry.handler.is_some())
@@ -294,9 +315,12 @@ impl Registry {
         } = envelope;
         // The map is covariant in the key, so the inbound type looks up the
         // `'static` keys without a copy.
-        let routes: &HashMap<(&str, u16), RouteEntry> = &self.routes;
+        let routes: &HashMap<RouteKey<'_>, RouteEntry> = &self.routes;
         let handler = routes
-            .get(&(event_type.as_str(), schema_version))
+            .get(&RouteKey {
+                event_type: &event_type,
+                schema_version,
+            })
             .filter(|entry| entry.route.subject == subject)
             .and_then(|entry| entry.handler.as_ref())
             .ok_or(DispatchError::Unhandled)?;
@@ -355,11 +379,11 @@ mod tests {
         payload: &'static str,
     ) -> Result<(), DispatchError> {
         let mut headers = async_nats::HeaderMap::new();
-        headers.insert(crate::wire::name::MESSAGE_ID, "event-1");
-        headers.insert(crate::wire::name::EVENT_TYPE, event_type);
-        headers.insert(crate::wire::name::EVENT_SCHEMA, schema);
-        headers.insert(crate::wire::name::CREATED_AT, "2026-09-29T10:00:00Z");
-        headers.insert(crate::wire::name::NATS_MSG_ID, "event-1");
+        headers.insert(crate::wire::header_name::MESSAGE_ID, "event-1");
+        headers.insert(crate::wire::header_name::EVENT_TYPE, event_type);
+        headers.insert(crate::wire::header_name::EVENT_SCHEMA, schema);
+        headers.insert(crate::wire::header_name::CREATED_AT, "2026-09-29T10:00:00Z");
+        headers.insert(crate::wire::header_name::NATS_MSG_ID, "event-1");
         let envelope =
             crate::wire::decode_envelope(subject, &headers, Bytes::from_static(payload.as_bytes()))
                 .unwrap();

@@ -462,7 +462,7 @@ async fn tls_root_ca_file_is_reread_for_a_same_client_reconnect_to_a_new_localho
         .expect("fixture event is prepared");
     messaging
         .producer()
-        .publish(&prepared, deadline(), &cancel)
+        .publish(&prepared, &context(deadline(), &cancel))
         .await
         .expect("the same messaging connection publishes after CA rotation");
 
@@ -653,7 +653,7 @@ async fn a_consumer_recovers_after_its_broker_connection_is_interrupted() {
         .unwrap();
     messaging
         .producer()
-        .publish(&before, deadline(), &cancel)
+        .publish(&before, &context(deadline(), &cancel))
         .await
         .unwrap();
     assert_eq!(
@@ -682,8 +682,7 @@ async fn a_consumer_recovers_after_its_broker_connection_is_interrupted() {
             .producer()
             .publish(
                 &contending,
-                Instant::now() + Duration::from_millis(50),
-                &cancel
+                &context(Instant::now() + Duration::from_millis(50), &cancel)
             )
             .await,
         Err(PublishError::Ambiguous)
@@ -717,7 +716,7 @@ async fn a_consumer_recovers_after_its_broker_connection_is_interrupted() {
         .unwrap();
     messaging
         .producer()
-        .publish(&recovered, deadline(), &cancel)
+        .publish(&recovered, &context(deadline(), &cancel))
         .await
         .expect("the same retained producer publishes after recovery");
     timeout(Duration::from_secs(10), async {

@@ -49,17 +49,21 @@ pub(crate) struct Outcomes<O> {
 }
 
 impl<O: OutcomeLabel> Outcomes<O> {
+    /// `label_key` names the label each outcome's value goes under;
     /// `event_type`, when given, labels every outcome with that event type.
     pub(crate) fn register(
         total: &'static str,
         duration: &'static str,
-        label: &'static str,
+        label_key: &'static str,
         event_type: Option<&'static str>,
     ) -> Self {
         let handles = O::ALL
             .iter()
             .map(|outcome| {
-                let mut labels = vec![metrics::Label::from_static_parts(label, outcome.label())];
+                let mut labels = vec![metrics::Label::from_static_parts(
+                    label_key,
+                    outcome.label(),
+                )];
                 if let Some(event_type) = event_type {
                     labels.push(metrics::Label::from_static_parts("event_type", event_type));
                 }
@@ -85,6 +89,16 @@ impl<O: OutcomeLabel> Outcomes<O> {
 impl<O> std::fmt::Debug for Outcomes<O> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("Outcomes")
+    }
+}
+
+/// Records an operation's outcome `label` on its span, and marks the span
+/// failed with that label as its `error.type` when `failed`.
+pub(crate) fn record_span_outcome(span: &tracing::Span, label: &'static str, failed: bool) {
+    span.record("outcome", label);
+    if failed {
+        span.record("error.type", label);
+        span.record("otel.status_code", "ERROR");
     }
 }
 

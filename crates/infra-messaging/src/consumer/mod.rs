@@ -10,7 +10,6 @@ use std::time::Duration;
 use async_nats::jetstream::consumer::pull;
 use async_nats::jetstream::consumer::{AckPolicy, DeliverPolicy, PullConsumer, ReplayPolicy};
 use async_nats::jetstream::context::{ConsumerInfoError, ConsumerInfoErrorKind};
-use async_nats::jetstream::stream::ConsumerErrorKind;
 use futures_util::{FutureExt as _, StreamExt as _};
 use tokio::sync::watch;
 use tokio::task::{JoinError, JoinHandle, JoinSet};
@@ -18,10 +17,11 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use self::delivery::{DeliveryHandler, HANDLER_TIMEOUT, redeliver_after};
+use crate::budget::{BROKER_OPERATION_BUDGET, bounded_operation};
 use crate::error::MessagingError;
-use crate::messaging::{BROKER_OPERATION_BUDGET, Shared, bounded_operation};
+use crate::messaging::Shared;
 use crate::registry::Registry;
-use crate::topology::{ConsumerAdmission, get_stream_failure, topology_failure};
+use crate::topology::{ConsumerAdmission, create_durable, get_stream_failure};
 use crate::wire;
 
 /// The broker redelivers an unsettled message after the handler budget and
@@ -44,9 +44,35 @@ const PULL_EXPIRY_GRACE: Duration = Duration::from_secs(2);
 /// this replica's unsubscription, so the broker redelivers to another pull.
 const RELEASE_DELAY: Duration = Duration::from_secs(1);
 
+/// NATS 2.15 counts the original subject and ACK reply in a pull's byte limit.
+/// V2 ACKs cover V1 too: prefix, domain, eight-byte account hash, stream,
+/// consumer, then five 64-bit decimal fields (including a signed timestamp).
+fn pull_delivery_bytes(
+    payload_bytes: usize,
+    subject_bytes: usize,
+    stream: &str,
+    consumer: &str,
+    domain: Option<&str>,
+) -> Option<usize> {
+    // Three separators between names, then a separator and at most 20 bytes
+    // for each numeric field. An absent or empty domain is written as "_".
+    let ack_fixed_bytes = "$JS.ACK.".len() + 8 + 3 + 5 * 21;
+    [
+        wire::HEADER_LIMIT_BYTES,
+        subject_bytes,
+        stream.len(),
+        consumer.len(),
+        domain.map_or(0, str::len).max(1),
+        ack_fixed_bytes,
+    ]
+    .into_iter()
+    .try_fold(payload_bytes, usize::checked_add)
+}
+
 /// A bounded pull consumer admitted against an existing source stream.
 #[derive(Debug)]
 pub struct Consumer {
+    shared: Arc<Shared>,
     pull: PullConsumer,
     concurrency: NonZeroUsize,
     pull_delivery_bytes: usize,
@@ -92,20 +118,22 @@ impl Consumer {
         let ConsumerAdmission {
             options,
             dead_letter,
+            deadline,
+            cancel,
         } = admission;
         // A route without a handler is publish-only and need not be consumed.
         if registry
-            .handled()
+            .handled_routes()
             .any(|route| !wire::matches_filter(&options.filter_subject, &route.subject))
         {
             return Err(MessagingError::Configuration(
                 "handled subject is outside the consumer filter",
             ));
         }
-        let server = shared.client.server_info();
+        let server = shared.connection.client.server_info();
         let subject_bytes =
             dead_letter.admit_routes(&registry, &options.filter_subject, server.max_payload)?;
-        let pull_delivery_bytes = wire::pull_delivery_bytes(
+        let pull_delivery_bytes = pull_delivery_bytes(
             shared.max_payload_bytes,
             subject_bytes,
             &shared.source_stream,
@@ -135,32 +163,27 @@ impl Consumer {
             replay_policy: ReplayPolicy::Instant,
             ..Default::default()
         };
-        let pull = bounded_operation(shared.startup_deadline, &shared.startup_cancel, async {
+        let pull = bounded_operation(deadline, &cancel, async {
             let stream = shared
                 .jetstream
                 .get_stream(&shared.source_stream)
                 .await
-                .map_err(|error| get_stream_failure(&error))?;
-            stream.create_consumer(config).await.map_err(|error| {
-                let broker = match error.kind() {
-                    ConsumerErrorKind::JetStream(broker) => Some(broker),
-                    _ => None,
-                };
-                topology_failure("create_consumer", &error, broker.as_ref())
-            })
+                .map_err(|error| get_stream_failure(&error, "source"))?;
+            create_durable(&stream, config).await
         })
         .await?;
         Ok(Self {
-            pull,
-            concurrency: options.concurrency,
-            pull_delivery_bytes,
             handler: Arc::new(DeliveryHandler::new(
-                shared,
+                Arc::clone(&shared),
                 registry,
                 options.filter_subject,
                 options.dlq_subject,
                 dead_letter.stream,
             )),
+            shared,
+            pull,
+            concurrency: options.concurrency,
+            pull_delivery_bytes,
         })
     }
 
@@ -173,7 +196,7 @@ impl Consumer {
         let task_force = force.clone();
         let (failure_tx, failure) = watch::channel(None);
         let task = tokio::spawn(async move {
-            let shared = Arc::clone(&self.handler.shared);
+            let shared = Arc::clone(&self.shared);
             let result = self.run(task_stop, task_force).await;
             if let Err(error) = &result {
                 // The owner's forced cut ends this consumer only; the shared
@@ -268,7 +291,7 @@ impl Consumer {
                             Err(_) => "local_timeout",
                         };
                         pull_failed("batch_create", error_kind);
-                        if durable_lost(&self.pull).await {
+                        if durable_confirmed_gone(&self.pull).await {
                             return Err(ConsumerError::ConsumerLost);
                         }
                         tokio::time::sleep(STREAM_ERROR_BACKOFF).await;
@@ -276,43 +299,24 @@ impl Consumer {
                     }
                 }
             };
-            // Batch has no missing-heartbeat watchdog. Bound unanswered pulls
-            // here, after the broker's expiry answer is due and before the
-            // SDK's own timer would end the batch as if it had answered.
-            let expires = Instant::now() + PULL_EXPIRES + PULL_EXPIRY_GRACE;
-            let mut remaining = slots;
-            let failure = loop {
-                if remaining == 0 {
-                    break None;
+            match self
+                .fill(&mut messages, deliveries, stop, force, slots)
+                .await?
+            {
+                BatchEnd::Filled => {}
+                BatchEnd::Stopped => {
+                    release(messages).await;
+                    break 'pulls;
                 }
-                tokio::select! {
-                    biased;
-                    () = stop.cancelled() => {
-                        release(messages).await;
-                        break 'pulls;
+                end @ (BatchEnd::Closed | BatchEnd::Failed(_)) => {
+                    release(messages).await;
+                    if durable_confirmed_gone(&self.pull).await {
+                        return Err(ConsumerError::ConsumerLost);
                     }
-                    joined = deliveries.join_next(), if !deliveries.is_empty() => reaped(joined)?,
-                    next = tokio::time::timeout_at(expires, messages.next()) => match next {
-                        Ok(Some(Ok(message))) => {
-                            remaining -= 1;
-                            let handler = Arc::clone(&self.handler);
-                            let cancel = force.child_token();
-                            deliveries.spawn(async move { handler.handle(message, cancel).await; });
-                        }
-                        Ok(None) => break None,
-                        Ok(Some(Err(error))) => break Some(batch_receive_error_kind(&error)),
-                        Err(_) => break Some("local_timeout"),
+                    if let BatchEnd::Failed(error_kind) = end {
+                        pull_failed("batch_receive", error_kind);
+                        tokio::time::sleep(STREAM_ERROR_BACKOFF).await;
                     }
-                }
-            };
-            if remaining > 0 {
-                release(messages).await;
-                if durable_lost(&self.pull).await {
-                    return Err(ConsumerError::ConsumerLost);
-                }
-                if let Some(error_kind) = failure {
-                    pull_failed("batch_receive", error_kind);
-                    tokio::time::sleep(STREAM_ERROR_BACKOFF).await;
                 }
             }
         }
@@ -321,6 +325,57 @@ impl Consumer {
         }
         Ok(())
     }
+
+    /// Admits up to `slots` deliveries of one pull batch, reaping finished
+    /// deliveries meanwhile.
+    async fn fill(
+        &self,
+        messages: &mut pull::Batch,
+        deliveries: &mut JoinSet<()>,
+        stop: &CancellationToken,
+        force: &CancellationToken,
+        slots: usize,
+    ) -> Result<BatchEnd, ConsumerError> {
+        // Batch has no missing-heartbeat watchdog. Bound unanswered pulls
+        // here, after the broker's expiry answer is due and before the
+        // SDK's own timer would end the batch as if it had answered.
+        let expires = Instant::now() + PULL_EXPIRES + PULL_EXPIRY_GRACE;
+        let mut remaining = slots;
+        while remaining > 0 {
+            tokio::select! {
+                biased;
+                () = stop.cancelled() => return Ok(BatchEnd::Stopped),
+                joined = deliveries.join_next(), if !deliveries.is_empty() => reaped(joined)?,
+                next = tokio::time::timeout_at(expires, messages.next()) => match next {
+                    Ok(Some(Ok(message))) => {
+                        remaining -= 1;
+                        let handler = Arc::clone(&self.handler);
+                        let cancel = force.child_token();
+                        deliveries.spawn(async move { handler.handle(message, cancel).await; });
+                    }
+                    Ok(None) => return Ok(BatchEnd::Closed),
+                    Ok(Some(Err(error))) => {
+                        return Ok(BatchEnd::Failed(batch_receive_error_kind(&error)));
+                    }
+                    Err(_) => return Ok(BatchEnd::Failed("local_timeout")),
+                }
+            }
+        }
+        Ok(BatchEnd::Filled)
+    }
+}
+
+/// How admitting one pull batch's deliveries ended.
+#[derive(Clone, Copy, Debug)]
+enum BatchEnd {
+    /// Every reserved slot received a delivery.
+    Filled,
+    /// The consumer was asked to stop.
+    Stopped,
+    /// The batch ended before filling its slots.
+    Closed,
+    /// The batch failed with this `error.type`.
+    Failed(&'static str),
 }
 
 /// A delivery task that panicked or was cancelled ends the consumer.
@@ -333,7 +388,7 @@ fn reaped(joined: Option<Result<(), JoinError>>) -> Result<(), ConsumerError> {
 
 /// Whether the broker confirmed that the durable is gone; an unanswered
 /// lookup is not that confirmation.
-async fn durable_lost(pull: &PullConsumer) -> bool {
+async fn durable_confirmed_gone(pull: &PullConsumer) -> bool {
     matches!(durable_is_gone(pull).await, Ok(true))
 }
 
@@ -503,6 +558,34 @@ impl Drop for ConsumerHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pull_budget_covers_native_ack_metadata_and_checks_overflow() {
+        let subject = "x".repeat(57_000);
+        let source = "SOURCE";
+        let consumer = "handler";
+        let maximum = u64::MAX;
+        let timestamp = i64::MIN;
+        let v1 = format!(
+            "$JS.ACK.{source}.{consumer}.{maximum}.{maximum}.{maximum}.{timestamp}.{maximum}"
+        );
+        let long_domain = "domain".repeat(1000);
+        for domain in [None, Some(""), Some(long_domain.as_str())] {
+            let ack_domain = domain.filter(|domain| !domain.is_empty()).unwrap_or("_");
+            let v2 = format!(
+                "$JS.ACK.{ack_domain}.01234567.{source}.{consumer}.{maximum}.{maximum}.{maximum}.{timestamp}.{maximum}"
+            );
+            let bound = pull_delivery_bytes(1024, subject.len(), source, consumer, domain).unwrap();
+            assert_eq!(
+                bound,
+                1024 + wire::HEADER_LIMIT_BYTES + subject.len() + v2.len()
+            );
+            assert!(1024 + wire::HEADER_LIMIT_BYTES + subject.len() + v1.len() <= bound);
+        }
+        for [payload, subject] in [[usize::MAX, 1], [1, usize::MAX]] {
+            assert!(pull_delivery_bytes(payload, subject, "s", "c", Some("d")).is_none());
+        }
+    }
 
     #[test]
     fn batch_receipt_diagnostics_classify_pinned_statuses_without_provider_text() {

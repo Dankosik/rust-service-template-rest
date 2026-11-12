@@ -84,6 +84,7 @@ features = ["test-support"]
 async-nats = { workspace = true, features = ["jetstream"] }
 domain-events = { workspace = true }
 infra-messaging = { workspace = true }
+operation-context = { workspace = true }
 # template:end outbox:test-messaging-outbox-dependencies
 # template:begin test-digest:test-digest-dependency
 sha2 = { workspace = true }

@@ -99,15 +99,21 @@ impl MessagingProbe {
         if self.shared.has_failed() {
             return Err(ProbeError::new("messaging consumer failed"));
         }
-        if self.shared.client.wait_closed().now_or_never().is_some()
+        if self
+            .shared
+            .connection
+            .client
+            .wait_closed()
+            .now_or_never()
+            .is_some()
             || !matches!(
-                self.shared.client.connection_state(),
+                self.shared.connection.client.connection_state(),
                 async_nats::connection::State::Connected
             )
         {
             return Err(ProbeError::new("messaging connection is unavailable"));
         }
-        validate_server(&self.shared.client, self.shared.envelope_limit)
+        validate_server(&self.shared.connection.client, self.shared.envelope_limit)
             .map_err(|_| ProbeError::new("messaging server admission is unavailable"))
     }
 }
