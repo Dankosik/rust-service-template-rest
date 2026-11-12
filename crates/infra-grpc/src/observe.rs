@@ -44,9 +44,9 @@ const CLIENT_DIAGNOSTIC_BYTES: usize = 1024;
 const CLIENT_HANDLED: &str = "grpc_client_handled_total";
 /// Client time to the call's status, a histogram by service and method.
 pub(crate) const CLIENT_HANDLING_SECONDS: &str = "grpc_client_handling_seconds";
-/// Buckets for both handling-time histograms: the Prometheus client default
-/// that `go-grpc-middleware` uses, so its dashboards' `_bucket` queries apply.
-/// Without them the recorder would render a summary.
+/// Prometheus client default buckets shared by call duration and admission wait.
+/// Explicit boundaries keep `go-grpc-middleware` dashboard queries against
+/// `_bucket` compatible when the recorder's defaults differ.
 pub const HANDLING_SECONDS_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
 ];
@@ -82,7 +82,7 @@ pub(crate) async fn observe(
         Some(context) => answer.with_context(context.clone()).await,
     }
     .unwrap_or_else(|_panic| crate::status::internal_status().into_http());
-    let custody = ResponseCustody::from_server_response(&mut response);
+    let custody = ResponseCustody::take_from_server_response(&mut response);
     crate::call::attach(response, call, fallback, custody, |_error| {
         tonic::Code::Unknown
     })
@@ -455,7 +455,7 @@ fn describe() {
         metrics::describe_counter!(
             CLIENT_STARTED,
             metrics::Unit::Count,
-            "Client gRPC calls sent by service and method"
+            "Client gRPC calls started by service and method, including calls that end before dispatch"
         );
         metrics::describe_counter!(
             SERVER_HANDLED,

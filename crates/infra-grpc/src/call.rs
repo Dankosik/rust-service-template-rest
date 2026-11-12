@@ -61,7 +61,7 @@ impl ResponseCustody {
     /// The custody the server layers hand over in the response extensions:
     /// the caller lifetime from the `opening` layer, its cancellation guard,
     /// and the business admission permit.
-    pub(crate) fn from_server_response<B>(response: &mut http::Response<B>) -> Self {
+    pub(crate) fn take_from_server_response<B>(response: &mut http::Response<B>) -> Self {
         let extensions = response.extensions_mut();
         Self {
             on_status: None,
