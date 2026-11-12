@@ -14,6 +14,7 @@ use tokio::sync::OwnedSemaphorePermit;
 use tokio_util::task::AbortOnDropHandle;
 
 use crate::observe::Call;
+use crate::protocol::{header_status_code, http_status_code};
 use crate::status::internal_status;
 
 use operation_context::{OperationContext, Stopped};
@@ -108,38 +109,6 @@ impl Side {
     }
 }
 
-/// The code a gRPC client reads from a response before its body: `grpc-status`
-/// when the headers carry it, otherwise the HTTP status mapping. `None` for a
-/// `200` without one, whose code the trailers still carry.
-pub fn client_response_code<B>(response: &http::Response<B>) -> Option<tonic::Code> {
-    header_status_code(response.headers()).or_else(|| http_status_code(response.status()))
-}
-
-fn header_status_code(headers: &HeaderMap) -> Option<tonic::Code> {
-    headers
-        .get("grpc-status")
-        .map(|value| tonic::Code::from_bytes(value.as_bytes()))
-}
-
-/// The code a gRPC client infers from an HTTP answer without `grpc-status`,
-/// per gRPC's HTTP-to-gRPC status mapping, which tonic's client applies too.
-/// `None` for `200`, whose status the trailers still carry.
-fn http_status_code(status: http::StatusCode) -> Option<tonic::Code> {
-    use http::StatusCode;
-    match status {
-        StatusCode::OK => None,
-        StatusCode::BAD_REQUEST => Some(tonic::Code::Internal),
-        StatusCode::UNAUTHORIZED => Some(tonic::Code::Unauthenticated),
-        StatusCode::FORBIDDEN => Some(tonic::Code::PermissionDenied),
-        StatusCode::NOT_FOUND => Some(tonic::Code::Unimplemented),
-        StatusCode::TOO_MANY_REQUESTS
-        | StatusCode::BAD_GATEWAY
-        | StatusCode::SERVICE_UNAVAILABLE
-        | StatusCode::GATEWAY_TIMEOUT => Some(tonic::Code::Unavailable),
-        _ => Some(tonic::Code::Unknown),
-    }
-}
-
 fn header_catalog_code(headers: &HeaderMap) -> Option<service_failure::Code> {
     // The catalog code travels only in the details, which tonic writes only
     // when they are non-empty; without them its parse, which clones the whole
@@ -181,14 +150,13 @@ impl Outcome {
         }
     }
 
-    /// The outcome `grpc-status` in `trailers` carries, also read from the
-    /// headers of a trailers-only answer; `None` without it.
-    fn of_trailers(side: Side, trailers: &HeaderMap) -> Option<Self> {
-        let code = header_status_code(trailers)?;
+    /// Reads the outcome from trailers or the initial headers of a trailers-only answer.
+    fn from_status_headers(side: Side, headers: &HeaderMap) -> Option<Self> {
+        let code = header_status_code(headers)?;
         Some(Self {
             code,
             failure: match side {
-                Side::Server => header_catalog_code(trailers),
+                Side::Server => header_catalog_code(headers),
                 Side::Client => None,
             },
         })
@@ -288,7 +256,7 @@ impl<B: Body> State<B> {
         let outcome = match polled {
             Poll::Ready(Some(Ok(frame))) => {
                 let trailers = frame.trailers_ref()?;
-                Outcome::of_trailers(self.side, trailers)
+                Outcome::from_status_headers(self.side, trailers)
                     .unwrap_or(Outcome::bare(tonic::Code::Unknown))
             }
             Poll::Ready(Some(Err(error))) => {
@@ -346,7 +314,7 @@ where
         let _ = status.add_header(response.headers_mut());
         Some(Outcome::of_status(side, &status))
     } else {
-        Outcome::of_trailers(side, response.headers()).or_else(|| match side {
+        Outcome::from_status_headers(side, response.headers()).or_else(|| match side {
             Side::Client => http_status_code(response.status()).map(Outcome::bare),
             Side::Server => None,
         })
