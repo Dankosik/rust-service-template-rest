@@ -270,9 +270,11 @@ impl Consumer {
         force: &CancellationToken,
     ) -> Result<(), ConsumerError> {
         let concurrency = self.concurrency.get();
-        let mut retained = false;
+        let mut retry_large_retained_record = false;
         'pulls: loop {
-            while deliveries.len() == concurrency || (retained && !deliveries.is_empty()) {
+            while deliveries.len() == concurrency
+                || (retry_large_retained_record && !deliveries.is_empty())
+            {
                 tokio::select! {
                     biased;
                     () = stop.cancelled() => break 'pulls,
@@ -311,7 +313,8 @@ impl Consumer {
             if stop.is_cancelled() {
                 break 'pulls;
             }
-            let (slots, max_bytes) = self.pull_budget(deliveries.len(), retained);
+            let (slots, max_bytes) =
+                self.pull_budget(deliveries.len(), retry_large_retained_record);
             let request = tokio::time::timeout(
                 BROKER_OPERATION_BUDGET,
                 self.pull
@@ -359,12 +362,17 @@ impl Consumer {
                 .await
             {
                 Ok(BatchEnd::Filled) => {
-                    if retained {
+                    if retry_large_retained_record {
                         reaped(deliveries.join_next().await)?;
-                        retained = false;
+                        retry_large_retained_record = false;
                     }
                 }
-                Ok(end) => {
+                Ok(
+                    end @ (BatchEnd::Stopped
+                    | BatchEnd::Closed
+                    | BatchEnd::FirstMessageTooLarge
+                    | BatchEnd::Failed { .. }),
+                ) => {
                     release(messages, slots, stop).await;
                     if matches!(end, BatchEnd::Stopped) || stop.is_cancelled() {
                         break 'pulls;
@@ -380,13 +388,13 @@ impl Consumer {
                     if stop.is_cancelled() {
                         break 'pulls;
                     }
-                    let was_retained = retained;
-                    retained = matches!(end, BatchEnd::FirstMessageTooLarge);
-                    if retained {
+                    let was_retrying_large_retained_record = retry_large_retained_record;
+                    retry_large_retained_record = matches!(end, BatchEnd::FirstMessageTooLarge);
+                    if retry_large_retained_record {
                         pull_failed("batch_receive", MAX_BYTES_EXCEEDED);
                         // A multi-message pull may report 409 before already
                         // allocated records reach this replica's subscription.
-                        if was_retained {
+                        if was_retrying_large_retained_record {
                             return Err(ConsumerError::RetainedMessageTooLarge);
                         }
                     } else if let BatchEnd::Failed { phase, error_kind } = end {
@@ -415,8 +423,12 @@ impl Consumer {
         Ok(())
     }
 
-    fn pull_budget(&self, active_deliveries: usize, retained: bool) -> (usize, usize) {
-        if retained {
+    fn pull_budget(
+        &self,
+        active_deliveries: usize,
+        retry_large_retained_record: bool,
+    ) -> (usize, usize) {
+        if retry_large_retained_record {
             // The caller drains every other slot before reserving a full-size
             // delivery for a record that may predate the current source limit.
             (1, self.retained_pull_bytes)
