@@ -108,8 +108,15 @@ impl PeerRegistry {
         true
     }
 
-    /// Wake every engine that registers `kind`, or all engines when it is `None`.
-    pub(crate) fn wake(&self, kind: Option<&str>) {
+    pub(crate) fn wake_all(&self) {
+        self.wake_matching(None);
+    }
+
+    pub(crate) fn wake_kind(&self, kind: &str) {
+        self.wake_matching(Some(kind));
+    }
+
+    fn wake_matching(&self, kind: Option<&str>) {
         for peer in &self.lock().entries {
             if kind.is_none_or(|kind| peer.kinds.contains(&kind)) {
                 peer.claim_wake.notify_one();

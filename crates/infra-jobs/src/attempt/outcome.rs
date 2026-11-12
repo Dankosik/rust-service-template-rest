@@ -4,7 +4,7 @@ use infra_postgres::observed;
 use sqlx::postgres::PgConnection;
 use tokio::time::Instant;
 
-use super::{AttemptId, ClaimFence, Persistence, expired};
+use super::{AttemptId, ClaimFence, Persistence, deadline_reached_or_cleanup_ended};
 use crate::engine::{Operation, OperationError, Shared, backstop, observe_failure};
 use crate::kind::{Disposition, JobError, MAX_ERROR_SUMMARY_BYTES, Policy};
 use crate::state::FailureReason;
@@ -107,11 +107,10 @@ pub(super) struct Unacknowledged;
 
 /// The write-only view of `transition`: the outcome that stores its own row.
 ///
-/// A completion returns `None`, because
-/// [`complete_batched`](super::completion::complete_batched) is the only path
-/// that completes an attempt. The match is exhaustive, so a new transition
-/// cannot reach a statement without first choosing which of the two writes it
-/// takes, and the view carries only the values its statement binds.
+/// The supervisor routes completion through
+/// [`complete_batched`](super::completion::complete_batched). A handler can
+/// complete the claim in its own transaction via
+/// [`Job::complete_in_tx`](crate::kind::Job::complete_in_tx).
 pub(super) fn write_of(transition: &Transition) -> Option<Write<'_>> {
     Some(match transition {
         Transition::Complete => return None,
@@ -146,7 +145,7 @@ pub(super) async fn send_outcome(
         let mut connection = infra_postgres::acquire(&shared.pool, "record job outcome")
             .await
             .map_err(OperationError::Acquire)?;
-        if expired(shared, deadline) {
+        if deadline_reached_or_cleanup_ended(&shared.cleanup, deadline) {
             return Err(OperationError::TimedOut);
         }
         execute(&mut connection, fence, write)
@@ -160,8 +159,8 @@ pub(super) async fn send_outcome(
     })
 }
 
-/// Store one attempt outcome. A completion is not among the views: its only
-/// write is [`complete_batched`](super::completion::complete_batched).
+/// The supervisor batches completions separately via
+/// [`complete_batched`](super::completion::complete_batched).
 async fn execute(
     connection: &mut PgConnection,
     fence: ClaimFence,

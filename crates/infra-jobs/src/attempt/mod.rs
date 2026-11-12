@@ -318,7 +318,7 @@ async fn run_attempt(
     supervisor_deadline: Instant,
     slots: Arc<AttemptSlots>,
 ) {
-    if expired(shared, supervisor_deadline) {
+    if deadline_reached_or_cleanup_ended(&shared.cleanup, supervisor_deadline) {
         observe_uncertain(shared, &attempt);
         return;
     }
@@ -429,7 +429,7 @@ async fn within<T>(
     let mut future = std::pin::pin!(future);
     let bounded = std::future::poll_fn(|cx| {
         // A resumed poll can send SQL, even when it initially only waited for I/O.
-        if Instant::now() >= until || cleanup.has_ended() {
+        if deadline_reached_or_cleanup_ended(cleanup, until) {
             std::task::Poll::Ready(None)
         } else {
             future.as_mut().poll(cx).map(Some)
@@ -443,8 +443,8 @@ async fn within<T>(
     }
 }
 
-fn expired(shared: &Shared, until: Instant) -> bool {
-    Instant::now() >= until || shared.cleanup.has_ended()
+fn deadline_reached_or_cleanup_ended(cleanup: &ForcedCleanup, until: Instant) -> bool {
+    Instant::now() >= until || cleanup.has_ended()
 }
 
 /// `base + wait`, capped at `limit`: the latest instant a local wait may reach.
@@ -576,7 +576,7 @@ async fn persist(
         generation,
     };
     loop {
-        if expired(shared, supervisor_deadline) {
+        if deadline_reached_or_cleanup_ended(&shared.cleanup, supervisor_deadline) {
             break;
         }
         let sent = within(&shared.cleanup, supervisor_deadline, async {
