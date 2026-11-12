@@ -84,8 +84,8 @@ impl Services {
     /// # Errors
     ///
     /// Returns [`Error::UndescribedService`] when no described set holds
-    /// that name, and [`Error::DuplicateService`] when it is already
-    /// registered.
+    /// that name, and [`Error::DuplicateService`] when the name is already
+    /// registered or reserved for the built-in health service.
     pub fn add<S>(&mut self, service: S) -> Result<(), Error>
     where
         S: tower::Service<http::Request<tonic::body::Body>, Error = Infallible>
@@ -97,6 +97,9 @@ impl Services {
         S::Response: axum::response::IntoResponse,
         S::Future: Send + 'static,
     {
+        if S::NAME == HealthServer::NAME {
+            return Err(Error::DuplicateService(S::NAME));
+        }
         if !self.described.contains_key(S::NAME) {
             return Err(Error::UndescribedService(S::NAME));
         }

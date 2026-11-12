@@ -212,6 +212,7 @@ impl<B: Body> Completion<B> {
 struct State<B: Body> {
     phase: Phase<B>,
     side: Side,
+    missing_status: tonic::Code,
 }
 
 impl<B: Body> State<B> {
@@ -257,7 +258,7 @@ impl<B: Body> State<B> {
             Poll::Ready(Some(Ok(frame))) => {
                 let trailers = frame.trailers_ref()?;
                 Outcome::from_status_headers(self.side, trailers)
-                    .unwrap_or(Outcome::bare(tonic::Code::Unknown))
+                    .unwrap_or(Outcome::bare(self.missing_status))
             }
             Poll::Ready(Some(Err(error))) => {
                 let Phase::Open(open) = &self.phase else {
@@ -265,7 +266,7 @@ impl<B: Body> State<B> {
                 };
                 Outcome::bare((open.error_code)(error))
             }
-            Poll::Ready(None) => Outcome::bare(tonic::Code::Unknown),
+            Poll::Ready(None) => Outcome::bare(self.missing_status),
             Poll::Pending => return None,
         };
         self.close(Phase::Done, outcome)
@@ -314,12 +315,31 @@ where
         let _ = status.add_header(response.headers_mut());
         Some(Outcome::of_status(side, &status))
     } else {
-        Outcome::from_status_headers(side, response.headers()).or_else(|| match side {
-            Side::Client => http_status_code(response.status()).map(Outcome::bare),
-            Side::Server => None,
-        })
+        Outcome::from_status_headers(side, response.headers())
     };
-    response.map(|body| ResponseBody::new(body, call, fallback, custody, error_code, initial))
+    if response
+        .extensions_mut()
+        .remove::<crate::router::Shed>()
+        .is_some()
+        && initial.is_some_and(|outcome| outcome.code == tonic::Code::ResourceExhausted)
+    {
+        crate::observe::record_shed();
+    }
+    let missing_status = match side {
+        Side::Client => http_status_code(response.status()).unwrap_or(tonic::Code::Unknown),
+        Side::Server => tonic::Code::Unknown,
+    };
+    response.map(|body| {
+        ResponseBody::new(
+            body,
+            call,
+            fallback,
+            custody,
+            error_code,
+            initial,
+            missing_status,
+        )
+    })
 }
 
 impl<B> ResponseBody<B>
@@ -333,6 +353,7 @@ where
         custody: ResponseCustody,
         error_code: fn(&B::Error) -> tonic::Code,
         initial: Option<Outcome>,
+        missing_status: tonic::Code,
     ) -> Self {
         let ended = body.is_end_stream();
         let side = call.side();
@@ -349,13 +370,14 @@ where
                 error_code,
             }),
             side,
+            missing_status,
         };
         let completion = if let Some(outcome) = initial {
             state.close(Phase::Done, outcome)
         } else if let Some(status) = state.stopped_status() {
             state.complete_with(&status)
         } else if ended {
-            state.close(Phase::Done, Outcome::bare(tonic::Code::Unknown))
+            state.close(Phase::Done, Outcome::bare(missing_status))
         } else {
             None
         };
@@ -657,7 +679,15 @@ mod tests {
     where
         B: Body<Data = Bytes, Error = tonic::Status> + Unpin + Send + 'static,
     {
-        ResponseBody::new(body, call(), None, custody, tonic::Status::code, None)
+        ResponseBody::new(
+            body,
+            call(),
+            None,
+            custody,
+            tonic::Status::code,
+            None,
+            tonic::Code::Unknown,
+        )
     }
 
     #[tokio::test]
@@ -901,6 +931,7 @@ mod tests {
             ResponseCustody::default(),
             tonic::Status::code,
             None,
+            tonic::Code::Unknown,
         );
         let ambient = opentelemetry::Context::current()
             .span()

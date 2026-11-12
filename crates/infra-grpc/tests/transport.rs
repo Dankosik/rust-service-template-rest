@@ -1062,12 +1062,20 @@ async fn opening_admission_counts_auth_followers_and_recovers_after_cancellation
         .unwrap();
         assert!(Status::from_header_map(response.headers()).is_none());
     }
-    // An expired caller wins even when capacity is exhausted.
-    let mut expired = opening_request(UNARY_PATH, None, "expired");
-    expired
+    // A deadline that cuts the refusal drain short is also counted only as a deadline.
+    tokio::time::pause();
+    let mut draining = opening_request(UNARY_PATH, None, "draining");
+    draining
         .headers_mut()
-        .insert("grpc-timeout", "0n".parse().unwrap());
-    let response = app.clone().oneshot(expired).await.unwrap();
+        .insert("grpc-timeout", "50m".parse().unwrap());
+    *draining.body_mut() = axum::body::Body::from_stream(futures_util::stream::pending::<
+        Result<bytes::Bytes, std::convert::Infallible>,
+    >());
+    let mut draining = Box::pin(app.clone().oneshot(draining));
+    assert!(futures_util::poll!(draining.as_mut()).is_pending());
+    tokio::time::advance(Duration::from_millis(50)).await;
+    let response = draining.await.unwrap();
+    tokio::time::resume();
     assert_eq!(
         Status::from_header_map(response.headers()).unwrap().code(),
         Code::DeadlineExceeded
@@ -1978,6 +1986,48 @@ async fn a_handler_failure_carries_its_reason_and_field_violations() {
     assert_eq!(violations[0].field, "message");
     assert_eq!(violations[0].description, "is reserved");
     fixture.stop().await;
+}
+
+#[tokio::test]
+async fn health_watch_honors_the_caller_timeout_after_its_initial_status() {
+    let fixture = Fixture::unseeded().await;
+    let channel = tonic::transport::Endpoint::from_shared(format!("http://{}", fixture.address))
+        .unwrap()
+        .connect_lazy();
+    let mut health = HealthClient::new(channel);
+    let mut request = Request::new(HealthCheckRequest {
+        service: ECHO_SERVICE.to_owned(),
+    });
+    request.set_timeout(Duration::from_secs(2));
+    let mut stream = timeout(WAIT, health.watch(request))
+        .await
+        .unwrap()
+        .unwrap()
+        .into_inner();
+    let first = timeout(WAIT, stream.message())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.status, ServingStatus::NotServing as i32);
+    let status = timeout(WAIT, stream.message()).await.unwrap().unwrap_err();
+    assert_eq!(status.code(), Code::DeadlineExceeded);
+    drop(stream);
+    drop(health);
+    fixture.stop().await;
+}
+
+#[test]
+fn the_builtin_health_name_cannot_be_registered_as_a_business_service() {
+    let mut services = Services::new();
+    services
+        .describe(tonic_health::pb::FILE_DESCRIPTOR_SET)
+        .unwrap();
+    let (_, health) = tonic_health::server::health_reporter();
+    assert_eq!(
+        services.add(health).unwrap_err(),
+        Error::DuplicateService("grpc.health.v1.Health")
+    );
 }
 
 #[tokio::test]

@@ -47,7 +47,7 @@ impl Credentials {
     /// [`AuthenticatedClient::require_on_behalf_of`] is set. A caller-supplied
     /// `Authorization` header and a missing required subject are refused as
     /// `INTERNAL` before dispatch. A response carrying
-    /// `grpc-status: UNAUTHENTICATED`, or HTTP 401 without `grpc-status`, evicts
+    /// `grpc-status: UNAUTHENTICATED`, or an ended HTTP 401 without `grpc-status`, evicts
     /// the token that call used once it is old enough; completed responses are
     /// returned without replay. The service is always ready, and acquisition
     /// failures map to `DEADLINE_EXCEEDED`, `CANCELLED`, `UNAVAILABLE`, or

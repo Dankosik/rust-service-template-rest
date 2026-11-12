@@ -626,6 +626,11 @@ mod tests {
                 ))
             };
             http::Response::builder()
+                .status(if method == "Trailer" {
+                    http::StatusCode::SERVICE_UNAVAILABLE
+                } else {
+                    http::StatusCode::OK
+                })
                 .header("content-type", "application/grpc")
                 .body(body)
                 .unwrap()
@@ -686,6 +691,16 @@ mod tests {
                 );
             } else if method != "Cancelled" {
                 let mut body = response.into_body();
+                if method == "Trailer" {
+                    let data = tokio::time::timeout(WAIT, body.frame())
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .unwrap()
+                        .into_data()
+                        .unwrap();
+                    assert_eq!(data, bytes::Bytes::from_static(b"data"));
+                }
                 let status = tokio::time::timeout(WAIT, trailer_status(&mut body))
                     .await
                     .unwrap();
