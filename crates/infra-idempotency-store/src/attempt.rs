@@ -101,8 +101,8 @@ pub struct HeaderPair {
     pub value: Vec<u8>,
 }
 
-/// One stored success. The store moves values without applying HTTP policy
-/// and keys them by the fingerprint [`Store::attempt`] arbitrated.
+/// One stored success. The store finds the row by [`ScopeKey`] and compares
+/// its fingerprint with the request's to decide replay or mismatch.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Record {
     pub status: i16,
@@ -150,9 +150,8 @@ impl Store {
     /// [`Attempted::Committed`] with `value`; `Err(value)` rolls back and
     /// yields [`Attempted::RolledBack`]. Work is never retried.
     ///
-    /// `work` supplies the success record's status, headers, and body; the
-    /// record is stored under `fingerprint`, and `caller` is recorded with it
-    /// for diagnostics.
+    /// The store writes the success record under `scope`. It saves
+    /// `fingerprint` for later arbitration and `caller` for diagnostics.
     ///
     /// # Errors
     ///
@@ -179,7 +178,7 @@ impl Store {
     /// # Errors
     ///
     /// As [`Self::attempt`].
-    pub async fn attempt_until<W, C, R>(
+    pub async fn attempt_with_acquire_deadline<W, C, R>(
         &self,
         scope: &ScopeKey,
         caller: &CallerIdentity,
@@ -464,7 +463,6 @@ fn failed(err: &sqlx::Error, phase: &'static str, class: AttemptError) -> Attemp
     class
 }
 
-/// Log a refusal that has no driver error, and return its class.
 fn refused(phase: &'static str, class: AttemptError, cause: &'static str) -> AttemptError {
     tracing::warn!(
         phase,
