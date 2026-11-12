@@ -19,7 +19,7 @@ use crate::wire::HEADER_LIMIT_BYTES;
 
 /// One native publication window shared by source, outbox and dead-letter
 /// publication; its permits are `floor(window / envelope_limit)`.
-const PUBLICATION_WINDOW_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const PUBLICATION_WINDOW_BYTES: usize = 64 * 1024 * 1024;
 
 /// Configuration already validated by the composition root, which owns the
 /// transport, credential and resident-memory policy.

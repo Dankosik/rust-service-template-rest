@@ -20,7 +20,7 @@ use tokio_util::task::AbortOnDropHandle;
 use self::delivery::{DeliveryHandler, HANDLER_TIMEOUT, redeliver_after};
 use crate::budget::{BROKER_OPERATION_BUDGET, bounded_operation};
 use crate::error::MessagingError;
-use crate::messaging::Shared;
+use crate::messaging::{PUBLICATION_WINDOW_BYTES, Shared};
 use crate::registry::Registry;
 use crate::topology::{ConsumerAdmission, create_durable, get_stream_failure};
 use crate::wire;
@@ -45,6 +45,7 @@ const PULL_EXPIRY_GRACE: Duration = Duration::from_secs(2);
 /// Redelivery delay of a delivery returned unhandled at drain. It outlasts
 /// this replica's unsubscription, so the broker redelivers to another pull.
 const RELEASE_DELAY: Duration = Duration::from_secs(1);
+const MAX_BYTES_EXCEEDED: &str = "max_bytes_exceeded";
 
 /// NATS 2.15 counts the original subject and ACK reply in a pull's byte limit.
 /// V2 ACKs cover V1 too: prefix, domain, eight-byte account hash, stream,
@@ -78,6 +79,7 @@ pub struct Consumer {
     pull: PullConsumer,
     concurrency: NonZeroUsize,
     pull_delivery_bytes: usize,
+    retained_pull_bytes: usize,
     handler: Arc<DeliveryHandler>,
 }
 
@@ -86,6 +88,10 @@ pub struct Consumer {
 pub enum ConsumerError {
     #[error("messaging durable consumer was deleted or replaced")]
     ConsumerLost,
+    #[error("messaging source message exceeds the maximum retained-message pull size")]
+    RetainedMessageTooLarge,
+    #[error("messaging source sequence {sequence} exceeds the dead-letter publication size limit")]
+    DeadLetterTooLarge { sequence: u64 },
     #[error("messaging consumer drain exceeded its shared deadline")]
     DrainTimedOut,
     /// The consumer task or one of its deliveries panicked or was cancelled,
@@ -135,7 +141,7 @@ impl Consumer {
         let server = shared.connection.client.server_info();
         let subject_bytes =
             dead_letter.admit_routes(&registry, &options.filter_subject, server.max_payload)?;
-        let pull_delivery_bytes = pull_delivery_bytes(
+        let delivery_bytes = pull_delivery_bytes(
             shared.max_payload_bytes,
             subject_bytes,
             &shared.source_stream,
@@ -143,9 +149,18 @@ impl Consumer {
             server.domain.as_deref(),
         )
         .ok_or(MessagingError::Bounds)?;
+        let retained_pull_bytes = pull_delivery_bytes(
+            PUBLICATION_WINDOW_BYTES - wire::HEADER_LIMIT_BYTES,
+            subject_bytes,
+            &shared.source_stream,
+            &options.durable_name,
+            server.domain.as_deref(),
+        )
+        .filter(|bytes| i64::try_from(*bytes).is_ok())
+        .ok_or(MessagingError::Bounds)?;
         // `consume` multiplies a full pull's budget unchecked, and the broker
         // reads its byte limit as an i64.
-        pull_delivery_bytes
+        delivery_bytes
             .checked_mul(options.concurrency.get())
             .and_then(|bytes| i64::try_from(bytes).ok())
             .ok_or(MessagingError::Bounds)?;
@@ -185,7 +200,8 @@ impl Consumer {
             shared,
             pull,
             concurrency: options.concurrency,
-            pull_delivery_bytes,
+            pull_delivery_bytes: delivery_bytes,
+            retained_pull_bytes,
         })
     }
 
@@ -238,13 +254,14 @@ impl Consumer {
 
     async fn consume(
         &self,
-        deliveries: &mut JoinSet<()>,
+        deliveries: &mut JoinSet<Result<(), ConsumerError>>,
         stop: &CancellationToken,
         force: &CancellationToken,
     ) -> Result<(), ConsumerError> {
         let concurrency = self.concurrency.get();
+        let mut retained = false;
         'pulls: loop {
-            while deliveries.len() == concurrency {
+            while deliveries.len() == concurrency || (retained && !deliveries.is_empty()) {
                 tokio::select! {
                     biased;
                     () = stop.cancelled() => break 'pulls,
@@ -270,13 +287,20 @@ impl Consumer {
             }
             // Each unconsumed batch entry already owns a free slot. Completed
             // tasks can only increase capacity while this request is alive.
-            let slots = concurrency - deliveries.len();
+            let (slots, max_bytes) = if retained {
+                // A retained record may predate the current source limit.
+                // Allow a full-size record only after all other slots drain.
+                (1, self.retained_pull_bytes)
+            } else {
+                let slots = concurrency - deliveries.len();
+                (slots, slots * self.pull_delivery_bytes)
+            };
             let request = tokio::time::timeout(
                 BROKER_OPERATION_BUDGET,
                 self.pull
                     .batch()
                     .max_messages(slots)
-                    .max_bytes(slots * self.pull_delivery_bytes)
+                    .max_bytes(max_bytes)
                     .expires(PULL_EXPIRES)
                     .messages(),
             );
@@ -305,12 +329,29 @@ impl Consumer {
                 .fill(&mut messages, deliveries, stop, force, slots)
                 .await?
             {
-                BatchEnd::Filled => {}
+                BatchEnd::Filled => {
+                    if retained {
+                        reaped(deliveries.join_next().await)?;
+                        retained = false;
+                    }
+                }
                 BatchEnd::Stopped => {
                     release(messages).await;
                     break 'pulls;
                 }
+                BatchEnd::FirstMessageTooLarge => {
+                    release(messages).await;
+                    if durable_confirmed_lost(&self.pull).await {
+                        return Err(ConsumerError::ConsumerLost);
+                    }
+                    pull_failed("batch_receive", MAX_BYTES_EXCEEDED);
+                    if max_bytes >= self.retained_pull_bytes {
+                        return Err(ConsumerError::RetainedMessageTooLarge);
+                    }
+                    retained = true;
+                }
                 end @ (BatchEnd::Closed | BatchEnd::Failed { .. }) => {
+                    retained = false;
                     release(messages).await;
                     if durable_confirmed_lost(&self.pull).await {
                         return Err(ConsumerError::ConsumerLost);
@@ -333,7 +374,7 @@ impl Consumer {
     async fn fill(
         &self,
         messages: &mut pull::Batch,
-        deliveries: &mut JoinSet<()>,
+        deliveries: &mut JoinSet<Result<(), ConsumerError>>,
         stop: &CancellationToken,
         force: &CancellationToken,
         slots: usize,
@@ -380,13 +421,17 @@ impl Consumer {
                         remaining -= 1;
                         let handler = Arc::clone(&self.handler);
                         let cancel = force.clone();
-                        deliveries.spawn(async move { handler.handle(message, cancel).await; });
+                        deliveries.spawn(async move { handler.handle(message, cancel).await });
                     }
                     Ok(None) => return Ok(BatchEnd::Closed),
                     Ok(Some(Err(error))) => {
+                        let error_kind = batch_receive_error_kind(&error);
+                        if remaining == slots && error_kind == MAX_BYTES_EXCEEDED {
+                            return Ok(BatchEnd::FirstMessageTooLarge);
+                        }
                         return Ok(BatchEnd::Failed {
                             phase: "batch_receive",
-                            error_kind: batch_receive_error_kind(&error),
+                            error_kind,
                         });
                     }
                     Err(_) => return Ok(BatchEnd::Failed {
@@ -409,6 +454,7 @@ enum BatchEnd {
     Stopped,
     /// The batch ended before filling its slots.
     Closed,
+    FirstMessageTooLarge,
     /// The batch could not receive or verify a delivery.
     Failed {
         phase: &'static str,
@@ -417,11 +463,13 @@ enum BatchEnd {
 }
 
 /// A delivery task that panicked or was cancelled ends the consumer.
-fn reaped(joined: Option<Result<(), JoinError>>) -> Result<(), ConsumerError> {
-    joined
-        .transpose()
-        .map(|_| ())
-        .map_err(|_| ConsumerError::TaskEnded)
+fn reaped(
+    joined: Option<Result<Result<(), ConsumerError>, JoinError>>,
+) -> Result<(), ConsumerError> {
+    match joined {
+        Some(result) => result.map_err(|_| ConsumerError::TaskEnded)?,
+        None => Ok(()),
+    }
 }
 
 /// An unanswered lookup does not confirm loss of the admitted durable.
@@ -483,8 +531,8 @@ fn batch_receive_error_kind(error: &async_nats::Error) -> &'static str {
         return "io_error";
     }
     // async-nats 0.50 Batch erases status/description into io::Error(Other).
-    // Recognize only its pinned format for diagnostics; provider text never
-    // becomes a field or changes pull/retry behavior.
+    // Recognize only the pinned SDK format. The exact byte-limit status also
+    // selects the bounded retained-record pull.
     let description = error.to_string();
     let Some(status) =
         description.strip_prefix("error while processing messages from the stream: ")
@@ -493,7 +541,7 @@ fn batch_receive_error_kind(error: &async_nats::Error) -> &'static str {
     };
     match status {
         "409, Some(\"Batch Completed\")" => "batch_completed",
-        "409, Some(\"Message Size Exceeds MaxBytes\")" => "max_bytes_exceeded",
+        "409, Some(\"Message Size Exceeds MaxBytes\")" => MAX_BYTES_EXCEEDED,
         _ => match status.split_once(", ").map(|(code, _)| code) {
             Some("400") => "status_400",
             Some("403") => "status_403",
