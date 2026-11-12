@@ -261,7 +261,7 @@ where
     );
     // template:begin authn:load-audience-list-override
     let builder = builder
-        .set_override_option("authn.audience", audience_list)
+        .set_override_option(variables::AUDIENCE_KEY, audience_list)
         .map_err(Error::Merge)?;
     // template:end authn:load-audience-list-override
     let merged = builder.build().map_err(Error::Merge)?;

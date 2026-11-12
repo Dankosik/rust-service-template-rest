@@ -14,9 +14,10 @@ use serde::Deserialize;
 
 use crate::HttpConfig;
 use crate::de::{blank_as_none, blank_secret_as_none};
-use crate::http::{
+use crate::http::request_budget_fits_drain;
+use crate::listener_limits::{
     DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_IN_FLIGHT, DEFAULT_REQUEST_TIMEOUT, connection_age_range,
-    connection_count_range, in_flight_range, request_budget_fits_drain, request_timeout_range,
+    connection_count_range, in_flight_range, request_timeout_range,
 };
 use crate::validate::{ValidationError, duration_range, required};
 
