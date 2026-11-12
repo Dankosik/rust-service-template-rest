@@ -50,14 +50,13 @@ fn pool_size_is_bounded() {
 }
 
 #[test]
-fn migration_deadline_is_bounded() {
-    for deadline in [Duration::from_millis(999), Duration::from_secs(86_401)] {
-        let config = PostgresConfig {
-            migration_deadline: deadline,
-            ..PostgresConfig::default()
-        };
-        let err = config.validate().unwrap_err();
-        assert_eq!(err.key, "postgres.migration_deadline");
+fn only_migration_loading_enforces_the_deadline_range() {
+    let options = LoadOptions::default();
+    for deadline in ["0s", "25h"] {
+        let variables = [("APP__POSTGRES__MIGRATION_DEADLINE", deadline)];
+        load_from(&options, BUILD, env(&variables)).unwrap();
+        let err = load_migration_from(&options, BUILD, env(&variables)).unwrap_err();
+        assert_matches!(err, Error::Validate(error) if error.key == "postgres.migration_deadline");
     }
 }
 
@@ -135,14 +134,6 @@ fn migration_snapshot_keeps_the_rules_of_its_own_sections() {
     )
     .unwrap_err();
     assert_matches!(unknown_source, Error::Deserialize(_), "{unknown_source}");
-
-    let unbounded = load_migration_from(
-        &LoadOptions::default(),
-        BUILD,
-        env(&[("APP__POSTGRES__MIGRATION_DEADLINE", "25h")]),
-    )
-    .unwrap_err();
-    assert_matches!(&unbounded, Error::Validate(error) if error.key == "postgres.migration_deadline", "{unbounded}");
 
     let missing_dsn = load_migration_from(
         &LoadOptions::default(),

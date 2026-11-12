@@ -97,7 +97,9 @@ pub struct OtelExporterConfig {
     /// the exporter stays disabled.
     #[serde(default, deserialize_with = "crate::de::blank_as_none")]
     pub otlp_endpoint: Option<String>,
-    /// Collector credential as `key=value,key=value`. Environment only.
+    /// Collector credential as `key=value,key=value`.
+    /// Set `APP__OBSERVABILITY__OTEL__EXPORTER__OTLP_HEADERS` in the
+    /// environment or via `--secrets-dir`.
     /// Missing, empty, or whitespace-only is absent (`None`).
     #[serde(default, deserialize_with = "crate::de::blank_secret_as_none")]
     pub otlp_headers: Option<SecretString>,
