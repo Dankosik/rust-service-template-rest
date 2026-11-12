@@ -53,10 +53,8 @@ pub enum Error {
     /// A secrets-directory file whose name is not a valid variable name.
     #[error("secret file {} is malformed: its name is a variable name, and {NAME_FORM}", path.display())]
     MalformedSecretName { path: PathBuf },
-    /// Two variable names that address the same key once lowercased.
-    #[error(
-        "{name} and {other} set the same key: a variable name is lowercased before it is split"
-    )]
+    /// Two variable names that address the same key within one carrier.
+    #[error("{name} and {other} set the same key")]
     AmbiguousName { name: String, other: String },
     /// One variable sets a scalar at a path another variable uses as a table.
     #[error("{parent} and {child} set overlapping keys: one key is inside the other")]
@@ -133,7 +131,7 @@ where
     K: Into<OsString>,
     V: Into<OsString>,
 {
-    let mut snapshot: Config = merge(options, environment)?;
+    let mut snapshot: Config = merge(options, environment, true)?;
     snapshot.app.apply_build_info(build);
     snapshot.validate()?;
     Ok(snapshot)
@@ -164,7 +162,7 @@ where
     K: Into<OsString>,
     V: Into<OsString>,
 {
-    let mut snapshot: crate::MigrationConfig = merge(options, environment)?;
+    let mut snapshot: crate::MigrationConfig = merge(options, environment, false)?;
     snapshot.app.apply_build_info(build);
     snapshot.validate()?;
     Ok(snapshot)
@@ -192,14 +190,22 @@ where
     K: Into<OsString>,
     V: Into<OsString>,
 {
-    let snapshot: crate::JobsOperatorConfig = merge(options, environment)?;
+    let snapshot: crate::JobsOperatorConfig = merge(options, environment, false)?;
     snapshot.validate()?;
     Ok(snapshot)
 }
 // template:end jobs:load-jobs-operator
 
 /// Merge the files and the `APP__` variables, then decode the result.
-fn merge<T, I, K, V>(options: &LoadOptions, environment: I) -> Result<T, Error>
+fn merge<T, I, K, V>(
+    options: &LoadOptions,
+    environment: I,
+    #[allow(
+        unused_variables,
+        reason = "only the authn profile needs list decoding"
+    )]
+    decode_authn: bool,
+) -> Result<T, Error>
 where
     T: DeserializeOwned,
     I: IntoIterator<Item = (K, V)>,
@@ -207,35 +213,47 @@ where
     V: Into<OsString>,
 {
     let variables = collect_variables(options.secrets_dir.as_deref(), environment)?;
+    let mut builder = config::Config::builder();
+    let mut table_keys = BTreeSet::new();
+    for path in options.files() {
+        builder = builder.add_source(scan_file(path, &mut table_keys)?);
+    }
+    if let Some(variable) = variables
+        .values()
+        .find(|variable| table_keys.contains(&variable.key))
+    {
+        return Err(Error::TableOverride {
+            key: variable.key.clone(),
+            input: variable.spelled.to_ascii_uppercase(),
+        });
+    }
+    // template:begin authn:load-audience-list-decode
+    let audience_list = if decode_authn {
+        variables::audience_list(&variables)?
+    } else {
+        None
+    };
+    // template:end authn:load-audience-list-decode
     // `Environment::source` keeps keys that still carry the `APP__` prefix;
     // inserting the stripped key would make every override disappear.
     let (source, variable_keys): (config::Map<String, String>, Vec<String>) = variables
         .into_iter()
         .map(|(name, variable)| ((name, variable.value), variable.key))
         .unzip();
-
-    let mut builder = config::Config::builder();
-    let mut table_keys = BTreeSet::new();
-    for path in options.files() {
-        builder = builder.add_source(scan_file(path, &mut table_keys)?);
-    }
-    if let Some(key) = variable_keys.iter().find(|key| table_keys.contains(*key)) {
-        return Err(Error::TableOverride {
-            key: key.clone(),
-            input: variable_name(key),
-        });
-    }
-    let merged = builder
-        .add_source(
-            config::Environment::with_prefix(ENV_PREFIX)
+    let builder = builder.add_source(
+        config::Environment::with_prefix(ENV_PREFIX)
                 .prefix_separator(ENV_SEPARATOR)
                 .separator(ENV_SEPARATOR)
                 // An empty value is still an explicit override; validation decides.
                 .ignore_empty(false)
                 .source(Some(source)),
-        )
-        .build()
+    );
+    // template:begin authn:load-audience-list-override
+    let builder = builder
+        .set_override_option("authn.audience", audience_list)
         .map_err(Error::Merge)?;
+    // template:end authn:load-audience-list-override
+    let merged = builder.build().map_err(Error::Merge)?;
 
     let carrier = if options.secrets_dir.is_some() {
         "the environment or the secrets directory"

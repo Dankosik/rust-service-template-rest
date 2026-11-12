@@ -3,7 +3,7 @@
 //!
 //! Startup order: flags → config → signal handlers → tracer provider →
 //! subscriber → metrics recorder → background tasks → dependencies → API
-//! contract → readiness admission → listeners → ready. A stop signal ends an
+//! contract → bind sockets → readiness admission → serve. A stop signal ends an
 //! unfinished startup, and a background task that ends on its own ends the
 //! service. Every exit after the signal handlers runs the one teardown in
 //! [`shutdown`]. Handlers and feature code never own this sequence.
@@ -48,7 +48,7 @@ use std::time::Duration;
 use futures_util::FutureExt;
 
 use health::{Probe, Readiness, RefreshPolicy};
-use infra_http::{HardenOptions, Server, ServerOptions};
+use infra_http::{BoundListener, HardenOptions, ServerOptions};
 use infra_telemetry::{
     LoggingFormat, LoggingOptions, Metrics, diagnostics_router, install_panic_hook,
     install_subscriber, install_tracer_provider, runtime_metrics,
@@ -586,8 +586,22 @@ async fn start(
     // template:begin http-idempotency:bootstrap-http-idempotency-activation
     idempotency::activate(composer, config, background).await?;
     // template:end http-idempotency:bootstrap-http-idempotency-activation
-    // Admission runs even without probes so the first probe after bind
-    // answers from an evaluation.
+    // Reserve every configured socket before publishing a ready verdict.
+    // Until dependency admission succeeds, none of them accepts requests.
+    let app_listener = BoundListener::bind(config.http.addr).await?;
+    let diagnostics_listener = match config.observability.metrics.addr {
+        Some(addr) => Some(BoundListener::bind(addr).await?),
+        None => None,
+    };
+    // template:begin grpc:bootstrap-grpc-bind-before-ready
+    let grpc_listener = match grpc_prepared {
+        Some(grpc) => Some((
+            BoundListener::bind(config.grpc.required_addr()?).await?,
+            grpc,
+        )),
+        None => None,
+    };
+    // template:end grpc:bootstrap-grpc-bind-before-ready
     readiness.refresh().await;
     readiness
         .reader()
@@ -618,11 +632,11 @@ async fn start(
     hotpath::tokio_runtime!();
     let app_listener = serving
         .app_listener
-        .insert(Server::bind(config.http.addr, app, server_options).await?);
+        .insert(app_listener.serve(app, server_options));
     background.watch_listener("http_accept", app_listener);
     tracing::info!(addr = %app_listener.local_addr(), "http listener bound");
 
-    if let Some(addr) = config.observability.metrics.addr {
+    if let Some(listener) = diagnostics_listener {
         // Intentionally unhardened: Prometheus text on a private listener.
         // `server_options` is shared HTTP transport policy, not `harden`.
         // Liveness is served here as well: this listener has its own
@@ -630,19 +644,18 @@ async fn start(
         let diagnostics = diagnostics_router(metrics.clone()).merge(infra_http::liveness_router());
         let server = serving
             .diagnostics
-            .insert(Server::bind(addr, diagnostics, server_options).await?);
+            .insert(listener.serve(diagnostics, server_options));
         background.watch_listener("diagnostics_accept", server);
         tracing::info!(addr = %server.local_addr(), "diagnostics listener bound");
     }
 
     // template:begin grpc:bootstrap-grpc-bind
-    if let Some(grpc) = grpc_prepared {
-        let addr = config.grpc.required_addr()?;
-        let bound = match grpc.tls {
-            Some(tls) => Server::bind_tls(addr, grpc.router, grpc.options, tls).await?,
-            None => Server::bind(addr, grpc.router, grpc.options).await?,
+    if let Some((listener, grpc)) = grpc_listener {
+        let server = match grpc.tls {
+            Some(tls) => listener.serve_tls(grpc.router, grpc.options, tls),
+            None => listener.serve(grpc.router, grpc.options),
         };
-        let listener = serving.grpc_listener.insert(bound);
+        let listener = serving.grpc_listener.insert(server);
         background.watch_listener("grpc_accept", listener);
         tracing::info!(addr = %listener.local_addr(), "grpc listener bound");
     }
@@ -718,8 +731,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_later_bind_failure_retains_and_closes_the_first_listener_and_live_peer() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    async fn a_later_bind_failure_never_publishes_readiness() {
         let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mut config = Config::default();
         config.http.addr = "127.0.0.1:0".parse().unwrap();
@@ -746,21 +758,11 @@ mod tests {
             Err(BootstrapError::Server(infra_http::ServerError::Bind { .. }))
         );
         assert!(!serving.admitted);
-        let address = serving.app_listener.as_ref().unwrap().local_addr();
-        let mut peer = tokio::net::TcpStream::connect(address).await.unwrap();
-        peer.write_all(b"GET /health/live HTTP/1.1\r\nHost: localhost\r\n\r\n")
-            .await
-            .unwrap();
-        let mut response = Vec::new();
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while !response.ends_with(b"ok") {
-                let count = peer.read_buf(&mut response).await.unwrap();
-                assert_ne!(count, 0);
-            }
-        })
-        .await
-        .unwrap();
-        assert!(response.starts_with(b"HTTP/1.1 200"));
+        assert!(serving.app_listener.is_none());
+        std::assert_matches!(
+            serving.readiness.as_ref().unwrap().reader().verdict(),
+            Err(health::NotReady::NotEvaluated)
+        );
         let mut signals = Signals::install().unwrap();
         let outcome = tokio::time::timeout(
             Duration::from_secs(2),
@@ -778,14 +780,6 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(outcome, Outcome::Graceful);
-        assert_eq!(
-            tokio::time::timeout(Duration::from_secs(2), peer.read(&mut [0_u8; 1]))
-                .await
-                .unwrap()
-                .unwrap(),
-            0
-        );
-        assert!(tokio::net::TcpStream::connect(address).await.is_err());
     }
 
     // template:begin service-auth:bootstrap-service-auth-test

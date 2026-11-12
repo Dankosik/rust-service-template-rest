@@ -54,6 +54,14 @@ fn runtime_workers_load_from_the_environment_and_zero_names_its_key() {
     .unwrap_err();
     assert_matches!(&err, Error::Deserialize(_), "{err}");
     assert!(err.to_string().contains("runtime.worker_threads"), "{err}");
+
+    let err = load_from(
+        &LoadOptions::default(),
+        BUILD,
+        env(&[("APP__RUNTIME__WORKER_THREADS", "513")]),
+    )
+    .unwrap_err();
+    assert_matches!(&err, Error::Validate(error) if error.key == "runtime.worker_threads", "{err}");
 }
 
 #[test]

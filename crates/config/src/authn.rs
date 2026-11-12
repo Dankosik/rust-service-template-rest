@@ -23,6 +23,8 @@ use crate::validate::{ValidationError, required_when};
 ///
 /// Configuration accepts either one string or a nonempty list. Values retain
 /// their spelling; duplicate list entries collapse to their first occurrence.
+/// `APP__AUTHN__AUDIENCE` takes one exact value. `APP__AUTHN__AUDIENCES`
+/// takes a TOML array of strings and overrides the same key.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Audiences(Vec<String>);
 
@@ -121,8 +123,12 @@ pub enum AuthnConfig {
         /// JWT access-token contract. Missing uses `resource-server`.
         #[serde(default)]
         token_profile: TokenProfile,
-        /// Accepted signature algorithms. Missing uses `[RS256]`.
-        #[serde(default = "default_algorithms")]
+        /// Accepted signature algorithms. `APP__AUTHN__ALGORITHMS` takes a comma-separated list.
+        /// Missing uses `[RS256]`.
+        #[serde(
+            default = "default_algorithms",
+            deserialize_with = "deserialize_algorithms"
+        )]
         algorithms: Vec<JwtAlgorithm>,
         /// Explicit JWKS endpoint. Missing uses OIDC discovery, then RFC 8414
         /// metadata.
@@ -186,6 +192,29 @@ impl Default for AuthnConfig {
 // template:begin oidc-jwt:authn-default-algorithms
 fn default_algorithms() -> Vec<JwtAlgorithm> {
     vec![JwtAlgorithm::Rs256]
+}
+
+fn deserialize_algorithms<'de, D>(deserializer: D) -> Result<Vec<JwtAlgorithm>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Input {
+        List(Vec<JwtAlgorithm>),
+        Text(String),
+    }
+
+    match Input::deserialize(deserializer)? {
+        Input::List(values) => Ok(values),
+        Input::Text(value) => value
+            .split(',')
+            .map(|value| {
+                JwtAlgorithm::deserialize(serde::de::value::StrDeserializer::new(value.trim()))
+            })
+            .collect::<Result<_, _>>()
+            .map_err(|_: D::Error| value_free("must contain only supported JWT algorithms")),
+    }
 }
 // template:end oidc-jwt:authn-default-algorithms
 

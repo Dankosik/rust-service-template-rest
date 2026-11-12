@@ -55,7 +55,7 @@ pub(crate) fn is_env_addressable(name: &str) -> bool {
 
 /// One variable of a carrier, kept under the lowercased name config-rs reads.
 pub(super) struct Variable {
-    spelled: String,
+    pub(super) spelled: String,
     /// The dotted key the variable sets, such as `http.addr`.
     pub(super) key: String,
     pub(super) value: String,
@@ -67,12 +67,20 @@ pub(super) type Variables = std::collections::BTreeMap<String, Variable>;
 /// spelling of its name: which of the two values won would depend on the
 /// order the carrier listed them in.
 fn admit(variables: &mut Variables, name: &str, suffix: &str, value: String) -> Result<(), Error> {
+    let name_key = name.to_ascii_lowercase();
+    // template:begin authn:load-audience-list-alias
+    let (name_key, suffix) = if name_key == "app__authn__audiences" {
+        ("app__authn__audience".to_owned(), "authn__audience")
+    } else {
+        (name_key, suffix)
+    };
+    // template:end authn:load-audience-list-alias
     let variable = Variable {
         spelled: name.to_owned(),
-        key: suffix.to_lowercase().replace(ENV_SEPARATOR, "."),
+        key: suffix.to_ascii_lowercase().replace(ENV_SEPARATOR, "."),
         value,
     };
-    match variables.insert(name.to_lowercase(), variable) {
+    match variables.insert(name_key, variable) {
         Some(other) => Err(Error::AmbiguousName {
             name: name.to_owned(),
             other: other.spelled,
@@ -80,6 +88,30 @@ fn admit(variables: &mut Variables, name: &str, suffix: &str, value: String) -> 
         None => Ok(()),
     }
 }
+
+// template:begin authn:load-audience-list
+pub(super) fn audience_list(variables: &Variables) -> Result<Option<Vec<String>>, Error> {
+    use serde::Deserialize as _;
+
+    let Some(variable) = variables.get("app__authn__audience").filter(|variable| {
+        variable
+            .spelled
+            .eq_ignore_ascii_case("APP__AUTHN__AUDIENCES")
+    }) else {
+        return Ok(None);
+    };
+    let invalid = || {
+        Error::Deserialize(format!(
+            "{} must be a TOML array of strings",
+            variable.spelled
+        ))
+    };
+    let value = toml::de::ValueDeserializer::parse(&variable.value).map_err(|_| invalid())?;
+    Vec::<String>::deserialize(value)
+        .map(Some)
+        .map_err(|_| invalid())
+}
+// template:end authn:load-audience-list
 
 /// The `APP__` variables of one load under their lowercased names: the
 /// secrets directory's files, then the process environment, whose value wins

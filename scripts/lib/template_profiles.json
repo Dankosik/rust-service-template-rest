@@ -233,6 +233,8 @@
       {"path": "README.md", "id": "readme-authn-profile"},
       {"path": "Cargo.toml", "ids": ["workspace-authn-crate"]},
       {"path": "crates/config/src/lib.rs", "ids": ["config-module", "config-export", "config-field", "config-validate"]},
+      {"path": "crates/config/src/load.rs", "ids": ["load-audience-list-decode", "load-audience-list-override"]},
+      {"path": "crates/config/src/load/variables.rs", "ids": ["load-audience-list-alias", "load-audience-list"]},
       {"path": "crates/infra-http/Cargo.toml", "ids": ["http-authn-dependency"]},
       {"path": "crates/infra-http/src/lib.rs", "ids": ["infra-http-authn-module", "infra-http-authn-exports"]},
       {"path": "crates/infra-http/src/contract.rs", "ids": ["http-contract-protected-scopes", "http-contract-protected-value"]},
@@ -531,7 +533,7 @@
           "service-run-with-grpc"
         ]
       },
-      {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["bootstrap-pending-grpc", "bootstrap-test-grpc-registration", "bootstrap-grpc-error", "bootstrap-run-registration-parameter", "bootstrap-grpc-serve-registration-argument", "bootstrap-grpc-serve-registration-parameter", "bootstrap-grpc-start-registration-argument", "bootstrap-grpc-start-registration-parameter", "bootstrap-grpc-prepare-start", "bootstrap-grpc-prepare-finish", "bootstrap-grpc-bind", "bootstrap-grpc-module", "bootstrap-grpc-registration-export"]},
+      {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["bootstrap-pending-grpc", "bootstrap-test-grpc-registration", "bootstrap-grpc-error", "bootstrap-run-registration-parameter", "bootstrap-grpc-serve-registration-argument", "bootstrap-grpc-serve-registration-parameter", "bootstrap-grpc-start-registration-argument", "bootstrap-grpc-start-registration-parameter", "bootstrap-grpc-prepare-start", "bootstrap-grpc-prepare-finish", "bootstrap-grpc-bind", "bootstrap-grpc-bind-before-ready", "bootstrap-grpc-module", "bootstrap-grpc-registration-export"]},
       {"path": "crates/service/src/bootstrap/telemetry.rs", "ids": ["bootstrap-grpc-histograms"]},
       {"path": "crates/service/src/bootstrap/shutdown.rs", "ids": ["shutdown-serving-grpc-field", "shutdown-concurrent-grpc-drain", "shutdown-listener-kind-grpc", "shutdown-listener-kind-grpc-events"]},
       {
@@ -580,7 +582,8 @@
       {
         "path": "crates/infra-http/src/server.rs",
         "ids": [
-          "http-server-tls"
+          "http-server-tls",
+          "http-bound-listener-tls"
         ]
       },
       {

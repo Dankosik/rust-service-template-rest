@@ -197,6 +197,7 @@ impl Config {
         // template:end inbound-webhooks:config-inbound-webhooks-validate
         self.health.validate()?;
         self.log.validate()?;
+        self.runtime.validate()?;
         self.observability.validate()?;
         // template:begin messaging:config-validate
         self.messaging.validate(&self.app.env)?;
