@@ -40,7 +40,7 @@ const READ_COMMITTED: TxOptions = TxOptions {
 #[derive(Clone, Debug)]
 pub struct Store {
     pool: PgPool,
-    /// Whole microseconds ([`whole_micros`]).
+    /// Whole microseconds ([`truncate_to_microseconds`]).
     retention: Duration,
 }
 
@@ -53,7 +53,7 @@ impl Store {
     pub fn new(pool: PgPool, retention: Duration) -> Self {
         Self {
             pool,
-            retention: whole_micros(retention),
+            retention: truncate_to_microseconds(retention),
         }
     }
 }
@@ -62,7 +62,7 @@ impl Store {
 /// bind a `Duration` with one as an `interval`, and configuration accepts
 /// nanosecond units; the database clock resolves 1 µs, so dropping the part
 /// once changes no expiry observably.
-fn whole_micros(duration: Duration) -> Duration {
+fn truncate_to_microseconds(duration: Duration) -> Duration {
     Duration::new(duration.as_secs(), duration.subsec_micros() * 1_000)
 }
 
@@ -74,18 +74,21 @@ mod tests {
 
     #[test]
     fn retention_keeps_whole_microseconds() {
-        let kept = whole_micros(Duration::new(3_600, 123_456_789));
+        let kept = truncate_to_microseconds(Duration::new(3_600, 123_456_789));
         assert_eq!(kept, Duration::new(3_600, 123_456_000));
         assert!(PgInterval::try_from(kept).is_ok());
 
         assert_eq!(
-            whole_micros(Duration::from_secs(60)),
+            truncate_to_microseconds(Duration::from_secs(60)),
             Duration::from_secs(60)
         );
         assert_eq!(
-            whole_micros(Duration::new(59, 999_999_999)),
+            truncate_to_microseconds(Duration::new(59, 999_999_999)),
             Duration::new(59, 999_999_000)
         );
-        assert_eq!(whole_micros(Duration::from_nanos(999)), Duration::ZERO);
+        assert_eq!(
+            truncate_to_microseconds(Duration::from_nanos(999)),
+            Duration::ZERO
+        );
     }
 }

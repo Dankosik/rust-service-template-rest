@@ -407,13 +407,15 @@ async fn write(
     }
 }
 
-/// Why the transaction ends without a commit. The provider commits on [`Ok`]
-/// and rolls back on [`Err`], so both reasons leave the closure as its error.
+/// The [`Err`] side of the transaction boundary. An [`Err`] from the closure
+/// asks the provider to roll back. The provider can also return its own error.
 enum Stop<R> {
     /// Arbitration decided without running the work.
     Decided(Decision),
     /// The work ran and asked for rollback.
     RolledBack(R),
+    /// An attempt failure inside the closure or a provider failure converted
+    /// from [`TxError`]. With [`TxError::CommitUnknown`], the work may have committed.
     Failed(AttemptError),
 }
 
