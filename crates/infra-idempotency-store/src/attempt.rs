@@ -51,9 +51,9 @@ impl ScopeKey {
     }
 
     /// The advisory lock key: the digest's first eight bytes as a signed
-    /// big-endian integer. A collision makes an unrelated scope answer
-    /// in-progress while the holder runs; it cannot run or replay that scope's
-    /// work.
+    /// big-endian integer. A collision yields `InProgress` only when another
+    /// scope holds the lock and arbitration finds no live record for this
+    /// scope. A live record still decides replay or mismatch.
     fn lock_key(&self) -> i64 {
         let mut prefix = [0; 8];
         prefix.copy_from_slice(&self.0[..8]);
