@@ -287,7 +287,7 @@ impl Credentials {
     /// [`RefreshDriver::run`] prioritizes that release signal over queued work.
     pub(crate) fn check_lifecycle(
         &self,
-        deadline: AcquisitionDeadline,
+        deadline: AcquisitionDeadline<'_>,
     ) -> Result<(), AcquisitionError> {
         if self.0.refresh_requests.is_closed() {
             return Err(deadline
@@ -297,7 +297,7 @@ impl Credentials {
         Ok(())
     }
 
-    fn check_admission(&self, deadline: AcquisitionDeadline) -> Result<(), AcquisitionError> {
+    fn check_admission(&self, deadline: AcquisitionDeadline<'_>) -> Result<(), AcquisitionError> {
         if let Some(error) = deadline.expired_error() {
             return Err(error);
         }
@@ -312,9 +312,13 @@ impl Credentials {
         headers: &mut HeaderMap,
         on_behalf_of: Option<OnBehalfOf>,
         context: &OperationContext,
+        request_context: Option<&OperationContext>,
     ) -> Result<Arc<Token>, AcquisitionError> {
         context.check().map_err(acquisition_stopped)?;
-        let deadline = acquisition_deadline(context);
+        let deadline = AcquisitionDeadline {
+            request_context,
+            ..acquisition_deadline(context)
+        };
         self.check_admission(deadline)?;
         let acquisition = async {
             match on_behalf_of {
@@ -325,11 +329,10 @@ impl Credentials {
                 None => self.service_token(deadline).await,
             }
         };
-        // Acquisition first: a cached token then never arms the deadline timer.
         let acquired = tokio::select! {
             biased;
-            result = acquisition => result,
             stopped = context.wait_stopped() => return Err(acquisition_stopped(stopped)),
+            result = acquisition => result,
         };
         context.check().map_err(acquisition_stopped)?;
         let acquired = acquired?;
@@ -342,7 +345,7 @@ impl Credentials {
     /// caller's deadline.
     pub(crate) async fn service_token(
         &self,
-        deadline: AcquisitionDeadline,
+        deadline: AcquisitionDeadline<'_>,
     ) -> Result<Arc<Token>, AcquisitionError> {
         self.check_admission(deadline)?;
         let now = Instant::now();
@@ -355,7 +358,7 @@ impl Credentials {
 
     async fn acquire_service_token(
         &self,
-        deadline: AcquisitionDeadline,
+        deadline: AcquisitionDeadline<'_>,
     ) -> Result<Arc<Token>, AcquisitionError> {
         let inner = &self.0.inner;
         let _service_request =
@@ -374,7 +377,10 @@ impl Credentials {
             .endpoint
             .fetch_service_token(deadline.cutoff.min(now + FETCH_TIMEOUT))
             .await;
-        match settle_fetch(result, deadline) {
+        if let Some(error) = deadline.stopped_error() {
+            return Err(error);
+        }
+        match result.map_err(provider_timeout) {
             Ok(token) => Ok(inner.store_service_token(token)),
             Err(error) => {
                 inner.remember_failure(error);
@@ -440,7 +446,7 @@ impl Credentials {
         &self,
         key: SubjectKey,
         subject: &SecretString,
-        deadline: AcquisitionDeadline,
+        deadline: AcquisitionDeadline<'_>,
     ) -> Result<Arc<Token>, AcquisitionError> {
         loop {
             self.check_admission(deadline)?;
@@ -465,7 +471,7 @@ impl Credentials {
         &self,
         key: SubjectKey,
         subject: &SecretString,
-        deadline: AcquisitionDeadline,
+        deadline: AcquisitionDeadline<'_>,
     ) -> Result<(Arc<Token>, bool), AcquisitionError> {
         let fetch = async move {
             let fetch_deadline = deadline.cutoff.min(Instant::now() + FETCH_TIMEOUT);
@@ -475,9 +481,9 @@ impl Credentials {
                 .endpoint
                 .fetch_exchange(subject, fetch_deadline)
                 .await;
-            if deadline.expired_error().is_some() {
-                // If the cutoff passed during this poll, let the outer timer
-                // drop the initializer so Moka can hand it off to a live waiter.
+            if deadline.stopped_error().is_some() {
+                // Drop the initializer through the enclosing stop branch so
+                // Moka hands off to a live waiter instead of sharing a failure.
                 return std::future::pending().await;
             }
             result.map_err(provider_timeout)
@@ -620,54 +626,58 @@ pub(crate) fn admit_request_subject<B>(
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct AcquisitionDeadline {
+pub(crate) struct AcquisitionDeadline<'a> {
     cutoff: Instant,
     expiry: AcquisitionError,
+    context: Option<&'a OperationContext>,
+    request_context: Option<&'a OperationContext>,
 }
 
-impl AcquisitionDeadline {
+impl AcquisitionDeadline<'_> {
+    #[cfg(test)]
     pub(crate) const fn caller(cutoff: Instant) -> Self {
         Self {
             cutoff,
             expiry: AcquisitionError::Timeout,
+            context: None,
+            request_context: None,
         }
     }
 
     fn expired_error(self) -> Option<AcquisitionError> {
         (Instant::now() >= self.cutoff).then_some(self.expiry)
     }
+
+    fn stopped_error(self) -> Option<AcquisitionError> {
+        self.expired_error().or_else(|| {
+            self.request_context
+                .and_then(OperationContext::stopped)
+                .or_else(|| self.context.and_then(OperationContext::stopped))
+                .map(acquisition_stopped)
+        })
+    }
 }
 
-pub(crate) fn acquisition_deadline(context: &OperationContext) -> AcquisitionDeadline {
+pub(crate) fn acquisition_deadline(context: &OperationContext) -> AcquisitionDeadline<'_> {
     // Keep acquisition bounded when the resource deadline cannot be expressed
     // as an Instant. That fallback belongs to the adapter.
-    context.deadline().and_then(Deadline::instant).map_or_else(
-        || AcquisitionDeadline {
-            cutoff: Instant::now() + FETCH_TIMEOUT,
-            expiry: AcquisitionError::Unavailable,
-        },
-        AcquisitionDeadline::caller,
-    )
-}
-
-/// Settles a token attempt against the cutoff that bounded the acquisition.
-/// [`AcquisitionError::Timeout`] names the caller's expired deadline, so a
-/// token arriving after it is not used. An attempt that ended at the
-/// adapter's own [`FETCH_TIMEOUT`] while the caller still had budget met a
-/// slow provider, a failure that may pass, so [`provider_timeout`] makes a
-/// gRPC caller see `UNAVAILABLE` and possibly retry.
-fn settle_fetch<T>(
-    result: Result<T, AcquisitionError>,
-    deadline: AcquisitionDeadline,
-) -> Result<T, AcquisitionError> {
-    if let Some(error) = deadline.expired_error() {
-        return Err(error);
+    let (cutoff, expiry) = match context.deadline().and_then(Deadline::instant) {
+        Some(cutoff) => (cutoff, AcquisitionError::Timeout),
+        None => (
+            Instant::now() + FETCH_TIMEOUT,
+            AcquisitionError::Unavailable,
+        ),
+    };
+    AcquisitionDeadline {
+        cutoff,
+        expiry,
+        context: Some(context),
+        request_context: None,
     }
-    result.map_err(provider_timeout)
 }
 
 /// Reclassifies an attempt that ended at [`FETCH_TIMEOUT`] as
-/// [`AcquisitionError::Unavailable`]; see [`settle_fetch`].
+/// [`AcquisitionError::Unavailable`] while the caller still has budget.
 fn provider_timeout(error: AcquisitionError) -> AcquisitionError {
     match error {
         AcquisitionError::Timeout => AcquisitionError::Unavailable,

@@ -117,11 +117,12 @@ impl AuthenticatedClient {
                 OperationContext::new(Some(deadline), context.cancellation().clone())
             });
         let acquisition_context = acquisition_context.as_ref().unwrap_or(&context);
-        // Authorization first: a cached token then never arms the deadline timer.
         let acquired = tokio::select! {
             biased;
-            result = self.credentials.authorize(request.headers_mut(), on_behalf_of, acquisition_context) => result,
             stopped = request_stopped => return Err(acquisition_stopped(stopped).into()),
+            result = self.credentials.authorize(
+                request.headers_mut(), on_behalf_of, acquisition_context, request_context.as_ref(),
+            ) => result,
         };
         check_request()?;
         let acquired = acquired?;

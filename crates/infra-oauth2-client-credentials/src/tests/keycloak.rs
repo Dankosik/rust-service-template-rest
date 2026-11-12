@@ -309,7 +309,7 @@ fn audience_mapper(client_id: &str) -> serde_json::Value {
     })
 }
 
-fn deadline() -> AcquisitionDeadline {
+fn deadline() -> AcquisitionDeadline<'static> {
     AcquisitionDeadline::caller(Instant::now() + Duration::from_secs(10))
 }
 
