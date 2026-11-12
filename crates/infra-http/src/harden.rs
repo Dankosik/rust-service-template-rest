@@ -62,8 +62,9 @@ pub struct HardenOptions {
     /// would keep a different ceiling than `http.max_body_bytes`.
     pub max_body_bytes: usize,
     /// Per-request budget; expiry answers 504 with code `gateway_timeout`, or
-    /// 408 with code `request_timeout` while the handler waits for request
-    /// body bytes the caller has not sent.
+    /// 408 with code `request_timeout` while a tracked request-body read waits.
+    /// Built-in body readers track their reads. Custom readers can use
+    /// [`crate::RequestContext::read_body`] to track each awaited read.
     /// Time a request spends waiting for an in-flight permit is spent from
     /// this same budget, so the handler gets only what admission leaves.
     pub request_timeout: Duration,

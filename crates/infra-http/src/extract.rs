@@ -26,6 +26,8 @@ use serde::de::{DeserializeOwned, IgnoredAny};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_path_to_error::Segment;
 
+use crate::RequestContext;
+use crate::context::read_body;
 use crate::problem::{Code, Problem, body_too_large, body_unreadable, sanitized_problem};
 
 const BODY_SYNTAX_DETAIL: &str = "request body is not valid JSON";
@@ -77,14 +79,14 @@ where
         if !json_content_type {
             return Err(Problem::new(Code::UnsupportedMediaType).detail(BODY_MEDIA_TYPE_DETAIL));
         }
-        let bytes =
-            Bytes::from_request(request, state)
-                .await
-                .map_err(|rejection| match rejection.status() {
-                    StatusCode::PAYLOAD_TOO_LARGE => body_too_large(),
-                    StatusCode::BAD_REQUEST => body_unreadable(),
-                    _ => wiring_failure("json"),
-                })?;
+        let context = request.extensions().get::<RequestContext>().cloned();
+        let bytes = read_body(context.as_ref(), Bytes::from_request(request, state))
+            .await
+            .map_err(|rejection| match rejection.status() {
+                StatusCode::PAYLOAD_TOO_LARGE => body_too_large(),
+                StatusCode::BAD_REQUEST => body_unreadable(),
+                _ => wiring_failure("json"),
+            })?;
         match axum::Json::<T>::from_bytes(&bytes) {
             Ok(axum::Json(value)) => Ok(Self(value)),
             Err(rejection) => Err(json_problem(&rejection, &bytes)),
@@ -231,6 +233,7 @@ struct TrackedPath<T>(Result<T, PathIssue>);
 
 enum PathIssue {
     MissingField(String),
+    RouteFieldConflict,
     UnknownVariant(serde_path_to_error::Path),
 }
 
@@ -241,14 +244,30 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for TrackedPath<T> {
             Err(error) => error,
         };
         let message = error.inner().to_string();
-        // Serde's missing-field and unknown-variant hooks reach Axum as
-        // unstructured messages. Keep the original rejection for other errors.
-        if let Some(field) = message
-            .strip_prefix("missing field `")
-            .and_then(|field| field.strip_suffix('`'))
-            && error.path().iter().next().is_none()
-        {
-            return Ok(Self(Err(PathIssue::MissingField(field.to_owned()))));
+        // Axum erases Serde's error hooks. The tracked position distinguishes
+        // errors on route keys or the root map from errors decoding a value.
+        let mut path = error.path().iter();
+        match (path.next(), path.next()) {
+            (None, _) => {
+                if let Some(field) = message
+                    .strip_prefix("missing field `")
+                    .and_then(|field| field.strip_suffix('`'))
+                {
+                    return Ok(Self(Err(PathIssue::MissingField(field.to_owned()))));
+                }
+                if message.starts_with("duplicate field `") && message.ends_with('`') {
+                    return Ok(Self(Err(PathIssue::RouteFieldConflict)));
+                }
+            }
+            (Some(Segment::Map { key }), None)
+                if message
+                    .strip_prefix("unknown field `")
+                    .and_then(|field| field.strip_prefix(key.as_str()))
+                    .is_some_and(|suffix| suffix.starts_with("`, ")) =>
+            {
+                return Ok(Self(Err(PathIssue::RouteFieldConflict)));
+            }
+            _ => {}
         }
         if message.starts_with("unknown variant `") {
             return Ok(Self(Err(PathIssue::UnknownVariant(error.path().clone()))));
@@ -266,6 +285,7 @@ impl PathIssue {
             Self::MissingField(field) if !params.iter().any(|(name, _)| name == field.as_str()) => {
                 wiring_failure("path")
             }
+            Self::RouteFieldConflict => wiring_failure("path"),
             Self::MissingField(_) => invalid_path(None),
             Self::UnknownVariant(path) => {
                 let name = match path.iter().next() {
@@ -401,6 +421,18 @@ mod tests {
         state: OrderState,
     }
 
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct StrictPath {
+        id: String,
+    }
+
+    #[derive(Deserialize)]
+    struct AliasedPath {
+        #[serde(alias = "old_id")]
+        id: String,
+    }
+
     fn app() -> Router {
         let handler_1 = |Json(order): Json<Order>| async move { order.lines.len().to_string() };
         let handler_2 = |Query(_): Query<Page>| async { "page" };
@@ -414,6 +446,8 @@ mod tests {
                 OrderState::Closed => String::new(),
             }
         };
+        let strict_path = |Path(params): Path<StrictPath>| async move { params.id };
+        let aliased_path = |Path(params): Path<AliasedPath>| async move { params.id };
         #[expect(
             clippy::disallowed_methods,
             reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
@@ -425,6 +459,8 @@ mod tests {
             .route("/orders/{id}/lines/{line}", get(handler_4))
             .route("/miswired/{id}", get(handler_5))
             .route("/miswired-struct/{id}", get(order_state))
+            .route("/miswired-extra/{id}/{extra}", get(strict_path))
+            .route("/miswired-alias/{id}/{old_id}", get(aliased_path))
             .route("/states/{state}", get(state))
             .route("/orders/{id}/states/{state}", get(order_state));
         harden(
@@ -683,7 +719,12 @@ mod tests {
 
     #[tokio::test]
     async fn an_extractor_that_cannot_match_its_route_is_a_sanitized_500() {
-        for uri in ["/miswired/7", "/miswired-struct/7"] {
+        for uri in [
+            "/miswired/7",
+            "/miswired-struct/7",
+            "/miswired-extra/7/8",
+            "/miswired-alias/7/8",
+        ] {
             let response = app().oneshot(get_uri(uri)).await.unwrap();
             let body = problem(
                 response,

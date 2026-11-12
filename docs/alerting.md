@@ -100,7 +100,7 @@ for the frequency and duration of those waits. For an admitted webhook with
 `webhook_receipt_unavailable` warning to find the failed receipt stage.
 
 `problem_code="gateway_timeout"` identifies an exhausted request budget.
-A caller that stopped sending its body gets `408 request_timeout` and
+Expiry during a tracked request-body read returns `408 request_timeout` and
 does not count here. An access log with `termination="server_shutdown"`
 records a forced shutdown before the response head as 503 for the SLO.
 The client received no HTTP status. Correlate by `http_route`.
