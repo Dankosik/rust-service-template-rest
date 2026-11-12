@@ -169,7 +169,7 @@ impl Idempotency {
         let attempted = match deadline.attempt_end() {
             None => Err(AttemptError::Unavailable),
             Some(attempt_end) => {
-                let attempt = store.attempt_until(
+                let attempt = store.attempt_with_acquire_deadline(
                     &scope,
                     &caller,
                     &fingerprint,
