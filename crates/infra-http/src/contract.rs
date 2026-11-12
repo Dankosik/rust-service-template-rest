@@ -112,11 +112,19 @@ fn compile_operation(
             method: method.to_owned(),
         });
     }
-    Access::from_operation(document, operation).map_err(|fault| FinalizeError::InvalidPolicy {
+    let invalid = |fault| FinalizeError::InvalidPolicy {
         path: path.to_owned(),
         method: method.to_owned(),
-        fault: fault.as_str(),
-    })
+        fault,
+    };
+    let access =
+        Access::from_operation(document, operation).map_err(|fault| invalid(fault.as_str()))?;
+    // template:begin http-idempotency:http-contract-idempotency-policy
+    if matches!(access, Access::Public) && crate::idempotency::declares_replay(operation) {
+        return Err(invalid("idempotency_requires_authentication"));
+    }
+    // template:end http-idempotency:http-contract-idempotency-policy
+    Ok(access)
 }
 
 /// The compiled access table, shared read-only by every request: axum clones

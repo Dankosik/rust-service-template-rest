@@ -87,6 +87,8 @@ impl Composer {
     ///
     /// Key handling stays inside final authentication. An invalid declaration
     /// stops route assembly before the service can serve it.
+    /// Finalization requires the assembled operation to have protected
+    /// effective security so capture can receive a verified caller.
     /// Declare every header that can change the intended effect as an inline
     /// request parameter so its values participate in retry matching.
     ///

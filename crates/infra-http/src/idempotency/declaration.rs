@@ -289,7 +289,7 @@ fn route_subject(paths: &Paths) -> String {
 
 #[cfg(test)]
 mod tests {
-    use utoipa_axum::router::UtoipaMethodRouter;
+    use utoipa_axum::router::{OpenApiRouter, UtoipaMethodRouter};
     use utoipa_axum::routes;
 
     use super::*;
@@ -329,6 +329,62 @@ mod tests {
 
     fn route() -> UtoipaMethodRouter {
         routes!(create_widget)
+    }
+
+    #[test]
+    fn finalization_requires_effective_authentication_for_idempotent_routes() {
+        let bearer = serde_json::json!([{ "bearerAuth": [] }]);
+        for (root_security, operation_security, protected) in [
+            (None, None, false),
+            (Some(bearer.clone()), Some(serde_json::json!([])), false),
+            (Some(bearer.clone()), None, true),
+            (None, Some(bearer), true),
+        ] {
+            let mut document = serde_json::json!({
+                "openapi": "3.1.0",
+                "info": {"title": "idempotency fixture", "version": "1"},
+                "paths": {},
+                "components": {
+                    "securitySchemes": {"bearerAuth": {"type": "http", "scheme": "bearer"}}
+                }
+            });
+            if let Some(security) = root_security {
+                document["security"] = security;
+            }
+            let mut carrier = route();
+            carrier
+                .1
+                .paths
+                .get_mut(WIDGETS)
+                .unwrap()
+                .post
+                .as_mut()
+                .unwrap()
+                .security = operation_security.map(|value| serde_json::from_value(value).unwrap());
+            let mut composer = crate::idempotency::Composer::inert();
+            let contract = OpenApiRouter::with_openapi(serde_json::from_value(document).unwrap())
+                .routes(composer.route(carrier).expect("route composes"));
+
+            let error = crate::finalize_public(contract).unwrap_err();
+            if protected {
+                assert_eq!(
+                    error,
+                    crate::FinalizeError::ProtectedOperation {
+                        path: WIDGETS.to_owned(),
+                        method: "POST".to_owned(),
+                    }
+                );
+            } else {
+                assert_eq!(
+                    error,
+                    crate::FinalizeError::InvalidPolicy {
+                        path: WIDGETS.to_owned(),
+                        method: "POST".to_owned(),
+                        fault: "idempotency_requires_authentication",
+                    }
+                );
+            }
+        }
     }
 
     #[test]
