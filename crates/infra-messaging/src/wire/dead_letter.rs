@@ -3,19 +3,20 @@
 
 use async_nats::HeaderMap;
 use bytes::Bytes;
+use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 
 use super::{
     CREATED_AT, DEAD_LETTER_REASON, DIGEST_HEX_LEN, EVENT_SCHEMA, EVENT_TYPE, HEADER_LIMIT_BYTES,
-    MESSAGE_ID, NATS_MSG_ID, ORIGINAL_SUBJECT, checked_header_line_bytes, header_name,
-    header_value, is_zero_time, parse_schema, parse_timestamp, record_id, required_header,
-    valid_subject,
+    MESSAGE_ID, NATS_MSG_ID, ORIGINAL_SUBJECT, checked_header_line_bytes, format_timestamp,
+    header_name, header_value, is_zero_time, parse_schema, parse_timestamp, prefixed_digest_hex,
+    required_header, valid_subject,
 };
 use crate::error::EnvelopeError;
 use enum_map::EnumMap;
 
 use crate::observe::{OutcomeLabel as _, outcome_label};
-use crate::prepared::PreparedEvent;
+use crate::prepared::{PreparedEvent, PreparedEventParts};
 
 const DEAD_LETTER_ID_PREFIX: &str = "dlq-";
 
@@ -99,10 +100,6 @@ pub(crate) fn dead_letter_headers(
 /// One stored dead-letter record used for deterministic redrive reconstruction.
 #[derive(Clone, Debug)]
 pub struct DeadLetterRecord {
-    /// The subject of the stored dead-letter record. [`restore_dead_letter`] reads the
-    /// original subject from `Original-Subject`; this field is provenance for
-    /// the record itself.
-    pub subject: String,
     pub headers: HeaderMap,
     pub payload: Bytes,
     pub stream: String,
@@ -141,25 +138,24 @@ pub fn restore_dead_letter(record: DeadLetterRecord) -> Result<PreparedEvent, En
     if is_zero_time(occurred_at) {
         return Err(EnvelopeError::DeadLetterCreatedAtRequired);
     }
-    // Go hashes an absent original publication ID too. The reconstructed
-    // event identity, rather than the transfer metadata, decides restorability.
-    let original_publication_id = header_value(&record.headers, header_name::NATS_MSG_ID);
+    // Go includes an empty hash component when the stored record has no Nats-Msg-Id.
+    let stored_publication_id = header_value(&record.headers, header_name::NATS_MSG_ID);
     let publication_id = record_id(
         "redrive-",
         &record.stream,
         record.stream_sequence,
         record.stored_at,
-        original_publication_id,
+        stored_publication_id,
     )?;
-    PreparedEvent::from_parts(
+    PreparedEvent::from_parts(PreparedEventParts {
         subject,
-        message_id.to_owned(),
+        message_id: message_id.to_owned(),
         publication_id,
-        event_type.to_owned(),
+        event_type: event_type.to_owned(),
         schema_version,
         occurred_at,
-        record.payload,
-    )
+        payload: record.payload,
+    })
 }
 
 /// Go-compatible deterministic transfer identity for dead-letter publication.
@@ -179,6 +175,26 @@ pub fn dead_letter_id(
         stored_at,
         original_publication_id,
     )
+}
+
+fn record_id(
+    prefix: &str,
+    stream: &str,
+    stream_sequence: u64,
+    stored_at: OffsetDateTime,
+    publication_id: &str,
+) -> Result<String, EnvelopeError> {
+    let stored_at = format_timestamp(stored_at)?;
+    let sequence = stream_sequence.to_string();
+    let mut hash = Sha256::new();
+    hash.update(stream.as_bytes());
+    hash.update([0]);
+    hash.update(sequence.as_bytes());
+    hash.update([0]);
+    hash.update(stored_at.as_bytes());
+    hash.update([0]);
+    hash.update(publication_id.as_bytes());
+    Ok(prefixed_digest_hex(prefix, &hash.finalize()))
 }
 
 #[cfg(test)]
@@ -240,7 +256,6 @@ mod tests {
         let transfer_id =
             dead_letter_id("SOURCE", 7, OffsetDateTime::UNIX_EPOCH, "event-1").unwrap();
         DeadLetterRecord {
-            subject: "orders.dlq".to_owned(),
             headers: dead_letter_headers(
                 original,
                 "orders.created",

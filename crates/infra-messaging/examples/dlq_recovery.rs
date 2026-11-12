@@ -89,7 +89,6 @@ impl Record {
         }
         let headers = stored_headers(&self.headers_base64)?;
         restore_dead_letter(DeadLetterRecord {
-            subject: self.subject.clone(),
             headers,
             payload: payload.into(),
             stream: self.stream.clone(),

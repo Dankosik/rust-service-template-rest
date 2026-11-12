@@ -2,7 +2,6 @@
 
 use async_nats::{HeaderMap, HeaderName};
 use bytes::Bytes;
-use sha2::{Digest, Sha256};
 use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, UtcOffset};
 
@@ -326,26 +325,6 @@ fn parse_timestamp(value: &str) -> Result<OffsetDateTime, EnvelopeError> {
         .ok()
         .and_then(|value| value.checked_to_offset(UtcOffset::UTC))
         .ok_or(EnvelopeError::CreatedAtInvalid)
-}
-
-fn record_id(
-    prefix: &str,
-    stream: &str,
-    stream_sequence: u64,
-    stored_at: OffsetDateTime,
-    publication_id: &str,
-) -> Result<String, EnvelopeError> {
-    let stored_at = format_timestamp(stored_at)?;
-    let sequence = stream_sequence.to_string();
-    let mut hash = Sha256::new();
-    hash.update(stream.as_bytes());
-    hash.update([0]);
-    hash.update(sequence.as_bytes());
-    hash.update([0]);
-    hash.update(stored_at.as_bytes());
-    hash.update([0]);
-    hash.update(publication_id.as_bytes());
-    Ok(prefixed_digest_hex(prefix, &hash.finalize()))
 }
 
 /// `prefix` followed by the lowercase hex of a SHA-256 digest.

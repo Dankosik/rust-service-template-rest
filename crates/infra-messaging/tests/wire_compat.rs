@@ -272,7 +272,6 @@ fn verify_go_record_in_rust(fixture: &FixtureCase) {
     );
 
     let restored = restore_dead_letter(DeadLetterRecord {
-        subject: fixture.dlq.subject.clone(),
         headers: headers(&fixture.dlq.headers),
         payload: body(&fixture.dlq.body_base64),
         stream: fixture.dlq.stream.clone(),

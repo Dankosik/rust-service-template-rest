@@ -20,7 +20,7 @@ use time::OffsetDateTime;
 
 use crate::Producer;
 use crate::error::EnvelopeError;
-use crate::prepared::PreparedEvent;
+use crate::prepared::{PreparedEvent, PreparedEventParts};
 use crate::wire::prefixed_digest_hex;
 
 const OUTBOX_KIND: &str = "publish_domain_event";
@@ -92,23 +92,27 @@ pub fn kinds(producer: Producer) -> Result<Kinds, infra_jobs::KindError> {
     kinds.validate()
 }
 
-impl PreparedEvent {
-    /// Largest raw JSON payload this event's immutable jobs representation admits.
-    ///
-    /// This is smaller than the jobs JSON limit because it includes the stable
-    /// routing and identity fields plus standard padded base64 storage.
-    ///
-    /// # Errors
-    ///
-    /// Returns the canonical jobs serialization error if immutable metadata
-    /// cannot be represented as a jobs payload.
-    pub fn outbox_payload_limit(&self) -> Result<usize, infra_jobs::EnqueueError> {
-        if self.subject().len() > infra_jobs::MAX_PAYLOAD_BYTES {
-            return Ok(0);
-        }
-        outbox_raw_capacity(&PublishDomainEvent::without_payload(self))
-    }
+#[derive(Default)]
+struct OutboxText<'a> {
+    subject: &'a str,
+    message_id: &'a str,
+    publication_id: &'a str,
+    event_type: &'a str,
+}
 
+impl<'a> OutboxText<'a> {
+    fn fields(self) -> [&'a str; 4] {
+        let Self {
+            subject,
+            message_id,
+            publication_id,
+            event_type,
+        } = self;
+        [subject, message_id, publication_id, event_type]
+    }
+}
+
+impl PreparedEvent {
     /// Enqueues this immutable event inside the caller's already-open transaction.
     ///
     /// The method never creates a connection or commits. A duplicate live key
@@ -174,7 +178,7 @@ impl PreparedEvent {
         let mut total = infra_jobs::json_payload_len(&PublishDomainEvent::fixed_fields(self))
             .map_err(infra_jobs::EnqueueError::Serialize)?;
         let mut budget = PREFLIGHT_BYTES_PER_POLL;
-        for field in self.outbox_variable_fields() {
+        for field in self.outbox_text().fields() {
             let mut offset = 0;
             while offset < field.len() {
                 let end = field.floor_char_boundary(offset + budget);
@@ -196,14 +200,13 @@ impl PreparedEvent {
         Ok(total)
     }
 
-    /// The caller-text fields whose serialized size depends on the event.
-    fn outbox_variable_fields(&self) -> [&str; 4] {
-        [
-            self.subject(),
-            self.message_id(),
-            self.publication_id(),
-            self.event_type(),
-        ]
+    fn outbox_text(&self) -> OutboxText<'_> {
+        OutboxText {
+            subject: self.subject(),
+            message_id: self.message_id(),
+            publication_id: self.publication_id(),
+            event_type: self.event_type(),
+        }
     }
 }
 
@@ -250,33 +253,25 @@ impl From<&PreparedEvent> for PublishDomainEvent {
     fn from(event: &PreparedEvent) -> Self {
         Self {
             payload_base64: STANDARD.encode(event.payload()),
-            ..Self::without_payload(event)
+            ..Self::with_text(event, &event.outbox_text())
         }
     }
 }
 
 impl PublishDomainEvent {
-    /// Every field but the payload.
-    fn without_payload(event: &PreparedEvent) -> Self {
-        Self::with_text(event, event.outbox_variable_fields())
-    }
-
     /// Only the fields whose serialized size does not depend on caller text.
     /// Empty strings do not allocate, so the preflight never clones that text.
     fn fixed_fields(event: &PreparedEvent) -> Self {
-        Self::with_text(event, [""; 4])
+        Self::with_text(event, &OutboxText::default())
     }
 
-    fn with_text(
-        event: &PreparedEvent,
-        [subject, message_id, publication_id, event_type]: [&str; 4],
-    ) -> Self {
+    fn with_text(event: &PreparedEvent, text: &OutboxText<'_>) -> Self {
         Self {
             format_version: FORMAT_VERSION,
-            subject: subject.to_owned(),
-            message_id: message_id.to_owned(),
-            publication_id: publication_id.to_owned(),
-            event_type: event_type.to_owned(),
+            subject: text.subject.to_owned(),
+            message_id: text.message_id.to_owned(),
+            publication_id: text.publication_id.to_owned(),
+            event_type: text.event_type.to_owned(),
             schema_version: event.schema_version(),
             occurred_at_unix_seconds: event.occurred_at().unix_timestamp(),
             occurred_at_nanosecond: event.occurred_at().nanosecond(),
@@ -304,15 +299,15 @@ impl PublishDomainEvent {
         // malformed stream event.
         serde_json::from_slice::<serde::de::IgnoredAny>(&payload)
             .map_err(|_| IntentError::NotJson)?;
-        Ok(PreparedEvent::from_parts(
-            self.subject.clone(),
-            self.message_id.clone(),
-            self.publication_id.clone(),
-            self.event_type.clone(),
-            self.schema_version,
+        Ok(PreparedEvent::from_parts(PreparedEventParts {
+            subject: self.subject.clone(),
+            message_id: self.message_id.clone(),
+            publication_id: self.publication_id.clone(),
+            event_type: self.event_type.clone(),
+            schema_version: self.schema_version,
             occurred_at,
             payload,
-        )?)
+        })?)
     }
 }
 
@@ -324,16 +319,6 @@ fn event_key(message_id: &str) -> String {
 /// to `overhead` bytes of other serialized fields: every 3 raw bytes take 4.
 fn raw_payload_capacity(overhead: usize) -> usize {
     (infra_jobs::MAX_PAYLOAD_BYTES.saturating_sub(overhead) / 4) * 3
-}
-
-/// [`raw_payload_capacity`] of `intent`. Standard base64 never needs a JSON
-/// escape, so the stored payload adds exactly its own length.
-fn outbox_raw_capacity(intent: &PublishDomainEvent) -> Result<usize, infra_jobs::EnqueueError> {
-    let overhead = serde_json::to_vec(intent)
-        .map_err(infra_jobs::EnqueueError::Serialize)?
-        .len()
-        - intent.payload_base64.len();
-    Ok(raw_payload_capacity(overhead))
 }
 
 #[cfg(test)]
@@ -350,9 +335,9 @@ mod tests {
 
     use super::{
         FORMAT_VERSION, IntentError, OutboxEnqueueError, PREFLIGHT_BYTES_PER_POLL,
-        PublishDomainEvent, event_key, outbox_raw_capacity,
+        PublishDomainEvent, event_key, raw_payload_capacity,
     };
-    use crate::prepared::PreparedEvent;
+    use crate::prepared::{PreparedEvent, PreparedEventParts};
 
     /// The stored parts of an event, as outbox storage keeps them.
     struct Parts {
@@ -375,15 +360,15 @@ mod tests {
         }
 
         fn event(&self) -> PreparedEvent {
-            PreparedEvent::from_parts(
-                self.subject.clone(),
-                self.message_id.clone(),
-                self.publication_id.clone(),
-                self.event_type.clone(),
-                1,
-                OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap(),
-                self.payload.clone(),
-            )
+            PreparedEvent::from_parts(PreparedEventParts {
+                subject: self.subject.clone(),
+                message_id: self.message_id.clone(),
+                publication_id: self.publication_id.clone(),
+                event_type: self.event_type.clone(),
+                schema_version: 1,
+                occurred_at: OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap(),
+                payload: self.payload.clone(),
+            })
             .expect("fixture parts are valid")
         }
     }
@@ -457,7 +442,7 @@ mod tests {
         };
 
         for intent in [compact, wide] {
-            let limit = outbox_raw_capacity(&intent).expect("primitive intent serializes");
+            let limit = outbox_raw_capacity(&intent);
 
             assert!(serialized_len(&intent, limit) <= infra_jobs::MAX_PAYLOAD_BYTES);
             assert!(serialized_len(&intent, limit + 1) > infra_jobs::MAX_PAYLOAD_BYTES);
@@ -473,7 +458,7 @@ mod tests {
         parts.message_id = "logical-\"id\\".to_owned();
         parts.publication_id = "publication-😀".to_owned();
         parts.event_type = "example.\"created".to_owned();
-        let limit = parts.event().outbox_payload_limit().unwrap();
+        let limit = outbox_raw_capacity(&PublishDomainEvent::from(&parts.event()));
         parts.payload = Bytes::from(vec![b'x'; limit]);
         let event = parts.event();
         let expected = serde_json::to_vec(&PublishDomainEvent::from(&event)).unwrap();
@@ -506,7 +491,6 @@ mod tests {
                 .unwrap()
                 .len();
             assert!(expected > infra_jobs::MAX_PAYLOAD_BYTES);
-            assert_eq!(event.outbox_payload_limit().unwrap(), 0);
 
             let (result, polls) = complete(event.prepare_outbox_intent());
             assert!(polls >= event.subject().len().div_ceil(PREFLIGHT_BYTES_PER_POLL));
@@ -576,6 +560,11 @@ mod tests {
             }
         }
         panic!("bounded fixture did not complete");
+    }
+
+    fn outbox_raw_capacity(intent: &PublishDomainEvent) -> usize {
+        let overhead = serialized_len(intent, 0);
+        raw_payload_capacity(overhead)
     }
 
     fn serialized_len(intent: &PublishDomainEvent, payload_bytes: usize) -> usize {
