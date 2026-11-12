@@ -25,7 +25,7 @@ pub enum AcquisitionError {
     Unavailable,
     #[error("OAuth2 provider acquisition capacity is exhausted")]
     AtCapacity,
-    /// The provider refused the request, with its registered error code.
+    /// The provider refused the request. Only a known registered code is retained.
     #[error("OAuth2 provider rejected the request: {0}")]
     Rejected(Rejection),
     #[error("OAuth2 token response is invalid")]

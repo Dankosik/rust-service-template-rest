@@ -5,7 +5,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use http::{HeaderMap, Request, header::AUTHORIZATION};
+use http::{HeaderMap, header::AUTHORIZATION};
 use infra_outbound_http::Client;
 use moka::Expiry;
 use operation_context::{Deadline, OperationContext, Stopped};
@@ -106,9 +106,6 @@ impl RefreshDriver {
                 _ = &mut self.owner_gone => break,
                 () = self.inner.refresh_ahead(request) => {}
             }
-            // The attempt finished, including a failed or cancelled one.
-            // Clearing once per iteration lets the next caller schedule; a
-            // refused send clears the flag at the enqueue site instead.
             self.inner.cached().refresh_pending = false;
         }
     }
@@ -144,13 +141,19 @@ enum ExchangeFlight<'a> {
     Waiter(ExchangeReceiver),
 }
 
-/// Only the fetching caller owns the sender. Dropping that caller releases
-/// its registration and wakes waiters without publishing a failure.
+/// Only the fetching caller owns the sender. If it drops this guard before
+/// [`Self::publish`], waiters wake without an outcome and can start a new attempt.
 struct ExchangeLeader<'a> {
     flights: &'a ExchangeFlights,
     key: SubjectKey,
     sender: watch::Sender<Option<ExchangeResult>>,
     completed: Option<ExchangeResult>,
+}
+
+impl ExchangeLeader<'_> {
+    fn publish(mut self, result: ExchangeResult) {
+        self.completed = Some(result);
+    }
 }
 
 impl Drop for ExchangeLeader<'_> {
@@ -493,7 +496,7 @@ impl Credentials {
         loop {
             self.check_admission(deadline)?;
             match inner.join_exchange(key) {
-                ExchangeFlight::Leader(mut leader) => {
+                ExchangeFlight::Leader(leader) => {
                     // A previous exchange may have finished between the cache
                     // miss and this registration.
                     let result = if let Some(token) = inner.reusable_exchange(key).await {
@@ -504,7 +507,7 @@ impl Credentials {
                     if let Some(error) = deadline.stopped_error() {
                         return Err(error);
                     }
-                    leader.completed = Some(result.clone());
+                    leader.publish(result.clone());
                     return result;
                 }
                 ExchangeFlight::Waiter(mut receiver) => {
@@ -651,31 +654,6 @@ fn is_cacheable_failure(error: AcquisitionError) -> bool {
         | AcquisitionError::InvalidResponse
         | AcquisitionError::Assertion => true,
     }
-}
-
-/// Why a binding refused a request before dispatch. Both are composition
-/// mistakes of this service, not refusals by its caller.
-#[derive(Clone, Copy)]
-pub(crate) enum AdmissionRefusal {
-    AuthorizationConflict,
-    SubjectRequired,
-}
-
-/// Removes the on-behalf-of subject before dispatch and applies the binding's
-/// admission policy. The extension is removed whether or not a subject is
-/// required, so it never reaches the resource.
-pub(crate) fn admit_request_subject<B>(
-    request: &mut Request<B>,
-    required: bool,
-) -> Result<Option<OnBehalfOf>, AdmissionRefusal> {
-    let subject = request.extensions_mut().remove::<OnBehalfOf>();
-    if request.headers().contains_key(AUTHORIZATION) {
-        return Err(AdmissionRefusal::AuthorizationConflict);
-    }
-    if required && subject.is_none() {
-        return Err(AdmissionRefusal::SubjectRequired);
-    }
-    Ok(subject)
 }
 
 #[derive(Clone, Copy)]
