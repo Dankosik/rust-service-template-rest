@@ -415,7 +415,9 @@ async fn dispatch_can_be_refused_after_request_setup() {
 
     let material = TlsMaterial::new(FIXTURE_HOST);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let client = fixture_client_with_limits(listener.local_addr().unwrap(), &material, limits());
+    let mut ceiling = limits();
+    ceiling.operation_timeout = Duration::from_secs(5);
+    let client = fixture_client_with_limits(listener.local_addr().unwrap(), &material, ceiling);
     let subscriber =
         tracing_subscriber::registry().with(AdvanceOnAttemptStart(Duration::from_secs(1)));
     let credential_expiry = Instant::now() + Duration::from_secs(1);
