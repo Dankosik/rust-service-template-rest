@@ -36,7 +36,9 @@ The redis-rs queue covers all admitted producers on a generation. Application
 commands and external probes yield for Tokio scheduling before arming
 retirement, then hand off to that queue without an intervening yield. A caller
 can cancel before handoff without withdrawing the connection. After handoff,
-retirement bounds the lifetime of an unanswered slot. Recheck the handoff if
+an application command observes a ready reply before a context stop or
+disconnect notification because the reply has already answered its slot.
+Retirement bounds the lifetime of an unanswered slot. Recheck the handoff if
 the driver adds a pre-enqueue wait or the number of producers changes.
 
 `infra-cache` retains redis 1.8.1 with `tokio-comp` and `tokio-rustls-comp`.

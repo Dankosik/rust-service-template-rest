@@ -323,14 +323,12 @@ impl Link {
             changed: Notify::new(),
             retirements,
         });
-        let supervisor = tokio::spawn(supervise(
-            shared.clone(),
-            server.clone(),
-            client,
-            password_file,
-            command_timeout,
-        ))
-        .abort_handle();
+        let exit = SupervisorExit {
+            shared: shared.clone(),
+            server: server.clone(),
+        };
+        let supervisor =
+            tokio::spawn(supervise(exit, client, password_file, command_timeout)).abort_handle();
         Self {
             server,
             shared,
@@ -362,16 +360,26 @@ impl Link {
             // Yield before arming retirement. The driver has room for every
             // admitted producer, so its first poll can enqueue without yielding.
             tokio::task::consume_budget().await;
+            context.check().map_err(CommandError::Stopped)?;
+            if generation.retired.is_cancelled() {
+                return Err(ErrorType::Io.into());
+            }
             let exchange = Exchange::new(&self.shared, &generation, slot);
             let mut connection = generation.connection.clone();
             let reply = tokio::task::unconstrained(command.query_async(&mut connection)).await;
-            exchange.finish_reply(reply)
+            exchange.finish_reply(reply).map_err(|error| {
+                context
+                    .stopped()
+                    .map_or_else(|| error.into(), CommandError::Stopped)
+            })
         };
+        // A delivered reply has already cleared its slot. Observe it before
+        // stopping the wait so cancellation cannot retire an answered exchange.
         tokio::select! {
             biased;
+            reply = query => reply,
             stopped = context.wait_stopped() => Err(CommandError::Stopped(stopped)),
             () = generation.retired.cancelled() => Err(ErrorType::Io.into()),
-            reply = query => reply.map_err(CommandError::from),
         }
     }
 
@@ -425,7 +433,7 @@ fn register_link_metrics() -> LinkMetrics {
     metrics
 }
 
-// Ensures a panic or unexpected exit cannot leave an apparently live cache.
+// Captured before spawn so an exit before the first poll also closes the link.
 struct SupervisorExit {
     shared: Arc<Shared>,
     server: ServerEndpoint,
@@ -476,19 +484,14 @@ async fn ping_until(
 }
 
 async fn supervise(
-    shared: Arc<Shared>,
-    server: ServerEndpoint,
+    exit: SupervisorExit,
     client: redis::Client,
     password_file: Option<PasswordFile>,
     command_timeout: Duration,
 ) {
-    let _exit = SupervisorExit {
-        shared: shared.clone(),
-        server: server.clone(),
-    };
     run_supervisor(
-        &shared,
-        &server,
+        &exit.shared,
+        &exit.server,
         &client,
         password_file.as_ref(),
         command_timeout,
