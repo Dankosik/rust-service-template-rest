@@ -74,8 +74,11 @@ impl Token {
             .filter(|&until| now < until && !self.is_rejected())
     }
 
-    pub(crate) fn is_expired(&self, now: Instant) -> bool {
-        self.expires_at.is_some_and(|expiry| now >= expiry)
+    pub(crate) fn check_expiry(&self, now: Instant) -> Result<(), AcquisitionError> {
+        if self.expires_at.is_some_and(|expiry| now >= expiry) {
+            return Err(AcquisitionError::InvalidResponse);
+        }
+        Ok(())
     }
 
     pub(crate) fn is_rejected(&self) -> bool {

@@ -353,9 +353,7 @@ impl Credentials {
         };
         context.check().map_err(acquisition_stopped)?;
         let acquired = acquired?;
-        if acquired.is_expired(Instant::now()) {
-            return Err(AcquisitionError::InvalidResponse);
-        }
+        acquired.check_expiry(Instant::now())?;
         headers.insert(AUTHORIZATION, acquired.header.clone());
         Ok(acquired)
     }

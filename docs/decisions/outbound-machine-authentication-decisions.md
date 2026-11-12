@@ -98,8 +98,7 @@ The template-owned gaps are: the assertion claims and signing call; the two
 grant forms and their response type; the exchanged-token cache wiring; the
 `act` claim model; configuration and initializer integration; sanitized
 outcomes. There is no custom protocol serializer/parser beyond one serde
-response type, no flight state machine, no retry loop, and no general
-token-source abstraction.
+response type and no general token-source abstraction.
 
 ## Deferred with reopen conditions (D7)
 
@@ -365,10 +364,10 @@ credential failures. One `UNAVAILABLE` for both invited a retry of a request
 that needs a different key or grant. The message stays fixed and the closed `AcquisitionError` is the
 status source, never sent to a peer. `PreparedCall` captures the gRPC caller and
 transport contexts before acquisition, and remains the only owner of
-`grpc-timeout` propagation; OAuth adds the bearer only through its prepared
-headers, then sends the prepared call. A call refused before dispatch ends
-through `PreparedCall::refuse`, so client metrics count it with the status its
-caller receives, not as `Canceled`. Its optional dependency points from OAuth to
+`grpc-timeout` propagation; OAuth adds the bearer through its prepared
+headers and rechecks its expiry after channel readiness, before dispatch.
+Local refusals before dispatch record the status returned to the caller,
+including credentials that expire during readiness. Its optional dependency points from OAuth to
 `infra-grpc`; removing either profile removes the bridge. Generated clients
 take the concrete authenticated `Service`. See the [transport decision
 record](grpc-decisions.md).
