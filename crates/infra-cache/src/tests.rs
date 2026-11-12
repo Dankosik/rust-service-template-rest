@@ -263,6 +263,9 @@ async fn serve_resp(
                 b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n"
             }
             Some("GET") => b"$-1\r\n",
+            Some("PING") if socket.observed.deny_ping.load(Ordering::SeqCst) => {
+                b"-NOPERM no permissions to run the 'ping' command\r\n"
+            }
             Some("PING") => b"+PONG\r\n",
             Some("DEL") => b":1\r\n",
             Some("SET") => {
@@ -300,6 +303,7 @@ struct SocketObservations {
     silence_through: std::sync::atomic::AtomicUsize,
     silence_all: std::sync::atomic::AtomicBool,
     silence_auth: std::sync::atomic::AtomicBool,
+    deny_ping: std::sync::atomic::AtomicBool,
     auth_successes: std::sync::atomic::AtomicUsize,
     auth_rejections: std::sync::atomic::AtomicUsize,
     auth_error: std::sync::Mutex<String>,

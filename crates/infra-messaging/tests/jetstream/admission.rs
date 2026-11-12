@@ -248,6 +248,75 @@ async fn consumer_admits_the_transfer_bound_and_refuses_one_byte_less_before_dur
 }
 
 #[tokio::test]
+async fn wildcard_consumer_budgets_unregistered_subjects_for_pull_and_transfer() {
+    let fixture = Fixture::create(false).await;
+    let filter = format!("{}.events.>", fixture.subject);
+    let registered_subject = format!("{}.events.known", fixture.subject);
+    let subject = format!("{}.events.{}", fixture.subject, "x".repeat(256));
+    let mut source = fixture
+        .jetstream
+        .get_stream(&fixture.stream)
+        .await
+        .unwrap()
+        .cached_info()
+        .config
+        .clone();
+    source.subjects = vec![filter.clone()];
+    fixture.jetstream.update_stream(source).await.unwrap();
+
+    let mut registered = Registry::try_new([Route::new::<ExampleEvent>(registered_subject)])
+        .expect("the handled subject belongs to the wildcard filter");
+    registered
+        .register::<ExampleEvent, _, _>(|_, _| async { Ok(()) })
+        .unwrap();
+    let mut consumer = consumer_options(&fixture);
+    consumer.filter_subject = filter;
+    let cancel = CancellationToken::new();
+    let messaging = Box::pin(Messaging::connect(
+        options(&fixture, Some(consumer), 1024),
+        deadline(),
+        cancel.clone(),
+    ))
+    .await
+    .unwrap();
+    let mut handle = messaging.consumer(registered).await.unwrap().start(&cancel);
+
+    let prepared = infra_messaging::PreparedEvent::prepare(
+        subject.clone(),
+        &event_with_value("wildcard-transfer", &"x".repeat(1012)),
+        1024,
+    )
+    .unwrap();
+    assert_eq!(prepared.payload().len(), 1024);
+    let mut headers = infra_messaging::wire::encode_prepared(&prepared).unwrap();
+    headers.insert("tracestate", "");
+    let trace = "x".repeat(8192 - encoded_headers(&headers));
+    headers.insert("tracestate", trace.as_str());
+    fixture
+        .jetstream
+        .publish_with_headers(subject.clone(), headers, prepared.payload().clone())
+        .await
+        .unwrap()
+        .await
+        .unwrap();
+
+    let transferred = wait_for_dead_letter(&fixture).await;
+    assert_eq!(
+        transferred
+            .headers
+            .get("Original-Subject")
+            .unwrap()
+            .as_str(),
+        subject
+    );
+    assert_eq!(transferred.payload, *prepared.payload());
+    wait_for_source_ack(&fixture).await;
+    handle.finish(deadline()).await.unwrap();
+    close(messaging).await;
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
 async fn unlimited_dlq_cannot_exceed_the_advertised_server_transfer_limit() {
     let fixture = Fixture::create(false).await;
     let server_limit = async_nats::connect(nats_url())

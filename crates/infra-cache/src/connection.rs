@@ -22,9 +22,8 @@ use crate::observe::{
 /// Bounds one whole setup attempt: password read, dial, TLS, and `HELLO`. A
 /// hang guard, not a latency target: a slow but live server is waited for.
 pub(crate) const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
-/// Ceiling on one exchange over an established connection that no caller
-/// context bounds: the readiness probe and the password refresh.
-const CONNECTED_EXCHANGE_TIMEOUT: Duration = Duration::from_secs(5);
+const CONNECTED_PROBE_MIN_BUDGET: Duration = Duration::from_secs(5);
+const PASSWORD_READ_TIMEOUT: Duration = Duration::from_secs(5);
 const SETUP_BACKOFF_MIN_DELAY: Duration = Duration::from_millis(100);
 const SETUP_BACKOFF_MAX_DELAY: Duration = Duration::from_secs(2);
 /// Minimum spacing between published generations, so a server that accepts
@@ -364,13 +363,14 @@ impl Link {
         }
     }
 
-    pub(crate) async fn probe(&self) -> Result<(), ErrorType> {
+    pub(crate) async fn probe(&self, command_timeout: Duration) -> Result<(), ErrorType> {
         let slot = self.claim_slot(&self.probe_slots)?;
         let generation = self.shared.acquire().await?;
-        let deadline = Instant::now() + CONNECTED_EXCHANGE_TIMEOUT;
-        let exchange = Exchange::new(&self.shared, generation, slot);
-        let result = query_until(&exchange.generation, &redis::Cmd::ping(), deadline).await;
-        exchange.finish(result)
+        let deadline = Instant::now() + command_timeout.max(CONNECTED_PROBE_MIN_BUDGET);
+        let mut exchange = Exchange::new(&self.shared, generation, slot);
+        let (result, disposition) = ping_until(&exchange.generation, deadline).await;
+        exchange.keeps_generation = disposition == Disposition::Keep;
+        result
     }
 
     fn claim_slot<'a>(&'a self, slots: &'a Semaphore) -> Result<CommandSlot<'a>, ErrorType> {
@@ -428,20 +428,33 @@ impl Drop for SupervisorExit {
     }
 }
 
-/// One command on `generation` until `deadline`. Never retires the generation:
-/// a refused password refresh keeps the authenticated session usable.
-async fn query_until<T: redis::FromRedisValue>(
+async fn query_until(
     generation: &Generation,
     command: &redis::Cmd,
     deadline: Instant,
-) -> Result<T, ErrorType> {
+) -> Result<redis::RedisResult<()>, ErrorType> {
     let mut connection = generation.connection.clone();
     tokio::select! {
         biased;
         () = generation.retired.cancelled() => Err(ErrorType::Io),
         result = timeout_at(deadline, command.query_async(&mut connection)) => {
-            result.map_err(|_| ErrorType::Timeout)?.map_err(|error| error_type(&error))
+            result.map_err(|_| ErrorType::Timeout)
         }
+    }
+}
+
+async fn ping_until(
+    generation: &Generation,
+    deadline: Instant,
+) -> (Result<(), ErrorType>, Disposition) {
+    match query_until(generation, &redis::Cmd::ping(), deadline).await {
+        Ok(Ok(())) => (Ok(()), Disposition::Keep),
+        // ACL can refuse PING while still allowing cache operations.
+        Ok(Err(error)) if error.code() == Some("NOPERM") => {
+            (Err(error_type(&error)), Disposition::Keep)
+        }
+        Ok(Err(error)) => (Err(error_type(&error)), Disposition::Retire),
+        Err(error) => (Err(error), Disposition::Retire),
     }
 }
 
@@ -621,7 +634,8 @@ async fn maintain(
                 // A rejected AUTH must not add its duration to the next refresh.
                 next_refresh = Instant::now() + PASSWORD_REFRESH_INTERVAL;
                 if let Some(rotation) = rotation.as_mut()
-                    && rotation.refresh_within_bound(server, generation).await == Disposition::Retire
+                    && rotation.refresh_and_record(server, generation, command_timeout).await
+                        == Disposition::Retire
                 {
                     return;
                 }
@@ -632,14 +646,17 @@ async fn maintain(
                 // would retire the generation, and fail those commands, before
                 // their own budget ends.
                 let deadline = Instant::now() + command_timeout;
-                if let Err(error) = query_until::<()>(generation, &redis::Cmd::ping(), deadline).await {
+                let (result, disposition) = ping_until(generation, deadline).await;
+                if let Err(error) = result {
                     tracing::warn!(
                         server.address = %server.host,
                         server.port = server.port,
                         error.type = error.label(),
                         "cache_ping_failed"
                     );
-                    return;
+                    if disposition == Disposition::Retire {
+                        return;
+                    }
                 }
                 next_ping = Instant::now() + PING_INTERVAL;
             }
@@ -688,7 +705,7 @@ impl RefreshOutcome {
     }
 }
 
-/// Whether a generation stays usable after a password refresh.
+/// Whether a maintenance exchange leaves the generation usable.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Disposition {
     Keep,
@@ -704,30 +721,31 @@ impl<'a> Rotation<'a> {
         }
     }
 
-    /// Runs one refresh under [`CONNECTED_EXCHANGE_TIMEOUT`] and records a
-    /// completed outcome; a generation retired mid-refresh records nothing.
-    async fn refresh_within_bound(
+    async fn refresh_and_record(
         &mut self,
         server: &ServerEndpoint,
         generation: &Generation,
+        command_timeout: Duration,
     ) -> Disposition {
-        let deadline = Instant::now() + CONNECTED_EXCHANGE_TIMEOUT;
         let outcome = tokio::select! {
             biased;
             // A generation retired mid-refresh records nothing.
             () = generation.retired.cancelled() => return Disposition::Retire,
-            outcome = timeout_at(deadline, self.refresh(generation, deadline)) => {
-                outcome.unwrap_or(RefreshOutcome::Failed(ErrorType::Timeout))
-            }
+            outcome = self.refresh(generation, command_timeout) => outcome,
         };
         self.record(server, &outcome);
         outcome.disposition()
     }
 
-    async fn refresh(&mut self, generation: &Generation, deadline: Instant) -> RefreshOutcome {
+    async fn refresh(
+        &mut self,
+        generation: &Generation,
+        command_timeout: Duration,
+    ) -> RefreshOutcome {
         // A read that outlives the bound is unreadable, not a connection
         // failure: the authenticated session stays usable.
-        let password = match timeout_at(deadline, self.file.read()).await {
+        let read_deadline = Instant::now() + PASSWORD_READ_TIMEOUT;
+        let password = match timeout_at(read_deadline, self.file.read()).await {
             Ok(Ok(password)) => password,
             Ok(Err(error)) => return RefreshOutcome::ReadFailed(error),
             Err(_elapsed) => {
@@ -742,7 +760,12 @@ impl<'a> Rotation<'a> {
         }
         let mut command = redis::cmd("AUTH");
         command.arg(self.file.username()).arg(&password);
-        match query_until::<()>(generation, &command, deadline).await {
+        // File I/O must not consume the time owed to commands ahead of AUTH.
+        let deadline = read_deadline.max(Instant::now() + command_timeout);
+        let result = query_until(generation, &command, deadline)
+            .await
+            .and_then(|reply| reply.map_err(|error| error_type(&error)));
+        match result {
             Ok(()) => {}
             Err(ErrorType::Auth) => return RefreshOutcome::AuthRefused,
             Err(error) => return RefreshOutcome::Failed(error),

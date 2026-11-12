@@ -227,6 +227,117 @@ async fn a_slow_reply_within_command_timeout_survives_the_maintenance_ping() {
     assert_eq!(server.connections(), connections);
 }
 
+#[tokio::test]
+async fn ping_permission_denial_keeps_the_connection_usable() {
+    use health::Probe;
+    use std::sync::atomic::Ordering;
+
+    let server = FakeServer::start().await;
+    let cache = admitted(&format!("redis://{}", server.address), true, true);
+    let namespace = cache.namespace("ping_permission");
+    assert_eq!(namespace.get("ready").await, Ok(None));
+    let connections = server.connections();
+    let pings = server.command_count("PING", None);
+    server.observed.deny_ping.store(true, Ordering::SeqCst);
+
+    assert!(cache.probe().check().await.is_err());
+    assert_eq!(namespace.get("after_probe").await, Ok(None));
+    server
+        .wait_for(
+            Duration::from_secs(7),
+            "maintenance PING did not recur",
+            || server.command_count("PING", None) >= pings + 3,
+        )
+        .await;
+    assert_eq!(namespace.get("after_maintenance").await, Ok(None));
+    assert_eq!(server.connections(), connections);
+}
+
+#[tokio::test]
+async fn a_slow_command_survives_an_overlapping_readiness_probe() {
+    use health::Probe;
+
+    let server = FakeServer::start().await;
+    *server.observed.slow_get_delay.lock().expect("delay lock") = Duration::from_secs(7);
+    let cache = Cache::start(CacheOptions {
+        command_timeout: Duration::from_secs(10),
+        ..options(&format!("redis://{}", server.address), true, true, None)
+    })
+    .expect("start cache");
+    let namespace = cache.namespace("probe_budget");
+    assert_eq!(namespace.get("ready").await, Ok(None));
+    let probe = cache.probe();
+
+    let (command, readiness) = tokio::join!(namespace.get("slow"), async {
+        server
+            .wait_for(
+                Duration::from_secs(1),
+                "slow GET did not reach the server",
+                || server.command_count("GET", Some("probe_budget:slow")) == 1,
+            )
+            .await;
+        probe.check().await
+    });
+    assert_eq!(command, Ok(None));
+    assert!(readiness.is_ok(), "{readiness:?}");
+}
+
+#[tokio::test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "finite writes simulate password rotation in the fixture"
+)]
+async fn a_slow_command_survives_overlapping_password_rotation() {
+    let server = FakeServer::start().await;
+    let initial = ephemeral_password();
+    let rotated = ephemeral_password();
+    server.require_password(&initial);
+    let file = tempfile::NamedTempFile::new().expect("password file");
+    std::fs::write(file.path(), &initial).expect("initial password");
+    let cache = Cache::start(CacheOptions {
+        command_timeout: Duration::from_secs(10),
+        ..with_password_file(
+            &format!("redis://{}", server.address),
+            file.path().to_path_buf(),
+        )
+    })
+    .expect("start cache");
+    let namespace = cache.namespace("rotation_budget");
+    assert_eq!(namespace.get("ready").await, Ok(None));
+    let connections = server.connections();
+    server
+        .wait_for(
+            Duration::from_secs(5),
+            "maintenance did not reach its second PING",
+            || server.command_count("PING", None) >= 2,
+        )
+        .await;
+    *server.observed.slow_get_delay.lock().expect("delay lock") = Duration::from_secs(8);
+
+    tokio::join!(
+        async { assert_eq!(namespace.get("slow").await, Ok(None)) },
+        async {
+            server
+                .wait_for(
+                    Duration::from_secs(1),
+                    "slow GET did not reach the server",
+                    || server.command_count("GET", Some("rotation_budget:slow")) == 1,
+                )
+                .await;
+            server.require_password(&rotated);
+            std::fs::write(file.path(), &rotated).expect("rotated password");
+            server
+                .wait_for(
+                    Duration::from_secs(10),
+                    "rotation AUTH did not reach the server",
+                    || server.command_count("AUTH", None) == 1,
+                )
+                .await;
+        }
+    );
+    assert_eq!(server.connections(), connections);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_dropped_idle_connection_reconnects_before_the_next_call() {
     let server = FakeServer::start().await;
