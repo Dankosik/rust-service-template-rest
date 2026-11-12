@@ -220,10 +220,7 @@ impl Store {
             if let Some(decision) = arbitrate(tx, scope, fingerprint).await? {
                 return Err(Stop::Decided(decision));
             }
-            let (record, value) = match work(tx).await {
-                Ok(done) => done,
-                Err(rollback) => return Err(Stop::RolledBack(rollback)),
-            };
+            let (record, value) = work(tx).await.map_err(Stop::RolledBack)?;
             write(tx, scope, caller, fingerprint, &record, self.retention).await?;
             Ok(value)
         };
