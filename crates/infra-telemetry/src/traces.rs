@@ -31,7 +31,7 @@ pub(crate) const TRACE_SPANS_EXPORTED_METRIC: &str = "otel_sdk_exporter_span_exp
 
 /// Gauge: 1 when the OTLP trace exporter was configured and initialized at
 /// startup, 0 otherwise. A startup-configuration signal, not delivery health.
-pub const TRACE_EXPORTER_ACTIVE_METRIC: &str = "service_startup_trace_exporter_active";
+pub(crate) const TRACE_EXPORTER_ACTIVE_METRIC: &str = "service_startup_trace_exporter_active";
 
 /// Trace sampler selected by typed configuration, with the ratio already
 /// attached to the variants that use it.
@@ -97,10 +97,7 @@ pub enum ExporterState {
     },
     Disabled,
     /// An endpoint resolved but the exporter could not be built.
-    Degraded {
-        /// Bounded label for why the exporter could not be built.
-        reason: &'static str,
-    },
+    Degraded,
 }
 
 impl ExporterState {
@@ -109,7 +106,7 @@ impl ExporterState {
         match self {
             ExporterState::Initialized { .. } => "initialized",
             ExporterState::Disabled => "disabled",
-            ExporterState::Degraded { .. } => "degraded",
+            ExporterState::Degraded => "degraded",
         }
     }
 
@@ -126,8 +123,8 @@ impl ExporterState {
                 "trace exporter initialized"
             ),
             ExporterState::Disabled => {}
-            ExporterState::Degraded { reason } => tracing::warn!(
-                reason = %reason,
+            ExporterState::Degraded => tracing::warn!(
+                reason = %"exporter_build",
                 "trace exporter degraded; spans are recorded but not exported"
             ),
         }
@@ -231,9 +228,7 @@ fn tracer_provider(
             }
             // The error's text may name files and SDK details, which stay
             // out of logs and metrics; the fixed category is reported.
-            Err(_withheld) => ExporterState::Degraded {
-                reason: "exporter_build",
-            },
+            Err(_withheld) => ExporterState::Degraded,
         },
     };
 
