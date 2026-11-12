@@ -55,7 +55,7 @@ pub(crate) enum ErrorType {
     /// The server refused the credentials, including `WRONGPASS` and
     /// `NOAUTH` replies to `HELLO`.
     Auth,
-    Response,
+    ServerErrorReply,
     Parse,
     /// A local command slot refusal, which
     /// `cache_command_admission_refused_total` counts apart, an unreadable
@@ -81,7 +81,7 @@ impl ErrorType {
             Self::Timeout => "timeout",
             Self::Io => "io",
             Self::Auth => "auth",
-            Self::Response => "response",
+            Self::ServerErrorReply => "response",
             Self::Parse => "parse",
             Self::Other => "other",
         }
@@ -102,7 +102,7 @@ pub(crate) fn error_type(error: &redis::RedisError) -> ErrorType {
         redis::ErrorKind::AuthenticationFailed => ErrorType::Auth,
         // redis-rs names only some server codes; `WRONGTYPE`, `OOM` and the
         // other unnamed codes are `Extension`, still a server error reply.
-        redis::ErrorKind::Server(_) | redis::ErrorKind::Extension => ErrorType::Response,
+        redis::ErrorKind::Server(_) | redis::ErrorKind::Extension => ErrorType::ServerErrorReply,
         redis::ErrorKind::Parse => ErrorType::Parse,
         // InvalidClientConfig and every other kind stay `other`.
         _ => ErrorType::Other,
@@ -198,11 +198,17 @@ struct Exchange<'a, F: Future> {
     shared: &'a Shared,
     generation: &'a Arc<Generation>,
     _slot: CommandSlot<'a>,
-    reply: Option<Pin<&'a mut F>>,
+    reply: ReplyState<'a, F>,
     keeps_generation: fn(&F::Output) -> bool,
-    /// `None` retires on any unanswered drop.
+    /// `None` retires when a dispatched reply remains unanswered on drop.
     ceiling: Option<Deadline>,
-    retire: bool,
+}
+
+enum ReplyState<'a, F> {
+    Unpolled(Pin<&'a mut F>),
+    Pending(Pin<&'a mut F>),
+    Keep,
+    Retire,
 }
 
 impl<'a, F: Future> Exchange<'a, F> {
@@ -218,25 +224,32 @@ impl<'a, F: Future> Exchange<'a, F> {
             shared,
             generation,
             _slot: slot,
-            reply: Some(reply),
+            reply: ReplyState::Unpolled(reply),
             keeps_generation,
             ceiling,
-            retire: false,
         }
     }
 
     fn poll_reply(&mut self, cx: &mut Context<'_>) -> Poll<F::Output> {
-        let Some(mut reply) = self.reply.take() else {
-            return Poll::Pending;
+        // Arm retirement before a poll that could unwind into this exchange's drop.
+        let mut reply = match std::mem::replace(&mut self.reply, ReplyState::Retire) {
+            ReplyState::Unpolled(reply) | ReplyState::Pending(reply) => reply,
+            state @ (ReplyState::Keep | ReplyState::Retire) => {
+                self.reply = state;
+                return Poll::Pending;
+            }
         };
-        self.retire = true;
         match reply.as_mut().poll(cx) {
             Poll::Ready(result) => {
-                self.retire = !(self.keeps_generation)(&result);
+                self.reply = if (self.keeps_generation)(&result) {
+                    ReplyState::Keep
+                } else {
+                    ReplyState::Retire
+                };
                 Poll::Ready(result)
             }
             Poll::Pending => {
-                self.reply = Some(reply);
+                self.reply = ReplyState::Pending(reply);
                 Poll::Pending
             }
         }
@@ -249,24 +262,26 @@ impl<'a, F: Future> Exchange<'a, F> {
 /// resolve to the new primary, and only a new connection reaches it.
 fn command_keeps_generation<T>(reply: &redis::RedisResult<T>) -> bool {
     reply.as_ref().err().is_none_or(|error| {
-        error_type(error) == ErrorType::Response && error.code() != Some("READONLY")
+        error_type(error) == ErrorType::ServerErrorReply && error.code() != Some("READONLY")
     })
 }
 
 impl<F: Future> Drop for Exchange<'_, F> {
     fn drop(&mut self) {
-        // Only re-poll after a pending poll. The unconstrained first poll has
-        // room to enqueue, so this poll can collect a delivered reply without
-        // dispatching new work. During unwinding just retire.
-        if self.retire && self.reply.is_some() && !std::thread::panicking() {
+        // The unconstrained first poll has room to enqueue, so re-polling
+        // can collect a delivered reply without dispatching new work.
+        if matches!(self.reply, ReplyState::Pending(_)) && !std::thread::panicking() {
             let _ = self.poll_reply(&mut Context::from_waker(Waker::noop()));
         }
-        // A caller that stops before the ceiling says nothing about the
-        // server. Its slot drains with the reply; a server that stopped
-        // answering still meets a peer's ceiling or the maintenance PING.
-        let caller_abandoned =
-            self.reply.is_some() && self.ceiling.is_some_and(|ceiling| !ceiling.expired());
-        if self.retire && !caller_abandoned {
+        let retire = match self.reply {
+            ReplyState::Unpolled(_) | ReplyState::Keep => false,
+            // A caller that stops before the ceiling says nothing about the
+            // server. Its slot drains with the reply; a stalled server still
+            // meets a peer's ceiling or the maintenance PING.
+            ReplyState::Pending(_) => self.ceiling.is_none_or(Deadline::expired),
+            ReplyState::Retire => true,
+        };
+        if retire {
             self.shared.retire(self.generation);
         }
         // Accounting and the permit drop only after retirement returns.
@@ -573,22 +588,18 @@ async fn query_until(
 async fn ping_until(
     generation: &Generation,
     command_timeout: Duration,
-) -> (Result<(), ErrorType>, Disposition) {
-    match query_until(generation, &redis::Cmd::ping(), || {
+) -> Result<(), (ErrorType, Disposition)> {
+    let reply = query_until(generation, &redis::Cmd::ping(), || {
         Deadline::new(Instant::now(), command_timeout)
     })
     .await
-    {
-        Ok(reply) => {
-            let disposition = if ping_keeps_generation(&reply) {
-                Disposition::Keep
-            } else {
-                Disposition::Retire
-            };
-            (reply.map_err(|error| error_type(&error)), disposition)
-        }
-        Err(error) => (Err(error), Disposition::Retire),
-    }
+    .map_err(|error| (error, Disposition::Retire))?;
+    let disposition = if ping_keeps_generation(&reply) {
+        Disposition::Keep
+    } else {
+        Disposition::Retire
+    };
+    reply.map_err(|error| (error_type(&error), disposition))
 }
 
 fn ping_keeps_generation(reply: &redis::RedisResult<()>) -> bool {
@@ -782,8 +793,7 @@ async fn maintain(
                 // sent before it. A budget shorter than `command_timeout`
                 // would retire the generation, and fail those commands, before
                 // their own budget ends.
-                let (result, disposition) = ping_until(generation, command_timeout).await;
-                if let Err(error) = result {
+                if let Err((error, disposition)) = ping_until(generation, command_timeout).await {
                     tracing::warn!(
                         server.address = %server.host,
                         server.port = server.port,
@@ -809,7 +819,6 @@ struct Rotation<'a> {
     unreadable_logged: bool,
 }
 
-/// How one password refresh ended.
 enum RefreshOutcome {
     ReadFailed(crate::CacheError),
     Unchanged,
