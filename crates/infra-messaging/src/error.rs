@@ -39,6 +39,8 @@ pub enum EnvelopeError {
     Serialization,
     #[error("payload exceeds configured maximum")]
     PayloadTooLarge,
+    #[error("event payload structure is invalid")]
+    PayloadStructure,
     #[error("encoded headers exceed {} KiB", crate::wire::HEADER_LIMIT_BYTES / 1024)]
     HeadersTooLarge,
     #[error("required header {0} is missing")]

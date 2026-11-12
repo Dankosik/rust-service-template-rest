@@ -34,6 +34,7 @@ hotpath = { version = "=0.28.4", default-features = false }
 # Workspace crates
 service-config = { path = "crates/config" }
 health = { path = "crates/health" }
+json-payload = { path = "crates/json-payload" }
 operation-context = { path = "crates/operation-context" }
 shared-rules = { path = "crates/shared-rules" }
 infra-http = { path = "crates/infra-http" }

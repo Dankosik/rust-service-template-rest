@@ -365,6 +365,42 @@ mod tests {
     }
 
     #[test]
+    fn routed_preparation_checks_route_before_non_finite_payload() {
+        struct Measured(std::cell::Cell<usize>);
+
+        impl EventPayload for Measured {
+            const EVENT_TYPE: &'static str = "order.measured";
+            const SCHEMA_VERSION: u16 = 1;
+        }
+
+        impl serde::Serialize for Measured {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                self.0.set(self.0.get() + 1);
+                serializer.serialize_f64(f64::NAN)
+            }
+        }
+
+        let event = Event {
+            id: "event-1".to_owned(),
+            occurred_at: time::OffsetDateTime::UNIX_EPOCH.to_utc(),
+            payload: Measured(std::cell::Cell::new(0)),
+        };
+        let missing = Registry::try_new([]).expect("empty publication registry");
+        std::assert_matches!(
+            missing.prepare(&event, 1024),
+            Err(EnvelopeError::MissingRoute { .. })
+        );
+        assert_eq!(event.payload.0.get(), 0);
+        let routed = Registry::try_new([Route::new::<Measured>("orders.measured")])
+            .expect("publication route");
+        std::assert_matches!(
+            routed.prepare(&event, 1024),
+            Err(EnvelopeError::Serialization)
+        );
+        assert_eq!(event.payload.0.get(), 1);
+    }
+
+    #[test]
     fn admission_refuses_a_type_that_nats_would_trim() {
         #[derive(serde::Serialize)]
         struct Padded;

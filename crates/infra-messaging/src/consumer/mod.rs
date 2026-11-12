@@ -259,6 +259,10 @@ impl Consumer {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one admission loop preserves stop, terminal failure, and admitted-work join ordering"
+    )]
     async fn consume(
         &self,
         deliveries: &mut JoinSet<Result<(), ConsumerError>>,
@@ -281,16 +285,31 @@ impl Consumer {
             // Pull requests address a durable by name, not creation identity.
             // A replacement between successful full batches has no waiting
             // request to terminate, so verify identity before every new pull.
-            match durable_is_lost(&self.pull).await {
+            let identity = tokio::select! {
+                biased;
+                () = stop.cancelled() => break 'pulls,
+                identity = durable_is_lost(&self.pull) => identity,
+            };
+            match identity {
                 Ok(false) => {}
                 Ok(true) => return Err(ConsumerError::ConsumerLost),
                 Err(error) => {
+                    if stop.is_cancelled() {
+                        break 'pulls;
+                    }
                     // Do not admit from a same-name replacement while the
                     // broker cannot confirm the durable's creation identity.
                     pull_failed("consumer_info", consumer_info_error_kind(&error.kind()));
-                    tokio::time::sleep(STREAM_ERROR_BACKOFF).await;
+                    tokio::select! {
+                        biased;
+                        () = stop.cancelled() => break 'pulls,
+                        () = tokio::time::sleep(STREAM_ERROR_BACKOFF) => {}
+                    }
                     continue;
                 }
+            }
+            if stop.is_cancelled() {
+                break 'pulls;
             }
             let (slots, max_bytes) = self.pull_budget(deliveries.len(), retained);
             let request = tokio::time::timeout(
@@ -314,11 +333,23 @@ impl Consumer {
                             Ok(Err(error)) => batch_create_error_kind(error.kind()),
                             Err(_) => "local_timeout",
                         };
+                        if stop.is_cancelled() {
+                            break 'pulls;
+                        }
                         pull_failed("batch_create", error_kind);
-                        if durable_confirmed_lost(&self.pull).await {
+                        let lost = tokio::select! {
+                            biased;
+                            () = stop.cancelled() => break 'pulls,
+                            lost = durable_confirmed_lost(&self.pull) => lost,
+                        };
+                        if lost {
                             return Err(ConsumerError::ConsumerLost);
                         }
-                        tokio::time::sleep(STREAM_ERROR_BACKOFF).await;
+                        tokio::select! {
+                            biased;
+                            () = stop.cancelled() => break 'pulls,
+                            () = tokio::time::sleep(STREAM_ERROR_BACKOFF) => {}
+                        }
                         continue 'pulls;
                     }
                 }
@@ -334,12 +365,20 @@ impl Consumer {
                     }
                 }
                 Ok(end) => {
-                    release(messages).await;
-                    if matches!(end, BatchEnd::Stopped) {
+                    release(messages, slots, stop).await;
+                    if matches!(end, BatchEnd::Stopped) || stop.is_cancelled() {
                         break 'pulls;
                     }
-                    if durable_confirmed_lost(&self.pull).await {
+                    let lost = tokio::select! {
+                        biased;
+                        () = stop.cancelled() => break 'pulls,
+                        lost = durable_confirmed_lost(&self.pull) => lost,
+                    };
+                    if lost {
                         return Err(ConsumerError::ConsumerLost);
+                    }
+                    if stop.is_cancelled() {
+                        break 'pulls;
                     }
                     let was_retained = retained;
                     retained = matches!(end, BatchEnd::FirstMessageTooLarge);
@@ -352,11 +391,19 @@ impl Consumer {
                         }
                     } else if let BatchEnd::Failed { phase, error_kind } = end {
                         pull_failed(phase, error_kind);
-                        tokio::time::sleep(STREAM_ERROR_BACKOFF).await;
+                        tokio::select! {
+                            biased;
+                            () = stop.cancelled() => break 'pulls,
+                            () = tokio::time::sleep(STREAM_ERROR_BACKOFF) => {}
+                        }
                     }
                 }
                 Err(error @ ConsumerError::DeadLetterTooLarge { .. }) => {
-                    let _ = tokio::time::timeout(BROKER_OPERATION_BUDGET, release(messages)).await;
+                    let _ = tokio::time::timeout(
+                        BROKER_OPERATION_BUDGET,
+                        release(messages, slots, stop),
+                    )
+                    .await;
                     return Err(error);
                 }
                 Err(error) => return Err(error),
@@ -407,7 +454,7 @@ impl Consumer {
                             let identity = tokio::select! {
                                 biased;
                                 () = stop.cancelled() => {
-                                    redeliver_after(&message, RELEASE_DELAY).await;
+                                    release_message(&message, stop).await;
                                     return Ok(BatchEnd::Stopped);
                                 }
                                 identity = durable_is_lost(&self.pull) => identity,
@@ -416,17 +463,17 @@ impl Consumer {
                                 Ok(false) => {}
                                 Ok(true) => return Err(ConsumerError::ConsumerLost),
                                 Err(error) => {
-                                    redeliver_after(&message, RELEASE_DELAY).await;
+                                    release_message(&message, stop).await;
                                     return Ok(BatchEnd::Failed {
                                         phase: "consumer_info",
                                         error_kind: consumer_info_error_kind(&error.kind()),
                                     });
                                 }
                             }
-                            if stop.is_cancelled() {
-                                redeliver_after(&message, RELEASE_DELAY).await;
-                                return Ok(BatchEnd::Stopped);
-                            }
+                        }
+                        if stop.is_cancelled() {
+                            release_message(&message, stop).await;
+                            return Ok(BatchEnd::Stopped);
                         }
                         remaining -= 1;
                         let handler = Arc::clone(&self.handler);
@@ -569,12 +616,14 @@ fn pull_failed(phase: &'static str, error_type: &'static str) {
     metrics::counter!("messaging_consumer_stream_errors_total").increment(1);
 }
 
-/// Returns the deliveries the client buffered but no handler admitted.
-/// An item the client cannot produce is left unacknowledged for ack-wait
-/// redelivery; the drain must not wait for the broker.
-async fn release(mut messages: pull::Batch) {
+// Missing or unsubmitted deliveries remain eligible for broker ack-wait
+// redelivery. Stop must not spend admitted work's drain window on release I/O.
+async fn release(mut messages: pull::Batch, slots: usize, stop: &CancellationToken) {
     let mut prefetched = Vec::new();
-    while let Some(Some(item)) = messages.next().now_or_never() {
+    for _ in 0..slots {
+        let Some(Some(item)) = messages.next().now_or_never() else {
+            break;
+        };
         if let Ok(message) = item {
             prefetched.push(message);
         }
@@ -582,7 +631,19 @@ async fn release(mut messages: pull::Batch) {
     // Ends this replica's pulls before the redelivery requests go out.
     drop(messages);
     for message in &prefetched {
-        redeliver_after(message, RELEASE_DELAY).await;
+        release_message(message, stop).await;
+    }
+}
+
+async fn release_message(message: &async_nats::jetstream::Message, stop: &CancellationToken) {
+    let request = redeliver_after(message, RELEASE_DELAY);
+    tokio::pin!(request);
+    tokio::select! {
+        biased;
+        () = stop.cancelled() => {
+            let _ = request.now_or_never();
+        }
+        () = &mut request => {}
     }
 }
 
@@ -599,7 +660,10 @@ pub(crate) fn describe_metrics() {
 }
 
 impl ConsumerHandle {
-    /// Stops new pulls while admitted work keeps its handler/settlement budget.
+    /// Requests an end to admission, interrupting admission-only waits.
+    /// Admitted work keeps its handler and settlement allowances. Locally held
+    /// unadmitted deliveries get a best-effort delayed NAK without waiting for
+    /// broker capacity after stop; ack-wait retains redelivery ownership.
     pub fn drain(&self) {
         self.stop.cancel();
     }
@@ -622,6 +686,7 @@ impl ConsumerHandle {
     }
 
     /// Cancellation-safe join for a root racing drain against another signal.
+    /// Success confirms all admitted work joined after admission stopped.
     /// The handle remains owned here when this future is dropped or times out,
     /// allowing the root to abort and retry within its shared cleanup deadline.
     ///

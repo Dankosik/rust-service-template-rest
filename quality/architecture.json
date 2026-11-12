@@ -5,6 +5,17 @@
     "crates/domain-events/Cargo.toml": {"role": "contract"},
     "crates/grpc-contracts/Cargo.toml": {"role": "contract"},
     "crates/health/Cargo.toml": {"role": "health"},
+    "crates/json-payload/Cargo.toml": {
+      "role": "contract",
+      "allow_dependents": {
+        "reason": "Typed event and job creation share finite-float JSON serialization without coupling their optional profiles.",
+        "authority": "docs/repo-architecture.md#global-invariants",
+        "members": [
+          "crates/infra-jobs/Cargo.toml",
+          "crates/infra-messaging/Cargo.toml"
+        ]
+      }
+    },
     "crates/operation-context/Cargo.toml": {
       "role": "contract",
       "allow_dependents": {

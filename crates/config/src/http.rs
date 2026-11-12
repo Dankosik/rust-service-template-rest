@@ -34,8 +34,8 @@ pub struct HttpConfig {
     #[serde(deserialize_with = "crate::de::listen_addr")]
     pub addr: SocketAddr,
     /// Total time the platform allows between SIGTERM and SIGKILL. Every
-    /// teardown stage draws from it; `drain_timeout` bounds only the HTTP
-    /// drain envelope.
+    /// teardown stage draws from it; `drain_timeout` bounds the service's HTTP
+    /// drain or the jobs worker's in-flight work drain.
     ///
     /// This crate checks `drain_timeout <= grace_period`. The composition
     /// root still requires leftover budget after the drain for diagnostics,
@@ -43,9 +43,10 @@ pub struct HttpConfig {
     /// rule is not encoded here.
     #[serde(with = "humantime_serde")]
     pub grace_period: Duration,
-    /// Bound for the HTTP drain, including the readiness propagation delay
-    /// in front of it. The process budgets Tokio shutdown separately from
-    /// this drain, within the SIGTERM-to-exit window (`grace_period`).
+    /// Bound for the service's HTTP drain, including readiness propagation,
+    /// and for the jobs worker's in-flight work drain, including configured
+    /// messaging consumption. The process budgets Tokio shutdown separately
+    /// within the SIGTERM-to-exit window (`grace_period`).
     #[serde(with = "humantime_serde")]
     pub drain_timeout: Duration,
     /// How long the listener keeps serving after readiness flips off, so a
