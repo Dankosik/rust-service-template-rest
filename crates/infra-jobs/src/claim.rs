@@ -9,12 +9,11 @@ use sqlx::postgres::PgConnection;
 use tokio::sync::{MutexGuard, Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::time::{Instant, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
-use tokio_util::task::TaskTracker;
 
 use crate::attempt::{self, AttemptId};
 use crate::engine::{
-    CANCEL_MARGIN, LEASE_RESERVE, Operation, OperationError, POLL_INTERVAL, PeerRegistration,
-    Shared, backstop, observe_failure, observe_recovery,
+    CANCEL_MARGIN, LEASE_RESERVE, Operation, OperationError, POLL_INTERVAL, Shared, backstop,
+    observe_failure, observe_recovery,
 };
 use crate::kind::{JobId, Registered};
 use crate::trace_context::Carrier;
@@ -92,16 +91,12 @@ pub(crate) fn describe_metrics() {
     );
 }
 
-/// Claim until `stop` fires. Closes the attempt tracker on every exit.
+/// Claim until `stop` fires.
 pub(crate) async fn run_claim_loop(
     shared: Arc<Shared>,
     stop: CancellationToken,
     failure: CancellationToken,
-    peer: PeerRegistration,
 ) {
-    let _close = CloseTracker(&shared.attempt_tracker);
-    // Deregister before releasing waiters on the attempt tracker.
-    let _peer = peer;
     let mut ticker = tokio::time::interval(POLL_INTERVAL);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut next = Next::Idle;
@@ -161,14 +156,6 @@ async fn cooldown(stop: &CancellationToken, last_claim: Instant) -> bool {
         biased;
         () = stop.cancelled() => false,
         () = tokio::time::sleep_until(last_claim + CLAIM_COOLDOWN) => true,
-    }
-}
-
-struct CloseTracker<'a>(&'a TaskTracker);
-
-impl Drop for CloseTracker<'_> {
-    fn drop(&mut self) {
-        self.0.close();
     }
 }
 

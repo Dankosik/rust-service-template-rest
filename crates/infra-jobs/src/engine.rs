@@ -245,7 +245,13 @@ impl Engine {
                 failure.clone(),
             );
         };
-        spawn(Run::Claim(self.peer), stop.clone());
+        spawn(
+            Run::Claim {
+                _peer: self.peer,
+                _close: CloseTracker(self.shared.attempt_tracker.clone()),
+            },
+            stop.clone(),
+        );
         if self.shared.owns_process_duties {
             spawn(Run::Retention, cancel.child_token());
             spawn(Run::Listener, cancel.child_token());
@@ -342,7 +348,11 @@ enum Role<'a> {
 
 /// The engine's own tasks. Each runs until its token is cancelled.
 enum Run {
-    Claim(PeerRegistration),
+    Claim {
+        // Deregister the peer before releasing drain waiters, even before the first poll.
+        _peer: PeerRegistration,
+        _close: CloseTracker,
+    },
     Retention,
     Listener,
     Sampling,
@@ -353,7 +363,7 @@ impl Run {
     /// with, so a caller cannot pair a run with the wrong label.
     const fn label(&self) -> &'static str {
         match self {
-            Self::Claim(_) => "claim",
+            Self::Claim { .. } => "claim",
             Self::Retention => "retention",
             Self::Listener => "listener",
             Self::Sampling => "sampling",
@@ -376,12 +386,20 @@ fn spawn_guarded(
     tracker.spawn(async move {
         let _guard = guard;
         match run {
-            Run::Claim(peer) => claim::run_claim_loop(shared, token, failure, peer).await,
+            _claim @ Run::Claim { .. } => claim::run_claim_loop(shared, token, failure).await,
             Run::Retention => maintenance::run_retention(shared, token).await,
             Run::Listener => listener::run_listener(shared, token).await,
             Run::Sampling => maintenance::run_sampling(shared, token).await,
         }
     });
+}
+
+struct CloseTracker(TaskTracker);
+
+impl Drop for CloseTracker {
+    fn drop(&mut self) {
+        self.0.close();
+    }
 }
 
 /// Ends its start when the supervised attempt ends abnormally.
@@ -495,8 +513,8 @@ fn lock_peers(peers: &Mutex<Peers>) -> MutexGuard<'_, Peers> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Owned by the unstarted engine, then by its claim loop.
-pub(crate) struct PeerRegistration {
+/// Owned by the unstarted engine, then by its claim task.
+struct PeerRegistration {
     peers: Arc<Mutex<Peers>>,
     wake: Arc<Notify>,
 }
@@ -868,6 +886,36 @@ mod tests {
             .await
             .unwrap();
         pool.close().await;
+    }
+
+    #[test]
+    fn engine_drains_after_runtime_drops_an_unpolled_claim_task() {
+        let started = {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let _entered = runtime.enter();
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgres://localhost/unused")
+                .unwrap();
+            let mut kinds = crate::KindsBuilder::new();
+            kinds.register(crate::Policy::default(), |_: crate::Job<Ordinary>| async {
+                Ok(())
+            });
+            let engine = Engine::new(pool, kinds.validate().unwrap(), NonZeroU32::MIN);
+            engine.start(&TaskTracker::new(), &CancellationToken::new())
+        };
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(1), started.drained())
+                .await
+                .expect("the stopped engine must drain even before its claim task is polled");
+        });
     }
 
     #[tokio::test]
