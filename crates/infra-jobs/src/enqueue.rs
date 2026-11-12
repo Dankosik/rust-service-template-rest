@@ -222,9 +222,8 @@ pub async fn compare_live_payload<K: JobKind>(
     })
 }
 
-/// At most one wake notification per kind and process in this interval, the
-/// claim cooldown: a job whose notification was skipped becomes due while the
-/// worker woken by the previous one keeps claiming.
+/// Reserve at most one wake per kind and process per claim cooldown. The slot
+/// is spent before commit, so a skipped wake may leave the job to polling.
 const WAKE_INTERVAL: Duration = crate::claim::CLAIM_COOLDOWN;
 
 /// Reserve this kind's wake slot and report whether the enqueue should send the
