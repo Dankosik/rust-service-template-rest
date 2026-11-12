@@ -18,9 +18,8 @@ use super::stored::{self, Stored};
 use crate::context::RequestDeadline;
 use crate::problem::{Code, Problem, sanitized_internal_error};
 
-/// Idempotent request outcomes at the HTTP idempotency boundary. The
-/// [idempotency guide](https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/guides/http-idempotency.md#transaction-outcomes-and-replay)
-/// defines each `outcome` label and the ones to alert on.
+/// Idempotent request outcomes at the HTTP idempotency boundary, one
+/// `outcome` label per `Outcome` variant.
 pub const HTTP_IDEMPOTENCY_OUTCOMES_METRIC: &str = "http_idempotency_outcomes_total";
 
 const RETRY_AFTER_HINT: Duration = Duration::from_secs(1);
@@ -147,8 +146,6 @@ impl Idempotency {
     /// Only effects issued through the supplied [`Tx`] share this guarantee.
     /// External effects are not covered, and work may run again on a retry
     /// after rollback. A timeout during COMMIT does not guarantee rollback.
-    /// See the [idempotency guide](https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/guides/http-idempotency.md#transaction-outcomes-and-replay)
-    /// for storage limits, transaction outcomes, and replay policy.
     pub async fn execute<W, R>(self, work: W) -> Response
     where
         W: AsyncFnOnce(&mut Tx<'_>) -> R,

@@ -4,9 +4,8 @@ Use this example when a waiter can stop before its work does. **Ownership**
 distinguishes the caller awaiting a result from the owner of actual execution.
 
 This fragment requires an execution owner that retains and observes completion.
-When working in this service, inspect its
-[lifecycle path](../../../../docs/architecture/runtime-lifecycle.md#business-work-admission-and-lifetime)
-against that requirement rather than assuming its current code meets it.
+When working in this service, inspect its lifecycle path in
+`crates/service/src/bootstrap` against that requirement rather than assuming its current code meets it.
 Elsewhere use the program's existing owner; the fragment does not require that
 service architecture.
 Here `permit` is an `OwnedSemaphorePermit` acquired under the

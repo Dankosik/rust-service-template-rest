@@ -5,8 +5,7 @@
 //! no-op instead of stopping startup. Ambient-credential conflicts, malformed
 //! typed OTLP headers, unparsable log directives, logger installation
 //! (including its writer thread), and recorder installation failures stop
-//! it. Shutdown is bounded by the caller's deadline. The crate decisions are
-//! recorded in `docs/configuration-source-policy.md`.
+//! it. Shutdown is bounded by the caller's deadline.
 
 mod logging;
 mod metrics;

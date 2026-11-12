@@ -19,7 +19,6 @@ SOURCE_ONLY_PREFIXES = (
     "scripts/ci/template-init-check.sh",
     "scripts/ci/initializer-matrix.py",
     "specs/",
-    "docs/roadmap.md",
     "evals/",
 )
 SOURCE_ONLY_REQUIRED_PATHS = (

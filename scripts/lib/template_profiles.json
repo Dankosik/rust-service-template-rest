@@ -17,10 +17,8 @@
     "scripts/ci/consumer-lifecycle-check.sh",
     "test/tests/consumer_lifecycle.rs",
     "test/examples/consumer_lifecycle_actor.rs",
-    "docs/consumer-lifecycle-rehearsal.md",
     "scripts/ci/jobs-reliability-reference.py",
     "specs/",
-    "docs/roadmap.md",
     "docs/assets/banner.png",
     "evals/"
   ],
@@ -28,10 +26,6 @@
     "remove_when_unselected": [],
     "markers": [
       {"path": ".github/workflows/ci.yml", "ids": ["ci-jobs-reliability-job", "ci-required-jobs-reliability-need", "ci-required-jobs-reliability-success"]},
-      {"path": "docs/guides/background-jobs.md", "id": "docs-jobs-consumer-lifecycle"},
-      {"path": "docs/guides/durable-messaging.md", "id": "docs-messaging-consumer-lifecycle"},
-      {"path": "docs/production-contract.md", "id": "docs-production-consumer-lifecycle"},
-      {"path": "docs/validation/postgres.md", "id": "docs-validation-consumer-lifecycle"},
       {"path": "README.md", "ids": ["readme-banner", "readme-template-overview"]}
     ]
   },
@@ -58,18 +52,14 @@
       ".sqlx/",
       ".cargo/config.toml",
       "make/profile-postgres.mk",
-      "docs/guides/postgres-maintenance.md",
       "env/monitoring/postgres-maintenance.rules.yml",
       "scripts/tests/postgres-maintenance-rules.yml"
     ],
     "markers": [
       {"path": "README.md", "id": "readme-postgres-profile"},
-      {"path": "docs/operation-budgets.md", "ids": ["docs-operation-postgres"]},
-      {"path": "docs/architecture/runtime-lifecycle.md", "id": "docs-lifecycle-maintenance-observation"},
       {"path": "env/monitoring/service.rules.yml", "id": "monitoring-postgres-pool"},
       {"path": "scripts/tests/service-rules.yml", "id": "monitoring-postgres-fixture"},
       {"path": "docs/alerting.md", "id": "docs-alerting-postgres-runbooks"},
-      {"path": "docs/first-production-feature.md", "ids": ["docs-first-feature-transactions"]},
       {"path": "Cargo.toml", "ids": ["workspace-postgres-vendor-exclude", "workspace-postgres-patch"]},
       {"path": ".dockerignore", "id": "dockerignore-postgres-vendor"},
       {"path": "build/docker/Dockerfile", "id": "docker-postgres-vendor"},
@@ -196,80 +186,12 @@
         "id": "test-readme-postgres"
       },
       {
-        "path": "docs/build-test-and-development-commands.md",
-        "id": "commands-postgres"
-      },
-      {
-        "path": "docs/build-test-and-development-commands.md",
-        "id": "commands-require-docker"
-      },
-      {
-        "path": "docs/build-test-and-development-commands.md",
-        "id": "commands-postgres-port"
-      },
-      {
         "path": "docs/repo-architecture.md",
         "id": "docs-architecture-schema"
       },
       {
-        "path": "docs/architecture/boundaries.md",
-        "id": "docs-boundaries-postgres-owners"
-      },
-      {
-        "path": "docs/architecture/boundaries.md",
-        "id": "docs-boundaries-postgres-edges"
-      },
-      {
-        "path": "docs/architecture/boundaries.md",
-        "id": "docs-boundaries-migrator-decision"
-      },
-      {
-        "path": "docs/architecture/runtime-lifecycle.md",
-        "id": "docs-lifecycle-postgres-startup"
-      },
-      {
-        "path": "docs/architecture/runtime-lifecycle.md",
-        "id": "docs-lifecycle-postgres-close"
-      },
-      {
-        "path": "docs/architecture/persistence.md",
-        "id": "docs-persistence-runtime"
-      },
-      {
-        "path": "docs/architecture/persistence.md",
-        "id": "docs-persistence-decisions"
-      },
-      {
         "path": "docs/validation/postgres.md",
         "ids": ["docs-postgres-validation", "docs-postgres-validation-http-consumers"]
-      },
-      {
-        "path": "docs/configuration-source-policy.md",
-        "ids": ["docs-config-postgres-source", "docs-config-postgres-rotation"]
-      },
-      {
-        "path": "docs/configuration-source-policy.md",
-        "id": "docs-config-postgres-budget"
-      },
-      {
-        "path": "docs/project-structure-and-module-organization.md",
-        "id": "docs-structure-schema"
-      },
-      {
-        "path": "docs/project-structure-and-module-organization.md",
-        "id": "docs-structure-repository"
-      },
-      {
-        "path": "docs/project-structure-and-module-organization.md",
-        "id": "docs-structure-db-proof"
-      },
-      {
-        "path": "docs/project-structure-and-module-organization.md",
-        "id": "docs-structure-compose"
-      },
-      {
-        "path": "docs/project-structure-and-module-organization.md",
-        "id": "docs-structure-migration-projection"
       },
       {
         "path": "docs/ci-cd-production-ready.md",
@@ -305,12 +227,10 @@
       "crates/config/src/authn.rs",
       "crates/config/src/authn/",
       "crates/infra-http/src/authn.rs",
-      "crates/service/src/bootstrap/authn.rs",
-      "docs/guides/authentication.md"
+      "crates/service/src/bootstrap/authn.rs"
     ],
     "markers": [
       {"path": "README.md", "id": "readme-authn-profile"},
-      {"path": "docs/operation-budgets.md", "ids": ["docs-operation-authn"]},
       {"path": "Cargo.toml", "ids": ["workspace-authn-crate"]},
       {"path": "crates/infra-serviceauth/src/verify.rs", "ids": ["serviceauth-bearer-authn-twin"]},
       {"path": "crates/config/src/lib.rs", "ids": ["config-module", "config-export", "config-field", "config-validate"]},
@@ -334,13 +254,6 @@
       {"path": "crates/service/tests/lifecycle.rs", "ids": ["service-lifecycle-disabled-authn"]},
       {"path": "crates/service/tests/openapi.rs", "ids": ["service-openapi-authn-contract"]},
       {"path": "env/config/local.toml", "ids": ["local-config-section"]},
-      {"path": "docs/architecture/boundaries.md", "ids": ["docs-boundaries-authn-owner", "docs-boundaries-authn-edges", "docs-boundaries-authn-composition"]},
-      {"path": "docs/architecture/http.md", "ids": ["docs-http-protected-composition", "docs-http-bearer-default-exception"]},
-      {"path": "docs/architecture/integration.md", "ids": ["docs-integration-authn-provider"]},
-      {"path": "docs/architecture/runtime-lifecycle.md", "ids": ["docs-lifecycle-authn"]},
-      {"path": "docs/build-test-and-development-commands.md", "ids": ["docs-commands-authn"]},
-      {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-authn-source", "docs-config-authn-budgets", "docs-config-authn-rotation"]},
-      {"path": "docs/project-structure-and-module-organization.md", "ids": ["docs-structure-authn-placement", "docs-structure-authn-test-support"]},
       {"path": "docs/template-sync.md", "ids": ["docs-template-init-authn", "docs-template-init-authn-lock", "docs-template-init-authn-sync"]}
     ]
   },
@@ -361,11 +274,7 @@
       {"path": "crates/infra-bearerauthn/Cargo.toml", "ids": ["authn-jwt-dependency", "authn-jwt-dev-dependency"]},
       {"path": "crates/infra-bearerauthn/src/provider.rs", "ids": ["authn-provider-get-json", "authn-provider-document", "authn-provider-document-test-import", "authn-provider-tls-bounds-test", "authn-provider-issuer-url"]},
       {"path": "crates/infra-bearerauthn/src/lib.rs", "ids": ["authn-jwks-module", "authn-jwt-module", "authn-refresh-module", "authn-jwt-test-metrics-module", "authn-jwt-prepare-export", "authn-jwt-preparation-phases", "authn-jwt-preparation-reasons", "authn-jwt-issuer-mismatch", "authn-jwt-issuer-mismatch-phase", "authn-jwt-issuer-mismatch-reason", "authn-jwt-reasons", "authn-jwt-reason-labels", "authn-jwt-engine", "authn-jwt-verifier", "authn-jwt-verify"]},
-      {"path": "crates/service/src/bootstrap/authn.rs", "ids": ["bootstrap-prepare-auth-jwt", "bootstrap-auth-jwt-algorithm-import", "bootstrap-auth-jwt-algorithm-converter", "bootstrap-auth-jwt-key-test"]},
-      {"path": "docs/guides/authentication.md", "ids": ["authentication-jwt"]},
-      {"path": "docs/architecture/integration.md", "ids": ["docs-integration-jwt"]},
-      {"path": "docs/architecture/runtime-lifecycle.md", "ids": ["docs-lifecycle-jwt-refresh"]},
-      {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-jwt-source", "docs-config-jwt-rotation"]}
+      {"path": "crates/service/src/bootstrap/authn.rs", "ids": ["bootstrap-prepare-auth-jwt", "bootstrap-auth-jwt-algorithm-import", "bootstrap-auth-jwt-algorithm-converter", "bootstrap-auth-jwt-key-test"]}
     ]
   },
   "oidc-introspection": {
@@ -382,10 +291,7 @@
       {"path": "crates/infra-bearerauthn/src/provider.rs", "ids": ["authn-provider-post-form-json", "authn-provider-form-encode", "authn-provider-post-form-tls-test", "authn-provider-fixture-cancel-feature", "authn-provider-fixture-cancel-cfg-close", "authn-provider-fixture-failure-feature", "authn-provider-fixture-failure-cfg-close", "authn-provider-fixture-client-feature", "authn-provider-fixture-client-cfg-close", "authn-provider-fixture-resolver-feature", "authn-provider-fixture-resolver-cfg-close", "authn-provider-fixture-resolve-feature", "authn-provider-fixture-resolve-cfg-close"]},
       {"path": "crates/infra-bearerauthn/src/lib.rs", "ids": ["authn-introspection-module", "authn-introspection-prepare-export", "authn-introspection-test-support", "authn-introspection-reasons", "authn-introspection-reason-labels", "authn-retained-payload", "authn-introspection-engine", "authn-introspection-verifier", "authn-introspection-verify"]},
       {"path": "crates/service/src/bootstrap/authn.rs", "ids": ["bootstrap-prepare-auth-introspection", "bootstrap-introspection-cache-tests"]},
-      {"path": "env/config/local.toml", "ids": ["local-config-introspection-inputs"]},
-      {"path": "docs/guides/authentication.md", "ids": ["authentication-introspection"]},
-      {"path": "docs/architecture/integration.md", "ids": ["docs-integration-introspection"]},
-      {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-introspection-source", "docs-config-introspection-rotation"]}
+      {"path": "env/config/local.toml", "ids": ["local-config-introspection-inputs"]}
     ]
   },
   "identity": [
@@ -601,14 +507,12 @@
       "crates/infra-telemetry/src/traces/tests/delivery/",
       "crates/service/examples/grpc.rs",
       "crates/service/src/bootstrap/grpc.rs",
-      "docs/guides/grpc.md",
       "docs/decisions/grpc-decisions.md",
       "scripts/ci/grpc-check.sh",
       "scripts/grpc-generate.sh",
       "tools/grpc-codegen/"
     ],
     "markers": [
-      {"path": "docs/operation-budgets.md", "ids": ["docs-operation-grpc"]},
       {"path": "env/monitoring/service.rules.yml", "id": "monitoring-grpc-slo"},
       {"path": "scripts/tests/service-rules.yml", "id": "monitoring-grpc-fixture"},
       {"path": "docs/alerting.md", "ids": ["docs-alerting-grpc-objectives", "docs-alerting-grpc-runbooks"]},
@@ -750,13 +654,6 @@
         "id": "readme-grpc-profile"
       },
       {
-        "path": "docs/architecture/boundaries.md",
-        "ids": [
-          "docs-boundaries-grpc-owners",
-          "docs-boundaries-grpc-edges"
-        ]
-      },
-      {
         "path": "docs/repo-architecture.md",
         "id": "docs-architecture-grpc-source"
       },
@@ -765,24 +662,8 @@
         "id": "docs-validation-grpc-generated"
       },
       {
-        "path": "docs/architecture/runtime-lifecycle.md",
-        "ids": ["docs-runtime-grpc", "docs-lifecycle-grpc-registration"]
-      },
-      {
-        "path": "docs/roadmap.md",
-        "id": "roadmap-stage-10-7"
-      },
-      {
-        "path": "docs/build-test-and-development-commands.md",
-        "id": "docs-command-grpc"
-      },
-      {
         "path": "docs/ci-cd-production-ready.md",
         "id": "docs-ci-grpc-gates"
-      },
-      {
-        "path": "docs/configuration-source-policy.md",
-        "ids": ["docs-config-grpc", "docs-config-grpc-rotation"]
       },
       {
         "path": "docs/template-sync.md",
@@ -804,8 +685,6 @@
     ],
     "markers": [
       {"path": "crates/service/Cargo.toml", "ids": ["service-runtime-progress-dependencies", "service-runtime-progress-tokio-features"]},
-      {"path": "docs/architecture/boundaries.md", "id": "docs-boundaries-runtime-proof"},
-      {"path": "docs/backend-utility-recipes.md", "id": "docs-utility-runtime-proof"},
       {"path": "make/template.mk", "ids": ["make-runtime-progress-standard-targets", "make-runtime-progress-target"]},
       {"path": ".github/workflows/ci.yml", "ids": ["ci-runtime-progress-output", "ci-runtime-progress-job", "ci-required-runtime-progress-need", "ci-required-runtime-progress-success"]},
       {"path": "scripts/ci/changed-surfaces.sh", "ids": ["classifier-runtime-progress-surface", "classifier-runtime-progress-inputs", "classifier-runtime-progress-tests", "classifier-runtime-progress-count"]},
@@ -837,7 +716,6 @@
     "markers": [
       {"path": "test/Cargo.toml", "id": "test-postgres-grpc-consumer-dependencies"},
       {"path": "test/tests/postgres/operational_recovery.rs", "ids": ["recovery-instance-grpc", "recovery-start-grpc", "recovery-grpc-value", "recovery-useful-grpc", "recovery-state-grpc", "recovery-refused-grpc", "recovery-stop-grpc", "recovery-grpc-module-1", "recovery-grpc-module-2", "recovery-grpc-module-3", "recovery-grpc-module-4", "recovery-grpc-router-tail", "recovery-grpc-module-5", "recovery-grpc-module-6", "recovery-grpc-module-7"]},
-      {"path": "docs/guides/grpc.md", "id": "docs-grpc-postgres-consumers"},
       {"path": "docs/validation/postgres.md", "id": "docs-postgres-validation-consumers"}
     ]
   },
@@ -864,7 +742,6 @@
       "crates/infra-oauth2-client-credentials/src/tests/grpc.rs"
     ],
     "markers": [
-      {"path": "docs/operation-budgets.md", "ids": ["docs-operation-oauth-grpc"]},
       {
         "path": "crates/infra-oauth2-client-credentials/Cargo.toml",
         "ids": [
@@ -882,20 +759,8 @@
         "id": "oauth-grpc-tests-module"
       },
       {
-        "path": "docs/guides/grpc.md",
-        "id": "docs-grpc-oauth"
-      },
-      {
         "path": "docs/decisions/grpc-decisions.md",
         "id": "docs-grpc-oauth-eviction"
-      },
-      {
-        "path": "docs/architecture/boundaries.md",
-        "id": "docs-boundaries-grpc-oauth-edge"
-      },
-      {
-        "path": "docs/guides/outbound-machine-authentication.md",
-        "id": "docs-oauth-grpc-binding"
       },
       {
         "path": "docs/decisions/outbound-machine-authentication-decisions.md",
@@ -932,12 +797,9 @@
       "crates/config/src/integrations/tests.rs",
       "crates/infra-oauth2-client-credentials/",
       "scripts/ci/test-integration-oauth.sh",
-      "docs/guides/outbound-machine-authentication.md",
-      "docs/decisions/outbound-machine-authentication-decisions.md",
-      "docs/guides/service-to-service-authentication.md"
+      "docs/decisions/outbound-machine-authentication-decisions.md"
     ],
     "markers": [
-      {"path": "docs/operation-budgets.md", "ids": ["docs-operation-oauth"]},
       {
         "path": "crates/config/src/lib.rs",
         "ids": [
@@ -967,18 +829,6 @@
         "id": "readme-outbound-auth-profile"
       },
       {
-        "path": "docs/roadmap.md",
-        "id": "roadmap-stage-10-8-outbound-auth"
-      },
-      {
-        "path": "docs/build-test-and-development-commands.md",
-        "id": "docs-commands-outbound-auth"
-      },
-      {
-        "path": "docs/configuration-source-policy.md",
-        "ids": ["docs-config-outbound-auth", "docs-config-outbound-auth-rotation"]
-      },
-      {
         "path": "docs/template-sync.md",
         "ids": [
           "docs-template-init-outbound-auth",
@@ -987,36 +837,8 @@
         ]
       },
       {
-        "path": "docs/architecture/boundaries.md",
-        "ids": [
-          "docs-boundaries-outbound-auth-owner",
-          "docs-boundaries-outbound-auth-edges",
-          "docs-boundaries-outbound-auth-composition"
-        ]
-      },
-      {
-        "path": "docs/architecture/integration.md",
-        "id": "docs-integration-outbound-auth"
-      },
-      {
-        "path": "docs/architecture/runtime-lifecycle.md",
-        "id": "docs-lifecycle-outbound-auth"
-      },
-      {
-        "path": "docs/project-structure-and-module-organization.md",
-        "id": "docs-structure-outbound-auth-placement"
-      },
-      {
-        "path": "docs/guides/outbound-machine-authentication.md",
-        "id": "docs-outbound-machine-authentication-guide"
-      },
-      {
         "path": "docs/decisions/outbound-machine-authentication-decisions.md",
         "id": "docs-outbound-machine-authentication-decisions"
-      },
-      {
-        "path": "docs/guides/service-to-service-authentication.md",
-        "id": "docs-service-to-service-authentication"
       },
       {
         "path": "docs/ci-cd-production-ready.md",
@@ -1027,57 +849,17 @@
   "outbound-http": {
     "remove_when_unselected": [
       "crates/infra-outbound-http/",
-      "docs/guides/outbound-http.md",
       "docs/decisions/outbound-http-decisions.md",
       "test/tests/outbound_http.rs"
     ],
     "markers": [
       {"path": "README.md", "id": "readme-outbound-http-profile"},
-      {"path": "docs/configuration-source-policy.md", "id": "docs-config-outbound-http-rotation"},
-      {"path": "docs/operation-budgets.md", "ids": ["docs-operation-outbound"]},
       {"path": "Cargo.toml", "ids": ["workspace-outbound-http-crate", "workspace-outbound-http-transport"]},
       {"path": "test/Cargo.toml", "ids": ["test-outbound-http-dependencies"]},
       {"path": "crates/service/Cargo.toml", "ids": ["service-outbound-http-dependency"]},
       {"path": "crates/service/src/bootstrap/telemetry.rs", "ids": ["service-bootstrap-outbound-histogram"]},
       {"path": "crates/jobs-worker/Cargo.toml", "ids": ["worker-outbound-http-dependency"]},
       {"path": "crates/jobs-worker/src/bootstrap/telemetry.rs", "ids": ["worker-bootstrap-outbound-histogram"]},
-      {
-        "path": "docs/architecture/boundaries.md",
-        "ids": [
-          "docs-boundaries-outbound-owner",
-          "docs-boundaries-outbound-edges"
-        ]
-      },
-      {
-        "path": "docs/architecture/integration.md",
-        "ids": [
-          "docs-integration-outbound"
-        ]
-      },
-      {
-        "path": "docs/architecture/runtime-lifecycle.md",
-        "ids": [
-          "docs-lifecycle-outbound"
-        ]
-      },
-      {
-        "path": "docs/project-structure-and-module-organization.md",
-        "ids": [
-          "docs-structure-outbound-placement"
-        ]
-      },
-      {
-        "path": "docs/first-production-feature.md",
-        "ids": [
-          "docs-first-feature-outbound"
-        ]
-      },
-      {
-        "path": "docs/build-test-and-development-commands.md",
-        "ids": [
-          "docs-commands-outbound"
-        ]
-      },
       {
         "path": "docs/template-sync.md",
         "ids": [
@@ -1102,7 +884,6 @@
     "remove_when_unselected": [],
     "markers": [
       {"path": "crates/infra-http/src/context.rs", "ids": ["http-request-deadline", "http-request-deadline-projection"]},
-      {"path": "docs/operation-budgets.md", "ids": ["docs-operation-request-deadline"]},
       {
         "path": "crates/infra-http/src/harden/tests.rs",
         "ids": [
@@ -1113,18 +894,6 @@
         "path": "crates/infra-http/src/lib.rs",
         "ids": [
           "infra-http-request-deadline-export"
-        ]
-      },
-      {
-        "path": "docs/architecture/http.md",
-        "ids": [
-          "docs-http-request-budget"
-        ]
-      },
-      {
-        "path": "docs/project-structure-and-module-organization.md",
-        "ids": [
-          "docs-structure-request-budget"
         ]
       }
     ]
@@ -1139,13 +908,10 @@
       "migrations/20260923000001_create_http_idempotency_records.sql",
       "migrations/20260928190000_compress_http_idempotency_bodies_with_lz4.sql",
       "migrations/20261002150000_tune_http_idempotency_records_autovacuum.sql",
-      "test/tests/http_idempotency/",
-      "docs/guides/http-idempotency.md"
+      "test/tests/http_idempotency/"
     ],
     "markers": [
       {"path": "README.md", "id": "readme-http-idempotency-profile"},
-      {"path": "docs/guides/postgres-maintenance.md", "ids": ["docs-maintenance-http-idempotency", "docs-maintenance-populations-idempotency"]},
-      {"path": "docs/architecture/runtime-lifecycle.md", "id": "docs-lifecycle-maintenance-idempotency"},
       {"path": "env/monitoring/postgres-maintenance.rules.yml", "ids": ["maintenance-rule-4", "maintenance-rule-5", "maintenance-rule-9"]},
       {"path": "Cargo.toml", "ids": ["workspace-http-idempotency-store", "workspace-http-idempotency-digest"]},
       {"path": "crates/infra-http/Cargo.toml", "ids": ["http-idempotency-dependencies"]},
@@ -1163,15 +929,7 @@
       {"path": "test/README.md", "ids": ["test-readme-http-idempotency"]},
       {"path": "env/config/local.toml", "ids": ["local-config-http-idempotency"]},
       {"path": "migrations/README.md", "ids": ["migrations-readme-http-idempotency"]},
-      {"path": "docs/architecture/boundaries.md", "ids": ["docs-boundaries-http-idempotency-owner", "docs-boundaries-http-idempotency-edges", "docs-boundaries-http-idempotency-composition"]},
-      {"path": "docs/architecture/http.md", "ids": ["docs-http-idempotent-composition"]},
-      {"path": "docs/first-production-feature.md", "ids": ["docs-first-feature-http-idempotency", "docs-first-feature-http-idempotency-contract"]},
-      {"path": "docs/project-structure-and-module-organization.md", "ids": ["docs-structure-http-idempotency-placement"]},
-      {"path": "docs/architecture/persistence.md", "ids": ["docs-persistence-http-idempotency"]},
-      {"path": "docs/architecture/runtime-lifecycle.md", "ids": ["docs-lifecycle-http-idempotency"]},
-      {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-http-idempotency"]},
       {"path": "docs/template-sync.md", "ids": ["docs-template-init-http-idempotency", "docs-template-init-http-idempotency-sync"]},
-      {"path": "docs/build-test-and-development-commands.md", "ids": ["docs-commands-http-idempotency"]},
       {"path": "docs/validation/postgres.md", "ids": ["docs-postgres-validation-http-idempotency"]}
     ]
   },
@@ -1204,16 +962,10 @@
       "migrations/20261002150002_index_failed_background_jobs.sql",
       "test/src/jobs.rs",
       "test/src/bin/",
-      "test/tests/jobs/",
-      "docs/guides/background-jobs.md",
-      "docs/architecture/async.md"
+      "test/tests/jobs/"
     ],
     "markers": [
       {"path": "README.md", "id": "readme-jobs-profile"},
-      {"path": "docs/operation-budgets.md", "ids": ["docs-operation-jobs"]},
-      {"path": "docs/production-contract.md", "ids": ["docs-production-jobs-recovery"]},
-      {"path": "docs/guides/postgres-maintenance.md", "ids": ["docs-maintenance-jobs", "docs-maintenance-sampling-jobs", "docs-maintenance-populations-jobs"]},
-      {"path": "docs/architecture/runtime-lifecycle.md", "id": "docs-lifecycle-maintenance-jobs"},
       {"path": "env/monitoring/postgres-maintenance.rules.yml", "ids": ["maintenance-rule-0", "maintenance-rule-1", "maintenance-rule-2", "maintenance-rule-3", "maintenance-rule-8", "maintenance-rule-21"]},
       {"path": "scripts/tests/postgres-maintenance-rules.yml", "id": "maintenance-fixture-failed-population"},
       {"path": "env/monitoring/service.rules.yml", "id": "monitoring-jobs"},
@@ -1243,19 +995,9 @@
       {"path": "test/README.md", "ids": ["test-readme-jobs"]},
       {"path": "env/config/local.toml", "ids": ["local-config-jobs"]},
       {"path": "migrations/README.md", "ids": ["migrations-readme-jobs"]},
-      {"path": "docs/architecture/boundaries.md", "ids": ["docs-boundaries-jobs-owners", "docs-boundaries-jobs-tests", "docs-boundaries-jobs-edges", "docs-boundaries-jobs-composition", "docs-boundaries-jobs-decision"]},
-      {"path": "docs/architecture/http.md", "ids": ["docs-http-jobs-worker-listener"]},
-      {"path": "docs/architecture/persistence.md", "ids": ["docs-persistence-jobs"]},
-      {"path": "docs/architecture/runtime-lifecycle.md", "ids": ["docs-lifecycle-jobs-worker"]},
-      {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-jobs", "docs-config-jobs-rotation"]},
-      {"path": "docs/first-production-feature.md", "ids": ["docs-first-feature-jobs"]},
-      {"path": "docs/project-structure-and-module-organization.md", "ids": ["docs-structure-jobs-placement"]},
-      {"path": "docs/repo-architecture.md", "ids": ["docs-architecture-jobs-leaf"]},
       {"path": "docs/template-sync.md", "ids": ["docs-template-init-jobs", "docs-template-init-jobs-sync"]},
-      {"path": "docs/build-test-and-development-commands.md", "ids": ["docs-commands-jobs"]},
       {"path": "docs/validation/postgres.md", "ids": ["docs-postgres-validation-jobs"]},
-      {"path": "docs/backend-library-selection.md", "ids": ["docs-library-selection-jobs"]},
-      {"path": "docs/guides/http-idempotency.md", "ids": ["docs-http-idempotency-jobs-enqueue"]}
+      {"path": "docs/backend-library-selection.md", "ids": ["docs-library-selection-jobs"]}
     ]
   },
   "test-digest": {
@@ -1282,11 +1024,7 @@
       {"path": "test/Cargo.toml", "ids": ["test-reading-counter-dependencies", "test-reading-counter-fixture"]},
       {"path": "test/src/lib.rs", "ids": ["test-lib-reading-counter"]},
       {"path": "test/tests/jobs/main.rs", "ids": ["jobs-reading-counter-module"]},
-      {"path": "test/README.md", "ids": ["test-readme-reading-reference"]},
-      {"path": "docs/guides/outbound-webhooks.md", "ids": ["docs-webhooks-reading-reference"]},
-      {"path": "docs/guides/background-jobs.md", "ids": ["docs-jobs-reading-reference"]},
-      {"path": "docs/architecture/async.md", "ids": ["docs-async-reading-reference"]},
-      {"path": "docs/guides/postgres-transactional-outbox.md", "ids": ["docs-outbox-reading-reference"]}
+      {"path": "test/README.md", "ids": ["test-readme-reading-reference"]}
     ]
   },
   "jobs-http-idempotency": {
@@ -1294,8 +1032,7 @@
       "test/tests/jobs/http_idempotency.rs"
     ],
     "markers": [
-      {"path": "test/tests/jobs/main.rs", "ids": ["jobs-http-idempotency-module"]},
-      {"path": "docs/guides/background-jobs.md", "ids": ["docs-background-jobs-idempotency"]}
+      {"path": "test/tests/jobs/main.rs", "ids": ["jobs-http-idempotency-module"]}
     ]
   },
   "messaging": {
@@ -1315,15 +1052,12 @@
       "scripts/ci/messaging-recovery.py",
       "scripts/tests/messaging-recovery-test.py",
       "test/fixtures/messaging-recovery-compose.yml",
-      "scripts/messaging-go-compat.sh",
-      "docs/guides/durable-messaging.md"
+      "scripts/messaging-go-compat.sh"
     ],
     "markers": [
-      {"path": "docs/operation-budgets.md", "ids": ["docs-operation-messaging"]},
       {"path": "env/monitoring/service.rules.yml", "id": "monitoring-messaging"},
       {"path": "scripts/tests/service-rules.yml", "id": "monitoring-messaging-fixture"},
       {"path": "docs/alerting.md", "id": "docs-alerting-messaging-runbooks"},
-      {"path": "docs/production-contract.md", "ids": ["docs-production-messaging-recovery"]},
       {"path": "Cargo.toml", "ids": ["workspace-messaging-crates", "workspace-messaging-client", "workspace-messaging-vendor-exclude", "workspace-messaging-patch"]},
       {"path": ".dockerignore", "id": "dockerignore-messaging-vendor"},
       {"path": ".gitleaks.toml", "id": "gitleaks-messaging-fixtures"},
@@ -1342,18 +1076,9 @@
       {"path": "env/docker-compose.yml", "ids": ["compose-nats-service"]},
       {"path": "README.md", "ids": ["docs-readme-messaging-profile"]},
       {"path": "CONTRIBUTING.md", "ids": ["contributing-messaging-prerequisites", "contributing-messaging-proof"]},
-      {"path": "docs/guides/durable-messaging.md", "ids": ["docs-durable-messaging", "docs-durable-messaging-operations"]},
       {"path": "docs/template-sync.md", "ids": ["docs-template-init-messaging", "docs-template-init-messaging-lock"]},
-      {"path": "docs/repo-architecture.md", "ids": ["docs-architecture-messaging-leaf"]},
-      {"path": "docs/architecture/boundaries.md", "ids": ["docs-boundaries-messaging-owner", "docs-boundaries-messaging-tests", "docs-boundaries-messaging-edges"]},
-      {"path": "docs/architecture/async.md", "ids": ["docs-async-messaging"]},
-      {"path": "docs/architecture/integration.md", "ids": ["docs-integration-messaging"]},
-      {"path": "docs/architecture/runtime-lifecycle.md", "ids": ["docs-lifecycle-messaging"]},
       {"path": "docs/backend-library-selection.md", "ids": ["docs-library-selection-messaging", "docs-library-selection-messaging-rejection"]},
-      {"path": "docs/build-test-and-development-commands.md", "ids": ["docs-commands-messaging"]},
-      {"path": "docs/ci-cd-production-ready.md", "ids": ["docs-ci-messaging-gates"]},
-      {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-messaging-source", "docs-config-messaging-rotation"]},
-      {"path": "docs/project-structure-and-module-organization.md", "ids": ["docs-structure-messaging-placement"]}
+      {"path": "docs/ci-cd-production-ready.md", "ids": ["docs-ci-messaging-gates"]}
     ]
   },
   "worker": {
@@ -1364,9 +1089,7 @@
       {"path": "docs/ci-cd-production-ready.md", "ids": ["docs-ci-jobs-worker-image"]},
       {"path": "docs/validation/containers.md", "ids": ["docs-containers-jobs-worker-check"]},
       {"path": "Cargo.toml", "ids": ["workspace-worker-crate"]},
-      {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-runtime-worker"]},
-      {"path": "build/docker/Dockerfile", "ids": ["docker-jobs-worker-build", "docker-jobs-worker-output", "docker-jobs-worker-runtime"]},
-      {"path": "docs/architecture/async.md", "ids": ["docs-async-worker-lifetime"]}
+      {"path": "build/docker/Dockerfile", "ids": ["docker-jobs-worker-build", "docker-jobs-worker-output", "docker-jobs-worker-runtime"]}
     ]
   },
   "service-secrets": {
@@ -1399,8 +1122,7 @@
       "test/tests/messaging_recovery.rs",
       "test/examples/messaging_recovery.rs",
       "test/examples/messaging_recovery/",
-      "test/fixtures/messaging_recovery.sql",
-      "docs/guides/postgres-transactional-outbox.md"
+      "test/fixtures/messaging_recovery.sql"
     ],
     "markers": [
       {"path": "scripts/ci/messaging-recovery.py", "ids": ["recovery-rehearsal-command", "recovery-rehearsal-dispatch"]},
@@ -1422,13 +1144,6 @@
       {"path": "test/src/jobs.rs", "ids": ["test-jobs-deferred-messages-fixture"]},
       {"path": "test/Cargo.toml", "ids": ["test-messaging-outbox-dependencies", "test-messaging-recovery-example"]},
       {"path": "README.md", "ids": ["docs-readme-outbox-profile"]},
-      {"path": "docs/guides/postgres-transactional-outbox.md", "ids": ["docs-postgres-transactional-outbox"]},
-      {"path": "docs/guides/durable-messaging.md", "ids": ["docs-durable-messaging-outbox",
-          "docs-native-messaging-rehearsals"]},
-      {"path": "docs/architecture/async.md", "ids": ["docs-async-outbox"]},
-      {"path": "docs/architecture/boundaries.md", "ids": ["docs-boundaries-outbox-owner", "docs-boundaries-outbox-edges"]},
-      {"path": "docs/architecture/runtime-lifecycle.md", "ids": ["docs-lifecycle-outbox"]},
-      {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-outbox-source"]},
       {"path": "docs/ci-cd-production-ready.md", "ids": ["docs-ci-outbox-gates"]}
     ]
   },
@@ -1457,48 +1172,6 @@
         ]
       },
       {
-        "path": "docs/architecture/async.md",
-        "ids": [
-          "docs-async-webhooks"
-        ]
-      },
-      {
-        "path": "docs/architecture/boundaries.md",
-        "ids": [
-          "docs-boundaries-webhooks-provider"
-        ]
-      },
-      {
-        "path": "docs/architecture/integration.md",
-        "ids": [
-          "docs-integration-webhooks-protocol"
-        ]
-      },
-      {
-        "path": "docs/guides/background-jobs.md",
-        "ids": [
-          "docs-background-jobs-webhooks"
-        ]
-      },
-      {
-        "path": "docs/configuration-source-policy.md",
-        "ids": [
-          "docs-config-webhooks-snapshot"
-        ]
-      },
-      {
-        "path": "docs/project-structure-and-module-organization.md",
-        "ids": [
-          "docs-structure-webhooks-common"
-        ]
-      },
-      {
-        "path": "docs/roadmap.md",
-        "ids": [
-          "roadmap-stage-10-5-webhooks"
-        ]
-      },
-      {
         "path": "docs/template-sync.md",
         "ids": [
           "docs-template-sync-webhooks"
@@ -1511,8 +1184,7 @@
       "crates/config/src/webhooks.rs",
       "crates/config/src/webhooks/",
       "crates/infra-webhooks/src/outbound.rs",
-      "test/tests/webhooks/outbound.rs",
-      "docs/guides/outbound-webhooks.md"
+      "test/tests/webhooks/outbound.rs"
     ],
     "markers": [
       {
@@ -1557,54 +1229,6 @@
         ]
       },
       {
-        "path": "docs/architecture/async.md",
-        "ids": [
-          "docs-async-webhooks-outbound"
-        ]
-      },
-      {
-        "path": "docs/architecture/boundaries.md",
-        "ids": [
-          "docs-boundaries-webhooks-outbound"
-        ]
-      },
-      {
-        "path": "docs/architecture/integration.md",
-        "ids": [
-          "docs-integration-webhooks-outbound"
-        ]
-      },
-      {
-        "path": "docs/guides/background-jobs.md",
-        "ids": [
-          "docs-background-jobs-webhooks-outbound"
-        ]
-      },
-      {
-        "path": "docs/configuration-source-policy.md",
-        "ids": [
-          "docs-config-webhooks-outbound"
-        ]
-      },
-      {
-        "path": "docs/project-structure-and-module-organization.md",
-        "ids": [
-          "docs-structure-webhooks-outbound"
-        ]
-      },
-      {
-        "path": "docs/roadmap.md",
-        "ids": [
-          "roadmap-stage-10-5-outbound-guide"
-        ]
-      },
-      {
-        "path": "docs/guides/outbound-webhooks.md",
-        "ids": [
-          "docs-outbound-webhooks-guide"
-        ]
-      },
-      {
         "path": "test/tests/webhooks/main.rs",
         "ids": [
           "test-webhooks-outbound-module"
@@ -1622,12 +1246,9 @@
       "crates/infra-webhooks/src/inbound/",
       "migrations/20260926022945_create_webhook_receipts.sql",
       "migrations/20260926130000_native_webhook_receipts.sql",
-      "test/tests/webhooks/inbound.rs",
-      "docs/guides/inbound-webhooks.md"
+      "test/tests/webhooks/inbound.rs"
     ],
     "markers": [
-      {"path": "docs/guides/postgres-maintenance.md", "ids": ["docs-maintenance-inbound-webhooks", "docs-maintenance-populations-receipts"]},
-      {"path": "docs/architecture/runtime-lifecycle.md", "id": "docs-lifecycle-maintenance-receipts"},
       {"path": "env/monitoring/postgres-maintenance.rules.yml", "ids": ["maintenance-rule-6", "maintenance-rule-7", "maintenance-rule-10"]},
       {
         "path": "crates/config/src/lib.rs",
@@ -1733,60 +1354,6 @@
         ]
       },
       {
-        "path": "docs/architecture/async.md",
-        "ids": [
-          "docs-async-webhooks-inbound"
-        ]
-      },
-      {
-        "path": "docs/architecture/boundaries.md",
-        "ids": [
-          "docs-boundaries-webhooks-inbound"
-        ]
-      },
-      {
-        "path": "docs/architecture/http.md",
-        "ids": [
-          "docs-http-inbound-webhooks"
-        ]
-      },
-      {
-        "path": "docs/architecture/integration.md",
-        "ids": [
-          "docs-integration-webhooks-inbound"
-        ]
-      },
-      {
-        "path": "docs/guides/background-jobs.md",
-        "ids": [
-          "docs-background-jobs-webhooks-inbound"
-        ]
-      },
-      {
-        "path": "docs/configuration-source-policy.md",
-        "ids": [
-          "docs-config-webhooks-inbound"
-        ]
-      },
-      {
-        "path": "docs/project-structure-and-module-organization.md",
-        "ids": [
-          "docs-structure-webhooks-inbound"
-        ]
-      },
-      {
-        "path": "docs/roadmap.md",
-        "ids": [
-          "roadmap-stage-10-5-inbound-guide"
-        ]
-      },
-      {
-        "path": "docs/guides/inbound-webhooks.md",
-        "ids": [
-          "docs-inbound-webhooks-guide"
-        ]
-      },
-      {
         "path": "test/tests/webhooks/main.rs",
         "ids": [
           "test-webhooks-inbound-modules",
@@ -1811,12 +1378,9 @@
       "crates/config/src/cache/",
       "crates/service/src/bootstrap/cache.rs",
       "scripts/ci/test-integration-cache.sh",
-      "docs/guides/cache.md",
       "docs/decisions/cache-decisions.md"
     ],
     "markers": [
-      {"path": "docs/operation-budgets.md", "ids": ["docs-operation-cache"]},
-      {"path": "docs/production-contract.md", "ids": ["docs-production-cache-recovery"]},
       {"path": "Cargo.toml", "ids": ["workspace-cache-crates", "workspace-cache-client"]},
       {"path": "crates/config/src/lib.rs", "ids": ["config-module", "config-export", "config-field", "config-validate"]},
       {"path": "crates/service/Cargo.toml", "ids": ["service-cache-dependency"]},
@@ -1829,19 +1393,10 @@
       {"path": "deny.toml", "ids": ["deny-cache-license"]},
       {"path": "README.md", "ids": ["docs-readme-cache-profile"]},
       {"path": "CONTRIBUTING.md", "ids": ["contributing-cache-prerequisites", "contributing-cache-proof"]},
-      {"path": "docs/guides/cache.md", "ids": ["docs-cache"]},
       {"path": "docs/decisions/cache-decisions.md", "ids": ["docs-cache-decisions"]},
       {"path": "docs/template-sync.md", "ids": ["docs-template-init-cache", "docs-template-init-cache-lock"]},
-      {"path": "docs/repo-architecture.md", "ids": ["docs-architecture-cache-leaf"]},
-      {"path": "docs/architecture/boundaries.md", "ids": ["docs-boundaries-cache-owner", "docs-boundaries-cache-tests", "docs-boundaries-cache-edges"]},
-      {"path": "docs/architecture/integration.md", "ids": ["docs-integration-cache"]},
-      {"path": "docs/architecture/runtime-lifecycle.md", "ids": ["docs-lifecycle-cache"]},
       {"path": "docs/backend-library-selection.md", "ids": ["docs-library-selection-cache", "docs-library-selection-cache-rejection"]},
-      {"path": "docs/build-test-and-development-commands.md", "ids": ["docs-commands-cache"]},
-      {"path": "docs/ci-cd-production-ready.md", "ids": ["docs-ci-cache-gates"]},
-      {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-cache-source", "docs-config-cache-budget", "docs-config-cache-rotation"]},
-      {"path": "docs/project-structure-and-module-organization.md", "ids": ["docs-structure-cache-placement"]},
-      {"path": "docs/roadmap.md", "ids": ["roadmap-stage-10-11-cache", "roadmap-stage-10-11-cache-note"]}
+      {"path": "docs/ci-cd-production-ready.md", "ids": ["docs-ci-cache-gates"]}
     ]
   },
   "jsonwebtoken": {
@@ -1858,17 +1413,13 @@
       "crates/config/src/object_storage/",
       "crates/service/src/bootstrap/object_storage.rs",
       "scripts/ci/test-integration-object-storage.sh",
-      "docs/guides/object-storage.md",
       "docs/decisions/object-storage-decisions.md"
     ],
     "markers": [
       {"path": ".gitleaks.toml", "id": "gitleaks-object-storage-fixtures"},
-      {"path": "docs/operation-budgets.md", "ids": ["docs-operation-storage"]},
       {"path": "Cargo.toml", "ids": ["workspace-object-storage-crate", "workspace-object-storage-client", "workspace-object-storage-vendor-exclude", "workspace-object-storage-patch"]},
       {"path": ".dockerignore", "id": "dockerignore-object-storage-vendor"},
       {"path": "build/docker/Dockerfile", "id": "docker-object-storage-vendor"},
-      {"path": "docs/production-contract.md", "ids": ["docs-production-object-storage-recovery"]},
-      {"path": "docs/first-production-feature.md", "ids": ["docs-first-feature-object-storage"]},
       {"path": "crates/config/src/lib.rs", "ids": ["config-module", "config-export", "config-field", "config-validate"]},
       {"path": "crates/service/Cargo.toml", "ids": ["service-object-storage-dependency"]},
       {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["service-bootstrap-object-storage-errors", "service-bootstrap-object-storage-startup", "service-bootstrap-object-storage-module"]},
@@ -1881,19 +1432,10 @@
       {"path": "env/docker-compose.yml", "ids": ["compose-versitygw-service"]},
       {"path": "README.md", "ids": ["docs-readme-object-storage-profile"]},
       {"path": "CONTRIBUTING.md", "ids": ["contributing-object-storage-prerequisites", "contributing-object-storage-proof"]},
-      {"path": "docs/guides/object-storage.md", "ids": ["docs-object-storage"]},
       {"path": "docs/decisions/object-storage-decisions.md", "ids": ["docs-object-storage-decisions"]},
       {"path": "docs/template-sync.md", "ids": ["docs-template-init-object-storage", "docs-template-init-object-storage-lock"]},
-      {"path": "docs/repo-architecture.md", "ids": ["docs-architecture-object-storage-leaf"]},
-      {"path": "docs/architecture/boundaries.md", "ids": ["docs-boundaries-object-storage-owner", "docs-boundaries-object-storage-tests", "docs-boundaries-object-storage-edges"]},
-      {"path": "docs/architecture/integration.md", "ids": ["docs-integration-object-storage"]},
-      {"path": "docs/architecture/runtime-lifecycle.md", "ids": ["docs-lifecycle-object-storage"]},
       {"path": "docs/backend-library-selection.md", "ids": ["docs-library-selection-object-storage", "docs-library-selection-object-storage-rejection"]},
-      {"path": "docs/build-test-and-development-commands.md", "ids": ["docs-commands-object-storage"]},
-      {"path": "docs/ci-cd-production-ready.md", "ids": ["docs-ci-object-storage-gates"]},
-      {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-object-storage-source", "docs-config-object-storage-budget", "docs-config-object-storage-rotation"]},
-      {"path": "docs/project-structure-and-module-organization.md", "ids": ["docs-structure-object-storage-placement"]},
-      {"path": "docs/roadmap.md", "ids": ["roadmap-stage-10-9-object-storage", "roadmap-stage-10-9-object-storage-note"]}
+      {"path": "docs/ci-cd-production-ready.md", "ids": ["docs-ci-object-storage-gates"]}
     ]
   },
   "service-auth": {
@@ -1904,7 +1446,6 @@
       "crates/infra-grpc/src/service_auth.rs",
       "crates/infra-grpc/tests/service_auth.rs",
       "crates/service/src/bootstrap/service_auth.rs",
-      "docs/guides/service-authentication.md",
       "docs/decisions/service-authentication-decisions.md"
     ],
     "markers": [
@@ -1928,16 +1469,7 @@
       {"path": "docs/railway-deployment-profile.md", "ids": ["docs-railway-service-auth"]},
       {"path": "env/config/local.toml", "ids": ["local-config"]},
       {"path": "README.md", "ids": ["docs-readme-service-auth-profile"]},
-      {"path": "docs/guides/service-authentication.md", "ids": ["docs-service-authentication"]},
-      {"path": "docs/guides/grpc.md", "ids": ["docs-grpc-service-auth", "docs-grpc-service-auth-middleware"]},
-      {"path": "docs/configuration-source-policy.md", "ids": ["docs-config-service-auth-source", "docs-config-service-auth-rotation", "docs-config-service-auth-budget"]},
       {"path": "docs/template-sync.md", "ids": ["docs-template-init-service-auth", "docs-template-init-service-auth-lock"]},
-      {"path": "docs/architecture/boundaries.md", "ids": ["docs-boundaries-service-auth-owner", "docs-boundaries-service-auth-edges"]},
-      {"path": "docs/project-structure-and-module-organization.md", "ids": ["docs-structure-service-auth-placement", "docs-structure-service-auth-test-support"]},
-      {"path": "docs/roadmap.md", "ids": ["roadmap-stage-10-12-service-auth"]},
-      {"path": "docs/architecture/runtime-lifecycle.md", "ids": ["docs-lifecycle-service-auth"]},
-      {"path": "docs/repo-architecture.md", "ids": ["docs-architecture-service-auth-leaf"]},
-      {"path": "docs/build-test-and-development-commands.md", "ids": ["docs-commands-service-auth"]},
       {"path": "docs/backend-library-selection.md", "ids": ["docs-library-selection-service-auth"]},
       {"path": "docs/decisions/service-authentication-decisions.md", "ids": ["docs-service-authentication-decisions"]}
     ]

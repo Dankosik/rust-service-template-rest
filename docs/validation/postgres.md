@@ -1,6 +1,5 @@
 # PostgreSQL Validation
 
-Read [local persistence availability](../architecture/persistence.md) first.
 When `template.lock` selects `database: none`, database validation commands are
 absent; this record does not authorize reconstructing the removed profile.
 A retained profile uses the real-server proof below when its claim requires it.
@@ -88,7 +87,7 @@ bash scripts/ci/test-integration-db.sh --test postgres -- --nocapture
 ```
 
 For a later workload-sizing observation, first apply the deployment-wide
-[connection allocation](../architecture/persistence.md#connection-allocation).
+connection allocation.
 Record the candidate/version, workload and duration, peak service/worker/pooler
 replicas including rollout overlap, pool maxima and worker mode/concurrency,
 LISTEN and direct-session owners, and actual database/pooler limits. Distinguish
@@ -249,8 +248,3 @@ In the source template's initializer matrix, runtime graphs 17-26 run this
 suite once each (23-26 with the joint module) and need a usable Docker
 daemon.
 <!-- template:end jobs:docs-postgres-validation-jobs -->
-
-<!-- template:begin source-template:docs-validation-consumer-lifecycle -->
-The source template provides a finite synthetic [native recovery rehearsal](../consumer-lifecycle-rehearsal.md)
-with historical actors, native archives and per-identity reconciliation.
-<!-- template:end source-template:docs-validation-consumer-lifecycle -->

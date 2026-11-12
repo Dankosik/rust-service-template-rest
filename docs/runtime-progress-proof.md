@@ -23,7 +23,7 @@ completion, not receiver durability or proof of a final scrape.
 
 ## Finite computation and completion custody
 
-The [executable CPU recipe](backend-utility-recipes.md#bounded-cpu-work-with-completion-ownership)
+The [executable CPU recipe](../crates/service/examples/runtime_progress.rs)
 accepts at most 64 KiB, 4096 fixed-width items and 4096 rounds: at most
 16,777,216 item operations. It retains at most 64 KiB of result. There is one
 admitted CPU operation and no waiting admission queue. Input bounds and

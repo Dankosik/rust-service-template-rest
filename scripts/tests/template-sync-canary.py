@@ -368,7 +368,6 @@ def check(source: Path) -> None:
             "crates/infra-jobs",
             "migrations/20260924000001_create_background_jobs.sql",
             "crates/config/src/jobs.rs",
-            "docs/guides/background-jobs.md",
         ):
             if (jobs_none / restored).exists() or (jobs_none / restored).is_symlink():
                 raise AssertionError(f"postgres jobs-none sync restored {restored}")

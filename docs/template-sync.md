@@ -51,8 +51,7 @@ The four identity values are required. `DATABASE` defaults to `none` and accepts
 `codex`, `claude`, `qwen`, `cursor`, `grok`, `opencode`, or `all`. Every combination is
 supported. `core` keeps canonical instructions without a product adapter;
 `all` keeps the six existing adapters. PostgreSQL remains disabled at runtime
-until configured when its pack is retained. The local
-[persistence authority](architecture/persistence.md) describes availability.
+until configured when its pack is retained.
 
 <!-- template:begin authn:docs-template-init-authn -->
 `AUTHN` defaults to `none` and accepts `none`, `oidc-jwt`, or `oidc-introspection`; exactly one whole-file engine may be retained. The direct entry takes the same choice as `--authn`. `none` removes all authentication configuration, code, tests, dependencies, and adopter guidance. An initialized authentication profile still defaults to runtime `authn.mode = "none"`; a protected route contract requires a complete valid trust tuple before startup.
@@ -60,7 +59,7 @@ The introspection profile retains its complete optional positive-cache configura
 <!-- template:end authn:docs-template-init-authn -->
 <!-- template:begin outbound-http:docs-template-init-outbound -->
 `OUTBOUND_HTTP` defaults to `none` and accepts `none` or `bounded`; the direct
-entry takes `--outbound-http`. `bounded` retains the [client guide](guides/outbound-http.md),
+entry takes `--outbound-http`. `bounded` retains the
 [decision record](decisions/outbound-http-decisions.md), crate, tests, and shared TLS
 fixtures independently of authentication. `none` removes that pack. The readonly
 request budget stays when auth or outbound needs it. The retained client uses a
@@ -70,9 +69,7 @@ supplies no provider configuration or automatic request.
 <!-- template:begin outbound-auth:docs-template-init-outbound-auth -->
 `OUTBOUND_AUTH` defaults to `none` and accepts `none` or
 `oauth2-client-credentials`; the direct entry takes `--outbound-auth`.
-Selecting OAuth2 retains its [guide](guides/outbound-machine-authentication.md), the
-[service-to-service authentication mandate](guides/service-to-service-authentication.md),
-its [decision record](decisions/outbound-machine-authentication-decisions.md), provider
+Selecting OAuth2 retains its [decision record](decisions/outbound-machine-authentication-decisions.md), provider
 crate, configuration, tests, and bounded outbound HTTP prerequisite. It
 persists the effective `OUTBOUND_HTTP=bounded` choice even when its input was
 `none`. `none` removes the complete profile. Selection creates no provider,
@@ -81,8 +78,7 @@ token call, task, listener, or readiness dependency.
 <!-- template:begin grpc:docs-template-init-grpc -->
 `GRPC` defaults to `none` and accepts `none` or `enabled`; the direct entry takes
 `--grpc`. It retains the native transport, committed schemas and generated
-contracts, the generation tool, configuration, the example and the
-[guide](guides/grpc.md). Selection starts no listener or client. Old locks lacking
+contracts, the generation tool, configuration and the example. Selection starts no listener or client. Old locks lacking
 `grpc` normalize to `none`; exact replay records and preserves the selection.
 `none` removes exclusive surfaces while shared HTTP failure and retained
 prost/TLS ownership survive. The concrete OAuth bridge remains only when both
@@ -91,7 +87,7 @@ profiles are selected.
 <!-- template:begin http-idempotency:docs-template-init-http-idempotency -->
 `HTTP_IDEMPOTENCY` defaults to `none` and accepts `none` or `postgres`; the
 direct entry takes `--http-idempotency`. `postgres` retains the
-[idempotency guide](guides/http-idempotency.md), the record-store crate, the
+record-store crate, the
 profile migration, and tests, and requires `DATABASE=postgres` and an
 authentication engine (`AUTHN=oidc-jwt` or `oidc-introspection`); an
 unsupported combination or an unknown value is refused before any target
@@ -101,10 +97,10 @@ until an operation opts in and the runtime retention is configured.
 <!-- template:end http-idempotency:docs-template-init-http-idempotency -->
 <!-- template:begin jobs:docs-template-init-jobs -->
 `JOBS` defaults to `none` and accepts `none` or `postgres`; the direct entry
-takes `--jobs`. `postgres` retains the [jobs guide](guides/background-jobs.md), the
+takes `--jobs`. `postgres` retains the
 `infra-jobs` and `jobs-worker` crates, the `jobs` configuration section, the
 migration, the jobs tests and the test-only fixture binary, the `/jobs-worker`
-image entrypoint, and the architecture leaf. It requires `DATABASE=postgres`
+image entrypoint. It requires `DATABASE=postgres`
 and combines with every `AUTHN`, `OUTBOUND_HTTP`, and `HTTP_IDEMPOTENCY`
 choice; `JOBS=postgres` without that database is refused before any target
 write with `JOBS=postgres requires DATABASE=postgres`, and an unknown value
@@ -118,8 +114,7 @@ starts no worker; `/jobs-worker` runs only where it is deployed.
 `MESSAGING` defaults to `none` and accepts `none` or `nats-jetstream`; the
 direct entry takes `--messaging`. `nats-jetstream` retains the typed event and
 adapter crates, the existing worker where needed, configuration, NATS proof,
-digest-pinned Compose input, CI ownership, and the [durable messaging
-guide](guides/durable-messaging.md). It is independently valid with `DATABASE=none`
+digest-pinned Compose input, and CI ownership. It is independently valid with `DATABASE=none`
 and `JOBS=none`. Selection starts no client or worker; a configured deployment
 supplies the operator-created topology. `none` removes the complete messaging
 closure. The separate `OUTBOX` selection defaults to `none` and accepts `none`
@@ -130,16 +125,14 @@ selection refuses before any target write.
 <!-- template:begin cache:docs-template-init-cache -->
 `CACHE` defaults to `none` and accepts `none` or `redis`; the direct entry
 takes `--cache`. `redis` retains the `infra-cache` crate, the `[cache]`
-section, the digest-pinned Compose Valkey service, the integration proof, and
-the [cache guide](guides/cache.md). It does not require PostgreSQL or jobs. Selection
+section, the digest-pinned Compose Valkey service, and the integration proof. It does not require PostgreSQL or jobs. Selection
 starts no client; a configured DSN does. `none` removes that closure.
 <!-- template:end cache:docs-template-init-cache -->
 <!-- template:begin object-storage:docs-template-init-object-storage -->
 `OBJECT_STORAGE` defaults to `none` and accepts `none` or `s3`; the direct
 entry takes `--object-storage`. `s3` retains the `infra-object-storage` crate,
 the `[object_storage]` section, the digest-pinned Compose versitygw service,
-the emulator and live-provider proofs, and the [object storage
-guide](guides/object-storage.md). It does not require PostgreSQL or jobs. Selection
+and the emulator and live-provider proofs. It does not require PostgreSQL or jobs. Selection
 creates no client; a configured provider does, without a request. `none`
 removes that closure.
 <!-- template:end object-storage:docs-template-init-object-storage -->
@@ -147,8 +140,7 @@ removes that closure.
 `SERVICE_AUTH` defaults to `none` and accepts `none` or `jwt`; the direct entry
 takes `--service-auth`. `jwt` requires `GRPC=enabled` and retains the
 `infra-serviceauth` crate, the `[service_auth]` section, gRPC caller admission
-and the outbound token binding, their tests, and the [service authentication
-guide](guides/service-authentication.md). Selection verifies and signs nothing until
+and the outbound token binding, and their tests. Selection verifies and signs nothing until
 `service_auth.mode = "jwt"`. `none` removes that closure.
 <!-- template:end service-auth:docs-template-init-service-auth -->
 
@@ -414,7 +406,7 @@ outbound HTTP or DNS solely for webhooks. The worker's consumer registration
 remains only with inbound webhooks.
 <!-- template:end webhooks-common:docs-template-sync-webhooks -->
 
-Use the service's [command policy](build-test-and-development-commands.md) and
+Use `make help` and the
 [validation router](validation-routing.md) for ordinary development.
 The source template additionally owns `make template-owned-purity-check` and
 `ALLOW_FULL=1 make template-init-check`. The canonical runtime inventory

@@ -81,12 +81,12 @@ infra-webhooks = { path = "crates/infra-webhooks" }
 # template:end webhooks-common:workspace-webhooks-crate
 
 # template:begin postgres:workspace-postgres-dependencies
-# Persistence (docs/architecture/persistence.md). `macros` where a checked
+# Persistence. `macros` where a checked
 # statement (`sqlx::query!`), `sqlx::migrate!` or `#[sqlx::test]` is used.
 sqlx = { version = "0.9.0", default-features = false }
 # template:end postgres:workspace-postgres-dependencies
 # template:begin http-idempotency:workspace-http-idempotency-digest
-# Idempotency structured strings (docs/guides/http-idempotency.md).
+# Idempotency structured strings.
 sfv = { version = "0.16.0", default-features = false }
 # template:end http-idempotency:workspace-http-idempotency-digest
 
@@ -152,18 +152,18 @@ tokio-stream = { version = "0.1.19", default-features = false }
 rustls = { version = "0.23.46", default-features = false }
 # template:end rustls:workspace-rustls
 
-# API contract (docs/architecture/http.md). The document is derived from the
+# API contract. The document is derived from the
 # handlers and committed as api/openapi/service.yaml.
 utoipa = { version = "6.0.0", default-features = false }
 utoipa-axum = { version = "0.3.0", default-features = false }
 
-# Configuration (docs/configuration-source-policy.md)
+# Configuration
 config = { version = "0.15.25", default-features = false }
 clap = { version = "4.6.7", default-features = false }
 serde = { version = "1", default-features = false }
 serde_json = { version = "1", default-features = false }
 # axum's own extractors report the failing member through it; infra-http reads
-# that path for `invalid_params` (docs/architecture/http.md).
+# that path for `invalid_params`.
 serde_path_to_error = { version = "0.1.20", default-features = false }
 toml = { version = "1.1.6", default-features = false }
 humantime = "2.4.0"
@@ -172,7 +172,7 @@ bytesize = { version = "2.7.0", default-features = false }
 secrecy = { version = "0.10.3", default-features = false }
 gethostname = "1.1.0"
 
-# Diagnostics (docs/configuration-source-policy.md). The OpenTelemetry family
+# Diagnostics. The OpenTelemetry family
 # moves together; tracing-opentelemetry is one minor ahead.
 tracing = { version = "0.1.44", default-features = false }
 tracing-subscriber = { version = "0.3.23", default-features = false }
@@ -190,11 +190,11 @@ metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 metrics-process = { version = "2.4.3", default-features = false }
 tokio-metrics = { version = "0.5.2", default-features = false }
 thiserror = { version = "2.0.20", default-features = false }
-# Shutdown reason sets in infra-telemetry (docs/configuration-source-policy.md).
+# Shutdown reason sets in infra-telemetry.
 bitflags = { version = "2.13.2", default-features = false }
 
 
-# Utility toolkit (docs/backend-utility-recipes.md).
+# Utility toolkit.
 # Declarations are not runtime dependencies; each owner opts in below.
 url = { version = "2.5", default-features = false }
 sha2 = { version = "0.11.0", default-features = false }

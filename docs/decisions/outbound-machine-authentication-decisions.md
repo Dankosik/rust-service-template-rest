@@ -7,7 +7,7 @@ from research recorded against `origin/main` 3c220db. The [research
 synthesis](https://github.com/Dankosik/rust-service-template-rest/blob/e4be7060311f3d33486b437b9bfb033db204708c/specs/service-to-service-auth/research/synthesis.md)
 keeps the claim-level evidence; this record keeps only the accepted decisions
 and their reopen conditions.
-[Guide](../guides/outbound-machine-authentication.md) owns adoption and observable
+`crates/infra-oauth2-client-credentials` owns adoption and observable
 behavior.
 
 ## Selection and cost
@@ -35,10 +35,37 @@ behavior.
 Authorization-server evidence: versions checked were Zitadel v4.19.2,
 Keycloak 26.7.4, Hydra v26.2.0, authentik 2026.8.3, Authelia v4.39.28, Spring
 Authorization Server 7.1.1, Duende 8.0.9, plus Auth0, Okta, Entra and Cognito
-documentation (2026-09-29). The [service-to-service authentication
-guide](../guides/service-to-service-authentication.md#choosing-an-authorization-server)
-carries the shortlist, the not-shortlisted list with reasons, and Keycloak
-registration notes for this path.
+documentation (2026-09-29). The template does not select or host an
+authorization server; that stays a service-local decision. The shortlist:
+
+| Server | Notes |
+| --- | --- |
+| Keycloak 26.7 | JVM container plus PostgreSQL, Apache-2.0. The only self-hostable candidate covering client assertions, client credentials, GA standard token exchange V2, and per-service audience through client scopes with one client per service. No `act` claim in supported features (the caller shows as `azp`): token exchange delegation, which emits `act`, is experimental in 26.7 and preview in 26.8 (checked 2026-10-01); a service token's `sub` is the service-account user ID; no `audience` parameter on client credentials; roughly 0.75–1.5 GB memory. |
+| Spring Authorization Server 7 | Covers the protocol, but it is a Java framework the team would build and operate; `act`, audience mapping, and assertion replay protection are custom code. |
+| Zitadel ≥ 4.19.2 | One Go container plus PostgreSQL, AGPL-3.0, GA token exchange with nested `act`. Does not fit this path without a gap (see below). Pin ≥ 4.19.2 for GHSA-vrh8-c9cm-wh8v and GHSA-w4gv-rcwj-w6r5. |
+
+Not shortlisted, with the deciding gap: authentik 2026.8 (token exchange
+accepts only a client secret; assertion verification skips `aud` and `jti`),
+Hydra (no RFC 8693 support; issue open since 2018), Authelia (no token
+exchange yet), Duende (licence cost), Auth0 (`private_key_jwt` is an
+Enterprise feature), Okta (per-service audiences need a paid add-on), Entra
+and Cognito (no exchange that emits `act`).
+
+Keycloak registration for this path: a confidential client with client
+authenticator "Signed JWT" configured with the service's public key or JWKS
+URL, service accounts enabled, and standard token exchange enabled on any
+client that exchanges tokens. Give the client an audience through client
+scopes; the receiving service is itself a client whose ID is that audience.
+Keycloak issues JWT access tokens by default, matching `token_profile =
+"resource-server"`.
+
+What Zitadel and authentik lack for this path: Zitadel's service users
+authenticate only through the RFC 7523 §2.1 JWT-bearer grant, and only a
+second registration, an OIDC application with its own key, can call token
+exchange — there is no single client identity covering both client
+credentials and exchange. authentik's token exchange authenticates only with
+a client secret, so it cannot use `private_key_jwt` for the exchange leg at
+all.
 
 ## Crate choices and named custom gaps
 
@@ -84,7 +111,7 @@ token-source abstraction.
 | `act` from Keycloak | Not relied on: Keycloak token exchange delegation, which emits `act` for the acting client, is experimental in 26.7 and preview in 26.8 (checked 2026-10-01). The inbound verifier already reads `act`, and the exchange request needs no `actor_token` for it. | Delegation becomes a supported Keycloak feature; then record the registration it needs in the guide. |
 | Transaction Tokens | Not adopted: draft-ietf-oauth-transaction-tokens-11 (2026-07-30) is not an RFC, no shortlisted authorization server issues them, and a Txn-Token is not an access token. | Published and a chosen authorization server issues them. |
 | Private JWK key input | PEM only. | An authorization server hands out keys only as JWK. |
-| Introspection client secret (inbound opaque-token mode) | Unchanged; this is a different mechanism from outbound client authentication — [Service-to-service authentication](../guides/service-to-service-authentication.md) requires JWT access tokens and `oidc-jwt` for this path. | Introspection becomes part of a service-to-service path. |
+| Introspection client secret (inbound opaque-token mode) | Unchanged; this is a different mechanism from outbound client authentication — service-to-service authentication requires JWT access tokens and `oidc-jwt` for this path. | Introspection becomes part of a service-to-service path. |
 
 ## Resolved dependency graph
 

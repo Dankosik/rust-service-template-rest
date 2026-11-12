@@ -590,7 +590,6 @@ def _project(source: Path, candidate: str, initializer, inputs, destination: Pat
         "crates/operation-context/Cargo.toml",
         "crates/operation-context/src/lib.rs",
         "crates/infra-http/src/context.rs",
-        "docs/operation-budgets.md",
     ))
     return nodes
 

@@ -9,7 +9,7 @@
       "role": "contract",
       "allow_dependents": {
         "reason": "Each listed operation owner propagates a fixed deadline and cancellation lineage.",
-        "authority": "docs/architecture/boundaries.md#operation-context",
+        "authority": "docs/repo-architecture.md#global-invariants",
         "members": [
           "crates/infra-bearerauthn/Cargo.toml",
           "crates/infra-cache/Cargo.toml",
@@ -60,15 +60,15 @@
       "allow_members": {
         "crates/config/Cargo.toml": {
           "reason": "The migrator consumes validated service configuration.",
-          "authority": "docs/architecture/boundaries.md#postgresql-owners"
+          "authority": "docs/repo-architecture.md#global-invariants"
         },
         "crates/infra-telemetry/Cargo.toml": {
           "reason": "The migrator owns its process telemetry initialization.",
-          "authority": "docs/architecture/boundaries.md#dependency-direction"
+          "authority": "docs/repo-architecture.md#global-invariants"
         },
         "crates/infra-postgres/Cargo.toml": {
           "reason": "The runner reuses PostgreSQL admission and budget rendering.",
-          "authority": "docs/architecture/boundaries.md#postgresql-owners"
+          "authority": "docs/repo-architecture.md#global-invariants"
         }
       }
     },
@@ -78,15 +78,15 @@
       "allow_members": {
         "crates/infra-http/Cargo.toml": {
           "reason": "Feature HTTP modules consume inbound contracts and register routes.",
-          "authority": "docs/architecture/boundaries.md#dependency-direction"
+          "authority": "docs/repo-architecture.md#global-invariants"
         },
         "crates/infra-cache/Cargo.toml": {
           "reason": "Features own keys, TTL policy and namespace get/set/delete use.",
-          "authority": "docs/architecture/boundaries.md#dependency-direction"
+          "authority": "docs/repo-architecture.md#global-invariants"
         },
         "crates/infra-object-storage/Cargo.toml": {
           "reason": "Features own keys and policy for object operations and presigned GET.",
-          "authority": "docs/architecture/boundaries.md#dependency-direction"
+          "authority": "docs/repo-architecture.md#global-invariants"
         }
       }
     },
@@ -100,19 +100,19 @@
       "allow_members": {
         "crates/service-failure/Cargo.toml": {
           "reason": "HTTP projects shared failure codes into Problem responses.",
-          "authority": "docs/architecture/boundaries.md#dependency-direction"
+          "authority": "docs/repo-architecture.md#global-invariants"
         },
         "crates/infra-idempotency-store/Cargo.toml": {
           "reason": "The retained idempotency profile composes durable arbitration.",
-          "authority": "docs/architecture/boundaries.md#dependency-direction"
+          "authority": "docs/repo-architecture.md#global-invariants"
         },
         "crates/infra-postgres/Cargo.toml": {
           "reason": "The idempotency inbound contract re-exports PostgreSQL Tx.",
-          "authority": "docs/architecture/boundaries.md#dependency-direction"
+          "authority": "docs/repo-architecture.md#global-invariants"
         },
         "crates/infra-webhooks/Cargo.toml": {
           "reason": "Inbound webhook route policy consumes verification and receipt contracts.",
-          "authority": "docs/architecture/boundaries.md#webhook-provider-boundary"
+          "authority": "docs/repo-architecture.md#global-invariants"
         }
       }
     },
@@ -122,7 +122,7 @@
       "allow_members": {
         "crates/service-failure/Cargo.toml": {
           "reason": "gRPC projects shared failure codes into tonic Status.",
-          "authority": "docs/architecture/boundaries.md#dependency-direction"
+          "authority": "docs/repo-architecture.md#global-invariants"
         }
       }
     },
@@ -135,7 +135,7 @@
       "allow_members": {
         "crates/infra-postgres/Cargo.toml": {
           "reason": "Jobs and idempotency reuse the PostgreSQL connection/transaction owner.",
-          "authority": "docs/architecture/boundaries.md#dependency-direction"
+          "authority": "docs/repo-architecture.md#global-invariants"
         }
       }
     },
@@ -144,15 +144,15 @@
       "allow_members": {
         "crates/infra-jobs/Cargo.toml": {
           "reason": "Webhook delivery and inbound processing use the existing jobs engine.",
-          "authority": "docs/architecture/boundaries.md#webhook-provider-boundary"
+          "authority": "docs/repo-architecture.md#global-invariants"
         },
         "crates/infra-postgres/Cargo.toml": {
           "reason": "Webhook receipt and delivery adapters reuse PostgreSQL ownership.",
-          "authority": "docs/architecture/boundaries.md#webhook-provider-boundary"
+          "authority": "docs/repo-architecture.md#global-invariants"
         },
         "crates/infra-outbound-http/Cargo.toml": {
           "reason": "Outbound webhook delivery uses the bounded trusted-origin HTTP client.",
-          "authority": "docs/architecture/boundaries.md#webhook-provider-boundary"
+          "authority": "docs/repo-architecture.md#global-invariants"
         }
       }
     },
@@ -162,15 +162,15 @@
       "allow_members": {
         "crates/domain-events/Cargo.toml": {
           "reason": "Messaging admits and transports feature-owned event envelopes.",
-          "authority": "docs/architecture/boundaries.md#dependency-direction"
+          "authority": "docs/repo-architecture.md#global-invariants"
         },
         "crates/infra-jobs/Cargo.toml": {
           "reason": "The outbox publication handler uses the existing jobs queue.",
-          "authority": "docs/architecture/boundaries.md#dependency-direction"
+          "authority": "docs/repo-architecture.md#global-invariants"
         },
         "crates/infra-postgres/Cargo.toml": {
           "reason": "Outbox enqueue shares the caller's PostgreSQL transaction.",
-          "authority": "docs/architecture/boundaries.md#dependency-direction"
+          "authority": "docs/repo-architecture.md#global-invariants"
         }
       }
     },
@@ -179,11 +179,11 @@
       "allow_members": {
         "crates/infra-outbound-http/Cargo.toml": {
           "reason": "Private credentials acquisition uses bounded trusted-origin HTTP exchanges.",
-          "authority": "docs/architecture/boundaries.md#dependency-direction"
+          "authority": "docs/repo-architecture.md#global-invariants"
         },
         "crates/infra-grpc/Cargo.toml": {
           "reason": "The optional bridge supplies an authenticated Service within the private credentials owner.",
-          "authority": "docs/architecture/boundaries.md#dependency-direction",
+          "authority": "docs/repo-architecture.md#global-invariants",
           "optional_only": true
         }
       }

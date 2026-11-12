@@ -164,8 +164,10 @@ The delta from that observed failing source is:
 
 ## Native Batch completion repair
 
-The 2026-10-07 [accepted dependency decision](../../specs/messaging-recovery-maturity/research/design-evidence.md#native-bounded-pull-completion-repair-2026-10-07)
-records the actual R3/TLS failure and comparison of supported native APIs.
+The 2026-10-07 accepted dependency decision recorded the actual R3/TLS failure
+and a comparison of supported native APIs; it lives in Git history as
+`specs/messaging-recovery-maturity/research/design-evidence.md` (last present
+at `80700f34`).
 NATS 2.15 can send `409 Batch Completed` before its quorum-delayed data. The
 published Batch treats it as a terminal error. Latest registry release 0.50.0
 (2026-07-20) and inspected upstream pull source at

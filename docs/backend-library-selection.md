@@ -16,8 +16,6 @@ all future versions. Do not hand-edit checksums or weaken dependency gates.
 
 ## Production utility toolkit
 
-[Executable utility recipes](backend-utility-recipes.md) records the full
-utility selection, runnable cases, actual source migrations and alternatives.
 The recipes are normal tests in the existing test package; only production
 consumers add normal dependencies. `Probe` now uses `async-trait`, cancellation
 uses `tokio-util`, and the `service-failure` catalog is declared once by its
@@ -145,7 +143,6 @@ The implementation must preserve all of these contracts:
 The first operation owns production integration. The executable HTTP recipe
 exercises `validator` as a dev-dependency; it does not publish a generic
 validator API, placeholder endpoint or authentication mechanism.
-See [HTTP Architecture](architecture/http.md#adding-an-operation).
 
 ## Serialization, value types and construction
 
@@ -167,9 +164,7 @@ mechanical `Row::try_get` mapping when appropriate. `FromRow` alone does not
 check SQL against the database at compile time. For suitable static queries,
 use [`query!` and related macros](https://docs.rs/sqlx/latest/sqlx/macro.query.html)
 with committed offline `.sqlx` metadata and the existing planned prepare check.
-This is already a deferred decision in
-[Persistence Architecture](architecture/persistence.md#decisions-recorded-here),
-not a second migration framework or a query invented to justify tooling. The
+This is already a deferred decision, not a second migration framework or a query invented to justify tooling. The
 trigger is the first *feature-owned* repository: an optional profile's own
 provider-owned statements over its own table do not by themselves adopt
 `query!`.
@@ -202,10 +197,10 @@ rather than assuming any SeaORM release can share the current pool.
 | A complex stable output warrants a reviewed snapshot | [`insta`](https://docs.rs/insta/latest/insta/) | Assert important semantics separately. Redact only irrelevant nondeterminism; never hide the ID or timestamp relationship being tested. Do not create a second snapshot authority for the already committed OpenAPI document. |
 | A parser/transformation has useful algebraic or grammar invariants | [`proptest`](https://docs.rs/proptest/latest/proptest/) | State the property independently of the implementation, retain useful explicit boundary cases, and bound generation. It is not mandatory for every helper. |
 <!-- template:begin jobs:docs-library-selection-jobs -->
-| Durable background jobs on PostgreSQL | The template-owned engine in `crates/infra-jobs` | Enqueue inside the caller's transaction; kinds and handlers in adapter crates; effects idempotent per [the guide](guides/background-jobs.md); reassess the crates on [async.md's watch list](architecture/async.md#reopen-conditions-and-watch-list) before replacing the engine |
+| Durable background jobs on PostgreSQL | The template-owned engine in `crates/infra-jobs` | Enqueue inside the caller's transaction; kinds and handlers in adapter crates; effects idempotent; reassess the maintained queue crates before replacing the engine |
 <!-- template:end jobs:docs-library-selection-jobs -->
 <!-- template:begin messaging:docs-library-selection-messaging -->
-| Typed durable JetStream transport interoperable with Go | `async-nats = "=0.50.0"`, default features off, with only `jetstream`, `aws-lc-rs`, and `nkeys` in `infra-messaging` | Reuse `time`, `serde`/`serde_json`, `bytes`, `sha2`, `base64`, `secrecy` (the credentials stay a `SecretString` until the client reads them), Tokio, metrics, and tracing; `opentelemetry` and `tracing-opentelemetry` carry the W3C trace context through message headers with the installed propagator, as `infra-jobs` does for its carrier. AWS-LC is the workspace Rustls provider; do not also enable `ring`, whose coexistence makes native client-provider selection ambiguous. Keep normal hostname verification and native roots. No chrono, websocket, KV, object-store, service, nuid, crypto, experimental, or server-extension feature is admitted. `foldhash` 0.2 (default features off, `std`) hashes the event registry maps; hashbrown already depends on it, and the keys are compile-time constants no caller can choose. `utoipa` (default features off) supplies the payload schemas of the [AsyncAPI contract document](guides/durable-messaging.md#contract-document); it is the schema derive the REST contract already uses. `nkeys` 0.4.5 (default features off; the latest release, 2025-07-03) is the key type `async-nats` already resolves for its `nkeys` feature. The adapter names it directly to sign a connection challenge for `messaging.credentials_file`: the client's own `credentials_file` reads the file once, and its per-connection `with_auth_callback` hands the signing to the caller. No crate reads the credentials file layout apart from a client; the adapter's twenty-line reader is checked against the client's parser in its tests. |
+| Typed durable JetStream transport interoperable with Go | `async-nats = "=0.50.0"`, default features off, with only `jetstream`, `aws-lc-rs`, and `nkeys` in `infra-messaging` | Reuse `time`, `serde`/`serde_json`, `bytes`, `sha2`, `base64`, `secrecy` (the credentials stay a `SecretString` until the client reads them), Tokio, metrics, and tracing; `opentelemetry` and `tracing-opentelemetry` carry the W3C trace context through message headers with the installed propagator, as `infra-jobs` does for its carrier. AWS-LC is the workspace Rustls provider; do not also enable `ring`, whose coexistence makes native client-provider selection ambiguous. Keep normal hostname verification and native roots. No chrono, websocket, KV, object-store, service, nuid, crypto, experimental, or server-extension feature is admitted. `foldhash` 0.2 (default features off, `std`) hashes the event registry maps; hashbrown already depends on it, and the keys are compile-time constants no caller can choose. `utoipa` (default features off) supplies the payload schemas of the AsyncAPI contract document (`Registry::asyncapi`); it is the schema derive the REST contract already uses. `nkeys` 0.4.5 (default features off; the latest release, 2025-07-03) is the key type `async-nats` already resolves for its `nkeys` feature. The adapter names it directly to sign a connection challenge for `messaging.credentials_file`: the client's own `credentials_file` reads the file once, and its per-connection `with_auth_callback` hands the signing to the caller. No crate reads the credentials file layout apart from a client; the adapter's twenty-line reader is checked against the client's parser in its tests. |
 | Provider-free typed event identity | `domain-events`, a small local contract crate | It exists to enforce feature-to-provider dependency direction. It does not mint IDs, read clocks, own routes, or introduce a generic producer/event-bus API. |
 <!-- template:end messaging:docs-library-selection-messaging -->
 
@@ -246,9 +241,11 @@ wrapper. `async-nats` supplies the selected protocol mechanics; the local
 adapter owns the accepted Go-compatible wire and settlement policy. Reconsider
 that boundary only for an accepted second transport or changed feature
 dependency direction. Do not add `asyncapi-rust` or `schemars` for the event
-contract document; the [guide](guides/durable-messaging.md#contract-document) records
-why. `cloudevents-sdk` 0.9.0 requires `async-nats ^0.42` and cannot resolve
-beside the pinned client, which adds to the guide's reasons against a
+contract document (checked 2026-10-02): `asyncapi-rust` 0.5.0 declares
+channels in derive attributes apart from the routes and takes payload schemas
+from `schemars`, which would be a second schema derive beside `utoipa` with no
+`time` integration. `cloudevents-sdk` 0.9.0 requires `async-nats ^0.42` and
+cannot resolve beside the pinned client, one more reason against a
 CloudEvents envelope.
 
 The adapter enables `time/large-dates` because a Go-accepted RFC3339 timestamp
@@ -302,10 +299,9 @@ and one owned output thread in `infra-telemetry::logging::output`, with PR #245'
 shared bounded JSON/text capture and private diagnostic boundary. The PR #244
 library comparison remains relevant to the queue and shutdown mechanism; its
 separate logger implementation and completion policy are superseded.
-[Bounded local output](configuration-source-policy.md#bounded-local-output)
-owns the fixed byte, record, callback and span limits, loss accounting and
-final-result policy. [Runtime Lifecycle](architecture/runtime-lifecycle.md#shutdown)
-owns guard custody, the shared telemetry deadline and process exits.
+`crates/infra-telemetry` owns the fixed byte, record, callback and span
+limits, loss accounting and final-result policy; the composition root owns
+guard custody, the shared telemetry deadline and process exits.
 
 The source comparison used Rust 1.99.0, Tokio 1.53.1 and
 tracing-subscriber 0.3.23 on 2026-10-05 and added no dependency:
@@ -322,9 +318,7 @@ The local mechanism supplies nonblocking admission, finite retained storage,
 observable write/flush failure and completion, and a nonblocking destructor
 without fallback output. It adds no process policy or second logger. A timed-out
 wait leaves actual sink custody with the bounded writer; it does not establish
-that the writer stopped. The historical
-[logging experiment](performance/infra-telemetry-performance.md#2026-09-29-json-layer-static-filter-histogram-upkeep)
-is not a throughput claim for this composition.
+that the writer stopped.
 
 Replace the local mechanism when a maintained component's supported API meets
 these capture, privacy, accounting and lifetime constraints with less overall

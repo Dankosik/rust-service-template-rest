@@ -83,59 +83,59 @@ configured.
 
 <!-- template:begin postgres:readme-postgres-profile -->
 - `DATABASE=postgres`: PostgreSQL through sqlx, with migrations and
-  compile-time checked queries ([persistence](docs/architecture/persistence.md)).
+  compile-time checked queries ([`infra-postgres`](crates/infra-postgres)).
 <!-- template:end postgres:readme-postgres-profile -->
 <!-- template:begin jobs:readme-jobs-profile -->
 - `JOBS=postgres`: durable background jobs and a worker binary
-  ([jobs](docs/guides/background-jobs.md)).
+  ([`infra-jobs`](crates/infra-jobs)).
 <!-- template:end jobs:readme-jobs-profile -->
 <!-- template:begin http-idempotency:readme-http-idempotency-profile -->
 - `HTTP_IDEMPOTENCY=postgres`: `Idempotency-Key` support
-  ([idempotency](docs/guides/http-idempotency.md)).
+  ([`infra-idempotency-store`](crates/infra-idempotency-store)).
 <!-- template:end http-idempotency:readme-http-idempotency-profile -->
 <!-- template:begin authn:readme-authn-profile -->
 - `AUTHN=oidc-jwt|oidc-introspection`: bearer authentication against an OIDC
-  provider ([authentication](docs/guides/authentication.md)).
+  provider ([`infra-bearerauthn`](crates/infra-bearerauthn)).
 <!-- template:end authn:readme-authn-profile -->
 <!-- template:begin outbound-http:readme-outbound-http-profile -->
 - `OUTBOUND_HTTP=bounded`: an HTTPS client with budgets
-  ([outbound HTTP](docs/guides/outbound-http.md)).
+  ([`infra-outbound-http`](crates/infra-outbound-http)).
 <!-- template:end outbound-http:readme-outbound-http-profile -->
 <!-- template:begin outbound-auth:readme-outbound-auth-profile -->
 - `OUTBOUND_AUTH=oauth2-client-credentials`: OAuth2 machine authentication with
   a private key and RFC 8693 token exchange
-  ([machine authentication](docs/guides/outbound-machine-authentication.md)).
+  ([`infra-oauth2-client-credentials`](crates/infra-oauth2-client-credentials)).
 <!-- template:end outbound-auth:readme-outbound-auth-profile -->
 <!-- template:begin grpc:readme-grpc-profile -->
-- `GRPC=enabled`: tonic gRPC on a separate listener ([gRPC](docs/guides/grpc.md)).
+- `GRPC=enabled`: tonic gRPC on a separate listener ([`infra-grpc`](crates/infra-grpc)).
 <!-- template:end grpc:readme-grpc-profile -->
 <!-- template:begin service-auth:docs-readme-service-auth-profile -->
 - `SERVICE_AUTH=jwt`: signed service-to-service tokens for gRPC
-  ([service authentication](docs/guides/service-authentication.md)).
+  ([`infra-serviceauth`](crates/infra-serviceauth)).
 <!-- template:end service-auth:docs-readme-service-auth-profile -->
 <!-- template:begin messaging:docs-readme-messaging-profile -->
 - `MESSAGING=nats-jetstream`: typed events on NATS JetStream
-  ([messaging](docs/guides/durable-messaging.md)).
+  ([`infra-messaging`](crates/infra-messaging)).
 <!-- template:end messaging:docs-readme-messaging-profile -->
 <!-- template:begin outbox:docs-readme-outbox-profile -->
 - `OUTBOX=postgres`: a transactional outbox to JetStream
-  ([outbox](docs/guides/postgres-transactional-outbox.md)).
+  (in [`infra-messaging`](crates/infra-messaging)).
 <!-- template:end outbox:docs-readme-outbox-profile -->
 <!-- template:begin webhooks:readme-webhooks-outbound-guide -->
 - `WEBHOOKS=durable`: signed outbound webhooks
-  ([outbound webhooks](docs/guides/outbound-webhooks.md)).
+  ([`infra-webhooks`](crates/infra-webhooks)).
 <!-- template:end webhooks:readme-webhooks-outbound-guide -->
 <!-- template:begin inbound-webhooks:readme-webhooks-inbound-guide -->
 - `INBOUND_WEBHOOKS=standard-webhooks`: verified inbound webhooks
-  ([inbound webhooks](docs/guides/inbound-webhooks.md)).
+  ([`infra-webhooks`](crates/infra-webhooks)).
 <!-- template:end inbound-webhooks:readme-webhooks-inbound-guide -->
 <!-- template:begin cache:docs-readme-cache-profile -->
 - `CACHE=redis`: a Redis or Valkey cache that falls back to the source of truth
-  ([cache](docs/guides/cache.md)).
+  ([`infra-cache`](crates/infra-cache)).
 <!-- template:end cache:docs-readme-cache-profile -->
 <!-- template:begin object-storage:docs-readme-object-storage-profile -->
 - `OBJECT_STORAGE=s3`: Amazon S3, Cloudflare R2 or Railway Buckets
-  ([object storage](docs/guides/object-storage.md)).
+  ([`infra-object-storage`](crates/infra-object-storage)).
 <!-- template:end object-storage:docs-readme-object-storage-profile -->
 
 ## Run it
@@ -153,10 +153,13 @@ curl http://127.0.0.1:8080/health/ready
 
 ## Documentation
 
+The code is the source of truth: crate documentation (`cargo doc --open`), the
+committed OpenAPI document in `api/openapi/`, typed configuration in
+`crates/config`, and `make help`. The few documents kept are the ones code
+cannot show:
+
 [Architecture](docs/repo-architecture.md) ·
-[First feature](docs/first-production-feature.md) ·
 [Production contract](docs/production-contract.md) ·
-[Configuration](docs/configuration-source-policy.md) ·
 [Validation](docs/validation-routing.md) ·
 [CI/CD](docs/ci-cd-production-ready.md)
 

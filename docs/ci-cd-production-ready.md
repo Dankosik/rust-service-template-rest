@@ -222,7 +222,6 @@ bounded service-owned cases in `quality/duplication-baseline.json`; dedicated
 test files are outside the scan. The checker never refreshes policy. The
 architecture checker applies `quality/architecture.json` to Cargo metadata declarations, including build,
 optional, alias and inactive-target edges. Clippy owns the nesting limit of six.
-See [maintenance and setup](build-test-and-development-commands.md#readability-and-crate-boundaries).
 
 In the source template `template-quality-projections` exercises both checker
 CLIs against four renamed profile graphs: minimal, all retained capabilities,
@@ -409,7 +408,7 @@ later change reopens one only with new evidence.
 | Static analysis | CodeQL for Rust (GA since CodeQL 2.23.3) and Actions, `build-mode: none`, advanced setup with `codeql-required`; Rust after merge (2026-10-22) | — | default setup was not configured, so the workflow does not conflict |
 | Image vulnerabilities and SBOM | Trivy 0.76.1 container: `--severity HIGH,CRITICAL --ignore-unfixed --exit-code 1`; CycloneDX SBOM from the same container over the pushed image | grype/syft (a second scanner); `cargo-cyclonedx` (describes the source graph, not the image); `aquasecurity/trivy-action` (a second Trivy pin) | 194 SBOM components on the scaffold image: 178 `pkg:cargo`, 14 `pkg:deb` (*verified*) |
 | Links | lychee 0.24.2 container, `--offline --include-fragments`, over `git ls-files '*.md'` | lychee via `cargo install` (no install-action manifest, compiles reqwest and tokio in CI); `lychee-action` (CI-only, second pin); `mlc` and `markdown-link-check` (fragment checking not documented); a template-owned script (a solved problem) | *verified*: reports `Cannot find fragment` and `File not found`; external URLs excluded on purpose so the gate cannot flake |
-| Test runner | `cargo-nextest` 0.9.148 for `make test`, `test-changed` and `test-package`, then `cargo test --doc` for the doctests nextest does not run; the database proof keeps `cargo test` ([Persistence](architecture/persistence.md#decisions-recorded-here)) | `cargo test` for every suite | *measured* (CI audit 2026-11-02): `cargo test` ran the workspace's 54 test binaries one after another for 127 s, the longest 41 s; nextest runs them at once |
+| Test runner | `cargo-nextest` 0.9.148 for `make test`, `test-changed` and `test-package`, then `cargo test --doc` for the doctests nextest does not run; the database proof keeps `cargo test` | `cargo test` for every suite | *measured* (CI audit 2026-11-02): `cargo test` ran the workspace's 54 test binaries one after another for 127 s, the longest 41 s; nextest runs them at once |
 
 ### Routing
 
