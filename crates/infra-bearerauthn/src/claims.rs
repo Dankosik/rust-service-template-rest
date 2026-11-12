@@ -215,7 +215,7 @@ pub(crate) fn validate_jwt_claims(
             return Err(invalid(VerificationReason::MissingClaim));
         }
     }
-    let scopes = normalize_scopes(claims.scope.or(claims.scp))
+    let scopes = Scopes::from_claim(claims.scope.or(claims.scp))
         .map_err(|()| invalid(VerificationReason::Scope))?;
     let actor = claims
         .act
@@ -342,7 +342,7 @@ pub(crate) fn validate_introspection_claims(
     let subject = non_empty(claims.sub);
     let client_id = non_empty(claims.client_id);
     require_identity(subject.as_deref(), client_id.as_deref())?;
-    let scopes = normalize_scopes(claims.scope.or(claims.scp))
+    let scopes = Scopes::from_claim(claims.scope.or(claims.scp))
         .map_err(|()| VerificationError::unavailable(VerificationReason::Scope))?;
     let actor = claims
         .act
@@ -395,23 +395,38 @@ fn non_empty(value: Option<Cow<'_, str>>) -> Option<String> {
     value.filter(|value| !value.is_empty()).map(Cow::into_owned)
 }
 
-/// Each engine maps a malformed scope to its own failure class.
-fn normalize_scopes(scope: Option<Values<'_>>) -> Result<Vec<String>, ()> {
-    let mut values: Vec<String> = match scope {
-        None => Vec::new(),
-        Some(Values::One(value)) if value.is_empty() => Vec::new(),
-        Some(Values::One(value)) => value.split(' ').map(ToOwned::to_owned).collect(),
-        Some(Values::Many(values)) => values.into_iter().map(Cow::into_owned).collect(),
-    };
-    if !values
-        .iter()
-        .all(|value| shared_rules::rfc6749::is_scope_token(value))
-    {
-        return Err(());
+#[derive(Eq, PartialEq)]
+pub(crate) struct Scopes(Vec<String>);
+
+impl Scopes {
+    /// Each engine maps a malformed scope to its own failure class.
+    fn from_claim(scope: Option<Values<'_>>) -> Result<Self, ()> {
+        let mut values: Vec<String> = match scope {
+            None => Vec::new(),
+            Some(Values::One(value)) if value.is_empty() => Vec::new(),
+            Some(Values::One(value)) => value.split(' ').map(ToOwned::to_owned).collect(),
+            Some(Values::Many(values)) => values.into_iter().map(Cow::into_owned).collect(),
+        };
+        if !values
+            .iter()
+            .all(|value| shared_rules::rfc6749::is_scope_token(value))
+        {
+            return Err(());
+        }
+        values.sort_unstable();
+        values.dedup();
+        Ok(Self(values))
     }
-    values.sort_unstable();
-    values.dedup();
-    Ok(values)
+
+    pub(crate) fn as_slice(&self) -> &[String] {
+        &self.0
+    }
+
+    pub(crate) fn contains_all(&self, required: &[String]) -> bool {
+        required
+            .iter()
+            .all(|scope| self.0.binary_search(scope).is_ok())
+    }
 }
 
 #[cfg(test)]

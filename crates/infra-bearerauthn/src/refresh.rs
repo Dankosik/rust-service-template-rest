@@ -36,7 +36,8 @@ pub(crate) enum SignatureRefresh {
     /// between that check and the request.
     #[debug("Refreshed(..)")]
     Refreshed(Arc<KeySet>),
-    /// The successful acquisition's cooldown prevents another fetch.
+    /// The last acquisition succeeded and left the caller's checked set installed.
+    /// Another fetch is still blocked by the cooldown measured from refresh start.
     NoNewerSet,
     Unavailable,
 }
@@ -87,7 +88,7 @@ pub(crate) struct KeyStore {
 }
 
 impl KeyStore {
-    /// Installs the startup key set; that fetch starts the first cooldown.
+    /// Installs the startup key set and starts the first cooldown.
     pub(crate) fn new(keys: Arc<KeySet>) -> Arc<Self> {
         metrics::describe_counter!(REFRESH_METRIC, "JWKS refresh outcomes by closed reason");
         let state = watch::Sender::new(State {
