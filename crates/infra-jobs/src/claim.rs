@@ -363,7 +363,7 @@ async fn claim(
                      OR (job.state = 'running' AND job.claim_expires_at <= statement_timestamp())) \
              RETURNING job.id, job.kind, (job.state = 'failed') AS \"exhausted!\", job.attempts, \
                        job.claim_generation, \
-                       CASE WHEN job.state = 'running' THEN job.payload::text END AS payload, \
+                       CASE WHEN job.state = 'running' THEN COALESCE(job.payload_text, job.payload::text) END AS payload, \
                        job.trace_context AS trace_parent, job.trace_state, job.error_summary, \
                        EXTRACT(EPOCH FROM statement_timestamp() - job.not_before)::double precision \
                            AS \"queue_wait_seconds!\"",

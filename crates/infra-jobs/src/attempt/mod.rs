@@ -542,7 +542,7 @@ async fn persist(
         let sent = within(shared, supervisor_deadline, async {
             match write {
                 None => complete_batched(shared, fence, supervisor_deadline, slots).await,
-                Some(write) => send_outcome(shared, fence, write).await,
+                Some(write) => send_outcome(shared, fence, write, supervisor_deadline).await,
             }
         })
         .await;
