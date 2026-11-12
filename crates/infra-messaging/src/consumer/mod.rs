@@ -278,7 +278,7 @@ impl Consumer {
                 tokio::select! {
                     biased;
                     () = stop.cancelled() => break 'pulls,
-                    joined = deliveries.join_next() => reaped(joined)?,
+                    joined = deliveries.join_next() => check_delivery_task_result(joined)?,
                 }
             }
             if stop.is_cancelled() {
@@ -329,7 +329,7 @@ impl Consumer {
                 tokio::select! {
                     biased;
                     () = stop.cancelled() => break 'pulls,
-                    joined = deliveries.join_next(), if !deliveries.is_empty() => reaped(joined)?,
+                    joined = deliveries.join_next(), if !deliveries.is_empty() => check_delivery_task_result(joined)?,
                     result = &mut request => {
                         let error_kind = match result {
                             Ok(Ok(messages)) => break messages,
@@ -363,7 +363,7 @@ impl Consumer {
             {
                 Ok(BatchEnd::Filled) => {
                     if retry_large_retained_record {
-                        reaped(deliveries.join_next().await)?;
+                        check_delivery_task_result(deliveries.join_next().await)?;
                         retry_large_retained_record = false;
                     }
                 }
@@ -419,7 +419,7 @@ impl Consumer {
             }
         }
         while let Some(joined) = deliveries.join_next().await {
-            reaped(Some(joined))?;
+            check_delivery_task_result(Some(joined))?;
         }
         Ok(())
     }
@@ -458,7 +458,7 @@ impl Consumer {
             tokio::select! {
                 biased;
                 () = stop.cancelled() => return Ok(BatchEnd::Stopped),
-                joined = deliveries.join_next(), if !deliveries.is_empty() => reaped(joined)?,
+                joined = deliveries.join_next(), if !deliveries.is_empty() => check_delivery_task_result(joined)?,
                 next = tokio::time::timeout_at(expires, messages.next()) => match next {
                     Ok(Some(Ok(message))) => {
                         if remaining == slots {
@@ -533,7 +533,7 @@ enum BatchEnd {
 }
 
 /// A delivery task that panicked or was cancelled ends the consumer.
-fn reaped(
+fn check_delivery_task_result(
     joined: Option<Result<Result<(), ConsumerError>, JoinError>>,
 ) -> Result<(), ConsumerError> {
     match joined {

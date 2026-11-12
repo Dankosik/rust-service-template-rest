@@ -29,8 +29,7 @@ pub const DEAD_LETTER_REASON: &str = "Dead-Letter-Reason";
 pub(crate) const NATIVE_HEADER_LIMIT_BYTES: usize = 65_535;
 /// The longest identity header value: message and publication ID, event type.
 pub(crate) const IDENTITY_MAX_BYTES: usize = 256;
-/// Hex digits of a SHA-256 digest.
-const DIGEST_HEX_LEN: usize = 64;
+const SHA256_HEX_LEN: usize = 64;
 /// The `NATS/1.0` status line and the blank line that ends a header block.
 const HEADER_PREAMBLE_BYTES: usize = "NATS/1.0\r\n\r\n".len();
 
@@ -255,6 +254,9 @@ pub(crate) fn validate_outbound_identity(value: &str) -> Result<(), EnvelopeErro
     Ok(())
 }
 
+/// JSON Schema spelling of the control-character rule in [`valid_identity`].
+pub(crate) const IDENTITY_SCHEMA_PATTERN: &str = "^[^\\u0000-\\u001F\\u007F-\\u009F]*$";
+
 /// Whether `value` is 1..=[`IDENTITY_MAX_BYTES`] bytes without a control character. `Cc` is
 /// U+0000..=U+001F and U+007F..=U+009F; in UTF-8 the last range is 0x7F or
 /// 0xC2 followed by 0x80..=0x9F, so no character needs decoding.
@@ -339,7 +341,7 @@ fn parse_timestamp(value: &str) -> Result<OffsetDateTime, EnvelopeError> {
 /// `prefix` followed by the lowercase hex of a SHA-256 digest.
 #[must_use]
 pub fn prefixed_digest_hex(prefix: &str, digest: &[u8; 32]) -> String {
-    let mut id = String::with_capacity(prefix.len() + DIGEST_HEX_LEN);
+    let mut id = String::with_capacity(prefix.len() + SHA256_HEX_LEN);
     id.push_str(prefix);
     id.push_str(const_hex::Buffer::<32>::new().format(digest));
     id
