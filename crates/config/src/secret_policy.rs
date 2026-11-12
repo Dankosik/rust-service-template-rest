@@ -22,6 +22,13 @@ pub(crate) fn is_secret_like_key(key: &str) -> bool {
         return false;
     }
     // template:end oidc-jwt:secret-policy-token-profile-exception
+    // template:begin object-storage:secret-policy-credentials-exception
+    // It selects how credentials are obtained, not a credential; only this
+    // exact key is exempt, so `messaging.credentials` stays secret-like.
+    if lowered == "object_storage.credentials" {
+        return false;
+    }
+    // template:end object-storage:secret-policy-credentials-exception
     let segments: Vec<&str> = lowered
         .split(['.', '_', '-'])
         .filter(|segment| !segment.is_empty())
@@ -118,6 +125,9 @@ mod tests {
             "cache.key_prefix",
             "cache.client_key_path",
             "object_storage.access_key_id",
+            // template:begin object-storage:secret-policy-credentials-vector
+            "object_storage.credentials",
+            // template:end object-storage:secret-policy-credentials-vector
             "keyboard.layout",
             // template:begin service-auth:secret-policy-service-auth-public-vector
             "service_auth.key_id",

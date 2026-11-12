@@ -1427,6 +1427,7 @@
       {"path": ".dockerignore", "id": "dockerignore-object-storage-vendor"},
       {"path": "build/docker/Dockerfile", "id": "docker-object-storage-vendor"},
       {"path": "crates/config/src/lib.rs", "ids": ["config-module", "config-export", "config-field", "config-validate"]},
+      {"path": "crates/config/src/secret_policy.rs", "ids": ["secret-policy-credentials-exception", "secret-policy-credentials-vector"]},
       {"path": "crates/service/Cargo.toml", "ids": ["service-object-storage-dependency"]},
       {"path": "crates/service/src/bootstrap/mod.rs", "ids": ["service-bootstrap-object-storage-errors", "service-bootstrap-object-storage-startup", "service-bootstrap-object-storage-module"]},
       {"path": "crates/service/src/bootstrap/telemetry.rs", "ids": ["service-bootstrap-object-storage-histogram"]},
