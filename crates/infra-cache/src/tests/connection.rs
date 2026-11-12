@@ -912,6 +912,86 @@ async fn caller_cutoff_bounds_connection_acquisition() {
 }
 
 #[tokio::test]
+async fn acknowledged_write_keeps_its_result_after_disconnect() {
+    let server = FakeServer::start().await;
+    let cache = Cache::start(CacheOptions {
+        command_timeout: Duration::from_secs(10),
+        ..options(&format!("redis://{}", server.address), true, true, None)
+    })
+    .expect("start cache");
+    let namespace = cache.namespace("acknowledged_write");
+    assert_eq!(namespace.get("ready").await, Ok(None));
+    let write = namespace.set("key", b"value", Duration::from_secs(10));
+    tokio::pin!(write);
+    assert!(poll_once(write.as_mut()).await.is_pending());
+    server
+        .wait_for(Duration::from_secs(1), "SET was not sent", || {
+            server.command_count("SET", Some("acknowledged_write:key")) == 1
+        })
+        .await;
+    // A later reply on the same FIFO connection proves the driver delivered SET.
+    assert_eq!(namespace.get("fence").await, Ok(None));
+    let old = server.connections();
+    assert_eq!(old, 1);
+    server.hang_up();
+    server
+        .wait_for(Duration::from_secs(5), "cache did not reconnect", || {
+            server.connections() > old
+        })
+        .await;
+
+    assert_eq!(write.await, Ok(()));
+}
+
+#[tokio::test]
+async fn cancelling_a_read_with_a_ready_reply_keeps_the_connection() {
+    use operation_context::OperationContext;
+
+    let server = FakeServer::start().await;
+    let cache = Cache::start(CacheOptions {
+        command_timeout: Duration::from_secs(2),
+        ..options(&format!("redis://{}", server.address), true, true, None)
+    })
+    .expect("start cache");
+    let namespace = cache.namespace("cancel_ready_read");
+    assert_eq!(namespace.get("ready").await, Ok(None));
+    let context = OperationContext::unbounded();
+    let read = namespace.get_with_context("key", &context);
+    tokio::pin!(read);
+    assert!(poll_once(read.as_mut()).await.is_pending());
+    server
+        .wait_for(Duration::from_secs(1), "GET was not sent", || {
+            server.command_count("GET", Some("cancel_ready_read:key")) == 1
+        })
+        .await;
+    assert_eq!(namespace.get("fence").await, Ok(None));
+
+    context.cancel();
+    assert_eq!(read.await, Err(crate::Unavailable));
+    assert_eq!(namespace.get("live").await, Ok(None));
+    assert_eq!(server.connections(), 1);
+}
+
+#[test]
+fn probe_reports_the_exit_of_a_supervisor_that_never_ran() {
+    use health::Probe;
+
+    // admitted() enters and then drops a current-thread runtime without driving it.
+    let cache = admitted("redis://127.0.0.1:6379", true, true);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("probe runtime");
+    runtime.block_on(async {
+        let error = tokio::time::timeout(Duration::from_secs(1), cache.probe().check())
+            .await
+            .expect("probe must observe the supervisor exit")
+            .expect_err("the supervisor cannot dial");
+        assert_eq!(error.to_string(), "cache ping failed: io");
+    });
+}
+
+#[tokio::test]
 async fn cancellation_after_write_dispatch_retires_once_without_replay() {
     use operation_context::OperationContext;
 
