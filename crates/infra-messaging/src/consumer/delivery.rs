@@ -187,12 +187,9 @@ impl DeliveryHandler {
         }
     }
 
-    /// Runs the handler for one delivery and settles it when the delivery
-    /// carries `JetStream` metadata. A handler failure stays with the
-    /// delivery: it is logged, counted and retried by the broker. Without
-    /// metadata the attempt count and deterministic dead-letter identity are
-    /// unavailable, so the delivery is logged and left unacknowledged for
-    /// ack-wait redelivery.
+    /// Leaves a delivery unacknowledged when its `JetStream` metadata cannot
+    /// establish the attempt count and deterministic dead-letter identity.
+    /// The broker can redeliver it when the acknowledgment wait expires.
     pub(super) async fn handle(
         &self,
         message: Message,
@@ -202,9 +199,6 @@ impl DeliveryHandler {
             let attempt = usize::try_from(info.delivered).ok()?;
             Some((info, attempt))
         }) else {
-            // The attempt count and deterministic dead-letter identity both
-            // need delivery metadata; leave the delivery for ack-wait
-            // redelivery.
             tracing::warn!(
                 subject = message.subject.as_str(),
                 "messaging_delivery_metadata_missing"
