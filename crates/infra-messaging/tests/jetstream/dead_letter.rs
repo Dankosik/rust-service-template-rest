@@ -545,6 +545,19 @@ async fn oversized_source_message_is_dead_lettered_without_invoking_the_handler(
     );
     assert_eq!(handler_calls.load(Ordering::SeqCst), 0);
     wait_for_source_ack(&fixture).await;
+    let next = infra_messaging::PreparedEvent::prepare(
+        fixture.subject.clone(),
+        &event_with_value("event-after-oversized", "ok"),
+        32,
+    )
+    .expect("ordinary event fits the reduced limit");
+    let ack = messaging
+        .producer()
+        .publish(&next, &context(deadline(), &cancel))
+        .await
+        .expect("ordinary event publishes after the oversized record is settled");
+    wait_for_source_ack_at_least(&fixture, ack.sequence).await;
+    assert_eq!(handler_calls.load(Ordering::SeqCst), 1);
     handle
         .finish(deadline())
         .await

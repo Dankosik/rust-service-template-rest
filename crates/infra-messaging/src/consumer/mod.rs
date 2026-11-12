@@ -345,7 +345,9 @@ impl Consumer {
                         return Err(ConsumerError::ConsumerLost);
                     }
                     pull_failed("batch_receive", MAX_BYTES_EXCEEDED);
-                    if max_bytes >= self.retained_pull_bytes {
+                    // Only a single-message pull can rule out a 409 caused by
+                    // records already allocated to the batch.
+                    if retained {
                         return Err(ConsumerError::RetainedMessageTooLarge);
                     }
                     retained = true;
