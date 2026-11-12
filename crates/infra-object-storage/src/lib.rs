@@ -57,7 +57,7 @@ pub use self::download::Download;
 use self::error::{Call, Failure, LocalFailure};
 pub use self::error::{ConfigError, ObjectStorageError};
 pub use self::key::{InvalidObjectKey, ObjectKey};
-pub use self::observe::{HISTOGRAMS, OPERATION_DURATION_BUCKETS, OPERATION_DURATION_METRIC};
+pub use self::observe::HISTOGRAMS;
 use self::observe::{Histograms, Operation, OperationGuard};
 pub use self::provider::Provider;
 use self::response_limit::ResponseLimit;
@@ -332,10 +332,10 @@ impl ObjectStorage {
             .checksum
             .applies_to(&body.source)
             .then_some(ChecksumAlgorithm::Crc64Nvme);
-        let call = if options.create_only {
-            Call::CreateOnly
+        let (call, if_none_match) = if options.create_only {
+            (Call::CreateOnly, Some("*".to_owned()))
         } else {
-            Call::UnconditionalMutation
+            (Call::UnconditionalMutation, None)
         };
         // Under the client's `WhenRequired` the SDK sends the named
         // algorithm but computes no checksum value. An upload that carries
@@ -355,7 +355,7 @@ impl ObjectStorage {
             .body(body.stream)
             .set_content_type(options.content_type.map(ContentType::into_string))
             .set_checksum_algorithm(checksum)
-            .set_if_none_match(options.create_only.then(|| "*".to_owned()))
+            .set_if_none_match(if_none_match)
             .set_expected_bucket_owner(self.inner.expected_bucket_owner.clone())
             .customize()
             .config_override(call_config)
@@ -389,8 +389,10 @@ impl ObjectStorage {
     /// # Errors
     ///
     /// `NotFound` when the key is absent; `TooLarge` when the stored object
-    /// exceeds `max_object_bytes`; `Integrity` for a range or unsized
-    /// response; otherwise `Busy`, `Unavailable`, or `Rejected`.
+    /// exceeds `max_object_bytes`; `Integrity` for a range response or a
+    /// missing or negative size; otherwise `Busy`, `Unavailable`, or
+    /// `Rejected`. This call reads a zero-length object's body through EOF,
+    /// so a body length or checksum mismatch can also return `Integrity`.
     pub async fn get(&self, key: &ObjectKey) -> Result<Download, ObjectStorageError> {
         self.get_with_context(key, &OperationContext::unbounded())
             .await

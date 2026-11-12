@@ -40,7 +40,8 @@ pub enum ObjectStorageError {
     #[error("object storage mutation outcome is unknown")]
     OutcomeUnknown,
     /// A checksum mismatch detected by the SDK, a range or unsized response,
-    /// or a body whose length differs from its declared size. Absent or skipped checksums do not produce this error.
+    /// or a download body whose length differs from its declared size.
+    /// Absent or skipped checksums do not produce this error.
     #[error("object storage integrity check failed")]
     Integrity,
 }
