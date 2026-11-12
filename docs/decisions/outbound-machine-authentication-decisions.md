@@ -196,17 +196,19 @@ cutoff; one clock governs every expiry decision. A representable positive expiry
 is `acquisition_start + expires_in`; zero, already elapsed, and unrepresentable
 expiry are invalid. The reuse cutoff is `expiry - 10s`; a token already inside
 that margin serves only the request that fetched it. Omitted expiry is likewise
-request-only and never cached. A reused token is always before its cutoff, so
-dispatch needs no second expiry check. There is no fallback to a prior token.
+request-only. A reused token is always before its cutoff, so dispatch needs
+no second expiry check. A foreground miss never falls back to a prior token.
+A background refresh that returns a request-only token keeps the current entry
+usable until its cutoff or rejection.
 
-A resource 401 evicts the token that request used when its token request
-started at least thirty seconds ago, removing it only while it is
-still the cached value (`Arc::ptr_eq`), so a concurrently acquired replacement
-survives. The response is returned without replay; the next operation acquires
-anew. This follows Spring Security's authorization-failure handler rather than
-Go's keep-until-expiry, so a revoked or rotated token does not fail every call
-until its provider lifetime ends. A 403 is a permission result and keeps the
-token.
+A resource 401 stops reuse of the token that request used when its token
+request started at least thirty seconds ago. HTTP observes the status before
+the bounded body read, so an oversized or broken body preserves its resource
+error and still stops token reuse. Rejection marks that token instance so a
+replacement for the same subject survives concurrent calls. The next operation
+can acquire a new token, and the rejected call is never replayed. This keeps
+a revoked or rotated token from failing every call until its provider lifetime
+ends. A 403 is a permission result and keeps the token.
 The ten-second rule is a refresh preference, never a minimum accepted token TTL.
 
 Exchanged tokens use the same `Token` and cutoff in a Moka cache keyed by the
@@ -214,9 +216,10 @@ subject token's SHA-256 digest. It retains a settled best effort of both the
 configured entry count and 16 MiB of Bearer-token bytes through weighted
 entries. This does not claim strict memory admission or RSS control: eviction
 can lag concurrent inserts, active calls retain values, and keys, metadata and
-allocator overhead remain. A Moka hit still needs the Tokio-clock reuse check;
-a stale hit is removed and exchanged once more. A fresh short-lived token serves
-the request that fetched it; omitted expiry never stores it. The shared exchange
+allocator overhead remain. A Moka hit still needs the Tokio-clock reuse check.
+Conditional initialization coalesces replacements for expired or rejected tokens.
+Request-only tokens and failed results expire immediately in Moka. The
+initializer may use a fresh request-only token for its own call. The shared exchange
 belongs to the first caller's future and its deadline; if that caller cancels,
 a waiter starts its own. Exchange failures are coalesced only for concurrent
 waiters and are never persisted as a negative cache. Exchanges for different
@@ -339,9 +342,11 @@ publication is implied by template proof.
 <!-- template:end outbound-auth:docs-outbound-machine-authentication-decisions -->
 
 <!-- template:begin outbound-auth-grpc:docs-oauth-grpc-decision -->
-The concrete gRPC binding stays inside `Credentials`. It injects one bearer,
-does not replay, and evicts only from the initial `UNAUTHENTICATED` status or
-HTTP 401 without `grpc-status`. An acquisition failure that may pass unchanged
+The concrete gRPC binding stays inside `Credentials`. The existing response
+owner reports `UNAUTHENTICATED` from initial headers or polled terminal
+trailers, and HTTP 401 when the initial headers omit `grpc-status`.
+The binding applies the same token reuse rule as HTTP without replay.
+An acquisition failure that may pass unchanged
 later (local `AtCapacity`, transport, provider 5xx or 429, a provider silent
 past the five-second attempt) is `UNAVAILABLE`;
 the caller's expired deadline is `DEADLINE_EXCEEDED`; a caller or lifecycle

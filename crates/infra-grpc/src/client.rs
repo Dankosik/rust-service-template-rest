@@ -14,7 +14,7 @@ use tracing::Instrument as _;
 use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
 
 use crate::Error;
-use crate::call::{Held, ResponseCustody, Side};
+use crate::call::{Held, ResponseCustody, ResponseStatusObserver, Side};
 use operation_context::{Deadline, OperationContext};
 use shared_rules::error_chain::DisplayErrorChain;
 use tokio::time::Instant;
@@ -291,6 +291,28 @@ impl PreparedCall {
     /// # Errors
     /// Returns the existing deadline, cancellation, or transport status.
     pub async fn send(self) -> Result<Response<Body>, tonic::Status> {
+        self.send_inner(None).await
+    }
+
+    /// Like [`Self::send`], with a synchronous callback for the peer status.
+    /// It runs once when the status is observed, either at response headers
+    /// or when the caller polls the terminal trailers. Locally generated
+    /// failures and abandoned bodies without an observed status skip it.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::send`].
+    pub async fn send_with_response_status(
+        self,
+        on_status: impl FnOnce(tonic::Code) + Send + 'static,
+    ) -> Result<Response<Body>, tonic::Status> {
+        self.send_inner(Some(Box::new(on_status))).await
+    }
+
+    async fn send_inner(
+        self,
+        on_status: Option<ResponseStatusObserver>,
+    ) -> Result<Response<Body>, tonic::Status> {
         let Self {
             mut channel,
             request,
@@ -330,6 +352,7 @@ impl PreparedCall {
                 call,
                 None,
                 ResponseCustody {
+                    on_status,
                     context: Some(lifetime),
                     held: Held {
                         permit: None,

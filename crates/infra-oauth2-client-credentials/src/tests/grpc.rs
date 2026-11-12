@@ -203,6 +203,7 @@ async fn serve_connection(stream: tokio::net::TcpStream, peer: Peer) {
 
 struct GatedTrailers {
     release: Pin<Box<dyn Future<Output = ()> + Send>>,
+    status: http::HeaderValue,
     finished: bool,
 }
 
@@ -222,7 +223,7 @@ impl hyper::body::Body for GatedTrailers {
         }
         self.finished = true;
         let mut trailers = http::HeaderMap::new();
-        trailers.insert("grpc-status", "0".parse().unwrap());
+        trailers.insert("grpc-status", self.status.clone());
         Poll::Ready(Some(Ok(hyper::body::Frame::trailers(trailers))))
     }
 }
@@ -233,10 +234,16 @@ async fn route(request: HyperRequest<Incoming>, peer: Peer) -> HyperResponse<Bod
         if let Some(timeout) = infra_grpc::grpc_timeout(request.headers()) {
             peer.timeouts.lock().unwrap().push(timeout);
         }
+        let status = request
+            .headers()
+            .get("x-fixture-grpc-status")
+            .cloned()
+            .unwrap_or_else(|| http::HeaderValue::from_static("0"));
         return HyperResponse::builder()
             .header("content-type", "application/grpc")
             .body(Body::new(GatedTrailers {
                 release: Box::pin(async move { peer.wait_to_answer().await }),
+                status,
                 finished: false,
             }))
             .unwrap();
@@ -687,6 +694,62 @@ async fn trailers_only_unauthenticated_evicts_without_replay_and_permission_deni
         );
         assert_eq!(resource.calls(), before_calls + 2);
     }
+    resource.finish().await;
+    tokens.finish().await;
+}
+
+#[tokio::test]
+async fn unauthenticated_in_terminal_trailers_evicts_without_replay() {
+    let tokens = Fixture::new().await;
+    let resource = Resource::new().await;
+    let credentials = tokens.credentials(&[], None);
+    warm_and_age(&credentials).await;
+    let channel = Client::try_new(
+        &format!("http://{}", resource.address),
+        ClientSecurity::Plaintext,
+        Duration::from_secs(10),
+    )
+    .unwrap();
+    let mut client = credentials.grpc(channel);
+    let mut response = client
+        .call(
+            http::Request::post("/budget-stream")
+                .header("content-type", "application/grpc")
+                .header("x-fixture-grpc-status", "16")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(!response.headers().contains_key("grpc-status"));
+    resource.release();
+    let frame = tokio::time::timeout(
+        Duration::from_secs(2),
+        poll_fn(|cx| hyper::body::Body::poll_frame(Pin::new(response.body_mut()), cx)),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .unwrap();
+    assert_eq!(frame.trailers_ref().unwrap()["grpc-status"], "16");
+    assert_eq!(resource.calls(), 1);
+    assert_eq!(tokens.token_requests().len(), 1);
+
+    tokens.token_json(
+        "200 OK",
+        &serde_json::json!({"access_token": "replacement", "token_type": "Bearer", "expires_in": 60}),
+    );
+    resource
+        .client(&credentials)
+        .unary(rpc(UnaryRequest::default(), Duration::from_secs(10)))
+        .await
+        .unwrap();
+    assert_eq!(resource.calls(), 2);
+    assert_eq!(tokens.token_requests().len(), 2);
+    assert_eq!(
+        resource.authorizations().last().unwrap(),
+        "Bearer replacement"
+    );
     resource.finish().await;
     tokens.finish().await;
 }

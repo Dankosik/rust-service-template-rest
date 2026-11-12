@@ -1,4 +1,7 @@
-use std::time::Duration;
+use std::{
+    sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
+};
 
 use http::HeaderValue;
 use tokio::time::Instant;
@@ -7,7 +10,7 @@ use crate::AcquisitionError;
 
 /// A token stops being reused this long before it expires, as in Go's `oauth2`.
 const REUSE_MARGIN: Duration = Duration::from_secs(10);
-/// A resource 401 evicts only a token at least this old. The provider would
+/// A resource rejection evicts only a token at least this old. The provider would
 /// answer a younger one with the same token, so a resource that refuses every
 /// token costs one token request per this period, not one per call.
 pub(crate) const EVICTION_MIN_AGE: Duration = Duration::from_secs(30);
@@ -19,7 +22,8 @@ pub(crate) struct Token {
     pub(crate) header: HeaderValue,
     pub(crate) requested_at: Instant,
     /// `None` when the provider gave no lifetime: use only for its requesting call.
-    pub(crate) reuse_until: Option<Instant>,
+    reuse_until: Option<Instant>,
+    rejected: AtomicBool,
 }
 
 impl Token {
@@ -50,6 +54,7 @@ impl Token {
             header,
             requested_at,
             reuse_until,
+            rejected: AtomicBool::new(false),
         })
     }
 
@@ -58,10 +63,18 @@ impl Token {
     }
 
     pub(crate) fn reusable_until(&self, now: Instant) -> Option<Instant> {
-        self.reuse_until.filter(|&until| now < until)
+        self.reuse_until
+            .filter(|&until| now < until && !self.is_rejected())
     }
 
-    pub(crate) fn is_evictable(&self, now: Instant) -> bool {
-        now.saturating_duration_since(self.requested_at) >= EVICTION_MIN_AGE
+    pub(crate) fn is_rejected(&self) -> bool {
+        self.rejected.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn reject(&self) {
+        if Instant::now().saturating_duration_since(self.requested_at) >= EVICTION_MIN_AGE {
+            // Reuse reads this bit alone; no other state is published with it.
+            self.rejected.store(true, Ordering::Relaxed);
+        }
     }
 }

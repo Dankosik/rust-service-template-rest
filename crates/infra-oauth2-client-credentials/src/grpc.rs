@@ -47,9 +47,10 @@ impl Credentials {
     /// [`AuthenticatedClient::require_on_behalf_of`] is set. A caller-supplied
     /// `Authorization` header and a missing required subject are refused as
     /// `INTERNAL` before dispatch. A response carrying
-    /// `grpc-status: UNAUTHENTICATED`, or HTTP 401 without `grpc-status`, evicts
-    /// the token that call used once it is old enough; completed responses are
-    /// returned without replay. The service is always ready, and acquisition
+    /// `grpc-status: UNAUTHENTICATED` in the initial headers or polled trailers,
+    /// or HTTP 401 without `grpc-status`, stops reuse of the token that call
+    /// used once it is at least 30 seconds old. Responses are never replayed.
+    /// The service is always ready, and acquisition
     /// failures map to `DEADLINE_EXCEEDED`, `CANCELLED`, `UNAVAILABLE`, or
     /// `UNAUTHENTICATED` by cause.
     #[must_use]
@@ -86,18 +87,22 @@ impl Service<Request<Body>> for AuthenticatedClient {
         };
         let credentials = self.credentials.clone();
         Box::pin(async move {
-            let acquired = match credentials
+            let token = match credentials
                 .authorize(prepared.headers_mut(), on_behalf_of, &context)
                 .await
             {
-                Ok(acquired) => acquired,
+                Ok(acquired) => Arc::downgrade(&acquired),
                 Err(error) => return Err(prepared.refuse(acquisition_status(error))),
             };
-            let response = prepared.send().await?;
-            if infra_grpc::client_response_code(&response) == Some(Code::Unauthenticated) {
-                credentials.evict_acquired(&acquired).await;
-            }
-            Ok(response)
+            prepared
+                .send_with_response_status(move |code| {
+                    if code == Code::Unauthenticated
+                        && let Some(token) = token.upgrade()
+                    {
+                        token.reject();
+                    }
+                })
+                .await
         })
     }
 }

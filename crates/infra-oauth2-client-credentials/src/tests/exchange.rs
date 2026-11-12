@@ -137,7 +137,7 @@ async fn exchanged_cache_evicts_large_payloads_before_the_entry_target() {
     cache.run_pending_tasks().await;
     let payload = cache
         .iter()
-        .map(|(_, token)| token.header.as_bytes().len())
+        .map(|(_, result)| result.unwrap().header.as_bytes().len())
         .sum::<usize>();
     assert!(
         cache.entry_count() < 33,
