@@ -234,7 +234,7 @@ impl JwtVerifier {
             Err(miss) => miss,
         };
         match self.key_store.refresh_for_signature_miss(&checked).await {
-            SignatureRefresh::Refreshed(key_set) => {
+            SignatureRefresh::NewerSet(key_set) => {
                 key_set.verify(message, signature, kid, algorithm)?;
                 Ok(key_set.generation())
             }

@@ -102,7 +102,7 @@ pub(crate) enum BootstrapError {
     #[error("configuration is invalid: {0}")]
     Config(#[from] service_config::ValidationError),
     // template:begin authn:bootstrap-authn-errors
-    #[error("authentication preparation failed for {mode} {key}: {source}")]
+    #[error("authentication ({mode}, {key}): {source}")]
     AuthenticationPreparation {
         mode: &'static str,
         key: &'static str,

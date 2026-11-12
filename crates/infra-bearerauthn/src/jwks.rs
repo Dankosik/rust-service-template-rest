@@ -148,10 +148,7 @@ impl KeyRejection {
     }
 }
 
-pub(crate) fn parse_key_set(
-    bytes: &[u8],
-    configured: &[JwtAlgorithm],
-) -> Result<KeySet, KeySetFailure> {
+fn parse_key_set(bytes: &[u8], configured: &[JwtAlgorithm]) -> Result<KeySet, KeySetFailure> {
     let JsonObject(raw) =
         serde_json::from_slice::<JsonObject<RawJwks>>(bytes).map_err(|_| KeySetFailure::Parse)?;
     let mut rejected = std::collections::BTreeMap::<KeyRejection, u64>::new();

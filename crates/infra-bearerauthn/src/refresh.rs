@@ -43,7 +43,7 @@ pub(crate) enum SignatureRefresh {
     /// by a fetch that finished after the request, or by one that finished
     /// between that check and the request.
     #[debug("Refreshed(..)")]
-    Refreshed(Arc<KeySet>),
+    NewerSet(Arc<KeySet>),
     /// The last acquisition succeeded and left the caller's checked set installed.
     /// Another fetch is still blocked by the cooldown measured from refresh start.
     NoNewerSet,
@@ -143,7 +143,7 @@ impl KeyStore {
             admission = if state.stopped {
                 Admission::Answer(SignatureRefresh::Unavailable)
             } else if !Arc::ptr_eq(&state.keys, checked) {
-                Admission::Answer(SignatureRefresh::Refreshed(state.keys.clone()))
+                Admission::Answer(SignatureRefresh::NewerSet(state.keys.clone()))
             } else if let Some(ticket) = state.pending() {
                 Admission::Join(ticket)
             } else if state.last_started.elapsed() < REFRESH_COOLDOWN {
@@ -173,7 +173,7 @@ impl KeyStore {
             .await
         {
             Ok(state) if !state.stopped && state.succeeded >= ticket => {
-                SignatureRefresh::Refreshed(state.keys.clone())
+                SignatureRefresh::NewerSet(state.keys.clone())
             }
             _ => SignatureRefresh::Unavailable,
         }
@@ -421,7 +421,7 @@ mod tests {
         let store = Arc::clone(store);
         tokio::spawn(async move {
             match store.refresh_for_signature_miss(&store.current()).await {
-                SignatureRefresh::Refreshed(keys) => Some(keys.has_kid("new")),
+                SignatureRefresh::NewerSet(keys) => Some(keys.has_kid("new")),
                 SignatureRefresh::NoNewerSet => None,
                 SignatureRefresh::Unavailable => Some(false),
             }
@@ -617,7 +617,7 @@ mod tests {
         store.finish(1, Ok(key_set("new")));
         assert_eq!(rotation.await.unwrap(), Some(true));
         // The token missed in the old set while that fetch was finishing.
-        let SignatureRefresh::Refreshed(keys) = store.refresh_for_signature_miss(&checked).await
+        let SignatureRefresh::NewerSet(keys) = store.refresh_for_signature_miss(&checked).await
         else {
             panic!("the newer installed set must be offered");
         };
@@ -637,8 +637,8 @@ mod tests {
         );
         let after_failure = store.refresh_for_signature_miss(&checked).await;
 
-        assert_matches!(during_fetch, Some(SignatureRefresh::Refreshed(keys)) if keys.has_kid("new"));
-        assert_matches!(after_failure, SignatureRefresh::Refreshed(keys) if keys.has_kid("new"));
+        assert_matches!(during_fetch, Some(SignatureRefresh::NewerSet(keys)) if keys.has_kid("new"));
+        assert_matches!(after_failure, SignatureRefresh::NewerSet(keys) if keys.has_kid("new"));
     }
 
     #[tokio::test]
