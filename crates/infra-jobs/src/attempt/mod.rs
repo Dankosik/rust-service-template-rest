@@ -490,23 +490,26 @@ async fn drive(
     supervisor_deadline: Instant,
 ) -> Option<Ended> {
     let mut handler = OwnedHandler(Some(future));
-    // Preparation can consume the attempt's budget before the first handler poll.
-    let now = Instant::now();
-    if now >= supervisor_deadline || cleanup.has_ended() {
-        cancel.cancel();
-        return None;
-    }
-    if now >= attempt_deadline {
-        cancel.cancel();
-        return Some(Ended::Timeout);
-    }
     let reason = {
         // Borrow through the poll boundary; the owner contains destruction as well.
         let mut run =
             std::pin::pin!(std::panic::AssertUnwindSafe(handler.0.as_mut()?).catch_unwind());
+        let admitted = async {
+            // Preparation can consume the attempt's budget before its first poll.
+            let now = Instant::now();
+            if now >= supervisor_deadline || cleanup.has_ended() {
+                cancel.cancel();
+                return None;
+            }
+            if now >= attempt_deadline {
+                cancel.cancel();
+                return Some(Ended::Timeout);
+            }
+            Some(ended_from(run.as_mut().await))
+        };
         let reason = tokio::select! {
             biased;
-            result = &mut run => return Some(ended_from(result)),
+            ended = admitted => return ended,
             () = cleanup.forced() => Ended::Cancelled,
             () = tokio::time::sleep_until(attempt_deadline) => Ended::Timeout,
         };
