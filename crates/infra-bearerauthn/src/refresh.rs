@@ -249,7 +249,7 @@ pub(crate) async fn run_refresh_worker(
             let replacement = tokio::select! {
                 biased;
                 () = cancel.cancelled() => break 'worker,
-                replacement = fetch_key_set(&provider, &jwks_uri, &algorithms) => replacement,
+                replacement = fetch_key_set(&provider, &jwks_uri, &algorithms, None) => replacement,
             };
             store.finish(ticket, replacement);
         }

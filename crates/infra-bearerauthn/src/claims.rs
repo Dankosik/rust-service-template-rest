@@ -1,6 +1,8 @@
 //! Typed claim decoding and application identity normalization.
 
-use crate::{Actor, Identity, PreparationError, Principal, VerificationError, VerificationReason};
+use crate::{
+    Actor, Identity, JsonObject, PreparationError, Principal, VerificationError, VerificationReason,
+};
 use serde::Deserialize;
 use std::{borrow::Cow, fmt};
 // template:begin oidc-jwt:authn-claims-jwt-import
@@ -77,10 +79,8 @@ impl<'de: 'a, 'a> Deserialize<'de> for Values<'a> {
 #[derive(Deserialize)]
 struct BorrowableString<'a>(#[serde(borrow)] Cow<'a, str>);
 
-/// The outermost RFC 8693 `act` object, shared by JWT and introspection
-/// evidence. A non-object `act` fails to deserialize, which the caller reads
-/// as malformed claims; `sub` and `client_id` accept only string values, and
-/// any other member, including a nested `act`, is ignored.
+/// The outermost RFC 8693 `act` object. Both engines treat a missing or null
+/// claim as absent and ignore nested actors.
 #[derive(Deserialize)]
 struct RawAct<'a> {
     #[serde(borrow)]
@@ -144,7 +144,7 @@ pub(crate) struct JwtClaims<'a> {
     jti: Option<Cow<'a, str>>,
     iat: Option<NumericDate>,
     #[serde(borrow)]
-    act: Option<RawAct<'a>>,
+    act: Option<JsonObject<RawAct<'a>>>,
 }
 // template:end oidc-jwt:authn-claims-jwt-type
 
@@ -173,7 +173,7 @@ struct ActiveClaims<'a> {
     #[serde(borrow)]
     scp: Option<Values<'a>>,
     #[serde(borrow)]
-    act: Option<RawAct<'a>>,
+    act: Option<JsonObject<RawAct<'a>>>,
 }
 // template:end oidc-introspection:authn-claims-introspection-envelope
 
@@ -191,8 +191,8 @@ pub(crate) fn validate_jwt_claims(
     let invalid = VerificationError::invalid;
     let payload =
         String::from_utf8(payload).map_err(|_| invalid(VerificationReason::MalformedClaims))?;
-    let claims: JwtClaims<'_> =
-        serde_json::from_str(&payload).map_err(|_| invalid(VerificationReason::MalformedClaims))?;
+    let JsonObject(claims) = serde_json::from_str::<JsonObject<JwtClaims<'_>>>(&payload)
+        .map_err(|_| invalid(VerificationReason::MalformedClaims))?;
     let (Some(issuer), Some(audience), Some(NumericDate(expiry))) =
         (claims.iss, claims.aud, claims.exp)
     else {
@@ -219,7 +219,7 @@ pub(crate) fn validate_jwt_claims(
         .map_err(|()| invalid(VerificationReason::Scope))?;
     let actor = claims
         .act
-        .map(RawAct::into_actor)
+        .map(|JsonObject(actor)| actor.into_actor())
         .transpose()
         .map_err(|()| invalid(VerificationReason::MalformedClaims))?;
     Ok(Principal::new(
@@ -324,7 +324,8 @@ pub(crate) fn validate_introspection_claims(
         .trim_matches([' ', '\t', '\r', '\n']);
     // Decode active claims separately so an inactive response may omit them or
     // give them other shapes; unreadable active evidence is unavailable trust.
-    let envelope: Envelope = serde_json::from_str(payload).map_err(|_| malformed())?;
+    let JsonObject(envelope) =
+        serde_json::from_str::<JsonObject<Envelope>>(payload).map_err(|_| malformed())?;
     if !envelope.active {
         return Err(invalid(VerificationReason::Inactive));
     }
@@ -346,7 +347,7 @@ pub(crate) fn validate_introspection_claims(
         .map_err(|()| VerificationError::unavailable(VerificationReason::Scope))?;
     let actor = claims
         .act
-        .map(RawAct::into_actor)
+        .map(|JsonObject(actor)| actor.into_actor())
         .transpose()
         .map_err(|()| malformed())?;
     Ok(VerifiedIntrospection {
@@ -433,6 +434,21 @@ impl Scopes {
 mod tests {
     use super::ClaimPolicy;
     use crate::{Failure, VerificationReason};
+
+    #[test]
+    fn json_object_requires_named_members() {
+        #[derive(serde::Deserialize)]
+        struct Metadata<'a> {
+            #[serde(borrow)]
+            label: &'a str,
+        }
+
+        let super::JsonObject(metadata) =
+            serde_json::from_str::<super::JsonObject<Metadata<'_>>>(r#"{"label":"example"}"#)
+                .unwrap();
+        assert_eq!(metadata.label, "example");
+        assert!(serde_json::from_str::<super::JsonObject<Metadata<'_>>>(r#"["example"]"#).is_err());
+    }
     // template:begin oidc-jwt:authn-claims-jwt-test-imports
     use super::validate_jwt_claims;
     use crate::TokenProfile;

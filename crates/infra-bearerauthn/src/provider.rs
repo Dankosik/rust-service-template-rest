@@ -202,6 +202,7 @@ impl ProviderClient {
         &self,
         url: &Url,
         document: Document,
+        deadline: Option<tokio::time::Instant>,
     ) -> Result<Vec<u8>, ProviderFailure> {
         let require_json_content_type = false;
         Exchange::start(document.operation(), "GET", url)
@@ -209,6 +210,7 @@ impl ProviderClient {
                 self.client.get(url.clone()),
                 require_json_content_type,
                 None,
+                deadline,
             )
             .await
     }
@@ -239,7 +241,7 @@ impl ProviderClient {
             .body(form_body);
         context.check().map_err(|_| ProviderFailure::Timeout)?;
         let result = Exchange::start("introspection", "POST", url)
-            .run(request, true, Some(context))
+            .run(request, true, Some(context), None)
             .await;
         context.check().map_err(|_| ProviderFailure::Timeout)?;
         result
@@ -307,6 +309,7 @@ impl Exchange {
         request: reqwest::RequestBuilder,
         require_json_content_type: bool,
         context: Option<&operation_context::OperationContext>,
+        deadline: Option<tokio::time::Instant>,
     ) -> Result<Vec<u8>, ProviderFailure> {
         let receive = receive(request, require_json_content_type).instrument(self.span.clone());
         let result = if let Some(context) = context {
@@ -316,6 +319,10 @@ impl Exchange {
                 () = tokio::time::sleep(PROVIDER_TIMEOUT) => Err(ProviderFailure::Timeout),
                 result = receive => result,
             }
+        } else if let Some(deadline) = deadline {
+            tokio::time::timeout_at(deadline, receive)
+                .await
+                .unwrap_or(Err(ProviderFailure::Timeout))
         } else {
             receive.await
         };
@@ -709,6 +716,7 @@ mod tests {
                 client.client.get(url.clone()),
                 false,
                 None,
+                None,
             ),
         )
         .await
@@ -719,7 +727,7 @@ mod tests {
 
         tokio::time::resume();
         let body = Exchange::start("discovery", "GET", &url)
-            .run(client.client.get(url.clone()), false, None)
+            .run(client.client.get(url.clone()), false, None, None)
             .await
             .unwrap();
         assert_eq!(body, b"{}");
@@ -763,14 +771,14 @@ mod tests {
         let url = Url::parse(&format!("https://{FIXTURE_HOST}/keys")).unwrap();
         assert_eq!(
             Exchange::start("jwks", "GET", &url)
-                .run(old_client.client.get(url.clone()), false, None)
+                .run(old_client.client.get(url.clone()), false, None, None)
                 .await
                 .unwrap(),
             b"{}"
         );
         assert_eq!(
             Exchange::start("jwks", "GET", &url)
-                .run(old_client.client.get(url.clone()), false, None)
+                .run(old_client.client.get(url.clone()), false, None, None)
                 .await,
             Err(ProviderFailure::Connect)
         );
@@ -783,7 +791,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             Exchange::start("jwks", "GET", &url)
-                .run(rebuilt_client.client.get(url.clone()), false, None)
+                .run(rebuilt_client.client.get(url.clone()), false, None, None)
                 .await
                 .unwrap(),
             b"{}"
@@ -813,7 +821,7 @@ mod tests {
             ))
             .unwrap();
             let body = fixture_client(address, &root)
-                .get_document(endpoint.url(), Document::Jwks)
+                .get_document(endpoint.url(), Document::Jwks, None)
                 .await
                 .unwrap();
             assert_eq!(
@@ -833,7 +841,7 @@ mod tests {
         let (address, root, server) = tls_server(oversized, false).await;
         assert_eq!(
             fixture_client(address, &root)
-                .get_document(&fixture_url(address), Document::Jwks)
+                .get_document(&fixture_url(address), Document::Jwks, None)
                 .await,
             Err(ProviderFailure::TooLarge)
         );
@@ -843,7 +851,7 @@ mod tests {
         let (address, root, server) = tls_server(response, false).await;
         assert_eq!(
             fixture_client(address, &root)
-                .get_document(&fixture_url(address), Document::Jwks)
+                .get_document(&fixture_url(address), Document::Jwks, None)
                 .await,
             Err(ProviderFailure::Status(404))
         );
@@ -853,7 +861,7 @@ mod tests {
         let (address, root, server) = tls_server(response, true).await;
         assert_eq!(
             fixture_client(address, &root)
-                .get_document(&fixture_url(address), Document::Jwks)
+                .get_document(&fixture_url(address), Document::Jwks, None)
                 .await,
             Err(ProviderFailure::Timeout),
         );
@@ -935,7 +943,7 @@ mod tests {
         let url = fixture_url(address);
         let request = client.client.get(url.clone());
         let exchange = Exchange::start("discovery", "GET", &url);
-        let pending = tokio::spawn(exchange.run(request, false, None));
+        let pending = tokio::spawn(exchange.run(request, false, None, None));
         tokio::time::timeout(Duration::from_secs(1), received)
             .await
             .unwrap()
@@ -950,7 +958,7 @@ mod tests {
         tokio::time::resume();
 
         let body = Exchange::start("discovery", "GET", &url)
-            .run(client.client.get(url.clone()), false, None)
+            .run(client.client.get(url.clone()), false, None, None)
             .await
             .unwrap();
         assert_eq!(body, b"{}");
