@@ -105,6 +105,32 @@ async fn admission_refuses_unacknowledged_or_volatile_streams_for_the_publishing
 }
 
 #[tokio::test]
+async fn an_explicit_dead_letter_stream_must_receive_the_dead_letter_subject() {
+    let fixture = Fixture::create(false).await;
+    let mut consumer = consumer_options(&fixture);
+    consumer.dlq_subject = fixture.subject.clone();
+    let (_guard, logged) = capture_logs();
+    std::assert_matches!(
+        Box::pin(Messaging::connect(
+            options(&fixture, Some(consumer), 1024),
+            deadline(),
+            CancellationToken::new(),
+        ))
+        .await,
+        Err(infra_messaging::MessagingError::Topology)
+    );
+    assert_eq!(
+        admission_refusals(&logged),
+        [(
+            "dead_letter_subject_mismatch".to_owned(),
+            "9216".to_owned(),
+            None
+        )]
+    );
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
 async fn publisher_admits_explicit_default_persistence_without_a_dead_letter_stream() {
     let fixture = Fixture::create(false).await;
     fixture
@@ -162,7 +188,8 @@ fn encoded_headers(headers: &async_nats::HeaderMap) -> usize {
 
 /// Independent native line encoding, including the replacement publication ID.
 fn transfer_additions(subject: &str, stream: &str) -> usize {
-    format!("Nats-Msg-Id: {}\r\nOriginal-Subject: {subject}\r\nDead-Letter-Reason: permanent\r\nNats-Expected-Stream: {stream}\r\n", "x".repeat(68)).len()
+    let id = "x".repeat(68);
+    format!("Message-Id: {id}\r\nNats-Msg-Id: {id}\r\nOriginal-Subject: {subject}\r\nDead-Letter-Reason: permanent\r\nNats-Expected-Stream: {stream}\r\n").len()
 }
 
 #[tokio::test]

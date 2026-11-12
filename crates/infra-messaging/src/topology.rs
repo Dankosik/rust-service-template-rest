@@ -172,18 +172,30 @@ pub(crate) async fn admit_topology(
         cancel,
     )
     .await?;
-    validate_stream_publication(&dead_letter.cached_info().config)
+    let dead_letter_config = &dead_letter.cached_info().config;
+    validate_stream_publication(dead_letter_config)
         .map_err(|refusal| refusal_failure("dead_letter_stream", refusal, envelope_limit, None))?;
+    if !wire::valid_subject(&consumer.dlq_subject)
+        || !dead_letter_config
+            .subjects
+            .iter()
+            .any(|filter| wire::matches_filter(filter, &consumer.dlq_subject))
+    {
+        return Err(refusal_failure(
+            "dead_letter_stream",
+            Refusal::DeadLetterSubjectMismatch,
+            envelope_limit,
+            None,
+        ));
+    }
     Ok(Some(ConsumerAdmission {
         options: consumer.clone(),
         dead_letter: DeadLetterTopology {
             stream: dead_letter_name,
             source_max_message_bytes,
-            dead_letter_max_message_bytes: usize::try_from(
-                dead_letter.cached_info().config.max_message_size,
-            )
-            .ok()
-            .and_then(NonZeroUsize::new),
+            dead_letter_max_message_bytes: usize::try_from(dead_letter_config.max_message_size)
+                .ok()
+                .and_then(NonZeroUsize::new),
         },
         deadline,
         cancel: cancel.clone(),
@@ -317,6 +329,7 @@ pub(crate) enum Refusal {
     /// the pull budget; the dead-letter stream's must be at least one transfer.
     StreamMessageSize,
     DeadLetterIsSource,
+    DeadLetterSubjectMismatch,
     StreamMemoryStorage,
     StreamAsyncPersistence,
     StreamNoAck,
@@ -335,6 +348,7 @@ impl Refusal {
             Self::StreamMessageSizeUnset => "stream_max_message_size_unset",
             Self::StreamMessageSize => "stream_max_message_size",
             Self::DeadLetterIsSource => "dead_letter_stream_is_source",
+            Self::DeadLetterSubjectMismatch => "dead_letter_subject_mismatch",
             Self::StreamMemoryStorage => "stream_memory_storage",
             Self::StreamAsyncPersistence => "stream_async_persistence",
             Self::StreamNoAck => "stream_no_ack",
@@ -354,6 +368,7 @@ impl Refusal {
             | Self::JetStreamDisabled
             | Self::HeadersUnsupported
             | Self::DeadLetterIsSource
+            | Self::DeadLetterSubjectMismatch
             | Self::StreamMemoryStorage
             | Self::StreamAsyncPersistence
             | Self::StreamNoAck => MessagingError::Topology,

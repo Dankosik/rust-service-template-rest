@@ -1,7 +1,7 @@
 //! Dead-letter transfer and redrive: the headers a transfer adds, the bound
 //! it must fit, its deterministic identity, and restoring the original event.
 
-use async_nats::HeaderMap;
+use async_nats::{HeaderMap, HeaderName};
 use bytes::Bytes;
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
@@ -19,6 +19,7 @@ use crate::observe::{OutcomeLabel as _, outcome_label};
 use crate::prepared::{PreparedEvent, PreparedEventParts};
 
 const DEAD_LETTER_ID_PREFIX: &str = "dlq-";
+const ORIGINAL_ID_PRESENT: HeaderName = HeaderName::from_static("Original-Message-Id-Present");
 
 outcome_label! {
     /// Why a delivery moved to the dead-letter stream; the `Dead-Letter-Reason`
@@ -47,14 +48,18 @@ pub(crate) fn dead_letter_bounds(
         .into_values()
         .max()?;
     let expected_stream = async_nats::header::NATS_EXPECTED_STREAM;
+    let transfer_id_bytes = DEAD_LETTER_ID_PREFIX.len() + DIGEST_HEX_LEN;
+    // The fallback Message-Id line is larger than the mutually exclusive provenance marker.
+    let identity_bytes = checked_header_line_bytes(MESSAGE_ID, transfer_id_bytes)?
+        .max(checked_header_line_bytes(ORIGINAL_ID_PRESENT.as_ref(), 1)?);
     let additions = [
-        (NATS_MSG_ID, DEAD_LETTER_ID_PREFIX.len() + DIGEST_HEX_LEN),
+        (NATS_MSG_ID, transfer_id_bytes),
         (ORIGINAL_SUBJECT, subject_bytes),
         (DEAD_LETTER_REASON, reason_bytes),
         (expected_stream.as_ref(), stream_bytes),
     ]
     .into_iter()
-    .try_fold(0_usize, |bytes, (name, value_bytes)| {
+    .try_fold(identity_bytes, |bytes, (name, value_bytes)| {
         bytes.checked_add(checked_header_line_bytes(name, value_bytes)?)
     })?;
     Some(DeadLetterBounds {
@@ -87,8 +92,11 @@ pub(crate) fn dead_letter_headers(
             headers.insert(header, value);
         }
     }
-    if header_value(&headers, header_name::MESSAGE_ID).is_empty() {
+    let message_id = header_value(&headers, header_name::MESSAGE_ID);
+    if message_id.is_empty() {
         headers.insert(header_name::MESSAGE_ID, transfer_id);
+    } else if message_id == transfer_id {
+        headers.insert(ORIGINAL_ID_PRESENT, "1");
     }
     headers.insert(header_name::NATS_MSG_ID, transfer_id);
     headers.insert(header_name::ORIGINAL_SUBJECT, subject);
@@ -111,17 +119,27 @@ pub struct DeadLetterRecord {
 ///
 /// # Errors
 /// Rejects a record without restorable subject, identity or creation time.
+/// An unmarked legacy transfer ID shared by both identity headers is ambiguous.
 pub fn restore_dead_letter(record: DeadLetterRecord) -> Result<PreparedEvent, EnvelopeError> {
     let subject = header_value(&record.headers, header_name::ORIGINAL_SUBJECT).to_owned();
     if !valid_subject(&subject) {
         return Err(EnvelopeError::DeadLetterSubject);
     }
     let message_id = required_header(&record.headers, header_name::MESSAGE_ID, MESSAGE_ID)?;
-    // Transfer keeps Go's wire and fills an absent `Message-Id` with the
-    // transfer ID, which is also the record's `Nats-Msg-Id`. That value names
-    // the transfer, not the event, so republishing under it would invent a
-    // logical identity.
-    if message_id == header_value(&record.headers, header_name::NATS_MSG_ID) {
+    let stored_publication_id = header_value(&record.headers, header_name::NATS_MSG_ID);
+    // Go and older Rust transfers use their deterministic ID as a fallback
+    // Message-Id. A genuine collision in a new Rust transfer carries provenance.
+    if message_id == stored_publication_id
+        && header_value(&record.headers, ORIGINAL_ID_PRESENT) != "1"
+        && message_id
+            .strip_prefix(DEAD_LETTER_ID_PREFIX)
+            .is_some_and(|digest| {
+                digest.len() == DIGEST_HEX_LEN
+                    && digest
+                        .bytes()
+                        .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+            })
+    {
         return Err(EnvelopeError::DeadLetterMessageIdMissing);
     }
     let event_type = required_header(&record.headers, header_name::EVENT_TYPE, EVENT_TYPE)?;
@@ -139,7 +157,6 @@ pub fn restore_dead_letter(record: DeadLetterRecord) -> Result<PreparedEvent, En
         return Err(EnvelopeError::DeadLetterCreatedAtRequired);
     }
     // Go includes an empty hash component when the stored record has no Nats-Msg-Id.
-    let stored_publication_id = header_value(&record.headers, header_name::NATS_MSG_ID);
     let publication_id = record_id(
         "redrive-",
         &record.stream,
@@ -289,6 +306,27 @@ mod tests {
     fn restore_keeps_the_original_message_id() {
         let restored = restore_dead_letter(transferred_record(&envelope_headers())).unwrap();
         assert_eq!(restored.message_id(), "event-1");
+    }
+
+    #[test]
+    fn restore_accepts_a_genuine_id_shared_with_the_dlq_publication() {
+        let mut external = transferred_record(&envelope_headers());
+        external.headers.insert(header_name::NATS_MSG_ID, "event-1");
+        assert_eq!(
+            restore_dead_letter(external).unwrap().message_id(),
+            "event-1"
+        );
+
+        let mut original = envelope_headers();
+        let transfer_id =
+            dead_letter_id("SOURCE", 7, OffsetDateTime::UNIX_EPOCH, "event-1").unwrap();
+        original.insert(header_name::MESSAGE_ID, transfer_id.as_str());
+        assert_eq!(
+            restore_dead_letter(transferred_record(&original))
+                .unwrap()
+                .message_id(),
+            transfer_id
+        );
     }
 
     #[test]

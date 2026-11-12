@@ -176,6 +176,12 @@ impl AckDroppingRelay {
         Self::start_with_filters(|_, _| false, move |_, payload| drop_reply(payload)).await
     }
 
+    pub(crate) async fn start_filtering_requests(
+        drop_request: impl FnMut(&[u8], &[u8]) -> bool + Send + 'static,
+    ) -> Self {
+        Self::start_with_filters(drop_request, |_, _| false).await
+    }
+
     /// Withholds the first source +ACK request, or its broker confirmation.
     pub(crate) async fn start_source_ack(stream: &str, durable: &str, drop_request: bool) -> Self {
         let identity = format!(".{stream}.{durable}.");
