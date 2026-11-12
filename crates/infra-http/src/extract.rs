@@ -271,7 +271,7 @@ impl PathIssue {
                 let name = match path.iter().next() {
                     Some(Segment::Map { key }) => params
                         .iter()
-                        .find(|(name, _)| name == key.as_str())
+                        .find(|(name, _)| *name == key.as_str())
                         .map(|(name, _)| name),
                     Some(Segment::Seq { index }) => params.iter().nth(*index).map(|(name, _)| name),
                     _ => {
