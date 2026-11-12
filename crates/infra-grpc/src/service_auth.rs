@@ -132,7 +132,7 @@ pub(crate) async fn admit_caller(
     if let Some(outcomes) = outcomes {
         outcomes.admitted.increment(1);
     }
-    tracing::Span::current().set_attribute("peer.service", caller.name().to_string());
+    tracing::Span::current().set_attribute("peer.service", Arc::<str>::from(caller.name().clone()));
     request.extensions_mut().insert::<Caller>(caller);
     request.headers_mut().remove(AUTHORIZATION);
     next.run(request).await
