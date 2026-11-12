@@ -28,8 +28,8 @@ const MAX_REFRESH_SPREAD: Duration = Duration::from_secs(REFRESH_INTERVAL.as_sec
 /// periodic fetch can pick up the rotation.
 ///
 /// Cost: a cooldown miss cannot tell a forged `kid` from a freshly rotated one,
-/// so for up to this long after a fetch starts (startup included) a valid token
-/// signed with a new key gets a non-retryable 401 `invalid_token`. Answering
+/// so for up to this long after a ticket is issued or startup keys are installed,
+/// a valid token signed with a new key gets a non-retryable 401 `invalid_token`. Answering
 /// 503 instead would let any caller turn forged `kid` values into unavailability
 /// signals and client retries; the rotation's own later traffic triggers the
 /// fetch once the cooldown ends.
@@ -45,7 +45,7 @@ pub(crate) enum SignatureRefresh {
     #[debug("NewerSet(..)")]
     NewerSet(Arc<KeySet>),
     /// The last acquisition succeeded and left the caller's checked set installed.
-    /// Another fetch is still blocked by the cooldown measured from refresh start.
+    /// Another fetch is still blocked by the cooldown.
     NoNewerSet,
     Unavailable,
 }
@@ -61,7 +61,7 @@ struct State {
     /// waiter compares it with its own ticket because a later failure may
     /// finish before the waiter is polled.
     succeeded: u64,
-    last_started: Instant,
+    cooldown_started_at: Instant,
     stopped: bool,
 }
 
@@ -75,9 +75,9 @@ impl State {
         self.succeeded != self.finished
     }
 
-    fn start_fetch(&mut self) -> u64 {
+    fn request_fetch(&mut self) -> u64 {
         self.requested += 1;
-        self.last_started = Instant::now();
+        self.cooldown_started_at = Instant::now();
         self.requested
     }
 }
@@ -86,7 +86,7 @@ impl State {
 enum Admission {
     Answer(SignatureRefresh),
     Join(u64),
-    Start(u64),
+    Request(u64),
 }
 
 pub(crate) struct KeyStore {
@@ -104,7 +104,7 @@ impl KeyStore {
             requested: 0,
             finished: 0,
             succeeded: 0,
-            last_started: Instant::now(),
+            cooldown_started_at: Instant::now(),
             stopped: false,
         });
         metrics::describe_gauge!(
@@ -131,14 +131,14 @@ impl KeyStore {
     }
 
     /// Returns a set installed since `checked`, otherwise joins the fetch in
-    /// flight or starts one outside the cooldown.
+    /// flight or requests one outside the cooldown.
     pub(crate) async fn refresh_for_signature_miss(
         &self,
         checked: &Arc<KeySet>,
     ) -> SignatureRefresh {
         let mut admission = Admission::Answer(SignatureRefresh::Unavailable);
         // Inspect the cooldown and claim or join a ticket under the same watch
-        // write lock; only a started fetch modifies the state.
+        // write lock; only issuing a ticket modifies the state.
         self.state.send_if_modified(|state| {
             admission = if state.stopped {
                 Admission::Answer(SignatureRefresh::Unavailable)
@@ -146,21 +146,21 @@ impl KeyStore {
                 Admission::Answer(SignatureRefresh::NewerSet(state.keys.clone()))
             } else if let Some(ticket) = state.pending() {
                 Admission::Join(ticket)
-            } else if state.last_started.elapsed() < REFRESH_COOLDOWN {
+            } else if state.cooldown_started_at.elapsed() < REFRESH_COOLDOWN {
                 Admission::Answer(if state.last_fetch_failed() {
                     SignatureRefresh::Unavailable
                 } else {
                     SignatureRefresh::NoNewerSet
                 })
             } else {
-                Admission::Start(state.start_fetch())
+                Admission::Request(state.request_fetch())
             };
-            matches!(admission, Admission::Start(_))
+            matches!(admission, Admission::Request(_))
         });
         let ticket = match admission {
             Admission::Answer(answer) => return answer,
             Admission::Join(ticket) => ticket,
-            Admission::Start(ticket) => {
+            Admission::Request(ticket) => {
                 self.wake.notify_one();
                 ticket
             }
@@ -184,7 +184,7 @@ impl KeyStore {
             if state.pending().is_some() {
                 return false;
             }
-            state.start_fetch();
+            state.request_fetch();
             true
         });
     }
@@ -226,7 +226,7 @@ impl KeyStore {
     #[cfg(test)]
     pub(crate) fn permit_unknown_refresh_for_test(&self) {
         self.state.send_modify(|state| {
-            state.last_started = Instant::now() - REFRESH_COOLDOWN - Duration::from_secs(1);
+            state.cooldown_started_at = Instant::now() - REFRESH_COOLDOWN - Duration::from_secs(1);
         });
     }
 }
