@@ -34,6 +34,7 @@ pub struct RunOptions<'a> {
     /// Bound on lock, history, and every pending migration after a live
     /// session exists. Connect is not inside this value; a
     /// `-- no-transaction` migration receives the remaining deadline.
+    /// Must fit the monotonic clock's range.
     pub deadline: Duration,
     /// Session `statement_timeout`, and `idle_in_transaction_session_timeout`, of the migration connection.
     pub statement_timeout: Duration,
@@ -81,6 +82,8 @@ pub enum RunError {
     ConnectTimeout(Duration),
     #[error("migration run exceeded the {0:?} deadline")]
     Deadline(Duration),
+    #[error("migration deadline {0:?} exceeds the monotonic clock range")]
+    InvalidDeadline(Duration),
     /// A `-- no-transaction` migration was not started: an interrupted
     /// concurrent build left an index that `IF NOT EXISTS` would keep.
     #[error(
@@ -115,7 +118,7 @@ impl RunError {
             | Self::Migrate(MigrateError::Execute(sqlx::Error::Io(_) | sqlx::Error::Tls(_))) => {
                 "connect"
             }
-            Self::Deadline(_) => "deadline",
+            Self::Deadline(_) | Self::InvalidDeadline(_) => "deadline",
             Self::InvalidIndexes { .. } | Self::Migrate(MigrateError::ExecuteMigration(..)) => {
                 "execute"
             }
@@ -166,6 +169,7 @@ impl RunFailure {
 /// and its history row share one transaction, except a `-- no-transaction`
 /// migration, whose row is written after its statement.
 pub async fn run(migrator: &Migrator, options: &RunOptions<'_>) -> Result<Report, RunFailure> {
+    run_cutoff(options.deadline)?;
     let session = SessionOptions {
         application_name: options.application_name,
         statement_timeout: options.statement_timeout,
@@ -193,7 +197,7 @@ pub async fn run(migrator: &Migrator, options: &RunOptions<'_>) -> Result<Report
             error: RunError::Connect(error),
             report: Report::default(),
         })?;
-    let deadline_at = tokio::time::Instant::now() + options.deadline;
+    let deadline_at = run_cutoff(options.deadline)?;
     // The run owns one progress snapshot shared with the timeout wrapper, so a
     // deadline still reports the migrations that committed before it fired.
     let progress = Mutex::new(Report::default());
@@ -232,6 +236,15 @@ fn report_snapshot(progress: &Mutex<Report>) -> Report {
 
 fn record_progress(progress: &Mutex<Report>, report: &Report) {
     *progress.lock().unwrap_or_else(PoisonError::into_inner) = report.clone();
+}
+
+fn run_cutoff(budget: Duration) -> Result<tokio::time::Instant, RunFailure> {
+    tokio::time::Instant::now()
+        .checked_add(budget)
+        .ok_or_else(|| RunFailure {
+            error: RunError::InvalidDeadline(budget),
+            report: Report::default(),
+        })
 }
 
 /// The `sqlx migrate run` sequence over the [`Migrate`] trait.
@@ -351,6 +364,17 @@ async fn set_session_timeouts(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn an_unrepresentable_migration_deadline_is_refused_before_connecting() {
+        let dsn = Dsn::admit("postgres://app:pw@127.0.0.1:1/app?sslmode=disable").unwrap();
+        let options = RunOptions::defaults(&dsn, "test", Duration::MAX);
+        let failure = run(&crate::MIGRATOR, &options).await.unwrap_err();
+
+        std::assert_matches!(failure.error, RunError::InvalidDeadline(budget) if budget == Duration::MAX);
+        assert_eq!(failure.report.before, None);
+        assert!(failure.report.applied.is_empty());
+    }
 
     #[test]
     fn stages_name_where_the_run_stopped() {
