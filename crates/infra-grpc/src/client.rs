@@ -348,24 +348,12 @@ impl PreparedCall {
     }
 }
 
-/// The largest `grpc-timeout` the wire carries:
-/// [`MAX_TIMEOUT_DIGITS`](crate::protocol::MAX_TIMEOUT_DIGITS) digits of hours.
-/// Tonic panics on a longer value, which a finite parent deadline can request.
-const WIRE_TIMEOUT_MAX: Duration = Duration::from_hours(99_999_999);
-
 fn forward_timeout(headers: &mut http::HeaderMap, caller: Deadline) -> Result<(), tonic::Status> {
     let remaining = caller.remaining();
     if remaining.is_zero() {
         return Err(Side::Client.deadline());
     }
-    // Tonic's `grpc-timeout` encoder is private; `set_timeout` on a scratch
-    // request is its public path.
-    let mut request = tonic::Request::new(());
-    request.set_timeout(remaining.min(WIRE_TIMEOUT_MAX));
-    let encoded = request.into_parts().0.into_headers();
-    if let Some(value) = encoded.get(crate::protocol::GRPC_TIMEOUT) {
-        headers.insert(crate::protocol::GRPC_TIMEOUT, value.clone());
-    }
+    crate::protocol::set_grpc_timeout(headers, remaining);
     Ok(())
 }
 

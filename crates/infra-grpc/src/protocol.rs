@@ -1,11 +1,14 @@
-//! The gRPC wire grammar the server and the client both read: the
-//! `grpc-timeout` header and the `/{service}/{method}` request path.
+//! Wire rules for gRPC method paths, timeouts and response status codes.
 
 use std::time::Duration;
 
-pub(crate) const GRPC_TIMEOUT: http::HeaderName = http::HeaderName::from_static("grpc-timeout");
+use http::{HeaderMap, HeaderName, StatusCode};
+
+pub(crate) const GRPC_TIMEOUT: HeaderName = HeaderName::from_static("grpc-timeout");
 /// Most digits a `grpc-timeout` value carries before its unit.
-pub(crate) const MAX_TIMEOUT_DIGITS: usize = 8;
+const MAX_TIMEOUT_DIGITS: usize = 8;
+/// The largest wire timeout is eight digits of hours. Tonic panics on longer durations.
+const WIRE_TIMEOUT_MAX: Duration = Duration::from_hours(99_999_999);
 
 /// Splits a request path `/{service}/{method}` whose parts are non-empty and
 /// whose method holds no further `/`.
@@ -23,7 +26,7 @@ pub(crate) fn method_path(service: &str, method: &str) -> String {
 /// Parses `grpc-timeout`. A malformed value, including more than eight digits,
 /// is absent. Tonic's own parser is private.
 #[must_use]
-pub fn grpc_timeout(headers: &http::HeaderMap) -> Option<Duration> {
+pub fn grpc_timeout(headers: &HeaderMap) -> Option<Duration> {
     headers
         .get(GRPC_TIMEOUT)
         .and_then(|value| parse_grpc_timeout(value.as_bytes()))
@@ -39,8 +42,7 @@ pub fn metadata_grpc_timeout(metadata: &tonic::metadata::MetadataMap) -> Option<
 }
 
 fn parse_grpc_timeout(value: &[u8]) -> Option<Duration> {
-    // The unit follows the digits.
-    if value.is_empty() || value.len() > MAX_TIMEOUT_DIGITS + 1 {
+    if value.len() > MAX_TIMEOUT_DIGITS + 1 {
         return None;
     }
     let (&unit, digits) = value.split_last()?;
@@ -57,6 +59,47 @@ fn parse_grpc_timeout(value: &[u8]) -> Option<Duration> {
         b'u' => Some(Duration::from_micros(amount)),
         b'n' => Some(Duration::from_nanos(amount)),
         _ => None,
+    }
+}
+
+pub(crate) fn set_grpc_timeout(headers: &mut HeaderMap, remaining: Duration) {
+    // Tonic exposes its encoder through the request API.
+    let mut request = tonic::Request::new(());
+    request.set_timeout(remaining.min(WIRE_TIMEOUT_MAX));
+    let mut encoded = request.into_parts().0.into_headers();
+    if let Some(value) = encoded.remove(GRPC_TIMEOUT) {
+        headers.insert(GRPC_TIMEOUT, value);
+    }
+}
+
+/// The code a gRPC client reads from a response before its body: `grpc-status`
+/// when the headers carry it, otherwise the HTTP status mapping. `None` for a
+/// `200` without one, whose code the trailers still carry.
+pub fn client_response_code<B>(response: &http::Response<B>) -> Option<tonic::Code> {
+    header_status_code(response.headers()).or_else(|| http_status_code(response.status()))
+}
+
+pub(crate) fn header_status_code(headers: &HeaderMap) -> Option<tonic::Code> {
+    headers
+        .get("grpc-status")
+        .map(|value| tonic::Code::from_bytes(value.as_bytes()))
+}
+
+/// The code a gRPC client infers from an HTTP answer without `grpc-status`,
+/// per gRPC's HTTP-to-gRPC status mapping, which tonic's client applies too.
+/// `None` for `200`, whose status the trailers still carry.
+pub(crate) fn http_status_code(status: StatusCode) -> Option<tonic::Code> {
+    match status {
+        StatusCode::OK => None,
+        StatusCode::BAD_REQUEST => Some(tonic::Code::Internal),
+        StatusCode::UNAUTHORIZED => Some(tonic::Code::Unauthenticated),
+        StatusCode::FORBIDDEN => Some(tonic::Code::PermissionDenied),
+        StatusCode::NOT_FOUND => Some(tonic::Code::Unimplemented),
+        StatusCode::TOO_MANY_REQUESTS
+        | StatusCode::BAD_GATEWAY
+        | StatusCode::SERVICE_UNAVAILABLE
+        | StatusCode::GATEWAY_TIMEOUT => Some(tonic::Code::Unavailable),
+        _ => Some(tonic::Code::Unknown),
     }
 }
 

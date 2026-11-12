@@ -23,13 +23,12 @@ mod services;
 mod status;
 mod tls;
 
-pub use call::client_response_code;
 pub use client::{
     Client, ClientIdentity, ClientSecurity, ClientTimeout, ClientTlsMaterial, PreparedCall,
 };
 pub use error::{Error, TlsMaterialError};
 pub use observe::{HANDLING_SECONDS_BUCKETS, HISTOGRAMS};
-pub use protocol::{grpc_timeout, metadata_grpc_timeout};
+pub use protocol::{client_response_code, grpc_timeout, metadata_grpc_timeout};
 pub use router::{Limits, ResponseContext, router, server_options};
 pub use services::Services;
 // template:begin service-auth:grpc-service-auth-exports

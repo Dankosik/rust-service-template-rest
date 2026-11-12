@@ -502,7 +502,7 @@ fn describe() {
     });
 }
 
-/// The grpc-go `codes.tonic::Code` names used by the grpc-ecosystem metrics.
+/// The grpc-go code names used by the grpc-ecosystem metrics.
 const fn code_name(code: tonic::Code) -> &'static str {
     match code {
         tonic::Code::Ok => "OK",
