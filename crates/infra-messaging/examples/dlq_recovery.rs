@@ -148,13 +148,22 @@ struct Ack {
     duplicate: bool,
 }
 
-#[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum Publication {
     NotAttempted,
     Rejected,
     Ambiguous,
     Confirmed,
+}
+
+impl Publication {
+    fn after_rejection(self) -> Self {
+        match self {
+            Self::NotAttempted | Self::Rejected => Self::Rejected,
+            Self::Ambiguous | Self::Confirmed => self,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -435,6 +444,27 @@ fn finish(state_path: &Path, state: &State) -> Result<()> {
     Ok(())
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "finite owned CLI distinguishes its existing publication journal before dispatch"
+)]
+fn read_state(path: &Path, selection_sha256: String) -> Result<State> {
+    if path.exists() {
+        let state: State = read_json(path)?;
+        if state.version != 1 || state.selection_sha256 != selection_sha256 {
+            return Err("state_identity");
+        }
+        return Ok(state);
+    }
+    Ok(State {
+        version: 1,
+        selection_sha256,
+        publication: Publication::NotAttempted,
+        retirement: Retirement::Retained,
+        ack: None,
+    })
+}
+
 async fn redrive(args: &[String], resources: &mut Resources, deadline: Instant) -> Result<()> {
     if args.len() != 2 {
         return Err("usage_redrive_selection");
@@ -452,25 +482,7 @@ async fn redrive(args: &[String], resources: &mut Resources, deadline: Instant) 
         return Err("selection_identity");
     }
     let state_path = path.with_extension("state.json");
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "finite owned CLI distinguishes its existing publication journal before dispatch"
-    )]
-    let mut state = if state_path.exists() {
-        let state: State = read_json(&state_path)?;
-        if state.version != 1 || state.selection_sha256 != selection_hash {
-            return Err("state_identity");
-        }
-        state
-    } else {
-        State {
-            version: 1,
-            selection_sha256: selection_hash,
-            publication: Publication::NotAttempted,
-            retirement: Retirement::Retained,
-            ack: None,
-        }
-    };
+    let mut state = read_state(&state_path, selection_hash)?;
     let client = resources.connect(&config).await?;
     let current = fetch(client, &selection.record.stream, selection.record.sequence).await?;
     if current.as_ref() != Some(&selection.record) {
@@ -485,6 +497,7 @@ async fn redrive(args: &[String], resources: &mut Resources, deadline: Instant) 
     // An earlier positive ACK is retained, but never skips the current identity
     // and lifecycle checks. Retrying ambiguity prepares exactly the same ID.
     if state.publication != Publication::Confirmed {
+        let rejected = state.publication.after_rejection();
         let startup = resources.startup.insert(
             Messaging::prepare(
                 MessagingOptions {
@@ -504,7 +517,7 @@ async fn redrive(args: &[String], resources: &mut Resources, deadline: Instant) 
             .map_err(|_| "publisher_configuration")?,
         );
         let Ok(messaging) = startup.admit().await else {
-            state.publication = Publication::Rejected;
+            state.publication = rejected;
             finish(&state_path, &state)?;
             return Ok(());
         };
@@ -532,7 +545,7 @@ async fn redrive(args: &[String], resources: &mut Resources, deadline: Instant) 
                     duplicate: ack.duplicate,
                 });
             }
-            Err(PublishError::Rejected) => state.publication = Publication::Rejected,
+            Err(PublishError::Rejected) => state.publication = rejected,
             Ok(_) | Err(PublishError::Ambiguous) => {}
         }
         save(&state_path, &state, Persist::Replace)?;
@@ -591,6 +604,18 @@ mod tests {
     use std::fs;
 
     use super::*;
+
+    #[test]
+    fn a_rejected_retry_preserves_earlier_publication_uncertainty() {
+        std::assert_matches!(
+            Publication::Ambiguous.after_rejection(),
+            Publication::Ambiguous
+        );
+        std::assert_matches!(
+            Publication::NotAttempted.after_rejection(),
+            Publication::Rejected
+        );
+    }
 
     #[test]
     fn stored_headers_preserve_repeated_identity_values_and_continuations() {
