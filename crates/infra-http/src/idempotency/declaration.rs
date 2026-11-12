@@ -1,7 +1,9 @@
 //! Local contract generation and validation for one idempotent route.
 
+use axum::http::HeaderName;
+use axum::http::header::CONTENT_TYPE;
 use utoipa::openapi::RefOr;
-use utoipa::openapi::path::{Operation, PathItem, Paths};
+use utoipa::openapi::path::{Operation, Parameter, ParameterIn, PathItem, Paths};
 use utoipa::openapi::response::Response;
 
 use super::openapi::{
@@ -43,6 +45,7 @@ pub(super) enum Rule {
     Shape,
     Method,
     KeyParameter,
+    FingerprintParameter,
     NonSuccessStatus,
     NoSuccess,
     UnreplayableHeader,
@@ -60,6 +63,9 @@ impl Rule {
             Self::Method => "the method must be POST, PUT, PATCH, or DELETE",
             Self::KeyParameter => {
                 "Idempotency-Key must be absent or one byte-equal generated header parameter"
+            }
+            Self::FingerprintParameter => {
+                "request parameters must be inline and header parameters must have valid HTTP field names"
             }
             Self::NonSuccessStatus => {
                 "an idempotent operation must not declare a 1xx or 3xx response"
@@ -79,15 +85,28 @@ impl Rule {
     }
 }
 
-/// Generate idempotency metadata for one route carrier, returning the
-/// operation id the runtime middleware logs.
-pub(super) fn prepare(paths: &mut Paths) -> Result<String, CompositionError> {
+#[derive(Debug)]
+pub(super) struct PreparedOperation {
+    pub(super) id: String,
+    pub(super) fingerprint_headers: Vec<HeaderName>,
+}
+
+pub(super) fn prepare(paths: &mut Paths) -> Result<PreparedOperation, CompositionError> {
     let subject = route_subject(paths);
     let shape = || CompositionError::new(&subject, Rule::Shape);
     let mut items = paths.paths.values_mut();
     let (Some(item), None) = (items.next(), items.next()) else {
         return Err(shape());
     };
+    if item.ref_path.is_some() {
+        return Err(shape());
+    }
+    let mut fingerprint_headers = Vec::new();
+    collect_fingerprint_headers(
+        item.parameters.as_deref().unwrap_or_default(),
+        &subject,
+        &mut fingerprint_headers,
+    )?;
     let (method, operation) = one_operation_mut(item).ok_or_else(shape)?;
     let operation_id = operation
         .operation_id
@@ -99,9 +118,41 @@ pub(super) fn prepare(paths: &mut Paths) -> Result<String, CompositionError> {
     }
 
     prepare_key_parameter(operation, &operation_id)?;
+    collect_fingerprint_headers(
+        operation.parameters.as_deref().unwrap_or_default(),
+        &operation_id,
+        &mut fingerprint_headers,
+    )?;
+    fingerprint_headers.sort_unstable_by(|left, right| left.as_str().cmp(right.as_str()));
+    fingerprint_headers.dedup();
     prepare_problem_responses(operation, &operation_id)?;
     prepare_success_responses(operation, &operation_id)?;
-    Ok(operation_id)
+    Ok(PreparedOperation {
+        id: operation_id,
+        fingerprint_headers,
+    })
+}
+
+fn collect_fingerprint_headers(
+    parameters: &[RefOr<Parameter>],
+    subject: &str,
+    headers: &mut Vec<HeaderName>,
+) -> Result<(), CompositionError> {
+    let invalid = || CompositionError::new(subject, Rule::FingerprintParameter);
+    for parameter in parameters {
+        let RefOr::T(parameter) = parameter else {
+            return Err(invalid());
+        };
+        if parameter.parameter_in == ParameterIn::Header
+            && !parameter.name.eq_ignore_ascii_case(KEY_HEADER)
+        {
+            let name = HeaderName::from_bytes(parameter.name.as_bytes()).map_err(|_| invalid())?;
+            if name != CONTENT_TYPE {
+                headers.push(name);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn prepare_key_parameter(
@@ -109,8 +160,6 @@ fn prepare_key_parameter(
     operation_id: &str,
 ) -> Result<(), CompositionError> {
     let generated_key = key_parameter();
-    // A `$ref` parameter is not inspected here: a referenced duplicate of
-    // the key is caught by the OpenAPI lint's unique-parameter rule.
     let mut existing_keys = operation
         .parameters
         .as_deref()
@@ -121,7 +170,7 @@ fn prepare_key_parameter(
             RefOr::Ref(_) => None,
         })
         .filter(|parameter| {
-            parameter.parameter_in == utoipa::openapi::path::ParameterIn::Header
+            parameter.parameter_in == ParameterIn::Header
                 && parameter.name.eq_ignore_ascii_case(KEY_HEADER)
         });
     match (existing_keys.next(), existing_keys.next()) {
@@ -285,10 +334,7 @@ mod tests {
     #[test]
     fn preparation_generates_key_family_and_replay_metadata() {
         let (_, mut paths, _): UtoipaMethodRouter = route();
-        assert_eq!(
-            prepare(&mut paths).as_deref(),
-            Ok("infraHttpTestCreateWidget")
-        );
+        assert_eq!(prepare(&mut paths).unwrap().id, "infraHttpTestCreateWidget");
         let operation = paths.paths[WIDGETS].post.as_ref().expect("post");
         assert!(
             operation

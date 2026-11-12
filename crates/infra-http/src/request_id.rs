@@ -1,9 +1,8 @@
 //! Request correlation.
 //!
 //! `tower_http::request_id` sets and propagates `X-Request-ID`, but trusts
-//! any inbound value verbatim. This module strips values outside the accepted
-//! grammar before that layer runs, so an attacker cannot inject log or header
-//! content, and reads the accepted value back for problem bodies and logs.
+//! any inbound value verbatim. Require one valid field before that layer runs
+//! so the request headers, problem bodies, and logs share one correlation id.
 
 use axum::http::header::HeaderName;
 use axum::http::{HeaderValue, Request};
@@ -38,13 +37,13 @@ impl MakeRequestId for MakeRequestUuid {
     }
 }
 
-/// Remove an inbound `X-Request-ID` that does not match
-/// `^[A-Za-z0-9._~-]{1,128}$`, so the next layer generates one.
+/// Keep exactly one inbound `X-Request-ID` matching `^[A-Za-z0-9._~-]{1,128}$`.
 pub(crate) fn strip_invalid<B>(mut request: Request<B>) -> Request<B> {
-    let keep = request
-        .headers()
-        .get(&REQUEST_ID_HEADER)
-        .is_some_and(|value| is_valid(value.as_bytes()));
+    let mut values = request.headers().get_all(&REQUEST_ID_HEADER).iter();
+    let keep = values
+        .next()
+        .is_some_and(|value| is_valid(value.as_bytes()))
+        && values.next().is_none();
     if !keep {
         request.headers_mut().remove(&REQUEST_ID_HEADER);
     }

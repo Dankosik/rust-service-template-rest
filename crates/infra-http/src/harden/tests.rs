@@ -39,6 +39,7 @@ fn app(options: &HardenOptions) -> Router {
         "unreachable"
     };
     let handler_4 = |body: String| async move { body };
+    let json_echo = |crate::extract::Json(body): crate::extract::Json<String>| async move { body };
     #[expect(
         clippy::disallowed_methods,
         reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
@@ -47,7 +48,8 @@ fn app(options: &HardenOptions) -> Router {
         .route("/ok", get(handler_1))
         .route("/slow", get(handler_2))
         .route("/panic", get(handler_3))
-        .route("/echo", post(handler_4));
+        .route("/echo", post(handler_4))
+        .route("/json", post(json_echo));
     harden(routes, options)
 }
 
@@ -135,7 +137,7 @@ async fn a_known_body_length_survives_the_chain() {
 }
 
 #[tokio::test]
-async fn valid_inbound_request_id_is_echoed_and_invalid_replaced() {
+async fn only_a_single_valid_inbound_request_id_is_echoed() {
     let server = TestServer::new(app(&options()));
     server
         .get("/ok")
@@ -152,6 +154,20 @@ async fn valid_inbound_request_id_is_echoed_and_invalid_replaced() {
     let parsed = uuid::Uuid::parse_str(id.to_str().unwrap()).unwrap();
     assert_eq!(parsed.get_version_num(), 4);
     assert_eq!(parsed.get_variant(), uuid::Variant::RFC4122);
+
+    let mut duplicate = request(Method::GET, "/missing");
+    for value in ["client-id_1", "bad id with spaces"] {
+        duplicate
+            .headers_mut()
+            .append(REQUEST_ID_HEADER, HeaderValue::from_static(value));
+    }
+    let response = app(&options()).oneshot(duplicate).await.unwrap();
+    let id = response.headers()[&REQUEST_ID_HEADER]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(uuid::Uuid::parse_str(&id).unwrap().get_version_num(), 4);
+    assert_eq!(body_json(response).await["request_id"], id);
 }
 
 #[tokio::test]
@@ -285,7 +301,8 @@ async fn declared_and_streamed_oversize_bodies_are_413_problems() {
 
     let streamed = HttpRequest::builder()
         .method(Method::POST)
-        .uri("/echo")
+        .uri("/json")
+        .header(CONTENT_TYPE, "application/json")
         .body(Body::from_stream(futures_stream(big)))
         .unwrap();
     let response = app(&options()).oneshot(streamed).await.unwrap();
@@ -309,7 +326,7 @@ async fn declared_and_streamed_oversize_bodies_are_413_problems() {
 }
 
 #[tokio::test]
-async fn handler_413_keeps_retry_after_when_converted_to_problem() {
+async fn handler_413_preserves_its_body_and_headers() {
     let handler = || async {
         (
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -335,18 +352,19 @@ async fn handler_413_keeps_retry_after_when_converted_to_problem() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     assert_eq!(response.headers()[RETRY_AFTER], "60");
-    assert_eq!(response.headers()[CONTENT_TYPE], "application/problem+json");
-    assert!(!response.headers().contains_key("content-digest"));
-    let length = response.headers().get(CONTENT_LENGTH).cloned();
-    let body = response.into_body().collect().await.unwrap().to_bytes();
-    if let Some(length) = length {
-        assert_eq!(
-            length.to_str().unwrap().parse::<usize>().unwrap(),
-            body.len()
-        );
-    }
-    let problem: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(problem["code"], "request_entity_too_large");
+    assert_eq!(
+        response.headers()[CONTENT_TYPE],
+        "text/plain; charset=utf-8"
+    );
+    assert_eq!(response.headers()[CONTENT_LENGTH], "4");
+    assert_eq!(
+        response.headers()["content-digest"],
+        "sha-256=:cW7Ku0WsaoigSTmP3i09UiXG3TEhrpu8WvRX60uvBWo=:"
+    );
+    assert_eq!(
+        response.into_body().collect().await.unwrap().to_bytes(),
+        "wait"
+    );
 }
 
 fn futures_stream(

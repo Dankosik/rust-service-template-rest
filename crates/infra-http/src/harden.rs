@@ -20,8 +20,8 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::extract::{DefaultBodyLimit, MatchedPath, Request, State};
-use axum::http::HeaderValue;
 use axum::http::header::X_CONTENT_TYPE_OPTIONS;
+use axum::http::{HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum_tracing_opentelemetry::middleware::OtelInResponseLayer;
@@ -37,7 +37,7 @@ use crate::observe::{self, AccessLogOptions, Observer};
 use crate::probes::is_health_probe_route;
 #[cfg(test)]
 use crate::problem::SANITIZED_DETAIL;
-use crate::problem::{Code, Problem, sanitized_internal_error};
+use crate::problem::{Code, Problem, body_too_large, sanitized_internal_error};
 use crate::request_id;
 
 /// The router-wide in-flight bound and how long a request waits for a permit.
@@ -113,7 +113,9 @@ pub fn harden(routes: Router, options: &HardenOptions) -> Router {
             crate::context::opening,
         ))
         .layer(CatchPanicLayer::custom(panic_to_problem))
+        .map_response(normalize_body_limit_rejection)
         .layer(RequestBodyLimitLayer::new(options.max_body_bytes))
+        .map_response(mark_downstream_413)
         .layer(DefaultBodyLimit::max(options.max_body_bytes));
 
     #[expect(
@@ -124,6 +126,33 @@ pub fn harden(routes: Router, options: &HardenOptions) -> Router {
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed);
     routes.layer(chain)
+}
+
+#[derive(Clone, Copy)]
+struct Downstream413;
+
+fn mark_downstream_413(mut response: Response) -> Response {
+    if response.status() == StatusCode::PAYLOAD_TOO_LARGE {
+        response.extensions_mut().insert(Downstream413);
+    }
+    response
+}
+
+fn normalize_body_limit_rejection<B>(mut response: axum::http::Response<B>) -> Response
+where
+    B: http_body::Body<Data = axum::body::Bytes> + Send + 'static,
+    B::Error: Into<axum::BoxError>,
+{
+    // Only tower-http's own early response bypasses the inner mapper.
+    if response.status() == StatusCode::PAYLOAD_TOO_LARGE
+        && response
+            .extensions_mut()
+            .remove::<Downstream413>()
+            .is_none()
+    {
+        return body_too_large().into_response();
+    }
+    response.map(axum::body::Body::new)
 }
 
 /// Admit a request once an in-flight permit is free. A request over the bound

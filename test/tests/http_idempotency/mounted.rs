@@ -196,6 +196,7 @@ impl CreateWidgets for SqlWidgets {
     operation_id = "createWidget",
     tag = "widgets",
     request_body = NewWidget,
+    params(("x-widget-name" = Option<String>, Header, description = "override the widget name")),
     security(("bearerAuth" = ["widgets:write"])),
     extensions(
         ("x-security-decision" = json!({
@@ -212,13 +213,20 @@ async fn create_widget(
     idempotency: Idempotency,
     principal: VerifiedPrincipal,
     State(widgets): State<Arc<dyn CreateWidgets>>,
-    Json(input): Json<NewWidget>,
+    headers: axum::http::HeaderMap,
+    Json(mut input): Json<NewWidget>,
 ) -> Response {
     // The route's declared `widgets:write` scope is checked by the final
     // authentication layer before this handler runs; only the operation's own
     // authorization (revoked-client denial) remains here.
     if !may_create(&principal) {
         return forbidden();
+    }
+    if let Some(name) = headers.get("x-widget-name") {
+        let Ok(name) = name.to_str() else {
+            return Problem::new(Code::BadRequest).into_response();
+        };
+        name.clone_into(&mut input.name);
     }
     let handler_timeout = input.color == HANDLER_TIMEOUT_COLOR;
     let execution =
@@ -1388,6 +1396,17 @@ async fn p9_a_success_replays_byte_for_byte_behind_current_authorization(pool: P
     );
     assert_eq!(exact.as_bytes(), first.as_bytes());
 
+    let changed_header = mounted
+        .create(ALICE, "k-1", &input, "req-header")
+        .add_header("x-widget-name", "different")
+        .await;
+    problem(
+        &changed_header,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "idempotency_key_mismatch",
+        "req-header",
+    );
+
     // Authorization runs on every attempt: the same caller through a revoked
     // client is refused before any replay and counted as not stored.
     let refused = mounted
@@ -1399,7 +1418,7 @@ async fn p9_a_success_replays_byte_for_byte_behind_current_authorization(pool: P
         outcomes(&recorder),
         counts(&[
             ("executed", 1),
-            ("key_mismatch", 1),
+            ("key_mismatch", 2),
             ("replayed", 1),
             ("not_stored", 1)
         ])
@@ -1430,7 +1449,7 @@ async fn p9_a_success_replays_byte_for_byte_behind_current_authorization(pool: P
         counts(&[
             ("executed", 2),
             ("replayed", 2),
-            ("key_mismatch", 2),
+            ("key_mismatch", 3),
             ("not_stored", 1)
         ])
     );
