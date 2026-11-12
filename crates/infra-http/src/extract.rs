@@ -233,7 +233,8 @@ struct TrackedPath<T>(Result<T, PathIssue>);
 
 enum PathIssue {
     MissingField(String),
-    RouteFieldConflict,
+    UnknownField,
+    DuplicateField,
     UnknownVariant(serde_path_to_error::Path),
 }
 
@@ -256,7 +257,7 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for TrackedPath<T> {
                     return Ok(Self(Err(PathIssue::MissingField(field.to_owned()))));
                 }
                 if message.starts_with("duplicate field `") && message.ends_with('`') {
-                    return Ok(Self(Err(PathIssue::RouteFieldConflict)));
+                    return Ok(Self(Err(PathIssue::DuplicateField)));
                 }
             }
             (Some(Segment::Map { key }), None)
@@ -265,7 +266,7 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for TrackedPath<T> {
                     .and_then(|field| field.strip_prefix(key.as_str()))
                     .is_some_and(|suffix| suffix.starts_with("`, ")) =>
             {
-                return Ok(Self(Err(PathIssue::RouteFieldConflict)));
+                return Ok(Self(Err(PathIssue::UnknownField)));
             }
             _ => {}
         }
@@ -285,8 +286,11 @@ impl PathIssue {
             Self::MissingField(field) if !params.iter().any(|(name, _)| name == field.as_str()) => {
                 wiring_failure("path")
             }
-            Self::RouteFieldConflict => wiring_failure("path"),
-            Self::MissingField(_) => invalid_path(None),
+            Self::UnknownField => wiring_failure("path"),
+            // A duplicate route binding needs two captures. A one-capture
+            // scalar can return the same message from value validation.
+            Self::DuplicateField if params.iter().nth(1).is_some() => wiring_failure("path"),
+            Self::MissingField(_) | Self::DuplicateField => invalid_path(None),
             Self::UnknownVariant(path) => {
                 let name = match path.iter().next() {
                     Some(Segment::Map { key }) => params
@@ -433,6 +437,22 @@ mod tests {
         id: String,
     }
 
+    #[derive(Deserialize)]
+    #[serde(try_from = "String")]
+    struct DistinctPair(String);
+
+    impl TryFrom<String> for DistinctPair {
+        type Error = &'static str;
+
+        fn try_from(value: String) -> Result<Self, Self::Error> {
+            let (first, second) = value.split_once('-').ok_or("expected two ids")?;
+            if first == second {
+                return Err("duplicate field `id`");
+            }
+            Ok(Self(value))
+        }
+    }
+
     fn app() -> Router {
         let handler_1 = |Json(order): Json<Order>| async move { order.lines.len().to_string() };
         let handler_2 = |Query(_): Query<Page>| async { "page" };
@@ -448,6 +468,7 @@ mod tests {
         };
         let strict_path = |Path(params): Path<StrictPath>| async move { params.id };
         let aliased_path = |Path(params): Path<AliasedPath>| async move { params.id };
+        let distinct_pair = |Path(pair): Path<DistinctPair>| async move { pair.0 };
         #[expect(
             clippy::disallowed_methods,
             reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
@@ -461,6 +482,7 @@ mod tests {
             .route("/miswired-struct/{id}", get(order_state))
             .route("/miswired-extra/{id}/{extra}", get(strict_path))
             .route("/miswired-alias/{id}/{old_id}", get(aliased_path))
+            .route("/pairs/{pair}", get(distinct_pair))
             .route("/states/{state}", get(state))
             .route("/orders/{id}/states/{state}", get(order_state));
         harden(
@@ -715,6 +737,9 @@ mod tests {
 
         let response = app().oneshot(get_uri("/orders/7")).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+
+        let response = app().oneshot(get_uri("/pairs/7-7")).await.unwrap();
+        problem(response, StatusCode::BAD_REQUEST, "bad_request").await;
     }
 
     #[tokio::test]
