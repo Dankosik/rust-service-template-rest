@@ -81,6 +81,8 @@ fn consumer_requires_its_distinct_operator_owned_names() {
 fn rejects_url_userinfo_unknown_protocol_and_unapproved_plaintext() {
     for (url, key) in [
         ("tls://user:password@nats.example:4222", "messaging.urls[0]"),
+        ("tls://@nats.example:4222", "messaging.urls[0]"),
+        ("tls://nats.exa\tmple:4222", "messaging.urls[0]"),
         ("https://nats.example:4222", "messaging.urls[0]"),
         ("nats://nats.example:4222", "messaging.allow_plaintext"),
     ] {

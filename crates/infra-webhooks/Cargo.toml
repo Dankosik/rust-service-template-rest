@@ -33,6 +33,7 @@ tracing = { workspace = true, features = ["std"] }
 httpdate = { workspace = true }
 infra-outbound-http = { workspace = true }
 serde_json = { workspace = true, features = ["std"] }
+shared-rules = { workspace = true }
 url = { workspace = true, features = ["std"] }
 # template:end webhooks:webhooks-outbound-dependencies
 # template:begin inbound-webhooks:webhooks-inbound-dependencies

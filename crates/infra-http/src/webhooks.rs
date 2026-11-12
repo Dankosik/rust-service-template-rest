@@ -275,7 +275,7 @@ impl EndpointOutcome {
 /// and http-idempotency profiles each keep a copy: a shared one in
 /// `problem.rs` is dead code in a projection that drops both.
 fn caused_by_length_limit(error: &(dyn std::error::Error + 'static)) -> bool {
-    std::iter::successors(Some(error), |&error| error.source())
+    shared_rules::error_chain::causes(error)
         .any(<dyn std::error::Error>::is::<http_body_util::LengthLimitError>)
 }
 

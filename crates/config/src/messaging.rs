@@ -238,9 +238,19 @@ impl MessagingConfig {
             // The key names the entry; a URL is never echoed.
             let key = format!("messaging.urls[{index}]");
             non_blank(&key, raw)?;
+            if shared_rules::uri::has_whitespace_or_control(raw) {
+                return Err(ValidationError::new(
+                    key,
+                    "must not contain whitespace or controls",
+                ));
+            }
             let url = Url::parse(raw)
                 .map_err(|_| ValidationError::new(key.clone(), "must be a valid NATS URL"))?;
-            if url.host_str().is_none() || !url.username().is_empty() || url.password().is_some() {
+            if url.host_str().is_none()
+                || !url.username().is_empty()
+                || url.password().is_some()
+                || shared_rules::uri::authority_has_userinfo(raw)
+            {
                 return Err(ValidationError::new(
                     key,
                     "must not contain userinfo and must name a host",

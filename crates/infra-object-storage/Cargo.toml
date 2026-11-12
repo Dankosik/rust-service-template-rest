@@ -41,6 +41,7 @@ http-body = { workspace = true }
 http-body-util = { workspace = true }
 metrics = { workspace = true }
 secrecy = { workspace = true }
+shared-rules = { workspace = true }
 sync_wrapper = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }

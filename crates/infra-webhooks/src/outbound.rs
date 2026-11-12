@@ -223,6 +223,11 @@ impl Endpoint {
     /// Returns [`EndpointError::InvalidDestination`] for an unusable destination,
     /// and [`EndpointError::Client`] when client construction fails.
     pub fn try_new(destination: &str, keys: KeyRing) -> Result<Self, EndpointError> {
+        if shared_rules::uri::has_whitespace_or_control(destination)
+            || shared_rules::uri::authority_has_userinfo(destination)
+        {
+            return Err(EndpointError::InvalidDestination);
+        }
         let destination = Url::parse(destination)
             .ok()
             .filter(|destination| destination.scheme() == "https" && is_admissible(destination))
@@ -629,6 +634,8 @@ mod tests {
     fn an_endpoint_refuses_credentials_fragments_and_plain_http() {
         for destination in [
             "https://user@partner.example/events",
+            "https://@partner.example/events",
+            "https://partner.exa\nmple/events",
             "https://partner.example/events#fragment",
             "http://partner.example/events",
         ] {

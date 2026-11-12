@@ -270,7 +270,7 @@ class Architecture(unittest.TestCase):
         self.edge(owner, "crates/operation-context/Cargo.toml")
         self.assertTrue(any("forbids every non-dev dependency" in error for error in self.verdict()))
         package["dependencies"] = []
-        self.edge("crates/infra-jobs/Cargo.toml", owner)
+        self.edge("crates/infra-idempotency-store/Cargo.toml", owner)
         self.assertTrue(any("shared-rules" in error for error in self.verdict()))
         self.policy["roles"]["shared-rules"]["std_only"] = "yes"
         self.assertTrue(any("architecture input" in error for error in self.verdict()))

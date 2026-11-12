@@ -183,8 +183,14 @@ pub(crate) fn admit(provider: &Provider, bucket: &str) -> Result<Admitted, Confi
     }
 }
 
-/// A bare origin: scheme and host, an optional port, and nothing else.
+/// A bare origin: scheme and host, an optional port, and nothing else, as
+/// written.
 fn origin(endpoint: &str, allow_plaintext: bool) -> Result<Url, ConfigError> {
+    if shared_rules::uri::has_whitespace_or_control(endpoint)
+        || shared_rules::uri::authority_has_userinfo(endpoint)
+    {
+        return Err(ConfigError::Endpoint);
+    }
     let url = Url::parse(endpoint).map_err(|_| ConfigError::Endpoint)?;
     let scheme_allowed = url.scheme() == "https" || (allow_plaintext && url.scheme() == "http");
     let bare = url.username().is_empty()
@@ -338,6 +344,8 @@ mod tests {
             "https://0123456789abcdef0123456789abcdef.xx.r2.cloudflarestorage.com",
             "https://evil.example/0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com",
             "https://user@0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com",
+            "https://@0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com",
+            "https://0123456789abcdef0123456789abcdef.r2.cloud\tflarestorage.com",
             "",
         ] {
             let refused = admit(

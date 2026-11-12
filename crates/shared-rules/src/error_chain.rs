@@ -1,7 +1,30 @@
-//! An error and its sources as one line of text.
+//! An error's chain of causes: as one line of text, and as the errors a
+//! caller can test by type.
 
 use std::error::Error;
 use std::fmt;
+
+/// `error`, then each error it was caused by, for a caller that looks for a
+/// cause of a given type.
+///
+/// A [`std::io::Error`] that wraps a custom error returns that error's source
+/// from `source()`, skipping the wrapped error itself; a TLS connector hands
+/// over a `rustls::Error` that way. This walk yields that payload before its sources.
+/// [`Causes`] keeps the plain `source()` chain, because an I/O error already
+/// prints its payload's text.
+pub fn causes<'a>(
+    error: &'a (dyn Error + 'static),
+) -> impl Iterator<Item = &'a (dyn Error + 'static)> {
+    std::iter::successors(Some(error), |&error| {
+        match error
+            .downcast_ref::<std::io::Error>()
+            .and_then(std::io::Error::get_ref)
+        {
+            Some(payload) => Some(payload),
+            None => error.source(),
+        }
+    })
+}
 
 /// Displays an error followed by each of its sources, separated by `: `.
 ///
@@ -21,9 +44,10 @@ impl fmt::Display for Causes<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::Causes;
+    use super::{Causes, causes};
     use std::error::Error;
     use std::fmt;
+    use std::io;
 
     #[derive(Debug)]
     struct Layer {
@@ -68,5 +92,42 @@ mod tests {
             source: None,
         };
         assert_eq!(Causes(&error).to_string(), "timed out");
+    }
+
+    #[test]
+    fn causes_start_at_the_error_and_follow_each_source() {
+        let error = Layer {
+            message: "request failed",
+            source: Some(Box::new(Layer {
+                message: "connection reset",
+                source: None,
+            })),
+        };
+        let messages: Vec<String> = causes(&error).map(ToString::to_string).collect();
+        assert_eq!(messages, ["request failed", "connection reset"]);
+    }
+
+    #[test]
+    fn causes_reach_the_payload_an_io_error_hides_from_source() {
+        let payload = Layer {
+            message: "certificate expired",
+            source: Some(Box::new(Layer {
+                message: "clock",
+                source: None,
+            })),
+        };
+        let io = io::Error::other(payload);
+        assert!(
+            io.source()
+                .is_some_and(|source| source.to_string() == "clock"),
+            "std skips the payload, which is why the walk steps into it"
+        );
+        let messages: Vec<String> = causes(&io).map(ToString::to_string).collect();
+        // The I/O error prints its payload's text, then the payload follows.
+        assert_eq!(
+            messages,
+            ["certificate expired", "certificate expired", "clock"]
+        );
+        assert!(causes(&io).any(<dyn Error>::is::<Layer>));
     }
 }
