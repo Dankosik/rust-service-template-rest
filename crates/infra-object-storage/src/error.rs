@@ -146,9 +146,7 @@ impl Failure {
         Self::with_label(ObjectStorageError::Unavailable, stop_label(stopped))
     }
 
-    /// The operation context stopped after the request may have been sent:
-    /// its reply is lost.
-    pub(crate) fn stopped_after_send(call: Call, stopped: Stopped) -> Self {
+    pub(crate) fn stopped_after_poll(call: Call, stopped: Stopped) -> Self {
         Self::with_label(classify(call, FailureKind::Lost), stop_label(stopped))
     }
 }
