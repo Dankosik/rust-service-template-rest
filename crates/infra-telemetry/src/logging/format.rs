@@ -349,37 +349,60 @@ struct Quoted<'a> {
 
 impl fmt::Write for Quoted<'_> {
     fn write_str(&mut self, text: &str) -> fmt::Result {
-        for character in text.chars() {
+        let mut rest = text;
+        loop {
+            let plain = rest.bytes().position(needs_escape).unwrap_or(rest.len());
+            let (run, tail) = rest.split_at(plain);
+            if run.len() >= self.values.room() {
+                let fits = run.floor_char_boundary(self.values.room().saturating_sub(1));
+                self.values.append(&run.as_bytes()[..fits]);
+                return self.stop();
+            }
+            self.values.append(run.as_bytes());
+            let Some(&byte) = tail.as_bytes().first() else {
+                return Ok(());
+            };
             let mut unit = [0; 6];
-            let escaped = escape(character, &mut unit);
+            let escaped = escape(byte, &mut unit);
             if escaped.len() >= self.values.room() {
-                // Stopping the formatter here also ends a source that streams.
-                self.cut = true;
-                return Err(fmt::Error);
+                return self.stop();
             }
             self.values.append(escaped);
+            rest = &tail[1..];
         }
-        Ok(())
     }
 }
 
-fn escape(character: char, unit: &mut [u8; 6]) -> &[u8] {
-    match character {
-        '"' => b"\\\"",
-        '\\' => b"\\\\",
-        '\u{8}' => b"\\b",
-        '\u{c}' => b"\\f",
-        '\n' => b"\\n",
-        '\r' => b"\\r",
-        '\t' => b"\\t",
-        '\0'..='\u{1f}' => {
+impl Quoted<'_> {
+    /// Stopping the formatter here also ends a source that streams.
+    fn stop(&mut self) -> fmt::Result {
+        self.cut = true;
+        Err(fmt::Error)
+    }
+}
+
+/// Whether JSON needs `byte` escaped. Every other byte, UTF-8 continuation
+/// bytes included, is copied as it is.
+const fn needs_escape(byte: u8) -> bool {
+    matches!(byte, b'"' | b'\\' | 0..=0x1f)
+}
+
+fn escape(byte: u8, unit: &mut [u8; 6]) -> &[u8] {
+    match byte {
+        b'"' => b"\\\"",
+        b'\\' => b"\\\\",
+        0x08 => b"\\b",
+        0x0c => b"\\f",
+        b'\n' => b"\\n",
+        b'\r' => b"\\r",
+        b'\t' => b"\\t",
+        _ => {
             let mut digits = const_hex::Buffer::<1, false>::new();
-            digits.format(&[character as u8]);
+            digits.format(&[byte]);
             let [high, low] = *digits.as_byte_array::<2>();
             *unit = [b'\\', b'u', b'0', b'0', high, low];
             &unit[..]
         }
-        _ => character.encode_utf8(&mut unit[..4]).as_bytes(),
     }
 }
 
