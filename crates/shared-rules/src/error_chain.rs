@@ -32,7 +32,7 @@ pub fn causes<'a>(
 pub fn sources<'a>(
     error: &'a (dyn Error + 'static),
 ) -> impl Iterator<Item = &'a (dyn Error + 'static)> {
-    bounded_chain(error, |error| error.source()).skip(1)
+    bounded_chain(error, Error::source).skip(1)
 }
 
 fn bounded_chain<'a>(
