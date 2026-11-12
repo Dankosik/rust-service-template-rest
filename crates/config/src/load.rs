@@ -198,6 +198,7 @@ where
 }
 // template:end jobs:load-jobs-operator
 
+#[derive(Clone, Copy)]
 enum AuthnAudienceOverride {
     Decode,
     #[allow(
