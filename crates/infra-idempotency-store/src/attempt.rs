@@ -134,8 +134,8 @@ pub enum AttemptError {
     /// arbitration again.
     #[error("unavailable")]
     Unavailable,
-    /// A non-transient driver fault, or a success record the write did not
-    /// store. Nothing committed.
+    /// A non-transient driver fault, a success record the write did not
+    /// store, or a caller identity PostgreSQL cannot store. Nothing committed.
     #[error("internal")]
     Internal,
     /// A live record that does not decode. Replay is impossible until the
@@ -149,6 +149,8 @@ impl Store {
     /// its success record. `Ok((record, value))` commits both and yields
     /// [`Attempted::Committed`] with `value`; `Err(value)` rolls back and
     /// yields [`Attempted::RolledBack`]. Work is never retried.
+    ///
+    /// Connection acquisition uses the pool's configured timeout.
     ///
     /// The store writes the success record under `scope`. It saves
     /// `fingerprint` for later arbitration and `caller` for diagnostics.
@@ -172,8 +174,8 @@ impl Store {
     }
 
     /// [`Self::attempt`] for a request with its own deadline: the wait for a
-    /// pooled connection lasts until `deadline` instead of
-    /// [`infra_postgres::ACQUIRE_TIMEOUT`].
+    /// pooled connection is bounded by `deadline`. That deadline applies
+    /// only to connection acquisition.
     ///
     /// # Errors
     ///
