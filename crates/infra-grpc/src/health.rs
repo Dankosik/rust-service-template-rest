@@ -16,8 +16,7 @@ pub(crate) struct Adapter {
 }
 
 impl Adapter {
-    pub(crate) fn new(readiness: ReadinessReader, names: &BTreeSet<&'static str>) -> Self {
-        let mut services = names.clone();
+    pub(crate) fn new(readiness: ReadinessReader, mut services: BTreeSet<&'static str>) -> Self {
         services.insert(tonic_health::pb::health_server::SERVICE_NAME);
         Self {
             readiness,
