@@ -3,7 +3,9 @@
 //! Passing a tracked route carrier to [`Composer::route`] opts it in and
 //! generates the served contract; final contract authentication wraps that
 //! carrier. The seam captures the verified caller, decoded key, original URI,
-//! raw Content-Type values, and bounded raw body. Handlers validate and
+//! raw Content-Type values, bounded raw body, and trailers. After upgrade,
+//! a retry carrying trailers against a pre-upgrade record gets a mismatch
+//! until the record expires. Handlers validate and
 //! authorize every attempt before `Idempotency::execute`, then return that
 //! response (or preserve its extensions) so the boundary can seal replay
 //! provenance. This detects route miswiring; it cannot roll back effects a

@@ -226,7 +226,8 @@ async fn capture_attempt(
         .iter()
         .map(HeaderValue::as_bytes)
         .collect::<Vec<_>>();
-    let fingerprint = identity::request_fingerprint(&parts.method, uri, &content_types, &body);
+    let fingerprint =
+        identity::request_fingerprint(&parts.method, uri, &content_types, &body, trailers.as_ref());
     let outcome = AttemptOutcome::default();
     parts.extensions.insert(Attempt {
         store,

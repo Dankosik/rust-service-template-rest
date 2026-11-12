@@ -68,7 +68,8 @@ Works with Claude Code, Codex, Cursor, Qwen Code, Grok and OpenCode.
   shedding, a request deadline and panic recovery.
 - OpenAPI generated from Rust and committed. CI fails on drift and on
   unapproved breaking changes.
-- One error format: `application/problem+json` from a closed catalog.
+- Application errors use `application/problem+json` from a closed catalog.
+  Readiness reports an unavailable instance with `503 text/plain`.
 - Health and readiness probes, JSON logs, OpenTelemetry traces, Prometheus
   metrics on a private listener, and [SLO burn-rate alerts](docs/alerting.md)
   with runbooks.
