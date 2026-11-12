@@ -497,10 +497,7 @@ impl ObjectStorage {
             .map_err(|interrupted| interrupted.fail(&mut guard, call))?;
         guard.answered_by(&result);
         Self::check(&context, &mut guard)?;
-        let output = match result {
-            Ok(output) => output,
-            Err(sdk_error) => return Err(guard.fail(&error::from_sdk(call, &sdk_error))),
-        };
+        let output = result.map_err(|sdk_error| guard.fail(&error::from_sdk(call, &sdk_error)))?;
         let metadata = ObjectMetadata::from_response_fields(
             output.content_length(),
             output.content_type(),
