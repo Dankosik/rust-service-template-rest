@@ -222,6 +222,9 @@ The adapter attempted to move an event to the dead-letter stream. A
 An `ambiguous` publication also leaves it for redelivery, and the DLQ may
 already contain a copy. Fix the handler or the producer, then recover the
 exact DLQ records with the [`dlq_recovery` example](../crates/infra-messaging/examples/dlq_recovery.rs).
+For malformed source messages, the transfer keeps the original payload and
+omits any retained identity or trace field that would exceed the source header
+budget. A DLQ record can therefore be inspectable even when it cannot be redriven.
 
 For wildcard consumers, keep source subjects within 4 KiB across publishers,
 subject mappings and stream imports. The adapter sizes pulls and DLQ

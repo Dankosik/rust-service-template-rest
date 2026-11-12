@@ -8,9 +8,10 @@ use time::OffsetDateTime;
 
 use super::{
     CREATED_AT, DEAD_LETTER_REASON, DIGEST_HEX_LEN, EVENT_SCHEMA, EVENT_TYPE, HEADER_LIMIT_BYTES,
-    MESSAGE_ID, NATS_MSG_ID, ORIGINAL_SUBJECT, checked_header_line_bytes, format_timestamp,
-    header_name, header_value, is_zero_time, parse_schema, parse_timestamp, prefixed_digest_hex,
-    required_header, valid_subject,
+    HEADER_PREAMBLE_BYTES, MESSAGE_ID, NATS_MSG_ID, ORIGINAL_SUBJECT, checked_header_line_bytes,
+    format_timestamp, header_line_bytes, header_name, header_value, is_zero_time, parse_schema,
+    parse_timestamp, prefixed_digest_hex, required_header, valid_subject,
+    validate_outbound_identity,
 };
 use crate::error::EnvelopeError;
 use enum_map::EnumMap;
@@ -20,6 +21,14 @@ use crate::prepared::{PreparedEvent, PreparedEventParts};
 
 const DEAD_LETTER_ID_PREFIX: &str = "dlq-";
 const ORIGINAL_ID_PRESENT: HeaderName = HeaderName::from_static("Original-Message-Id-Present");
+const RETAINED_HEADERS: [HeaderName; 6] = [
+    header_name::MESSAGE_ID,
+    header_name::EVENT_TYPE,
+    header_name::EVENT_SCHEMA,
+    header_name::CREATED_AT,
+    crate::trace::TRACEPARENT,
+    crate::trace::TRACESTATE,
+];
 
 outcome_label! {
     /// Why a delivery moved to the dead-letter stream; the `Dead-Letter-Reason`
@@ -36,9 +45,8 @@ pub(crate) struct DeadLetterBounds {
     pub(crate) headers: usize,
 }
 
-/// Bounds a supported normal transfer using source total bytes and known routes.
-/// The source already includes header framing; replacement fields are counted
-/// again so the bound does not depend on a minimum original envelope size.
+/// Reserve for the 12-byte framing of a new block and for re-encoding
+/// retained fields from a noncanonical block the client accepted.
 pub(crate) fn dead_letter_bounds(
     source_bytes: usize,
     subject_bytes: usize,
@@ -62,15 +70,20 @@ pub(crate) fn dead_letter_bounds(
     .try_fold(identity_bytes, |bytes, (name, value_bytes)| {
         bytes.checked_add(checked_header_line_bytes(name, value_bytes)?)
     })?;
+    // The client accepts bare LF and a missing final newline. Re-encoding can
+    // add one CR and one space per retained line, a CR on the version line,
+    // a final blank CRLF, and the last missing LF.
+    let framing_reserve = HEADER_PREAMBLE_BYTES.max(RETAINED_HEADERS.len() * 2 + 4);
+    let framed_source = source_bytes.checked_add(framing_reserve)?;
     Some(DeadLetterBounds {
-        total: source_bytes.checked_add(additions)?,
-        headers: source_bytes
+        total: framed_source.checked_add(additions)?,
+        headers: framed_source
             .min(HEADER_LIMIT_BYTES)
             .checked_add(additions)?,
     })
 }
 
-/// Keeps first identity/trace values and appends the metadata admission budgets.
+/// Keeps whole first identity and trace values that fit the source header budget.
 pub(crate) fn dead_letter_headers(
     original: &HeaderMap,
     subject: &str,
@@ -79,17 +92,13 @@ pub(crate) fn dead_letter_headers(
     reason: DeadLetterReason,
 ) -> HeaderMap {
     let mut headers = HeaderMap::new();
-    for header in [
-        header_name::MESSAGE_ID,
-        header_name::EVENT_TYPE,
-        header_name::EVENT_SCHEMA,
-        header_name::CREATED_AT,
-        crate::trace::TRACEPARENT,
-        crate::trace::TRACESTATE,
-    ] {
+    let mut remaining = HEADER_LIMIT_BYTES - HEADER_PREAMBLE_BYTES;
+    for header in RETAINED_HEADERS {
         let value = header_value(original, header.clone());
-        if !value.is_empty() {
+        let bytes = header_line_bytes(header.as_ref(), value);
+        if !value.is_empty() && bytes <= remaining {
             headers.insert(header, value);
+            remaining -= bytes;
         }
     }
     let message_id = header_value(&headers, header_name::MESSAGE_ID);
@@ -126,6 +135,7 @@ pub fn restore_dead_letter(record: DeadLetterRecord) -> Result<PreparedEvent, En
         return Err(EnvelopeError::DeadLetterSubject);
     }
     let message_id = required_header(&record.headers, header_name::MESSAGE_ID, MESSAGE_ID)?;
+    validate_outbound_identity(message_id)?;
     let stored_publication_id = header_value(&record.headers, header_name::NATS_MSG_ID);
     // Go and older Rust transfers use their deterministic ID as a fallback
     // Message-Id. A genuine collision in a new Rust transfer carries provenance.
@@ -143,6 +153,7 @@ pub fn restore_dead_letter(record: DeadLetterRecord) -> Result<PreparedEvent, En
         return Err(EnvelopeError::DeadLetterMessageIdMissing);
     }
     let event_type = required_header(&record.headers, header_name::EVENT_TYPE, EVENT_TYPE)?;
+    validate_outbound_identity(event_type)?;
     let schema_version = parse_schema(required_header(
         &record.headers,
         header_name::EVENT_SCHEMA,
@@ -269,6 +280,26 @@ mod tests {
         }
     }
 
+    #[test]
+    fn transfer_bound_includes_the_framing_of_a_headerless_source() {
+        let record = transferred_record(&HeaderMap::new());
+        let subject = header_value(&record.headers, header_name::ORIGINAL_SUBJECT);
+        let bounds =
+            dead_letter_bounds(record.payload.len(), subject.len(), record.stream.len()).unwrap();
+        assert!(encoded_header_bytes(&record.headers) + record.payload.len() <= bounds.total);
+    }
+
+    #[test]
+    fn transfer_keeps_payload_identity_when_oversized_trace_metadata_cannot_fit() {
+        let mut original = envelope_headers();
+        original.insert(crate::trace::TRACESTATE, "x".repeat(HEADER_LIMIT_BYTES));
+        let record = transferred_record(&original);
+        assert!(record.headers.get(crate::trace::TRACESTATE).is_none());
+        let restored = restore_dead_letter(record).unwrap();
+        assert_eq!(restored.message_id(), "event-1");
+        assert_eq!(restored.payload().as_ref(), b"{}");
+    }
+
     fn transferred_record(original: &HeaderMap) -> DeadLetterRecord {
         let transfer_id =
             dead_letter_id("SOURCE", 7, OffsetDateTime::UNIX_EPOCH, "event-1").unwrap();
@@ -349,5 +380,24 @@ mod tests {
             restore_failure(transferred_record(&without(CREATED_AT))),
             EnvelopeError::MissingHeader(CREATED_AT)
         );
+    }
+
+    #[test]
+    fn restore_rejects_a_record_whose_identity_would_change_on_delivery() {
+        let mut record = transferred_record(&envelope_headers());
+        record.headers.insert(header_name::MESSAGE_ID, " event-1 ");
+        assert_eq!(restore_failure(record), EnvelopeError::Identity);
+    }
+
+    #[test]
+    fn restore_names_the_invalid_schema_or_time() {
+        for (header, expected) in [
+            (header_name::EVENT_SCHEMA, EnvelopeError::Schema),
+            (header_name::CREATED_AT, EnvelopeError::CreatedAtInvalid),
+        ] {
+            let mut record = transferred_record(&envelope_headers());
+            record.headers.insert(header, "");
+            assert_eq!(restore_failure(record), expected);
+        }
     }
 }

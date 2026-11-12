@@ -106,6 +106,11 @@ impl Route {
 
 #[derive(Debug, thiserror::Error)]
 pub enum RegistryError {
+    #[error("route event type {event_type:?} v{schema_version} is invalid")]
+    InvalidEventType {
+        event_type: String,
+        schema_version: u16,
+    },
     #[error("route subject is invalid for {event_type} v{schema_version}")]
     InvalidSubject {
         event_type: String,
@@ -177,7 +182,7 @@ impl Registry {
     /// Creates a registry with all composition-owned routes.
     ///
     /// # Errors
-    /// Rejects duplicate routes and invalid subjects.
+    /// Rejects duplicate routes, invalid subjects and types NATS would trim.
     pub fn try_new(routes: impl IntoIterator<Item = Route>) -> Result<Self, RegistryError> {
         let mut mapped = HashMap::default();
         for route in routes {
@@ -189,6 +194,12 @@ impl Registry {
             // hold a line break.
             if !valid_subject(&route.subject) {
                 return Err(RegistryError::InvalidSubject {
+                    event_type: event_type.to_owned(),
+                    schema_version,
+                });
+            }
+            if crate::wire::validate_outbound_identity(event_type).is_err() {
+                return Err(RegistryError::InvalidEventType {
                     event_type: event_type.to_owned(),
                     schema_version,
                 });
@@ -351,6 +362,32 @@ mod tests {
     impl EventPayload for Shipped {
         const EVENT_TYPE: &'static str = "order.shipped";
         const SCHEMA_VERSION: u16 = 1;
+    }
+
+    #[test]
+    fn admission_refuses_a_type_that_nats_would_trim() {
+        #[derive(serde::Serialize)]
+        struct Padded;
+
+        impl EventPayload for Padded {
+            const EVENT_TYPE: &'static str = "order.shipped\u{a0}";
+            const SCHEMA_VERSION: u16 = 1;
+        }
+
+        let route = Route::new::<Padded>("orders.shipped");
+        std::assert_matches!(
+            Registry::try_new([route]),
+            Err(RegistryError::InvalidEventType { .. })
+        );
+        let event = Event {
+            id: "event-1".to_owned(),
+            occurred_at: time::OffsetDateTime::UNIX_EPOCH.to_utc(),
+            payload: Padded,
+        };
+        std::assert_matches!(
+            PreparedEvent::prepare("orders.shipped", &event, 1024),
+            Err(EnvelopeError::Identity)
+        );
     }
 
     /// Routes both types and handles `Created`, rejecting a zero quantity.
