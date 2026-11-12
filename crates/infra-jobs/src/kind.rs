@@ -420,7 +420,7 @@ impl KindsBuilder {
         self.entries.push(Registered {
             name: K::NAME,
             policy,
-            running: policy
+            running_slots: policy
                 .max_running
                 .map(|limit| Arc::new(crate::claim::admission_slots(limit))),
             dispatch: Box::new(Typed {
@@ -579,8 +579,7 @@ pub const fn assert_valid_kind_name(name: &str) {
 pub(crate) struct Registered {
     pub(crate) name: &'static str,
     pub(crate) policy: Policy,
-    /// The free part of `policy.max_running`, when the kind sets one.
-    pub(crate) running: Option<Arc<Semaphore>>,
+    pub(crate) running_slots: Option<Arc<Semaphore>>,
     pub(crate) dispatch: Box<dyn Dispatch>,
     /// Handles for every completed attempt. The engine registers them at start,
     /// under the installed recorder; [`Self::metrics`] registers them on first

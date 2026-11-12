@@ -91,7 +91,7 @@ pub(crate) async fn run_retention(shared: Arc<Shared>, cancel: CancellationToken
             }
             match remove_expired_with_cancel(&shared, Some(&cancel)).await {
                 Ok((_, PassEnd::Cancelled)) => return,
-                Ok(_) => observe_recovery(&shared, Operation::Retention),
+                Ok((_, PassEnd::Finished)) => observe_recovery(&shared, Operation::Retention),
                 Err(error) => observe_failure(&shared, Operation::Retention, &error),
             }
         }
