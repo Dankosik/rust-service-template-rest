@@ -291,7 +291,7 @@ impl PreparedCall {
     /// # Errors
     /// Returns the existing deadline, cancellation, or transport status.
     pub async fn send(self) -> Result<Response<Body>, tonic::Status> {
-        self.send_inner(None).await
+        self.send_inner(|| Ok(()), None).await
     }
 
     /// Like [`Self::send`], with a synchronous callback for the peer status.
@@ -306,11 +306,26 @@ impl PreparedCall {
         self,
         on_status: impl FnOnce(tonic::Code) + Send + 'static,
     ) -> Result<Response<Body>, tonic::Status> {
-        self.send_inner(Some(Box::new(on_status))).await
+        self.send_with_dispatch_check(|| Ok(()), on_status).await
+    }
+
+    /// Like [`Self::send_with_response_status`], with a final check after the
+    /// channel is ready and before it receives the request.
+    ///
+    /// # Errors
+    ///
+    /// Also returns a status from the dispatch check, without sending the request.
+    pub async fn send_with_dispatch_check(
+        self,
+        check: impl FnOnce() -> Result<(), tonic::Status> + Send,
+        on_status: impl FnOnce(tonic::Code) + Send + 'static,
+    ) -> Result<Response<Body>, tonic::Status> {
+        self.send_inner(check, Some(Box::new(on_status))).await
     }
 
     async fn send_inner(
         self,
+        check: impl FnOnce() -> Result<(), tonic::Status> + Send,
         on_status: Option<ResponseStatusObserver>,
     ) -> Result<Response<Body>, tonic::Status> {
         let Self {
@@ -337,6 +352,7 @@ impl PreparedCall {
                     if let Some(forwarded) = forwarded {
                         forward_timeout(request.headers_mut(), forwarded)?;
                     }
+                    check()?;
                     ready.call(request).await.map_err(transport_status)
                 } => result,
             };

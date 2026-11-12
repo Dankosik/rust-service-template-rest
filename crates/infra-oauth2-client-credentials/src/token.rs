@@ -15,14 +15,14 @@ const REUSE_MARGIN: Duration = Duration::from_secs(10);
 /// token costs one token request per this period, not one per call.
 pub(crate) const EVICTION_MIN_AGE: Duration = Duration::from_secs(30);
 
-/// A sensitive `Bearer` header value and the instant it stops being reused.
+/// A sensitive `Bearer` header value and its known expiration.
 #[derive(derive_more::Debug)]
 #[debug("Token([REDACTED])")]
 pub(crate) struct Token {
     pub(crate) header: HeaderValue,
     pub(crate) requested_at: Instant,
     /// `None` when the provider gave no lifetime: use only for its requesting call.
-    reuse_until: Option<Instant>,
+    expires_at: Option<Instant>,
     rejected: AtomicBool,
 }
 
@@ -44,7 +44,7 @@ impl Token {
         let mut header =
             HeaderValue::try_from(value).map_err(|_| AcquisitionError::InvalidResponse)?;
         header.set_sensitive(true);
-        let reuse_until = match expires_in {
+        let expires_at = match expires_in {
             None => None,
             Some(lifetime) => {
                 let expiry = requested_at
@@ -53,13 +53,13 @@ impl Token {
                 if Instant::now() >= expiry {
                     return Err(AcquisitionError::InvalidResponse);
                 }
-                Some(expiry.checked_sub(REUSE_MARGIN).unwrap_or(requested_at))
+                Some(expiry)
             }
         };
         Ok(Self {
             header,
             requested_at,
-            reuse_until,
+            expires_at,
             rejected: AtomicBool::new(false),
         })
     }
@@ -69,8 +69,16 @@ impl Token {
     }
 
     pub(crate) fn reusable_until(&self, now: Instant) -> Option<Instant> {
-        self.reuse_until
+        self.expires_at
+            .and_then(|expiry| expiry.checked_sub(REUSE_MARGIN))
             .filter(|&until| now < until && !self.is_rejected())
+    }
+
+    pub(crate) fn check_expiry(&self, now: Instant) -> Result<(), AcquisitionError> {
+        if self.expires_at.is_some_and(|expiry| now >= expiry) {
+            return Err(AcquisitionError::InvalidResponse);
+        }
+        Ok(())
     }
 
     pub(crate) fn is_rejected(&self) -> bool {

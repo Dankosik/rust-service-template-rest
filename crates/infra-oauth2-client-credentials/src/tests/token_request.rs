@@ -336,12 +336,7 @@ async fn exchange_rejects_a_token_when_processing_crosses_the_attempt_deadline()
         {
             // The transport has accepted the buffered response. Cross the
             // attempt deadline before control returns to OAuth for decoding.
-            tokio::time::pause();
-            let mut advance = std::pin::pin!(tokio::time::advance(Duration::from_secs(5)));
-            let _ = advance
-                .as_mut()
-                .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()));
-            tokio::time::resume();
+            advance_during_metric(Duration::from_secs(5));
         }
     });
     let observation = metrics::set_default_local_recorder(&recorder);
@@ -360,6 +355,52 @@ async fn exchange_rejects_a_token_when_processing_crosses_the_attempt_deadline()
     assert_eq!(fixture.token_requests().len(), 1);
     assert!(fixture.resource_requests().is_empty());
     fixture.finish().await;
+}
+
+#[tokio::test]
+async fn a_token_that_expires_after_acquisition_is_not_sent_to_the_resource() {
+    let fixture = Fixture::new().await;
+    let mut response = exchange_response("short-lived");
+    response["expires_in"] = 1.into();
+    fixture.token_json("200 OK", &response);
+    let client = fixture
+        .credentials(&[], None)
+        .http(fixture.resource_client());
+    let recorder = ObserveMetricRegistration(|key: &metrics::Key| {
+        if key.name() == "oauth2_token_acquisitions_total"
+            && key
+                .labels()
+                .any(|label| label.key() == "outcome" && label.value() == "success")
+        {
+            // Advance after successful admission, before returning to the binding.
+            advance_during_metric(Duration::from_secs(1));
+        }
+    });
+    let observation = metrics::set_default_local_recorder(&recorder);
+    let result = client
+        .execute(
+            fixture.on_behalf_of_request("subject"),
+            deadline(Duration::from_secs(10)),
+        )
+        .await;
+    drop(observation);
+
+    assert_matches!(
+        result,
+        Err(Error::Acquisition(AcquisitionError::InvalidResponse))
+    );
+    assert_eq!(fixture.token_requests().len(), 1);
+    assert!(fixture.resource_requests().is_empty());
+    fixture.finish().await;
+}
+
+fn advance_during_metric(duration: Duration) {
+    tokio::time::pause();
+    let mut advance = std::pin::pin!(tokio::time::advance(duration));
+    let _ = advance
+        .as_mut()
+        .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()));
+    tokio::time::resume();
 }
 
 struct ObserveMetricRegistration<F>(F);

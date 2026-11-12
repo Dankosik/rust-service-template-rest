@@ -98,8 +98,7 @@ The template-owned gaps are: the assertion claims and signing call; the two
 grant forms and their response type; the exchanged-token cache wiring; the
 `act` claim model; configuration and initializer integration; sanitized
 outcomes. There is no custom protocol serializer/parser beyond one serde
-response type, no flight state machine, no retry loop, and no general
-token-source abstraction.
+response type and no general token-source abstraction.
 
 ## Deferred with reopen conditions (D7)
 
@@ -194,13 +193,13 @@ owner's bounded token client and the absolute attempt deadline; it sends `applic
 either grant and decodes one private serde `TokenResponse`. A 5xx or 429 token
 response is `Unavailable`; any other non-2xx is `Rejected`.
 
-`Token` holds the private sensitive header and an optional Tokio monotonic reuse
-cutoff; one clock governs every expiry decision. A representable positive expiry
+`Token` holds the private sensitive header and an optional Tokio monotonic expiry;
+one clock governs every expiry decision. A representable positive expiry
 is `acquisition_start + expires_in`; zero, already elapsed, and unrepresentable
 expiry are invalid. The reuse cutoff is `expiry - 10s`; a token already inside
 that margin serves only the request that fetched it. Omitted expiry is likewise
-request-only. A reused token is always before its cutoff, so dispatch needs
-no second expiry check. A foreground miss never falls back to a prior token.
+request-only. Header injection rechecks the hard expiry because the token can
+age between admission and dispatch. A foreground miss never falls back to a prior token.
 A background refresh that returns a request-only token keeps the current entry
 usable until its cutoff or rejection.
 
@@ -220,13 +219,14 @@ configured entry count and 16 MiB of Bearer-token bytes through weighted
 entries. This does not claim strict memory admission or RSS control: eviction
 can lag concurrent inserts, active calls retain values, and keys, metadata and
 allocator overhead remain. A Moka hit still needs the Tokio-clock reuse check.
-Conditional initialization coalesces replacements for expired or rejected tokens.
-Request-only tokens and failed results expire immediately in Moka. The
-initializer may use a fresh request-only token for its own call. The shared exchange
-belongs to the first caller's future and its deadline. If that caller stops,
+Only reusable tokens enter Moka. One caller owns the active exchange for each
+subject, including replacement of expired or rejected tokens. Waiters receive
+its completed result through a Tokio watch channel. This avoids Moka's
+initializer retry limit, which can panic after repeated cancellations.
+Only the fetching caller may use a request-only token. If that caller stops,
 a waiter starts its own attempt with a new five-second cap, bounded by its
-remaining caller budget. Caller expiry drops the initializer so waiters can
-take over without receiving its timeout. Exchange failures are coalesced only
+remaining caller budget. Dropping the owner removes the registration and closes
+the channel without publishing its cancellation or timeout. Exchange failures are coalesced only
 for concurrent waiters and are never persisted as a negative cache. Exchanges
 for different subjects acquire the same owner's finite provider capacity as
 service tokens and refresh-ahead. Inbound admission and cache-entry capacity
@@ -364,10 +364,10 @@ credential failures. One `UNAVAILABLE` for both invited a retry of a request
 that needs a different key or grant. The message stays fixed and the closed `AcquisitionError` is the
 status source, never sent to a peer. `PreparedCall` captures the gRPC caller and
 transport contexts before acquisition, and remains the only owner of
-`grpc-timeout` propagation; OAuth adds the bearer only through its prepared
-headers, then sends the prepared call. A call refused before dispatch ends
-through `PreparedCall::refuse`, so client metrics count it with the status its
-caller receives, not as `Canceled`. Its optional dependency points from OAuth to
+`grpc-timeout` propagation; OAuth adds the bearer through its prepared
+headers and rechecks its expiry after channel readiness, before dispatch.
+Local refusals before dispatch record the status returned to the caller,
+including credentials that expire during readiness. Its optional dependency points from OAuth to
 `infra-grpc`; removing either profile removes the bridge. Generated clients
 take the concrete authenticated `Service`. See the [transport decision
 record](grpc-decisions.md).

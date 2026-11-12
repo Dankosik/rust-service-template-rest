@@ -1,4 +1,5 @@
 use std::{
+    collections::{HashMap, hash_map::Entry},
     future::Future,
     sync::{Arc, Mutex, MutexGuard, PoisonError},
     time::Duration,
@@ -10,7 +11,7 @@ use moka::Expiry;
 use operation_context::{Deadline, OperationContext, Stopped};
 use secrecy::{ExposeSecret as _, SecretString};
 use tokio::{
-    sync::{mpsc, oneshot},
+    sync::{mpsc, oneshot, watch},
     time::Instant,
 };
 
@@ -130,12 +131,39 @@ pub(crate) struct Inner {
     /// Held by the one caller requesting a new service token, so requests
     /// for it never overlap.
     pub(crate) service_request: tokio::sync::Mutex<()>,
-    /// Tokens exchanged on behalf of a verified subject. Moka lets concurrent
-    /// misses for one subject share a single exchange.
-    pub(crate) exchanged: moka::future::Cache<SubjectKey, ExchangeResult>,
+    pub(crate) exchanged: moka::future::Cache<SubjectKey, Arc<Token>>,
+    exchange_flights: ExchangeFlights,
 }
 
 type ExchangeResult = Result<Arc<Token>, AcquisitionError>;
+type ExchangeReceiver = watch::Receiver<Option<ExchangeResult>>;
+type ExchangeFlights = Mutex<HashMap<SubjectKey, ExchangeReceiver>>;
+
+enum ExchangeFlight<'a> {
+    Leader(ExchangeLeader<'a>),
+    Waiter(ExchangeReceiver),
+}
+
+/// Only the fetching caller owns the sender. Dropping that caller releases
+/// its registration and wakes waiters without publishing a failure.
+struct ExchangeLeader<'a> {
+    flights: &'a ExchangeFlights,
+    key: SubjectKey,
+    sender: watch::Sender<Option<ExchangeResult>>,
+    completed: Option<ExchangeResult>,
+}
+
+impl Drop for ExchangeLeader<'_> {
+    fn drop(&mut self) {
+        self.flights
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&self.key);
+        if let Some(result) = self.completed.take() {
+            self.sender.send_replace(Some(result));
+        }
+    }
+}
 
 /// The SHA-256 digest of a subject's access token, keying its exchanged
 /// tokens. It has no `Debug`, so the digest never reaches a log.
@@ -185,33 +213,29 @@ struct CompletedFailure {
     until: Instant,
 }
 
-/// Moka publishes the result to concurrent waiters. Errors and request-only
-/// tokens expire immediately, and each reader checks reuse on the Tokio clock.
+/// Retention is best-effort. Each reader checks reuse on the Tokio clock.
 struct ExchangedExpiry;
 
-impl Expiry<SubjectKey, ExchangeResult> for ExchangedExpiry {
+impl Expiry<SubjectKey, Arc<Token>> for ExchangedExpiry {
     fn expire_after_create(
         &self,
         _key: &SubjectKey,
-        result: &ExchangeResult,
+        token: &Arc<Token>,
         _current_time: std::time::Instant,
     ) -> Option<Duration> {
         let now = Instant::now();
-        let until = result
-            .as_ref()
-            .ok()
-            .and_then(|token| token.reusable_until(now));
+        let until = token.reusable_until(now);
         Some(until.map_or(Duration::ZERO, |until| until.saturating_duration_since(now)))
     }
 
     fn expire_after_update(
         &self,
         key: &SubjectKey,
-        result: &ExchangeResult,
+        token: &Arc<Token>,
         current_time: std::time::Instant,
         _duration_until_expiry: Option<Duration>,
     ) -> Option<Duration> {
-        self.expire_after_create(key, result, current_time)
+        self.expire_after_create(key, token, current_time)
     }
 }
 
@@ -256,15 +280,14 @@ impl Credentials {
             service_request: tokio::sync::Mutex::new(()),
             exchanged: moka::future::Cache::builder()
                 .max_capacity(u64::from(EXCHANGE_CACHE_BYTES))
-                .weigher(move |_: &SubjectKey, result: &ExchangeResult| {
-                    result.as_ref().map_or(minimum_weight, |token| {
-                        u32::try_from(token.header.as_bytes().len())
-                            .unwrap_or(u32::MAX)
-                            .max(minimum_weight)
-                    })
+                .weigher(move |_: &SubjectKey, token: &Arc<Token>| {
+                    u32::try_from(token.header.as_bytes().len())
+                        .unwrap_or(u32::MAX)
+                        .max(minimum_weight)
                 })
                 .expire_after(ExchangedExpiry)
                 .build(),
+            exchange_flights: Mutex::default(),
         });
         let (refresh_requests, requests) = mpsc::channel(1);
         let (owner_release, owner_gone) = oneshot::channel();
@@ -330,6 +353,7 @@ impl Credentials {
         };
         context.check().map_err(acquisition_stopped)?;
         let acquired = acquired?;
+        acquired.check_expiry(Instant::now())?;
         headers.insert(AUTHORIZATION, acquired.header.clone());
         Ok(acquired)
     }
@@ -430,8 +454,8 @@ impl Credentials {
     }
 
     /// Returns a live exchanged token for `subject`, exchanging it when the
-    /// cache has none. Moka coalesces concurrent misses for one subject into
-    /// the exchange of the first caller, bounded by that caller's `deadline`
+    /// cache has none. Concurrent misses for one subject wait on the exchange
+    /// of the first caller, bounded by that caller's `deadline`
     /// and [`FETCH_TIMEOUT`]. When that caller is dropped or out of budget,
     /// its exchange is cancelled and a waiting caller starts its own; a
     /// waiter never fails because of another caller's deadline. Exchanges
@@ -442,75 +466,110 @@ impl Credentials {
         subject: &SecretString,
         deadline: AcquisitionDeadline<'_>,
     ) -> Result<Arc<Token>, AcquisitionError> {
-        loop {
-            self.check_admission(deadline)?;
-            // A hit skips `entry`, which boxes the key in an `Arc`, and the
-            // deadline timer that only a miss needs.
-            if let Some(Ok(token)) = self.0.inner.exchanged.get(&key).await
-                && token.is_reusable(Instant::now())
-            {
-                return Ok(token);
-            }
-            let (token, fresh) = self.exchanged_or_fetch(key, subject, deadline).await?;
-            // Only the initializer may use a newly acquired request-only token.
-            if fresh || token.is_reusable(Instant::now()) {
-                return Ok(token);
-            }
+        self.check_admission(deadline)?;
+        let result = if let Some(token) = self.0.inner.reusable_exchange(key).await {
+            Ok(token)
+        } else {
+            tokio::time::timeout_at(
+                deadline.cutoff,
+                self.acquire_exchange(key, subject, deadline),
+            )
+            .await
+            .map_err(|_| deadline.expiry)?
+        };
+        if let Some(error) = deadline.stopped_error() {
+            return Err(error);
         }
+        result
     }
 
-    /// Returns the cached or newly exchanged token and whether this call
-    /// inserted it.
-    async fn exchanged_or_fetch(
+    async fn acquire_exchange(
         &self,
         key: SubjectKey,
         subject: &SecretString,
         deadline: AcquisitionDeadline<'_>,
-    ) -> Result<(Arc<Token>, bool), AcquisitionError> {
-        let fetch = async move {
-            let fetch_deadline = deadline.cutoff.min(Instant::now() + FETCH_TIMEOUT);
-            let result = self
-                .0
-                .inner
-                .endpoint
-                .fetch_exchange(subject, fetch_deadline)
-                .await;
-            if deadline.stopped_error().is_some() {
-                // Drop the initializer through the enclosing stop branch so
-                // Moka hands off to a live waiter instead of sharing a failure.
-                return std::future::pending().await;
-            }
-            result.map_err(provider_timeout)
-        };
-        // Conditional replacement uses the same Moka initializer for misses and
-        // rejected values. A late rejection never mutates a replacement's key.
-        let attempt = self
-            .0
-            .inner
-            .exchanged
-            .entry(key)
-            .or_insert_with_if(fetch, |result| {
-                !result
-                    .as_ref()
-                    .is_ok_and(|token| token.is_reusable(Instant::now()))
-            });
-        tokio::select! {
-            // Drop this caller's initializer at its wait limit so a surviving
-            // waiter can take over without inheriting that limit.
-            biased;
-            () = tokio::time::sleep_until(deadline.cutoff) => Err(deadline.expiry),
-            entry = attempt => {
-                if let Some(error) = deadline.expired_error() {
-                    return Err(error);
+    ) -> ExchangeResult {
+        let inner = &self.0.inner;
+        loop {
+            self.check_admission(deadline)?;
+            match inner.join_exchange(key) {
+                ExchangeFlight::Leader(mut leader) => {
+                    // A previous exchange may have finished between the cache
+                    // miss and this registration.
+                    let result = if let Some(token) = inner.reusable_exchange(key).await {
+                        Ok(token)
+                    } else {
+                        inner.fetch_exchange(key, subject, deadline).await
+                    };
+                    if let Some(error) = deadline.stopped_error() {
+                        return Err(error);
+                    }
+                    leader.completed = Some(result.clone());
+                    return result;
                 }
-                let fresh = entry.is_fresh();
-                entry.into_value().map(|token| (token, fresh))
+                ExchangeFlight::Waiter(mut receiver) => {
+                    if let Ok(result) = receiver.wait_for(Option::is_some).await {
+                        match result.as_ref() {
+                            Some(Ok(token)) if token.is_reusable(Instant::now()) => {
+                                return Ok(token.clone());
+                            }
+                            Some(Err(error)) => return Err(*error),
+                            _ => {}
+                        }
+                    }
+                }
             }
         }
     }
 }
 
 impl Inner {
+    async fn fetch_exchange(
+        &self,
+        key: SubjectKey,
+        subject: &SecretString,
+        deadline: AcquisitionDeadline<'_>,
+    ) -> ExchangeResult {
+        let fetch_deadline = deadline.cutoff.min(Instant::now() + FETCH_TIMEOUT);
+        let result = self.endpoint.fetch_exchange(subject, fetch_deadline).await;
+        if let Some(error) = deadline.stopped_error() {
+            return Err(error);
+        }
+        if let Ok(token) = &result
+            && token.is_reusable(Instant::now())
+        {
+            self.exchanged.insert(key, token.clone()).await;
+        }
+        result.map_err(provider_timeout)
+    }
+
+    async fn reusable_exchange(&self, key: SubjectKey) -> Option<Arc<Token>> {
+        self.exchanged
+            .get(&key)
+            .await
+            .filter(|token| token.is_reusable(Instant::now()))
+    }
+
+    fn join_exchange(&self, key: SubjectKey) -> ExchangeFlight<'_> {
+        let mut flights = self
+            .exchange_flights
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        match flights.entry(key) {
+            Entry::Occupied(entry) => ExchangeFlight::Waiter(entry.get().clone()),
+            Entry::Vacant(entry) => {
+                let (sender, receiver) = watch::channel(None);
+                entry.insert(receiver);
+                ExchangeFlight::Leader(ExchangeLeader {
+                    flights: &self.exchange_flights,
+                    key,
+                    sender,
+                    completed: None,
+                })
+            }
+        }
+    }
+
     fn cached(&self) -> MutexGuard<'_, Cached> {
         self.cached.lock().unwrap_or_else(PoisonError::into_inner)
     }
