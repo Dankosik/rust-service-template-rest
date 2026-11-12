@@ -169,7 +169,7 @@ async fn redrive_preserves_identity_archives_each_cycle_and_rejects_old_versions
     assert_eq!(history[0], after["recovery_history"][0]);
     assert_eq!(history[1]["version"], receipt.new_version);
     assert_eq!(history[1]["attempts"], 1);
-    super::close(&[&jobs]).await;
+    super::close_pools(&[&jobs]).await;
 }
 
 // template:begin outbox:test-jobs-operator-outbox
@@ -235,7 +235,7 @@ mod outbox {
                 .unwrap(),
             prepared.payload().as_ref()
         );
-        super::super::close(&[&jobs]).await;
+        super::super::close_pools(&[&jobs]).await;
     }
 }
 // template:end outbox:test-jobs-operator-outbox
@@ -469,7 +469,7 @@ async fn recovery_initial_lock_has_local_statement_budget_and_preserves_failed_c
             "the failed transaction restores the session budget"
         );
     }
-    super::close(&[&jobs]).await;
+    super::close_pools(&[&jobs]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -535,7 +535,7 @@ async fn concurrent_recovery_has_one_winner_after_the_row_lock(pool: PgPool) {
             .await
             .unwrap();
     }
-    super::close(&[&jobs]).await;
+    super::close_pools(&[&jobs]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -592,7 +592,7 @@ async fn concurrent_enqueue_owns_the_live_key_and_rolls_back_the_entire_redrive(
     assert!(!format!("{error:?}").contains(SECRET));
     assert_eq!(stored(&pool, &target).await, before);
     assert_eq!(super::job_count(&pool).await, 2);
-    super::close(&[&jobs]).await;
+    super::close_pools(&[&jobs]).await;
 }
 
 async fn proxied_pool(pool: &PgPool) -> (CommitProxy, PgPool) {
@@ -639,7 +639,7 @@ async fn recovery_results_remain_provisional_until_commit_is_acknowledged(pool: 
         .unwrap_err();
         assert!(error.is_commit_unknown());
         assert_eq!(proxy.fired(), Some(fault));
-        super::close(&[&proxied]).await;
+        super::close_pools(&[&proxied]).await;
         proxy.shutdown().await;
         let row = stored(&pool, &target).await;
         match fault {
@@ -652,7 +652,7 @@ async fn recovery_results_remain_provisional_until_commit_is_acknowledged(pool: 
             }
         }
     }
-    super::close(&[&jobs]).await;
+    super::close_pools(&[&jobs]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -790,5 +790,5 @@ async fn inspection_advances_over_nonmatches_and_returns_only_safe_lossless_fiel
         inspect(&jobs, &missing).await,
         InspectionResult::One { item: None, .. }
     ));
-    super::close(&[&jobs]).await;
+    super::close_pools(&[&jobs]).await;
 }

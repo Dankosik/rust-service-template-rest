@@ -1361,7 +1361,6 @@
         "path": "test/tests/webhooks/main.rs",
         "ids": [
           "test-webhooks-inbound-modules",
-          "test-webhooks-inbound-std",
           "test-webhooks-inbound-postgres",
           "test-webhooks-inbound-constants",
           "test-webhooks-inbound-pool"

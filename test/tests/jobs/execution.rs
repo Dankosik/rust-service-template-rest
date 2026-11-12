@@ -224,7 +224,7 @@ async fn join(run: EngineRun, pools: &[&PgPool]) {
     run.cancel.cancel();
     run.tracker.close();
     super::bounded("background tasks", run.tracker.wait()).await;
-    super::close(pools).await;
+    super::close_pools(pools).await;
 }
 
 async fn finish(run: EngineRun, pools: &[&PgPool]) {
@@ -1241,7 +1241,7 @@ async fn x2_an_engine_beside_another_shares_its_listener_and_worker_id(pool: PgP
     cancel.cancel();
     tracker.close();
     super::bounded("the engine tasks join", tracker.wait()).await;
-    super::close(&[&jobs]).await;
+    super::close_pools(&[&jobs]).await;
 }
 
 struct Capped {
@@ -2474,7 +2474,7 @@ async fn x11_retention_deletes_only_old_completed_rows_and_keeps_failed_kinds(po
         assert_eq!(count_kind_state(&jobs, kind, "pending").await, 1);
         assert_eq!(count_kind_state(&jobs, kind, "running").await, 1);
     }
-    super::close(&[&jobs]).await;
+    super::close_pools(&[&jobs]).await;
 }
 
 async fn stage_terminal(
@@ -2862,7 +2862,7 @@ async fn x12_cancelled_retention_leaves_no_short_timeout_in_the_pool(pool: PgPoo
             .await
             .expect("a pool session after the cancelled retention");
     assert_eq!(statement_timeout, "8s");
-    super::close(&[&jobs]).await;
+    super::close_pools(&[&jobs]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -2936,5 +2936,5 @@ async fn w2_check_startup_accepts_a_migrated_writer_and_refuses_read_only(pool: 
         read_only.check_startup().await,
         Err(StartupError::NotWritable)
     );
-    super::close(&[&writer, &reader]).await;
+    super::close_pools(&[&writer, &reader]).await;
 }

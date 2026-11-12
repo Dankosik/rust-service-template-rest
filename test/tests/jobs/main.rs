@@ -38,12 +38,11 @@ mod http_idempotency;
 // template:end jobs-http-idempotency:jobs-http-idempotency-module
 
 use std::future::Future;
-use std::num::NonZeroU32;
 use std::panic::AssertUnwindSafe;
 use std::time::Duration;
 
 use futures_util::FutureExt as _;
-use infra_postgres::{Closed, Dsn, Isolation, PgPool, PoolOptions};
+use infra_postgres::{Dsn, Isolation, PgPool};
 
 pub(crate) use infra_postgres::sqlstate;
 
@@ -51,30 +50,12 @@ const APP: &str = "integration-tests-jobs";
 const WAIT: Duration = Duration::from_secs(10);
 /// Pause between polls for a lock waiter.
 const POLL: Duration = Duration::from_millis(20);
-const CLOSE_BUDGET: Duration = Duration::from_secs(5);
 
 pub(crate) async fn template_pool(dsn: &Dsn, max_connections: u32) -> PgPool {
-    infra_postgres::connect(
-        dsn,
-        &PoolOptions {
-            max_connections: NonZeroU32::new(max_connections).expect("a pool size"),
-            application_name: APP,
-            default_isolation: Isolation::ReadCommitted,
-            session_budgets: infra_postgres::SessionBudgets::Startup,
-        },
-    )
-    .await
-    .expect("the template pool connects")
+    integration_tests::template_pool(dsn, APP, max_connections, Isolation::ReadCommitted).await
 }
 
-pub(crate) async fn close(pools: &[&PgPool]) {
-    for pool in pools {
-        assert_eq!(
-            infra_postgres::close(pool, CLOSE_BUDGET).await,
-            Closed::Complete
-        );
-    }
-}
+pub(crate) use integration_tests::close_pools;
 
 pub(crate) async fn job_count(pool: &PgPool) -> i64 {
     sqlx::query_scalar("SELECT count(*) FROM background_jobs")

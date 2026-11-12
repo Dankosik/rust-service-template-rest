@@ -509,7 +509,7 @@ async fn e1_e2_e8_a_committed_enqueue_returns_created_and_one_row(pool: PgPool) 
     assert!(row.error_summary_is_null);
     assert!(row.trace_context_is_null);
     assert_eq!(super::job_count(&jobs).await, 1);
-    super::close(&[&jobs]).await;
+    super::close_pools(&[&jobs]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -534,7 +534,7 @@ async fn e2_a_closure_error_after_enqueue_leaves_no_job(pool: PgPool) {
         result.as_ref().err().map(explain).unwrap_or_default()
     );
     assert_eq!(super::job_count(&jobs).await, 0);
-    super::close(&[&jobs]).await;
+    super::close_pools(&[&jobs]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -579,7 +579,7 @@ async fn e2_a_commit_the_server_rejects_leaves_no_job(pool: PgPool) {
         .await
         .expect("the staged count");
     assert_eq!(staged, 0);
-    super::close(&[&jobs]).await;
+    super::close_pools(&[&jobs]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -620,7 +620,7 @@ async fn e2_an_open_transaction_hides_the_job_until_commit(pool: PgPool) {
     let id_text = id.to_string();
     assert_eq!(super::job_count(&pool).await, 1);
     assert!(visible(&pool, &id_text).await);
-    super::close(&[&jobs]).await;
+    super::close_pools(&[&jobs]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -694,7 +694,7 @@ async fn e4_validation_failures_leave_the_transaction_usable(pool: PgPool) {
     let row = stored_job(&jobs, &id.to_string()).await;
     assert_eq!(row.kind, Note::NAME);
     assert_eq!(row.id_text, id.to_string());
-    super::close(&[&jobs]).await;
+    super::close_pools(&[&jobs]).await;
 }
 
 #[sqlx::test(migrations = false)]
@@ -727,7 +727,7 @@ async fn e4_a_missing_schema_returns_42p01_and_aborts_the_transaction(pool: PgPo
         "{}",
         result.as_ref().err().map(explain).unwrap_or_default()
     );
-    super::close(&[&jobs]).await;
+    super::close_pools(&[&jobs]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -768,7 +768,7 @@ async fn e4_a_read_only_transaction_returns_25006_and_writes_nothing(pool: PgPoo
         result.as_ref().err().map(explain).unwrap_or_default()
     );
     assert_eq!(super::job_count(&jobs).await, 0);
-    super::close(&[&jobs]).await;
+    super::close_pools(&[&jobs]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -806,7 +806,7 @@ async fn e5_a_one_hour_delay_is_the_statement_time_plus_one_hour(pool: PgPool) {
     .expect("the delayed enqueue commits");
     assert!(visible(&jobs, &id.to_string()).await);
     assert_eq!(super::job_count(&jobs).await, 1);
-    super::close(&[&jobs]).await;
+    super::close_pools(&[&jobs]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -844,7 +844,7 @@ async fn e5_a_sub_microsecond_delay_is_accepted(pool: PgPool) {
     .expect("the truncated delay commits");
     assert!(visible(&jobs, &id.to_string()).await);
     assert_eq!(super::job_count(&jobs).await, 1);
-    super::close(&[&jobs]).await;
+    super::close_pools(&[&jobs]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -896,7 +896,7 @@ async fn e6_any_isolation_writes_when_no_holder_and_a_key_is_per_kind(pool: PgPo
         assert!(matches!(second, Enqueued::Created(_)), "{isolation:?}");
         assert_eq!(unkeyed(&jobs, Note::NAME).await, before + 2);
     }
-    super::close(&[&jobs]).await;
+    super::close_pools(&[&jobs]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -918,7 +918,7 @@ async fn e6_any_isolation_writes_beside_a_terminal_holder(pool: PgPool) {
             );
         }
     }
-    super::close(&[&jobs]).await;
+    super::close_pools(&[&jobs]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -952,7 +952,7 @@ async fn e6_repeatable_read_writes_when_a_live_holder_became_terminal_after_the_
         states_for_key(&jobs, key).await,
         vec!["completed".to_owned(), "pending".to_owned()]
     );
-    super::close(&[&jobs]).await;
+    super::close_pools(&[&jobs]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -996,7 +996,7 @@ async fn e6_read_committed_duplicate_against_a_live_holder_keeps_the_transaction
         assert_eq!(enqueued, Enqueued::Duplicate, "{key}");
         assert_eq!(rows_for_key(&jobs, Note::NAME, key).await, 1, "{key}");
     }
-    super::close(&[&jobs]).await;
+    super::close_pools(&[&jobs]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -1079,7 +1079,7 @@ async fn e6_read_committed_inflight_insert_keeps_commit_and_rollback_oracles(poo
             assert!(visible(&jobs, &id.to_string()).await, "{label}");
         }
     }
-    super::close(&[&jobs]).await;
+    super::close_pools(&[&jobs]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -1111,7 +1111,7 @@ async fn e6_snapshot_isolation_duplicate_when_the_snapshot_sees_the_live_holder(
         assert_eq!(enqueued, Enqueued::Duplicate, "{isolation:?}");
         assert_eq!(rows_for_key(&jobs, Note::NAME, &key).await, 1);
     }
-    super::close(&[&jobs]).await;
+    super::close_pools(&[&jobs]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -1157,7 +1157,7 @@ async fn e6_snapshot_isolation_40001_when_a_live_job_is_inserted_after_the_snaps
         );
         assert_eq!(rows_for_key(&jobs, Note::NAME, &key).await, 1);
     }
-    super::close(&[&jobs]).await;
+    super::close_pools(&[&jobs]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -1194,7 +1194,7 @@ async fn e6_repeatable_read_40001_when_a_claim_write_commits_after_the_snapshot(
         result.as_ref().err().map(explain).unwrap_or_default()
     );
     assert_eq!(states_for_key(&jobs, key).await, vec!["running".to_owned()]);
-    super::close(&[&jobs]).await;
+    super::close_pools(&[&jobs]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -1262,7 +1262,7 @@ async fn e6_repeatable_read_inflight_claim_keeps_commit_and_rollback_oracles(poo
             );
         }
     }
-    super::close(&[&jobs]).await;
+    super::close_pools(&[&jobs]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -1306,7 +1306,7 @@ async fn e6_compare_live_payload_distinguishes_same_and_different_live_duplicate
     .expect("the conflicting duplicate commits");
     assert_eq!(different, LivePayloadComparison::Different);
     assert_eq!(rows_for_key(&jobs, Note::NAME, key).await, 1);
-    super::close(&[&jobs]).await;
+    super::close_pools(&[&jobs]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -1360,7 +1360,7 @@ async fn e6_compare_live_payload_keeps_the_live_key_locked_until_commit(pool: Pg
         states_for_key(&jobs, &key).await,
         vec!["completed".to_owned()]
     );
-    super::close(&[&jobs]).await;
+    super::close_pools(&[&jobs]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -1408,5 +1408,5 @@ async fn e6_compare_live_payload_reports_a_lost_live_key_after_duplicate(pool: P
         states_for_key(&jobs, &key).await,
         vec!["completed".to_owned()]
     );
-    super::close(&[&jobs]).await;
+    super::close_pools(&[&jobs]).await;
 }

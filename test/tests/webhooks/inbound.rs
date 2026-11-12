@@ -320,7 +320,7 @@ async fn receiver_preserves_first_admission_on_authenticated_changed_replay(pool
         row.try_get::<Vec<u8>, _>("message_id").expect("message"),
         b"message-1".to_vec()
     );
-    super::close(&[&pool]).await;
+    super::close_pools(&[&pool]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -368,7 +368,7 @@ async fn concurrent_verified_copies_converge_on_one_receipt_and_job(pool: PgPool
     };
     assert_eq!(incoming.body(), expected);
     assert_eq!(incoming.message_id(), b"message-race");
-    super::close(&[&pool]).await;
+    super::close_pools(&[&pool]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -394,7 +394,7 @@ async fn admission_waits_for_a_connection_until_the_callers_deadline(pool: PgPoo
         .await;
     assert_eq!(outcome, Ok(ReceiptOutcome::Accepted));
     release.await.expect("release task");
-    super::close(&[&single, &pool]).await;
+    super::close_pools(&[&single, &pool]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -416,7 +416,7 @@ async fn enqueue_failure_rolls_back_the_new_receipt(pool: PgPool) {
         .await;
     assert_eq!(outcome, Err(ReceiveError::Unavailable));
     assert_eq!(receipt_count(&pool).await, 0);
-    super::close(&[&pool]).await;
+    super::close_pools(&[&pool]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -470,10 +470,10 @@ async fn lost_receipt_commit_acknowledgement_returns_unavailable_and_retry_conve
         );
         assert_eq!(receipt_count(&pool).await, previous + 1);
         assert_eq!(job_count(&pool).await, previous + 1);
-        super::close(&[&proxied]).await;
+        super::close_pools(&[&proxied]).await;
         proxy.shutdown().await;
     }
-    super::close(&[&pool]).await;
+    super::close_pools(&[&pool]).await;
 }
 
 #[derive(Default)]
@@ -539,7 +539,7 @@ impl RunningProcessor {
         self.cancel.cancel();
         self.tracker.close();
         super::bounded("the processor tasks join", self.tracker.wait()).await;
-        super::close(pools).await;
+        super::close_pools(pools).await;
     }
 }
 
@@ -724,7 +724,7 @@ async fn mounted_percent_decoded_endpoint_reaches_signature_rejection(pool: PgPo
         .await;
     response.assert_status(StatusCode::BAD_REQUEST);
     assert_eq!(receipt_count(&pool).await, 0);
-    super::close(&[&pool]).await;
+    super::close_pools(&[&pool]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -845,7 +845,7 @@ async fn mounted_receipt_cutoff_reserves_response_time_and_same_identity_recover
         );
     }
     // template:end http-idempotency:test-webhook-cutoff-metric-assertions
-    super::close(&[&writer, &pool]).await;
+    super::close_pools(&[&writer, &pool]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -894,7 +894,7 @@ async fn receipt_identity_preserves_binary_ids_and_endpoint_scope(pool: PgPool) 
         ]
     );
     assert_eq!(job_count(&pool).await, 3);
-    super::close(&[&pool]).await;
+    super::close_pools(&[&pool]).await;
 }
 
 /// A provider scheme other than Standard Webhooks: a shared token header and
@@ -1006,7 +1006,7 @@ async fn a_provider_verifier_shares_the_receipt_path_beside_standard_webhooks(po
     );
     assert_eq!(receipt_count(&pool).await, 2);
     assert_eq!(job_count(&pool).await, 2);
-    super::close(&[&pool]).await;
+    super::close_pools(&[&pool]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -1088,7 +1088,7 @@ async fn remove_expired_deletes_only_receipts_older_than_retention(pool: PgPool)
         3,
         "receipt expiry permits another processing job for the same delivery identity"
     );
-    super::close(&[&pool]).await;
+    super::close_pools(&[&pool]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -1128,9 +1128,9 @@ async fn unknown_cleanup_commit_does_not_count_deleted_receipts(pool: PgPool) {
         assert!(scrape.contains(line), "{line} missing from {scrape}");
     }
     assert!(!scrape.contains("webhook_receipt_cleanup_removed_receipts_total"));
-    super::close(&[&proxied]).await;
+    super::close_pools(&[&proxied]).await;
     proxy.shutdown().await;
-    super::close(&[&pool]).await;
+    super::close_pools(&[&pool]).await;
 }
 
 async fn receipt_population_sample(pool: &PgPool) -> String {
@@ -1221,7 +1221,7 @@ async fn observation_includes_locked_receipts_and_becomes_empty_after_cleanup(po
         )));
     }
     assert_eq!(receipt_count(&pool).await, 1, "retention remains intact");
-    super::close(&[&pool]).await;
+    super::close_pools(&[&pool]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -1339,7 +1339,7 @@ async fn mounted_admission_distinguishes_replay_id_bounds_and_body_failures(pool
     assert_eq!(incoming.message_id(), vec![b'm'; 255]);
     assert_eq!(incoming.content_type(), Some(b"text/plain".as_slice()));
     assert_eq!(incoming.body(), b"\0first\xff");
-    super::close(&[&pool]).await;
+    super::close_pools(&[&pool]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -1367,7 +1367,7 @@ async fn a_server_limit_below_the_webhook_limit_answers_413_without_content_leng
             .expect("JSON");
     assert_eq!(problem["code"], "request_entity_too_large");
     assert_eq!(receipt_count(&pool).await, 0);
-    super::close(&[&pool]).await;
+    super::close_pools(&[&pool]).await;
 }
 
 const NATIVE_RECEIPTS_VERSION: i64 = 20_260_926_130_000;
@@ -1469,7 +1469,7 @@ async fn receipt_migration_preserves_historical_pairs_jobs_and_admission_approxi
     );
     assert_eq!(receipt_count(&pool).await, 3);
     assert_eq!(job_count(&pool).await, 1);
-    super::close(&[&pool]).await;
+    super::close_pools(&[&pool]).await;
 }
 
 async fn assert_receipt_migration_rollback(pool: &PgPool, expected_code: &str) {
@@ -1516,7 +1516,7 @@ async fn assert_receipt_migration_rollback(pool: &PgPool, expected_code: &str) {
             .await
             .expect("history unchanged");
     assert!(!applied);
-    super::close(&[pool]).await;
+    super::close_pools(&[pool]).await;
 }
 
 #[sqlx::test(migrations = false)]

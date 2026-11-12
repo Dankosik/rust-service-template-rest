@@ -287,7 +287,7 @@ async fn producer_commits_only_common_fields_and_preserves_raw_body(pool: PgPool
         row.try_get::<String, _>("body").expect("body"),
         base64::engine::general_purpose::STANDARD.encode(body)
     );
-    super::close(&[&pool]).await;
+    super::close_pools(&[&pool]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -308,7 +308,7 @@ async fn caller_rollback_leaves_no_delivery(pool: PgPool) {
     .await;
     assert!(matches!(&result, Err(Step::Rejected)), "{result:?}");
     assert_eq!(job_count(&pool).await, 0);
-    super::close(&[&pool]).await;
+    super::close_pools(&[&pool]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -393,7 +393,7 @@ async fn queued_statuses_retry_except_for_gone_and_complete_on_any_2xx(pool: PgP
             .expect("retry remains out of the next table row");
         }
     }
-    super::close(&[&pool]).await;
+    super::close_pools(&[&pool]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -487,7 +487,7 @@ async fn reclaim_repeats_the_external_delivery_and_fences_the_late_completion(po
         .expect("receiver succeeds");
     original.stop().await;
     replacement.stop().await;
-    super::close(&[&pool]).await;
+    super::close_pools(&[&pool]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -533,7 +533,7 @@ async fn legacy_job_uses_current_path_and_rotated_keys_despite_invalid_saved_rou
         .await
         .expect("fixture succeeds");
     running.stop().await;
-    super::close(&[&pool]).await;
+    super::close_pools(&[&pool]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -568,7 +568,7 @@ async fn missing_current_endpoint_spends_the_final_attempt_and_exhausts(pool: Pg
         Some("missing_endpoint")
     );
     running.stop().await;
-    super::close(&[&pool]).await;
+    super::close_pools(&[&pool]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -608,5 +608,5 @@ async fn an_undecodable_payload_is_retried_not_failed_permanently(pool: PgPool) 
             .is_some_and(|summary| summary.contains("does not decode"))
     );
     running.stop().await;
-    super::close(&[&pool]).await;
+    super::close_pools(&[&pool]).await;
 }

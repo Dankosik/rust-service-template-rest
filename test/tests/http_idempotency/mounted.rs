@@ -65,7 +65,7 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 
 use crate::commit_proxy::{CommitProxy, Fault};
 use crate::{
-    Hold, RETENTION, RETRY_PAUSE, WAIT, bounded, close, count, make_read_only, template_pool,
+    Hold, RETENTION, RETRY_PAUSE, WAIT, bounded, close_pools, count, make_read_only, template_pool,
 };
 
 #[path = "../../fixtures/tls.rs"]
@@ -653,7 +653,7 @@ impl Mounted {
     }
 
     async fn finish(self) {
-        close(&[&self.store_pool]).await;
+        close_pools(&[&self.store_pool]).await;
         self.provider.stop().await;
     }
 }

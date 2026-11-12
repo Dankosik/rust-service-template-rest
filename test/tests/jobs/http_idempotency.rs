@@ -177,7 +177,7 @@ async fn e1_e3_a_committed_attempt_enqueues_once(pool: PgPool) {
     let id = created_id(seen.lock().expect("seen").expect("the work enqueued"));
     assert_eq!(super::job_count(&pool).await, 1);
     assert!(row_is(&pool, &id, WIDGET).await);
-    super::close(&[&first.pool, &second.pool]).await;
+    super::close_pools(&[&first.pool, &second.pool]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -220,7 +220,7 @@ async fn e3_a_replayed_attempt_enqueues_nothing(pool: PgPool) {
     }
     assert_eq!(runs.load(Ordering::SeqCst), 1);
     assert_eq!(super::job_count(&pool).await, 1);
-    super::close(&[&first.pool, &second.pool]).await;
+    super::close_pools(&[&first.pool, &second.pool]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -244,7 +244,7 @@ async fn e3_a_rolled_back_attempt_enqueues_nothing(pool: PgPool) {
     assert!(matches!(outcome, Ok(Attempted::RolledBack(()))));
     assert_eq!(runs.load(Ordering::SeqCst), 1);
     assert_eq!(super::job_count(&pool).await, 0);
-    super::close(&[&first.pool, &second.pool]).await;
+    super::close_pools(&[&first.pool, &second.pool]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -297,7 +297,7 @@ async fn e3_an_in_progress_attempt_enqueues_nothing(pool: PgPool) {
     assert_eq!(runs.load(Ordering::SeqCst), 1);
     assert_eq!(super::job_count(&pool).await, 1);
     assert!(row_is(&pool, &id, WIDGET).await);
-    super::close(&[&first.pool, &second.pool]).await;
+    super::close_pools(&[&first.pool, &second.pool]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -342,7 +342,7 @@ async fn e6_another_scope_gets_duplicate_and_still_commits(pool: PgPool) {
         Enqueued::Duplicate
     );
     assert_eq!(super::job_count(&pool).await, 1);
-    super::close(&[&first.pool, &second.pool]).await;
+    super::close_pools(&[&first.pool, &second.pool]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -424,5 +424,5 @@ async fn e6_a_concurrent_enqueue_waits_then_duplicate_and_both_commit(pool: PgPo
     );
     assert_eq!(super::job_count(&pool).await, 1);
     assert!(row_is(&pool, &id, WIDGET).await);
-    super::close(&[&first_pool, &second_pool]).await;
+    super::close_pools(&[&first_pool, &second_pool]).await;
 }
