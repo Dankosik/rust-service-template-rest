@@ -20,7 +20,6 @@ use crate::{
     refresh::{KeyStore, REFRESH_INTERVAL, SignatureRefresh, run_refresh_worker},
 };
 
-/// Discovery and the initial JWKS fetch share this budget.
 const STARTUP_BUDGET: Duration = Duration::from_secs(6);
 /// Bounds provider-supplied text that reaches an operator error; it is not
 /// part of the issuer grammar.
@@ -244,7 +243,9 @@ impl JwtVerifier {
 /// Prepares initial trust before traffic admission and returns the one refresh
 /// future for bootstrap to spawn through its process tracker. Install the
 /// metrics recorder first: the verifier registers its counters here.
-/// `cancel` stops only the refresh task; a 6-second budget bounds startup.
+/// `cancel` stops only the refresh task. The six-second startup budget starts
+/// before client construction. Synchronous work is checked after it returns
+/// because it cannot be preempted by the async deadline.
 ///
 /// # Errors
 ///
@@ -254,15 +255,18 @@ pub async fn prepare_jwt(
     options: JwtOptions,
     cancel: CancellationToken,
 ) -> Result<(Verifier, RefreshTask), PreparationError> {
+    let startup_deadline = Instant::now() + STARTUP_BUDGET;
     let provider = ProviderClient::try_new()?;
-    prepare_with_provider(options, provider, cancel).await
+    prepare_with_provider(options, provider, cancel, startup_deadline).await
 }
 
 async fn prepare_with_provider(
     options: JwtOptions,
     provider: ProviderClient,
     cancel: CancellationToken,
+    startup_deadline: Instant,
 ) -> Result<(Verifier, RefreshTask), PreparationError> {
+    check_startup_deadline(startup_deadline, PreparationPhase::Client)?;
     metrics::describe_counter!(
         KEY_REJECTIONS_METRIC,
         "Rejected JWKS entries by closed reason"
@@ -271,10 +275,13 @@ async fn prepare_with_provider(
     if options.algorithms.is_empty() {
         return Err(PreparationError::invalid_options());
     }
-    let startup_deadline = Instant::now() + STARTUP_BUDGET;
-    let jwks_uri = match options.jwks_uri {
-        Some(jwks_uri) => jwks_uri,
-        None => discover_jwks_uri(&provider, &options.issuer, startup_deadline).await?,
+    check_startup_deadline(startup_deadline, PreparationPhase::Options)?;
+    let jwks_uri = if let Some(jwks_uri) = options.jwks_uri {
+        jwks_uri
+    } else {
+        let uri = discover_jwks_uri(&provider, &options.issuer, startup_deadline).await?;
+        check_startup_deadline(startup_deadline, PreparationPhase::Discovery)?;
+        uri
     };
     let key_set = fetch_key_set(
         &provider,
@@ -284,13 +291,14 @@ async fn prepare_with_provider(
     )
     .await
     .map_err(|failure| PreparationError::new(PreparationPhase::Jwks, failure.into()))?;
+    check_startup_deadline(startup_deadline, PreparationPhase::Jwks)?;
     let key_store = KeyStore::new(key_set);
-    let verifier = JwtVerifier::new(
+    let verifier = Verifier::jwt(JwtVerifier::new(
         claim_policy,
         options.token_profile,
         options.algorithms.clone(),
         key_store.clone(),
-    );
+    ));
     let refresh_task: RefreshTask = Box::pin(run_refresh_worker(
         key_store,
         provider,
@@ -298,7 +306,18 @@ async fn prepare_with_provider(
         options.algorithms,
         cancel,
     ));
-    Ok((Verifier::jwt(verifier), refresh_task))
+    check_startup_deadline(startup_deadline, PreparationPhase::Jwks)?;
+    Ok((verifier, refresh_task))
+}
+
+fn check_startup_deadline(
+    deadline: Instant,
+    phase: PreparationPhase,
+) -> Result<(), PreparationError> {
+    if Instant::now() >= deadline {
+        return Err(PreparationError::new(phase, PreparationReason::Timeout));
+    }
+    Ok(())
 }
 
 impl PreparationError {
@@ -958,6 +977,7 @@ mod tests {
         root: &[u8],
         jwks_uri: Option<&str>,
     ) -> Result<(crate::Verifier, super::RefreshTask), crate::PreparationError> {
+        let startup_deadline = tokio::time::Instant::now() + super::STARTUP_BUDGET;
         let origin = format!("https://{FIXTURE_HOST}:{}", address.port());
         let options = super::JwtOptions {
             issuer: crate::IssuerUrl::parse(&format!("{origin}/tenant")).unwrap(),
@@ -971,7 +991,7 @@ mod tests {
         let provider =
             crate::provider::new_fixture_client(FIXTURE_HOST, address, root, cancel.clone())
                 .unwrap();
-        super::prepare_with_provider(options, provider, cancel).await
+        super::prepare_with_provider(options, provider, cancel, startup_deadline).await
     }
 
     #[tokio::test]
@@ -1208,8 +1228,15 @@ mod tests {
         exact
     }
 
+    #[derive(serde::Deserialize)]
+    struct StringIssuer {
+        #[serde(rename = "iss")]
+        _issuer: String,
+    }
+
     /// This crate and `jsonwebtoken::decode`, deciding the same token under
-    /// the same issuer, audience, leeway and key.
+    /// the same issuer, audience, leeway and key. The oracle also requires a
+    /// string issuer because the library permits issuer arrays.
     struct Deciders {
         verifier: JwtVerifier,
         key: jsonwebtoken::DecodingKey,
@@ -1238,10 +1265,8 @@ mod tests {
             }
         }
 
-        /// `IgnoredAny` keeps the library's own claim rules and adds none.
         fn library(&self, token: &str) -> bool {
-            jsonwebtoken::decode::<serde::de::IgnoredAny>(token, &self.key, &self.validation)
-                .is_ok()
+            jsonwebtoken::decode::<StringIssuer>(token, &self.key, &self.validation).is_ok()
         }
 
         /// A token outside the bearer grammar never reaches the verifier. The
@@ -1261,11 +1286,10 @@ mod tests {
         }
     }
 
-    /// This crate verifies the signature and reads the registered claims
-    /// itself. Its decisions on them must stay those of `jsonwebtoken::decode`,
-    /// and no header that the library refuses may pass here.
+    /// Compare the registered claims with the library under the same issuer
+    /// shape rule. No header that the library refuses may pass here.
     #[tokio::test]
-    async fn registered_claim_decisions_match_jsonwebtoken_decode() {
+    async fn registered_claim_decisions_match_the_reference_validation() {
         let deciders = Deciders::new();
         let now = jsonwebtoken::get_current_timestamp();
         let base = serde_json::json!({
@@ -1447,10 +1471,9 @@ mod tests {
             ..proptest::prelude::ProptestConfig::default()
         })]
 
-        /// Any combination of registered claim shapes, with either spelling
-        /// of its strings, is decided as `jsonwebtoken::decode` decides it.
+        /// Registered claim shapes and escaped strings agree with the reference validation.
         #[test]
-        fn generated_registered_claims_are_decided_as_jsonwebtoken_decides_them(
+        fn generated_registered_claims_match_the_reference_validation(
             iss in member(Member::Json(CORPUS_ISSUER.into())),
             aud in member(Member::Json("api".into())),
             exp in member(Member::Time { offset: 600, fractional: false }),
@@ -1477,12 +1500,12 @@ mod tests {
             proptest::prop_assert_eq!(here, deciders.library(&token), "payload {}", payload);
         }
 
-        /// A payload damaged anywhere after its subject is decided as
-        /// `jsonwebtoken::decode` decides it, unless the damage leaves it
+        /// A payload damaged anywhere after its subject agrees with the
+        /// reference validation, unless the damage leaves it
         /// outside UTF-8. The subject stays intact because only this crate
         /// requires an identity.
         #[test]
-        fn damaged_payloads_are_decided_as_jsonwebtoken_decides_them(edits in edits()) {
+        fn damaged_payloads_match_the_reference_validation(edits in edits()) {
             const KEPT: &str = r#"{"sub":"subject","#;
             let deciders = Deciders::new();
             let now = jsonwebtoken::get_current_timestamp();

@@ -117,9 +117,8 @@ impl Values<'_> {
 // template:begin oidc-jwt:authn-claims-jwt-type
 #[derive(Deserialize)]
 pub(crate) struct JwtClaims<'a> {
-    /// A string or, as jsonwebtoken reads it, an array naming the issuer.
     #[serde(borrow)]
-    iss: Option<Values<'a>>,
+    iss: Option<Cow<'a, str>>,
     #[serde(borrow)]
     aud: Option<Values<'a>>,
     exp: Option<NumericDate>,
@@ -290,7 +289,7 @@ fn present_numeric_date<'de, D: serde::Deserializer<'de>>(
 
 /// JWT registered-claim order: lifetime first, then issuer and audience.
 fn check_registered_claims(
-    issuer: &Values<'_>,
+    issuer: &str,
     audience: &Values<'_>,
     expiry: u64,
     not_before: Option<u64>,
@@ -298,7 +297,7 @@ fn check_registered_claims(
     now: u64,
 ) -> Result<(), VerificationError> {
     check_lifetime(expiry, not_before, now)?;
-    if !issuer.contains_any(std::slice::from_ref(&policy.issuer)) {
+    if issuer != policy.issuer {
         return Err(VerificationError::invalid(VerificationReason::Issuer));
     }
     if !audience.contains_any(&policy.audiences) {
@@ -557,7 +556,7 @@ mod tests {
     }
 
     #[test]
-    fn registered_claims_follow_the_jsonwebtoken_rules_in_its_order() {
+    fn registered_claim_validation_enforces_shape_and_order() {
         let verify = |extra: serde_json::Value| {
             let mut claims = serde_json::json!({
                 "iss": "https://issuer.example", "aud": "api", "exp": 1000, "sub": "subject",
@@ -632,11 +631,11 @@ mod tests {
             ),
             (
                 serde_json::json!({"iss": ["other", "https://issuer.example"]}),
-                Ok(1000),
+                Err(VerificationReason::MalformedClaims),
             ),
             (
                 serde_json::json!({"iss": []}),
-                Err(VerificationReason::Issuer),
+                Err(VerificationReason::MalformedClaims),
             ),
             (
                 serde_json::json!({"aud": [1]}),
