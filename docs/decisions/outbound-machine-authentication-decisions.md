@@ -159,17 +159,18 @@ that spacing. Successful refresh samples another 30–33 seconds from completion
 and keeps the later of that deadline and the new token's eligibility. No retry
 eligibility permits reuse at or after cutoff or delays a foreground cache miss.
 
-Private integer policy uses the existing fallible AWS-LC random-byte API, with
-fresh two-byte samples at those three assignment owners. Nanosecond arithmetic
-rounds spread down. Source failure discards the bytes and uses the prior full
-lead or thirty-second retry spacing, without logging credentials, changing
-readiness, or retrying the RNG. No new RNG state, timer, dependency family or
-public policy interface is needed. The NATS reconnect schedule reaches the same
+The refresh policy uses the existing fallible AWS-LC random-byte API, with
+fresh two-byte samples at those three assignment owners. The
+[shared jitter rule](shared-rules-decisions.md) rounds the sampled share of
+the window down to a nanosecond. Source failure discards the bytes and uses
+the prior full lead or thirty-second retry spacing, without logging
+credentials, changing readiness, or retrying the RNG. No new RNG state, timer,
+dependency family or public policy interface is needed. The NATS reconnect schedule reaches the same
 source through async-nats's rustls re-export
 (`async_nats::rustls::crypto::aws_lc_rs::default_provider().secure_random`).
 Rejected: `backon` (its jitter is additive, `[0, delay)`, and applied after the
 cap, while these schedules need subtractive spread), a new rand, getrandom or
-fastrand dependency, clock or hash seeding, and a shared jitter helper. A direct
+fastrand dependency, and clock or hash seeding. A direct
 `aws-lc-rs` edge in messaging was withdrawn because it forced a `Cargo.lock`
 change. Reopen only if the re-export or resolution changes. Missing expiry and non-reusable short tokens
 have no refresh eligibility; shared exchange parsing creates no random schedule
@@ -220,11 +221,14 @@ allocator overhead remain. A Moka hit still needs the Tokio-clock reuse check.
 Conditional initialization coalesces replacements for expired or rejected tokens.
 Request-only tokens and failed results expire immediately in Moka. The
 initializer may use a fresh request-only token for its own call. The shared exchange
-belongs to the first caller's future and its deadline; if that caller cancels,
-a waiter starts its own. Exchange failures are coalesced only for concurrent
-waiters and are never persisted as a negative cache. Exchanges for different
-subjects acquire the same owner's finite provider capacity as service tokens
-and refresh-ahead. Inbound admission and cache-entry capacity are separate controls.
+belongs to the first caller's future and its deadline. If that caller stops,
+a waiter starts its own attempt with a new five-second cap, bounded by its
+remaining caller budget. Caller expiry drops the initializer so waiters can
+take over without receiving its timeout. Exchange failures are coalesced only
+for concurrent waiters and are never persisted as a negative cache. Exchanges
+for different subjects acquire the same owner's finite provider capacity as
+service tokens and refresh-ahead. Inbound admission and cache-entry capacity
+are separate controls.
 
 Each actual fetch initializer creates its existing attempt metric, checks its
 original operation context cutoff, then uses `Semaphore::try_acquire` before assertion signing.

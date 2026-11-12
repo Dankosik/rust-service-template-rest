@@ -394,34 +394,41 @@ async fn cancelling_an_exchange_releases_capacity_without_releasing_a_live_waite
 }
 
 #[tokio::test]
-async fn a_waiter_restarts_the_exchange_its_leader_ran_out_of_budget_for() {
+async fn a_waiter_gets_its_own_attempt_budget_after_its_leader_times_out() {
     let fixture = Fixture::new().await;
     fixture.token_json("200 OK", &exchange_response("exchanged"));
+    let resource = Client::try_new_for_test_http(
+        &fixture.origin,
+        infra_outbound_http::Limits {
+            operation_timeout: Duration::from_secs(10),
+            ..TOKEN_LIMITS
+        },
+    )
+    .unwrap();
     let client = fixture
         .prepare(Options {
             provider_concurrency: 1,
             ..fixture.options(&[], None)
         })
-        .http(fixture.resource_client());
+        .http(resource);
     let gate = fixture.block_tokens();
     let mut leader = Box::pin(client.execute(
         fixture.on_behalf_of_request("subject"),
-        deadline(Duration::from_secs(1)),
+        deadline(Duration::from_secs(4)),
     ));
     tokio::select! { () = fixture.token_received() => {}, result = &mut leader => panic!("response must be gated: {result:?}"), }
     let mut waiter = Box::pin(client.execute(
         fixture.on_behalf_of_request("subject"),
-        deadline(Duration::from_secs(4)),
+        deadline(Duration::from_secs(10)),
     ));
     poll_pending(waiter.as_mut()).await;
-    tokio::time::pause();
-    tokio::time::advance(Duration::from_secs(1)).await;
+    advance(Duration::from_secs(4)).await;
     assert_matches!(
         leader.await,
         Err(Error::Acquisition(AcquisitionError::Timeout))
     );
-    tokio::time::resume();
     tokio::select! { () = fixture.token_received() => {}, result = &mut waiter => panic!("replacement must be gated: {result:?}"), }
+    advance(Duration::from_secs(2)).await;
     gate.add_permits(2);
     waiter.await.unwrap();
     assert_eq!(fixture.token_requests().len(), 2);

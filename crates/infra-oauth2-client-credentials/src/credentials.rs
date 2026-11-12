@@ -467,18 +467,20 @@ impl Credentials {
         subject: &SecretString,
         deadline: AcquisitionDeadline,
     ) -> Result<(Arc<Token>, bool), AcquisitionError> {
-        let fetch_deadline = deadline.cutoff.min(Instant::now() + FETCH_TIMEOUT);
-        // A waiter that takes over the result has its own deadline, so the
-        // initializer's expiry reaches it only as the provider's.
         let fetch = async move {
-            settle_fetch(
-                self.0
-                    .inner
-                    .endpoint
-                    .fetch_exchange(subject, fetch_deadline)
-                    .await,
-                deadline,
-            )
+            let fetch_deadline = deadline.cutoff.min(Instant::now() + FETCH_TIMEOUT);
+            let result = self
+                .0
+                .inner
+                .endpoint
+                .fetch_exchange(subject, fetch_deadline)
+                .await;
+            if deadline.expired_error().is_some() {
+                // If the cutoff passed during this poll, let the outer timer
+                // drop the initializer so Moka can hand it off to a live waiter.
+                return std::future::pending().await;
+            }
+            result.map_err(provider_timeout)
         };
         // Conditional replacement uses the same Moka initializer for misses and
         // rejected values. A late rejection never mutates a replacement's key.
@@ -498,6 +500,9 @@ impl Credentials {
             biased;
             () = tokio::time::sleep_until(deadline.cutoff) => Err(deadline.expiry),
             entry = attempt => {
+                if let Some(error) = deadline.expired_error() {
+                    return Err(error);
+                }
                 let fresh = entry.is_fresh();
                 entry.into_value().map(|token| (token, fresh))
             }
