@@ -195,7 +195,7 @@ fn token_digest(token: &BearerToken<'_>) -> TokenDigest {
 #[derive(Clone)]
 enum Fill {
     Fresh(VerifiedIntrospection),
-    Retained(VerifiedIntrospection),
+    RecheckCache,
 }
 
 impl IntrospectionVerifier {
@@ -224,8 +224,8 @@ impl IntrospectionVerifier {
         }))
     }
 
-    /// Rechecks retained calendar eligibility; concurrent misses share tagged
-    /// evidence so a waiter cannot mistake retention for fresh provider trust.
+    /// Shares provider work across misses. Each waiter checks cache eligibility
+    /// at its own lookup.
     pub(crate) async fn verify(
         self: &Arc<Self>,
         token: &BearerToken<'_>,
@@ -268,7 +268,7 @@ impl IntrospectionVerifier {
                         if let Some(value) = retained.get(&key).await
                             && value.reusable_at(now()?)
                         {
-                            return Ok(Fill::Retained(value));
+                            return Ok(Fill::RecheckCache);
                         }
                         let value = verifier
                             .introspect(token, &OperationContext::unbounded(), &now)
@@ -279,15 +279,10 @@ impl IntrospectionVerifier {
                 })?
                 .wait()
                 .await?;
-            match filled {
-                Fill::Fresh(value) => return value.deliver(now()?),
-                Fill::Retained(value) if value.reusable_at(now()?) => {
-                    return Ok(value.principal);
-                }
-                // Retention expired while this caller waited; the next pass
-                // introspects afresh.
-                Fill::Retained(_) => {}
+            if let Fill::Fresh(value) = filled {
+                return value.deliver(now()?);
             }
+            // A cache hit seen by another waiter may expire before this one resumes.
         }
     }
 
@@ -1124,13 +1119,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn joined_retained_evidence_cannot_become_fresh_or_remove_a_replacement() {
+    async fn joined_cache_hit_rechecks_the_current_entry() {
         let context = OperationContext::unbounded();
         let fixture = Fixture::new().await;
         let base = epoch_now();
         let token = parse_bearer([b"Bearer provenance".as_slice()]).unwrap();
         let key = super::token_digest(&token);
-        for replacement in [false, true] {
+        for (elapsed_seconds, replacement) in [(0, false), (60, false), (60, true)] {
             fixture.respond("200 OK", &active_response("old", base + 60));
             let verifier = fixture.verifier(Some(cache_options(1)));
             verifier
@@ -1138,22 +1133,24 @@ mod tests {
                 .await
                 .unwrap();
             let cache = verifier.cache.as_ref().unwrap();
-            let old = cache.retained.get(&key).await.unwrap();
             let before = fixture.calls();
             let gate = Arc::new(Semaphore::new(0));
             let publication_gate = gate.clone();
-            // Hold publication of retained evidence so a joined consumer
-            // resumes after a calendar step (and optionally a newer replacement).
             let publication = cache
                 .join_fill(key, || async move {
                     publication_gate.acquire().await.unwrap().forget();
-                    Ok(super::Fill::Retained(old))
+                    Ok(super::Fill::RecheckCache)
                 })
                 .unwrap();
             let mut publication = Box::pin(publication.wait());
             poll_pending(publication.as_mut()).await;
-            let mut waiter =
-                Box::pin(verifier.verify_with_now(&token, &context, move || Ok(base + 60)));
+            if elapsed_seconds == 0 {
+                // Simulate removal of the cache entry while the token is still valid.
+                cache.retained.invalidate(&key).await;
+            }
+            let mut waiter = Box::pin(
+                verifier.verify_with_now(&token, &context, move || Ok(base + elapsed_seconds)),
+            );
             poll_pending(waiter.as_mut()).await;
             if replacement {
                 let newer = validate_introspection_claims(
@@ -1180,8 +1177,6 @@ mod tests {
                 assert_eq!(result.unwrap().subject(), Some("new"));
                 assert_eq!(fixture.calls(), before);
             } else {
-                // At exp the old value still fits fresh leeway, but is ineligible
-                // retained evidence. An outage must not fall back to it.
                 assert_eq!(result.unwrap_err().failure, Failure::Unavailable);
                 assert_eq!(fixture.calls(), before + 1);
             }
