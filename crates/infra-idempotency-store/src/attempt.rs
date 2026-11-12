@@ -282,12 +282,16 @@ async fn arbitrate(
     )
     .await
     .map_err(|err| read_failed(&err, "arbitrate"))?;
-    // The join yields a whole record or none of its columns.
+    // The join returns the fingerprint, status, and headers together.
+    // The body is selected separately, only for a matching fingerprint.
     let live = match (row.fingerprint, row.status, row.headers) {
-        (Some(stored_fingerprint), Some(status), Some(headers)) => Some(
-            decide_live(stored_fingerprint, status, headers, row.body, fingerprint)
-                .map_err(|err| read_failed(&err, "arbitrate"))?,
-        ),
+        (Some(stored_fingerprint), Some(status), Some(headers)) => Some(decide_live(
+            stored_fingerprint,
+            status,
+            headers,
+            row.body,
+            fingerprint,
+        )?),
         _ => None,
     };
     if !row.writable {
@@ -301,21 +305,22 @@ async fn arbitrate(
         Some(decision) => Ok(Some(decision)),
         None if !row.acquired => Ok(Some(Decision::InProgress)),
         // Step 2. It must stay a statement of its own after step 1.
-        None => observed(
-            "read idempotency record",
-            sqlx::query!(
-                "SELECT fingerprint AS \"fingerprint: Digest\", status, \
-                 headers AS \"headers: Vec<HeaderPair>\", \
-                 CASE WHEN fingerprint = $2 THEN body END AS body \
-                 FROM http_idempotency_records \
-                 WHERE scope_key = $1 AND expires_at > statement_timestamp()",
-                scope.0.as_slice(),
-                fingerprint.as_slice(),
+        None => {
+            let row = observed(
+                "read idempotency record",
+                sqlx::query!(
+                    "SELECT fingerprint AS \"fingerprint: Digest\", status, \
+                     headers AS \"headers: Vec<HeaderPair>\", \
+                     CASE WHEN fingerprint = $2 THEN body END AS body \
+                     FROM http_idempotency_records \
+                     WHERE scope_key = $1 AND expires_at > statement_timestamp()",
+                    scope.0.as_slice(),
+                    fingerprint.as_slice(),
+                )
+                .fetch_optional(tx),
             )
-            .fetch_optional(tx),
-        )
-        .await
-        .and_then(|row| {
+            .await
+            .map_err(|err| read_failed(&err, "read_record"))?;
             row.map(|row| {
                 decide_live(
                     row.fingerprint,
@@ -326,8 +331,7 @@ async fn arbitrate(
                 )
             })
             .transpose()
-        })
-        .map_err(|err| read_failed(&err, "read_record")),
+        }
     }
 }
 
@@ -340,11 +344,11 @@ fn decide_live(
     headers: Vec<HeaderPair>,
     body: Option<Vec<u8>>,
     fingerprint: &Digest,
-) -> Result<Decision, sqlx::Error> {
+) -> Result<Decision, AttemptError> {
     if stored_fingerprint != *fingerprint {
         return Ok(Decision::Mismatch);
     }
-    let body = body.ok_or_else(|| sqlx::Error::Decode("the stored body is null".into()))?;
+    let body = body.ok_or_else(|| refused("decode_record", AttemptError::Integrity, "decode"))?;
     Ok(Decision::Replay(Record {
         status,
         headers,
