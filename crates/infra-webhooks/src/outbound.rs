@@ -8,6 +8,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
     future::poll_fn,
+    io,
     num::NonZeroU32,
     task::Poll,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -125,17 +126,8 @@ impl Producer {
             return Err(OutboundError::UnknownEndpoint);
         }
 
-        // The envelope with empty strings and body; each field below adds only
-        // its escaped contents, and the body its Base64 length.
-        let envelope = serde_json::to_vec(&Delivery {
-            version: delivery_version(),
-            endpoint_id: String::new(),
-            content_type: String::new(),
-            body: Bytes::new(),
-        })
-        .map_err(serialize_failed)?;
         let mut budget = PREFLIGHT_BYTES_PER_POLL;
-        let mut serialized_len = envelope.len() + body_len.div_ceil(3) * 4;
+        let mut serialized_len = EMPTY_DELIVERY_JSON.len() + body_len.div_ceil(3) * 4;
         serialized_len += escaped_len(content_type, &mut budget, |fragment| {
             HeaderValue::from_bytes(fragment.as_bytes())
                 .map(drop)
@@ -160,7 +152,6 @@ async fn escaped_len(
     mut admit: impl FnMut(&str) -> Result<(), OutboundError>,
 ) -> Result<usize, OutboundError> {
     let mut len = 0;
-    let mut escaped = Vec::new();
     let mut rest = field;
     while !rest.is_empty() {
         let end = rest.floor_char_boundary(*budget);
@@ -172,14 +163,29 @@ async fn escaped_len(
         }
         let (fragment, tail) = rest.split_at(end);
         admit(fragment)?;
-        escaped.clear();
+        let mut escaped = ByteCount(0);
         serde_json::to_writer(&mut escaped, fragment).map_err(serialize_failed)?;
         // The envelope already counts the quotes.
-        len += escaped.len() - 2;
+        len += escaped.0 - 2;
         *budget -= end;
         rest = tail;
     }
     Ok(len)
+}
+
+/// A writer that keeps only the number of bytes written, so measuring the
+/// escaped form allocates nothing.
+struct ByteCount(usize);
+
+impl io::Write for ByteCount {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0 += buf.len();
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Return `Pending` once after waking the task, so any executor polls again.
@@ -355,6 +361,11 @@ struct Delivery {
 const fn delivery_version() -> u8 {
     2
 }
+
+/// [`Delivery`] serialized with empty strings and body. [`Producer::preflight`]
+/// adds each field's escaped contents and the body's Base64 length to it
+/// instead of serializing this constant envelope on every enqueue.
+const EMPTY_DELIVERY_JSON: &str = r#"{"version":2,"endpoint_id":"","content_type":"","body":""}"#;
 
 impl JobKind for Delivery {
     const NAME: &'static str = DELIVERY_KIND;
@@ -655,6 +666,21 @@ mod tests {
                 "content_type": "application/json",
                 "body": "cmF3AGJ5dGVz"
             })
+        );
+    }
+
+    #[test]
+    fn empty_delivery_json_is_the_serialized_empty_delivery() {
+        let empty = super::Delivery {
+            version: super::delivery_version(),
+            endpoint_id: String::new(),
+            content_type: String::new(),
+            body: bytes::Bytes::new(),
+        };
+
+        assert_eq!(
+            serde_json::to_string(&empty).unwrap(),
+            super::EMPTY_DELIVERY_JSON
         );
     }
 
