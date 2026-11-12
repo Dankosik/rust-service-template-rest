@@ -61,12 +61,12 @@ pub struct InboundEnvelope {
 
 /// Builds the exact five normal identity headers from an immutable prepared event.
 ///
-/// Every [`PreparedEvent`] a caller can hold has a validated identity and a
-/// creation time that can be formatted.
+/// The bounds enforced by [`PreparedEvent`] keep these headers within
+/// [`HEADER_LIMIT_BYTES`].
 ///
 /// # Errors
-/// Rejects an oversized encoded header set or a creation time that cannot be
-/// formatted.
+/// Returns [`EnvelopeError::CreatedAtOutOfRange`] if the creation time cannot
+/// be formatted.
 pub fn encode_prepared(event: &PreparedEvent) -> Result<HeaderMap, EnvelopeError> {
     let mut headers = HeaderMap::new();
     headers.insert(header_name::MESSAGE_ID, event.message_id());
@@ -77,7 +77,6 @@ pub fn encode_prepared(event: &PreparedEvent) -> Result<HeaderMap, EnvelopeError
         format_timestamp(event.occurred_at())?,
     );
     headers.insert(header_name::NATS_MSG_ID, event.publication_id());
-    validate_header_bytes(&headers)?;
     Ok(headers)
 }
 

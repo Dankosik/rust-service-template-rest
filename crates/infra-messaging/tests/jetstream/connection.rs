@@ -611,7 +611,7 @@ async fn cancelled_topology_admission_retains_the_native_client_until_closed() {
     let mut closing = Box::pin(startup.close(deadline(), &cancel));
     assert_eq!(
         futures_util::poll!(&mut closing),
-        std::task::Poll::Ready(infra_messaging::CloseOutcome::TimedOut),
+        std::task::Poll::Ready(infra_messaging::CloseOutcome::WaitInterrupted),
         "cancelled startup close must not wait for native termination"
     );
     drop(closing);
@@ -643,7 +643,7 @@ async fn cancelled_close_returns_before_native_termination_and_termination_remai
         // this task yields, so this poll distinguishes the caller's wait.
         assert_eq!(
             futures_util::poll!(&mut closing),
-            Poll::Ready(infra_messaging::CloseOutcome::TimedOut)
+            Poll::Ready(infra_messaging::CloseOutcome::WaitInterrupted)
         );
         drop(closing);
         timeout(Duration::from_secs(3), async {
