@@ -273,12 +273,11 @@ async fn accept_panic_after_stop_is_still_observed() {
     }
     let stop = Arc::new(std::sync::OnceLock::new());
     let marker = PanicOnClone(stop.clone());
-    let server = bind_listener(loopback(), app(), options(), move |stream| {
+    let listener = BoundListener::bind(loopback()).await.unwrap();
+    let server = serve_listener(listener, app(), options(), move |stream| {
         let _ = &marker;
         async move { Some((stream, "http")) }
-    })
-    .await
-    .unwrap();
+    });
     stop.set(server.connection_shutdown.finish.clone()).unwrap();
     let failure = server.accept_failure();
     let peer = TcpStream::connect(server.local_addr()).await.unwrap();

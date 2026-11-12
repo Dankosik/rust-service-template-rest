@@ -149,6 +149,7 @@ impl Drop for ReportAcceptFailure {
 }
 
 /// A bound TCP socket whose accept task has not started.
+#[derive(Debug)]
 pub struct BoundListener {
     listener: TcpListener,
     local_addr: SocketAddr,
