@@ -38,8 +38,13 @@ pub enum Error {
     UnregisteredCallerRule(String),
     #[error("gRPC caller rule is declared twice for {0}")]
     DuplicateCallerRule(String),
-    #[error("gRPC caller rule for {0} names a caller outside the name grammar or twice")]
-    InvalidCallerRule(String),
+    #[error("gRPC caller rule for {path}: {source}")]
+    InvalidCallerRule {
+        path: String,
+        source: infra_serviceauth::InvalidServiceName,
+    },
+    #[error("gRPC caller rule for {0} names the same caller twice")]
+    DuplicateCallerName(String),
     #[error("gRPC method {0} has no caller rule")]
     MissingCallerRule(String),
     // template:end service-auth:grpc-caller-rule-errors

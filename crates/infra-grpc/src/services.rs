@@ -239,8 +239,8 @@ impl Services {
     /// Returns [`Error::UnregisteredCallerRule`] unless `path` names a
     /// described method of an added service or an added reflection path,
     /// [`Error::DuplicateCallerRule`] when `path` already has a rule, and
-    /// [`Error::InvalidCallerRule`] for a caller outside the name grammar or
-    /// named twice.
+    /// [`Error::InvalidCallerRule`] for a caller outside the name grammar.
+    /// Returns [`Error::DuplicateCallerName`] when a caller is named twice.
     pub fn allow_callers(&mut self, path: &str, callers: &[&str]) -> Result<(), Error> {
         let reflection = self.reflection && crate::REFLECTION_PATHS.contains(&path);
         if !(self.is_registered_method(path) || reflection) {
@@ -251,10 +251,14 @@ impl Services {
         }
         let mut names: Vec<infra_serviceauth::ServiceName> = Vec::with_capacity(callers.len());
         for caller in callers {
-            let name = infra_serviceauth::ServiceName::parse(caller)
-                .map_err(|_| Error::InvalidCallerRule(path.to_owned()))?;
+            let name = infra_serviceauth::ServiceName::parse(caller).map_err(|source| {
+                Error::InvalidCallerRule {
+                    path: path.to_owned(),
+                    source,
+                }
+            })?;
             if names.contains(&name) {
-                return Err(Error::InvalidCallerRule(path.to_owned()));
+                return Err(Error::DuplicateCallerName(path.to_owned()));
             }
             names.push(name);
         }
