@@ -3,9 +3,8 @@
 use std::time::Duration;
 
 use infra_postgres::{
-    Cleanup, CleanupPass, CleanupSchedule, MAINTENANCE_OBSERVATION_INTERVAL, MaintenanceFailure,
-    MaintenanceObserver, MaintenancePopulation, PopulationSample, TxError, failure_cause,
-    in_observation_tx, in_tx, observed, set_statement_timeout, sqlstate,
+    Cleanup, CleanupPass, MaintenanceFailure, PassEnd, PopulationSample, TxError, failure_cause,
+    in_observation_tx, in_tx, observed, run_scheduled_cleanup, set_statement_timeout, sqlstate,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -53,12 +52,12 @@ impl Receiver {
     async fn remove_expired_pass(
         &self,
         cancel: &CancellationToken,
-    ) -> Result<(u64, CleanupDisposition), CleanupError> {
+    ) -> Result<(u64, PassEnd), CleanupError> {
         let mut pass = CleanupPass::start(Cleanup::WebhookReceipts);
         let mut removed = 0;
         loop {
             if cancel.is_cancelled() {
-                return Ok((removed, CleanupDisposition::Cancelled));
+                return Ok((removed, PassEnd::Cancelled));
             }
             let batch = in_tx(&self.pool, async |tx| -> Result<u64, CleanupError> {
                 // Bounds the batch on the server, so a batch whose client has
@@ -90,7 +89,7 @@ impl Receiver {
             removed += batch;
             if batch < u64::from(CLEANUP_BATCH_ROWS) {
                 pass.completed();
-                return Ok((removed, CleanupDisposition::Completed));
+                return Ok((removed, PassEnd::Completed));
             }
         }
     }
@@ -99,9 +98,6 @@ impl Receiver {
     /// tracked owner. Neither failure changes readiness. Cancellation drops
     /// both loops, including any transaction in flight.
     pub async fn run_cleanup(self, cancel: CancellationToken) {
-        if cancel.is_cancelled() {
-            return;
-        }
         metrics::describe_counter!(
             CLEANUP_RUNS_METRIC,
             metrics::Unit::Count,
@@ -112,43 +108,14 @@ impl Receiver {
             metrics::Unit::Count,
             "Expired webhook receipts the cleanup deleted."
         );
-        let _ = Box::pin(cancel.run_until_cancelled(async {
-            tokio::join!(self.cleanup_loop(&cancel), self.observe_population(&cancel));
-        }))
+        run_scheduled_cleanup(
+            Cleanup::WebhookReceipts,
+            CLEANUP_RUNS_METRIC,
+            &cancel,
+            || async { self.remove_expired_pass(&cancel).await.map(|(_, end)| end) },
+            || self.sample_population(),
+        )
         .await;
-    }
-
-    async fn cleanup_loop(&self, cancel: &CancellationToken) {
-        let mut schedule = CleanupSchedule::new(Cleanup::WebhookReceipts);
-        loop {
-            if cancel.is_cancelled() {
-                return;
-            }
-            schedule.next().await;
-            if cancel.is_cancelled() {
-                return;
-            }
-            let outcome = match self.remove_expired_pass(cancel).await {
-                Ok((_, CleanupDisposition::Cancelled)) => return,
-                Ok((_, CleanupDisposition::Completed)) => "completed",
-                Err(_) => "failed",
-            };
-            metrics::counter!(CLEANUP_RUNS_METRIC, "outcome" => outcome).increment(1);
-        }
-    }
-
-    async fn observe_population(&self, cancel: &CancellationToken) {
-        let mut observer = MaintenanceObserver::start(MaintenancePopulation::WebhookReceipts);
-        loop {
-            if cancel.is_cancelled() {
-                return;
-            }
-            observer.sample(self.sample_population()).await;
-            if cancel.is_cancelled() {
-                return;
-            }
-            tokio::time::sleep(MAINTENANCE_OBSERVATION_INTERVAL).await;
-        }
     }
 
     async fn sample_population(&self) -> Result<PopulationSample, MaintenanceFailure> {
@@ -176,12 +143,6 @@ impl Receiver {
         })
         .await
     }
-}
-
-#[derive(Clone, Copy, Debug)]
-enum CleanupDisposition {
-    Completed,
-    Cancelled,
 }
 
 /// The failure class of one receipt cleanup run.

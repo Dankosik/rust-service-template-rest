@@ -337,3 +337,72 @@ fn cleanup_releases_the_original_active_gauge_after_moving_threads() {
             .contains("postgres_cleanup_active_passes{cleanup=\"jobs\"} 0")
     );
 }
+
+const RUNS_METRIC: &str = "test_cleanup_runs_total";
+
+#[tokio::test(start_paused = true)]
+async fn scheduled_cleanup_counts_each_finished_pass_and_stops_at_a_cancelled_one() {
+    let recorder = PrometheusBuilder::new().build_recorder();
+    let _recording = metrics::set_default_local_recorder(&recorder);
+    let cancel = CancellationToken::new();
+    let mut passes = 0;
+
+    run_scheduled_cleanup(
+        Cleanup::Jobs,
+        RUNS_METRIC,
+        &cancel,
+        || {
+            passes += 1;
+            std::future::ready(match passes {
+                1 => Err(()),
+                2 => Ok(PassEnd::Completed),
+                _ => {
+                    cancel.cancel();
+                    Ok(PassEnd::Cancelled)
+                }
+            })
+        },
+        || std::future::ready(Err(MaintenanceFailure::Statement)),
+    )
+    .await;
+
+    assert_eq!(passes, 3);
+    let scrape = recorder.handle().render();
+    assert!(
+        scrape.contains(&format!(r#"{RUNS_METRIC}{{outcome="failed"}} 1"#)),
+        "{scrape}"
+    );
+    assert!(
+        scrape.contains(&format!(r#"{RUNS_METRIC}{{outcome="completed"}} 1"#)),
+        "{scrape}"
+    );
+    let series = scrape
+        .lines()
+        .filter(|line| line.starts_with(RUNS_METRIC))
+        .count();
+    assert_eq!(series, 2, "the cancelled pass is not counted: {scrape}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_owner_cancelled_before_start_runs_no_pass_and_publishes_no_observer() {
+    let recorder = PrometheusBuilder::new().build_recorder();
+    let _recording = metrics::set_default_local_recorder(&recorder);
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let mut attempts = 0;
+
+    run_scheduled_cleanup(
+        Cleanup::Jobs,
+        RUNS_METRIC,
+        &cancel,
+        || {
+            attempts += 1;
+            std::future::ready(Ok::<_, ()>(PassEnd::Completed))
+        },
+        || std::future::ready(Err(MaintenanceFailure::Statement)),
+    )
+    .await;
+
+    assert_eq!(attempts, 0);
+    assert!(!recorder.handle().render().contains(OBSERVER_ENABLED_METRIC));
+}

@@ -25,7 +25,8 @@ pub use dsn::{Dsn, DsnError};
 pub use error::{failure_cause, is_transient, sqlstate};
 pub use maintenance::{
     Cleanup, CleanupPass, CleanupSchedule, MAINTENANCE_OBSERVATION_INTERVAL, MaintenanceFailure,
-    MaintenanceObserver, MaintenancePopulation, PopulationSample, in_observation_tx,
+    MaintenanceObserver, MaintenancePopulation, PassEnd, PopulationSample, in_observation_tx,
+    run_scheduled_cleanup,
 };
 pub use observe::{
     HISTOGRAMS, acquire, acquire_until, observed, record_metrics, record_metrics_periodically,
