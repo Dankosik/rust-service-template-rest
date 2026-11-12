@@ -13,7 +13,10 @@ use infra_grpc::Client;
 use tonic::{Code, Status, body::Body};
 use tower::Service;
 
-use crate::{AcquisitionError, AdmissionRefusal, Credentials, acquisition_deadline, take_subject};
+use crate::{
+    AcquisitionError, Credentials,
+    credentials::{AdmissionRefusal, acquisition_deadline, take_subject},
+};
 
 /// A cloneable governed gRPC client with private machine credentials.
 #[derive(Clone)]
