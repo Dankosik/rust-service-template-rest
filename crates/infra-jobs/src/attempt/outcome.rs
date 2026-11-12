@@ -169,7 +169,7 @@ async fn execute(
 ) -> Result<u64, sqlx::Error> {
     let ClaimFence { job_id, generation } = fence;
     let id = job_id.0;
-    let (summary, query) = match write {
+    let (statement_summary, query) = match write {
         Write::Retry {
             summary,
             base_micros,
@@ -236,7 +236,7 @@ async fn execute(
             ),
         ),
     };
-    Ok(observed(summary, query.execute(connection))
+    Ok(observed(statement_summary, query.execute(connection))
         .await?
         .rows_affected())
 }

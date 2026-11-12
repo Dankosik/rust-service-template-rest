@@ -170,7 +170,7 @@ async fn await_tick(
     tokio::select! {
         biased;
         () = stop.cancelled() => return false,
-        () = shared.wake.notified() => ticker.reset(),
+        () = shared.claim_wake.notified() => ticker.reset(),
         _ = ticker.tick() => {}
     }
     !stop.is_cancelled()
@@ -475,7 +475,7 @@ fn dispatch_known(
                 payload,
                 trace,
                 lease_offset,
-                queue_wait,
+                queue_wait_seconds,
             } => {
                 let deadline = local_deadline(sent, lease_offset);
                 let Some(slot) = slots.split(1) else {
@@ -489,8 +489,11 @@ fn dispatch_known(
                 let kind_slot = registered
                     .running
                     .as_ref()
-                    .and_then(|running| KindSlot::take(running, &shared.wake));
-                registered.metrics().queue_wait.record(queue_wait.max(0.0));
+                    .and_then(|running| KindSlot::take(running, &shared.claim_wake));
+                registered
+                    .metrics()
+                    .queue_wait
+                    .record(queue_wait_seconds.max(0.0));
                 let guard = crate::engine::SupervisorGuard::new(
                     Arc::clone(&shared.drain),
                     stop.clone(),
@@ -536,7 +539,7 @@ enum Drawn {
         trace: Carrier,
         /// The lease past the send instant, the same value the statement bound.
         lease_offset: Duration,
-        queue_wait: f64,
+        queue_wait_seconds: f64,
     },
     Exhausted {
         attempt: AttemptId,
@@ -560,13 +563,13 @@ struct ClaimRow {
 impl ClaimRow {
     fn into_drawn(self, registry: &crate::Kinds) -> Result<Drawn, sqlx::Error> {
         let Some(registered) = registry.get(&self.kind) else {
-            return Err(decode_error("unknown job kind"));
+            return Err(ClaimDecodeError::UnknownKind.into_sqlx());
         };
         let attempt = AttemptId {
             job_id: JobId(self.id),
             kind: registered.name,
             number: u16::try_from(self.attempts)
-                .map_err(|_| decode_error("attempt does not fit"))?,
+                .map_err(|_| ClaimDecodeError::AttemptOutOfRange.into_sqlx())?,
         };
         if self.exhausted {
             return Ok(Drawn::Exhausted {
@@ -575,7 +578,7 @@ impl ClaimRow {
             });
         }
         let Some(payload) = self.payload else {
-            return Err(decode_error("running claim has no payload"));
+            return Err(ClaimDecodeError::MissingPayload.into_sqlx());
         };
         Ok(Drawn::Running {
             lease_offset: lease_offset(registered.policy.timeout),
@@ -584,12 +587,42 @@ impl ClaimRow {
             generation: self.claim_generation,
             payload,
             trace: Carrier::from_stored(self.trace_parent, self.trace_state),
-            queue_wait: self.queue_wait_seconds,
+            queue_wait_seconds: self.queue_wait_seconds,
         })
     }
 }
-fn decode_error(message: &'static str) -> sqlx::Error {
-    sqlx::Error::Decode(message.into())
+
+#[derive(Debug, thiserror::Error)]
+enum ClaimDecodeError {
+    #[error("unknown job kind")]
+    UnknownKind,
+    #[error("attempt does not fit")]
+    AttemptOutOfRange,
+    #[error("running claim has no payload")]
+    MissingPayload,
+}
+
+impl ClaimDecodeError {
+    fn into_sqlx(self) -> sqlx::Error {
+        sqlx::Error::Decode(Box::new(self))
+    }
+
+    const fn as_str(&self) -> &'static str {
+        match self {
+            Self::UnknownKind => "unknown_kind",
+            Self::AttemptOutOfRange => "attempt_out_of_range",
+            Self::MissingPayload => "missing_payload",
+        }
+    }
+}
+
+pub(crate) fn decode_reason(error: &sqlx::Error) -> Option<&'static str> {
+    let sqlx::Error::Decode(source) = error else {
+        return None;
+    };
+    source
+        .downcast_ref::<ClaimDecodeError>()
+        .map(ClaimDecodeError::as_str)
 }
 
 #[cfg(test)]

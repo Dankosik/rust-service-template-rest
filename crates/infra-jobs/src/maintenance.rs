@@ -121,7 +121,10 @@ async fn run_kind_sampling(shared: &Shared, cancel: &CancellationToken) {
         }
         match sample_once(shared).await {
             Ok(Some(sample)) => {
-                if shared.publish_if_current(&sample.revision, || publish_sample(&sample)) {
+                if shared
+                    .peers
+                    .publish_if_current(&sample.revision, || publish_sample(&sample))
+                {
                     observe_recovery(shared, Operation::Sample);
                 }
             }
@@ -283,7 +286,7 @@ async fn delete_batch(shared: &Shared) -> Result<u64, OperationError> {
 
 async fn sample_once(shared: &Shared) -> Result<Option<Sample>, OperationError> {
     let _turn = shared.statement_turn.lock().await;
-    let (kinds, revision) = shared.sampling_kinds();
+    let (kinds, revision) = shared.peers.sampling_kinds();
     if kinds.is_empty() {
         return Ok(None);
     }
