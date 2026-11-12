@@ -165,12 +165,15 @@ async fn admit(
     next.run(request).await
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct AdmissionShed;
+
 fn shed_response() -> Response {
     metrics::counter!(observe::SHED_REQUESTS_METRIC).increment(1);
-    Problem::new(Code::ServiceUnavailable)
+    let problem = Problem::new(Code::ServiceUnavailable)
         .detail(service_failure::AT_CAPACITY_DETAIL)
-        .retry_after(service_failure::AT_CAPACITY_RETRY_AFTER)
-        .into_response()
+        .retry_after(service_failure::AT_CAPACITY_RETRY_AFTER);
+    (axum::Extension(AdmissionShed), problem).into_response()
 }
 
 /// A recovered panic becomes a sanitized 500 without recording its payload.
