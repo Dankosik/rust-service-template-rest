@@ -187,18 +187,21 @@ async fn receive(
             return Problem::new(Code::WebhookRejected).into_response();
         }
     };
-    let result = deadline
-        .within_attempt(|attempt_end| {
-            receiver.receive_bytes(
+    let result = match deadline.attempt_end() {
+        None => Err(ReceiveError::Unavailable),
+        Some(attempt_end) => {
+            let receipt = receiver.receive_bytes(
                 &endpoint_id,
                 &parts.headers,
                 body,
                 SystemTime::now(),
                 attempt_end,
-            )
-        })
-        .await
-        .unwrap_or(Err(ReceiveError::Unavailable));
+            );
+            tokio::time::timeout_at(attempt_end, receipt)
+                .await
+                .unwrap_or(Err(ReceiveError::Unavailable))
+        }
+    };
     match result {
         Ok(outcome) => {
             let outcome = match outcome {
