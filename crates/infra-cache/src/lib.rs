@@ -70,7 +70,7 @@ pub struct CacheOptions {
     pub dsn: SecretString,
     /// A file that holds the password alone, for a platform that rotates it
     /// by rewriting the file; its trailing line breaks are not part of the
-    /// password. The DSN then carries no password.
+    /// password. A nonempty DSN password is incompatible with this file.
     pub password_file: Option<PathBuf>,
     /// PEM file of a private root CA. Absent uses the process trust store.
     pub root_ca_path: Option<PathBuf>,
@@ -99,8 +99,9 @@ pub struct ClientCertificate {
 /// Why admission refused to build a client. Display never includes the DSN,
 /// a password, or Redis error text.
 ///
-/// The password-file variants also describe a later read for a password
-/// refresh, which is only logged.
+/// The password-file variants also describe reads during connection setup and
+/// refresh. Refresh counts failed reads and warns on the first failure in
+/// each consecutive run of read failures.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum CacheError {
     #[error("cache DSN is invalid")]
@@ -218,12 +219,12 @@ pub struct Cache {
 }
 
 impl Cache {
-    /// Admit the DSN and build the connection without waiting for the network.
+    /// Validate the options, build the client, and start connecting in the background.
     ///
     /// Must be called from a Tokio runtime with the time and I/O drivers enabled.
-    /// It reads the password, root CA, and client certificate files synchronously,
-    /// so an async caller runs it on the blocking pool with the runtime entered.
-    /// The background task drives the dial. Commands and the probe report an outage.
+    /// Configured password and TLS files are read synchronously, so an async
+    /// caller runs this on the blocking pool with the runtime entered. Commands
+    /// and the probe report an outage.
     ///
     /// Install the intended metrics recorder first: the connection's counter
     /// and gauge handles bind to the recorder current here.
@@ -290,6 +291,32 @@ impl Cache {
     #[must_use]
     pub fn server(&self) -> &ServerEndpoint {
         &self.link.server
+    }
+}
+
+/// `PING` probe. The name is `cache`. Failure text is `cache ping failed: <error.type>` only.
+///
+/// The caller's startup/readiness budget can cancel the probe. A PING that
+/// can finish normally gets enough time for commands already ahead of it.
+#[derive(Clone, Debug)]
+pub struct CacheProbe {
+    cache: Cache,
+}
+
+#[async_trait::async_trait]
+impl health::Probe for CacheProbe {
+    fn name(&self) -> &'static str {
+        "cache"
+    }
+
+    async fn check(&self) -> Result<(), health::ProbeError> {
+        self.cache
+            .link
+            .probe(self.cache.command_timeout)
+            .await
+            .map_err(|error| {
+                health::ProbeError::new(format!("cache ping failed: {}", error.label()))
+            })
     }
 }
 
@@ -530,32 +557,6 @@ impl CacheNamespace {
         );
         command.arg(operation.redis_name()).arg(key);
         command
-    }
-}
-
-/// `PING` probe. The name is `cache`. Failure text is `cache ping failed: <error.type>` only.
-///
-/// The caller's startup/readiness budget can cancel the probe. A PING that
-/// can finish normally gets enough time for commands already ahead of it.
-#[derive(Clone, Debug)]
-pub struct CacheProbe {
-    cache: Cache,
-}
-
-#[async_trait::async_trait]
-impl health::Probe for CacheProbe {
-    fn name(&self) -> &'static str {
-        "cache"
-    }
-
-    async fn check(&self) -> Result<(), health::ProbeError> {
-        self.cache
-            .link
-            .probe(self.cache.command_timeout)
-            .await
-            .map_err(|error| {
-                health::ProbeError::new(format!("cache ping failed: {}", error.label()))
-            })
     }
 }
 

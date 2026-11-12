@@ -129,8 +129,9 @@ fn admit_address(
     }
 }
 
-/// The password file to read at each connection, if any. A password belongs
-/// in exactly one of the DSN and the file.
+/// Returns the password file to read at each connection, if configured. A
+/// nonempty DSN password and a password file are mutually exclusive. With
+/// neither configured, admission requires unauthenticated access to be allowed.
 fn admit_password(
     settings: &redis::RedisConnectionInfo,
     password_file: Option<PathBuf>,

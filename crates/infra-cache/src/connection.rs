@@ -192,16 +192,19 @@ impl CommandScope {
     }
 }
 
-/// Retires a failed exchange, or an unanswered one abandoned once its
-/// ceiling has passed, before releasing its admission slot.
+/// Owns the admission slot until any required retirement finishes.
 struct Exchange<'a, F: Future> {
     shared: &'a Shared,
     generation: &'a Arc<Generation>,
     _slot: CommandSlot<'a>,
     reply: ReplyState<'a, F>,
     keeps_generation: fn(&F::Output) -> bool,
-    /// `None` retires when a dispatched reply remains unanswered on drop.
-    ceiling: Option<Deadline>,
+    pending_retirement: PendingReplyRetirement,
+}
+
+enum PendingReplyRetirement {
+    OnDrop,
+    OnDropIfExpired(Deadline),
 }
 
 enum ReplyState<'a, F> {
@@ -218,7 +221,7 @@ impl<'a, F: Future> Exchange<'a, F> {
         slot: CommandSlot<'a>,
         reply: Pin<&'a mut F>,
         keeps_generation: fn(&F::Output) -> bool,
-        ceiling: Option<Deadline>,
+        pending_retirement: PendingReplyRetirement,
     ) -> Self {
         Self {
             shared,
@@ -226,7 +229,7 @@ impl<'a, F: Future> Exchange<'a, F> {
             _slot: slot,
             reply: ReplyState::Unpolled(reply),
             keeps_generation,
-            ceiling,
+            pending_retirement,
         }
     }
 
@@ -275,16 +278,19 @@ impl<F: Future> Drop for Exchange<'_, F> {
         }
         let retire = match self.reply {
             ReplyState::Unpolled(_) | ReplyState::Keep => false,
-            // A caller that stops before the ceiling says nothing about the
-            // server. Its slot drains with the reply; a stalled server still
-            // meets a peer's ceiling or the maintenance PING.
-            ReplyState::Pending(_) => self.ceiling.is_none_or(Deadline::expired),
+            // A sent command keeps its place in the driver's reply queue until
+            // the reply arrives or the driver shuts down. A peer's ceiling or
+            // the maintenance PING can still retire a stalled connection.
+            ReplyState::Pending(_) => match self.pending_retirement {
+                PendingReplyRetirement::OnDrop => true,
+                PendingReplyRetirement::OnDropIfExpired(deadline) => deadline.expired(),
+            },
             ReplyState::Retire => true,
         };
         if retire {
             self.shared.retire(self.generation);
         }
-        // Accounting and the permit drop only after retirement returns.
+        // The slot guard decrements the gauge and releases the local permit after this.
     }
 }
 
@@ -452,7 +458,7 @@ impl Link {
                 slot,
                 reply,
                 command_keeps_generation,
-                Some(scope.ceiling),
+                PendingReplyRetirement::OnDropIfExpired(scope.ceiling),
             );
             let reply = poll_fn(|cx| exchange.poll_reply(cx)).await;
             drop(exchange);
@@ -488,7 +494,7 @@ impl Link {
             slot,
             reply,
             ping_keeps_generation,
-            None,
+            PendingReplyRetirement::OnDrop,
         );
         reply_until(
             &generation.retired,
