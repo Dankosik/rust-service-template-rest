@@ -31,7 +31,8 @@ use tokio::time::Instant;
 
 use crate::protocol::{KeyRing, ProtocolError, ensure_body_size, ensure_message_id_len};
 
-pub use maintenance::{CLEANUP_REMOVED_METRIC, CLEANUP_RUNS_METRIC, CleanupError};
+pub use infra_postgres::CleanupError;
+pub use maintenance::{CLEANUP_REMOVED_METRIC, CLEANUP_RUNS_METRIC};
 pub use processing::{Consumer, Consumers, EndpointAlreadyBound, MissingConsumer, Processor};
 
 /// Re-exported so a consumer crate implements [`Consumer`] without its own

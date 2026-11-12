@@ -3,8 +3,8 @@
 use std::time::Duration;
 
 use infra_postgres::{
-    Cleanup, CleanupPass, MaintenanceFailure, PassEnd, PopulationSample, TxError, failure_cause,
-    in_observation_tx, in_tx, observed, run_scheduled_cleanup, set_statement_timeout, sqlstate,
+    Cleanup, CleanupError, CleanupPass, MaintenanceFailure, PassEnd, PopulationSample, TxOptions,
+    in_observation_tx, observed, run_scheduled_cleanup,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -34,15 +34,16 @@ pub const CLEANUP_REMOVED_METRIC: &str = "webhook_receipt_cleanup_removed_receip
 
 impl Receiver {
     /// Delete expired receipts in batches of at most 500, returning confirmed
-    /// progress after a short batch. Each batch is its own transaction with a
-    /// 5 s statement timeout and skips receipts another cleanup holds; an
-    /// admission's `ON CONFLICT DO NOTHING` locks no existing receipt.
+    /// progress after a short batch. Each batch is its own transaction and
+    /// skips receipts another cleanup holds. An admission's
+    /// `ON CONFLICT DO NOTHING` locks no existing receipt.
     /// Confirmed counts do not certify an empty expired population.
     ///
     /// # Errors
     ///
     /// The failure class of the batch that failed, logged with a bounded
-    /// cause; earlier batches stay committed.
+    /// cause. Earlier batches stay committed. A timeout leaves the batch's
+    /// commit outcome unconfirmed.
     pub async fn remove_expired(&self) -> Result<u64, CleanupError> {
         self.remove_expired_pass(&CancellationToken::new())
             .await
@@ -59,32 +60,24 @@ impl Receiver {
             if cancel.is_cancelled() {
                 return Ok((removed, PassEnd::Cancelled));
             }
-            let batch = in_tx(&self.pool, async |tx| -> Result<u64, CleanupError> {
-                // Bounds the batch on the server, so a batch whose client has
-                // gone still ends within 5 s. A hang guard, not a pace: a slow
-                // batch is waited for.
-                set_statement_timeout(tx, Duration::from_secs(5))
-                    .await
-                    .map_err(|err| cleanup_failed(&err, CleanupError::Statement))?;
-                let deleted = observed(
-                    "delete expired webhook receipts",
-                    sqlx::query!(
-                        "DELETE FROM webhook_receipts WHERE (endpoint_id, message_id) IN \
+            let batch = pass
+                .run_batch(&self.pool, TxOptions::default(), async |tx| {
+                    let deleted = observed(
+                        "delete expired webhook receipts",
+                        sqlx::query!(
+                            "DELETE FROM webhook_receipts WHERE (endpoint_id, message_id) IN \
                          (SELECT endpoint_id, message_id FROM webhook_receipts \
                          WHERE received_at < statement_timestamp() - $1::bigint * interval '1 second' \
                          ORDER BY received_at LIMIT $2 FOR UPDATE SKIP LOCKED)",
-                        RETENTION_SECONDS,
-                        i64::from(CLEANUP_BATCH_ROWS),
+                            RETENTION_SECONDS,
+                            i64::from(CLEANUP_BATCH_ROWS),
+                        )
+                        .execute(tx),
                     )
-                    .execute(&mut *tx),
-                )
-                .await
-                .map_err(|err| cleanup_failed(&err, CleanupError::Statement))?;
-                Ok(deleted.rows_affected())
-            })
-            .await
-            .inspect_err(|_| pass.failed())?;
-            pass.committed(batch);
+                    .await?;
+                    Ok(deleted.rows_affected())
+                })
+                .await?;
             metrics::counter!(CLEANUP_REMOVED_METRIC).increment(batch);
             removed += batch;
             if batch < u64::from(CLEANUP_BATCH_ROWS) {
@@ -143,43 +136,6 @@ impl Receiver {
         })
         .await
     }
-}
-
-/// The failure class of one receipt cleanup run.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum CleanupError {
-    #[error("acquire")]
-    Acquire,
-    #[error("begin")]
-    Begin,
-    #[error("statement")]
-    Statement,
-    #[error("commit")]
-    Commit,
-}
-
-impl From<TxError> for CleanupError {
-    fn from(err: TxError) -> Self {
-        match &err {
-            TxError::Acquire(err) => cleanup_failed(err, Self::Acquire),
-            TxError::Begin(err) => cleanup_failed(err, Self::Begin),
-            TxError::CommitFailed(err) | TxError::CommitUnknown(err) => {
-                cleanup_failed(err, Self::Commit)
-            }
-        }
-    }
-}
-
-/// Log a failed cleanup batch with only bounded fields, never driver text,
-/// and return its class.
-fn cleanup_failed(err: &sqlx::Error, class: CleanupError) -> CleanupError {
-    tracing::warn!(
-        failure = %class,
-        sqlstate = sqlstate(err).as_deref(),
-        cause = failure_cause(err),
-        "webhook_receipt_cleanup_failed"
-    );
-    class
 }
 
 #[cfg(test)]
