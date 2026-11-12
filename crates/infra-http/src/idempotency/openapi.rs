@@ -13,7 +13,7 @@ use utoipa::openapi::schema::{ObjectBuilder, Type};
 use utoipa::openapi::{Ref, RefOr, Required};
 use utoipa::{OpenApi, ToResponse};
 
-use super::identity::{KEY_GRAMMAR, MAX_KEY_BYTES};
+use super::identity::{KEY_GRAMMAR, MAX_DECODED_KEY_BYTES};
 use crate::authn::{AuthenticationMalformed, AuthenticationUnavailable};
 use crate::problem::{Code, Problem, http_status, responses};
 
@@ -33,14 +33,14 @@ pub(super) fn key_parameter() -> Parameter {
         .name(KEY_HEADER)
         .parameter_in(ParameterIn::Header)
         .description(Some(format!(
-            "One key for one intended effect. Supply exactly one header field. {KEY_GRAMMAR} After decoding, the key must contain 1 to {MAX_KEY_BYTES} bytes. Retry the same request with the same decoded key."
+            "One key for one intended effect. Supply exactly one header field. {KEY_GRAMMAR} After decoding, the key must contain 1 to {MAX_DECODED_KEY_BYTES} bytes. Retry the same request with the same decoded key."
         )))
         .required(Required::True)
         .schema(Some(
             ObjectBuilder::new()
                 .schema_type(Type::String)
                 .description(Some(format!(
-                    "A visible-ASCII value or an IETF Structured Field string. The decoded value must contain 1 to {MAX_KEY_BYTES} bytes; quoted values can have a longer wire representation because of quotes and escapes."
+                    "A visible-ASCII value or an IETF Structured Field string. The decoded value must contain 1 to {MAX_DECODED_KEY_BYTES} bytes; quoted values can have a longer wire representation because of quotes and escapes."
                 )))
                 .examples([UNQUOTED_KEY_EXAMPLE, QUOTED_KEY_EXAMPLE]),
         ))

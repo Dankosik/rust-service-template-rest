@@ -160,12 +160,12 @@ pub(crate) async fn opening(
         // the handler and with it the body.
         stopped = async {
             let reason = request_operation.wait_stopped().await;
-            stopped_response(reason, upload.awaited())
+            stopped_response(reason, upload.version_if_awaiting())
         } => return stopped,
         response = next.run(request) => response,
     };
     if let Some(reason) = request_operation.stopped() {
-        return stopped_response(reason, upload.awaited());
+        return stopped_response(reason, upload.version_if_awaiting());
     }
     response.map(|body| {
         if body.is_end_stream() {
@@ -239,8 +239,7 @@ impl Upload {
         }
     }
 
-    /// The request version when the handler is blocked on the caller's body.
-    fn awaited(&self) -> Option<Version> {
+    fn version_if_awaiting(&self) -> Option<Version> {
         self.awaiting
             .as_ref()
             .filter(|awaiting| awaiting.load(Ordering::Relaxed))
