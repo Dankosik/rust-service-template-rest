@@ -13,8 +13,8 @@ use tokio_util::task::TaskTracker;
 
 use crate::attempt::{self, AttemptId};
 use crate::engine::{
-    CANCEL_MARGIN, LEASE_RESERVE, Operation, OperationError, POLL_INTERVAL, Shared, backstop,
-    observe_failure, observe_recovery,
+    CANCEL_MARGIN, LEASE_RESERVE, Operation, OperationError, POLL_INTERVAL, PeerRegistration,
+    Shared, backstop, observe_failure, observe_recovery,
 };
 use crate::kind::{JobId, Registered};
 use crate::trace_context::Carrier;
@@ -24,7 +24,7 @@ pub const CLAIM_DURATION_METRIC: &str = "jobs_claim_duration_seconds";
 pub(crate) const CLAIM_DURATION_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 8.0, 12.0,
 ];
-/// Queue time between a job's current `not_before` and its acknowledged claim. Label `kind`.
+/// Queue time from `not_before` to the start of the successful claim statement. Label `kind`.
 pub const QUEUE_WAIT_METRIC: &str = "jobs_queue_wait_seconds";
 pub(crate) const QUEUE_WAIT_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0,
@@ -88,7 +88,7 @@ pub(crate) fn describe_metrics() {
     metrics::describe_histogram!(
         QUEUE_WAIT_METRIC,
         Unit::Seconds,
-        "Time from a job's current not-before to its acknowledged claim"
+        "Time from a job's current not-before to the start of its successful claim statement"
     );
 }
 
@@ -97,8 +97,11 @@ pub(crate) async fn run_claim_loop(
     shared: Arc<Shared>,
     stop: CancellationToken,
     failure: CancellationToken,
+    peer: PeerRegistration,
 ) {
     let _close = CloseTracker(&shared.attempt_tracker);
+    // Deregister before releasing waiters on the attempt tracker.
+    let _peer = peer;
     let mut ticker = tokio::time::interval(POLL_INTERVAL);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut next = Next::Idle;

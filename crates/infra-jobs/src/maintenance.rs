@@ -120,11 +120,12 @@ async fn run_kind_sampling(shared: &Shared, cancel: &CancellationToken) {
             return;
         }
         match sample_once(shared).await {
-            Ok(sample) => {
+            Ok(Some(sample)) => {
                 if shared.publish_for_kinds(&sample.kinds, || publish_sample(&sample)) {
                     observe_recovery(shared, Operation::Sample);
                 }
             }
+            Ok(None) => {}
             Err(error) => {
                 observe_failure(shared, Operation::Sample, &error);
             }
@@ -239,12 +240,12 @@ pub(crate) fn init_metrics(kinds: &[&'static str]) {
         "Database Unix timestamp of the last successful jobs observation."
     );
     for &kind in kinds {
-        init_kind_metrics(kind);
+        reset_kind_metrics(kind);
     }
     invalidate_sample();
 }
 
-pub(crate) fn init_kind_metrics(kind: &'static str) {
+pub(crate) fn reset_kind_metrics(kind: &'static str) {
     publish_kind(kind, KindDepths::default());
 }
 
@@ -280,9 +281,12 @@ async fn delete_batch(shared: &Shared) -> Result<u64, OperationError> {
     .await
 }
 
-async fn sample_once(shared: &Shared) -> Result<Sample, OperationError> {
+async fn sample_once(shared: &Shared) -> Result<Option<Sample>, OperationError> {
     let _turn = shared.statement_turn.lock().await;
     let kinds = shared.registered_kinds();
+    if kinds.is_empty() {
+        return Ok(None);
+    }
     backstop(async {
         in_tx(&shared.pool, async |tx| -> Result<Sample, OperationError> {
             set_statement_timeout(tx, SAMPLE_STATEMENT_TIMEOUT).await?;
@@ -368,6 +372,7 @@ async fn sample_once(shared: &Shared) -> Result<Sample, OperationError> {
         .await
     })
     .await
+    .map(Some)
 }
 
 struct SampleRow {
