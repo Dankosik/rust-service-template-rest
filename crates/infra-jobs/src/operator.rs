@@ -498,13 +498,13 @@ fn page_result(
 /// [`OperatorError::Missing`]; the mutation's kind/version/failed predicate is
 /// the single authoritative identity check, so this statement locks the row
 /// without comparing it.
-async fn lock_failed_job(tx: &mut Tx<'_>, target: &RecoveryTarget) -> Result<(), OperatorError> {
+async fn lock_job_row(tx: &mut Tx<'_>, id: JobId) -> Result<(), OperatorError> {
     apply_statement_timeout(tx).await?;
     observed(
         "lock failed job",
         sqlx::query!(
             "SELECT id FROM background_jobs WHERE id = $1 FOR UPDATE",
-            target.id.0
+            id.0
         )
         .fetch_optional(&mut *tx),
     )
@@ -534,7 +534,7 @@ fn conflict_or_database(error: sqlx::Error) -> OperatorError {
 /// Refuses missing/stale targets or a conflicting live key; all failures must
 /// propagate out of the caller's transaction so that recovery is rolled back.
 pub async fn redrive(tx: &mut Tx<'_>, target: &RecoveryTarget) -> Result<Redriven, OperatorError> {
-    lock_failed_job(tx, target).await?;
+    lock_job_row(tx, target.id).await?;
     let row = observed(
         "redrive failed job",
         sqlx::query!(
@@ -576,7 +576,7 @@ pub async fn redrive(tx: &mut Tx<'_>, target: &RecoveryTarget) -> Result<Redrive
 /// # Errors
 /// Refuses missing/stale targets and propagates database failures.
 pub async fn discard(tx: &mut Tx<'_>, target: &RecoveryTarget) -> Result<(), OperatorError> {
-    lock_failed_job(tx, target).await?;
+    lock_job_row(tx, target.id).await?;
     let result = observed("discard failed job", sqlx::query!(
         "DELETE FROM background_jobs WHERE id = $1 AND kind = $2 AND claim_generation = $3 AND state = 'failed'",
         target.id.0, target.kind, target.version
