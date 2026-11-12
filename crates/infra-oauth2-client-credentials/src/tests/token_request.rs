@@ -289,11 +289,15 @@ async fn short_lived_and_omitted_lifetime_service_tokens_are_request_only() {
 }
 
 #[tokio::test]
-async fn unrepresentable_service_and_exchanged_lifetimes_refuse_before_resource_dispatch() {
+async fn invalid_service_and_exchanged_lifetimes_refuse_before_resource_dispatch() {
     let fixture = Fixture::new().await;
-    for request in [fixture.request(), fixture.on_behalf_of_request("subject")] {
-        let mut response = exchange_response("overflow");
-        response["expires_in"] = u64::MAX.into();
+    for (request, lifetime) in [
+        (fixture.request(), u64::MAX.into()),
+        (fixture.on_behalf_of_request("subject"), u64::MAX.into()),
+        (fixture.request(), serde_json::Value::Null),
+    ] {
+        let mut response = exchange_response("invalid-lifetime");
+        response["expires_in"] = lifetime;
         fixture.token_json("200 OK", &response);
         let error = fixture
             .credentials(&[], None)
@@ -303,7 +307,7 @@ async fn unrepresentable_service_and_exchanged_lifetimes_refuse_before_resource_
             .unwrap_err();
         assert_matches!(error, Error::Acquisition(AcquisitionError::InvalidResponse));
     }
-    assert_eq!(fixture.token_requests().len(), 2);
+    assert_eq!(fixture.token_requests().len(), 3);
     assert!(fixture.resource_requests().is_empty());
     fixture.finish().await;
 }
@@ -366,12 +370,12 @@ fn every_token_request_is_counted_once_under_its_grant_and_closed_outcome() {
                     .unwrap_err();
                 let gate = fixture.block_tokens();
                 let timed = client();
-                let mut timed = Box::pin(
-                    timed.execute(fixture.request(), deadline(Duration::from_secs(1))),
-                );
+                let mut request = fixture.request();
+                request.extensions_mut().insert(OperationContext::with_timeout(Duration::from_secs(1)));
+                let mut timed = Box::pin(timed.execute(request, far()));
                 tokio::select! { () = fixture.token_received() => {}, result = &mut timed => panic!("response must be gated: {result:?}"), }
                 advance(Duration::from_secs(1)).await;
-                timed.await.unwrap_err();
+                assert_matches!(timed.await, Err(Error::Acquisition(AcquisitionError::Timeout)));
                 let dropped = client();
                 let dropped_client = dropped;
                 let mut dropped = Box::pin(dropped_client.execute(fixture.request(), far()));

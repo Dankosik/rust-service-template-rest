@@ -117,6 +117,14 @@ async fn token_failures_are_sanitized_and_never_dispatch_the_resource() {
             AcquisitionError::Unavailable,
         ),
         (
+            b"HTTP/1.1 429 Too Many Requests\r\ncontent-length: 1048577\r\nconnection: close\r\n\r\n".to_vec(),
+            AcquisitionError::Unavailable,
+        ),
+        (
+            b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 1048577\r\nconnection: close\r\n\r\n".to_vec(),
+            AcquisitionError::Unavailable,
+        ),
+        (
             b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 1048577\r\nconnection: close\r\n\r\n".to_vec(),
             AcquisitionError::ResponseLimit,
         ),

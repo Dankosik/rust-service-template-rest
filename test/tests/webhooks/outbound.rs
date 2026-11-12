@@ -191,6 +191,7 @@ async fn read_headers<S: tokio::io::AsyncRead + Unpin>(stream: &mut S) -> Vec<u8
 
 async fn reply_peer(
     status: u16,
+    content_length: usize,
 ) -> (
     std::net::SocketAddr,
     tokio::sync::oneshot::Receiver<Vec<u8>>,
@@ -206,8 +207,9 @@ async fn reply_peer(
         let headers = read_headers(&mut stream).await;
         sent.send(headers)
             .expect("request capture remains available");
-        let response =
-            format!("HTTP/1.1 {status} fixture\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        let response = format!(
+            "HTTP/1.1 {status} fixture\r\nContent-Length: {content_length}\r\nConnection: close\r\n\r\n"
+        );
         stream
             .write_all(response.as_bytes())
             .await
@@ -313,13 +315,14 @@ async fn caller_rollback_leaves_no_delivery(pool: PgPool) {
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn queued_statuses_retry_except_for_gone_and_complete_on_any_2xx(pool: PgPool) {
-    for (status, expected_state) in [
-        (401, "pending"),
-        (404, "pending"),
-        (410, "failed"),
-        (204, "completed"),
+    for (status, content_length, expected_state) in [
+        (401, 0, "pending"),
+        (404, 0, "pending"),
+        (410, 0, "failed"),
+        (410, 65_537, "failed"),
+        (204, 0, "completed"),
     ] {
-        let (address, captured, peer) = reply_peer(status).await;
+        let (address, captured, peer) = reply_peer(status, content_length).await;
         let configured = outbound(&["partner"]);
         let id = enqueue(&pool, &configured, "partner", b"{\"event\":\"status\"}").await;
         let running = RunningDispatcher::start(
@@ -506,7 +509,7 @@ async fn legacy_job_uses_current_path_and_rotated_keys_despite_invalid_saved_rou
     .await
     .expect("obsolete routing values do not constrain the legacy common payload");
 
-    let (address, captured, peer) = reply_peer(200).await;
+    let (address, captured, peer) = reply_peer(200, 0).await;
     let running = RunningDispatcher::start(
         &pool,
         dispatcher(&[("partner", "/current?binding=live")], address),

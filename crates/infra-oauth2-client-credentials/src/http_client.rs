@@ -107,10 +107,20 @@ impl AuthenticatedClient {
                 }
             })?;
         check_request()?;
+        let acquisition_context = request_context
+            .as_ref()
+            .and_then(OperationContext::deadline)
+            .map(|request_deadline| {
+                let deadline = context
+                    .deadline()
+                    .map_or(request_deadline, |local| local.earlier(request_deadline));
+                OperationContext::new(Some(deadline), context.cancellation().clone())
+            });
+        let acquisition_context = acquisition_context.as_ref().unwrap_or(&context);
         // Authorization first: a cached token then never arms the deadline timer.
         let acquired = tokio::select! {
             biased;
-            result = self.credentials.authorize(request.headers_mut(), on_behalf_of, &context) => result,
+            result = self.credentials.authorize(request.headers_mut(), on_behalf_of, acquisition_context) => result,
             stopped = request_stopped => return Err(acquisition_stopped(stopped).into()),
         };
         check_request()?;

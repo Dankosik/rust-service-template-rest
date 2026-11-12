@@ -6,7 +6,9 @@ use http::{
     header::{ACCEPT, CONTENT_TYPE},
 };
 use infra_outbound_http::{Client, Limits};
+use operation_context::{Deadline, OperationContext};
 use secrecy::{ExposeSecret as _, SecretString};
+use serde::{Deserialize, Deserializer};
 use tokio::{
     sync::{Semaphore, SemaphorePermit},
     time::Instant,
@@ -165,11 +167,24 @@ impl TokenEndpoint {
             .header(ACCEPT, "application/json")
             .body(Bytes::from(body))
             .map_err(|_| AcquisitionError::InvalidResponse)?;
+        let mut provider_unavailable = false;
+        let context = OperationContext::from_deadline(Deadline::at(deadline));
         let response = self
             .http
-            .execute(request, deadline)
-            .await
-            .map_err(|error| map_transport_error(&error))?;
+            .execute_with_response_status(request, &context, |status| {
+                provider_unavailable =
+                    status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS;
+            })
+            .await;
+        if provider_unavailable
+            && matches!(
+                &response,
+                Ok(_) | Err(infra_outbound_http::Error::ResponseBodyTooLarge)
+            )
+        {
+            return Err(AcquisitionError::Unavailable);
+        }
+        let response = response.map_err(|error| map_transport_error(&error))?;
         decode_token_response(&response)
     }
 }
@@ -199,22 +214,23 @@ impl Grant<'_> {
     }
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Deserialize)]
 struct TokenResponse {
     access_token: String,
     token_type: String,
+    #[serde(default, deserialize_with = "deserialize_lifetime")]
     expires_in: Option<u64>,
     issued_token_type: Option<String>,
 }
 
-/// Admits one token response: a retryable provider status, a rejection code,
-/// the JSON media type when present, and the decoded body.
+fn deserialize_lifetime<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u64>, D::Error> {
+    u64::deserialize(deserializer).map(Some)
+}
+
 fn decode_token_response(response: &Response<Bytes>) -> Result<TokenResponse, AcquisitionError> {
     let status = response.status();
-    // A throttled request, like a 5xx, may succeed later unchanged.
-    if status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS {
-        return Err(AcquisitionError::Unavailable);
-    }
     if !status.is_success() {
         return Err(AcquisitionError::Rejected(Rejection::from_body(
             response.body(),
