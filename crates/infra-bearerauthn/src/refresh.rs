@@ -117,9 +117,8 @@ impl KeyStore {
         self.state.borrow().keys.clone()
     }
 
-    /// Joins the fetch in flight, or starts one outside the cooldown. `checked`
-    /// is the set the token was checked against; when the fetch that started
-    /// the cooldown has since installed another, that set is the answer.
+    /// Returns a set installed since `checked`, otherwise joins the fetch in
+    /// flight or starts one outside the cooldown.
     pub(crate) async fn refresh_for_signature_miss(
         &self,
         checked: &Arc<KeySet>,
@@ -130,16 +129,15 @@ impl KeyStore {
         self.state.send_if_modified(|state| {
             admission = if state.stopped {
                 Admission::Answer(SignatureRefresh::Unavailable)
+            } else if !Arc::ptr_eq(&state.keys, checked) {
+                Admission::Answer(SignatureRefresh::Refreshed(state.keys.clone()))
             } else if let Some(ticket) = state.pending() {
                 Admission::Join(ticket)
             } else if state.last_started.elapsed() < REFRESH_COOLDOWN {
                 Admission::Answer(if state.last_fetch_failed() {
                     SignatureRefresh::Unavailable
-                } else if Arc::ptr_eq(&state.keys, checked) {
-                    SignatureRefresh::NoNewerSet
                 } else {
-                    // That fetch finished after the token was checked.
-                    SignatureRefresh::Refreshed(state.keys.clone())
+                    SignatureRefresh::NoNewerSet
                 })
             } else {
                 Admission::Start(state.start_fetch())
@@ -281,6 +279,7 @@ mod tests {
         },
         test_metrics::Diagnostics,
     };
+    use futures_util::FutureExt as _;
     use jsonwebtoken::Algorithm;
     use std::assert_matches;
     use std::{
@@ -324,6 +323,7 @@ mod tests {
             store.refresh_for_signature_miss(&keys).await,
             SignatureRefresh::NoNewerSet
         );
+
         assert_eq!(diagnostics.acquisitions.lock().unwrap().len(), 1);
 
         for failure in [
@@ -615,6 +615,17 @@ mod tests {
             store.refresh_for_signature_miss(&keys).await,
             SignatureRefresh::NoNewerSet
         );
+
+        store.request_periodic();
+        let during_fetch = store.refresh_for_signature_miss(&checked).now_or_never();
+        store.finish(
+            2,
+            Err(KeySetFailure::Fetch(crate::ProviderFailure::Timeout)),
+        );
+        let after_failure = store.refresh_for_signature_miss(&checked).await;
+
+        assert_matches!(during_fetch, Some(SignatureRefresh::Refreshed(keys)) if keys.has_kid("new"));
+        assert_matches!(after_failure, SignatureRefresh::Refreshed(keys) if keys.has_kid("new"));
     }
 
     #[tokio::test]
