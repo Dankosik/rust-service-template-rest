@@ -15,6 +15,9 @@ use crate::trace_context;
 
 pub const MAX_PAYLOAD_BYTES: usize = 262_144;
 const MAX_UNIQUE_KEY_BYTES: usize = 255;
+/// `serde_json` writes one token per call, so doubling from an empty buffer
+/// costs about log2(len) reallocations per job; typical payloads fit here.
+const MIN_PAYLOAD_CAPACITY: usize = 256;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct EnqueueOptions<'a> {
@@ -255,7 +258,7 @@ impl Write for PayloadWriter {
                 .capacity()
                 .saturating_mul(2)
                 .max(needed)
-                .min(MAX_PAYLOAD_BYTES);
+                .clamp(MIN_PAYLOAD_CAPACITY, MAX_PAYLOAD_BYTES);
             self.retained.reserve_exact(capacity - self.retained.len());
         }
         self.retained.extend_from_slice(&bytes[..keep]);

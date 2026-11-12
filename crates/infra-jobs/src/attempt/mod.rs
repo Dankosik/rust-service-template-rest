@@ -141,11 +141,36 @@ struct AttemptSlots {
 /// queued completion — so the guard names its membership and not claim custody.
 struct MetricMembership(metrics::Gauge);
 
-impl MetricMembership {
-    fn new(name: &'static str) -> Self {
-        let gauge = metrics::gauge!(name);
+/// The gauge whose units [`MetricMembership`] holds, looked up once.
+///
+/// [`crate::Engine::start`] binds it under the installed recorder; first use
+/// binds it otherwise. A lookup per attempt would hash the name and search the
+/// recorder's registry, one of them under the completion queue lock.
+pub(crate) struct MembershipGauge {
+    name: &'static str,
+    handle: std::sync::OnceLock<metrics::Gauge>,
+}
+
+impl MembershipGauge {
+    const fn new(name: &'static str) -> Self {
+        Self {
+            name,
+            handle: std::sync::OnceLock::new(),
+        }
+    }
+
+    pub(crate) const fn owned_attempts() -> Self {
+        Self::new(OWNED_ATTEMPTS_METRIC)
+    }
+
+    pub(crate) fn bind(&self) -> &metrics::Gauge {
+        self.handle.get_or_init(|| metrics::gauge!(self.name))
+    }
+
+    fn join(&self) -> MetricMembership {
+        let gauge = self.bind().clone();
         gauge.increment(1.0);
-        Self(gauge)
+        MetricMembership(gauge)
     }
 }
 
@@ -240,7 +265,7 @@ pub(crate) fn supervise(
     crate::trace_context::link(&span, &trace);
     drop(trace);
     let slots = Arc::new(AttemptSlots {
-        _membership: MetricMembership::new(OWNED_ATTEMPTS_METRIC),
+        _membership: shared.owned_attempts.join(),
         _global: slot,
         _kind: kind_slot,
     });
