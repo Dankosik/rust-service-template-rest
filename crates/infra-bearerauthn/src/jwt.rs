@@ -1906,8 +1906,8 @@ mod tests {
         for (now, expected) in [
             (970, Ok(())),
             (969, Err(VerificationReason::NotYetValid)),
-            (EXP + 30, Ok(())),
-            (EXP + 31, Err(VerificationReason::Expired)),
+            (EXP + 29, Ok(())),
+            (EXP + 30, Err(VerificationReason::Expired)),
             (u64::MAX, Err(VerificationReason::Expired)),
         ] {
             let hit = verify_at(&memo, &token, now).await.map(|_| ());

@@ -352,7 +352,7 @@ struct Window {
 impl Window {
     /// Expiry is checked first, so a token outside both bounds is expired.
     const fn admits(self, now: u64) -> Result<(), Reason> {
-        if now > self.expires_at.saturating_add(LEEWAY_SECONDS) {
+        if shared_rules::rfc7519::is_expired(self.expires_at, now, LEEWAY_SECONDS) {
             Err(Reason::Expired)
         } else if self.valid_from > now.saturating_add(LEEWAY_SECONDS) {
             Err(Reason::NotYetValid)
@@ -535,14 +535,14 @@ mod tests {
         assert_eq!(
             name(
                 case.verifier
-                    .verify_at(token.as_bytes(), NOW + 60 + LEEWAY_SECONDS)
+                    .verify_at(token.as_bytes(), NOW + 59 + LEEWAY_SECONDS)
             ),
             Ok("orders".into())
         );
         assert_eq!(
             name(
                 case.verifier
-                    .verify_at(token.as_bytes(), NOW + 61 + LEEWAY_SECONDS)
+                    .verify_at(token.as_bytes(), NOW + 60 + LEEWAY_SECONDS)
             ),
             Err(Reason::Expired)
         );
@@ -691,8 +691,8 @@ mod tests {
             ),
             (
                 Box::new(|claims| {
-                    claims["iat"] = (NOW - 120).into();
-                    claims["exp"] = (NOW - 61).into();
+                    claims["iat"] = (NOW - 90).into();
+                    claims["exp"] = (NOW - 30).into();
                 }),
                 Reason::Expired,
             ),
@@ -724,7 +724,7 @@ mod tests {
         // Inside the 30-second allowance on both sides.
         let token = case.signed(|_, claims| {
             claims["iat"] = (NOW - 89).into();
-            claims["exp"] = (NOW - 30).into();
+            claims["exp"] = (NOW - 29).into();
         });
         assert_eq!(case.check(&token), Ok("orders".to_owned()));
         let token = case.signed(|_, claims| {
