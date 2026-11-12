@@ -536,6 +536,10 @@ async fn close_dependencies(resources: &mut Resources, deadline: Instant) -> boo
         // template:end jobs:worker-shutdown-close-jobs
         false
     };
+    #[allow(
+        clippy::let_and_return,
+        reason = "the messaging profile rebinds degraded before it is returned"
+    )]
     let messaging_close = async {
         #[allow(unused_variables, reason = "the messaging profile supplies the close")]
         let degraded = false;

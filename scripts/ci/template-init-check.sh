@@ -450,7 +450,7 @@ run_graph() {
 	# policy, which the full template alone cannot prove for this profile set.
 	record_command "${receipt}" "${log_dir}/runtime-${graph}-check.log" "runtime-${graph}-check" \
 		"${runtime_environment[@]}" cargo clippy --workspace --all-targets \
-			"${check_features[@]}" --locked --offline --manifest-path "${target}/Cargo.toml" -- -D warnings
+			${check_features[@]+"${check_features[@]}"} --locked --offline --manifest-path "${target}/Cargo.toml" -- -D warnings
 	if [[ ${webhooks} != none || ${inbound_webhooks} != none ]]; then
 		record_command "${receipt}" "${log_dir}/runtime-${graph}-provider.log" "runtime-${graph}-provider" \
 			"${runtime_environment[@]}" make -C "${target}" test-package PKG=infra-webhooks
