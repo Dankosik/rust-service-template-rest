@@ -28,15 +28,15 @@ pub use maintenance::{
     MaintenanceObserver, MaintenancePopulation, PassEnd, PopulationSample, in_observation_tx,
     run_scheduled_cleanup,
 };
-pub use observe::{
-    HISTOGRAMS, acquire, acquire_until, observed, record_metrics, record_metrics_periodically,
-};
+pub use observe::{HISTOGRAMS, observed, record_metrics, record_metrics_periodically};
 pub use pool::{
-    ACQUIRE_TIMEOUT, Closed, ConnectError, PoolOptions, SessionBudgets, SessionOptions, admit_pool,
-    close, connect, connect_session, prepare_pool, to_runtime_param,
+    ACQUIRE_TIMEOUT, CloseOutcome, ConnectError, PoolOptions, SessionBudgets, SessionOptions,
+    acquire, acquire_until, admit_pool, close, connect, connect_session, prepare_pool,
+    to_runtime_param,
 };
 pub use probe::PostgresProbe;
 pub use sqlx::postgres::PgPool;
 pub use transaction::{
-    Isolation, Tx, TxError, TxOptions, in_tx, in_tx_until, in_tx_with, set_statement_timeout,
+    Isolation, Tx, TxError, TxOptions, in_tx, in_tx_with, in_tx_with_acquire_deadline,
+    set_statement_timeout,
 };

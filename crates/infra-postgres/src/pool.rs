@@ -16,13 +16,12 @@ use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::time::Duration;
 
-use sqlx::ConnectOptions;
-use sqlx::Connection;
-use sqlx::pool::PoolConnectionMetadata;
+use sqlx::pool::{PoolConnection, PoolConnectionMetadata};
 use sqlx::postgres::{PgConnectOptions, PgConnection, PgPool, PgPoolOptions};
+use sqlx::{ConnectOptions, Connection, Postgres};
 
 use crate::dsn::Dsn;
-use crate::observe::{acquire, observed};
+use crate::observe::{acquisition, observed};
 use crate::transaction::Isolation;
 
 /// Bound on waiting for a pooled connection, including opening a new one.
@@ -55,9 +54,9 @@ pub(crate) const STATEMENT_TIMEOUT: Duration = Duration::from_secs(8);
 pub(crate) const IDLE_IN_TRANSACTION_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// Statements slower than this are logged at `warn` with their SQL text and
-/// duration. Statement-level logging is otherwise off: it would repeat every
-/// query at `debug` and, through bound values in error paths, risk carrying
-/// data into logs.
+/// duration. Routine statement logging defaults to off to avoid repeating
+/// every query and carrying data into logs through driver error paths.
+/// The `hotpath` feature enables routine statement logging at `debug`.
 const SLOW_STATEMENT_THRESHOLD: Duration = Duration::from_secs(1);
 
 /// A pooled connection idle longer than this is pinged before it is handed
@@ -102,8 +101,7 @@ pub enum ConnectError {
     /// The mandatory session readback did not complete before its client deadline.
     #[error("postgres session verification: did not complete inside the {budget:?} budget")]
     SessionVerificationTimeout { budget: Duration },
-    /// The first connection was refused: credentials, TLS, or the server.
-    /// The message names the failure kind, not the target.
+    /// A driver error while acquiring a connection or reading the session settings.
     #[error("postgres connect: {0}")]
     Connect(#[source] sqlx::Error),
     /// The session does not carry a timeout inside the template's budget.
@@ -236,6 +234,72 @@ pub fn prepare_pool(dsn: &Dsn, options: &PoolOptions<'_>) -> PgPool {
     pool_options.connect_lazy_with(connect_options)
 }
 
+/// Acquire a native pooled connection with bounded operation diagnostics.
+///
+/// `operation` is a callsite-owned static label, never a request or SQL value.
+/// Slow successes and native acquire timeouts are logged; cancellation leaves
+/// the native future and its ownership to `SQLx` without inventing an outcome.
+///
+/// # Errors
+///
+/// The native acquisition error, unchanged.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the pool adapter owns the native checkout"
+)]
+pub async fn acquire(
+    pool: &PgPool,
+    operation: &'static str,
+) -> Result<PoolConnection<Postgres>, sqlx::Error> {
+    acquisition(
+        operation,
+        pool.options().get_acquire_timeout(),
+        pool.acquire(),
+    )
+    .await
+}
+
+/// [`acquire`] for a caller whose own deadline bounds the work: the wait lasts
+/// until `deadline`, not [`ACQUIRE_TIMEOUT`]. A caller
+/// that waits is served once a connection frees, and cutting its wait short
+/// refuses work the pool could still do. Pass the deadline of the request or
+/// job, never an invented one; without a deadline use [`acquire`].
+///
+/// The pool bounds each native wait by its fixed acquire timeout, so this waits
+/// again while `deadline` allows. Each wait queues behind those that arrived
+/// meanwhile; a connection still frees in the order the pool serves it. A wait
+/// that ends at `deadline` is the native `PoolTimedOut`, so callers keep one
+/// failure to map.
+///
+/// # Errors
+///
+/// The native acquisition error, unchanged, or `PoolTimedOut` at `deadline`.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the pool adapter owns the native checkout"
+)]
+pub async fn acquire_until(
+    pool: &PgPool,
+    operation: &'static str,
+    deadline: tokio::time::Instant,
+) -> Result<PoolConnection<Postgres>, sqlx::Error> {
+    acquisition(
+        operation,
+        deadline.saturating_duration_since(tokio::time::Instant::now()),
+        async {
+            loop {
+                match tokio::time::timeout_at(deadline, pool.acquire()).await {
+                    Err(_elapsed) => return Err(sqlx::Error::PoolTimedOut),
+                    Ok(Err(sqlx::Error::PoolTimedOut))
+                        if tokio::time::Instant::now() < deadline => {}
+                    Ok(result) => return result,
+                }
+            }
+        },
+    )
+    .await
+}
+
 /// Ping a connection idle past [`PING_IDLE_AFTER`] before it is handed out,
 /// within [`IDLE_PING_TIMEOUT`]; an error discards it.
 #[expect(
@@ -279,9 +343,9 @@ fn ping_if_idle(
 ///
 /// # Errors
 ///
-/// Returns the native connection refusal, an acquire timeout, a distinct
-/// session-admission timeout, or a session policy refusal. This function never
-/// closes the caller's pool.
+/// Returns a driver error from checkout or readback, an acquire timeout, a
+/// session-verification timeout, or a session policy refusal. This function
+/// never closes the caller's pool.
 pub async fn admit_pool(pool: &PgPool, options: &PoolOptions<'_>) -> Result<(), ConnectError> {
     let budget = SESSION_VERIFICATION_TIMEOUT;
     tokio::time::timeout(budget, verify_session(pool, options))
@@ -301,7 +365,7 @@ pub async fn admit_pool(pool: &PgPool, options: &PoolOptions<'_>) -> Result<(), 
 pub async fn connect(dsn: &Dsn, options: &PoolOptions<'_>) -> Result<PgPool, ConnectError> {
     let pool = prepare_pool(dsn, options);
     if let Err(refused) = admit_pool(&pool, options).await {
-        if close(&pool, SESSION_REJECTION_CLOSE_TIMEOUT).await == Closed::TimedOut {
+        if close(&pool, SESSION_REJECTION_CLOSE_TIMEOUT).await == CloseOutcome::TimedOut {
             tracing::warn!(
                 budget = ?SESSION_REJECTION_CLOSE_TIMEOUT,
                 "postgres_session_rejection_close_timed_out"
@@ -423,8 +487,7 @@ pub async fn connect_session(
 }
 
 /// Connect options that publish `settings` through the startup packet, so a
-/// connection opened later carries them too, without a round trip. Statement
-/// logging stays off for the reason [`SLOW_STATEMENT_THRESHOLD`] records.
+/// connection opened later carries them too, without a round trip.
 ///
 /// `extra_float_digits` is left to the server: the driver would otherwise
 /// publish `2`, which every supported server already treats like its own
@@ -468,16 +531,16 @@ pub fn to_runtime_param(duration: Duration) -> String {
     format!("{}ms", duration.as_nanos().div_ceil(1_000_000))
 }
 
-pub async fn close(pool: &PgPool, budget: Duration) -> Closed {
+pub async fn close(pool: &PgPool, budget: Duration) -> CloseOutcome {
     match tokio::time::timeout(budget, pool.close()).await {
-        Ok(()) => Closed::Complete,
-        Err(_elapsed) => Closed::TimedOut,
+        Ok(()) => CloseOutcome::Complete,
+        Err(_elapsed) => CloseOutcome::TimedOut,
     }
 }
 
 #[must_use]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Closed {
+pub enum CloseOutcome {
     Complete,
     TimedOut,
 }
@@ -557,6 +620,6 @@ mod tests {
             !pool.is_closed(),
             "admission must leave cleanup to its owner"
         );
-        assert_eq!(close(&pool, ACQUIRE_TIMEOUT).await, Closed::Complete);
+        assert_eq!(close(&pool, ACQUIRE_TIMEOUT).await, CloseOutcome::Complete);
     }
 }

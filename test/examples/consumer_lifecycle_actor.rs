@@ -144,7 +144,7 @@ mod fixture {
         }
         assert_eq!(
             infra_postgres::close(&pool, WAIT).await,
-            infra_postgres::Closed::Complete
+            infra_postgres::CloseOutcome::Complete
         );
     }
 

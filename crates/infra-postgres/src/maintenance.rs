@@ -19,7 +19,6 @@ pub(crate) const CLEANUP_DURATION_METRIC: &str = "postgres_cleanup_pass_duration
 
 /// Buckets in seconds for [`CLEANUP_DURATION_METRIC`]. They reach 3600 s so
 /// long passes, which have no deadline, stay visible.
-/// Roots override only this name.
 pub(crate) const CLEANUP_DURATION_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0,
     600.0, 1200.0, 1800.0, 3600.0,
@@ -86,7 +85,7 @@ pub async fn run_scheduled_cleanup<E, P, S>(
     }
     // Started under the same check as the passes, so a cancelled owner never
     // publishes an observer start.
-    let mut observer = MaintenanceObserver::start(cleanup.population());
+    let mut observer = MaintenanceObserver::start(MaintenancePopulation::Cleanup(cleanup));
     let passes = async {
         let mut schedule = CleanupSchedule::new(cleanup);
         // `run_until_cancelled` polls these loops before the token, so each
@@ -121,26 +120,15 @@ pub async fn run_scheduled_cleanup<E, P, S>(
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MaintenancePopulation {
-    Jobs,
-    HttpIdempotency,
-    WebhookReceipts,
+    Cleanup(Cleanup),
     FailedJobs,
 }
 
 impl MaintenancePopulation {
     pub(crate) const fn label(self) -> &'static str {
-        match self.cleanup() {
-            Some(cleanup) => cleanup.label(),
-            None => "failed_jobs",
-        }
-    }
-
-    const fn cleanup(self) -> Option<Cleanup> {
         match self {
-            Self::Jobs => Some(Cleanup::Jobs),
-            Self::HttpIdempotency => Some(Cleanup::HttpIdempotency),
-            Self::WebhookReceipts => Some(Cleanup::WebhookReceipts),
-            Self::FailedJobs => None,
+            Self::Cleanup(cleanup) => cleanup.label(),
+            Self::FailedJobs => "failed_jobs",
         }
     }
 }
@@ -160,14 +148,6 @@ impl Cleanup {
             Self::Jobs => "jobs",
             Self::HttpIdempotency => "http_idempotency",
             Self::WebhookReceipts => "webhook_receipts",
-        }
-    }
-
-    const fn population(self) -> MaintenancePopulation {
-        match self {
-            Self::Jobs => MaintenancePopulation::Jobs,
-            Self::HttpIdempotency => MaintenancePopulation::HttpIdempotency,
-            Self::WebhookReceipts => MaintenancePopulation::WebhookReceipts,
         }
     }
 }
@@ -364,7 +344,7 @@ impl MaintenanceObserver {
         this.successes.increment(0);
         this.failures.increment(0);
         this.cancellations.increment(0);
-        if let Some(cleanup) = population.cleanup() {
+        if let MaintenancePopulation::Cleanup(cleanup) = population {
             // Register the writer before its first pass without resetting progress.
             metrics::counter!(CLEANUP_REMOVED_ROWS_METRIC, "cleanup" => cleanup.label())
                 .increment(0);

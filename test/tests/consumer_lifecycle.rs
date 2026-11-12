@@ -690,7 +690,7 @@ async fn historical_actors_survive_native_restore() {
     let before_broker = broker_snapshot(&harness.source.nats).await;
     assert_eq!(
         infra_postgres::close(&source, WAIT).await,
-        infra_postgres::Closed::Complete
+        infra_postgres::CloseOutcome::Complete
     );
     let fenced_at = Instant::now();
     write_json(
@@ -836,6 +836,6 @@ async fn historical_actors_survive_native_restore() {
     );
     assert_eq!(
         infra_postgres::close(&restored, WAIT).await,
-        infra_postgres::Closed::Complete
+        infra_postgres::CloseOutcome::Complete
     );
 }

@@ -346,7 +346,7 @@ async fn pending_session_admission_keeps_a_closeable_pool_and_bounds_its_wait(po
         );
         assert_eq!(
             infra_postgres::close(&ours, RETURN_OBSERVATION_BUDGET).await,
-            infra_postgres::Closed::Complete,
+            infra_postgres::CloseOutcome::Complete,
             "cleanup must finish while the old socket remains silent"
         );
         assert!(ours.is_closed());
@@ -368,7 +368,7 @@ async fn pool_publishes_the_session_defaults(pool: PgPool) {
     infra_postgres::record_metrics(&ours);
     assert_eq!(
         infra_postgres::close(&ours, Duration::from_secs(5)).await,
-        infra_postgres::Closed::Complete
+        infra_postgres::CloseOutcome::Complete
     );
 }
 
@@ -1468,7 +1468,7 @@ async fn cancelled_begin_discards_its_connection_before_later_autocommit_and_opt
     );
     assert_eq!(
         infra_postgres::close(&proxied, Duration::from_secs(5)).await,
-        infra_postgres::Closed::Complete
+        infra_postgres::CloseOutcome::Complete
     );
     proxy.shutdown().await;
 }

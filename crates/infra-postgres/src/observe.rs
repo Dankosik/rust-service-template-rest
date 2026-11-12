@@ -10,8 +10,6 @@
 use std::time::{Duration, Instant};
 
 use metrics::{SharedString, Unit};
-use sqlx::Postgres;
-use sqlx::pool::PoolConnection;
 use sqlx::postgres::PgPool;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, Span};
@@ -176,72 +174,6 @@ pub async fn record_metrics_periodically(
             }
         })
         .await;
-}
-
-/// Acquire a native pooled connection with bounded operation diagnostics.
-///
-/// `operation` is a callsite-owned static label, never a request or SQL value.
-/// Slow successes and native acquire timeouts are logged; cancellation leaves
-/// the native future and its ownership to `SQLx` without inventing an outcome.
-///
-/// # Errors
-///
-/// The native acquisition error, unchanged.
-#[expect(
-    clippy::disallowed_methods,
-    reason = "the acquisition observer owns the native checkout"
-)]
-pub async fn acquire(
-    pool: &PgPool,
-    operation: &'static str,
-) -> Result<PoolConnection<Postgres>, sqlx::Error> {
-    acquisition(
-        operation,
-        pool.options().get_acquire_timeout(),
-        pool.acquire(),
-    )
-    .await
-}
-
-/// [`acquire`] for a caller whose own deadline bounds the work: the wait lasts
-/// until `deadline`, not [`ACQUIRE_TIMEOUT`](crate::ACQUIRE_TIMEOUT). A caller
-/// that waits is served once a connection frees, and cutting its wait short
-/// refuses work the pool could still do. Pass the deadline of the request or
-/// job, never an invented one; without a deadline use [`acquire`].
-///
-/// The pool bounds each native wait by its fixed acquire timeout, so this waits
-/// again while `deadline` allows. Each wait queues behind those that arrived
-/// meanwhile; a connection still frees in the order the pool serves it. A wait
-/// that ends at `deadline` is the native `PoolTimedOut`, so callers keep one
-/// failure to map.
-///
-/// # Errors
-///
-/// The native acquisition error, unchanged, or `PoolTimedOut` at `deadline`.
-#[expect(
-    clippy::disallowed_methods,
-    reason = "the acquisition observer owns the native checkout"
-)]
-pub async fn acquire_until(
-    pool: &PgPool,
-    operation: &'static str,
-    deadline: tokio::time::Instant,
-) -> Result<PoolConnection<Postgres>, sqlx::Error> {
-    acquisition(
-        operation,
-        deadline.saturating_duration_since(tokio::time::Instant::now()),
-        async {
-            loop {
-                match tokio::time::timeout_at(deadline, pool.acquire()).await {
-                    Err(_elapsed) => return Err(sqlx::Error::PoolTimedOut),
-                    Ok(Err(sqlx::Error::PoolTimedOut))
-                        if tokio::time::Instant::now() < deadline => {}
-                    Ok(result) => return result,
-                }
-            }
-        },
-    )
-    .await
 }
 
 /// This observer owns no timeout, retry or connection cleanup; `budget` only

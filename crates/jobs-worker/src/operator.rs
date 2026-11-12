@@ -10,7 +10,7 @@ use infra_jobs::operator::{
     self as jobs, InputError, Inspection, InspectionResult, JobSnapshot, OperatorError,
     RecoveryTarget,
 };
-use infra_postgres::{Closed, ConnectError, Dsn, Isolation, PgPool, TxOptions};
+use infra_postgres::{CloseOutcome, ConnectError, Dsn, Isolation, PgPool, TxOptions};
 use migrate::HistoryError;
 use secrecy::ExposeSecret;
 use serde_json::{Value, json};
@@ -371,7 +371,7 @@ async fn serve(config: &PostgresConfig, request: &Request) -> Report {
         Err(cause) => return request.failed_before_start(cause),
     };
     let mut report = verify_and_execute(&pool, &mut signals, request).await;
-    if infra_postgres::close(&pool, DEPENDENCY_CLOSE).await != Closed::Complete {
+    if infra_postgres::close(&pool, DEPENDENCY_CLOSE).await != CloseOutcome::Complete {
         // A missing close acknowledgement never changes a known commit outcome.
         report.body["cleanup"] = "incomplete".into();
         report.success = false;

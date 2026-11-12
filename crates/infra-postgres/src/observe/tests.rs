@@ -4,7 +4,7 @@ use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
 use sqlx::postgres::PgPoolOptions;
 
 use super::*;
-use crate::{Dsn, in_tx};
+use crate::{Dsn, acquire_until, in_tx};
 
 pub(crate) type EventFields = std::collections::BTreeMap<String, String>;
 
@@ -218,7 +218,7 @@ fn acquire_until_waits_for_the_deadline_not_for_the_pool_timeout() {
             started.elapsed()
         );
 
-        let result: Result<(), TxError> = crate::in_tx_until(
+        let result: Result<(), TxError> = crate::in_tx_with_acquire_deadline(
             &pool,
             tokio::time::Instant::now() + Duration::from_millis(100),
             crate::TxOptions::default(),

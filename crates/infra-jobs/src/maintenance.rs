@@ -161,7 +161,7 @@ enum Population {
 impl Population {
     const fn observer(self) -> MaintenancePopulation {
         match self {
-            Self::Completed => MaintenancePopulation::Jobs,
+            Self::Completed => MaintenancePopulation::Cleanup(Cleanup::Jobs),
             Self::Failed => MaintenancePopulation::FailedJobs,
         }
     }

@@ -22,7 +22,7 @@ pub mod reading_counter_receiver;
 use std::num::NonZeroU32;
 use std::time::Duration;
 
-use infra_postgres::{Closed, Dsn, Isolation, PoolOptions, SessionBudgets};
+use infra_postgres::{CloseOutcome, Dsn, Isolation, PoolOptions, SessionBudgets};
 use sqlx::PgPool;
 use url::Url;
 
@@ -122,7 +122,7 @@ pub async fn close_pools(pools: &[&PgPool]) {
     for pool in pools {
         assert_eq!(
             infra_postgres::close(pool, CLOSE_BUDGET).await,
-            Closed::Complete
+            CloseOutcome::Complete
         );
     }
 }

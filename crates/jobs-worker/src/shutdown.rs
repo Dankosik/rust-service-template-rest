@@ -19,7 +19,7 @@ use infra_jobs::Started;
 use infra_messaging::{CloseOutcome, ConsumerHandle, Messaging, MessagingStartup};
 // template:end messaging:worker-shutdown-messaging-imports
 // template:begin jobs:worker-shutdown-postgres-imports
-use infra_postgres::{Closed, PgPool};
+use infra_postgres::PgPool;
 // template:end jobs:worker-shutdown-postgres-imports
 use infra_telemetry::{
     LoggerGuard, LoggerShutdown, ProviderShutdown, SHUTDOWN_JOIN_SLACK, TracerProviderHandle,
@@ -486,11 +486,11 @@ async fn finish_background(background: &Background, deadline: Instant) -> bool {
 // template:begin jobs:worker-shutdown-close-pool
 async fn close_pool(pool: &PgPool, budget: Duration) -> bool {
     match infra_postgres::close(pool, budget).await {
-        Closed::Complete => {
+        infra_postgres::CloseOutcome::Complete => {
             tracing::info!("postgres_pool_closed");
             false
         }
-        Closed::TimedOut => {
+        infra_postgres::CloseOutcome::TimedOut => {
             tracing::warn!("postgres pool outlived its close budget");
             true
         }

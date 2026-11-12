@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use foldhash::HashMap;
 use infra_jobs::{CompleteError, Handler, Job, JobError, KindsBuilder, Policy};
-use infra_postgres::{Tx, TxError, TxOptions, in_tx_until};
+use infra_postgres::{Tx, TxError, TxOptions, in_tx_with_acquire_deadline};
 
 use super::{Incoming, async_trait};
 
@@ -150,7 +150,7 @@ impl Handler<Incoming> for Processor {
                 "inbound webhook consumer is unavailable",
             ));
         };
-        let completed = in_tx_until(
+        let completed = in_tx_with_acquire_deadline(
             job.pool(),
             job.deadline(),
             TxOptions::default(),
