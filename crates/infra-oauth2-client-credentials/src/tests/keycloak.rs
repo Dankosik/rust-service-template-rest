@@ -218,13 +218,8 @@ impl Realm {
             exchange_cache_capacity: 1024,
             provider_concurrency: 32,
         };
-        let admitted = Admitted {
-            endpoint,
-            permits: crate::options::admitted_provider_concurrency(options.provider_concurrency)
-                .unwrap(),
-        };
+        let admitted = Admitted::try_new_for_test(options, endpoint).unwrap();
         let (credentials, driver) = Credentials::build(
-            options,
             admitted,
             Client::try_new_for_test_http(&self.origin, TOKEN_LIMITS).unwrap(),
         )

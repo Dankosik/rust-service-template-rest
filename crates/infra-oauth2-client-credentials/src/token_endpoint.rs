@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
 use bytes::Bytes;
 use http::{
@@ -91,10 +91,9 @@ impl TokenEndpoint {
         &self,
         subject: &SecretString,
         deadline: Instant,
-    ) -> Result<Arc<Token>, AcquisitionError> {
+    ) -> Result<Token, AcquisitionError> {
         self.fetch_token(Grant::TokenExchange { subject }, deadline)
             .await
-            .map(Arc::new)
     }
 
     async fn fetch_token(

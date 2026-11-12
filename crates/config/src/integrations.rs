@@ -117,6 +117,8 @@ impl OAuthConfig {
     /// One retained token per user active within a token lifetime on one
     /// replica.
     const DEFAULT_EXCHANGE_CACHE_CAPACITY: u32 = 1024;
+    // Keep in sync with direct Options admission in
+    // crates/infra-oauth2-client-credentials/src/options.rs.
     const EXCHANGE_CACHE_CAPACITY_RANGE: std::ops::RangeInclusive<u32> = 1..=65_536;
     /// Matches introspection's default while bounding distinct token attempts.
     const DEFAULT_PROVIDER_CONCURRENCY: std::num::NonZeroU32 =
