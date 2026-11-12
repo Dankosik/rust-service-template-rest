@@ -94,9 +94,8 @@ pub(crate) async fn observe(
 /// by its caller, which stopped waiting, reset the stream or stopped reading
 /// it, and is recorded as `Canceled`, as grpc-go records it.
 pub(crate) struct Call {
-    series: Arc<Series>,
-    /// Shares the request's bytes. `None` when the path is not a label.
-    uri: Option<http::Uri>,
+    handles: Arc<Handles>,
+    side: Side,
     span: tracing::Span,
     started: Instant,
     finished: bool,
@@ -105,12 +104,12 @@ pub(crate) struct Call {
 impl Call {
     pub(crate) fn start<B>(series: &Arc<Series>, request: &http::Request<B>) -> Self {
         let started = Instant::now();
-        let path = series.label_path(request);
-        let span = make_span(request, path, series.side());
-        series.started(path);
+        let handles = series.handles(request);
+        let span = make_span(request, &handles.path, series.side());
+        handles.started.increment(1);
         Self {
-            series: Arc::clone(series),
-            uri: (path != UNKNOWN_PATH).then(|| request.uri().clone()),
+            handles,
+            side: series.side(),
             span,
             started,
             finished: false,
@@ -122,7 +121,7 @@ impl Call {
     }
 
     pub(crate) fn side(&self) -> Side {
-        self.series.side()
+        self.side
     }
 
     /// The catalog failure behind the status: several share one status code,
@@ -130,7 +129,7 @@ impl Call {
     /// the catalog.
     pub(crate) fn failed(&self, failure: service_failure::Code) {
         self.span.set_attribute("failure.code", failure.as_str());
-        self.series.failed(self.path(), failure);
+        self.handles.failed(failure);
     }
 
     pub(crate) fn finish(mut self, code: tonic::Code) {
@@ -139,13 +138,8 @@ impl Call {
     }
 
     fn record(&self, code: tonic::Code) {
-        update_span(&self.span, code, self.side());
-        self.series
-            .handled(self.path(), code, self.started.elapsed());
-    }
-
-    fn path(&self) -> &str {
-        self.uri.as_ref().map_or(UNKNOWN_PATH, http::Uri::path)
+        update_span(&self.span, code, self.side);
+        self.handles.handled(code, self.started.elapsed());
     }
 }
 
@@ -245,23 +239,36 @@ static CLIENT_SERIES: OnceLock<Arc<Series>> = OnceLock::new();
 /// other path under `unknown`, so a caller-chosen path cannot create a
 /// series. All clients share a finite, never-evicted set of matching native
 /// generated-method candidates. This limits observation, never routing.
+///
+/// A call resolves its handles once, when it starts, and records through
+/// them without another lookup.
 pub(crate) struct Series {
     started_metric: &'static str,
     handled_metric: &'static str,
     handling_seconds_metric: &'static str,
     kind: Kind,
-    paths: RwLock<HashMap<Box<str>, Handles>>,
+    /// Handles of every path that is not a label.
+    unknown: OnceLock<Arc<Handles>>,
 }
 
 /// Which side a [`Series`] observes, and so which paths become labels.
 enum Kind {
-    /// Only the described methods of the registered services.
-    Server { described: HashSet<Box<str>> },
+    /// Only the described methods of the registered services. The set is
+    /// fixed at startup, so finding a call's handles takes no lock.
+    Server {
+        described: HashMap<Box<str>, OnceLock<Arc<Handles>>>,
+    },
     /// Generated-method candidates, up to [`CLIENT_METHOD_LIMIT`].
-    Client,
+    Client {
+        admitted: RwLock<HashMap<Box<str>, Arc<Handles>>>,
+    },
 }
 
+/// The series of one label path.
 struct Handles {
+    /// The label path, [`UNKNOWN_PATH`] for `unknown`.
+    path: Box<str>,
+    handled_metric: &'static str,
     started: metrics::Counter,
     handling_seconds: metrics::Histogram,
     /// Indexed by status code.
@@ -276,7 +283,12 @@ impl Series {
             SERVER_STARTED,
             SERVER_HANDLED,
             SERVER_HANDLING_SECONDS,
-            Kind::Server { described: methods },
+            Kind::Server {
+                described: methods
+                    .into_iter()
+                    .map(|path| (path, OnceLock::new()))
+                    .collect(),
+            },
         ))
     }
 
@@ -286,7 +298,9 @@ impl Series {
                 CLIENT_STARTED,
                 CLIENT_HANDLED,
                 CLIENT_HANDLING_SECONDS,
-                Kind::Client,
+                Kind::Client {
+                    admitted: RwLock::default(),
+                },
             ))
         }))
     }
@@ -303,104 +317,92 @@ impl Series {
             handled_metric,
             handling_seconds_metric,
             kind,
-            paths: RwLock::default(),
+            unknown: OnceLock::new(),
         }
     }
 
     pub(crate) const fn side(&self) -> Side {
         match self.kind {
             Kind::Server { .. } => Side::Server,
-            Kind::Client => Side::Client,
+            Kind::Client { .. } => Side::Client,
         }
     }
 
-    /// The request path when it becomes labels, [`UNKNOWN_PATH`] otherwise.
-    fn label_path<'a, B>(&self, request: &'a http::Request<B>) -> &'a str {
-        match &self.kind {
-            Kind::Server { described } => {
-                let path = request.uri().path();
-                if described.contains(path) {
-                    path
-                } else {
-                    UNKNOWN_PATH
-                }
+    /// The handles of the request's label path, `unknown` when its path is
+    /// not a label.
+    fn handles<B>(&self, request: &http::Request<B>) -> Arc<Handles> {
+        let labelled = match &self.kind {
+            Kind::Server { described } => described
+                .get_key_value(request.uri().path())
+                .map(|(path, handles)| Arc::clone(handles.get_or_init(|| self.register(path)))),
+            Kind::Client { admitted } => {
+                client_path(request).and_then(|path| self.admit_client_path(admitted, path))
             }
-            Kind::Client => {
-                client_path(request).map_or(UNKNOWN_PATH, |path| self.admit_client_path(path))
-            }
-        }
+        };
+        labelled
+            .unwrap_or_else(|| Arc::clone(self.unknown.get_or_init(|| self.register(UNKNOWN_PATH))))
     }
 
-    /// `path` while the client label set has room for it, [`UNKNOWN_PATH`]
-    /// once [`CLIENT_METHOD_LIMIT`] other paths hold it.
-    fn admit_client_path<'a>(&self, path: &'a str) -> &'a str {
+    /// The handles of `path` while the client label set has room for it,
+    /// `None` once [`CLIENT_METHOD_LIMIT`] other paths hold it.
+    fn admit_client_path(
+        &self,
+        admitted: &RwLock<HashMap<Box<str>, Arc<Handles>>>,
+        path: &str,
+    ) -> Option<Arc<Handles>> {
+        if let Some(handles) = admitted
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(path)
         {
-            let paths = self.paths.read().unwrap_or_else(PoisonError::into_inner);
-            if paths.contains_key(path) {
-                return path;
-            }
+            return Some(Arc::clone(handles));
         }
-        let mut paths = self.paths.write().unwrap_or_else(PoisonError::into_inner);
-        if !paths.contains_key(path) {
-            let admitted = paths.len() - usize::from(paths.contains_key(UNKNOWN_PATH));
-            if admitted >= CLIENT_METHOD_LIMIT {
-                return UNKNOWN_PATH;
-            }
-            // Admission and handle registration share the write lock. Racing
-            // first calls cannot allocate recorder series beyond the bound.
-            paths.insert(path.into(), self.handles(path));
+        let mut paths = admitted.write().unwrap_or_else(PoisonError::into_inner);
+        if let Some(handles) = paths.get(path) {
+            return Some(Arc::clone(handles));
         }
-        path
-    }
-
-    fn started(&self, path: &str) {
-        self.with(path, |handles| handles.started.increment(1));
-    }
-
-    fn handled(&self, path: &str, code: tonic::Code, elapsed: Duration) {
-        self.with(path, |handles| {
-            handles.handling_seconds.record(elapsed.as_secs_f64());
-            handles.handled[code as usize]
-                .get_or_init(|| {
-                    let mut labels = call_labels(path);
-                    labels.push(metrics::Label::new("grpc_code", code_name(code)));
-                    metrics::counter!(self.handled_metric, labels)
-                })
-                .increment(1);
-        });
-    }
-
-    fn failed(&self, path: &str, failure: service_failure::Code) {
-        self.with(path, |handles| {
-            handles.failed[failure as usize]
-                .get_or_init(|| {
-                    let mut labels = call_labels(path);
-                    labels.push(metrics::Label::new("failure_code", failure.as_str()));
-                    metrics::counter!(SERVER_FAILURES, labels)
-                })
-                .increment(1);
-        });
-    }
-
-    fn with(&self, path: &str, record: impl FnOnce(&Handles)) {
-        {
-            let paths = self.paths.read().unwrap_or_else(PoisonError::into_inner);
-            if let Some(handles) = paths.get(path) {
-                return record(handles);
-            }
+        if paths.len() >= CLIENT_METHOD_LIMIT {
+            return None;
         }
-        let handles = self.handles(path);
-        let mut paths = self.paths.write().unwrap_or_else(PoisonError::into_inner);
-        record(paths.entry(path.into()).or_insert(handles));
+        // Admission and handle registration share the write lock. Racing
+        // first calls cannot allocate recorder series beyond the bound.
+        let handles = self.register(path);
+        paths.insert(path.into(), Arc::clone(&handles));
+        Some(handles)
     }
 
-    fn handles(&self, path: &str) -> Handles {
-        Handles {
+    fn register(&self, path: &str) -> Arc<Handles> {
+        Arc::new(Handles {
+            path: path.into(),
+            handled_metric: self.handled_metric,
             started: metrics::counter!(self.started_metric, call_labels(path)),
             handling_seconds: metrics::histogram!(self.handling_seconds_metric, call_labels(path)),
             handled: Default::default(),
             failed: std::array::from_fn(|_| OnceLock::new()),
-        }
+        })
+    }
+}
+
+impl Handles {
+    fn handled(&self, code: tonic::Code, elapsed: Duration) {
+        self.handling_seconds.record(elapsed.as_secs_f64());
+        self.handled[code as usize]
+            .get_or_init(|| {
+                let mut labels = call_labels(&self.path);
+                labels.push(metrics::Label::new("grpc_code", code_name(code)));
+                metrics::counter!(self.handled_metric, labels)
+            })
+            .increment(1);
+    }
+
+    fn failed(&self, failure: service_failure::Code) {
+        self.failed[failure as usize]
+            .get_or_init(|| {
+                let mut labels = call_labels(&self.path);
+                labels.push(metrics::Label::new("failure_code", failure.as_str()));
+                metrics::counter!(SERVER_FAILURES, labels)
+            })
+            .increment(1);
     }
 }
 
@@ -793,10 +795,11 @@ mod tests {
             CLIENT_METHOD_LIMIT + 1,
             "{rendered}"
         );
-        assert_eq!(
-            Series::client().paths.read().unwrap().len(),
-            CLIENT_METHOD_LIMIT + 1
-        );
+        let series = Series::client();
+        let Kind::Client { admitted } = &series.kind else {
+            panic!("the client series observes the client side");
+        };
+        assert_eq!(admitted.read().unwrap().len(), CLIENT_METHOD_LIMIT);
         for (method, status) in [
             ("Header", "OK"),
             ("Trailer", "Aborted"),
