@@ -36,6 +36,7 @@ reqwest = { workspace = true, features = ["rustls"] }
 # regardless of the selected engine, so this dependency is unconditional.
 secrecy = { workspace = true }
 # template:begin oidc-introspection:authn-secret-dependency
+futures-util = { workspace = true, features = ["std"] }
 moka = { workspace = true, features = ["future"] }
 # template:end oidc-introspection:authn-secret-dependency
 serde = { workspace = true, features = ["std", "derive"] }

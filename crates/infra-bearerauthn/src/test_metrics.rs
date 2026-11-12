@@ -1,4 +1,4 @@
-//! Metric and trace capture shared by the JWT engine and key refresh tests.
+//! Metric and trace capture for authentication tests.
 
 use std::sync::Arc;
 
