@@ -64,7 +64,7 @@ impl PreparedEvent {
         // created-at text is derived from `occurred_at` when the envelope is
         // encoded. Check the range here so preparation rejects an unencodable
         // time rather than a later publication attempt.
-        crate::wire::format_timestamp(occurred_at)?;
+        crate::wire::check_timestamp(occurred_at)?;
         Ok(Self {
             subject,
             message_id: event.id.clone(),
@@ -100,7 +100,7 @@ impl PreparedEvent {
         if schema_version == 0 || crate::wire::is_zero_time(occurred_at) {
             return Err(EnvelopeError::Identity);
         }
-        crate::wire::format_timestamp(occurred_at)?;
+        crate::wire::check_timestamp(occurred_at)?;
         Ok(Self {
             subject,
             message_id,
@@ -373,5 +373,33 @@ mod tests {
         assert_eq!(writer.total_bytes, 65_541);
         assert_eq!(writer.bytes.len(), 1_024);
         assert!(writer.bytes.capacity() <= 1_024);
+    }
+
+    #[test]
+    fn preparation_accepts_only_creation_times_rfc3339_can_carry() {
+        let payload = || ExactPayload {
+            text: "",
+            amount: 0.0,
+            items: [false; 2],
+        };
+        let at = |year: i32| {
+            time::Date::from_calendar_date(year, time::Month::December, 31)
+                .and_then(|date| date.with_hms(23, 59, 59))
+                .map(time::PrimitiveDateTime::as_utc)
+                .expect("valid date")
+        };
+        for (occurred_at, accepted) in [(at(9999), true), (at(0), true), (at(-1), false)] {
+            let event = Event {
+                occurred_at,
+                ..event(payload())
+            };
+            let result = PreparedEvent::prepare("events.created", &event, 1_024);
+            if accepted {
+                let prepared = result.expect("the time is in range");
+                crate::wire::encode_prepared(&prepared).expect("an accepted time encodes");
+            } else {
+                assert!(matches!(result, Err(EnvelopeError::CreatedAtOutOfRange)));
+            }
+        }
     }
 }

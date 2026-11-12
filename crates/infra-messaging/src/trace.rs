@@ -55,7 +55,7 @@ impl Injector for HeaderInjector<'_> {
                 .bytes()
                 .all(|byte| byte.is_ascii() && !byte.is_ascii_control())
         {
-            self.0.insert(name, value.as_str());
+            self.0.insert(name, value);
         }
     }
 }

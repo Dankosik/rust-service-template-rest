@@ -350,7 +350,7 @@ impl Consumer {
                     Ok(Some(Ok(message))) => {
                         remaining -= 1;
                         let handler = Arc::clone(&self.handler);
-                        let cancel = force.child_token();
+                        let cancel = force.clone();
                         deliveries.spawn(async move { handler.handle(message, cancel).await; });
                     }
                     Ok(None) => return Ok(BatchEnd::Closed),
