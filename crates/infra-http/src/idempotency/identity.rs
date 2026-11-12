@@ -4,7 +4,8 @@
 //! a persistent format: changing them changes identity against live records.
 //! Preserve the exact framing pinned by the scope/request test vectors.
 
-use axum::http::{HeaderMap, Method, Uri};
+use axum::http::header::CONTENT_TYPE;
+use axum::http::{HeaderMap, HeaderName, Method, Uri};
 use infra_idempotency_store::{CallerIdentity, CallerKind, Digest, ScopeKey};
 use sha2::{Digest as _, Sha256};
 
@@ -16,6 +17,7 @@ pub(super) const KEY_GRAMMAR: &str = "An unquoted value is visible ASCII; a valu
 
 const SCOPE_DOMAIN: &[u8] = b"http-idempotency/scope/v2";
 const REQUEST_DOMAIN: &[u8] = b"http-idempotency/request/v1";
+const REQUEST_WITH_HEADERS_DOMAIN: &[u8] = b"http-idempotency/request/v2";
 
 /// Select the sealed verified caller that owns a key.
 pub(super) fn caller_identity(
@@ -81,12 +83,19 @@ pub(super) fn scope_key(caller: &CallerIdentity, key: &[u8]) -> ScopeKey {
 pub(super) fn request_fingerprint(
     method: &Method,
     uri: &Uri,
-    content_types: &[&[u8]],
+    headers: &HeaderMap,
+    fingerprint_headers: &[HeaderName],
     body: &[u8],
     trailers: Option<&HeaderMap>,
 ) -> Digest {
     let mut hasher = Sha256::new();
-    hasher.update(REQUEST_DOMAIN);
+    // Keep the old format for routes without extra headers. On other routes,
+    // a live v1 record must refuse replay because it cannot prove equality.
+    hasher.update(if fingerprint_headers.is_empty() {
+        REQUEST_DOMAIN
+    } else {
+        REQUEST_WITH_HEADERS_DOMAIN
+    });
     hasher.update([0]);
     frame(&mut hasher, method.as_str().as_bytes());
     frame(&mut hasher, uri.path().as_bytes());
@@ -97,9 +106,13 @@ pub(super) fn request_fingerprint(
         }
         None => hasher.update([0]),
     }
-    hasher.update((content_types.len() as u64).to_be_bytes());
-    for value in content_types {
-        frame(&mut hasher, value);
+    frame_header_values(&mut hasher, headers, &CONTENT_TYPE);
+    if !fingerprint_headers.is_empty() {
+        hasher.update((fingerprint_headers.len() as u64).to_be_bytes());
+        for name in fingerprint_headers {
+            frame(&mut hasher, name.as_str().as_bytes());
+            frame_header_values(&mut hasher, headers, name);
+        }
     }
     frame(&mut hasher, body);
     // An absent or empty trailer section keeps the persisted v1 fingerprint.
@@ -115,6 +128,14 @@ pub(super) fn request_fingerprint(
         }
     }
     hasher.finalize().into()
+}
+
+fn frame_header_values(hasher: &mut Sha256, headers: &HeaderMap, name: &HeaderName) {
+    let values = headers.get_all(name);
+    hasher.update((values.iter().count() as u64).to_be_bytes());
+    for value in values {
+        frame(hasher, value.as_bytes());
+    }
 }
 
 fn trim_ows(value: &[u8]) -> &[u8] {
@@ -143,9 +164,23 @@ fn frame(hasher: &mut Sha256, bytes: &[u8]) {
 
 #[cfg(test)]
 mod tests {
-    use axum::http::{Method, Uri};
+    use axum::http::{HeaderValue, Method, Uri};
 
     use super::*;
+
+    fn legacy_fingerprint(
+        method: &Method,
+        uri: &Uri,
+        content_types: &[&[u8]],
+        body: &[u8],
+        trailers: Option<&HeaderMap>,
+    ) -> Digest {
+        let mut headers = HeaderMap::new();
+        for value in content_types {
+            headers.append(CONTENT_TYPE, HeaderValue::from_bytes(value).unwrap());
+        }
+        request_fingerprint(method, uri, &headers, &[], body, trailers)
+    }
 
     fn decode_digest(hex: &str) -> Digest {
         let mut digest = [0; 32];
@@ -203,7 +238,7 @@ mod tests {
             ))
         );
         assert_eq!(
-            request_fingerprint(
+            legacy_fingerprint(
                 &Method::POST,
                 &"/widgets/%2F?a=1&b=2".parse::<Uri>().expect("URI"),
                 &[b"application/json".as_slice()],
@@ -217,10 +252,10 @@ mod tests {
     #[test]
     fn request_framing_preserves_absence_order_and_exact_bytes() {
         let uri: Uri = "/widgets".parse().expect("URI");
-        let baseline = request_fingerprint(&Method::POST, &uri, &[], b"{}", None);
+        let baseline = legacy_fingerprint(&Method::POST, &uri, &[], b"{}", None);
         assert_ne!(
             baseline,
-            request_fingerprint(
+            legacy_fingerprint(
                 &Method::POST,
                 &"/widgets?".parse().expect("URI"),
                 &[],
@@ -230,21 +265,21 @@ mod tests {
         );
         assert_ne!(
             baseline,
-            request_fingerprint(&Method::POST, &uri, &[b"".as_slice()], b"{}", None)
+            legacy_fingerprint(&Method::POST, &uri, &[b"".as_slice()], b"{}", None)
         );
         assert_ne!(
             baseline,
-            request_fingerprint(&Method::POST, &uri, &[], b"{ }", None)
+            legacy_fingerprint(&Method::POST, &uri, &[], b"{ }", None)
         );
         assert_ne!(
-            request_fingerprint(
+            legacy_fingerprint(
                 &Method::POST,
                 &uri,
                 &[b"a".as_slice(), b"b".as_slice()],
                 b"{}",
                 None,
             ),
-            request_fingerprint(
+            legacy_fingerprint(
                 &Method::POST,
                 &uri,
                 &[b"b".as_slice(), b"a".as_slice()],
@@ -253,8 +288,8 @@ mod tests {
             )
         );
         assert_ne!(
-            request_fingerprint(&Method::POST, &uri, &[b"ab".as_slice()], b"{}", None),
-            request_fingerprint(
+            legacy_fingerprint(&Method::POST, &uri, &[b"ab".as_slice()], b"{}", None),
+            legacy_fingerprint(
                 &Method::POST,
                 &uri,
                 &[b"a".as_slice(), b"b".as_slice()],
@@ -266,11 +301,9 @@ mod tests {
 
     #[test]
     fn request_identity_distinguishes_trailer_values_but_ignores_field_name_order() {
-        use axum::http::HeaderValue;
-
         let uri: Uri = "/widgets".parse().expect("URI");
         let fingerprint = |trailers: Option<&HeaderMap>| {
-            request_fingerprint(&Method::POST, &uri, &[], b"{}", trailers)
+            legacy_fingerprint(&Method::POST, &uri, &[], b"{}", trailers)
         };
         let mut first = HeaderMap::new();
         assert_eq!(fingerprint(None), fingerprint(Some(&first)));

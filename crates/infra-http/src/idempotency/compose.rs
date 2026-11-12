@@ -12,8 +12,7 @@ use std::sync::Arc;
 use axum::RequestExt;
 use axum::body::{Body, Bytes};
 use axum::extract::{FromRequestParts, OriginalUri, Request, State};
-use axum::http::HeaderValue;
-use axum::http::header::CONTENT_TYPE;
+use axum::http::{HeaderName, HeaderValue};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use http_body_util::{BodyExt, Collected, Full};
@@ -88,6 +87,8 @@ impl Composer {
     ///
     /// Key handling stays inside final authentication. An invalid declaration
     /// stops route assembly before the service can serve it.
+    /// Declare every header that can change the intended effect as an inline
+    /// request parameter so its values participate in retry matching.
     ///
     /// # Errors
     ///
@@ -106,10 +107,11 @@ impl Composer {
             "Idempotency capture refusals, handler refusals, and execution outcomes."
         );
         let (schemas, mut paths, method_router) = routes;
-        let operation_id = declaration::prepare(&mut paths)?;
+        let operation = declaration::prepare(&mut paths)?;
         let state = RouteState {
             store: self.store.clone(),
-            operation_id: Arc::from(operation_id),
+            operation_id: Arc::from(operation.id),
+            fingerprint_headers: Arc::from(operation.fingerprint_headers),
         };
         self.operations += 1;
         Ok((
@@ -150,6 +152,7 @@ struct RouteState {
     /// `None` under an inert composer, whose routes answer a wiring failure.
     store: Option<Store>,
     operation_id: Arc<str>,
+    fingerprint_headers: Arc<[HeaderName]>,
 }
 
 /// Capture the attempt after final contract authentication and before
@@ -177,6 +180,7 @@ async fn capture_attempt(
     let RouteState {
         store,
         operation_id,
+        fingerprint_headers,
     } = state;
     let Some(store) = store else {
         return ControlFlow::Break(wiring_failure(&operation_id, "store_missing"));
@@ -220,14 +224,14 @@ async fn capture_attempt(
         .extensions
         .get::<OriginalUri>()
         .map_or(&parts.uri, |original| &original.0);
-    let content_types = parts
-        .headers
-        .get_all(CONTENT_TYPE)
-        .iter()
-        .map(HeaderValue::as_bytes)
-        .collect::<Vec<_>>();
-    let fingerprint =
-        identity::request_fingerprint(&parts.method, uri, &content_types, &body, trailers.as_ref());
+    let fingerprint = identity::request_fingerprint(
+        &parts.method,
+        uri,
+        &parts.headers,
+        &fingerprint_headers,
+        &body,
+        trailers.as_ref(),
+    );
     let outcome = AttemptOutcome::default();
     parts.extensions.insert(Attempt {
         store,

@@ -3,7 +3,9 @@
 //! Passing a tracked route carrier to [`Composer::route`] opts it in and
 //! generates the served contract; final contract authentication wraps that
 //! carrier. The seam captures the verified caller, decoded key, original URI,
-//! raw Content-Type values, bounded raw body, and trailers. Pre-upgrade
+//! raw Content-Type and declared request header values, bounded raw body, and
+//! trailers. On routes with additional declared headers, a live record from
+//! before header matching returns a mismatch until it expires. Pre-upgrade
 //! records contain no trailer identity. Until those records expire, a
 //! retry with trailers gets a mismatch, while a retry without trailers can
 //! still match a record written for a request with trailers.

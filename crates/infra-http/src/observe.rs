@@ -15,8 +15,8 @@
 //! The metrics follow the OpenTelemetry HTTP semantic conventions as
 //! Prometheus renders them: the response-head duration by method, route
 //! template, and status, whose `_count` series is the request count, and the
-//! active requests by method, held until the response body is dropped
-//! (including after consumption or cancellation). A drop before the response
+//! active requests by method, held until the response body ends, fails, or
+//! is dropped. A drop before the response
 //! head is recorded as 499 for client abandonment or 503 for a forced server
 //! shutdown. Neither status was sent to the client.
 //!
@@ -34,12 +34,12 @@ use std::time::{Duration, Instant};
 
 use axum::body::{Body, Bytes};
 use axum::extract::{MatchedPath, Request, State};
-use axum::http::header::{CONTENT_ENCODING, CONTENT_LENGTH, TRAILER, TRANSFER_ENCODING};
+use axum::http::header::CONTENT_LENGTH;
 use axum::http::{Method, StatusCode, Uri};
 use axum::middleware::Next;
 use axum::response::{IntoResponse as _, Response};
 use foldhash::HashMap;
-use http_body::{Frame, SizeHint};
+use http_body::{Body as _, Frame, SizeHint};
 use metrics::{Gauge, Histogram, Label, SharedString};
 use opentelemetry::context::FutureExt as _;
 use shared_rules::otel_http::request_method;
@@ -51,7 +51,7 @@ use tracing_opentelemetry_instrumentation_sdk::{otel_trace_span, set_parent_or_f
 
 use crate::harden::AdmissionShed;
 use crate::probes::is_health_probe_route;
-use crate::problem::{Problem, body_too_large};
+use crate::problem::Problem;
 use crate::server::ConnectionInfo;
 
 /// The response-head duration, labelled by `http_request_method`,
@@ -328,10 +328,13 @@ impl Active {
     }
 
     fn until_body_ends(self, response: Response) -> Response {
+        if response.body().is_end_stream() {
+            return response;
+        }
         response.map(|body| {
             Body::new(ActiveBody {
                 inner: body,
-                _active: self,
+                active: Some(self),
             })
         })
     }
@@ -342,7 +345,7 @@ impl Active {
 /// still becomes `Content-Length`.
 struct ActiveBody {
     inner: Body,
-    _active: Active,
+    active: Option<Active>,
 }
 
 impl http_body::Body for ActiveBody {
@@ -353,7 +356,11 @@ impl http_body::Body for ActiveBody {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Bytes>, axum::Error>>> {
-        http_body::Body::poll_frame(Pin::new(&mut self.inner), cx)
+        let frame = Pin::new(&mut self.inner).poll_frame(cx);
+        if matches!(frame, Poll::Ready(None | Some(Err(_)))) || self.inner.is_end_stream() {
+            self.active.take();
+        }
+        frame
     }
 
     fn is_end_stream(&self) -> bool {
@@ -467,30 +474,8 @@ fn status_label(status: u16) -> &'static str {
     STATUS_CODES[usize::from(status - 100)].as_str()
 }
 
-/// Complete every Problem the chain or a handler returns: a bare 413 from
-/// tower-http's body limit or an axum extractor takes the Problem envelope,
-/// and every Problem body gains the request id.
+/// Add the request id to the Problem body without replacing other responses.
 fn complete_problem(mut response: Response, request_id: Option<&str>) -> Response {
-    if response.status() == StatusCode::PAYLOAD_TOO_LARGE
-        && response.extensions().get::<Problem>().is_none()
-    {
-        let mut problem = body_too_large();
-        if let Some(id) = request_id {
-            problem = problem.with_request_id(id.to_owned());
-        }
-        let (parts, body) = problem.into_response().into_parts();
-        let headers = response.headers_mut();
-        for name in [CONTENT_ENCODING, CONTENT_LENGTH, TRAILER, TRANSFER_ENCODING] {
-            headers.remove(name);
-        }
-        for name in ["content-digest", "repr-digest", "digest", "content-md5"] {
-            headers.remove(name);
-        }
-        headers.extend(parts.headers);
-        response.extensions_mut().extend(parts.extensions);
-        *response.body_mut() = body;
-        return response;
-    }
     let Some(id) = request_id else {
         return response;
     };
@@ -601,19 +586,40 @@ mod tests {
         );
     }
 
-    #[test]
-    fn an_active_gauge_appears_on_first_use_and_returns_to_zero() {
+    #[tokio::test]
+    async fn an_active_gauge_returns_to_zero_at_eof_before_the_body_is_dropped() {
+        use http_body_util::BodyExt as _;
+        use tower::ServiceExt as _;
+
         let recorder = DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
-        let series = Series::default();
-        metrics::with_local_recorder(&recorder, || {
-            assert_eq!(snapshotter.snapshot().into_vec().len(), 0);
-            let first = Active::start(&series, "GET");
-            let second = Active::start(&series, "GET");
-            drop((first, second));
-            // A snapshot resets the gauge it reads, so this is the only one.
-            assert_eq!(gauge_values(&snapshotter), [("GET".to_owned(), 0.0)]);
-        });
+        let _recorder = metrics::set_default_local_recorder(&recorder);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
+        )]
+        let routes = axum::Router::new().route("/", axum::routing::get(|| async { "complete" }));
+        let app = crate::harden(
+            routes,
+            &crate::HardenOptions {
+                max_body_bytes: 64,
+                request_timeout: Duration::from_secs(1),
+                max_in_flight: None,
+                log_health_probes: false,
+            },
+        );
+        let mut body = app
+            .oneshot(Request::new(Body::empty()))
+            .await
+            .unwrap()
+            .into_body();
+        assert_eq!(
+            body.frame().await.unwrap().unwrap().into_data().unwrap(),
+            "complete"
+        );
+        assert!(body.frame().await.is_none());
+        assert_eq!(gauge_values(&snapshotter), [("GET".to_owned(), 0.0)]);
+        drop(body);
     }
 
     fn gauge_values(snapshotter: &Snapshotter) -> Vec<(String, f64)> {
