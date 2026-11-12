@@ -1,6 +1,7 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::BTreeSet;
 use std::convert::Infallible;
 
+use foldhash::{HashMap, HashSet};
 use prost::Message as _;
 use tonic::server::NamedService as _;
 

@@ -1,7 +1,6 @@
 //! Service tokens on native gRPC: caller admission for business calls and
 //! the client binding that sends this service's token.
 
-use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -10,6 +9,7 @@ use std::task::{Context, Poll};
 use axum::extract::Request;
 use axum::middleware::Next;
 use axum::response::Response;
+use foldhash::HashMap;
 use http::header::AUTHORIZATION;
 use infra_serviceauth::{Caller, CallerName, ReceiverTokens, Verifier};
 use tonic::body::Body;

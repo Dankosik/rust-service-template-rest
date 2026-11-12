@@ -19,6 +19,7 @@ use std::io;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use arrayvec::ArrayVec;
 use opentelemetry::trace::TraceContextExt as _;
 use tracing::dispatcher::WeakDispatch;
 use tracing::field::{Field, Visit};
@@ -193,16 +194,10 @@ struct Entry {
     start: usize,
     end: usize,
 }
-const EMPTY: Entry = Entry {
-    key: "",
-    start: 0,
-    end: 0,
-};
 
 struct Scratch {
     values: Bytes<MAX_RECORD_BYTES>,
-    fields: [Entry; MAX_EVENT_FIELDS],
-    field_count: usize,
+    fields: ArrayVec<Entry, MAX_EVENT_FIELDS>,
     /// The record lacks something its call site gave: a value or field that did
     /// not fit, or the fields of a span with no cache.
     truncated: bool,
@@ -212,20 +207,18 @@ impl Scratch {
     fn new(value_limit: usize) -> Self {
         Self {
             values: Bytes::new(value_limit),
-            fields: [EMPTY; MAX_EVENT_FIELDS],
-            field_count: 0,
+            fields: ArrayVec::new(),
             truncated: false,
         }
     }
 
     /// Records the value written since `start` under `key`.
     fn add_field(&mut self, key: &'static str, start: usize) {
-        self.fields[self.field_count] = Entry {
+        self.fields.push(Entry {
             key,
             start,
             end: self.values.len,
-        };
-        self.field_count += 1;
+        });
     }
 
     /// Nothing more is captured. A span cache cannot be cut, so for a span this
@@ -244,7 +237,7 @@ impl Scratch {
         if self.values.failed {
             return;
         }
-        if self.field_count == max_fields {
+        if self.fields.len() == max_fields {
             self.stop();
             return;
         }
@@ -265,7 +258,7 @@ impl Scratch {
         if self.values.failed {
             return;
         }
-        if self.field_count == MAX_EVENT_FIELDS || self.values.room() < 2 {
+        if self.fields.is_full() || self.values.room() < 2 {
             self.stop();
             return;
         }
@@ -292,7 +285,7 @@ impl Scratch {
         if self.values.failed {
             return;
         }
-        if self.field_count == MAX_EVENT_FIELDS {
+        if self.fields.is_full() {
             self.stop();
             return;
         }
@@ -313,8 +306,8 @@ impl Scratch {
             return false;
         }
         cache.values.len = 0;
-        cache.field_count = 0;
-        let captured = &self.fields[..self.field_count];
+        cache.fields.clear();
+        let captured = self.fields.as_slice();
         for (index, field) in captured.iter().enumerate() {
             if captured[index + 1..]
                 .iter()
@@ -322,19 +315,18 @@ impl Scratch {
             {
                 continue;
             }
-            if cache.field_count == MAX_SPAN_FIELDS {
+            if cache.fields.is_full() {
                 return false;
             }
             let start = cache.values.len;
             cache
                 .values
                 .append(&self.values.storage[field.start..field.end]);
-            cache.fields[cache.field_count] = Entry {
+            cache.fields.push(Entry {
                 key: field.key,
                 start,
                 end: cache.values.len,
-            };
-            cache.field_count += 1;
+            });
         }
         !cache.values.failed
     }
@@ -408,8 +400,7 @@ fn escape(byte: u8, unit: &mut [u8; 6]) -> &[u8] {
 
 struct SpanFields {
     values: Bytes<MAX_SPAN_BYTES>,
-    fields: [Entry; MAX_SPAN_FIELDS],
-    field_count: usize,
+    fields: ArrayVec<Entry, MAX_SPAN_FIELDS>,
     _slot: Permit,
 }
 
@@ -523,7 +514,7 @@ impl FormatLayer {
                 Source::Event
             },
         });
-        let event_fields = scratch.field_count;
+        let event_fields = scratch.fields.len();
         let span = ctx.event_span(event);
         if let Some(span) = &span {
             // Leaf first avoids Scope::from_root's growable ancestry buffer.
@@ -535,7 +526,7 @@ impl FormatLayer {
                     scratch.truncated = true;
                     continue;
                 };
-                for field in &cached.fields[..cached.field_count] {
+                for field in &cached.fields {
                     scratch.copy(*field, &cached.values.storage[..cached.values.len]);
                 }
                 if scratch.values.failed {
@@ -570,7 +561,7 @@ impl FormatLayer {
         write_body(
             line,
             &scratch.values.storage[..scratch.values.len],
-            &mut scratch.fields[..scratch.field_count],
+            scratch.fields.as_mut_slice(),
             event_fields,
             scratch.truncated,
             self.format,
@@ -629,8 +620,7 @@ where
         scratch.push("name", attrs.metadata().name(), MAX_SPAN_FIELDS);
         let mut cache = SpanFields {
             values: Bytes::new(MAX_SPAN_BYTES),
-            fields: [EMPTY; MAX_SPAN_FIELDS],
-            field_count: 0,
+            fields: ArrayVec::new(),
             _slot: slot,
         };
         if !scratch.compact_into(&mut cache) {
@@ -660,11 +650,11 @@ where
         let Some(cached) = extensions.get_mut::<SpanFields>() else {
             return;
         };
-        let delta_fields = scratch.field_count;
+        let delta_fields = scratch.fields.len();
         // Old values join the delta before its own repeated keys collapse, so
         // only the compacted fields need to fit the span's bytes.
         scratch.values.limit = MAX_RECORD_BYTES;
-        for field in &cached.fields[..cached.field_count] {
+        for field in &cached.fields {
             if !scratch.fields[..delta_fields]
                 .iter()
                 .any(|delta| delta.key == field.key)

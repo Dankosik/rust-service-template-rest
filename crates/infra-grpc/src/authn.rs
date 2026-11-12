@@ -1,11 +1,11 @@
 //! Bearer authentication of business calls and their declared scopes.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::extract::Request;
 use axum::middleware::Next;
 use axum::response::Response;
+use foldhash::HashMap;
 
 use crate::Failure;
 use crate::call::Side;

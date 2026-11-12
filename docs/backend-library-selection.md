@@ -37,6 +37,8 @@ uses `tokio-util`, and the `service-failure` catalog is declared once by its
 | `moka` `sync` | The verified-token memo in `infra-serviceauth`, bounded at 1024 entries. | The validity-window check stays in the verifier; the cache only bounds capacity. |
 | `similar` 2.7, `text` (dev) | The unified diff in the committed-OpenAPI test. | Kept at the 2.x line `insta` already resolves. |
 | std `assert_matches!` | Pattern assertions in tests, which print the value on failure. | Std since Rust 1.96; no crate. |
+| `foldhash` 0.2, `std` | The hasher of the verified-token memo in `infra-serviceauth` (`quality`), and of the per-call method tables in `infra-grpc` and endpoint tables of inbound webhooks (`foldhash::HashMap`). | Only for keys the service admitted: a memo entry exists only after its signature verified, and request paths are looked up in tables fixed at startup, never inserted. Measured on 2026-11-12 (Apple M-series, release, fat LTO, median of seven runs): hashing a 420-byte token 70.2 → 8.2 ns, a memo hit 105.5 → 43.6 ns, a 46-byte path lookup 8.9 → 3.5 ns. hashbrown already resolves it, so it adds no package. Digest-keyed caches such as introspection keep the default hasher; a 32-byte key saves a few nanoseconds beside a SHA-256 of the token. |
+| `arrayvec` 0.7 | The captured-field tables of the log formatter. | Replaces a sentinel-filled array and a separate count. A new table is no longer initialised in full: measured the same way, a span with two fields 405 → 335 ns to create and an event under one span 2,138 → 2,088 ns. The value buffer stays the local `Bytes`, whose writes are all-or-nothing; `ArrayVec`'s `io::Write` writes a prefix. |
 
 Rejected after the same code search, 2026-11-12: `mime`, because
 `shared_rules::rfc9110::media_type_is` already owns the media-type check and
@@ -48,6 +50,18 @@ fixtures assert structured fields, span records and background-task events;
 and unable to read a Retry-After value. Crates with no matching code
 (identifier, slug, phone, currency, HTML, User-Agent, CLI output, `sd-notify`,
 `rust-embed`) wait for a feature that needs them.
+
+Rejected in the narrow-crate search of the same day: `smallvec` and
+`compact_str` for token scopes and claims, built once per JWT next to a
+signature check, exposed as `&[String]`, and mostly longer than 24 bytes;
+`arc-swap` for the JWKS key set, whose keys and refresh counters change under
+one `watch` lock that decides who starts a refresh (reopen on observed
+contention there); `quanta`, whose clock ignores `tokio::time::pause`;
+`pin-project-lite`, since the wrapped bodies are `Unpin`; `scopeguard`, since
+the drop guards carry metrics and state; `memchr`, whose candidate searches are
+in test fixtures; `atoi`, `itoa` and `parking_lot`, with no measurable site;
+`base64-simd`, unreleased since 2023; `sonic-rs` and `simd-json`, which would
+replace the JSON contract rather than one mechanism.
 
 The examples live with their owners in `crates/infra-http/src/harden/tests.rs`,
 `crates/config/src/validate.rs` and `crates/service/tests/openapi.rs`. Test-only

@@ -2594,6 +2594,7 @@ dependencies = [
  "bytes",
  "derive-where",
  "derive_more",
+ "foldhash",
  "futures-util",
  "grpc-contracts",
  "health",
@@ -2889,6 +2890,7 @@ dependencies = [
  "aws-lc-rs",
  "base64 0.23.1",
  "derive_more",
+ "foldhash",
  "http",
  "jsonwebtoken",
  "metrics",
@@ -2906,6 +2908,7 @@ dependencies = [
 name = "infra-telemetry"
 version = "0.1.0"
 dependencies = [
+ "arrayvec",
  "axum",
  "bitflags 2.13.2",
  "const-hex",
@@ -2948,6 +2951,7 @@ dependencies = [
  "base64 0.23.1",
  "bytes",
  "derive_more",
+ "foldhash",
  "hotpath",
  "http",
  "httpdate",
