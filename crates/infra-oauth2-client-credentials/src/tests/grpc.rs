@@ -33,7 +33,7 @@ use tower::{Service as _, service_fn};
 
 use secrecy::SecretString;
 
-use super::{Credentials, Fixture, acquisition_deadline, deadline, token_context};
+use super::{Credentials, Fixture, acquisition_deadline, token_context};
 use crate::{AcquisitionError, OnBehalfOf, Rejection};
 
 #[derive(Clone)]
