@@ -733,10 +733,8 @@ async fn mounted_percent_decoded_endpoint_reaches_signature_rejection(pool: PgPo
     reason = "the fixture occupies the only pool permit to observe HTTP acquisition cancellation"
 )]
 async fn mounted_receipt_cutoff_reserves_response_time_and_same_identity_recovers(pool: PgPool) {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::task::Poll;
-
     use axum::body::{Body, to_bytes};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tower::ServiceExt as _;
 
     struct CountedVerifier(Arc<AtomicUsize>, KeyRing);
@@ -767,44 +765,38 @@ async fn mounted_receipt_cutoff_reserves_response_time_and_same_identity_recover
             Arc::new(CountedVerifier(Arc::clone(&calls), keys.clone())) as Arc<dyn Verifier>,
         )],
     );
-    let request = || {
+    let request_with = |body| {
         let mut request = http::Request::post("/webhooks/partner%2Fa%3F%23")
-            .body(Body::from("{}"))
+            .body(body)
             .expect("request");
         *request.headers_mut() = signed_headers(&keys, "message-budget", b"{}");
         request
     };
+    let request = || request_with(Body::from("{}"));
 
     tokio::time::pause();
-    for (budget, may_start) in [
-        (Duration::from_millis(100), false),
-        (Duration::from_secs(1), true),
-    ] {
+    for (budget_ms, delay_ms, verifier_calls) in [(100, 50, 1), (1_000, 900, 2), (1_000, 950, 2)] {
+        let budget = Duration::from_millis(budget_ms);
         let app = mounted_receiver(receiver.clone(), budget);
         let start = tokio::time::Instant::now();
-        let response = app.oneshot(request());
-        tokio::pin!(response);
-        let first_poll = futures_util::poll!(response.as_mut());
-        let response = if may_start {
-            assert!(first_poll.is_pending());
-            assert_eq!(calls.load(Ordering::SeqCst), 1);
-            tokio::time::advance(Duration::from_millis(900)).await;
-            super::bounded("receipt cutoff response", response)
-                .await
-                .expect("response")
+        let request = if delay_ms == 950 {
+            request_with(Body::from_stream(futures_util::stream::once(async move {
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                Ok::<_, std::convert::Infallible>(Bytes::from_static(b"{}"))
+            })))
         } else {
-            assert_eq!(
-                calls.load(Ordering::SeqCst),
-                0,
-                "exhausted receipt is never polled"
-            );
-            let Poll::Ready(response) = first_poll else {
-                panic!("the reserve exhausts the attempt before acquisition");
-            };
-            response.expect("response")
+            request()
         };
+        let response = app.oneshot(request);
+        tokio::pin!(response);
+        assert!(futures_util::poll!(response.as_mut()).is_pending());
+        tokio::time::advance(Duration::from_millis(delay_ms)).await;
+        let response = super::bounded("receipt cutoff response", response)
+            .await
+            .expect("response");
+        assert_eq!(calls.load(Ordering::SeqCst), verifier_calls);
         assert!(tokio::time::Instant::now() < start + budget);
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
         assert_eq!(
             response.headers()["content-type"],
             "application/problem+json"
@@ -813,7 +805,7 @@ async fn mounted_receipt_cutoff_reserves_response_time_and_same_identity_recover
             .await
             .expect("problem body");
         let problem: serde_json::Value = serde_json::from_slice(&body).expect("problem JSON");
-        assert_eq!(problem["code"], "service_unavailable");
+        assert_eq!(problem["code"], "gateway_timeout");
     }
     tokio::time::resume();
     assert_eq!(receipt_count(&pool).await, 0);
@@ -835,7 +827,7 @@ async fn mounted_receipt_cutoff_reserves_response_time_and_same_identity_recover
         .filter(|line| line.starts_with("webhook_ingress_outcomes_total{"))
         .collect();
     assert_eq!(outcomes.len(), 3, "{scrape}");
-    for (outcome, count) in [("unavailable", 2), ("accepted", 1), ("duplicate", 1)] {
+    for (outcome, count) in [("deadline_exceeded", 3), ("accepted", 1), ("duplicate", 1)] {
         assert!(
             outcomes
                 .iter()

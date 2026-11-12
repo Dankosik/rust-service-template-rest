@@ -20,12 +20,14 @@ use utoipa_axum::routes;
 
 use crate::context::RequestDeadline;
 use crate::extract::Path;
-use crate::problem::responses::{InternalServerError, ProblemComponents, RequestEntityTooLarge};
+use crate::problem::responses::{
+    GatewayTimeout, InternalServerError, ProblemComponents, RequestEntityTooLarge,
+};
 use crate::problem::{Code, Problem, body_too_large, sanitized_internal_error};
 
 /// Webhook ingress results. Label `outcome` is `accepted`, `duplicate`,
-/// `rejected`, `unavailable`, or `unknown_endpoint`. A configured endpoint
-/// adds its operator-chosen ID as `endpoint`, and a rejection adds a static
+/// `rejected`, `unavailable`, `deadline_exceeded`, or `unknown_endpoint`.
+/// A configured endpoint adds its ID as `endpoint`, and a rejection adds a static
 /// `reason`: the receiver's, or `body_too_large` / `body_unreadable` when the
 /// body could not be read within its limit. A requested ID that matches no configured
 /// endpoint is caller-controlled and never becomes a label.
@@ -102,11 +104,14 @@ pub enum WebhookProblemResponses {
     /// 503: durable receipt storage is unavailable.
     #[response(status = 503)]
     Unavailable(#[ref_response] ServiceUnavailable),
+    /// 504: the request budget for a receipt attempt was exhausted.
+    #[response(status = 504)]
+    Timeout(#[ref_response] GatewayTimeout),
 }
 
 /// The webhook response family's components, registered by [`router`].
 #[derive(OpenApi)]
-#[openapi(components(responses(NotFound, WebhookRejected, ServiceUnavailable)))]
+#[openapi(components(responses(NotFound, WebhookRejected, ServiceUnavailable, GatewayTimeout)))]
 struct WebhookComponents;
 
 /// The public webhook route with its annotated contract. The state is any
@@ -187,20 +192,18 @@ async fn receive(
             return Problem::new(Code::WebhookRejected).into_response();
         }
     };
-    let result = match deadline.attempt_end() {
-        None => Err(ReceiveError::Unavailable),
-        Some(attempt_end) => {
-            let receipt = receiver.receive_bytes(
-                &endpoint_id,
-                &parts.headers,
-                body,
-                SystemTime::now(),
-                attempt_end,
-            );
-            tokio::time::timeout_at(attempt_end, receipt)
-                .await
-                .unwrap_or(Err(ReceiveError::Unavailable))
-        }
+    let Some(attempt_end) = deadline.attempt_end() else {
+        return receipt_deadline_exceeded(&endpoint_id);
+    };
+    let receipt = receiver.receive_bytes(
+        &endpoint_id,
+        &parts.headers,
+        body,
+        SystemTime::now(),
+        attempt_end,
+    );
+    let Ok(result) = tokio::time::timeout_at(attempt_end, receipt).await else {
+        return receipt_deadline_exceeded(&endpoint_id);
     };
     match result {
         Ok(outcome) => {
@@ -216,11 +219,23 @@ async fn receive(
             EndpointOutcome::Rejected(rejection.reason()).record(&endpoint_id);
             Problem::new(Code::WebhookRejected).into_response()
         }
+        // The store's pool acquisition shares the same cutoff and can report
+        // its failure before the outer timeout is polled.
+        Err(ReceiveError::Unavailable) if tokio::time::Instant::now() >= attempt_end => {
+            receipt_deadline_exceeded(&endpoint_id)
+        }
         Err(ReceiveError::Unavailable) => {
             EndpointOutcome::Unavailable.record(&endpoint_id);
             Problem::new(Code::ServiceUnavailable).into_response()
         }
     }
+}
+
+fn receipt_deadline_exceeded(endpoint_id: &str) -> Response {
+    EndpointOutcome::DeadlineExceeded.record(endpoint_id);
+    Problem::new(Code::GatewayTimeout)
+        .detail("request budget for durable webhook receipt was exhausted")
+        .into_response()
 }
 
 fn unknown_endpoint() -> Response {
@@ -236,6 +251,7 @@ enum EndpointOutcome {
     /// Carries the static `reason` label.
     Rejected(&'static str),
     Unavailable,
+    DeadlineExceeded,
 }
 
 impl EndpointOutcome {
@@ -245,6 +261,7 @@ impl EndpointOutcome {
             Self::Duplicate => "duplicate",
             Self::Rejected(_) => "rejected",
             Self::Unavailable => "unavailable",
+            Self::DeadlineExceeded => "deadline_exceeded",
         }
     }
 

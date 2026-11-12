@@ -11,9 +11,10 @@ use std::hash::{BuildHasher as _, Hasher as _, RandomState};
 use std::net::SocketAddr;
 use std::num::NonZeroU32;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use axum::Router;
+use axum::{Extension, Router};
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto;
 use hyper_util::service::TowerToHyperService;
@@ -23,6 +24,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant, timeout_at};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
+use tower::ServiceBuilder;
 
 mod sniff;
 
@@ -115,6 +117,18 @@ struct ConnectionShutdown {
     force: CancellationToken,
 }
 
+#[derive(Clone)]
+pub(crate) struct ConnectionInfo {
+    pub(crate) scheme: &'static str,
+    forced: Arc<AtomicBool>,
+}
+
+impl ConnectionInfo {
+    pub(crate) fn was_forced(&self) -> bool {
+        self.forced.load(Ordering::Relaxed)
+    }
+}
+
 struct ReportAcceptFailure {
     finish: CancellationToken,
     failure: watch::Sender<Option<AcceptFailure>>,
@@ -149,7 +163,10 @@ impl Server {
         app: Router,
         options: ServerOptions,
     ) -> Result<Self, ServerError> {
-        bind_listener(addr, app, options, |stream| async move { Some(stream) }).await
+        bind_listener(addr, app, options, |stream| async move {
+            Some((stream, "http"))
+        })
+        .await
     }
 
     // template:begin grpc:http-server-tls
@@ -176,7 +193,7 @@ impl Server {
             async move {
                 let peer = stream.peer_addr().ok();
                 match tokio::time::timeout(handshake_timeout, acceptor.accept(stream)).await {
-                    Ok(Ok(tls_stream)) => Some(tls_stream),
+                    Ok(Ok(tls_stream)) => Some((tls_stream, "https")),
                     Ok(Err(error)) => {
                         tracing::debug!(
                             peer = peer.map(tracing::field::display),
@@ -341,8 +358,7 @@ fn connection_builder(options: ServerOptions) -> auto::Builder<TokioExecutor> {
     builder
 }
 
-// `prepare_io` turns the accepted socket into the stream hyper serves; it
-// returns None to close a connection before hyper owns it.
+// A failed preparation closes the connection before hyper owns it.
 async fn bind_listener<F, Fut, IO>(
     addr: SocketAddr,
     app: Router,
@@ -351,7 +367,7 @@ async fn bind_listener<F, Fut, IO>(
 ) -> Result<Server, ServerError>
 where
     F: Fn(TcpStream) -> Fut + Clone + Send + 'static,
-    Fut: Future<Output = Option<IO>> + Send + 'static,
+    Fut: Future<Output = Option<(IO, &'static str)>> + Send + 'static,
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let listener = TcpListener::bind(addr)
@@ -409,7 +425,7 @@ async fn accept_loop<F, Fut, IO>(
     prepare_io: F,
 ) where
     F: Fn(TcpStream) -> Fut + Clone + Send + 'static,
-    Fut: Future<Output = Option<IO>> + Send + 'static,
+    Fut: Future<Output = Option<(IO, &'static str)>> + Send + 'static,
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let finish = &connection_shutdown.finish;
@@ -488,10 +504,12 @@ async fn serve_connection<F, Fut, IO>(
     shutdown: ConnectionShutdown,
 ) where
     F: Fn(TcpStream) -> Fut,
-    Fut: Future<Output = Option<IO>>,
+    Fut: Future<Output = Option<(IO, &'static str)>>,
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let ConnectionShutdown { finish, force } = shutdown;
+    let forced = Arc::new(AtomicBool::new(false));
+    let connection_forced = Arc::clone(&forced);
     let serve = async move {
         // No request can be in flight before preparation ends, so drain
         // drops the connection instead of waiting preparation out.
@@ -499,14 +517,21 @@ async fn serve_connection<F, Fut, IO>(
             io = prepare_io(stream) => io,
             () = finish.cancelled() => None,
         };
-        let Some(io) = io else {
+        let Some((io, scheme)) = io else {
             return;
         };
         let io = SniffDeadline::new(io, options.header_read_timeout);
         // Not `serve_connection_with_upgrades`: hyper hands an upgraded socket
         // to a task outside this one, so drain and the connection cap would
         // stop counting it while it stays open.
-        let connection = builder.serve_connection(TokioIo::new(io), TowerToHyperService::new(app));
+        let service = ServiceBuilder::new()
+            .layer(Extension(ConnectionInfo {
+                scheme,
+                forced: connection_forced,
+            }))
+            .service(app);
+        let connection =
+            builder.serve_connection(TokioIo::new(io), TowerToHyperService::new(service));
         tokio::pin!(connection);
         let ended = tokio::select! {
             ended = connection.as_mut() => ended,
@@ -521,7 +546,11 @@ async fn serve_connection<F, Fut, IO>(
     };
     tokio::select! {
         biased;
-        () = force.cancelled() => {},
+        () = async {
+            force.cancelled().await;
+            // select drops the losing connection future before its branch runs.
+            forced.store(true, Ordering::Relaxed);
+        } => {},
         () = serve => {},
     }
 }

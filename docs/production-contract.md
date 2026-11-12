@@ -70,7 +70,8 @@ applicable runtime rules.
   attempts and backoff; a new stage does not grant a fresh budget.
 - With PostgreSQL, retain SQLx's native finite acquisition and pool bound;
   request-scoped acquisition spends the remaining HTTP deadline with its
-  existing 100 ms response reserve. Keep transactions short and avoid holding
+  response reserve, capped at 100 ms and at half the original request budget.
+  Keep transactions short and avoid holding
   a connection across unrelated provider work. Readiness shares the pool and
   may withdraw a saturated replica. A timeout or cancellation at an effect
   boundary does not prove rollback; handle uncertain commit/effect outcomes

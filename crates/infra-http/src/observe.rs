@@ -16,11 +16,9 @@
 //! Prometheus renders them: the response-head duration by method, route
 //! template, and status, whose `_count` series is the request count, and the
 //! active requests by method, held until the response body is dropped
-//! (including after consumption or cancellation). A request dropped before
-//! its response head, because the caller closed the connection or reset the
-//! stream, is recorded with status 499, nginx's "client closed request", as
-//! the gRPC transport records an abandoned call as `Canceled`; recording
-//! nothing would hide latency the callers gave up on from the alerts.
+//! (including after consumption or cancellation). A drop before the response
+//! head is recorded as 499 for client abandonment or 503 for a forced server
+//! shutdown. Neither status was sent to the client.
 //!
 //! The access-log line is written inside the span, so it carries the trace
 //! and span ids through the subscriber, and outside admission and the opening
@@ -51,6 +49,7 @@ use tracing_opentelemetry_instrumentation_sdk::{otel_trace_span, set_parent_or_f
 
 use crate::probes::is_health_probe_route;
 use crate::problem::{Problem, body_too_large};
+use crate::server::ConnectionInfo;
 
 /// The response-head duration, labelled by `http_request_method`,
 /// `http_route` (the matched route template or `<unmatched>`), and
@@ -122,7 +121,7 @@ pub(crate) struct AccessLogOptions {
 pub(crate) async fn observe(
     State(options): State<AccessLogOptions>,
     matched: Option<MatchedPath>,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Response {
     let started = Instant::now();
@@ -133,7 +132,8 @@ pub(crate) async fn observe(
     let request_id = request_id
         .as_ref()
         .and_then(|id| id.header_value().to_str().ok());
-    let span = make_span(&request, matched.as_ref(), request_id);
+    let connection = request.extensions_mut().remove::<ConnectionInfo>();
+    let span = make_span(&request, matched.as_ref(), request_id, connection.as_ref());
     let fallback = set_parent_or_fallback(&span, otel_http::extract_context(request.headers()));
     let route = matched
         .as_ref()
@@ -147,6 +147,7 @@ pub(crate) async fn observe(
         span: &span,
         started,
         answered: false,
+        connection,
     };
 
     let traced = next.run(request).instrument(span.clone());
@@ -175,9 +176,6 @@ pub(crate) async fn observe(
     active.until_body_ends(response)
 }
 
-/// One request's duration and access-log line, written once: with the
-/// response head's status, or with [`CLIENT_CLOSED_REQUEST`] when the request
-/// future is dropped before it.
 struct Pending<'a> {
     options: AccessLogOptions,
     method: &'a Method,
@@ -186,15 +184,16 @@ struct Pending<'a> {
     span: &'a tracing::Span,
     started: Instant,
     answered: bool,
+    connection: Option<ConnectionInfo>,
 }
 
 impl Pending<'_> {
     fn answer(&mut self, status: StatusCode, problem_code: Option<&str>) {
         self.answered = true;
-        self.record(status, problem_code);
+        self.record(status, problem_code, None);
     }
 
-    fn record(&self, status: StatusCode, problem_code: Option<&str>) {
+    fn record(&self, status: StatusCode, problem_code: Option<&str>, termination: Option<&str>) {
         let elapsed = self.started.elapsed();
         record_duration(
             request_method(self.method.as_str()),
@@ -213,6 +212,7 @@ impl Pending<'_> {
                 status = status.as_u16(),
                 duration_ms,
                 problem_code,
+                termination,
                 request_id = self.request_id,
                 "http_request"
             );
@@ -222,8 +222,21 @@ impl Pending<'_> {
 
 impl Drop for Pending<'_> {
     fn drop(&mut self) {
-        if !self.answered {
-            self.record(CLIENT_CLOSED_REQUEST, None);
+        if self.answered {
+            return;
+        }
+        if self
+            .connection
+            .as_ref()
+            .is_some_and(ConnectionInfo::was_forced)
+        {
+            self.record(
+                StatusCode::SERVICE_UNAVAILABLE,
+                None,
+                Some("server_shutdown"),
+            );
+        } else {
+            self.record(CLIENT_CLOSED_REQUEST, None, None);
         }
     }
 }
@@ -236,6 +249,7 @@ fn make_span(
     request: &Request,
     matched: Option<&MatchedPath>,
     request_id: Option<&str>,
+    connection: Option<&ConnectionInfo>,
 ) -> tracing::Span {
     let method = request_method(request.method().as_str());
     let route = matched.map(MatchedPath::as_str);
@@ -255,18 +269,17 @@ fn make_span(
         "network.protocol.version",
         otel_http::http_flavor(request.version()),
     );
-    span.set_attribute("url.scheme", url_scheme(request.uri()));
+    span.set_attribute("url.scheme", url_scheme(request.uri(), connection));
     span.set_attribute("span.type", "web");
     span
 }
 
-/// The scheme of the request as this server received it. An HTTP/2 request
-/// carries it in `:scheme`; an HTTP/1 request line has none, and the listener
-/// the hardened chain is bound to is plaintext (TLS ends at the platform edge),
-/// so that request is `http`.
-fn url_scheme(uri: &Uri) -> &'static str {
+/// HTTP/1 origin-form targets carry no scheme. Use the listener's scheme
+/// when the request target omits it.
+fn url_scheme(uri: &Uri, connection: Option<&ConnectionInfo>) -> &'static str {
     match uri.scheme_str() {
         Some("https") => "https",
+        None => connection.map_or("http", |connection| connection.scheme),
         _ => "http",
     }
 }
