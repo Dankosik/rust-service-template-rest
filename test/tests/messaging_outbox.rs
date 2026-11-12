@@ -740,7 +740,7 @@ async fn malformed_stored_intent_is_terminal_and_never_false_completion(pool: Pg
     );
     let corrupted = sqlx::query(
         "UPDATE background_jobs \
-         SET payload = jsonb_set(payload, '{payload_base64}', to_jsonb('not-base64'::text), false) \
+         SET payload_text = jsonb_set(payload, '{payload_base64}', to_jsonb('not-base64'::text), false)::text \
          WHERE kind = $1 AND unique_key = $2",
     )
     .bind(OUTBOX_KIND)

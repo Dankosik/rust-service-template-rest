@@ -1,0 +1,36 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT payload_text, CASE WHEN payload_text IS NULL THEN payload::text END AS legacy_payload FROM background_jobs WHERE kind = $1 AND unique_key = $2::text COLLATE \"C\" AND state IN ('pending', 'running') FOR UPDATE",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "payload_text",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "background_jobs",
+            "name": "payload_text"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "legacy_payload",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      true,
+      null
+    ]
+  },
+  "hash": "e2b22b001cbd2bf61b216812960cb2ee125d82be30ee1efc765864c75c9e86a4"
+}

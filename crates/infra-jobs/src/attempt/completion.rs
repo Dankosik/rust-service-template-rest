@@ -227,7 +227,7 @@ async fn write_batch(shared: &Shared, mut batch: CompletionBatch, deadline: Inst
             .map(|queued| (queued.fence.job_id.0, queued.fence.generation))
             .unzip();
         within(
-            shared,
+            &shared.cleanup,
             deadline,
             backstop(Box::pin(async {
                 let mut connection = infra_postgres::acquire(&shared.pool, "complete jobs batch")

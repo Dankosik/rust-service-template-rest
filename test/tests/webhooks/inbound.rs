@@ -1390,12 +1390,13 @@ async fn receipt_migration_preserves_historical_pairs_jobs_and_admission_approxi
         "content_type": null, "body": "bGVnYWN5"
     }))
     .expect("legacy inbound payload");
-    infra_postgres::in_tx(&pool, async |tx| -> Result<(), infra_postgres::TxError> {
-        let _enqueued = infra_jobs::enqueue(tx, &incoming, infra_jobs::EnqueueOptions::default())
-            .await
-            .expect("enqueue legacy fixture");
-        Ok(())
-    })
+    sqlx::query(
+        "INSERT INTO background_jobs (kind, payload, not_before) \
+         VALUES ($1, $2, statement_timestamp())",
+    )
+    .bind(<Incoming as infra_jobs::JobKind>::NAME)
+    .bind(serde_json::to_value(&incoming).expect("serialize historical payload"))
+    .execute(&pool)
     .await
     .expect("legacy job");
     let jobs_before: Vec<serde_json::Value> =
@@ -1425,11 +1426,12 @@ async fn receipt_migration_preserves_historical_pairs_jobs_and_admission_approxi
             .fetch_all(&pool)
             .await
             .expect("jobs after");
-    // Forward migrations add both history columns; every existing row starts empty.
+    // Forward migrations add empty histories and leave legacy payloads in JSONB.
     for job in &mut jobs_after {
+        let row = job.as_object_mut().expect("job row is a JSON object");
+        assert_eq!(row.remove("payload_text"), Some(serde_json::Value::Null));
         for column in ["errors", "recovery_history"] {
-            let history = job.as_object_mut().and_then(|row| row.remove(column));
-            assert_eq!(history, Some(serde_json::json!([])), "{column}");
+            assert_eq!(row.remove(column), Some(serde_json::json!([])), "{column}");
         }
     }
     assert_eq!(jobs_after, jobs_before);

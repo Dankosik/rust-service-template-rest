@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 use futures_util::FutureExt as _;
 use infra_jobs::{
     DEFAULT_TIMEOUT, DrainEnd, Engine, EnqueueError, EnqueueOptions, Enqueued, Job, JobError,
-    JobKind, KindsBuilder, LEASE_RESERVE, MIN_TIMEOUT, POLL_INTERVAL, Policy, StartupError,
-    enqueue,
+    JobKind, KindsBuilder, LEASE_RESERVE, LivePayloadComparison, MIN_TIMEOUT, POLL_INTERVAL,
+    Policy, StartupError, compare_live_payload, enqueue,
 };
 use infra_postgres::{Dsn, PgPool, TxError, in_tx};
 use integration_tests::jobs::{self, Probe, ProbeAction};
@@ -55,6 +55,17 @@ struct Stranded {
 
 impl JobKind for Stranded {
     const NAME: &'static str = "test.stranded";
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+enum NumericPayload {
+    Integer(u64),
+    Float(f64),
+}
+
+impl JobKind for NumericPayload {
+    const NAME: &'static str = "test.numeric_payload";
 }
 
 #[derive(Debug)]
@@ -231,6 +242,85 @@ async fn finish(run: EngineRun, pools: &[&PgPool]) {
     run.started.stop_claiming();
     super::bounded("the engine drains", run.started.drained()).await;
     join(run, pools).await;
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn numeric_payloads_keep_handler_distinctions(pool: PgPool) {
+    let jobs = open(&pool, 1).await;
+    let keyed = |unique_key: &'static str| EnqueueOptions {
+        unique_key: Some(unique_key),
+        ..EnqueueOptions::default()
+    };
+    must(
+        in_tx(&jobs, async |tx| {
+            for (key, stored, proposed) in [
+                (
+                    "zero",
+                    NumericPayload::Float(-0.0),
+                    NumericPayload::Float(0.0),
+                ),
+                (
+                    "one",
+                    NumericPayload::Integer(1),
+                    NumericPayload::Float(1.0),
+                ),
+            ] {
+                created(enqueue(tx, &stored, keyed(key)).await?);
+                assert_eq!(
+                    enqueue(tx, &proposed, keyed(key)).await?,
+                    Enqueued::Duplicate
+                );
+                assert_eq!(
+                    compare_live_payload(tx, key, &proposed).await?,
+                    LivePayloadComparison::Different
+                );
+            }
+            Ok(())
+        })
+        .await,
+        "enqueue distinct numeric payloads",
+    );
+
+    let (send, mut receive) = tokio::sync::mpsc::unbounded_channel();
+    let mut kinds = KindsBuilder::new();
+    kinds.register(Policy::default(), move |job: Job<NumericPayload>| {
+        let send = send.clone();
+        async move {
+            let negative_zero = matches!(job.payload(), NumericPayload::Float(value) if value.to_bits() == (-0.0_f64).to_bits());
+            send.send(negative_zero).expect("test is receiving attempts");
+            Ok(())
+        }
+    });
+    let run = start(
+        &jobs,
+        kinds.validate().expect("numeric payload registry"),
+        1,
+    );
+    let (first, second) = super::bounded("the numeric jobs reach the handler", async {
+        (receive.recv().await, receive.recv().await)
+    })
+    .await;
+    assert!(matches!(
+        (first, second),
+        (Some(true), Some(false)) | (Some(false), Some(true))
+    ));
+    finish(run, &[&jobs]).await;
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn an_expired_checkout_does_not_use_an_idle_connection(pool: PgPool) {
+    let jobs = open(&pool, 1).await;
+    drop(
+        infra_postgres::acquire(&jobs, "warm the test pool")
+            .await
+            .expect("connection"),
+    );
+    let deadline = tokio::time::Instant::now() - Duration::from_millis(1);
+    assert!(matches!(
+        infra_postgres::acquire_until(&jobs, "expired checkout", deadline).await,
+        Err(sqlx::Error::PoolTimedOut)
+    ));
+    super::close_pools(&[&jobs]).await;
 }
 
 async fn until<T>(what: &str, bound: Duration, mut ready: impl AsyncFnMut() -> Option<T>) -> T {

@@ -47,6 +47,14 @@ activating recovery or relying on retained-failure custody. New workers require
 their complete admitted history. Keep the additive schema on rollback and roll
 forward: an old binary restores failed deletion. Never clear recovery history
 or reset claim-generation sequences as a rollback step.
+
+Apply `20261112120000_preserve_background_job_payload_text.sql` before
+replacing producers and workers. The nullable column needs no backfill.
+New producers also populate the existing JSONB column so old workers can
+still read new jobs during rollout or rollback. Exact payload delivery and
+comparison require updated producers and workers. Existing JSONB-only rows
+retain their stored representation, including any normalization that already
+occurred.
 <!-- template:end jobs:migrations-readme-jobs -->
 
 Rules enforced by `cargo test -p migrate` over the embedded set and by

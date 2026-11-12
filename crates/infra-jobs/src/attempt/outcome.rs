@@ -2,8 +2,9 @@
 
 use infra_postgres::observed;
 use sqlx::postgres::PgConnection;
+use tokio::time::Instant;
 
-use super::{AttemptId, ClaimFence, Persistence};
+use super::{AttemptId, ClaimFence, Persistence, expired};
 use crate::engine::{Operation, OperationError, Shared, backstop, observe_failure};
 use crate::kind::{Disposition, JobError, MAX_ERROR_SUMMARY_BYTES, Policy};
 use crate::state::FailureReason;
@@ -138,12 +139,16 @@ pub(super) async fn send_outcome(
     shared: &Shared,
     fence: ClaimFence,
     write: Write<'_>,
+    deadline: Instant,
 ) -> Result<Written, Unacknowledged> {
     // An sqlx statement future is about 16 KiB; box it once so the supervisor stays small.
     let result = backstop(Box::pin(async {
         let mut connection = infra_postgres::acquire(&shared.pool, "record job outcome")
             .await
             .map_err(OperationError::Acquire)?;
+        if expired(shared, deadline) {
+            return Err(OperationError::TimedOut);
+        }
         execute(&mut connection, fence, write)
             .await
             .map_err(OperationError::from)

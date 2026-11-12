@@ -961,6 +961,7 @@
       "migrations/20261001120000_add_background_job_errors.sql",
       "migrations/20261002150001_add_background_job_recovery_history.sql",
       "migrations/20261002150002_index_failed_background_jobs.sql",
+      "migrations/20261112120000_preserve_background_job_payload_text.sql",
       "test/src/jobs.rs",
       "test/src/bin/",
       "test/tests/jobs/"
