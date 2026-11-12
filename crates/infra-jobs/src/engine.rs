@@ -306,7 +306,13 @@ impl Started {
             () = self.drained() => {}
             () = tokio::time::sleep_until(deadline) => {}
         }
-        let timed_out = !self.shared.drain.completed_by(deadline);
+        // A deadline and an exit can share a clock tick. Keep the first
+        // observation for every waiter on this cleanup.
+        let timed_out = *self
+            .shared
+            .cleanup
+            .timed_out
+            .get_or_init(|| !self.shared.drain.completed_by(deadline));
         let counters = &self.shared.counters;
         DrainEnd {
             known_results: counters.known_results.load(Ordering::Relaxed),
@@ -721,6 +727,7 @@ impl fmt::Debug for Shared {
 pub(crate) struct ForcedCleanup {
     force: CancellationToken,
     deadline: OnceLock<Instant>,
+    timed_out: OnceLock<bool>,
 }
 
 impl ForcedCleanup {
@@ -856,7 +863,9 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn cleanup_reports_when_the_last_supervisor_exited_even_if_the_waiter_resumes_later() {
         let budget = Duration::from_secs(2);
-        for (exit_after, timed_out) in [(1, false), (3, true)] {
+        for (exit_after, observe_timeout_first, timed_out) in
+            [(1, false, false), (2, true, true), (3, false, true)]
+        {
             let pool = sqlx::postgres::PgPoolOptions::new()
                 .connect_lazy("postgres://localhost/unused")
                 .unwrap();
@@ -880,14 +889,26 @@ mod tests {
             );
             supervisor.retire();
             drop(claim_loop);
+            let deadline = Instant::now() + budget;
             let mut finish = std::pin::pin!(started.cancel_and_finish(budget));
             assert!(futures_util::poll!(finish.as_mut()).is_pending());
             tokio::time::advance(Duration::from_secs(exit_after)).await;
-            drop(supervisor);
-            tokio::time::advance(Duration::from_secs(2)).await;
+            let end = if observe_timeout_first {
+                let end = finish.await;
+                assert_eq!(Instant::now(), deadline);
+                drop(supervisor);
+                end
+            } else {
+                drop(supervisor);
+                tokio::time::advance(Duration::from_secs(2)).await;
+                finish.await
+            };
 
-            assert_eq!(finish.await.timed_out, timed_out);
-            assert_eq!(started.cancel_and_finish(budget).await.timed_out, timed_out);
+            assert_eq!(end.timed_out, timed_out);
+            assert_eq!(
+                started.cancel_and_finish(Duration::ZERO).await.timed_out,
+                timed_out
+            );
         }
     }
 
