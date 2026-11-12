@@ -14,7 +14,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
-use crate::engine::{Operation, RECORD_RETRY_INTERVAL, Shared, observe_recovery};
+use crate::engine::{ForcedCleanup, Operation, RECORD_RETRY_INTERVAL, Shared, observe_recovery};
 use crate::kind::{Attempt, HandlerFuture, JobError, JobId, Registered};
 use crate::state::FailureReason;
 
@@ -422,11 +422,24 @@ fn prepare_handler(
 }
 
 /// `future`'s output, or `None` once `until` passes or cleanup ends.
-async fn within<T>(shared: &Shared, until: Instant, future: impl Future<Output = T>) -> Option<T> {
+async fn within<T>(
+    cleanup: &ForcedCleanup,
+    until: Instant,
+    future: impl Future<Output = T>,
+) -> Option<T> {
+    let mut future = std::pin::pin!(future);
+    let bounded = std::future::poll_fn(|cx| {
+        // A resumed poll can send SQL, even when it initially only waited for I/O.
+        if Instant::now() >= until || cleanup.has_ended() {
+            std::task::Poll::Ready(None)
+        } else {
+            future.as_mut().poll(cx).map(Some)
+        }
+    });
     tokio::select! {
         biased;
-        value = future => Some(value),
-        () = shared.cleanup.ended() => None,
+        value = bounded => value,
+        () = cleanup.ended() => None,
         () = tokio::time::sleep_until(until) => None,
     }
 }
@@ -489,7 +502,7 @@ async fn drive(
         };
         cancel.cancel();
         let grace = clamped_deadline(Instant::now(), COOPERATIVE_GRACE, supervisor_deadline);
-        if let Some(result) = within(shared, grace, &mut run).await {
+        if let Some(result) = within(&shared.cleanup, grace, &mut run).await {
             return Some(ended_after_cancel(&result, reason));
         }
         reason
@@ -539,7 +552,7 @@ async fn persist(
         if expired(shared, supervisor_deadline) {
             break;
         }
-        let sent = within(shared, supervisor_deadline, async {
+        let sent = within(&shared.cleanup, supervisor_deadline, async {
             match write {
                 None => complete_batched(shared, fence, supervisor_deadline, slots).await,
                 Some(write) => send_outcome(shared, fence, write, supervisor_deadline).await,
@@ -555,9 +568,13 @@ async fn persist(
             Some(Err(Unacknowledged)) => {}
         }
         let until = clamped_deadline(Instant::now(), RECORD_RETRY_INTERVAL, supervisor_deadline);
-        if within(shared, supervisor_deadline, tokio::time::sleep_until(until))
-            .await
-            .is_none()
+        if within(
+            &shared.cleanup,
+            supervisor_deadline,
+            tokio::time::sleep_until(until),
+        )
+        .await
+        .is_none()
         {
             break;
         }
@@ -688,6 +705,22 @@ mod tests {
             limit,
             "an overflowing sum takes the limit"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_expired_wait_does_not_resume_work_that_is_ready_again() {
+        let cleanup = ForcedCleanup::default();
+        let delay = Duration::from_secs(1);
+        let deadline = Instant::now() + delay;
+        let ran = std::cell::Cell::new(false);
+        let mut work = std::pin::pin!(within(&cleanup, deadline, async {
+            tokio::time::sleep_until(deadline).await;
+            ran.set(true);
+        }));
+        assert!(futures_util::poll!(work.as_mut()).is_pending());
+        tokio::time::advance(delay).await;
+        assert_eq!(work.await, None);
+        assert!(!ran.get());
     }
 
     /// Collects the fields of every span, from creation and later records.
