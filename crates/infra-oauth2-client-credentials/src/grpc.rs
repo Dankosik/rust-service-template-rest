@@ -88,7 +88,7 @@ impl Service<Request<Body>> for AuthenticatedClient {
         let credentials = self.credentials.clone();
         Box::pin(async move {
             let token = match credentials
-                .authorize(prepared.headers_mut(), on_behalf_of, &context)
+                .authorize(prepared.headers_mut(), on_behalf_of, &context, None)
                 .await
             {
                 Ok(acquired) => Arc::downgrade(&acquired),

@@ -312,6 +312,115 @@ async fn invalid_service_and_exchanged_lifetimes_refuse_before_resource_dispatch
     fixture.finish().await;
 }
 
+struct CancelOnProviderRejection(OperationContext);
+
+impl metrics::Recorder for CancelOnProviderRejection {
+    fn describe_counter(
+        &self,
+        _: metrics::KeyName,
+        _: Option<metrics::Unit>,
+        _: metrics::SharedString,
+    ) {
+    }
+
+    fn describe_gauge(
+        &self,
+        _: metrics::KeyName,
+        _: Option<metrics::Unit>,
+        _: metrics::SharedString,
+    ) {
+    }
+
+    fn describe_histogram(
+        &self,
+        _: metrics::KeyName,
+        _: Option<metrics::Unit>,
+        _: metrics::SharedString,
+    ) {
+    }
+
+    fn register_counter(&self, key: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Counter {
+        if key.name() == "oauth2_token_acquisitions_total"
+            && key
+                .labels()
+                .any(|label| label.key() == "outcome" && label.value() == "invalid_client")
+        {
+            self.0.cancel();
+        }
+        metrics::Counter::noop()
+    }
+
+    fn register_gauge(&self, _: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {
+        metrics::Gauge::noop()
+    }
+
+    fn register_histogram(
+        &self,
+        _: &metrics::Key,
+        _: &metrics::Metadata<'_>,
+    ) -> metrics::Histogram {
+        metrics::Histogram::noop()
+    }
+}
+
+#[tokio::test]
+async fn cancellation_at_provider_completion_leaves_a_live_caller_its_own_attempt() {
+    for on_behalf_of in [false, true] {
+        for extension in [false, true] {
+            let fixture = Fixture::new().await;
+            let client = fixture
+                .credentials(&[], None)
+                .http(fixture.resource_client());
+            let request = || {
+                if on_behalf_of {
+                    fixture.on_behalf_of_request("subject")
+                } else {
+                    fixture.request()
+                }
+            };
+            let caller = OperationContext::with_timeout(Duration::from_secs(10));
+            let mut first = request();
+            let operation = OperationContext::with_timeout(Duration::from_secs(10));
+            let context = if extension {
+                first.extensions_mut().insert(caller.clone());
+                &operation
+            } else {
+                &caller
+            };
+            let recorder = CancelOnProviderRejection(caller.clone());
+            // The real provider response is already decoded when its terminal
+            // counter registers, so cancellation arrives during acquisition polling.
+            let _recorder = metrics::set_default_local_recorder(&recorder);
+            fixture.token_json(
+                "400 Bad Request",
+                &serde_json::json!({"error": "invalid_client"}),
+            );
+            let gate = fixture.block_tokens();
+            let mut first = Box::pin(client.execute_with_context(first, context));
+            tokio::select! {
+                () = fixture.token_received() => {}
+                result = &mut first => panic!("provider response must be gated: {result:?}"),
+            }
+            let mut survivor =
+                Box::pin(client.execute(request(), deadline(Duration::from_secs(10))));
+            poll_pending(survivor.as_mut()).await;
+            gate.add_permits(1);
+            assert_matches!(
+                first.await,
+                Err(Error::Acquisition(AcquisitionError::Cancelled))
+            );
+            assert!(fixture.resource_requests().is_empty());
+
+            fixture.token_json("200 OK", &exchange_response("replacement"));
+            gate.add_permits(1);
+            assert_eq!(survivor.await.unwrap().status(), StatusCode::OK);
+            assert_eq!(fixture.token_requests().len(), 2);
+            assert_eq!(fixture.resource_requests().len(), 1);
+            fixture.finish().await;
+        }
+    }
+}
+
 /// The `oauth2_token_acquisitions_total` series a scrape holds, as
 /// `(grant, outcome, count)`.
 fn acquisition_counts(scrape: &str) -> Vec<(String, String, u64)> {
