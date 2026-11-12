@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, hash_map::Entry},
     future::Future,
     sync::{Arc, Mutex, MutexGuard, PoisonError},
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use http::{HeaderMap, Request, header::AUTHORIZATION};
@@ -245,7 +245,7 @@ impl Credentials {
     /// Dropping or completing that driver closes any surviving clients.
     ///
     /// # Errors
-    /// Returns a sanitized option or transport-construction failure.
+    /// Returns a sanitized option, clock, or transport-construction failure.
     pub fn prepare(options: Options) -> Result<(Self, RefreshDriver), ConfigurationError> {
         let admitted = admit_options(&options)?;
         let token_http =
@@ -261,7 +261,7 @@ impl Credentials {
         admitted: Admitted,
         token_http: Client,
     ) -> Result<(Self, RefreshDriver), ConfigurationError> {
-        let signer = Signer::try_new(&options)?;
+        let signer = Signer::try_new(&options, SystemTime::now())?;
         let endpoint = TokenEndpoint::new(
             admitted.endpoint,
             token_http,

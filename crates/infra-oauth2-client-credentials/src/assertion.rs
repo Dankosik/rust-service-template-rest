@@ -1,4 +1,4 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use secrecy::ExposeSecret as _;
 use uuid::Uuid;
@@ -25,7 +25,7 @@ pub(crate) struct Signer {
 }
 
 impl Signer {
-    pub(crate) fn try_new(options: &Options) -> Result<Self, ConfigurationError> {
+    pub(crate) fn try_new(options: &Options, now: SystemTime) -> Result<Self, ConfigurationError> {
         let invalid_key = ConfigurationError {
             key: "private_key",
             reason: "must be a PEM key matching its configured algorithm",
@@ -45,7 +45,13 @@ impl Signer {
             client_id: options.client_id.clone(),
             assertion_audience: options.assertion_audience.clone(),
         };
-        signer.sign().map_err(|_| invalid_key)?;
+        let elapsed = now
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| ConfigurationError {
+                key: "system_clock",
+                reason: "must be at or after the Unix epoch",
+            })?;
+        signer.sign_at(elapsed).map_err(|_| invalid_key)?;
         Ok(signer)
     }
 
@@ -60,11 +66,15 @@ impl Signer {
     /// Signs one fresh assertion. Never cached: RFC 7523bis requires a
     /// single-use `jti` and every shortlisted server enforces it.
     pub(crate) fn sign(&self) -> Result<String, AcquisitionError> {
-        let issued = SystemTime::now()
+        let elapsed = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map_err(|_| AcquisitionError::Assertion)?
-            .as_secs()
-            .saturating_sub(ASSERTION_BACKDATE_SECS);
+            .map_err(|_| AcquisitionError::Assertion)?;
+        self.sign_at(elapsed)
+            .map_err(|_| AcquisitionError::Assertion)
+    }
+
+    fn sign_at(&self, elapsed: Duration) -> jsonwebtoken::errors::Result<String> {
+        let issued = elapsed.as_secs().saturating_sub(ASSERTION_BACKDATE_SECS);
         let claims = AssertionClaims {
             iss: &self.client_id,
             sub: &self.client_id,
@@ -75,7 +85,6 @@ impl Signer {
             jti: Uuid::new_v4().to_string(),
         };
         jsonwebtoken::encode(&self.header, &claims, &self.key)
-            .map_err(|_| AcquisitionError::Assertion)
     }
 }
 

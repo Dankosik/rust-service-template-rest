@@ -45,23 +45,48 @@ async fn a_client_requiring_a_subject_refuses_a_request_without_one_before_any_i
 }
 
 #[tokio::test]
-async fn token_wait_spends_the_original_resource_deadline_before_dispatch() {
+async fn an_elapsed_deadline_wins_over_request_cancellation_during_token_wait() {
     let fixture = Fixture::new().await;
     let gate = fixture.block_tokens();
     let client = fixture
         .credentials(&[], None)
         .http(fixture.resource_client());
-    let mut exchange =
-        Box::pin(client.execute(fixture.request(), deadline(Duration::from_secs(1))));
+    let operation = OperationContext::with_timeout(Duration::from_secs(1));
+    let request_context = OperationContext::unbounded();
+    let mut request = fixture.request();
+    request.extensions_mut().insert(request_context.clone());
+    let mut exchange = Box::pin(client.execute_with_context(request, &operation));
     tokio::select! { () = fixture.token_received() => {}, result = &mut exchange => panic!("response must be gated: {result:?}"), }
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(1)).await;
+    request_context.cancel();
     assert_matches!(
         exchange.await,
         Err(Error::Acquisition(AcquisitionError::Timeout))
     );
     tokio::time::resume();
     drop(gate);
+    assert!(fixture.resource_requests().is_empty());
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn an_elapsed_deadline_wins_over_request_cancellation_before_token_work() {
+    let fixture = Fixture::new().await;
+    let client = fixture
+        .credentials(&[], None)
+        .http(fixture.resource_client());
+    let operation = OperationContext::with_timeout(Duration::ZERO);
+    let request_context = OperationContext::unbounded();
+    request_context.cancel();
+    let mut request = fixture.request();
+    request.extensions_mut().insert(request_context);
+
+    assert_matches!(
+        client.execute_with_context(request, &operation).await,
+        Err(Error::Acquisition(AcquisitionError::Timeout))
+    );
+    assert!(fixture.token_requests().is_empty());
     assert!(fixture.resource_requests().is_empty());
     fixture.finish().await;
 }

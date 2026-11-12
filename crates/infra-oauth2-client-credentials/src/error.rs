@@ -1,6 +1,6 @@
 use std::{borrow::Cow, fmt};
 
-/// Safe admission failure identifying only the option and its static cause.
+/// Safe admission failure identifying only the failed input and its static cause.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("OAuth2 {key}: {reason}")]
 pub struct ConfigurationError {
