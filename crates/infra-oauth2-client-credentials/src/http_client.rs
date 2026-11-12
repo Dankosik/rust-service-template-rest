@@ -86,28 +86,6 @@ impl AuthenticatedClient {
     ) -> Result<Response<Bytes>, Error> {
         let context = self.resource.begin_operation(context);
         let request_context = request.extensions().get::<OperationContext>().cloned();
-        let check_request = || {
-            request_context
-                .as_ref()
-                .map_or(Ok(()), OperationContext::check)
-                .map_err(acquisition_stopped)
-        };
-        let request_stopped = async {
-            match &request_context {
-                Some(request_context) => request_context.wait_stopped().await,
-                None => std::future::pending().await,
-            }
-        };
-        self.credentials
-            .check_lifecycle(acquisition_deadline(&context, request_context.as_ref()))?;
-        let on_behalf_of =
-            admit_request_subject(&mut request, self.subject_required).map_err(|refusal| {
-                match refusal {
-                    AdmissionRefusal::AuthorizationConflict => Error::AuthorizationConflict,
-                    AdmissionRefusal::SubjectRequired => Error::SubjectRequired,
-                }
-            })?;
-        check_request()?;
         let acquisition_context = request_context
             .as_ref()
             .and_then(OperationContext::deadline)
@@ -118,14 +96,43 @@ impl AuthenticatedClient {
                 OperationContext::new(Some(deadline), context.cancellation().clone())
             });
         let acquisition_context = acquisition_context.as_ref().unwrap_or(&context);
+        let check_stop = || {
+            let request_stop = request_context
+                .as_ref()
+                .map_or(Ok(()), OperationContext::check);
+            // Observe the deadline after sampling the request stop so a cutoff
+            // reached by then takes precedence.
+            acquisition_context
+                .check()
+                .and(request_stop)
+                .map_err(acquisition_stopped)
+        };
+        let request_stopped = async {
+            match &request_context {
+                Some(request_context) => request_context.wait_stopped().await,
+                None => std::future::pending().await,
+            }
+        };
+        self.credentials.check_lifecycle(acquisition_deadline(
+            acquisition_context,
+            request_context.as_ref(),
+        ))?;
+        let on_behalf_of =
+            admit_request_subject(&mut request, self.subject_required).map_err(|refusal| {
+                match refusal {
+                    AdmissionRefusal::AuthorizationConflict => Error::AuthorizationConflict,
+                    AdmissionRefusal::SubjectRequired => Error::SubjectRequired,
+                }
+            })?;
+        check_stop()?;
         let acquired = tokio::select! {
             biased;
-            stopped = request_stopped => return Err(acquisition_stopped(stopped).into()),
+            stopped = request_stopped => Err(acquisition_stopped(stopped)),
             result = self.credentials.authorize(
                 request.headers_mut(), on_behalf_of, acquisition_context, request_context.as_ref(),
             ) => result,
         };
-        check_request()?;
+        check_stop()?;
         let acquired = acquired?;
         self.resource
             .execute_with_dispatch_check(
