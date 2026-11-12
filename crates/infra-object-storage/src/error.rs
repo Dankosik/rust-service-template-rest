@@ -92,8 +92,8 @@ pub enum ConfigError {
 pub(crate) enum Call {
     /// Get, head, presign, or the bucket probe.
     Read,
-    /// Put or delete.
-    Mutation,
+    /// A replacing put or a delete.
+    UnconditionalMutation,
     /// A put with `If-None-Match: *`, sent once.
     CreateOnly,
 }
@@ -104,7 +104,7 @@ impl Call {
     fn ambiguous(self) -> ObjectStorageError {
         match self {
             Self::Read => ObjectStorageError::Unavailable,
-            Self::Mutation | Self::CreateOnly => ObjectStorageError::OutcomeUnknown,
+            Self::UnconditionalMutation | Self::CreateOnly => ObjectStorageError::OutcomeUnknown,
         }
     }
 }
@@ -302,15 +302,23 @@ mod tests {
         let status = |status, code| FailureKind::Status { status, code };
         let cases = [
             (Call::Read, FailureKind::Lost, E::Unavailable),
-            (Call::Mutation, FailureKind::Lost, E::OutcomeUnknown),
+            (
+                Call::UnconditionalMutation,
+                FailureKind::Lost,
+                E::OutcomeUnknown,
+            ),
             (Call::CreateOnly, FailureKind::Lost, E::OutcomeUnknown),
-            (Call::Mutation, FailureKind::NotSent, E::Rejected),
+            (
+                Call::UnconditionalMutation,
+                FailureKind::NotSent,
+                E::Rejected,
+            ),
             (Call::Read, status(404, Some("NoSuchKey")), E::NotFound),
             (Call::Read, status(404, Some("NotFound")), E::NotFound),
             (Call::Read, status(404, None), E::NotFound),
             (Call::Read, status(404, Some("NoSuchBucket")), E::Rejected),
             (
-                Call::Mutation,
+                Call::UnconditionalMutation,
                 status(404, Some("NoSuchBucket")),
                 E::Rejected,
             ),
@@ -320,7 +328,7 @@ mod tests {
                 E::AlreadyExists,
             ),
             (
-                Call::Mutation,
+                Call::UnconditionalMutation,
                 status(412, Some("PreconditionFailed")),
                 E::Rejected,
             ),
@@ -330,17 +338,17 @@ mod tests {
                 E::Unavailable,
             ),
             (
-                Call::Mutation,
+                Call::UnconditionalMutation,
                 status(429, Some("TooManyRequests")),
                 E::Unavailable,
             ),
             (
-                Call::Mutation,
+                Call::UnconditionalMutation,
                 status(503, Some("SlowDown")),
                 E::Unavailable,
             ),
             (
-                Call::Mutation,
+                Call::UnconditionalMutation,
                 status(500, Some("InternalError")),
                 E::OutcomeUnknown,
             ),
@@ -351,31 +359,35 @@ mod tests {
                 E::Unavailable,
             ),
             (Call::Read, status(403, Some("AccessDenied")), E::Rejected),
-            (Call::Mutation, status(400, Some("BadDigest")), E::Rejected),
             (
-                Call::Mutation,
+                Call::UnconditionalMutation,
+                status(400, Some("BadDigest")),
+                E::Rejected,
+            ),
+            (
+                Call::UnconditionalMutation,
                 status(403, Some("SignatureDoesNotMatch")),
                 E::Rejected,
             ),
             (
-                Call::Mutation,
+                Call::UnconditionalMutation,
                 status(400, Some("RequestTimeout")),
                 E::Unavailable,
             ),
             (
-                Call::Mutation,
+                Call::UnconditionalMutation,
                 status(501, Some("NotImplemented")),
                 E::Rejected,
             ),
             (Call::Read, status(501, Some("NotImplemented")), E::Rejected),
             // A 2xx reply with an error body is classified by its code.
             (
-                Call::Mutation,
+                Call::UnconditionalMutation,
                 status(200, Some("InternalError")),
                 E::OutcomeUnknown,
             ),
             (
-                Call::Mutation,
+                Call::UnconditionalMutation,
                 status(200, Some("SlowDown")),
                 E::Unavailable,
             ),
@@ -389,9 +401,13 @@ mod tests {
                 status(200, Some("ConditionalRequestConflict")),
                 E::Unavailable,
             ),
-            (Call::Mutation, status(200, None), E::OutcomeUnknown),
             (
-                Call::Mutation,
+                Call::UnconditionalMutation,
+                status(200, None),
+                E::OutcomeUnknown,
+            ),
+            (
+                Call::UnconditionalMutation,
                 status(200, Some("NoSuchBucket")),
                 E::Rejected,
             ),

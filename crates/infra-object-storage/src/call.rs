@@ -36,7 +36,7 @@ pub(crate) fn call_policy(
 ) -> (TimeoutConfig, RetryConfig) {
     let attempt = match call {
         Call::Read => remaining.min(ceiling / READ_ATTEMPT_SHARE),
-        Call::Mutation | Call::CreateOnly => remaining,
+        Call::UnconditionalMutation | Call::CreateOnly => remaining,
     };
     let timeout = TimeoutConfig::builder()
         .operation_timeout(remaining)
@@ -47,7 +47,9 @@ pub(crate) fn call_policy(
         Call::Read => RetryConfig::standard()
             .with_max_attempts(MAX_ATTEMPTS)
             .with_max_backoff(MAX_BACKOFF),
-        Call::Mutation | Call::CreateOnly => RetryConfig::standard().with_max_attempts(1),
+        Call::UnconditionalMutation | Call::CreateOnly => {
+            RetryConfig::standard().with_max_attempts(1)
+        }
     };
     (timeout, retry)
 }

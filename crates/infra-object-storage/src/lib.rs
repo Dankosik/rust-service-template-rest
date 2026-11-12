@@ -335,7 +335,7 @@ impl ObjectStorage {
         let call = if options.create_only {
             Call::CreateOnly
         } else {
-            Call::Mutation
+            Call::UnconditionalMutation
         };
         // Under the client's `WhenRequired` the SDK sends the named
         // algorithm but computes no checksum value. An upload that carries
@@ -532,7 +532,7 @@ impl ObjectStorage {
         key: &ObjectKey,
         parent: &OperationContext,
     ) -> Result<(), ObjectStorageError> {
-        let call = Call::Mutation;
+        let call = Call::UnconditionalMutation;
         let (context, mut guard) = self.begin(parent, Operation::Delete)?;
         let _permit = self.admit(&mut guard)?;
         let request = self
