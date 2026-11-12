@@ -179,7 +179,9 @@ impl TokenEndpoint {
         if provider_unavailable
             && matches!(
                 &response,
-                Ok(_) | Err(infra_outbound_http::Error::ResponseBodyTooLarge)
+                Ok(_)
+                    | Err(infra_outbound_http::Error::ResponseBodyTooLarge
+                        | infra_outbound_http::Error::Transport { .. })
             )
         {
             return Err(AcquisitionError::Unavailable);
