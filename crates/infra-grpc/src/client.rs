@@ -404,7 +404,7 @@ fn client_tls(material: &ClientTlsMaterial) -> Result<ClientTlsConfig, Error> {
 )]
 fn transport_status(error: tonic::transport::Error) -> tonic::Status {
     let error = &error as &(dyn std::error::Error + 'static);
-    if std::iter::successors(Some(error), |error| error.source())
+    if shared_rules::error_chain::causes(error)
         .any(<dyn std::error::Error>::is::<tonic::TimeoutExpired>)
     {
         return Side::Client.deadline();

@@ -164,9 +164,7 @@ impl Attempt {
         // source, so the client span is where it is told.
         if let Err(Error::Transport { source }) = result {
             // Hyper and hyper-util name only the failed step in their own
-            // text and keep the reason in `source()`. The walk follows
-            // `source()` rather than `next_cause`: an I/O error's own text
-            // already prints its payload.
+            // text and keep the reason in `source()`.
             self.span.in_scope(|| {
                 tracing::warn!(
                     error = %Causes(&**source),
@@ -323,7 +321,7 @@ fn status_label(status: StatusCode) -> SharedString {
 /// response head hyper refused to parse, and `transport` for the rest, such
 /// as a connection lost during the exchange.
 fn transport_error_type(source: &(dyn StdError + 'static)) -> &'static str {
-    let causes = || std::iter::successors(Some(source), |cause| next_cause(*cause));
+    let causes = || shared_rules::error_chain::causes(source);
     if causes().any(<dyn StdError>::is::<rustls::Error>) {
         "tls"
     } else if causes().any(|cause| {
@@ -340,19 +338,6 @@ fn transport_error_type(source: &(dyn StdError + 'static)) -> &'static str {
         "protocol"
     } else {
         "transport"
-    }
-}
-
-/// The cause one level down. An I/O error holds its custom error as a payload
-/// that `source()` skips, and the TLS connector hands over a rustls error
-/// that way.
-fn next_cause<'a>(error: &'a (dyn StdError + 'static)) -> Option<&'a (dyn StdError + 'static)> {
-    match error
-        .downcast_ref::<std::io::Error>()
-        .and_then(std::io::Error::get_ref)
-    {
-        Some(payload) => Some(payload),
-        None => error.source(),
     }
 }
 

@@ -19,6 +19,8 @@ there, what was rejected, and when to revisit.
 | Endpoint URL text with any Unicode whitespace or control is refused before parsing (`uri::has_whitespace_or_control`), for the OAuth token URL in `config` and `infra-oauth2-client-credentials`, the gRPC destination in `config`, and the provider URLs of `infra-bearerauthn`, which also takes `uri::authority_has_userinfo` instead of its hand-written copy | Four copies had drifted: `config` and `infra-oauth2-client-credentials` refused every Unicode whitespace and control, `infra-bearerauthn` only ASCII ones. The WHATWG parser silently drops tabs, line breaks and edge controls, and percent-encodes the rest into a path the operator never wrote, so the stricter form is the one that keeps "the URL admitted is the URL written". | An issuer, JWKS, discovery or introspection URL holding U+00A0, U+0085, U+2028 or another non-ASCII whitespace or control is now refused at startup instead of being percent-encoded. Reopen if a supported provider publishes such a URL. |
 | `rfc9110::media_type_is` owns the `Content-Type` match (type before `;`, optional whitespace trimmed, ASCII case ignored) for the OAuth token response and the authentication provider documents | `infra-oauth2-client-credentials` and `infra-bearerauthn` spelled it with `split_once` and `split(';').next()`; a header that `to_str` admits holds no whitespace but space and tab, so trimming those is the same as their `trim()`. Each caller keeps its policy for a missing or unreadable header. | None beyond the move. |
 | `rfc7515::typ_subtype` reads a JWT `typ` as its `application/` subtype (RFC 7515 §4.1.9), for the access-token and generic-JWT checks of `infra-bearerauthn` and the configured service token type of `infra-serviceauth` | `infra-bearerauthn` listed both spellings of each type; `infra-serviceauth` stripped the prefix. No input was found on which they disagreed. | None beyond the move. |
+| `error_chain::causes` yields an error and each cause, stepping into the payload a `std::io::Error` hides from `source()`, for every "is some cause a `T`" test: the length-limit, `serde_path_to_error` and timeout checks in `infra-http` and `infra-grpc`, the checksum and credential checks in `infra-object-storage`, the pool-timeout check in `infra-jobs`, and the transport class in `infra-outbound-http` | Seven walks in five crates spelled `successors(.., source)` or a `while let` loop. Only `infra-outbound-http` knew that `io::Error::source` returns the payload's source and skips the payload, which is how its TLS connector hands over a `rustls::Error`; the others would miss a typed cause wrapped that way. `Causes` keeps the plain `source()` walk, because an I/O error already prints its payload's text. `infra-jobs`'s summary writer stays its own: it skips text already printed and stops at a byte bound. | A cause wrapped in an I/O error is now found by every check; none of the current callers was seen to receive one. Reopen when `std::error::Error::sources()` stabilizes with the same payload rule. |
+| `uri::has_whitespace_or_control` and `uri::authority_has_userinfo` also guard the NATS URLs in `config`, the object-storage endpoint in `infra-object-storage`, and the webhook destination in `infra-webhooks` | Those three admissions read only the parsed `Url`, which admits `https://@host` (empty userinfo) and drops a tab or line break inside the host, so the URL used was not the URL written. `infra-outbound-http` checks an already parsed `Url` or `http::Uri` and has no raw text, so it keeps its own check; the PostgreSQL DSN carries credentials by design and keeps its own admission. | A NATS URL, object-storage endpoint or webhook destination with whitespace, a control character or an empty userinfo is now refused at startup. Reopen as for the endpoint row above. |
 
 ## Left with their owners
 
@@ -55,4 +57,16 @@ These look alike across crates but fail the membership test:
   `rustls`, which this crate must not carry;
 - the configuration-to-adapter mappings in `service` and `jobs-worker`
   (sampler, log format, session budgets): neither `config` nor
-  `infra-telemetry` may depend on the other.
+  `infra-telemetry` may depend on the other;
+- the Prometheus default histogram boundaries in `infra-telemetry`,
+  `infra-grpc` and `infra-bearerauthn`: each crate chose them for its own
+  metric, and no standard makes the copies change together;
+- the HTTP status-to-error rules of `infra-http` and `infra-outbound-http`:
+  OpenTelemetry splits them by span kind (4xx is an error only on a client),
+  so a shared function would take a side flag;
+- the lowercase hex writers in `infra-telemetry`, `infra-messaging` and
+  `infra-http` idempotency: three shapes (buffer, `String`, `Display`) of a
+  two-line formula that has not drifted;
+- the messaging payload bounds that `config` repeats from `infra-messaging`
+  (8 KiB header allowance, 64 MiB window): the service's own numbers with two
+  owners, each comment naming its twin.

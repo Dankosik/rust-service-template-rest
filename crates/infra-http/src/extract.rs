@@ -228,7 +228,7 @@ fn failed_member<'a, E>(
 where
     E: StdError + 'static,
 {
-    std::iter::successors(Some(rejection), |&error| error.source())
+    shared_rules::error_chain::causes(rejection)
         .find_map(|error| error.downcast_ref::<serde_path_to_error::Error<E>>())
         .map(serde_path_to_error::Error::path)
 }

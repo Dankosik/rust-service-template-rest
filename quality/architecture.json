@@ -34,11 +34,14 @@
           "crates/infra-cache/Cargo.toml",
           "crates/infra-grpc/Cargo.toml",
           "crates/infra-http/Cargo.toml",
+          "crates/infra-jobs/Cargo.toml",
           "crates/infra-messaging/Cargo.toml",
           "crates/infra-oauth2-client-credentials/Cargo.toml",
+          "crates/infra-object-storage/Cargo.toml",
           "crates/infra-outbound-http/Cargo.toml",
           "crates/infra-postgres/Cargo.toml",
-          "crates/infra-serviceauth/Cargo.toml"
+          "crates/infra-serviceauth/Cargo.toml",
+          "crates/infra-webhooks/Cargo.toml"
         ]
       }
     },

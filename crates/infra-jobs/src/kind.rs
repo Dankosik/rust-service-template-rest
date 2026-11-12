@@ -343,17 +343,12 @@ where
 /// for a connection that did not come is the pool's capacity, not a fault of
 /// the job.
 fn pool_timed_out(error: &(dyn std::error::Error + 'static)) -> bool {
-    let mut current = Some(error);
-    while let Some(error) = current {
-        if matches!(
+    shared_rules::error_chain::causes(error).any(|error| {
+        matches!(
             error.downcast_ref::<sqlx::Error>(),
             Some(sqlx::Error::PoolTimedOut)
-        ) {
-            return true;
-        }
-        current = error.source();
-    }
-    false
+        )
+    })
 }
 
 /// `error`'s text, then each source whose text the summary does not already

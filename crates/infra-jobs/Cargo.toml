@@ -24,6 +24,7 @@ metrics = { workspace = true }
 opentelemetry = { workspace = true, features = ["trace"] }
 serde = { workspace = true, features = ["std"] }
 serde_json = { workspace = true, features = ["std"] }
+shared-rules = { workspace = true }
 sqlx = { workspace = true, features = ["macros", "postgres", "runtime-tokio", "tls-rustls-aws-lc-rs", "uuid"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }

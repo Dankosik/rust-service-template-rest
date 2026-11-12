@@ -192,7 +192,11 @@ where
         // The SDK reports a failed credential load as a dispatch failure,
         // although it happens before the request is signed.
         SdkError::DispatchFailure(_)
-            if caused_by::<aws_credential_types::provider::error::CredentialsError>(error) =>
+            if shared_rules::error_chain::causes(error).any(
+                <dyn std::error::Error>::is::<
+                    aws_credential_types::provider::error::CredentialsError,
+                >,
+            ) =>
         {
             (FailureKind::NoCredentials, "credentials".into())
         }
@@ -261,13 +265,8 @@ fn status_of_reply(status: u16, code: Option<&str>) -> u16 {
 
 /// Whether a download body error is a checksum mismatch rather than transport.
 pub(crate) fn is_checksum_mismatch(error: &(dyn std::error::Error + 'static)) -> bool {
-    caused_by::<aws_smithy_checksums::body::validate::Error>(error)
-}
-
-/// Whether `error` or one of its sources is a `T`.
-fn caused_by<T: std::error::Error + 'static>(error: &(dyn std::error::Error + 'static)) -> bool {
-    std::iter::successors(Some(error), |error| error.source())
-        .any(|error| error.downcast_ref::<T>().is_some())
+    shared_rules::error_chain::causes(error)
+        .any(<dyn std::error::Error>::is::<aws_smithy_checksums::body::validate::Error>)
 }
 
 #[cfg(test)]
