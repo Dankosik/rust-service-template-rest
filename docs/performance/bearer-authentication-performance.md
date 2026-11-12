@@ -71,6 +71,33 @@ Rejected or not retained:
   the cache keys; each retained value still holds the token as a
   `SecretString` for token exchange.
 
+## Cutoff branch polled second
+
+A November 12, 2026 review found that `Verifier::verify_with_context` polled
+the caller's stop signal before verification in a `biased` `select!`. With a
+deadline, as every HTTP request carries, that first poll registers a Tokio
+timer under the runtime-wide time-driver mutex and a waiter on the
+cancellation token; a JWT with a known key, or a cached introspection hit, is
+ready on its first poll, so both registrations are removed again unused.
+Verification is now polled first. A stop is still reported: the check before
+the engine keeps a stopped caller from reaching it, and the check after the
+`select!` turns a late result into `Unavailable` before any metric is
+recorded. The same order now applies to service-token acquisition in
+`infra-oauth2-client-credentials` and to link acquisition in `infra-cache`,
+each checking the stop before returning an acquisition error.
+
+A scratch benchmark of just the `select!` with a one-hour deadline and a
+ready branch, release build on a loaded Apple M5 laptop (load average
+about 32, so absolute numbers are noisy), five runs each:
+
+| Case | Old order | New order |
+| --- | --- | --- |
+| 1 thread, per call | median 1084 ns (best 343 ns) | median 9 ns |
+| 4 threads, per call | median 3240 ns | median 9 ns |
+
+For scale, cached introspection measured about 636 ns per operation above.
+The end-to-end `authenticate` harness was not rerun.
+
 ## Allocation reductions
 
 The September 28, 2026 investigation compared `infra-bearerauthn` at

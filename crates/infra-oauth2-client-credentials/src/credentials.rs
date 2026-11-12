@@ -348,12 +348,14 @@ impl Credentials {
                 None => self.service_token(deadline).await.map(Acquired::Service),
             }
         };
+        // Acquisition first: a cached token then never arms the deadline timer.
         let acquired = tokio::select! {
             biased;
+            result = acquisition => result,
             stopped = context.wait_stopped() => return Err(acquisition_stopped(stopped)),
-            result = acquisition => result?,
         };
         context.check().map_err(acquisition_stopped)?;
+        let acquired = acquired?;
         headers.insert(AUTHORIZATION, acquired.token().header.clone());
         Ok(acquired)
     }

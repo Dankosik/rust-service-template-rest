@@ -102,12 +102,14 @@ impl AuthenticatedClient {
                 AdmissionRefusal::SubjectRequired => Error::SubjectRequired,
             })?;
         request_context.check().map_err(acquisition_stopped)?;
+        // Authorization first: a cached token then never arms the deadline timer.
         let acquired = tokio::select! {
             biased;
+            result = self.credentials.authorize(request.headers_mut(), on_behalf_of, &context) => result,
             stopped = request_context.wait_stopped() => return Err(acquisition_stopped(stopped).into()),
-            result = self.credentials.authorize(request.headers_mut(), on_behalf_of, &context) => result?,
         };
         request_context.check().map_err(acquisition_stopped)?;
+        let acquired = acquired?;
         let response = self
             .resource
             .execute_with_context(request, &context)
