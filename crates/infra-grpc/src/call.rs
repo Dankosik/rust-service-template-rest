@@ -97,7 +97,6 @@ impl Side {
         }
     }
 
-    /// The status of a call stopped for `reason`.
     pub(crate) fn stopped(self, reason: Stopped) -> tonic::Status {
         match reason {
             Stopped::Deadline => self.deadline(),
@@ -134,7 +133,7 @@ fn header_catalog_code(headers: &HeaderMap) -> Option<service_failure::Code> {
 struct Outcome {
     code: tonic::Code,
     failure: Option<service_failure::Code>,
-    peer_status: bool,
+    response_derived: bool,
 }
 
 impl Outcome {
@@ -142,14 +141,14 @@ impl Outcome {
         Self {
             code,
             failure: None,
-            peer_status: false,
+            response_derived: false,
         }
     }
 
     fn of_status(side: Side, status: &tonic::Status) -> Self {
         Self {
             code: status.code(),
-            peer_status: false,
+            response_derived: false,
             failure: match side {
                 Side::Server => crate::status::catalog_code(status),
                 Side::Client => None,
@@ -163,7 +162,7 @@ impl Outcome {
     fn from_response<B>(side: Side, response: &http::Response<B>) -> Option<Self> {
         match (side, response.extensions().get::<tonic::Status>()) {
             (Side::Server, Some(status)) => Some(Self {
-                peer_status: true,
+                response_derived: true,
                 ..Self::of_status(side, status)
             }),
             _ => Self::from_status_headers(side, response.headers()),
@@ -175,7 +174,7 @@ impl Outcome {
         let code = header_status_code(headers)?;
         Some(Self {
             code,
-            peer_status: true,
+            response_derived: true,
             failure: match side {
                 Side::Server => header_catalog_code(headers),
                 Side::Client => None,
@@ -184,8 +183,7 @@ impl Outcome {
     }
 }
 
-/// One poll of a response body.
-type Polled<E> = Poll<Option<Result<Frame<Bytes>, E>>>;
+type ResponseFramePoll<E> = Poll<Option<Result<Frame<Bytes>, E>>>;
 
 fn store_waker(slot: &mut Option<Waker>, waker: &Waker) {
     match slot {
@@ -234,7 +232,7 @@ impl<B: Body> Completion<B> {
             call.failed(failure);
         }
         call.finish(self.outcome.code);
-        if self.outcome.peer_status
+        if self.outcome.response_derived
             && let Some(on_status) = self.open.on_status
         {
             on_status(self.outcome.code);
@@ -281,13 +279,16 @@ impl<B: Body> State<B> {
     }
 
     /// Completes with a locally generated status and yields its trailers.
-    fn end_with(&mut self, status: &tonic::Status) -> (Polled<B::Error>, Option<Completion<B>>) {
+    fn end_with(
+        &mut self,
+        status: &tonic::Status,
+    ) -> (ResponseFramePoll<B::Error>, Option<Completion<B>>) {
         let completion = self.complete_with(status);
         (self.take_terminal(), completion)
     }
 
     /// Completes from a frame the body yielded; `None` while the call is open.
-    fn complete_from(&mut self, polled: &Polled<B::Error>) -> Option<Completion<B>> {
+    fn complete_from(&mut self, polled: &ResponseFramePoll<B::Error>) -> Option<Completion<B>> {
         let outcome = match polled {
             Poll::Ready(Some(Ok(frame))) => {
                 let trailers = frame.trailers_ref()?;
@@ -305,7 +306,7 @@ impl<B: Body> State<B> {
         self.close(Phase::Done, outcome)
     }
 
-    fn take_terminal(&mut self) -> Polled<B::Error> {
+    fn take_terminal(&mut self) -> ResponseFramePoll<B::Error> {
         match std::mem::replace(&mut self.phase, Phase::Done) {
             Phase::Trailers(trailers) => Poll::Ready(Some(Ok(Frame::trailers(trailers)))),
             phase => {
@@ -363,7 +364,7 @@ where
         Side::Server => None,
     }
     .map_or(Outcome::bare(tonic::Code::Unknown), |code| Outcome {
-        peer_status: true,
+        response_derived: true,
         ..Outcome::bare(code)
     });
     response.map(|body| {
@@ -497,7 +498,7 @@ where
     type Data = Bytes;
     type Error = B::Error;
 
-    fn poll_frame(self: Pin<&mut Self>, context: &mut Context<'_>) -> Polled<B::Error> {
+    fn poll_frame(self: Pin<&mut Self>, context: &mut Context<'_>) -> ResponseFramePoll<B::Error> {
         let this = self.get_mut();
         this.reap_watcher(context);
         let mut state = lock(&this.state);
