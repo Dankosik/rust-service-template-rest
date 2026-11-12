@@ -15,8 +15,8 @@ use tokio_util::sync::CancellationToken;
 use crate::ServerEndpoint;
 use crate::credentials::PasswordFile;
 use crate::observe::{
-    self, ADMISSION_REFUSED_METRIC, COMMANDS_IN_FLIGHT_METRIC, ErrorType,
-    PASSWORD_REFRESHES_METRIC, RETIREMENTS_METRIC,
+    ADMISSION_REFUSED_METRIC, COMMANDS_IN_FLIGHT_METRIC, PASSWORD_REFRESHES_METRIC,
+    RETIREMENTS_METRIC,
 };
 
 /// Bounds one whole setup attempt: password read, dial, TLS, and `HELLO`. A
@@ -38,6 +38,63 @@ const PING_INTERVAL: Duration = Duration::from_secs(2);
 const PASSWORD_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 /// Shared by every namespace, including commands waiting for a connection.
 const APPLICATION_SLOTS: usize = 256;
+
+/// Bounded cause of an unsuccessful cache exchange. Server text is never copied.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ErrorType {
+    /// The operation context stopped (its deadline, including
+    /// `command_timeout`, or caller cancellation, which a namespace records
+    /// as `cancelled`), a setup or probe bound elapsed, or the client
+    /// reported a timeout.
+    Timeout,
+    /// A transport failure, a closed link, or a connection generation that
+    /// retired under the command.
+    Io,
+    /// The server refused the credentials, including `WRONGPASS` and
+    /// `NOAUTH` replies to `HELLO`.
+    Auth,
+    Response,
+    Parse,
+    /// A local command slot refusal, which
+    /// `cache_command_admission_refused_total` counts apart, an unreadable
+    /// password file, a client that could not be rebuilt, or any other
+    /// redis-rs error kind.
+    Other,
+}
+
+impl ErrorType {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Timeout => "timeout",
+            Self::Io => "io",
+            Self::Auth => "auth",
+            Self::Response => "response",
+            Self::Parse => "parse",
+            Self::Other => "other",
+        }
+    }
+}
+
+/// Bounded cause of a Redis client failure.
+pub(crate) fn error_type(error: &redis::RedisError) -> ErrorType {
+    if error.is_timeout() {
+        return ErrorType::Timeout;
+    }
+    // RESP3 authenticates inside `HELLO`, whose refusal is a plain server error.
+    if matches!(error.code(), Some("WRONGPASS" | "NOAUTH")) {
+        return ErrorType::Auth;
+    }
+    match error.kind() {
+        redis::ErrorKind::Io => ErrorType::Io,
+        redis::ErrorKind::AuthenticationFailed => ErrorType::Auth,
+        // redis-rs names only some server codes; `WRONGTYPE`, `OOM` and the
+        // other unnamed codes are `Extension`, still a server error reply.
+        redis::ErrorKind::Server(_) | redis::ErrorKind::Extension => ErrorType::Response,
+        redis::ErrorKind::Parse => ErrorType::Parse,
+        // InvalidClientConfig and every other kind stay `other`.
+        _ => ErrorType::Other,
+    }
+}
 
 pub(crate) struct Link {
     pub(crate) server: ServerEndpoint,
@@ -129,7 +186,7 @@ impl<'a> Exchange<'a> {
             Ok(_) => true,
             Err(error) => reply_keeps_generation(error),
         };
-        reply.map_err(|error| observe::error_type(&error))
+        reply.map_err(|error| error_type(&error))
     }
 }
 
@@ -138,7 +195,7 @@ impl<'a> Exchange<'a> {
 /// `READONLY` still retires: after a failover the configured endpoint may
 /// resolve to the new primary, and only a new connection reaches it.
 fn reply_keeps_generation(error: &redis::RedisError) -> bool {
-    observe::error_type(error) == ErrorType::Response && error.code() != Some("READONLY")
+    error_type(error) == ErrorType::Response && error.code() != Some("READONLY")
 }
 
 impl Drop for Exchange<'_> {
@@ -383,7 +440,7 @@ async fn query_until<T: redis::FromRedisValue>(
         biased;
         () = generation.retired.cancelled() => Err(ErrorType::Io),
         result = timeout_at(deadline, command.query_async(&mut connection)) => {
-            result.map_err(|_| ErrorType::Timeout)?.map_err(|error| observe::error_type(&error))
+            result.map_err(|_| ErrorType::Timeout)?.map_err(|error| error_type(&error))
         }
     }
 }
@@ -543,7 +600,7 @@ async fn connect(
     client
         .get_multiplexed_async_connection_with_config(&config)
         .await
-        .map_err(|error| observe::error_type(&error))
+        .map_err(|error| error_type(&error))
 }
 
 /// Keeps `generation` checked until it must retire. The caller retires it

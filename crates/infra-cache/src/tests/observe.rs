@@ -11,19 +11,21 @@ fn redis_errors_map_to_bounded_error_types() {
     ];
     for (kind, expected) in cases {
         let error = redis::RedisError::from((kind, "hunter2 must not leak"));
-        assert_eq!(crate::observe::error_type(&error).label(), expected);
+        assert_eq!(crate::connection::error_type(&error).label(), expected);
         assert_ne!(error.to_string(), "");
     }
     let server = redis::RedisError::from((
         redis::ErrorKind::Server(redis::ServerErrorKind::ResponseError),
         "NOAUTH hunter2",
     ));
-    assert_eq!(crate::observe::error_type(&server).label(), "response");
+    assert_eq!(crate::connection::error_type(&server).label(), "response");
 }
 
 #[test]
 fn a_failed_command_names_its_cause_on_the_series() {
-    use crate::observe::{ErrorType, NamespaceHistograms, Operation, OperationGuard};
+    use crate::Operation;
+    use crate::connection::ErrorType;
+    use crate::observe::{NamespaceHistograms, OperationGuard};
 
     let recorder = observation_recorder();
     let server = crate::ServerEndpoint {

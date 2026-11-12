@@ -53,9 +53,9 @@ use redis::{SetExpiry, SetOptions};
 use secrecy::SecretString;
 
 use self::admission::Admitted;
-use self::connection::Link;
+use self::connection::{ErrorType, Link};
 pub use self::observe::{HISTOGRAMS, OPERATION_DURATION_BUCKETS, OPERATION_DURATION_METRIC};
-use self::observe::{NamespaceHistograms, Operation, OperationGuard, Outcome};
+use self::observe::{NamespaceHistograms, OperationGuard, Outcome};
 
 /// Bound of one whole connection setup attempt. A startup check that waits
 /// for the first connection should allow at least this long.
@@ -283,6 +283,33 @@ impl Cache {
     }
 }
 
+/// The closed set of namespace operations.
+#[derive(Clone, Copy)]
+enum Operation {
+    Get,
+    Set,
+    Delete,
+}
+
+impl Operation {
+    fn redis_name(self) -> &'static str {
+        match self {
+            Self::Get => "GET",
+            Self::Set => "SET",
+            Self::Delete => "DEL",
+        }
+    }
+
+    /// A stopped caller discards a read reply as a timeout or cancellation.
+    /// A confirmed mutation is final and keeps its result.
+    fn is_read(self) -> bool {
+        match self {
+            Self::Get => true,
+            Self::Set | Self::Delete => false,
+        }
+    }
+}
+
 /// One feature's keys on a shared connection.
 ///
 /// Each operation/outcome histogram handle binds to the recorder current at
@@ -302,7 +329,7 @@ impl CacheNamespace {
     /// Returns [`Unavailable`] for a timeout, a stop, an unusable server, or a
     /// server error reply.
     pub async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, Unavailable> {
-        self.get_bounded(key, &self.unbounded_command_context())
+        self.get_bounded(key, &self.standalone_command_context())
             .await
     }
 
@@ -350,7 +377,7 @@ impl CacheNamespace {
     /// absolute expiry overflows. A timed-out write may have landed and is
     /// never replayed.
     pub async fn set(&self, key: &str, value: &[u8], ttl: Duration) -> Result<(), SetError> {
-        self.set_bounded(key, value, ttl, &self.unbounded_command_context())
+        self.set_bounded(key, value, ttl, &self.standalone_command_context())
             .await
     }
 
@@ -402,9 +429,10 @@ impl CacheNamespace {
     /// # Errors
     ///
     /// Returns [`Unavailable`] for a timeout, a stop, an unusable server, or a
-    /// server error reply.
+    /// server error reply. A timed-out deletion may have landed and is
+    /// never replayed.
     pub async fn delete(&self, key: &str) -> Result<(), Unavailable> {
-        self.delete_bounded(key, &self.unbounded_command_context())
+        self.delete_bounded(key, &self.standalone_command_context())
             .await
     }
 
@@ -443,7 +471,7 @@ impl CacheNamespace {
 
     /// [`Self::command_context`] of an unbounded parent, without deriving a
     /// child token that nothing could cancel.
-    fn unbounded_command_context(&self) -> OperationContext {
+    fn standalone_command_context(&self) -> OperationContext {
         OperationContext::with_timeout(self.cache.command_timeout)
     }
 
@@ -472,7 +500,7 @@ impl CacheNamespace {
             Ok(_) if operation.is_read() && stopped.is_some() => Err(if cancelled {
                 guard.cancel()
             } else {
-                guard.fail(observe::ErrorType::Timeout)
+                guard.fail(ErrorType::Timeout)
             }),
             // A mutation the server confirmed stays a success after the context
             // stopped; see `Operation::is_read`.
@@ -480,7 +508,7 @@ impl CacheNamespace {
                 guard.succeed(outcome(&value));
                 Ok(value)
             }
-            Err(observe::ErrorType::Timeout) if cancelled => Err(guard.cancel()),
+            Err(ErrorType::Timeout) if cancelled => Err(guard.cancel()),
             Err(error) => Err(guard.fail(error)),
         }
     }
