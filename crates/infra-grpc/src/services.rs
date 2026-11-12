@@ -283,7 +283,7 @@ impl Services {
     /// reflection included, then has a rule. A registration that declares
     /// none and verifies no token is left to bearer authentication or, in
     /// development, to no authentication.
-    pub(crate) fn caller_admission(
+    pub(crate) fn take_caller_admission(
         &mut self,
     ) -> Result<crate::service_auth::CallerAdmission, Error> {
         if self.caller_verifier.is_some() || !self.caller_rules.is_empty() {

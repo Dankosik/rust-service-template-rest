@@ -85,7 +85,7 @@ pub fn router(
     )]
     let service_tokens = false;
     // template:begin service-auth:grpc-router-caller-rules
-    let admission = std::sync::Arc::new(services.caller_admission()?);
+    let admission = std::sync::Arc::new(services.take_caller_admission()?);
     #[allow(
         unused_variables,
         reason = "only the authn region reads it, to skip bearer authentication"
