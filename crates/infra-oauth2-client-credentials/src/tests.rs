@@ -32,7 +32,7 @@ use url::Url;
 use crate::{
     AcquisitionError, Algorithm, Credentials, Error, OnBehalfOf, Options, RefreshDriver, Rejection,
     credentials::{Cached, acquisition_deadline},
-    options::{Admitted, admitted_provider_concurrency},
+    options::Admitted,
     token::EVICTION_MIN_AGE,
     token_endpoint::{FETCH_TIMEOUT, TOKEN_LIMITS},
 };
@@ -167,12 +167,8 @@ impl Fixture {
     }
 
     fn build(&self, options: Options) -> (Credentials, RefreshDriver) {
-        let admitted = Admitted {
-            endpoint: self.endpoint.clone(),
-            permits: admitted_provider_concurrency(options.provider_concurrency).unwrap(),
-        };
+        let admitted = Admitted::try_new_for_test(options, self.endpoint.clone()).unwrap();
         Credentials::build(
-            options,
             admitted,
             Client::try_new_for_test_http(&self.origin, TOKEN_LIMITS).unwrap(),
         )
