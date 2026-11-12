@@ -306,7 +306,14 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "${CARGO_DEPENDENCIES}" == true || "${FALLBACK}" == true ]] || [[ "${RUST_SOURCE}" == true && "${EVENT_NAME}" != pull_request && "${EVENT_NAME}" != merge_group ]]; then
-            bash ./scripts/ci/measure.sh quality-workspace -- make --keep-going lint build test
+            # Keep going here so MAKEFLAGS cannot leak the flag to native builds.
+            bash ./scripts/ci/measure.sh quality-workspace -- bash -c '
+              result=0
+              for target in lint build test; do
+                make "$target" || result=1
+              done
+              exit "$result"
+            '
             exit 0
           fi
           if [[ "${LINT_CONFIG}" == true || "${NATIVE_CHECKER}" == true ]]; then
