@@ -21,6 +21,18 @@ use crate::prepared::{PreparedEvent, PreparedEventParts};
 
 const DEAD_LETTER_ID_PREFIX: &str = "dlq-";
 const ORIGINAL_ID_PRESENT: HeaderName = HeaderName::from_static("Original-Message-Id-Present");
+const RETAINED_HEADERS: [HeaderName; 6] = [
+    header_name::MESSAGE_ID,
+    header_name::EVENT_TYPE,
+    header_name::EVENT_SCHEMA,
+    header_name::CREATED_AT,
+    crate::trace::TRACEPARENT,
+    crate::trace::TRACESTATE,
+];
+// The client also accepts bare LF and a missing final newline. Re-encoding
+// can add one CR and one separator space per retained line, a CR on the
+// version line, a final blank CRLF, and the last missing LF.
+const HEADER_REENCODING_RESERVE: usize = RETAINED_HEADERS.len() * 2 + 4;
 
 outcome_label! {
     /// Why a delivery moved to the dead-letter stream; the `Dead-Letter-Reason`
@@ -37,9 +49,8 @@ pub(crate) struct DeadLetterBounds {
     pub(crate) headers: usize,
 }
 
-/// A source without headers still gains a header block on transfer. Its
-/// framing also covers the separator spaces NATS can omit on input for the
-/// retained fields when we re-encode an existing block.
+/// Reserve for the 12-byte framing of a new block and for re-encoding
+/// retained fields from a noncanonical block the client accepted.
 pub(crate) fn dead_letter_bounds(
     source_bytes: usize,
     subject_bytes: usize,
@@ -63,7 +74,8 @@ pub(crate) fn dead_letter_bounds(
     .try_fold(identity_bytes, |bytes, (name, value_bytes)| {
         bytes.checked_add(checked_header_line_bytes(name, value_bytes)?)
     })?;
-    let framed_source = source_bytes.checked_add(HEADER_PREAMBLE_BYTES)?;
+    let framed_source =
+        source_bytes.checked_add(HEADER_REENCODING_RESERVE.max(HEADER_PREAMBLE_BYTES))?;
     Some(DeadLetterBounds {
         total: framed_source.checked_add(additions)?,
         headers: framed_source
@@ -82,14 +94,7 @@ pub(crate) fn dead_letter_headers(
 ) -> HeaderMap {
     let mut headers = HeaderMap::new();
     let mut remaining = HEADER_LIMIT_BYTES - HEADER_PREAMBLE_BYTES;
-    for header in [
-        header_name::MESSAGE_ID,
-        header_name::EVENT_TYPE,
-        header_name::EVENT_SCHEMA,
-        header_name::CREATED_AT,
-        crate::trace::TRACEPARENT,
-        crate::trace::TRACESTATE,
-    ] {
+    for header in RETAINED_HEADERS {
         let value = header_value(original, header.clone());
         let bytes = header_line_bytes(header.as_ref(), value);
         if !value.is_empty() && bytes <= remaining {
@@ -282,10 +287,7 @@ mod tests {
         let subject = header_value(&record.headers, header_name::ORIGINAL_SUBJECT);
         let bounds =
             dead_letter_bounds(record.payload.len(), subject.len(), record.stream.len()).unwrap();
-        assert_eq!(
-            encoded_header_bytes(&record.headers) + record.payload.len(),
-            bounds.total
-        );
+        assert!(encoded_header_bytes(&record.headers) + record.payload.len() <= bounds.total);
     }
 
     #[test]

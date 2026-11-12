@@ -192,7 +192,9 @@ fn transfer_additions(subject: &str, stream: &str) -> usize {
     format!("Message-Id: {id}\r\nNats-Msg-Id: {id}\r\nOriginal-Subject: {subject}\r\nDead-Letter-Reason: permanent\r\nNats-Expected-Stream: {stream}\r\n").len()
 }
 
-const HEADER_BLOCK_FRAMING_BYTES: usize = "NATS/1.0\r\n\r\n".len();
+// Six retained fields can each gain a space and a CR. The block can also
+// gain a version-line CR, a final LF, and a blank CRLF.
+const TRANSFER_FRAMING_RESERVE_BYTES: usize = 16;
 
 #[tokio::test]
 async fn consumer_admits_the_transfer_bound_and_refuses_one_byte_less_before_durable_creation() {
@@ -200,7 +202,7 @@ async fn consumer_admits_the_transfer_bound_and_refuses_one_byte_less_before_dur
         let fixture = Fixture::create(false).await;
         let required = 1024
             + 8192
-            + HEADER_BLOCK_FRAMING_BYTES
+            + TRANSFER_FRAMING_RESERVE_BYTES
             + transfer_additions(&fixture.subject, &fixture.dlq_stream);
         let mut config = fixture
             .jetstream
@@ -397,7 +399,7 @@ async fn unlimited_dlq_cannot_exceed_the_advertised_server_transfer_limit() {
         [(
             "server_max_payload".to_owned(),
             (server_limit
-                + HEADER_BLOCK_FRAMING_BYTES
+                + TRANSFER_FRAMING_RESERVE_BYTES
                 + transfer_additions(&fixture.subject, &fixture.dlq_stream))
             .to_string(),
             Some(server_limit.to_string())
