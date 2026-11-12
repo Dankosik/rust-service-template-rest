@@ -137,13 +137,15 @@ rlimit = { version = "0.11.0", default-features = false }
 tokio-util = { version = "0.7.19", default-features = false }
 tower = { version = "0.5.3", default-features = false }
 tower-http = { version = "0.7.1", default-features = false }
+# Pinned with tonic. Outside the gRPC block because the telemetry tests decode
+# OTLP export bodies with it in every profile.
+prost = { version = "=0.14.4", default-features = false }
 # template:begin grpc:workspace-grpc-dependencies
 tonic = { version = "=0.14.8", default-features = false }
 tonic-prost = { version = "=0.14.8", default-features = false }
 tonic-health = { version = "=0.14.8", default-features = false }
 tonic-reflection = { version = "=0.14.8", default-features = false }
 tonic-types = { version = "=0.14.8", default-features = false }
-prost = { version = "=0.14.4", default-features = false }
 prost-types = { version = "=0.14.4", default-features = false }
 tokio-stream = { version = "0.1.19", default-features = false }
 # template:end grpc:workspace-grpc-dependencies
