@@ -51,9 +51,10 @@ pub struct ServerOptions {
     pub max_header_bytes: usize,
     /// Accepted connections at once; `None` accepts without a bound.
     pub max_connections: Option<NonZeroU32>,
-    /// Age after which a connection is told to finish and close, as at
-    /// drain: HTTP/2 gets GOAWAY and its open streams complete, HTTP/1
-    /// closes after the response in flight. A client that reconnects is
+    /// Age from socket acceptance, including TLS preparation, after which a
+    /// connection is told to finish and close as at drain. A connection still
+    /// being prepared is dropped. HTTP/2 gets GOAWAY and its open streams
+    /// complete, HTTP/1 closes after the response in flight. A client that reconnects is
     /// balanced again, which a long-lived connection behind a
     /// connection-level balancer never is. Each connection's age is spread
     /// by up to 10% either way, as grpc-go spreads `MaxConnectionAge`, so
@@ -534,7 +535,7 @@ async fn accept_loop<F, Fut, IO>(
 
 /// One accepted connection from preparation to close: graceful on `finish`
 /// or at its age, dropped at once on `force`.
-async fn serve_connection<F, Fut, IO>(
+fn serve_connection<F, Fut, IO>(
     stream: TcpStream,
     peer: SocketAddr,
     prepare_io: F,
@@ -542,72 +543,77 @@ async fn serve_connection<F, Fut, IO>(
     app: Router,
     options: ServerOptions,
     shutdown: ConnectionShutdown,
-) where
+) -> impl Future<Output = ()>
+where
     F: Fn(TcpStream) -> Fut,
     Fut: Future<Output = Option<(IO, &'static str)>>,
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    let ConnectionShutdown { finish, force } = shutdown;
-    let forced = Arc::new(AtomicBool::new(false));
-    let connection_forced = Arc::clone(&forced);
-    let serve = async move {
-        // No request can be in flight before preparation ends, so drain
-        // drops the connection instead of waiting preparation out.
-        let io = tokio::select! {
-            io = prepare_io(stream) => io,
-            () = finish.cancelled() => None,
-        };
-        let Some((io, scheme)) = io else {
-            return;
-        };
-        let io = SniffDeadline::new(io, options.header_read_timeout);
-        // Not `serve_connection_with_upgrades`: hyper hands an upgraded socket
-        // to a task outside this one, so drain and the connection cap would
-        // stop counting it while it stays open.
-        let service = ServiceBuilder::new()
-            .layer(Extension(ConnectionInfo {
-                scheme,
-                forced: connection_forced,
-            }))
-            .service(app);
-        let connection =
-            builder.serve_connection(TokioIo::new(io), TowerToHyperService::new(service));
-        tokio::pin!(connection);
-        let ended = tokio::select! {
-            ended = connection.as_mut() => ended,
-            () = wind_down(&finish, options.max_connection_age) => {
-                connection.as_mut().graceful_shutdown();
-                connection.await
+    let age_deadline = options
+        .max_connection_age
+        .map(|age| deadline_after(spread(age)));
+    async move {
+        let ConnectionShutdown { finish, force } = shutdown;
+        let forced = Arc::new(AtomicBool::new(false));
+        let connection_forced = Arc::clone(&forced);
+        let serve = async move {
+            let closing = wind_down(&finish, age_deadline);
+            tokio::pin!(closing);
+            // No request can be in flight before preparation ends.
+            let io = tokio::select! {
+                biased;
+                () = closing.as_mut() => None,
+                io = prepare_io(stream) => io,
+            };
+            let Some((io, scheme)) = io else {
+                return;
+            };
+            let io = SniffDeadline::new(io, options.header_read_timeout);
+            // Not `serve_connection_with_upgrades`: hyper hands an upgraded socket
+            // to a task outside this one, so drain and the connection cap would
+            // stop counting it while it stays open.
+            let service = ServiceBuilder::new()
+                .layer(Extension(ConnectionInfo {
+                    scheme,
+                    forced: connection_forced,
+                }))
+                .service(app);
+            let connection =
+                builder.serve_connection(TokioIo::new(io), TowerToHyperService::new(service));
+            tokio::pin!(connection);
+            let ended = tokio::select! {
+                biased;
+                () = closing => {
+                    connection.as_mut().graceful_shutdown();
+                    connection.await
+                }
+                ended = connection.as_mut() => ended,
+            };
+            if let Err(err) = ended {
+                tracing::debug!(%peer, error = %err, "http_connection_failed");
             }
         };
-        if let Err(err) = ended {
-            tracing::debug!(%peer, error = %err, "http_connection_failed");
+        tokio::select! {
+            biased;
+            () = async {
+                force.cancelled().await;
+                // select drops the losing connection future before its branch runs.
+                forced.store(true, Ordering::Relaxed);
+            } => {},
+            () = serve => {},
         }
-    };
-    tokio::select! {
-        biased;
-        () = async {
-            force.cancelled().await;
-            // select drops the losing connection future before its branch runs.
-            forced.store(true, Ordering::Relaxed);
-        } => {},
-        () = serve => {},
     }
 }
 
-/// Resolves when drain asks connections to finish or this one reaches its age.
-async fn wind_down(finish: &CancellationToken, max_connection_age: Option<Duration>) {
-    tokio::select! {
-        () = finish.cancelled() => {},
-        () = reached_age(max_connection_age) => {},
-    }
-}
-
-/// Resolves when a connection has lived for its spread age; never without one.
-async fn reached_age(max_connection_age: Option<Duration>) {
-    match max_connection_age {
-        Some(age) => tokio::time::sleep(spread(age)).await,
-        None => std::future::pending().await,
+/// Resolves when drain starts or the connection reaches its age.
+async fn wind_down(finish: &CancellationToken, age_deadline: Option<Instant>) {
+    if let Some(deadline) = age_deadline {
+        tokio::select! {
+            () = finish.cancelled() => {},
+            () = tokio::time::sleep_until(deadline) => {},
+        }
+    } else {
+        finish.cancelled().await;
     }
 }
 

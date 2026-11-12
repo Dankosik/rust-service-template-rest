@@ -579,6 +579,27 @@ async fn drain_does_not_wait_for_an_unfinished_tls_handshake() {
 }
 
 #[tokio::test]
+async fn connection_age_closes_a_socket_still_waiting_for_tls() {
+    let (server_config, _) = localhost_tls(b"h2");
+    let options = ServerOptions {
+        header_read_timeout: Duration::from_secs(10),
+        max_connection_age: Some(Duration::from_millis(200)),
+        ..options()
+    };
+    let server = Server::bind_tls(loopback(), app(), options, Arc::new(server_config))
+        .await
+        .unwrap();
+    let mut client = TcpStream::connect(server.local_addr()).await.unwrap();
+    let mut byte = [0];
+    let closed = tokio::time::timeout(Duration::from_secs(2), client.read(&mut byte)).await;
+    std::assert_matches!(closed, Ok(Ok(0)), "expected EOF before the TLS timeout");
+    assert_eq!(
+        server.drain(Duration::from_secs(1)).await.unwrap(),
+        Drained::Complete
+    );
+}
+
+#[tokio::test]
 async fn tls_listener_serves_http2() {
     use http_body_util::BodyExt as _;
 
