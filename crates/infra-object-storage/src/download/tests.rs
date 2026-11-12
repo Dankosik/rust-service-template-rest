@@ -13,6 +13,7 @@ use tokio::time::Instant;
 
 use super::*;
 use crate::observe::{Histograms, Operation};
+use crate::tests::{Records, in_tracing_child};
 
 struct GatedBody {
     chunks: VecDeque<Bytes>,
@@ -510,6 +511,12 @@ async fn empty_eof_and_pending_consumers_share_the_deadline() {
 
 #[tokio::test(start_paused = true)]
 async fn unexpected_timer_abort_before_first_poll_fails_closed() {
+    if !in_tracing_child("download::tests::unexpected_timer_abort_before_first_poll_fails_closed") {
+        return;
+    }
+    let records = Records::default();
+    let _subscriber = tracing::subscriber::set_default(records.clone());
+    let _every_dispatcher = tracing::Dispatch::new(Records::default());
     let (body, destroyed) = body(None);
     let end = tokio::time::sleep(Duration::from_secs(60)).deadline();
     let (mut download, slots) = open(body, 4, end);
@@ -524,6 +531,14 @@ async fn unexpected_timer_abort_before_first_poll_fails_closed() {
     assert_eq!(
         download.next_chunk().await,
         Err(ObjectStorageError::Unavailable)
+    );
+    let failures = records.matching("event", "object_storage_operation_failed");
+    let [event] = failures.as_slice() else {
+        panic!("one failure event: {failures:?}");
+    };
+    assert!(
+        event.contains(" error.type=download_timer_exited"),
+        "{event}"
     );
 }
 

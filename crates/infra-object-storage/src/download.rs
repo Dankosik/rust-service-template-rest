@@ -166,7 +166,7 @@ impl State {
 
     /// Bytes not yet returned to the reader, including a withheld final
     /// chunk; `None` once the download failed.
-    fn unread(&self) -> Option<u64> {
+    fn unread_bytes(&self) -> Option<u64> {
         match &self.status {
             Status::Open(resources) => Some(
                 resources.remaining
@@ -256,7 +256,7 @@ impl Drop for TimerExit {
         if let Some(shared) = self.0.upgrade() {
             terminate(
                 &shared,
-                Termination::Fallback(Outcome::Failure(LocalFailure::DownloadBody.into())),
+                Termination::Fallback(Outcome::Failure(LocalFailure::DownloadTimerExited.into())),
             );
         }
     }
@@ -381,8 +381,8 @@ impl Download {
     ///
     /// As [`Self::next_chunk`].
     pub async fn into_bytes(mut self) -> Result<Bytes, ObjectStorageError> {
-        let unread = lock(&self.shared).unread().unwrap_or(0);
-        let mut buffer = Vec::with_capacity(usize::try_from(unread).unwrap_or(0));
+        let unread_bytes = lock(&self.shared).unread_bytes().unwrap_or(0);
+        let mut buffer = Vec::with_capacity(usize::try_from(unread_bytes).unwrap_or(0));
         while let Some(chunk) = self.next_chunk().await? {
             buffer.extend_from_slice(&chunk);
         }
@@ -417,7 +417,7 @@ impl http_body::Body for Download {
         // Hyper may skip an exact-zero body, so a failed download reports no
         // exact size and keeps its error visible.
         lock(&self.shared)
-            .unread()
+            .unread_bytes()
             .map_or_else(SizeHint::default, SizeHint::with_exact)
     }
 }

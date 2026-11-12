@@ -189,8 +189,8 @@ enum OriginScheme {
     HttpOrHttps,
 }
 
-/// A bare origin: scheme and host, an optional port, and nothing else, as
-/// written.
+/// Reject whitespace, control characters and userinfo before parsing can
+/// normalize them away. Check the remaining origin components after parsing.
 fn origin(endpoint: &str, scheme: OriginScheme) -> Result<Url, ConfigError> {
     if shared_rules::uri::has_whitespace_or_control(endpoint)
         || shared_rules::uri::authority_has_userinfo(endpoint)
