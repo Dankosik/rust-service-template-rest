@@ -1,17 +1,21 @@
 use super::*;
-use crate::LoadOptions;
 use crate::load::{Error, load_from};
 use crate::test_support::{BUILD, env, write};
+use crate::{HttpConfig, LoadOptions};
 use std::assert_matches;
 
 fn parse(toml: &str) -> Result<GrpcConfig, toml::de::Error> {
     toml::from_str(toml)
 }
 
+fn default_drain_budget() -> Duration {
+    HttpConfig::default().effective_drain_budget()
+}
+
 #[test]
 fn disabled_listener_is_inert_by_default_and_redacts_all_material() {
     let config = GrpcConfig::default();
-    config.validate(&HttpConfig::default()).unwrap();
+    config.validate(default_drain_budget()).unwrap();
     let debug = format!("{config:?}");
     assert!(debug.contains("enabled"));
     assert!(!debug.contains("certificate"));
@@ -23,25 +27,25 @@ fn disabled_listener_is_inert_by_default_and_redacts_all_material() {
 fn enabled_plaintext_requires_an_address_and_explicit_security() {
     let missing = parse("enabled = true").unwrap();
     assert_eq!(
-        missing.validate(&HttpConfig::default()).unwrap_err().key,
+        missing.validate(default_drain_budget()).unwrap_err().key,
         "grpc.addr"
     );
 
     let missing = parse("enabled = true\naddr = \"127.0.0.1:50051\"").unwrap();
     assert_eq!(
-        missing.validate(&HttpConfig::default()).unwrap_err().key,
+        missing.validate(default_drain_budget()).unwrap_err().key,
         "grpc.security"
     );
 
     let config = parse("enabled = true\naddr = \"127.0.0.1:0\"\nsecurity = \"plaintext\"").unwrap();
-    config.validate(&HttpConfig::default()).unwrap();
+    config.validate(default_drain_budget()).unwrap();
 }
 
 #[test]
 fn tls_requires_certificate_and_environment_only_private_key() {
     let config = parse("enabled = true\naddr = \"127.0.0.1:0\"\nsecurity = \"tls\"").unwrap();
     assert_eq!(
-        config.validate(&HttpConfig::default()).unwrap_err().key,
+        config.validate(default_drain_budget()).unwrap_err().key,
         "grpc.certificate"
     );
 
@@ -49,7 +53,7 @@ fn tls_requires_certificate_and_environment_only_private_key() {
         parse("enabled = true\naddr = \"127.0.0.1:0\"\nsecurity = \"tls\"\ncertificate = \"cert\"")
             .unwrap();
     assert_eq!(
-        config.validate(&HttpConfig::default()).unwrap_err().key,
+        config.validate(default_drain_budget()).unwrap_err().key,
         "grpc.private_key"
     );
 }
@@ -73,7 +77,7 @@ fn limits_default_to_the_http_bounds_and_zero_turns_one_off() {
         max_connection_age: Duration::ZERO,
         ..enabled()
     };
-    unbounded.validate(&HttpConfig::default()).unwrap();
+    unbounded.validate(default_drain_budget()).unwrap();
     assert_eq!(unbounded.in_flight_cap(), None);
     assert_eq!(unbounded.connection_cap(), None);
     assert_eq!(unbounded.max_connection_age(), None);
@@ -85,18 +89,18 @@ fn the_admission_wait_may_not_outlast_the_call_budget() {
         admission_wait: Duration::from_secs(8),
         ..enabled()
     };
-    longest.validate(&HttpConfig::default()).unwrap();
+    longest.validate(default_drain_budget()).unwrap();
     let none = GrpcConfig {
         admission_wait: Duration::ZERO,
         ..enabled()
     };
-    none.validate(&HttpConfig::default()).unwrap();
+    none.validate(default_drain_budget()).unwrap();
     let beyond = GrpcConfig {
         admission_wait: Duration::from_millis(8_001),
         ..enabled()
     };
     assert_eq!(
-        beyond.validate(&HttpConfig::default()).unwrap_err().key,
+        beyond.validate(default_drain_budget()).unwrap_err().key,
         "grpc.admission_wait"
     );
 }
@@ -107,14 +111,14 @@ fn a_call_budget_must_fit_inside_the_shared_drain() {
         request_timeout: Duration::from_secs(11),
         ..enabled()
     };
-    let err = config.validate(&HttpConfig::default()).unwrap_err();
+    let err = config.validate(default_drain_budget()).unwrap_err();
     assert_eq!(err.key, "grpc.request_timeout");
 
     let http = HttpConfig {
         drain_timeout: Duration::from_secs(40),
         ..HttpConfig::default()
     };
-    config.validate(&http).unwrap();
+    config.validate(http.effective_drain_budget()).unwrap();
 }
 
 #[test]
@@ -123,7 +127,7 @@ fn a_connection_age_under_a_second_is_refused() {
         max_connection_age: Duration::from_millis(10),
         ..enabled()
     };
-    let err = config.validate(&HttpConfig::default()).unwrap_err();
+    let err = config.validate(default_drain_budget()).unwrap_err();
     assert_eq!(err.key, "grpc.max_connection_age");
 }
 
@@ -134,7 +138,7 @@ fn plaintext_refuses_tls_material() {
     )
     .unwrap();
     assert_eq!(
-        config.validate(&HttpConfig::default()).unwrap_err().key,
+        config.validate(default_drain_budget()).unwrap_err().key,
         "grpc.certificate"
     );
 }
