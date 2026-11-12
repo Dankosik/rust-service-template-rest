@@ -18,7 +18,7 @@ use utoipa::{IntoResponses, OpenApi, ToResponse};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
-use crate::context::RequestDeadline;
+use crate::context::{RequestContext, RequestDeadline, read_body};
 use crate::extract::Path;
 use crate::problem::responses::{
     GatewayTimeout, InternalServerError, ProblemComponents, RequestEntityTooLarge,
@@ -181,7 +181,8 @@ async fn receive(
         );
         return sanitized_internal_error();
     };
-    let body = match Limited::new(body, MAX_BODY_BYTES).collect().await {
+    let context = parts.extensions.get::<RequestContext>();
+    let body = match read_body(context, Limited::new(body, MAX_BODY_BYTES).collect()).await {
         Ok(collected) => collected.to_bytes(),
         Err(error) if caused_by_length_limit(&*error) => {
             EndpointOutcome::Rejected("body_too_large").record(&endpoint_id);

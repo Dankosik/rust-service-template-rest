@@ -27,7 +27,7 @@ use super::execute::{
 use super::identity::{self, KEY_GRAMMAR, MAX_DECODED_KEY_BYTES};
 use super::openapi::{IdempotencyComponents, KEY_HEADER, REPLAYED_HEADER, REPLAYED_VALUE};
 use crate::authn::VerifiedPrincipal;
-use crate::context::RequestDeadline;
+use crate::context::{RequestContext, RequestDeadline, read_body};
 use crate::problem::{Code, Problem, body_too_large, body_unreadable, sanitized_internal_error};
 use utoipa_axum::router::UtoipaMethodRouter;
 
@@ -213,7 +213,8 @@ async fn capture_attempt(
         return ControlFlow::Break(invalid_key());
     };
     let scope = identity::scope_key(&caller, &key);
-    let collected = match buffer_body(body).await {
+    let context = parts.extensions.get::<RequestContext>();
+    let collected = match read_body(context, buffer_body(body)).await {
         Ok(collected) => collected,
         Err(refusal) => {
             Outcome::NotStored.record();

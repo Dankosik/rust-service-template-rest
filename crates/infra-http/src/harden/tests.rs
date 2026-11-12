@@ -262,7 +262,7 @@ async fn timeout_is_a_504_problem() {
     assert_eq!(json["request_id"].as_str(), Some(id.to_str().unwrap()));
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_body_the_caller_stops_sending_is_a_408_problem_that_closes_the_connection() {
     let first_chunk = futures_util::stream::once(async {
         Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"{"))
@@ -270,11 +270,18 @@ async fn a_body_the_caller_stops_sending_is_a_408_problem_that_closes_the_connec
     let stalled = futures_util::StreamExt::chain(first_chunk, futures_util::stream::pending());
     let request = HttpRequest::builder()
         .method(Method::POST)
-        .uri("/echo")
+        .uri("/json")
+        .header(CONTENT_TYPE, "application/json")
         .body(Body::from_stream(stalled))
         .unwrap();
 
-    let response = app(&options()).oneshot(request).await.unwrap();
+    let handler = |_: crate::extract::Json<serde_json::Value>| async { StatusCode::OK };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
+    )]
+    let routes = Router::new().route("/json", post(handler));
+    let response = harden(routes, &options()).oneshot(request).await.unwrap();
 
     assert_eq!(response.status(), StatusCode::REQUEST_TIMEOUT);
     assert_eq!(
@@ -285,6 +292,38 @@ async fn a_body_the_caller_stops_sending_is_a_408_problem_that_closes_the_connec
         "close"
     );
     assert_eq!(body_json(response).await["code"], "request_timeout");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_cancelled_body_read_does_not_turn_a_handler_timeout_into_408() {
+    let handler = |context: crate::RequestContext, request: Request| async move {
+        let mut body = request.into_body();
+        let read = tokio::time::timeout(Duration::from_millis(10), context.read_body(body.frame()));
+        assert!(read.await.is_err());
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        drop(body);
+        StatusCode::OK
+    };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
+    )]
+    let routes = Router::new().route("/upload", post(handler));
+    let request = HttpRequest::post("/upload")
+        .body(Body::from_stream(futures_util::stream::pending::<
+            Result<axum::body::Bytes, std::io::Error>,
+        >()))
+        .unwrap();
+
+    let response = harden(routes, &options()).oneshot(request).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+    assert!(
+        !response
+            .headers()
+            .contains_key(axum::http::header::CONNECTION)
+    );
+    assert_eq!(body_json(response).await["code"], "gateway_timeout");
 }
 
 struct EventFields {

@@ -97,9 +97,7 @@ pub struct InvalidParam {
     pub reason: String,
 }
 
-/// RFC 9457 problem details: the failure envelope of every non-success
-/// response except the plain-text probes, keyed by a stable `code` from one
-/// closed catalog.
+/// RFC 9457 problem details with a stable `code` from the closed failure catalog.
 // Where the schema deliberately differs from the Rust type: optional members
 // are omitted, never `null`, which the `nullable = false` annotations tell the
 // contract; `code` is a plain `string` rather than the closed `Code` enum,
