@@ -25,6 +25,7 @@ pub use compose::{Activation, Composer};
 pub use declaration::CompositionError;
 pub use execute::{HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Idempotency};
 pub use infra_postgres::Tx;
+pub(crate) use openapi::declares_replay;
 
 /// Whether a body read failed at a length limit. axum boxes the transport
 /// limit's error into [`axum::Error`] when a request has no `Content-Length`,
