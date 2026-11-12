@@ -319,6 +319,7 @@ async fn queued_statuses_retry_except_for_gone_and_complete_on_any_2xx(pool: PgP
         (401, 0, "pending"),
         (404, 0, "pending"),
         (410, 0, "failed"),
+        (410, 1, "failed"),
         (410, 65_537, "failed"),
         (204, 0, "completed"),
     ] {

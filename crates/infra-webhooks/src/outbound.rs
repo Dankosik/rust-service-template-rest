@@ -316,7 +316,12 @@ impl Handler<Delivery> for Dispatcher {
                 endpoint_gone = status == StatusCode::GONE;
             })
             .await;
-        if endpoint_gone && matches!(&response, Err(HttpError::ResponseBodyTooLarge)) {
+        if endpoint_gone
+            && matches!(
+                &response,
+                Err(HttpError::ResponseBodyTooLarge | HttpError::Transport { .. })
+            )
+        {
             return Err(fail(endpoint_id, DeliveryFailure::EndpointGone));
         }
         classify_response(endpoint_id, response, SystemTime::now())
