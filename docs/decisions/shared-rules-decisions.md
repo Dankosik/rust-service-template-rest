@@ -26,6 +26,12 @@ there, what was rejected, and when to revisit.
 | `error_chain::causes` also classifies broker failures in `infra-messaging` topology and readiness checks (`classify_topology`) | It recursed through `source()` by hand, so a JetStream timeout, invalid subject or 401/403 wrapped in an `std::io::Error` fell through to the generic topology failure, the case the `causes` row above describes. | Such a wrapped cause is now classified; none was seen in practice. |
 | `uri::has_whitespace_or_control` and `uri::authority_has_userinfo` also guard the typed OTLP endpoint in `config` (`observability.otel.exporter.otlp_endpoint`) | It checked only the `http://` or `https://` prefix, so `http://user:secret@collector` and an endpoint holding a tab, NBSP or line break were admitted while every other endpoint in `config` refused them. RFC 9110 §4.2.4 forbids userinfo in an http(s) URI; the prefix check guarantees the `://` the raw userinfo check reads. `OTEL_EXPORTER_OTLP_ENDPOINT` and `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, read by `infra-telemetry` when the key is vacant, follow the OpenTelemetry SDK convention and are not `config` keys, so they keep their own admission. | An OTLP endpoint with whitespace, a control character or userinfo is now refused at startup. Reopen as for the endpoint row above. |
 
+Error-chain walks consider at most 64 entries, including the original error.
+A cyclic `Error::source()` can otherwise hold a worker in a synchronous
+walk even when every repeated message is skipped. A fixed limit also bounds
+long chains without relying on trait-object identity. Classification and
+diagnostics may omit causes beyond that limit.
+
 ## Left with their owners
 
 These look alike across crates but fail the membership test:
