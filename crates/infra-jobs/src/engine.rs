@@ -4,7 +4,7 @@ use std::fmt;
 use std::future::Future;
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use enum_map::EnumMap;
@@ -18,6 +18,7 @@ use crate::Kinds;
 use crate::claim;
 use crate::listener;
 use crate::maintenance;
+use crate::peers::{PeerRegistration, PeerRegistry};
 use crate::session::StartupError;
 
 pub const POLL_INTERVAL: Duration = Duration::from_secs(1);
@@ -158,8 +159,8 @@ impl Engine {
             Role::Owner => (uuid::Uuid::new_v4(), Arc::default(), true),
             Role::Beside(owner) => (owner.worker_id, Arc::clone(&owner.peers), false),
         };
-        let wake = Arc::new(Notify::new());
-        let peer = PeerRegistration::new(&registry, &peers, &wake);
+        let claim_wake = Arc::new(Notify::new());
+        let peer = peers.register(&registry, &claim_wake);
         Self {
             peer,
             shared: Arc::new(Shared {
@@ -175,7 +176,7 @@ impl Engine {
                 failing: EnumMap::default(),
                 completions: crate::attempt::Completions::default(),
                 owned_attempts: crate::attempt::MembershipGauge::owned_attempts(),
-                wake,
+                claim_wake,
                 peers,
                 owns_process_duties,
             }),
@@ -224,7 +225,7 @@ impl Engine {
         }
         claim::describe_metrics();
         if self.shared.owns_process_duties {
-            maintenance::init_metrics(&self.shared.sampling_kinds().0);
+            maintenance::init_metrics(&self.shared.peers.sampling_kinds().0);
         }
         metrics::describe_counter!(
             OPERATION_FAILURES_METRIC,
@@ -558,98 +559,6 @@ impl Drop for TaskGuard {
 /// Stands in for a cleanup budget too long to add to the clock.
 const NO_CLEANUP_DEADLINE: Duration = Duration::from_hours(24 * 365);
 
-/// One engine as the process's listener and sampler see it.
-struct Peer {
-    kinds: Vec<&'static str>,
-    wake: Arc<Notify>,
-}
-
-#[derive(Default)]
-struct Peers {
-    entries: Vec<Peer>,
-    sample_revision: Arc<()>,
-}
-
-impl Peers {
-    fn invalidate_sample(&mut self) {
-        self.sample_revision = Arc::default();
-        maintenance::invalidate_sample();
-    }
-}
-
-/// The peer list is never held across an `.await`.
-fn lock_peers(peers: &Mutex<Peers>) -> MutexGuard<'_, Peers> {
-    peers
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-/// Owned by the unstarted engine, then by its claim task.
-struct PeerRegistration {
-    peers: Arc<Mutex<Peers>>,
-    wake: Arc<Notify>,
-}
-
-impl PeerRegistration {
-    fn new(registry: &Kinds, peers: &Arc<Mutex<Peers>>, wake: &Arc<Notify>) -> Self {
-        let mut registry_peers = lock_peers(peers);
-        let previous = registered_kinds(&registry_peers.entries);
-        let kinds: Vec<_> = registry.names().collect();
-        for &kind in &kinds {
-            if previous.binary_search(&kind).is_err() {
-                maintenance::reset_kind_metrics(kind);
-            }
-        }
-        registry_peers.entries.push(Peer {
-            kinds,
-            wake: Arc::clone(wake),
-        });
-        registry_peers.invalidate_sample();
-        Self {
-            peers: Arc::clone(peers),
-            wake: Arc::clone(wake),
-        }
-    }
-}
-
-impl Drop for PeerRegistration {
-    fn drop(&mut self) {
-        let mut peers = lock_peers(&self.peers);
-        let Some(index) = peers
-            .entries
-            .iter()
-            .position(|peer| Arc::ptr_eq(&peer.wake, &self.wake))
-        else {
-            return;
-        };
-        let removed = peers.entries.swap_remove(index);
-        let remaining = registered_kinds(&peers.entries);
-        let mut changed = false;
-        for kind in removed.kinds {
-            if remaining.binary_search(&kind).is_err() {
-                maintenance::reset_kind_metrics(kind);
-                changed = true;
-            }
-        }
-        if changed {
-            peers.invalidate_sample();
-        }
-    }
-}
-
-/// Every peer's kinds as one list, sorted and without duplicates.
-///
-/// [`PeerRegistration`] looks up kinds in this list with binary search.
-fn registered_kinds(peers: &[Peer]) -> Vec<&'static str> {
-    let mut kinds: Vec<_> = peers
-        .iter()
-        .flat_map(|peer| peer.kinds.iter().copied())
-        .collect();
-    kinds.sort_unstable();
-    kinds.dedup();
-    kinds
-}
-
 pub(crate) struct Shared {
     pub(crate) worker_id: uuid::Uuid,
     pub(crate) pool: PgPool,
@@ -668,42 +577,11 @@ pub(crate) struct Shared {
     failing: EnumMap<Operation, AtomicBool>,
     pub(crate) completions: crate::attempt::Completions,
     pub(crate) owned_attempts: crate::attempt::MembershipGauge,
-    /// Set when a due job of a registered kind was committed.
-    pub(crate) wake: Arc<Notify>,
-    /// Every engine of this worker process, this one included.
-    peers: Arc<Mutex<Peers>>,
+    /// A database notification, listener subscription, or slot release can
+    /// wake the claim loop to recheck for work.
+    pub(crate) claim_wake: Arc<Notify>,
+    pub(crate) peers: Arc<PeerRegistry>,
     owns_process_duties: bool,
-}
-
-impl Shared {
-    /// Snapshot the kinds and the identity that authorizes publishing their sample.
-    pub(crate) fn sampling_kinds(&self) -> (Vec<&'static str>, Arc<()>) {
-        let peers = lock_peers(&self.peers);
-        (
-            registered_kinds(&peers.entries),
-            Arc::clone(&peers.sample_revision),
-        )
-    }
-
-    /// A change can invalidate a sample even if the same kinds later return.
-    pub(crate) fn publish_if_current(&self, revision: &Arc<()>, publish: impl FnOnce()) -> bool {
-        let peers = lock_peers(&self.peers);
-        if !Arc::ptr_eq(&peers.sample_revision, revision) {
-            return false;
-        }
-        publish();
-        true
-    }
-
-    /// Wake every engine of this process that registers `kind`, or all of
-    /// them when `kind` is `None`.
-    pub(crate) fn wake_peers(&self, kind: Option<&str>) {
-        for peer in &lock_peers(&self.peers).entries {
-            if kind.is_none_or(|kind| peer.kinds.contains(&kind)) {
-                peer.wake.notify_one();
-            }
-        }
-    }
 }
 
 impl fmt::Debug for Shared {
@@ -830,11 +708,16 @@ fn log_operation_failure(operation: Operation, error: &OperationError) {
             }
         }
     };
+    let decode_reason = match error {
+        OperationError::Statement(error) => claim::decode_reason(error),
+        _ => None,
+    };
     tracing::warn!(
         operation = operation.as_str(),
         failure = error.as_str(),
         sqlstate = sqlstate.as_deref(),
         cause,
+        decode_reason,
         "jobs_operation_failed"
     );
 }
@@ -1008,8 +891,9 @@ mod tests {
                 Ok(())
             });
             let engine = Engine::new(pool.clone(), kinds.validate().unwrap(), NonZeroU32::MIN);
-            let (sampled_kinds, sampled_revision) = engine.shared.sampling_kinds();
-            assert!(engine.shared.publish_if_current(&sampled_revision, || {
+            let peers = &engine.shared.peers;
+            let (sampled_kinds, sampled_revision) = peers.sampling_kinds();
+            assert!(peers.publish_if_current(&sampled_revision, || {
                 metrics::gauge!(maintenance::FAILED_JOBS_METRIC, "kind" => "ordinary").set(3.0);
                 metrics::gauge!(maintenance::OBSERVATION_TIMESTAMP_METRIC).set(100.0);
             }));
@@ -1034,7 +918,7 @@ mod tests {
                 gauges.get(maintenance::FAILED_JOBS_METRIC, Some("publisher")),
                 0.0
             );
-            assert!(!engine.shared.publish_if_current(&sampled_revision, || {
+            assert!(!peers.publish_if_current(&sampled_revision, || {
                 panic!("an observation from before peer admission must not publish");
             }));
             assert_eq!(
@@ -1042,8 +926,8 @@ mod tests {
                 0.0
             );
 
-            let (current_kinds, current_revision) = engine.shared.sampling_kinds();
-            assert!(engine.shared.publish_if_current(&current_revision, || {
+            let (current_kinds, current_revision) = peers.sampling_kinds();
+            assert!(peers.publish_if_current(&current_revision, || {
                 metrics::gauge!(maintenance::OBSERVATION_TIMESTAMP_METRIC).set(200.0);
             }));
             assert_eq!(
@@ -1052,13 +936,13 @@ mod tests {
             );
 
             drop(publisher);
-            assert_eq!(engine.shared.sampling_kinds().0, sampled_kinds);
-            assert!(!engine.shared.publish_if_current(&current_revision, || {
+            assert_eq!(peers.sampling_kinds().0, sampled_kinds);
+            assert!(!peers.publish_if_current(&current_revision, || {
                 panic!("an observation that still includes the retired peer must not publish");
             }));
             let _replacement = make_publisher();
-            assert_eq!(engine.shared.sampling_kinds().0, current_kinds);
-            assert!(!engine.shared.publish_if_current(&current_revision, || {
+            assert_eq!(peers.sampling_kinds().0, current_kinds);
+            assert!(!peers.publish_if_current(&current_revision, || {
                 panic!("an observation from before peer replacement must not publish");
             }));
             assert_eq!(
@@ -1091,7 +975,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), started.drained())
             .await
             .unwrap();
-        assert_eq!(owner.shared.sampling_kinds().0, ["ordinary"]);
+        assert_eq!(owner.shared.peers.sampling_kinds().0, ["ordinary"]);
         tracker.close();
         tokio::time::timeout(Duration::from_secs(1), tracker.wait())
             .await

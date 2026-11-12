@@ -82,10 +82,7 @@ pub fn json_payload_len<T: serde::Serialize + ?Sized>(
 
     impl Write for ByteCount {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            self.0 = self
-                .0
-                .checked_add(bytes.len())
-                .ok_or_else(|| io::Error::other("serialized payload length overflow"))?;
+            self.0 = checked_serialized_len(self.0, bytes.len())?;
             Ok(bytes.len())
         }
 
@@ -290,10 +287,7 @@ struct PayloadWriter {
 
 impl Write for PayloadWriter {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.total = self
-            .total
-            .checked_add(bytes.len())
-            .ok_or_else(|| io::Error::other("serialized payload length overflow"))?;
+        self.total = checked_serialized_len(self.total, bytes.len())?;
         let keep = bytes.len().min(MAX_PAYLOAD_BYTES - self.retained.len());
         let needed = self.retained.len() + keep;
         if needed > self.retained.capacity() {
@@ -312,6 +306,12 @@ impl Write for PayloadWriter {
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
+}
+
+fn checked_serialized_len(total: usize, chunk_len: usize) -> io::Result<usize> {
+    total
+        .checked_add(chunk_len)
+        .ok_or_else(|| io::Error::other("serialized payload length overflow"))
 }
 
 /// Validate and bind. A failure has sent nothing.
