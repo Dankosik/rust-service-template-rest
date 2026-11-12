@@ -276,7 +276,9 @@ fn map_attempted(
         Ok(Attempted::RolledBack(Rollback::Unstorable)) => {
             Answer::boundary_problem(sanitized_internal_error(), Outcome::Unstorable)
         }
-        Err(AttemptError::Integrity) => integrity_failure(operation_id, "store_undecodable", None),
+        Err(AttemptError::Integrity) => {
+            integrity_failure(scope, operation_id, "store_undecodable", None)
+        }
         Ok(Attempted::Mismatch) => Answer::boundary_problem(key_mismatch(), Outcome::KeyMismatch),
         Ok(Attempted::Replay(record)) => match stored::decode(record) {
             Ok(stored) => Answer::operation_response(
@@ -284,6 +286,7 @@ fn map_attempted(
                 Outcome::Replayed,
             ),
             Err(undecodable) => integrity_failure(
+                scope,
                 operation_id,
                 "replay_undecodable",
                 Some(undecodable.class()),
@@ -308,11 +311,13 @@ pub(super) fn mark_provenance(mut response: Response, provenance: Provenance) ->
 }
 
 fn integrity_failure(
+    scope: &ScopeKey,
     operation_id: &str,
     failure: &'static str,
     reason: Option<&'static str>,
 ) -> Answer {
     tracing::error!(
+        scope_digest = %ScopeDigest(scope.digest()),
         operation = operation_id,
         failure,
         reason,
