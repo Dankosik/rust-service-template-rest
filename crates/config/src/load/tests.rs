@@ -383,6 +383,32 @@ fn an_overlay_cannot_erase_a_table_before_unknown_keys_are_checked() {
 }
 
 #[test]
+fn an_overlay_cannot_hide_keys_inside_arrays() {
+    let dir = tempfile::tempdir().unwrap();
+    let overlay = write(&dir, "overlay.toml", "[messaging]\nurls = []");
+    for (contents, expected) in [
+        (
+            "[messaging]\nurls = [{ urll = 'example' }]",
+            "messaging.urls[0].urll",
+        ),
+        (
+            "[messaging]\nurls = [[], [{ urll = 'example' }]]",
+            "messaging.urls[1][0].urll",
+        ),
+    ] {
+        let base = write(&dir, "base.toml", contents);
+        let options = LoadOptions {
+            config: Some(base.clone()),
+            config_overlay: vec![overlay.clone()],
+            ..LoadOptions::default()
+        };
+
+        let err = load_from(&options, BUILD, env(&[])).unwrap_err();
+        assert_matches!(&err, Error::UnaddressableKey { key, path } if key == expected && path == &base, "{err}");
+    }
+}
+
+#[test]
 fn env_parses_durations_sizes_numbers_and_enums() {
     let cfg = load_from(
         &LoadOptions::default(),
