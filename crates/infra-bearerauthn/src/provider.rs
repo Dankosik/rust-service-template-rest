@@ -114,7 +114,8 @@ impl IssuerUrl {
     // template:end oidc-jwt:authn-provider-issuer-url
 }
 
-/// One admitted provider endpoint whose query ordering and escaping are preserved.
+/// An admitted HTTPS endpoint. [`Self::as_str`] preserves the input spelling.
+/// Provider requests use the parsed URL, which can normalize query escaping.
 #[derive(Clone, Eq, PartialEq, derive_more::Debug)]
 #[debug("EndpointUrl([REDACTED])")]
 pub struct EndpointUrl {
@@ -562,7 +563,7 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_queries_are_preserved_and_provider_debug_is_redacted() {
+    fn endpoint_spelling_is_preserved_and_provider_debug_is_redacted() {
         let raw = "https://provider.example/keys?token=private%2Fvalue&x=1&x=2";
         let endpoint = EndpointUrl::parse(raw).unwrap();
         assert_eq!(endpoint.as_str(), raw);
