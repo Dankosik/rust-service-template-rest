@@ -1869,7 +1869,17 @@ mod tests {
                 drop(pending);
             });
         });
-        let counters = diagnostics.counters.lock().unwrap();
+        assert_authentication_counters(&diagnostics.counters.lock().unwrap());
+    }
+
+    fn labeled(key: &metrics::Key, labels: &[(&str, &str)]) -> bool {
+        labels.iter().all(|(name, value)| {
+            key.labels()
+                .any(|label| label.key() == *name && label.value() == *value)
+        })
+    }
+
+    fn assert_authentication_counters(counters: &[(metrics::Key, u64)]) {
         let verifications = counters
             .iter()
             .filter(|(key, _)| key.name() == "authn_token_verifications_total")
@@ -1877,15 +1887,14 @@ mod tests {
         assert_eq!(verifications.len(), 2);
         assert!(verifications.iter().all(|(key, value)| {
             *value == 1
-                && key
-                    .labels()
-                    .any(|label| label.key() == "mode" && label.value() == "jwt")
-                && key
-                    .labels()
-                    .any(|label| label.key() == "outcome" && label.value() == "success")
-                && key
-                    .labels()
-                    .any(|label| label.key() == "reason" && label.value() == "verified")
+                && labeled(
+                    key,
+                    &[
+                        ("mode", "jwt"),
+                        ("outcome", "success"),
+                        ("reason", "verified"),
+                    ],
+                )
         }));
         let outcomes = counters
             .iter()
@@ -1903,15 +1912,14 @@ mod tests {
         ] {
             assert!(outcomes.iter().any(|(key, value)| {
                 *value == 1
-                    && key
-                        .labels()
-                        .any(|label| label.key() == "transport" && label.value() == transport)
-                    && key
-                        .labels()
-                        .any(|label| label.key() == "result" && label.value() == result)
-                    && key
-                        .labels()
-                        .any(|label| label.key() == "failure" && label.value() == failure)
+                    && labeled(
+                        key,
+                        &[
+                            ("transport", transport),
+                            ("result", result),
+                            ("failure", failure),
+                        ],
+                    )
             }));
         }
     }
