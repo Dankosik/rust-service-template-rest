@@ -4,7 +4,8 @@ use std::time::Instant;
 use metrics::{Histogram, Unit};
 use tracing::Span;
 
-use crate::{ServerEndpoint, Unavailable};
+use crate::connection::ErrorType;
+use crate::{Operation, ServerEndpoint, Unavailable};
 
 pub const OPERATION_DURATION_METRIC: &str = "cache_operation_duration_seconds";
 
@@ -24,76 +25,11 @@ pub(crate) const COMMANDS_IN_FLIGHT_METRIC: &str = "cache_commands_in_flight";
 pub(crate) const RETIREMENTS_METRIC: &str = "cache_connection_retirements_total";
 pub(crate) const PASSWORD_REFRESHES_METRIC: &str = "cache_password_file_refreshes_total";
 
-/// The closed set of namespace operations.
-#[derive(Clone, Copy)]
-pub(crate) enum Operation {
-    Get,
-    Set,
-    Delete,
-}
-
-impl Operation {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Get => "get",
-            Self::Set => "set",
-            Self::Delete => "delete",
-        }
-    }
-
-    pub(crate) fn redis_name(self) -> &'static str {
-        match self {
-            Self::Get => "GET",
-            Self::Set => "SET",
-            Self::Delete => "DEL",
-        }
-    }
-
-    /// Whether a reply that arrives after the caller's context stopped is
-    /// discarded as a timeout. The caller's budget is gone, so a read reply
-    /// is stale; a confirmed mutation is final and keeps its result.
-    pub(crate) fn is_read(self) -> bool {
-        match self {
-            Self::Get => true,
-            Self::Set | Self::Delete => false,
-        }
-    }
-}
-
-/// Why a command did not produce a usable success: the span's `error.type`
-/// and the `error_type` label of a failed series. Server text is never copied.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ErrorType {
-    /// The operation context stopped (its deadline, including
-    /// `command_timeout`, or caller cancellation, which a namespace records
-    /// as `cancelled`), a setup or probe bound elapsed, or the client
-    /// reported a timeout.
-    Timeout,
-    /// A transport failure, a closed link, or a connection generation that
-    /// retired under the command.
-    Io,
-    /// The server refused the credentials, including `WRONGPASS` and
-    /// `NOAUTH` replies to `HELLO`.
-    Auth,
-    Response,
-    Parse,
-    /// A local command slot refusal, which
-    /// `cache_command_admission_refused_total` counts apart, an unreadable
-    /// password file, a client that could not be rebuilt, or any other
-    /// redis-rs error kind.
-    Other,
-}
-
-impl ErrorType {
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Timeout => "timeout",
-            Self::Io => "io",
-            Self::Auth => "auth",
-            Self::Response => "response",
-            Self::Parse => "parse",
-            Self::Other => "other",
-        }
+fn operation_label(operation: Operation) -> &'static str {
+    match operation {
+        Operation::Get => "get",
+        Operation::Set => "set",
+        Operation::Delete => "delete",
     }
 }
 
@@ -195,7 +131,7 @@ impl NamespaceHistograms {
                 metrics::histogram!(
                     OPERATION_DURATION_METRIC,
                     "cache" => namespace,
-                    "operation" => operation.label(),
+                    "operation" => operation_label(operation),
                     "outcome" => outcome.label(),
                     "error_type" => error_label,
                 )
@@ -203,7 +139,7 @@ impl NamespaceHistograms {
                 metrics::histogram!(
                     OPERATION_DURATION_METRIC,
                     "cache" => namespace,
-                    "operation" => operation.label(),
+                    "operation" => operation_label(operation),
                     "outcome" => outcome.label(),
                 )
             }
@@ -272,7 +208,7 @@ impl<'a> OperationGuard<'a> {
         self.span.in_scope(|| {
             tracing::debug!(
                 cache.name = self.namespace,
-                cache.operation = self.operation.label(),
+                cache.operation = operation_label(self.operation),
                 error.type = label,
                 "cache_operation_failed"
             );
@@ -324,25 +260,4 @@ pub(crate) fn describe() {
         Unit::Count,
         "Periodic cache password file re-reads on an open connection, by outcome (unchanged, auth_accepted, read_failed, refresh_failed) and the reason of a refresh_failed"
     );
-}
-
-/// Bounded cause of a Redis client failure.
-pub(crate) fn error_type(error: &redis::RedisError) -> ErrorType {
-    if error.is_timeout() {
-        return ErrorType::Timeout;
-    }
-    // RESP3 authenticates inside `HELLO`, whose refusal is a plain server error.
-    if matches!(error.code(), Some("WRONGPASS" | "NOAUTH")) {
-        return ErrorType::Auth;
-    }
-    match error.kind() {
-        redis::ErrorKind::Io => ErrorType::Io,
-        redis::ErrorKind::AuthenticationFailed => ErrorType::Auth,
-        // redis-rs names only some server codes; `WRONGTYPE`, `OOM` and the
-        // other unnamed codes are `Extension`, still a server error reply.
-        redis::ErrorKind::Server(_) | redis::ErrorKind::Extension => ErrorType::Response,
-        redis::ErrorKind::Parse => ErrorType::Parse,
-        // InvalidClientConfig and every other kind stay `other`.
-        _ => ErrorType::Other,
-    }
 }
