@@ -267,7 +267,7 @@ impl From<&PreparedEvent> for PublishDomainEvent {
     fn from(event: &PreparedEvent) -> Self {
         Self {
             payload_base64: STANDARD.encode(event.payload()),
-            ..Self::with_text(event, event.outbox_text())
+            ..Self::with_text(event, &event.outbox_text())
         }
     }
 }
@@ -276,10 +276,10 @@ impl PublishDomainEvent {
     /// Only the fields whose serialized size does not depend on caller text.
     /// Empty strings do not allocate, so the preflight never clones that text.
     fn fixed_fields(event: &PreparedEvent) -> Self {
-        Self::with_text(event, OutboxText::default())
+        Self::with_text(event, &OutboxText::default())
     }
 
-    fn with_text(event: &PreparedEvent, text: OutboxText<'_>) -> Self {
+    fn with_text(event: &PreparedEvent, text: &OutboxText<'_>) -> Self {
         Self {
             format_version: FORMAT_VERSION,
             subject: text.subject.to_owned(),
