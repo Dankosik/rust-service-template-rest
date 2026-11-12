@@ -13,11 +13,11 @@
 //! message is counted with that failure and its handling time is the whole
 //! call, as grpc-go's interceptors count it.
 
-use std::collections::{HashMap, HashSet};
 use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Once, OnceLock, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
+use foldhash::{HashMap, HashSet};
 use futures_util::FutureExt as _;
 use opentelemetry::context::FutureExt as _;
 use tracing::Instrument as _;

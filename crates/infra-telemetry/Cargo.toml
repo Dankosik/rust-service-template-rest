@@ -15,6 +15,7 @@ workspace = true
 hotpath = ["dep:hotpath", "hotpath/hotpath", "hotpath/sqlx"]
 
 [dependencies]
+arrayvec = { workspace = true }
 enum-map = { workspace = true, features = ["derive"] }
 const-hex = { workspace = true }
 hotpath = { workspace = true, optional = true }

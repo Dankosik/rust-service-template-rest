@@ -1,11 +1,11 @@
 //! The worker side: endpoint-to-consumer bindings and the jobs handler that
 //! applies one retained delivery.
 
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::fmt;
 use std::sync::Arc;
 
+use foldhash::HashMap;
 use infra_jobs::{CompleteError, Handler, Job, JobError, KindsBuilder, Policy};
 use infra_postgres::{Tx, TxError, TxOptions, in_tx_until};
 

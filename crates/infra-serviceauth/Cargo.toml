@@ -23,6 +23,7 @@ derive_more = { workspace = true, features = ["debug", "display"] }
 http = { workspace = true, features = ["std"] }
 jsonwebtoken = { workspace = true, features = ["aws_lc_rs", "use_pem"] }
 metrics = { workspace = true }
+foldhash = { workspace = true, features = ["std"] }
 moka = { workspace = true, features = ["sync"] }
 secrecy = { workspace = true }
 serde = { workspace = true, features = ["std", "derive"] }

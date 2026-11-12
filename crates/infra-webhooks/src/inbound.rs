@@ -9,7 +9,6 @@
 mod maintenance;
 mod processing;
 
-use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -17,6 +16,7 @@ use std::time::SystemTime;
 use base64::display::Base64Display;
 use base64::engine::general_purpose::STANDARD;
 use bytes::Bytes;
+use foldhash::HashMap;
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue};
 use infra_jobs::{EnqueueError, EnqueueOptions, Enqueued, JobKind, enqueue};

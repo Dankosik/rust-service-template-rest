@@ -128,8 +128,10 @@ struct Inner {
     /// remembered token is decided by its window alone, as a full check would
     /// decide it (S14). It is not a replay cache (S5): nothing is refused for
     /// having been remembered. The cache bounds memory only; the window is
-    /// checked here on every hit.
-    remembered: Cache<Box<[u8]>, (Caller, Window)>,
+    /// checked here on every hit. Only a token whose signature verified is
+    /// inserted, so a caller cannot choose colliding keys; `SipHash` over the
+    /// whole token cost more than the rest of a hit.
+    remembered: Cache<Box<[u8]>, (Caller, Window), foldhash::quality::RandomState>,
 }
 
 impl fmt::Debug for Verifier {
@@ -167,7 +169,7 @@ impl Verifier {
                 .time_to_live(std::time::Duration::from_secs(
                     MAX_TOKEN_LIFETIME_SECONDS + 2 * LEEWAY_SECONDS,
                 ))
-                .build(),
+                .build_with_hasher(foldhash::quality::RandomState::default()),
         }))
     }
 

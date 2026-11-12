@@ -97,8 +97,6 @@ async-nats = { version = "=0.50.0", default-features = false }
 # The key type async-nats signs connection challenges with; the adapter signs
 # them itself for a credentials file it reads again on every connection.
 nkeys = { version = "0.4.5", default-features = false }
-# Seeded fast hasher for the event registry maps; hashbrown already uses it.
-foldhash = { version = "0.2.0", default-features = false }
 # template:end messaging:workspace-messaging-client
 # template:begin cache:workspace-cache-client
 redis = { version = "1.7.1", default-features = false }
@@ -206,6 +204,10 @@ derive-where = { version = "1.7.0", default-features = false }
 enum-map = { version = "3.1.0", default-features = false }
 const-hex = { version = "1.19.3", default-features = false }
 async-stream = { version = "0.3.6", default-features = false }
+# Seeded fast hasher for tables keyed by values the service admitted; hashbrown
+# already uses it (docs/backend-library-selection.md).
+foldhash = { version = "0.2.0", default-features = false }
+arrayvec = { version = "0.7.8", default-features = false }
 similar = { version = "2.7.0", default-features = false }
 itertools = { version = "0.15.0", default-features = false }
 axum-extra = { version = "0.12.6", default-features = false }
