@@ -191,7 +191,10 @@ The private `post_form(&self, fields, deadline)` uses the fixed endpoint, the
 owner's bounded token client and the absolute attempt deadline; it sends `application/x-www-form-urlencoded`
 (`url::form_urlencoded::Serializer`) with `Accept: application/json` for
 either grant and decodes one private serde `TokenResponse`. A 5xx or 429 token
-response is `Unavailable`; any other non-2xx is `Rejected`.
+response is `Unavailable`; any other non-2xx is `Rejected`. A received failure
+status keeps that classification if the body exceeds its limit or fails to
+read. Without a readable body, the registered error code is unknown.
+Deadline and cancellation errors take precedence over the response status.
 
 `Token` holds the private sensitive header and an optional Tokio monotonic expiry;
 one clock governs every expiry decision. A representable positive expiry
@@ -246,10 +249,9 @@ timeout, and future drop. Waiters and cache hits hold no permit. Cancellation
 of a waiter cannot free its leader's slot; a replacement leader undergoes
 admission anew. The semaphore is never closed or manually replenished.
 Refresh refusal keeps the usable token and retry spacing of thirty seconds plus
-an independently sampled zero-to-three-second spread. Eligible service-token
-refreshes similarly advance their start by a sampled share of at most one tenth
-of their lead, capped at thirty seconds; exchange and request-only tokens never
-schedule background refresh.
+an independently sampled zero-to-three-second spread. A separate sample shortens
+the service token's maximum refresh lead by at most one tenth, capped at thirty
+seconds. Exchange and request-only tokens never schedule background refresh.
 No detached replacement request or resource dispatch follows a refusal.
 
 The configured positive u32 is checked for `usize` conversion and
