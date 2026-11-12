@@ -6,7 +6,7 @@
 //! server span, HTTP metrics, problem completion, access log) → traceparent
 //! response header → in-flight admission (waits for a permit, then sheds; probes
 //! exempt) → opening context and deadline → panic recovery → body limit
-//! (tower-http) → extractor body limit → routes / 404 / 405
+//! → extractor body limit → routes / 404 / 405
 //!
 //! Every layer is applied with `Router::layer`, so the 404 and 405 fallbacks
 //! travel through the same chain. Cross-origin requests are fail-closed by
@@ -16,20 +16,23 @@
 use std::any::Any;
 use std::num::NonZeroU32;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use axum::Router;
+use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, MatchedPath, Request, State};
-use axum::http::header::X_CONTENT_TYPE_OPTIONS;
+use axum::http::header::{CONTENT_LENGTH, X_CONTENT_TYPE_OPTIONS};
 use axum::http::{HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum_tracing_opentelemetry::middleware::OtelInResponseLayer;
+use http_body::Body as _;
+use http_body_util::{BodyExt as _, LengthLimitError, Limited};
 use tokio::sync::Semaphore;
 use tower::ServiceBuilder;
 use tower::util::option_layer;
 use tower_http::catch_panic::CatchPanicLayer;
-use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::request_id::{PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
 
@@ -50,8 +53,8 @@ struct Admission {
 
 #[derive(Clone, Debug)]
 pub struct HardenOptions {
-    /// Request body ceiling; overflow answers 413. Applied both to tower-http's
-    /// `RequestBodyLimitLayer` and to axum's extractor `DefaultBodyLimit`;
+    /// Request body ceiling; overflow answers 413. Applied both to the
+    /// transport stream and to axum's extractor `DefaultBodyLimit`;
     /// axum's own default is independent, so omitting the extractor layer
     /// would keep a different ceiling than `http.max_body_bytes`.
     pub max_body_bytes: usize,
@@ -113,9 +116,10 @@ pub fn harden(routes: Router, options: &HardenOptions) -> Router {
             crate::context::opening,
         ))
         .layer(CatchPanicLayer::custom(panic_to_problem))
-        .map_response(normalize_body_limit_rejection)
-        .layer(RequestBodyLimitLayer::new(options.max_body_bytes))
-        .map_response(mark_downstream_413)
+        .layer(middleware::from_fn_with_state(
+            options.max_body_bytes,
+            limit_body,
+        ))
         .layer(DefaultBodyLimit::max(options.max_body_bytes));
 
     #[expect(
@@ -128,31 +132,37 @@ pub fn harden(routes: Router, options: &HardenOptions) -> Router {
     routes.layer(chain)
 }
 
-#[derive(Clone, Copy)]
-struct Downstream413;
-
-fn mark_downstream_413(mut response: Response) -> Response {
-    if response.status() == StatusCode::PAYLOAD_TOO_LARGE {
-        response.extensions_mut().insert(Downstream413);
+async fn limit_body(State(max_bytes): State<usize>, request: Request, next: Next) -> Response {
+    let declared = request
+        .headers()
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok()?.parse::<usize>().ok());
+    let limit = declared.unwrap_or(max_bytes);
+    if limit > max_bytes {
+        return body_too_large().into_response();
     }
-    response
-}
-
-fn normalize_body_limit_rejection<B>(mut response: axum::http::Response<B>) -> Response
-where
-    B: http_body::Body<Data = axum::body::Bytes> + Send + 'static,
-    B::Error: Into<axum::BoxError>,
-{
-    // Only tower-http's own early response bypasses the inner mapper.
+    if request.body().is_end_stream() {
+        return next.run(request).await;
+    }
+    let overflowed = Arc::new(AtomicBool::new(false));
+    let request = request.map(|body| {
+        let overflowed = Arc::clone(&overflowed);
+        Body::new(Limited::new(body, limit).map_err(move |error| {
+            if error.is::<LengthLimitError>() {
+                overflowed.store(true, Ordering::Relaxed);
+            }
+            error
+        }))
+    });
+    let response = next.run(request).await;
+    // Axum's raw extractors lose the cause when they render their 413.
     if response.status() == StatusCode::PAYLOAD_TOO_LARGE
-        && response
-            .extensions_mut()
-            .remove::<Downstream413>()
-            .is_none()
+        && overflowed.load(Ordering::Relaxed)
+        && response.extensions().get::<Problem>().is_none()
     {
         return body_too_large().into_response();
     }
-    response.map(axum::body::Body::new)
+    response
 }
 
 /// Admit a request once an in-flight permit is free. A request over the bound

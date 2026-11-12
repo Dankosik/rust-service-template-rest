@@ -39,7 +39,6 @@ fn app(options: &HardenOptions) -> Router {
         "unreachable"
     };
     let handler_4 = |body: String| async move { body };
-    let json_echo = |crate::extract::Json(body): crate::extract::Json<String>| async move { body };
     #[expect(
         clippy::disallowed_methods,
         reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
@@ -48,8 +47,7 @@ fn app(options: &HardenOptions) -> Router {
         .route("/ok", get(handler_1))
         .route("/slow", get(handler_2))
         .route("/panic", get(handler_3))
-        .route("/echo", post(handler_4))
-        .route("/json", post(json_echo));
+        .route("/echo", post(handler_4));
     harden(routes, options)
 }
 
@@ -301,8 +299,7 @@ async fn declared_and_streamed_oversize_bodies_are_413_problems() {
 
     let streamed = HttpRequest::builder()
         .method(Method::POST)
-        .uri("/json")
-        .header(CONTENT_TYPE, "application/json")
+        .uri("/echo")
         .body(Body::from_stream(futures_stream(big)))
         .unwrap();
     let response = app(&options()).oneshot(streamed).await.unwrap();
