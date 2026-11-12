@@ -6,6 +6,7 @@ use std::{
 };
 
 use reqwest::{header, redirect::Policy};
+use shared_rules::{rfc9110, uri};
 #[cfg(
     // template:begin oidc-introspection:authn-provider-fixture-cancel-feature
     any(feature = "test-support",
@@ -158,27 +159,16 @@ impl fmt::Debug for EndpointUrl {
 /// [`Url::parse`] silently drops whitespace and an empty userinfo, so the raw
 /// spelling is checked too.
 fn admit(raw: &str) -> Result<EndpointUrl, PreparationError> {
-    if raw
-        .bytes()
-        .any(|byte| byte.is_ascii_whitespace() || byte.is_ascii_control())
-    {
+    if uri::has_whitespace_or_control(raw) {
         return Err(invalid_url());
     }
     let url = Url::parse(raw).map_err(|_| invalid_url())?;
-    let authority = raw
-        .split_once("://")
-        .map(|(_, value)| {
-            value
-                .split_once(['/', '?', '#'])
-                .map_or(value, |(authority, _)| authority)
-        })
-        .unwrap_or_default();
     if url.scheme() != "https"
         || url.host().is_none()
         || !url.username().is_empty()
         || url.password().is_some()
         || url.fragment().is_some()
-        || authority.contains('@')
+        || uri::authority_has_userinfo(raw)
     {
         return Err(invalid_url());
     }
@@ -492,12 +482,7 @@ fn has_media_type(response: &reqwest::Response, expected: &str) -> bool {
         .headers()
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| {
-            value
-                .split(';')
-                .next()
-                .is_some_and(|type_| type_.trim().eq_ignore_ascii_case(expected))
-        })
+        .is_some_and(|value| rfc9110::media_type_is(value, expected))
 }
 
 /// A TLS acceptor for `host` and the root certificate that trusts it.
@@ -566,8 +551,10 @@ mod tests {
             "https://provider.example#fragment",
             " https://provider.example",
             "https://provider.example\n",
+            "https://@provider.example",
+            "https://provider.example/\u{a0}tenant",
         ] {
-            assert!(IssuerUrl::parse(invalid).is_err(), "{invalid}");
+            assert!(IssuerUrl::parse(invalid).is_err(), "{invalid:?}");
         }
     }
 

@@ -15,6 +15,8 @@ pub mod test_support;
 
 use std::{fmt, sync::Arc};
 
+use shared_rules::rfc7515;
+
 pub use source::{ReceiverTokens, SigningError, SigningOptions, TokenSource};
 pub use trust::{TrustError, TrustRegistry};
 pub use verify::{Caller, Failure, VERIFICATIONS_METRIC, Verifier};
@@ -109,7 +111,7 @@ impl JwtType {
     /// # Errors
     /// Returns [`InvalidJwtType`] outside RFC 6838 `restricted-name` syntax.
     pub fn parse(value: &str) -> Result<Self, InvalidJwtType> {
-        let short = Self::short(value).ok_or(InvalidJwtType)?;
+        let short = rfc7515::typ_subtype(value).ok_or(InvalidJwtType)?;
         let name = short.as_bytes();
         let restricted = |byte: &u8| byte.is_ascii_alphanumeric() || b"!#$&-^_.+".contains(byte);
         if (1..=127).contains(&name.len())
@@ -128,18 +130,7 @@ impl JwtType {
     }
 
     fn admits(&self, typ: &str) -> bool {
-        Self::short(typ).is_some_and(|short| short.eq_ignore_ascii_case(&self.0))
-    }
-
-    /// The value without an `application/` prefix; `None` for another type.
-    fn short(value: &str) -> Option<&str> {
-        match value.split_once('/') {
-            None => Some(value),
-            Some((top, rest)) if top.eq_ignore_ascii_case("application") && !rest.contains('/') => {
-                Some(rest)
-            }
-            Some(_) => None,
-        }
+        rfc7515::typ_subtype(typ).is_some_and(|subtype| subtype.eq_ignore_ascii_case(&self.0))
     }
 }
 

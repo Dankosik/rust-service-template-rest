@@ -119,11 +119,7 @@ pub(crate) fn admit_options(options: &Options) -> Result<Admitted, Configuration
     }
     // `Url::parse` silently strips tabs and newlines, so refuse them first with
     // the rule that actually failed.
-    if options
-        .token_url
-        .chars()
-        .any(|c| c.is_whitespace() || c.is_control())
-    {
+    if shared_rules::uri::has_whitespace_or_control(&options.token_url) {
         return error("token_url", "must not contain whitespace or controls");
     }
     let Ok(endpoint) = Url::parse(&options.token_url) else {

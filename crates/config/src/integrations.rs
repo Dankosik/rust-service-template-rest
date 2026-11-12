@@ -251,11 +251,7 @@ pub(crate) fn validate_integrations(
 impl GrpcClientConfig {
     fn validate(&self, prefix: &str) -> Result<(), ValidationError> {
         crate::validate::non_blank(&format!("{prefix}.destination"), &self.destination)?;
-        if self
-            .destination
-            .chars()
-            .any(|character| character.is_control() || character.is_whitespace())
-        {
+        if shared_rules::uri::has_whitespace_or_control(&self.destination) {
             return Err(ValidationError::new(
                 format!("{prefix}.destination"),
                 "must not contain whitespace or controls",
@@ -340,10 +336,7 @@ impl OAuthConfig {
 }
 
 fn validate_token_url(key: &str, token_url: &str) -> Result<(), ValidationError> {
-    if token_url
-        .chars()
-        .any(|character| character.is_whitespace() || character.is_control())
-    {
+    if shared_rules::uri::has_whitespace_or_control(token_url) {
         return Err(ValidationError::new(
             key,
             "must not contain whitespace or controls",

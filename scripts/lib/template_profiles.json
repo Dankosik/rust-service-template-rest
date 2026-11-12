@@ -795,7 +795,6 @@
     "remove_when_unselected": [
       "crates/config/src/integrations/tests.rs",
       "crates/infra-oauth2-client-credentials/",
-      "crates/shared-rules/src/uri.rs",
       "scripts/ci/test-integration-oauth.sh",
       "docs/decisions/outbound-machine-authentication-decisions.md"
     ],
@@ -805,10 +804,6 @@
         "ids": [
           "config-export"
         ]
-      },
-      {
-        "path": "crates/shared-rules/src/lib.rs",
-        "id": "shared-rules-uri"
       },
       {
         "path": "crates/config/src/integrations.rs",

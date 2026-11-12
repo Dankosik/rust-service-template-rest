@@ -30,9 +30,47 @@ fn split_last_dot(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
     Some((&bytes[..dot], &bytes[dot + 1..]))
 }
 
+/// The `application/` subtype a `typ` header value names, as written; `None`
+/// for a value under another top-level type. RFC 7515 §4.1.9 has a value
+/// without `/` read as if `application/` preceded it, and media type names
+/// ignore ASCII case, so callers compare the result with
+/// `eq_ignore_ascii_case`.
+#[must_use]
+pub fn typ_subtype(typ: &str) -> Option<&str> {
+    match typ.split_once('/') {
+        None => Some(typ),
+        Some((top, subtype))
+            if top.eq_ignore_ascii_case("application") && !subtype.contains('/') =>
+        {
+            Some(subtype)
+        }
+        Some(_) => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Compact, compact};
+    use super::{Compact, compact, typ_subtype};
+
+    #[test]
+    fn a_typ_names_its_application_subtype_with_or_without_the_prefix() {
+        assert_eq!(typ_subtype("at+jwt"), Some("at+jwt"));
+        assert_eq!(typ_subtype("application/at+jwt"), Some("at+jwt"));
+        assert_eq!(typ_subtype("APPLICATION/JWT"), Some("JWT"));
+        assert_eq!(typ_subtype(""), Some(""));
+    }
+
+    #[test]
+    fn a_typ_under_another_top_level_type_names_no_application_subtype() {
+        for typ in [
+            "text/jwt",
+            "application/at+jwt/x",
+            "/jwt",
+            "applications/jwt",
+        ] {
+            assert_eq!(typ_subtype(typ), None, "{typ}");
+        }
+    }
 
     #[test]
     fn a_compact_jws_has_three_parts_and_signs_the_first_two() {
