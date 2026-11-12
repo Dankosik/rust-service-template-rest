@@ -375,7 +375,7 @@ mod tests {
 
         std::assert_matches!(failure.error, RunError::InvalidDeadline(budget) if budget == Duration::MAX);
         assert_eq!(failure.report.before, None);
-        assert!(failure.report.applied.is_empty());
+        assert_eq!(failure.report.applied, Vec::<i64>::new());
     }
 
     #[test]
