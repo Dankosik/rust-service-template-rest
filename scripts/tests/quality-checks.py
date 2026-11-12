@@ -227,7 +227,7 @@ class Architecture(unittest.TestCase):
         self.assertTrue(self.verdict())
         self.policy["members"][provider]["allow_members"] = {
             feature: {"reason": "Orders adapter calls the orders use case",
-                      "authority": "docs/architecture/boundaries.md"}}
+                      "authority": "docs/repo-architecture.md"}}
         self.assertEqual([], self.verdict())
 
     def test_dependents_allowance_admits_only_listed_members(self):

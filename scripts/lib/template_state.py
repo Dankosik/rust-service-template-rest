@@ -100,15 +100,10 @@ REQUIRED_AUTHORITIES = frozenset(
         "quality/duplication-baseline.json",
         "quality/architecture.json",
         "docs/repo-architecture.md",
-        "docs/architecture/boundaries.md",
-        "docs/architecture/persistence.md",
-        "docs/project-structure-and-module-organization.md",
         "docs/validation/containers.md",
         "docs/validation/delivery.md",
         "docs/validation/postgres.md",
-        "docs/build-test-and-development-commands.md",
         "docs/ci-cd-production-ready.md",
-        "docs/configuration-source-policy.md",
     }
 )
 
@@ -862,21 +857,15 @@ _PROTECTED_MANIFEST_FILES = frozenset(
         "make/service.mk",
         "make/profile-postgres.mk",
         "docs/repo-architecture.md",
-        "docs/configuration-source-policy.md",
-        "docs/project-structure-and-module-organization.md",
-        "docs/build-test-and-development-commands.md",
         "docs/ci-cd-production-ready.md",
         "docs/railway-deployment-profile.md",
         "docs/production-contract.md",
-        "docs/first-production-feature.md",
-        "docs/guides/authentication.md",
         "docs/validation/postgres.md",
         "docs/validation/containers.md",
         "docs/validation/delivery.md",
         "make/source.mk",
         "scripts/ci/template-init-check.sh",
         "scripts/ci/initializer-matrix.py",
-        "docs/roadmap.md",
     }
 )
 _PROTECTED_MANIFEST_PREFIXES = (

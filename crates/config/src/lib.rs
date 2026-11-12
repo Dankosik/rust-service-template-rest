@@ -10,10 +10,9 @@
 //! process structure, such as the drain-plus-teardown tail against the grace
 //! period, stay in the composition root.
 //!
-//! The loader is [`config`](https://docs.rs/config) with `serde`; see
-//! `docs/configuration-source-policy.md` for why, and for what the
+//! The loader is [`config`](https://docs.rs/config) with `serde`; the
 //! variable-name and file pre-scans and the secrets directory in [`load()`]
-//! add that the crate does not.
+//! add what the crate does not.
 
 mod app;
 mod health;

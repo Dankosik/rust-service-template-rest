@@ -77,8 +77,8 @@ pub(super) async fn prepare(
                         "does not fit this platform",
                     )
                 })?;
-            // Checked even with the cache off: configuration-source-policy
-            // makes invalid cache options a startup error in either state.
+            // Checked even with the cache off: invalid cache options are a
+            // startup error in either state.
             let cache =
                 infra_bearerauthn::IntrospectionCacheOptions::try_new(*cache_capacity, *cache_ttl)
                     .map_err(|source| BootstrapError::AuthenticationPreparation {

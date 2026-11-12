@@ -162,7 +162,7 @@ Select commands from [`make/template.mk`](make/template.mk):
 | --- | --- |
 | One crate's behavior or tests | `make build` and `make test-package PKG=<crate>`, or `make test-changed PKGS="<crates>"` with the list `scripts/ci/affected-crates.sh` prints |
 | Several crates, `Cargo.toml`, `Cargo.lock`, or `rust-toolchain.toml` | `make build` and `make test` |
-| A claim about observed database behavior (transaction, lock, commit outcome, migration, or readiness) | Load the service-local persistence architecture and database validation owner, then run its required real-database proof |
+| A claim about observed database behavior (transaction, lock, commit outcome, migration, or readiness) | Load the service's database validation owner ([PostgreSQL validation](docs/validation/postgres.md) when retained), then run its required real-database proof |
 | Formatting or lint configuration | `make fmt-check` and `make lint` |
 | Documentation or agent instructions | Static consistency review; `make docs-check` proves every relative link and fragment resolves; `make check-instructions` for skills, roles, and their generated carriers |
 | Mixed or unclear surfaces | `make plan` shows the route the changed surfaces select; `make verify` runs it and records a receipt |
@@ -224,12 +224,11 @@ retain their boundaries.
 | Accepted work first enters another checkout | [Repository Boundaries](docs/spec-first-workflow/shared/repository-boundaries.md) |
 | Proven task closeout leaves execution-only artifacts or task-owned temporary resources, or scoped cleanup is requested | [Cleanup](docs/spec-first-workflow/shared/cleanup.md) |
 | Work adds, completes, or re-scopes a roadmap stage or its fixed decisions | The service's local roadmap or accepted delivery plan |
-| Crate ownership, dependency direction, request path, lifecycle, persistence, or an integration boundary can change | [Repository Architecture](docs/repo-architecture.md), then the one leaf it selects |
+| Crate ownership, dependency direction, request path, lifecycle, persistence, or an integration boundary can change | [Repository Architecture](docs/repo-architecture.md) |
 | A crate, binary, dependency, or CI gate is added or removed | [Repository Architecture](docs/repo-architecture.md), then the service's local contribution policy |
 | A non-obvious technical decision must survive the current session | The service's accepted decision artifact |
 | A change reverses a choice, or adopts a rejected alternative, that a decision artifact records | That record's reopen condition: proceed on evidence that it is met, or on the user's explicit request, and update the record in the same change; otherwise keep the decision |
 | Contribution, pull-request, or evidence expectations | The service's local contribution policy |
-| Configuration key, secret source, telemetry environment, or runtime budget changes | [Configuration Source Policy](docs/configuration-source-policy.md) |
 | Instructions, tools, roles, or skills change | [Prompt Maintenance](docs/prompt-maintenance.md); [Skill Authoring](docs/skill-authoring.md) for skills; then `make check-instructions` |
 | A prompt for another agent, session, phase, or native entry skill must be written | [Prompt Composition](docs/prompt-composition.md) |
 | A durable control, carrier, model, or effort must be chosen or operated | [Agent Harness](docs/agent-harness.md) |
@@ -277,7 +276,10 @@ in a crate root or `mod.rs` remain allowed; split such a module only when a
 change already restructures it.
 
 Agents are the only readers of this code, and the code is its own source of
-truth. Express a fact as a name, type, test, or assertion before a comment. A
+truth. Express a fact as a name, type, test, or assertion before a comment. The
+same rule governs documents: do not write a document that restates what code,
+the committed contract, or `make help` already shows. A document records only
+a decision's reason, an operator runbook, or a policy the code cannot state. A
 comment or doc comment records only what the code cannot show: the reason for
 a choice or a rejected alternative, an external constraint such as a protocol
 requirement or an upstream defect, or an invariant across items that no type

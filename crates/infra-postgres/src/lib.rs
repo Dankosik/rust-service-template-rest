@@ -9,8 +9,7 @@
 //! observation for the tables a profile cleans up ([`MaintenanceObserver`],
 //! [`CleanupPass`]). Owns no business rule and no process lifecycle: the
 //! composition root decides when the pool opens and closes, features decide
-//! what runs inside a transaction. Rationale and the decisions behind each
-//! budget: `docs/architecture/persistence.md`.
+//! what runs inside a transaction.
 
 mod credentials;
 mod dsn;

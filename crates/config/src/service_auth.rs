@@ -42,8 +42,7 @@ pub enum ServiceAuthConfig {
     },
 }
 
-/// Leaves trust and credential inputs out of `Debug`, as
-/// `docs/configuration-source-policy.md` requires.
+/// Leaves trust and credential inputs out of `Debug` so they never reach logs.
 impl std::fmt::Debug for ServiceAuthConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ServiceAuthConfig")

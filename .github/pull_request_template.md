@@ -8,7 +8,6 @@
 - [ ] Dependencies or toolchain changed (`Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`)
 - [ ] CI/CD workflow or quality gates changed (`.github/workflows/`, `Makefile`, `make/`)
 - [ ] Documentation or agent instructions changed (`docs/`, `AGENTS.md`, `README.md`)
-- [ ] Roadmap stage delivered or re-scoped (`docs/roadmap.md`)
 
 ## Test Evidence
 

@@ -4,9 +4,8 @@ Use this router for mixed surfaces or a verification claim beyond the
 ordinary local budget. [AGENTS.md](../AGENTS.md#validation-budget) owns
 ordinary local completion. This router selects existing commands; a file path,
 a domain label, or an available command does not create a local acceptance
-gate. `make/template.mk` owns command composition
-([Commands](build-test-and-development-commands.md) explains every target),
-and `scripts/ci/changed-surfaces.sh` is the one classifier CI and
+gate. `make/template.mk` owns command composition (`make help` lists every
+target), and `scripts/ci/changed-surfaces.sh` is the one classifier CI and
 `make verify` share.
 
 ## Ordinary local completion
@@ -31,7 +30,7 @@ does not make every available check mandatory locally.
 | --- | --- | --- |
 | OpenAPI document drift or compatibility | [Generated Contracts](validation/generated.md) | `make openapi-check`, `make openapi-breaking BASE_OPENAPI=<file>` |
 | Dependency advisories, licenses, unused dependencies, secrets, workflow security, image vulnerabilities | [Security](validation/security.md) | matching security target |
-| Bounded clone admission or declared crate direction | [Readability commands](build-test-and-development-commands.md#readability-and-crate-boundaries), [Boundary policy](architecture/boundaries.md#executable-dependency-policy) | `make duplication-check`, `make architecture-check`, `make quality-check-self-test`; source-only `make template-quality-projections` |
+| Bounded clone admission or declared crate direction | [`quality/architecture.json`](../quality/architecture.json), [`.jscpd.json`](../.jscpd.json) | `make duplication-check`, `make architecture-check`, `make quality-check-self-test`; source-only `make template-quality-projections` |
 | CI workflows, shell scripts, tool pins, Dockerfile lint, publication naming | [Delivery](validation/delivery.md) | matching delivery leaf |
 | Runtime image build, lifecycle, scan, or SBOM | [Containers](validation/containers.md) | `ALLOW_HEAVY=1 make runtime-image-build` and the required scenario |
 | Observed transaction, locking, commit-outcome, readiness, or migration behavior on a real PostgreSQL; the image's migration rehearsal | [PostgreSQL](validation/postgres.md) | `ALLOW_HEAVY=1 make test-integration-db`, `make migration-check`, `ALLOW_HEAVY=1 make migration-validate` |

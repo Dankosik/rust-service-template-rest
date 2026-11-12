@@ -274,7 +274,7 @@ classify() {
 		esac
 		case "${file}" in
 		.jscpd.json | quality/duplication-baseline.json | scripts/ci/duplication-check.py) mark duplication ;;
-		quality/architecture.json | scripts/ci/architecture-check.py | docs/architecture/boundaries.md) mark architecture ;;
+		quality/architecture.json | scripts/ci/architecture-check.py) mark architecture ;;
 		esac
 		# Database-backed proof: the adapter, the runner, the test crate and
 		# its fixtures, the compose file, and the scripts that drive them.
@@ -451,11 +451,9 @@ classify() {
 		scripts/ci/validation-lock.sh | scripts/ci/validation-lock.py | scripts/tests/validation-lock-test.py | \
 		.agents/* | AGENTS.md | CLAUDE.md | QWEN.md | Grok.md | opencode.json | \
 		.claude/* | .codex/* | .cursor/* | .qwen/* | .grok/* | .opencode/* | \
-		docs/repo-architecture.md | docs/architecture/* | docs/configuration-source-policy.md | docs/production-contract.md | \
-		docs/first-production-feature.md | docs/project-structure-and-module-organization.md | \
-		docs/backend-library-selection.md | docs/backend-utility-recipes.md | \
-		docs/build-test-and-development-commands.md | docs/ci-cd-production-ready.md | docs/railway-deployment-profile.md | .railway/* | \
-		docs/validation/* | docs/template-sync.md | docs/template-upgrade.md | docs/guides/* | docs/decisions/* | docs/alerting.md)
+		docs/repo-architecture.md | docs/production-contract.md | docs/backend-library-selection.md | \
+		docs/ci-cd-production-ready.md | docs/railway-deployment-profile.md | .railway/* | \
+		docs/validation/* | docs/template-sync.md | docs/template-upgrade.md | docs/decisions/* | docs/alerting.md)
 			mark module_initializer
 			;;
 		esac; fi
@@ -585,7 +583,7 @@ HOOK
 	for file in .jscpd.json quality/duplication-baseline.json scripts/ci/duplication-check.py; do
 		assert_case "${file}" "duplication" "architecture"
 	done
-	for file in quality/architecture.json scripts/ci/architecture-check.py docs/architecture/boundaries.md; do
+	for file in quality/architecture.json scripts/ci/architecture-check.py; do
 		assert_case "${file}" "architecture" "duplication"
 	done
 	for file in Cargo.toml Cargo.lock crates/health/Cargo.toml rust-toolchain.toml make/template.mk make/source.mk scripts/ci/template-init-check.sh scripts/tests/template-profile-projections.py .github/workflows/ci.yml scripts/ci/changed-surfaces.sh scripts/ci/verify.sh tools/versions.env scripts/tests/quality-checks.py; do
@@ -738,27 +736,12 @@ HOOK
 			"cargo_dependencies module_initializer initializer_runtime" \
 			"rust_source documentation"
 	done
-	assert_case docs/guides/authentication.md \
-		"documentation module_initializer" \
-		"rust_source cargo_dependencies initializer_runtime"
-	assert_case docs/guides/outbound-http.md \
-		"documentation module_initializer" \
-		"rust_source cargo_dependencies initializer_runtime"
 	assert_case docs/decisions/outbound-http-decisions.md \
 		"documentation module_initializer" \
 		"rust_source cargo_dependencies initializer_runtime"
 	assert_case test/fixtures/tls.rs \
 		"rust_source module_initializer initializer_runtime db_integration" \
 		"cargo_dependencies documentation"
-	assert_case docs/guides/http-idempotency.md \
-		"documentation module_initializer" \
-		"rust_source cargo_dependencies initializer_runtime"
-	assert_case docs/guides/background-jobs.md \
-		"documentation module_initializer" \
-		"rust_source cargo_dependencies initializer_runtime"
-	assert_case docs/architecture/async.md \
-		"documentation module_initializer" \
-		"rust_source cargo_dependencies initializer_runtime"
 	assert_case crates/service/tests/lifecycle.rs \
 		"rust_source" \
 		"cargo_dependencies documentation"
@@ -966,10 +949,7 @@ HOOK
 	assert_case lychee.toml \
 		"documentation module_initializer" \
 		"agent_instructions rust_source cargo_dependencies initializer_runtime"
-	assert_case docs/roadmap.md \
-		"documentation" \
-		"agent_instructions"
-	assert_case specs/rust-skills/research/synthesis.md \
+	assert_case specs/example/spec.md \
 		"documentation" \
 		"agent_instructions"
 	assert_case .github/pull_request_template.md \

@@ -14,7 +14,7 @@ only with that profile.
 ## Install
 
 1. Load the file through `rule_files` or a `PrometheusRule`, next to
-   [PostgreSQL maintenance](guides/postgres-maintenance.md) when that profile is kept.
+   `env/monitoring/postgres-maintenance.rules.yml` when the PostgreSQL profile is kept.
 2. Replace the scrape-job selector `job=~"service|jobs-worker"`, and the
    `absent(up{job="service"})` dead-man check, with your scrape job names:
    `sd 'service\|jobs-worker' 'orders-api|orders-worker' env/monitoring/service.rules.yml`.
@@ -180,8 +180,7 @@ minutes. Requests queue behind the pool, and latency alerts usually follow.
 Compare `db_client_connection_count{db_client_connection_state="used"}` with
 `db_client_connection_max`, and `postgres_transaction_duration_seconds` with
 its usual level: long transactions hold connections, more traffic needs more
-of them. Raise the pool only within the database's connection budget
-([operation budgets](operation-budgets.md)).
+of them. Raise the pool only within the database's connection budget.
 <!-- template:end postgres:docs-alerting-postgres-runbooks -->
 
 <!-- template:begin jobs:docs-alerting-jobs-runbooks -->
@@ -206,7 +205,8 @@ two-second statement timeout.
 
 Jobs failed permanently or exhausted their attempts, and stay failed until an
 operator acts. Read the failure in the `jobs-worker` logs, fix the cause, then
-[inspect and recover retained jobs](guides/background-jobs.md#inspect-and-recover-retained-jobs).
+inspect and recover retained jobs with the operator commands `jobs-worker --help`
+lists (`failed`, `inspect`, `redrive`, `discard`).
 <!-- template:end jobs:docs-alerting-jobs-runbooks -->
 
 <!-- template:begin messaging:docs-alerting-messaging-runbooks -->
@@ -215,6 +215,6 @@ operator acts. Read the failure in the `jobs-worker` logs, fix the cause, then
 Consumed events moved to the dead-letter stream: `reason` is `malformed`,
 `permanent` or `exhausted`. An `outcome` other than `accepted` means the
 dead-letter publication itself failed and the event is redelivered from the
-source. Fix the handler or the producer, then
-[recover the exact DLQ records](guides/durable-messaging.md#recover-one-exact-dlq-record).
+source. Fix the handler or the producer, then recover the exact DLQ records
+with the [`dlq_recovery` example](../crates/infra-messaging/examples/dlq_recovery.rs).
 <!-- template:end messaging:docs-alerting-messaging-runbooks -->
