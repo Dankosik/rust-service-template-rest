@@ -2,11 +2,9 @@
 //!
 //! An attempt holds one explicit `READ COMMITTED` transaction:
 //!
-//! 1. One statement checks the writer, takes the scope's transaction-scoped
-//!    advisory lock without waiting, and reads a live record. A live record
-//!    decides whatever the lock returned: equal fingerprints replay, different
-//!    ones mismatch. No record and no lock means another attempt holds the
-//!    scope.
+//! 1. One statement checks the writer and reads a live record. Equal
+//!    fingerprints replay, and different ones mismatch. Only a miss tries
+//!    to take the scope's transaction-scoped advisory lock without waiting.
 //! 2. With the lock and no record, a second statement reads again.
 //! 3. Only a record still missing in step 2 runs the work, then writes the
 //!    success record in the same transaction.
@@ -124,7 +122,7 @@ pub enum Attempted<C, R> {
     Replay(Record),
     /// A live record for a different request decided. The work did not run.
     Mismatch,
-    /// Another transaction holds the scope. The work did not run.
+    /// No live record was found and another transaction holds the lock key.
     InProgress,
 }
 
@@ -261,16 +259,16 @@ async fn arbitrate(
     scope: &ScopeKey,
     fingerprint: &Digest,
 ) -> Result<Option<Decision>, AttemptError> {
-    // Step 1. The lock is taken after the statement's snapshot, so a missing
-    // record with the lock still needs step 2. Advisory locks work on a
-    // standby too; a lock taken there ends with the refused transaction.
+    // Step 1. Advisory locks work on a standby too; a lock taken there ends
+    // with the refused transaction.
     let row = observed(
         "lock and read idempotency record",
         sqlx::query!(
             "SELECT \
              NOT pg_is_in_recovery() AND current_setting('transaction_read_only') = 'off' \
                  AS \"writable!\", \
-             pg_try_advisory_xact_lock($1) AS \"acquired!\", \
+             CASE WHEN r.scope_key IS NULL THEN pg_try_advisory_xact_lock($1) \
+                  ELSE FALSE END AS \"acquired!\", \
              r.fingerprint AS \"fingerprint?: Digest\", r.status AS \"status?\", \
              r.headers AS \"headers?: Vec<HeaderPair>\", \
              CASE WHEN r.fingerprint = $3 THEN r.body END AS body \
