@@ -305,7 +305,6 @@
       "crates/config/src/authn.rs",
       "crates/config/src/authn/",
       "crates/infra-http/src/authn.rs",
-      "crates/infra-grpc/src/authn.rs",
       "crates/service/src/bootstrap/authn.rs",
       "docs/guides/authentication.md"
     ],
@@ -818,7 +817,9 @@
     "markers": []
   },
   "grpc-authn": {
-    "remove_when_unselected": [],
+    "remove_when_unselected": [
+      "crates/infra-grpc/src/authn.rs"
+    ],
     "markers": [
       {"path": "crates/service/src/bootstrap/grpc.rs", "ids": ["bootstrap-grpc-verifier", "bootstrap-grpc-verifier-argument"]}
     ]
