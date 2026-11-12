@@ -21,13 +21,8 @@ use tokio_util::sync::DropGuard;
 
 /// Transfers one value through HTTP extensions, which require `Clone`:
 /// cloning the holder never clones the value, which one owner takes.
+#[derive_where::derive_where(Clone)]
 pub(crate) struct Handoff<T>(Arc<Mutex<Option<T>>>);
-
-impl<T> Clone for Handoff<T> {
-    fn clone(&self) -> Self {
-        Self(Arc::clone(&self.0))
-    }
-}
 
 impl<T> Handoff<T> {
     pub(crate) fn new(value: T) -> Self {

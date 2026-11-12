@@ -662,7 +662,7 @@ mod tests {
         let Err(ended) = failed else {
             panic!("a preparation panic must not return a handler");
         };
-        assert!(matches!(ended, Ended::Panic));
+        std::assert_matches!(ended, Ended::Panic);
         assert!(!ran.load(Ordering::Relaxed));
 
         let Ok(later) = prepare_handler(registered.dispatch.as_ref(), attempt(), b"false") else {

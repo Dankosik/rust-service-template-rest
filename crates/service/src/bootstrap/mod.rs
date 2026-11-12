@@ -741,10 +741,10 @@ mod tests {
             &mut serving,
         )
         .await;
-        assert!(matches!(
+        std::assert_matches!(
             result,
             Err(BootstrapError::Server(infra_http::ServerError::Bind { .. }))
-        ));
+        );
         assert!(!serving.admitted);
         let address = serving.app_listener.as_ref().unwrap().local_addr();
         let mut peer = tokio::net::TcpStream::connect(address).await.unwrap();

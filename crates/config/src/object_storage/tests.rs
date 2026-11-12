@@ -2,6 +2,7 @@ use super::*;
 use crate::LoadOptions;
 use crate::load::{Error, load_from};
 use crate::test_support::{BUILD, env, write};
+use std::assert_matches;
 
 fn railway() -> ObjectStorageConfig {
     ObjectStorageConfig {
@@ -267,20 +268,17 @@ fn object_storage_secret_in_a_file_is_refused() {
         env(&[]),
     )
     .unwrap_err();
-    assert!(
-        matches!(&err, Error::SecretInFile { key, .. } if key == "object_storage.secret_access_key"),
-        "{err}"
-    );
+    assert_matches!(&err, Error::SecretInFile { key, .. } if key == "object_storage.secret_access_key", "{err}");
 }
 
 #[test]
 fn object_storage_unknown_provider_fails_loading() {
-    assert!(matches!(
+    assert_matches!(
         load_from(
             &LoadOptions::default(),
             BUILD,
             env(&[("APP__OBJECT_STORAGE__PROVIDER", "minio")]),
         ),
         Err(Error::Deserialize(_))
-    ));
+    );
 }

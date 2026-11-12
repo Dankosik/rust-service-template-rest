@@ -98,8 +98,9 @@ async fn consumer_admission_checks_the_filter_for_handled_subjects_only() {
         .consumer(handles_elsewhere)
         .await
         .expect_err("a handler the filter can never reach refuses the consumer");
-    assert!(
-        matches!(refused, infra_messaging::MessagingError::Configuration(_)),
+    std::assert_matches!(
+        refused,
+        infra_messaging::MessagingError::Configuration(_),
         "{refused:?}"
     );
 
@@ -138,7 +139,7 @@ async fn durable_deleted_between_pulls_stops_the_consumer() {
     let failure = timeout(Duration::from_secs(10), handle.failed())
         .await
         .expect("a durable the broker reports missing must stop the consumer");
-    assert!(matches!(failure, ConsumerError::ConsumerLost));
+    std::assert_matches!(failure, ConsumerError::ConsumerLost);
 
     drop(handle);
     close(messaging).await;
@@ -182,16 +183,16 @@ async fn deleting_a_durable_with_a_waiting_batch_stops_the_consumer() {
         .delete_consumer_from_stream(&fixture.durable, &fixture.stream)
         .await
         .unwrap();
-    assert!(matches!(
+    std::assert_matches!(
         timeout(Duration::from_secs(10), handle.failed())
             .await
             .unwrap(),
         ConsumerError::ConsumerLost
-    ));
-    assert!(matches!(
+    );
+    std::assert_matches!(
         handle.finish(deadline()).await,
         Err(ConsumerError::ConsumerLost)
-    ));
+    );
     close(messaging).await;
     fixture.cleanup().await;
 }
@@ -257,17 +258,17 @@ async fn a_durable_replaced_between_full_batches_stops_before_another_handler() 
         .await
         .unwrap();
     release.cancel();
-    assert!(matches!(
+    std::assert_matches!(
         timeout(Duration::from_secs(10), handle.failed())
             .await
             .expect("a successful previous batch cannot hide replacement"),
         ConsumerError::ConsumerLost
-    ));
+    );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    assert!(matches!(
+    std::assert_matches!(
         handle.finish(deadline()).await,
         Err(ConsumerError::ConsumerLost)
-    ));
+    );
     close(messaging).await;
     fixture.cleanup().await;
 }

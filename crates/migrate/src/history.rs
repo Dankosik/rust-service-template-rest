@@ -233,7 +233,7 @@ mod tests {
         assert_eq!(versions(&[]).unwrap(), vec![first, second]);
         assert_eq!(versions(&[applied(first)]).unwrap(), vec![second]);
         assert_eq!(versions(&[applied(newer)]).unwrap(), vec![first, second]);
-        assert!(matches!(
+        std::assert_matches!(
             pending(
                 &migrator,
                 &[applied(first), applied(20_260_926_125_000), applied(second)]
@@ -241,8 +241,8 @@ mod tests {
             Err(PendingError::Migrate(MigrateError::VersionMissing(
                 20_260_926_125_000
             )))
-        ));
-        assert!(matches!(
+        );
+        std::assert_matches!(
             pending(
                 &migrator,
                 &[AppliedMigration {
@@ -251,7 +251,7 @@ mod tests {
                 }]
             ),
             Err(PendingError::Migrate(MigrateError::VersionMismatch(version))) if version == first
-        ));
+        );
 
         let empty = Migrator::with_migrations(Vec::new());
         assert_eq!(
@@ -271,10 +271,10 @@ mod tests {
             migration(duplicate, "first", MigrationType::Simple, false),
             migration(duplicate, "second", MigrationType::Simple, false),
         ]);
-        assert!(matches!(
+        std::assert_matches!(
             pending(&migrator, &[]),
             Err(PendingError::DuplicateVersion(version)) if version == duplicate
-        ));
+        );
     }
 
     #[test]

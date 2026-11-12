@@ -39,19 +39,19 @@ async fn tls_trust_and_hostname_failures_remain_transport_errors() {
         tls_server(&material, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
     let mut untrusted = TlsMaterial::new(FIXTURE_HOST);
     untrusted.root = material.untrusted_root.clone();
-    assert!(matches!(
+    std::assert_matches!(
         fixture_client(address, &untrusted)
             .execute(request(), deadline())
             .await,
         Err(Error::Transport { .. })
-    ));
+    );
     server.await.expect("untrusted fixture server succeeds");
 
     let material = TlsMaterial::new(FIXTURE_HOST);
     let (address, server) =
         tls_server(&material, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
     let client = fixture_client_for_host("different.fixture.test", address, &material, limits());
-    assert!(matches!(
+    std::assert_matches!(
         client
             .execute(
                 request_to("https://different.fixture.test/fixture"),
@@ -59,7 +59,7 @@ async fn tls_trust_and_hostname_failures_remain_transport_errors() {
             )
             .await,
         Err(Error::Transport { .. })
-    ));
+    );
     server.await.expect("hostname fixture server succeeds");
 }
 
@@ -99,7 +99,7 @@ async fn framed_and_streamed_bodies_obey_the_response_ceiling() {
                 b"ok"
             );
         } else {
-            assert!(matches!(result, Err(Error::ResponseBodyTooLarge)));
+            std::assert_matches!(result, Err(Error::ResponseBodyTooLarge));
         }
         server.await.expect("body fixture server succeeds");
     }
@@ -141,12 +141,12 @@ async fn parser_header_count_overflow_is_a_transport_error() {
         b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nX-Overflow: one\r\n\r\n",
     )
     .await;
-    assert!(matches!(
+    std::assert_matches!(
         fixture_client_with_limits(address, &material, parser_limit)
             .execute(request(), deadline())
             .await,
         Err(Error::Transport { .. })
-    ));
+    );
     server.await.expect("parser header fixture joins");
 }
 
@@ -194,12 +194,12 @@ async fn response_head_beyond_the_parser_buffer_is_a_transport_error() {
         .await
         .expect("head fixture completes within its budget");
     });
-    assert!(matches!(
+    std::assert_matches!(
         fixture_client(address, &material)
             .execute(request(), deadline())
             .await,
         Err(Error::Transport { .. })
-    ));
+    );
     server.await.expect("head fixture joins");
 }
 
@@ -235,7 +235,7 @@ async fn advertised_overflow_and_missing_exact_cap_eof_do_not_return_a_body() {
             .await
             .expect_err(name);
         match name {
-            "advertised overflow" => assert!(matches!(error, Error::ResponseBodyTooLarge)),
+            "advertised overflow" => std::assert_matches!(error, Error::ResponseBodyTooLarge),
             "missing exact-cap EOF"
             | "missing chunked EOF after exact-cap payload"
             | "malformed trailer after exact-cap payload" => {
@@ -260,7 +260,7 @@ async fn expired_deadline_refuses_before_network_work() {
     let expired = client
         .execute(request(), Instant::now() - Duration::from_millis(1))
         .await;
-    assert!(matches!(expired, Err(Error::Timeout)));
+    std::assert_matches!(expired, Err(Error::Timeout));
     assert!(
         tokio::time::timeout(Duration::from_millis(20), listener.accept())
             .await
@@ -346,12 +346,12 @@ async fn context_cancellation_ends_an_incomplete_buffered_body() {
         result = dispatched => result.expect("request observed"),
     }
     context.cancel();
-    assert!(matches!(
+    std::assert_matches!(
         tokio::time::timeout(Duration::from_millis(200), exchange)
             .await
             .expect("cancellation must end waiting before the local ceiling"),
         Err(Error::Cancelled)
-    ));
+    );
     server.abort();
     assert!(server.await.expect_err("fixture cancelled").is_cancelled());
 }
@@ -397,7 +397,7 @@ async fn setup_spends_the_fixed_parent_or_operation_end_before_dispatch() {
             .execute(request(), Instant::now() + Duration::from_secs(parent))
             .with_subscriber(subscriber)
             .await;
-        assert!(matches!(result, Err(Error::Timeout)), "{result:?}");
+        std::assert_matches!(result, Err(Error::Timeout), "{result:?}");
         assert!(
             tokio::time::timeout(Duration::from_millis(20), listener.accept())
                 .await
@@ -534,7 +534,7 @@ async fn ready_response_after_the_fixed_end_is_timeout() {
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(10)).await;
     let result = exchange.await;
-    assert!(matches!(result, Err(Error::Timeout)), "{result:?}");
+    std::assert_matches!(result, Err(Error::Timeout), "{result:?}");
 }
 
 /// A listener that completes no further handshakes: its accept queue is
@@ -631,12 +631,12 @@ async fn request_is_not_replayed_after_the_peer_received_it() {
         .await
         .expect("replay fixture is bounded")
     });
-    assert!(matches!(
+    std::assert_matches!(
         fixture_client(address, &material)
             .execute(request(), deadline())
             .await,
         Err(Error::Transport { .. })
-    ));
+    );
     assert!(
         !server.await.expect("replay fixture joins"),
         "request was replayed"

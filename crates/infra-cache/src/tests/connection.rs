@@ -358,10 +358,7 @@ async fn reliability_admission_bounds_connection_waits_without_cancelling_setup(
     let mut waiting_probe = probe.check();
     assert!(poll_once(waiting_probe.as_mut()).await.is_pending());
     let mut excess_probe = probe.check();
-    assert!(matches!(
-        poll_once(excess_probe.as_mut()).await,
-        Poll::Ready(Err(_))
-    ));
+    std::assert_matches!(poll_once(excess_probe.as_mut()).await, Poll::Ready(Err(_)));
     assert_work_metrics(&recorder, 257, 2, 0);
     drop(waiting_probe);
     drop(waiting.pop());
@@ -430,10 +427,10 @@ async fn reliability_full_application_window_leaves_probe_and_maintenance_admiss
         ) => {}
     }
     let mut excess_probe = probe.check();
-    assert!(matches!(
+    std::assert_matches!(
         poll_once(excess_probe.as_mut()).await,
         Poll::Ready(Err(error)) if error.to_string() == "cache ping failed: other"
-    ));
+    );
     // Leave caller futures unpolled; the supervisor must progress independently
     // of all 257 occupied application/probe slots, even after the probe deadline.
     server

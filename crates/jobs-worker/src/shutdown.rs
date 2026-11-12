@@ -742,7 +742,7 @@ mod tests {
             Duration::from_secs(3)
         );
         assert!(background.tracker.is_empty());
-        assert!(matches!(observed_end.now_or_never(), Some(Err(_))));
+        std::assert_matches!(observed_end.now_or_never(), Some(Err(_)));
         assert!(
             background.failure().is_none(),
             "forced cancellation is not an unexpected return"

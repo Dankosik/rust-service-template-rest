@@ -2,6 +2,7 @@ use super::*;
 use crate::load::{Error, load_from, load_migration_from};
 use crate::test_support::{BUILD, env, write};
 use crate::{LoadOptions, LogFormat};
+use std::assert_matches;
 
 #[test]
 fn defaults_are_inert() {
@@ -125,7 +126,7 @@ fn migration_snapshot_keeps_the_rules_of_its_own_sections() {
         env(&[("APP__POSTGRES__BOGUS", "1")]),
     )
     .unwrap_err();
-    assert!(matches!(unknown, Error::Deserialize(_)), "{unknown}");
+    assert_matches!(unknown, Error::Deserialize(_), "{unknown}");
 
     let unknown_source = load_migration_from(
         &LoadOptions::default(),
@@ -133,10 +134,7 @@ fn migration_snapshot_keeps_the_rules_of_its_own_sections() {
         env(&[("APP__POSTGRES__SESSION_BUDGETS", "pooler")]),
     )
     .unwrap_err();
-    assert!(
-        matches!(unknown_source, Error::Deserialize(_)),
-        "{unknown_source}"
-    );
+    assert_matches!(unknown_source, Error::Deserialize(_), "{unknown_source}");
 
     let unbounded = load_migration_from(
         &LoadOptions::default(),
@@ -144,10 +142,7 @@ fn migration_snapshot_keeps_the_rules_of_its_own_sections() {
         env(&[("APP__POSTGRES__MIGRATION_DEADLINE", "25h")]),
     )
     .unwrap_err();
-    assert!(
-        matches!(&unbounded, Error::Validate(error) if error.key == "postgres.migration_deadline"),
-        "{unbounded}"
-    );
+    assert_matches!(&unbounded, Error::Validate(error) if error.key == "postgres.migration_deadline", "{unbounded}");
 
     let missing_dsn = load_migration_from(
         &LoadOptions::default(),
@@ -155,10 +150,7 @@ fn migration_snapshot_keeps_the_rules_of_its_own_sections() {
         env(&[("APP__POSTGRES__ENABLED", "true")]),
     )
     .unwrap_err();
-    assert!(
-        matches!(&missing_dsn, Error::Validate(error) if error.key == "postgres.dsn"),
-        "{missing_dsn}"
-    );
+    assert_matches!(&missing_dsn, Error::Validate(error) if error.key == "postgres.dsn", "{missing_dsn}");
 
     let dir = tempfile::tempdir().unwrap();
     let leaked = write(
@@ -175,5 +167,5 @@ fn migration_snapshot_keeps_the_rules_of_its_own_sections() {
         env(&[]),
     )
     .unwrap_err();
-    assert!(matches!(err, Error::SecretInFile { .. }), "{err}");
+    assert_matches!(err, Error::SecretInFile { .. }, "{err}");
 }

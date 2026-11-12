@@ -1,5 +1,3 @@
-use std::fmt;
-
 use secrecy::{ExposeSecret as _, SecretString};
 use tokio::sync::Semaphore;
 use url::Url;
@@ -29,7 +27,8 @@ impl From<Algorithm> for jsonwebtoken::Algorithm {
 }
 
 /// Immutable composition input. Secrets come from the configuration snapshot.
-#[derive(Clone)]
+#[derive(Clone, derive_more::Debug)]
+#[debug("Options([REDACTED])")]
 pub struct Options {
     /// The token endpoint URL; must be HTTPS without userinfo or fragment and
     /// must not contain whitespace or control characters.
@@ -55,12 +54,6 @@ pub struct Options {
     /// Maximum simultaneous token attempts shared by both grants. Must be
     /// positive and supported as a semaphore permit count on this target.
     pub provider_concurrency: u32,
-}
-
-impl fmt::Debug for Options {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("Options([REDACTED])")
-    }
 }
 
 /// Options [`admit_options`] accepted, in the form

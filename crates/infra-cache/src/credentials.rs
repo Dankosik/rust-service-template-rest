@@ -10,20 +10,14 @@ use crate::CacheError;
 
 const DEFAULT_USER: &str = "default";
 
+#[derive(derive_more::Debug)]
+#[debug("PasswordFile {{ .. }}")]
 pub(crate) struct PasswordFile {
     path: PathBuf,
     username: String,
     /// One permit, held by a blocking read until it ends, including one whose
     /// caller stopped waiting.
     reading: Arc<Semaphore>,
-}
-
-impl std::fmt::Debug for PasswordFile {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("PasswordFile")
-            .finish_non_exhaustive()
-    }
 }
 
 impl PasswordFile {

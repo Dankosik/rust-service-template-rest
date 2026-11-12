@@ -507,8 +507,9 @@ mod tests {
         assert!(check(8_000).is_ok());
         assert!(check(1).is_ok());
         for found_ms in [0, 8_001, -1] {
-            assert!(
-                matches!(check(found_ms), Err(ConnectError::SessionBudget { .. })),
+            std::assert_matches!(
+                check(found_ms),
+                Err(ConnectError::SessionBudget { .. }),
                 "{found_ms}"
             );
         }
@@ -549,7 +550,7 @@ mod tests {
         assert_eq!(pool.size(), 0, "preparation must not open a connection");
         let started = std::time::Instant::now();
         let err = admit_pool(&pool, &options).await.unwrap_err();
-        assert!(matches!(err, ConnectError::Timeout { .. }), "{err}");
+        std::assert_matches!(err, ConnectError::Timeout { .. }, "{err}");
         assert!(started.elapsed() < ACQUIRE_TIMEOUT + Duration::from_secs(2));
         assert!(!err.to_string().contains("pw"), "{err}");
         assert!(

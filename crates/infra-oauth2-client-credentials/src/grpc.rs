@@ -19,7 +19,8 @@ use crate::{
 };
 
 /// A cloneable governed gRPC client with private machine credentials.
-#[derive(Clone)]
+#[derive(Clone, derive_more::Debug)]
+#[debug("grpc::AuthenticatedClient([REDACTED])")]
 pub struct AuthenticatedClient {
     credentials: Credentials,
     resource: Client,
@@ -34,12 +35,6 @@ impl AuthenticatedClient {
     pub fn require_on_behalf_of(mut self) -> Self {
         self.subject_required = true;
         self
-    }
-}
-
-impl std::fmt::Debug for AuthenticatedClient {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("grpc::AuthenticatedClient([REDACTED])")
     }
 }
 

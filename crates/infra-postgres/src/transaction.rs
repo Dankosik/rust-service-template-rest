@@ -437,13 +437,13 @@ mod tests {
     fn commit_classification_by_sqlstate() {
         for code in ["23505", "23503", "40001", "40P01"] {
             let err = classify_commit(crate::error::tests::database(code));
-            assert!(matches!(err, TxError::CommitFailed(_)), "{code}");
+            std::assert_matches!(err, TxError::CommitFailed(_), "{code}");
         }
         for code in ["40003", "25P02", "57014", "08006", "XX000"] {
             let err = classify_commit(crate::error::tests::database(code));
-            assert!(matches!(err, TxError::CommitUnknown(_)), "{code}");
+            std::assert_matches!(err, TxError::CommitUnknown(_), "{code}");
         }
         let err = classify_commit(sqlx::Error::Io(std::io::Error::other("reset")));
-        assert!(matches!(err, TxError::CommitUnknown(_)), "{err}");
+        std::assert_matches!(err, TxError::CommitUnknown(_), "{err}");
     }
 }

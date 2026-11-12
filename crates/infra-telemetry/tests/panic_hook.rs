@@ -118,8 +118,8 @@ fn emit_panics(format: &str) {
         .join();
     std::panic::set_hook(original_hook);
     assert!(literal.is_err() && formatted.is_err() && owned.is_err() && nonstring.is_err());
-    assert!(matches!(
+    std::assert_matches!(
         logger.shutdown(Instant::now() + Duration::from_secs(1)),
         LoggerShutdown::Completed(_)
-    ));
+    );
 }

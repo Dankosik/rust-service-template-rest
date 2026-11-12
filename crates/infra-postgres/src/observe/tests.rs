@@ -159,7 +159,7 @@ fn a_transaction_that_gets_no_connection_records_its_wait_and_its_outcome() {
                 .acquire_timeout(Duration::from_millis(50))
                 .connect_lazy_with(dsn.connect_options());
             let result: Result<(), TxError> = in_tx(&pool, async |_tx| Ok(())).await;
-            assert!(matches!(result, Err(TxError::Acquire(_))), "{result:?}");
+            std::assert_matches!(result, Err(TxError::Acquire(_)), "{result:?}");
         });
         // A transaction dropped before it ended.
         drop(TransactionObservation::start(Span::none()));
@@ -197,7 +197,7 @@ fn acquire_until_waits_for_the_deadline_not_for_the_pool_timeout() {
 
         let started = tokio::time::Instant::now();
         let waited = acquire_until(&pool, "test", started + Duration::from_millis(400)).await;
-        assert!(matches!(waited, Err(sqlx::Error::PoolTimedOut)));
+        std::assert_matches!(waited, Err(sqlx::Error::PoolTimedOut));
         assert!(
             started.elapsed() >= Duration::from_millis(400),
             "the wait outlasts the pool's {:?} timeout: {:?}",
@@ -211,7 +211,7 @@ fn acquire_until_waits_for_the_deadline_not_for_the_pool_timeout() {
             .connect_lazy_with(dsn.connect_options());
         let started = tokio::time::Instant::now();
         let cut = acquire_until(&patient, "test", started + Duration::from_millis(100)).await;
-        assert!(matches!(cut, Err(sqlx::Error::PoolTimedOut)));
+        std::assert_matches!(cut, Err(sqlx::Error::PoolTimedOut));
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "{:?}",
@@ -225,8 +225,9 @@ fn acquire_until_waits_for_the_deadline_not_for_the_pool_timeout() {
             async |_tx| Ok(()),
         )
         .await;
-        assert!(
-            matches!(result, Err(TxError::Acquire(sqlx::Error::PoolTimedOut))),
+        std::assert_matches!(
+            result,
+            Err(TxError::Acquire(sqlx::Error::PoolTimedOut)),
             "{result:?}"
         );
     });

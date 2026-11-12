@@ -208,7 +208,8 @@ const fn serialize_failed(error: serde_json::Error) -> OutboundError {
 }
 
 /// Worker side: one endpoint's destination, transport client and signing keys.
-#[derive(Clone)]
+#[derive(Clone, derive_more::Debug)]
+#[debug("Endpoint([REDACTED])")]
 pub struct Endpoint {
     destination: Url,
     client: Client,
@@ -270,13 +271,9 @@ fn is_admissible(destination: &Url) -> bool {
         && destination.fragment().is_none()
 }
 
-impl fmt::Debug for Endpoint {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("Endpoint([REDACTED])")
-    }
-}
-
 /// Delivery handler over the worker's startup snapshot of endpoints.
+#[derive(derive_more::Debug)]
+#[debug("Dispatcher([REDACTED])")]
 pub struct Dispatcher {
     endpoints: BTreeMap<String, Endpoint>,
 }
@@ -330,12 +327,6 @@ impl Handler<Delivery> for Dispatcher {
             .execute_with_context(request, &job.context())
             .await;
         classify_response(endpoint_id, response, SystemTime::now())
-    }
-}
-
-impl fmt::Debug for Dispatcher {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("Dispatcher([REDACTED])")
     }
 }
 
@@ -614,6 +605,7 @@ fn unix_timestamp(now: SystemTime) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use crate::test_metrics::CounterKeys;
+    use std::assert_matches;
     use std::time::{Duration, UNIX_EPOCH};
 
     use http::{HeaderMap, HeaderValue, header};
@@ -632,11 +624,9 @@ mod tests {
             "https://partner.example/events#fragment",
             "http://partner.example/events",
         ] {
-            assert!(
-                matches!(
-                    Endpoint::try_new(destination, ring()),
-                    Err(EndpointError::InvalidDestination)
-                ),
+            assert_matches!(
+                Endpoint::try_new(destination, ring()),
+                Err(EndpointError::InvalidDestination),
                 "{destination} must be rejected"
             );
         }
@@ -711,12 +701,11 @@ mod tests {
                 if extra == 0 {
                     assert!(result.is_ok(), "exact jobs limit must be admitted");
                 } else {
-                    assert!(matches!(
+                    assert_matches!(
                         result,
                         Err(super::OutboundError::Enqueue(
                             infra_jobs::EnqueueError::PayloadTooLarge { bytes }
-                        )) if bytes == expected_bytes
-                    ));
+                        )) if bytes == expected_bytes);
                 }
             }
         }
@@ -726,20 +715,20 @@ mod tests {
     async fn preflight_preserves_validation_priority_including_an_invalid_oversized_tail() {
         let outbound = super::Producer::new(["partner".to_owned()]);
         let content_type = format!("{}\n", "x".repeat(infra_jobs::MAX_PAYLOAD_BYTES));
-        assert!(matches!(
+        assert_matches!(
             outbound
                 .preflight("missing", super::MAX_BODY_BYTES + 1, &content_type)
                 .await,
             Err(super::OutboundError::BodyTooLarge)
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             outbound.preflight("missing", 0, &content_type).await,
             Err(super::OutboundError::UnknownEndpoint)
-        ));
-        assert!(matches!(
+        );
+        assert_matches!(
             outbound.preflight("partner", 0, &content_type).await,
             Err(super::OutboundError::InvalidContentType)
-        ));
+        );
     }
 
     #[test]
@@ -781,10 +770,7 @@ mod tests {
             })
             .expect("preflight reaches a verdict");
         assert!(notifications.0.load(Ordering::Relaxed) >= 1, "8 KiB yields");
-        assert!(matches!(
-            verdict,
-            Err(super::OutboundError::InvalidContentType)
-        ));
+        assert_matches!(verdict, Err(super::OutboundError::InvalidContentType));
     }
 
     #[test]

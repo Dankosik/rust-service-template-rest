@@ -2,6 +2,7 @@ use super::*;
 use crate::load::{Error, load_from};
 use crate::test_support::{BUILD, env, write};
 use crate::{Config, LoadOptions};
+use std::assert_matches;
 
 #[test]
 fn whitespace_only_private_key_is_refused() {
@@ -123,7 +124,7 @@ fn oauth_without_an_algorithm_fails_naming_the_key() {
         ]),
     )
     .unwrap_err();
-    assert!(matches!(&err, Error::Deserialize(_)), "{err}");
+    assert_matches!(&err, Error::Deserialize(_), "{err}");
     assert!(
         err.to_string()
             .contains("missing configuration field \"integrations.billing.oauth.algorithm\""),
@@ -210,13 +211,10 @@ fn oauth_exchange_cache_capacity_has_a_default_an_environment_form_and_a_range()
 
     for rejected in ["0", "65537"] {
         let err = load(Some(rejected)).unwrap_err();
-        assert!(
-            matches!(&err, Error::Validate(error) if error.key == "integrations.billing.oauth.exchange_cache_capacity" && error.message == format!("must be between 1 and 65536, got {rejected}")),
-            "{err}"
-        );
+        assert_matches!(&err, Error::Validate(error) if error.key == "integrations.billing.oauth.exchange_cache_capacity" && error.message == format!("must be between 1 and 65536, got {rejected}"), "{err}");
     }
     let err = load(Some("many")).unwrap_err();
-    assert!(matches!(&err, Error::Deserialize(_)), "{err}");
+    assert_matches!(&err, Error::Deserialize(_), "{err}");
     let rendered = err.to_string();
     assert!(
         rendered.contains(
@@ -307,7 +305,7 @@ fn oauth_provider_concurrency_rejects_invalid_scalars_without_echoing_values() {
     ] {
         for (file, environment) in [(Some(file), None), (None, Some(environment))] {
             let err = load_oauth_provider_concurrency(file, environment).unwrap_err();
-            assert!(matches!(&err, Error::Deserialize(_)), "{err}");
+            assert_matches!(&err, Error::Deserialize(_), "{err}");
             let rendered = err.to_string();
             assert!(
                 rendered.contains(
@@ -387,7 +385,7 @@ fn oauth_bad_algorithm_fails_without_echoing_the_value() {
         ]),
     )
     .unwrap_err();
-    assert!(matches!(&err, Error::Deserialize(_)), "{err}");
+    assert_matches!(&err, Error::Deserialize(_), "{err}");
     let rendered = err.to_string();
     assert!(
         rendered.contains(
@@ -419,7 +417,7 @@ fn oauth_client_secret_is_refused_as_an_unknown_key() {
         ]),
     )
     .unwrap_err();
-    assert!(matches!(&err, Error::Deserialize(_)), "{err}");
+    assert_matches!(&err, Error::Deserialize(_), "{err}");
     let rendered = err.to_string();
     assert!(
         rendered.contains("unknown field `client_secret`")
@@ -446,10 +444,7 @@ fn oauth_private_key_in_a_file_is_refused() {
         env(&[]),
     )
     .unwrap_err();
-    assert!(
-        matches!(&err, Error::SecretInFile { key, .. } if key == "integrations.billing.oauth.private_key"),
-        "{err}"
-    );
+    assert_matches!(&err, Error::SecretInFile { key, .. } if key == "integrations.billing.oauth.private_key", "{err}");
 }
 
 #[test]
@@ -480,10 +475,7 @@ fn oauth_invalid_values_fail_with_static_diagnostics() {
         ]),
     )
     .unwrap_err();
-    assert!(
-        matches!(&err, Error::Validate(error) if error.key == "integrations.billing.oauth.token_url" && error.message == "must use HTTPS"),
-        "{err}"
-    );
+    assert_matches!(&err, Error::Validate(error) if error.key == "integrations.billing.oauth.token_url" && error.message == "must use HTTPS", "{err}");
     let rendered = err.to_string();
     for value in [
         "identity.example/token",
@@ -524,7 +516,7 @@ fn oauth_invalid_types_have_static_key_diagnostics() {
         ]),
     )
     .unwrap_err();
-    assert!(matches!(&err, Error::Deserialize(_)), "{err}");
+    assert_matches!(&err, Error::Deserialize(_), "{err}");
     let rendered = err.to_string();
     assert!(
         rendered.contains(
@@ -591,10 +583,7 @@ fn oauth_scope_presence_and_client_id_validation_stays_private() {
         ]),
     )
     .unwrap_err();
-    assert!(
-        matches!(&err, Error::Validate(error) if error.key == "integrations.billing.oauth.scopes" && error.message == "must contain RFC 6749 scope tokens"),
-        "{err}"
-    );
+    assert_matches!(&err, Error::Validate(error) if error.key == "integrations.billing.oauth.scopes" && error.message == "must contain RFC 6749 scope tokens", "{err}");
     assert!(!err.to_string().contains("bad scope"), "{err}");
 
     let err = load_from(
@@ -609,10 +598,7 @@ fn oauth_scope_presence_and_client_id_validation_stays_private() {
         ]),
     )
     .unwrap_err();
-    assert!(
-        matches!(&err, Error::Validate(error) if error.key == "integrations.billing.oauth.client_id" && error.message == "cannot be empty"),
-        "{err}"
-    );
+    assert_matches!(&err, Error::Validate(error) if error.key == "integrations.billing.oauth.client_id" && error.message == "cannot be empty", "{err}");
 }
 
 #[test]
@@ -633,10 +619,7 @@ fn oauth_blank_new_required_keys_are_refused() {
         ]),
     )
     .unwrap_err();
-    assert!(
-        matches!(&err, Error::Validate(error) if error.key == "integrations.billing.oauth.private_key" && error.message == "is required when integrations.billing.oauth is set; set APP__INTEGRATIONS__BILLING__OAUTH__PRIVATE_KEY"),
-        "{err}"
-    );
+    assert_matches!(&err, Error::Validate(error) if error.key == "integrations.billing.oauth.private_key" && error.message == "is required when integrations.billing.oauth is set; set APP__INTEGRATIONS__BILLING__OAUTH__PRIVATE_KEY", "{err}");
 
     let err = load_from(
         &LoadOptions::default(),
@@ -658,10 +641,7 @@ fn oauth_blank_new_required_keys_are_refused() {
         ]),
     )
     .unwrap_err();
-    assert!(
-        matches!(&err, Error::Validate(error) if error.key == "integrations.billing.oauth.key_id" && error.message == "cannot be empty"),
-        "{err}"
-    );
+    assert_matches!(&err, Error::Validate(error) if error.key == "integrations.billing.oauth.key_id" && error.message == "cannot be empty", "{err}");
 
     let err = load_from(
         &LoadOptions::default(),
@@ -684,10 +664,7 @@ fn oauth_blank_new_required_keys_are_refused() {
         ]),
     )
     .unwrap_err();
-    assert!(
-        matches!(&err, Error::Validate(error) if error.key == "integrations.billing.oauth.assertion_audience" && error.message == "cannot be empty"),
-        "{err}"
-    );
+    assert_matches!(&err, Error::Validate(error) if error.key == "integrations.billing.oauth.assertion_audience" && error.message == "cannot be empty", "{err}");
 }
 
 #[test]
@@ -718,10 +695,7 @@ fn oauth_whitespace_audience_is_refused() {
         ]),
     )
     .unwrap_err();
-    assert!(
-        matches!(&err, Error::Validate(error) if error.key == "integrations.billing.oauth.audience"),
-        "{err}"
-    );
+    assert_matches!(&err, Error::Validate(error) if error.key == "integrations.billing.oauth.audience", "{err}");
 }
 
 #[test]
@@ -751,8 +725,5 @@ fn oauth_userinfo_validation_stays_private() {
         ]),
     )
     .unwrap_err();
-    assert!(
-        matches!(&err, Error::Validate(error) if error.key == "integrations.billing.oauth.token_url" && error.message == "must not include userinfo"),
-        "{err}"
-    );
+    assert_matches!(&err, Error::Validate(error) if error.key == "integrations.billing.oauth.token_url" && error.message == "must not include userinfo", "{err}");
 }

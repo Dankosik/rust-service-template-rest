@@ -13,7 +13,7 @@ mod verify;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 
-use std::{fmt, sync::Arc};
+use std::sync::Arc;
 
 use shared_rules::rfc7515;
 
@@ -35,7 +35,9 @@ fn unix_seconds() -> Option<u64> {
 /// A service's name in the trust domain: its tokens' `iss` and `sub`, and the
 /// audience it accepts. One to 63 lowercase ASCII letters, digits and
 /// hyphens, neither first nor last a hyphen (an RFC 1123 label).
-#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd, derive_more::Debug, derive_more::Display)]
+#[debug("{_0:?}")]
+#[display("{_0}")]
 pub struct CallerName(Arc<str>);
 
 /// A name outside the caller-name grammar. It never echoes the input.
@@ -79,23 +81,12 @@ impl From<CallerName> for Arc<str> {
     }
 }
 
-impl fmt::Debug for CallerName {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Debug::fmt(&*self.0, formatter)
-    }
-}
-
-impl fmt::Display for CallerName {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
-    }
-}
-
 /// The `typ` header that names one trust domain's service tokens, such as
 /// `example-svc+jwt` (RFC 8725 section 3.11). Compared as a media type:
 /// ASCII case-insensitively, with or without the `application/` prefix
 /// (RFC 7515 section 4.1.9). Tokens carry the short lowercase form.
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq, derive_more::Debug)]
+#[debug("{_0:?}")]
 pub struct JwtType(Arc<str>);
 
 /// A token type outside the media-type subtype grammar.
@@ -134,15 +125,10 @@ impl JwtType {
     }
 }
 
-impl fmt::Debug for JwtType {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Debug::fmt(&*self.0, formatter)
-    }
-}
-
 /// A `kid` this crate admits: 1 to 256 visible ASCII characters, so the
 /// registry and a signer cannot disagree on an invisible difference.
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq, derive_more::Debug)]
+#[debug("{_0:?}")]
 pub struct KeyId(Arc<str>);
 
 /// A key id outside the key-id grammar. It never echoes the input.
@@ -171,12 +157,6 @@ impl KeyId {
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
-    }
-}
-
-impl fmt::Debug for KeyId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Debug::fmt(&*self.0, formatter)
     }
 }
 

@@ -19,7 +19,6 @@ mod shutdown;
 mod signals;
 
 use std::ffi::OsString;
-use std::fmt;
 use std::process::ExitCode;
 
 use clap::Parser;
@@ -32,6 +31,8 @@ pub type BuildError = Box<dyn std::error::Error + Send + Sync + 'static>;
 /// handlers: each retained job kind and typed messaging handler. The worker
 /// decides which registered capabilities become active from the immutable
 /// configuration before it opens either dependency.
+#[derive(derive_more::Debug)]
+#[debug("Registration {{ .. }}")]
 pub struct Registration<'a> {
     // template:begin jobs:worker-registration-jobs
     pub jobs: infra_jobs::KindsBuilder,
@@ -113,12 +114,6 @@ impl<'a> Registration<'a> {
     #[must_use]
     pub fn shutdown(&self) -> CancellationToken {
         self.background.cancel.child_token()
-    }
-}
-
-impl fmt::Debug for Registration<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Registration").finish_non_exhaustive()
     }
 }
 
@@ -289,8 +284,9 @@ mod tests {
             &missing_file(),
             Box::new(|_| Err("registration must not run before configuration".into())),
         );
-        assert!(
-            matches!(started, Err(WorkerError::Load(_))),
+        std::assert_matches!(
+            started,
+            Err(WorkerError::Load(_)),
             "configuration must fail before registration"
         );
     }

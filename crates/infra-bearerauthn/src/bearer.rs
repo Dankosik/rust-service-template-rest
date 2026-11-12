@@ -1,22 +1,15 @@
 //! Strict RFC 6750 bearer-envelope parsing.
 
-use std::fmt;
-
 use shared_rules::rfc6750::{self, NoBearer};
 
 use crate::Failure;
 
 /// The accepted bearer token text. Its contents are intentionally opaque and
 /// its debug form is redacted.
-#[derive(Eq, PartialEq)]
+#[derive(Eq, PartialEq, derive_more::Debug)]
+#[debug("BearerToken([REDACTED])")]
 pub struct BearerToken<'a> {
     text: &'a str,
-}
-
-impl fmt::Debug for BearerToken<'_> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("BearerToken([REDACTED])")
-    }
 }
 
 impl<'a> BearerToken<'a> {

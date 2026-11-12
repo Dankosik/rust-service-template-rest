@@ -1,14 +1,10 @@
 //! Service token verification: one header and one payload parse, then the
 //! signature against the presenting caller's keys only.
 
-use std::{
-    borrow::Cow,
-    collections::HashMap,
-    fmt,
-    sync::{Arc, Mutex, PoisonError},
-};
+use std::{borrow::Cow, fmt, sync::Arc};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use moka::sync::Cache;
 use serde::{Deserialize, Deserializer, de};
 use shared_rules::{
     rfc6750::{self, NoBearer},
@@ -24,10 +20,7 @@ const LEEWAY_SECONDS: u64 = 30;
 /// plus [`LEEWAY_SECONDS`], and a caller handle signs anew after half of
 /// [`MAX_TOKEN_LIFETIME_SECONDS`], so a receiver holds about three entries per
 /// caller handle.
-const MAX_REMEMBERED: usize = 1024;
-
-/// Verified tokens by their bytes, with their caller and validity window.
-type Remembered = HashMap<Box<[u8]>, (Caller, Window)>;
+const MAX_REMEMBERED: u64 = 1024;
 
 /// Service token verification outcomes by closed reason.
 pub const VERIFICATIONS_METRIC: &str = "service_auth_verifications_total";
@@ -134,8 +127,9 @@ struct Inner {
     /// and on the audience, type and registry fixed for the process, so a
     /// remembered token is decided by its window alone, as a full check would
     /// decide it (S14). It is not a replay cache (S5): nothing is refused for
-    /// having been remembered.
-    remembered: Mutex<Remembered>,
+    /// having been remembered. The cache bounds memory only; the window is
+    /// checked here on every hit.
+    remembered: Cache<Box<[u8]>, (Caller, Window)>,
 }
 
 impl fmt::Debug for Verifier {
@@ -165,7 +159,15 @@ impl Verifier {
             jwt_type,
             trust,
             verified: metrics::counter!(VERIFICATIONS_METRIC, "outcome" => "success", "reason" => "verified"),
-            remembered: Mutex::new(HashMap::new()),
+            // An accepted token is past use by `exp + LEEWAY_SECONDS`, at most
+            // this long after it was remembered; the time bound lets expired
+            // entries leave before the size bound refuses new ones.
+            remembered: Cache::builder()
+                .max_capacity(MAX_REMEMBERED)
+                .time_to_live(std::time::Duration::from_secs(
+                    MAX_TOKEN_LIFETIME_SECONDS + 2 * LEEWAY_SECONDS,
+                ))
+                .build(),
         }))
     }
 
@@ -207,36 +209,21 @@ impl Verifier {
     /// Every check at `now`, without repeating the signature check for a
     /// token that already passed.
     fn verify_at(&self, token: &[u8], now: u64) -> Result<Caller, Reason> {
-        let mut remembered = self
-            .0
-            .remembered
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        if let Some((caller, window)) = remembered.get(token) {
+        if let Some((caller, window)) = self.0.remembered.get(token) {
             return match window.admits(now) {
-                Ok(()) => Ok(caller.clone()),
+                Ok(()) => Ok(caller),
                 Err(Reason::Expired) => {
-                    remembered.remove(token);
+                    self.0.remembered.invalidate(token);
                     Err(Reason::Expired)
                 }
                 // A clock stepped back before the window; it may step forward.
                 Err(reason) => Err(reason),
             };
         }
-        drop(remembered);
         let (caller, window) = self.verify_uncached(token, now)?;
-        let mut remembered = self
-            .0
+        self.0
             .remembered
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        if remembered.len() >= MAX_REMEMBERED {
-            remembered.retain(|_, (_, window)| window.admits(now) != Err(Reason::Expired));
-            if remembered.len() >= MAX_REMEMBERED {
-                remembered.clear();
-            }
-        }
-        remembered.insert(token.into(), (caller.clone(), window));
+            .insert(token.into(), (caller.clone(), window));
         Ok(caller)
     }
 
@@ -458,6 +445,7 @@ fn present<'de, D: Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error>
 mod tests {
     use super::*;
     use crate::test_support::{TestKey, registry};
+    use std::assert_matches;
 
     const NOW: u64 = 1_800_000_000;
     const TYPE: &str = "example-svc+jwt";
@@ -576,12 +564,14 @@ mod tests {
                 Err(Reason::Audience)
             );
         }
-        assert!(case.verifier.0.remembered.lock().unwrap().is_empty());
+        case.verifier.0.remembered.run_pending_tasks();
+        assert_eq!(case.verifier.0.remembered.entry_count(), 0);
         for index in 0..=MAX_REMEMBERED {
             let token = case.signed(|_, claims| claims["jti"] = index.into());
             assert!(case.verifier.verify_at(token.as_bytes(), NOW).is_ok());
         }
-        assert!(case.verifier.0.remembered.lock().unwrap().len() <= MAX_REMEMBERED);
+        case.verifier.0.remembered.run_pending_tasks();
+        assert!(case.verifier.0.remembered.entry_count() <= MAX_REMEMBERED);
     }
 
     #[test]
@@ -855,11 +845,9 @@ mod tests {
         );
         assert_eq!(case.check(&tampered), Err(Reason::Signature));
         for malformed in ["", "a", "a.b", "a.b.c.d", "e30.e30.", "!.e30.AA"] {
-            assert!(
-                matches!(
-                    case.check(malformed),
-                    Err(Reason::Header | Reason::Claims | Reason::Signature)
-                ),
+            assert_matches!(
+                case.check(malformed),
+                Err(Reason::Header | Reason::Claims | Reason::Signature),
                 "{malformed}"
             );
         }

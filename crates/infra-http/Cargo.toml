@@ -36,6 +36,7 @@ infra-bearerauthn = { workspace = true }
 secrecy = { workspace = true }
 # template:end authn:http-authn-dependency
 # template:begin http-idempotency:http-idempotency-dependencies
+const-hex = { workspace = true }
 infra-idempotency-store = { workspace = true }
 infra-postgres = { workspace = true }
 sha2 = { workspace = true }

@@ -54,7 +54,7 @@ async fn acceptance_commits_three_intents_once_or_rolls_them_all_back(pool: PgPo
         Err(Error::Control)
     })
     .await;
-    assert!(matches!(rolled_back, Err(Error::Control)));
+    std::assert_matches!(rolled_back, Err(Error::Control));
     assert_eq!(counts(&pool).await, (0, 0, 0));
     assert_eq!(super::job_count(&pool).await, 0);
     assert!(
@@ -75,10 +75,10 @@ async fn acceptance_commits_three_intents_once_or_rolls_them_all_back(pool: PgPo
     let mut changed = prepared.operation().clone();
     changed.content = "Different immutable content".to_owned();
     let changed = PreparedRequest::try_new(changed, "reading.accepted").unwrap();
-    assert!(matches!(
+    std::assert_matches!(
         reading::accept(&admitted, &changed, &outbound, "reading").await,
         Err(Error::Conflict)
-    ));
+    );
     assert_eq!(super::job_count(&pool).await, 3);
     assert_eq!(
         reading::read_request(&admitted, prepared.operation())
@@ -137,7 +137,7 @@ async fn marker_arbitration_keeps_aggregate_atomic_and_returns_the_first_result(
         if commit {
             assert_eq!(first.unwrap(), second);
         } else {
-            assert!(matches!(first, Err(Error::Control)));
+            std::assert_matches!(first, Err(Error::Control));
         }
         assert_eq!(second.read_count, i64::try_from(index - 19).unwrap());
         assert_eq!(
@@ -158,10 +158,10 @@ async fn marker_arbitration_keeps_aggregate_atomic_and_returns_the_first_result(
     );
     let mut conflict = first.clone();
     conflict.content_version = 2;
-    assert!(matches!(
+    std::assert_matches!(
         reading::apply_effect(&admitted, Channel::Local, &conflict).await,
         Err(Error::Conflict)
-    ));
+    );
     assert_eq!(counts(&pool).await, (0, 2, 2));
     // Receiver channels have separate effects even for the same logical operation.
     reading::apply_effect(&admitted, Channel::Outbox, &first)

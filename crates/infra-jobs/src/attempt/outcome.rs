@@ -8,6 +8,7 @@ use crate::engine::{Operation, OperationError, Shared, backstop, observe_failure
 use crate::kind::{Disposition, JobError, MAX_ERROR_SUMMARY_BYTES, Policy};
 use crate::state::FailureReason;
 
+#[derive(Debug)]
 pub(super) enum Transition {
     Complete,
     Retry {
@@ -46,7 +47,7 @@ impl Transition {
 ///
 /// It carries only the values its statement binds. Labels stay with
 /// [`Transition`], so a timed-out retry is a [`Self::Retry`] here.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(super) enum Write<'a> {
     Retry {
         summary: &'a str,
@@ -247,6 +248,7 @@ pub(crate) fn complete_query(
     )
 }
 
+#[derive(Debug)]
 pub(super) enum Ended {
     Success,
     Error(JobError),
@@ -398,15 +400,15 @@ mod tests {
     #[test]
     #[expect(clippy::float_cmp, reason = "attempt^4 * 1e6 is exact in f64")]
     fn dispositions_preserve_cap_and_snooze() {
-        assert!(matches!(outcome(Ended::Success, 25), Transition::Complete));
-        assert!(matches!(
+        std::assert_matches!(outcome(Ended::Success, 25), Transition::Complete);
+        std::assert_matches!(
             outcome(Ended::Error(JobError::retryable("fail")), 25),
             Transition::Fail {
                 reason: FailureReason::Exhausted,
                 ..
             }
-        ));
-        assert!(matches!(
+        );
+        std::assert_matches!(
             outcome(
                 Ended::Error(
                     JobError::retry_after_at_least("at least", Duration::from_secs(2)).unwrap()
@@ -420,8 +422,8 @@ mod tests {
                 },
                 ..
             } if base_micros == 1_000_000.0
-        ));
-        assert!(matches!(
+        );
+        std::assert_matches!(
             outcome(
                 Ended::Error(
                     JobError::retry_after_at_least("at least", Duration::from_secs(2)).unwrap()
@@ -435,8 +437,8 @@ mod tests {
                 },
                 ..
             } if base_micros == 81_000_000.0
-        ));
-        assert!(matches!(
+        );
+        std::assert_matches!(
             outcome(
                 Ended::Error(JobError::snooze(Duration::from_micros(7)).unwrap()),
                 25,
@@ -445,42 +447,39 @@ mod tests {
                 delay_micros: 7,
                 ..
             }
-        ));
-        assert!(matches!(
+        );
+        std::assert_matches!(
             outcome(Ended::Error(JobError::unavailable("pool timed out")), 25),
             Transition::Snooze { delay_micros: 10_000_000, ref summary } if summary == "pool timed out"
-        ));
-        assert!(matches!(
+        );
+        std::assert_matches!(
             outcome(Ended::Panic, 1),
             Transition::Retry {
                 ref summary,
                 cause: RetryCause::FAILURE,
                 ..
             } if summary == "handler panicked"
-        ));
-        assert!(matches!(
+        );
+        std::assert_matches!(
             outcome(Ended::Timeout, 1),
             Transition::Retry {
                 cause: RetryCause::Timeout,
                 ..
             }
-        ));
-        assert!(matches!(
+        );
+        std::assert_matches!(
             outcome(Ended::Error(JobError::permanent("stop")), 1),
             Transition::Fail {
                 reason: FailureReason::Permanent,
                 ..
             }
-        ));
+        );
     }
 
     #[test]
     fn a_completed_attempt_selects_no_single_row_write() {
         assert!(write_of(&Transition::Complete).is_none());
-        assert!(matches!(
-            write_of(&Transition::Release),
-            Some(Write::Release)
-        ));
+        std::assert_matches!(write_of(&Transition::Release), Some(Write::Release));
     }
 
     #[test]
@@ -493,33 +492,30 @@ mod tests {
                 floor_micros: 2_000_000,
             },
         };
-        assert!(matches!(
+        std::assert_matches!(
             write_of(&retry),
             Some(Write::Retry {
                 summary,
                 base_micros,
                 floor_micros,
             }) if summary == "retry me" && base_micros == 81_000_000.0 && floor_micros == 2_000_000
-        ));
+        );
         let snooze = Transition::Snooze {
             delay_micros: 7,
             summary: String::new(),
         };
-        assert!(matches!(
-            write_of(&snooze),
-            Some(Write::Snooze { delay_micros: 7 })
-        ));
+        std::assert_matches!(write_of(&snooze), Some(Write::Snooze { delay_micros: 7 }));
         let fail = Transition::Fail {
             reason: FailureReason::Exhausted,
             summary: "done".to_owned(),
         };
-        assert!(matches!(
+        std::assert_matches!(
             write_of(&fail),
             Some(Write::Fail {
                 reason: FailureReason::Exhausted,
                 summary,
             }) if summary == "done"
-        ));
+        );
     }
 
     #[test]

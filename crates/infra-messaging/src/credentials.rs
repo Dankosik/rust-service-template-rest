@@ -61,22 +61,15 @@ impl CredentialsFileError {
     }
 }
 
-/// The admitted credentials file.
-#[derive(Clone)]
+/// The admitted credentials file. Neither the path nor the user it last read
+/// is formatted.
+#[derive(Clone, derive_more::Debug)]
+#[debug("CredentialsFile {{ .. }}")]
 pub(crate) struct CredentialsFile {
     path: Arc<Path>,
     /// The user JWT of the last answer. It names the user and is not the
     /// secret; the key seed is, and it is never kept.
     last_jwt: Arc<Mutex<String>>,
-}
-
-/// Neither the path nor the user it last read is formatted.
-impl std::fmt::Debug for CredentialsFile {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("CredentialsFile")
-            .finish_non_exhaustive()
-    }
 }
 
 impl CredentialsFile {

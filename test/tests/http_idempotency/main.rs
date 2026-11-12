@@ -356,10 +356,7 @@ async fn p1_a_held_key_refuses_duplicates_and_commits_one_effect(pool: PgPool) {
         for replica in [&replica_1, &replica_2] {
             for fingerprint in [INPUT, OTHER_INPUT] {
                 let duplicate = execute(replica, SCOPE, fingerprint, &record, &work).await;
-                assert!(
-                    matches!(duplicate, Ok(Attempted::InProgress)),
-                    "{duplicate:?}"
-                );
+                std::assert_matches!(duplicate, Ok(Attempted::InProgress), "{duplicate:?}");
             }
         }
         assert_eq!(work.runs(), 1, "no duplicate ran its work");
@@ -414,10 +411,7 @@ async fn p1_a_record_committed_under_the_work_is_kept_and_the_work_rolls_back(po
             },
         )
         .await;
-    assert!(
-        matches!(refused, Err(AttemptError::Internal)),
-        "{refused:?}"
-    );
+    std::assert_matches!(refused, Err(AttemptError::Internal), "{refused:?}");
     assert_eq!(count(&pool, EFFECTS).await, 0);
 
     // The other writer's record still decides the key.
@@ -455,8 +449,7 @@ async fn p2_rolled_back_work_leaves_no_effect_or_record_and_the_retry_executes(p
                 },
             )
             .await;
-        assert!(
-            matches!(outcome, Ok(Attempted::RolledBack(returned)) if returned == refusal),
+        std::assert_matches!(outcome, Ok(Attempted::RolledBack(returned)) if returned == refusal,
             "{outcome:?}"
         );
     }
@@ -587,9 +580,9 @@ async fn p3_corrupt_columns_are_integrity_failures_even_for_a_mismatch(pool: PgP
             )
             .await;
             if fingerprint == INPUT || mismatch_sees_it {
-                assert!(matches!(result, Err(AttemptError::Integrity)), "{result:?}");
+                std::assert_matches!(result, Err(AttemptError::Integrity), "{result:?}");
             } else {
-                assert!(matches!(result, Ok(Attempted::Mismatch)), "{result:?}");
+                std::assert_matches!(result, Ok(Attempted::Mismatch), "{result:?}");
             }
         }
     }
@@ -744,10 +737,7 @@ async fn p4_cleanup_drains_the_backlog_and_keeps_live_and_held_records(pool: PgP
             let removed = bounded("a cleanup run", Box::pin(replica_2.remove_expired())).await;
             // The executing attempt still holds its key.
             let duplicate = execute(&replica_2, SCOPE, INPUT, &record, &work).await;
-            assert!(
-                matches!(duplicate, Ok(Attempted::InProgress)),
-                "{duplicate:?}"
-            );
+            std::assert_matches!(duplicate, Ok(Attempted::InProgress), "{duplicate:?}");
             work.hold.release();
             removed
         },);
@@ -1026,10 +1016,7 @@ async fn p5_a_read_only_session_is_unavailable_even_with_a_live_record(pool: PgP
     let (reader_pool, reader) = replica(&dsn).await;
     for scope in [SCOPE, OTHER_CALLER] {
         let refused = execute(&reader, scope, INPUT, &record, &work).await;
-        assert!(
-            matches!(refused, Err(AttemptError::Unavailable)),
-            "{refused:?}"
-        );
+        std::assert_matches!(refused, Err(AttemptError::Unavailable), "{refused:?}");
     }
     assert_eq!(work.runs(), 1);
     assert_eq!(count(&pool, EFFECTS).await, 1);
@@ -1066,10 +1053,7 @@ async fn p6_an_aborted_statement_is_internal_and_the_same_key_can_retry(pool: Pg
             },
         )
         .await;
-    assert!(
-        matches!(aborted, Err(AttemptError::Internal)),
-        "{aborted:?}"
-    );
+    std::assert_matches!(aborted, Err(AttemptError::Internal), "{aborted:?}");
     assert_eq!(count(&pool, EFFECTS).await, 0);
     assert_eq!(records(&pool, SCOPE).await, 0);
 

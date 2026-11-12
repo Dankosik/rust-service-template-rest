@@ -24,6 +24,7 @@ workspace = true
 operation-context = { workspace = true }
 async-trait = { workspace = true }
 backon = { workspace = true, features = ["std"] }
+derive_more = { workspace = true, features = ["debug"] }
 health = { workspace = true }
 metrics = { workspace = true }
 redis = { workspace = true, features = [

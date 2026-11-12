@@ -255,10 +255,10 @@ async fn cpu_recipe_enforces_finite_input_and_returns_a_separately_owned_result(
         (vec![0; CPU_RECORD_BYTES - 1], 1),
         (vec![0; CPU_RECORD_BYTES], CPU_MAX_ROUNDS + 1),
     ] {
-        assert!(matches!(
+        std::assert_matches!(
             recipe.submit(&source, rounds, None),
             Err(CpuAdmissionError::InvalidInput)
-        ));
+        );
     }
     let source = [1_u128.to_le_bytes(), 0_u128.to_le_bytes()].concat();
     let result = recipe.submit(&source, 2, None).unwrap();
@@ -304,15 +304,15 @@ async fn cancelling_a_cpu_waiter_does_not_admit_replacement_or_complete_the_join
         .unwrap()
         .unwrap();
     drop(waiter);
-    assert!(matches!(
+    std::assert_matches!(
         recipe.submit(&1_u128.to_le_bytes(), 2, None),
         Err(CpuAdmissionError::Busy)
-    ));
+    );
     recipe.close();
-    assert!(matches!(
+    std::assert_matches!(
         recipe.submit(&1_u128.to_le_bytes(), 2, None),
         Err(CpuAdmissionError::Closed)
-    ));
+    );
     // This is an incomplete wait, not cancellation of the blocking closure.
     assert!(
         tokio::time::timeout(Duration::from_millis(1), recipe.wait())

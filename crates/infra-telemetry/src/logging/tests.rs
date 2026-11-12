@@ -59,10 +59,10 @@ pub(crate) fn capture(
 }
 
 fn drain(guard: LoggerGuard) {
-    assert!(matches!(
+    std::assert_matches!(
         guard.shutdown(std::time::Instant::now() + std::time::Duration::from_secs(2)),
         LoggerShutdown::Completed(_)
-    ));
+    );
 }
 
 #[derive(Clone, Copy)]

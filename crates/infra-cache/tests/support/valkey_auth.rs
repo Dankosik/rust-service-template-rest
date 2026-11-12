@@ -493,8 +493,7 @@ async fn replacement_password_is_authenticated_on_retained_and_new_connections()
         })
         .await
         .expect("old-password authentication timed out");
-        assert!(
-            matches!(old_reply, Value::ServerError(ref error) if error.code() == "WRONGPASS"),
+        std::assert_matches!(old_reply, Value::ServerError(ref error) if error.code() == "WRONGPASS",
             "retired password must fail new authentication"
         );
 

@@ -387,7 +387,7 @@ fn an_unreachable_port_is_unavailable_within_the_command_bound() {
             let namespace = cache.namespace("down");
             let started = Instant::now();
             let err = namespace.get(&unique_key()).await.unwrap_err();
-            assert!(matches!(err, Unavailable));
+            std::assert_matches!(err, Unavailable);
             assert!(started.elapsed() < TIMEOUT_BOUND);
         });
     });
@@ -424,7 +424,7 @@ fn a_silent_server_times_out_within_the_command_bound() {
             let namespace = cache.namespace("silent");
             let started = Instant::now();
             let err = namespace.get(&unique_key()).await.unwrap_err();
-            assert!(matches!(err, Unavailable));
+            std::assert_matches!(err, Unavailable);
             assert!(started.elapsed() < TIMEOUT_BOUND);
         });
     });
@@ -452,7 +452,7 @@ async fn a_proxy_outage_degrades_and_recovery_hits_again() {
     );
     proxy.stop().await;
     let err = namespace.get(&key).await.unwrap_err();
-    assert!(matches!(err, Unavailable));
+    std::assert_matches!(err, Unavailable);
     proxy.restart_plain(upstream).await;
     let deadline = Instant::now() + RECOVERY_DEADLINE;
     loop {
@@ -561,8 +561,9 @@ async fn a_rebuilt_cache_reads_the_replaced_ca_after_recovery() {
         .restart_tls(upstream, tls_acceptor(&replacement))
         .await;
 
-    assert!(
-        matches!(namespace.get(&key).await, Err(Unavailable)),
+    std::assert_matches!(
+        namespace.get(&key).await,
+        Err(Unavailable),
         "the constructed client must retain its original CA"
     );
     let rebuilt = Cache::start(options(
@@ -596,7 +597,7 @@ async fn an_untrusted_ca_is_unavailable() {
     ))
     .expect("admit untrusted CA file");
     let err = cache.namespace("tls").get(&unique_key()).await.unwrap_err();
-    assert!(matches!(err, Unavailable));
+    std::assert_matches!(err, Unavailable);
 }
 
 #[tokio::test]
@@ -645,7 +646,7 @@ async fn a_proxy_that_requires_a_client_certificate_refuses_a_client_without_one
         .get(&unique_key())
         .await
         .unwrap_err();
-    assert!(matches!(err, Unavailable));
+    std::assert_matches!(err, Unavailable);
 }
 
 fn observation_recorder() -> metrics_exporter_prometheus::PrometheusRecorder {

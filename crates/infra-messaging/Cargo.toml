@@ -37,6 +37,9 @@ required-features = ["integration"]
 workspace = true
 
 [dependencies]
+derive_more = { workspace = true, features = ["debug"] }
+enum-map = { workspace = true, features = ["derive"] }
+const-hex = { workspace = true }
 operation-context = { workspace = true }
 async-nats = { workspace = true, features = ["jetstream", "aws-lc-rs", "nkeys"] }
 async-trait = { workspace = true }

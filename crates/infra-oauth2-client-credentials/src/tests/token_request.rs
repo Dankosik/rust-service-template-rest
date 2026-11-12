@@ -1,4 +1,5 @@
 use super::*;
+use std::assert_matches;
 
 #[derive(serde::Deserialize)]
 struct DecodedAssertion {
@@ -223,10 +224,10 @@ async fn exchange_without_the_access_token_issued_type_is_refused() {
                 deadline(Duration::from_secs(10)),
             )
             .await;
-        assert!(matches!(
+        assert_matches!(
             result,
             Err(Error::Acquisition(AcquisitionError::InvalidResponse))
-        ));
+        );
     }
     fixture.finish().await;
 }
@@ -244,10 +245,10 @@ async fn tokens_that_cannot_form_a_header_are_refused_before_resource_dispatch()
             .http(fixture.resource_client())
             .execute(fixture.request(), deadline(Duration::from_secs(10)))
             .await;
-        assert!(matches!(
+        assert_matches!(
             result,
             Err(Error::Acquisition(AcquisitionError::InvalidResponse))
-        ));
+        );
     }
     assert_eq!(fixture.token_requests().len(), 2);
     assert!(fixture.resource_requests().is_empty());
@@ -299,10 +300,7 @@ async fn unrepresentable_service_and_exchanged_lifetimes_refuse_before_resource_
             .execute(request, deadline(Duration::from_secs(10)))
             .await
             .unwrap_err();
-        assert!(matches!(
-            error,
-            Error::Acquisition(AcquisitionError::InvalidResponse)
-        ));
+        assert_matches!(error, Error::Acquisition(AcquisitionError::InvalidResponse));
     }
     assert_eq!(fixture.token_requests().len(), 2);
     assert!(fixture.resource_requests().is_empty());
@@ -386,10 +384,9 @@ fn every_token_request_is_counted_once_under_its_grant_and_closed_outcome() {
                 };
                 let before_capacity = outbound_counts();
                 assert_ne!(before_capacity, [] as [String; 0]);
-                assert!(matches!(
+                assert_matches!(
                     dropped_client.execute(fixture.on_behalf_of_request("at-capacity"), far()).await,
-                    Err(Error::Acquisition(AcquisitionError::AtCapacity))
-                ));
+                    Err(Error::Acquisition(AcquisitionError::AtCapacity)));
                 assert_eq!(outbound_counts(), before_capacity);
                 let mut waiter = Box::pin(dropped_client.execute(fixture.request(), far()));
                 poll_pending(waiter.as_mut()).await;

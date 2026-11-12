@@ -500,13 +500,13 @@ mod tests {
         let waker = std::task::Waker::noop();
         let mut context = Context::from_waker(waker);
         let first = Pin::new(&mut body).poll_frame(&mut context);
-        assert!(matches!(first, Poll::Ready(Some(Ok(ref frame))) if frame.is_data()));
+        std::assert_matches!(first, Poll::Ready(Some(Ok(ref frame))) if frame.is_data());
         let second = Pin::new(&mut body).poll_frame(&mut context);
-        assert!(matches!(second, Poll::Ready(Some(Ok(ref frame))) if frame.is_trailers()));
-        assert!(matches!(
+        std::assert_matches!(second, Poll::Ready(Some(Ok(ref frame))) if frame.is_trailers());
+        std::assert_matches!(
             Pin::new(&mut body).poll_frame(&mut context),
             Poll::Ready(None)
-        ));
+        );
         assert!(body.is_end_stream());
         assert!(!mismatch.load(Ordering::Acquire));
     }

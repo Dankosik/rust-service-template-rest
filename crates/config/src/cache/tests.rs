@@ -1,3 +1,4 @@
+use std::assert_matches;
 use std::path::Path;
 
 use super::*;
@@ -197,10 +198,7 @@ fn cache_dsn_in_a_file_is_refused() {
         env(&[]),
     )
     .unwrap_err();
-    assert!(
-        matches!(&err, Error::SecretInFile { key, .. } if key == "cache.dsn"),
-        "{err}"
-    );
+    assert_matches!(&err, Error::SecretInFile { key, .. } if key == "cache.dsn", "{err}");
 }
 
 #[test]
@@ -271,12 +269,12 @@ fn cache_client_certificate_paths_are_set_from_the_environment_together() {
 
 #[test]
 fn cache_unknown_environment_key_fails_loading() {
-    assert!(matches!(
+    assert_matches!(
         load_from(
             &LoadOptions::default(),
             BUILD,
             env(&[("APP__CACHE__UNKNOWN", "x")]),
         ),
         Err(Error::Deserialize(_))
-    ));
+    );
 }

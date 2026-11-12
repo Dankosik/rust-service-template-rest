@@ -290,8 +290,7 @@ async fn silent_session_readback_rejects_admission_before_the_relay_is_released(
             .expect("verification and rejection cleanup are bounded")
             .expect("admission task completes")
             .unwrap_err();
-        assert!(
-            matches!(error, ConnectError::SessionVerificationTimeout { budget } if budget == Duration::from_secs(5)),
+        std::assert_matches!(error, ConnectError::SessionVerificationTimeout { budget } if budget == Duration::from_secs(5),
             "{error}"
         );
         assert_eq!(
@@ -334,8 +333,7 @@ async fn pending_session_admission_keeps_a_closeable_pool_and_bounds_its_wait(po
                 .await
                 .expect("session admission must have its own client deadline")
                 .unwrap_err();
-            assert!(
-                matches!(refused, ConnectError::SessionVerificationTimeout { budget } if budget == Duration::from_secs(5)),
+            std::assert_matches!(refused, ConnectError::SessionVerificationTimeout { budget } if budget == Duration::from_secs(5),
                 "{refused}"
             );
             assert!(started.elapsed() >= Duration::from_secs(5));
@@ -658,15 +656,13 @@ async fn budgets_the_server_carries_are_verified_when_the_pool_opens(pool: PgPoo
     let unlimited = pool_with_server_budgets(&dsn, Isolation::ServerDefault)
         .await
         .unwrap_err();
-    assert!(
-        matches!(
-            unlimited,
-            ConnectError::SessionBudget {
-                setting: "statement_timeout",
-                found_ms: 0,
-                ..
-            }
-        ),
+    std::assert_matches!(
+        unlimited,
+        ConnectError::SessionBudget {
+            setting: "statement_timeout",
+            found_ms: 0,
+            ..
+        },
         "{unlimited}"
     );
 
@@ -675,15 +671,13 @@ async fn budgets_the_server_carries_are_verified_when_the_pool_opens(pool: PgPoo
     let looser = pool_with_server_budgets(&dsn, Isolation::ServerDefault)
         .await
         .unwrap_err();
-    assert!(
-        matches!(
-            looser,
-            ConnectError::SessionBudget {
-                setting: "statement_timeout",
-                found_ms: 30_000,
-                ..
-            }
-        ),
+    std::assert_matches!(
+        looser,
+        ConnectError::SessionBudget {
+            setting: "statement_timeout",
+            found_ms: 30_000,
+            ..
+        },
         "{looser}"
     );
 
@@ -703,14 +697,12 @@ async fn budgets_the_server_carries_are_verified_when_the_pool_opens(pool: PgPoo
     let isolation = pool_with_server_budgets(&dsn, Isolation::ReadCommitted)
         .await
         .unwrap_err();
-    assert!(
-        matches!(
-            isolation,
-            ConnectError::SessionIsolation {
-                expected: "READ COMMITTED",
-                ..
-            }
-        ),
+    std::assert_matches!(
+        isolation,
+        ConnectError::SessionIsolation {
+            expected: "READ COMMITTED",
+            ..
+        },
         "{isolation}"
     );
 }
@@ -760,7 +752,7 @@ async fn through_a_transaction_pooler_the_published_budgets_reach_every_transact
         Err(AppError::Business)
     })
     .await;
-    assert!(matches!(rolled_back, Err(AppError::Business)));
+    std::assert_matches!(rolled_back, Err(AppError::Business));
     let swallowed: Result<(), AppError> = in_tx(&ours, async |tx| {
         let duplicate = sqlx::query("INSERT INTO pooled_items (id) VALUES (0)")
             .execute(&mut *tx)
@@ -769,8 +761,9 @@ async fn through_a_transaction_pooler_the_published_budgets_reach_every_transact
         Ok(())
     })
     .await;
-    assert!(
-        matches!(swallowed, Err(AppError::Tx(TxError::CommitFailed(_)))),
+    std::assert_matches!(
+        swallowed,
+        Err(AppError::Tx(TxError::CommitFailed(_))),
         "{swallowed:?}"
     );
     let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM pooled_items")
@@ -895,10 +888,10 @@ async fn acquisition_diagnostics_cover_transactions_history_and_readiness(pool: 
             migrate::verify_history(&ours),
             probe.check(),
         );
-        assert!(matches!(
+        std::assert_matches!(
             transaction,
             Err(AppError::Tx(TxError::Acquire(sqlx::Error::PoolTimedOut)))
-        ));
+        );
         assert_eq!(history, Err(HistoryError::Unavailable));
         assert_eq!(
             readiness.unwrap_err().to_string(),
@@ -980,10 +973,10 @@ async fn acquisition_diagnostics_cover_transactions_history_and_readiness(pool: 
             "execution failure is not an acquire timeout"
         );
         ours.close().await;
-        assert!(matches!(
+        std::assert_matches!(
             infra_postgres::acquire(&ours, "closed diagnostic").await,
             Err(sqlx::Error::PoolClosed)
-        ));
+        );
         assert!(
             events.take().is_empty(),
             "pool closure is not an acquire timeout"
@@ -1027,14 +1020,12 @@ async fn responsive_saturation_recovers_work_and_readiness_under_current_policy(
         .await
         .expect("current policy withdraws readiness after bounded saturation");
         let verdict = reader.verdict();
-        assert!(
-            matches!(
-                verdict,
-                Err(health::NotReady::ProbeFailed {
-                    probe: "postgres",
-                    ..
-                })
-            ),
+        std::assert_matches!(
+            verdict,
+            Err(health::NotReady::ProbeFailed {
+                probe: "postgres",
+                ..
+            }),
             "{verdict:?}"
         );
         // The server still answers through the held slot: this is pool
@@ -1115,7 +1106,7 @@ async fn in_tx_commits_on_ok_and_rolls_back_on_err(pool: PgPool) {
         Err(AppError::Business)
     })
     .await;
-    assert!(matches!(failed, Err(AppError::Business)), "{failed:?}");
+    std::assert_matches!(failed, Err(AppError::Business), "{failed:?}");
 
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM t")
         .fetch_one(&pool)
@@ -1156,7 +1147,7 @@ async fn a_finished_transaction_returns_its_connection_outside_any_transaction(p
         Err(AppError::Business)
     })
     .await;
-    assert!(matches!(failed, Err(AppError::Business)), "{failed:?}");
+    std::assert_matches!(failed, Err(AppError::Business), "{failed:?}");
     // Autocommit on the same connection, visible at once to another one:
     // neither the commit nor the queued rollback left it inside a
     // transaction.
@@ -1516,9 +1507,9 @@ async fn stalled_or_failed_return_preserves_the_operation_result_and_releases_ca
             proxy.release_ready();
         }
         if commit {
-            assert!(matches!(result, Ok(value) if value == id), "{result:?}");
+            std::assert_matches!(result, Ok(value) if value == id, "{result:?}");
         } else {
-            assert!(matches!(result, Err(AppError::Business)), "{result:?}");
+            std::assert_matches!(result, Err(AppError::Business), "{result:?}");
         }
         assert_eq!(
             ours.size(),
@@ -1648,11 +1639,9 @@ async fn an_edited_applied_migration_fails_in_the_history_stage(pool: PgPool) {
         .await
         .unwrap_err();
     assert_eq!(err.stage(), "history");
-    assert!(
-        matches!(
-            &err.error,
-            RunError::Migrate(MigrateError::VersionMismatch(20_260_918_000_001))
-        ),
+    std::assert_matches!(
+        &err.error,
+        RunError::Migrate(MigrateError::VersionMismatch(20_260_918_000_001)),
         "{err}"
     );
     assert_eq!(applied_count(&pool).await, 2, "nothing was re-applied");
@@ -1748,11 +1737,9 @@ async fn a_no_transaction_build_is_refused_until_its_invalid_index_is_dropped(po
     // The table migration commits; the unique build then fails on the
     // duplicate and leaves its index behind, invalid, with no history row.
     let err = migrate::run(&fixture, &options(&dsn)).await.unwrap_err();
-    assert!(
-        matches!(
-            &err.error,
-            RunError::Migrate(MigrateError::ExecuteMigration(_, 20_260_918_000_002))
-        ),
+    std::assert_matches!(
+        &err.error,
+        RunError::Migrate(MigrateError::ExecuteMigration(_, 20_260_918_000_002)),
         "{err}"
     );
     assert_eq!(applied_count(&pool).await, 1);
@@ -1760,11 +1747,10 @@ async fn a_no_transaction_build_is_refused_until_its_invalid_index_is_dropped(po
     // `IF NOT EXISTS` alone would now record the invalid index as built.
     let err = migrate::run(&fixture, &options(&dsn)).await.unwrap_err();
     assert_eq!(err.stage(), "execute", "{err}");
-    assert!(
-        matches!(
+    std::assert_matches!(
             &err.error,
             RunError::InvalidIndexes { version: 20_260_918_000_002, indexes } if indexes == "widgets_sku"
-        ),
+        ,
         "{err}"
     );
     assert_eq!(applied_count(&pool).await, 1);
@@ -1886,11 +1872,9 @@ async fn a_migration_that_fails_is_the_execute_stage(pool: PgPool) {
         .await
         .unwrap_err();
     assert_eq!(err.stage(), "execute", "{err}");
-    assert!(
-        matches!(
-            &err.error,
-            RunError::Migrate(MigrateError::ExecuteMigration(_, 20_260_918_000_001))
-        ),
+    std::assert_matches!(
+        &err.error,
+        RunError::Migrate(MigrateError::ExecuteMigration(_, 20_260_918_000_001)),
         "{err}"
     );
     assert_eq!(applied_count(&pool).await, 0);

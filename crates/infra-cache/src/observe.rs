@@ -127,7 +127,8 @@ impl Outcome {
 /// call would hash and look it up in the recorder instead. A handle stays
 /// bound to the recorder of its first use; bootstrap installs the recorder
 /// before it opens the cache.
-#[derive(Default)]
+#[derive(Default, derive_more::Debug)]
+#[debug("NamespaceHistograms {{ .. }}")]
 pub(crate) struct NamespaceHistograms {
     get: OutcomeHistograms,
     set: OutcomeHistograms,
@@ -163,14 +164,6 @@ impl ErrorHistograms {
             ErrorType::Parse => &self.parse,
             ErrorType::Other => &self.other,
         }
-    }
-}
-
-impl std::fmt::Debug for NamespaceHistograms {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("NamespaceHistograms")
-            .finish_non_exhaustive()
     }
 }
 

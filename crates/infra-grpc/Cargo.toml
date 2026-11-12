@@ -12,6 +12,9 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+async-stream = { workspace = true }
+derive-where = { workspace = true }
+derive_more = { workspace = true, features = ["debug"] }
 tokio-util = { workspace = true, features = ["rt"] }
 operation-context = { workspace = true }
 axum = { workspace = true }

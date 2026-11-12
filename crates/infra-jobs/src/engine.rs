@@ -658,7 +658,8 @@ impl Operation {
 }
 
 /// One flag per [`Operation`]: set after the first failure, clear after recovery.
-#[derive(Default)]
+#[derive(Default, derive_more::Debug)]
+#[debug("Failing {{ .. }}")]
 struct Failing {
     claim: AtomicBool,
     record: AtomicBool,
@@ -678,12 +679,6 @@ impl Failing {
             Operation::Sample => &self.sample,
             Operation::Listen => &self.listen,
         }
-    }
-}
-
-impl fmt::Debug for Failing {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.debug_struct("Failing").finish_non_exhaustive()
     }
 }
 
@@ -967,9 +962,9 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn backstop_bounds_an_unacknowledged_operation() {
-        assert!(matches!(
+        std::assert_matches!(
             backstop(std::future::pending::<Result<(), OperationError>>()).await,
             Err(OperationError::TimedOut)
-        ));
+        );
     }
 }

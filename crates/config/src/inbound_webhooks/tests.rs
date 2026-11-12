@@ -2,6 +2,7 @@ use super::{InboundWebhookEndpointConfig, InboundWebhooksConfig};
 use crate::LoadOptions;
 use crate::load::{Error, load_from};
 use crate::test_support::{BUILD, env, write};
+use std::assert_matches;
 
 fn with_endpoint(active_key: &str, previous_key: Option<&str>) -> InboundWebhooksConfig {
     let mut config = InboundWebhooksConfig::default();
@@ -136,7 +137,7 @@ fn inbound_webhooks_secrets_without_a_reference_are_not_echoed() {
     )
     .unwrap_err();
     let rendered = err.to_string();
-    assert!(matches!(&err, Error::Deserialize(_)), "{rendered}");
+    assert_matches!(&err, Error::Deserialize(_), "{rendered}");
     assert!(rendered.contains("inbound_webhooks.secrets"), "{rendered}");
     assert!(!rendered.contains("fixture-secret-value"), "{rendered}");
 }

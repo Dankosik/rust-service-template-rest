@@ -889,10 +889,10 @@ fn grpc_server_outputs_withhold_caller_identity_and_client_keeps_destination() {
             .block_on(provider.shutdown(tokio::time::Instant::now() + Duration::from_secs(5))),
         infra_telemetry::ProviderShutdown::Completed
     );
-    assert!(matches!(
+    std::assert_matches!(
         logger.shutdown(Instant::now() + Duration::from_secs(2)),
         infra_telemetry::LoggerShutdown::Completed(_)
-    ));
+    );
     let client_exported = client_collector.finish(&oidc.runtime);
     for witness in [
         "example.v1.EchoService/Unary",

@@ -264,10 +264,10 @@ mod tests {
         let prepared = PreparedEvent::prepare("events.created", &event, expected.len())
             .expect("payload at the exact ceiling is admitted");
         assert_eq!(prepared.payload().as_ref(), expected.as_bytes());
-        assert!(matches!(
+        std::assert_matches!(
             PreparedEvent::prepare("events.created", &event, expected.len() - 1),
             Err(EnvelopeError::PayloadTooLarge)
-        ));
+        );
     }
 
     #[test]
@@ -398,7 +398,7 @@ mod tests {
                 let prepared = result.expect("the time is in range");
                 crate::wire::encode_prepared(&prepared).expect("an accepted time encodes");
             } else {
-                assert!(matches!(result, Err(EnvelopeError::CreatedAtOutOfRange)));
+                std::assert_matches!(result, Err(EnvelopeError::CreatedAtOutOfRange));
             }
         }
     }

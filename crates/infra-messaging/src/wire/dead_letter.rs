@@ -12,6 +12,8 @@ use super::{
     valid_subject,
 };
 use crate::error::EnvelopeError;
+use enum_map::EnumMap;
+
 use crate::observe::{OutcomeLabel as _, outcome_label};
 use crate::prepared::PreparedEvent;
 
@@ -40,9 +42,8 @@ pub(crate) fn dead_letter_bounds(
     subject_bytes: usize,
     stream_bytes: usize,
 ) -> Option<DeadLetterBounds> {
-    let reason_bytes = DeadLetterReason::ALL
-        .iter()
-        .map(|reason| reason.label().len())
+    let reason_bytes = EnumMap::from_fn(|reason: DeadLetterReason| reason.label().len())
+        .into_values()
         .max()?;
     let expected_stream = async_nats::header::NATS_EXPECTED_STREAM;
     let additions = [
@@ -205,7 +206,7 @@ mod tests {
             let source_bytes = encoded_header_bytes(&original) + payload.len();
             let bounds =
                 dead_letter_bounds(source_bytes, subject.len(), "ACTUAL_DLQ".len()).unwrap();
-            for &reason in DeadLetterReason::ALL {
+            for (reason, ()) in EnumMap::<DeadLetterReason, ()>::default() {
                 let transferred =
                     dead_letter_headers(&original, &subject, "ACTUAL_DLQ", &transfer_id, reason);
                 assert!(encoded_header_bytes(&transferred) <= bounds.headers);

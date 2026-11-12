@@ -1,3 +1,4 @@
+use std::assert_matches;
 use std::num::NonZeroU32;
 
 use secrecy::SecretString;
@@ -129,10 +130,7 @@ fn webhooks_secret_in_a_file_is_refused() {
         env(&[]),
     )
     .unwrap_err();
-    assert!(
-        matches!(&err, Error::SecretInFile { key, .. } if key == "webhooks.endpoints.partner.secret"),
-        "{err}"
-    );
+    assert_matches!(&err, Error::SecretInFile { key, .. } if key == "webhooks.endpoints.partner.secret", "{err}");
 }
 
 #[test]
@@ -147,7 +145,7 @@ fn webhooks_secret_without_its_key_segment_is_not_echoed() {
     )
     .unwrap_err();
     let rendered = err.to_string();
-    assert!(matches!(&err, Error::Deserialize(_)), "{rendered}");
+    assert_matches!(&err, Error::Deserialize(_), "{rendered}");
     assert!(
         rendered.contains("webhooks.endpoints.partner"),
         "{rendered}"
@@ -176,10 +174,7 @@ fn webhooks_endpoint_id_the_environment_cannot_name_is_refused() {
         )]),
     )
     .unwrap_err();
-    assert!(
-        matches!(&err, Error::UnaddressableKey { key, .. } if key == "webhooks.endpoints.Partner"),
-        "{err}"
-    );
+    assert_matches!(&err, Error::UnaddressableKey { key, .. } if key == "webhooks.endpoints.Partner", "{err}");
 }
 
 #[test]
@@ -240,10 +235,7 @@ fn webhooks_blank_environment_secrets_are_refused() {
             variables.push((name, value));
         }
         let err = load_from(&LoadOptions::default(), BUILD, env(&variables)).unwrap_err();
-        assert!(
-            matches!(&err, Error::Validate(validation) if validation.key == expected_key),
-            "{err}"
-        );
+        assert_matches!(&err, Error::Validate(validation) if validation.key == expected_key, "{err}");
         assert_eq!(
             err.to_string(),
             format!("configuration is invalid: {expected_key}: cannot be empty")

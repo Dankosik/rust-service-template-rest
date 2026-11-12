@@ -351,12 +351,15 @@ fn record_id(
 /// `prefix` followed by the lowercase hex of a SHA-256 digest.
 #[must_use]
 pub fn prefixed_digest_hex(prefix: &str, digest: &[u8]) -> String {
-    let mut id = String::with_capacity(prefix.len() + DIGEST_HEX_LEN);
+    let mut id = String::with_capacity(prefix.len() + 2 * digest.len());
     id.push_str(prefix);
-    for &byte in digest {
-        const HEX: &[u8; 16] = b"0123456789abcdef";
-        id.push(char::from(HEX[usize::from(byte >> 4)]));
-        id.push(char::from(HEX[usize::from(byte & 15)]));
+    let mut hex = [0_u8; DIGEST_HEX_LEN];
+    for chunk in digest.chunks(DIGEST_HEX_LEN / 2) {
+        // Each output slice is exactly twice its chunk, the only case
+        // `encode_to_str` refuses, so the `else` never runs.
+        if let Ok(text) = const_hex::encode_to_str(chunk, &mut hex[..2 * chunk.len()]) {
+            id.push_str(text);
+        }
     }
     id
 }

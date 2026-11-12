@@ -1,5 +1,6 @@
 //! Bounded local output. Only the owned worker touches the sink.
 
+use enum_map::{Enum, EnumMap, enum_len};
 use std::cell::Cell;
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -37,7 +38,7 @@ pub(super) struct Record {
 }
 
 /// Why the logger rejected a record; a label of `telemetry_log_records_dropped_total`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Enum)]
 pub enum DropReason {
     QueueFull,
     Oversize,
@@ -48,16 +49,6 @@ pub enum DropReason {
 }
 
 impl DropReason {
-    /// Every reason, in discriminant order: a reason indexes the counters.
-    pub(super) const ALL: [Self; 6] = [
-        Self::QueueFull,
-        Self::Oversize,
-        Self::SpanCapacity,
-        Self::Busy,
-        Self::Reentrant,
-        Self::Closed,
-    ];
-
     const fn label(self) -> &'static str {
         match self {
             Self::QueueFull => "queue_full",
@@ -71,7 +62,7 @@ impl DropReason {
 }
 
 /// The writer operation that failed; a label of `telemetry_log_sink_errors_total`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Enum)]
 pub enum SinkOperation {
     Write,
     Flush,
@@ -79,9 +70,6 @@ pub enum SinkOperation {
 }
 
 impl SinkOperation {
-    /// Every operation, in discriminant order: an operation indexes the counters.
-    const ALL: [Self; 3] = [Self::Write, Self::Flush, Self::Worker];
-
     const fn label(self) -> &'static str {
         match self {
             Self::Write => "write",
@@ -91,35 +79,22 @@ impl SinkOperation {
     }
 }
 
-const _: () = {
-    let mut index = 0;
-    while index < DropReason::ALL.len() {
-        assert!(DropReason::ALL[index] as usize == index);
-        index += 1;
-    }
-    let mut index = 0;
-    while index < SinkOperation::ALL.len() {
-        assert!(SinkOperation::ALL[index] as usize == index);
-        index += 1;
-    }
-};
-
 /// Local observations, independent of recorder installation or scrape timing.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct LogSnapshot {
-    dropped: [u64; DropReason::ALL.len()],
-    sink_errors: [u64; SinkOperation::ALL.len()],
+    pub(super) dropped: EnumMap<DropReason, u64>,
+    sink_errors: EnumMap<SinkOperation, u64>,
 }
 
 impl LogSnapshot {
     #[must_use]
-    pub const fn dropped(&self, reason: DropReason) -> u64 {
-        self.dropped[reason as usize]
+    pub fn dropped(&self, reason: DropReason) -> u64 {
+        self.dropped[reason]
     }
 
     #[must_use]
-    pub const fn sink_errors(&self, operation: SinkOperation) -> u64 {
-        self.sink_errors[operation as usize]
+    pub fn sink_errors(&self, operation: SinkOperation) -> u64 {
+        self.sink_errors[operation]
     }
 }
 
@@ -158,22 +133,26 @@ pub enum LoggerShutdown {
 
 #[derive(Debug)]
 struct Counters {
-    dropped: [AtomicU64; DropReason::ALL.len()],
-    sink_errors: [AtomicU64; SinkOperation::ALL.len()],
+    dropped: EnumMap<DropReason, AtomicU64>,
+    sink_errors: EnumMap<SinkOperation, AtomicU64>,
 }
 
 impl Counters {
     const fn new() -> Self {
         Self {
-            dropped: [const { AtomicU64::new(0) }; DropReason::ALL.len()],
-            sink_errors: [const { AtomicU64::new(0) }; SinkOperation::ALL.len()],
+            dropped: EnumMap::from_array([const { AtomicU64::new(0) }; enum_len::<DropReason>()]),
+            sink_errors: EnumMap::from_array(
+                [const { AtomicU64::new(0) }; enum_len::<SinkOperation>()],
+            ),
         }
     }
 
     fn snapshot(&self) -> LogSnapshot {
         LogSnapshot {
-            dropped: std::array::from_fn(|i| self.dropped[i].load(Ordering::Relaxed)),
-            sink_errors: std::array::from_fn(|i| self.sink_errors[i].load(Ordering::Relaxed)),
+            dropped: EnumMap::from_fn(|reason| self.dropped[reason].load(Ordering::Relaxed)),
+            sink_errors: EnumMap::from_fn(|operation| {
+                self.sink_errors[operation].load(Ordering::Relaxed)
+            }),
         }
     }
 }
@@ -216,8 +195,8 @@ impl Shared {
     }
 
     fn record_sink_error(&self, operation: SinkOperation) {
-        self.counters.sink_errors[operation as usize].fetch_add(1, Ordering::Relaxed);
-        TOTALS.sink_errors[operation as usize].fetch_add(1, Ordering::Relaxed);
+        self.counters.sink_errors[operation].fetch_add(1, Ordering::Relaxed);
+        TOTALS.sink_errors[operation].fetch_add(1, Ordering::Relaxed);
         match operation {
             SinkOperation::Write => self.latch_drain_failure(LoggerShutdownReasons::WRITE),
             SinkOperation::Flush => self.latch_drain_failure(LoggerShutdownReasons::FLUSH),
@@ -257,8 +236,8 @@ impl Output {
     }
 
     pub(super) fn record_drop(&self, reason: DropReason) {
-        self.shared.counters.dropped[reason as usize].fetch_add(1, Ordering::Relaxed);
-        TOTALS.dropped[reason as usize].fetch_add(1, Ordering::Relaxed);
+        self.shared.counters.dropped[reason].fetch_add(1, Ordering::Relaxed);
+        TOTALS.dropped[reason].fetch_add(1, Ordering::Relaxed);
         self.shared
             .latch_drain_failure(LoggerShutdownReasons::DROPPED);
     }
@@ -482,13 +461,11 @@ pub(super) fn describe_metrics() {
 /// and repeated upkeep calls neither disappear nor count twice.
 pub(super) fn publish() {
     let snapshot = TOTALS.snapshot();
-    for reason in DropReason::ALL {
-        metrics::counter!(DROPPED_METRIC, "reason" => reason.label())
-            .absolute(snapshot.dropped(reason));
+    for (reason, &dropped) in &snapshot.dropped {
+        metrics::counter!(DROPPED_METRIC, "reason" => reason.label()).absolute(dropped);
     }
-    for operation in SinkOperation::ALL {
-        metrics::counter!(SINK_ERRORS_METRIC, "operation" => operation.label())
-            .absolute(snapshot.sink_errors(operation));
+    for (operation, &errors) in &snapshot.sink_errors {
+        metrics::counter!(SINK_ERRORS_METRIC, "operation" => operation.label()).absolute(errors);
     }
 }
 
@@ -605,13 +582,14 @@ mod tests {
             !gate.released.load(Ordering::SeqCst),
             "admission did not wait for sink"
         );
-        assert_eq!(guard.snapshot().dropped, [1, 0, 0, 0, 0, 0]);
+        assert_eq!(guard.snapshot().dropped.into_array(), [1, 0, 0, 0, 0, 0]);
 
         guard.begin_shutdown();
         gate.release.send(()).expect("resume sink");
         let result = guard.shutdown(Instant::now() + TEST_TIMEOUT);
-        assert!(
-            matches!(result, LoggerShutdown::Completed(_)),
+        std::assert_matches!(
+            result,
+            LoggerShutdown::Completed(_),
             "historical loss: {result:?}"
         );
         assert!(
@@ -663,7 +641,7 @@ mod tests {
                 };
                 snapshot
             };
-            assert_eq!(snapshot.sink_errors, [1, 0, 0]);
+            assert_eq!(snapshot.sink_errors.into_array(), [1, 0, 0]);
             assert_eq!(
                 &*gate.bytes.lock().expect("test output mutex"),
                 b"recovered\n"
@@ -712,7 +690,7 @@ mod tests {
         let (LoggerShutdown::Completed(snapshot) | LoggerShutdown::Incomplete { snapshot, .. }) =
             guard.shutdown(Instant::now() + TEST_TIMEOUT);
 
-        assert_eq!(snapshot.sink_errors, [1, 0, 0]);
+        assert_eq!(snapshot.sink_errors.into_array(), [1, 0, 0]);
         assert_eq!(&*bytes.lock().expect("test output mutex"), b"fir\nsecond\n");
     }
 
@@ -736,7 +714,7 @@ mod tests {
             panic!("a lost final record makes the drain incomplete");
         };
         assert_eq!(reasons, LoggerShutdownReasons::DROPPED);
-        assert_eq!(snapshot.dropped, [1, 0, 0, 0, 0, 0]);
+        assert_eq!(snapshot.dropped.into_array(), [1, 0, 0, 0, 0, 0]);
         assert!(gate.destroyed.load(Ordering::SeqCst));
     }
 
@@ -806,7 +784,7 @@ mod tests {
             };
             if panics {
                 assert_eq!(reasons, LoggerShutdownReasons::WORKER);
-                assert_eq!(snapshot.sink_errors, [0, 0, 1]);
+                assert_eq!(snapshot.sink_errors.into_array(), [0, 0, 1]);
             } else {
                 assert_eq!(reasons, LoggerShutdownReasons::FLUSH);
                 assert_eq!(snapshot.sink_errors(SinkOperation::Write), 0);
@@ -821,7 +799,7 @@ mod tests {
     fn loss_before_recorder_installation_is_published_without_double_counting() {
         let (output, guard) = start(io::sink()).expect("start writer");
         let result = guard.shutdown(Instant::now() + TEST_TIMEOUT);
-        assert!(matches!(result, LoggerShutdown::Completed(_)));
+        std::assert_matches!(result, LoggerShutdown::Completed(_));
         output.submit(record(b"closed\n"));
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();

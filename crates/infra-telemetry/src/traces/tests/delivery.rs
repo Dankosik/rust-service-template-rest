@@ -523,10 +523,10 @@ fn collector_diagnostics_cannot_escape_to_local_records_or_span_events() {
                 assert_eq!(request.header("authorization"), Some(HEADER_SECRET));
                 thread.join().expect("collector script finishes");
                 assert_eq!(shutdown(handle), ProviderShutdown::Completed);
-                assert!(matches!(
+                std::assert_matches!(
                     logger.shutdown(std::time::Instant::now() + WAIT),
                     crate::logging::LoggerShutdown::Completed(_)
-                ));
+                );
                 let records = records.records();
                 assert!(
                     records.contains("ordinary_event"),

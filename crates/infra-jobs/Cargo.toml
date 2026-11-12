@@ -16,6 +16,7 @@ hotpath = ["dep:hotpath", "hotpath/hotpath"]
 
 [dependencies]
 operation-context = { workspace = true }
+derive_more = { workspace = true, features = ["debug", "display"] }
 hotpath = { workspace = true, optional = true }
 futures-util = { workspace = true, features = ["std"] }
 humantime = { workspace = true }

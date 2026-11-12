@@ -20,13 +20,7 @@ use time::format_description::well_known::Rfc3339;
 type Error = jobs_worker::BuildError;
 
 fn payload_sha256(bytes: &[u8]) -> String {
-    let mut hex = String::with_capacity(64);
-    for byte in Sha256::digest(bytes) {
-        const HEX: &[u8; 16] = b"0123456789abcdef";
-        hex.push(char::from(HEX[usize::from(byte >> 4)]));
-        hex.push(char::from(HEX[usize::from(byte & 15)]));
-    }
-    hex
+    infra_messaging::wire::prefixed_digest_hex("", &Sha256::digest(bytes))
 }
 
 #[expect(

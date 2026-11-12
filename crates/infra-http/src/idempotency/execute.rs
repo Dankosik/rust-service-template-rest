@@ -345,10 +345,7 @@ struct ScopeDigest<'a>(&'a Digest);
 
 impl fmt::Display for ScopeDigest<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for byte in self.0 {
-            write!(formatter, "{byte:02x}")?;
-        }
-        Ok(())
+        formatter.write_str(const_hex::Buffer::<32>::new().format(self.0))
     }
 }
 

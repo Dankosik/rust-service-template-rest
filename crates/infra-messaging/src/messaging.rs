@@ -382,7 +382,7 @@ mod tests {
                 CancellationToken::new(),
             )
             .await;
-            assert!(matches!(result, Err(MessagingError::Bounds)));
+            std::assert_matches!(result, Err(MessagingError::Bounds));
         }
     }
 }

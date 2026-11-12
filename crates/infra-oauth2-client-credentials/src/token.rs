@@ -1,4 +1,4 @@
-use std::{fmt, time::Duration};
+use std::time::Duration;
 
 use http::HeaderValue;
 use tokio::time::Instant;
@@ -13,6 +13,8 @@ const REUSE_MARGIN: Duration = Duration::from_secs(10);
 pub(crate) const EVICTION_MIN_AGE: Duration = Duration::from_secs(30);
 
 /// A sensitive `Bearer` header value and the instant it stops being reused.
+#[derive(derive_more::Debug)]
+#[debug("Token([REDACTED])")]
 pub(crate) struct Token {
     pub(crate) header: HeaderValue,
     pub(crate) requested_at: Instant,
@@ -57,11 +59,5 @@ impl Token {
 
     pub(crate) fn is_evictable(&self, now: Instant) -> bool {
         now.saturating_duration_since(self.requested_at) >= EVICTION_MIN_AGE
-    }
-}
-
-impl fmt::Debug for Token {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("Token([REDACTED])")
     }
 }

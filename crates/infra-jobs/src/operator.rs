@@ -627,34 +627,28 @@ mod tests {
         );
         assert!(Inspection::unhandled("a,a,b", None, 500).is_ok());
         for list in ["a,", "a, b", "A", ","] {
-            assert!(matches!(
+            std::assert_matches!(
                 Inspection::unhandled(list, None, 100),
                 Err(InputError::HandledKinds)
-            ));
+            );
         }
         assert!(Inspection::unhandled(&vec!["a"; 1024].join(","), None, 100).is_ok());
-        assert!(matches!(
+        std::assert_matches!(
             Inspection::unhandled(&vec!["a"; 1025].join(","), None, 100),
             Err(InputError::HandledKinds)
-        ));
-        assert!(matches!(
-            Inspection::failed(None, 0),
-            Err(InputError::Limit)
-        ));
-        assert!(matches!(
-            Inspection::failed(None, 501),
-            Err(InputError::Limit)
-        ));
+        );
+        std::assert_matches!(Inspection::failed(None, 0), Err(InputError::Limit));
+        std::assert_matches!(Inspection::failed(None, 501), Err(InputError::Limit));
         assert!(Inspection::failed(Some(&format!("v1:{ID}")), 100).is_ok());
         for cursor in [
             format!("v2:{ID}"),
             format!("v1:{}", ID.to_uppercase()),
             format!("v1:{}", ID.replace('-', "")),
         ] {
-            assert!(matches!(
+            std::assert_matches!(
                 Inspection::failed(Some(&cursor), 100),
                 Err(InputError::Cursor)
-            ));
+            );
         }
     }
 

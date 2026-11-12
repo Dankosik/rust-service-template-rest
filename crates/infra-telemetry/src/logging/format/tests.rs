@@ -56,9 +56,7 @@ fn complete_record_limit_includes_escaping_and_newline_in_both_formats() {
         assert!(!lines[0].contains("truncated"));
         assert!(lines[3].contains("survivor"));
         assert!(
-            DropReason::ALL
-                .into_iter()
-                .all(|reason| snapshot.dropped(reason) == 0),
+            snapshot.dropped.values().all(|&count| count == 0),
             "{snapshot:?}"
         );
         for cut in &lines[1..3] {
@@ -101,9 +99,7 @@ fn a_value_cut_between_characters_stays_valid_text_and_names_the_cut() {
             tracing::info!(truncated = false, "own_field_cannot_spoof_the_marker");
         });
         assert!(
-            DropReason::ALL
-                .into_iter()
-                .all(|reason| snapshot.dropped(reason) == 0),
+            snapshot.dropped.values().all(|&count| count == 0),
             "{snapshot:?}"
         );
         let lines: Vec<_> = records.lines().collect();
@@ -159,9 +155,7 @@ fn debug_and_display_stop_serializing_at_the_owned_byte_limit() {
         assert!(debug_writes.load(Ordering::Relaxed) <= 8192);
         assert!(display_writes.load(Ordering::Relaxed) <= 8192);
         assert!(
-            DropReason::ALL
-                .into_iter()
-                .all(|reason| snapshot.dropped(reason) == 0),
+            snapshot.dropped.values().all(|&count| count == 0),
             "{snapshot:?}"
         );
         let lines: Vec<_> = records.lines().collect();
@@ -283,9 +277,7 @@ fn flattened_field_limit_counts_duplicate_span_names_before_deduplication() {
         assert!(lines[0].contains("at_field_limit") && !lines[0].contains("truncated"));
         assert!(lines[1].contains("past_field_limit") && is_marked(lines[1], format));
         assert!(
-            DropReason::ALL
-                .into_iter()
-                .all(|reason| snapshot.dropped(reason) == 0),
+            snapshot.dropped.values().all(|&count| count == 0),
             "{snapshot:?}"
         );
     }
@@ -385,9 +377,7 @@ fn escaped_field_keys_count_toward_the_complete_record_limit() {
         assert!(!lines[0].contains("\\\"\\\""), "the oversize key stays out");
         assert!(lines[1].contains("survivor"));
         assert!(
-            DropReason::ALL
-                .into_iter()
-                .all(|reason| snapshot.dropped(reason) == 0),
+            snapshot.dropped.values().all(|&count| count == 0),
             "{snapshot:?}"
         );
     }

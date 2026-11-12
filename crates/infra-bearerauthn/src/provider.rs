@@ -1,9 +1,6 @@
 //! Trusted provider URL admission and pooled HTTPS transport.
 
-use std::{
-    fmt,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 use reqwest::{header, redirect::Policy};
 use shared_rules::{rfc9110, uri};
@@ -86,7 +83,8 @@ impl ProviderFailure {
 }
 
 /// An exact issuer identity: an HTTPS URL without a query or fragment.
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq, derive_more::Debug)]
+#[debug("IssuerUrl([REDACTED])")]
 pub struct IssuerUrl(EndpointUrl);
 
 impl IssuerUrl {
@@ -116,14 +114,9 @@ impl IssuerUrl {
     // template:end oidc-jwt:authn-provider-issuer-url
 }
 
-impl fmt::Debug for IssuerUrl {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("IssuerUrl([REDACTED])")
-    }
-}
-
 /// One admitted provider endpoint whose query ordering and escaping are preserved.
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq, derive_more::Debug)]
+#[debug("EndpointUrl([REDACTED])")]
 pub struct EndpointUrl {
     exact: String,
     url: Url,
@@ -147,12 +140,6 @@ impl EndpointUrl {
 
     pub(crate) fn url(&self) -> &Url {
         &self.url
-    }
-}
-
-impl fmt::Debug for EndpointUrl {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("EndpointUrl([REDACTED])")
     }
 }
 

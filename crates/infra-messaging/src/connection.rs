@@ -417,7 +417,7 @@ mod tests {
                     &ConnectError::with_source(kind, source),
                     BROKER_OPERATION_BUDGET,
                 );
-                assert!(matches!(failure, MessagingError::Connection));
+                std::assert_matches!(failure, MessagingError::Connection);
             }
         });
 

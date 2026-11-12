@@ -67,7 +67,10 @@ pub trait JobKind: Serialize + DeserializeOwned + Send + Sync + 'static {
 }
 
 /// A job's stable identifier, as enqueue generates it.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(
+    Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, derive_more::Debug, derive_more::Display,
+)]
+#[debug("JobId({_0})")]
 pub struct JobId(pub(crate) uuid::Uuid);
 
 impl JobId {
@@ -75,20 +78,6 @@ impl JobId {
     /// instead of writing random index pages.
     pub(crate) fn new_v7() -> Self {
         Self(uuid::Uuid::now_v7())
-    }
-}
-
-impl fmt::Display for JobId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(&self.0, formatter)
-    }
-}
-
-impl fmt::Debug for JobId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("JobId(")?;
-        fmt::Display::fmt(&self.0, formatter)?;
-        formatter.write_str(")")
     }
 }
 
@@ -225,7 +214,8 @@ pub(crate) enum Disposition {
 /// Not a [`std::error::Error`]: that impl would overlap the blanket
 /// `From<E: Error>` below with the reflexive `From<T> for T` (E0119), and the
 /// blanket impl is what lets `?` in a handler convert any error.
-#[derive(Debug)]
+#[derive(Debug, derive_more::Display)]
+#[display("{summary}")]
 pub struct JobError {
     pub(crate) disposition: Disposition,
     pub(crate) summary: String,
@@ -308,12 +298,6 @@ impl JobError {
     #[must_use]
     pub const fn is_permanent(&self) -> bool {
         matches!(self.disposition, Disposition::Permanent)
-    }
-}
-
-impl fmt::Display for JobError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.summary)
     }
 }
 

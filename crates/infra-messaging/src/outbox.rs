@@ -242,6 +242,7 @@ impl Handler<PublishDomainEvent> for Publisher {
 }
 
 #[derive(Clone, Deserialize, Serialize)]
+#[cfg_attr(test, derive(Debug))]
 struct PublishDomainEvent {
     #[serde(rename = "version")]
     format_version: u8,
@@ -429,7 +430,7 @@ mod tests {
         let mut stored = PublishDomainEvent::from(&prepared(Bytes::from_static(br"{}")));
         stored.payload_base64 = "not-base64".to_owned();
 
-        assert!(matches!(stored.to_prepared(), Err(IntentError::Base64)));
+        std::assert_matches!(stored.to_prepared(), Err(IntentError::Base64));
     }
 
     #[test]
@@ -499,11 +500,11 @@ mod tests {
         parts.payload = Bytes::from(vec![b'x'; limit + 1]);
         let event = parts.event();
         let (result, _) = complete(event.prepare_outbox_intent());
-        assert!(matches!(
+        std::assert_matches!(
             result,
             Err(OutboxEnqueueError::PayloadTooLarge { bytes, max_bytes })
                 if bytes == limit + 1 && max_bytes == limit
-        ));
+        );
     }
 
     #[test]
@@ -523,22 +524,22 @@ mod tests {
 
             let (result, polls) = complete(event.prepare_outbox_intent());
             assert!(polls >= event.subject().len().div_ceil(PREFLIGHT_BYTES_PER_POLL));
-            assert!(matches!(
+            std::assert_matches!(
                 result,
                 Err(OutboxEnqueueError::Jobs(infra_jobs::EnqueueError::PayloadTooLarge { bytes }))
                     if bytes == expected
-            ));
+            );
 
             parts.payload = Bytes::from_static(b"{}");
             let event = parts.event();
             let (result, polls) = complete(event.prepare_outbox_intent());
-            assert!(matches!(
+            std::assert_matches!(
                 result,
                 Err(OutboxEnqueueError::PayloadTooLarge {
                     bytes: 2,
                     max_bytes: 0
                 })
-            ));
+            );
             if event.subject().len() > infra_jobs::MAX_PAYLOAD_BYTES {
                 assert_eq!(polls, 1, "a nonempty body needs no oversized-subject scan");
             }

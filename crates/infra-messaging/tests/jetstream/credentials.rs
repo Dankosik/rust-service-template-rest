@@ -99,11 +99,11 @@ async fn credentials_file_rotation_is_authenticated_by_the_broker() {
         .connect(&auth_url)
         .await
         .expect_err("the runner-owned broker rejects an unauthenticated client");
-    assert!(matches!(
+    std::assert_matches!(
         unauthenticated.kind(),
         async_nats::ConnectErrorKind::Authentication
             | async_nats::ConnectErrorKind::AuthorizationViolation
-    ));
+    );
     println!("auth_rotation phase=unauthenticated_denied");
 
     let (fixture, admin) =
@@ -240,8 +240,9 @@ async fn an_unusable_credentials_source_refuses_the_connection() {
     let refused = Box::pin(Messaging::connect(missing, deadline(), cancel.clone()))
         .await
         .expect_err("a missing credentials file refuses the connection");
-    assert!(
-        matches!(refused, infra_messaging::MessagingError::Configuration(_)),
+    std::assert_matches!(
+        refused,
+        infra_messaging::MessagingError::Configuration(_),
         "{refused:?}"
     );
 
@@ -252,8 +253,9 @@ async fn an_unusable_credentials_source_refuses_the_connection() {
     let refused = Box::pin(Messaging::connect(malformed, deadline(), cancel.clone()))
         .await
         .expect_err("a malformed credentials file refuses the connection");
-    assert!(
-        matches!(refused, infra_messaging::MessagingError::Authentication),
+    std::assert_matches!(
+        refused,
+        infra_messaging::MessagingError::Authentication,
         "{refused:?}"
     );
 

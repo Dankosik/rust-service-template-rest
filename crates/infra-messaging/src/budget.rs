@@ -46,8 +46,7 @@ mod tests {
             std::future::pending::<Result<(), MessagingError>>(),
         )
         .await;
-        assert!(
-            matches!(result, Err(MessagingError::TimedOut { budget }) if budget == caller),
+        std::assert_matches!(result, Err(MessagingError::TimedOut { budget }) if budget == caller,
             "{result:?}"
         );
     }

@@ -1,4 +1,5 @@
 use super::*;
+use std::assert_matches;
 
 #[tokio::test]
 async fn a_client_requiring_a_subject_refuses_a_request_without_one_before_any_io() {
@@ -20,7 +21,7 @@ async fn a_client_requiring_a_subject_refuses_a_request_without_one_before_any_i
         .execute(fixture.request(), deadline(Duration::from_secs(10)))
         .await
         .unwrap_err();
-    assert!(matches!(error, Error::SubjectRequired));
+    assert_matches!(error, Error::SubjectRequired);
     assert_eq!(fixture.token_requests().len(), 1);
     assert_eq!(fixture.resource_requests().len(), 1);
 
@@ -55,10 +56,10 @@ async fn token_wait_spends_the_original_resource_deadline_before_dispatch() {
     tokio::select! { () = fixture.token_received() => {}, result = &mut exchange => panic!("response must be gated: {result:?}"), }
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(1)).await;
-    assert!(matches!(
+    assert_matches!(
         exchange.await,
         Err(Error::Acquisition(AcquisitionError::Timeout))
-    ));
+    );
     tokio::time::resume();
     drop(gate);
     assert!(fixture.resource_requests().is_empty());
@@ -88,10 +89,10 @@ async fn resource_local_ceiling_includes_token_wait_and_resource_wait() {
     tokio::select! { () = fixture.resource_received() => {}, result = &mut call => panic!("resource must be gated: {result:?}"), }
     advance(Duration::from_secs(2)).await;
     let result = poll_fn(|cx| Poll::Ready(call.as_mut().poll(cx))).await;
-    assert!(matches!(
+    assert_matches!(
         result,
         Poll::Ready(Err(Error::Resource(infra_outbound_http::Error::Timeout)))
-    ));
+    );
     drop(call);
     assert_eq!(fixture.token_requests().len(), 1);
     assert_eq!(fixture.resource_requests().len(), 1);
@@ -160,7 +161,7 @@ async fn token_failures_are_sanitized_and_never_dispatch_the_resource() {
             .execute(fixture.request(), deadline(Duration::from_secs(10)))
             .await
             .unwrap_err();
-        assert!(matches!(&error, Error::Acquisition(actual) if *actual == expected));
+        assert_matches!(&error, Error::Acquisition(actual) if *actual == expected);
         assert!(!format!("{error:?}").contains("provider-secret-body"));
         assert!(!error.to_string().contains("provider-secret-body"));
     }
@@ -172,10 +173,10 @@ async fn token_failures_are_sanitized_and_never_dispatch_the_resource() {
     tokio::select! { () = fixture.token_received() => {}, result = &mut timed => panic!("response must be gated: {result:?}"), }
     tokio::time::pause();
     tokio::time::advance(FETCH_TIMEOUT).await;
-    assert!(matches!(
+    assert_matches!(
         timed.await,
         Err(Error::Acquisition(AcquisitionError::Timeout))
-    ));
+    );
     tokio::time::resume();
     drop(gate);
     assert!(fixture.resource_requests().is_empty());
@@ -190,14 +191,14 @@ async fn caller_authorization_conflict_refuses_before_token_or_resource_io() {
             header::AUTHORIZATION,
             "Bearer caller-token".parse().unwrap(),
         );
-        assert!(matches!(
+        assert_matches!(
             fixture
                 .credentials(&[], None)
                 .http(fixture.resource_client())
                 .execute(conflicting, deadline(Duration::from_secs(10)))
                 .await,
             Err(Error::AuthorizationConflict)
-        ));
+        );
     }
     assert!(fixture.token_requests().is_empty());
     assert!(fixture.resource_requests().is_empty());

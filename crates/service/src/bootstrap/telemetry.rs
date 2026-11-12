@@ -94,12 +94,11 @@ mod tests {
             ..OtelConfig::default()
         };
         let options = tracing_options(&config);
-        assert!(matches!(options.sampler, ResolvedSampler::AlwaysOn));
+        std::assert_matches!(options.sampler, ResolvedSampler::AlwaysOn);
 
         config.observability.otel.traces_sampler = TracesSampler::TraceIdRatio;
         let options = tracing_options(&config);
-        assert!(
-            matches!(options.sampler, ResolvedSampler::TraceIdRatio(ratio) if (ratio - 0.5).abs() < f64::EPSILON)
+        std::assert_matches!(options.sampler, ResolvedSampler::TraceIdRatio(ratio) if (ratio - 0.5).abs() < f64::EPSILON
         );
     }
 }

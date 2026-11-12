@@ -1,11 +1,12 @@
 //! SDK diagnostics admitted as finite numeric observations before every output.
 
+use enum_map::{Enum, EnumMap, enum_len};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tracing::field::{Field, Visit};
 use tracing::{Event, Metadata};
 
 /// SDK diagnostic events counted under [`DIAGNOSTICS_METRIC`].
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Enum)]
 enum SdkEvent {
     SpanDroppingStarted,
     SpansDropped,
@@ -18,18 +19,6 @@ enum SdkEvent {
 }
 
 impl SdkEvent {
-    /// Every event, in discriminant order: an event indexes [`COUNTS`].
-    const ALL: [Self; 8] = [
-        Self::SpanDroppingStarted,
-        Self::SpansDropped,
-        Self::PartialSuccess,
-        Self::ResponseParseError,
-        Self::StatusError,
-        Self::NetworkError,
-        Self::ResponseBodyTooLarge,
-        Self::ExportError,
-    ];
-
     fn from_name(name: &str) -> Option<Self> {
         Some(match name {
             "BatchSpanProcessor.SpanDroppingStarted" => Self::SpanDroppingStarted,
@@ -58,20 +47,12 @@ impl SdkEvent {
     }
 }
 
-const _: () = {
-    let mut index = 0;
-    while index < SdkEvent::ALL.len() {
-        assert!(SdkEvent::ALL[index] as usize == index);
-        index += 1;
-    }
-};
-
 const DIAGNOSTICS_METRIC: &str = "telemetry_sdk_diagnostics_total";
 const QUEUE_DROPPED_METRIC: &str = "telemetry_sdk_queue_dropped_spans";
 const REJECTED_METRIC: &str = "telemetry_sdk_reported_rejected_spans_total";
 
-static COUNTS: [AtomicU64; SdkEvent::ALL.len()] =
-    [const { AtomicU64::new(0) }; SdkEvent::ALL.len()];
+static COUNTS: EnumMap<SdkEvent, AtomicU64> =
+    EnumMap::from_array([const { AtomicU64::new(0) }; enum_len::<SdkEvent>()]);
 static DROPPED: Observed = Observed::new();
 static REJECTED: Observed = Observed::new();
 
@@ -172,7 +153,7 @@ pub(super) fn observe(event: &Event<'_>, metadata: &Metadata<'_>) {
     let Some(sdk_event) = SdkEvent::from_name(metadata.name()) else {
         return;
     };
-    add(&COUNTS[sdk_event as usize], 1);
+    add(&COUNTS[sdk_event], 1);
     let mut counts = ReportedCounts::default();
     event.record(&mut counts);
     match sdk_event {
@@ -206,9 +187,9 @@ pub(super) fn describe_metrics() {
 }
 
 pub(super) fn publish() {
-    for event in SdkEvent::ALL {
+    for (event, count) in &COUNTS {
         metrics::counter!(DIAGNOSTICS_METRIC, "event" => event.label())
-            .absolute(COUNTS[event as usize].load(Ordering::Relaxed));
+            .absolute(count.load(Ordering::Relaxed));
     }
     if let Some(count) = DROPPED.get() {
         #[expect(
