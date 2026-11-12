@@ -480,8 +480,8 @@ impl Drop for OwnedHandler {
     }
 }
 
-/// Once a handler has started, a ready result wins over cancellation. After
-/// cancellation only success wins (see [`ended_after_cancel`]).
+/// Inside the supervisor and cleanup bounds, a running handler's ready result
+/// wins over cancellation. After cancellation only success wins.
 async fn drive(
     cleanup: &ForcedCleanup,
     future: HandlerFuture,
@@ -494,19 +494,20 @@ async fn drive(
         // Borrow through the poll boundary; the owner contains destruction as well.
         let mut run =
             std::pin::pin!(std::panic::AssertUnwindSafe(handler.0.as_mut()?).catch_unwind());
-        let admitted = async {
-            // Preparation can consume the attempt's budget before its first poll.
+        let mut first_poll = true;
+        let admitted = std::future::poll_fn(|cx| {
             let now = Instant::now();
             if now >= supervisor_deadline || cleanup.has_ended() {
                 cancel.cancel();
-                return None;
+                return std::task::Poll::Ready(None);
             }
-            if now >= attempt_deadline {
+            // Preparation can consume the attempt's budget before its first poll.
+            if std::mem::take(&mut first_poll) && now >= attempt_deadline {
                 cancel.cancel();
-                return Some(Ended::Timeout);
+                return std::task::Poll::Ready(Some(Ended::Timeout));
             }
-            Some(ended_from(run.as_mut().await))
-        };
+            run.as_mut().poll(cx).map(|result| Some(ended_from(result)))
+        });
         let reason = tokio::select! {
             biased;
             ended = admitted => return ended,
@@ -740,6 +741,33 @@ mod tests {
         .await;
 
         std::assert_matches!(ended, Some(Ended::Timeout));
+        assert!(cancel.is_cancelled());
+        assert!(observed.await.is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_suspended_handler_does_not_resume_after_its_supervisor_deadline() {
+        let cleanup = ForcedCleanup::default();
+        let cancel = CancellationToken::new();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let (resume, suspended) = tokio::sync::oneshot::channel();
+        let (ran, observed) = tokio::sync::oneshot::channel();
+        let mut attempt = std::pin::pin!(drive(
+            &cleanup,
+            Box::pin(async move {
+                suspended.await.unwrap();
+                let _ = ran.send(());
+                Ok(())
+            }),
+            cancel.clone(),
+            deadline,
+            deadline,
+        ));
+        assert!(futures_util::poll!(attempt.as_mut()).is_pending());
+        tokio::time::advance(Duration::from_secs(1)).await;
+        resume.send(()).unwrap();
+
+        assert!(attempt.await.is_none());
         assert!(cancel.is_cancelled());
         assert!(observed.await.is_err());
     }
