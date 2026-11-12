@@ -53,14 +53,12 @@ pub(crate) enum SignatureRefresh {
 #[derive(Clone)]
 struct State {
     keys: Arc<KeySet>,
-    /// Fetches asked for so far; each is a ticket that waiters compare against.
-    requested: u64,
-    /// The latest finished ticket, successful or not.
-    finished: u64,
+    requested_ticket: u64,
+    finished_ticket: u64,
     /// The latest ticket whose fetch installed a set; the startup set is 0. A
     /// waiter compares it with its own ticket because a later failure may
     /// finish before the waiter is polled.
-    succeeded: u64,
+    last_successful_ticket: u64,
     cooldown_started_at: Instant,
     stopped: bool,
 }
@@ -68,17 +66,17 @@ struct State {
 impl State {
     /// The ticket of the fetch asked for but not yet finished.
     fn pending(&self) -> Option<u64> {
-        (self.requested > self.finished).then_some(self.requested)
+        (self.requested_ticket > self.finished_ticket).then_some(self.requested_ticket)
     }
 
     fn last_fetch_failed(&self) -> bool {
-        self.succeeded != self.finished
+        self.last_successful_ticket != self.finished_ticket
     }
 
     fn request_fetch(&mut self) -> u64 {
-        self.requested += 1;
+        self.requested_ticket += 1;
         self.cooldown_started_at = Instant::now();
-        self.requested
+        self.requested_ticket
     }
 }
 
@@ -101,9 +99,9 @@ impl KeyStore {
         metrics::describe_counter!(REFRESH_METRIC, "JWKS refresh outcomes by closed reason");
         let state = watch::Sender::new(State {
             keys,
-            requested: 0,
-            finished: 0,
-            succeeded: 0,
+            requested_ticket: 0,
+            finished_ticket: 0,
+            last_successful_ticket: 0,
             cooldown_started_at: Instant::now(),
             stopped: false,
         });
@@ -169,10 +167,10 @@ impl KeyStore {
         // before this subscription. Dropping this waiter leaves the worker running.
         let mut state = self.state.subscribe();
         match state
-            .wait_for(|state| state.stopped || state.finished >= ticket)
+            .wait_for(|state| state.stopped || state.finished_ticket >= ticket)
             .await
         {
-            Ok(state) if !state.stopped && state.succeeded >= ticket => {
+            Ok(state) if !state.stopped && state.last_successful_ticket >= ticket => {
                 SignatureRefresh::NewerSet(state.keys.clone())
             }
             _ => SignatureRefresh::Unavailable,
@@ -210,11 +208,11 @@ impl KeyStore {
         self.state.send_modify(|state| {
             if let Ok(keys) = replacement {
                 state.keys = keys;
-                state.succeeded = ticket;
+                state.last_successful_ticket = ticket;
                 self.last_acquisition
                     .set(acquisition_timestamp(SystemTime::now()));
             }
-            state.finished = ticket;
+            state.finished_ticket = ticket;
         });
         metrics::counter!(REFRESH_METRIC, "result" => result, "reason" => reason).increment(1);
     }
@@ -482,9 +480,9 @@ mod tests {
             () = worker => panic!("refresh worker stopped unexpectedly"),
             result = tokio::time::timeout(
                 Duration::from_secs(1),
-                state.wait_for(|state| state.finished >= ticket),
+                state.wait_for(|state| state.finished_ticket >= ticket),
             ) => {
-                assert_eq!(result.unwrap().unwrap().finished, ticket);
+                assert_eq!(result.unwrap().unwrap().finished_ticket, ticket);
             }
         }
     }
@@ -499,7 +497,7 @@ mod tests {
             let started = tokio::time::Instant::now();
             tokio::time::advance(Duration::from_secs(809)).await;
             poll_waiting_worker(worker.as_mut()).await;
-            assert_eq!(store.state.borrow().requested, period * 2);
+            assert_eq!(store.state.borrow().requested_ticket, period * 2);
 
             let checked = store.current();
             let mut unknown = std::pin::pin!(store.refresh_for_signature_miss(&checked));
@@ -529,16 +527,16 @@ mod tests {
         tokio::time::advance(Duration::from_secs(4_000)).await;
         finish_worker_fetch(worker.as_mut(), &store, 1).await;
         poll_waiting_worker(worker.as_mut()).await;
-        assert_eq!(store.state.borrow().requested, 1);
+        assert_eq!(store.state.borrow().requested_ticket, 1);
         tokio::time::advance(Duration::from_secs(809)).await;
         poll_waiting_worker(worker.as_mut()).await;
-        assert_eq!(store.state.borrow().requested, 1);
+        assert_eq!(store.state.borrow().requested_ticket, 1);
         tokio::time::advance(Duration::from_secs(92)).await;
         finish_worker_fetch(worker.as_mut(), &store, 2).await;
         tokio::time::advance(Duration::from_secs(1_000)).await;
         cancel.cancel();
         worker.await;
-        assert_eq!(store.state.borrow().requested, 2);
+        assert_eq!(store.state.borrow().requested_ticket, 2);
         assert!(store.state.borrow().stopped);
     }
 
