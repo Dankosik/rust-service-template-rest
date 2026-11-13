@@ -742,6 +742,12 @@ mod tests {
             tenant: String,
             scope: Vec<String>,
             sub: String,
+            accounts: Vec<Account>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Account {
+            id: u128,
+            balance: i128,
         }
         #[derive(Debug, serde::Deserialize)]
         struct WrongShape {
@@ -749,13 +755,16 @@ mod tests {
             _tenant: u64,
         }
         let principal = validate_introspection_claims(
-            br#"{"active":true,"iss":"https://issuer.example","aud":"api","exp":130,"sub":"subject","scope":["write","read","read"],"tenant":"old","tenant":"private-value"}"#,
+            br#"{"active":true,"iss":"https://issuer.example","aud":"api","exp":130,"sub":"subject","scope":["write","read","read"],"tenant":"old","tenant":"private-value","accounts":[{"id":"old","id":340282366920938463463374607431768211455,"balance":-170141183460469231731687303715884105728}]}"#,
             &policy(), 100, access_token(),
         ).unwrap().principal;
         let claims = principal.claims::<ApplicationClaims>().unwrap();
         assert_eq!(claims.tenant, "private-value");
         assert_eq!(claims.scope, ["write", "read", "read"]);
         assert_eq!(claims.sub, "subject");
+        assert_eq!(claims.accounts.len(), 1);
+        assert_eq!(claims.accounts[0].id, u128::MAX);
+        assert_eq!(claims.accounts[0].balance, i128::MIN);
         assert_eq!(principal.scopes(), ["read", "write"]);
         let error = principal.claims::<WrongShape>().unwrap_err();
         assert_eq!(error, crate::ClaimAccessError::InvalidShape);
