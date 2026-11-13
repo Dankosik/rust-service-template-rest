@@ -5,8 +5,8 @@ use std::time::Duration;
 use futures_util::FutureExt;
 use health::Probe;
 use infra_messaging::{
-    Consumer, ConsumerError, ConsumerOptions, Credentials, Messaging, MessagingOptions,
-    Registry as MessagingRegistry,
+    Consumer, ConsumerError, ConsumerOptions, Credentials, Messaging, MessagingError,
+    MessagingOptions, Registry as MessagingRegistry,
 };
 use service_config::{Config, MessagingCredentials};
 use tokio::time::Instant;
@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 use super::{Ended, WorkerError, pending_end, worker_identity};
 use crate::Registration;
 use crate::background::Background;
-use crate::shutdown::Resources;
+use crate::shutdown::{BrokerResource, Resources};
 use crate::signals::Signals;
 
 const MESSAGING_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -55,15 +55,23 @@ pub(super) async fn connect_messaging(
     }
     let options = messaging_options(config, messages.is_some())?;
     let deadline = Instant::now() + MESSAGING_STARTUP_TIMEOUT;
-    let startup = resources.messaging_startup.insert(Messaging::prepare(
-        options,
-        deadline,
-        cancel.child_token(),
-    )?);
+    let startup = Messaging::prepare(options, deadline, cancel.child_token())?;
+    let BrokerResource::Starting(startup) = resources
+        .broker
+        .insert(BrokerResource::Starting(Box::new(startup)))
+    else {
+        return Err(MessagingError::Connection.into());
+    };
     let messaging = startup.admit().await?;
-    let messaging = resources.messaging.insert(messaging);
-    resources.messaging_startup = None;
+    drop(
+        resources
+            .broker
+            .replace(BrokerResource::Admitted(messaging)),
+    );
     if let Some(registry) = messages {
+        let messaging = resources
+            .admitted_messaging()
+            .ok_or(MessagingError::Connection)?;
         Ok(Some(messaging.consumer(registry).await?))
     } else {
         Ok(None)
@@ -107,7 +115,7 @@ fn messaging_options(
 }
 
 pub(super) fn probe(resources: &Resources) -> Option<Box<dyn Probe>> {
-    let messaging = resources.messaging.as_ref()?;
+    let messaging = resources.admitted_messaging()?;
     Some(Box::new(messaging.probe()))
 }
 

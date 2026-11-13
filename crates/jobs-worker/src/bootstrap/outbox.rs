@@ -26,8 +26,7 @@ pub(super) async fn publisher(
 ) -> Result<Engine, WorkerError> {
     // `connect_messaging` admitted the broker before any engine is built.
     let messaging = resources
-        .messaging
-        .as_ref()
+        .admitted_messaging()
         .ok_or(MessagingError::Connection)?;
     let kinds = infra_messaging::outbox::kinds(messaging.producer())?;
     if ordinary.is_some_and(|ordinary| {

@@ -1,9 +1,7 @@
 //! Staged teardown under the original process deadline, including partial startup.
 //!
-//! Stage order: readiness off and claiming stopped, drain, cleanup after a
-//! forced drain, listeners, background join, pool close, telemetry flush.
-//! Every stage takes the lesser of its ceiling and what is left of
-//! `http.grace_period`.
+//! Each stage spends the remaining process budget up to its own ceiling.
+//! The final runtime wait is reserved inside `http.grace_period`.
 
 use std::panic::AssertUnwindSafe;
 use std::time::Duration;
@@ -139,8 +137,7 @@ pub(crate) struct Resources {
     // template:end jobs:worker-shutdown-resources-started
     // template:begin messaging:worker-shutdown-resources-messaging
     pub(crate) consumer: Option<ConsumerHandle>,
-    pub(crate) messaging: Option<Messaging>,
-    pub(crate) messaging_startup: Option<MessagingStartup>,
+    pub(crate) broker: Option<BrokerResource>,
     // template:end messaging:worker-shutdown-resources-messaging
     // template:begin jobs:worker-shutdown-resources-pool
     pub(crate) pool: Option<PgPool>,
@@ -205,11 +202,13 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
     // Forced acknowledgement and dependency close share this single allocation.
     let dependency_deadline = budget.stage_deadline(DEPENDENCY_CLOSE);
     if !background.tracker.is_empty() {
+        degraded = true;
         background.abort();
         tracing::warn!("background join expired; abort requested");
-        degraded |= stage(
+        stage_or(
             "background_abort",
-            finish_background(&background, dependency_deadline),
+            wait_for_background_abort(&background, dependency_deadline),
+            (),
         )
         .await;
     }
@@ -479,7 +478,7 @@ async fn join_background(background: &Background, budget: Duration) -> bool {
     }
 }
 
-async fn finish_background(background: &Background, deadline: Instant) -> bool {
+async fn wait_for_background_abort(background: &Background, deadline: Instant) {
     if tokio::time::timeout_at(deadline, background.tracker.wait())
         .await
         .is_ok()
@@ -488,8 +487,6 @@ async fn finish_background(background: &Background, deadline: Instant) -> bool {
     } else {
         tracing::warn!("background_completion_unconfirmed");
     }
-    // Forced termination never becomes a graceful join.
-    true
 }
 
 // template:begin jobs:worker-shutdown-close-pool
@@ -508,20 +505,28 @@ async fn close_pool(pool: &PgPool, budget: Duration) -> bool {
 // template:end jobs:worker-shutdown-close-pool
 
 // template:begin messaging:worker-shutdown-close-messaging-fn
-async fn close_messaging(
-    messaging: Option<Messaging>,
-    startup: Option<MessagingStartup>,
-    deadline: Instant,
-) -> bool {
+pub(crate) enum BrokerResource {
+    Starting(Box<MessagingStartup>),
+    Admitted(Messaging),
+}
+
+impl Resources {
+    pub(crate) fn admitted_messaging(&self) -> Option<&Messaging> {
+        match self.broker.as_ref() {
+            Some(BrokerResource::Admitted(messaging)) => Some(messaging),
+            Some(BrokerResource::Starting(_)) | None => None,
+        }
+    }
+}
+
+async fn close_messaging(broker: Option<BrokerResource>, deadline: Instant) -> bool {
     // The root token is already cancelled here, and close gives up at
     // once under a cancelled token, so close gets a fresh one.
     let cancel = tokio_util::sync::CancellationToken::new();
-    let closed = if let Some(messaging) = messaging {
-        messaging.close(deadline, &cancel).await
-    } else if let Some(startup) = startup {
-        startup.close(deadline, &cancel).await
-    } else {
-        return false;
+    let closed = match broker {
+        Some(BrokerResource::Starting(startup)) => startup.close(deadline, &cancel).await,
+        Some(BrokerResource::Admitted(messaging)) => messaging.close(deadline, &cancel).await,
+        None => return false,
     };
     match closed {
         CloseOutcome::Complete => {
@@ -553,12 +558,7 @@ async fn close_dependencies(resources: &mut Resources, deadline: Instant) -> boo
         #[allow(unused_variables, reason = "the messaging profile supplies the close")]
         let degraded = false;
         // template:begin messaging:worker-shutdown-close-messaging
-        let degraded = close_messaging(
-            resources.messaging.take(),
-            resources.messaging_startup.take(),
-            deadline,
-        )
-        .await;
+        let degraded = close_messaging(resources.broker.take(), deadline).await;
         // template:end messaging:worker-shutdown-close-messaging
         degraded
     };
@@ -688,7 +688,7 @@ mod tests {
         background.spawn("waits", CancellationToken::cancelled_owned);
         background.spawn("returns", |_cancel| async {});
         assert_eq!(
-            tokio::time::timeout(BACKGROUND_JOIN, background.stopped())
+            tokio::time::timeout(BACKGROUND_JOIN, background.wait_for_failure())
                 .await
                 .unwrap(),
             "returns"
