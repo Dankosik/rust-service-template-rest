@@ -67,7 +67,7 @@ impl Receiver {
             .await
     }
 
-    async fn delete_expired_batch(tx: &mut Tx<'_>) -> Result<u64, sqlx::Error> {
+    async fn delete_expired_batch(tx: &mut Tx<'_>, batch_limit: u32) -> Result<u64, sqlx::Error> {
         let deleted = observed(
             "delete expired webhook receipts",
             sqlx::query!(
@@ -76,7 +76,7 @@ impl Receiver {
                          WHERE received_at < statement_timestamp() - $1::bigint * interval '1 second' \
                          ORDER BY received_at LIMIT $2 FOR UPDATE SKIP LOCKED)",
                 RETENTION_SECONDS,
-                i64::from(CLEANUP_BATCH_ROWS),
+                i64::from(batch_limit),
             )
             .execute(tx),
         )

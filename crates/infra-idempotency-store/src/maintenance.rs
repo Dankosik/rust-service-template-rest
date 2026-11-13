@@ -99,7 +99,7 @@ impl Store {
             .await
     }
 
-    async fn delete_expired_batch(tx: &mut Tx<'_>) -> Result<u64, sqlx::Error> {
+    async fn delete_expired_batch(tx: &mut Tx<'_>, batch_limit: u32) -> Result<u64, sqlx::Error> {
         // The tuple locator is consumed under its row lock within this statement.
         let deleted = observed(
             "delete expired idempotency records",
@@ -110,7 +110,7 @@ impl Store {
                          ORDER BY expires_at LIMIT $1 FOR UPDATE SKIP LOCKED) \
                          DELETE FROM http_idempotency_records AS r USING batch \
                          WHERE r.ctid = batch.ctid AND r.expires_at <= statement_timestamp()",
-                i64::from(CLEANUP_BATCH_ROWS),
+                i64::from(batch_limit),
             )
             .execute(tx),
         )
