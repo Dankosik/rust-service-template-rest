@@ -1,0 +1,14 @@
+id: signed-limit-cast
+language: rust
+severity: hint
+message: "A sign-changing cast is `cast_unsigned()` / `cast_signed()` (1.87), which names the intent."
+rule:
+  any:
+    - pattern: "$T::MAX as $U"
+    - pattern: "$T::MIN as $U"
+constraints:
+  T:
+    regex: "^(i|u)(8|16|32|64|128|size)$"
+  U:
+    regex: "^(i|u)(8|16|32|64|128|size)$"
+ignores: ["vendor/**"]

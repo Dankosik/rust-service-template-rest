@@ -1,0 +1,9 @@
+id: pending-forwarding-arm
+language: rust
+severity: hint
+message: "An arm that only forwards Pending is `std::task::ready!` (1.64)."
+rule:
+  pattern:
+    context: "match x { Poll::Pending => return Poll::Pending, }"
+    selector: match_arm
+ignores: ["vendor/**"]

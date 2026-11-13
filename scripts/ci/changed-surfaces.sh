@@ -411,6 +411,8 @@ classify() {
 		esac
 		case "${file}" in
 		.editorconfig | .gitattributes | .gitignore | LICENSE | .github/CODEOWNERS | .github/ISSUE_TEMPLATE/*) mark no_validation_required ;;
+		# Report-only rules read by `make modernize-scan`; nothing gates on them.
+		tools/modernize/*) mark no_validation_required ;;
 		esac
 		case "${file}" in
 		template.lock | template-owned.paths | scripts/lib/template_*.py | scripts/lib/template_profiles.json | Makefile | make/*.mk | scripts/ci/build-context.py | scripts/ci/runtime-image-inventory.py | scripts/ci/runtime-image-scan.sh | scripts/tests/runtime-image-inventory.py | scripts/ci/image-inputs-check.py | scripts/tests/image-inputs-check.py | scripts/ci/changed-surfaces.sh | scripts/ci/git-changed-paths.sh | scripts/ci/affected-crates.sh | scripts/ci/verify.sh | scripts/ci/validation-lock.sh | scripts/ci/validation-lock.py | scripts/tests/validation-lock-test.py | scripts/ci/measure.sh)
@@ -887,6 +889,9 @@ HOOK
 	assert_case opencode.json \
 		"agent_instructions" \
 		"documentation no_validation_required"
+	assert_case tools/modernize/rules/fixed-windows.yml \
+		"no_validation_required" \
+		"rust_source python validation_system"
 	for file in scripts/agent-roles-sync.sh scripts/codex-agents-sync.sh scripts/harness-skills-sync.sh scripts/lib/sync-cli.sh; do
 		assert_case "${file}" \
 			"agent_instructions shell" \

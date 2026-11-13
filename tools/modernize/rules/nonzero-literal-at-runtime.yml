@@ -1,0 +1,20 @@
+id: nonzero-literal-at-runtime
+language: rust
+severity: hint
+message: "A NonZero literal checked at run time; use `const { NonZero*::new(n).expect(..) }` (1.79) or `NonZero*::MIN` (1.70)."
+rule:
+  any:
+    - pattern: "$T::new($N).unwrap()"
+    - pattern: "$T::new($N).expect($M)"
+  not:
+    inside:
+      any:
+        - kind: const_block
+        - kind: const_item
+      stopBy: end
+constraints:
+  T:
+    regex: "NonZero"
+  N:
+    kind: integer_literal
+ignores: ["vendor/**"]

@@ -1,0 +1,16 @@
+id: err-forwarding-match
+language: rust
+severity: hint
+message: "A match whose Err arm only forwards the error is `?`, `.map(..)` or `let Ok(..) = .. else`."
+rule:
+  any:
+    - pattern:
+        context: "match x { Err($E) => Err($E), }"
+        selector: match_arm
+    - pattern:
+        context: "match x { Err($E) => return Err($E), }"
+        selector: match_arm
+    - pattern:
+        context: "match x { Poll::Ready(Err($E)) => return Poll::Ready(Err($E)), }"
+        selector: match_arm
+ignores: ["vendor/**"]

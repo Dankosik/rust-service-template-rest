@@ -1,0 +1,10 @@
+id: fixed-windows
+language: rust
+severity: hint
+message: "A literal window size is `array_windows::<N>()` (1.94), which yields arrays."
+rule:
+  pattern: "$S.windows($N)"
+constraints:
+  N:
+    kind: integer_literal
+ignores: ["vendor/**"]

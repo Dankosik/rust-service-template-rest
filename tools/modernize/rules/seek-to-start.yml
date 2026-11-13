@@ -1,0 +1,7 @@
+id: seek-to-start
+language: rust
+severity: hint
+message: "Seeking to the start is `Seek::rewind()` (1.55)."
+rule:
+  pattern: "$F.seek(SeekFrom::Start(0))"
+ignores: ["vendor/**"]
