@@ -202,7 +202,7 @@ fn finished_exports_are_counted_by_outcome() {
             .now_or_never()
             .expect("the fixed exporter is ready");
         };
-        let budget = Duration::from_secs(60);
+        let budget = Duration::from_mins(1);
         export(Fixed(|| Ok(())), budget, 3);
         export(
             Fixed(|| Err(OTelSdkError::Timeout(Duration::ZERO))),

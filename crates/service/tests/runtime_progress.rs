@@ -142,7 +142,7 @@ async fn command_output(program: &str, arguments: &[String], within: Duration) -
         if bytes.len() > 8 * 1024 * 1024 {
             return Err("command output exceeded 8 MiB; use file capture".to_owned());
         }
-        Ok(String::from_utf8_lossy(&bytes).into_owned())
+        Ok(String::from_utf8_lossy_owned(bytes))
     };
     let out = tokio::spawn(read(Box::new(stdout)));
     let err = tokio::spawn(read(Box::new(stderr)));
@@ -936,8 +936,8 @@ fn gap(mut completions: Vec<f64>, start: f64, end: f64) -> f64 {
     completions.extend([start, end]);
     completions.sort_by(f64::total_cmp);
     completions
-        .windows(2)
-        .map(|pair| pair[1] - pair[0])
+        .array_windows()
+        .map(|[earlier, later]| later - earlier)
         .fold(0.0, f64::max)
 }
 

@@ -12,7 +12,7 @@ fn defaults_are_inert() {
     assert_eq!(config.max_connections.get(), 4);
     assert_eq!(config.password_file, None);
     assert_eq!(config.session_budgets, PostgresSessionBudgets::Startup);
-    assert_eq!(config.migration_deadline, Duration::from_secs(300));
+    assert_eq!(config.migration_deadline, Duration::from_mins(5));
     config.validate().unwrap();
 }
 

@@ -13,7 +13,7 @@ pub(super) fn request_timeout_range(key: &str, value: Duration) -> Result<(), Va
         key,
         value,
         Duration::from_millis(100),
-        Duration::from_secs(600),
+        Duration::from_mins(10),
     )
 }
 

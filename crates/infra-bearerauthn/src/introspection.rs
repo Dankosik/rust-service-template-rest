@@ -1423,10 +1423,7 @@ mod tests {
                 crate::PreparationPhase::Options
             );
         }
-        for (capacity, ttl) in [
-            (1, Duration::from_secs(1)),
-            (1024, Duration::from_secs(300)),
-        ] {
+        for (capacity, ttl) in [(1, Duration::from_secs(1)), (1024, Duration::from_mins(5))] {
             let options = IntrospectionCacheOptions::try_new(capacity, ttl).unwrap();
             assert_eq!(options.capacity, capacity);
             assert_eq!(options.ttl, ttl);
@@ -1451,7 +1448,7 @@ mod tests {
         };
         let small = principal("");
         let at = |millis| UNIX_EPOCH + Duration::from_millis(millis);
-        let ttl = Duration::from_secs(60);
+        let ttl = Duration::from_mins(1);
         assert_eq!(
             retention(&small, Duration::from_secs(5), at(100_500)),
             Duration::from_secs(5)

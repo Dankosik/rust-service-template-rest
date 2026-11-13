@@ -238,19 +238,13 @@ fn parse_schema(value: &str) -> Result<u16, EnvelopeError> {
 }
 
 fn validate_identity(value: &str) -> Result<(), EnvelopeError> {
-    if !valid_identity(value) {
-        return Err(EnvelopeError::Identity);
-    }
-    Ok(())
+    valid_identity(value).ok_or(EnvelopeError::Identity)
 }
 
 /// The NATS reader trims surrounding whitespace before handing off a header.
 pub(crate) fn validate_outbound_identity(value: &str) -> Result<(), EnvelopeError> {
     validate_identity(value)?;
-    if value.trim() != value {
-        return Err(EnvelopeError::Identity);
-    }
-    Ok(())
+    (value.trim() == value).ok_or(EnvelopeError::Identity)
 }
 
 /// JSON Schema spelling of the control-character rule in [`valid_identity`].
@@ -305,10 +299,7 @@ fn encoded_header_bytes(headers: &HeaderMap) -> usize {
 }
 
 pub(crate) fn validate_header_bytes(headers: &HeaderMap) -> Result<(), EnvelopeError> {
-    if encoded_header_bytes(headers) > HEADER_LIMIT_BYTES {
-        return Err(EnvelopeError::HeadersTooLarge);
-    }
-    Ok(())
+    (encoded_header_bytes(headers) <= HEADER_LIMIT_BYTES).ok_or(EnvelopeError::HeadersTooLarge)
 }
 
 pub(crate) fn format_timestamp(value: OffsetDateTime) -> Result<String, EnvelopeError> {

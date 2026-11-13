@@ -241,7 +241,7 @@ async fn fixture(name: &str) -> Migrator {
 }
 
 fn options(dsn: &Dsn) -> RunOptions<'_> {
-    RunOptions::defaults(dsn, APP, Duration::from_secs(300))
+    RunOptions::defaults(dsn, APP, Duration::from_mins(5))
 }
 
 async fn applied_count(pool: &PgPool) -> i64 {

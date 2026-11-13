@@ -430,7 +430,7 @@ async fn retry_is_bounded_and_only_repeats_eligible_failures() {
 async fn a_local_cache_has_explicit_capacity_expiration_and_invalidation() {
     let cache = moka::future::Cache::<String, u32>::builder()
         .max_capacity(32)
-        .time_to_live(Duration::from_secs(60))
+        .time_to_live(Duration::from_mins(1))
         .build();
     let loads = AtomicUsize::new(0);
     for _ in 0..2 {

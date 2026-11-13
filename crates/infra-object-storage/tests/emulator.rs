@@ -148,7 +148,7 @@ async fn presigned_get_works_until_it_expires() {
     let http = reqwest::Client::new();
 
     let url = storage
-        .presign_get(&key, Duration::from_secs(60))
+        .presign_get(&key, Duration::from_mins(1))
         .await
         .unwrap();
     let response = http.get(url.expose()).send().await.unwrap();

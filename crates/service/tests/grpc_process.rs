@@ -139,7 +139,7 @@ impl Example {
             let drained = std::io::copy(&mut stderr, &mut std::io::sink());
             let overflow = bytes.len() > DIAGNOSTIC_BYTES || drained.as_ref().is_ok_and(|n| *n > 0);
             bytes.truncate(DIAGNOSTIC_BYTES);
-            let text = String::from_utf8_lossy(&bytes).into_owned();
+            let text = String::from_utf8_lossy_owned(bytes);
             let captured = match read.and(drained.map(|_| ())) {
                 Err(error) => Err(format!("stderr capture failed: {error}; captured: {text}")),
                 Ok(()) if overflow => {

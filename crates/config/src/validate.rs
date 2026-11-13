@@ -147,7 +147,7 @@ mod tests {
             "http.request_timeout",
             Duration::from_millis(milliseconds),
             Duration::from_millis(100),
-            Duration::from_secs(600),
+            Duration::from_mins(10),
         );
         assert_eq!(result.is_ok(), valid);
     }
@@ -158,7 +158,7 @@ mod tests {
             "http.request_timeout",
             Duration::from_millis(10),
             Duration::from_millis(100),
-            Duration::from_secs(600),
+            Duration::from_mins(10),
         )
         .unwrap_err();
         assert_eq!(

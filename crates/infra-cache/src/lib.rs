@@ -28,7 +28,7 @@
 //!     Ok(None) | Err(Unavailable) => {}
 //! }
 //! let bytes = load_from_source_of_truth(key).await;
-//! match profiles.set(key, &bytes, Duration::from_secs(60)).await {
+//! match profiles.set(key, &bytes, Duration::from_mins(1)).await {
 //!     Ok(()) | Err(SetError::Unavailable(_)) => {}
 //!     Err(error @ SetError::InvalidTtl) => return Err(error),
 //! }

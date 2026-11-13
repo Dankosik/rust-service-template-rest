@@ -709,7 +709,7 @@ mod tests {
             "a wait that reaches the limit keeps it"
         );
         assert_eq!(
-            clamped_deadline(base, Duration::from_secs(600), limit),
+            clamped_deadline(base, Duration::from_mins(10), limit),
             limit
         );
         assert_eq!(

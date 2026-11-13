@@ -176,7 +176,7 @@ async fn read_resp_arguments(
         let mut bulk = vec![0; length + 2];
         read.read_exact(&mut bulk).await.ok()?;
         bulk.truncate(length);
-        arguments.push(String::from_utf8_lossy(&bulk).into_owned());
+        arguments.push(String::from_utf8_lossy_owned(bulk));
     }
     Some(arguments)
 }

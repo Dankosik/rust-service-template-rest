@@ -488,8 +488,9 @@ mod tests {
             &wrapped,
             &in_io,
         ] {
-            assert!(
-                matches!(classify_topology(error), MessagingError::TimedOut { .. }),
+            std::assert_matches!(
+                classify_topology(error),
+                MessagingError::TimedOut { .. },
                 "{error}"
             );
         }
@@ -498,9 +499,6 @@ mod tests {
     #[test]
     fn an_unrecognized_chain_is_a_topology_failure() {
         let error = Wrapper(Box::new(RequestError::new(RequestErrorKind::Other)));
-        assert!(matches!(
-            classify_topology(&error),
-            MessagingError::Topology
-        ));
+        std::assert_matches!(classify_topology(&error), MessagingError::Topology);
     }
 }

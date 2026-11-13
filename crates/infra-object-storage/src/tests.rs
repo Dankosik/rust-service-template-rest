@@ -896,7 +896,7 @@ async fn presign_is_bounded_and_redacted() {
         .unwrap()
         .expected_bucket_owner = Some("123456789012".to_owned());
     let url = storage
-        .presign_get(&key(), Duration::from_secs(60))
+        .presign_get(&key(), Duration::from_mins(1))
         .await
         .unwrap();
     assert!(url.expose().contains("X-Amz-Signature="), "presigned query");
@@ -932,7 +932,7 @@ async fn the_span_names_the_region_only_on_amazon() {
     }))
     .unwrap();
     amazon
-        .presign_get(&key(), Duration::from_secs(60))
+        .presign_get(&key(), Duration::from_mins(1))
         .await
         .unwrap();
     assert_eq!(
@@ -951,7 +951,7 @@ async fn the_span_names_the_region_only_on_amazon() {
         endpoint: R2_ENDPOINT.to_owned(),
     }))
     .unwrap();
-    r2.presign_get(&key(), Duration::from_secs(60))
+    r2.presign_get(&key(), Duration::from_mins(1))
         .await
         .unwrap();
     assert_eq!(records.matching("span", " cloud.region=").len(), 1);
@@ -1239,7 +1239,7 @@ async fn stopped_parents_refuse_every_storage_entry_before_dispatch() {
         );
         assert_eq!(
             storage
-                .presign_get_with_context(&key(), Duration::from_secs(60), &context)
+                .presign_get_with_context(&key(), Duration::from_mins(1), &context)
                 .await
                 .err(),
             Some(ObjectStorageError::Unavailable)

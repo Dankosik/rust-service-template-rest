@@ -67,14 +67,14 @@ fn download(timeout: Duration) -> (Download, Arc<Semaphore>, oneshot::Sender<()>
 #[tokio::test(start_paused = true)]
 async fn collection_reserves_only_the_unread_tail() {
     for (read_chunks, expected) in [(0, &b"abcde"[..]), (1, &b"de"[..]), (2, &b""[..])] {
-        let (mut download, admission, eof) = download(Duration::from_secs(60));
+        let (mut download, admission, eof) = download(Duration::from_mins(1));
         eof.send(()).unwrap();
         for _ in 0..read_chunks {
             download.next_chunk().await.unwrap().unwrap();
         }
         if read_chunks == 2 {
             joined(&mut download.timer).await;
-            tokio::time::advance(Duration::from_secs(60)).await;
+            tokio::time::advance(Duration::from_mins(1)).await;
             assert_eq!(download.next_chunk().await.unwrap(), None);
             assert!(download.is_end_stream());
         }
@@ -92,7 +92,7 @@ async fn collection_reserves_only_the_unread_tail() {
 
 #[tokio::test]
 async fn cancelled_final_chunk_poll_is_collected_only_after_eof() {
-    let (mut download, admission, eof) = download(Duration::from_secs(60));
+    let (mut download, admission, eof) = download(Duration::from_mins(1));
     assert_eq!(download.next_chunk().await.unwrap().unwrap(), "abc");
     {
         let mut next = std::pin::pin!(download.next_chunk());
@@ -182,7 +182,7 @@ fn assert_download_failure(
         }),
         OperationGuard::start(Arc::new(Histograms::default()), Operation::Get, None),
         Arc::clone(&admission).try_acquire_owned().unwrap(),
-        OperationContext::with_timeout(Duration::from_secs(60)),
+        OperationContext::with_timeout(Duration::from_mins(1)),
     );
     let mut context = Context::from_waker(Waker::noop());
     assert_eq!(drops.load(Ordering::SeqCst), 0);
@@ -244,7 +244,7 @@ async fn retained_failed_download_releases_body_and_finishes_once() {
                 assert_download_failure(chunk, error, expected, partial, frames)
             });
             joined(&mut download.timer).await;
-            tokio::time::advance(Duration::from_secs(60)).await;
+            tokio::time::advance(Duration::from_mins(1)).await;
             let mut context = Context::from_waker(Waker::noop());
             assert_eq!(
                 read(&mut download, &mut context, frames),
@@ -518,7 +518,7 @@ async fn unexpected_timer_abort_before_first_poll_fails_closed() {
     let _subscriber = tracing::subscriber::set_default(records.clone());
     let _every_dispatcher = tracing::Dispatch::new(Records::default());
     let (body, destroyed) = body(None);
-    let end = tokio::time::sleep(Duration::from_secs(60)).deadline();
+    let end = tokio::time::sleep(Duration::from_mins(1)).deadline();
     let (mut download, slots) = open(body, 4, end);
     // This task has not yielded since spawn: the exit guard must already exist.
     download.timer.abort();
@@ -547,7 +547,7 @@ async fn drop_and_provider_panic_release_custody_before_timer_runs() {
     for panic in [false, true] {
         let (mut body, mut destroyed) = body(None);
         body.panic = panic;
-        let end = tokio::time::sleep(Duration::from_secs(60)).deadline();
+        let end = tokio::time::sleep(Duration::from_mins(1)).deadline();
         let (mut download, slots) = open(body, 4, end);
         let completion = download.timer.abort_handle();
         if panic {

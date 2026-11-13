@@ -424,7 +424,7 @@ async fn replacement_password_is_authenticated_on_retained_and_new_connections()
             Outcome::Accepted,
         );
         namespace
-            .set(&key, b"kept", Duration::from_secs(60))
+            .set(&key, b"kept", Duration::from_mins(1))
             .await
             .expect("initial authenticated SET");
 

@@ -393,10 +393,12 @@ pub async fn apply_effect(
     })
     .await;
     match result {
-        Err(error) if error.commit_unknown() => match read_effect(pool, channel, operation).await {
-            Ok(Some(effect)) => Ok(effect),
-            Ok(None) | Err(_) => Err(error),
-        },
+        Err(error)
+            if error.commit_unknown()
+                && let Ok(Some(effect)) = read_effect(pool, channel, operation).await =>
+        {
+            Ok(effect)
+        }
         result => result,
     }
 }

@@ -82,7 +82,7 @@ impl Default for PostgresConfig {
             max_connections: const { NonZeroU32::new(4).expect("4 is nonzero") },
             // Above the two-minute statement budget of a transactional
             // migration, so a few of them fit in one run.
-            migration_deadline: Duration::from_secs(300),
+            migration_deadline: Duration::from_mins(5),
         }
     }
 }

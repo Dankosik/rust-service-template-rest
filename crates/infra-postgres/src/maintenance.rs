@@ -23,7 +23,7 @@ pub use population::{
 const LOG_TARGET: &str = module_path!();
 
 /// Delay between scheduled cleanup passes.
-const CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
+const CLEANUP_INTERVAL: Duration = Duration::from_mins(1);
 
 /// Cadence for the existing scheduled owner; direct cleanup calls do not use it.
 #[derive(Debug)]

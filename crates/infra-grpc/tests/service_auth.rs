@@ -157,7 +157,7 @@ fn readiness() -> Readiness {
     Readiness::new(
         Vec::new(),
         RefreshPolicy {
-            interval: Duration::from_secs(60),
+            interval: Duration::from_mins(1),
             probe_budget: Duration::from_secs(1),
             failure_threshold: 1,
         },
