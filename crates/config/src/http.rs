@@ -10,7 +10,7 @@ use shared_rules::hyper::HTTP1_MIN_READ_BUFFER_BYTES;
 
 use crate::listener_limits::{
     DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_IN_FLIGHT, DEFAULT_REQUEST_TIMEOUT, connection_age_range,
-    connection_count_range, in_flight_range, request_timeout_range,
+    connection_count_range, in_flight_range, request_budget_fits_drain, request_timeout_range,
 };
 use crate::validate::{ValidationError, duration_range, int_range};
 
@@ -120,9 +120,9 @@ impl HttpConfig {
         NonZeroU32::new(self.max_in_flight)
     }
 
-    /// Adapter form of `http.max_connection_age`: `None` means no age.
+    /// Adapter form of `http.max_connection_age`: zero becomes `None`.
     #[must_use]
-    pub fn max_connection_age(&self) -> Option<Duration> {
+    pub fn connection_age_cap(&self) -> Option<Duration> {
         (!self.max_connection_age.is_zero()).then_some(self.max_connection_age)
     }
 
@@ -204,40 +204,19 @@ impl HttpConfig {
     }
 }
 
-/// Both listeners share the drain `http` owns, so each listener's request
-/// budget must fit `drain`, what is left of it after readiness propagation.
-pub(crate) fn request_budget_fits_drain(
-    key: &str,
-    timeout: Duration,
-    drain: Duration,
-    subject: &str,
-) -> Result<(), ValidationError> {
-    if timeout > drain {
-        return Err(ValidationError::new(
-            key,
-            format!(
-                "must be <= the drain budget after readiness propagation ({}) so in-flight {subject} can finish, got {}",
-                humantime::format_duration(drain),
-                humantime::format_duration(timeout)
-            ),
-        ));
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn a_connection_age_is_off_at_zero_or_at_least_a_second() {
-        assert_eq!(HttpConfig::default().max_connection_age(), None);
+        assert_eq!(HttpConfig::default().connection_age_cap(), None);
         let aged = HttpConfig {
             max_connection_age: Duration::from_mins(30),
             ..HttpConfig::default()
         };
         aged.validate().unwrap();
-        assert_eq!(aged.max_connection_age(), Some(Duration::from_mins(30)));
+        assert_eq!(aged.connection_age_cap(), Some(Duration::from_mins(30)));
         let too_short = HttpConfig {
             max_connection_age: Duration::from_millis(500),
             ..HttpConfig::default()

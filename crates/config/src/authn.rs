@@ -47,7 +47,10 @@ impl<'de> Deserialize<'de> for Audiences {
             Many(Vec<String>),
         }
 
-        let values = match Input::deserialize(deserializer)? {
+        let input = Input::deserialize(deserializer).map_err(|_| {
+            value_free::<D::Error>("`authn.audience` must be a string or a list of strings")
+        })?;
+        let values = match input {
             Input::One(value) => vec![value],
             Input::Many(values) => values,
         };
@@ -206,7 +209,12 @@ where
         Text(String),
     }
 
-    match Input::deserialize(deserializer)? {
+    let input = Input::deserialize(deserializer).map_err(|_| {
+        value_free::<D::Error>(
+            "`authn.algorithms` must be a list of supported JWT algorithms or a comma-separated string",
+        )
+    })?;
+    match input {
         Input::List(values) => Ok(values),
         Input::Text(value) => value
             .split(',')

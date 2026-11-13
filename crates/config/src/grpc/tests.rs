@@ -69,7 +69,7 @@ fn limits_default_to_the_http_bounds_and_zero_turns_one_off() {
     assert_eq!(config.in_flight_cap().map(NonZeroU32::get), Some(256));
     assert_eq!(config.admission_wait, Duration::from_secs(1));
     assert_eq!(config.connection_cap().map(NonZeroU32::get), Some(4096));
-    assert_eq!(config.max_connection_age(), Some(Duration::from_mins(30)));
+    assert_eq!(config.connection_age_cap(), Some(Duration::from_mins(30)));
 
     let unbounded = GrpcConfig {
         max_in_flight: 0,
@@ -80,7 +80,7 @@ fn limits_default_to_the_http_bounds_and_zero_turns_one_off() {
     unbounded.validate(default_drain_budget()).unwrap();
     assert_eq!(unbounded.in_flight_cap(), None);
     assert_eq!(unbounded.connection_cap(), None);
-    assert_eq!(unbounded.max_connection_age(), None);
+    assert_eq!(unbounded.connection_age_cap(), None);
 }
 
 #[test]
@@ -187,7 +187,7 @@ fn grpc_limits_load_from_the_environment_and_a_bad_one_names_its_key() {
     );
     assert_eq!(cfg.grpc.admission_wait, Duration::from_secs(2));
     assert_eq!(cfg.grpc.connection_cap(), None);
-    assert_eq!(cfg.grpc.max_connection_age(), Some(Duration::from_mins(5)));
+    assert_eq!(cfg.grpc.connection_age_cap(), Some(Duration::from_mins(5)));
 
     let over_drain = [("APP__GRPC__REQUEST_TIMEOUT", "11s")];
     let err = load_from(

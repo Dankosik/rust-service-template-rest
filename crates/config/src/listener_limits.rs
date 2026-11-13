@@ -17,6 +17,26 @@ pub(super) fn request_timeout_range(key: &str, value: Duration) -> Result<(), Va
     )
 }
 
+/// Both listeners share the drain budget remaining after readiness propagation.
+pub(super) fn request_budget_fits_drain(
+    key: &str,
+    timeout: Duration,
+    drain: Duration,
+    subject: &str,
+) -> Result<(), ValidationError> {
+    if timeout > drain {
+        return Err(ValidationError::new(
+            key,
+            format!(
+                "must be <= the drain budget after readiness propagation ({}) so in-flight {subject} can finish, got {}",
+                humantime::format_duration(drain),
+                humantime::format_duration(timeout)
+            ),
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn in_flight_range(key: &str, value: u32) -> Result<(), ValidationError> {
     int_range(key, u64::from(value), 0, 100_000)
 }

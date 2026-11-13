@@ -13,10 +13,9 @@ use secrecy::SecretString;
 use serde::Deserialize;
 
 use crate::de::{blank_as_none, blank_secret_as_none};
-use crate::http::request_budget_fits_drain;
 use crate::listener_limits::{
     DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_IN_FLIGHT, DEFAULT_REQUEST_TIMEOUT, connection_age_range,
-    connection_count_range, in_flight_range, request_timeout_range,
+    connection_count_range, in_flight_range, request_budget_fits_drain, request_timeout_range,
 };
 use crate::validate::{ValidationError, duration_range, required};
 
@@ -139,9 +138,9 @@ impl GrpcConfig {
         NonZeroU32::new(self.max_connections)
     }
 
-    /// Adapter form of `grpc.max_connection_age`: `None` means no age.
+    /// Adapter form of `grpc.max_connection_age`: zero becomes `None`.
     #[must_use]
-    pub fn max_connection_age(&self) -> Option<Duration> {
+    pub fn connection_age_cap(&self) -> Option<Duration> {
         (!self.max_connection_age.is_zero()).then_some(self.max_connection_age)
     }
 
