@@ -224,7 +224,6 @@ fn required_header<'a>(
     )
 }
 
-/// The `Event-Schema` header value of `version`.
 pub(crate) fn schema_label(version: u16) -> String {
     format!("v{version}")
 }
@@ -279,7 +278,6 @@ pub(crate) const fn valid_identity(value: &str) -> bool {
 /// The `: ` after a header name and the line break after its value.
 const HEADER_LINE_FRAMING_BYTES: usize = ": \r\n".len();
 
-/// Encoded bytes of one `name: value` header line.
 fn header_line_bytes(name: &str, value: &str) -> usize {
     name.len() + value.len() + HEADER_LINE_FRAMING_BYTES
 }
