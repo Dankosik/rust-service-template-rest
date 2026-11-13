@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 use super::{Ended, WorkerError, pending_end, worker_identity};
 use crate::Registration;
 use crate::background::Background;
-use crate::shutdown::{BrokerResource, Resources};
+use crate::resources::{BrokerResource, Resources};
 use crate::signals::Signals;
 
 const MESSAGING_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);

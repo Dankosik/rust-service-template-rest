@@ -150,6 +150,13 @@ fn parse_handled_kinds(handled_kinds: &str) -> Result<BTreeSet<String>, InputErr
 #[derive(Debug)]
 pub struct Inspection(Selection);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InspectionMode {
+    One,
+    Failed,
+    Unhandled,
+}
+
 #[derive(Debug)]
 enum Selection {
     One(JobId),
@@ -200,6 +207,17 @@ impl Inspection {
     ) -> Result<Self, InputError> {
         let kinds = parse_handled_kinds(handled_kinds)?;
         Self::page(after, limit, Filter::Unhandled(kinds))
+    }
+
+    #[must_use]
+    pub const fn mode(&self) -> InspectionMode {
+        match &self.0 {
+            Selection::One(_) => InspectionMode::One,
+            Selection::Page { filter, .. } => match filter {
+                Filter::Failed => InspectionMode::Failed,
+                Filter::Unhandled(_) => InspectionMode::Unhandled,
+            },
+        }
     }
 
     /// The admitted sorted, deduplicated fleet kinds for an unhandled inspection.

@@ -8,24 +8,25 @@ use std::time::Duration;
 
 use futures_util::FutureExt;
 
-use health::Readiness;
 use infra_http::{Drained, Server};
 // template:begin jobs:worker-shutdown-jobs-imports
 use infra_jobs::Started;
 // template:end jobs:worker-shutdown-jobs-imports
 // template:begin messaging:worker-shutdown-messaging-imports
-use infra_messaging::{CloseOutcome, ConsumerHandle, Messaging, MessagingStartup};
+use infra_messaging::CloseOutcome;
 // template:end messaging:worker-shutdown-messaging-imports
 // template:begin jobs:worker-shutdown-postgres-imports
 use infra_postgres::PgPool;
 // template:end jobs:worker-shutdown-postgres-imports
-use infra_telemetry::{
-    LoggerGuard, LoggerShutdown, ProviderShutdown, SHUTDOWN_JOIN_SLACK, TracerProviderHandle,
-};
+use infra_telemetry::{LoggerShutdown, ProviderShutdown, SHUTDOWN_JOIN_SLACK};
 use service_config::HttpConfig;
 use tokio::time::Instant;
 
 use crate::background::Background;
+// template:begin messaging:worker-shutdown-broker-import
+use crate::resources::BrokerResource;
+// template:end messaging:worker-shutdown-broker-import
+use crate::resources::{Listeners, Resources};
 use crate::signals::Signals;
 
 /// Ceiling for finishing attempts after a forced drain.
@@ -112,38 +113,6 @@ impl Budget {
     fn stage_deadline(&self, want: Duration) -> Instant {
         Instant::now() + self.remaining(want)
     }
-}
-
-/// The listeners bound so far. Common shutdown closes whichever are present.
-#[derive(Debug, Default)]
-pub(crate) struct Listeners {
-    pub(crate) health: Option<Server>,
-    pub(crate) diagnostics: Option<Server>,
-}
-
-impl Listeners {
-    /// Names each listener's watch task, its stop failure, and its close stage.
-    pub(crate) const HEALTH: &'static str = "health_listener";
-    pub(crate) const DIAGNOSTICS: &'static str = "diagnostics_listener";
-}
-
-/// What startup opened and teardown closes.
-#[derive(Default)]
-pub(crate) struct Resources {
-    pub(crate) tracer_provider: Option<TracerProviderHandle>,
-    pub(crate) logger: Option<LoggerGuard>,
-    // template:begin jobs:worker-shutdown-resources-started
-    pub(crate) started: Vec<Started>,
-    // template:end jobs:worker-shutdown-resources-started
-    // template:begin messaging:worker-shutdown-resources-messaging
-    pub(crate) consumer: Option<ConsumerHandle>,
-    pub(crate) broker: Option<BrokerResource>,
-    // template:end messaging:worker-shutdown-resources-messaging
-    // template:begin jobs:worker-shutdown-resources-pool
-    pub(crate) pool: Option<PgPool>,
-    // template:end jobs:worker-shutdown-resources-pool
-    pub(crate) listeners: Listeners,
-    pub(crate) readiness: Option<Readiness>,
 }
 
 /// Concrete partial resources and the first stop/failure deadline.
@@ -505,20 +474,6 @@ async fn close_pool(pool: &PgPool, budget: Duration) -> bool {
 // template:end jobs:worker-shutdown-close-pool
 
 // template:begin messaging:worker-shutdown-close-messaging-fn
-pub(crate) enum BrokerResource {
-    Starting(Box<MessagingStartup>),
-    Admitted(Messaging),
-}
-
-impl Resources {
-    pub(crate) fn admitted_messaging(&self) -> Option<&Messaging> {
-        match self.broker.as_ref() {
-            Some(BrokerResource::Admitted(messaging)) => Some(messaging),
-            Some(BrokerResource::Starting(_)) | None => None,
-        }
-    }
-}
-
 async fn close_messaging(broker: Option<BrokerResource>, deadline: Instant) -> bool {
     // The root token is already cancelled here, and close gives up at
     // once under a cancelled token, so close gets a fresh one.
@@ -590,7 +545,11 @@ async fn finish_telemetry(
                     false
                 }
                 ProviderShutdown::Incomplete(reasons) => {
-                    tracing::warn!(reasons = reasons.bits(), "trace_shutdown_incomplete");
+                    tracing::warn!(
+                        reasons = reasons.bits(),
+                        reason_flags = ?reasons,
+                        "trace_shutdown_incomplete"
+                    );
                     true
                 }
             }

@@ -6,7 +6,7 @@ use service_config::Config;
 
 use super::{Ended, WorkerError, pending_end};
 use crate::background::Background;
-use crate::shutdown::Resources;
+use crate::resources::Resources;
 use crate::signals::Signals;
 
 pub(super) fn validate(kinds: KindsBuilder) -> Result<Option<Kinds>, WorkerError> {

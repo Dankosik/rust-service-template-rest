@@ -340,7 +340,7 @@ pub enum ProviderShutdown {
 
 bitflags::bitflags! {
     /// Finite failure observations; no exporter error text is retained.
-    /// Operators see [`Self::bits`] in the `telemetry` shutdown stage.
+    /// The `telemetry` shutdown stage logs the named flags alongside [`Self::bits`].
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
     pub struct ProviderShutdownReasons: u32 {
         /// An SDK operation during the drain (an export, or the exporter's or

@@ -7,7 +7,7 @@ use infra_messaging::MessagingError;
 use service_config::Config;
 
 use super::{RetainedCapabilities, WorkerError};
-use crate::shutdown::Resources;
+use crate::resources::Resources;
 
 pub(super) fn admit_pool_inputs(
     config: &Config,
@@ -71,7 +71,7 @@ mod tests {
 
     use crate::background::Background;
     use crate::bootstrap::{RetainedCapabilities, WorkerError};
-    use crate::shutdown::Resources;
+    use crate::resources::Resources;
 
     #[tokio::test]
     async fn deferred_message_intent_refuses_missing_consumer_config_before_factory_runs() {

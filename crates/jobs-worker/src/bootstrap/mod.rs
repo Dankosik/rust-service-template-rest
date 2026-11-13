@@ -30,7 +30,8 @@ use infra_telemetry::install_panic_hook;
 use service_config::Config;
 
 use crate::background::Background;
-use crate::shutdown::{self, Listeners, Resources};
+use crate::resources::{Listeners, Resources};
+use crate::shutdown;
 use crate::signals::{SignalError, Signals};
 use crate::{BuildError, Register, Registration};
 
