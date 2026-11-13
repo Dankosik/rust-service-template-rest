@@ -15,7 +15,7 @@ use infra_idempotency_store::{
 use tokio::time::Instant;
 
 use super::Tx;
-use super::stored::{self, Stored};
+use super::stored::{self, ReplayableResponse};
 use crate::context::RequestDeadline;
 use crate::problem::{Code, Problem, sanitized_internal_error};
 
@@ -169,7 +169,7 @@ impl Idempotency {
         let attempted = match deadline.attempt_end() {
             None => Err(AttemptError::Unavailable),
             Some(attempt_end) => {
-                let attempt = store.attempt_until(
+                let attempt = store.attempt_with_acquire_deadline(
                     &scope,
                     &caller,
                     &fingerprint,
@@ -197,13 +197,13 @@ impl Idempotency {
 async fn commit_candidate(
     response: Response,
     operation_id: &str,
-) -> Result<(Record, Stored), Rollback> {
+) -> Result<(Record, ReplayableResponse), Rollback> {
     if !response.status().is_success() {
         return Err(Rollback::Response(response));
     }
     stored::capture(response)
         .await
-        .and_then(|stored| Ok((stored.to_record()?, stored)))
+        .map(|replayable| (replayable.to_record(), replayable))
         .map_err(|unstorable| {
             tracing::warn!(
                 operation = operation_id,
@@ -262,7 +262,7 @@ impl Answer {
 }
 
 fn map_attempted(
-    attempted: Result<Attempted<Stored, Rollback>, AttemptError>,
+    attempted: Result<Attempted<ReplayableResponse, Rollback>, AttemptError>,
     scope: &ScopeKey,
     operation_id: &str,
 ) -> Answer {
@@ -276,14 +276,17 @@ fn map_attempted(
         Ok(Attempted::RolledBack(Rollback::Unstorable)) => {
             Answer::boundary_problem(sanitized_internal_error(), Outcome::Unstorable)
         }
-        Err(AttemptError::Integrity) => integrity_failure(operation_id, "store_undecodable", None),
+        Err(AttemptError::Integrity) => {
+            integrity_failure(scope, operation_id, "store_undecodable", None)
+        }
         Ok(Attempted::Mismatch) => Answer::boundary_problem(key_mismatch(), Outcome::KeyMismatch),
         Ok(Attempted::Replay(record)) => match stored::decode(record) {
-            Ok(stored) => Answer::operation_response(
-                mark_provenance(stored.into_response(), Provenance::Replayed),
+            Ok(replayable) => Answer::operation_response(
+                mark_provenance(replayable.into_response(), Provenance::Replayed),
                 Outcome::Replayed,
             ),
             Err(undecodable) => integrity_failure(
+                scope,
                 operation_id,
                 "replay_undecodable",
                 Some(undecodable.class()),
@@ -295,8 +298,8 @@ fn map_attempted(
         Ok(Attempted::RolledBack(Rollback::Response(response))) => {
             Answer::operation_response(response, Outcome::NotStored)
         }
-        Ok(Attempted::Committed(stored)) => Answer::operation_response(
-            mark_provenance(stored.into_response(), Provenance::Executed),
+        Ok(Attempted::Committed(replayable)) => Answer::operation_response(
+            mark_provenance(replayable.into_response(), Provenance::Executed),
             Outcome::Executed,
         ),
     }
@@ -308,11 +311,13 @@ pub(super) fn mark_provenance(mut response: Response, provenance: Provenance) ->
 }
 
 fn integrity_failure(
+    scope: &ScopeKey,
     operation_id: &str,
     failure: &'static str,
     reason: Option<&'static str>,
 ) -> Answer {
     tracing::error!(
+        scope_digest = %ScopeDigest(scope.digest()),
         operation = operation_id,
         failure,
         reason,

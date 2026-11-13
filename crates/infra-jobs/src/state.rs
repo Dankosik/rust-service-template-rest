@@ -12,7 +12,6 @@ pub enum JobState {
 }
 
 impl JobState {
-    /// Every stored state; [`Self::parse`] accepts exactly these strings.
     const ALL: [Self; 4] = [Self::Pending, Self::Running, Self::Completed, Self::Failed];
 
     #[must_use]
@@ -46,7 +45,6 @@ pub enum FailureReason {
 }
 
 impl FailureReason {
-    /// Every stored reason; [`Self::parse`] accepts exactly these strings.
     const ALL: [Self; 2] = [Self::Permanent, Self::Exhausted];
 
     #[must_use]

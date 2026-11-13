@@ -1,32 +1,59 @@
 //! Request opening and explicitly continuing response work have distinct lifetimes.
 
-use std::pin::Pin;
+use std::future::Future;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::task::{Context, Poll};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use axum::body::{Body, Bytes};
 use axum::extract::{FromRequestParts, Request, State};
 use axum::http::header::CONNECTION;
 use axum::http::request::Parts;
 use axum::http::{HeaderValue, Version};
 use axum::middleware::Next;
 use axum::response::{IntoResponse as _, Response};
-use http_body::{Body as HttpBody, Frame, SizeHint};
+use http_body::Body as _;
 use operation_context::{Deadline, OperationContext, Stopped};
-use tokio_util::sync::DropGuard;
 
+use crate::body::hold_guard_until_end;
 use crate::problem::{Code, Problem, sanitized_internal_error};
 
 /// Fixed request-opening budget installed by the hardened chain.
 #[derive(Clone, Debug)]
-pub struct RequestContext(OperationContext);
+pub struct RequestContext {
+    operation: OperationContext,
+    upload_reads: Option<Arc<AtomicUsize>>,
+}
 
 impl RequestContext {
     #[must_use]
     pub const fn operation(&self) -> &OperationContext {
-        &self.0
+        &self.operation
+    }
+
+    /// Track an awaited read of the incoming request body for timeout classification.
+    ///
+    /// Pass only the body-read future. If it is dropped while pending, a later
+    /// opening deadline is classified independently of that read.
+    pub async fn read_body<F: Future>(&self, read: F) -> F::Output {
+        read_body(Some(self), read).await
+    }
+}
+
+pub(crate) async fn read_body<F: Future>(context: Option<&RequestContext>, read: F) -> F::Output {
+    let _upload_read = context
+        .and_then(|context| context.upload_reads.as_deref())
+        .map(|reads| {
+            reads.fetch_add(1, Ordering::Relaxed);
+            UploadRead(reads)
+        });
+    read.await
+}
+
+struct UploadRead<'a>(&'a AtomicUsize);
+
+impl Drop for UploadRead<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -114,13 +141,19 @@ impl<S: Send + Sync> FromRequestParts<S> for ResponseContext {
     reason = "the error is the extractor's axum rejection, a Response"
 )]
 pub(crate) fn extension<T: Clone + Send + Sync + 'static>(parts: &Parts) -> Result<T, Response> {
-    parts.extensions.get::<T>().cloned().ok_or_else(|| {
-        tracing::error!(
-            extractor = std::any::type_name::<T>(),
-            "http_extractor_wiring_failed"
-        );
-        sanitized_internal_error()
-    })
+    parts
+        .extensions
+        .get::<T>()
+        .cloned()
+        .ok_or_else(missing_extension::<T>)
+}
+
+pub(crate) fn missing_extension<T>() -> Response {
+    tracing::error!(
+        extractor = std::any::type_name::<T>(),
+        "http_extractor_wiring_failed"
+    );
+    sanitized_internal_error()
 }
 
 /// When the request reached admission. The opening budget counts from here, so
@@ -139,16 +172,24 @@ pub(crate) async fn opening(
         .map_or_else(tokio::time::Instant::now, |arrival| arrival.0);
     let deadline = Deadline::new(origin, budget);
     let response_context = OperationContext::unbounded();
-    let request_operation =
-        OperationContext::new(Some(deadline), response_context.cancellation().clone());
+    let context = RequestContext {
+        operation: OperationContext::new(Some(deadline), response_context.cancellation().clone()),
+        upload_reads: (!request.body().is_end_stream()).then(|| Arc::new(AtomicUsize::new(0))),
+    };
+    let version = request.version();
+    let upload_version = || {
+        context
+            .upload_reads
+            .as_ref()
+            .filter(|reads| reads.load(Ordering::Relaxed) != 0)
+            .map(|_| version)
+    };
     let guard = response_context.cancellation().clone().drop_guard();
     // The raw context is the extension outbound clients read for parent
     // deadline and cancellation; the wrapper below is the handler-facing
     // extractor.
-    request.extensions_mut().insert(request_operation.clone());
-    request
-        .extensions_mut()
-        .insert(RequestContext(request_operation.clone()));
+    request.extensions_mut().insert(context.operation.clone());
+    request.extensions_mut().insert(context.clone());
     request
         .extensions_mut()
         .insert(ResponseContext(response_context));
@@ -157,31 +198,19 @@ pub(crate) async fn opening(
         request.extensions_mut().insert(deadline);
     }
     // template:end request-budget:http-request-deadline-projection
-    let upload = Upload::track(&mut request);
     let response = tokio::select! {
         biased;
-        // The upload is read when the budget expires, before `select!` drops
-        // the handler and with it the body.
+        // Check the live reads before `select!` drops the handler's future.
         stopped = async {
-            let reason = request_operation.wait_stopped().await;
-            stopped_response(reason, upload.version_if_awaiting())
+            let reason = context.operation.wait_stopped().await;
+            stopped_response(reason, upload_version())
         } => return stopped,
         response = next.run(request) => response,
     };
-    if let Some(reason) = request_operation.stopped() {
-        return stopped_response(reason, upload.version_if_awaiting());
+    if let Some(reason) = context.operation.stopped() {
+        return stopped_response(reason, upload_version());
     }
-    response.map(|body| {
-        if body.is_end_stream() {
-            drop(guard);
-            body
-        } else {
-            Body::new(CancelBody {
-                body,
-                guard: Some(guard),
-            })
-        }
-    })
+    response.map(|body| hold_guard_until_end(body, guard))
 }
 
 fn stopped_response(reason: Stopped, upload: Option<Version>) -> Response {
@@ -214,109 +243,10 @@ pub(crate) fn budget_expired_response() -> Response {
         .into_response()
 }
 
-/// Whether the handler is waiting on the caller for request body bytes: the
-/// body's last poll was pending and the body is still held. A body that
-/// arrived empty is not tracked.
-struct Upload {
-    awaiting: Option<Arc<AtomicBool>>,
-    version: Version,
-}
-
-impl Upload {
-    fn track(request: &mut Request) -> Self {
-        let version = request.version();
-        if request.body().is_end_stream() {
-            return Self {
-                awaiting: None,
-                version,
-            };
-        }
-        let awaiting = Arc::new(AtomicBool::new(false));
-        let body = std::mem::take(request.body_mut());
-        *request.body_mut() = Body::new(UploadBody {
-            body,
-            awaiting: Arc::clone(&awaiting),
-        });
-        Self {
-            awaiting: Some(awaiting),
-            version,
-        }
-    }
-
-    fn version_if_awaiting(&self) -> Option<Version> {
-        self.awaiting
-            .as_ref()
-            .filter(|awaiting| awaiting.load(Ordering::Relaxed))
-            .map(|_| self.version)
-    }
-}
-
-struct UploadBody {
-    body: Body,
-    awaiting: Arc<AtomicBool>,
-}
-
-impl HttpBody for UploadBody {
-    type Data = Bytes;
-    type Error = axum::Error;
-
-    fn poll_frame(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
-        let this = self.get_mut();
-        let result = Pin::new(&mut this.body).poll_frame(cx);
-        this.awaiting.store(result.is_pending(), Ordering::Relaxed);
-        result
-    }
-
-    fn is_end_stream(&self) -> bool {
-        self.body.is_end_stream()
-    }
-
-    fn size_hint(&self) -> SizeHint {
-        self.body.size_hint()
-    }
-}
-
-impl Drop for UploadBody {
-    fn drop(&mut self) {
-        self.awaiting.store(false, Ordering::Relaxed);
-    }
-}
-
-struct CancelBody {
-    body: Body,
-    guard: Option<DropGuard>,
-}
-
-impl HttpBody for CancelBody {
-    type Data = Bytes;
-    type Error = axum::Error;
-
-    fn poll_frame(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
-        let this = self.get_mut();
-        let result = Pin::new(&mut this.body).poll_frame(cx);
-        if matches!(result, Poll::Ready(None | Some(Err(_)))) || this.body.is_end_stream() {
-            this.guard.take();
-        }
-        result
-    }
-
-    fn is_end_stream(&self) -> bool {
-        self.body.is_end_stream()
-    }
-    fn size_hint(&self) -> SizeHint {
-        self.body.size_hint()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::{Body, Bytes};
     use axum::routing::get;
     use http_body_util::BodyExt as _;
     use tower::ServiceExt as _;

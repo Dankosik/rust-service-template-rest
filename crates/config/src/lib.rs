@@ -4,11 +4,14 @@
 //! files in order → `APP__SECTION__KEY` variables, read from the files of
 //! `--secrets-dir` and then from the environment. A later source may override
 //! individual keys in an earlier table. Replacing the table with a value
-//! fails startup, since it could hide unknown keys before decoding. Unknown
-//! keys anywhere fail startup. Secret-like keys may carry a value only
-//! through a variable. Each section owns its type, defaults, and validation
-//! in one file.
-//! [`Config::validate`] runs those section validators; a rule spanning
+//! fails startup, since it could hide unknown keys before decoding. Secret-like
+//! keys may carry a value only through a variable.
+//!
+//! The full [`Config`] snapshot rejects unknown keys during decoding. The
+//! migration and jobs operator loaders apply the shared input rules, then
+//! ignore sections outside their own snapshots when decoding.
+//!
+//! [`Config::validate`] delegates to each section's validator. A rule spanning
 //! two sections lives in the one that depends on the other. Rules that need
 //! process structure, such as the drain-plus-teardown tail against the grace
 //! period, stay in the composition root.
@@ -20,6 +23,7 @@
 mod app;
 mod health;
 mod http;
+mod listener_limits;
 // template:begin grpc:config-module
 mod grpc;
 // template:end grpc:config-module
@@ -90,7 +94,7 @@ pub use integrations::GrpcClientConfig;
 // template:begin inbound-webhooks:config-inbound-webhooks-export
 pub use inbound_webhooks::{InboundWebhookEndpointConfig, InboundWebhooksConfig};
 // template:end inbound-webhooks:config-inbound-webhooks-export
-pub use load::{ENV_PREFIX, Error, load};
+pub use load::{Error, load};
 pub use log::{LogConfig, LogFormat};
 pub use observability::{
     MetricsConfig, ObservabilityConfig, OtelConfig, OtelExporterConfig, TracesSampler,
@@ -190,7 +194,7 @@ impl Config {
         self.app.validate()?;
         self.http.validate()?;
         // template:begin grpc:config-validate
-        self.grpc.validate(&self.http)?;
+        self.grpc.validate(self.http.effective_drain_budget())?;
         // template:end grpc:config-validate
         // template:begin inbound-webhooks:config-inbound-webhooks-validate
         self.inbound_webhooks.validate(self.postgres.enabled)?;
@@ -200,7 +204,7 @@ impl Config {
         self.runtime.validate()?;
         self.observability.validate()?;
         // template:begin messaging:config-validate
-        self.messaging.validate(&self.app.env)?;
+        let _ = self.messaging.validate(&self.app.env)?;
         // template:end messaging:config-validate
         // template:begin cache:config-validate
         self.cache

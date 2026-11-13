@@ -339,7 +339,7 @@ pub(crate) enum Refusal {
 
 impl Refusal {
     /// The closed `error.type` of this refusal.
-    const fn error_type(self) -> &'static str {
+    pub(crate) const fn error_type(self) -> &'static str {
         match self {
             Self::ServerVersion => "server_version",
             Self::JetStreamDisabled => "jetstream_disabled",

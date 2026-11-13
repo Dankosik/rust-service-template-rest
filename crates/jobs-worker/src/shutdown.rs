@@ -519,7 +519,7 @@ async fn close_messaging(
             tracing::info!("messaging_closed");
             false
         }
-        CloseOutcome::TimedOut | CloseOutcome::UnobservedClose => {
+        CloseOutcome::WaitInterrupted | CloseOutcome::UnobservedClose => {
             tracing::warn!(outcome = ?closed, "messaging resource close incomplete");
             true
         }

@@ -26,7 +26,7 @@ use domain_events::{Event, EventPayload};
 use infra_jobs::{Engine, EnqueueError, Kinds};
 use infra_messaging::outbox::{OutboxEnqueueError, OutboxEnqueued};
 use infra_messaging::{
-    ConsumerOptions, HandlerError, Messaging, MessagingOptions, Registry, Route,
+    ConsumerOptions, EnvelopeError, HandlerError, Messaging, MessagingOptions, Registry, Route,
 };
 use infra_postgres::{Isolation, PgPool, TxError, in_tx};
 use operation_context::{Deadline, OperationContext};
@@ -382,6 +382,84 @@ enum Step {
     Query(sqlx::Error),
     #[display("transaction: {_0}")]
     Transaction(TxError),
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn typed_refusal_leaves_no_outbox_intent_and_allows_corrected_same_id(pool: PgPool) {
+    #[derive(serde::Serialize)]
+    #[serde(untagged)]
+    enum Payload {
+        Number(Option<f64>),
+        Json(Box<serde_json::value::RawValue>),
+    }
+
+    impl EventPayload for Payload {
+        const EVENT_TYPE: &'static str = "test.outbox.checked";
+        const SCHEMA_VERSION: u16 = 1;
+    }
+
+    let fixture = Fixture::create().await;
+    let jobs = template_pool(&pool, 3).await;
+    let registry = Registry::try_new([Route::new::<Payload>(fixture.subject.clone())])
+        .expect("typed publication route");
+    let leaf = serde_json::to_string("[{}]\\\"\\").expect("escaped string");
+    let raw127 = format!("{}{leaf}{}", "[".repeat(127), "]".repeat(127));
+    let raw128 = format!("[{raw127}]");
+    assert!(serde_json::from_str::<serde_json::Value>(&raw127).is_ok());
+    assert!(serde_json::from_str::<serde_json::Value>(&raw128).is_err());
+    let cases = [
+        (
+            "event-float-retry",
+            Payload::Number(Some(f64::NAN)),
+            Payload::Number(None),
+            EnvelopeError::Serialization,
+            b"null".to_vec(),
+        ),
+        (
+            "event-depth-retry",
+            Payload::Json(serde_json::value::RawValue::from_string(raw128).expect("raw JSON")),
+            Payload::Json(
+                serde_json::value::RawValue::from_string(raw127.clone()).expect("raw JSON"),
+            ),
+            EnvelopeError::PayloadStructure,
+            raw127.into_bytes(),
+        ),
+    ];
+    for (id, invalid, corrected, expected_error, expected_bytes) in cases {
+        let before = outbox_count(&jobs).await;
+        let mut event = Event {
+            id: id.to_owned(),
+            occurred_at: time::UtcDateTime::from_unix_timestamp(1_700_000_000)
+                .expect("fixed occurrence"),
+            payload: invalid,
+        };
+        // Commit even a refused preparation, so rollback cannot hide an intent.
+        let rejected = in_tx(&jobs, async |tx| -> Result<_, Step> {
+            match registry.prepare(&event, 1024) {
+                Ok(prepared) => Ok(Ok(prepared.enqueue(tx).await?)),
+                Err(error) => Ok(Err(error)),
+            }
+        })
+        .await
+        .expect("refusal leaves the caller transaction usable");
+        assert_eq!(rejected, Err(expected_error));
+        assert_eq!(outbox_count(&jobs).await, before);
+
+        event.payload = corrected;
+        let prepared = registry.prepare(&event, 1024).expect("corrected payload");
+        assert_eq!(prepared.payload().as_ref(), expected_bytes);
+        assert_eq!(
+            in_tx(&jobs, async |tx| -> Result<_, Step> {
+                prepared.enqueue(tx).await.map_err(Step::from)
+            })
+            .await
+            .expect("the refused identity remains available"),
+            OutboxEnqueued::Created
+        );
+        assert_eq!(outbox_count(&jobs).await, before + 1);
+    }
+    close_pools(&[&jobs]).await;
+    fixture.cleanup().await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]

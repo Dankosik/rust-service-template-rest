@@ -14,11 +14,11 @@ use tracing::Span;
 use crate::ObjectStorageError;
 use crate::error::Failure;
 
-pub const OPERATION_DURATION_METRIC: &str = "object_storage_operation_duration_seconds";
+const OPERATION_DURATION_METRIC: &str = "object_storage_operation_duration_seconds";
 
 /// Buckets in seconds for [`OPERATION_DURATION_METRIC`], from a fast head to
 /// a large transfer.
-pub const OPERATION_DURATION_BUCKETS: &[f64] = &[
+const OPERATION_DURATION_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0,
 ];
 
@@ -49,29 +49,17 @@ impl Operation {
         }
     }
 
-    /// The exported span name: `Service.Operation`, the OpenTelemetry
-    /// convention for AWS SDK client spans.
-    fn span_name(self) -> &'static str {
+    /// The span name follows OpenTelemetry's `Service.Operation` convention
+    /// for AWS SDK client spans. Presigning has its own method because it
+    /// signs a request locally.
+    fn rpc_names(self) -> (&'static str, &'static str) {
         match self {
-            Self::Put => "S3.PutObject",
-            Self::Get => "S3.GetObject",
-            Self::Head => "S3.HeadObject",
-            Self::Delete => "S3.DeleteObject",
-            Self::PresignGet => "S3.PresignGetObject",
-            Self::Probe => "S3.HeadBucket",
-        }
-    }
-
-    /// The operation recorded as `rpc.method`. Presigning is named separately
-    /// from GET because it signs a request locally.
-    fn method(self) -> &'static str {
-        match self {
-            Self::Put => "PutObject",
-            Self::Get => "GetObject",
-            Self::Head => "HeadObject",
-            Self::Delete => "DeleteObject",
-            Self::PresignGet => "PresignGetObject",
-            Self::Probe => "HeadBucket",
+            Self::Put => ("S3.PutObject", "PutObject"),
+            Self::Get => ("S3.GetObject", "GetObject"),
+            Self::Head => ("S3.HeadObject", "HeadObject"),
+            Self::Delete => ("S3.DeleteObject", "DeleteObject"),
+            Self::PresignGet => ("S3.PresignGetObject", "PresignGetObject"),
+            Self::Probe => ("S3.HeadBucket", "HeadBucket"),
         }
     }
 }
@@ -140,13 +128,14 @@ impl OperationGuard {
         operation: Operation,
         cloud_region: Option<&str>,
     ) -> Self {
+        let (span_name, method) = operation.rpc_names();
         let span = tracing::info_span!(
             "object_storage",
-            otel.name = operation.span_name(),
+            otel.name = span_name,
             otel.kind = "client",
             rpc.system = "aws-api",
             rpc.service = "S3",
-            rpc.method = operation.method(),
+            rpc.method = method,
             cloud.region = cloud_region,
             object_storage.outcome = tracing::field::Empty,
             aws.request_id = tracing::field::Empty,
@@ -196,29 +185,31 @@ impl OperationGuard {
         self.span.record("otel.status_code", "ERROR");
         self.finish(Outcome::Failure(failure.error));
         let operation = self.operation.label();
-        self.span.in_scope(|| match failure.error {
-            ObjectStorageError::NotFound
-            | ObjectStorageError::AlreadyExists
-            | ObjectStorageError::TooLarge
-            | ObjectStorageError::Busy => tracing::debug!(
-                object_storage.operation = operation,
-                object_storage.outcome = failure.error.label(),
-                error.type = failure.error_type.as_ref(),
-                aws.request_id = self.request_id.as_deref(),
-                aws.extended_request_id = self.extended_request_id.as_deref(),
-                "object_storage_operation_failed"
-            ),
-            ObjectStorageError::Unavailable
-            | ObjectStorageError::Rejected
-            | ObjectStorageError::OutcomeUnknown
-            | ObjectStorageError::Integrity => tracing::warn!(
-                object_storage.operation = operation,
-                object_storage.outcome = failure.error.label(),
-                error.type = failure.error_type.as_ref(),
-                aws.request_id = self.request_id.as_deref(),
-                aws.extended_request_id = self.extended_request_id.as_deref(),
-                "object_storage_operation_failed"
-            ),
+        self.span.in_scope(|| {
+            macro_rules! emit_failure {
+                ($level:expr) => {
+                    tracing::event!(
+                        $level,
+                        object_storage.operation = operation,
+                        object_storage.outcome = failure.error.label(),
+                        error.type = failure.error_type.as_ref(),
+                        aws.request_id = self.request_id.as_deref(),
+                        aws.extended_request_id = self.extended_request_id.as_deref(),
+                        "object_storage_operation_failed"
+                    )
+                };
+            }
+
+            match failure.error {
+                ObjectStorageError::NotFound
+                | ObjectStorageError::AlreadyExists
+                | ObjectStorageError::TooLarge
+                | ObjectStorageError::Busy => emit_failure!(tracing::Level::DEBUG),
+                ObjectStorageError::Unavailable
+                | ObjectStorageError::Rejected
+                | ObjectStorageError::OutcomeUnknown
+                | ObjectStorageError::Integrity => emit_failure!(tracing::Level::WARN),
+            }
         });
         failure.error
     }

@@ -101,8 +101,8 @@ pub struct HeaderPair {
     pub value: Vec<u8>,
 }
 
-/// One stored success. The store moves values without applying HTTP policy
-/// and keys them by the fingerprint [`Store::attempt`] arbitrated.
+/// One stored success. The store finds the row by [`ScopeKey`] and compares
+/// its fingerprint with the request's to decide replay or mismatch.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Record {
     pub status: i16,
@@ -134,8 +134,8 @@ pub enum AttemptError {
     /// arbitration again.
     #[error("unavailable")]
     Unavailable,
-    /// A non-transient driver fault, or a success record the write did not
-    /// store. Nothing committed.
+    /// A non-transient driver fault, a success record the write did not
+    /// store, or a caller identity PostgreSQL cannot store. Nothing committed.
     #[error("internal")]
     Internal,
     /// A live record that does not decode. Replay is impossible until the
@@ -150,9 +150,10 @@ impl Store {
     /// [`Attempted::Committed`] with `value`; `Err(value)` rolls back and
     /// yields [`Attempted::RolledBack`]. Work is never retried.
     ///
-    /// `work` supplies the success record's status, headers, and body; the
-    /// record is stored under `fingerprint`, and `caller` is recorded with it
-    /// for diagnostics.
+    /// Connection acquisition uses the pool's configured timeout.
+    ///
+    /// The store writes the success record under `scope`. It saves
+    /// `fingerprint` for later arbitration and `caller` for diagnostics.
     ///
     /// # Errors
     ///
@@ -173,13 +174,13 @@ impl Store {
     }
 
     /// [`Self::attempt`] for a request with its own deadline: the wait for a
-    /// pooled connection lasts until `deadline` instead of
-    /// [`infra_postgres::ACQUIRE_TIMEOUT`].
+    /// pooled connection is bounded by `deadline`. That deadline applies
+    /// only to connection acquisition.
     ///
     /// # Errors
     ///
     /// As [`Self::attempt`].
-    pub async fn attempt_until<W, C, R>(
+    pub async fn attempt_with_acquire_deadline<W, C, R>(
         &self,
         scope: &ScopeKey,
         caller: &CallerIdentity,
@@ -219,10 +220,7 @@ impl Store {
             if let Some(decision) = arbitrate(tx, scope, fingerprint).await? {
                 return Err(Stop::Decided(decision));
             }
-            let (record, value) = match work(tx).await {
-                Ok(done) => done,
-                Err(rollback) => return Err(Stop::RolledBack(rollback)),
-            };
+            let (record, value) = work(tx).await.map_err(Stop::RolledBack)?;
             write(tx, scope, caller, fingerprint, &record, self.retention).await?;
             Ok(value)
         };
@@ -281,12 +279,16 @@ async fn arbitrate(
     )
     .await
     .map_err(|err| read_failed(&err, "arbitrate"))?;
-    // The join yields a whole record or none of its columns.
+    // The join returns the fingerprint, status, and headers together.
+    // The body is selected separately, only for a matching fingerprint.
     let live = match (row.fingerprint, row.status, row.headers) {
-        (Some(stored), Some(status), Some(headers)) => Some(
-            decide_live(stored, status, headers, row.body, fingerprint)
-                .map_err(|err| read_failed(&err, "arbitrate"))?,
-        ),
+        (Some(stored_fingerprint), Some(status), Some(headers)) => Some(decide_live(
+            stored_fingerprint,
+            status,
+            headers,
+            row.body,
+            fingerprint,
+        )?),
         _ => None,
     };
     if !row.writable {
@@ -300,21 +302,22 @@ async fn arbitrate(
         Some(decision) => Ok(Some(decision)),
         None if !row.acquired => Ok(Some(Decision::InProgress)),
         // Step 2. It must stay a statement of its own after step 1.
-        None => observed(
-            "read idempotency record",
-            sqlx::query!(
-                "SELECT fingerprint AS \"fingerprint: Digest\", status, \
-                 headers AS \"headers: Vec<HeaderPair>\", \
-                 CASE WHEN fingerprint = $2 THEN body END AS body \
-                 FROM http_idempotency_records \
-                 WHERE scope_key = $1 AND expires_at > statement_timestamp()",
-                scope.0.as_slice(),
-                fingerprint.as_slice(),
+        None => {
+            let row = observed(
+                "read idempotency record",
+                sqlx::query!(
+                    "SELECT fingerprint AS \"fingerprint: Digest\", status, \
+                     headers AS \"headers: Vec<HeaderPair>\", \
+                     CASE WHEN fingerprint = $2 THEN body END AS body \
+                     FROM http_idempotency_records \
+                     WHERE scope_key = $1 AND expires_at > statement_timestamp()",
+                    scope.0.as_slice(),
+                    fingerprint.as_slice(),
+                )
+                .fetch_optional(tx),
             )
-            .fetch_optional(tx),
-        )
-        .await
-        .and_then(|row| {
+            .await
+            .map_err(|err| read_failed(&err, "read_record"))?;
             row.map(|row| {
                 decide_live(
                     row.fingerprint,
@@ -325,8 +328,7 @@ async fn arbitrate(
                 )
             })
             .transpose()
-        })
-        .map_err(|err| read_failed(&err, "read_record")),
+        }
     }
 }
 
@@ -334,16 +336,16 @@ async fn arbitrate(
 /// the body only for an equal fingerprint, so a mismatch neither detoasts nor
 /// transfers it; a replay whose body is missing is a corrupt record.
 fn decide_live(
-    stored: Digest,
+    stored_fingerprint: Digest,
     status: i16,
     headers: Vec<HeaderPair>,
     body: Option<Vec<u8>>,
     fingerprint: &Digest,
-) -> Result<Decision, sqlx::Error> {
-    if stored != *fingerprint {
+) -> Result<Decision, AttemptError> {
+    if stored_fingerprint != *fingerprint {
         return Ok(Decision::Mismatch);
     }
-    let body = body.ok_or_else(|| sqlx::Error::Decode("the stored body is null".into()))?;
+    let body = body.ok_or_else(|| refused("decode_record", AttemptError::Integrity, "decode"))?;
     Ok(Decision::Replay(Record {
         status,
         headers,
@@ -354,9 +356,9 @@ fn decide_live(
 fn read_failed(err: &sqlx::Error, phase: &'static str) -> AttemptError {
     match err {
         sqlx::Error::ColumnDecode { .. } | sqlx::Error::Decode(_) => {
-            failed(err, "decode_record", AttemptError::Integrity)
+            failed(err, "decode_record", AttemptError::Integrity, None)
         }
-        _ => failed(err, phase, classify(err)),
+        _ => failed(err, phase, classify(err), None),
     }
 }
 
@@ -395,7 +397,7 @@ async fn write(
         .execute(tx),
     )
     .await
-    .map_err(|err| failed(&err, "write_record", classify(&err)))?;
+    .map_err(|err| failed(&err, "write_record", classify(&err), None))?;
     if written.rows_affected() == 1 {
         Ok(())
     } else {
@@ -432,15 +434,16 @@ impl<R> From<TxError> for Stop<R> {
 }
 
 fn classify_tx(err: &TxError) -> AttemptError {
-    match err {
-        TxError::Acquire(err) => failed(err, "acquire", classify(err)),
-        TxError::Begin(err) => failed(err, "begin", classify(err)),
-        TxError::CommitFailed(err) => failed(err, "commit", classify(err)),
+    let (phase, class, commit_outcome) = match err {
+        TxError::Acquire(err) => ("acquire", classify(err), None),
+        TxError::Begin(err) => ("begin", classify(err), None),
+        TxError::CommitFailed(err) => ("commit", classify(err), Some("commit_failed")),
         // The transaction owner could not establish rollback. Even a permanent
         // protocol fault may follow a successful COMMIT, so preserve uncertainty
         // and let the identical same-key retry reconcile the durable outcome.
-        TxError::CommitUnknown(err) => failed(err, "commit", AttemptError::Unavailable),
-    }
+        TxError::CommitUnknown(_) => ("commit", AttemptError::Unavailable, Some("commit_unknown")),
+    };
+    failed(err.driver(), phase, class, commit_outcome)
 }
 
 fn classify(err: &sqlx::Error) -> AttemptError {
@@ -453,10 +456,16 @@ fn classify(err: &sqlx::Error) -> AttemptError {
 
 /// Log a failure with only bounded fields, never driver text, and return its
 /// class.
-fn failed(err: &sqlx::Error, phase: &'static str, class: AttemptError) -> AttemptError {
+fn failed(
+    err: &sqlx::Error,
+    phase: &'static str,
+    class: AttemptError,
+    commit_outcome: Option<&'static str>,
+) -> AttemptError {
     tracing::warn!(
         phase,
         failure_class = %class,
+        commit_outcome,
         sqlstate = sqlstate(err).as_deref(),
         cause = failure_cause(err),
         "http_idempotency_store_failed"
@@ -464,7 +473,6 @@ fn failed(err: &sqlx::Error, phase: &'static str, class: AttemptError) -> Attemp
     class
 }
 
-/// Log a refusal that has no driver error, and return its class.
 fn refused(phase: &'static str, class: AttemptError, cause: &'static str) -> AttemptError {
     tracing::warn!(
         phase,

@@ -21,7 +21,8 @@ use std::time::{Duration, Instant};
 
 use base64::Engine;
 use health::Probe;
-use infra_cache::{Cache, CacheOptions, ClientCertificate, Unavailable};
+use infra_cache::{Cache, CacheOptions, ClientCertificate, HISTOGRAMS, Unavailable};
+use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
 use secrecy::SecretString;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
@@ -636,13 +637,11 @@ async fn a_proxy_that_requires_a_client_certificate_refuses_a_client_without_one
 }
 
 fn observation_recorder() -> metrics_exporter_prometheus::PrometheusRecorder {
-    metrics_exporter_prometheus::PrometheusBuilder::new()
-        .set_buckets_for_metric(
-            metrics_exporter_prometheus::Matcher::Full(
-                infra_cache::OPERATION_DURATION_METRIC.to_owned(),
-            ),
-            infra_cache::OPERATION_DURATION_BUCKETS,
-        )
-        .expect("observation buckets are valid")
-        .build_recorder()
+    let mut builder = PrometheusBuilder::new();
+    for &(name, buckets) in HISTOGRAMS {
+        builder = builder
+            .set_buckets_for_metric(Matcher::Full(name.to_owned()), buckets)
+            .expect("observation buckets are valid");
+    }
+    builder.build_recorder()
 }

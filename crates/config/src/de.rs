@@ -23,6 +23,30 @@ pub(crate) fn value_free<E: serde::de::Error>(message: impl std::fmt::Display) -
     E::custom(format_args!("{VALUE_FREE}{message}"))
 }
 
+/// Buffer the scalar kind before config-rs can coerce it. Callers supply
+/// the value-free diagnostic for either a rejected kind or malformed text.
+#[allow(
+    dead_code,
+    reason = "removing OIDC introspection and outbound authentication leaves no caller"
+)]
+pub(crate) fn deserialize_scalar<'de, D, T>(deserializer: D, message: &str) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + FromStr,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Input<T> {
+        Typed(T),
+        Text(String),
+    }
+
+    match Input::<T>::deserialize(deserializer).map_err(|_| value_free(message))? {
+        Input::Typed(value) => Ok(value),
+        Input::Text(value) => value.parse().map_err(|_| value_free(message)),
+    }
+}
+
 // Buffer the scalar kind before config-rs can coerce floats or booleans.
 #[derive(Deserialize)]
 #[serde(untagged)]
@@ -66,6 +90,31 @@ where
         .map_err(|_| invalid_count::<D::Error>())?
         .map(CountInput::into_count)
         .transpose()
+}
+
+// Buffer the scalar kind before config-rs coerces `true`, `yes`, or `off`
+// into 1.0 or 0.0.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RatioInput {
+    Number(f64),
+    Text(String),
+}
+
+fn invalid_ratio<E: serde::de::Error>() -> E {
+    E::invalid_value(Unexpected::Other("a malformed number"), &"a number")
+}
+
+/// A decimal number from a file number or environment text; booleans and
+/// words are refused rather than read as 1.0 or 0.0.
+pub(crate) fn ratio<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match RatioInput::deserialize(deserializer).map_err(|_| invalid_ratio::<D::Error>())? {
+        RatioInput::Number(value) => Ok(value),
+        RatioInput::Text(value) => value.trim().parse().map_err(|_| invalid_ratio()),
+    }
 }
 
 /// What a listen address must be, for the decode message.
@@ -128,11 +177,11 @@ fn invalid_listen_addr<E: serde::de::Error>(value: &str) -> E {
 /// do DNS. Explicit IPv6 forms such as `[::1]:9000` are unchanged.
 fn parse_listen_addr(value: &str) -> Option<SocketAddr> {
     let trimmed = value.trim();
-    let candidate = match trimmed.strip_prefix(':') {
-        Some(port) => format!("0.0.0.0:{port}"),
-        None => trimmed.to_owned(),
-    };
-    candidate.parse().ok()
+    match trimmed.strip_prefix(':') {
+        Some(port) => format!("0.0.0.0:{port}").parse(),
+        None => trimmed.parse(),
+    }
+    .ok()
 }
 
 #[cfg(test)]

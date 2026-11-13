@@ -298,7 +298,7 @@ async fn worker_operator_commands_commit_with_postgres_only_and_emit_safe_receip
     let discard_version = discard_target.version().to_string();
     let cases: &[(&[&str], i32, &str)] = &[
         (&["inspect", &id], 0, "found"),
-        (&["failed"], 0, "ok"),
+        (&["failed", "--limit", "1"], 0, "ok"),
         (&["unhandled", "--handled-kinds", ""], 0, "ok"),
         (
             &["unhandled", "--handled-kinds", "zebra,alpha,zebra"],
@@ -344,7 +344,16 @@ async fn worker_operator_commands_commit_with_postgres_only_and_emit_safe_receip
     for (args, code, outcome) in cases {
         let receipt = run_operator(url.as_str(), args, *code).await;
         assert_eq!(receipt["outcome"], *outcome);
+        if args[0] == "failed" {
+            assert_eq!(receipt["complete"], false);
+            assert_eq!(
+                receipt["next_cursor"],
+                format!("v1:{}", id.as_str().min(discard_id.as_str()))
+            );
+        }
         if args[0] == "unhandled" {
+            assert_eq!(receipt["complete"], true);
+            assert_eq!(receipt.get("next_cursor"), Some(&Value::Null));
             let expected = if args[2].is_empty() {
                 json!([])
             } else {
@@ -689,7 +698,6 @@ async fn inspection_advances_over_nonmatches_and_returns_only_safe_lossless_fiel
         let InspectionResult::Page {
             scanned,
             items,
-            complete,
             next_cursor,
             ..
         } = inspect(&jobs, &request).await
@@ -698,7 +706,6 @@ async fn inspection_advances_over_nonmatches_and_returns_only_safe_lossless_fiel
         };
         assert_eq!(scanned, 2);
         assert!(items.is_empty());
-        assert!(!complete);
         assert_eq!(
             next_cursor.as_deref(),
             Some("v1:00000000-0000-0000-0000-000000000002")
@@ -714,7 +721,6 @@ async fn inspection_advances_over_nonmatches_and_returns_only_safe_lossless_fiel
         let InspectionResult::Page {
             scanned,
             items,
-            complete,
             next_cursor,
             ..
         } = result
@@ -722,7 +728,10 @@ async fn inspection_advances_over_nonmatches_and_returns_only_safe_lossless_fiel
             panic!("a page")
         };
         assert_eq!(scanned, 2);
-        assert!(!complete);
+        assert_eq!(
+            next_cursor.as_deref(),
+            Some("v1:00000000-0000-0000-0000-000000000004")
+        );
         assert_eq!(items.len(), 1);
         assert_eq!(
             items[0].id.to_string(),
@@ -735,7 +744,6 @@ async fn inspection_advances_over_nonmatches_and_returns_only_safe_lossless_fiel
         let InspectionResult::Page {
             scanned,
             items,
-            complete,
             next_cursor,
             ..
         } = inspect(&jobs, &request).await
@@ -743,7 +751,7 @@ async fn inspection_advances_over_nonmatches_and_returns_only_safe_lossless_fiel
             panic!("a page")
         };
         assert_eq!(scanned, 0);
-        assert!(items.is_empty() && complete && next_cursor.is_none());
+        assert!(items.is_empty() && next_cursor.is_none());
     }
     let request = Inspection::one(&Uuid::from_u128(3).to_string()).unwrap();
     let result = in_tx_with(

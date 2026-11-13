@@ -16,8 +16,8 @@ pub(crate) fn within_operation_budget(deadline: Instant) -> Instant {
     deadline.min(Instant::now() + BROKER_OPERATION_BUDGET)
 }
 
-/// Runs one broker operation within [`within_operation_budget`] of `deadline`,
-/// unless `cancel` fires first.
+/// Reports cancellation when observed before the deadline, or timeout if the
+/// deadline has already elapsed when cancellation is observed.
 pub(crate) async fn bounded_operation<T>(
     deadline: Instant,
     cancel: &CancellationToken,
@@ -27,7 +27,13 @@ pub(crate) async fn bounded_operation<T>(
     let budget = deadline.saturating_duration_since(Instant::now());
     tokio::select! {
         biased;
-        () = cancel.cancelled() => Err(MessagingError::Cancelled),
+        () = cancel.cancelled() => {
+            if Instant::now() >= deadline {
+                Err(MessagingError::TimedOut { budget })
+            } else {
+                Err(MessagingError::Cancelled)
+            }
+        },
         () = tokio::time::sleep_until(deadline) => Err(MessagingError::TimedOut { budget }),
         result = operation => result,
     }
@@ -49,5 +55,22 @@ mod tests {
         std::assert_matches!(result, Err(MessagingError::TimedOut { budget }) if budget == caller,
             "{result:?}"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_late_cancellation_reports_the_elapsed_operation_deadline() {
+        let budget = Duration::from_millis(100);
+        let cancel = CancellationToken::new();
+        let mut operation = std::pin::pin!(bounded_operation(
+            Instant::now() + budget,
+            &cancel,
+            std::future::pending::<Result<(), MessagingError>>(),
+        ));
+        assert!(futures_util::poll!(operation.as_mut()).is_pending());
+        tokio::time::advance(budget).await;
+        cancel.cancel();
+
+        let result = operation.await;
+        std::assert_matches!(result, Err(MessagingError::TimedOut { budget: elapsed }) if elapsed == budget);
     }
 }

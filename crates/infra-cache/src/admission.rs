@@ -1,5 +1,4 @@
-//! Startup admission: the DSN, address policy, credentials, and TLS material
-//! are checked once, before any connection, and turned into a client.
+//! Startup admission for Redis client options and Tokio runtime requirements.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -29,8 +28,8 @@ pub(crate) struct Admitted {
     pub(crate) password_file: Option<PasswordFile>,
 }
 
-/// Checks `options` without touching the network. `command_timeout` is not
-/// admission input.
+/// Checks `options` without touching the network.
+/// [`CacheOptions::command_timeout`] is not admission input.
 pub(crate) fn admit(options: CacheOptions) -> Result<Admitted, CacheError> {
     let CacheOptions {
         dsn,
@@ -78,7 +77,14 @@ pub(crate) fn admit(options: CacheOptions) -> Result<Admitted, CacheError> {
     })
 }
 
-pub(crate) fn check_io_driver() -> Result<(), CacheError> {
+pub(crate) fn check_runtime() -> Result<(), CacheError> {
+    if tokio::runtime::Handle::try_current().is_err() {
+        return Err(CacheError::NoRuntime);
+    }
+    // Tokio exposes a missing time driver as a panic at timer construction.
+    std::panic::catch_unwind(|| drop(tokio::time::sleep(Duration::ZERO)))
+        .map_err(|_| CacheError::NoTimeDriver)?;
+
     let io_error = |error: std::io::Error| CacheError::IoDriverCheck { kind: error.kind() };
     let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).map_err(io_error)?;
     socket.set_nonblocking(true).map_err(io_error)?;
@@ -129,8 +135,9 @@ fn admit_address(
     }
 }
 
-/// The password file to read at each connection, if any. A password belongs
-/// in exactly one of the DSN and the file.
+/// Returns the password file to read at each connection, if configured. A
+/// nonempty DSN password and a password file are mutually exclusive. With
+/// neither configured, admission requires unauthenticated access to be allowed.
 fn admit_password(
     settings: &redis::RedisConnectionInfo,
     password_file: Option<PathBuf>,

@@ -1,7 +1,7 @@
 //! Admitted password-file input. The connection supervisor owns refresh and AUTH.
 
 use std::io::ErrorKind;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokio::sync::Semaphore;
@@ -22,13 +22,8 @@ pub(crate) struct PasswordFile {
 
 impl PasswordFile {
     /// Admission checks availability; every subsequent setup reads again.
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "startup cache admission owns the initial password read; refresh uses async IO"
-    )]
     pub(crate) fn admit(path: PathBuf, username: Option<&str>) -> Result<Self, CacheError> {
-        let content = std::fs::read_to_string(&path)
-            .map_err(|error| CacheError::PasswordFile { kind: error.kind() })?;
+        let content = read_password_file(&path)?;
         password_from(content)?;
         Ok(Self {
             path,
@@ -44,10 +39,8 @@ impl PasswordFile {
         &self.username
     }
 
-    /// Dropping this future stops only the wait: the blocking read runs on, so
-    /// a hung mount would pin one blocking thread per setup or refresh attempt.
-    /// While that read runs, another fails at once as
-    /// [`ErrorKind::ResourceBusy`] instead of starting a second.
+    /// A blocking read can outlive its caller's wait. While it runs, another
+    /// read fails at once as [`ErrorKind::ResourceBusy`].
     pub(crate) async fn read(&self) -> Result<String, CacheError> {
         let permit =
             self.reading
@@ -64,22 +57,19 @@ impl PasswordFile {
         .await
         .map_err(|_| CacheError::PasswordFile {
             kind: ErrorKind::Other,
-        })?
-        .map_err(|error| CacheError::PasswordFile { kind: error.kind() })?;
+        })??;
         password_from(content)
     }
 }
 
 #[expect(
     clippy::disallowed_methods,
-    reason = "owned blocking work: PasswordFile::read keeps at most one in flight"
+    reason = "startup admission and owned blocking reads; PasswordFile::read keeps at most one in flight"
 )]
-fn read_password_file(path: &std::path::Path) -> std::io::Result<String> {
-    std::fs::read_to_string(path)
+fn read_password_file(path: &Path) -> Result<String, CacheError> {
+    std::fs::read_to_string(path).map_err(|error| CacheError::PasswordFile { kind: error.kind() })
 }
 
-/// The password in a password file's content: the file's secret value, which
-/// must not be empty.
 fn password_from(content: String) -> Result<String, CacheError> {
     let password = shared_rules::secret_file::value(content);
     if password.is_empty() {

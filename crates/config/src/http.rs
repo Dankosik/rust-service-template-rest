@@ -6,23 +6,13 @@ use std::time::Duration;
 
 use bytesize::ByteSize;
 use serde::Deserialize;
+use shared_rules::hyper::HTTP1_MIN_READ_BUFFER_BYTES;
 
+use crate::listener_limits::{
+    DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_IN_FLIGHT, DEFAULT_REQUEST_TIMEOUT, connection_age_range,
+    connection_count_range, in_flight_range, request_timeout_range,
+};
 use crate::validate::{ValidationError, duration_range, int_range};
-
-/// Operator-facing floor for `http.max_header_bytes`. hyper refuses an HTTP/1
-/// read buffer below this size; the adapter still clamps independently so
-/// `Server::bind` cannot pass a smaller value even if validation was skipped.
-const MIN_HEADER_BYTES: u64 = 8 * 1024;
-
-/// Default request budget of both listeners.
-pub(crate) const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
-/// Default concurrent handler bound of both listeners.
-pub(crate) const DEFAULT_MAX_IN_FLIGHT: u32 = 256;
-/// Default accepted-connection bound of both listeners. Well above
-/// [`DEFAULT_MAX_IN_FLIGHT`]: shedding answers with an informative rejection,
-/// while the connection cap closes the socket with no response, and the
-/// headroom keeps the informative rejection common.
-pub(crate) const DEFAULT_MAX_CONNECTIONS: u32 = 4096;
 
 /// The `http` section: application listener address, request budgets, capacity bounds, and shutdown timing.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -34,8 +24,8 @@ pub struct HttpConfig {
     #[serde(deserialize_with = "crate::de::listen_addr")]
     pub addr: SocketAddr,
     /// Total time the platform allows between SIGTERM and SIGKILL. Every
-    /// teardown stage draws from it; `drain_timeout` bounds only the HTTP
-    /// drain envelope.
+    /// teardown stage draws from it; `drain_timeout` bounds the service's HTTP
+    /// drain or the jobs worker's in-flight work drain.
     ///
     /// This crate checks `drain_timeout <= grace_period`. The composition
     /// root still requires leftover budget after the drain for diagnostics,
@@ -43,9 +33,10 @@ pub struct HttpConfig {
     /// rule is not encoded here.
     #[serde(with = "humantime_serde")]
     pub grace_period: Duration,
-    /// Bound for the HTTP drain, including the readiness propagation delay
-    /// in front of it. The process budgets Tokio shutdown separately from
-    /// this drain, within the SIGTERM-to-exit window (`grace_period`).
+    /// Bound for the service's HTTP drain, including readiness propagation,
+    /// and for the jobs worker's in-flight work drain, including configured
+    /// messaging consumption. The process budgets Tokio shutdown separately
+    /// within the SIGTERM-to-exit window (`grace_period`).
     #[serde(with = "humantime_serde")]
     pub drain_timeout: Duration,
     /// How long the listener keeps serving after readiness flips off, so a
@@ -59,9 +50,9 @@ pub struct HttpConfig {
     /// PING cadence.
     #[serde(with = "humantime_serde")]
     pub header_read_timeout: Duration,
-    /// Per-request handler budget. It is the only bound on how long one
-    /// request may hold a task and its pooled resources; body reads happen
-    /// inside it because extractors run inside the handler future.
+    /// Budget through the response head, including admission and request body
+    /// reads. Features that stream responses own the lifetime of their bodies
+    /// and any resources held after the response head.
     #[serde(with = "humantime_serde")]
     pub request_timeout: Duration,
     /// HTTP/1 read-buffer ceiling for one request head; overflow answers
@@ -189,7 +180,7 @@ impl HttpConfig {
         int_range(
             "http.max_header_bytes",
             self.max_header_bytes.as_u64(),
-            MIN_HEADER_BYTES,
+            u64::from(HTTP1_MIN_READ_BUFFER_BYTES),
             ByteSize::mib(1).as_u64(),
         )?;
         int_range(
@@ -232,34 +223,6 @@ pub(crate) fn request_budget_fits_drain(
         ));
     }
     Ok(())
-}
-
-/// A listener's per-request or per-call budget.
-pub(crate) fn request_timeout_range(key: &str, value: Duration) -> Result<(), ValidationError> {
-    duration_range(
-        key,
-        value,
-        Duration::from_millis(100),
-        Duration::from_secs(600),
-    )
-}
-
-/// A listener's concurrent handler bound; zero turns shedding off.
-pub(crate) fn in_flight_range(key: &str, value: u32) -> Result<(), ValidationError> {
-    int_range(key, u64::from(value), 0, 100_000)
-}
-
-/// A listener's accepted-connection bound; zero accepts without one.
-pub(crate) fn connection_count_range(key: &str, value: u32) -> Result<(), ValidationError> {
-    int_range(key, u64::from(value), 0, 1_000_000)
-}
-
-/// A connection age is off at zero, or between one second and one day.
-pub(crate) fn connection_age_range(key: &str, value: Duration) -> Result<(), ValidationError> {
-    if value.is_zero() {
-        return Ok(());
-    }
-    duration_range(key, value, Duration::from_secs(1), Duration::from_hours(24))
 }
 
 #[cfg(test)]

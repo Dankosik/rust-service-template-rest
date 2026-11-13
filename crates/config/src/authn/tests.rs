@@ -48,6 +48,33 @@ fn jwt_loads_algorithm_and_audience_lists_from_variables() {
 }
 
 #[test]
+fn jwt_load_errors_name_the_rejected_field() {
+    for (audience, algorithms, expected) in [
+        (" ", "ES256", "`authn.audience` values must be nonblank"),
+        (
+            "service",
+            "ES256,invalid-jwt-algorithm",
+            "`authn.algorithms` must contain only supported JWT algorithms",
+        ),
+    ] {
+        let error = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[
+                ("APP__AUTHN__MODE", "oidc-jwt"),
+                ("APP__AUTHN__ISSUER", "issuer"),
+                ("APP__AUTHN__AUDIENCE", audience),
+                ("APP__AUTHN__ALGORITHMS", algorithms),
+            ]),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains(expected), "{error}");
+        assert!(!error.contains("invalid-jwt-algorithm"), "{error}");
+    }
+}
+
+#[test]
 fn jwt_normalizes_scalar_or_list_audiences_without_changing_values() {
     let scalar = parse(
         r#"
@@ -401,25 +428,56 @@ fn introspection_environment_rejects_out_of_range_cache_settings() {
 
 #[test]
 fn introspection_environment_rejects_invalid_scalar_overrides() {
-    for (key, value) in [
-        ("APP__AUTHN__CACHE_ENABLED", ""),
-        ("APP__AUTHN__CACHE_ENABLED", "not-a-boolean"),
-        ("APP__AUTHN__CACHE_CAPACITY", ""),
-        ("APP__AUTHN__CACHE_CAPACITY", "-1"),
-        ("APP__AUTHN__CACHE_CAPACITY", "1.5"),
-        ("APP__AUTHN__PROVIDER_CONCURRENCY", ""),
-        ("APP__AUTHN__PROVIDER_CONCURRENCY", "0"),
-        ("APP__AUTHN__PROVIDER_CONCURRENCY", "4294967296"),
+    for (key, value, expected) in [
+        (
+            "APP__AUTHN__CACHE_ENABLED",
+            "",
+            "`authn.cache_enabled` must be true or false",
+        ),
+        (
+            "APP__AUTHN__CACHE_ENABLED",
+            "not-a-boolean",
+            "`authn.cache_enabled` must be true or false",
+        ),
+        (
+            "APP__AUTHN__CACHE_CAPACITY",
+            "",
+            "`authn.cache_capacity` must be an integer from 1 to 1024",
+        ),
+        (
+            "APP__AUTHN__CACHE_CAPACITY",
+            "-1",
+            "`authn.cache_capacity` must be an integer from 1 to 1024",
+        ),
+        (
+            "APP__AUTHN__CACHE_CAPACITY",
+            "1.5",
+            "`authn.cache_capacity` must be an integer from 1 to 1024",
+        ),
+        (
+            "APP__AUTHN__PROVIDER_CONCURRENCY",
+            "",
+            "`authn.provider_concurrency` must be an integer from 1 to 4294967295",
+        ),
+        (
+            "APP__AUTHN__PROVIDER_CONCURRENCY",
+            "0",
+            "`authn.provider_concurrency` must be an integer from 1 to 4294967295",
+        ),
+        (
+            "APP__AUTHN__PROVIDER_CONCURRENCY",
+            "4294967296",
+            "`authn.provider_concurrency` must be an integer from 1 to 4294967295",
+        ),
     ] {
-        assert!(
-            load_from(
-                &LoadOptions::default(),
-                BUILD,
-                introspection_environment(&[(key, value)]),
-            )
-            .is_err(),
-            "{key}={value}"
-        );
+        let rendered = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            introspection_environment(&[(key, value)]),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(rendered.contains(expected), "{key}={value}: {rendered}");
     }
 }
 // template:end oidc-introspection:load-introspection-environment

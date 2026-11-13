@@ -18,7 +18,7 @@
 
 use std::time::Duration;
 
-use axum::http::header::{CONTENT_TYPE, RETRY_AFTER};
+use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE, RETRY_AFTER};
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
@@ -97,9 +97,7 @@ pub struct InvalidParam {
     pub reason: String,
 }
 
-/// RFC 9457 problem details: the failure envelope of every non-success
-/// response except the plain-text probes, keyed by a stable `code` from one
-/// closed catalog.
+/// RFC 9457 problem details with a stable `code` from the closed failure catalog.
 // Where the schema deliberately differs from the Rust type: optional members
 // are omitted, never `null`, which the `nullable = false` annotations tell the
 // contract; `code` is a plain `string` rather than the closed `Code` enum,
@@ -176,7 +174,7 @@ impl Problem {
 
     /// Filled by problem completion; callers do not thread the id.
     #[must_use]
-    pub(crate) fn with_request_id(mut self, id: String) -> Self {
+    fn with_request_id(mut self, id: String) -> Self {
         self.request_id = Some(id);
         self
     }
@@ -201,21 +199,20 @@ impl Problem {
 
 impl IntoResponse for Problem {
     fn into_response(self) -> Response {
-        let code = self.code;
         let retry_after = self.retry_after;
         // Problem contains only infallibly serializable strings and integers.
         // The extension lets the transport complete the body (request id) and
         // lets the access log read the code.
         let mut response = (
-            http_status(code),
+            http_status(self.code),
             [(
                 CONTENT_TYPE,
                 HeaderValue::from_static("application/problem+json"),
             )],
-            axum::Extension(self.clone()),
-            axum::Json(self),
+            axum::Json(&self),
         )
             .into_response();
+        response.extensions_mut().insert(self);
         if let Some(after) = retry_after {
             response
                 .headers_mut()
@@ -223,6 +220,21 @@ impl IntoResponse for Problem {
         }
         response
     }
+}
+
+pub(crate) fn complete_problem(mut response: Response, request_id: Option<&str>) -> Response {
+    let Some(id) = request_id else {
+        return response;
+    };
+    let Some(problem) = response.extensions_mut().remove::<Problem>() else {
+        return response;
+    };
+    let problem = problem.with_request_id(id.to_owned());
+    // Keep the status and headers already set by the response's owner.
+    *response.body_mut() = axum::Json(&problem).into_response().into_body();
+    response.headers_mut().remove(CONTENT_LENGTH);
+    response.extensions_mut().insert(problem);
+    response
 }
 
 /// Whole seconds, rounded up and at least one.
@@ -270,7 +282,7 @@ pub(crate) fn sanitized_internal_error() -> Response {
 /// `Problem`, whose code fixes the status. Their names are distinct from
 /// [`Code`] on purpose: `Code::BadRequest` is what a handler returns,
 /// `responses::BadRequest` is what the contract declares. A new status joins
-/// this module with its first operation; the set every operation declares is
+/// this module with its first operation; the shared transport set is
 /// [`responses::TransportProblemResponses`]. A response family owned by one
 /// optional pack lives with that pack's seam instead: `authn`, `webhooks`, and
 /// `idempotency`. Doc comments on the newtypes are the response descriptions
@@ -300,9 +312,8 @@ pub mod responses {
     #[response(content_type = "application/problem+json")]
     pub struct GatewayTimeout(pub Problem);
 
-    /// The problem responses the OpenAPI document declares on every
-    /// operation as shared transport answers. This is the Problem set every
-    /// operation can name without colliding with probe-owned 503 `text/plain`.
+    /// The shared transport answers operations can declare without colliding
+    /// with probe-owned 503 `text/plain`.
     /// The hardened chain also emits Problem 503/504/408/405 at runtime; those
     /// stay out of this group (ready already documents 503 as `text/plain`).
     /// Header overflow is hyper-native 431 before the router, not a

@@ -7,14 +7,11 @@ const MAX_CONTENT_TYPE_BYTES: usize = 1024;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContentType(String);
 
-/// The content type is empty, too long, or not a valid header value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("content type is not a valid header value")]
+#[error("content type is blank, too long, or contains unsupported bytes")]
 pub struct InvalidContentType;
 
 impl ContentType {
-    /// Admit a content type before any request carries it.
-    ///
     /// # Errors
     ///
     /// Returns [`InvalidContentType`] for a blank value, one over 1024 bytes,

@@ -997,8 +997,10 @@ async fn cached_verification_succeeds_in_the_final_hundred_milliseconds() {
         IntrospectionCacheOptions::try_new(16, Duration::from_secs(30)).unwrap(),
     ));
     let authorization = format!("Bearer {ALICE}");
-    let token = infra_bearerauthn::parse_bearer([authorization.as_bytes()]).unwrap();
-    verifier.verify(&token).await.unwrap();
+    verifier
+        .verify_fixture_authorization(authorization.as_bytes())
+        .await
+        .unwrap();
     assert_eq!(provider.requests.load(Ordering::Relaxed), 1);
     tokio::time::pause();
     let server = TestServer::new(timeout_router(

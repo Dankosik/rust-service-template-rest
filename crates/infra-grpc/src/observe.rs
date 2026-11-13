@@ -44,9 +44,9 @@ const CLIENT_DIAGNOSTIC_BYTES: usize = 1024;
 const CLIENT_HANDLED: &str = "grpc_client_handled_total";
 /// Client time to the call's status, a histogram by service and method.
 pub(crate) const CLIENT_HANDLING_SECONDS: &str = "grpc_client_handling_seconds";
-/// Buckets for both handling-time histograms: the Prometheus client default
-/// that `go-grpc-middleware` uses, so its dashboards' `_bucket` queries apply.
-/// Without them the recorder would render a summary.
+/// Prometheus client default buckets shared by call duration and admission wait.
+/// Explicit boundaries keep `go-grpc-middleware` dashboard queries against
+/// `_bucket` compatible when the recorder's defaults differ.
 pub const HANDLING_SECONDS_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
 ];
@@ -82,7 +82,7 @@ pub(crate) async fn observe(
         Some(context) => answer.with_context(context.clone()).await,
     }
     .unwrap_or_else(|_panic| crate::status::internal_status().into_http());
-    let custody = ResponseCustody::from_server_response(&mut response);
+    let custody = ResponseCustody::take_from_server_response(&mut response);
     crate::call::attach(response, call, fallback, custody, |_error| {
         tonic::Code::Unknown
     })
@@ -267,8 +267,6 @@ enum Kind {
 
 /// The series of one label path.
 struct Handles {
-    /// The label path, [`UNKNOWN_PATH`] for `unknown`.
-    path: Box<str>,
     /// `service/method`, the span name.
     span_name: Box<str>,
     service: Arc<str>,
@@ -284,39 +282,28 @@ struct Handles {
 
 impl Series {
     pub(crate) fn server(methods: HashSet<Box<str>>) -> Arc<Self> {
-        Arc::new(Self::new(
-            SERVER_STARTED,
-            SERVER_HANDLED,
-            SERVER_HANDLING_SECONDS,
-            Kind::Server {
-                described: methods
-                    .into_iter()
-                    .map(|path| (path, OnceLock::new()))
-                    .collect(),
-            },
-        ))
+        Arc::new(Self::new(Kind::Server {
+            described: methods
+                .into_iter()
+                .map(|path| (path, OnceLock::new()))
+                .collect(),
+        }))
     }
 
     pub(crate) fn client() -> Arc<Self> {
         Arc::clone(CLIENT_SERIES.get_or_init(|| {
-            Arc::new(Self::new(
-                CLIENT_STARTED,
-                CLIENT_HANDLED,
-                CLIENT_HANDLING_SECONDS,
-                Kind::Client {
-                    admitted: RwLock::default(),
-                },
-            ))
+            Arc::new(Self::new(Kind::Client {
+                admitted: RwLock::default(),
+            }))
         }))
     }
 
-    fn new(
-        started_metric: &'static str,
-        handled_metric: &'static str,
-        handling_seconds_metric: &'static str,
-        kind: Kind,
-    ) -> Self {
+    fn new(kind: Kind) -> Self {
         describe();
+        let (started_metric, handled_metric, handling_seconds_metric) = match &kind {
+            Kind::Server { .. } => (SERVER_STARTED, SERVER_HANDLED, SERVER_HANDLING_SECONDS),
+            Kind::Client { .. } => (CLIENT_STARTED, CLIENT_HANDLED, CLIENT_HANDLING_SECONDS),
+        };
         Self {
             started_metric,
             handled_metric,
@@ -379,13 +366,15 @@ impl Series {
     fn register(&self, path: &str) -> Arc<Handles> {
         let (service, method) = service_and_method(path);
         Arc::new(Handles {
-            path: path.into(),
             span_name: format!("{service}/{method}").into(),
             service: service.into(),
             method: method.into(),
             handled_metric: self.handled_metric,
-            started: metrics::counter!(self.started_metric, call_labels(path)),
-            handling_seconds: metrics::histogram!(self.handling_seconds_metric, call_labels(path)),
+            started: metrics::counter!(self.started_metric, call_labels(service, method)),
+            handling_seconds: metrics::histogram!(
+                self.handling_seconds_metric,
+                call_labels(service, method)
+            ),
             handled: Default::default(),
             failed: std::array::from_fn(|_| OnceLock::new()),
         })
@@ -397,7 +386,7 @@ impl Handles {
         self.handling_seconds.record(elapsed.as_secs_f64());
         self.handled[code as usize]
             .get_or_init(|| {
-                let mut labels = call_labels(&self.path);
+                let mut labels = call_labels(&self.service, &self.method);
                 labels.push(metrics::Label::new("grpc_code", code_name(code)));
                 metrics::counter!(self.handled_metric, labels)
             })
@@ -407,7 +396,7 @@ impl Handles {
     fn failed(&self, failure: service_failure::Code) {
         self.failed[failure as usize]
             .get_or_init(|| {
-                let mut labels = call_labels(&self.path);
+                let mut labels = call_labels(&self.service, &self.method);
                 labels.push(metrics::Label::new("failure_code", failure.as_str()));
                 metrics::counter!(SERVER_FAILURES, labels)
             })
@@ -438,9 +427,7 @@ fn service_and_method(path: &str) -> (&str, &str) {
     crate::protocol::split_method_path(path).unwrap_or(("unknown", "unknown"))
 }
 
-/// The `grpc_service` and `grpc_method` labels every series of `path` carries.
-fn call_labels(path: &str) -> Vec<metrics::Label> {
-    let (service, method) = service_and_method(path);
+fn call_labels(service: &str, method: &str) -> Vec<metrics::Label> {
     vec![
         metrics::Label::new("grpc_service", service.to_owned()),
         metrics::Label::new("grpc_method", method.to_owned()),
@@ -457,7 +444,7 @@ fn describe() {
         metrics::describe_counter!(
             CLIENT_STARTED,
             metrics::Unit::Count,
-            "Client gRPC calls sent by service and method"
+            "Client gRPC calls started by service and method, including calls that end before dispatch"
         );
         metrics::describe_counter!(
             SERVER_HANDLED,

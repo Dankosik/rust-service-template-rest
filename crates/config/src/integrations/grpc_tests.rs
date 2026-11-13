@@ -39,8 +39,22 @@ fn grpc_integration_environment_builds_a_lazy_client_tuple() {
     assert!(!format!("{cfg:?}").contains("private-client-key"));
 }
 
-#[test]
-fn grpc_integration_refuses_unpaired_mtls_material() {
+#[rstest::rstest]
+#[case::missing_private_key(
+    ("APP__INTEGRATIONS__BILLING__GRPC__CERTIFICATE", "public-client-cert"),
+    "integrations.billing.grpc.private_key",
+    Some("APP__INTEGRATIONS__BILLING__GRPC__PRIVATE_KEY"),
+)]
+#[case::missing_certificate(
+    ("APP__INTEGRATIONS__BILLING__GRPC__PRIVATE_KEY", "private-client-key"),
+    "integrations.billing.grpc.certificate",
+    None,
+)]
+fn grpc_integration_names_the_missing_mtls_field(
+    #[case] configured: (&str, &str),
+    #[case] missing_key: &str,
+    #[case] env_hint: Option<&str>,
+) {
     let err = load_from(
         &LoadOptions::default(),
         BUILD,
@@ -50,12 +64,12 @@ fn grpc_integration_refuses_unpaired_mtls_material() {
                 "https://billing.example:8443",
             ),
             ("APP__INTEGRATIONS__BILLING__GRPC__SECURITY", "tls"),
-            (
-                "APP__INTEGRATIONS__BILLING__GRPC__CERTIFICATE",
-                "public-client-cert",
-            ),
+            configured,
         ]),
     )
     .unwrap_err();
-    assert_matches!(&err, Error::Validate(error) if error.key == "integrations.billing.grpc.certificate/integrations.billing.grpc.private_key", "{err}");
+    assert_matches!(&err, Error::Validate(error) if error.key == missing_key, "{err}");
+    if let Some(env_hint) = env_hint {
+        assert!(err.to_string().contains(env_hint), "{err}");
+    }
 }

@@ -18,6 +18,7 @@ use axum::{Extension, Router};
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto;
 use hyper_util::service::TowerToHyperService;
+use shared_rules::hyper::HTTP1_MIN_READ_BUFFER_BYTES;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Semaphore, watch};
 use tokio::time::{Instant, timeout_at};
@@ -46,14 +47,15 @@ pub struct ServerOptions {
     /// Read-buffer ceiling for one request head. HTTP/1 overflow answers
     /// hyper-native 431 before the router (not a [`crate::Problem`]). hyper
     /// refuses an HTTP/1 buffer below 8 KiB, so a smaller value is raised to
-    /// 8 KiB for HTTP/1. HTTP/2 applies the value unchanged as the
-    /// uncompressed header-list size.
+    /// 8 KiB for HTTP/1. HTTP/2 applies it as the uncompressed header-list
+    /// size, capped at `u32::MAX`.
     pub max_header_bytes: usize,
     /// Accepted connections at once; `None` accepts without a bound.
     pub max_connections: Option<NonZeroU32>,
-    /// Age after which a connection is told to finish and close, as at
-    /// drain: HTTP/2 gets GOAWAY and its open streams complete, HTTP/1
-    /// closes after the response in flight. A client that reconnects is
+    /// Age from socket acceptance, including TLS preparation, after which a
+    /// connection is told to finish and close as at drain. A connection still
+    /// being prepared is dropped. HTTP/2 gets GOAWAY and its open streams
+    /// complete, HTTP/1 closes after the response in flight. A client that reconnects is
     /// balanced again, which a long-lived connection behind a
     /// connection-level balancer never is. Each connection's age is spread
     /// by up to 10% either way, as grpc-go spreads `MaxConnectionAge`, so
@@ -116,9 +118,24 @@ struct ConnectionShutdown {
     force: CancellationToken,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum ListenerScheme {
+    Http,
+    Https,
+}
+
+impl ListenerScheme {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Http => "http",
+            Self::Https => "https",
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct ConnectionInfo {
-    pub(crate) scheme: &'static str,
+    pub(crate) scheme: ListenerScheme,
     forced: Arc<AtomicBool>,
 }
 
@@ -177,11 +194,16 @@ impl BoundListener {
     #[must_use]
     pub fn serve(self, app: Router, options: ServerOptions) -> Server {
         serve_listener(self, app, options, |stream| async move {
-            Some((stream, "http"))
+            Some((stream, ListenerScheme::Http))
         })
     }
 
     // template:begin grpc:http-bound-listener-tls
+    /// Start accepting TLS connections on the current Tokio runtime.
+    ///
+    /// The handshake is bounded by [`ServerOptions::header_read_timeout`].
+    /// A handshake error, timeout, or drain closes the connection before any
+    /// request can be in flight.
     #[must_use]
     pub fn serve_tls(
         self,
@@ -196,7 +218,7 @@ impl BoundListener {
             async move {
                 let peer = stream.peer_addr().ok();
                 match tokio::time::timeout(handshake_timeout, acceptor.accept(stream)).await {
-                    Ok(Ok(tls_stream)) => Some((tls_stream, "https")),
+                    Ok(Ok(tls_stream)) => Some((tls_stream, ListenerScheme::Https)),
                     Ok(Err(error)) => {
                         tracing::debug!(
                             peer = peer.map(tracing::field::display),
@@ -235,29 +257,6 @@ impl Server {
     ) -> Result<Self, ServerError> {
         Ok(BoundListener::bind(addr).await?.serve(app, options))
     }
-
-    // template:begin grpc:http-server-tls
-    /// Bind `addr` and start accepting TLS connections on the current Tokio runtime.
-    ///
-    /// The handshake is bounded by [`ServerOptions::header_read_timeout`],
-    /// which also closes a client that never starts it. A handshake error or
-    /// timeout closes the connection without a response, and so does drain:
-    /// no request can be in flight before the handshake ends.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ServerError::Bind`] when the address cannot be bound.
-    pub async fn bind_tls(
-        addr: SocketAddr,
-        app: Router,
-        options: ServerOptions,
-        tls: Arc<rustls::ServerConfig>,
-    ) -> Result<Self, ServerError> {
-        Ok(BoundListener::bind(addr)
-            .await?
-            .serve_tls(app, options, tls))
-    }
-    // template:end grpc:http-server-tls
 
     /// The address the listener actually bound, including an OS-assigned port.
     #[must_use]
@@ -339,11 +338,6 @@ impl Drop for Server {
     }
 }
 
-/// hyper refuses an HTTP/1 read buffer below this size (builder panic
-/// minimum). Config admission rejects the same floor so operators never see
-/// a silent raise; this clamp still protects `Server::bind` when validation
-/// did not run.
-const HYPER_MIN_HEADER_BUF: usize = 8 * 1024;
 /// Template HTTP/2 PING cadence. Independent of `header_read_timeout`,
 /// which is the HTTP/1 idle bound.
 const HTTP2_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(20);
@@ -382,7 +376,12 @@ fn connection_builder(options: ServerOptions) -> auto::Builder<TokioExecutor> {
         // `axum::serve` sets none, which is why it cannot bound header reads.
         .timer(TokioTimer::new())
         .header_read_timeout(options.header_read_timeout)
-        .max_buf_size(options.max_header_bytes.max(HYPER_MIN_HEADER_BUF))
+        // Direct callers can bypass configuration validation.
+        .max_buf_size(
+            options
+                .max_header_bytes
+                .max(usize::from(HTTP1_MIN_READ_BUFFER_BYTES)),
+        )
         .keep_alive(true);
     builder
         .http2()
@@ -409,7 +408,7 @@ fn serve_listener<F, Fut, IO>(
 ) -> Server
 where
     F: Fn(TcpStream) -> Fut + Clone + Send + 'static,
-    Fut: Future<Output = Option<(IO, &'static str)>> + Send + 'static,
+    Fut: Future<Output = Option<(IO, ListenerScheme)>> + Send + 'static,
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let BoundListener {
@@ -465,7 +464,7 @@ async fn accept_loop<F, Fut, IO>(
     prepare_io: F,
 ) where
     F: Fn(TcpStream) -> Fut + Clone + Send + 'static,
-    Fut: Future<Output = Option<(IO, &'static str)>> + Send + 'static,
+    Fut: Future<Output = Option<(IO, ListenerScheme)>> + Send + 'static,
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
     let finish = &connection_shutdown.finish;
@@ -534,7 +533,7 @@ async fn accept_loop<F, Fut, IO>(
 
 /// One accepted connection from preparation to close: graceful on `finish`
 /// or at its age, dropped at once on `force`.
-async fn serve_connection<F, Fut, IO>(
+fn serve_connection<F, Fut, IO>(
     stream: TcpStream,
     peer: SocketAddr,
     prepare_io: F,
@@ -542,72 +541,77 @@ async fn serve_connection<F, Fut, IO>(
     app: Router,
     options: ServerOptions,
     shutdown: ConnectionShutdown,
-) where
+) -> impl Future<Output = ()>
+where
     F: Fn(TcpStream) -> Fut,
-    Fut: Future<Output = Option<(IO, &'static str)>>,
+    Fut: Future<Output = Option<(IO, ListenerScheme)>>,
     IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    let ConnectionShutdown { finish, force } = shutdown;
-    let forced = Arc::new(AtomicBool::new(false));
-    let connection_forced = Arc::clone(&forced);
-    let serve = async move {
-        // No request can be in flight before preparation ends, so drain
-        // drops the connection instead of waiting preparation out.
-        let io = tokio::select! {
-            io = prepare_io(stream) => io,
-            () = finish.cancelled() => None,
-        };
-        let Some((io, scheme)) = io else {
-            return;
-        };
-        let io = SniffDeadline::new(io, options.header_read_timeout);
-        // Not `serve_connection_with_upgrades`: hyper hands an upgraded socket
-        // to a task outside this one, so drain and the connection cap would
-        // stop counting it while it stays open.
-        let service = ServiceBuilder::new()
-            .layer(Extension(ConnectionInfo {
-                scheme,
-                forced: connection_forced,
-            }))
-            .service(app);
-        let connection =
-            builder.serve_connection(TokioIo::new(io), TowerToHyperService::new(service));
-        tokio::pin!(connection);
-        let ended = tokio::select! {
-            ended = connection.as_mut() => ended,
-            () = wind_down(&finish, options.max_connection_age) => {
-                connection.as_mut().graceful_shutdown();
-                connection.await
+    let age_deadline = options
+        .max_connection_age
+        .map(|age| deadline_after(spread(age)));
+    async move {
+        let ConnectionShutdown { finish, force } = shutdown;
+        let forced = Arc::new(AtomicBool::new(false));
+        let connection_forced = Arc::clone(&forced);
+        let serve = async move {
+            let closing = wind_down(&finish, age_deadline);
+            tokio::pin!(closing);
+            // No request can be in flight before preparation ends.
+            let io = tokio::select! {
+                biased;
+                () = closing.as_mut() => None,
+                io = prepare_io(stream) => io,
+            };
+            let Some((io, scheme)) = io else {
+                return;
+            };
+            let io = SniffDeadline::new(io, options.header_read_timeout);
+            // Not `serve_connection_with_upgrades`: hyper hands an upgraded socket
+            // to a task outside this one, so drain and the connection cap would
+            // stop counting it while it stays open.
+            let service = ServiceBuilder::new()
+                .layer(Extension(ConnectionInfo {
+                    scheme,
+                    forced: connection_forced,
+                }))
+                .service(app);
+            let connection =
+                builder.serve_connection(TokioIo::new(io), TowerToHyperService::new(service));
+            tokio::pin!(connection);
+            let ended = tokio::select! {
+                biased;
+                () = closing => {
+                    connection.as_mut().graceful_shutdown();
+                    connection.await
+                }
+                ended = connection.as_mut() => ended,
+            };
+            if let Err(err) = ended {
+                tracing::debug!(%peer, error = %err, "http_connection_failed");
             }
         };
-        if let Err(err) = ended {
-            tracing::debug!(%peer, error = %err, "http_connection_failed");
+        tokio::select! {
+            biased;
+            () = async {
+                force.cancelled().await;
+                // select drops the losing connection future before its branch runs.
+                forced.store(true, Ordering::Relaxed);
+            } => {},
+            () = serve => {},
         }
-    };
-    tokio::select! {
-        biased;
-        () = async {
-            force.cancelled().await;
-            // select drops the losing connection future before its branch runs.
-            forced.store(true, Ordering::Relaxed);
-        } => {},
-        () = serve => {},
     }
 }
 
-/// Resolves when drain asks connections to finish or this one reaches its age.
-async fn wind_down(finish: &CancellationToken, max_connection_age: Option<Duration>) {
-    tokio::select! {
-        () = finish.cancelled() => {},
-        () = reached_age(max_connection_age) => {},
-    }
-}
-
-/// Resolves when a connection has lived for its spread age; never without one.
-async fn reached_age(max_connection_age: Option<Duration>) {
-    match max_connection_age {
-        Some(age) => tokio::time::sleep(spread(age)).await,
-        None => std::future::pending().await,
+/// Resolves when drain starts or the connection reaches its age.
+async fn wind_down(finish: &CancellationToken, age_deadline: Option<Instant>) {
+    if let Some(deadline) = age_deadline {
+        tokio::select! {
+            () = finish.cancelled() => {},
+            () = tokio::time::sleep_until(deadline) => {},
+        }
+    } else {
+        finish.cancelled().await;
     }
 }
 

@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::time::Duration;
 
 use bytes::Bytes;
 use http::{
@@ -26,7 +26,6 @@ pub(crate) const TOKEN_LIMITS: Limits = Limits {
 const GRANT_CLIENT_CREDENTIALS: &str = "client_credentials";
 const GRANT_TOKEN_EXCHANGE: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
 const TOKEN_TYPE_ACCESS_TOKEN: &str = "urn:ietf:params:oauth:token-type:access_token";
-/// The token-attempt metric identity, shared by its description and records.
 const ACQUISITIONS_TOTAL: &str = "oauth2_token_acquisitions_total";
 
 /// The authorization server's token endpoint as both grants reach it: one
@@ -76,8 +75,8 @@ impl TokenEndpoint {
         self.url.host_str()
     }
 
-    /// Performs one client-credentials token request, bounded by the
-    /// caller's deadline and [`FETCH_TIMEOUT`], and records its outcome.
+    /// Performs one client-credentials token request and records its outcome.
+    /// The caller includes the [`FETCH_TIMEOUT`] cap in `deadline`.
     pub(crate) async fn fetch_service_token(
         &self,
         deadline: Instant,
@@ -86,18 +85,15 @@ impl TokenEndpoint {
     }
 
     /// Performs one token-exchange request for `subject`, bounded by
-    /// `deadline`, and records its outcome. Called only as the initializer
-    /// of [`Credentials::exchanged_or_fetch`](crate::Credentials::exchanged_or_fetch)'s
-    /// `or_insert_with_if`, so it runs at most once per coalesced group of
-    /// concurrent callers for one subject.
+    /// `deadline`, and records its outcome. Only the caller that owns the
+    /// active exchange for the subject runs this attempt.
     pub(crate) async fn fetch_exchange(
         &self,
         subject: &SecretString,
         deadline: Instant,
-    ) -> Result<Arc<Token>, AcquisitionError> {
+    ) -> Result<Token, AcquisitionError> {
         self.fetch_token(Grant::TokenExchange { subject }, deadline)
             .await
-            .map(Arc::new)
     }
 
     async fn fetch_token(
@@ -144,15 +140,7 @@ impl TokenEndpoint {
     ) -> Result<Token, AcquisitionError> {
         let assertion = self.signer.sign()?;
         let scope = joined_scopes(&self.scopes);
-        let mut fields = match grant {
-            Grant::ClientCredentials => vec![("grant_type", GRANT_CLIENT_CREDENTIALS)],
-            Grant::TokenExchange { subject } => vec![
-                ("grant_type", GRANT_TOKEN_EXCHANGE),
-                ("subject_token", subject.expose_secret()),
-                ("subject_token_type", TOKEN_TYPE_ACCESS_TOKEN),
-                ("requested_token_type", TOKEN_TYPE_ACCESS_TOKEN),
-            ],
-        };
+        let mut fields = grant.form_fields();
         if let Some(scope) = scope.as_deref() {
             fields.push(("scope", scope));
         }
@@ -177,38 +165,38 @@ impl TokenEndpoint {
             .header(ACCEPT, "application/json")
             .body(Bytes::from(body))
             .map_err(|_| AcquisitionError::InvalidResponse)?;
-        let mut provider_unavailable = false;
+        let mut observed_status = None;
         let context = OperationContext::from_deadline(Deadline::at(deadline));
         let response = self
             .http
             .execute_with_response_status(request, &context, |status| {
-                provider_unavailable =
-                    status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS;
+                observed_status = Some(status);
             })
             .await;
-        if provider_unavailable
-            && matches!(
-                &response,
-                Ok(_)
-                    | Err(infra_outbound_http::Error::ResponseBodyTooLarge
-                        | infra_outbound_http::Error::Transport { .. })
-            )
-        {
-            return Err(AcquisitionError::Unavailable);
-        }
-        let response = response.map_err(|error| map_transport_error(&error))?;
-        decode_token_response(&response)
+        classify_token_response(response, observed_status)
     }
 }
 
 /// One token grant: what its request sends and how its answer is admitted.
 #[derive(Clone, Copy)]
-enum Grant<'a> {
+enum Grant<'subject> {
     ClientCredentials,
-    TokenExchange { subject: &'a SecretString },
+    TokenExchange { subject: &'subject SecretString },
 }
 
-impl Grant<'_> {
+impl<'subject> Grant<'subject> {
+    fn form_fields(self) -> Vec<(&'static str, &'subject str)> {
+        match self {
+            Self::ClientCredentials => vec![("grant_type", GRANT_CLIENT_CREDENTIALS)],
+            Self::TokenExchange { subject } => vec![
+                ("grant_type", GRANT_TOKEN_EXCHANGE),
+                ("subject_token", subject.expose_secret()),
+                ("subject_token_type", TOKEN_TYPE_ACCESS_TOKEN),
+                ("requested_token_type", TOKEN_TYPE_ACCESS_TOKEN),
+            ],
+        }
+    }
+
     /// The `grant` metric label; shorter than the URN token exchange sends as
     /// `grant_type`.
     fn metric_label(self) -> &'static str {
@@ -241,13 +229,33 @@ fn deserialize_lifetime<'de, D: Deserializer<'de>>(
     u64::deserialize(deserializer).map(Some)
 }
 
-fn decode_token_response(response: &Response<Bytes>) -> Result<TokenResponse, AcquisitionError> {
-    let status = response.status();
-    if !status.is_success() {
-        return Err(AcquisitionError::Rejected(Rejection::from_body(
-            response.body(),
-        )));
+fn classify_token_response(
+    response: Result<Response<Bytes>, infra_outbound_http::Error>,
+    observed_status: Option<StatusCode>,
+) -> Result<TokenResponse, AcquisitionError> {
+    use infra_outbound_http::Error::{ResponseBodyTooLarge, Transport};
+
+    match (response, observed_status) {
+        (Ok(response), _) if response.status().is_success() => decode_token_response(&response),
+        (Ok(response), _) => Err(provider_failure(
+            response.status(),
+            Some(response.body().as_ref()),
+        )),
+        (Err(ResponseBodyTooLarge | Transport { .. }), Some(status)) if !status.is_success() => {
+            Err(provider_failure(status, None))
+        }
+        (Err(error), _) => Err(map_transport_error(&error)),
     }
+}
+
+fn provider_failure(status: StatusCode, body: Option<&[u8]>) -> AcquisitionError {
+    if status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS {
+        return AcquisitionError::Unavailable;
+    }
+    AcquisitionError::Rejected(body.map_or(Rejection::Other, Rejection::from_body))
+}
+
+fn decode_token_response(response: &Response<Bytes>) -> Result<TokenResponse, AcquisitionError> {
     if let Some(content_type) = response.headers().get(CONTENT_TYPE) {
         let value = content_type
             .to_str()
@@ -265,6 +273,7 @@ fn map_transport_error(error: &infra_outbound_http::Error) -> AcquisitionError {
         infra_outbound_http::Error::Cancelled => AcquisitionError::Cancelled,
         infra_outbound_http::Error::ResponseBodyTooLarge => AcquisitionError::ResponseLimit,
         infra_outbound_http::Error::InvalidTarget
+        | infra_outbound_http::Error::DispatchRefused
         | infra_outbound_http::Error::Transport { .. } => AcquisitionError::Transport,
     }
 }
@@ -277,18 +286,17 @@ fn joined_scopes(scopes: &[String]) -> Option<String> {
     }
 }
 
-/// Admits a parsed response as a [`Token`]. With `issued_token_type` set, a response is
-/// admitted only when it reports that exact issued type (RFC 8693 section
-/// 2.2.1).
+/// When `expected_issued_token_type` is set, admission requires an exact
+/// match with the provider's issued type (RFC 8693 section 2.2.1).
 fn token_from_response(
     response: &TokenResponse,
     started: Instant,
-    issued_token_type: Option<&str>,
+    expected_issued_token_type: Option<&str>,
 ) -> Result<Token, AcquisitionError> {
     if !response.token_type.eq_ignore_ascii_case("bearer") {
         return Err(AcquisitionError::InvalidResponse);
     }
-    if let Some(expected) = issued_token_type
+    if let Some(expected) = expected_issued_token_type
         && response.issued_token_type.as_deref() != Some(expected)
     {
         return Err(AcquisitionError::InvalidResponse);

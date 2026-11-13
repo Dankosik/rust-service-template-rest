@@ -1,8 +1,7 @@
 //! PostgreSQL durable background jobs.
 //!
-//! Owns the one jobs table, `background_jobs`, and every statement on it.
-//! Enqueue runs on the caller's open transaction. Only this crate names the
-//! table.
+//! Owns the runtime statements on `background_jobs`. Enqueue runs on the
+//! caller's open transaction.
 
 mod attempt;
 mod claim;
@@ -14,6 +13,7 @@ mod kind;
 mod listener;
 mod maintenance;
 pub mod operator;
+mod peers;
 mod session;
 mod state;
 mod trace_context;

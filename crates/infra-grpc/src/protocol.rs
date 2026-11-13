@@ -18,7 +18,6 @@ pub(crate) fn split_method_path(path: &str) -> Option<(&str, &str)> {
     valid.then_some((service, method))
 }
 
-/// The request path of `method` on `service`.
 pub(crate) fn method_path(service: &str, method: &str) -> String {
     format!("/{service}/{method}")
 }
@@ -52,8 +51,8 @@ fn parse_grpc_timeout(value: &[u8]) -> Option<Duration> {
     }
     let amount = std::str::from_utf8(digits).ok()?.parse::<u64>().ok()?;
     match unit {
-        b'H' => Some(Duration::from_secs(amount.checked_mul(60 * 60)?)),
-        b'M' => Some(Duration::from_secs(amount.checked_mul(60)?)),
+        b'H' => Some(Duration::from_hours(amount)),
+        b'M' => Some(Duration::from_mins(amount)),
         b'S' => Some(Duration::from_secs(amount)),
         b'm' => Some(Duration::from_millis(amount)),
         b'u' => Some(Duration::from_micros(amount)),

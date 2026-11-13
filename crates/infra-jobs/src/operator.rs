@@ -247,7 +247,6 @@ pub struct JobSnapshot {
     pub attempts: i32,
     /// Why automatic execution stopped; set only for a failed job.
     pub failure_reason: Option<FailureReason>,
-    /// When the job was created.
     pub created_at: String,
     /// The earliest time the job may run.
     pub not_before: String,
@@ -259,7 +258,6 @@ pub struct JobSnapshot {
     pub recovery_count: i32,
 }
 
-/// An observation is complete only when fewer than the admitted limit were scanned.
 #[derive(Debug)]
 pub enum InspectionResult {
     One {
@@ -270,9 +268,7 @@ pub enum InspectionResult {
         observed_at: String,
         scanned: u16,
         items: Vec<JobSnapshot>,
-        /// Whether fewer rows than the admitted limit were scanned.
-        complete: bool,
-        /// The cursor for the next page; `None` when there is none.
+        /// The last scanned row's cursor when the scan fills the admitted limit.
         next_cursor: Option<String>,
     },
 }
@@ -472,8 +468,7 @@ fn page_result(
     observed_at: String,
 ) -> Result<InspectionResult, OperatorError> {
     let scanned = u16::try_from(rows.len()).map_err(|_| OperatorError::InvalidStoredState)?;
-    let complete = scanned < limit;
-    let next_cursor = if complete {
+    let next_cursor = if scanned < limit {
         None
     } else {
         rows.last().map(|row| encode_cursor(JobId(row.id)))
@@ -489,7 +484,6 @@ fn page_result(
         observed_at,
         scanned,
         items,
-        complete,
         next_cursor,
     })
 }

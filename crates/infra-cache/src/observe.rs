@@ -9,11 +9,12 @@ use tracing::Span;
 use crate::connection::ErrorType;
 use crate::{Operation, ServerEndpoint, Unavailable};
 
-pub const OPERATION_DURATION_METRIC: &str = "cache_operation_duration_seconds";
+const OPERATION_DURATION_METRIC: &str = "cache_operation_duration_seconds";
 
-/// Buckets in seconds for [`OPERATION_DURATION_METRIC`]. A command that runs
-/// into a `command_timeout` above the top bucket lands only in `+Inf`.
-pub const OPERATION_DURATION_BUCKETS: &[f64] = &[
+/// Buckets in seconds for [`OPERATION_DURATION_METRIC`].
+/// A timeout whose measured duration exceeds the highest finite bucket lands
+/// only in `+Inf`.
+const OPERATION_DURATION_BUCKETS: &[f64] = &[
     0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 1.0,
 ];
 
@@ -35,7 +36,7 @@ fn operation_label(operation: Operation) -> &'static str {
     }
 }
 
-/// How a command ended. Every variant is one series of an operation.
+/// How a command ended. Failures record a separate series for each error type.
 #[derive(Clone, Copy, enum_map::Enum)]
 pub(crate) enum Outcome {
     Hit,
@@ -198,7 +199,7 @@ pub(crate) fn describe() {
     metrics::describe_histogram!(
         OPERATION_DURATION_METRIC,
         Unit::Seconds,
-        "Cache operation duration in seconds"
+        "Cache duration in seconds after command construction, excluding SETs with invalid TTL"
     );
     metrics::describe_counter!(
         ADMISSION_REFUSED_METRIC,
@@ -213,7 +214,7 @@ pub(crate) fn describe() {
     metrics::describe_counter!(
         RETIREMENTS_METRIC,
         Unit::Count,
-        "Cache connections taken out of use, after which the next command waits for a reconnect"
+        "Active cache connections taken out of use, including during shutdown"
     );
     metrics::describe_counter!(
         PASSWORD_REFRESHES_METRIC,

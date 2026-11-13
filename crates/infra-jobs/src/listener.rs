@@ -57,12 +57,12 @@ async fn listen(shared: &Shared, pool: &PgPool) {
         let ended = match subscribe(pool).await {
             Ok(mut listener) => {
                 observe_recovery(shared, Operation::Listen);
-                // Anything committed while no listener was attached is due now.
-                shared.wake_peers(None);
+                // Catch up on notifications missed while disconnected.
+                shared.peers.wake_all();
                 loop {
                     match listener.try_recv().await {
                         Ok(Some(notification)) => {
-                            shared.wake_peers(Some(notification.payload()));
+                            shared.peers.wake_kind(notification.payload());
                         }
                         Ok(None) => break connection_lost(),
                         Err(error) => break error,

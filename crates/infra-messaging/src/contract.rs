@@ -14,7 +14,8 @@ use utoipa::openapi::schema::Schema;
 
 use crate::registry::{Registry, RouteKey};
 use crate::wire::{
-    CREATED_AT, EVENT_SCHEMA, EVENT_TYPE, IDENTITY_MAX_BYTES, MESSAGE_ID, NATS_MSG_ID, schema_label,
+    CREATED_AT, EVENT_SCHEMA, EVENT_TYPE, IDENTITY_MAX_BYTES, IDENTITY_SCHEMA_PATTERN, MESSAGE_ID,
+    NATS_MSG_ID, schema_label,
 };
 
 /// Appends a payload type's schema, and every schema it references, to the
@@ -47,7 +48,9 @@ pub enum ContractError {
 impl Registry {
     /// Renders every route as an `AsyncAPI` 3.0 document: one channel per
     /// subject, one message per event type and schema version with the
-    /// envelope headers and a self-contained JSON Schema 2020-12 payload.
+    /// envelope headers and a JSON Schema 2020-12 payload. Schema references
+    /// to local components are moved into the payload's definitions. External
+    /// references are preserved and may require a separate schema resource.
     ///
     /// The document has no operations, because a route does not say whether
     /// this process publishes or consumes it. Keys are sorted, so the same
@@ -104,8 +107,6 @@ impl Registry {
     }
 }
 
-/// No Unicode control character (`Cc`), matching [`crate::wire`]'s identity check.
-const IDENTITY_PATTERN: &str = "^[^\\u0000-\\u001F\\u007F-\\u009F]*$";
 const CREATED_AT_DESCRIPTION: &str =
     "RFC 3339 time; a consumer refuses the zero time 0001-01-01T00:00:00Z as malformed.";
 
@@ -125,7 +126,7 @@ fn message(
         "type": "string",
         "minLength": 1,
         "maxLength": IDENTITY_MAX_BYTES,
-        "pattern": IDENTITY_PATTERN,
+        "pattern": IDENTITY_SCHEMA_PATTERN,
         "description": format!(
             "At most {IDENTITY_MAX_BYTES} UTF-8 bytes; a consumer refuses a longer value as malformed."
         ),
@@ -151,11 +152,26 @@ fn message(
             "schemaFormat": "application/schema+json;version=draft-2020-12",
             "schema": {
                 "$schema": "https://json-schema.org/draft/2020-12/schema",
-                "$ref": format!("#/$defs/{}", shared_rules::rfc6901::escape(payload)),
+                "$ref": payload_schema_reference(payload),
                 "$defs": definitions,
             },
         },
     })
+}
+
+fn payload_schema_reference(name: &str) -> String {
+    let token = shared_rules::rfc6901::escape(name);
+    let mut reference = String::from("#/$defs/");
+    // RFC 6901 §6 applies URI fragment encoding after JSON Pointer escaping.
+    for byte in token.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            reference.push(char::from(byte));
+        } else {
+            reference.push('%');
+            reference.push_str(const_hex::Buffer::<1>::new().format_upper(&[byte]));
+        }
+    }
+    reference
 }
 
 /// Visit only JSON Schema subschemas. Annotation and extension values, including
@@ -244,6 +260,37 @@ mod tests {
     impl EventPayload for OrderCancelled {
         const EVENT_TYPE: &'static str = "order.cancelled";
         const SCHEMA_VERSION: u16 = 1;
+    }
+
+    struct CustomSchemaName;
+
+    impl EventPayload for CustomSchemaName {
+        const EVENT_TYPE: &'static str = "order.custom";
+        const SCHEMA_VERSION: u16 = 1;
+    }
+
+    impl utoipa::PartialSchema for CustomSchemaName {
+        fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+            <OrderCancelled as utoipa::PartialSchema>::schema()
+        }
+    }
+
+    impl utoipa::ToSchema for CustomSchemaName {
+        fn name() -> std::borrow::Cow<'static, str> {
+            "Order%41/Étape~draft".into()
+        }
+    }
+
+    #[test]
+    fn payload_schema_reference_encodes_the_definition_name_as_a_uri_fragment() {
+        let registry =
+            Registry::try_new([Route::documented::<CustomSchemaName>("orders")]).unwrap();
+        let document = registry.asyncapi("orders", "1").unwrap();
+        let schema =
+            &document["channels"]["orders"]["messages"]["order.custom.v1"]["payload"]["schema"];
+
+        assert_eq!(schema["$ref"], "#/$defs/Order%2541~1%C3%89tape~0draft");
+        assert_eq!(schema["$defs"]["Order%41/Étape~draft"]["type"], "object");
     }
 
     #[test]

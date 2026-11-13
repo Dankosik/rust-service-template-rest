@@ -116,7 +116,6 @@ impl From<Vec<u8>> for PutBody {
     }
 }
 
-/// The body yielded more or fewer bytes than declared.
 #[derive(Debug, thiserror::Error)]
 #[error("upload body length differs from the declared length")]
 struct LengthMismatch;
@@ -197,18 +196,12 @@ impl Body for ExactLength {
                             return self.refuse();
                         }
                         self.ended = true;
-                        if self.held.is_some() {
-                            self.trailers = Some(frame);
-                            continue;
-                        }
-                        return Poll::Ready(Some(Ok(frame)));
+                        self.trailers = Some(frame);
+                        continue;
                     };
                     let len = data.remaining() as u64;
                     if len == 0 {
                         continue;
-                    }
-                    if self.held.is_some() {
-                        return self.refuse();
                     }
                     let Some(remaining) = self.remaining.checked_sub(len) else {
                         return self.refuse();

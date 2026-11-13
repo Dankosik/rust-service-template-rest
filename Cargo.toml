@@ -34,6 +34,7 @@ hotpath = { version = "=0.28.4", default-features = false }
 # Workspace crates
 service-config = { path = "crates/config" }
 health = { path = "crates/health" }
+json-payload = { path = "crates/json-payload" }
 operation-context = { path = "crates/operation-context" }
 shared-rules = { path = "crates/shared-rules" }
 infra-http = { path = "crates/infra-http" }
@@ -129,6 +130,7 @@ hyper-util = { version = "=0.1.21", default-features = false }
 http-body = "1.1.0"
 http-body-util = "0.1.5"
 http = { version = "1.5.0", default-features = false }
+mime = { version = "0.3.17", default-features = false }
 tokio = { version = "1.53.1", default-features = false }
 # The service binary's global allocator; see docs/backend-library-selection.md.
 tikv-jemallocator = { version = "0.7.0", default-features = false }

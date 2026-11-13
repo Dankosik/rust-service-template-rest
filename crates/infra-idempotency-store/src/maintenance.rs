@@ -30,11 +30,6 @@ pub enum StartupError {
     Unavailable,
 }
 
-struct PassSummary {
-    removed: u64,
-    end: PassEnd,
-}
-
 impl Store {
     /// Check that the current session is writable, bounded to 5 s.
     ///
@@ -85,35 +80,23 @@ impl Store {
     /// cause. Earlier batches stay committed. A timeout leaves the batch's
     /// commit outcome unconfirmed.
     pub async fn remove_expired(&self) -> Result<u64, CleanupError> {
-        self.cleanup_pass(None).await.map(|result| result.removed)
+        self.cleanup_pass(None).await.map(|(removed, _)| removed)
     }
 
     async fn cleanup_pass(
         &self,
         cancel: Option<&CancellationToken>,
-    ) -> Result<PassSummary, CleanupError> {
-        let mut pass = CleanupPass::start(Cleanup::HttpIdempotency);
-        let mut removed = 0;
-        loop {
-            if cancel.is_some_and(CancellationToken::is_cancelled) {
-                return Ok(PassSummary {
-                    removed,
-                    end: PassEnd::Cancelled,
-                });
-            }
-            let deleted_rows = pass
-                .run_batch(&self.pool, READ_COMMITTED, Self::delete_expired_batch)
-                .await?;
-            metrics::counter!(CLEANUP_REMOVED_METRIC).increment(deleted_rows);
-            removed += deleted_rows;
-            if deleted_rows < u64::from(CLEANUP_BATCH_ROWS) {
-                pass.completed();
-                return Ok(PassSummary {
-                    removed,
-                    end: PassEnd::Completed,
-                });
-            }
-        }
+    ) -> Result<(u64, PassEnd), CleanupError> {
+        CleanupPass::start(Cleanup::HttpIdempotency)
+            .run_until_short_batch(
+                &self.pool,
+                READ_COMMITTED,
+                cancel,
+                CLEANUP_BATCH_ROWS,
+                CLEANUP_REMOVED_METRIC,
+                Self::delete_expired_batch,
+            )
+            .await
     }
 
     async fn delete_expired_batch(tx: &mut Tx<'_>) -> Result<u64, sqlx::Error> {
@@ -155,13 +138,13 @@ impl Store {
             Cleanup::HttpIdempotency,
             CLEANUP_RUNS_METRIC,
             &cancel,
-            || async { self.cleanup_pass(Some(&cancel)).await.map(|pass| pass.end) },
-            || self.population(),
+            || async { self.cleanup_pass(Some(&cancel)).await.map(|(_, end)| end) },
+            || self.sample_expired_population(),
         )
         .await;
     }
 
-    async fn population(&self) -> Result<PopulationSample, MaintenanceFailure> {
+    async fn sample_expired_population(&self) -> Result<PopulationSample, MaintenanceFailure> {
         in_observation_tx(&self.pool, async |tx| {
             let sample = observed(
                 "observe expired idempotency records",

@@ -190,17 +190,20 @@ impl tower::Service<http::Request<Body>> for ServiceTokenClient {
                 tonic::Status::internal("authorization conflicts with the service token"),
             ))));
         }
-        match self.tokens.authorization() {
-            Ok(Some(value)) => {
-                prepared.headers_mut().insert(AUTHORIZATION, value);
-            }
-            Ok(None) => {}
-            Err(error) => {
-                let mut status = tonic::Status::unavailable("service token unavailable");
-                status.set_source(Arc::new(error));
-                return Box::pin(std::future::ready(Err(prepared.refuse(status))));
-            }
-        }
-        Box::pin(prepared.send())
+        let tokens = self.tokens.clone();
+        Box::pin(prepared.send_inner(
+            move |headers| {
+                let authorization = tokens.authorization().map_err(|error| {
+                    let mut status = tonic::Status::unavailable("service token unavailable");
+                    status.set_source(Arc::new(error));
+                    status
+                })?;
+                if let Some(value) = authorization {
+                    headers.insert(AUTHORIZATION, value);
+                }
+                Ok(())
+            },
+            None,
+        ))
     }
 }

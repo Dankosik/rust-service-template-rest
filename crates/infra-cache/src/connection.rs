@@ -22,8 +22,8 @@ use crate::observe::{
     RETIREMENTS_METRIC,
 };
 
-/// Bounds one whole setup attempt: password read, dial, TLS, and `HELLO`. A
-/// hang guard, not a latency target: a slow but live server is waited for.
+/// Bounds one whole setup attempt: password read, dial, TLS, and `HELLO`.
+/// The same limit applies while the server is making progress.
 pub(crate) const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
 const CONNECTED_PROBE_MIN_BUDGET: Duration = Duration::from_secs(5);
 const PASSWORD_READ_TIMEOUT: Duration = Duration::from_secs(5);
@@ -55,7 +55,7 @@ pub(crate) enum ErrorType {
     /// The server refused the credentials, including `WRONGPASS` and
     /// `NOAUTH` replies to `HELLO`.
     Auth,
-    Response,
+    ServerErrorReply,
     Parse,
     /// A local command slot refusal, which
     /// `cache_command_admission_refused_total` counts apart, an unreadable
@@ -81,7 +81,7 @@ impl ErrorType {
             Self::Timeout => "timeout",
             Self::Io => "io",
             Self::Auth => "auth",
-            Self::Response => "response",
+            Self::ServerErrorReply => "response",
             Self::Parse => "parse",
             Self::Other => "other",
         }
@@ -102,7 +102,7 @@ pub(crate) fn error_type(error: &redis::RedisError) -> ErrorType {
         redis::ErrorKind::AuthenticationFailed => ErrorType::Auth,
         // redis-rs names only some server codes; `WRONGTYPE`, `OOM` and the
         // other unnamed codes are `Extension`, still a server error reply.
-        redis::ErrorKind::Server(_) | redis::ErrorKind::Extension => ErrorType::Response,
+        redis::ErrorKind::Server(_) | redis::ErrorKind::Extension => ErrorType::ServerErrorReply,
         redis::ErrorKind::Parse => ErrorType::Parse,
         // InvalidClientConfig and every other kind stay `other`.
         _ => ErrorType::Other,
@@ -138,7 +138,7 @@ enum State {
     Connecting,
     /// The published generation. The driver's disconnect push may cancel its
     /// `retired` token while the state still names it; [`Shared::acquire`]
-    /// refuses that token and the supervisor's `retire` moves the state.
+    /// refuses that token and the supervisor's [`Shared::retire`] moves the state.
     Connected(Arc<Generation>),
     /// Observable during backoff; the supervisor keeps retrying.
     SetupFailed(ErrorType),
@@ -166,14 +166,52 @@ impl Drop for CommandSlot<'_> {
     }
 }
 
-/// Retires an unanswered exchange before releasing its admission slot.
+/// A command's stop scope and the cache's own ceiling within it.
+pub(crate) struct CommandScope {
+    pub(crate) context: OperationContext,
+    ceiling: Deadline,
+}
+
+impl CommandScope {
+    /// `parent` under a `command_timeout` ceiling starting now.
+    pub(crate) fn under(parent: &OperationContext, command_timeout: Duration) -> Self {
+        let ceiling = Deadline::new(Instant::now(), command_timeout);
+        Self {
+            context: parent.child_until(ceiling),
+            ceiling,
+        }
+    }
+
+    /// Without a parent there is no child token for anything to cancel.
+    pub(crate) fn standalone(command_timeout: Duration) -> Self {
+        let ceiling = Deadline::new(Instant::now(), command_timeout);
+        Self {
+            context: OperationContext::from_deadline(ceiling),
+            ceiling,
+        }
+    }
+}
+
+/// Owns the admission slot until any required retirement finishes.
 struct Exchange<'a, F: Future> {
     shared: &'a Shared,
     generation: &'a Arc<Generation>,
     _slot: CommandSlot<'a>,
-    reply: Option<Pin<&'a mut F>>,
+    reply: ReplyState<'a, F>,
     keeps_generation: fn(&F::Output) -> bool,
-    retire: bool,
+    pending_retirement: PendingReplyRetirement,
+}
+
+enum PendingReplyRetirement {
+    OnDrop,
+    OnDropIfExpired(Deadline),
+}
+
+enum ReplyState<'a, F> {
+    Unpolled(Pin<&'a mut F>),
+    Pending(Pin<&'a mut F>),
+    Keep,
+    Retire,
 }
 
 impl<'a, F: Future> Exchange<'a, F> {
@@ -183,29 +221,38 @@ impl<'a, F: Future> Exchange<'a, F> {
         slot: CommandSlot<'a>,
         reply: Pin<&'a mut F>,
         keeps_generation: fn(&F::Output) -> bool,
+        pending_retirement: PendingReplyRetirement,
     ) -> Self {
         Self {
             shared,
             generation,
             _slot: slot,
-            reply: Some(reply),
+            reply: ReplyState::Unpolled(reply),
             keeps_generation,
-            retire: false,
+            pending_retirement,
         }
     }
 
     fn poll_reply(&mut self, cx: &mut Context<'_>) -> Poll<F::Output> {
-        let Some(mut reply) = self.reply.take() else {
-            return Poll::Pending;
+        // Arm retirement before a poll that could unwind into this exchange's drop.
+        let mut reply = match std::mem::replace(&mut self.reply, ReplyState::Retire) {
+            ReplyState::Unpolled(reply) | ReplyState::Pending(reply) => reply,
+            state @ (ReplyState::Keep | ReplyState::Retire) => {
+                self.reply = state;
+                return Poll::Pending;
+            }
         };
-        self.retire = true;
         match reply.as_mut().poll(cx) {
             Poll::Ready(result) => {
-                self.retire = !(self.keeps_generation)(&result);
+                self.reply = if (self.keeps_generation)(&result) {
+                    ReplyState::Keep
+                } else {
+                    ReplyState::Retire
+                };
                 Poll::Ready(result)
             }
             Poll::Pending => {
-                self.reply = Some(reply);
+                self.reply = ReplyState::Pending(reply);
                 Poll::Pending
             }
         }
@@ -218,22 +265,32 @@ impl<'a, F: Future> Exchange<'a, F> {
 /// resolve to the new primary, and only a new connection reaches it.
 fn command_keeps_generation<T>(reply: &redis::RedisResult<T>) -> bool {
     reply.as_ref().err().is_none_or(|error| {
-        error_type(error) == ErrorType::Response && error.code() != Some("READONLY")
+        error_type(error) == ErrorType::ServerErrorReply && error.code() != Some("READONLY")
     })
 }
 
 impl<F: Future> Drop for Exchange<'_, F> {
     fn drop(&mut self) {
-        // Only re-poll after a pending poll. The unconstrained first poll has
-        // room to enqueue, so this poll can collect a delivered reply without
-        // dispatching new work. During unwinding just retire.
-        if self.retire && self.reply.is_some() && !std::thread::panicking() {
+        // The unconstrained first poll has room to enqueue, so re-polling
+        // can collect a delivered reply without dispatching new work.
+        if matches!(self.reply, ReplyState::Pending(_)) && !std::thread::panicking() {
             let _ = self.poll_reply(&mut Context::from_waker(Waker::noop()));
         }
-        if self.retire {
+        let retire = match self.reply {
+            ReplyState::Unpolled(_) | ReplyState::Keep => false,
+            // A sent command keeps its place in the driver's reply queue until
+            // the reply arrives or the driver shuts down. A peer's ceiling or
+            // the maintenance PING can still retire a stalled connection.
+            ReplyState::Pending(_) => match self.pending_retirement {
+                PendingReplyRetirement::OnDrop => true,
+                PendingReplyRetirement::OnDropIfExpired(deadline) => deadline.expired(),
+            },
+            ReplyState::Retire => true,
+        };
+        if retire {
             self.shared.retire(self.generation);
         }
-        // Accounting and the permit drop only after retirement returns.
+        // The slot guard decrements the gauge and releases the local permit after this.
     }
 }
 
@@ -369,8 +426,9 @@ impl Link {
     pub(crate) async fn command<T: redis::FromRedisValue>(
         &self,
         command: &redis::Cmd,
-        context: &OperationContext,
+        scope: &CommandScope,
     ) -> Result<T, CommandError> {
+        let context = &scope.context;
         context.check().map_err(CommandError::Stopped)?;
         let slot = self.claim_slot(&self.application_slots)?;
         // Acquisition first: a connected link then never arms the deadline timer.
@@ -400,6 +458,7 @@ impl Link {
                 slot,
                 reply,
                 command_keeps_generation,
+                PendingReplyRetirement::OnDropIfExpired(scope.ceiling),
             );
             let reply = poll_fn(|cx| exchange.poll_reply(cx)).await;
             drop(exchange);
@@ -410,7 +469,7 @@ impl Link {
             })
         };
         // A delivered reply has already cleared its slot. Observe it before
-        // stopping the wait so cancellation cannot retire an answered exchange.
+        // stopping the wait so a stop at the ceiling cannot retire an answered exchange.
         tokio::select! {
             biased;
             reply = query => reply,
@@ -424,10 +483,6 @@ impl Link {
         let generation = self.shared.acquire().await?;
         // The first PING poll must reach the driver before cancellation can retire it.
         tokio::task::consume_budget().await;
-        let deadline = Deadline::new(
-            Instant::now(),
-            command_timeout.max(CONNECTED_PROBE_MIN_BUDGET),
-        );
         let command = redis::Cmd::ping();
         let mut connection = generation.connection.clone();
         let reply = pin!(tokio::task::unconstrained(
@@ -439,13 +494,20 @@ impl Link {
             slot,
             reply,
             ping_keeps_generation,
+            PendingReplyRetirement::OnDrop,
         );
-        tokio::select! {
-            biased;
-            () = generation.retired.cancelled() => Err(ErrorType::Io),
-            reply = poll_fn(|cx| exchange.poll_reply(cx)) => reply.map_err(|error| error_type(&error)),
-            () = deadline.wait() => Err(ErrorType::Timeout),
-        }
+        reply_until(
+            &generation.retired,
+            poll_fn(|cx| exchange.poll_reply(cx)),
+            || {
+                Deadline::new(
+                    Instant::now(),
+                    command_timeout.max(CONNECTED_PROBE_MIN_BUDGET),
+                )
+            },
+        )
+        .await?
+        .map_err(|error| error_type(&error))
     }
 
     fn claim_slot<'a>(&'a self, slots: &'a Semaphore) -> Result<CommandSlot<'a>, ErrorType> {
@@ -503,35 +565,47 @@ impl Drop for SupervisorExit {
     }
 }
 
+// The first reply poll can enqueue without yielding. Sample the deadline after
+// that poll so every command ahead in the queue has already started its budget.
+async fn reply_until<T>(
+    retired: &CancellationToken,
+    reply: impl Future<Output = T>,
+    deadline: impl FnOnce() -> Deadline,
+) -> Result<T, ErrorType> {
+    tokio::select! {
+        biased;
+        () = retired.cancelled() => Err(ErrorType::Io),
+        reply = reply => Ok(reply),
+        () = async { deadline().wait().await } => Err(ErrorType::Timeout),
+    }
+}
+
 async fn query_until(
     generation: &Generation,
     command: &redis::Cmd,
-    deadline: Deadline,
+    deadline: impl FnOnce() -> Deadline,
 ) -> Result<redis::RedisResult<()>, ErrorType> {
+    tokio::task::consume_budget().await;
     let mut connection = generation.connection.clone();
-    tokio::select! {
-        biased;
-        () = generation.retired.cancelled() => Err(ErrorType::Io),
-        reply = command.query_async(&mut connection) => Ok(reply),
-        () = deadline.wait() => Err(ErrorType::Timeout),
-    }
+    let reply = tokio::task::unconstrained(command.query_async(&mut connection));
+    reply_until(&generation.retired, reply, deadline).await
 }
 
 async fn ping_until(
     generation: &Generation,
-    deadline: Deadline,
-) -> (Result<(), ErrorType>, Disposition) {
-    match query_until(generation, &redis::Cmd::ping(), deadline).await {
-        Ok(reply) => {
-            let disposition = if ping_keeps_generation(&reply) {
-                Disposition::Keep
-            } else {
-                Disposition::Retire
-            };
-            (reply.map_err(|error| error_type(&error)), disposition)
-        }
-        Err(error) => (Err(error), Disposition::Retire),
-    }
+    command_timeout: Duration,
+) -> Result<(), (ErrorType, Disposition)> {
+    let reply = query_until(generation, &redis::Cmd::ping(), || {
+        Deadline::new(Instant::now(), command_timeout)
+    })
+    .await
+    .map_err(|error| (error, Disposition::Retire))?;
+    let disposition = if ping_keeps_generation(&reply) {
+        Disposition::Keep
+    } else {
+        Disposition::Retire
+    };
+    reply.map_err(|error| (error_type(&error), disposition))
 }
 
 fn ping_keeps_generation(reply: &redis::RedisResult<()>) -> bool {
@@ -613,7 +687,7 @@ async fn run_supervisor(
 }
 
 /// One bounded setup attempt. A connection the peer closes before publication
-/// is `Io`; the returned generation owns its retirement token.
+/// is [`ErrorType::Io`]; the returned generation owns its retirement token.
 async fn setup_attempt<'a>(
     server: &ServerEndpoint,
     client: &redis::Client,
@@ -725,9 +799,7 @@ async fn maintain(
                 // sent before it. A budget shorter than `command_timeout`
                 // would retire the generation, and fail those commands, before
                 // their own budget ends.
-                let deadline = Deadline::new(Instant::now(), command_timeout);
-                let (result, disposition) = ping_until(generation, deadline).await;
-                if let Err(error) = result {
+                if let Err((error, disposition)) = ping_until(generation, command_timeout).await {
                     tracing::warn!(
                         server.address = %server.host,
                         server.port = server.port,
@@ -753,7 +825,6 @@ struct Rotation<'a> {
     unreadable_logged: bool,
 }
 
-/// How one password refresh ended.
 enum RefreshOutcome {
     ReadFailed(crate::CacheError),
     Unchanged,
@@ -841,14 +912,15 @@ impl<'a> Rotation<'a> {
         let mut command = redis::cmd("AUTH");
         command.arg(self.file.username()).arg(&password);
         // File I/O must not consume the time owed to commands ahead of AUTH.
-        let now = Instant::now();
-        let deadline = Deadline::new(
-            now,
-            command_timeout.max(read_deadline.saturating_duration_since(now)),
-        );
-        let result = query_until(generation, &command, deadline)
-            .await
-            .and_then(|reply| reply.map_err(|error| error_type(&error)));
+        let result = query_until(generation, &command, || {
+            let now = Instant::now();
+            Deadline::new(
+                now,
+                command_timeout.max(read_deadline.saturating_duration_since(now)),
+            )
+        })
+        .await
+        .and_then(|reply| reply.map_err(|error| error_type(&error)));
         match result {
             Ok(()) => {}
             Err(ErrorType::Auth) => return RefreshOutcome::AuthRefused,

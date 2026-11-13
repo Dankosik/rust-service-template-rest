@@ -30,7 +30,7 @@ const REPLAYABLE: [HeaderName; 7] = [
 
 /// A captured success: what the first response and every replay carry.
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
-pub(super) struct Stored {
+pub(super) struct ReplayableResponse {
     status: StatusCode,
     headers: Vec<(HeaderName, HeaderValue)>,
     body: Bytes,
@@ -78,7 +78,7 @@ impl Undecodable {
     }
 }
 
-pub(super) async fn capture(response: Response) -> Result<Stored, Unstorable> {
+pub(super) async fn capture(response: Response) -> Result<ReplayableResponse, Unstorable> {
     let (parts, body) = response.into_parts();
     if !parts.status.is_success() {
         return Err(Unstorable::Status);
@@ -107,15 +107,15 @@ pub(super) async fn capture(response: Response) -> Result<Stored, Unstorable> {
     if header_bytes(&headers) > MAX_TOTAL_STORED_HEADER_BYTES {
         return Err(Unstorable::HeaderLimit);
     }
-    Ok(Stored {
+    Ok(ReplayableResponse {
         status: parts.status,
         headers,
         body,
     })
 }
 
-impl Stored {
-    pub(super) fn to_record(&self) -> Result<Record, Unstorable> {
+impl ReplayableResponse {
+    pub(super) fn to_record(&self) -> Record {
         let headers = self
             .headers
             .iter()
@@ -124,14 +124,18 @@ impl Stored {
                 value: value.as_bytes().to_vec(),
             })
             .collect();
-        let status = i16::try_from(self.status.as_u16()).map_err(|_| Unstorable::Status)?;
-        Ok(Record {
+        #[expect(
+            clippy::cast_possible_wrap,
+            reason = "StatusCode only represents 100 through 999"
+        )]
+        let status = self.status.as_u16() as i16;
+        Record {
             status,
             headers,
             // Share the captured bytes with persistence without copying the body
-            // that Stored retains for the first response.
+            // retained for the first response.
             body: self.body.clone(),
-        })
+        }
     }
 
     pub(super) fn into_response(self) -> Response {
@@ -146,7 +150,7 @@ impl Stored {
 }
 
 /// Validate a database record before replaying it.
-pub(super) fn decode(record: Record) -> Result<Stored, Undecodable> {
+pub(super) fn decode(record: Record) -> Result<ReplayableResponse, Undecodable> {
     if record.body.len() > MAX_STORED_BODY_BYTES {
         return Err(Undecodable::BodyLimit);
     }
@@ -175,7 +179,7 @@ pub(super) fn decode(record: Record) -> Result<Stored, Undecodable> {
     if header_bytes(&headers) > MAX_TOTAL_STORED_HEADER_BYTES {
         return Err(Undecodable::HeaderLimit);
     }
-    Ok(Stored {
+    Ok(ReplayableResponse {
         status,
         headers,
         body: record.body,
@@ -237,7 +241,7 @@ mod tests {
         ))
         .await
         .expect("storable response");
-        let record = captured.to_record().expect("record");
+        let record = captured.to_record();
         assert_eq!(
             record.headers,
             vec![
@@ -370,7 +374,7 @@ mod tests {
                 headers.iter().map(|(name, value)| (*name, value.as_str())).collect();
             let replay = runtime.block_on(async {
                 let captured = capture(response(status, &pairs, body.clone())).await.unwrap();
-                decode(captured.to_record().unwrap()).unwrap().into_response()
+                decode(captured.to_record()).unwrap().into_response()
             });
 
             proptest::prop_assert_eq!(replay.status().as_u16(), status);

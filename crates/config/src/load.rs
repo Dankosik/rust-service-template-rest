@@ -19,7 +19,7 @@ use variables::collect_variables;
 pub(crate) use variables::{ADDRESSABLE_KEY_FORM, is_env_addressable, variable_name};
 
 /// Variable namespace. `APP__HTTP__ADDR` sets `http.addr`.
-pub const ENV_PREFIX: &str = "APP";
+const ENV_PREFIX: &str = "APP";
 const ENV_SEPARATOR: &str = "__";
 
 /// What a variable name must be, for the two errors that refuse one.
@@ -131,7 +131,7 @@ where
     K: Into<OsString>,
     V: Into<OsString>,
 {
-    let mut snapshot: Config = merge(options, environment, true)?;
+    let mut snapshot: Config = merge(options, environment, AuthnAudienceOverride::Decode)?;
     snapshot.app.apply_build_info(build);
     snapshot.validate()?;
     Ok(snapshot)
@@ -162,7 +162,8 @@ where
     K: Into<OsString>,
     V: Into<OsString>,
 {
-    let mut snapshot: crate::MigrationConfig = merge(options, environment, false)?;
+    let mut snapshot: crate::MigrationConfig =
+        merge(options, environment, AuthnAudienceOverride::Skip)?;
     snapshot.app.apply_build_info(build);
     snapshot.validate()?;
     Ok(snapshot)
@@ -190,11 +191,22 @@ where
     K: Into<OsString>,
     V: Into<OsString>,
 {
-    let snapshot: crate::JobsOperatorConfig = merge(options, environment, false)?;
+    let snapshot: crate::JobsOperatorConfig =
+        merge(options, environment, AuthnAudienceOverride::Skip)?;
     snapshot.validate()?;
     Ok(snapshot)
 }
 // template:end jobs:load-jobs-operator
+
+#[derive(Clone, Copy)]
+enum AuthnAudienceOverride {
+    Decode,
+    #[allow(
+        dead_code,
+        reason = "only the optional migration and jobs operator loaders skip the override"
+    )]
+    Skip,
+}
 
 /// Merge the files and the `APP__` variables, then decode the result.
 fn merge<T, I, K, V>(
@@ -204,7 +216,7 @@ fn merge<T, I, K, V>(
         unused_variables,
         reason = "only the authn profile needs list decoding"
     )]
-    decode_authn: bool,
+    authn_audience_override: AuthnAudienceOverride,
 ) -> Result<T, Error>
 where
     T: DeserializeOwned,
@@ -224,14 +236,13 @@ where
     {
         return Err(Error::TableOverride {
             key: variable.key.clone(),
-            input: variable.spelled.to_ascii_uppercase(),
+            input: variable.original_name.to_ascii_uppercase(),
         });
     }
     // template:begin authn:load-audience-list-decode
-    let audience_list = if decode_authn {
-        variables::audience_list(&variables)?
-    } else {
-        None
+    let audience_list = match authn_audience_override {
+        AuthnAudienceOverride::Decode => variables::audience_list(&variables)?,
+        AuthnAudienceOverride::Skip => None,
     };
     // template:end authn:load-audience-list-decode
     // `Environment::source` keeps keys that still carry the `APP__` prefix;
@@ -250,7 +261,7 @@ where
     );
     // template:begin authn:load-audience-list-override
     let builder = builder
-        .set_override_option("authn.audience", audience_list)
+        .set_override_option(variables::AUDIENCE_KEY, audience_list)
         .map_err(Error::Merge)?;
     // template:end authn:load-audience-list-override
     let merged = builder.build().map_err(Error::Merge)?;

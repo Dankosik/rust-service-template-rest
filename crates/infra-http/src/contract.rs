@@ -112,17 +112,45 @@ fn compile_operation(
             method: method.to_owned(),
         });
     }
-    Access::from_operation(document, operation).map_err(|fault| FinalizeError::InvalidPolicy {
+    let invalid = |fault| FinalizeError::InvalidPolicy {
         path: path.to_owned(),
         method: method.to_owned(),
-        fault: fault.as_str(),
-    })
+        fault,
+    };
+    let access =
+        Access::from_operation(document, operation).map_err(|fault| invalid(fault.as_str()))?;
+    // template:begin http-idempotency:http-contract-idempotency-policy
+    if matches!(access, Access::Public) && crate::idempotency::declares_replay(operation) {
+        return Err(invalid("idempotency_requires_authentication"));
+    }
+    // template:end http-idempotency:http-contract-idempotency-policy
+    Ok(access)
 }
 
 /// The compiled access table, shared read-only by every request: axum clones
 /// middleware state per request, so the table sits behind an `Arc`.
 #[derive(Clone)]
 pub(crate) struct Policy(Arc<BTreeMap<String, BTreeMap<String, Access>>>);
+
+macro_rules! fixed_path_operations {
+    ($item:ident, $borrow:ident) => {
+        [
+            ("GET", $item.get.$borrow()),
+            ("PUT", $item.put.$borrow()),
+            ("POST", $item.post.$borrow()),
+            ("DELETE", $item.delete.$borrow()),
+            ("OPTIONS", $item.options.$borrow()),
+            ("HEAD", $item.head.$borrow()),
+            ("PATCH", $item.patch.$borrow()),
+            ("TRACE", $item.trace.$borrow()),
+            ("QUERY", $item.query.$borrow()),
+        ]
+    };
+}
+
+// template:begin http-idempotency:http-contract-fixed-operations-export
+pub(super) use fixed_path_operations;
+// template:end http-idempotency:http-contract-fixed-operations-export
 
 impl Policy {
     pub(crate) fn compile(document: &OpenApi) -> Result<Self, FinalizeError> {
@@ -134,17 +162,7 @@ impl Policy {
                 path.clone()
             };
             let mut methods = BTreeMap::new();
-            let fixed_operations = [
-                ("GET", &item.get),
-                ("PUT", &item.put),
-                ("POST", &item.post),
-                ("DELETE", &item.delete),
-                ("OPTIONS", &item.options),
-                ("HEAD", &item.head),
-                ("PATCH", &item.patch),
-                ("TRACE", &item.trace),
-                ("QUERY", &item.query),
-            ];
+            let fixed_operations = fixed_path_operations!(item, as_ref);
             for (method, operation) in fixed_operations {
                 let Some(operation) = operation else {
                     continue;

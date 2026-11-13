@@ -51,10 +51,7 @@ pub(crate) fn checked_delay_micros(duration: Duration) -> Result<i64, InvalidDel
     i64::try_from(duration.as_micros()).map_err(|_| InvalidDelay)
 }
 
-/// Bound, in UTF-8 bytes, on a stored error summary. [`with_sources`] appends
-/// another source only while the text stays below it; `sanitize_summary` in
-/// `crate::attempt::outcome` owns the final stored bound and control
-/// replacement.
+/// Bound, in UTF-8 bytes, on a stored error summary.
 pub(crate) const MAX_ERROR_SUMMARY_BYTES: usize = 1024;
 
 /// A payload type a worker can run.
@@ -127,8 +124,9 @@ impl<K: JobKind> Job<K> {
     }
 
     /// This attempt's local deadline: its registered timeout, capped by the
-    /// supervisor's lease deadline. The supervisor ends the attempt when it
-    /// passes; synchronous handler work cannot be preempted.
+    /// supervisor's lease deadline. After it passes, the supervisor signals
+    /// cancellation before polling the handler again for cleanup. Synchronous
+    /// handler work already in progress cannot be preempted.
     #[must_use]
     pub const fn deadline(&self) -> Instant {
         self.attempt.attempt_deadline
@@ -341,9 +339,9 @@ fn pool_timed_out(error: &(dyn std::error::Error + 'static)) -> bool {
 /// contain: an error that prints its cause (`"complete job: {0}"`) is not
 /// repeated, and one that keeps its cause only in `source()` does not lose it.
 ///
-/// A source is appended only while the summary stays below
-/// [`MAX_ERROR_SUMMARY_BYTES`]; the final stored bound and control replacement
-/// belong to the caller, `sanitize_summary`.
+/// Once the summary reaches [`MAX_ERROR_SUMMARY_BYTES`], no further sources
+/// are read. The final append can cross the limit, which the stored summary's
+/// sanitizer enforces.
 fn with_sources(error: &(dyn std::error::Error + 'static)) -> String {
     let mut summary = error.to_string();
     let mut sources = shared_rules::error_chain::sources(error);
@@ -422,11 +420,9 @@ impl KindsBuilder {
         self.entries.push(Registered {
             name: K::NAME,
             policy,
-            running: policy.max_running.map(|limit| {
-                Arc::new(Semaphore::new(
-                    usize::try_from(limit.get()).unwrap_or(Semaphore::MAX_PERMITS),
-                ))
-            }),
+            running_slots: policy
+                .max_running
+                .map(|limit| Arc::new(crate::claim::admission_slots(limit))),
             dispatch: Box::new(Typed {
                 handler: Arc::new(handler),
                 _kind: PhantomData,
@@ -583,8 +579,7 @@ pub const fn assert_valid_kind_name(name: &str) {
 pub(crate) struct Registered {
     pub(crate) name: &'static str,
     pub(crate) policy: Policy,
-    /// The free part of `policy.max_running`, when the kind sets one.
-    pub(crate) running: Option<Arc<Semaphore>>,
+    pub(crate) running_slots: Option<Arc<Semaphore>>,
     pub(crate) dispatch: Box<dyn Dispatch>,
     /// Handles for every completed attempt. The engine registers them at start,
     /// under the installed recorder; [`Self::metrics`] registers them on first

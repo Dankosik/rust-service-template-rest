@@ -10,12 +10,14 @@ use std::{
 
 use http::{Request, Response};
 use infra_grpc::Client;
+use tokio::time::Instant;
 use tonic::{Code, Status, body::Body};
 use tower::Service;
 
 use crate::{
     AcquisitionError, Credentials,
-    credentials::{AdmissionRefusal, acquisition_deadline, admit_request_subject},
+    credentials::acquisition_deadline,
+    request_admission::{AdmissionRefusal, admit_request_subject},
 };
 
 /// A cloneable governed gRPC client with private machine credentials.
@@ -91,17 +93,25 @@ impl Service<Request<Body>> for AuthenticatedClient {
                 .authorize(prepared.headers_mut(), on_behalf_of, &context, None)
                 .await
             {
-                Ok(acquired) => Arc::downgrade(&acquired),
+                Ok(acquired) => acquired,
                 Err(error) => return Err(prepared.refuse(acquisition_status(error))),
             };
+            let used = Arc::downgrade(&token);
             prepared
-                .send_with_response_status(move |code| {
-                    if code == Code::Unauthenticated
-                        && let Some(token) = token.upgrade()
-                    {
-                        token.reject();
-                    }
-                })
+                .send_with_dispatch_check(
+                    move || {
+                        token
+                            .check_expiry(Instant::now())
+                            .map_err(acquisition_status)
+                    },
+                    move |code| {
+                        if code == Code::Unauthenticated
+                            && let Some(token) = used.upgrade()
+                        {
+                            token.reject_if_old_enough();
+                        }
+                    },
+                )
                 .await
         })
     }

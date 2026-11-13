@@ -7,9 +7,11 @@
 //! together and assembles the full API document.
 //!
 //! The chain mixes `tower-http` layers (request id, response headers, panic
-//! recovery, body limit) with this crate's own middleware for observation,
-//! admission, the request deadline and request-id sanitizing.
+//! recovery) with this crate's own middleware for observation, admission, the
+//! request deadline, the transport body limit and request-id sanitizing.
+//! Axum's extractor limit uses the same body-size ceiling.
 
+mod body;
 mod contract;
 pub mod extract;
 pub mod problem;

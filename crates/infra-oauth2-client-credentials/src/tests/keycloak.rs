@@ -20,9 +20,10 @@ use url::Url;
 use uuid::Uuid;
 
 use super::{
-    AcquisitionDeadline, AcquisitionError, Algorithm, Credentials, Options, Rejection, TOKEN_LIMITS,
+    AcquisitionError, Algorithm, Credentials, Options, Rejection, TOKEN_LIMITS,
+    acquisition_deadline, token_context,
 };
-use crate::{credentials::SubjectKey, options::Admitted};
+use crate::options::Admitted;
 
 const KEY_ID: &str = "key-1";
 /// The audience client an exchanged token is addressed to.
@@ -217,13 +218,8 @@ impl Realm {
             exchange_cache_capacity: 1024,
             provider_concurrency: 32,
         };
-        let admitted = Admitted {
-            endpoint,
-            permits: crate::options::admitted_provider_concurrency(options.provider_concurrency)
-                .unwrap(),
-        };
+        let admitted = Admitted::try_new_for_test(options, endpoint).unwrap();
         let (credentials, driver) = Credentials::build(
-            options,
             admitted,
             Client::try_new_for_test_http(&self.origin, TOKEN_LIMITS).unwrap(),
         )
@@ -309,10 +305,6 @@ fn audience_mapper(client_id: &str) -> serde_json::Value {
     })
 }
 
-fn deadline() -> AcquisitionDeadline<'static> {
-    AcquisitionDeadline::caller(Instant::now() + Duration::from_secs(10))
-}
-
 /// The claims of an access token Keycloak returned over this direct
 /// connection; the resource server, not this client, verifies signatures.
 fn claims(token: &crate::token::Token) -> Claims {
@@ -340,13 +332,19 @@ async fn every_algorithm_authenticates_the_client_and_exchanges_a_subject_token(
         let key = key_pair(algorithm);
         let credentials = realm.caller(algorithm, &key, &[], Some(TARGET)).await;
 
-        let service = credentials.service_token(deadline()).await.unwrap();
+        let service = credentials
+            .service_token(acquisition_deadline(&token_context(), None))
+            .await
+            .unwrap();
         let service = claims(&service);
         assert_eq!(service.iss, realm.issuer());
         assert_eq!(service.azp, caller(algorithm));
         // A second request signs a new assertion; a reused `jti` is refused.
         *credentials.cached() = super::Cached::default();
-        credentials.service_token(deadline()).await.unwrap();
+        credentials
+            .service_token(acquisition_deadline(&token_context(), None))
+            .await
+            .unwrap();
 
         let subject = realm.subject_token().await;
         let subject_claims: Claims = jsonwebtoken::dangerous::insecure_decode(
@@ -354,9 +352,8 @@ async fn every_algorithm_authenticates_the_client_and_exchanges_a_subject_token(
         )
         .unwrap()
         .claims;
-        let key = SubjectKey::of(&subject);
         let exchanged = credentials
-            .exchange(key, &subject, deadline())
+            .exchange(&subject, acquisition_deadline(&token_context(), None))
             .await
             .unwrap();
         let exchanged = claims(&exchanged);
@@ -379,23 +376,28 @@ async fn refusals_carry_the_error_code_keycloak_reports() {
     // An assertion signed by a key the server does not hold for this client.
     let stranger = realm.credentials(algorithm, &key_pair(algorithm), &[], None);
     assert_eq!(
-        stranger.service_token(deadline()).await.unwrap_err(),
+        stranger
+            .service_token(acquisition_deadline(&token_context(), None))
+            .await
+            .unwrap_err(),
         AcquisitionError::Rejected(Rejection::InvalidClient)
     );
 
     let unknown_scope = realm.credentials(algorithm, &key, &["not-a-scope"], None);
     assert_eq!(
-        unknown_scope.service_token(deadline()).await.unwrap_err(),
+        unknown_scope
+            .service_token(acquisition_deadline(&token_context(), None))
+            .await
+            .unwrap_err(),
         AcquisitionError::Rejected(Rejection::InvalidScope)
     );
 
     // RFC 8693 section 2.2.2 reports an unusable subject token as
     // `invalid_request`, so it is not distinguishable from a malformed form.
     let subject = SecretString::from("not-a-token");
-    let key = SubjectKey::of(&subject);
     assert_eq!(
         registered
-            .exchange(key, &subject, deadline())
+            .exchange(&subject, acquisition_deadline(&token_context(), None))
             .await
             .unwrap_err(),
         AcquisitionError::Rejected(Rejection::InvalidRequest)

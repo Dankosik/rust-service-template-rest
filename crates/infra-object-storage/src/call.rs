@@ -16,8 +16,7 @@ use crate::observe::OperationGuard;
 /// hide an earlier attempt that applied the mutation, and a create-only
 /// retry could meet this call's own lost success as `AlreadyExists`.
 const MAX_ATTEMPTS: u32 = 3;
-/// Cap on one jittered retry delay, so three attempts fit an interactive
-/// `operation_timeout`. The SDK default of 20 s would outlast it.
+/// The SDK's default 20 s backoff cap can outlast an interactive operation budget.
 const MAX_BACKOFF: Duration = Duration::from_secs(1);
 /// TCP and TLS connect bound per attempt; the SDK default of the pinned
 /// behavior version, stated so an SDK bump cannot move it. The attempt bound
@@ -34,22 +33,23 @@ pub(crate) fn call_policy(
     remaining: Duration,
     ceiling: Duration,
 ) -> (TimeoutConfig, RetryConfig) {
-    let attempt = match call {
-        Call::Read => remaining.min(ceiling / READ_ATTEMPT_SHARE),
-        Call::Mutation | Call::CreateOnly => remaining,
+    let (attempt_timeout, retry_config) = match call {
+        Call::Read => (
+            remaining.min(ceiling / READ_ATTEMPT_SHARE),
+            RetryConfig::standard()
+                .with_max_attempts(MAX_ATTEMPTS)
+                .with_max_backoff(MAX_BACKOFF),
+        ),
+        Call::UnconditionalMutation | Call::CreateOnly => {
+            (remaining, RetryConfig::standard().with_max_attempts(1))
+        }
     };
     let timeout = TimeoutConfig::builder()
         .operation_timeout(remaining)
-        .operation_attempt_timeout(attempt)
-        .connect_timeout(CONNECT_TIMEOUT.min(attempt))
+        .operation_attempt_timeout(attempt_timeout)
+        .connect_timeout(CONNECT_TIMEOUT.min(attempt_timeout))
         .build();
-    let retry = match call {
-        Call::Read => RetryConfig::standard()
-            .with_max_attempts(MAX_ATTEMPTS)
-            .with_max_backoff(MAX_BACKOFF),
-        Call::Mutation | Call::CreateOnly => RetryConfig::standard().with_max_attempts(1),
-    };
-    (timeout, retry)
+    (timeout, retry_config)
 }
 
 /// Poll only while a context is live. A definitive mutation result from a
@@ -92,10 +92,10 @@ pub(crate) struct Interrupted {
 }
 
 impl Interrupted {
-    /// Before the first poll nothing was sent; after it, the reply is lost.
+    /// Once the SDK future has been polled, a mutation may have reached the provider.
     pub(crate) fn fail(self, guard: &mut OperationGuard, call: Call) -> ObjectStorageError {
         let failure = if self.polled {
-            Failure::stopped_after_send(call, self.stopped)
+            Failure::stopped_after_poll(call, self.stopped)
         } else {
             Failure::stopped(self.stopped)
         };

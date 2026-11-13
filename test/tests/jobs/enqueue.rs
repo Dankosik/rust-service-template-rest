@@ -10,7 +10,7 @@ use integration_tests::dsn_for;
 use serde::ser::Error as _;
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
-use sqlx::postgres::PgConnection;
+use sqlx::postgres::{PgConnection, PgListener};
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
@@ -44,6 +44,15 @@ struct Raw(String);
 
 impl JobKind for Raw {
     const NAME: &'static str = "test.raw";
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct OptionalReading {
+    values: Vec<Option<f64>>,
+}
+
+impl JobKind for OptionalReading {
+    const NAME: &'static str = "test.optional.reading";
 }
 
 #[derive(Debug, Deserialize)]
@@ -695,6 +704,84 @@ async fn e4_validation_failures_leave_the_transaction_usable(pool: PgPool) {
     let row = stored_job(&jobs, &id.to_string()).await;
     assert_eq!(row.kind, Note::NAME);
     assert_eq!(row.id_text, id.to_string());
+    super::close_pools(&[&jobs]).await;
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn optional_non_finite_jobs_refuse_before_effects_and_duplicate_keys(pool: PgPool) {
+    let jobs = open(&pool, 1).await;
+    let mut listener = PgListener::connect_with(&pool)
+        .await
+        .expect("wake listener");
+    listener.listen("background_jobs").await.expect("listen");
+    let key = "corrected-reading";
+    in_tx(&jobs, async |tx| -> Result<(), AttemptError> {
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            refused(
+                enqueue(
+                    tx,
+                    &OptionalReading {
+                        values: vec![None, Some(value)],
+                    },
+                    keyed(key),
+                )
+                .await,
+                "Serialize",
+                |err| matches!(err, EnqueueError::Serialize(_)),
+            );
+            still_usable(tx).await;
+        }
+        sqlx::query("SELECT pg_notify('background_jobs', 'refusals_complete')")
+            .execute(&mut *tx)
+            .await?;
+        Ok(())
+    })
+    .await
+    .expect("refusals leave a committable transaction");
+    assert_eq!(super::job_count(&jobs).await, 0);
+    let notification = tokio::time::timeout(Duration::from_secs(5), listener.recv())
+        .await
+        .expect("notification fence arrives")
+        .expect("notification connection remains usable");
+    assert_eq!(notification.payload(), "refusals_complete");
+
+    let corrected = OptionalReading {
+        values: vec![None, Some(1.5)],
+    };
+    let id = created(write(&jobs, Isolation::ReadCommitted, &corrected, Some(key)).await);
+    let stored: String =
+        sqlx::query_scalar("SELECT payload_text FROM background_jobs WHERE id::text = $1")
+            .bind(id.to_string())
+            .fetch_one(&jobs)
+            .await
+            .expect("corrected payload bytes");
+    assert_eq!(stored, r#"{"values":[null,1.5]}"#);
+
+    in_tx(&jobs, async |tx| -> Result<(), AttemptError> {
+        refused(
+            enqueue(
+                tx,
+                &OptionalReading {
+                    values: vec![Some(f64::NAN)],
+                },
+                keyed(key),
+            )
+            .await,
+            "Serialize before Duplicate",
+            |err| matches!(err, EnqueueError::Serialize(_)),
+        );
+        still_usable(tx).await;
+        assert_eq!(
+            duplicate_then_compare(tx, key, &corrected).await?,
+            LivePayloadComparison::Same
+        );
+        Ok(())
+    })
+    .await
+    .expect("refused duplicate leaves the corrected holder usable");
+    assert_eq!(rows_for_key(&jobs, OptionalReading::NAME, key).await, 1);
+    assert_eq!(super::job_count(&jobs).await, 1);
+    drop(listener);
     super::close_pools(&[&jobs]).await;
 }
 

@@ -706,6 +706,40 @@ impl CleanupPass {
         }
     }
 
+    /// Run batches until cancellation between batches or a batch removes
+    /// fewer rows than its limit. Count rows only after commit acknowledgement.
+    /// A short batch does not establish that the eligible population is empty.
+    ///
+    /// # Errors
+    ///
+    /// The failed batch's error. Earlier confirmed batches stay committed.
+    pub async fn run_until_short_batch<F>(
+        mut self,
+        pool: &PgPool,
+        options: TxOptions,
+        cancel: Option<&CancellationToken>,
+        batch_limit: u32,
+        removed_metric: &'static str,
+        delete: F,
+    ) -> Result<(u64, PassEnd), CleanupError>
+    where
+        F: Copy + AsyncFnOnce(&mut Tx<'_>) -> Result<u64, sqlx::Error>,
+    {
+        let mut removed = 0;
+        loop {
+            if cancel.is_some_and(CancellationToken::is_cancelled) {
+                return Ok((removed, PassEnd::Cancelled));
+            }
+            let rows = self.run_batch(pool, options, delete).await?;
+            metrics::counter!(removed_metric).increment(rows);
+            removed += rows;
+            if rows < u64::from(batch_limit) {
+                self.completed();
+                return Ok((removed, PassEnd::Completed));
+            }
+        }
+    }
+
     /// Execute one cleanup transaction with a server statement timeout and
     /// a client deadline from acquisition through commit acknowledgement.
     ///

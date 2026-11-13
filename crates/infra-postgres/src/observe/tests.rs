@@ -126,6 +126,26 @@ fn every_boundary_failure_has_its_own_outcome() {
 }
 
 #[tokio::test]
+async fn separate_pools_report_their_own_limits() {
+    let recorder = PrometheusBuilder::new().build_recorder();
+    let _recorder = metrics::set_default_local_recorder(&recorder);
+    let pool = |max_connections| {
+        PgPoolOptions::new()
+            .max_connections(max_connections)
+            .connect_lazy_with(sqlx::postgres::PgConnectOptions::new())
+    };
+    super::record_metrics(&pool(5), "write");
+    super::record_metrics(&pool(20), "read");
+    let scrape = recorder.handle().render();
+    assert!(
+        scrape.contains("db_client_connection_max{db_client_connection_pool_name=\"write\"} 5")
+    );
+    assert!(
+        scrape.contains("db_client_connection_max{db_client_connection_pool_name=\"read\"} 20")
+    );
+}
+
+#[tokio::test]
 async fn a_transaction_that_gets_no_connection_records_its_wait_and_its_outcome() {
     let mut builder = PrometheusBuilder::new();
     for &(metric, buckets) in HISTOGRAMS {

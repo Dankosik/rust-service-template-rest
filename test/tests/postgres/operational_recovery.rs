@@ -697,6 +697,7 @@ mod grpc {
             EndpointUrl, IntrospectionOptions, IssuerUrl,
             test_support::{FixtureTransport, prepare_introspection_with_fixture},
         };
+        use infra_http::BoundListener;
         use std::{num::NonZeroUsize, sync::Arc};
         use tokio_rustls::rustls::{
             self,
@@ -718,8 +719,10 @@ mod grpc {
             let expiry = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 3600;
             axum::Json(serde_json::json!({"active": true, "iss": "https://issuer.example", "aud": "api", "sub": "consumer", "exp": expiry}))
         }));
-        let server = Server::bind_tls(
-            "127.0.0.1:0".parse().unwrap(),
+        let listener = BoundListener::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        let server = listener.serve_tls(
             router,
             ServerOptions {
                 header_read_timeout: Duration::from_secs(5),
@@ -728,9 +731,7 @@ mod grpc {
                 max_connection_age: None,
             },
             Arc::new(config),
-        )
-        .await
-        .unwrap();
+        );
         let cancel = CancellationToken::new();
         let fixture = FixtureTransport::try_new(
             "provider.test",

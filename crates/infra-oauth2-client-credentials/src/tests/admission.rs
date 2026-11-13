@@ -1,4 +1,7 @@
+use std::time::UNIX_EPOCH;
+
 use super::*;
+use crate::assertion::Signer;
 
 fn valid_options() -> Options {
     Options {
@@ -187,6 +190,23 @@ fn a_key_mismatched_with_its_algorithm_or_not_pem_is_refused_at_construction() {
         let error = Credentials::prepare(options).unwrap_err();
         assert_eq!(error.key, "private_key");
     }
+}
+
+#[test]
+fn a_pre_epoch_clock_is_reported_separately_from_the_private_key() {
+    let options = Options {
+        private_key: SecretString::from(
+            KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)
+                .unwrap()
+                .serialize_pem(),
+        ),
+        algorithm: Algorithm::Es256,
+        ..valid_options()
+    };
+    let error = Signer::try_new(&options, UNIX_EPOCH - Duration::from_secs(1))
+        .err()
+        .unwrap();
+    assert_eq!(error.key, "system_clock");
 }
 
 /// `Url` admits a path of any length; the request target an `http::Uri`

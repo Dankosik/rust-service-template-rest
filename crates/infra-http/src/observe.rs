@@ -27,19 +27,14 @@
 //! Matched health probe routes are skipped by route template, not raw path,
 //! so an unmatched request that merely looks like a probe is still logged.
 
-use std::pin::Pin;
 use std::sync::{Arc, PoisonError, RwLock};
-use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
-use axum::body::{Body, Bytes};
 use axum::extract::{MatchedPath, Request, State};
-use axum::http::header::CONTENT_LENGTH;
 use axum::http::{Method, StatusCode, Uri};
 use axum::middleware::Next;
-use axum::response::{IntoResponse as _, Response};
+use axum::response::Response;
 use foldhash::HashMap;
-use http_body::{Body as _, Frame, SizeHint};
 use metrics::{Gauge, Histogram, Label, SharedString};
 use opentelemetry::context::FutureExt as _;
 use shared_rules::otel_http::request_method;
@@ -49,10 +44,12 @@ use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
 use tracing_opentelemetry_instrumentation_sdk::{otel_trace_span, set_parent_or_fallback};
 
+use crate::body::hold_guard_until_end;
 use crate::harden::AdmissionShed;
 use crate::probes::is_health_probe_route;
-use crate::problem::Problem;
-use crate::server::ConnectionInfo;
+use crate::problem::{Problem, complete_problem};
+use crate::request_id::REQUEST_ID_HEADER;
+use crate::server::{ConnectionInfo, ListenerScheme};
 
 /// The response-head duration, labelled by `http_request_method`,
 /// `http_route` (the matched route template or `<unmatched>`), and
@@ -116,55 +113,61 @@ const CLIENT_CLOSED_REQUEST: StatusCode = match StatusCode::from_u16(499) {
     Err(_) => panic!("499 is a valid status code"),
 };
 
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct AccessLogOptions {
-    pub(crate) log_health_probes: bool,
-}
-
 /// The middleware state: what the access log is told and the metric handles
 /// shared by every request through one [`harden`](crate::harden())ed router.
 #[derive(Clone, Debug)]
 pub(crate) struct Observer {
-    options: AccessLogOptions,
+    log_health_probes: bool,
     series: Arc<Series>,
 }
 
 impl Observer {
-    pub(crate) fn new(options: AccessLogOptions) -> Self {
+    pub(crate) fn new(log_health_probes: bool) -> Self {
         Self {
-            options,
+            log_health_probes,
             series: Arc::default(),
         }
     }
 }
 
 pub(crate) async fn observe(
-    State(Observer { options, series }): State<Observer>,
+    State(Observer {
+        log_health_probes,
+        series,
+    }): State<Observer>,
     matched: Option<MatchedPath>,
     mut request: Request,
     next: Next,
 ) -> Response {
     let started = Instant::now();
-    let method = request.method().clone();
     // Own the accepted header while the request moves into the next service;
     // the borrowed string also remains available for response completion.
     let request_id = request.extensions().get::<RequestId>().cloned();
-    let request_id = request_id
+    let request_id_text = request_id
         .as_ref()
         .and_then(|id| id.header_value().to_str().ok());
     let connection = request.extensions_mut().remove::<ConnectionInfo>();
-    let span = make_span(&request, matched.as_ref(), request_id, connection.as_ref());
+    let method = request.method();
+    let method_label = request_method(method.as_str());
+    let span = make_span(
+        &request,
+        method_label,
+        matched.as_ref(),
+        request_id_text,
+        connection.as_ref(),
+    );
     let fallback = set_parent_or_fallback(&span, otel_http::extract_context(request.headers()));
     let route = matched
         .as_ref()
         .map_or(UNMATCHED_ROUTE, MatchedPath::as_str);
-    let active = Active::start(&series, request_method(method.as_str()));
+    let log_access = !suppresses_access_log(log_health_probes, method, route);
+    let active = Active::start(&series, method_label);
     let mut pending = Pending {
-        options,
+        log_access,
         series: &series,
-        method: &method,
+        method_label,
         route,
-        request_id,
+        request_id: request_id_text,
         span: &span,
         started,
         answered: false,
@@ -182,7 +185,7 @@ pub(crate) async fn observe(
     // Complete the Problem before metrics and logging read the response head.
     // These observations do not wait for a streaming body; only the active
     // gauge below follows the body's lifetime.
-    let response = complete_problem(response, request_id);
+    let mut response = complete_problem(response, request_id_text);
     let status = response.status();
     let extensions = response.extensions();
     let problem_code = extensions
@@ -191,13 +194,19 @@ pub(crate) async fn observe(
     let termination = extensions.get::<AdmissionShed>().map(|_| "load_shed");
     pending.answer(status, problem_code, termination);
     update_span_from_response(&span, status);
-    active.until_body_ends(response)
+    if let Some(id) = &request_id {
+        response
+            .headers_mut()
+            .insert(REQUEST_ID_HEADER, id.header_value().clone());
+        response.extensions_mut().insert(id.clone());
+    }
+    response.map(|body| hold_guard_until_end(body, active))
 }
 
 struct Pending<'a> {
-    options: AccessLogOptions,
+    log_access: bool,
     series: &'a Series,
-    method: &'a Method,
+    method_label: &'static str,
     route: &'a str,
     request_id: Option<&'a str>,
     span: &'a tracing::Span,
@@ -219,19 +228,15 @@ impl Pending<'_> {
 
     fn record(&self, status: StatusCode, problem_code: Option<&str>, termination: Option<&str>) {
         let elapsed = self.started.elapsed();
-        self.series.record_duration(
-            request_method(self.method.as_str()),
-            self.route,
-            status,
-            elapsed,
-        );
-        if suppresses_access_log(self.options, self.method, self.route) {
+        self.series
+            .record_duration(self.method_label, self.route, status, elapsed);
+        if !self.log_access {
             return;
         }
         let duration_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
         self.span.in_scope(|| {
             tracing::info!(
-                method = request_method(self.method.as_str()),
+                method = self.method_label,
                 route = %self.route,
                 status = status.as_u16(),
                 duration_ms,
@@ -271,11 +276,11 @@ impl Drop for Pending<'_> {
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 fn make_span(
     request: &Request,
+    method: &'static str,
     matched: Option<&MatchedPath>,
     request_id: Option<&str>,
     connection: Option<&ConnectionInfo>,
 ) -> tracing::Span {
-    let method = request_method(request.method().as_str());
     let route = matched.map(MatchedPath::as_str);
     let span = otel_trace_span!(
         "HTTP request",
@@ -301,11 +306,12 @@ fn make_span(
 /// HTTP/1 origin-form targets carry no scheme. Use the listener's scheme
 /// when the request target omits it.
 fn url_scheme(uri: &Uri, connection: Option<&ConnectionInfo>) -> &'static str {
-    match uri.scheme_str() {
-        Some("https") => "https",
-        None => connection.map_or("http", |connection| connection.scheme),
-        _ => "http",
-    }
+    let scheme = match uri.scheme_str() {
+        Some("https") => ListenerScheme::Https,
+        None => connection.map_or(ListenerScheme::Http, |connection| connection.scheme),
+        Some(_) => ListenerScheme::Http,
+    };
+    scheme.as_str()
 }
 
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
@@ -325,50 +331,6 @@ impl Active {
         let gauge = series.active_gauge(method);
         gauge.increment(1);
         Self(gauge)
-    }
-
-    fn until_body_ends(self, response: Response) -> Response {
-        if response.body().is_end_stream() {
-            return response;
-        }
-        response.map(|body| {
-            Body::new(ActiveBody {
-                inner: body,
-                active: Some(self),
-            })
-        })
-    }
-}
-
-/// A response body that holds its request's [`Active`] gauge and otherwise
-/// passes everything through, the size hint included, so a known length
-/// still becomes `Content-Length`.
-struct ActiveBody {
-    inner: Body,
-    active: Option<Active>,
-}
-
-impl http_body::Body for ActiveBody {
-    type Data = Bytes;
-    type Error = axum::Error;
-
-    fn poll_frame(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Frame<Bytes>, axum::Error>>> {
-        let frame = Pin::new(&mut self.inner).poll_frame(cx);
-        if matches!(frame, Poll::Ready(None | Some(Err(_)))) || self.inner.is_end_stream() {
-            self.active.take();
-        }
-        frame
-    }
-
-    fn is_end_stream(&self) -> bool {
-        http_body::Body::is_end_stream(&self.inner)
-    }
-
-    fn size_hint(&self) -> SizeHint {
-        http_body::Body::size_hint(&self.inner)
     }
 }
 
@@ -423,14 +385,14 @@ impl Series {
         status: StatusCode,
         elapsed: Duration,
     ) {
-        let status = status.as_u16();
+        let key = (method, status.as_u16());
         let seconds = elapsed.as_secs_f64();
         if let Some(histogram) = self
             .durations
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .get(route)
-            .and_then(|statuses| statuses.get(&(method, status)))
+            .and_then(|route_durations| route_durations.get(&key))
         {
             histogram.record(seconds);
             return;
@@ -440,13 +402,13 @@ impl Series {
             .unwrap_or_else(PoisonError::into_inner)
             .entry(route.into())
             .or_default()
-            .entry((method, status))
+            .entry(key)
             .or_insert_with(|| duration_histogram(method, route, status))
             .record(seconds);
     }
 }
 
-fn duration_histogram(method: &'static str, route: &str, status: u16) -> Histogram {
+fn duration_histogram(method: &'static str, route: &str, status: StatusCode) -> Histogram {
     let labels = vec![
         Label::new("http_request_method", method),
         Label::new("http_response_status_code", status_label(status)),
@@ -470,35 +432,19 @@ static STATUS_CODES: [StatusCode; 900] = {
     codes
 };
 
-fn status_label(status: u16) -> &'static str {
-    STATUS_CODES[usize::from(status - 100)].as_str()
+fn status_label(status: StatusCode) -> &'static str {
+    STATUS_CODES[usize::from(status.as_u16() - 100)].as_str()
 }
 
-/// Add the request id to the Problem body without replacing other responses.
-fn complete_problem(mut response: Response, request_id: Option<&str>) -> Response {
-    let Some(id) = request_id else {
-        return response;
-    };
-    let Some(problem) = response.extensions_mut().remove::<Problem>() else {
-        return response;
-    };
-    let problem = problem.with_request_id(id.to_owned());
-    // Only `Problem::into_response` attaches the extension, so status and
-    // headers (Allow, WWW-Authenticate, Retry-After) are already right.
-    *response.body_mut() = axum::Json(&problem).into_response().into_body();
-    response.headers_mut().remove(CONTENT_LENGTH);
-    response.extensions_mut().insert(problem);
-    response
-}
-
-fn suppresses_access_log(options: AccessLogOptions, method: &Method, route: &str) -> bool {
-    !options.log_health_probes && method == Method::GET && is_health_probe_route(route)
+fn suppresses_access_log(log_health_probes: bool, method: &Method, route: &str) -> bool {
+    !log_health_probes && method == Method::GET && is_health_probe_route(route)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    use axum::body::Body;
     use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
 
     /// The labels of every duration series the snapshot holds, sorted: the
@@ -682,9 +628,7 @@ mod tests {
 
     #[test]
     fn probes_are_skipped_by_route_template_only() {
-        let quiet = AccessLogOptions {
-            log_health_probes: false,
-        };
+        let quiet = false;
         assert!(suppresses_access_log(quiet, &Method::GET, "/health/live"));
         assert!(suppresses_access_log(quiet, &Method::GET, "/health/ready"));
         assert!(suppresses_access_log(
@@ -694,9 +638,7 @@ mod tests {
         ));
         assert!(!suppresses_access_log(quiet, &Method::POST, "/health/live"));
         assert!(!suppresses_access_log(quiet, &Method::GET, UNMATCHED_ROUTE));
-        let verbose = AccessLogOptions {
-            log_health_probes: true,
-        };
+        let verbose = true;
         assert!(!suppresses_access_log(
             verbose,
             &Method::GET,

@@ -291,13 +291,13 @@ impl PreparedCall {
     /// # Errors
     /// Returns the existing deadline, cancellation, or transport status.
     pub async fn send(self) -> Result<Response<Body>, tonic::Status> {
-        self.send_inner(None).await
+        self.send_inner(|_| Ok(()), None).await
     }
 
-    /// Like [`Self::send`], with a synchronous callback for the peer status.
-    /// It runs once when the status is observed, either at response headers
-    /// or when the caller polls the stream to its end. Locally generated
-    /// failures and abandoned bodies without an observed status skip it.
+    /// Like [`Self::send`], with a synchronous callback for the response status.
+    /// It runs once for the gRPC status in the response headers or trailers.
+    /// If the body ends without one, a non-200 HTTP status supplies the code.
+    /// Local failures and bodies abandoned before a status is available skip it.
     ///
     /// # Errors
     ///
@@ -306,11 +306,27 @@ impl PreparedCall {
         self,
         on_status: impl FnOnce(tonic::Code) + Send + 'static,
     ) -> Result<Response<Body>, tonic::Status> {
-        self.send_inner(Some(Box::new(on_status))).await
+        self.send_with_dispatch_check(|| Ok(()), on_status).await
     }
 
-    async fn send_inner(
+    /// Like [`Self::send_with_response_status`], with a final check after the
+    /// channel is ready and before it receives the request.
+    ///
+    /// # Errors
+    ///
+    /// Also returns a status from the dispatch check, without sending the request.
+    pub async fn send_with_dispatch_check(
         self,
+        check: impl FnOnce() -> Result<(), tonic::Status> + Send,
+        on_status: impl FnOnce(tonic::Code) + Send + 'static,
+    ) -> Result<Response<Body>, tonic::Status> {
+        self.send_inner(move |_| check(), Some(Box::new(on_status)))
+            .await
+    }
+
+    pub(crate) async fn send_inner(
+        self,
+        prepare_dispatch: impl FnOnce(&mut http::HeaderMap) -> Result<(), tonic::Status> + Send,
         on_status: Option<ResponseStatusObserver>,
     ) -> Result<Response<Body>, tonic::Status> {
         let Self {
@@ -333,6 +349,8 @@ impl PreparedCall {
                 reason = opening.wait_stopped() => Err(stopped(reason)),
                 result = async {
                     let ready = channel.ready().await.map_err(transport_status)?;
+                    opening.check().map_err(stopped)?;
+                    prepare_dispatch(request.headers_mut())?;
                     opening.check().map_err(stopped)?;
                     if let Some(forwarded) = forwarded {
                         forward_timeout(request.headers_mut(), forwarded)?;

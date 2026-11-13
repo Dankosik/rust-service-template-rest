@@ -1,5 +1,7 @@
 //! CLAIM and the claim loop.
 
+use std::num::NonZeroU32;
+use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -43,9 +45,8 @@ pub(crate) struct Claimed {
 
 /// One attempt's place under its kind's `max_running`.
 ///
-/// A full kind leaves the claim loop idle with free engine slots, so the
-/// release that frees a place in a full kind wakes the loop instead of
-/// leaving the kind's due jobs to the next poll.
+/// Wake on release because the claim loop can consume the last free place
+/// concurrently with it. The loop coalesces wakes and applies its cooldown.
 #[derive(Debug)]
 pub(crate) struct KindSlot {
     permit: Option<OwnedSemaphorePermit>,
@@ -55,8 +56,8 @@ pub(crate) struct KindSlot {
 impl KindSlot {
     /// The claim loop is the only taker and asked for no more than the free
     /// part, so a place is free for every row it drew.
-    fn take(running: &Arc<Semaphore>, wake: &Arc<Notify>) -> Option<Self> {
-        let permit = Arc::clone(running).try_acquire_owned().ok()?;
+    fn take(running_slots: &Arc<Semaphore>, wake: &Arc<Notify>) -> Option<Self> {
+        let permit = Arc::clone(running_slots).try_acquire_owned().ok()?;
         Some(Self {
             permit: Some(permit),
             wake: Arc::clone(wake),
@@ -69,13 +70,16 @@ impl Drop for KindSlot {
         let Some(permit) = self.permit.take() else {
             return;
         };
-        let was_full = permit.semaphore().available_permits() == 0;
         // Released before the wake, so the woken loop sees the free place.
         drop(permit);
-        if was_full {
-            self.wake.notify_one();
-        }
+        self.wake.notify_one();
     }
+}
+
+/// Tokio's permit limit can be smaller than a configured `u32` on 32-bit.
+pub(crate) fn admission_slots(limit: NonZeroU32) -> Semaphore {
+    let permits = usize::try_from(limit.get()).unwrap_or(Semaphore::MAX_PERMITS);
+    Semaphore::new(permits.min(Semaphore::MAX_PERMITS))
 }
 
 pub(crate) fn describe_metrics() {
@@ -105,13 +109,15 @@ pub(crate) async fn run_claim_loop(
         match next {
             Next::Now => {}
             Next::Soon => {
-                if !cooldown(&stop, last_claim).await {
+                if cooldown(&stop, last_claim).await.is_break() {
                     return;
                 }
             }
             Next::Idle => {
-                if !await_tick(&shared, &stop, &mut ticker).await
-                    || !cooldown(&stop, last_claim).await
+                if wait_for_wake_or_tick(&shared, &stop, &mut ticker)
+                    .await
+                    .is_break()
+                    || cooldown(&stop, last_claim).await.is_break()
                 {
                     return;
                 }
@@ -151,26 +157,30 @@ enum Next {
 /// The shortest gap between the starts of two claims that do not follow a full round.
 pub(crate) const CLAIM_COOLDOWN: Duration = Duration::from_millis(25);
 
-async fn cooldown(stop: &CancellationToken, last_claim: Instant) -> bool {
+async fn cooldown(stop: &CancellationToken, last_claim: Instant) -> ControlFlow<()> {
     tokio::select! {
         biased;
-        () = stop.cancelled() => false,
-        () = tokio::time::sleep_until(last_claim + CLAIM_COOLDOWN) => true,
+        () = stop.cancelled() => ControlFlow::Break(()),
+        () = tokio::time::sleep_until(last_claim + CLAIM_COOLDOWN) => ControlFlow::Continue(()),
     }
 }
 
-async fn await_tick(
+async fn wait_for_wake_or_tick(
     shared: &Shared,
     stop: &CancellationToken,
     ticker: &mut tokio::time::Interval,
-) -> bool {
+) -> ControlFlow<()> {
     tokio::select! {
         biased;
-        () = stop.cancelled() => return false,
-        () = shared.wake.notified() => ticker.reset(),
+        () = stop.cancelled() => return ControlFlow::Break(()),
+        () = shared.claim_wake.notified() => ticker.reset(),
         _ = ticker.tick() => {}
     }
-    !stop.is_cancelled()
+    if stop.is_cancelled() {
+        ControlFlow::Break(())
+    } else {
+        ControlFlow::Continue(())
+    }
 }
 
 async fn take_slots(shared: &Shared, stop: &CancellationToken) -> Option<OwnedSemaphorePermit> {
@@ -257,6 +267,7 @@ async fn claim(
     requested: i64,
 ) -> Result<Vec<Drawn>, sqlx::Error> {
     let binds = policy_binds(&shared.registry, requested);
+    let rescued_summary = "lease expired; rescued";
     observed(
         "claim jobs",
         sqlx::query_as!(
@@ -334,14 +345,14 @@ async fn claim(
                  attempted_by = CASE WHEN picked.exhausted THEN job.attempted_by \
                                      ELSE $5 END, \
                  error_summary = CASE WHEN picked.rescued \
-                                      THEN 'lease expired; rescued' \
+                                      THEN $7::text \
                                       WHEN picked.exhausted \
                                       THEN COALESCE(job.error_summary, 'attempt budget spent') \
                                       ELSE job.error_summary END, \
                  errors = CASE WHEN picked.rescued \
                                THEN job.errors || jsonb_build_object( \
                                         'attempt', picked.attempts, 'at', statement_timestamp(), \
-                                        'error', 'lease expired; rescued') \
+                                        'error', $7::text) \
                                ELSE job.errors END, \
                  claim_generation = nextval('background_jobs_claim_generation') \
              FROM picked \
@@ -360,6 +371,7 @@ async fn claim(
             requested,
             shared.worker_id,
             &binds.claim_limits,
+            rescued_summary,
         )
         .try_map(|row| row.into_drawn(&shared.registry))
         .fetch_all(&mut *connection),
@@ -393,11 +405,14 @@ fn policy_binds(registry: &crate::Kinds, requested: i64) -> PolicyBinds<'_> {
         binds
             .lease_offsets_micros
             .push(saturating_micros(lease_offset(registered.policy.timeout)));
-        binds
-            .claim_limits
-            .push(registered.running.as_ref().map_or(requested, |running| {
-                requested.min(slot_count(running.available_permits()))
-            }));
+        binds.claim_limits.push(
+            registered
+                .running_slots
+                .as_ref()
+                .map_or(requested, |slots| {
+                    requested.min(slot_count(slots.available_permits()))
+                }),
+        );
     }
     binds
 }
@@ -472,7 +487,7 @@ fn dispatch_known(
                 payload,
                 trace,
                 lease_offset,
-                queue_wait,
+                queue_wait_seconds,
             } => {
                 let deadline = local_deadline(sent, lease_offset);
                 let Some(slot) = slots.split(1) else {
@@ -484,11 +499,15 @@ fn dispatch_known(
                     break;
                 };
                 let kind_slot = registered
-                    .running
+                    .running_slots
                     .as_ref()
-                    .and_then(|running| KindSlot::take(running, &shared.wake));
-                registered.metrics().queue_wait.record(queue_wait.max(0.0));
+                    .and_then(|slots| KindSlot::take(slots, &shared.claim_wake));
+                registered
+                    .metrics()
+                    .queue_wait
+                    .record(queue_wait_seconds.max(0.0));
                 let guard = crate::engine::SupervisorGuard::new(
+                    Arc::clone(&shared.drain),
                     stop.clone(),
                     failure.clone(),
                     attempt.job_id,
@@ -503,7 +522,7 @@ fn dispatch_known(
                     slot,
                     kind_slot,
                 };
-                shared.attempt_tracker.spawn(attempt::supervise(
+                tokio::spawn(attempt::supervise(
                     Arc::clone(shared),
                     claimed,
                     deadline,
@@ -532,7 +551,7 @@ enum Drawn {
         trace: Carrier,
         /// The lease past the send instant, the same value the statement bound.
         lease_offset: Duration,
-        queue_wait: f64,
+        queue_wait_seconds: f64,
     },
     Exhausted {
         attempt: AttemptId,
@@ -556,13 +575,13 @@ struct ClaimRow {
 impl ClaimRow {
     fn into_drawn(self, registry: &crate::Kinds) -> Result<Drawn, sqlx::Error> {
         let Some(registered) = registry.get(&self.kind) else {
-            return Err(decode_error("unknown job kind"));
+            return Err(ClaimDecodeError::UnknownKind.into_sqlx());
         };
         let attempt = AttemptId {
             job_id: JobId(self.id),
             kind: registered.name,
             number: u16::try_from(self.attempts)
-                .map_err(|_| decode_error("attempt does not fit"))?,
+                .map_err(|_| ClaimDecodeError::AttemptOutOfRange.into_sqlx())?,
         };
         if self.exhausted {
             return Ok(Drawn::Exhausted {
@@ -571,7 +590,7 @@ impl ClaimRow {
             });
         }
         let Some(payload) = self.payload else {
-            return Err(decode_error("running claim has no payload"));
+            return Err(ClaimDecodeError::MissingPayload.into_sqlx());
         };
         Ok(Drawn::Running {
             lease_offset: lease_offset(registered.policy.timeout),
@@ -580,12 +599,42 @@ impl ClaimRow {
             generation: self.claim_generation,
             payload,
             trace: Carrier::from_stored(self.trace_parent, self.trace_state),
-            queue_wait: self.queue_wait_seconds,
+            queue_wait_seconds: self.queue_wait_seconds,
         })
     }
 }
-fn decode_error(message: &'static str) -> sqlx::Error {
-    sqlx::Error::Decode(message.into())
+
+#[derive(Debug, thiserror::Error)]
+enum ClaimDecodeError {
+    #[error("unknown job kind")]
+    UnknownKind,
+    #[error("attempt does not fit")]
+    AttemptOutOfRange,
+    #[error("running claim has no payload")]
+    MissingPayload,
+}
+
+impl ClaimDecodeError {
+    fn into_sqlx(self) -> sqlx::Error {
+        sqlx::Error::Decode(Box::new(self))
+    }
+
+    const fn as_str(&self) -> &'static str {
+        match self {
+            Self::UnknownKind => "unknown_kind",
+            Self::AttemptOutOfRange => "attempt_out_of_range",
+            Self::MissingPayload => "missing_payload",
+        }
+    }
+}
+
+pub(crate) fn decode_reason(error: &sqlx::Error) -> Option<&'static str> {
+    let sqlx::Error::Decode(source) = error else {
+        return None;
+    };
+    source
+        .downcast_ref::<ClaimDecodeError>()
+        .map(ClaimDecodeError::as_str)
 }
 
 #[cfg(test)]
@@ -593,7 +642,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn only_the_release_that_frees_a_full_kind_wakes_the_claim_loop() {
+    async fn every_kind_slot_release_notifies_the_claim_loop() {
         let running = Arc::new(Semaphore::new(2));
         let wake = Arc::new(Notify::new());
         let first = KindSlot::take(&running, &wake).expect("a free place");
@@ -607,13 +656,11 @@ mod tests {
             .await
             .expect("the release of a full kind wakes the loop");
 
-        // A place was already free: the loop saw it in its last claim.
+        // A concurrent claim can use the other free place before this release.
         drop(second);
         assert_eq!(running.available_permits(), 2);
-        assert!(
-            tokio::time::timeout(Duration::from_millis(20), wake.notified())
-                .await
-                .is_err()
-        );
+        tokio::time::timeout(Duration::from_secs(1), wake.notified())
+            .await
+            .expect("a release also wakes the loop when another place was free");
     }
 }

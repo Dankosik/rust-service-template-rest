@@ -40,7 +40,7 @@ fn a_failed_command_names_its_cause_on_the_series() {
                 ErrorType::Auth,
                 ErrorType::Io,
                 ErrorType::Timeout,
-                ErrorType::Response,
+                ErrorType::ServerErrorReply,
                 ErrorType::Parse,
                 ErrorType::Other,
             ] {

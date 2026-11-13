@@ -1,7 +1,8 @@
 //! Typed claim decoding and application identity normalization.
 
 use crate::{
-    Actor, Identity, JsonObject, PreparationError, Principal, VerificationError, VerificationReason,
+    Actor, JsonObject, PreparationError, Principal, VerificationError, VerificationReason,
+    principal::Identity,
 };
 use serde::Deserialize;
 use std::{borrow::Cow, fmt};
@@ -30,6 +31,20 @@ impl ClaimPolicy {
             return Err(PreparationError::invalid_options());
         }
         Ok(Self { issuer, audiences })
+    }
+
+    fn check_issuer_and_audience(
+        &self,
+        issuer: &str,
+        audience: &Values<'_>,
+    ) -> Result<(), VerificationError> {
+        if issuer != self.issuer {
+            return Err(VerificationError::invalid(VerificationReason::Issuer));
+        }
+        if !audience.contains_any(&self.audiences) {
+            return Err(VerificationError::invalid(VerificationReason::Audience));
+        }
+        Ok(())
     }
 }
 
@@ -116,7 +131,7 @@ impl Values<'_> {
 
 // template:begin oidc-jwt:authn-claims-jwt-type
 #[derive(Deserialize)]
-pub(crate) struct JwtClaims<'a> {
+struct JwtClaims<'a> {
     #[serde(borrow)]
     iss: Option<Cow<'a, str>>,
     #[serde(borrow)]
@@ -214,7 +229,8 @@ pub(crate) fn validate_jwt_claims(
     else {
         return Err(invalid(VerificationReason::MissingClaim));
     };
-    check_registered_claims(&issuer, &audience, expiry, claims.nbf, policy, now)?;
+    check_lifetime(expiry, claims.nbf, now)?;
+    policy.check_issuer_and_audience(&issuer, &audience)?;
     let subject = non_empty(claims.sub);
     // Resource-server identity accepts aliases; RFC 9068 requires `client_id` itself.
     let standard_client_id = non_empty(claims.client_id);
@@ -225,11 +241,15 @@ pub(crate) fn validate_jwt_claims(
             .find_map(non_empty)
     });
     require_identity(subject.as_deref(), client_id.as_deref())?;
-    if token_profile == TokenProfile::Rfc9068 {
-        let has_jti = claims.jti.as_deref().is_some_and(|jti| !jti.is_empty());
-        if claims.iat.is_none() || subject.is_none() || !has_standard_client_id || !has_jti {
-            return Err(invalid(VerificationReason::MissingClaim));
+    let missing_profile_claims = match token_profile {
+        TokenProfile::ResourceServer => false,
+        TokenProfile::Rfc9068 => {
+            let has_jti = claims.jti.as_deref().is_some_and(|jti| !jti.is_empty());
+            claims.iat.is_none() || subject.is_none() || !has_standard_client_id || !has_jti
         }
+    };
+    if missing_profile_claims {
+        return Err(invalid(VerificationReason::MissingClaim));
     }
     let scopes = Scopes::from_claim(claims.scope.or(claims.scp))
         .map_err(|()| invalid(VerificationReason::Scope))?;
@@ -286,25 +306,6 @@ fn present_numeric_date<'de, D: serde::Deserializer<'de>>(
 ) -> Result<Option<u64>, D::Error> {
     NumericDate::deserialize(deserializer).map(|date| Some(date.0))
 }
-
-/// JWT registered-claim order: lifetime first, then issuer and audience.
-fn check_registered_claims(
-    issuer: &str,
-    audience: &Values<'_>,
-    expiry: u64,
-    not_before: Option<u64>,
-    policy: &ClaimPolicy,
-    now: u64,
-) -> Result<(), VerificationError> {
-    check_lifetime(expiry, not_before, now)?;
-    if issuer != policy.issuer {
-        return Err(VerificationError::invalid(VerificationReason::Issuer));
-    }
-    if !audience.contains_any(&policy.audiences) {
-        return Err(VerificationError::invalid(VerificationReason::Audience));
-    }
-    Ok(())
-}
 // template:end oidc-jwt:authn-claims-jwt-validation
 
 // template:begin oidc-introspection:authn-claims-introspection-validation
@@ -352,12 +353,7 @@ pub(crate) fn validate_introspection_claims(
     let (Some(issuer), Some(audience), Some(expiry)) = (claims.iss, claims.aud, claims.exp) else {
         return Err(invalid(VerificationReason::MissingClaim));
     };
-    if issuer != policy.issuer {
-        return Err(invalid(VerificationReason::Issuer));
-    }
-    if !audience.contains_any(&policy.audiences) {
-        return Err(invalid(VerificationReason::Audience));
-    }
+    policy.check_issuer_and_audience(&issuer, &audience)?;
     check_lifetime(expiry, claims.nbf, now)?;
     let subject = non_empty(claims.sub);
     let client_id = non_empty(claims.client_id);

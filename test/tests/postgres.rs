@@ -365,7 +365,7 @@ async fn pool_publishes_the_session_defaults(pool: PgPool) {
     );
     assert_eq!(show(&ours, "application_name").await, APP);
     // No recorder is installed here; the gauges must still be harmless.
-    infra_postgres::record_metrics(&ours);
+    infra_postgres::record_metrics(&ours, "postgres");
     assert_eq!(
         infra_postgres::close(&ours, Duration::from_secs(5)).await,
         infra_postgres::CloseOutcome::Complete

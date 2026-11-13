@@ -1,14 +1,13 @@
 use std::{
     future::Future,
     sync::{Arc, Mutex, MutexGuard, PoisonError},
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
-use http::{HeaderMap, Request, header::AUTHORIZATION};
+use http::{HeaderMap, header::AUTHORIZATION};
 use infra_outbound_http::Client;
-use moka::Expiry;
 use operation_context::{Deadline, OperationContext, Stopped};
-use secrecy::{ExposeSecret as _, SecretString};
+use secrecy::SecretString;
 use tokio::{
     sync::{mpsc, oneshot},
     time::Instant,
@@ -22,8 +21,11 @@ use crate::{
     token_endpoint::{FETCH_TIMEOUT, TOKEN_LIMITS, TokenEndpoint},
 };
 
+mod exchange;
+
+use self::exchange::ExchangeState;
+
 const FAILURE_WINDOW: Duration = Duration::from_secs(1);
-const EXCHANGE_CACHE_BYTES: u32 = 16 * 1024 * 1024;
 /// A reusable token is replaced in the background once at most this much, or a
 /// quarter, of its reuse remains, as Azure.Core refreshes five minutes early.
 const REFRESH_AHEAD: Duration = Duration::from_mins(5);
@@ -105,9 +107,6 @@ impl RefreshDriver {
                 _ = &mut self.owner_gone => break,
                 () = self.inner.refresh_ahead(request) => {}
             }
-            // The attempt finished, including a failed or cancelled one.
-            // Clearing once per iteration lets the next caller schedule; a
-            // refused send clears the flag at the enqueue site instead.
             self.inner.cached().refresh_pending = false;
         }
     }
@@ -130,28 +129,7 @@ pub(crate) struct Inner {
     /// Held by the one caller requesting a new service token, so requests
     /// for it never overlap.
     pub(crate) service_request: tokio::sync::Mutex<()>,
-    /// Tokens exchanged on behalf of a verified subject. Moka lets concurrent
-    /// misses for one subject share a single exchange.
-    pub(crate) exchanged: moka::future::Cache<SubjectKey, ExchangeResult>,
-}
-
-type ExchangeResult = Result<Arc<Token>, AcquisitionError>;
-
-/// The SHA-256 digest of a subject's access token, keying its exchanged
-/// tokens. It has no `Debug`, so the digest never reaches a log.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct SubjectKey([u8; 32]);
-
-impl SubjectKey {
-    pub(crate) fn of(subject: &SecretString) -> Self {
-        let digest = aws_lc_rs::digest::digest(
-            &aws_lc_rs::digest::SHA256,
-            subject.expose_secret().as_bytes(),
-        );
-        let mut key = [0_u8; 32];
-        key.copy_from_slice(digest.as_ref());
-        Self(key)
-    }
+    pub(crate) exchange: ExchangeState,
 }
 
 #[derive(Default)]
@@ -170,6 +148,13 @@ pub(crate) struct ServiceToken {
 }
 
 impl Cached {
+    fn completed_failure(&self, now: Instant) -> Option<AcquisitionError> {
+        self.failure
+            .as_ref()
+            .filter(|failure| now < failure.until)
+            .map(|failure| failure.error)
+    }
+
     /// Moves the next background attempt to at least `from + refresh_retry()`,
     /// without pulling an existing schedule earlier.
     fn defer_refresh(&mut self, from: Instant) {
@@ -185,86 +170,42 @@ struct CompletedFailure {
     until: Instant,
 }
 
-/// Moka publishes the result to concurrent waiters. Errors and request-only
-/// tokens expire immediately, and each reader checks reuse on the Tokio clock.
-struct ExchangedExpiry;
-
-impl Expiry<SubjectKey, ExchangeResult> for ExchangedExpiry {
-    fn expire_after_create(
-        &self,
-        _key: &SubjectKey,
-        result: &ExchangeResult,
-        _current_time: std::time::Instant,
-    ) -> Option<Duration> {
-        let now = Instant::now();
-        let until = result
-            .as_ref()
-            .ok()
-            .and_then(|token| token.reusable_until(now));
-        Some(until.map_or(Duration::ZERO, |until| until.saturating_duration_since(now)))
-    }
-
-    fn expire_after_update(
-        &self,
-        key: &SubjectKey,
-        result: &ExchangeResult,
-        current_time: std::time::Instant,
-        _duration_until_expiry: Option<Duration>,
-    ) -> Option<Duration> {
-        self.expire_after_create(key, result, current_time)
-    }
-}
-
 impl Credentials {
     /// Prepares credentials without performing DNS, token, or resource I/O.
     /// The integration must drive and await the returned [`RefreshDriver`].
     /// Dropping or completing that driver closes any surviving clients.
     ///
     /// # Errors
-    /// Returns a sanitized option or transport-construction failure.
+    /// Returns a sanitized option, clock, or transport-construction failure.
     pub fn prepare(options: Options) -> Result<(Self, RefreshDriver), ConfigurationError> {
-        let admitted = admit_options(&options)?;
+        let admitted = admit_options(options)?;
         let token_http =
-            Client::try_new(&admitted.endpoint, TOKEN_LIMITS).map_err(|_| ConfigurationError {
+            Client::try_new(admitted.endpoint(), TOKEN_LIMITS).map_err(|_| ConfigurationError {
                 key: "token_url",
                 reason: "transport construction failed",
             })?;
-        Self::build(options, admitted, token_http)
+        Self::build(admitted, token_http)
     }
 
     pub(crate) fn build(
-        options: Options,
         admitted: Admitted,
         token_http: Client,
     ) -> Result<(Self, RefreshDriver), ConfigurationError> {
-        let signer = Signer::try_new(&options)?;
+        let (options, endpoint, permits) = admitted.into_parts();
+        let signer = Signer::try_new(&options, SystemTime::now())?;
         let endpoint = TokenEndpoint::new(
-            admitted.endpoint,
+            endpoint,
             token_http,
             options.scopes,
             options.audience,
             signer,
-            admitted.permits,
+            permits,
         )?;
-        // Rounded down: moka admits an entry only while the total weight stays
-        // within the limit, so a rounded-up weight would retain fewer subjects
-        // than configured.
-        let minimum_weight = EXCHANGE_CACHE_BYTES / options.exchange_cache_capacity;
         let inner = Arc::new(Inner {
             endpoint,
             cached: Mutex::default(),
             service_request: tokio::sync::Mutex::new(()),
-            exchanged: moka::future::Cache::builder()
-                .max_capacity(u64::from(EXCHANGE_CACHE_BYTES))
-                .weigher(move |_: &SubjectKey, result: &ExchangeResult| {
-                    result.as_ref().map_or(minimum_weight, |token| {
-                        u32::try_from(token.header.as_bytes().len())
-                            .unwrap_or(u32::MAX)
-                            .max(minimum_weight)
-                    })
-                })
-                .expire_after(ExchangedExpiry)
-                .build(),
+            exchange: ExchangeState::new(options.exchange_cache_capacity),
         });
         let (refresh_requests, requests) = mpsc::channel(1);
         let (owner_release, owner_gone) = oneshot::channel();
@@ -316,10 +257,7 @@ impl Credentials {
         self.check_admission(deadline)?;
         let acquisition = async {
             match on_behalf_of {
-                Some(OnBehalfOf(subject)) => {
-                    self.exchange(SubjectKey::of(&subject), &subject, deadline)
-                        .await
-                }
+                Some(OnBehalfOf(subject)) => self.exchange(&subject, deadline).await,
                 None => self.service_token(deadline).await,
             }
         };
@@ -330,6 +268,7 @@ impl Credentials {
         };
         context.check().map_err(acquisition_stopped)?;
         let acquired = acquired?;
+        acquired.check_expiry(Instant::now())?;
         headers.insert(AUTHORIZATION, acquired.header.clone());
         Ok(acquired)
     }
@@ -400,14 +339,7 @@ impl Credentials {
     /// unless a failure or a queued attempt suppresses it. The caller holds
     /// the cached guard across the read and the send.
     fn schedule_refresh_ahead(&self, cached: &mut Cached, now: Instant, token: &Arc<Token>) {
-        if cached.refresh_pending {
-            return;
-        }
-        if cached
-            .failure
-            .as_ref()
-            .is_some_and(|failure| now < failure.until)
-        {
+        if cached.refresh_pending || cached.completed_failure(now).is_some() {
             return;
         }
         cached.defer_refresh(now);
@@ -428,86 +360,6 @@ impl Credentials {
     pub(crate) fn cached(&self) -> MutexGuard<'_, Cached> {
         self.0.inner.cached()
     }
-
-    /// Returns a live exchanged token for `subject`, exchanging it when the
-    /// cache has none. Moka coalesces concurrent misses for one subject into
-    /// the exchange of the first caller, bounded by that caller's `deadline`
-    /// and [`FETCH_TIMEOUT`]. When that caller is dropped or out of budget,
-    /// its exchange is cancelled and a waiting caller starts its own; a
-    /// waiter never fails because of another caller's deadline. Exchanges
-    /// for different subjects run concurrently.
-    pub(crate) async fn exchange(
-        &self,
-        key: SubjectKey,
-        subject: &SecretString,
-        deadline: AcquisitionDeadline<'_>,
-    ) -> Result<Arc<Token>, AcquisitionError> {
-        loop {
-            self.check_admission(deadline)?;
-            // A hit skips `entry`, which boxes the key in an `Arc`, and the
-            // deadline timer that only a miss needs.
-            if let Some(Ok(token)) = self.0.inner.exchanged.get(&key).await
-                && token.is_reusable(Instant::now())
-            {
-                return Ok(token);
-            }
-            let (token, fresh) = self.exchanged_or_fetch(key, subject, deadline).await?;
-            // Only the initializer may use a newly acquired request-only token.
-            if fresh || token.is_reusable(Instant::now()) {
-                return Ok(token);
-            }
-        }
-    }
-
-    /// Returns the cached or newly exchanged token and whether this call
-    /// inserted it.
-    async fn exchanged_or_fetch(
-        &self,
-        key: SubjectKey,
-        subject: &SecretString,
-        deadline: AcquisitionDeadline<'_>,
-    ) -> Result<(Arc<Token>, bool), AcquisitionError> {
-        let fetch = async move {
-            let fetch_deadline = deadline.cutoff.min(Instant::now() + FETCH_TIMEOUT);
-            let result = self
-                .0
-                .inner
-                .endpoint
-                .fetch_exchange(subject, fetch_deadline)
-                .await;
-            if deadline.stopped_error().is_some() {
-                // Drop the initializer through the enclosing stop branch so
-                // Moka hands off to a live waiter instead of sharing a failure.
-                return std::future::pending().await;
-            }
-            result.map_err(provider_timeout)
-        };
-        // Conditional replacement uses the same Moka initializer for misses and
-        // rejected values. A late rejection never mutates a replacement's key.
-        let attempt = self
-            .0
-            .inner
-            .exchanged
-            .entry(key)
-            .or_insert_with_if(fetch, |result| {
-                !result
-                    .as_ref()
-                    .is_ok_and(|token| token.is_reusable(Instant::now()))
-            });
-        tokio::select! {
-            // Drop this caller's initializer at its wait limit so a surviving
-            // waiter can take over without inheriting that limit.
-            biased;
-            () = tokio::time::sleep_until(deadline.cutoff) => Err(deadline.expiry),
-            entry = attempt => {
-                if let Some(error) = deadline.expired_error() {
-                    return Err(error);
-                }
-                let fresh = entry.is_fresh();
-                entry.into_value().map(|token| (token, fresh))
-            }
-        }
-    }
 }
 
 impl Inner {
@@ -516,11 +368,7 @@ impl Inner {
     }
 
     fn completed_failure(&self, now: Instant) -> Option<AcquisitionError> {
-        self.cached()
-            .failure
-            .as_ref()
-            .filter(|failure| now < failure.until)
-            .map(|failure| failure.error)
+        self.cached().completed_failure(now)
     }
 
     fn remember_failure(&self, error: AcquisitionError) {
@@ -594,50 +442,15 @@ fn is_cacheable_failure(error: AcquisitionError) -> bool {
     }
 }
 
-/// Why a binding refused a request before dispatch. Both are composition
-/// mistakes of this service, not refusals by its caller.
-#[derive(Clone, Copy)]
-pub(crate) enum AdmissionRefusal {
-    AuthorizationConflict,
-    SubjectRequired,
-}
-
-/// Removes the on-behalf-of subject before dispatch and applies the binding's
-/// admission policy. The extension is removed whether or not a subject is
-/// required, so it never reaches the resource.
-pub(crate) fn admit_request_subject<B>(
-    request: &mut Request<B>,
-    required: bool,
-) -> Result<Option<OnBehalfOf>, AdmissionRefusal> {
-    let subject = request.extensions_mut().remove::<OnBehalfOf>();
-    if request.headers().contains_key(AUTHORIZATION) {
-        return Err(AdmissionRefusal::AuthorizationConflict);
-    }
-    if required && subject.is_none() {
-        return Err(AdmissionRefusal::SubjectRequired);
-    }
-    Ok(subject)
-}
-
 #[derive(Clone, Copy)]
 pub(crate) struct AcquisitionDeadline<'a> {
     cutoff: Instant,
     expiry: AcquisitionError,
-    context: Option<&'a OperationContext>,
+    context: &'a OperationContext,
     request_context: Option<&'a OperationContext>,
 }
 
 impl AcquisitionDeadline<'_> {
-    #[cfg(test)]
-    pub(crate) const fn caller(cutoff: Instant) -> Self {
-        Self {
-            cutoff,
-            expiry: AcquisitionError::Timeout,
-            context: None,
-            request_context: None,
-        }
-    }
-
     fn expired_error(self) -> Option<AcquisitionError> {
         (Instant::now() >= self.cutoff).then_some(self.expiry)
     }
@@ -646,7 +459,7 @@ impl AcquisitionDeadline<'_> {
         self.expired_error().or_else(|| {
             self.request_context
                 .and_then(OperationContext::stopped)
-                .or_else(|| self.context.and_then(OperationContext::stopped))
+                .or_else(|| self.context.stopped())
                 .map(acquisition_stopped)
         })
     }
@@ -668,7 +481,7 @@ pub(crate) fn acquisition_deadline<'a>(
     AcquisitionDeadline {
         cutoff,
         expiry,
-        context: Some(context),
+        context,
         request_context,
     }
 }

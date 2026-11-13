@@ -333,9 +333,7 @@ async fn queued_refresh_spends_its_original_budget_waiting_for_foreground_acquis
     );
     let (credentials, driver) = fixture.build(fixture.options(&[], None));
     credentials
-        .service_token(AcquisitionDeadline::caller(deadline(Duration::from_secs(
-            10,
-        ))))
+        .service_token(acquisition_deadline(&token_context(), None))
         .await
         .unwrap();
     fixture.token_received().await;
@@ -344,9 +342,7 @@ async fn queued_refresh_spends_its_original_budget_waiting_for_foreground_acquis
     tokio::time::advance(Duration::from_secs(3321)).await;
     tokio::time::resume();
     credentials
-        .service_token(AcquisitionDeadline::caller(deadline(Duration::from_secs(
-            10,
-        ))))
+        .service_token(acquisition_deadline(&token_context(), None))
         .await
         .unwrap();
     assert!(

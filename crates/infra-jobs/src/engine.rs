@@ -4,12 +4,12 @@ use std::fmt;
 use std::future::Future;
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use enum_map::EnumMap;
 use sqlx::postgres::PgPool;
-use tokio::sync::{Notify, Semaphore};
+use tokio::sync::{Notify, Semaphore, watch};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -18,14 +18,14 @@ use crate::Kinds;
 use crate::claim;
 use crate::listener;
 use crate::maintenance;
+use crate::peers::{PeerRegistration, PeerRegistry};
 use crate::session::StartupError;
 
 pub const POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// Recovery reserve added to each kind's attempt timeout.
 ///
-/// Less the 2 s cancellation margin, it is the supervisor's window after the
-/// handler's timeout for writing the outcome: one 12 s statement bound and its
-/// 1 s retries fit in it.
+/// The cancellation margin and the time from sending the claim to starting
+/// the attempt reduce the time left to write its outcome after a timeout.
 pub const LEASE_RESERVE: Duration = Duration::from_secs(60);
 /// How far the worker's own cancellation leads the database expiry, so the
 /// supervisor stops writing before another worker can rescue the lease.
@@ -58,7 +58,7 @@ pub struct Started {
 pub struct DrainEnd {
     /// Handlers whose result (including panic/timeout) became known.
     pub known_results: usize,
-    /// Handlers joined with cancellation, eligible for a fenced release.
+    /// Attempts classified as cancelled, including handlers dropped after grace.
     pub cancelled: usize,
     /// Acknowledged one-row release writes.
     pub released: usize,
@@ -159,9 +159,8 @@ impl Engine {
             Role::Owner => (uuid::Uuid::new_v4(), Arc::default(), true),
             Role::Beside(owner) => (owner.worker_id, Arc::clone(&owner.peers), false),
         };
-        let slots = usize::try_from(max_workers.get()).unwrap_or(usize::MAX);
-        let wake = Arc::new(Notify::new());
-        let peer = PeerRegistration::new(&registry, &peers, &wake);
+        let claim_wake = Arc::new(Notify::new());
+        let peer = peers.register(&registry, &claim_wake);
         Self {
             peer,
             shared: Arc::new(Shared {
@@ -169,15 +168,15 @@ impl Engine {
                 worker_id,
                 registry,
                 max_workers,
-                slots: Arc::new(Semaphore::new(slots)),
+                slots: Arc::new(claim::admission_slots(max_workers)),
                 statement_turn: tokio::sync::Mutex::new(()),
                 cleanup: ForcedCleanup::default(),
                 counters: Counters::default(),
-                attempt_tracker: TaskTracker::new(),
+                drain: Arc::default(),
                 failing: EnumMap::default(),
                 completions: crate::attempt::Completions::default(),
                 owned_attempts: crate::attempt::MembershipGauge::owned_attempts(),
-                wake,
+                claim_wake,
                 peers,
                 owns_process_duties,
             }),
@@ -226,7 +225,7 @@ impl Engine {
         }
         claim::describe_metrics();
         if self.shared.owns_process_duties {
-            maintenance::init_metrics(&self.shared.sampling_kinds().0);
+            maintenance::init_metrics(&self.shared.peers.sampling_kinds().0);
         }
         metrics::describe_counter!(
             OPERATION_FAILURES_METRIC,
@@ -248,7 +247,7 @@ impl Engine {
         spawn(
             Run::Claim {
                 _peer: self.peer,
-                _close: CloseTracker(self.shared.attempt_tracker.clone()),
+                _exit: DrainParticipant::ClaimLoop(Arc::clone(&self.shared.drain)),
             },
             stop.clone(),
         );
@@ -284,12 +283,12 @@ impl Started {
     /// Attempts admitted and not yet recorded.
     #[must_use]
     pub fn in_flight(&self) -> usize {
-        self.shared.attempt_tracker.len()
+        self.shared.drain.in_flight()
     }
 
     /// Resolves once the claim loop has exited and every supervisor has ended.
     pub async fn drained(&self) {
-        self.shared.attempt_tracker.wait().await;
+        self.shared.drain.wait().await;
     }
 
     /// Cancel unfinished handlers and finish known outcomes inside `budget`.
@@ -300,12 +299,19 @@ impl Started {
     #[must_use]
     pub async fn cancel_and_finish(&self, budget: Duration) -> DrainEnd {
         self.stop_claiming();
-        self.shared.cleanup.begin(budget);
-        let timed_out = tokio::select! {
+        let deadline = self.shared.cleanup.begin(budget);
+        tokio::select! {
             biased;
-            () = self.drained() => false,
-            () = self.shared.cleanup.ended() => true,
-        };
+            () = self.drained() => {}
+            () = tokio::time::sleep_until(deadline) => {}
+        }
+        // A deadline and an exit can share a clock tick. Keep the first
+        // observation for every waiter on this cleanup.
+        let timed_out = *self
+            .shared
+            .cleanup
+            .timed_out
+            .get_or_init(|| !self.shared.drain.completed_by(deadline));
         let counters = &self.shared.counters;
         DrainEnd {
             known_results: counters.known_results.load(Ordering::Relaxed),
@@ -351,7 +357,7 @@ enum Run {
     Claim {
         // Deregister the peer before releasing drain waiters, even before the first poll.
         _peer: PeerRegistration,
-        _close: CloseTracker,
+        _exit: DrainParticipant,
     },
     Retention,
     Listener,
@@ -394,11 +400,75 @@ fn spawn_guarded(
     });
 }
 
-struct CloseTracker(TaskTracker);
+#[derive(Default)]
+struct DrainState {
+    in_flight: usize,
+    claim_loop_exited: bool,
+    completed_at: Option<Instant>,
+}
 
-impl Drop for CloseTracker {
+pub(crate) struct AttemptDrain(watch::Sender<DrainState>);
+
+impl Default for AttemptDrain {
+    fn default() -> Self {
+        Self(watch::Sender::new(DrainState::default()))
+    }
+}
+
+impl AttemptDrain {
+    fn in_flight(&self) -> usize {
+        self.0.borrow().in_flight
+    }
+
+    fn completed_by(&self, deadline: Instant) -> bool {
+        self.0
+            .borrow()
+            .completed_at
+            .is_some_and(|at| at <= deadline)
+    }
+
+    async fn wait(&self) {
+        let mut receiver = self.0.subscribe();
+        drop(
+            receiver
+                .wait_for(|state| state.completed_at.is_some())
+                .await,
+        );
+    }
+
+    fn admit(&self) {
+        self.0.send_if_modified(|state| {
+            state.in_flight += 1;
+            false
+        });
+    }
+
+    fn finish(&self, retire: impl FnOnce(&mut DrainState)) {
+        // Publish the timestamp with the state change that completes the drain.
+        // Earlier exits update the count silently so only the last exit wakes waiters.
+        self.0.send_if_modified(|state| {
+            retire(state);
+            if state.claim_loop_exited && state.in_flight == 0 {
+                state.completed_at = Some(Instant::now());
+                true
+            } else {
+                false
+            }
+        });
+    }
+}
+
+enum DrainParticipant {
+    ClaimLoop(Arc<AttemptDrain>),
+    Supervisor(Arc<AttemptDrain>),
+}
+
+impl Drop for DrainParticipant {
     fn drop(&mut self) {
-        self.0.close();
+        match self {
+            Self::ClaimLoop(drain) => drain.finish(|state| state.claim_loop_exited = true),
+            Self::Supervisor(drain) => drain.finish(|state| state.in_flight -= 1),
+        }
     }
 }
 
@@ -409,9 +479,7 @@ impl Drop for CloseTracker {
 /// claim-stop token of the engine that admitted the claim: an abnormal end, or
 /// an abort while the supervisor is still running, fails the engine through
 /// `failure` and stops new claim rounds through `stop`. The running round keeps
-/// its custody, and the claim loop's exit closes `attempt_tracker`, which
-/// [`Started::drained`] waits on, so the drain still waits for every other
-/// supervisor to end.
+/// its custody. [`Started::drained`] waits for the claim loop and all supervisors.
 pub(crate) struct SupervisorGuard {
     stop: CancellationToken,
     failure: CancellationToken,
@@ -420,21 +488,25 @@ pub(crate) struct SupervisorGuard {
     job_id: crate::kind::JobId,
     kind: &'static str,
     retired: bool,
+    _exit: DrainParticipant,
 }
 
 impl SupervisorGuard {
     pub(crate) fn new(
+        drain: Arc<AttemptDrain>,
         stop: CancellationToken,
         failure: CancellationToken,
         job_id: crate::kind::JobId,
         kind: &'static str,
     ) -> Self {
+        drain.admit();
         Self {
             stop,
             failure,
             job_id,
             kind,
             retired: false,
+            _exit: DrainParticipant::Supervisor(drain),
         }
     }
 
@@ -484,100 +556,7 @@ impl Drop for TaskGuard {
     }
 }
 
-/// Stands in for a cleanup budget too long to add to the clock.
-const NO_CLEANUP_DEADLINE: Duration = Duration::from_hours(24 * 365);
-
-/// One engine as the process's listener and sampler see it.
-struct Peer {
-    kinds: Vec<&'static str>,
-    wake: Arc<Notify>,
-}
-
-#[derive(Default)]
-struct Peers {
-    entries: Vec<Peer>,
-    sample_revision: Arc<()>,
-}
-
-impl Peers {
-    fn invalidate_sample(&mut self) {
-        self.sample_revision = Arc::default();
-        maintenance::invalidate_sample();
-    }
-}
-
-/// The peer list is never held across an `.await`.
-fn lock_peers(peers: &Mutex<Peers>) -> MutexGuard<'_, Peers> {
-    peers
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-/// Owned by the unstarted engine, then by its claim task.
-struct PeerRegistration {
-    peers: Arc<Mutex<Peers>>,
-    wake: Arc<Notify>,
-}
-
-impl PeerRegistration {
-    fn new(registry: &Kinds, peers: &Arc<Mutex<Peers>>, wake: &Arc<Notify>) -> Self {
-        let mut registry_peers = lock_peers(peers);
-        let previous = registered_kinds(&registry_peers.entries);
-        let kinds: Vec<_> = registry.names().collect();
-        for &kind in &kinds {
-            if previous.binary_search(&kind).is_err() {
-                maintenance::reset_kind_metrics(kind);
-            }
-        }
-        registry_peers.entries.push(Peer {
-            kinds,
-            wake: Arc::clone(wake),
-        });
-        registry_peers.invalidate_sample();
-        Self {
-            peers: Arc::clone(peers),
-            wake: Arc::clone(wake),
-        }
-    }
-}
-
-impl Drop for PeerRegistration {
-    fn drop(&mut self) {
-        let mut peers = lock_peers(&self.peers);
-        let Some(index) = peers
-            .entries
-            .iter()
-            .position(|peer| Arc::ptr_eq(&peer.wake, &self.wake))
-        else {
-            return;
-        };
-        let removed = peers.entries.swap_remove(index);
-        let remaining = registered_kinds(&peers.entries);
-        let mut changed = false;
-        for kind in removed.kinds {
-            if remaining.binary_search(&kind).is_err() {
-                maintenance::reset_kind_metrics(kind);
-                changed = true;
-            }
-        }
-        if changed {
-            peers.invalidate_sample();
-        }
-    }
-}
-
-/// Every peer's kinds as one list, sorted and without duplicates.
-///
-/// [`PeerRegistration`] looks up kinds in this list with binary search.
-fn registered_kinds(peers: &[Peer]) -> Vec<&'static str> {
-    let mut kinds: Vec<_> = peers
-        .iter()
-        .flat_map(|peer| peer.kinds.iter().copied())
-        .collect();
-    kinds.sort_unstable();
-    kinds.dedup();
-    kinds
-}
+const CLEANUP_OVERFLOW_FALLBACK: Duration = Duration::from_hours(24 * 365);
 
 pub(crate) struct Shared {
     pub(crate) worker_id: uuid::Uuid,
@@ -592,47 +571,16 @@ pub(crate) struct Shared {
     pub(crate) statement_turn: tokio::sync::Mutex<()>,
     pub(crate) cleanup: ForcedCleanup,
     pub(crate) counters: Counters,
-    pub(crate) attempt_tracker: TaskTracker,
+    pub(crate) drain: Arc<AttemptDrain>,
     /// Per operation: set after the first failure, clear after recovery.
     failing: EnumMap<Operation, AtomicBool>,
     pub(crate) completions: crate::attempt::Completions,
     pub(crate) owned_attempts: crate::attempt::MembershipGauge,
-    /// Set when a due job of a registered kind was committed.
-    pub(crate) wake: Arc<Notify>,
-    /// Every engine of this worker process, this one included.
-    peers: Arc<Mutex<Peers>>,
+    /// A database notification, listener subscription, or slot release can
+    /// wake the claim loop to recheck for work.
+    pub(crate) claim_wake: Arc<Notify>,
+    pub(crate) peers: Arc<PeerRegistry>,
     owns_process_duties: bool,
-}
-
-impl Shared {
-    /// Snapshot the kinds and the identity that authorizes publishing their sample.
-    pub(crate) fn sampling_kinds(&self) -> (Vec<&'static str>, Arc<()>) {
-        let peers = lock_peers(&self.peers);
-        (
-            registered_kinds(&peers.entries),
-            Arc::clone(&peers.sample_revision),
-        )
-    }
-
-    /// A change can invalidate a sample even if the same kinds later return.
-    pub(crate) fn publish_if_current(&self, revision: &Arc<()>, publish: impl FnOnce()) -> bool {
-        let peers = lock_peers(&self.peers);
-        if !Arc::ptr_eq(&peers.sample_revision, revision) {
-            return false;
-        }
-        publish();
-        true
-    }
-
-    /// Wake every engine of this process that registers `kind`, or all of
-    /// them when `kind` is `None`.
-    pub(crate) fn wake_peers(&self, kind: Option<&str>) {
-        for peer in &lock_peers(&self.peers).entries {
-            if kind.is_none_or(|kind| peer.kinds.contains(&kind)) {
-                peer.wake.notify_one();
-            }
-        }
-    }
 }
 
 impl fmt::Debug for Shared {
@@ -640,7 +588,7 @@ impl fmt::Debug for Shared {
         formatter
             .debug_struct("Shared")
             .field("max_workers", &self.max_workers)
-            .field("in_flight", &self.attempt_tracker.len())
+            .field("in_flight", &self.drain.in_flight())
             .finish_non_exhaustive()
     }
 }
@@ -653,18 +601,31 @@ impl fmt::Debug for Shared {
 #[derive(Default)]
 pub(crate) struct ForcedCleanup {
     force: CancellationToken,
-    deadline: OnceLock<Instant>,
+    window: OnceLock<CleanupWindow>,
+    timed_out: OnceLock<bool>,
+}
+
+struct CleanupWindow {
+    started_at: Instant,
+    deadline: Instant,
 }
 
 impl ForcedCleanup {
     /// The first call fixes the deadline at `budget` from now; a later call
     /// keeps it.
-    fn begin(&self, budget: Duration) {
-        self.deadline.get_or_init(|| {
-            let now = Instant::now();
-            now.checked_add(budget).unwrap_or(now + NO_CLEANUP_DEADLINE)
+    fn begin(&self, budget: Duration) -> Instant {
+        let window = self.window.get_or_init(|| {
+            let started_at = Instant::now();
+            let deadline = started_at
+                .checked_add(budget)
+                .unwrap_or(started_at + CLEANUP_OVERFLOW_FALLBACK);
+            CleanupWindow {
+                started_at,
+                deadline,
+            }
         });
         self.force.cancel();
+        window.deadline
     }
 
     /// Resolves once a cleanup is forced.
@@ -672,20 +633,26 @@ impl ForcedCleanup {
         self.force.cancelled().await;
     }
 
+    pub(crate) fn requested_before(&self, deadline: Instant) -> bool {
+        self.window
+            .get()
+            .is_some_and(|window| window.started_at < deadline)
+    }
+
     /// Resolves once the budget of a forced cleanup is spent; pending until
     /// a cleanup is forced.
     pub(crate) async fn ended(&self) {
         self.force.cancelled().await;
-        match self.deadline.get() {
-            Some(deadline) => tokio::time::sleep_until(*deadline).await,
+        match self.window.get() {
+            Some(window) => tokio::time::sleep_until(window.deadline).await,
             None => std::future::pending().await,
         }
     }
 
     pub(crate) fn has_ended(&self) -> bool {
-        self.deadline
+        self.window
             .get()
-            .is_some_and(|deadline| Instant::now() >= *deadline)
+            .is_some_and(|window| Instant::now() >= window.deadline)
     }
 }
 
@@ -740,11 +707,16 @@ fn log_operation_failure(operation: Operation, error: &OperationError) {
             }
         }
     };
+    let decode_reason = match error {
+        OperationError::Statement(error) => claim::decode_reason(error),
+        _ => None,
+    };
     tracing::warn!(
         operation = operation.as_str(),
         failure = error.as_str(),
         sqlstate = sqlstate.as_deref(),
         cause,
+        decode_reason,
         "jobs_operation_failed"
     );
 }
@@ -785,6 +757,127 @@ mod tests {
         const NAME: &'static str = "publisher";
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn a_suspended_attempt_keeps_the_first_stop_reason() {
+        for (force_before_timeout, expected) in [(true, (0, 1)), (false, (1, 0))] {
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgres://localhost/unused")
+                .unwrap();
+            pool.close().await;
+            let mut kinds = crate::KindsBuilder::new();
+            kinds.register(
+                crate::Policy {
+                    timeout: Duration::from_secs(1),
+                    max_attempts: 1,
+                    ..crate::Policy::default()
+                },
+                |job: crate::Job<Ordinary>| async move {
+                    job.cancellation().cancelled().await;
+                    Err(crate::JobError::retryable("handler stopped"))
+                },
+            );
+            let engine = Engine::new(pool, kinds.validate().unwrap(), NonZeroU32::MIN);
+            let shared = &engine.shared;
+            let job_id = crate::JobId(uuid::Uuid::nil());
+            let guard = SupervisorGuard::new(
+                Arc::clone(&shared.drain),
+                CancellationToken::new(),
+                CancellationToken::new(),
+                job_id,
+                "ordinary",
+            );
+            let claimed = claim::Claimed {
+                registered: Arc::clone(shared.registry.get("ordinary").unwrap()),
+                attempt: crate::attempt::AttemptId {
+                    job_id,
+                    kind: "ordinary",
+                    number: 1,
+                },
+                generation: 1,
+                payload: b"null".to_vec(),
+                trace: crate::trace_context::Carrier::default(),
+                slot: Arc::clone(&shared.slots).try_acquire_owned().unwrap(),
+                kind_slot: None,
+            };
+            let mut supervisor = std::pin::pin!(crate::attempt::supervise(
+                Arc::clone(shared),
+                claimed,
+                Instant::now() + Duration::from_secs(8),
+                guard,
+            ));
+            assert!(futures_util::poll!(supervisor.as_mut()).is_pending());
+            if !force_before_timeout {
+                tokio::time::advance(Duration::from_secs(2)).await;
+            }
+            let cleanup_deadline = shared.cleanup.begin(Duration::from_secs(4));
+            if force_before_timeout {
+                tokio::time::advance(Duration::from_secs(2)).await;
+            }
+            assert!(futures_util::poll!(supervisor.as_mut()).is_pending());
+            assert_eq!(
+                (
+                    shared.counters.known_results.load(Ordering::Relaxed),
+                    shared.counters.cancelled.load(Ordering::Relaxed),
+                ),
+                expected,
+            );
+            tokio::time::advance(cleanup_deadline.saturating_duration_since(Instant::now())).await;
+            supervisor.await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cleanup_reports_when_the_last_supervisor_exited_even_if_the_waiter_resumes_later() {
+        let budget = Duration::from_secs(2);
+        for (exit_after, observe_timeout_first, timed_out) in
+            [(1, false, false), (2, true, true), (3, false, true)]
+        {
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgres://localhost/unused")
+                .unwrap();
+            let mut kinds = crate::KindsBuilder::new();
+            kinds.register(crate::Policy::default(), |_: crate::Job<Ordinary>| async {
+                Ok(())
+            });
+            let engine = Engine::new(pool, kinds.validate().unwrap(), NonZeroU32::MIN);
+            let claim_loop = DrainParticipant::ClaimLoop(Arc::clone(&engine.shared.drain));
+            let started = Started {
+                shared: engine.shared,
+                stop: CancellationToken::new(),
+                failure: CancellationToken::new(),
+            };
+            let mut supervisor = SupervisorGuard::new(
+                Arc::clone(&started.shared.drain),
+                started.stop.clone(),
+                started.failure.clone(),
+                crate::JobId(uuid::Uuid::nil()),
+                "ordinary",
+            );
+            supervisor.retire();
+            drop(claim_loop);
+            let deadline = Instant::now() + budget;
+            let mut finish = std::pin::pin!(started.cancel_and_finish(budget));
+            assert!(futures_util::poll!(finish.as_mut()).is_pending());
+            tokio::time::advance(Duration::from_secs(exit_after)).await;
+            let end = if observe_timeout_first {
+                let end = finish.await;
+                assert_eq!(Instant::now(), deadline);
+                drop(supervisor);
+                end
+            } else {
+                drop(supervisor);
+                tokio::time::advance(Duration::from_secs(2)).await;
+                finish.await
+            };
+
+            assert_eq!(end.timed_out, timed_out);
+            assert_eq!(
+                started.cancel_and_finish(Duration::ZERO).await.timed_out,
+                timed_out
+            );
+        }
+    }
+
     #[tokio::test]
     async fn late_peer_invalidates_freshness_and_rejects_an_in_flight_old_union() {
         let pool = sqlx::postgres::PgPoolOptions::new()
@@ -797,8 +890,9 @@ mod tests {
                 Ok(())
             });
             let engine = Engine::new(pool.clone(), kinds.validate().unwrap(), NonZeroU32::MIN);
-            let (sampled_kinds, sampled_revision) = engine.shared.sampling_kinds();
-            assert!(engine.shared.publish_if_current(&sampled_revision, || {
+            let peers = &engine.shared.peers;
+            let (sampled_kinds, sampled_revision) = peers.sampling_kinds();
+            assert!(peers.publish_if_current(&sampled_revision, || {
                 metrics::gauge!(maintenance::FAILED_JOBS_METRIC, "kind" => "ordinary").set(3.0);
                 metrics::gauge!(maintenance::OBSERVATION_TIMESTAMP_METRIC).set(100.0);
             }));
@@ -823,7 +917,7 @@ mod tests {
                 gauges.get(maintenance::FAILED_JOBS_METRIC, Some("publisher")),
                 0.0
             );
-            assert!(!engine.shared.publish_if_current(&sampled_revision, || {
+            assert!(!peers.publish_if_current(&sampled_revision, || {
                 panic!("an observation from before peer admission must not publish");
             }));
             assert_eq!(
@@ -831,8 +925,8 @@ mod tests {
                 0.0
             );
 
-            let (current_kinds, current_revision) = engine.shared.sampling_kinds();
-            assert!(engine.shared.publish_if_current(&current_revision, || {
+            let (current_kinds, current_revision) = peers.sampling_kinds();
+            assert!(peers.publish_if_current(&current_revision, || {
                 metrics::gauge!(maintenance::OBSERVATION_TIMESTAMP_METRIC).set(200.0);
             }));
             assert_eq!(
@@ -841,13 +935,13 @@ mod tests {
             );
 
             drop(publisher);
-            assert_eq!(engine.shared.sampling_kinds().0, sampled_kinds);
-            assert!(!engine.shared.publish_if_current(&current_revision, || {
+            assert_eq!(peers.sampling_kinds().0, sampled_kinds);
+            assert!(!peers.publish_if_current(&current_revision, || {
                 panic!("an observation that still includes the retired peer must not publish");
             }));
             let _replacement = make_publisher();
-            assert_eq!(engine.shared.sampling_kinds().0, current_kinds);
-            assert!(!engine.shared.publish_if_current(&current_revision, || {
+            assert_eq!(peers.sampling_kinds().0, current_kinds);
+            assert!(!peers.publish_if_current(&current_revision, || {
                 panic!("an observation from before peer replacement must not publish");
             }));
             assert_eq!(
@@ -880,7 +974,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), started.drained())
             .await
             .unwrap();
-        assert_eq!(owner.shared.sampling_kinds().0, ["ordinary"]);
+        assert_eq!(owner.shared.peers.sampling_kinds().0, ["ordinary"]);
         tracker.close();
         tokio::time::timeout(Duration::from_secs(1), tracker.wait())
             .await
@@ -1016,6 +1110,7 @@ mod tests {
                         Duration::from_secs(10)
                     },
                 SupervisorGuard::new(
+                    Arc::clone(&engine.shared.drain),
                     stop.clone(),
                     failure.clone(),
                     crate::JobId(uuid::Uuid::nil()),
@@ -1063,6 +1158,7 @@ mod tests {
         let stop = CancellationToken::new();
         let failure = CancellationToken::new();
         let guard = SupervisorGuard::new(
+            Arc::default(),
             stop.clone(),
             failure.clone(),
             crate::JobId(uuid::Uuid::nil()),

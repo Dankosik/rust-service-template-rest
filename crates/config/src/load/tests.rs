@@ -439,6 +439,53 @@ fn env_parses_durations_sizes_numbers_and_enums() {
 }
 
 #[test]
+fn sampler_ratio_refuses_booleans_and_words() {
+    for value in ["true", "yes", "on", "false", "no", "off"] {
+        let err = load_from(
+            &LoadOptions::default(),
+            BUILD,
+            env(&[("APP__OBSERVABILITY__OTEL__TRACES_SAMPLER_ARG", value)]),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("expected a number"),
+            "{value}: {err}"
+        );
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    for (name, body, accepted) in [
+        ("bool.toml", "traces_sampler_arg = true", None),
+        ("word.toml", "traces_sampler_arg = \"off\"", None),
+        ("integer.toml", "traces_sampler_arg = 1", Some(1.0)),
+        ("float.toml", "traces_sampler_arg = 0.25", Some(0.25)),
+    ] {
+        let file = write(&dir, name, &format!("[observability.otel]\n{body}\n"));
+        let loaded = load_from(
+            &LoadOptions {
+                config: Some(file),
+                ..LoadOptions::default()
+            },
+            BUILD,
+            env(&[]),
+        );
+        match accepted {
+            Some(expected) => {
+                let arg = loaded.unwrap().observability.otel.traces_sampler_arg;
+                assert!((arg - expected).abs() < f64::EPSILON, "{name}: {arg}");
+            }
+            None => assert!(
+                loaded
+                    .unwrap_err()
+                    .to_string()
+                    .contains("expected a number"),
+                "{name}"
+            ),
+        }
+    }
+}
+
+#[test]
 fn unknown_keys_fail_from_files_and_env() {
     let dir = tempfile::tempdir().unwrap();
     let file = write(&dir, "bad.toml", "[http]\naddress = \":1\"\n");

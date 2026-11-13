@@ -70,6 +70,7 @@ pub struct OtelConfig {
     pub traces_sampler: TracesSampler,
     /// Ratio for the ratio-based samplers, in `[0, 1]`. Always validated
     /// (finite and in range) even when the selected sampler ignores it.
+    #[serde(deserialize_with = "crate::de::ratio")]
     pub traces_sampler_arg: f64,
     /// OTLP exporter endpoint and credential.
     pub exporter: OtelExporterConfig,

@@ -45,23 +45,48 @@ async fn a_client_requiring_a_subject_refuses_a_request_without_one_before_any_i
 }
 
 #[tokio::test]
-async fn token_wait_spends_the_original_resource_deadline_before_dispatch() {
+async fn an_elapsed_deadline_wins_over_request_cancellation_during_token_wait() {
     let fixture = Fixture::new().await;
     let gate = fixture.block_tokens();
     let client = fixture
         .credentials(&[], None)
         .http(fixture.resource_client());
-    let mut exchange =
-        Box::pin(client.execute(fixture.request(), deadline(Duration::from_secs(1))));
+    let operation = OperationContext::with_timeout(Duration::from_secs(1));
+    let request_context = OperationContext::unbounded();
+    let mut request = fixture.request();
+    request.extensions_mut().insert(request_context.clone());
+    let mut exchange = Box::pin(client.execute_with_context(request, &operation));
     tokio::select! { () = fixture.token_received() => {}, result = &mut exchange => panic!("response must be gated: {result:?}"), }
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(1)).await;
+    request_context.cancel();
     assert_matches!(
         exchange.await,
         Err(Error::Acquisition(AcquisitionError::Timeout))
     );
     tokio::time::resume();
     drop(gate);
+    assert!(fixture.resource_requests().is_empty());
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn an_elapsed_deadline_wins_over_request_cancellation_before_token_work() {
+    let fixture = Fixture::new().await;
+    let client = fixture
+        .credentials(&[], None)
+        .http(fixture.resource_client());
+    let operation = OperationContext::with_timeout(Duration::ZERO);
+    let request_context = OperationContext::unbounded();
+    request_context.cancel();
+    let mut request = fixture.request();
+    request.extensions_mut().insert(request_context);
+
+    assert_matches!(
+        client.execute_with_context(request, &operation).await,
+        Err(Error::Acquisition(AcquisitionError::Timeout))
+    );
+    assert!(fixture.token_requests().is_empty());
     assert!(fixture.resource_requests().is_empty());
     fixture.finish().await;
 }
@@ -155,6 +180,18 @@ async fn token_failures_are_sanitized_and_never_dispatch_the_resource() {
             AcquisitionError::Rejected(Rejection::Other),
         ),
         (
+            response("400 Bad Request", br#"{"error":{"invalid_client":null}}"#),
+            AcquisitionError::Rejected(Rejection::Other),
+        ),
+        (
+            b"HTTP/1.1 400 Bad Request\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{".to_vec(),
+            AcquisitionError::Rejected(Rejection::Other),
+        ),
+        (
+            b"HTTP/1.1 400 Bad Request\r\ncontent-length: 1048577\r\nconnection: close\r\n\r\n".to_vec(),
+            AcquisitionError::Rejected(Rejection::Other),
+        ),
+        (
             json_response(
                 "200 OK",
                 &serde_json::json!({"access_token":"token", "token_type":"MAC", "expires_in":3600}),
@@ -185,6 +222,13 @@ async fn token_failures_are_sanitized_and_never_dispatch_the_resource() {
         assert!(!format!("{error:?}").contains("provider-secret-body"));
         assert!(!error.to_string().contains("provider-secret-body"));
     }
+    assert!(fixture.resource_requests().is_empty());
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn token_acquisition_stops_at_the_fetch_deadline_without_dispatching_the_resource() {
+    let fixture = Fixture::new().await;
     let gate = fixture.block_tokens();
     let client = fixture
         .credentials(&[], None)
@@ -349,9 +393,7 @@ async fn a_late_401_does_not_evict_a_newer_token() {
     let client = credentials.http(fixture.resource_client());
     // Old enough that only its replacement keeps the late 401 from evicting.
     credentials
-        .service_token(AcquisitionDeadline::caller(deadline(Duration::from_secs(
-            10,
-        ))))
+        .service_token(acquisition_deadline(&token_context(), None))
         .await
         .unwrap();
     advance(EVICTION_MIN_AGE).await;
@@ -366,9 +408,7 @@ async fn a_late_401_does_not_evict_a_newer_token() {
         &serde_json::json!({"access_token": "second", "token_type": "Bearer", "expires_in": 60}),
     );
     credentials
-        .service_token(AcquisitionDeadline::caller(deadline(Duration::from_secs(
-            10,
-        ))))
+        .service_token(acquisition_deadline(&token_context(), None))
         .await
         .unwrap();
 

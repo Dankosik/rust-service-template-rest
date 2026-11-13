@@ -63,9 +63,6 @@ impl HttpIdempotencyConfig {
     }
 }
 
-/// Missing, empty, or whitespace-only text is vacant (`None`); a present
-/// value is trimmed, then parsed as a human-form duration. Any
-/// sub-microsecond part it names survives parsing unchanged.
 fn blank_duration_as_none<'de, D>(deserializer: D) -> Result<Option<Duration>, D::Error>
 where
     D: serde::Deserializer<'de>,

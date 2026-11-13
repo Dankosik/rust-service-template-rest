@@ -10,7 +10,7 @@ publish.workspace = true
 
 # cargo-shear 1.14.0 scans target directories, missing the #[path] inclusion
 # of test/fixtures/tls.rs. Remove this exception when it follows that source.
-# The full template's jwt.rs also uses rcgen, so cargo-shear calls the
+# The full template's jwks.rs also uses rcgen, so cargo-shear calls the
 # exception redundant there; a projection without JWT keeps only the #[path] use.
 [package.metadata.cargo-shear]
 ignored = ["rcgen"]

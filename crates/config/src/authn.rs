@@ -14,7 +14,7 @@ use secrecy::SecretString;
 use serde::{Deserialize, Deserializer};
 
 // template:begin oidc-introspection:authn-occupied-secret-import
-use crate::de::blank_secret_as_none;
+use crate::de::{blank_secret_as_none, deserialize_scalar};
 // template:end oidc-introspection:authn-occupied-secret-import
 use crate::de::value_free;
 use crate::validate::{ValidationError, required_when};
@@ -51,7 +51,8 @@ impl<'de> Deserialize<'de> for Audiences {
             Input::One(value) => vec![value],
             Input::Many(values) => values,
         };
-        Self::try_new(values).map_err(value_free)
+        Self::try_new(values)
+            .map_err(|message| value_free(format_args!("`authn.audience` {message}")))
     }
 }
 
@@ -155,16 +156,16 @@ pub enum AuthnConfig {
         /// Immediate provider-exchange capacity. Missing uses 32.
         #[serde(
             default = "default_provider_concurrency",
-            deserialize_with = "deserialize_scalar"
+            deserialize_with = "deserialize_provider_concurrency"
         )]
         provider_concurrency: NonZeroU32,
         /// Reuse verified positive results until their fixed expiry. Default off.
-        #[serde(default, deserialize_with = "deserialize_scalar")]
+        #[serde(default, deserialize_with = "deserialize_cache_enabled")]
         cache_enabled: bool,
         /// Maximum retained results, from 1 through 1024. Missing uses 256.
         #[serde(
             default = "default_cache_capacity",
-            deserialize_with = "deserialize_scalar"
+            deserialize_with = "deserialize_cache_capacity"
         )]
         cache_capacity: usize,
         /// Maximum fixed retention, from 1s through 5m. Missing uses 30s.
@@ -213,7 +214,9 @@ where
                 JwtAlgorithm::deserialize(serde::de::value::StrDeserializer::new(value.trim()))
             })
             .collect::<Result<_, _>>()
-            .map_err(|_: D::Error| value_free("must contain only supported JWT algorithms")),
+            .map_err(|_: D::Error| {
+                value_free("`authn.algorithms` must contain only supported JWT algorithms")
+            }),
     }
 }
 // template:end oidc-jwt:authn-default-algorithms
@@ -233,27 +236,35 @@ const fn default_cache_ttl() -> Duration {
     Duration::from_secs(30)
 }
 
-// The tagged enum buffers values before decoding fields, so config-rs cannot
-// coerce environment strings here. Adapt only these scalar fields; trust and
-// credential strings must retain their exact bytes.
-fn deserialize_scalar<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+// The tagged enum buffers field values, so config-rs reports failures at
+// `authn` alone. These messages name the rejected field.
+fn deserialize_provider_concurrency<'de, D>(deserializer: D) -> Result<NonZeroU32, D::Error>
 where
     D: Deserializer<'de>,
-    T: Deserialize<'de> + std::str::FromStr,
-    T::Err: std::fmt::Display,
 {
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum Input<T> {
-        Typed(T),
-        Text(String),
-    }
-
-    match Input::<T>::deserialize(deserializer)? {
-        Input::Typed(value) => Ok(value),
-        Input::Text(value) => value.parse().map_err(serde::de::Error::custom),
-    }
+    deserialize_scalar(
+        deserializer,
+        "`authn.provider_concurrency` must be an integer from 1 to 4294967295",
+    )
 }
+
+fn deserialize_cache_enabled<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_scalar(deserializer, "`authn.cache_enabled` must be true or false")
+}
+
+fn deserialize_cache_capacity<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    deserialize_scalar(
+        deserializer,
+        "`authn.cache_capacity` must be an integer from 1 to 1024",
+    )
+}
+
 // template:end oidc-introspection:authn-default-provider-concurrency
 
 impl AuthnConfig {

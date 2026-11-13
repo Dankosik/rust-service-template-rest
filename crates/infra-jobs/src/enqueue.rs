@@ -82,10 +82,7 @@ pub fn json_payload_len<T: serde::Serialize + ?Sized>(
 
     impl Write for ByteCount {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            self.0 = self
-                .0
-                .checked_add(bytes.len())
-                .ok_or_else(|| io::Error::other("serialized payload length overflow"))?;
+            self.0 = checked_serialized_len(self.0, bytes.len())?;
             Ok(bytes.len())
         }
 
@@ -145,8 +142,8 @@ pub async fn enqueue<K: JobKind>(
             prepared.payload,
             prepared.unique_key,
             prepared.delay_micros,
-            trace.trace_parent.as_deref(),
-            trace.trace_state.as_deref(),
+            trace.trace_parent(),
+            trace.trace_state(),
             id.0,
         )
         .fetch_optional(&mut *tx),
@@ -290,10 +287,7 @@ struct PayloadWriter {
 
 impl Write for PayloadWriter {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.total = self
-            .total
-            .checked_add(bytes.len())
-            .ok_or_else(|| io::Error::other("serialized payload length overflow"))?;
+        self.total = checked_serialized_len(self.total, bytes.len())?;
         let keep = bytes.len().min(MAX_PAYLOAD_BYTES - self.retained.len());
         let needed = self.retained.len() + keep;
         if needed > self.retained.capacity() {
@@ -314,6 +308,12 @@ impl Write for PayloadWriter {
     }
 }
 
+fn checked_serialized_len(total: usize, chunk_len: usize) -> io::Result<usize> {
+    total
+        .checked_add(chunk_len)
+        .ok_or_else(|| io::Error::other("serialized payload length overflow"))
+}
+
 /// Validate and bind. A failure has sent nothing.
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 fn prepare<'a, K: JobKind>(
@@ -331,7 +331,7 @@ fn prepare<'a, K: JobKind>(
     }
     let delay_micros = checked_delay_micros(options.delay)?;
     let mut writer = PayloadWriter::default();
-    serde_json::to_writer(&mut writer, payload).map_err(EnqueueError::Serialize)?;
+    json_payload::to_writer(&mut writer, payload).map_err(EnqueueError::Serialize)?;
     if writer.total > MAX_PAYLOAD_BYTES {
         return Err(EnqueueError::PayloadTooLarge {
             bytes: writer.total,
@@ -466,9 +466,16 @@ mod tests {
     #[derive(Deserialize)]
     struct Streamed {
         elements: usize,
-        fail: bool,
+        failure: StreamFailure,
         #[serde(skip)]
         calls: AtomicUsize,
+    }
+
+    #[derive(Clone, Copy, Deserialize)]
+    enum StreamFailure {
+        None,
+        Custom,
+        NonFinite,
     }
 
     impl Serialize for Streamed {
@@ -479,8 +486,10 @@ mod tests {
             for _ in 0..self.elements {
                 sequence.serialize_element("\0")?;
             }
-            if self.fail {
-                return Err(S::Error::custom("late refusal"));
+            match self.failure {
+                StreamFailure::None => {}
+                StreamFailure::Custom => return Err(S::Error::custom("late refusal")),
+                StreamFailure::NonFinite => sequence.serialize_element(&f64::INFINITY)?,
             }
             sequence.end()
         }
@@ -519,12 +528,45 @@ mod tests {
     }
 
     #[test]
-    fn a_payload_the_worker_cannot_decode_is_refused_before_sending() {
+    fn non_finite_floats_are_serialization_errors_before_typed_decode() {
         for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             let err = prepare(&Reading { value }, EnqueueOptions::default()).unwrap_err();
-            std::assert_matches!(err, EnqueueError::PayloadDoesNotDecode(_), "{value}");
+            std::assert_matches!(err, EnqueueError::Serialize(_), "{value}");
         }
-        assert!(prepare(&Reading { value: 1.5 }, EnqueueOptions::default()).is_ok());
+        let prepared = prepare(&Reading { value: 1.5 }, EnqueueOptions::default()).unwrap();
+        assert_eq!(prepared.payload, r#"{"value":1.5}"#);
+    }
+
+    #[test]
+    fn key_and_delay_validation_precede_non_finite_serialization() {
+        let payload = Reading { value: f64::NAN };
+        for (key, invalid_key) in [("", true), ("valid", false)] {
+            let err = prepare(
+                &payload,
+                EnqueueOptions {
+                    delay: MAX_DELAY + Duration::from_nanos(1),
+                    unique_key: Some(key),
+                },
+            )
+            .unwrap_err();
+            if invalid_key {
+                std::assert_matches!(err, EnqueueError::InvalidUniqueKey);
+            } else {
+                std::assert_matches!(err, EnqueueError::InvalidDelay(_));
+            }
+        }
+    }
+
+    #[test]
+    fn a_serializable_payload_the_worker_cannot_decode_is_refused() {
+        let payload = Streamed {
+            elements: 0,
+            failure: StreamFailure::None,
+            calls: AtomicUsize::new(0),
+        };
+        let err = prepare(&payload, EnqueueOptions::default()).unwrap_err();
+        std::assert_matches!(err, EnqueueError::PayloadDoesNotDecode(_));
+        assert_eq!(payload.calls.load(Ordering::Relaxed), 1);
     }
 
     #[test]
@@ -663,26 +705,36 @@ mod tests {
 
     #[test]
     fn streamed_payload_serializes_once_with_size_before_nul_and_late_error_first() {
-        for fail in [false, true] {
+        for failure in [
+            StreamFailure::None,
+            StreamFailure::Custom,
+            StreamFailure::NonFinite,
+        ] {
             let payload = Streamed {
                 elements: MAX_PAYLOAD_BYTES,
-                fail,
+                failure,
                 calls: AtomicUsize::new(0),
             };
             let err = prepare(&payload, EnqueueOptions::default()).unwrap_err();
-            if fail {
-                let EnqueueError::Serialize(error) = err else {
-                    panic!("late serialization failure must precede size and NUL");
-                };
-                assert_eq!(error.to_string(), "late refusal");
-            } else {
-                // Each encoded NUL string is eight bytes, plus one comma;
-                // the surrounding brackets replace the missing first comma.
-                std::assert_matches!(
-                    err,
-                    EnqueueError::PayloadTooLarge { bytes }
-                        if bytes == payload.elements * 9 + 1
-                );
+            match failure {
+                StreamFailure::Custom => {
+                    let EnqueueError::Serialize(error) = err else {
+                        panic!("late serialization failure must precede size and NUL");
+                    };
+                    assert_eq!(error.to_string(), "late refusal");
+                }
+                StreamFailure::NonFinite => {
+                    std::assert_matches!(err, EnqueueError::Serialize(_));
+                }
+                StreamFailure::None => {
+                    // Each encoded NUL string is eight bytes, plus one comma;
+                    // the surrounding brackets replace the missing first comma.
+                    std::assert_matches!(
+                        err,
+                        EnqueueError::PayloadTooLarge { bytes }
+                            if bytes == payload.elements * 9 + 1
+                    );
+                }
             }
             assert_eq!(payload.calls.load(Ordering::Relaxed), 1);
         }
@@ -697,7 +749,7 @@ mod tests {
         let mut writer = PayloadWriter::default();
         let payload = Streamed {
             elements: MAX_PAYLOAD_BYTES,
-            fail: false,
+            failure: StreamFailure::None,
             calls: AtomicUsize::new(0),
         };
         serde_json::to_writer(&mut writer, &payload).unwrap();

@@ -18,18 +18,13 @@ use crate::engine::{ForcedCleanup, Operation, RECORD_RETRY_INTERVAL, Shared, obs
 use crate::kind::{Attempt, HandlerFuture, JobError, JobId, Registered};
 use crate::state::FailureReason;
 
-pub(crate) use completion::Completions;
 use completion::complete_batched;
-pub(crate) use outcome::complete_query;
+pub(crate) use completion::{Completions, complete_query};
 use outcome::{Ended, Transition, Unacknowledged, Written, map_outcome, send_outcome, write_of};
 
-/// How long a cancelled or timed-out handler may keep running before [`drive`]
-/// stops waiting for it to join its own work.
-///
-/// This is a tuning value, not a protocol contract: a handler that needs longer
-/// than this window is abandoned with its future dropped, so nothing observable
-/// depends on the exact number. [`drive`] caps the resulting wait at the
-/// supervisor deadline, so grace never holds a claim past it.
+/// After cancellation, [`drive`] keeps a success received during this grace
+/// period. The supervisor deadline and forced-cleanup deadline can end the
+/// wait sooner.
 const COOPERATIVE_GRACE: Duration = Duration::from_millis(100);
 
 /// Attempt admission retained by supervisors or completion bookkeeping. No labels.
@@ -319,7 +314,7 @@ async fn run_attempt(
     supervisor_deadline: Instant,
     slots: Arc<AttemptSlots>,
 ) {
-    if expired(shared, supervisor_deadline) {
+    if deadline_reached_or_cleanup_ended(&shared.cleanup, supervisor_deadline) {
         observe_uncertain(shared, &attempt);
         return;
     }
@@ -372,10 +367,12 @@ async fn run_attempt(
     if let Some(ran) = ran {
         handles.duration.record(ran.as_secs_f64());
     }
-    let terminal = matches!(transition, Transition::Fail { .. });
-    if !terminal {
+    let terminal_summary = if let Transition::Fail { summary, .. } = &transition {
+        Some(summary.as_str())
+    } else {
         observe_attempt(Some(handles), &attempt, &transition);
-    }
+        None
+    };
     let written = persist(
         shared,
         handles,
@@ -386,26 +383,14 @@ async fn run_attempt(
         &slots,
     )
     .await;
-    if terminal {
-        observe_terminal(handles, &attempt, &transition, written);
-    }
-}
-
-/// A terminal failure counts only once its write applies. A row the write did
-/// not move is failed, re-run, or exhausted by its lease rescue, which counts
-/// it; counting it here too would count one job twice.
-fn observe_terminal(
-    handles: &KindMetrics,
-    attempt: &AttemptId,
-    transition: &Transition,
-    written: Option<Written>,
-) {
-    match (transition, written) {
-        (_, Some(Written::Applied)) => observe_attempt(Some(handles), attempt, transition),
-        (Transition::Fail { summary, .. }, _) => {
+    if let Some(summary) = terminal_summary {
+        // Count a terminal failure only when its write applies. Otherwise a
+        // later attempt or lease rescue may count it.
+        if written == Some(Written::Applied) {
+            observe_attempt(Some(handles), &attempt, &transition);
+        } else {
             tracing::info!(job.id = %attempt.job_id, job.kind = attempt.kind, job.attempt = attempt.number, outcome = transition.label(), error = error_field(summary), "job_attempt_failed");
         }
-        _ => {}
     }
 }
 
@@ -430,7 +415,7 @@ async fn within<T>(
     let mut future = std::pin::pin!(future);
     let bounded = std::future::poll_fn(|cx| {
         // A resumed poll can send SQL, even when it initially only waited for I/O.
-        if Instant::now() >= until || cleanup.has_ended() {
+        if deadline_reached_or_cleanup_ended(cleanup, until) {
             std::task::Poll::Ready(None)
         } else {
             future.as_mut().poll(cx).map(Some)
@@ -444,8 +429,8 @@ async fn within<T>(
     }
 }
 
-fn expired(shared: &Shared, until: Instant) -> bool {
-    Instant::now() >= until || shared.cleanup.has_ended()
+fn deadline_reached_or_cleanup_ended(cleanup: &ForcedCleanup, until: Instant) -> bool {
+    Instant::now() >= until || cleanup.has_ended()
 }
 
 /// `base + wait`, capped at `limit`: the latest instant a local wait may reach.
@@ -480,8 +465,9 @@ impl Drop for OwnedHandler {
     }
 }
 
-/// Once a handler has started, a ready result wins over cancellation. After
-/// cancellation only success wins (see [`ended_after_cancel`]).
+/// Before the attempt deadline, a ready handler result wins over a drain
+/// request within the supervisor and cleanup bounds. After cancellation only
+/// success wins.
 async fn drive(
     cleanup: &ForcedCleanup,
     future: HandlerFuture,
@@ -494,24 +480,38 @@ async fn drive(
         // Borrow through the poll boundary; the owner contains destruction as well.
         let mut run =
             std::pin::pin!(std::panic::AssertUnwindSafe(handler.0.as_mut()?).catch_unwind());
-        let admitted = async {
-            // Preparation can consume the attempt's budget before its first poll.
+        let mut first_poll = true;
+        let admitted = std::future::poll_fn(|cx| {
             let now = Instant::now();
             if now >= supervisor_deadline || cleanup.has_ended() {
                 cancel.cancel();
-                return None;
+                return std::task::Poll::Ready(None);
             }
+            let first = std::mem::take(&mut first_poll);
             if now >= attempt_deadline {
-                cancel.cancel();
-                return Some(Ended::Timeout);
+                // Preparation can consume the attempt's budget before admission.
+                if first {
+                    cancel.cancel();
+                    return std::task::Poll::Ready(Some(Ended::Timeout));
+                }
+                // The cancellation branches supply the wakeup and reason. The
+                // handler may resume for cleanup only after its token fires.
+                return std::task::Poll::Pending;
             }
-            Some(ended_from(run.as_mut().await))
-        };
-        let reason = tokio::select! {
+            run.as_mut().poll(cx).map(|result| Some(ended_from(result)))
+        });
+        tokio::select! {
             biased;
             ended = admitted => return ended,
-            () = cleanup.forced() => Ended::Cancelled,
-            () = tokio::time::sleep_until(attempt_deadline) => Ended::Timeout,
+            () = cleanup.forced() => {}
+            () = tokio::time::sleep_until(attempt_deadline) => {}
+        }
+        // Both signals can arrive between polls. Refund only when forced
+        // cleanup started before the attempt expired.
+        let reason = if cleanup.requested_before(attempt_deadline) {
+            Ended::Cancelled
+        } else {
+            Ended::Timeout
         };
         cancel.cancel();
         let grace = clamped_deadline(Instant::now(), COOPERATIVE_GRACE, supervisor_deadline);
@@ -562,7 +562,7 @@ async fn persist(
         generation,
     };
     loop {
-        if expired(shared, supervisor_deadline) {
+        if deadline_reached_or_cleanup_ended(&shared.cleanup, supervisor_deadline) {
             break;
         }
         let sent = within(&shared.cleanup, supervisor_deadline, async {
@@ -740,6 +740,60 @@ mod tests {
         .await;
 
         std::assert_matches!(ended, Some(Ended::Timeout));
+        assert!(cancel.is_cancelled());
+        assert!(observed.await.is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_suspended_handler_observes_cancellation_on_resuming_after_its_attempt_deadline() {
+        let cleanup = ForcedCleanup::default();
+        let cancel = CancellationToken::new();
+        let handler_cancel = cancel.clone();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let (resume, suspended) = tokio::sync::oneshot::channel();
+        let (ran, observed) = tokio::sync::oneshot::channel();
+        let mut attempt = std::pin::pin!(drive(
+            &cleanup,
+            Box::pin(async move {
+                suspended.await.unwrap();
+                let _ = ran.send(handler_cancel.is_cancelled());
+                Err(JobError::retryable("handler stopped"))
+            }),
+            cancel,
+            deadline,
+            deadline + Duration::from_secs(5),
+        ));
+        assert!(futures_util::poll!(attempt.as_mut()).is_pending());
+        tokio::time::advance(Duration::from_secs(1)).await;
+        resume.send(()).unwrap();
+
+        std::assert_matches!(attempt.await, Some(Ended::Timeout));
+        assert!(observed.await.unwrap());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_suspended_handler_does_not_resume_after_its_supervisor_deadline() {
+        let cleanup = ForcedCleanup::default();
+        let cancel = CancellationToken::new();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let (resume, suspended) = tokio::sync::oneshot::channel();
+        let (ran, observed) = tokio::sync::oneshot::channel();
+        let mut attempt = std::pin::pin!(drive(
+            &cleanup,
+            Box::pin(async move {
+                suspended.await.unwrap();
+                let _ = ran.send(());
+                Ok(())
+            }),
+            cancel.clone(),
+            deadline,
+            deadline,
+        ));
+        assert!(futures_util::poll!(attempt.as_mut()).is_pending());
+        tokio::time::advance(Duration::from_secs(1)).await;
+        resume.send(()).unwrap();
+
+        assert!(attempt.await.is_none());
         assert!(cancel.is_cancelled());
         assert!(observed.await.is_err());
     }

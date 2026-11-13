@@ -18,7 +18,7 @@ use utoipa::{IntoResponses, OpenApi, ToResponse};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
-use crate::context::RequestDeadline;
+use crate::context::{RequestContext, RequestDeadline, read_body};
 use crate::extract::Path;
 use crate::problem::responses::{
     GatewayTimeout, InternalServerError, ProblemComponents, RequestEntityTooLarge,
@@ -71,24 +71,37 @@ impl WebhookState {
 
 /// webhook endpoint is unknown
 #[derive(Debug, ToResponse)]
+#[expect(
+    dead_code,
+    reason = "The response body exists only for the OpenAPI derive"
+)]
 #[response(content_type = "application/problem+json")]
-pub struct NotFound(pub Problem);
+struct NotFound(Problem);
 
 /// webhook body, message identity, or signature evidence is unacceptable
 #[derive(Debug, ToResponse)]
+#[expect(
+    dead_code,
+    reason = "The response body exists only for the OpenAPI derive"
+)]
 #[response(content_type = "application/problem+json")]
-pub struct WebhookRejected(pub Problem);
+struct WebhookRejected(Problem);
 
 /// durable webhook receipt storage is unavailable
 #[derive(Debug, ToResponse)]
+#[expect(
+    dead_code,
+    reason = "The response body exists only for the OpenAPI derive"
+)]
 #[response(content_type = "application/problem+json")]
-pub struct ServiceUnavailable(pub Problem);
+struct ServiceUnavailable(Problem);
 
 /// The non-success webhook admission outcomes.  The route itself owns
 /// the signature requirement; OpenAPI's empty security array means only
 /// that bearer authentication is not the operation's authentication.
 #[derive(Debug, IntoResponses)]
-pub enum WebhookProblemResponses {
+#[expect(dead_code, reason = "The variants exist only for the OpenAPI derive")]
+enum WebhookProblemResponses {
     /// 400: the webhook was rejected.
     #[response(status = 400)]
     Rejected(#[ref_response] WebhookRejected),
@@ -181,7 +194,8 @@ async fn receive(
         );
         return sanitized_internal_error();
     };
-    let body = match Limited::new(body, MAX_BODY_BYTES).collect().await {
+    let context = parts.extensions.get::<RequestContext>();
+    let body = match read_body(context, Limited::new(body, MAX_BODY_BYTES).collect()).await {
         Ok(collected) => collected.to_bytes(),
         Err(error) if caused_by_length_limit(&*error) => {
             EndpointOutcome::Rejected("body_too_large").record(&endpoint_id);

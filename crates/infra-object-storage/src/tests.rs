@@ -966,13 +966,13 @@ async fn the_span_names_the_region_only_on_amazon() {
 
 // First registration can race a dispatcher rebuild in tracing-core 0.1.36:
 // an unrelated test thread's earlier `never` can overwrite the rebuilt interest.
-// Give only the two capture tests a fresh callsite/dispatcher lifetime.
+// Give the capture tests a fresh callsite/dispatcher lifetime.
 #[expect(
     clippy::disallowed_methods,
     clippy::print_stdout,
     reason = "the synchronous fixture owns the child entry marker, bounded completion and teardown"
 )]
-fn in_tracing_child(test_name: &str) -> bool {
+pub(super) fn in_tracing_child(test_name: &str) -> bool {
     const CHILD: &str = "OBJECT_STORAGE_TRACING_TEST_CHILD";
     if std::env::var(CHILD).as_deref() == Ok(test_name) {
         println!("{CHILD}={test_name}");
@@ -1013,7 +1013,7 @@ fn in_tracing_child(test_name: &str) -> bool {
 
 /// Every span and event a test emits, one line each with its recorded fields.
 #[derive(Clone, Default)]
-struct Records(Arc<Mutex<Vec<String>>>);
+pub(super) struct Records(Arc<Mutex<Vec<String>>>);
 
 struct Line(String);
 
@@ -1032,7 +1032,7 @@ impl Records {
         self.0.lock().unwrap().push(line.0);
     }
 
-    fn matching(&self, kind: &str, field: &str) -> Vec<String> {
+    pub(super) fn matching(&self, kind: &str, field: &str) -> Vec<String> {
         let lines = self.0.lock().unwrap();
         lines
             .iter()

@@ -2,8 +2,8 @@
 //!
 //! Order is the contract, outermost first:
 //!
-//! request-id sanitize → set → propagate → nosniff → observation (OpenTelemetry
-//! server span, HTTP metrics, problem completion, access log) → traceparent
+//! request-id sanitize → set → nosniff → observation (OpenTelemetry server span,
+//! HTTP metrics, request-id echo, problem completion, access log) → traceparent
 //! response header → in-flight admission (waits for a permit, then sheds; probes
 //! exempt) → opening context and deadline → panic recovery → body limit
 //! → extractor body limit → routes / 404 / 405
@@ -35,10 +35,10 @@ use tokio::sync::Semaphore;
 use tower::ServiceBuilder;
 use tower::util::option_layer;
 use tower_http::catch_panic::CatchPanicLayer;
-use tower_http::request_id::{PropagateRequestIdLayer, SetRequestIdLayer};
+use tower_http::request_id::SetRequestIdLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
 
-use crate::observe::{self, AccessLogOptions, Observer};
+use crate::observe::{self, Observer};
 use crate::probes::is_health_probe_route;
 #[cfg(test)]
 use crate::problem::SANITIZED_DETAIL;
@@ -62,8 +62,9 @@ pub struct HardenOptions {
     /// would keep a different ceiling than `http.max_body_bytes`.
     pub max_body_bytes: usize,
     /// Per-request budget; expiry answers 504 with code `gateway_timeout`, or
-    /// 408 with code `request_timeout` while the handler waits for request
-    /// body bytes the caller has not sent.
+    /// 408 with code `request_timeout` while a tracked request-body read waits.
+    /// Built-in body readers track their reads. Custom readers can use
+    /// [`crate::RequestContext::read_body`] to track each awaited read.
     /// Time a request spends waiting for an in-flight permit is spent from
     /// this same budget, so the handler gets only what admission leaves.
     pub request_timeout: Duration,
@@ -94,12 +95,11 @@ pub fn harden(routes: Router, options: &HardenOptions) -> Router {
     });
 
     let chain = ServiceBuilder::new()
-        .map_request(request_id::strip_invalid)
+        .map_request(request_id::sanitize)
         .layer(SetRequestIdLayer::new(
             request_id::REQUEST_ID_HEADER,
             request_id::MakeRequestUuid,
         ))
-        .layer(PropagateRequestIdLayer::new(request_id::REQUEST_ID_HEADER))
         .layer(SetResponseHeaderLayer::overriding(
             X_CONTENT_TYPE_OPTIONS,
             HeaderValue::from_static("nosniff"),
@@ -107,9 +107,7 @@ pub fn harden(routes: Router, options: &HardenOptions) -> Router {
         // Outside opening enforcement, so every Problem is completed before it is
         // counted and logged.
         .layer(middleware::from_fn_with_state(
-            Observer::new(AccessLogOptions {
-                log_health_probes: options.log_health_probes,
-            }),
+            Observer::new(options.log_health_probes),
             observe::observe,
         ))
         .layer(OtelInResponseLayer)
@@ -163,19 +161,23 @@ async fn limit_body(State(max_bytes): State<usize>, request: Request, next: Next
         && overflowed.load(Ordering::Relaxed)
         && response.extensions().get::<Problem>().is_none()
     {
-        let (parts, body) = body_too_large().into_response().into_parts();
-        let headers = response.headers_mut();
-        for name in [CONTENT_ENCODING, CONTENT_LENGTH, TRAILER, TRANSFER_ENCODING] {
-            headers.remove(name);
-        }
-        for name in ["content-digest", "repr-digest", "digest", "content-md5"] {
-            headers.remove(name);
-        }
-        headers.extend(parts.headers);
-        response.extensions_mut().extend(parts.extensions);
-        *response.body_mut() = body;
+        normalize_overflow_response(&mut response);
     }
     response
+}
+
+fn normalize_overflow_response(response: &mut Response) {
+    let (parts, body) = body_too_large().into_response().into_parts();
+    let headers = response.headers_mut();
+    for name in [CONTENT_ENCODING, CONTENT_LENGTH, TRAILER, TRANSFER_ENCODING] {
+        headers.remove(name);
+    }
+    for name in ["content-digest", "repr-digest", "digest", "content-md5"] {
+        headers.remove(name);
+    }
+    headers.extend(parts.headers);
+    response.extensions_mut().extend(parts.extensions);
+    *response.body_mut() = body;
 }
 
 /// Admit a request once an in-flight permit is free. A request over the bound

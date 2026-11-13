@@ -24,8 +24,7 @@ use crate::{
     provider::ProviderClient,
 };
 
-/// The largest verified provider payload one cache entry retains.
-const MAX_ENTRY_BYTES: usize = 64 * 1024;
+const MAX_RETAINED_PAYLOAD_BYTES: usize = 64 * 1024;
 
 /// Bootstrap input for RFC 7662 token introspection.
 #[derive(Clone, derive_more::Debug)]
@@ -231,7 +230,10 @@ impl IntrospectionVerifier {
         token: &BearerToken<'_>,
         context: &OperationContext,
     ) -> Result<Principal, VerificationError> {
-        self.verify_with_now(token, context, crate::unix_now).await
+        self.verify_with_now(token, context, || {
+            crate::unix_now().map(|now| now.as_secs())
+        })
+        .await
     }
 
     async fn verify_with_now(
@@ -342,10 +344,11 @@ impl Expiry<TokenDigest, VerifiedIntrospection> for Retention {
     }
 }
 
-/// The earlier of the configured TTL and token expiry, without leeway. Zero
-/// means the result is returned to its waiters but not retained.
+/// A fresh result can be delivered to its waiters even when its retention is zero.
 fn retention(principal: &Principal, ttl: Duration, now: SystemTime) -> Duration {
-    if now.duration_since(UNIX_EPOCH).is_err() || principal.payload_len() > MAX_ENTRY_BYTES {
+    if now.duration_since(UNIX_EPOCH).is_err()
+        || principal.payload_len() > MAX_RETAINED_PAYLOAD_BYTES
+    {
         return Duration::ZERO;
     }
     // An expiry beyond what `SystemTime` represents is simply far away.
@@ -387,8 +390,8 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        IntrospectionCacheOptions, IntrospectionOptions, IntrospectionVerifier, MAX_ENTRY_BYTES,
-        retention,
+        IntrospectionCacheOptions, IntrospectionOptions, IntrospectionVerifier,
+        MAX_RETAINED_PAYLOAD_BYTES, retention,
     };
     use crate::{
         EndpointUrl, Failure, IssuerUrl,
@@ -1193,7 +1196,8 @@ mod tests {
         for options in [None, Some(cache_options(1))] {
             let verifier = fixture.verifier(options);
             let before = fixture.calls();
-            let unavailable = || crate::unix_time(UNIX_EPOCH - Duration::from_secs(1));
+            let unavailable =
+                || crate::unix_time(UNIX_EPOCH - Duration::from_secs(1)).map(|now| now.as_secs());
             for warmed in [false, true] {
                 if warmed {
                     verifier
@@ -1265,7 +1269,8 @@ mod tests {
             let mut waiter = Box::pin(verifier.verify_with_now(&token, &context, move || {
                 match *waiter_clock.lock().unwrap() {
                     Some(now) => Ok(now),
-                    None => crate::unix_time(UNIX_EPOCH - Duration::from_secs(1)),
+                    None => crate::unix_time(UNIX_EPOCH - Duration::from_secs(1))
+                        .map(|now| now.as_secs()),
                 }
             }));
             poll_pending(waiter.as_mut()).await;
@@ -1397,8 +1402,8 @@ mod tests {
         .unwrap().principal;
         assert_eq!(retention(&unbounded, ttl, at(100_500)), ttl);
         for (length, expected) in [
-            (MAX_ENTRY_BYTES, Duration::from_millis(30_500)),
-            (MAX_ENTRY_BYTES + 1, Duration::ZERO),
+            (MAX_RETAINED_PAYLOAD_BYTES, Duration::from_millis(30_500)),
+            (MAX_RETAINED_PAYLOAD_BYTES + 1, Duration::ZERO),
         ] {
             let prefix = r#"{"active":true,"iss":"https://issuer.example","aud":"api","exp":131,"sub":"subject","custom":""#;
             let response = format!("{prefix}{}\"}}", "x".repeat(length - prefix.len() - 2));

@@ -3,8 +3,8 @@
 use std::time::Duration;
 
 use infra_postgres::{
-    Cleanup, CleanupError, CleanupPass, MaintenanceFailure, PassEnd, PopulationSample, TxOptions,
-    in_observation_tx, observed, run_scheduled_cleanup,
+    Cleanup, CleanupError, CleanupPass, MaintenanceFailure, PassEnd, PopulationSample, Tx,
+    TxOptions, in_observation_tx, observed, run_scheduled_cleanup,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -45,46 +45,42 @@ impl Receiver {
     /// cause. Earlier batches stay committed. A timeout leaves the batch's
     /// commit outcome unconfirmed.
     pub async fn remove_expired(&self) -> Result<u64, CleanupError> {
-        self.remove_expired_pass(&CancellationToken::new())
+        self.remove_expired_pass(None)
             .await
             .map(|(removed, _)| removed)
     }
 
     async fn remove_expired_pass(
         &self,
-        cancel: &CancellationToken,
+        cancel: Option<&CancellationToken>,
     ) -> Result<(u64, PassEnd), CleanupError> {
-        let mut pass = CleanupPass::start(Cleanup::WebhookReceipts);
-        let mut removed = 0;
-        loop {
-            if cancel.is_cancelled() {
-                return Ok((removed, PassEnd::Cancelled));
-            }
-            let batch = pass
-                .run_batch(&self.pool, TxOptions::default(), async |tx| {
-                    let deleted = observed(
-                        "delete expired webhook receipts",
-                        sqlx::query!(
-                            "DELETE FROM webhook_receipts WHERE (endpoint_id, message_id) IN \
+        CleanupPass::start(Cleanup::WebhookReceipts)
+            .run_until_short_batch(
+                &self.pool,
+                TxOptions::default(),
+                cancel,
+                CLEANUP_BATCH_ROWS,
+                CLEANUP_REMOVED_METRIC,
+                Self::delete_expired_batch,
+            )
+            .await
+    }
+
+    async fn delete_expired_batch(tx: &mut Tx<'_>) -> Result<u64, sqlx::Error> {
+        let deleted = observed(
+            "delete expired webhook receipts",
+            sqlx::query!(
+                "DELETE FROM webhook_receipts WHERE (endpoint_id, message_id) IN \
                          (SELECT endpoint_id, message_id FROM webhook_receipts \
                          WHERE received_at < statement_timestamp() - $1::bigint * interval '1 second' \
                          ORDER BY received_at LIMIT $2 FOR UPDATE SKIP LOCKED)",
-                            RETENTION_SECONDS,
-                            i64::from(CLEANUP_BATCH_ROWS),
-                        )
-                        .execute(tx),
-                    )
-                    .await?;
-                    Ok(deleted.rows_affected())
-                })
-                .await?;
-            metrics::counter!(CLEANUP_REMOVED_METRIC).increment(batch);
-            removed += batch;
-            if batch < u64::from(CLEANUP_BATCH_ROWS) {
-                pass.completed();
-                return Ok((removed, PassEnd::Completed));
-            }
-        }
+                RETENTION_SECONDS,
+                i64::from(CLEANUP_BATCH_ROWS),
+            )
+            .execute(tx),
+        )
+        .await?;
+        Ok(deleted.rows_affected())
     }
 
     /// Run periodic cleanup and independent population observation in the same
@@ -105,7 +101,11 @@ impl Receiver {
             Cleanup::WebhookReceipts,
             CLEANUP_RUNS_METRIC,
             &cancel,
-            || async { self.remove_expired_pass(&cancel).await.map(|(_, end)| end) },
+            || async {
+                self.remove_expired_pass(Some(&cancel))
+                    .await
+                    .map(|(_, end)| end)
+            },
             || self.sample_population(),
         )
         .await;

@@ -182,7 +182,7 @@ fn resident_delivery_memory_is_bounded(
         ..MessagingConfig::default()
     };
     match config.validate("production") {
-        Ok(()) => assert!(accepted),
+        Ok(_) => assert!(accepted),
         Err(error) => {
             assert!(!accepted);
             assert_eq!(error.key, "messaging.consumer_concurrency");

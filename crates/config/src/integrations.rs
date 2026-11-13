@@ -14,6 +14,7 @@ use url::Url;
 use crate::ValidationError;
 // template:begin grpc:config-integration-grpc-import
 use crate::GrpcSecurity;
+use crate::validate::missing;
 // template:end grpc:config-integration-grpc-import
 
 /// One named integration's optional client input.
@@ -116,6 +117,8 @@ impl OAuthConfig {
     /// One retained token per user active within a token lifetime on one
     /// replica.
     const DEFAULT_EXCHANGE_CACHE_CAPACITY: u32 = 1024;
+    // Keep in sync with direct Options admission in
+    // crates/infra-oauth2-client-credentials/src/options.rs.
     const EXCHANGE_CACHE_CAPACITY_RANGE: std::ops::RangeInclusive<u32> = 1..=65_536;
     /// Matches introspection's default while bounding distinct token attempts.
     const DEFAULT_PROVIDER_CONCURRENCY: std::num::NonZeroU32 =
@@ -130,26 +133,13 @@ const fn default_provider_concurrency() -> std::num::NonZeroU32 {
     OAuthConfig::DEFAULT_PROVIDER_CONCURRENCY
 }
 
-// Buffer the scalar kind before decoding: config-rs otherwise coerces floats
-// and booleans to integers. Environment values arrive as strings.
 fn deserialize_provider_concurrency<'de, D>(
     deserializer: D,
 ) -> Result<std::num::NonZeroU32, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum Input {
-        Typed(std::num::NonZeroU32),
-        Text(String),
-    }
-
-    let invalid = || crate::de::value_free("must be an integer from 1 to 4294967295");
-    match Input::deserialize(deserializer).map_err(|_| invalid())? {
-        Input::Typed(value) => Ok(value),
-        Input::Text(value) => value.parse().map_err(|_| invalid()),
-    }
+    crate::de::deserialize_scalar(deserializer, "must be an integer from 1 to 4294967295")
 }
 
 /// Client-assertion signing algorithm, decoded from its RFC 7518 identifier.
@@ -264,14 +254,21 @@ impl GrpcClientConfig {
                     }
                 }
             }
-            GrpcSecurity::Tls => {
-                if self.certificate.is_some() != self.private_key.is_some() {
-                    return Err(ValidationError::new(
-                        format!("{prefix}.certificate/{prefix}.private_key"),
-                        "must be configured together for mTLS",
+            GrpcSecurity::Tls => match (&self.certificate, &self.private_key) {
+                (Some(_), None) => {
+                    return Err(missing(
+                        &format!("{prefix}.private_key"),
+                        &format!("{prefix}.certificate is set"),
                     ));
                 }
-            }
+                (None, Some(_)) => {
+                    return Err(missing(
+                        &format!("{prefix}.certificate"),
+                        &format!("{prefix}.private_key is set"),
+                    ));
+                }
+                (Some(_), Some(_)) | (None, None) => {}
+            },
         }
         Ok(())
     }

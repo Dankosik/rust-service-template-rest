@@ -259,11 +259,10 @@ pub async fn acquire(
     .await
 }
 
-/// [`acquire`] for a caller whose own deadline bounds the work: the wait lasts
-/// until `deadline`, not [`ACQUIRE_TIMEOUT`]. A caller
-/// that waits is served once a connection frees, and cutting its wait short
-/// refuses work the pool could still do. Pass the deadline of the request or
-/// job, never an invented one; without a deadline use [`acquire`].
+/// [`acquire`] for a caller whose own deadline bounds the work. Pass the
+/// request or job's `deadline` so a connection that frees in time can still
+/// serve it. For a single wait bounded by the pool's configured timeout, use
+/// [`acquire`].
 ///
 /// The pool bounds each native wait by its fixed acquire timeout, so this waits
 /// again while `deadline` allows. Each wait queues behind those that arrived

@@ -1,11 +1,11 @@
 //! The inbound bearer boundary shared by every transport.
 
-use operation_context::OperationContext;
+use operation_context::{OperationContext, Stopped};
 
 use crate::{Failure, Principal, Verifier, parse_bearer};
 
 /// Bearer-authentication outcomes at an inbound transport boundary.
-pub const AUTHN_VERIFICATIONS_METRIC: &str = "authn_verifications_total";
+pub(crate) const AUTHN_VERIFICATIONS_METRIC: &str = "authn_verifications_total";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Transport {
@@ -54,6 +54,7 @@ impl TransportSuccessCounters {
 enum Outcome {
     Success,
     Failure(Failure),
+    TimedOut,
     Cancelled,
 }
 
@@ -65,6 +66,7 @@ impl Outcome {
             Self::Failure(Failure::Malformed) => ("failure", "malformed"),
             Self::Failure(Failure::Invalid) => ("failure", "invalid"),
             Self::Failure(Failure::Unavailable) => ("failure", "unavailable"),
+            Self::TimedOut => ("timeout", "timeout"),
             Self::Cancelled => ("cancelled", "cancelled"),
         }
     }
@@ -103,12 +105,15 @@ impl Verifier {
     }
 
     /// Parses and verifies under the caller's original deadline and cancellation.
-    /// A stopped caller is counted as cancelled, never as invalid credentials.
+    /// A stopped caller is never counted as invalid credentials.
     ///
-    /// `authorization` is every `Authorization` value of the request; see
-    /// [`parse_bearer`] for how a second value or another scheme is classified.
-    /// Records exactly one [`AUTHN_VERIFICATIONS_METRIC`] outcome labelled with
-    /// `transport`, including `cancelled` when the caller drops the future.
+    /// Pass every `Authorization` value of the request. A second value is
+    /// [`Failure::Malformed`]. No value or a single value with a valid scheme
+    /// other than Bearer is [`Failure::Missing`].
+    /// Records exactly one `authn_verifications_total` outcome labelled with
+    /// `transport`: `timeout` when the context's deadline expires, `cancelled`
+    /// when the context is cancelled or the caller drops the future, so an
+    /// operator can tell a slow provider from a departed client.
     ///
     /// # Errors
     /// Returns [`Failure::Unavailable`] when the context stops; otherwise returns
@@ -123,12 +128,16 @@ impl Verifier {
             transport,
             recorded: false,
         };
-        context.check().map_err(|_| Failure::Unavailable)?;
+        if let Err(stopped) = context.check() {
+            return Err(outcome.stop(stopped));
+        }
         let result = match parse_bearer(authorization) {
             Ok(token) => self.verify_with_context(&token, context).await,
             Err(failure) => Err(failure),
         };
-        context.check().map_err(|_| Failure::Unavailable)?;
+        if let Err(stopped) = context.check() {
+            return Err(outcome.stop(stopped));
+        }
         outcome.finish(&self.counters.transport, &result);
         result
     }
@@ -146,6 +155,16 @@ impl OutcomeGuard {
             Err(failure) => counter(self.transport, Outcome::Failure(*failure)).increment(1),
         }
         self.recorded = true;
+    }
+
+    fn stop(mut self, stopped: Stopped) -> Failure {
+        let outcome = match stopped {
+            Stopped::Deadline => Outcome::TimedOut,
+            Stopped::Cancelled => Outcome::Cancelled,
+        };
+        counter(self.transport, outcome).increment(1);
+        self.recorded = true;
+        Failure::Unavailable
     }
 }
 

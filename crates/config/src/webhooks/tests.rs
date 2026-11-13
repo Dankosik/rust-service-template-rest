@@ -64,12 +64,6 @@ fn rejects_empty_signing_secrets() {
 
     let err = config.validate().unwrap_err();
     assert_eq!(err.key, "webhooks.endpoints.partner.secret");
-
-    let endpoint = config.endpoints.get_mut("partner").unwrap();
-    endpoint.secret = SecretString::from("whsec_current".to_owned());
-    endpoint.previous_secret = Some(SecretString::from("  ".to_owned()));
-    let err = config.validate().unwrap_err();
-    assert_eq!(err.key, "webhooks.endpoints.partner.previous_secret");
 }
 
 #[test]
@@ -205,41 +199,66 @@ fn webhooks_hyphenated_endpoint_id_meets_its_environment_secret() {
 }
 
 #[test]
-fn webhooks_blank_environment_secrets_are_refused() {
-    let base = [
-        (
-            "APP__WEBHOOKS__ENDPOINTS__PARTNER__URL",
-            "https://partner.example/events",
-        ),
-        (
+fn webhooks_blank_environment_secret_is_refused() {
+    let err = load_from(
+        &LoadOptions::default(),
+        BUILD,
+        env(&[
+            (
+                "APP__WEBHOOKS__ENDPOINTS__PARTNER__URL",
+                "https://partner.example/events",
+            ),
+            ("APP__WEBHOOKS__ENDPOINTS__PARTNER__SECRET", ""),
+        ]),
+    )
+    .unwrap_err();
+    assert_matches!(&err, Error::Validate(validation) if validation.key == "webhooks.endpoints.partner.secret", "{err}");
+    assert_eq!(
+        err.to_string(),
+        "configuration is invalid: webhooks.endpoints.partner.secret: cannot be empty"
+    );
+}
+
+#[test]
+fn webhooks_blank_previous_secret_ends_the_rotation() {
+    let cfg = load_from(
+        &LoadOptions::default(),
+        BUILD,
+        env(&[
+            (
+                "APP__WEBHOOKS__ENDPOINTS__PARTNER__URL",
+                "https://partner.example/events",
+            ),
+            (
+                "APP__WEBHOOKS__ENDPOINTS__PARTNER__SECRET",
+                "fixture-current-secret",
+            ),
+            ("APP__WEBHOOKS__ENDPOINTS__PARTNER__PREVIOUS_SECRET", "  "),
+        ]),
+    )
+    .unwrap();
+    assert!(cfg.webhooks.endpoints["partner"].previous_secret.is_none());
+}
+
+#[test]
+fn webhooks_file_placeholders_document_environment_only_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let documented = write(
+        &dir,
+        "documented.toml",
+        "[webhooks.endpoints.partner]\nurl = \"https://partner.example/events\"\nsecret = \"\"\nprevious_secret = \"\"\n",
+    );
+    let cfg = load_from(
+        &LoadOptions {
+            config: Some(documented),
+            ..LoadOptions::default()
+        },
+        BUILD,
+        env(&[(
             "APP__WEBHOOKS__ENDPOINTS__PARTNER__SECRET",
             "fixture-current-secret",
-        ),
-    ];
-    for (name, value, expected_key) in [
-        (
-            "APP__WEBHOOKS__ENDPOINTS__PARTNER__SECRET",
-            "",
-            "webhooks.endpoints.partner.secret",
-        ),
-        (
-            "APP__WEBHOOKS__ENDPOINTS__PARTNER__PREVIOUS_SECRET",
-            "  ",
-            "webhooks.endpoints.partner.previous_secret",
-        ),
-    ] {
-        let mut variables = base.to_vec();
-        if name.ends_with("__SECRET") {
-            variables[1] = (name, value);
-        } else {
-            variables.push((name, value));
-        }
-        let err = load_from(&LoadOptions::default(), BUILD, env(&variables)).unwrap_err();
-        assert_matches!(&err, Error::Validate(validation) if validation.key == expected_key, "{err}");
-        assert_eq!(
-            err.to_string(),
-            format!("configuration is invalid: {expected_key}: cannot be empty")
-        );
-        assert!(!format!("{err:?}").contains("fixture-current-secret"));
-    }
+        )]),
+    )
+    .unwrap();
+    assert!(cfg.webhooks.endpoints["partner"].previous_secret.is_none());
 }

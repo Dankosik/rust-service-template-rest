@@ -26,6 +26,13 @@ const MAX_REFRESH_SPREAD: Duration = Duration::from_secs(REFRESH_INTERVAL.as_sec
 /// request-triggered fetch per cooldown. A miss during cooldown can join a
 /// pending fetch. If none is pending, another miss after cooldown or the next
 /// periodic fetch can pick up the rotation.
+///
+/// Cost: a cooldown miss cannot tell a forged `kid` from a freshly rotated one,
+/// so for up to this long after a ticket is issued or startup keys are installed,
+/// a valid token signed with a new key gets a non-retryable 401 `invalid_token`. Answering
+/// 503 instead would let any caller turn forged `kid` values into unavailability
+/// signals and client retries; the rotation's own later traffic triggers the
+/// fetch once the cooldown ends.
 const REFRESH_COOLDOWN: Duration = Duration::from_secs(30);
 const REFRESH_METRIC: &str = "authn_jwks_refreshes_total";
 const ACQUISITION_METRIC: &str = "authn_jwks_last_successful_acquisition_timestamp_seconds";
@@ -35,10 +42,10 @@ pub(crate) enum SignatureRefresh {
     /// A newer set than the one the token was checked against is installed:
     /// by a fetch that finished after the request, or by one that finished
     /// between that check and the request.
-    #[debug("Refreshed(..)")]
-    Refreshed(Arc<KeySet>),
+    #[debug("NewerSet(..)")]
+    NewerSet(Arc<KeySet>),
     /// The last acquisition succeeded and left the caller's checked set installed.
-    /// Another fetch is still blocked by the cooldown measured from refresh start.
+    /// Another fetch is still blocked by the cooldown.
     NoNewerSet,
     Unavailable,
 }
@@ -46,32 +53,30 @@ pub(crate) enum SignatureRefresh {
 #[derive(Clone)]
 struct State {
     keys: Arc<KeySet>,
-    /// Fetches asked for so far; each is a ticket that waiters compare against.
-    requested: u64,
-    /// The latest finished ticket, successful or not.
-    finished: u64,
+    requested_ticket: u64,
+    finished_ticket: u64,
     /// The latest ticket whose fetch installed a set; the startup set is 0. A
     /// waiter compares it with its own ticket because a later failure may
     /// finish before the waiter is polled.
-    succeeded: u64,
-    last_started: Instant,
+    last_successful_ticket: u64,
+    cooldown_started_at: Instant,
     stopped: bool,
 }
 
 impl State {
     /// The ticket of the fetch asked for but not yet finished.
     fn pending(&self) -> Option<u64> {
-        (self.requested > self.finished).then_some(self.requested)
+        (self.requested_ticket > self.finished_ticket).then_some(self.requested_ticket)
     }
 
     fn last_fetch_failed(&self) -> bool {
-        self.succeeded != self.finished
+        self.last_successful_ticket != self.finished_ticket
     }
 
-    fn start_fetch(&mut self) -> u64 {
-        self.requested += 1;
-        self.last_started = Instant::now();
-        self.requested
+    fn request_fetch(&mut self) -> u64 {
+        self.requested_ticket += 1;
+        self.cooldown_started_at = Instant::now();
+        self.requested_ticket
     }
 }
 
@@ -79,7 +84,7 @@ impl State {
 enum Admission {
     Answer(SignatureRefresh),
     Join(u64),
-    Start(u64),
+    Request(u64),
 }
 
 pub(crate) struct KeyStore {
@@ -94,10 +99,10 @@ impl KeyStore {
         metrics::describe_counter!(REFRESH_METRIC, "JWKS refresh outcomes by closed reason");
         let state = watch::Sender::new(State {
             keys,
-            requested: 0,
-            finished: 0,
-            succeeded: 0,
-            last_started: Instant::now(),
+            requested_ticket: 0,
+            finished_ticket: 0,
+            last_successful_ticket: 0,
+            cooldown_started_at: Instant::now(),
             stopped: false,
         });
         metrics::describe_gauge!(
@@ -124,36 +129,36 @@ impl KeyStore {
     }
 
     /// Returns a set installed since `checked`, otherwise joins the fetch in
-    /// flight or starts one outside the cooldown.
+    /// flight or requests one outside the cooldown.
     pub(crate) async fn refresh_for_signature_miss(
         &self,
         checked: &Arc<KeySet>,
     ) -> SignatureRefresh {
         let mut admission = Admission::Answer(SignatureRefresh::Unavailable);
         // Inspect the cooldown and claim or join a ticket under the same watch
-        // write lock; only a started fetch modifies the state.
+        // write lock; only issuing a ticket modifies the state.
         self.state.send_if_modified(|state| {
             admission = if state.stopped {
                 Admission::Answer(SignatureRefresh::Unavailable)
             } else if !Arc::ptr_eq(&state.keys, checked) {
-                Admission::Answer(SignatureRefresh::Refreshed(state.keys.clone()))
+                Admission::Answer(SignatureRefresh::NewerSet(state.keys.clone()))
             } else if let Some(ticket) = state.pending() {
                 Admission::Join(ticket)
-            } else if state.last_started.elapsed() < REFRESH_COOLDOWN {
+            } else if state.cooldown_started_at.elapsed() < REFRESH_COOLDOWN {
                 Admission::Answer(if state.last_fetch_failed() {
                     SignatureRefresh::Unavailable
                 } else {
                     SignatureRefresh::NoNewerSet
                 })
             } else {
-                Admission::Start(state.start_fetch())
+                Admission::Request(state.request_fetch())
             };
-            matches!(admission, Admission::Start(_))
+            matches!(admission, Admission::Request(_))
         });
         let ticket = match admission {
             Admission::Answer(answer) => return answer,
             Admission::Join(ticket) => ticket,
-            Admission::Start(ticket) => {
+            Admission::Request(ticket) => {
                 self.wake.notify_one();
                 ticket
             }
@@ -162,11 +167,11 @@ impl KeyStore {
         // before this subscription. Dropping this waiter leaves the worker running.
         let mut state = self.state.subscribe();
         match state
-            .wait_for(|state| state.stopped || state.finished >= ticket)
+            .wait_for(|state| state.stopped || state.finished_ticket >= ticket)
             .await
         {
-            Ok(state) if !state.stopped && state.succeeded >= ticket => {
-                SignatureRefresh::Refreshed(state.keys.clone())
+            Ok(state) if !state.stopped && state.last_successful_ticket >= ticket => {
+                SignatureRefresh::NewerSet(state.keys.clone())
             }
             _ => SignatureRefresh::Unavailable,
         }
@@ -177,7 +182,7 @@ impl KeyStore {
             if state.pending().is_some() {
                 return false;
             }
-            state.start_fetch();
+            state.request_fetch();
             true
         });
     }
@@ -203,11 +208,11 @@ impl KeyStore {
         self.state.send_modify(|state| {
             if let Ok(keys) = replacement {
                 state.keys = keys;
-                state.succeeded = ticket;
+                state.last_successful_ticket = ticket;
                 self.last_acquisition
                     .set(acquisition_timestamp(SystemTime::now()));
             }
-            state.finished = ticket;
+            state.finished_ticket = ticket;
         });
         metrics::counter!(REFRESH_METRIC, "result" => result, "reason" => reason).increment(1);
     }
@@ -219,7 +224,7 @@ impl KeyStore {
     #[cfg(test)]
     pub(crate) fn permit_unknown_refresh_for_test(&self) {
         self.state.send_modify(|state| {
-            state.last_started = Instant::now() - REFRESH_COOLDOWN - Duration::from_secs(1);
+            state.cooldown_started_at = Instant::now() - REFRESH_COOLDOWN - Duration::from_secs(1);
         });
     }
 }
@@ -414,7 +419,7 @@ mod tests {
         let store = Arc::clone(store);
         tokio::spawn(async move {
             match store.refresh_for_signature_miss(&store.current()).await {
-                SignatureRefresh::Refreshed(keys) => Some(keys.has_kid("new")),
+                SignatureRefresh::NewerSet(keys) => Some(keys.has_kid("new")),
                 SignatureRefresh::NoNewerSet => None,
                 SignatureRefresh::Unavailable => Some(false),
             }
@@ -475,9 +480,9 @@ mod tests {
             () = worker => panic!("refresh worker stopped unexpectedly"),
             result = tokio::time::timeout(
                 Duration::from_secs(1),
-                state.wait_for(|state| state.finished >= ticket),
+                state.wait_for(|state| state.finished_ticket >= ticket),
             ) => {
-                assert_eq!(result.unwrap().unwrap().finished, ticket);
+                assert_eq!(result.unwrap().unwrap().finished_ticket, ticket);
             }
         }
     }
@@ -492,7 +497,7 @@ mod tests {
             let started = tokio::time::Instant::now();
             tokio::time::advance(Duration::from_secs(809)).await;
             poll_waiting_worker(worker.as_mut()).await;
-            assert_eq!(store.state.borrow().requested, period * 2);
+            assert_eq!(store.state.borrow().requested_ticket, period * 2);
 
             let checked = store.current();
             let mut unknown = std::pin::pin!(store.refresh_for_signature_miss(&checked));
@@ -522,16 +527,16 @@ mod tests {
         tokio::time::advance(Duration::from_secs(4_000)).await;
         finish_worker_fetch(worker.as_mut(), &store, 1).await;
         poll_waiting_worker(worker.as_mut()).await;
-        assert_eq!(store.state.borrow().requested, 1);
+        assert_eq!(store.state.borrow().requested_ticket, 1);
         tokio::time::advance(Duration::from_secs(809)).await;
         poll_waiting_worker(worker.as_mut()).await;
-        assert_eq!(store.state.borrow().requested, 1);
+        assert_eq!(store.state.borrow().requested_ticket, 1);
         tokio::time::advance(Duration::from_secs(92)).await;
         finish_worker_fetch(worker.as_mut(), &store, 2).await;
         tokio::time::advance(Duration::from_secs(1_000)).await;
         cancel.cancel();
         worker.await;
-        assert_eq!(store.state.borrow().requested, 2);
+        assert_eq!(store.state.borrow().requested_ticket, 2);
         assert!(store.state.borrow().stopped);
     }
 
@@ -610,7 +615,7 @@ mod tests {
         store.finish(1, Ok(key_set("new")));
         assert_eq!(rotation.await.unwrap(), Some(true));
         // The token missed in the old set while that fetch was finishing.
-        let SignatureRefresh::Refreshed(keys) = store.refresh_for_signature_miss(&checked).await
+        let SignatureRefresh::NewerSet(keys) = store.refresh_for_signature_miss(&checked).await
         else {
             panic!("the newer installed set must be offered");
         };
@@ -630,8 +635,8 @@ mod tests {
         );
         let after_failure = store.refresh_for_signature_miss(&checked).await;
 
-        assert_matches!(during_fetch, Some(SignatureRefresh::Refreshed(keys)) if keys.has_kid("new"));
-        assert_matches!(after_failure, SignatureRefresh::Refreshed(keys) if keys.has_kid("new"));
+        assert_matches!(during_fetch, Some(SignatureRefresh::NewerSet(keys)) if keys.has_kid("new"));
+        assert_matches!(after_failure, SignatureRefresh::NewerSet(keys) if keys.has_kid("new"));
     }
 
     #[tokio::test]

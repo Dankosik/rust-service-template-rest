@@ -92,14 +92,8 @@ impl NativeConnection {
         })
     }
 
-    /// Drains and closes the client, bounded by `deadline`, `cancel` and one
-    /// [`BROKER_OPERATION_BUDGET`], and observes native and final-event
-    /// completion.
-    ///
-    /// A client already closed, with its final event observed, returns
-    /// [`CloseOutcome::Complete`]. Otherwise an already-cancelled `cancel`, or
-    /// a deadline that has passed, skips the drain, force-closes the native
-    /// client, and returns [`CloseOutcome::TimedOut`].
+    // Completion at entry takes precedence over cancellation and deadline.
+    // When the wait is interrupted, the native client owns the requested termination.
     pub(crate) async fn close(
         &self,
         deadline: Instant,
@@ -128,20 +122,24 @@ impl NativeConnection {
             }
         };
         let outcome = if cancel.is_cancelled() || Instant::now() >= deadline {
-            CloseOutcome::TimedOut
+            CloseOutcome::WaitInterrupted
         } else {
             tokio::select! {
                 biased;
-                () = cancel.cancelled() => CloseOutcome::TimedOut,
-                () = tokio::time::sleep_until(deadline) => CloseOutcome::TimedOut,
+                () = cancel.cancelled() => CloseOutcome::WaitInterrupted,
+                () = tokio::time::sleep_until(deadline) => CloseOutcome::WaitInterrupted,
                 result = drain => result,
             }
         };
         if outcome != CloseOutcome::Complete {
             client.force_close();
-            if Instant::now() < deadline {
+            if outcome == CloseOutcome::UnobservedClose && Instant::now() < deadline {
                 // Forced closure does not gain a fresh wait budget.
-                let _ = tokio::time::timeout_at(deadline, client.wait_closed()).await;
+                tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => {}
+                    _ = tokio::time::timeout_at(deadline, client.wait_closed()) => {}
+                }
             }
         }
         outcome

@@ -53,6 +53,7 @@ async fn the_configured_capacity_bounds_how_many_subjects_keep_their_exchanged_t
         ..fixture.options(&[], None)
     });
     let client = credentials.http(fixture.resource_client());
+    let cache = &credentials.0.inner.exchange.cache;
     for subject in ["alice", "bob"] {
         client
             .execute(
@@ -64,8 +65,8 @@ async fn the_configured_capacity_bounds_how_many_subjects_keep_their_exchanged_t
     }
     assert_eq!(fixture.token_requests().len(), 2);
     // Moka applies its bound when it runs its pending maintenance.
-    credentials.0.inner.exchanged.run_pending_tasks().await;
-    assert!(credentials.0.inner.exchanged.entry_count() <= 1);
+    cache.run_pending_tasks().await;
+    assert!(cache.entry_count() <= 1);
     for subject in ["alice", "bob"] {
         client
             .execute(
@@ -74,11 +75,11 @@ async fn the_configured_capacity_bounds_how_many_subjects_keep_their_exchanged_t
             )
             .await
             .unwrap();
-        credentials.0.inner.exchanged.run_pending_tasks().await;
+        cache.run_pending_tasks().await;
     }
     // One subject at most kept its token, so the other exchanged again.
     assert!(fixture.token_requests().len() > 2);
-    assert!(credentials.0.inner.exchanged.entry_count() <= 1);
+    assert!(cache.entry_count() <= 1);
     fixture.finish().await;
 }
 
@@ -92,6 +93,7 @@ async fn a_capacity_that_does_not_divide_the_payload_target_keeps_every_configur
         ..fixture.options(&[], None)
     });
     let client = credentials.http(fixture.resource_client());
+    let cache = &credentials.0.inner.exchange.cache;
     for _ in 0..2 {
         for subject in 0..SUBJECTS {
             client
@@ -102,14 +104,11 @@ async fn a_capacity_that_does_not_divide_the_payload_target_keeps_every_configur
                 .await
                 .unwrap();
             // Moka applies its bound when it runs its pending maintenance.
-            credentials.0.inner.exchanged.run_pending_tasks().await;
+            cache.run_pending_tasks().await;
         }
     }
     assert_eq!(fixture.token_requests().len(), SUBJECTS as usize);
-    assert_eq!(
-        credentials.0.inner.exchanged.entry_count(),
-        u64::from(SUBJECTS)
-    );
+    assert_eq!(cache.entry_count(), u64::from(SUBJECTS));
     fixture.finish().await;
 }
 
@@ -133,11 +132,11 @@ async fn exchanged_cache_evicts_large_payloads_before_the_entry_target() {
             .await
             .unwrap();
     }
-    let cache = &credentials.0.inner.exchanged;
+    let cache = &credentials.0.inner.exchange.cache;
     cache.run_pending_tasks().await;
     let payload = cache
         .iter()
-        .map(|(_, result)| result.unwrap().header.as_bytes().len())
+        .map(|(_, token)| token.header.as_bytes().len())
         .sum::<usize>();
     assert!(
         cache.entry_count() < 33,

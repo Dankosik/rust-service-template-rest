@@ -91,12 +91,40 @@ pub(crate) async fn run_retention(shared: Arc<Shared>, cancel: CancellationToken
             }
             match remove_expired_with_cancel(&shared, Some(&cancel)).await {
                 Ok((_, PassEnd::Cancelled)) => return,
-                Ok(_) => observe_recovery(&shared, Operation::Retention),
+                Ok((_, PassEnd::Finished)) => observe_recovery(&shared, Operation::Retention),
                 Err(error) => observe_failure(&shared, Operation::Retention, &error),
             }
         }
     }))
     .await;
+}
+
+async fn delete_batch(shared: &Shared) -> Result<u64, OperationError> {
+    let _turn = shared.statement_turn.lock().await;
+    backstop(async {
+        in_tx(&shared.pool, async |tx| -> Result<u64, OperationError> {
+            set_statement_timeout(tx, RETENTION_STATEMENT_TIMEOUT).await?;
+            // The state stays a literal: a bound state cannot prove the partial
+            // `background_jobs_terminal` predicate, so a generic plan would
+            // scan the table.
+            let delete = sqlx::query!(
+                "DELETE FROM background_jobs \
+                 WHERE id = ANY (ARRAY( \
+                     SELECT id FROM background_jobs \
+                     WHERE state = 'completed' AND finished_at <= statement_timestamp() - $1::interval \
+                     ORDER BY finished_at \
+                     LIMIT $2 \
+                     FOR UPDATE SKIP LOCKED))",
+                RETAIN_COMPLETED_FOR as _,
+                i64::from(RETENTION_BATCH_ROWS),
+            );
+            Ok(observed("delete finished jobs", delete.execute(&mut *tx))
+                .await?
+                .rows_affected())
+        })
+        .await
+    })
+    .await
 }
 
 /// Independently poll registered-kind and global maintenance samples under
@@ -121,7 +149,10 @@ async fn run_kind_sampling(shared: &Shared, cancel: &CancellationToken) {
         }
         match sample_once(shared).await {
             Ok(Some(sample)) => {
-                if shared.publish_if_current(&sample.revision, || publish_sample(&sample)) {
+                if shared
+                    .peers
+                    .publish_if_current(&sample.revision, || publish_sample(&sample))
+                {
                     observe_recovery(shared, Operation::Sample);
                 }
             }
@@ -246,44 +277,16 @@ pub(crate) fn init_metrics(kinds: &[&'static str]) {
 }
 
 pub(crate) fn reset_kind_metrics(kind: &'static str) {
-    publish_kind(kind, KindDepths::default());
+    publish_kind(kind, KindQueueMetrics::default());
 }
 
 pub(crate) fn invalidate_sample() {
     metrics::gauge!(OBSERVATION_TIMESTAMP_METRIC).set(0.0);
 }
 
-async fn delete_batch(shared: &Shared) -> Result<u64, OperationError> {
-    let _turn = shared.statement_turn.lock().await;
-    backstop(async {
-        in_tx(&shared.pool, async |tx| -> Result<u64, OperationError> {
-            set_statement_timeout(tx, RETENTION_STATEMENT_TIMEOUT).await?;
-            // The state stays a literal: a bound state cannot prove the partial
-            // `background_jobs_terminal` predicate, so a generic plan would
-            // scan the table.
-            let delete = sqlx::query!(
-                "DELETE FROM background_jobs \
-                 WHERE id = ANY (ARRAY( \
-                     SELECT id FROM background_jobs \
-                     WHERE state = 'completed' AND finished_at <= statement_timestamp() - $1::interval \
-                     ORDER BY finished_at \
-                     LIMIT $2 \
-                     FOR UPDATE SKIP LOCKED))",
-                RETAIN_COMPLETED_FOR as _,
-                i64::from(RETENTION_BATCH_ROWS),
-            );
-            Ok(observed("delete finished jobs", delete.execute(&mut *tx))
-                .await?
-                .rows_affected())
-        })
-        .await
-    })
-    .await
-}
-
 async fn sample_once(shared: &Shared) -> Result<Option<Sample>, OperationError> {
     let _turn = shared.statement_turn.lock().await;
-    let (kinds, revision) = shared.sampling_kinds();
+    let (kinds, revision) = shared.peers.sampling_kinds();
     if kinds.is_empty() {
         return Ok(None);
     }
@@ -386,8 +389,8 @@ struct SampleRow {
 }
 
 impl SampleRow {
-    const fn depths(&self) -> KindDepths {
-        KindDepths {
+    const fn queue_metrics(&self) -> KindQueueMetrics {
+        KindQueueMetrics {
             available: self.available,
             scheduled: self.scheduled,
             running: self.running,
@@ -397,9 +400,8 @@ impl SampleRow {
     }
 }
 
-/// One kind's sampled queue depths, as its gauges publish them.
 #[derive(Clone, Copy, Default)]
-struct KindDepths {
+struct KindQueueMetrics {
     available: i64,
     scheduled: i64,
     running: i64,
@@ -428,24 +430,25 @@ fn decode_sample(rows: Vec<SampleRow>, revision: Arc<()>) -> Result<Sample, Oper
 
 fn publish_sample(sample: &Sample) {
     for row in &sample.rows {
-        publish_kind(&row.kind, row.depths());
+        publish_kind(&row.kind, row.queue_metrics());
     }
     metrics::gauge!(OBSERVATION_TIMESTAMP_METRIC).set(sample.observed_at);
 }
 
 /// Every per-kind series a sample sets, the one list registration zeroes too.
-fn publish_kind(kind: &str, depths: KindDepths) {
+fn publish_kind(kind: &str, queue_metrics: KindQueueMetrics) {
     for (state, count) in [
-        ("available", depths.available),
-        ("scheduled", depths.scheduled),
-        ("running", depths.running),
+        ("available", queue_metrics.available),
+        ("scheduled", queue_metrics.scheduled),
+        ("running", queue_metrics.running),
     ] {
         metrics::gauge!(LIVE_JOBS_METRIC, "kind" => kind.to_owned(), "state" => state)
             .set(gauge_count(count));
     }
-    metrics::gauge!(FAILED_JOBS_METRIC, "kind" => kind.to_owned()).set(gauge_count(depths.failed));
+    metrics::gauge!(FAILED_JOBS_METRIC, "kind" => kind.to_owned())
+        .set(gauge_count(queue_metrics.failed));
     metrics::gauge!(OLDEST_AVAILABLE_AGE_METRIC, "kind" => kind.to_owned())
-        .set(depths.oldest_available_seconds);
+        .set(queue_metrics.oldest_available_seconds);
 }
 
 #[expect(

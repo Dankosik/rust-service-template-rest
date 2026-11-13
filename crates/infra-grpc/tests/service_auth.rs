@@ -543,19 +543,27 @@ fn caller_rules_name_registered_methods_once_with_valid_callers() {
             "{path}"
         );
     }
-    for callers in [&["Orders"][..], &["orders", "orders"], &["a b"]] {
+    let unary = format!("{ECHO}/Unary");
+    for callers in [&["Orders"], &["a b"]] {
         assert_eq!(
-            services.allow_callers(&format!("{ECHO}/Unary"), callers),
-            Err(Error::InvalidCallerRule(format!("{ECHO}/Unary"))),
+            services.allow_callers(&unary, callers),
+            Err(Error::InvalidCallerRule {
+                path: unary.clone(),
+                source: infra_serviceauth::InvalidServiceName,
+            }),
             "{callers:?}"
         );
     }
+    assert_eq!(
+        services.allow_callers(&unary, &["orders", "orders"]),
+        Err(Error::DuplicateCallerName(unary.clone()))
+    );
     services
-        .allow_callers(&format!("{ECHO}/Unary"), &["orders", "billing"])
+        .allow_callers(&unary, &["orders", "billing"])
         .unwrap();
     assert_eq!(
-        services.allow_callers(&format!("{ECHO}/Unary"), &["orders"]),
-        Err(Error::DuplicateCallerRule(format!("{ECHO}/Unary")))
+        services.allow_callers(&unary, &["orders"]),
+        Err(Error::DuplicateCallerRule(unary))
     );
 }
 

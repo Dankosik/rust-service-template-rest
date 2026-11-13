@@ -17,16 +17,16 @@ behavior.
 | D1: private-key client assertion (`private_key_jwt`, RFC 7523) only; no client-secret mode kept beside it | RFC 9700 §2.5 recommends asymmetric client authentication so the authorization server holds no shared secret; every shortlisted server supports a key-based method. A shared secret is the same credential class as the static-bearer and HS256 schemes this work replaces. | Amazon Cognito and other secret-only providers cannot use this profile. Reopen when a required provider supports only shared secrets. |
 | D1: one request form for both grants — `grant_type`, `client_id`, `client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer`, `client_assertion`, plus `scope`/`audience` when configured (RFC 7523 §2.2, RFC 7521 §4.2) | Keycloak, Hydra, Authelia, Spring Authorization Server, Duende, Okta and Auth0 (Enterprise) accept this form; one registered client and key cover both client credentials and token exchange. | Zitadel does not fit: its service users need the JWT-bearer grant, and only a second OIDC application with its own key can call token exchange. Reopen if Zitadel is chosen — the gap is the JWT-bearer grant form plus a separate exchange identity. |
 | D2: assertion claims `iss=sub=client_id`, single-string `aud` = the authorization server's issuer identifier (not its token endpoint), `iat=nbf=signing time-10s`, `exp=iat+60s` (50s after signing), a fresh `jti` per request; header `alg`, `kid`, `typ: client-authentication+jwt` | rfc7523bis §4 and the 2025-01-24 OIDF disclosure (CVE-2025-27370/27371) require a single-string audience naming the issuer, so a malicious server cannot obtain an assertion another server accepts; Keycloak caps assertion age at 60 s and requires a single-use `jti`, as do Hydra, Authelia, Duende, Auth0 and Entra. | A server accepting only its token endpoint (Hydra v26, Okta, Entra) gets that URL instead — safe because each integration is configured against one authorization server. Reopen if a required server rejects the typed `typ` header (Spring Authorization Server 1.5.x on Spring Security 6.5 does). |
-| D3/D3a: RFC 8693 token exchange authenticated with the same client assertion, cached per credential owner keyed by SHA-256 of the subject token, with best-effort settled targets of `exchange_cache_capacity` entries (default 1024) and 16 MiB Bearer-token bytes; concurrent misses per subject coalesce, and a resource 401 evicts only that subject's entry; no `actor_token` | Keycloak 26.7.4 standard token exchange V2 (GA since 26.2) authenticates the requester as a confidential client and requires it in the subject token's `aud`; Spring's `TokenExchangeOAuth2AuthorizedClientProvider` also reuses an exchanged token until it expires. Huskarl is a maintained Rust alternative with token exchange, but the selected adapter is retained because its policy still owns admission, transport/error projection, no-retry behavior and lifecycle. | Count and payload are retention targets, not strict admission or RSS bounds: concurrent inserts, active references, keys, metadata and allocator overhead remain. Zitadel emits `act` only for an `actor_token` under its impersonation permission, and authentik authenticates exchange only with a client secret — neither fits D1. Reopen if a required server emits `act` under D1's constraints. |
+| D3/D3a: RFC 8693 token exchange authenticated with the same client assertion, cached per credential owner keyed by SHA-256 of the subject token, with best-effort settled targets of `exchange_cache_capacity` entries (default 1024) and 16 MiB Bearer-token bytes; concurrent misses per subject coalesce, and a resource 401 stops reuse of the exchanged token used by that call if it is already old enough; no `actor_token` | Keycloak 26.7.4 standard token exchange V2 (GA since 26.2) authenticates the requester as a confidential client and requires it in the subject token's `aud`; Spring's `TokenExchangeOAuth2AuthorizedClientProvider` also reuses an exchanged token until it expires. Huskarl is a maintained Rust alternative with token exchange, but the selected adapter is retained because its policy still owns admission, transport/error projection, no-retry behavior and lifecycle. | Count and payload are retention targets, not strict admission or RSS bounds: concurrent inserts, active references, keys, metadata and allocator overhead remain. Zitadel emits `act` only for an `actor_token` under its impersonation permission, and authentik authenticates exchange only with a client secret — neither fits D1. Reopen if a required server emits `act` under D1's constraints. |
 | One cached token behind a double-checked refresh lock, as Go's `oauth2.ReuseTokenSource` and yup-oauth2 do | Moka's one-key `try_get_with`/`Expiry` cache shared failures, but its retention depended on initializer internals, a zero-lifetime trick, and a second clock that Tokio test time cannot move. | A completed service acquisition failure is shared for one second; then one later caller may retry under its own deadline. Reusable tokens win over suppression. Exchange failures remain coalesced only for concurrent waiters, with no persisted negative cache. |
 | One driver-owned refresh with a stable sampled lead of 90–100% of the smaller of five minutes and a quarter of reusable lifetime, retaining Azure.Core's early-refresh model | Refreshing only at the cutoff made every concurrent caller wait for the provider. On a DigitalOcean c-4 with 64 concurrent callers and a 100 ms provider, each refresh held 64 requests for over 20 ms; with the early refresh only the first acquisition does. An inline early refresh would spend one caller's deadline on the provider. | `Credentials::prepare` returns a `RefreshDriver` that its integration drives and awaits before dependency drop. Its scheduled five-second cap includes lock waiting; final owner loss or lifecycle shutdown cancels it. A completed failure is shared for one second and success clears it. The existing enqueue and successful-completion owners independently sample 30–33 second next-eligibility spacing; cache hits never slide the admitted token's lead. |
-| A resource 401 evicts only a token at least thirty seconds old | Evicting on every 401, as Spring Security does, turned a resource that refuses every token (wrong audience, clock skew) into one token request per call; never evicting, as Go's `oauth2` does, keeps a revoked token until it expires. The provider answers a request made seconds after the last with an equivalent token, so nothing is lost by keeping a young one. | A token revoked within thirty seconds of issue is used until that age. Reopen if a provider revokes tokens that young or rate limits one request per thirty seconds. |
+| A resource 401 stops reuse of the token used by that call if it is already at least thirty seconds old | Evicting on every 401, as Spring Security does, turned a resource that refuses every token (wrong audience, clock skew) into one token request per call; never evicting, as Go's `oauth2` does, keeps a revoked token until it expires. The provider answers a request made seconds after the last with an equivalent token, so nothing is lost by keeping a young one. | A token revoked within thirty seconds of issue is used until that age. Reopen if a provider revokes tokens that young or rate limits one request per thirty seconds. |
 | A provider rejection keeps its registered `error` code as a closed enum; a 429 is `Unavailable` | One `Rejected` reason hid whether the key, the scope, or the grant was refused, and the adapter emitted no log. RFC 6749 section 5.2 and RFC 8693 section 2.2.2 register a finite code set, so mapping it leaks no provider bytes; Go's `oauth2.RetrieveError` exposes the same code. A throttled request may succeed unchanged later, like a 5xx. | An unregistered code is `Other`; `error_description` is still discarded. `Retry-After` is not read, since the adapter does not retry. Reopen if a provider's diagnosis needs `error_description`. |
 | The assertion is dated ten seconds back | Go's `oauth2/jws` does the same for hosts whose clock runs ahead of the provider's. `iat=nbf=now` made a provider one second behind read the assertion as not yet valid. | The assertion is usable for fifty seconds after signing instead of sixty; each is used once, immediately. |
 | `algorithm` is required, with no default; `EdDSA` is not offered | The algorithm must match the key, so a default only chose `RS256` for whoever omitted it, and FAPI 2.0 admits no PKCS#1 v1.5 signatures. RFC 9864 (2025) deprecates the polymorphic `EdDSA` identifier for `Ed25519`, which `jsonwebtoken` 11.1.0 cannot emit. | A tuple written without `algorithm` fails startup naming the key. Reopen `Ed25519` when `jsonwebtoken` and the chosen authorization server accept it. |
 | A bound client may require `OnBehalfOf` (`require_on_behalf_of()`), refusing a request without it before any I/O | The subject travels in request extensions, the only channel a `tower::Service` has, so a forgotten one was a call made with the service's own, usually wider, authority. A second client type per transport would duplicate both bindings for one boolean. | Opt-in per binding: a client that serves both paths keeps the fallback. Reopen if an integration needs the requirement per call. |
 | `exchange_cache_capacity` is a configuration key (default 1024, inclusive 1–65536) paired with a 16 MiB payload retention target | The count is users active on one replica within a token lifetime; the payload target prevents unusually large Bearer values from turning a count-only cache into unbounded retention. | Both are best-effort settled retention targets rather than instant admission control or an RSS guarantee. Reopen if a service needs a strict memory budget or a different per-owner cache target. |
-| `provider_concurrency` is a positive `u32` configuration key (default 32) | One semaphore on the prepared `Inner` bounds actual attempts across both grants; cache hits and same-key waiters consume no permit. The default matches introspection, while operators choose their deployment's bound. | Add the field to direct `Options` literals and handle `AtCapacity` in exhaustive matches. No admission queue, retry, reservation, priority, or cached capacity failure. Independent preparations have independent bounds. |
+| `provider_concurrency` is a positive `u32` configuration key (default 32) | One semaphore on the credential owner's `TokenEndpoint` bounds actual attempts across both grants; cache hits and same-key waiters consume no permit. The default matches introspection, while operators choose their deployment's bound. | Add the field to direct `Options` literals and handle `AtCapacity` in exhaustive matches. No admission queue, retry, reservation, priority, or cached capacity failure. Independent preparations have independent bounds. |
 
 | The gRPC binding answers its two local refusals, a caller-supplied `Authorization` and a missing required subject, with `INTERNAL` | Both are composition mistakes of this service. gRFC A54 reserves `INVALID_ARGUMENT`, `FAILED_PRECONDITION` and five more codes for the application and has a channel turn them into `INTERNAL` when call credentials fail an RPC; the earlier `INVALID_ARGUMENT` blamed the inbound caller whenever a handler forwarded the status. | A handler that matched `INVALID_ARGUMENT` from this client now sees `INTERNAL`. The HTTP binding keeps its typed `Error` variants. |
 | `expires_in` is admitted only as a JSON number of whole seconds | RFC 6749 section 5.1 defines a number, and every supported provider in the guide sends one. Go's `oauth2` also accepts a numeric string for older Microsoft endpoints, which this profile does not support for another reason (`x5t#S256`). | A provider that sends a string is an `invalid` outcome on every acquisition, visible at once. Reopen when a provider the guide lists as supported sends a string. |
@@ -98,8 +98,7 @@ The template-owned gaps are: the assertion claims and signing call; the two
 grant forms and their response type; the exchanged-token cache wiring; the
 `act` claim model; configuration and initializer integration; sanitized
 outcomes. There is no custom protocol serializer/parser beyond one serde
-response type, no flight state machine, no retry loop, and no general
-token-source abstraction.
+response type and no general token-source abstraction.
 
 ## Deferred with reopen conditions (D7)
 
@@ -146,7 +145,7 @@ acquisition may recover; success clears the record. The adapter timeout is
 `Unavailable`: `Timeout` names only the caller's expired deadline, so a gRPC
 caller with budget left sees a retryable `UNAVAILABLE` rather than
 `DEADLINE_EXCEEDED`. Cancellation, lock waiting, and a caller deadline do not
-publish it. Expiry or eligible 401 eviction
+publish it. Expiry or eligible 401 invalidation
 does not clear it. The driver owns refresh-ahead. Its five-second budget begins
 when scheduled and includes lock waiting, and owner loss or lifecycle shutdown
 cancels it without admitting a following attempt.
@@ -192,15 +191,19 @@ The private `post_form(&self, fields, deadline)` uses the fixed endpoint, the
 owner's bounded token client and the absolute attempt deadline; it sends `application/x-www-form-urlencoded`
 (`url::form_urlencoded::Serializer`) with `Accept: application/json` for
 either grant and decodes one private serde `TokenResponse`. A 5xx or 429 token
-response is `Unavailable`; any other non-2xx is `Rejected`.
+response is `Unavailable`; any other non-2xx is `Rejected`. A received failure
+status keeps that classification if the body exceeds its limit or fails to
+read. Without a readable body, the registered error code is unknown.
+Deadline and cancellation errors take precedence over the response status.
 
-`Token` holds the private sensitive header and an optional Tokio monotonic reuse
-cutoff; one clock governs every expiry decision. A representable positive expiry
+`Token` holds the private sensitive header and an optional Tokio monotonic expiry;
+one clock governs every expiry decision. A representable positive expiry
 is `acquisition_start + expires_in`; zero, already elapsed, and unrepresentable
 expiry are invalid. The reuse cutoff is `expiry - 10s`; a token already inside
 that margin serves only the request that fetched it. Omitted expiry is likewise
-request-only. A reused token is always before its cutoff, so dispatch needs
-no second expiry check. A foreground miss never falls back to a prior token.
+request-only. Header injection and HTTP transport handoff recheck hard expiry
+because token acquisition and synchronous resource setup can spend the token's
+remaining lifetime. A foreground miss never falls back to a prior token.
 A background refresh that returns a request-only token keeps the current entry
 usable until its cutoff or rejection.
 
@@ -220,13 +223,14 @@ configured entry count and 16 MiB of Bearer-token bytes through weighted
 entries. This does not claim strict memory admission or RSS control: eviction
 can lag concurrent inserts, active calls retain values, and keys, metadata and
 allocator overhead remain. A Moka hit still needs the Tokio-clock reuse check.
-Conditional initialization coalesces replacements for expired or rejected tokens.
-Request-only tokens and failed results expire immediately in Moka. The
-initializer may use a fresh request-only token for its own call. The shared exchange
-belongs to the first caller's future and its deadline. If that caller stops,
+Only reusable tokens enter Moka. One caller owns the active exchange for each
+subject, including replacement of expired or rejected tokens. Waiters receive
+its completed result through a Tokio watch channel. This avoids Moka's
+initializer retry limit, which can panic after repeated cancellations.
+Only the fetching caller may use a request-only token. If that caller stops,
 a waiter starts its own attempt with a new five-second cap, bounded by its
-remaining caller budget. Caller expiry drops the initializer so waiters can
-take over without receiving its timeout. Exchange failures are coalesced only
+remaining caller budget. Dropping the owner removes the registration and closes
+the channel without publishing its cancellation or timeout. Exchange failures are coalesced only
 for concurrent waiters and are never persisted as a negative cache. Exchanges
 for different subjects acquire the same owner's finite provider capacity as
 service tokens and refresh-ahead. Inbound admission and cache-entry capacity
@@ -245,10 +249,9 @@ timeout, and future drop. Waiters and cache hits hold no permit. Cancellation
 of a waiter cannot free its leader's slot; a replacement leader undergoes
 admission anew. The semaphore is never closed or manually replenished.
 Refresh refusal keeps the usable token and retry spacing of thirty seconds plus
-an independently sampled zero-to-three-second spread. Eligible service-token
-refreshes similarly advance their start by a sampled share of at most one tenth
-of their lead, capped at thirty seconds; exchange and request-only tokens never
-schedule background refresh.
+an independently sampled zero-to-three-second spread. A separate sample shortens
+the service token's maximum refresh lead by at most one tenth, capped at thirty
+seconds. Exchange and request-only tokens never schedule background refresh.
 No detached replacement request or resource dispatch follows a refusal.
 
 The configured positive u32 is checked for `usize` conversion and
@@ -313,12 +316,12 @@ The production adapter's local token/resource-server proof covers encoding,
 audience and scope omission, permissive RFC success parsing, shared success and
 one-second completed service-failure suppression, reuse cutoff, missing expiry,
 cancellation replacement, per-waiter
-budget, owner isolation, Bearer injection, 401 eviction that spares a newer
+budget, owner isolation, Bearer injection, 401 invalidation that spares a newer
 token, and 401/403 without replay. It also verifies the assertion
 header and claims with the matching public key, distinct `jti` values, key and
 algorithm refusal, both request forms, the issued-token-type check, per-subject
 reuse and coalescing, a waiter restarting the exchange its first caller ran
-out of budget for, single-subject eviction, uncached exchange failures, one
+out of budget for, invalidation scoped to one subject, uncached exchange failures, one
 exchange for a short-lived token, one count per token request under its grant
 and outcome (success, a registered error code, timeout, cancellation) read
 from a local Prometheus recorder, and gRPC on-behalf dispatch. The Keycloak
@@ -364,10 +367,10 @@ credential failures. One `UNAVAILABLE` for both invited a retry of a request
 that needs a different key or grant. The message stays fixed and the closed `AcquisitionError` is the
 status source, never sent to a peer. `PreparedCall` captures the gRPC caller and
 transport contexts before acquisition, and remains the only owner of
-`grpc-timeout` propagation; OAuth adds the bearer only through its prepared
-headers, then sends the prepared call. A call refused before dispatch ends
-through `PreparedCall::refuse`, so client metrics count it with the status its
-caller receives, not as `Canceled`. Its optional dependency points from OAuth to
+`grpc-timeout` propagation; OAuth adds the bearer through its prepared
+headers and rechecks its expiry after channel readiness, before dispatch.
+Local refusals before dispatch record the status returned to the caller,
+including credentials that expire during readiness. Its optional dependency points from OAuth to
 `infra-grpc`; removing either profile removes the bridge. Generated clients
 take the concrete authenticated `Service`. See the [transport decision
 record](grpc-decisions.md).

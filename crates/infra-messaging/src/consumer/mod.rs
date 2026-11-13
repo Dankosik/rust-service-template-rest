@@ -45,7 +45,7 @@ const PULL_EXPIRY_GRACE: Duration = Duration::from_secs(2);
 /// Redelivery delay of a delivery returned unhandled at drain. It outlasts
 /// this replica's unsubscription, so the broker redelivers to another pull.
 const RELEASE_DELAY: Duration = Duration::from_secs(1);
-const MAX_BYTES_EXCEEDED: &str = "max_bytes_exceeded";
+const STREAM_ERRORS_TOTAL: &str = "messaging_consumer_stream_errors_total";
 
 /// NATS 2.15 counts the original subject and ACK reply in a pull's byte limit.
 /// V2 ACKs cover V1 too: prefix, domain, eight-byte account hash, stream,
@@ -259,6 +259,10 @@ impl Consumer {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one admission loop preserves stop, terminal failure, and admitted-work join ordering"
+    )]
     async fn consume(
         &self,
         deliveries: &mut JoinSet<Result<(), ConsumerError>>,
@@ -266,13 +270,15 @@ impl Consumer {
         force: &CancellationToken,
     ) -> Result<(), ConsumerError> {
         let concurrency = self.concurrency.get();
-        let mut retained = false;
+        let mut retry_large_retained_record = false;
         'pulls: loop {
-            while deliveries.len() == concurrency || (retained && !deliveries.is_empty()) {
+            while deliveries.len() == concurrency
+                || (retry_large_retained_record && !deliveries.is_empty())
+            {
                 tokio::select! {
                     biased;
                     () = stop.cancelled() => break 'pulls,
-                    joined = deliveries.join_next() => reaped(joined)?,
+                    joined = deliveries.join_next() => check_delivery_task_result(joined)?,
                 }
             }
             if stop.is_cancelled() {
@@ -281,18 +287,34 @@ impl Consumer {
             // Pull requests address a durable by name, not creation identity.
             // A replacement between successful full batches has no waiting
             // request to terminate, so verify identity before every new pull.
-            match durable_is_lost(&self.pull).await {
+            let loss_check = tokio::select! {
+                biased;
+                () = stop.cancelled() => break 'pulls,
+                loss_check = durable_is_lost(&self.pull) => loss_check,
+            };
+            match loss_check {
                 Ok(false) => {}
                 Ok(true) => return Err(ConsumerError::ConsumerLost),
                 Err(error) => {
+                    if stop.is_cancelled() {
+                        break 'pulls;
+                    }
                     // Do not admit from a same-name replacement while the
                     // broker cannot confirm the durable's creation identity.
                     pull_failed("consumer_info", consumer_info_error_kind(&error.kind()));
-                    tokio::time::sleep(STREAM_ERROR_BACKOFF).await;
+                    tokio::select! {
+                        biased;
+                        () = stop.cancelled() => break 'pulls,
+                        () = tokio::time::sleep(STREAM_ERROR_BACKOFF) => {}
+                    }
                     continue;
                 }
             }
-            let (slots, max_bytes) = self.pull_budget(deliveries.len(), retained);
+            if stop.is_cancelled() {
+                break 'pulls;
+            }
+            let (slots, max_bytes) =
+                self.pull_budget(deliveries.len(), retry_large_retained_record);
             let request = tokio::time::timeout(
                 BROKER_OPERATION_BUDGET,
                 self.pull
@@ -307,18 +329,30 @@ impl Consumer {
                 tokio::select! {
                     biased;
                     () = stop.cancelled() => break 'pulls,
-                    joined = deliveries.join_next(), if !deliveries.is_empty() => reaped(joined)?,
+                    joined = deliveries.join_next(), if !deliveries.is_empty() => check_delivery_task_result(joined)?,
                     result = &mut request => {
                         let error_kind = match result {
                             Ok(Ok(messages)) => break messages,
                             Ok(Err(error)) => batch_create_error_kind(error.kind()),
                             Err(_) => "local_timeout",
                         };
+                        if stop.is_cancelled() {
+                            break 'pulls;
+                        }
                         pull_failed("batch_create", error_kind);
-                        if durable_confirmed_lost(&self.pull).await {
+                        let lost = tokio::select! {
+                            biased;
+                            () = stop.cancelled() => break 'pulls,
+                            lost = durable_confirmed_lost(&self.pull) => lost,
+                        };
+                        if lost {
                             return Err(ConsumerError::ConsumerLost);
                         }
-                        tokio::time::sleep(STREAM_ERROR_BACKOFF).await;
+                        tokio::select! {
+                            biased;
+                            () = stop.cancelled() => break 'pulls,
+                            () = tokio::time::sleep(STREAM_ERROR_BACKOFF) => {}
+                        }
                         continue 'pulls;
                     }
                 }
@@ -328,48 +362,74 @@ impl Consumer {
                 .await
             {
                 Ok(BatchEnd::Filled) => {
-                    if retained {
-                        reaped(deliveries.join_next().await)?;
-                        retained = false;
+                    if retry_large_retained_record {
+                        check_delivery_task_result(deliveries.join_next().await)?;
+                        retry_large_retained_record = false;
                     }
                 }
-                Ok(end) => {
-                    release(messages).await;
-                    if matches!(end, BatchEnd::Stopped) {
+                Ok(
+                    end @ (BatchEnd::Stopped
+                    | BatchEnd::Closed
+                    | BatchEnd::MaxBytesExceededBeforeFirstDelivery
+                    | BatchEnd::Failed { .. }),
+                ) => {
+                    release(messages, slots, stop).await;
+                    if matches!(end, BatchEnd::Stopped) || stop.is_cancelled() {
                         break 'pulls;
                     }
-                    if durable_confirmed_lost(&self.pull).await {
+                    let lost = tokio::select! {
+                        biased;
+                        () = stop.cancelled() => break 'pulls,
+                        lost = durable_confirmed_lost(&self.pull) => lost,
+                    };
+                    if lost {
                         return Err(ConsumerError::ConsumerLost);
                     }
-                    let was_retained = retained;
-                    retained = matches!(end, BatchEnd::FirstMessageTooLarge);
-                    if retained {
-                        pull_failed("batch_receive", MAX_BYTES_EXCEEDED);
+                    if stop.is_cancelled() {
+                        break 'pulls;
+                    }
+                    let was_retrying_large_retained_record = retry_large_retained_record;
+                    retry_large_retained_record =
+                        matches!(end, BatchEnd::MaxBytesExceededBeforeFirstDelivery);
+                    if retry_large_retained_record {
+                        pull_failed("batch_receive", BatchReceiveError::MaxBytesExceeded.label());
                         // A multi-message pull may report 409 before already
                         // allocated records reach this replica's subscription.
-                        if was_retained {
+                        if was_retrying_large_retained_record {
                             return Err(ConsumerError::RetainedMessageTooLarge);
                         }
                     } else if let BatchEnd::Failed { phase, error_kind } = end {
                         pull_failed(phase, error_kind);
-                        tokio::time::sleep(STREAM_ERROR_BACKOFF).await;
+                        tokio::select! {
+                            biased;
+                            () = stop.cancelled() => break 'pulls,
+                            () = tokio::time::sleep(STREAM_ERROR_BACKOFF) => {}
+                        }
                     }
                 }
                 Err(error @ ConsumerError::DeadLetterTooLarge { .. }) => {
-                    let _ = tokio::time::timeout(BROKER_OPERATION_BUDGET, release(messages)).await;
+                    let _ = tokio::time::timeout(
+                        BROKER_OPERATION_BUDGET,
+                        release(messages, slots, stop),
+                    )
+                    .await;
                     return Err(error);
                 }
                 Err(error) => return Err(error),
             }
         }
         while let Some(joined) = deliveries.join_next().await {
-            reaped(Some(joined))?;
+            check_delivery_task_result(Some(joined))?;
         }
         Ok(())
     }
 
-    fn pull_budget(&self, active_deliveries: usize, retained: bool) -> (usize, usize) {
-        if retained {
+    fn pull_budget(
+        &self,
+        active_deliveries: usize,
+        retry_large_retained_record: bool,
+    ) -> (usize, usize) {
+        if retry_large_retained_record {
             // The caller drains every other slot before reserving a full-size
             // delivery for a record that may predate the current source limit.
             (1, self.retained_pull_bytes)
@@ -398,35 +458,35 @@ impl Consumer {
             tokio::select! {
                 biased;
                 () = stop.cancelled() => return Ok(BatchEnd::Stopped),
-                joined = deliveries.join_next(), if !deliveries.is_empty() => reaped(joined)?,
+                joined = deliveries.join_next(), if !deliveries.is_empty() => check_delivery_task_result(joined)?,
                 next = tokio::time::timeout_at(expires, messages.next()) => match next {
                     Ok(Some(Ok(message))) => {
                         if remaining == slots {
                             // The preflight INFO and the named pull are separate requests.
                             // Verify creation identity after this batch has delivered data.
-                            let identity = tokio::select! {
+                            let loss_check = tokio::select! {
                                 biased;
                                 () = stop.cancelled() => {
-                                    redeliver_after(&message, RELEASE_DELAY).await;
+                                    release_message(&message, stop).await;
                                     return Ok(BatchEnd::Stopped);
                                 }
-                                identity = durable_is_lost(&self.pull) => identity,
+                                loss_check = durable_is_lost(&self.pull) => loss_check,
                             };
-                            match identity {
+                            match loss_check {
                                 Ok(false) => {}
                                 Ok(true) => return Err(ConsumerError::ConsumerLost),
                                 Err(error) => {
-                                    redeliver_after(&message, RELEASE_DELAY).await;
+                                    release_message(&message, stop).await;
                                     return Ok(BatchEnd::Failed {
                                         phase: "consumer_info",
                                         error_kind: consumer_info_error_kind(&error.kind()),
                                     });
                                 }
                             }
-                            if stop.is_cancelled() {
-                                redeliver_after(&message, RELEASE_DELAY).await;
-                                return Ok(BatchEnd::Stopped);
-                            }
+                        }
+                        if stop.is_cancelled() {
+                            release_message(&message, stop).await;
+                            return Ok(BatchEnd::Stopped);
                         }
                         remaining -= 1;
                         let handler = Arc::clone(&self.handler);
@@ -435,13 +495,13 @@ impl Consumer {
                     }
                     Ok(None) => return Ok(BatchEnd::Closed),
                     Ok(Some(Err(error))) => {
-                        let error_kind = batch_receive_error_kind(&error);
-                        if remaining == slots && error_kind == MAX_BYTES_EXCEEDED {
-                            return Ok(BatchEnd::FirstMessageTooLarge);
+                        let failure = classify_batch_receive_error(&error);
+                        if remaining == slots && matches!(failure, BatchReceiveError::MaxBytesExceeded) {
+                            return Ok(BatchEnd::MaxBytesExceededBeforeFirstDelivery);
                         }
                         return Ok(BatchEnd::Failed {
                             phase: "batch_receive",
-                            error_kind,
+                            error_kind: failure.label(),
                         });
                     }
                     Err(_) => return Ok(BatchEnd::Failed {
@@ -464,7 +524,7 @@ enum BatchEnd {
     Stopped,
     /// The batch ended before filling its slots.
     Closed,
-    FirstMessageTooLarge,
+    MaxBytesExceededBeforeFirstDelivery,
     /// The batch could not receive or verify a delivery.
     Failed {
         phase: &'static str,
@@ -473,7 +533,7 @@ enum BatchEnd {
 }
 
 /// A delivery task that panicked or was cancelled ends the consumer.
-fn reaped(
+fn check_delivery_task_result(
     joined: Option<Result<Result<(), ConsumerError>, JoinError>>,
 ) -> Result<(), ConsumerError> {
     match joined {
@@ -533,12 +593,26 @@ fn batch_create_error_kind(kind: pull::BatchErrorKind) -> &'static str {
     }
 }
 
-fn batch_receive_error_kind(error: &async_nats::Error) -> &'static str {
+enum BatchReceiveError {
+    MaxBytesExceeded,
+    Other(&'static str),
+}
+
+impl BatchReceiveError {
+    const fn label(&self) -> &'static str {
+        match self {
+            Self::MaxBytesExceeded => "max_bytes_exceeded",
+            Self::Other(label) => label,
+        }
+    }
+}
+
+fn classify_batch_receive_error(error: &async_nats::Error) -> BatchReceiveError {
     let Some(error) = error.downcast_ref::<std::io::Error>() else {
-        return "other";
+        return BatchReceiveError::Other("other");
     };
     if error.kind() != std::io::ErrorKind::Other {
-        return "io_error";
+        return BatchReceiveError::Other("io_error");
     }
     // async-nats 0.50 Batch erases status/description into io::Error(Other).
     // Recognize only the pinned SDK format. The exact byte-limit status also
@@ -547,11 +621,13 @@ fn batch_receive_error_kind(error: &async_nats::Error) -> &'static str {
     let Some(status) =
         description.strip_prefix("error while processing messages from the stream: ")
     else {
-        return "io_error";
+        return BatchReceiveError::Other("io_error");
     };
-    match status {
+    let label = match status {
         "409, Some(\"Batch Completed\")" => "batch_completed",
-        "409, Some(\"Message Size Exceeds MaxBytes\")" => MAX_BYTES_EXCEEDED,
+        "409, Some(\"Message Size Exceeds MaxBytes\")" => {
+            return BatchReceiveError::MaxBytesExceeded;
+        }
         _ => match status.split_once(", ").map(|(code, _)| code) {
             Some("400") => "status_400",
             Some("403") => "status_403",
@@ -561,20 +637,23 @@ fn batch_receive_error_kind(error: &async_nats::Error) -> &'static str {
             Some("503") => "status_503",
             _ => "status_other",
         },
-    }
+    };
+    BatchReceiveError::Other(label)
 }
 
 fn pull_failed(phase: &'static str, error_type: &'static str) {
     tracing::warn!(phase, error.type = error_type, "messaging_pull_failed");
-    metrics::counter!("messaging_consumer_stream_errors_total").increment(1);
+    metrics::counter!(STREAM_ERRORS_TOTAL).increment(1);
 }
 
-/// Returns the deliveries the client buffered but no handler admitted.
-/// An item the client cannot produce is left unacknowledged for ack-wait
-/// redelivery; the drain must not wait for the broker.
-async fn release(mut messages: pull::Batch) {
+// Missing or unsubmitted deliveries remain eligible for broker ack-wait
+// redelivery. Stop must not spend admitted work's drain window on release I/O.
+async fn release(mut messages: pull::Batch, slots: usize, stop: &CancellationToken) {
     let mut prefetched = Vec::new();
-    while let Some(Some(item)) = messages.next().now_or_never() {
+    for _ in 0..slots {
+        let Some(Some(item)) = messages.next().now_or_never() else {
+            break;
+        };
         if let Ok(message) = item {
             prefetched.push(message);
         }
@@ -582,7 +661,19 @@ async fn release(mut messages: pull::Batch) {
     // Ends this replica's pulls before the redelivery requests go out.
     drop(messages);
     for message in &prefetched {
-        redeliver_after(message, RELEASE_DELAY).await;
+        release_message(message, stop).await;
+    }
+}
+
+async fn release_message(message: &async_nats::jetstream::Message, stop: &CancellationToken) {
+    let request = redeliver_after(message, RELEASE_DELAY);
+    tokio::pin!(request);
+    tokio::select! {
+        biased;
+        () = stop.cancelled() => {
+            let _ = request.now_or_never();
+        }
+        () = &mut request => {}
     }
 }
 
@@ -591,15 +682,15 @@ async fn release(mut messages: pull::Batch) {
 pub(crate) fn describe_metrics() {
     use metrics::describe_counter;
 
-    describe_counter!(
-        "messaging_consumer_stream_errors_total",
-        "Recoverable pull-stream errors"
-    );
+    describe_counter!(STREAM_ERRORS_TOTAL, "Recoverable pull-stream errors");
     delivery::describe_metrics();
 }
 
 impl ConsumerHandle {
-    /// Stops new pulls while admitted work keeps its handler/settlement budget.
+    /// Requests an end to admission, interrupting admission-only waits.
+    /// Admitted work keeps its handler and settlement allowances. Locally held
+    /// unadmitted deliveries get a best-effort delayed NAK without waiting for
+    /// broker capacity after stop; ack-wait retains redelivery ownership.
     pub fn drain(&self) {
         self.stop.cancel();
     }
@@ -622,6 +713,7 @@ impl ConsumerHandle {
     }
 
     /// Cancellation-safe join for a root racing drain against another signal.
+    /// Success confirms all admitted work joined after admission stopped.
     /// The handle remains owned here when this future is dropped or times out,
     /// allowing the root to abort and retry within its shared cleanup deadline.
     ///
@@ -710,15 +802,15 @@ mod tests {
             ("sentinel.provider.chosen", "io_error"),
         ] {
             let error: async_nats::Error = Box::new(std::io::Error::other(description));
-            assert_eq!(batch_receive_error_kind(&error), expected);
+            assert_eq!(classify_batch_receive_error(&error).label(), expected);
         }
         let error: async_nats::Error = Box::new(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "error while processing messages from the stream: 409, Some(\"Batch Completed\")",
         ));
-        assert_eq!(batch_receive_error_kind(&error), "io_error");
+        assert_eq!(classify_batch_receive_error(&error).label(), "io_error");
         let error: async_nats::Error = Box::new(std::fmt::Error);
-        assert_eq!(batch_receive_error_kind(&error), "other");
+        assert_eq!(classify_batch_receive_error(&error).label(), "other");
     }
 
     #[tokio::test(start_paused = true)]

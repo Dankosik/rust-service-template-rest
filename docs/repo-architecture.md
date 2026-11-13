@@ -29,6 +29,11 @@ the factual authority; read them for how something works.
    refresher, the staged teardown.
 6. A task-local design may retain, replace, or remove current architecture,
    but it names the changed owner and the proving surface.
+7. `crates/json-payload` owns the serde-dependent finite-float contract shared
+   by typed event and job creation. It stays separate from std-only
+   `shared-rules` and unmarked by optional profiles so either consumer remains
+   independent; a bare projection may retain the inert leaf. Its only
+   dependents are `infra-messaging` and `infra-jobs`.
 
 ## Source Of Truth
 

@@ -31,8 +31,8 @@ use url::Url;
 
 use crate::{
     AcquisitionError, Algorithm, Credentials, Error, OnBehalfOf, Options, RefreshDriver, Rejection,
-    credentials::{AcquisitionDeadline, Cached},
-    options::{Admitted, admitted_provider_concurrency},
+    credentials::{Cached, acquisition_deadline},
+    options::Admitted,
     token::EVICTION_MIN_AGE,
     token_endpoint::{FETCH_TIMEOUT, TOKEN_LIMITS},
 };
@@ -167,12 +167,8 @@ impl Fixture {
     }
 
     fn build(&self, options: Options) -> (Credentials, RefreshDriver) {
-        let admitted = Admitted {
-            endpoint: self.endpoint.clone(),
-            permits: admitted_provider_concurrency(options.provider_concurrency).unwrap(),
-        };
+        let admitted = Admitted::try_new_for_test(options, self.endpoint.clone()).unwrap();
         Credentials::build(
-            options,
             admitted,
             Client::try_new_for_test_http(&self.origin, TOKEN_LIMITS).unwrap(),
         )
@@ -411,6 +407,10 @@ fn exchange_response(access_token: &str) -> serde_json::Value {
 
 fn deadline(after: Duration) -> Instant {
     Instant::now() + after
+}
+
+fn token_context() -> OperationContext {
+    OperationContext::with_timeout(Duration::from_secs(10))
 }
 
 /// Moves the Tokio clock without waiting, leaving it running for socket I/O.

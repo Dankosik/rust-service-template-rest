@@ -100,7 +100,7 @@ for the frequency and duration of those waits. For an admitted webhook with
 `webhook_receipt_unavailable` warning to find the failed receipt stage.
 
 `problem_code="gateway_timeout"` identifies an exhausted request budget.
-A caller that stopped sending its body gets `408 request_timeout` and
+Expiry during a tracked request-body read returns `408 request_timeout` and
 does not count here. An access log with `termination="server_shutdown"`
 records a forced shutdown before the response head as 503 for the SLO.
 The client received no HTTP status. Correlate by `http_route`.
@@ -220,8 +220,12 @@ lists (`failed`, `inspect`, `redrive`, `discard`).
 The adapter attempted to move an event to the dead-letter stream. A
 `rejected` publication leaves the event in the source stream for redelivery.
 An `ambiguous` publication also leaves it for redelivery, and the DLQ may
-already contain a copy. Fix the handler or the producer, then recover the
-exact DLQ records with the [`dlq_recovery` example](../crates/infra-messaging/examples/dlq_recovery.rs).
+already contain a copy. Fix the handler or the producer. Use `inspect` in
+the [`dlq_recovery` example](../crates/infra-messaging/examples/dlq_recovery.rs)
+to read an exact DLQ record without changing the broker. Redrive and
+retirement are available through the recovery controller for its own
+isolated broker sessions. Use your deployment's recovery procedure for
+other brokers.
 After lowering a source limit, older records can still need the previous DLQ
 capacity. If the consumer stops with a dead-letter size error, raise the DLQ
 or broker limit to fit the indicated source record and restart the consumer.

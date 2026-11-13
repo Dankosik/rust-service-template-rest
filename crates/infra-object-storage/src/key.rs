@@ -19,8 +19,6 @@ pub struct ObjectKey(String);
 pub struct InvalidObjectKey;
 
 impl ObjectKey {
-    /// Admit a key.
-    ///
     /// # Errors
     ///
     /// Returns [`InvalidObjectKey`] when the key does not match the grammar.

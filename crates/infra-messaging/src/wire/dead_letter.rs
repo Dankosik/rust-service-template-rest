@@ -7,11 +7,10 @@ use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 
 use super::{
-    CREATED_AT, DEAD_LETTER_REASON, DIGEST_HEX_LEN, EVENT_SCHEMA, EVENT_TYPE, HEADER_LIMIT_BYTES,
-    HEADER_PREAMBLE_BYTES, MESSAGE_ID, NATS_MSG_ID, ORIGINAL_SUBJECT, checked_header_line_bytes,
-    format_timestamp, header_line_bytes, header_name, header_value, is_zero_time, parse_schema,
-    parse_timestamp, prefixed_digest_hex, required_header, valid_subject,
-    validate_outbound_identity,
+    CREATED_AT, EVENT_SCHEMA, EVENT_TYPE, HEADER_LIMIT_BYTES, HEADER_PREAMBLE_BYTES, MESSAGE_ID,
+    SHA256_HEX_LEN, checked_header_line_bytes, format_timestamp, header_line_bytes, header_name,
+    header_value, is_zero_time, parse_schema, parse_timestamp, prefixed_digest_hex,
+    required_header, valid_subject, validate_outbound_identity,
 };
 use crate::error::EnvelopeError;
 use enum_map::EnumMap;
@@ -45,6 +44,20 @@ pub(crate) struct DeadLetterBounds {
     pub(crate) headers: usize,
 }
 
+fn transfer_headers<T>(
+    publication_id: T,
+    subject: T,
+    reason: T,
+    stream: T,
+) -> [(HeaderName, T); 4] {
+    [
+        (header_name::NATS_MSG_ID, publication_id),
+        (header_name::ORIGINAL_SUBJECT, subject),
+        (header_name::DEAD_LETTER_REASON, reason),
+        (async_nats::header::NATS_EXPECTED_STREAM, stream),
+    ]
+}
+
 /// Reserve for the 12-byte framing of a new block and for re-encoding
 /// retained fields from a noncanonical block the client accepted.
 pub(crate) fn dead_letter_bounds(
@@ -55,21 +68,15 @@ pub(crate) fn dead_letter_bounds(
     let reason_bytes = EnumMap::from_fn(|reason: DeadLetterReason| reason.label().len())
         .into_values()
         .max()?;
-    let expected_stream = async_nats::header::NATS_EXPECTED_STREAM;
-    let transfer_id_bytes = DEAD_LETTER_ID_PREFIX.len() + DIGEST_HEX_LEN;
+    let transfer_id_bytes = DEAD_LETTER_ID_PREFIX.len() + SHA256_HEX_LEN;
     // The fallback Message-Id line is larger than the mutually exclusive provenance marker.
     let identity_bytes = checked_header_line_bytes(MESSAGE_ID, transfer_id_bytes)?
         .max(checked_header_line_bytes(ORIGINAL_ID_PRESENT.as_ref(), 1)?);
-    let additions = [
-        (NATS_MSG_ID, transfer_id_bytes),
-        (ORIGINAL_SUBJECT, subject_bytes),
-        (DEAD_LETTER_REASON, reason_bytes),
-        (expected_stream.as_ref(), stream_bytes),
-    ]
-    .into_iter()
-    .try_fold(identity_bytes, |bytes, (name, value_bytes)| {
-        bytes.checked_add(checked_header_line_bytes(name, value_bytes)?)
-    })?;
+    let additions = transfer_headers(transfer_id_bytes, subject_bytes, reason_bytes, stream_bytes)
+        .into_iter()
+        .try_fold(identity_bytes, |bytes, (name, value_bytes)| {
+            bytes.checked_add(checked_header_line_bytes(name.as_ref(), value_bytes)?)
+        })?;
     // The client accepts bare LF and a missing final newline. Re-encoding can
     // add one CR and one space per retained line, a CR on the version line,
     // a final blank CRLF, and the last missing LF.
@@ -107,10 +114,9 @@ pub(crate) fn dead_letter_headers(
     } else if message_id == transfer_id {
         headers.insert(ORIGINAL_ID_PRESENT, "1");
     }
-    headers.insert(header_name::NATS_MSG_ID, transfer_id);
-    headers.insert(header_name::ORIGINAL_SUBJECT, subject);
-    headers.insert(header_name::DEAD_LETTER_REASON, reason.label());
-    headers.insert(async_nats::header::NATS_EXPECTED_STREAM, stream);
+    for (name, value) in transfer_headers(transfer_id, subject, reason.label(), stream) {
+        headers.insert(name, value);
+    }
     headers
 }
 
@@ -137,19 +143,7 @@ pub fn restore_dead_letter(record: DeadLetterRecord) -> Result<PreparedEvent, En
     let message_id = required_header(&record.headers, header_name::MESSAGE_ID, MESSAGE_ID)?;
     validate_outbound_identity(message_id)?;
     let stored_publication_id = header_value(&record.headers, header_name::NATS_MSG_ID);
-    // Go and older Rust transfers use their deterministic ID as a fallback
-    // Message-Id. A genuine collision in a new Rust transfer carries provenance.
-    if message_id == stored_publication_id
-        && header_value(&record.headers, ORIGINAL_ID_PRESENT) != "1"
-        && message_id
-            .strip_prefix(DEAD_LETTER_ID_PREFIX)
-            .is_some_and(|digest| {
-                digest.len() == DIGEST_HEX_LEN
-                    && digest
-                        .bytes()
-                        .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
-            })
-    {
+    if has_ambiguous_original_id(&record.headers, message_id, stored_publication_id) {
         return Err(EnvelopeError::DeadLetterMessageIdMissing);
     }
     let event_type = required_header(&record.headers, header_name::EVENT_TYPE, EVENT_TYPE)?;
@@ -184,6 +178,25 @@ pub fn restore_dead_letter(record: DeadLetterRecord) -> Result<PreparedEvent, En
         occurred_at,
         payload: record.payload,
     })
+}
+
+fn has_ambiguous_original_id(
+    headers: &HeaderMap,
+    message_id: &str,
+    stored_publication_id: &str,
+) -> bool {
+    // Go and older Rust transfers use their deterministic ID as a fallback
+    // Message-Id. A genuine collision in a new Rust transfer carries provenance.
+    message_id == stored_publication_id
+        && header_value(headers, ORIGINAL_ID_PRESENT) != "1"
+        && message_id
+            .strip_prefix(DEAD_LETTER_ID_PREFIX)
+            .is_some_and(|digest| {
+                digest.len() == SHA256_HEX_LEN
+                    && digest
+                        .bytes()
+                        .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+            })
 }
 
 /// Go-compatible deterministic transfer identity for dead-letter publication.

@@ -284,6 +284,29 @@ fn object_storage_secret_in_a_file_is_refused() {
 }
 
 #[test]
+fn object_storage_credentials_selector_in_a_file_is_public() {
+    let dir = tempfile::tempdir().unwrap();
+    let selected = write(
+        &dir,
+        "selected.toml",
+        "[object_storage]\nprovider = \"amazon_s3\"\nbucket = \"document-results\"\nregion = \"eu-central-1\"\nexpected_bucket_owner = \"123456789012\"\ncredentials = \"workload_identity\"\n",
+    );
+    let cfg = load_from(
+        &LoadOptions {
+            config: Some(selected),
+            ..LoadOptions::default()
+        },
+        BUILD,
+        env(&[]),
+    )
+    .unwrap();
+    assert_eq!(
+        cfg.object_storage.credentials,
+        crate::ObjectStorageCredentials::WorkloadIdentity
+    );
+}
+
+#[test]
 fn object_storage_unknown_provider_fails_loading() {
     assert_matches!(
         load_from(

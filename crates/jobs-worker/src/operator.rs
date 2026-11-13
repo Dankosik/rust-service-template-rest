@@ -163,14 +163,13 @@ impl Request {
                 observed_at,
                 scanned,
                 items,
-                complete,
                 next_cursor,
             }) => {
                 let mut body = self.receipt(Outcome::Ok);
                 body["observed_at"] = observed_at.into();
                 body["scanned"] = scanned.into();
                 body["items"] = items.iter().map(snapshot).collect();
-                body["complete"] = complete.into();
+                body["complete"] = next_cursor.is_none().into();
                 body["next_cursor"] = json!(next_cursor);
                 body
             }

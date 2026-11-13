@@ -57,7 +57,7 @@ pub use self::download::Download;
 use self::error::{Call, Failure, LocalFailure};
 pub use self::error::{ConfigError, ObjectStorageError};
 pub use self::key::{InvalidObjectKey, ObjectKey};
-pub use self::observe::{HISTOGRAMS, OPERATION_DURATION_BUCKETS, OPERATION_DURATION_METRIC};
+pub use self::observe::HISTOGRAMS;
 use self::observe::{Histograms, Operation, OperationGuard};
 pub use self::provider::Provider;
 use self::response_limit::ResponseLimit;
@@ -332,10 +332,10 @@ impl ObjectStorage {
             .checksum
             .applies_to(&body.source)
             .then_some(ChecksumAlgorithm::Crc64Nvme);
-        let call = if options.create_only {
-            Call::CreateOnly
+        let (call, if_none_match) = if options.create_only {
+            (Call::CreateOnly, Some("*".to_owned()))
         } else {
-            Call::Mutation
+            (Call::UnconditionalMutation, None)
         };
         // Under the client's `WhenRequired` the SDK sends the named
         // algorithm but computes no checksum value. An upload that carries
@@ -355,7 +355,7 @@ impl ObjectStorage {
             .body(body.stream)
             .set_content_type(options.content_type.map(ContentType::into_string))
             .set_checksum_algorithm(checksum)
-            .set_if_none_match(options.create_only.then(|| "*".to_owned()))
+            .set_if_none_match(if_none_match)
             .set_expected_bucket_owner(self.inner.expected_bucket_owner.clone())
             .customize()
             .config_override(call_config)
@@ -389,8 +389,10 @@ impl ObjectStorage {
     /// # Errors
     ///
     /// `NotFound` when the key is absent; `TooLarge` when the stored object
-    /// exceeds `max_object_bytes`; `Integrity` for a range or unsized
-    /// response; otherwise `Busy`, `Unavailable`, or `Rejected`.
+    /// exceeds `max_object_bytes`; `Integrity` for a range response or a
+    /// missing or negative size; otherwise `Busy`, `Unavailable`, or
+    /// `Rejected`. This call reads a zero-length object's body through EOF,
+    /// so a body length or checksum mismatch can also return `Integrity`.
     pub async fn get(&self, key: &ObjectKey) -> Result<Download, ObjectStorageError> {
         self.get_with_context(key, &OperationContext::unbounded())
             .await
@@ -458,8 +460,8 @@ impl ObjectStorage {
     ///
     /// `NotFound` when the key is absent; on a provider whose HEAD reply
     /// carries no error body (Amazon S3 among them), a missing bucket also
-    /// reads as `NotFound`. `Integrity` when the response has no size;
-    /// otherwise `Busy`, `Unavailable`, or `Rejected`.
+    /// reads as `NotFound`. `Integrity` when the response size is missing or
+    /// negative; otherwise `Busy`, `Unavailable`, or `Rejected`.
     pub async fn head(&self, key: &ObjectKey) -> Result<ObjectMetadata, ObjectStorageError> {
         self.head_with_context(key, &OperationContext::unbounded())
             .await
@@ -495,10 +497,7 @@ impl ObjectStorage {
             .map_err(|interrupted| interrupted.fail(&mut guard, call))?;
         guard.answered_by(&result);
         Self::check(&context, &mut guard)?;
-        let output = match result {
-            Ok(output) => output,
-            Err(sdk_error) => return Err(guard.fail(&error::from_sdk(call, &sdk_error))),
-        };
+        let output = result.map_err(|sdk_error| guard.fail(&error::from_sdk(call, &sdk_error)))?;
         let metadata = ObjectMetadata::from_response_fields(
             output.content_length(),
             output.content_type(),
@@ -523,14 +522,16 @@ impl ObjectStorage {
 
     /// # Errors
     ///
-    /// As [`Self::delete`]. A stop after the request has been polled is
-    /// `OutcomeUnknown`; recovery does not grant replay authority.
+    /// As [`Self::delete`]. A stop before the first request poll is `Unavailable`.
+    /// A stop that interrupts an already-polled request is `OutcomeUnknown`;
+    /// recovery does not grant replay authority. A definitive provider answer
+    /// from a poll that began live still applies if that poll crosses the cutoff.
     pub async fn delete_with_context(
         &self,
         key: &ObjectKey,
         parent: &OperationContext,
     ) -> Result<(), ObjectStorageError> {
-        let call = Call::Mutation;
+        let call = Call::UnconditionalMutation;
         let (context, mut guard) = self.begin(parent, Operation::Delete)?;
         let _permit = self.admit(&mut guard)?;
         let request = self
@@ -548,22 +549,9 @@ impl ObjectStorage {
             .await
             .map_err(|interrupted| interrupted.fail(&mut guard, call))?;
         guard.answered_by(&result);
-        match result {
-            Ok(_) => {
-                guard.succeed();
-                Ok(())
-            }
-            // S3 and R2 answer 204; a provider that answers `NoSuchKey` means
-            // the same thing.
-            Err(sdk_error)
-                if aws_sdk_s3::error::ProvideErrorMetadata::code(&sdk_error)
-                    == Some("NoSuchKey") =>
-            {
-                guard.succeed();
-                Ok(())
-            }
-            Err(sdk_error) => Err(guard.fail(&error::from_sdk(call, &sdk_error))),
-        }
+        error::interpret_delete_result(&result).map_err(|failure| guard.fail(&failure))?;
+        guard.succeed();
+        Ok(())
     }
 
     /// Presign a GET for `expires_in`, between 1 second and 7 days. This is a

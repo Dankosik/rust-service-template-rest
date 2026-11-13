@@ -4,7 +4,8 @@ use url::Url;
 
 use crate::ConfigurationError;
 
-/// The admitted inclusive range for [`Options::exchange_cache_capacity`].
+// Keep this range and its admission error in sync with the capacity range in
+// crates/config/src/integrations.rs.
 const EXCHANGE_CACHE_CAPACITY_RANGE: std::ops::RangeInclusive<u32> = 1..=65_536;
 
 /// The client-assertion signing algorithm. One algorithm per key (RFC 8725bis
@@ -59,11 +60,36 @@ pub struct Options {
 /// Options [`admit_options`] accepted, in the form
 /// [`Credentials::build`](crate::Credentials::build) uses.
 pub(crate) struct Admitted {
-    pub(crate) endpoint: Url,
-    pub(crate) permits: usize,
+    options: Options,
+    endpoint: Url,
+    permits: usize,
 }
 
-pub(crate) fn admitted_provider_concurrency(value: u32) -> Result<usize, ConfigurationError> {
+impl Admitted {
+    pub(crate) fn endpoint(&self) -> &Url {
+        &self.endpoint
+    }
+
+    pub(crate) fn into_parts(self) -> (Options, Url, usize) {
+        (self.options, self.endpoint, self.permits)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn try_new_for_test(
+        options: Options,
+        endpoint: Url,
+    ) -> Result<Self, ConfigurationError> {
+        // Loopback fixtures inject their own HTTP transport and endpoint.
+        let permits = admitted_provider_concurrency(options.provider_concurrency)?;
+        Ok(Self {
+            options,
+            endpoint,
+            permits,
+        })
+    }
+}
+
+fn admitted_provider_concurrency(value: u32) -> Result<usize, ConfigurationError> {
     usize::try_from(value)
         .ok()
         .filter(|&permits| permits > 0 && permits <= Semaphore::MAX_PERMITS)
@@ -73,7 +99,7 @@ pub(crate) fn admitted_provider_concurrency(value: u32) -> Result<usize, Configu
         })
 }
 
-pub(crate) fn admit_options(options: &Options) -> Result<Admitted, ConfigurationError> {
+pub(crate) fn admit_options(options: Options) -> Result<Admitted, ConfigurationError> {
     let permits = admitted_provider_concurrency(options.provider_concurrency)?;
     let error = |key, reason| Err(ConfigurationError { key, reason });
     // Direct construction of `Options` bypasses the configuration loader.
@@ -129,5 +155,9 @@ pub(crate) fn admit_options(options: &Options) -> Result<Admitted, Configuration
     if endpoint.fragment().is_some() {
         return error("token_url", "must not include a fragment");
     }
-    Ok(Admitted { endpoint, permits })
+    Ok(Admitted {
+        options,
+        endpoint,
+        permits,
+    })
 }

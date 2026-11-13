@@ -77,7 +77,7 @@ fn messaging_options(
     let messaging = &config.messaging;
     let source_stream = messaging.required_source_stream()?.to_owned();
     let consumer = if needs_subscription {
-        let keys = messaging.required_consumer()?;
+        let keys = messaging.required_consumer_keys()?;
         Some(ConsumerOptions {
             durable_name: keys.durable.to_owned(),
             filter_subject: keys.filter_subject.to_owned(),

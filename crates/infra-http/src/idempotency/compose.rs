@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use axum::RequestExt;
 use axum::body::{Body, Bytes};
-use axum::extract::{FromRequestParts, OriginalUri, Request, State};
+use axum::extract::{OriginalUri, Request, State};
 use axum::http::{HeaderName, HeaderValue};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -19,15 +19,15 @@ use http_body_util::{BodyExt, Collected, Full};
 use infra_idempotency_store::Store;
 use utoipa::OpenApi as _;
 
-use super::caused_by_length_limit;
 use super::declaration::{self, CompositionError};
 use super::execute::{
     Attempt, AttemptOutcome, HTTP_IDEMPOTENCY_OUTCOMES_METRIC, Outcome, Provenance,
 };
 use super::identity::{self, KEY_GRAMMAR, MAX_DECODED_KEY_BYTES};
-use super::openapi::{IdempotencyComponents, KEY_HEADER, REPLAYED_HEADER, REPLAYED_VALUE};
+use super::openapi::IdempotencyComponents;
+use super::{KEY_HEADER, REPLAYED_HEADER, REPLAYED_VALUE, caused_by_length_limit};
 use crate::authn::VerifiedPrincipal;
-use crate::context::RequestDeadline;
+use crate::context::{RequestContext, RequestDeadline, read_body};
 use crate::problem::{Code, Problem, body_too_large, body_unreadable, sanitized_internal_error};
 use utoipa_axum::router::UtoipaMethodRouter;
 
@@ -87,6 +87,8 @@ impl Composer {
     ///
     /// Key handling stays inside final authentication. An invalid declaration
     /// stops route assembly before the service can serve it.
+    /// Finalization requires the assembled operation to have protected
+    /// effective security so capture can receive a verified caller.
     /// Declare every header that can change the intended effect as an inline
     /// request parameter so its values participate in retry matching.
     ///
@@ -190,7 +192,7 @@ async fn capture_attempt(
     let Some(deadline) = parts.extensions.get::<RequestDeadline>().copied() else {
         return ControlFlow::Break(wiring_failure(&operation_id, "deadline_missing"));
     };
-    let Ok(principal) = VerifiedPrincipal::from_request_parts(&mut parts, &()).await else {
+    let Some(principal) = VerifiedPrincipal::from_extensions(&parts.extensions) else {
         return ControlFlow::Break(wiring_failure(&operation_id, "principal_missing"));
     };
     let Some(caller) = identity::caller_identity(
@@ -211,7 +213,8 @@ async fn capture_attempt(
         return ControlFlow::Break(invalid_key());
     };
     let scope = identity::scope_key(&caller, &key);
-    let collected = match buffer_body(body).await {
+    let context = parts.extensions.get::<RequestContext>();
+    let collected = match read_body(context, buffer_body(body)).await {
         Ok(collected) => collected,
         Err(refusal) => {
             Outcome::NotStored.record();

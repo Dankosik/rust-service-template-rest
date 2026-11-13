@@ -4,7 +4,7 @@ use infra_postgres::observed;
 use sqlx::postgres::PgConnection;
 use tokio::time::Instant;
 
-use super::{AttemptId, ClaimFence, Persistence, expired};
+use super::{AttemptId, ClaimFence, Persistence, deadline_reached_or_cleanup_ended};
 use crate::engine::{Operation, OperationError, Shared, backstop, observe_failure};
 use crate::kind::{Disposition, JobError, MAX_ERROR_SUMMARY_BYTES, Policy};
 use crate::state::FailureReason;
@@ -36,7 +36,10 @@ impl Transition {
                 cause: RetryCause::Timeout,
                 ..
             } => "timeout",
-            Self::Retry { .. } => "retry",
+            Self::Retry {
+                cause: RetryCause::Failure { .. },
+                ..
+            } => "retry",
             Self::Fail { reason, .. } => reason.as_str(),
             Self::Snooze { .. } => "snoozed",
             Self::Release => "cancelled",
@@ -107,11 +110,10 @@ pub(super) struct Unacknowledged;
 
 /// The write-only view of `transition`: the outcome that stores its own row.
 ///
-/// A completion returns `None`, because
-/// [`complete_batched`](super::completion::complete_batched) is the only path
-/// that completes an attempt. The match is exhaustive, so a new transition
-/// cannot reach a statement without first choosing which of the two writes it
-/// takes, and the view carries only the values its statement binds.
+/// The supervisor routes completion through
+/// [`complete_batched`](super::completion::complete_batched). A handler can
+/// complete the claim in its own transaction via
+/// [`Job::complete_in_tx`](crate::kind::Job::complete_in_tx).
 pub(super) fn write_of(transition: &Transition) -> Option<Write<'_>> {
     Some(match transition {
         Transition::Complete => return None,
@@ -146,7 +148,7 @@ pub(super) async fn send_outcome(
         let mut connection = infra_postgres::acquire(&shared.pool, "record job outcome")
             .await
             .map_err(OperationError::Acquire)?;
-        if expired(shared, deadline) {
+        if deadline_reached_or_cleanup_ended(&shared.cleanup, deadline) {
             return Err(OperationError::TimedOut);
         }
         execute(&mut connection, fence, write)
@@ -160,8 +162,8 @@ pub(super) async fn send_outcome(
     })
 }
 
-/// Store one attempt outcome. A completion is not among the views: its only
-/// write is [`complete_batched`](super::completion::complete_batched).
+/// The supervisor batches completions separately via
+/// [`complete_batched`](super::completion::complete_batched).
 async fn execute(
     connection: &mut PgConnection,
     fence: ClaimFence,
@@ -169,7 +171,7 @@ async fn execute(
 ) -> Result<u64, sqlx::Error> {
     let ClaimFence { job_id, generation } = fence;
     let id = job_id.0;
-    let (summary, query) = match write {
+    let (statement_summary, query) = match write {
         Write::Retry {
             summary,
             base_micros,
@@ -236,29 +238,9 @@ async fn execute(
             ),
         ),
     };
-    Ok(observed(summary, query.execute(connection))
+    Ok(observed(statement_summary, query.execute(connection))
         .await?
         .rows_affected())
-}
-
-/// COMPLETE for one fenced claim, for the caller to execute.
-///
-/// Every outcome write fences on `claim_expires_at IS NOT NULL`, which the
-/// table's CHECK makes equivalent to `state = 'running'`. A literal
-/// `state = 'running'` proves the partial `background_jobs_running` predicate,
-/// and after ANALYZE saw few running rows the planner scans that whole index
-/// for the id, dead entries of every job claimed since the last VACUUM
-/// included. This predicate leaves the primary key as the only access path.
-pub(crate) fn complete_query(
-    fence: ClaimFence,
-) -> sqlx::query::Query<'static, sqlx::Postgres, sqlx::postgres::PgArguments> {
-    sqlx::query!(
-        "UPDATE background_jobs \
-         SET state = 'completed', finished_at = statement_timestamp(), claim_expires_at = NULL \
-         WHERE id = $1 AND claim_generation = $2 AND claim_expires_at IS NOT NULL",
-        fence.job_id.0,
-        fence.generation,
-    )
 }
 
 #[derive(Debug)]
@@ -374,13 +356,7 @@ fn payload_summary(kind: &str, error: &serde_json::Error) -> String {
     )
 }
 
-/// The final stored form of a summary: control characters become spaces, and
-/// the UTF-8 length stops at [`MAX_ERROR_SUMMARY_BYTES`] without splitting a
-/// character.
-///
-/// This is the one owner of the stored bound. Every summary this module writes
-/// passes here, and [`crate::kind`] appends its sources only while they stay
-/// below the same limit.
+/// The final formatting step before an attempt summary is stored.
 fn sanitize_summary(text: &str) -> String {
     let mut sanitized = String::with_capacity(text.len().min(MAX_ERROR_SUMMARY_BYTES));
     for ch in text.chars() {
