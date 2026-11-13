@@ -232,7 +232,7 @@ impl MaintenanceObserver {
     ) {
         let attempt = self.attempt();
         match tokio::time::timeout(MAINTENANCE_OBSERVATION_BUDGET, read).await {
-            Ok(Ok(sample)) => attempt.succeeded(sample),
+            Ok(Ok(sample)) => attempt.record_sample(sample),
             Ok(Err(failure)) => attempt.failed(failure),
             Err(_) => attempt.failed(MaintenanceFailure::TimedOut),
         }
@@ -307,8 +307,8 @@ struct MaintenanceAttempt<'a> {
 
 impl MaintenanceAttempt<'_> {
     /// Publish only after the read transaction has acknowledged success.
-    fn succeeded(self, sample: PopulationSample) {
-        self.succeeded_at(sample, MaintenanceClock::now());
+    fn record_sample(self, sample: PopulationSample) {
+        self.record_sample_at(sample, MaintenanceClock::now());
     }
 
     fn validated_receipt_time(
@@ -336,7 +336,7 @@ impl MaintenanceAttempt<'_> {
     }
 
     /// An invalid sample is a failed attempt that keeps the last-good one.
-    fn succeeded_at(mut self, sample: PopulationSample, received: MaintenanceClock) {
+    fn record_sample_at(mut self, sample: PopulationSample, received: MaintenanceClock) {
         let Some(received_at) = self.validated_receipt_time(sample, received) else {
             self.failed_at(MaintenanceFailure::ClockInvalid, received);
             return;

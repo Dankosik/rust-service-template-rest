@@ -303,7 +303,8 @@ impl Drop for StatementEnd {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TransactionOutcome {
     Committed,
-    /// The closure returned `Err`; the boundary rolled back.
+    /// The closure returned `Err`. Dropping the transaction queues rollback
+    /// without waiting for PostgreSQL to acknowledge it.
     RolledBack,
     AcquireFailed,
     BeginFailed,
