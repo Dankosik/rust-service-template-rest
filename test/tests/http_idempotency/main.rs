@@ -683,6 +683,99 @@ async fn p4_an_expired_record_is_not_replayed_and_is_replaced(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn p4_waiting_for_an_expired_row_preserves_retention_and_replay(pool: PgPool) {
+    create_effects(&pool).await;
+    let store_pool = template_pool(&dsn_for(&pool).await, 1).await;
+    let retention = Duration::from_secs(2);
+    let store = Store::new(store_pool.clone(), retention).expect("retention fits PostgreSQL");
+
+    for (scope, delete_while_locked) in [(SCOPE, false), (OTHER_SCOPE, true)] {
+        sqlx::query(INSERT_LIVE)
+            .bind(scope)
+            .bind(INPUT)
+            .execute(&pool)
+            .await
+            .expect("seed the old record");
+        expire(&pool, scope).await;
+
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the competing transaction owns the row lock until released"
+        )]
+        let mut holder = pool.begin().await.expect("a row-lock holder");
+        let holder_pid: i32 = sqlx::query_scalar(
+            "SELECT pg_backend_pid() FROM http_idempotency_records WHERE scope_key = $1 FOR UPDATE",
+        )
+        .bind(scope)
+        .fetch_one(&mut *holder)
+        .await
+        .expect("lock the expired record");
+
+        let work = Work::default();
+        let response = success(r#"{"id":2}"#);
+        let (written, before_release) = bounded("the blocked record write to commit", async {
+            tokio::join!(execute(&store, scope, INPUT, &response, &work), async {
+                loop {
+                    let blocked: bool = sqlx::query_scalar(
+                        "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
+                         WHERE datname = current_database() AND application_name = $1 \
+                         AND wait_event_type = 'Lock' AND $2 = ANY(pg_blocking_pids(pid)))",
+                    )
+                    .bind(APP)
+                    .bind(holder_pid)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("observe the writer waiting on the row lock");
+                    if blocked {
+                        break;
+                    }
+                    tokio::time::sleep(RETRY_PAUSE).await;
+                }
+                // Spend the original TTL while PostgreSQL is waiting for the lock.
+                tokio::time::sleep(retention + RETRY_PAUSE).await;
+                if delete_while_locked {
+                    sqlx::query("DELETE FROM http_idempotency_records WHERE scope_key = $1")
+                        .bind(scope)
+                        .execute(&mut *holder)
+                        .await
+                        .expect("delete the expired record as cleanup would");
+                }
+                let before_release: String = sqlx::query_scalar("SELECT clock_timestamp()::text")
+                    .fetch_one(&mut *holder)
+                    .await
+                    .expect("read the database clock while the row remains locked");
+                holder.commit().await.expect("release the row lock");
+                before_release
+            })
+        })
+        .await;
+        assert_eq!(committed(written), response);
+
+        let retry_response = success(r#"{"id":3}"#);
+        let retry = bounded(
+            "same-key replay after the write",
+            execute(&store, scope, INPUT, &retry_response, &work),
+        )
+        .await;
+        assert_eq!(live(retry), Some(response));
+        assert_eq!(work.runs(), 1);
+        let full_retention: bool = sqlx::query_scalar(
+            "SELECT expires_at >= $2::text::timestamptz + $3::interval \
+             FROM http_idempotency_records WHERE scope_key = $1",
+        )
+        .bind(scope)
+        .bind(before_release)
+        .bind(retention)
+        .fetch_one(&pool)
+        .await
+        .expect("read the stored expiry");
+        assert!(full_retention, "retention starts after the row lock wait");
+    }
+    assert_eq!(count(&pool, EFFECTS).await, 2);
+    close_pools(&[&store_pool]).await;
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn p4_an_expired_key_can_execute_while_a_replay_is_in_flight(pool: PgPool) {
     create_effects(&pool).await;
     let dsn = dsn_for(&pool).await;

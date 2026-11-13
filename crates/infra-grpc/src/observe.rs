@@ -69,7 +69,7 @@ pub(crate) async fn observe(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    let call = Call::start(&series, &request);
+    let call = Call::start(&series, &request, None);
     let fallback =
         set_parent_or_fallback(call.span(), otel_http::extract_context(request.headers()));
     let answer = AssertUnwindSafe(next.run(request))
@@ -102,10 +102,14 @@ pub(crate) struct Call {
 }
 
 impl Call {
-    pub(crate) fn start<B>(series: &Arc<Series>, request: &http::Request<B>) -> Self {
+    pub(crate) fn start<B>(
+        series: &Arc<Series>,
+        request: &http::Request<B>,
+        destination: Option<&http::Uri>,
+    ) -> Self {
         let started = Instant::now();
         let handles = series.handles(request);
-        let span = make_span(request, &handles, series.side());
+        let span = make_span(request, &handles, series.side(), destination);
         handles.started.increment(1);
         Self {
             handles,
@@ -153,7 +157,12 @@ impl Drop for Call {
 
 /// The RPC span with its OpenTelemetry attributes, named after the label
 /// path's method: `unknown/unknown` for a path that is no known method.
-fn make_span<B>(request: &http::Request<B>, handles: &Handles, side: Side) -> tracing::Span {
+fn make_span<B>(
+    request: &http::Request<B>,
+    handles: &Handles,
+    side: Side,
+    destination: Option<&http::Uri>,
+) -> tracing::Span {
     let span = otel_trace_span!(
         "GRPC request",
         otel.name = &*handles.span_name,
@@ -162,15 +171,17 @@ fn make_span<B>(request: &http::Request<B>, handles: &Handles, side: Side) -> tr
     span.set_attribute("rpc.system", "grpc");
     span.set_attribute("rpc.service", Arc::clone(&handles.service));
     span.set_attribute("rpc.method", Arc::clone(&handles.method));
-    // Client destination identity is configured by the caller of our adapter;
-    // inbound authority and User-Agent are untrusted request data.
-    if matches!(side, Side::Client) {
-        let (server_address, server_port) = otel_http::http_host_port(request);
-        if !server_address.is_empty() && server_address.len() <= CLIENT_DIAGNOSTIC_BYTES {
-            span.set_attribute("server.address", server_address.to_owned());
-        }
-        if let Some(port) = server_port {
-            span.set_attribute("server.port", port);
+    // Tonic applies the channel's authority after the adapter starts the span.
+    if let Some(destination) = destination {
+        if let Some(host) = destination.host()
+            && !host.is_empty()
+            && host.len() <= CLIENT_DIAGNOSTIC_BYTES
+        {
+            let address = host.trim_start_matches('[').trim_end_matches(']');
+            span.set_attribute("server.address", address.to_owned());
+            if let Some(port) = destination.port_u16() {
+                span.set_attribute("server.port", i64::from(port));
+            }
         }
         let user_agent = otel_http::user_agent(request);
         if !user_agent.is_empty() && user_agent.len() <= CLIENT_DIAGNOSTIC_BYTES {

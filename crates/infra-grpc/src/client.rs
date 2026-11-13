@@ -85,9 +85,11 @@ impl ClientTimeout {
 /// handler received, also bounds the call: the earliest of its deadline and
 /// this client's wins for opening and lifetime, and its cancellation cancels
 /// the call.
-#[derive(Clone, Debug)]
+#[derive(Clone, derive_more::Debug)]
 pub struct Client {
     channel: Channel,
+    #[debug(skip)]
+    destination: http::Uri,
     timeout: ClientTimeout,
     series: Arc<crate::observe::Series>,
 }
@@ -166,6 +168,7 @@ impl Client {
             // This path places tonic's connect timer outside TLS as well as
             // DNS/TCP, so the shared channel can release a stalled full dial.
             channel: endpoint.connect_with_connector_lazy(connector),
+            destination: endpoint.uri().clone(),
             timeout,
             series: crate::observe::Series::client(),
         })
@@ -242,7 +245,7 @@ impl Client {
             caller.map(|budget| Deadline::new(origin, budget)),
             parent_deadline,
         );
-        let call = crate::observe::Call::start(&self.series, &request);
+        let call = crate::observe::Call::start(&self.series, &request, Some(&self.destination));
         otel_http::inject_context(
             &tracing_opentelemetry_instrumentation_sdk::find_context_from_tracing(call.span()),
             request.headers_mut(),
@@ -273,7 +276,8 @@ impl PreparedCall {
         &self.opening
     }
 
-    /// Metadata for credentials; changing it cannot reset the selected cutoffs.
+    /// Metadata for credentials. Dispatch derives the wire `grpc-timeout`
+    /// from the original caller and parent deadlines.
     pub fn headers_mut(&mut self) -> &mut http::HeaderMap {
         self.request.headers_mut()
     }
@@ -352,9 +356,7 @@ impl PreparedCall {
                     opening.check().map_err(stopped)?;
                     prepare_dispatch(request.headers_mut())?;
                     opening.check().map_err(stopped)?;
-                    if let Some(forwarded) = forwarded {
-                        forward_timeout(request.headers_mut(), forwarded)?;
-                    }
+                    apply_forwarded_timeout(request.headers_mut(), forwarded)?;
                     ready.call(request).await.map_err(transport_status)
                 } => result,
             };
@@ -389,8 +391,15 @@ impl PreparedCall {
     }
 }
 
-fn forward_timeout(headers: &mut http::HeaderMap, caller: Deadline) -> Result<(), tonic::Status> {
-    let remaining = caller.remaining();
+fn apply_forwarded_timeout(
+    headers: &mut http::HeaderMap,
+    forwarded: Option<Deadline>,
+) -> Result<(), tonic::Status> {
+    let Some(deadline) = forwarded else {
+        headers.remove(crate::protocol::GRPC_TIMEOUT);
+        return Ok(());
+    };
+    let remaining = deadline.remaining();
     if remaining.is_zero() {
         return Err(Side::Client.deadline());
     }
@@ -463,14 +472,14 @@ mod tests {
         );
         tokio::time::advance(Duration::from_secs(1)).await;
         let mut headers = http::HeaderMap::new();
-        forward_timeout(&mut headers, Deadline::new(origin, supplied)).unwrap();
+        apply_forwarded_timeout(&mut headers, Some(Deadline::new(origin, supplied))).unwrap();
         assert_eq!(crate::grpc_timeout(&headers), Some(Duration::from_secs(4)));
         assert_eq!(opening.remaining(), Duration::from_secs(1));
         assert_eq!(full.unwrap().remaining(), Duration::from_secs(1));
         assert_eq!(long.unwrap().remaining(), Duration::from_secs(4));
         tokio::time::advance(Duration::from_secs(4)).await;
         assert_eq!(
-            forward_timeout(&mut headers, Deadline::new(origin, supplied))
+            apply_forwarded_timeout(&mut headers, Some(Deadline::new(origin, supplied)))
                 .unwrap_err()
                 .code(),
             tonic::Code::DeadlineExceeded
@@ -482,7 +491,7 @@ mod tests {
         assert!(opening.expired());
         assert!(!Deadline::new(origin, largest_wire).expired());
         // A finite parent budget past the wire maximum is sent as that maximum.
-        forward_timeout(&mut headers, Deadline::new(origin, Duration::MAX)).unwrap();
+        apply_forwarded_timeout(&mut headers, Some(Deadline::new(origin, Duration::MAX))).unwrap();
         assert_eq!(headers[crate::protocol::GRPC_TIMEOUT], "99999999H");
     }
 

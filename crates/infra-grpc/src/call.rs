@@ -711,6 +711,7 @@ mod tests {
         Call::start(
             &crate::observe::Series::server(["/test.Service/Stream".into()].into_iter().collect()),
             &request,
+            None,
         )
     }
 
