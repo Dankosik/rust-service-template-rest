@@ -25,7 +25,7 @@ const LEEWAY_SECONDS: u64 = 30;
 const MAX_REMEMBERED: u64 = 1024;
 
 /// Service token verification outcomes by closed reason.
-pub const VERIFICATIONS_METRIC: &str = "service_auth_verifications_total";
+const VERIFICATIONS_METRIC: &str = "service_auth_verifications_total";
 
 /// The fixed outcomes a transport maps to its response.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
