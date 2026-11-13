@@ -105,6 +105,7 @@ ACTIONLINT ?= go run github.com/rhysd/actionlint/cmd/actionlint@v$(ACTIONLINT_VE
 # Python tools run from PyPI at the pinned version: uv locally, pipx on CI
 # runners, which have it preinstalled.
 RUFF ?= $(if $(shell command -v uvx 2>/dev/null),uvx ruff@$(RUFF_VERSION),pipx run ruff==$(RUFF_VERSION))
+AST_GREP ?= $(if $(shell command -v uvx 2>/dev/null),uvx --from ast-grep-cli@$(AST_GREP_VERSION) ast-grep,pipx run --spec ast-grep-cli==$(AST_GREP_VERSION) ast-grep)
 # Tracked and untracked shell scripts that exist in the worktree.
 SHELL_FILES = $(wildcard $(shell git ls-files --cached --others --exclude-standard -- '*.sh'))
 # Tracked and untracked Markdown files; `git ls-files` keeps target/ out.
@@ -127,7 +128,7 @@ TEMPLATE_STANDARD_TARGETS := help template-init build run test test-package test
 	test-integration-object-storage test-object-storage-conformance test-integration-oauth integration-compile migration-check migration-history-self-test migration-validate \
 	native-transport-regressions \
 	plan verify install-hooks verify-check changed-surfaces-check affected-crates-check validation-lock-self-test \
-	duplication-check architecture-check quality-check-self-test
+	duplication-check architecture-check quality-check-self-test modernize-scan
 # template:begin grpc:make-grpc-standard-targets
 TEMPLATE_STANDARD_TARGETS += grpc-generate grpc-check grpc-generator-deny
 # template:end grpc:make-grpc-standard-targets
@@ -451,6 +452,10 @@ shellcheck: ## ShellCheck every shell script through the pinned container
 python-lint: ## Lint the Python scripts for defects with the pinned ruff
 	@command -v uvx >/dev/null 2>&1 || command -v pipx >/dev/null 2>&1 || { echo "$@ requires uv or pipx for ruff@$(RUFF_VERSION)" >&2; exit 2; }
 	$(RUFF) check --no-cache .
+
+modernize-scan: ## After a toolchain bump: report code newer std forms or lints now cover (SINCE=<old toolchain>)
+	@command -v uvx >/dev/null 2>&1 || command -v pipx >/dev/null 2>&1 || { echo "$@ requires uv or pipx for ast-grep@$(AST_GREP_VERSION)" >&2; exit 2; }
+	CARGO='$(BUILD_CARGO)' AST_GREP='$(AST_GREP)' SINCE='$(SINCE)' python3 scripts/modernize-scan.py
 
 # Offline on purpose: relative paths and #fragments are this repository's
 # contract; external URLs are not, and checking them would make the gate flaky.

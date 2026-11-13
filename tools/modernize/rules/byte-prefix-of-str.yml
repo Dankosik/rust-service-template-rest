@@ -1,0 +1,7 @@
+id: byte-prefix-of-str
+language: rust
+severity: hint
+message: "A byte-length prefix of a str can split a character; `floor_char_boundary(n)` (1.91) cannot."
+rule:
+  pattern: "&$S[..$S.len().min($N)]"
+ignores: ["vendor/**"]

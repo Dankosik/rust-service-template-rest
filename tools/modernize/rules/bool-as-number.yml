@@ -1,0 +1,9 @@
+id: bool-as-number
+language: rust
+severity: hint
+message: "A bool as 1/0 is `f64::from(b)` / `u8::from(b)` (From<bool>, 1.68 for floats)."
+rule:
+  any:
+    - pattern: "if $C { 1.0 } else { 0.0 }"
+    - pattern: "if $C { 1 } else { 0 }"
+ignores: ["vendor/**"]

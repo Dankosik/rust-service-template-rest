@@ -1,0 +1,5 @@
+# Report-only patterns for `make modernize-scan`: hand-written forms that a
+# std construct or an edition rule now states more precisely. A hit is a
+# candidate to judge, not a defect; nothing gates on this directory.
+ruleDirs:
+  - rules
