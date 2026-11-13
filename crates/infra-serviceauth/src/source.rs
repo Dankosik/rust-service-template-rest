@@ -163,7 +163,8 @@ impl ReceiverTokens {
     ///
     /// # Errors
     /// Returns [`SigningError::Clock`] when the system clock precedes the
-    /// Unix epoch.
+    /// Unix epoch, or [`SigningError::Signing`] if signing a new token or
+    /// converting it to an authorization header fails.
     pub fn authorization(&self) -> Result<Option<HeaderValue>, SigningError> {
         let Some(signer) = &self.signer else {
             return Ok(None);

@@ -135,7 +135,7 @@ impl fmt::Debug for TrustRegistry {
 
 /// The document's members in order, or the first repeated member: a repeat
 /// is a refusal, since JSON parsers disagree about which duplicate wins.
-struct Entries(Result<Vec<(String, Unique)>, String>);
+struct Entries(Result<Vec<(String, DuplicateCheckedJson)>, String>);
 
 impl<'de> Deserialize<'de> for Entries {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -146,12 +146,12 @@ impl<'de> Deserialize<'de> for Entries {
                 formatter.write_str("an object of JWK Sets")
             }
             fn visit_map<A: de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-                let mut entries: Vec<(String, Unique)> = Vec::new();
+                let mut entries: Vec<(String, DuplicateCheckedJson)> = Vec::new();
                 let mut repeated = None;
                 // Read to the end even after a repeat: serde_json's `end_map`
                 // refuses a visitor that stops early, and `parse` turns any
                 // serde error into the unnamed document error.
-                while let Some((name, value)) = map.next_entry::<String, Unique>()? {
+                while let Some((name, value)) = map.next_entry::<String, DuplicateCheckedJson>()? {
                     if repeated.is_none() && entries.iter().any(|(known, _)| *known == name) {
                         repeated = Some(name.clone());
                     }
@@ -167,51 +167,51 @@ impl<'de> Deserialize<'de> for Entries {
 /// A JSON value, or `None` when an object anywhere in it repeats a member
 /// name: [`serde_json::Value`] silently keeps the last duplicate, which would
 /// drop a key set or a `kid` the operator wrote.
-struct Unique(Option<serde_json::Value>);
+struct DuplicateCheckedJson(Option<serde_json::Value>);
 
-impl<'de> Deserialize<'de> for Unique {
+impl<'de> Deserialize<'de> for DuplicateCheckedJson {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         struct Visitor;
         impl<'de> de::Visitor<'de> for Visitor {
-            type Value = Unique;
+            type Value = DuplicateCheckedJson;
             fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
                 formatter.write_str("a JSON value")
             }
-            fn visit_bool<E>(self, value: bool) -> Result<Unique, E> {
-                Ok(Unique(Some(value.into())))
+            fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
+                Ok(DuplicateCheckedJson(Some(value.into())))
             }
-            fn visit_i64<E>(self, value: i64) -> Result<Unique, E> {
-                Ok(Unique(Some(value.into())))
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
+                Ok(DuplicateCheckedJson(Some(value.into())))
             }
-            fn visit_u64<E>(self, value: u64) -> Result<Unique, E> {
-                Ok(Unique(Some(value.into())))
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
+                Ok(DuplicateCheckedJson(Some(value.into())))
             }
-            fn visit_f64<E>(self, value: f64) -> Result<Unique, E> {
-                Ok(Unique(Some(value.into())))
+            fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E> {
+                Ok(DuplicateCheckedJson(Some(value.into())))
             }
-            fn visit_str<E>(self, value: &str) -> Result<Unique, E> {
-                Ok(Unique(Some(value.into())))
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(DuplicateCheckedJson(Some(value.into())))
             }
-            fn visit_string<E>(self, value: String) -> Result<Unique, E> {
-                Ok(Unique(Some(value.into())))
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
+                Ok(DuplicateCheckedJson(Some(value.into())))
             }
-            fn visit_unit<E>(self) -> Result<Unique, E> {
-                Ok(Unique(Some(serde_json::Value::Null)))
+            fn visit_unit<E>(self) -> Result<Self::Value, E> {
+                Ok(DuplicateCheckedJson(Some(serde_json::Value::Null)))
             }
-            fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Unique, A::Error> {
+            fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
                 let mut items = Some(Vec::new());
-                while let Some(Unique(item)) = seq.next_element()? {
+                while let Some(DuplicateCheckedJson(item)) = seq.next_element()? {
                     items = items.zip(item).map(|(mut items, item)| {
                         items.push(item);
                         items
                     });
                 }
-                Ok(Unique(items.map(serde_json::Value::Array)))
+                Ok(DuplicateCheckedJson(items.map(serde_json::Value::Array)))
             }
             // Reads to the end after a repeat, for the reason `Entries` does.
-            fn visit_map<A: de::MapAccess<'de>>(self, mut map: A) -> Result<Unique, A::Error> {
+            fn visit_map<A: de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
                 let mut members = Some(serde_json::Map::new());
-                while let Some((name, Unique(value))) = map.next_entry::<String, Unique>()? {
+                while let Some((name, DuplicateCheckedJson(value))) = map.next_entry()? {
                     members = members
                         .filter(|members| !members.contains_key(&name))
                         .zip(value)
@@ -220,7 +220,7 @@ impl<'de> Deserialize<'de> for Unique {
                             members
                         });
                 }
-                Ok(Unique(members.map(serde_json::Value::Object)))
+                Ok(DuplicateCheckedJson(members.map(serde_json::Value::Object)))
             }
         }
         deserializer.deserialize_any(Visitor)
