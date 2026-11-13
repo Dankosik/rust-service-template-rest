@@ -274,7 +274,7 @@ impl fmt::Display for SpanName {
 }
 
 fn is_error_status(status: StatusCode) -> bool {
-    status.is_client_error() || status.is_server_error() || status.as_u16() >= 600
+    status.as_u16() >= 400
 }
 
 /// Every code `StatusCode` admits, 100 through 999, as three ASCII digits each.

@@ -75,7 +75,8 @@ pub enum BuildError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// The URL is not an absolute URL on the client's origin.
+    /// The request URL is not an absolute URL on the client's origin or
+    /// the caller supplied a `Host` header.
     #[error("outbound HTTP target is invalid")]
     InvalidTarget,
     /// A deadline or [`Limits::operation_timeout`] ended the operation.
@@ -307,8 +308,11 @@ impl Client {
     /// check after request preparation and immediately before transport handoff.
     ///
     /// # Errors
-    /// Returns [`Error::DispatchRefused`] when the check returns `false`, or
-    /// the same errors as [`Self::execute_with_response_status`].
+    ///
+    /// Returns [`Error::DispatchRefused`] when the check returns `false` and
+    /// the operation is still active. A timeout or cancellation observed
+    /// after the check takes precedence. Also returns the errors documented
+    /// by [`Self::execute_with_response_status`].
     pub async fn execute_with_dispatch_check(
         &self,
         request: Request<Bytes>,
@@ -456,10 +460,9 @@ fn stopped_error(stopped: Stopped) -> Error {
     }
 }
 
-/// Appends `data`, growing `collected` twofold like `Vec` but never past
-/// `limit`; [`Limited`] admits at most `limit` bytes in total. The buffer is
-/// not presized from `Content-Length`, so a declared length cannot hold memory
-/// for bytes the provider never sends.
+/// Requests at most `limit` bytes of capacity, which the allocator may round up.
+/// [`Limited`] bounds the total bytes appended. Capacity grows as data arrives,
+/// so a declared `Content-Length` cannot reserve memory for unsent bytes.
 fn append_within(collected: &mut Vec<u8>, data: &[u8], limit: usize) {
     let required = collected.len().saturating_add(data.len());
     if required > collected.capacity() {
