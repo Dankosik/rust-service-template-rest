@@ -683,7 +683,12 @@ mod tests {
         });
         let result = tokio::time::timeout(
             Duration::from_secs(2),
-            super::serve(config, registration, &mut signals, &mut deadline),
+            Box::pin(super::serve(
+                config,
+                registration,
+                &mut signals,
+                &mut deadline,
+            )),
         )
         .await
         .unwrap();

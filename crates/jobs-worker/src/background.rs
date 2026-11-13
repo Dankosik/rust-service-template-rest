@@ -39,7 +39,7 @@ impl Background {
     {
         let cancel = self.cancel.child_token();
         let task = start(cancel.clone());
-        let guard = ReportUnlessCancelled {
+        let guard = ReportUnexpectedTaskEnd {
             name,
             cancel,
             stopped: self.stopped.clone(),
@@ -74,8 +74,8 @@ impl Background {
         }
     }
 
-    /// Resolve with the name of the first task that ended while its token
-    /// was live. Pending while every task runs.
+    /// Wait for the first recorded failure, including one reported by a task
+    /// that is still running.
     pub(crate) async fn stopped(&self) -> &'static str {
         let mut stopped = self.stopped.subscribe();
         if let Ok(seen) = stopped.wait_for(Option::is_some).await
@@ -89,14 +89,13 @@ impl Background {
     }
 }
 
-/// Dropped when its task ends, a panic included.
-struct ReportUnlessCancelled {
+struct ReportUnexpectedTaskEnd {
     name: &'static str,
     cancel: CancellationToken,
     stopped: watch::Sender<Option<&'static str>>,
 }
 
-impl Drop for ReportUnlessCancelled {
+impl Drop for ReportUnexpectedTaskEnd {
     fn drop(&mut self) {
         if self.cancel.is_cancelled() && !std::thread::panicking() {
             return;
