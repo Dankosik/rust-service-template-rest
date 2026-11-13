@@ -601,7 +601,8 @@ impl Mounted {
         let widgets: Arc<dyn CreateWidgets> = Arc::new(SqlWidgets {
             hold: Arc::clone(&hold),
         });
-        let mut composer = Composer::new(Store::new(store_pool.clone(), RETENTION));
+        let store = Store::new(store_pool.clone(), RETENTION).expect("retention fits PostgreSQL");
+        let mut composer = Composer::new(store);
         let contract = widget_contract(&mut composer);
         let activation = composer.finish();
         std::assert_matches!(activation, Activation::Active { .. }, "{activation:?}");
@@ -1745,6 +1746,69 @@ async fn p9_a_read_only_writer_answers_unavailable(pool: PgPool) {
     assert_eq!(outcomes(&recorder), counts(&[("unavailable", 1)]));
     assert_eq!(count(&pool, WIDGET_ROWS).await, 0);
     mounted.finish().await;
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn p9_postgres_timeouts_allow_a_same_key_retry(pool: PgPool) {
+    create_widgets(&pool).await;
+    let dsn = dsn_for(&pool).await;
+    let input = json!({"name": "gizmo", "color": "red"});
+    let mut lock_connection = infra_postgres::acquire(&pool, "test lock holder")
+        .await
+        .expect("a lock-holder connection");
+
+    for (setting, sqlstate, expected_rows) in [
+        ("lock_timeout", "55P03", 1),
+        ("transaction_timeout", "25P04", 2),
+    ] {
+        pool.execute(
+            format!(
+                "DO $$ BEGIN EXECUTE format(\
+                 'ALTER DATABASE %I SET lock_timeout = 0', current_database()); \
+                 EXECUTE format('ALTER DATABASE %I SET %I = %L', \
+                 current_database(), '{setting}', '1s'); END $$"
+            )
+            .as_str(),
+        )
+        .await
+        .expect("set the timeout for new sessions");
+        let mounted = Mounted::new(template_pool(&dsn, 1).await, BUDGET).await;
+        let recorder = PrometheusBuilder::new().build_recorder();
+        let _local = metrics::set_default_local_recorder(&recorder);
+
+        let mut holder = sqlx::Connection::begin(&mut *lock_connection)
+            .await
+            .expect("a table-lock holder");
+        (&mut *holder)
+            .execute("LOCK TABLE http_idempotency_records IN ACCESS EXCLUSIVE MODE")
+            .await
+            .expect("block idempotency arbitration");
+        let refused = mounted.create(ALICE, setting, &input, "req-timeout").await;
+        holder.rollback().await.expect("release the table lock");
+
+        let scrape = recorder.handle().render();
+        assert!(
+            scrape.lines().any(|line| {
+                line.starts_with("db_client_operation_duration_seconds_count{")
+                    && line.contains("db_query_summary=\"lock and read idempotency record\"")
+                    && line.contains(&format!("error_type=\"{sqlstate}\""))
+            }),
+            "{scrape}"
+        );
+        problem(
+            &refused,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "idempotency_unavailable",
+            "req-timeout",
+        );
+        assert_eq!(retry_after(&refused).as_deref(), Some("1"));
+        assert_eq!(count(&pool, WIDGET_ROWS).await, expected_rows - 1);
+
+        let retry = mounted.create(ALICE, setting, &input, "req-retry").await;
+        created(&retry, "req-retry");
+        assert_eq!(count(&pool, WIDGET_ROWS).await, expected_rows);
+        mounted.finish().await;
+    }
 }
 
 /// An ambiguous COMMIT must answer a retryable Problem whatever the driver

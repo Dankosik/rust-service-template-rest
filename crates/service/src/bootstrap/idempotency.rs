@@ -4,18 +4,23 @@ use super::background::Background;
 use infra_http::idempotency::{Activation, Composer};
 use infra_idempotency_store::Store;
 use infra_postgres::PgPool;
-use service_config::Config;
+use service_config::{Config, ValidationError};
 
 use super::BootstrapError;
 
 /// The composer through which idempotent operations join the contract. It
 /// has a store only when both the pool and a retention are set; otherwise
 /// activation refuses the missing value if an idempotent operation is served.
-pub(super) fn prepare(config: &Config, postgres_pool: Option<&PgPool>) -> Composer {
-    match (postgres_pool, config.http_idempotency.retention) {
-        (Some(pool), Some(retention)) => Composer::new(Store::new(pool.clone(), retention)),
-        _ => Composer::inert(),
-    }
+pub(super) fn prepare(
+    config: &Config,
+    postgres_pool: Option<&PgPool>,
+) -> Result<Composer, ValidationError> {
+    let (Some(pool), Some(retention)) = (postgres_pool, config.http_idempotency.retention) else {
+        return Ok(Composer::inert());
+    };
+    Store::new(pool.clone(), retention)
+        .map(Composer::new)
+        .map_err(|error| ValidationError::new("http_idempotency.retention", error.to_string()))
 }
 
 /// Start the composed boundary when it serves at least one. An inactive

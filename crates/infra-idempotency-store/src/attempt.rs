@@ -19,13 +19,13 @@
 //! record is never replaced, so it needs no second read.
 
 use std::fmt;
-use std::time::Duration;
 
 use bytes::Bytes;
 use infra_postgres::{
     Tx, TxError, failure_cause, in_tx_with, in_tx_with_acquire_deadline, is_transient, observed,
     sqlstate,
 };
+use sqlx::postgres::types::PgInterval;
 
 use crate::{READ_COMMITTED, Store};
 
@@ -369,7 +369,7 @@ async fn write(
     caller: &CallerIdentity,
     fingerprint: &Digest,
     record: &Record,
-    retention: Duration,
+    retention: PgInterval,
 ) -> Result<(), AttemptError> {
     // Replaces only an expired row; a live row leaves no row affected.
     let written = observed(
@@ -392,7 +392,7 @@ async fn write(
             caller.issuer,
             caller.kind.as_str(),
             caller.value,
-            retention as _,
+            retention,
         )
         .execute(tx),
     )
@@ -485,6 +485,8 @@ fn refused(phase: &'static str, class: AttemptError, cause: &'static str) -> Att
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     #[test]
@@ -528,7 +530,7 @@ mod tests {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgres://localhost/unused")
             .unwrap();
-        let store = Store::new(pool.clone(), Duration::from_secs(60));
+        let store = Store::new(pool.clone(), Duration::from_secs(60)).unwrap();
         for (issuer, value) in [
             ("https://issuer.example", "sub\0ject"),
             ("iss\0uer", "subject"),

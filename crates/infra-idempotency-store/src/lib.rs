@@ -20,7 +20,7 @@ mod maintenance;
 use std::time::Duration;
 
 use infra_postgres::{Isolation, TxOptions};
-use sqlx::postgres::PgPool;
+use sqlx::postgres::{PgPool, types::PgInterval};
 
 pub use attempt::{
     AttemptError, Attempted, CallerIdentity, CallerKind, Digest, HeaderPair, Record, ScopeKey,
@@ -41,55 +41,49 @@ const READ_COMMITTED: TxOptions = TxOptions {
 #[derive(Clone, Debug)]
 pub struct Store {
     pool: PgPool,
-    /// Whole microseconds ([`truncate_to_microseconds`]).
-    retention: Duration,
+    retention: PgInterval,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("retention exceeds the PostgreSQL interval range in microseconds")]
+pub struct InvalidRetention;
 
 impl Store {
     /// A store over `pool` whose records stay live for `retention` after
     /// their write, measured on the database clock.
     ///
     /// Does no I/O. Keeps whole microseconds of `retention`.
-    #[must_use]
-    pub fn new(pool: PgPool, retention: Duration) -> Self {
-        Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidRetention`] when the whole microseconds exceed the
+    /// range of a PostgreSQL interval's time component.
+    pub fn new(pool: PgPool, retention: Duration) -> Result<Self, InvalidRetention> {
+        let microseconds = i64::try_from(retention.as_micros()).map_err(|_| InvalidRetention)?;
+        Ok(Self {
             pool,
-            retention: truncate_to_microseconds(retention),
-        }
+            retention: PgInterval {
+                months: 0,
+                days: 0,
+                microseconds,
+            },
+        })
     }
-}
-
-/// `duration` without its sub-microsecond part. `sqlx-postgres` refuses to
-/// bind a `Duration` with one as an `interval`, and configuration accepts
-/// nanosecond units; the database clock resolves 1 µs, so dropping the part
-/// once changes no expiry observably.
-fn truncate_to_microseconds(duration: Duration) -> Duration {
-    Duration::new(duration.as_secs(), duration.subsec_micros() * 1_000)
 }
 
 #[cfg(test)]
 mod tests {
-    use sqlx::postgres::types::PgInterval;
-
     use super::*;
 
-    #[test]
-    fn retention_keeps_whole_microseconds() {
-        let kept = truncate_to_microseconds(Duration::new(3_600, 123_456_789));
-        assert_eq!(kept, Duration::new(3_600, 123_456_000));
-        assert!(PgInterval::try_from(kept).is_ok());
-
-        assert_eq!(
-            truncate_to_microseconds(Duration::from_secs(60)),
-            Duration::from_secs(60)
-        );
-        assert_eq!(
-            truncate_to_microseconds(Duration::new(59, 999_999_999)),
-            Duration::new(59, 999_999_000)
-        );
-        assert_eq!(
-            truncate_to_microseconds(Duration::from_nanos(999)),
-            Duration::ZERO
-        );
+    #[tokio::test]
+    async fn a_retention_outside_the_postgres_interval_range_is_rejected() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/unused")
+            .expect("lazy pool does no I/O");
+        let max = Duration::from_micros(i64::MAX.unsigned_abs());
+        assert!(Store::new(pool.clone(), max).is_ok());
+        let rejected = Store::new(pool.clone(), max + Duration::from_micros(1));
+        assert_eq!(rejected.unwrap_err(), InvalidRetention);
+        pool.close().await;
     }
 }

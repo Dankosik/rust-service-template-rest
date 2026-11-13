@@ -20,10 +20,11 @@ pub fn sqlstate(err: &sqlx::Error) -> Option<Cow<'_, str>> {
 /// meet. With a valid SQLSTATE: a lost connection (class `08`), exhausted
 /// resources (class `53`), a serialization failure, deadlock, or uncertain
 /// statement completion (`40001`, `40P01`, `40003`), a server shutting down or
-/// starting (`57P01`, `57P02`, `57P03`), a cancelled statement (`57014`), a
-/// session the server ended for idling in a transaction (`25P03`), or a
-/// read-only session (`25006`). Without one: a pool that timed out or closed,
-/// or a failed socket or TLS session.
+/// starting (`57P01`, `57P02`, `57P03`), a cancelled statement (`57014`),
+/// an unavailable lock (`55P03`), a session the server ended for idling in a
+/// transaction (`25P03`) or exceeding its transaction timeout (`25P04`), or
+/// a read-only session (`25006`). Without one: a pool that timed out or
+/// closed, or a failed socket or TLS session.
 #[must_use]
 pub fn is_transient(err: &sqlx::Error) -> bool {
     match sqlstate(err) {
@@ -39,7 +40,9 @@ pub fn is_transient(err: &sqlx::Error) -> bool {
                         | "57P02"
                         | "57P03"
                         | "57014"
+                        | "55P03"
                         | "25P03"
+                        | "25P04"
                         | "25006"
                 )
         }
