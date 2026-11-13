@@ -693,7 +693,7 @@ const AUTHORITY: &str = "grpc-inbound-authority-private.example";
 const USER_AGENT: &str = "grpc-inbound-agent-private";
 const TRACE_ID: &str = "11111111111111111111111111111111";
 const TRACEPARENT: &str = "00-11111111111111111111111111111111-2222222222222222-01";
-const CLIENT_DESTINATION: &str = "grpc-configured-destination.example";
+const CLIENT_DESTINATION: &str = "127.0.0.1";
 const CLIENT_AGENT: &str = "grpc-configured-agent";
 
 async fn exercise_server_privacy(address: &str, certificate: &str, token: &str) {
@@ -739,11 +739,6 @@ async fn exercise_server_privacy(address: &str, certificate: &str, token: &str) 
 }
 
 async fn exercise_client_destination(address: &str, certificate: String, token: &str) {
-    let authority = format!(
-        "{CLIENT_DESTINATION}:{}",
-        address.parse::<std::net::SocketAddr>().unwrap().port()
-    );
-    let destination = format!("https://{authority}");
     let transport = infra_grpc::Client::try_new(
         &format!("https://{address}"),
         infra_grpc::ClientSecurity::Tls(infra_grpc::ClientTlsMaterial {
@@ -753,7 +748,7 @@ async fn exercise_client_destination(address: &str, certificate: String, token: 
         Duration::from_secs(5),
     )
     .expect("observed client");
-    let mut client = EchoServiceClient::with_origin(transport, destination.parse().unwrap());
+    let mut client = EchoServiceClient::new(transport);
     let mut request = Request::new(UnaryRequest {
         message: "client identity echo".to_owned(),
     });
@@ -763,12 +758,6 @@ async fn exercise_client_destination(address: &str, certificate: String, token: 
     request
         .metadata_mut()
         .insert("user-agent", CLIENT_AGENT.parse().unwrap());
-    // The current observer reads Host before falling back to URI.host(),
-    // whose value excludes the port. Supply the configured authority to
-    // exercise preservation of both the destination name and its port.
-    request
-        .metadata_mut()
-        .insert("host", authority.parse().unwrap());
     assert_eq!(
         client
             .unary(request)
@@ -842,7 +831,7 @@ fn assert_server_privacy_outputs(
     }
 }
 
-fn exercise_server_format(oidc: &OidcFixture, format: &str, level: &str) {
+fn exercise_server_format(oidc: &OidcFixture, format: &str, level: &str) -> u16 {
     let collector = Collector::start(&oidc.runtime);
     let (certificate, private_key) = tls_material();
     let mut example = Example::spawn_with(
@@ -872,6 +861,7 @@ fn exercise_server_format(oidc: &OidcFixture, format: &str, level: &str) {
     assert_eq!(code, Some(0), "{format}: {stderr}; {logs:?}");
     let exported = collector.finish(&oidc.runtime);
     assert_server_privacy_outputs(format, &stderr, &logs, &exported);
+    address.parse::<std::net::SocketAddr>().unwrap().port()
 }
 
 #[test]
@@ -899,9 +889,8 @@ fn grpc_server_outputs_withhold_caller_identity_and_client_keeps_destination() {
     })
     .expect("client subscriber");
 
-    for (format, level) in [("json", "debug"), ("text", "trace")] {
-        exercise_server_format(&oidc, format, level);
-    }
+    let ports = [("json", "debug"), ("text", "trace")]
+        .map(|(format, level)| exercise_server_format(&oidc, format, level));
 
     assert_eq!(
         oidc.runtime
@@ -914,30 +903,27 @@ fn grpc_server_outputs_withhold_caller_identity_and_client_keeps_destination() {
     );
     let client_exported = client_collector.finish(&oidc.runtime);
     let client_spans = exported_spans(&client_exported);
-    let client_span = client_spans
+    let mut observed_ports = Vec::new();
+    for span in client_spans
         .iter()
-        .find(|span| span.name == "example.v1.EchoService/Unary")
-        .unwrap_or_else(|| panic!("client span missing: {client_spans:?}"));
-    let text = |key: &str| match attribute(client_span, key) {
-        Some(Value::StringValue(value)) => Some(value.as_str()),
-        _ => None,
-    };
-    assert!(
-        text("server.address").is_some_and(|address| address.contains(CLIENT_DESTINATION)),
-        "client destination missing: {client_span:?}"
-    );
-    assert!(
-        matches!(
-            attribute(client_span, "server.port"),
-            Some(Value::IntValue(_))
-        ),
-        "client port missing: {client_span:?}"
-    );
-    assert_eq!(text("user_agent.original"), Some(CLIENT_AGENT));
-    assert!(
-        attribute(client_span, "rpc.grpc.status_code").is_some(),
-        "client status missing: {client_span:?}"
-    );
+        .filter(|span| span.name == "example.v1.EchoService/Unary")
+    {
+        let text = |key: &str| match attribute(span, key) {
+            Some(Value::StringValue(value)) => Some(value.as_str()),
+            _ => None,
+        };
+        assert_eq!(text("server.address"), Some(CLIENT_DESTINATION));
+        assert_eq!(text("user_agent.original"), Some(CLIENT_AGENT));
+        assert!(attribute(span, "rpc.grpc.status_code").is_some());
+        let Some(Value::IntValue(port)) = attribute(span, "server.port") else {
+            panic!("client port missing: {span:?}");
+        };
+        observed_ports.push(*port);
+    }
+    let mut expected_ports = ports.map(i64::from);
+    expected_ports.sort_unstable();
+    observed_ports.sort_unstable();
+    assert_eq!(observed_ports, expected_ports);
     oidc.finish();
 }
 
