@@ -120,6 +120,71 @@ async fn a_readonly_reply_reconnects_to_the_new_primary() {
     );
 }
 
+#[tokio::test]
+async fn a_readonly_reply_after_cancellation_reconnects_to_the_new_primary() {
+    use operation_context::OperationContext;
+
+    let server = FakeServer::start().await;
+    let cache = Cache::start(CacheOptions {
+        command_timeout: Duration::from_secs(15),
+        ..options(&format!("redis://{}", server.address), true, true, None)
+    })
+    .expect("start cache");
+    let namespace = cache.namespace("late_readonly");
+    let limit = Duration::from_secs(5);
+    let ttl = Duration::from_secs(1);
+    assert_eq!(
+        tokio::time::timeout(limit, namespace.get("ready")).await,
+        Ok(Ok(None))
+    );
+    server
+        .primary
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let (release, held) = tokio::sync::oneshot::channel();
+    *server
+        .observed
+        .next_set_reply
+        .lock()
+        .expect("SET reply gate lock") = Some(held);
+
+    let context = OperationContext::unbounded();
+    let write = namespace.set_with_context("cancelled", b"value", ttl, &context);
+    tokio::pin!(write);
+    tokio::select! {
+        result = &mut write => panic!("held write completed: {result:?}"),
+        () = server.wait_for(limit, "write must reach the old primary", || {
+            server.command_count("SET", Some("late_readonly:cancelled")) == 1
+        }) => {}
+    }
+    context.cancel();
+    assert_eq!(
+        tokio::time::timeout(limit, write).await,
+        Ok(Err(crate::SetError::Unavailable(crate::Unavailable)))
+    );
+    assert_eq!(server.connections(), 1);
+    assert!(
+        !server.closed_through(1),
+        "early cancellation must leave the socket open"
+    );
+    release
+        .send(())
+        .expect("the old primary is holding its reply");
+
+    server
+        .wait_for(limit, "late READONLY must trigger a reconnect", || {
+            server.connections() == 2 && server.closed_through(1)
+        })
+        .await;
+    assert_eq!(
+        tokio::time::timeout(limit, namespace.set("new", b"value", ttl)).await,
+        Ok(Ok(()))
+    );
+    assert_eq!(
+        server.command_count("SET", Some("late_readonly:cancelled")),
+        1
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_refused_hello_is_reported_as_auth() {
     use health::Probe;
@@ -1110,6 +1175,62 @@ async fn cancellation_after_write_dispatch_leaves_a_stalled_server_to_maintenanc
         .await;
     assert_eq!(namespace.get("recovered").await, Ok(None));
     assert_eq!(server.command_count("SET", Some("cancel_effect:once")), 1);
+}
+
+#[tokio::test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test-owned credential replacement completes before refresh observes it"
+)]
+async fn an_overdue_ping_runs_before_another_slow_password_refresh() {
+    let server = FakeServer::start().await;
+    let initial = ephemeral_password();
+    server.require_password(&initial);
+    let file = tempfile::NamedTempFile::new().expect("password file");
+    std::fs::write(file.path(), initial).expect("initial password");
+    let cache = Cache::start(CacheOptions {
+        command_timeout: Duration::from_secs(10),
+        ..with_password_file(
+            &format!("redis://{}", server.address),
+            file.path().to_path_buf(),
+        )
+    })
+    .expect("start cache");
+    assert_eq!(cache.namespace("refresh").get("ready").await, Ok(None));
+
+    // The server rejects the new password but delays its reply past a full
+    // refresh interval. The connection remains usable and PING is already due.
+    *server.observed.auth_reply_delay.lock().expect("delay lock") = Duration::from_millis(5_500);
+    std::fs::write(file.path(), ephemeral_password()).expect("changed password");
+    server
+        .wait_for(
+            Duration::from_secs(8),
+            "password refresh did not send AUTH",
+            || server.command_count("AUTH", None) == 1,
+        )
+        .await;
+    let ping_followed_auth = || {
+        let commands = server.observed.commands.lock().expect("commands lock");
+        commands
+            .iter()
+            .map(|(_, args)| args[0].as_str())
+            .skip_while(|command| *command != "AUTH")
+            .nth(1)
+            .map(|command| command == "PING")
+    };
+    server
+        .wait_for(
+            Duration::from_secs(8),
+            "no maintenance command followed AUTH",
+            || ping_followed_auth().is_some(),
+        )
+        .await;
+    assert_eq!(
+        ping_followed_auth(),
+        Some(true),
+        "another refresh overtook PING"
+    );
+    assert_eq!(server.connections(), 1);
 }
 
 #[tokio::test]
