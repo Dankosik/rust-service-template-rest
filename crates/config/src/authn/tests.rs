@@ -75,6 +75,40 @@ fn jwt_load_errors_name_the_rejected_field() {
 }
 
 #[test]
+fn jwt_load_errors_describe_the_expected_field_shape() {
+    let dir = tempfile::tempdir().unwrap();
+    for (audience, algorithms, expected) in [
+        (
+            r#"["rejected-value", 7]"#,
+            r#"["RS256"]"#,
+            "`authn.audience` must be a string or a list of strings",
+        ),
+        (
+            r#""service""#,
+            r#"["rejected-value"]"#,
+            "`authn.algorithms` must be a list of supported JWT algorithms or a comma-separated string",
+        ),
+    ] {
+        let config = write(
+            &dir,
+            "authn.toml",
+            &format!(
+                "[authn]\nmode = \"oidc-jwt\"\nissuer = \"issuer\"\naudience = {audience}\nalgorithms = {algorithms}\n"
+            ),
+        );
+        let options = LoadOptions {
+            config: Some(config),
+            ..LoadOptions::default()
+        };
+        let error = load_from(&options, BUILD, env(&[]))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(expected), "{error}");
+        assert!(!error.contains("rejected-value"), "{error}");
+    }
+}
+
+#[test]
 fn jwt_normalizes_scalar_or_list_audiences_without_changing_values() {
     let scalar = parse(
         r#"
