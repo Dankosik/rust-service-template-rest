@@ -216,7 +216,7 @@ fn operator_usage_is_validated_before_configuration_without_echoing_input() {
 #[test]
 fn operator_commands_use_only_postgres_configuration_and_safe_identity_receipts() {
     let cases: &[(&[&str], &str)] = &[
-        (&["inspect", JOB_ID], "inspect"),
+        (&["inspect", "00000000000040008000000000000001"], "inspect"),
         (&["failed"], "failed"),
         (&["unhandled", "--handled-kinds", ""], "unhandled"),
         (
@@ -275,6 +275,11 @@ fn operator_commands_use_only_postgres_configuration_and_safe_identity_receipts(
             assert_eq!(receipt["outcome"], "unavailable");
             assert!(receipt.get("items").is_none());
             assert!(receipt.get("next_cursor").is_none());
+            if *action == "inspect" {
+                assert_eq!(receipt["id"], JOB_ID);
+            } else {
+                assert!(receipt.get("id").is_none());
+            }
         }
         if *action == "unhandled" {
             let expected = if args[2].is_empty() {

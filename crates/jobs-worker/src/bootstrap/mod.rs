@@ -162,7 +162,16 @@ pub(crate) async fn serve(
     ));
     if let Ended::Failure(error) = &ended {
         if resources.logger.is_some() {
-            tracing::error!(error = %error, "jobs worker failed");
+            #[allow(
+                unused_variables,
+                reason = "retained messaging supplies the failure kind"
+            )]
+            let failure_kind: Option<&str> = None;
+            // template:begin messaging:worker-bootstrap-log-consumer-failure
+            let failure_kind =
+                matches!(error, WorkerError::ConsumerStopped(_)).then_some("consumer_stopped");
+            // template:end messaging:worker-bootstrap-log-consumer-failure
+            tracing::error!(failure.kind = failure_kind, error = %error, "jobs worker failed");
         } else {
             let _ = service_config::process_failure(error);
         }
@@ -462,10 +471,7 @@ async fn wait_for_stop(
         () = jobs::engine_stopped(resources) => Ended::Failure(WorkerError::EngineStopped),
         // template:end jobs:worker-bootstrap-wait-jobs-failure
         // template:begin messaging:worker-bootstrap-wait-messaging-failure
-        error = messaging::consumer_stopped(resources) => {
-            tracing::error!(error = %error, "messaging consumer stopped");
-            Ended::Failure(WorkerError::ConsumerStopped(error))
-        },
+        error = messaging::consumer_stopped(resources) => Ended::Failure(WorkerError::ConsumerStopped(error)),
         // template:end messaging:worker-bootstrap-wait-messaging-failure
     }
 }
