@@ -247,15 +247,16 @@ components:
             $ref: '#/components/schemas/Problem'
     IdempotencyRequestInProgress:
       description: |-
-        a request with this Idempotency-Key is still in progress, or the operation
-        reports a conflict; retry with the same key after the Retry-After interval
+        A request with this Idempotency-Key is still in progress, or the operation
+        reports a conflict. For `idempotency_request_in_progress`, retry with the
+        same key after the Retry-After interval.
       headers:
         Retry-After:
           schema:
             type: integer
             format: int64
             minimum: 0
-          description: seconds to wait before retrying with the same Idempotency-Key
+          description: seconds to wait before retrying an in-progress request with the same Idempotency-Key
       content:
         application/problem+json:
           schema:

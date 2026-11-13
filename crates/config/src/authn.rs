@@ -19,6 +19,9 @@ use crate::de::{blank_secret_as_none, deserialize_scalar};
 use crate::de::value_free;
 use crate::validate::{ValidationError, required_when};
 
+pub(crate) const AUDIENCE_INPUT_FORM: &str =
+    "`authn.audience` must be a string or a list of strings";
+
 /// Exact audiences accepted by an authentication profile.
 ///
 /// Configuration accepts either one string or a nonempty list. Values retain
@@ -47,9 +50,8 @@ impl<'de> Deserialize<'de> for Audiences {
             Many(Vec<String>),
         }
 
-        let input = Input::deserialize(deserializer).map_err(|_| {
-            value_free::<D::Error>("`authn.audience` must be a string or a list of strings")
-        })?;
+        let input = Input::deserialize(deserializer)
+            .map_err(|_| value_free::<D::Error>(AUDIENCE_INPUT_FORM))?;
         let values = match input {
             Input::One(value) => vec![value],
             Input::Many(values) => values,

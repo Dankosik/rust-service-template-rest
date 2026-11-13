@@ -1,10 +1,9 @@
 //! Readiness participation.
 //!
-//! The probe shares the pool on purpose: readiness is refreshed by the
-//! background refresher, never per request, so a saturated pool fails the
-//! probe there and the instance stops receiving traffic instead of queueing
-//! it. The refresher's budget bounds the whole check; the acquire budget
-//! bounds the wait for a connection inside it.
+//! The probe shares the pool so readiness can reflect saturation in the
+//! pool that serves requests. The background refresher applies its failure
+//! threshold and bounds the whole check. The acquire budget bounds the wait
+//! for a connection inside it.
 
 use health::{Probe, ProbeError};
 use sqlx::Connection;
@@ -48,10 +47,10 @@ fn probe_error(err: &sqlx::Error) -> ProbeError {
         sqlx::Error::Io(_) => "connection failed".to_owned(),
         sqlx::Error::Tls(_) => "tls handshake failed".to_owned(),
         sqlx::Error::Database(_) => match crate::error::sqlstate(err) {
-            Some(code) => format!("server rejected the ping (SQLSTATE {code})"),
-            None => "server rejected the ping".to_owned(),
+            Some(code) => format!("server rejected the readiness check (SQLSTATE {code})"),
+            None => "server rejected the readiness check".to_owned(),
         },
-        _ => "ping failed".to_owned(),
+        _ => "readiness check failed".to_owned(),
     })
 }
 

@@ -102,30 +102,30 @@ pub enum ConnectError {
     #[error("postgres session verification: did not complete inside the {budget:?} budget")]
     SessionVerificationTimeout { budget: Duration },
     /// A driver error while acquiring a connection or reading the session settings.
-    #[error("postgres connect: {0}")]
+    #[error("postgres session admission: {0}")]
     Connect(#[source] sqlx::Error),
     /// The session does not carry a timeout inside the template's budget.
     /// `found_ms` is the effective value; zero is PostgreSQL's "no limit".
     #[error(
         "postgres session: {setting} is {}, expected a limit of at most {budget:?}; {}",
         found(*.found_ms),
-        .source_of_budgets.remedy()
+        .session_settings_source.remedy()
     )]
     SessionBudget {
         setting: &'static str,
         found_ms: i64,
         budget: Duration,
-        source_of_budgets: SessionBudgets,
+        session_settings_source: SessionSettingsSource,
     },
     /// The session's default isolation is not the one this process requires.
     #[error(
         "postgres session: default_transaction_isolation is {found}, expected {expected}; {}",
-        .source_of_budgets.remedy()
+        .session_settings_source.remedy()
     )]
     SessionIsolation {
         found: String,
         expected: &'static str,
-        source_of_budgets: SessionBudgets,
+        session_settings_source: SessionSettingsSource,
     },
 }
 
@@ -140,7 +140,7 @@ fn found(milliseconds: i64) -> String {
 /// Where a pooled session's budgets and default isolation come from
 /// (`postgres.session_budgets`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum SessionBudgets {
+pub enum SessionSettingsSource {
     /// Published by this process in every connection's startup packet. Works
     /// against PostgreSQL directly and through a pooler that applies startup
     /// parameters.
@@ -151,12 +151,10 @@ pub enum SessionBudgets {
     Server,
 }
 
-impl SessionBudgets {
+impl SessionSettingsSource {
     const fn remedy(self) -> &'static str {
         match self {
-            Self::Startup => {
-                "a pooler in front of the database did not apply the startup parameter"
-            }
+            Self::Startup => "if a pooler is in use, verify that it applies the startup parameter",
             Self::Server => {
                 "postgres.session_budgets = \"server\" needs it set on the role or database"
             }
@@ -176,9 +174,9 @@ pub struct PoolOptions<'a> {
     /// connection. [`Isolation::ServerDefault`] leaves the server setting
     /// unchanged.
     pub default_isolation: Isolation,
-    /// Whether this process publishes the session budgets or the server
-    /// already carries them. Either way [`connect`] verifies them.
-    pub session_budgets: SessionBudgets,
+    /// Whether this process publishes the session budgets and any explicit
+    /// isolation level or expects the server to supply them.
+    pub session_settings_source: SessionSettingsSource,
 }
 
 /// What a one-off session (the migrator) decides per connection.
@@ -201,11 +199,11 @@ pub struct SessionOptions<'a> {
 pub fn prepare_pool(dsn: &Dsn, options: &PoolOptions<'_>) -> PgPool {
     crate::observe::describe();
     let mut settings = Vec::new();
-    if options.session_budgets == SessionBudgets::Startup {
-        settings.push(("statement_timeout", to_runtime_param(STATEMENT_TIMEOUT)));
+    if options.session_settings_source == SessionSettingsSource::Startup {
+        settings.push(("statement_timeout", format_pg_duration(STATEMENT_TIMEOUT)));
         settings.push((
             "idle_in_transaction_session_timeout",
-            to_runtime_param(IDLE_IN_TRANSACTION_TIMEOUT),
+            format_pg_duration(IDLE_IN_TRANSACTION_TIMEOUT),
         ));
         if let Some(level) = options.default_isolation.as_sql() {
             settings.push(("default_transaction_isolation", level.to_owned()));
@@ -341,6 +339,10 @@ fn ping_if_idle(
 /// [`ConnectError::SessionVerificationTimeout`] reports it. Cancellation
 /// leaves cleanup to the caller.
 ///
+/// Use the same [`PoolOptions::default_isolation`] and
+/// [`PoolOptions::session_settings_source`] as in [`prepare_pool`]. They
+/// determine the expected isolation level and the advice on a mismatch.
+///
 /// # Errors
 ///
 /// Returns a driver error from checkout or readback, an acquire timeout, a
@@ -381,7 +383,7 @@ pub async fn connect(dsn: &Dsn, options: &PoolOptions<'_>) -> Result<PgPool, Con
 ///
 /// Publishing a setting does not prove the session has it: PgBouncer before
 /// 1.26 accepts a startup parameter it is told to track or ignore and drops
-/// it, and with [`SessionBudgets::Server`] nothing is published at all. A
+/// it, and with [`SessionSettingsSource::Server`] nothing is published at all. A
 /// stricter limit than the template's is admitted; no limit, or a looser
 /// one, is not.
 async fn verify_session(pool: &PgPool, options: &PoolOptions<'_>) -> Result<(), ConnectError> {
@@ -416,14 +418,14 @@ async fn verify_session(pool: &PgPool, options: &PoolOptions<'_>) -> Result<(), 
             IDLE_IN_TRANSACTION_TIMEOUT,
         ),
     ] {
-        check_budget(setting, found_ms, budget, options.session_budgets)?;
+        check_budget(setting, found_ms, budget, options.session_settings_source)?;
     }
     match options.default_isolation.as_sql() {
         Some(expected) if !expected.eq_ignore_ascii_case(&session.isolation) => {
             Err(ConnectError::SessionIsolation {
                 found: session.isolation,
                 expected,
-                source_of_budgets: options.session_budgets,
+                session_settings_source: options.session_settings_source,
             })
         }
         _ => Ok(()),
@@ -434,7 +436,7 @@ fn check_budget(
     setting: &'static str,
     found_ms: i64,
     budget: Duration,
-    source_of_budgets: SessionBudgets,
+    session_settings_source: SessionSettingsSource,
 ) -> Result<(), ConnectError> {
     let within =
         u128::try_from(found_ms).is_ok_and(|found| found > 0 && found <= budget.as_millis());
@@ -445,7 +447,7 @@ fn check_budget(
             setting,
             found_ms,
             budget,
-            source_of_budgets,
+            session_settings_source,
         })
     }
 }
@@ -463,13 +465,13 @@ pub async fn connect_session(
     let settings = [
         (
             "statement_timeout",
-            to_runtime_param(options.statement_timeout),
+            format_pg_duration(options.statement_timeout),
         ),
         (
             "idle_in_transaction_session_timeout",
-            to_runtime_param(options.idle_in_transaction_timeout),
+            format_pg_duration(options.idle_in_transaction_timeout),
         ),
-        ("lock_timeout", to_runtime_param(options.lock_timeout)),
+        ("lock_timeout", format_pg_duration(options.lock_timeout)),
     ]
     .into_iter()
     .chain(
@@ -527,7 +529,7 @@ fn session_connect_options<'a>(
 /// `statement_timeout`, `idle_in_transaction_session_timeout`, and
 /// `lock_timeout` — that is not a zero-length bound.
 #[must_use]
-pub fn to_runtime_param(duration: Duration) -> String {
+pub fn format_pg_duration(duration: Duration) -> String {
     format!("{}ms", duration.as_nanos().div_ceil(1_000_000))
 }
 
@@ -551,10 +553,10 @@ mod tests {
 
     #[test]
     fn runtime_params_round_up_and_name_the_unit() {
-        assert_eq!(to_runtime_param(Duration::from_secs(8)), "8000ms");
-        assert_eq!(to_runtime_param(Duration::from_micros(1_500)), "2ms");
-        assert_eq!(to_runtime_param(Duration::from_nanos(1)), "1ms");
-        assert_eq!(to_runtime_param(Duration::ZERO), "0ms");
+        assert_eq!(format_pg_duration(Duration::from_secs(8)), "8000ms");
+        assert_eq!(format_pg_duration(Duration::from_micros(1_500)), "2ms");
+        assert_eq!(format_pg_duration(Duration::from_nanos(1)), "1ms");
+        assert_eq!(format_pg_duration(Duration::ZERO), "0ms");
     }
 
     #[test]
@@ -564,7 +566,7 @@ mod tests {
                 "statement_timeout",
                 found_ms,
                 STATEMENT_TIMEOUT,
-                SessionBudgets::Server,
+                SessionSettingsSource::Server,
             )
         };
         assert!(check(8_000).is_ok());
@@ -586,7 +588,7 @@ mod tests {
             "statement_timeout",
             30_000,
             STATEMENT_TIMEOUT,
-            SessionBudgets::Startup,
+            SessionSettingsSource::Startup,
         )
         .unwrap_err()
         .to_string();
@@ -607,7 +609,7 @@ mod tests {
             max_connections: NonZeroU32::MIN,
             application_name: "svc",
             default_isolation: Isolation::ServerDefault,
-            session_budgets: SessionBudgets::Startup,
+            session_settings_source: SessionSettingsSource::Startup,
         };
         let pool = prepare_pool(&dsn, &options);
         assert_eq!(pool.size(), 0, "preparation must not open a connection");

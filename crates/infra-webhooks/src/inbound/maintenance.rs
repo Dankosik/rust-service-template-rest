@@ -3,19 +3,20 @@
 use std::time::Duration;
 
 use infra_postgres::{
-    Cleanup, CleanupError, CleanupPass, MaintenanceFailure, PassEnd, PopulationSample, Tx,
-    TxOptions, in_observation_tx, observed, run_scheduled_cleanup,
+    Cleanup, CleanupError, CleanupPass, CleanupPassResult, MaintenanceFailure, PopulationSample,
+    Tx, TxOptions, in_observation_tx, observed, run_scheduled_cleanup,
 };
 use tokio_util::sync::CancellationToken;
 
 use super::Receiver;
 
-/// A sender retries one message ID with fresh timestamps for its whole retry
-/// horizon. Standard Webhooks senders retry for more than a day; this
-/// template's nominal outbound backoff runs about six and a half days. The
-/// fixed admission window does not cover every retry floor, outage, redrive,
-/// or restore; consumers retain business effect identity for their replay lifetime.
-/// The spec's 5-minute example only covers replay of one signed request.
+/// Receipts become eligible for deletion after 14 days. A sender can reuse
+/// the same message ID with fresh timestamps throughout its retry horizon.
+/// This template's nominal outbound backoff runs about six and a half days.
+/// The five-minute timestamp tolerance in [`crate::protocol::KeyRing::verify`]
+/// applies to each signed request. Consumers retain business effect identity
+/// for their replay lifetime because retry floors, outages, redrives, and
+/// restores can bring a delivery back after cleanup deletes its receipt.
 const RECEIPT_RETENTION: Duration = Duration::from_hours(14 * 24);
 
 #[expect(
@@ -47,13 +48,13 @@ impl Receiver {
     pub async fn remove_expired(&self) -> Result<u64, CleanupError> {
         self.remove_expired_pass(None)
             .await
-            .map(|(removed, _)| removed)
+            .map(|pass| pass.removed_rows)
     }
 
     async fn remove_expired_pass(
         &self,
         cancel: Option<&CancellationToken>,
-    ) -> Result<(u64, PassEnd), CleanupError> {
+    ) -> Result<CleanupPassResult, CleanupError> {
         CleanupPass::start(Cleanup::WebhookReceipts)
             .run_until_short_batch(
                 &self.pool,
@@ -66,7 +67,7 @@ impl Receiver {
             .await
     }
 
-    async fn delete_expired_batch(tx: &mut Tx<'_>) -> Result<u64, sqlx::Error> {
+    async fn delete_expired_batch(tx: &mut Tx<'_>, batch_limit: u32) -> Result<u64, sqlx::Error> {
         let deleted = observed(
             "delete expired webhook receipts",
             sqlx::query!(
@@ -75,7 +76,7 @@ impl Receiver {
                          WHERE received_at < statement_timestamp() - $1::bigint * interval '1 second' \
                          ORDER BY received_at LIMIT $2 FOR UPDATE SKIP LOCKED)",
                 RETENTION_SECONDS,
-                i64::from(CLEANUP_BATCH_ROWS),
+                i64::from(batch_limit),
             )
             .execute(tx),
         )
@@ -104,7 +105,7 @@ impl Receiver {
             || async {
                 self.remove_expired_pass(Some(&cancel))
                     .await
-                    .map(|(_, end)| end)
+                    .map(|pass| pass.end)
             },
             || self.sample_population(),
         )

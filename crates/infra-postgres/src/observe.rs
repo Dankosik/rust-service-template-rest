@@ -4,7 +4,7 @@
 //! gauges and their limit), whether callers wait for a connection (the
 //! transaction-only wait histogram and named acquisition events), how long
 //! a transaction holds one and how it ends (the duration histogram and the
-//! span), and how long each statement takes and how it fails ([`observed`]).
+//! span), and how long an observed operation takes and how it fails ([`observed`]).
 //! The driver's slow-statement warning adds the SQL text of the ones that matter.
 
 use std::time::{Duration, Instant};
@@ -87,9 +87,8 @@ const fn strictly_increasing(buckets: &[f64]) -> bool {
     true
 }
 
-/// How long one statement took from sending it to its complete answer
-/// (`db.client.operation.duration`), by `db.query.summary` and, when it
-/// failed, `error.type`.
+/// Observed PostgreSQL operation duration (`db.client.operation.duration`),
+/// by `db.query.summary` and, when the operation fails, `error.type`.
 pub(crate) const OPERATION_DURATION_METRIC: &str = "db_client_operation_duration_seconds";
 
 /// Buckets in seconds for [`OPERATION_DURATION_METRIC`]: the boundaries the
@@ -130,7 +129,7 @@ pub(crate) fn describe() {
     metrics::describe_histogram!(
         OPERATION_DURATION_METRIC,
         Unit::Seconds,
-        "PostgreSQL statement duration in seconds"
+        "PostgreSQL operation duration in seconds"
     );
 }
 
@@ -208,23 +207,23 @@ pub(crate) async fn acquisition<T>(
     result
 }
 
-/// `error.type` of a statement whose caller stopped waiting for it.
+/// `error.type` when the caller stops waiting for the operation.
 const CANCELLED: &str = "cancelled";
 
-/// Run one statement and record how long it took and how it ended.
+/// Poll a PostgreSQL operation and record how long it takes to finish or be
+/// dropped. The measurement includes any waits inside the supplied future.
 ///
-/// `summary` is the statement's `db.query.summary`: its SQL command and the
-/// table it targets (`"UPDATE background_jobs"`), written by the caller
-/// because nothing here parses SQL. It becomes a metric label and the span
-/// name, so it is a literal, never built from a value.
+/// The caller chooses a stable `summary` for the operation. It becomes the
+/// `db.query.summary` metric label and the span name, so it must come from a
+/// bounded set of static values.
 ///
-/// The statement gets a client span only inside another span. A background
+/// The operation gets a client span only inside another span. A background
 /// loop that polls outside any span would otherwise start a one-span trace
-/// per tick; its statements are still measured.
+/// per tick. Its operations are still measured.
 ///
 /// # Errors
 ///
-/// The statement's own error, unchanged.
+/// The operation's own error.
 pub async fn observed<T>(
     summary: &'static str,
     statement: impl Future<Output = Result<T, sqlx::Error>>,
@@ -303,7 +302,8 @@ impl Drop for StatementEnd {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TransactionOutcome {
     Committed,
-    /// The closure returned `Err`; the boundary rolled back.
+    /// The closure returned `Err`. Dropping the transaction queues rollback
+    /// without waiting for PostgreSQL to acknowledge it.
     RolledBack,
     AcquireFailed,
     BeginFailed,

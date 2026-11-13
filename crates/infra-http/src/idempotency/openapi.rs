@@ -132,8 +132,9 @@ fn component<'r, T: ToResponse<'r>>() -> RefOr<Response> {
 #[response(content_type = "application/problem+json")]
 pub(super) struct IdempotencyBadRequest(pub Problem);
 
-/// a request with this Idempotency-Key is still in progress, or the operation
-/// reports a conflict; retry with the same key after the Retry-After interval
+/// A request with this Idempotency-Key is still in progress, or the operation
+/// reports a conflict. For `idempotency_request_in_progress`, retry with the
+/// same key after the Retry-After interval.
 #[derive(Debug, ToResponse)]
 #[expect(
     dead_code,
@@ -143,7 +144,7 @@ pub(super) struct IdempotencyBadRequest(pub Problem);
     content_type = "application/problem+json",
     headers((
         "Retry-After" = u64,
-        description = "seconds to wait before retrying with the same Idempotency-Key"
+        description = "seconds to wait before retrying an in-progress request with the same Idempotency-Key"
     ))
 )]
 pub(super) struct IdempotencyRequestInProgress(pub Problem);

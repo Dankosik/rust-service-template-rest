@@ -528,7 +528,7 @@ mod tests {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgres://localhost/unused")
             .unwrap();
-        let store = Store::new(pool.clone(), Duration::from_mins(1));
+        let store = Store::new(pool.clone(), Duration::from_mins(1)).unwrap();
         for (issuer, value) in [
             ("https://issuer.example", "sub\0ject"),
             ("iss\0uer", "subject"),

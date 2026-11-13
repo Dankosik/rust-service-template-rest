@@ -1,7 +1,7 @@
 //! PostgreSQL pool admission.
 
 use super::background::Background;
-use infra_postgres::{Dsn, PgPool, PoolOptions, SessionBudgets};
+use infra_postgres::{Dsn, PgPool, PoolOptions, SessionSettingsSource};
 use secrecy::ExposeSecret;
 use service_config::Config;
 
@@ -28,9 +28,9 @@ pub(super) async fn open(
         // Same process identity as traces (`service.name`).
         application_name: &config.observability.otel.service_name,
         default_isolation: infra_postgres::Isolation::ServerDefault,
-        session_budgets: match config.postgres.session_budgets {
-            service_config::PostgresSessionBudgets::Startup => SessionBudgets::Startup,
-            service_config::PostgresSessionBudgets::Server => SessionBudgets::Server,
+        session_settings_source: match config.postgres.session_budgets {
+            service_config::PostgresSessionBudgets::Startup => SessionSettingsSource::Startup,
+            service_config::PostgresSessionBudgets::Server => SessionSettingsSource::Server,
         },
     };
     let pool = retained.insert(infra_postgres::prepare_pool(&dsn, &options));

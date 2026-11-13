@@ -44,10 +44,12 @@ pub struct HttpConfig {
     /// being accepted. Production-shaped on purpose; local overlays set `0s`.
     #[serde(with = "humantime_serde")]
     pub readiness_propagation_delay: Duration,
-    /// Time a connection may take to deliver a complete request head. hyper
-    /// restarts this timer whenever an HTTP/1 connection goes idle, so it is
-    /// also the HTTP/1 keep-alive idle bound. HTTP/2 idle uses a separate
-    /// PING cadence.
+    /// Separate time limits of this duration apply to protocol detection and
+    /// reading a complete HTTP/1 request head. On the first request, those
+    /// waits can add up to twice this value. The HTTP/1 timer also bounds
+    /// keep-alive idle time. HTTP/2 request headers have a size limit
+    /// (`max_header_bytes`) and no read timeout from this setting. HTTP/2
+    /// idle uses a separate PING cadence.
     #[serde(with = "humantime_serde")]
     pub header_read_timeout: Duration,
     /// Budget through the response head, including admission and request body

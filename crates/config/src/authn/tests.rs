@@ -22,7 +22,7 @@ fn jwt_loads_algorithm_and_audience_lists_from_variables() {
     let config = write(
         &dir,
         "authn.toml",
-        "[authn]\nmode = \"oidc-jwt\"\nissuer = \"issuer\"\naudience = [\"base\"]\nalgorithms = [\"RS256\"]\n",
+        "[authn]\nmode = \"oidc-jwt\"\nissuer = \"issuer\"\naudience = 2026-11-13\nalgorithms = [\"RS256\"]\n",
     );
     write(&dir, "APP__AUTHN__AUDIENCE", "mounted");
     let options = LoadOptions {
@@ -84,6 +84,16 @@ fn jwt_load_errors_describe_the_expected_field_shape() {
             "`authn.audience` must be a string or a list of strings",
         ),
         (
+            "2026-11-13t12:00:00z",
+            r#"["RS256"]"#,
+            "`authn.audience` must be a string or a list of strings",
+        ),
+        (
+            r#"["service", 2026-11-13]"#,
+            r#"["RS256"]"#,
+            "`authn.audience` must be a string or a list of strings",
+        ),
+        (
             r#""service""#,
             r#"["rejected-value"]"#,
             "`authn.algorithms` must be a list of supported JWT algorithms or a comma-separated string",
@@ -105,6 +115,38 @@ fn jwt_load_errors_describe_the_expected_field_shape() {
             .to_string();
         assert!(error.contains(expected), "{error}");
         assert!(!error.contains("rejected-value"), "{error}");
+    }
+}
+
+#[test]
+fn jwt_load_accepts_a_quoted_date_or_list_from_a_later_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = write(
+        &dir,
+        "base.toml",
+        "[authn]\nmode = \"oidc-jwt\"\nissuer = \"issuer\"\naudience = 2026-11-13\n",
+    );
+    for (input, expected) in [
+        (r#""2026-11-13""#, &["2026-11-13"][..]),
+        (
+            r#"["2026-11-13", "service"]"#,
+            &["2026-11-13", "service"][..],
+        ),
+    ] {
+        let options = LoadOptions {
+            config: Some(base.clone()),
+            config_overlay: vec![write(
+                &dir,
+                "overlay.toml",
+                &format!("authn.audience = {input}\n"),
+            )],
+            ..LoadOptions::default()
+        };
+        let cfg = load_from(&options, BUILD, env(&[])).unwrap();
+        let AuthnConfig::OidcJwt { audience, .. } = cfg.authn else {
+            panic!("expected OIDC JWT configuration");
+        };
+        assert_eq!(audience.as_slice(), expected);
     }
 }
 

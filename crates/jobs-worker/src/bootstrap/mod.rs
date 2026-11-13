@@ -30,7 +30,8 @@ use infra_telemetry::install_panic_hook;
 use service_config::Config;
 
 use crate::background::Background;
-use crate::shutdown::{self, Listeners, Resources};
+use crate::resources::{Listeners, Resources};
+use crate::shutdown;
 use crate::signals::{SignalError, Signals};
 use crate::{BuildError, Register, Registration};
 
@@ -161,7 +162,16 @@ pub(crate) async fn serve(
     ));
     if let Ended::Failure(error) = &ended {
         if resources.logger.is_some() {
-            tracing::error!(error = %error, "jobs worker failed");
+            #[allow(
+                unused_variables,
+                reason = "retained messaging supplies the failure kind"
+            )]
+            let failure_kind: Option<&str> = None;
+            // template:begin messaging:worker-bootstrap-log-consumer-failure
+            let failure_kind =
+                matches!(error, WorkerError::ConsumerStopped(_)).then_some("consumer_stopped");
+            // template:end messaging:worker-bootstrap-log-consumer-failure
+            tracing::error!(failure.kind = failure_kind, error = %error, "jobs worker failed");
         } else {
             let _ = service_config::process_failure(error);
         }
@@ -193,7 +203,7 @@ async fn run_worker(
         tokio::select! {
             biased;
             result = signals.wait() => Err(signal_ended(result, background)),
-            task = background.stopped() => Err(Ended::Failure(WorkerError::BackgroundStopped(task))),
+            task = background.wait_for_failure() => Err(Ended::Failure(WorkerError::BackgroundStopped(task))),
             result = &mut admission => result.map_err(Ended::Failure),
         }
     };
@@ -254,12 +264,13 @@ fn pending_failure(resources: &Resources, background: &Background) -> Option<Wor
     if let Some(task) = background.failure() {
         return Some(WorkerError::BackgroundStopped(task));
     }
+    let Listeners {
+        health,
+        diagnostics,
+    } = &resources.listeners;
     for (name, server) in [
-        (Listeners::HEALTH, resources.listeners.health.as_ref()),
-        (
-            Listeners::DIAGNOSTICS,
-            resources.listeners.diagnostics.as_ref(),
-        ),
+        (Listeners::HEALTH, health.as_ref()),
+        (Listeners::DIAGNOSTICS, diagnostics.as_ref()),
     ] {
         if let Some(server) = server
             && server.accept_failure().now_or_never().is_some()
@@ -331,12 +342,17 @@ async fn prepare(
     postgres::admit_pool(config, &capabilities, background, resources).await?;
     // template:end jobs:worker-bootstrap-admit-pool-call
     // template:begin outbox:worker-bootstrap-activate-postgres-messages
-    capabilities.activate_postgres_messages(resources)?;
+    if let Some(messages) = &mut capabilities.messages {
+        messages.activate_postgres_messages(resources)?;
+    }
     // template:end outbox:worker-bootstrap-activate-postgres-messages
     // template:begin messaging:worker-bootstrap-messaging-connect
     let consumer = messaging::connect_messaging(
         config,
-        capabilities.messages.take(),
+        capabilities
+            .messages
+            .take()
+            .map(|messages| messages.registry),
         &background.cancel,
         resources,
     )
@@ -369,14 +385,11 @@ async fn prepare(
 }
 
 struct RetainedCapabilities {
-    // template:begin outbox:worker-bootstrap-postgres-messages-field
-    postgres_messages: Option<crate::PostgresMessages>,
-    // template:end outbox:worker-bootstrap-postgres-messages-field
     // template:begin jobs:worker-bootstrap-registrations-jobs
     jobs: Option<infra_jobs::Kinds>,
     // template:end jobs:worker-bootstrap-registrations-jobs
     // template:begin messaging:worker-bootstrap-registrations-messaging
-    messages: Option<infra_messaging::Registry>,
+    messages: Option<messaging::RetainedMessages>,
     // template:end messaging:worker-bootstrap-registrations-messaging
 }
 
@@ -410,7 +423,7 @@ fn register_capabilities(
     )]
     let has_messages = false;
     // template:begin jobs:worker-bootstrap-validate-jobs
-    // Taken, not moved, so the messaging check can still borrow the registration.
+    // Leave the registration intact for the messaging projection.
     let jobs = jobs::validate(std::mem::take(&mut registration.jobs))?;
     #[allow(
         unused_variables,
@@ -419,8 +432,7 @@ fn register_capabilities(
     let has_jobs = jobs.is_some();
     // template:end jobs:worker-bootstrap-validate-jobs
     // template:begin messaging:worker-bootstrap-retain-messaging
-    let messages =
-        messaging::consumes_messages(config, &registration)?.then_some(registration.messages);
+    let messages = messaging::RetainedMessages::retain(config, registration)?;
     let has_messages = messages.is_some();
     // template:end messaging:worker-bootstrap-retain-messaging
     // template:begin outbox:worker-bootstrap-outbox-registration
@@ -430,9 +442,6 @@ fn register_capabilities(
         return Err(WorkerError::NoRegistrations);
     }
     Ok(RetainedCapabilities {
-        // template:begin outbox:worker-bootstrap-postgres-messages-value
-        postgres_messages: registration.postgres_messages,
-        // template:end outbox:worker-bootstrap-postgres-messages-value
         // template:begin jobs:worker-bootstrap-registrations-jobs-value
         jobs,
         // template:end jobs:worker-bootstrap-registrations-jobs-value
@@ -457,15 +466,12 @@ async fn wait_for_stop(
             pending_failure(resources, background)
                 .map_or_else(|| signal_ended(result, background), Ended::Failure)
         },
-        task = background.stopped() => Ended::Failure(WorkerError::BackgroundStopped(task)),
+        task = background.wait_for_failure() => Ended::Failure(WorkerError::BackgroundStopped(task)),
         // template:begin jobs:worker-bootstrap-wait-jobs-failure
         () = jobs::engine_stopped(resources) => Ended::Failure(WorkerError::EngineStopped),
         // template:end jobs:worker-bootstrap-wait-jobs-failure
         // template:begin messaging:worker-bootstrap-wait-messaging-failure
-        error = messaging::consumer_stopped(resources) => {
-            tracing::error!(error = %error, "messaging consumer stopped");
-            Ended::Failure(WorkerError::ConsumerStopped(error))
-        },
+        error = messaging::consumer_stopped(resources) => Ended::Failure(WorkerError::ConsumerStopped(error)),
         // template:end messaging:worker-bootstrap-wait-messaging-failure
     }
 }
@@ -500,7 +506,7 @@ mod tests {
         };
         tokio::time::advance(policy.stale_after() + Duration::from_secs(1)).await;
         assert_eq!(
-            tokio::time::timeout(Duration::from_secs(1), background.stopped())
+            tokio::time::timeout(Duration::from_secs(1), background.wait_for_failure())
                 .await
                 .unwrap(),
             "readiness_progress"

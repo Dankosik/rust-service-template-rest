@@ -3,9 +3,8 @@
 //! One recorder per process. HTTP server metrics come from the HTTP adapter,
 //! process metrics from `metrics-process`, runtime metrics from
 //! `tokio-metrics`; this module owns the recorder, the periodic upkeep, the
-//! scheduler progress sampler, and the scrape route. Each crate that emits a histogram
-//! owns its name and buckets; a histogram nobody registered gets
-//! [`DEFAULT_BUCKETS`].
+//! scheduler progress sampler, and the scrape route. Each crate that emits a
+//! histogram owns its name and any override of the default buckets.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -120,8 +119,10 @@ pub struct Metrics {
 }
 
 impl Metrics {
-    /// Installs the process-global recorder. Histograms without a
-    /// `(metric, buckets)` entry get the Prometheus client default buckets.
+    /// Installs the process-global recorder. The built-in scheduler lag buckets
+    /// take precedence over any valid entry for `runtime_scheduler_lag_seconds`.
+    /// Other histograms use the supplied buckets or the Prometheus client
+    /// defaults.
     ///
     /// # Errors
     ///

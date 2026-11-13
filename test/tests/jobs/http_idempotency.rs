@@ -44,7 +44,8 @@ struct Replica {
 impl Replica {
     async fn open(dsn: &Dsn) -> Self {
         let pool = super::template_pool(dsn, 2).await;
-        let store = Store::new(pool.clone(), Duration::from_hours(1));
+        let store = Store::new(pool.clone(), Duration::from_hours(1))
+            .expect("retention fits PostgreSQL");
         Self { pool, store }
     }
 }

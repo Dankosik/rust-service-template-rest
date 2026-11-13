@@ -22,7 +22,7 @@ pub mod reading_counter_receiver;
 use std::num::NonZeroU32;
 use std::time::Duration;
 
-use infra_postgres::{CloseOutcome, Dsn, Isolation, PoolOptions, SessionBudgets};
+use infra_postgres::{CloseOutcome, Dsn, Isolation, PoolOptions, SessionSettingsSource};
 use sqlx::PgPool;
 use url::Url;
 
@@ -105,7 +105,7 @@ pub async fn template_pool(
             max_connections: NonZeroU32::new(max_connections).expect("a pool size"),
             application_name,
             default_isolation: isolation,
-            session_budgets: SessionBudgets::Startup,
+            session_settings_source: SessionSettingsSource::Startup,
         },
     )
     .await

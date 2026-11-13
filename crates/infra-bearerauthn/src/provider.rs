@@ -2,6 +2,7 @@
 
 use std::time::{Duration, Instant};
 
+use operation_context::{OperationContext, Stopped};
 use reqwest::{header, redirect::Policy};
 use shared_rules::{rfc9110, uri};
 #[cfg(
@@ -223,7 +224,7 @@ impl ProviderClient {
         client_id: &str,
         client_secret: &str,
         form_body: String,
-        context: &operation_context::OperationContext,
+        context: &OperationContext,
     ) -> Result<Vec<u8>, ProviderFailure> {
         context.check().map_err(|_| ProviderFailure::Timeout)?;
         let client_id = form_encode(client_id);
@@ -282,20 +283,20 @@ enum ExchangeMode<'a> {
         dead_code,
         reason = "the JWT-only profile removes introspection requests"
     )]
-    Introspection(&'a operation_context::OperationContext),
+    Introspection(&'a OperationContext),
 }
 
 /// One provider exchange: its client span and its duration sample. Only the
 /// configured host and port are recorded, never a path, query or credential.
-/// Dropped unfinished, it records `cancelled`.
-struct Exchange {
+struct Exchange<'a> {
+    caller: Option<&'a OperationContext>,
     operation: &'static str,
     started: Instant,
     span: tracing::Span,
     finished: bool,
 }
 
-impl Exchange {
+impl<'a> Exchange<'a> {
     fn start(operation: &'static str, method: &'static str, url: &Url) -> Self {
         let span = tracing::info_span!(
             "authn_provider",
@@ -310,6 +311,7 @@ impl Exchange {
             otel.status_code = tracing::field::Empty,
         );
         Self {
+            caller: None,
             operation,
             started: Instant::now(),
             span,
@@ -318,17 +320,22 @@ impl Exchange {
     }
 
     async fn run(
-        self,
+        mut self,
         request: reqwest::RequestBuilder,
-        mode: ExchangeMode<'_>,
+        mode: ExchangeMode<'a>,
     ) -> Result<Vec<u8>, ProviderFailure> {
         let require_json_content_type = matches!(mode, ExchangeMode::Introspection(_));
         let receive = receive(request, require_json_content_type).instrument(self.span.clone());
         let result = match mode {
             ExchangeMode::Introspection(context) => {
+                self.caller = Some(context);
                 tokio::select! {
                     biased;
-                    _ = context.wait_stopped() => return Err(ProviderFailure::Timeout),
+                    stopped = context.wait_stopped() => {
+                        self.finished = true;
+                        self.record(Some(stopped_label(stopped)));
+                        return Err(ProviderFailure::Timeout);
+                    }
                     () = tokio::time::sleep(PROVIDER_TIMEOUT) => Err(ProviderFailure::Timeout),
                     result = receive => result,
                 }
@@ -370,11 +377,19 @@ impl Exchange {
     }
 }
 
-impl Drop for Exchange {
+impl Drop for Exchange<'_> {
     fn drop(&mut self) {
         if !self.finished {
-            self.record(Some("cancelled"));
+            let stopped = self.caller.and_then(OperationContext::stopped);
+            self.record(Some(stopped.map_or("cancelled", stopped_label)));
         }
+    }
+}
+
+const fn stopped_label(stopped: Stopped) -> &'static str {
+    match stopped {
+        Stopped::Deadline => "caller_deadline",
+        Stopped::Cancelled => "cancelled",
     }
 }
 

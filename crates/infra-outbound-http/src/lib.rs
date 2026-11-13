@@ -340,7 +340,7 @@ impl Client {
         let mut request = policy::admit_request(&self.origin, request)?;
 
         let template = request.extensions_mut().remove::<UrlTemplate>();
-        let mut attempt = observe::Attempt::start(request.method(), template, &self.server);
+        let mut attempt = observe::Attempt::start(request.method(), template, &self.server, &stops);
         if self.propagate_trace_context {
             attempt.inject_trace_context(request.headers_mut());
         }
@@ -360,7 +360,7 @@ impl Client {
         &self,
         request: Request<Bytes>,
         stops: &StopScopes<'_>,
-        attempt: &mut observe::Attempt,
+        attempt: &mut observe::Attempt<'_>,
         check: impl FnOnce() -> bool + Send,
         on_status: impl FnOnce(StatusCode) + Send,
     ) -> Result<Response<Bytes>, Error> {

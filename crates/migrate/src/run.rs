@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use infra_postgres::{
-    ACQUIRE_TIMEOUT, Dsn, SessionOptions, connect_session, observed, sqlstate, to_runtime_param,
+    ACQUIRE_TIMEOUT, Dsn, SessionOptions, connect_session, format_pg_duration, observed, sqlstate,
 };
 use sqlx::Connection;
 use sqlx::migrate::{Migrate, MigrateError, Migration, Migrator};
@@ -327,8 +327,8 @@ async fn set_session_timeouts(
         "SELECT set_config",
         sqlx::query!(
             "SELECT set_config('statement_timeout', $1, false) AS statement_timeout, set_config('lock_timeout', $2, false) AS lock_timeout",
-            to_runtime_param(statement_timeout),
-            to_runtime_param(lock_timeout),
+            format_pg_duration(statement_timeout),
+            format_pg_duration(lock_timeout),
         )
         .fetch_one(conn),
     )
