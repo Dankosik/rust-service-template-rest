@@ -9,7 +9,7 @@
     reason = "the finite CLI owns bounded manifest files and durable fsync custody"
 )]
 use std::fs::File;
-use std::io::{ErrorKind, Read, Write};
+use std::io::{self, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -601,7 +601,7 @@ async fn redrive(args: &[String], resources: &mut Resources, deadline: Instant) 
 
 #[tokio::main(flavor = "current_thread")]
 #[expect(
-    clippy::print_stderr,
+    clippy::disallowed_methods,
     reason = "finite CLI returns sanitized JSON terminal failures"
 )]
 async fn main() -> ExitCode {
@@ -621,8 +621,14 @@ async fn main() -> ExitCode {
         .await
         .unwrap_or(Err("command_deadline"));
     let closed = resources.close(deadline).await;
+    if result.is_ok() && closed {
+        return ExitCode::SUCCESS;
+    }
+    // A failed diagnostic write must preserve the command's exit status.
+    let mut stderr = io::stderr().lock();
     if let Err(reason) = result {
-        eprintln!(
+        let _ = writeln!(
+            stderr,
             "{}",
             json!({
                 "error": reason,
@@ -632,16 +638,13 @@ async fn main() -> ExitCode {
         );
     }
     if !closed {
-        eprintln!(
+        let _ = writeln!(
+            stderr,
             "{}",
             json!({"error": "close_unobserved", "custody": "retained_by_session"})
         );
     }
-    if result.is_ok() && closed {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
-    }
+    ExitCode::FAILURE
 }
 
 #[cfg(test)]
@@ -649,6 +652,50 @@ mod tests {
     use std::fs;
 
     use super::*;
+
+    #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the subprocess fixture polls for exit and reaps the child on timeout"
+    )]
+    fn invalid_invocation_returns_failure_with_a_broken_stderr_pipe() {
+        use std::process::{Command, Stdio};
+
+        const CHILD: &str = "DLQ_RECOVERY_BROKEN_STDERR_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            // The test harness flags are invalid CLI arguments for dlq_recovery.
+            assert_eq!(super::main(), ExitCode::FAILURE);
+            // A harness that did not run this test would exit zero.
+            std::process::exit(1);
+        }
+
+        let (reader, writer) = std::io::pipe().unwrap();
+        drop(reader);
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::invalid_invocation_returns_failure_with_a_broken_stderr_pipe",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .stdout(Stdio::null())
+            .stderr(writer)
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("dlq_recovery fixture did not exit");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(status.code(), Some(1));
+    }
 
     #[test]
     fn a_rejected_retry_preserves_earlier_publication_uncertainty() {
