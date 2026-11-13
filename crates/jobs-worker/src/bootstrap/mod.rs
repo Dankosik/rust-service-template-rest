@@ -193,7 +193,7 @@ async fn run_worker(
         tokio::select! {
             biased;
             result = signals.wait() => Err(signal_ended(result, background)),
-            task = background.stopped() => Err(Ended::Failure(WorkerError::BackgroundStopped(task))),
+            task = background.wait_for_failure() => Err(Ended::Failure(WorkerError::BackgroundStopped(task))),
             result = &mut admission => result.map_err(Ended::Failure),
         }
     };
@@ -457,7 +457,7 @@ async fn wait_for_stop(
             pending_failure(resources, background)
                 .map_or_else(|| signal_ended(result, background), Ended::Failure)
         },
-        task = background.stopped() => Ended::Failure(WorkerError::BackgroundStopped(task)),
+        task = background.wait_for_failure() => Ended::Failure(WorkerError::BackgroundStopped(task)),
         // template:begin jobs:worker-bootstrap-wait-jobs-failure
         () = jobs::engine_stopped(resources) => Ended::Failure(WorkerError::EngineStopped),
         // template:end jobs:worker-bootstrap-wait-jobs-failure
@@ -500,7 +500,7 @@ mod tests {
         };
         tokio::time::advance(policy.stale_after() + Duration::from_secs(1)).await;
         assert_eq!(
-            tokio::time::timeout(Duration::from_secs(1), background.stopped())
+            tokio::time::timeout(Duration::from_secs(1), background.wait_for_failure())
                 .await
                 .unwrap(),
             "readiness_progress"
