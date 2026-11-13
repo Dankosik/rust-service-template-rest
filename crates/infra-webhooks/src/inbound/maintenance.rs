@@ -10,12 +10,13 @@ use tokio_util::sync::CancellationToken;
 
 use super::Receiver;
 
-/// A sender retries one message ID with fresh timestamps for its whole retry
-/// horizon. Standard Webhooks senders retry for more than a day; this
-/// template's nominal outbound backoff runs about six and a half days. The
-/// fixed admission window does not cover every retry floor, outage, redrive,
-/// or restore; consumers retain business effect identity for their replay lifetime.
-/// The spec's 5-minute example only covers replay of one signed request.
+/// Receipts become eligible for deletion after 14 days. A sender can reuse
+/// the same message ID with fresh timestamps throughout its retry horizon.
+/// This template's nominal outbound backoff runs about six and a half days.
+/// The five-minute timestamp tolerance in [`crate::protocol::KeyRing::verify`]
+/// applies to each signed request. Consumers retain business effect identity
+/// for their replay lifetime because retry floors, outages, redrives, and
+/// restores can bring a delivery back after cleanup deletes its receipt.
 const RECEIPT_RETENTION: Duration = Duration::from_hours(14 * 24);
 
 #[expect(

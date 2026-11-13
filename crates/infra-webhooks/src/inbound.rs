@@ -161,8 +161,9 @@ impl Receiver {
     ///
     /// A duplicate must pass verification again. A successful result means the
     /// receipt transaction was acknowledged; it never claims the consumer ran.
-    /// The wait for a pooled connection lasts until `deadline`, the caller's
-    /// own budget, instead of the pool's fixed bound.
+    /// `deadline` bounds only the wait for a pooled connection. Each attempt
+    /// keeps the pool's fixed timeout and is retried on timeout while time
+    /// remains. The caller owns any deadline for the full receipt operation.
     ///
     /// # Errors
     ///
@@ -191,8 +192,8 @@ impl Receiver {
 
     /// Verify and atomically retain an inbound delivery, taking ownership of its body.
     ///
-    /// This has the same admission semantics as [`Self::receive`], but moves the
-    /// body into the winning receipt's payload without copying it.
+    /// See [`Self::receive`] for admission and deadline semantics. The body
+    /// moves into the winning receipt's payload without a copy.
     ///
     /// # Errors
     ///
