@@ -30,7 +30,7 @@ use commit_proxy::{CommitProxy, Fault, ReadyBoundary};
 use health::Probe;
 use infra_postgres::{
     ACQUIRE_TIMEOUT, ConnectError, Dsn, Isolation, PASSWORD_REFRESH_INTERVAL, PgPool, PoolOptions,
-    PostgresProbe, SessionBudgets, TxError, TxOptions, in_tx, in_tx_with,
+    PostgresProbe, SessionSettingsSource, TxError, TxOptions, in_tx, in_tx_with,
     refresh_password_periodically, sqlstate,
 };
 use integration_tests::{DATABASE_URL, dsn_for, fixture_dir, pooler_dsn_for, url_for};
@@ -128,7 +128,7 @@ async fn pool_with_default_isolation(
             max_connections: NonZeroU32::new(max_connections).expect("pool size in tests"),
             application_name: APP,
             default_isolation,
-            session_budgets: SessionBudgets::Startup,
+            session_settings_source: SessionSettingsSource::Startup,
         },
     )
     .await
@@ -147,7 +147,7 @@ async fn pool_with_server_budgets(
             max_connections: NonZeroU32::MIN,
             application_name: APP,
             default_isolation,
-            session_budgets: SessionBudgets::Server,
+            session_settings_source: SessionSettingsSource::Server,
         },
     )
     .await
@@ -263,7 +263,10 @@ enum AppError {
 async fn silent_session_readback_rejects_admission_before_the_relay_is_released(pool: PgPool) {
     let direct = dsn_for(&pool).await;
     assert_eq!(direct.ssl_mode_name(), "disable");
-    for session_budgets in [SessionBudgets::Startup, SessionBudgets::Server] {
+    for session_settings_source in [
+        SessionSettingsSource::Startup,
+        SessionSettingsSource::Server,
+    ] {
         let proxy = CommitProxy::start(server_address(&direct).await).await;
         let dsn = dsn_at(&pool, proxy.address()).await;
         proxy.arm_autocommit(Fault::ForwardThenSilence, "pg_settings");
@@ -271,7 +274,7 @@ async fn silent_session_readback_rejects_admission_before_the_relay_is_released(
             max_connections: NonZeroU32::MIN,
             application_name: APP,
             default_isolation: Isolation::ServerDefault,
-            session_budgets,
+            session_settings_source,
         };
         let started = Instant::now();
         let mut admission =
@@ -318,7 +321,7 @@ async fn pending_session_admission_keeps_a_closeable_pool_and_bounds_its_wait(po
             max_connections: NonZeroU32::MIN,
             application_name: APP,
             default_isolation: Isolation::ServerDefault,
-            session_budgets: SessionBudgets::Startup,
+            session_settings_source: SessionSettingsSource::Startup,
         };
         let ours = infra_postgres::prepare_pool(&proxied, &options);
         proxy.arm_autocommit(Fault::ForwardThenSilence, "pg_settings");

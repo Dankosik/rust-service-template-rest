@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use domain_events::Event;
 use infra_messaging::{Registry, Route};
-use infra_postgres::{Dsn, Isolation, PoolOptions, SessionBudgets, TxError, in_tx};
+use infra_postgres::{Dsn, Isolation, PoolOptions, SessionSettingsSource, TxError, in_tx};
 use sha2::{Digest as _, Sha256};
 use time::format_description::well_known::Rfc3339;
 
@@ -118,7 +118,7 @@ fn produce(args: Vec<OsString>) -> Result<(), Error> {
                 max_connections: NonZeroU32::MIN,
                 application_name: "messaging-recovery-producer",
                 default_isolation: Isolation::ReadCommitted,
-                session_budgets: SessionBudgets::Startup,
+                session_settings_source: SessionSettingsSource::Startup,
             },
         )
         .await?;

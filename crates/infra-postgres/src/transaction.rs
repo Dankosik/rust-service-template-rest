@@ -90,7 +90,8 @@ impl Tx<'_> {
     }
 }
 
-/// Bound every later statement of `tx` by `timeout`.
+/// Set the timeout for later statements in `tx`. [`Duration::ZERO`] disables it.
+///
 /// `set_config(..., is_local = true)` lasts until the transaction ends, so
 /// PostgreSQL restores the session timeout itself on commit, rollback, or a
 /// dropped connection.
