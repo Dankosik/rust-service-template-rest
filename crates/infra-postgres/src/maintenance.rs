@@ -13,7 +13,7 @@ mod cleanup;
 mod population;
 
 pub(crate) use cleanup::{CLEANUP_DURATION_BUCKETS, CLEANUP_DURATION_METRIC};
-pub use cleanup::{Cleanup, CleanupError, CleanupPass, PassEnd};
+pub use cleanup::{Cleanup, CleanupError, CleanupPass, CleanupPassResult, PassEnd};
 pub use population::{
     MAINTENANCE_OBSERVATION_INTERVAL, MaintenanceFailure, MaintenanceObserver,
     MaintenancePopulation, PopulationSample, in_observation_tx,

@@ -3,8 +3,8 @@
 use std::time::Duration;
 
 use infra_postgres::{
-    Cleanup, CleanupError, CleanupPass, MaintenanceFailure, PassEnd, PopulationSample, Tx,
-    failure_cause, in_observation_tx, observed, run_scheduled_cleanup, sqlstate,
+    Cleanup, CleanupError, CleanupPass, CleanupPassResult, MaintenanceFailure, PopulationSample,
+    Tx, failure_cause, in_observation_tx, observed, run_scheduled_cleanup, sqlstate,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -80,13 +80,13 @@ impl Store {
     /// cause. Earlier batches stay committed. A timeout leaves the batch's
     /// commit outcome unconfirmed.
     pub async fn remove_expired(&self) -> Result<u64, CleanupError> {
-        self.cleanup_pass(None).await.map(|(removed, _)| removed)
+        self.cleanup_pass(None).await.map(|pass| pass.removed_rows)
     }
 
     async fn cleanup_pass(
         &self,
         cancel: Option<&CancellationToken>,
-    ) -> Result<(u64, PassEnd), CleanupError> {
+    ) -> Result<CleanupPassResult, CleanupError> {
         CleanupPass::start(Cleanup::HttpIdempotency)
             .run_until_short_batch(
                 &self.pool,
@@ -138,7 +138,7 @@ impl Store {
             Cleanup::HttpIdempotency,
             CLEANUP_RUNS_METRIC,
             &cancel,
-            || async { self.cleanup_pass(Some(&cancel)).await.map(|(_, end)| end) },
+            || async { self.cleanup_pass(Some(&cancel)).await.map(|pass| pass.end) },
             || self.sample_expired_population(),
         )
         .await;

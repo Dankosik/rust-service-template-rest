@@ -50,6 +50,13 @@ pub enum PassEnd {
     Cancelled,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CleanupPassResult {
+    /// Rows removed by batches whose commits were acknowledged.
+    pub removed_rows: u64,
+    pub end: PassEnd,
+}
+
 const CLEANUP_ACTIVE_METRIC: &str = "postgres_cleanup_active_passes";
 const CLEANUP_BATCHES_METRIC: &str = "postgres_cleanup_committed_batches_total";
 pub(super) const CLEANUP_REMOVED_ROWS_METRIC: &str = "postgres_cleanup_removed_rows_total";
@@ -198,21 +205,27 @@ impl CleanupPass {
         batch_limit: u32,
         removed_metric: &'static str,
         delete: F,
-    ) -> Result<(u64, PassEnd), CleanupError>
+    ) -> Result<CleanupPassResult, CleanupError>
     where
         F: Copy + AsyncFnOnce(&mut Tx<'_>, u32) -> Result<u64, sqlx::Error>,
     {
-        let mut removed = 0;
+        let mut removed_rows = 0;
         loop {
             if cancel.is_some_and(CancellationToken::is_cancelled) {
-                return Ok((removed, PassEnd::Cancelled));
+                return Ok(CleanupPassResult {
+                    removed_rows,
+                    end: PassEnd::Cancelled,
+                });
             }
             let rows = self.run_batch(pool, options, batch_limit, delete).await?;
             metrics::counter!(removed_metric).increment(rows);
-            removed += rows;
+            removed_rows += rows;
             if rows < u64::from(batch_limit) {
                 self.completed();
-                return Ok((removed, PassEnd::Completed));
+                return Ok(CleanupPassResult {
+                    removed_rows,
+                    end: PassEnd::Completed,
+                });
             }
         }
     }

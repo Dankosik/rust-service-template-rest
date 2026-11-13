@@ -64,7 +64,7 @@ fn population_failure_and_cancellation_retain_dated_success_until_recovery() {
 
         let database_time = observer.previous_clock.wall.unwrap();
         let oldest = database_time - 600.0;
-        observer.attempt().succeeded(PopulationSample {
+        observer.attempt().record_sample(PopulationSample {
             observed_at_unix_seconds: database_time,
             oldest_at_unix_seconds: Some(oldest),
         });
@@ -109,7 +109,7 @@ fn population_failure_and_cancellation_retain_dated_success_until_recovery() {
                 "{scrape}"
             );
         }
-        observer.attempt().succeeded(PopulationSample {
+        observer.attempt().record_sample(PopulationSample {
             observed_at_unix_seconds: database_time,
             oldest_at_unix_seconds: None,
         });
@@ -148,7 +148,7 @@ fn clock_inconsistency_never_replaces_a_valid_population_with_empty() {
             observer.previous_clock = original;
             let mut initial = observer.attempt();
             initial.requested = original;
-            initial.succeeded_at(
+            initial.record_sample_at(
                 PopulationSample {
                     observed_at_unix_seconds: 1000.0,
                     oldest_at_unix_seconds: Some(400.0),
@@ -160,7 +160,7 @@ fn clock_inconsistency_never_replaces_a_valid_population_with_empty() {
                 wall: Some(request_wall),
                 monotonic: base + Duration::from_secs(1),
             };
-            attempt.succeeded_at(
+            attempt.record_sample_at(
                 PopulationSample {
                     observed_at_unix_seconds: database_time,
                     oldest_at_unix_seconds: oldest,
@@ -186,7 +186,7 @@ fn clock_inconsistency_never_replaces_a_valid_population_with_empty() {
                 wall: Some(receipt_wall + 1.0),
                 monotonic: base + Duration::from_secs(3),
             };
-            resumed.succeeded_at(
+            resumed.record_sample_at(
                 PopulationSample {
                     observed_at_unix_seconds: receipt_wall + 1.0,
                     oldest_at_unix_seconds: None,

@@ -3,8 +3,8 @@
 use std::time::Duration;
 
 use infra_postgres::{
-    Cleanup, CleanupError, CleanupPass, MaintenanceFailure, PassEnd, PopulationSample, Tx,
-    TxOptions, in_observation_tx, observed, run_scheduled_cleanup,
+    Cleanup, CleanupError, CleanupPass, CleanupPassResult, MaintenanceFailure, PopulationSample,
+    Tx, TxOptions, in_observation_tx, observed, run_scheduled_cleanup,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -48,13 +48,13 @@ impl Receiver {
     pub async fn remove_expired(&self) -> Result<u64, CleanupError> {
         self.remove_expired_pass(None)
             .await
-            .map(|(removed, _)| removed)
+            .map(|pass| pass.removed_rows)
     }
 
     async fn remove_expired_pass(
         &self,
         cancel: Option<&CancellationToken>,
-    ) -> Result<(u64, PassEnd), CleanupError> {
+    ) -> Result<CleanupPassResult, CleanupError> {
         CleanupPass::start(Cleanup::WebhookReceipts)
             .run_until_short_batch(
                 &self.pool,
@@ -105,7 +105,7 @@ impl Receiver {
             || async {
                 self.remove_expired_pass(Some(&cancel))
                     .await
-                    .map(|(_, end)| end)
+                    .map(|pass| pass.end)
             },
             || self.sample_population(),
         )
