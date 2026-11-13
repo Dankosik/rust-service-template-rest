@@ -382,17 +382,7 @@ impl Client {
             attempt.record_status(response.status());
             on_status(response.status());
             stops.check()?;
-            let body_limit = self.limits.response_body_bytes;
-            if hyper::body::Body::size_hint(response.body())
-                .exact()
-                .is_some_and(|length| length > body_limit as u64)
-            {
-                return Err(Error::ResponseBodyTooLarge);
-            }
-
-            let (parts, body) = response.into_parts();
-            let body = collect_body(body, body_limit, stops).await?;
-            Ok(Response::from_parts(parts, body))
+            buffer_response(response, self.limits.response_body_bytes, stops).await
         };
         tokio::select! {
             biased;
@@ -432,11 +422,19 @@ impl StopScopes<'_> {
     }
 }
 
-async fn collect_body(
-    body: hyper::body::Incoming,
+async fn buffer_response(
+    response: Response<hyper::body::Incoming>,
     limit: usize,
     stops: &StopScopes<'_>,
-) -> Result<Bytes, Error> {
+) -> Result<Response<Bytes>, Error> {
+    if hyper::body::Body::size_hint(response.body())
+        .exact()
+        .is_some_and(|length| length > limit as u64)
+    {
+        return Err(Error::ResponseBodyTooLarge);
+    }
+
+    let (parts, body) = response.into_parts();
     let mut body = Limited::new(body, limit);
     let mut collected = Vec::new();
     loop {
@@ -450,7 +448,9 @@ async fn collect_body(
         // A frame's `Bytes` can share a large read buffer, so each frame
         // is dropped here, before the next poll.
     }
-    Ok(Bytes::from(collected))
+    let buffered = Bytes::from(collected);
+    drop(body);
+    Ok(Response::from_parts(parts, buffered))
 }
 
 fn stopped_error(stopped: Stopped) -> Error {
