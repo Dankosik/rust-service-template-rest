@@ -13,6 +13,10 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bytes::Bytes;
 use http::{HeaderMap, HeaderValue};
 
+pub(crate) const WEBHOOK_ID: &str = "webhook-id";
+pub(crate) const WEBHOOK_TIMESTAMP: &str = "webhook-timestamp";
+pub(crate) const WEBHOOK_SIGNATURE: &str = "webhook-signature";
+
 /// The fixed maximum raw webhook body accepted by either direction.
 pub const MAX_BODY_BYTES: usize = 128 * 1024;
 const TIMESTAMP_TOLERANCE_SECONDS: u64 = 300;
@@ -130,12 +134,12 @@ impl KeyRing {
         now: SystemTime,
     ) -> Result<VerifiedMessage, ProtocolError> {
         ensure_body_size(body)?;
-        let message_id = unambiguous_header(headers, "webhook-id")?;
+        let message_id = unambiguous_header(headers, WEBHOOK_ID)?;
         ensure_message_id(message_id.as_bytes())?;
-        let timestamp = parse_timestamp(unambiguous_header(headers, "webhook-timestamp")?)?;
+        let timestamp = parse_timestamp(unambiguous_header(headers, WEBHOOK_TIMESTAMP)?)?;
         ensure_timestamp_window(timestamp, now)?;
 
-        let mut values = headers.get_all("webhook-signature").iter().peekable();
+        let mut values = headers.get_all(WEBHOOK_SIGNATURE).iter().peekable();
         if values.peek().is_none() {
             return Err(ProtocolError::MissingHeader);
         }

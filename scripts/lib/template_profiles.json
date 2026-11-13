@@ -1193,6 +1193,7 @@
       "crates/config/src/webhooks.rs",
       "crates/config/src/webhooks/",
       "crates/infra-webhooks/src/outbound.rs",
+      "crates/infra-webhooks/src/outbound/",
       "test/tests/webhooks/outbound.rs"
     ],
     "markers": [
