@@ -3,7 +3,7 @@
 use infra_serviceauth::{
     JwtType, KeyId, ServiceName, SigningOptions, TokenSource, TrustRegistry, Verifier,
 };
-use service_config::{Config, ServiceAuthConfig, ValidationError};
+use service_config::{Config, ServiceAuthConfig, ServiceSigningKey, ValidationError};
 
 /// What the gRPC listener verifies and what outbound clients sign with.
 pub(super) struct PreparedServiceAuth {
@@ -19,7 +19,8 @@ pub(super) fn prepare(config: &Config) -> Result<PreparedServiceAuth, Validation
         name,
         jwt_type,
         trust,
-        ..
+        key_id,
+        private_key,
     } = &config.service_auth
     else {
         return Ok(PreparedServiceAuth {
@@ -34,7 +35,8 @@ pub(super) fn prepare(config: &Config) -> Result<PreparedServiceAuth, Validation
         JwtType::parse(jwt_type).map_err(|error| invalid("service_auth.jwt_type", &error))?;
     let trust =
         TrustRegistry::parse(trust).map_err(|error| invalid("service_auth.trust", &error))?;
-    let signing_key = config.service_auth.signing_key()?;
+    let signing_key =
+        ServiceSigningKey::from_optional_parts(key_id.as_deref(), private_key.as_ref())?;
     let tokens = match signing_key {
         Some(key) => TokenSource::try_new(SigningOptions {
             name: name.clone(),

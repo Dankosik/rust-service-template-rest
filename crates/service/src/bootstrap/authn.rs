@@ -55,7 +55,7 @@ pub(super) async fn prepare(
             audience,
             introspection_endpoint,
             introspection_client_id,
-            introspection_client_secret: _,
+            introspection_client_secret,
             provider_concurrency,
             cache_enabled,
             cache_capacity,
@@ -69,7 +69,10 @@ pub(super) async fn prepare(
                     source,
                 },
             )?;
-            let client_secret = config.authn.required_introspection_client_secret()?.clone();
+            let client_secret = AuthnConfig::require_introspection_client_secret(
+                introspection_client_secret.as_ref(),
+            )?
+            .clone();
             let provider_concurrency = std::num::NonZeroUsize::try_from(*provider_concurrency)
                 .map_err(|_| {
                     service_config::ValidationError::new(
