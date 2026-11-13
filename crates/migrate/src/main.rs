@@ -4,11 +4,13 @@
 //! `APP__*`) and decodes only the sections it uses, so a migration run is
 //! attributable to the same service, version, and environment as the
 //! process it prepares the schema for and needs no secret but the DSN.
-//! Requires the PostgreSQL profile to be enabled; writes one terminal
-//! `migration_run` record, using a default JSON logger when configuration or
-//! logger setup fails; a migration run exits 0 on success or no change and 1
-//! otherwise (clap flag errors keep clap's 0/2 convention). A stop signal
-//! drops the run, the server ends the session, lock, and transaction.
+//! Requires the PostgreSQL profile to be enabled. Once the logger is installed,
+//! the CLI submits one terminal `migration_run` record. Configuration or
+//! logger setup failures use a default JSON logger. If that logger cannot be
+//! installed, the original error goes to stderr. The CLI exits 0 on success
+//! or no change and 1 otherwise (clap flag errors keep clap's 0/2 convention).
+//! A stop signal drops the run, and the server ends the session, lock, and
+//! transaction.
 
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
@@ -24,6 +26,12 @@ use service_config::{BuildInfo, LoadOptions, MigrationConfig, ValidationError, p
 const BUILD_INFO: BuildInfo = BuildInfo::from_package_version(env!("CARGO_PKG_VERSION"));
 
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
+
+const FALLBACK_LOGGING: LoggingOptions<'static> = LoggingOptions {
+    level: "info,migrate_record=info",
+    format: LoggingFormat::Json,
+    tracer_provider: None,
+};
 
 #[derive(Debug, thiserror::Error)]
 enum Failure {
@@ -86,18 +94,15 @@ fn main() -> ExitCode {
     }) {
         Ok(logger) => logger,
         Err(err) => {
-            let Ok(fallback) = install_subscriber(&LoggingOptions {
-                level: "info,migrate_record=info",
-                format: LoggingFormat::Json,
-                tracer_provider: None,
-            }) else {
+            let Ok(fallback) = install_subscriber(&FALLBACK_LOGGING) else {
                 return process_failure(&err);
             };
-            return finish_setup_failure(
-                format!("install logger: {err}"),
+            return finish_run(
+                None,
+                fallback,
+                Err(Failure::Setup(format!("install logger: {err}"))),
                 target,
                 started,
-                fallback,
             );
         }
     };
@@ -108,49 +113,23 @@ fn main() -> ExitCode {
     {
         Ok(runtime) => runtime,
         Err(err) => {
-            return finish_without_runtime(Err(Failure::Runtime(err)), target, started, logger);
+            return finish_run(None, logger, Err(Failure::Runtime(err)), target, started);
         }
     };
 
     let outcome = runtime.block_on(apply(&config, target));
-    finish_run(runtime, logger, outcome, target, started)
+    finish_run(Some(runtime), logger, outcome, target, started)
 }
 
 fn finish_config_failure(message: String, target: Option<i64>, started: Instant) -> ExitCode {
-    let Ok(logger) = install_subscriber(&LoggingOptions {
-        level: "info,migrate_record=info",
-        format: LoggingFormat::Json,
-        tracer_provider: None,
-    }) else {
+    let Ok(logger) = install_subscriber(&FALLBACK_LOGGING) else {
         return process_failure(&message);
     };
-    finish_setup_failure(message, target, started, logger)
-}
-
-fn finish_setup_failure(
-    message: String,
-    target: Option<i64>,
-    started: Instant,
-    logger: LoggerGuard,
-) -> ExitCode {
-    finish_without_runtime(Err(Failure::Setup(message)), target, started, logger)
-}
-
-fn finish_without_runtime(
-    outcome: Result<Report, Failure>,
-    target: Option<i64>,
-    started: Instant,
-    logger: LoggerGuard,
-) -> ExitCode {
-    let cleanup_deadline = Instant::now() + CLEANUP_TIMEOUT;
-    logger.begin_shutdown();
-    let primary = finish(outcome, target, started);
-    finish_logger(logger, cleanup_deadline);
-    primary
+    finish_run(None, logger, Err(Failure::Setup(message)), target, started)
 }
 
 fn finish_run(
-    runtime: tokio::runtime::Runtime,
+    runtime: Option<tokio::runtime::Runtime>,
     logger: LoggerGuard,
     outcome: Result<Report, Failure>,
     target: Option<i64>,
@@ -161,15 +140,13 @@ fn finish_run(
     // Submit the terminal record before runtime shutdown can spend the shared
     // cleanup allowance on detached blocking work such as a DNS lookup.
     let primary = finish(outcome, target, started);
-    runtime.shutdown_timeout(cleanup_deadline.saturating_duration_since(Instant::now()));
-    finish_logger(logger, cleanup_deadline);
-    primary
-}
-
-fn finish_logger(logger: LoggerGuard, cleanup_deadline: Instant) {
+    if let Some(runtime) = runtime {
+        runtime.shutdown_timeout(cleanup_deadline.saturating_duration_since(Instant::now()));
+    }
     // The snapshot remains local: another record after closing would require
     // another drain. Telemetry loss cannot change or replay the database result.
     let _ = logger.shutdown(cleanup_deadline);
+    primary
 }
 
 fn finish(outcome: Result<Report, Failure>, target: Option<i64>, started: Instant) -> ExitCode {
