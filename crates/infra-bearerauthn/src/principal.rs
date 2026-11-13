@@ -1,4 +1,6 @@
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
+
+use serde::Deserialize;
 
 use crate::claims::Scopes;
 
@@ -63,11 +65,15 @@ impl Principal {
     /// # Errors
     /// Returns a sanitized error when the application type cannot read the claims.
     pub fn claims<T: serde::de::DeserializeOwned>(&self) -> Result<T, ClaimAccessError> {
-        // The Value pass preserves last-member-wins semantics. Decoding T directly
-        // from JSON would reject duplicate fields in application structs.
-        let value: serde_json::Value = serde_json::from_str(&self.identity.payload)
-            .map_err(|_| ClaimAccessError::InvalidShape)?;
-        serde_json::from_value(value).map_err(|_| ClaimAccessError::InvalidShape)
+        let invalid_shape = |_| ClaimAccessError::InvalidShape;
+        let mut input = ClaimJson(&self.identity.payload);
+        let claims = input.value(MAX_CLAIM_NESTING)?;
+        if !input.remaining().is_empty() {
+            return Err(ClaimAccessError::InvalidShape);
+        }
+        let mut json = Vec::with_capacity(self.identity.payload.len());
+        claims.write_json(&mut json).map_err(invalid_shape)?;
+        serde_json::from_slice(&json).map_err(invalid_shape)
     }
 
     #[must_use]
@@ -154,6 +160,129 @@ impl Actor {
 pub enum ClaimAccessError {
     #[error("verified claims do not match the requested type")]
     InvalidShape,
+}
+
+// Keep serde_json's ordinary limit of 127 nested containers.
+const MAX_CLAIM_NESTING: u8 = 127;
+
+enum ClaimValue<'a> {
+    Object(Vec<(String, Self)>),
+    Array(Vec<Self>),
+    Scalar(&'a str),
+}
+
+impl ClaimValue<'_> {
+    fn write_json(&self, json: &mut Vec<u8>) -> serde_json::Result<()> {
+        match self {
+            Self::Object(members) => {
+                json.push(b'{');
+                for (index, (key, value)) in members.iter().enumerate() {
+                    if index != 0 {
+                        json.push(b',');
+                    }
+                    serde_json::to_writer(&mut *json, key)?;
+                    json.push(b':');
+                    value.write_json(json)?;
+                }
+                json.push(b'}');
+            }
+            Self::Array(items) => {
+                json.push(b'[');
+                for (index, value) in items.iter().enumerate() {
+                    if index != 0 {
+                        json.push(b',');
+                    }
+                    value.write_json(json)?;
+                }
+                json.push(b']');
+            }
+            Self::Scalar(raw) => json.extend_from_slice(raw.as_bytes()),
+        }
+        Ok(())
+    }
+}
+
+// Walk containers to collapse duplicate members. Serde owns the scalar and
+// key grammar, and the final typed decode sees the original numeric text.
+struct ClaimJson<'a>(&'a str);
+
+impl<'a> ClaimJson<'a> {
+    fn remaining(&self) -> &'a str {
+        self.0.trim_start_matches([' ', '\t', '\r', '\n'])
+    }
+
+    fn take(&mut self, delimiter: char) -> bool {
+        if let Some(rest) = self.remaining().strip_prefix(delimiter) {
+            self.0 = rest;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn scalar<T: Deserialize<'a>>(&mut self) -> Result<(T, &'a str), ClaimAccessError> {
+        let input = self.remaining();
+        let mut stream = serde_json::Deserializer::from_str(input).into_iter::<T>();
+        let value = stream
+            .next()
+            .and_then(Result::ok)
+            .ok_or(ClaimAccessError::InvalidShape)?;
+        let (raw, rest) = input.split_at(stream.byte_offset());
+        self.0 = rest;
+        Ok((value, raw))
+    }
+
+    fn value(&mut self, depth: u8) -> Result<ClaimValue<'a>, ClaimAccessError> {
+        match self.remaining().as_bytes().first() {
+            Some(b'{' | b'[') if depth == 0 => Err(ClaimAccessError::InvalidShape),
+            Some(b'{') => {
+                self.take('{');
+                let mut members = BTreeMap::new();
+                let mut first = None;
+                if !self.take('}') {
+                    loop {
+                        let (key, _) = self.scalar::<String>()?;
+                        if !self.take(':') {
+                            return Err(ClaimAccessError::InvalidShape);
+                        }
+                        first.get_or_insert_with(|| key.clone());
+                        members.insert(key, self.value(depth - 1)?);
+                        if self.take('}') {
+                            break;
+                        }
+                        if !self.take(',') {
+                            return Err(ClaimAccessError::InvalidShape);
+                        }
+                    }
+                }
+                // Serde JSON features can give the first object key special
+                // meaning. Keep it first when decoding the normalized JSON.
+                let first = first.and_then(|key| members.remove_entry(&key));
+                Ok(ClaimValue::Object(
+                    first.into_iter().chain(members).collect(),
+                ))
+            }
+            Some(b'[') => {
+                self.take('[');
+                let mut items = Vec::new();
+                if !self.take(']') {
+                    loop {
+                        items.push(self.value(depth - 1)?);
+                        if self.take(']') {
+                            break;
+                        }
+                        if !self.take(',') {
+                            return Err(ClaimAccessError::InvalidShape);
+                        }
+                    }
+                }
+                Ok(ClaimValue::Array(items))
+            }
+            _ => self
+                .scalar::<serde_json::Value>()
+                .map(|(_, raw)| ClaimValue::Scalar(raw)),
+        }
+    }
 }
 
 // template:begin oidc-introspection:authn-retained-payload

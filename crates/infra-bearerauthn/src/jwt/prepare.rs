@@ -177,9 +177,8 @@ async fn fetch_discovery(
             let mut rfc8414 = issuer.url().clone();
             rfc8414.set_path(&format!("/.well-known/oauth-authorization-server{path}"));
             match fetch_metadata(provider, &rfc8414, deadline).await {
-                // A fallback 404 indicates absent RFC 8414 metadata. Keep the
-                // OIDC error so an outage such as a 503 stays visible at startup.
-                Err(PreparationReason::Fetch(ProviderFailure::Status(404))) => Err(first),
+                // Keep an OIDC outage visible when RFC 8414 metadata is missing or gone.
+                Err(PreparationReason::Fetch(ProviderFailure::Status(404 | 410))) => Err(first),
                 result => result,
             }
         }
@@ -394,17 +393,33 @@ mod tests {
     #[tokio::test]
     async fn a_failing_oidc_location_keeps_its_error_when_rfc8414_is_absent() {
         use crate::{PreparationPhase, PreparationReason, ProviderFailure};
-        for (response, expected) in [
+        for (response, fallback, expected) in [
             (
                 "HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
                 PreparationReason::Fetch(ProviderFailure::Status(503)),
             ),
-            ("{}", PreparationReason::Parse),
+            (
+                "HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                "HTTP/1.1 410 Gone\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                PreparationReason::Fetch(ProviderFailure::Status(503)),
+            ),
+            (
+                "{}",
+                "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                PreparationReason::Parse,
+            ),
         ] {
-            let (address, root, requested) = metadata_server(vec![(
-                "/tenant/.well-known/openid-configuration",
-                response.to_owned(),
-            )])
+            let (address, root, requested) = metadata_server(vec![
+                (
+                    "/tenant/.well-known/openid-configuration",
+                    response.to_owned(),
+                ),
+                (
+                    "/.well-known/oauth-authorization-server/tenant",
+                    fallback.to_owned(),
+                ),
+            ])
             .await;
             let error = prepare(address, &root, None).await.err().unwrap();
             assert_eq!(error.phase(), PreparationPhase::Discovery);
