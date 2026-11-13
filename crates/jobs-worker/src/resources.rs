@@ -29,7 +29,7 @@ pub(crate) struct Resources {
     pub(crate) tracer_provider: Option<TracerProviderHandle>,
     pub(crate) logger: Option<LoggerGuard>,
     // template:begin jobs:worker-shutdown-resources-started
-    pub(crate) started: Vec<Started>,
+    pub(crate) started_engines: Vec<Started>,
     // template:end jobs:worker-shutdown-resources-started
     // template:begin messaging:worker-shutdown-resources-messaging
     pub(crate) consumer: Option<ConsumerHandle>,

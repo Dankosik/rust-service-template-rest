@@ -4,10 +4,7 @@
 //! passing a registration function or closure to [`run`], which fills a
 //! [`Registration`]. The shipped binary supplies its retained profile
 //! registrations; a composition with no retained capability refuses after
-//! configuration is loaded. The synchronous startup phases and the one
-//! exit-code mapping live here, the asynchronous startup in `bootstrap`, the
-//! stop signals in `signals`, worker-owned tasks in `background`, and the
-//! staged teardown in `shutdown`.
+//! configuration is loaded.
 
 mod background;
 mod bootstrap;
