@@ -68,6 +68,7 @@ impl Store {
         }
         Ok(Self {
             pool,
+            // SQLx rejects sub-microsecond precision when encoding a PostgreSQL interval.
             retention: Duration::new(retention.as_secs(), retention.subsec_micros() * 1_000),
         })
     }

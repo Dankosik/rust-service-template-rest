@@ -4,7 +4,7 @@ use super::background::Background;
 use infra_http::idempotency::{Activation, Composer};
 use infra_idempotency_store::Store;
 use infra_postgres::PgPool;
-use service_config::{Config, ValidationError};
+use service_config::{Config, HttpIdempotencyConfig, ValidationError};
 
 use super::BootstrapError;
 
@@ -20,7 +20,9 @@ pub(super) fn prepare(
     };
     Store::new(pool.clone(), retention)
         .map(Composer::new)
-        .map_err(|error| ValidationError::new("http_idempotency.retention", error.to_string()))
+        .map_err(|error| {
+            ValidationError::new(HttpIdempotencyConfig::RETENTION_KEY, error.to_string())
+        })
 }
 
 /// Start the composed boundary when it serves at least one. An inactive
