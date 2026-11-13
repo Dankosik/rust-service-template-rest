@@ -32,29 +32,33 @@ Registry and maintenance evidence, fetched 2026-09-27: `redis` (redis-rs) 1.7.1,
 
 ## Resolved dependency graph
 
-The redis-rs queue covers all admitted producers on a generation. Application
-commands and external probes yield for Tokio scheduling before arming
-retirement, then hand off to that queue without an intervening yield. A caller
-can cancel before handoff without withdrawing the connection. After handoff,
-an application command observes a ready reply before a context stop or
-disconnect notification because the reply has already answered its slot.
-Both forms of PING and the refresh AUTH start their reply budget after their
-first query poll hands off to that queue. A command that enters ahead of them
-on another worker has already started its own budget by then.
-Outside panic unwinding, dropping a pending command or probe polls the
-exchange once more without waiting. A delivered reply can still preserve the
-connection. An unanswered probe slot or a command slot abandoned after its
-`command_timeout` causes retirement. An unanswered command abandoned earlier
-keeps the connection. The first poll must reach the driver so the drop poll
-cannot dispatch new work. Recheck the handoff if the driver adds a pre-enqueue
-wait or the number of producers changes.
+Caller admission and driver capacity have separate lifetimes. An early
+cancellation releases the caller's admission slot while the existing
+supervisor keeps the driver reservation until the reply arrives or the
+generation retires. Otherwise a backpressured socket can leave the driver
+queue full of abandoned commands after their callers release admission.
+The supervisor keeps the reply receiver alive, so an already queued command
+can still reach the socket after its caller stops.
+The generation reserves one queue entry for maintenance and requires each
+application command and external probe to reserve one of the other entries
+before its first Redis poll. Waiting for that reservation is cancellable.
+Only a query that has entered the driver's queue can be polled again on drop
+to collect an already delivered reply or cause retirement. Recheck this
+guarantee if redis-rs adds a pre-enqueue wait or the number of producers
+changes.
+
+An external probe can wait up to its connected timeout for a reservation.
+After handoff it gets its full reply budget, as do maintenance PING and AUTH,
+so a late reservation cannot shorten the time owed to commands ahead of it.
+The caller's outer startup or readiness deadline still bounds the whole check.
 
 `infra-cache` retains redis 1.8.1 with `tokio-comp` and `tokio-rustls-comp`.
 The supervisor reuses the already declared and locked `backon` 1.6.0 (`std`),
-`tokio-util` (`rt`), and Tokio synchronization/macros. The obsolete
-`connection-manager`, `token-based-authentication`, and direct `futures-util`
-stream edges are removed. `Cargo.lock` owns the resulting transitive package
-set; no dependency version upgrade is part of this change.
+`tokio-util` (`rt`), and Tokio synchronization/macros. It uses the workspace's
+resolved `futures-util` (`alloc`) to poll abandoned replies without imposing
+one task per cancelled request or writing a readiness queue. Redis's own
+concurrency limiter releases its permit when the caller drops its future, so
+it cannot account for a queued request after cancellation.
 
 `socket2` 0.6.5 remains a direct edge because redis does not re-export
 `TcpKeepalive`, which sets keepalive retries. `xxhash-rust` uses BSL-1.0
