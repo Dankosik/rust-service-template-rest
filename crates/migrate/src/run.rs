@@ -1,6 +1,5 @@
 //! Applying pending migrations over one dedicated session.
 
-use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use infra_postgres::{
@@ -108,9 +107,7 @@ pub enum RunError {
 const LOCK_NOT_AVAILABLE: &str = "55P03";
 
 impl RunError {
-    /// The `stage` word on the terminal `migration_run` record.
-    #[must_use]
-    pub fn stage(&self) -> &'static str {
+    fn stage(&self) -> &'static str {
         match self {
             Self::Connect(_)
             | Self::ConnectTimeout(_)
@@ -165,7 +162,7 @@ impl RunFailure {
 /// # Errors
 ///
 /// [`RunFailure`] carries the [`RunError`] and the progress observed before
-/// the failure. [`RunError::stage`] names where it stopped. Each migration
+/// the failure. [`RunFailure::stage`] names where it stopped. Each migration
 /// and its history row share one transaction, except a `-- no-transaction`
 /// migration, whose row is written after its statement.
 pub async fn run(migrator: &Migrator, options: &RunOptions<'_>) -> Result<Report, RunFailure> {
@@ -198,44 +195,26 @@ pub async fn run(migrator: &Migrator, options: &RunOptions<'_>) -> Result<Report
             report: Report::default(),
         })?;
     let deadline_at = run_cutoff(options.deadline)?;
-    // The run owns one progress snapshot shared with the timeout wrapper, so a
-    // deadline still reports the migrations that committed before it fired.
-    let progress = Mutex::new(Report::default());
-    let report = match tokio::time::timeout_at(
+    let mut report = Report::default();
+    let outcome = tokio::time::timeout_at(
         deadline_at,
-        apply_pending(&mut conn, migrator, options, deadline_at, &progress),
+        apply_pending(&mut conn, migrator, options, deadline_at, &mut report),
     )
-    .await
-    {
-        Ok(Ok(report)) => report,
-        Ok(Err(error)) => {
-            return Err(RunFailure {
-                error,
-                report: report_snapshot(&progress),
-            });
-        }
+    .await;
+    match outcome {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => return Err(RunFailure { error, report }),
         Err(_) => {
             return Err(RunFailure {
                 error: RunError::Deadline(options.deadline),
-                report: report_snapshot(&progress),
+                report,
             });
         }
-    };
+    }
     // A close error must not fail an applied run. On failure the connection is
     // dropped instead, which ends the session, its lock, and any transaction.
     let _ = conn.close().await;
     Ok(report)
-}
-
-fn report_snapshot(progress: &Mutex<Report>) -> Report {
-    progress
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .clone()
-}
-
-fn record_progress(progress: &Mutex<Report>, report: &Report) {
-    *progress.lock().unwrap_or_else(PoisonError::into_inner) = report.clone();
 }
 
 fn run_cutoff(budget: Duration) -> Result<tokio::time::Instant, RunFailure> {
@@ -258,16 +237,12 @@ async fn apply_pending(
     migrator: &Migrator,
     options: &RunOptions<'_>,
     deadline_at: tokio::time::Instant,
-    progress: &Mutex<Report>,
-) -> Result<Report, RunError> {
+    report: &mut Report,
+) -> Result<(), RunError> {
     conn.lock().await?;
     conn.ensure_migrations_table(&migrator.table_name).await?;
     let history = applied_history(conn, &migrator.table_name).await?;
-    let mut report = Report {
-        before: history.iter().map(|migration| migration.version).max(),
-        applied: Vec::new(),
-    };
-    record_progress(progress, &report);
+    report.before = history.iter().map(|migration| migration.version).max();
     for migration in pending(migrator, &history)? {
         tracing::event!(
             target: "migrate_record",
@@ -290,10 +265,9 @@ async fn apply_pending(
             "migration_applied"
         );
         report.applied.push(migration.version);
-        record_progress(progress, &report);
     }
     conn.unlock().await?;
-    Ok(report)
+    Ok(())
 }
 
 /// Apply one `-- no-transaction` migration.
