@@ -11,16 +11,16 @@ use std::{
     net::SocketAddr,
     num::NonZeroU32,
     pin::Pin,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-    },
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
-// template:begin authn:grpc-transport-test-auth-time
-use std::time::{SystemTime, UNIX_EPOCH};
-// template:end authn:grpc-transport-test-auth-time
+// template:begin authn:grpc-transport-test-auth-std-imports
+use std::{
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
+};
+// template:end authn:grpc-transport-test-auth-std-imports
 
 use futures_util::StreamExt as _;
 use grpc_contracts::example::v1::{
