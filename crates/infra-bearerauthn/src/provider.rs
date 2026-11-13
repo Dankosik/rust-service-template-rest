@@ -628,7 +628,7 @@ mod tests {
                 break;
             }
             request.extend_from_slice(&chunk[..read]);
-            if request.windows(4).any(|part| part == b"\r\n\r\n") {
+            if request.array_windows().any(|part| part == b"\r\n\r\n") {
                 break;
             }
         }

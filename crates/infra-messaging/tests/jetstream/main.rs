@@ -441,22 +441,22 @@ fn install_tracing() -> &'static opentelemetry_sdk::trace::InMemorySpanExporter 
     use opentelemetry::trace::TracerProvider as _;
     use tracing_subscriber::layer::SubscriberExt as _;
 
-    static EXPORTER: std::sync::OnceLock<opentelemetry_sdk::trace::InMemorySpanExporter> =
-        std::sync::OnceLock::new();
-    EXPORTER.get_or_init(|| {
-        opentelemetry::global::set_text_map_propagator(
-            opentelemetry_sdk::propagation::TraceContextPropagator::new(),
-        );
-        let exporter = opentelemetry_sdk::trace::InMemorySpanExporter::default();
-        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
-            .with_simple_exporter(exporter.clone())
-            .build();
-        let subscriber = tracing_subscriber::registry()
-            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")));
-        tracing::subscriber::set_global_default(subscriber)
-            .expect("no other test installs a subscriber");
-        exporter
-    })
+    static EXPORTER: std::sync::LazyLock<opentelemetry_sdk::trace::InMemorySpanExporter> =
+        std::sync::LazyLock::new(|| {
+            opentelemetry::global::set_text_map_propagator(
+                opentelemetry_sdk::propagation::TraceContextPropagator::new(),
+            );
+            let exporter = opentelemetry_sdk::trace::InMemorySpanExporter::default();
+            let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+                .with_simple_exporter(exporter.clone())
+                .build();
+            let subscriber = tracing_subscriber::registry()
+                .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")));
+            tracing::subscriber::set_global_default(subscriber)
+                .expect("no other test installs a subscriber");
+            exporter
+        });
+    &EXPORTER
 }
 
 /// The exported spans named `name`; a fixture's subject makes the name unique.

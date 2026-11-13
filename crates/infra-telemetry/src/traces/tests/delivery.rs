@@ -132,7 +132,10 @@ fn read_request(stream: &mut impl Read) -> Option<Request> {
         Some(())
     };
     let head_end = loop {
-        if let Some(at) = received.windows(4).position(|window| window == b"\r\n\r\n") {
+        if let Some(at) = received
+            .array_windows()
+            .position(|window| window == b"\r\n\r\n")
+        {
             break at + 4;
         }
         read_more(&mut received)?;

@@ -386,7 +386,7 @@ async fn drain_interrupts_identity_waits_and_joins_any_admitted_delivery() {
                 &fixture,
                 vec![relay.url.clone()],
                 Some(ConsumerOptions {
-                    concurrency: std::num::NonZeroUsize::new(2).unwrap(),
+                    concurrency: const { std::num::NonZeroUsize::new(2).expect("2 is nonzero") },
                     ..consumer_options(&fixture)
                 }),
                 1024,

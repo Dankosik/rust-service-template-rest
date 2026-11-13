@@ -144,5 +144,5 @@ for suffix in ordinary blocked primary negative; do
 	export "RUNTIME_PROGRESS_RESOURCE_${suffix}=${resource}"
 done
 export RUNTIME_PROGRESS_IMAGE="${image_id}" RUNTIME_PROGRESS_SOURCE="${source_revision}" RUNTIME_PROGRESS_RESULTS="${results}"
-timeout --signal=TERM --kill-after=15s 12m "${driver}" --ignored --exact "${test_name}" --nocapture \
+timeout --signal=TERM --kill-after=15s 12m "${driver}" --ignored --exact "${test_name}" --no-capture \
 	2>&1 | tee "${inputs}/driver.log"

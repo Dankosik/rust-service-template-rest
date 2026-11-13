@@ -52,7 +52,7 @@ fn run_fixture(scenario: &str, sink: Sink) -> (i32, String, String, Duration) {
         .unwrap();
     let mut child = Process(
         Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "tests::terminal_fixture", "--nocapture"])
+            .args(["--exact", "tests::terminal_fixture", "--no-capture"])
             .env(FIXTURE, scenario)
             .stdin(Stdio::piped())
             .stdout(Stdio::from(OwnedFd::from(writer.try_clone().unwrap())))

@@ -482,9 +482,7 @@ impl MaintenanceAttempt<'_> {
         // between writes may conservatively observe unknown, never fresh absence.
         self.observer.last_attempt_success.set(0.0);
         self.observer.database_observed.set(observed_at);
-        self.observer
-            .present
-            .set(if oldest.is_some() { 1.0 } else { 0.0 });
+        self.observer.present.set(f64::from(oldest.is_some()));
         self.observer.oldest.set(oldest.unwrap_or(0.0));
         self.observer.clock_valid.set(1.0);
         self.observer.last_success.set(received.wall.unwrap_or(0.0));

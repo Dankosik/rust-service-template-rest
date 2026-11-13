@@ -152,7 +152,7 @@ impl Instance {
 
     #[expect(
         clippy::print_stdout,
-        reason = "print the observed bounded failure class with --nocapture"
+        reason = "print the observed bounded failure class with --no-capture"
     )]
     async fn state(&mut self, ready: bool) {
         timeout(WAIT, async {
@@ -362,7 +362,7 @@ async fn publish(pool: &PgPool, expected: &str) {
 #[expect(
     clippy::disallowed_methods,
     clippy::print_stdout,
-    reason = "hold raw pool capacity and print observed recovery timing with --nocapture"
+    reason = "hold raw pool capacity and print observed recovery timing with --no-capture"
 )]
 #[sqlx::test(migrations = false)]
 async fn consumers_recover_from_local_pressure_shared_interruption_and_admission(pool: PgPool) {
@@ -751,7 +751,7 @@ mod grpc {
                 .unwrap(),
                 client_id: "fixture".to_owned(),
                 client_secret: secrecy::SecretString::from("fixture"),
-                provider_concurrency: NonZeroUsize::new(16).unwrap(),
+                provider_concurrency: const { NonZeroUsize::new(16).expect("16 is nonzero") },
                 cache: None,
             },
             fixture,

@@ -18,11 +18,7 @@ use super::Receiver;
 /// The spec's 5-minute example only covers replay of one signed request.
 const RECEIPT_RETENTION: Duration = Duration::from_hours(14 * 24);
 
-#[expect(
-    clippy::cast_possible_wrap,
-    reason = "fourteen days of seconds is far inside i64"
-)]
-const RETENTION_SECONDS: i64 = RECEIPT_RETENTION.as_secs() as i64;
+const RETENTION_SECONDS: i64 = RECEIPT_RETENTION.as_secs().cast_signed();
 
 const CLEANUP_BATCH_ROWS: u32 = 500;
 

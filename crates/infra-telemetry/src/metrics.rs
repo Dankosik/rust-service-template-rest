@@ -155,7 +155,7 @@ impl Metrics {
     /// state. A missing tracer provider (`None`) counts as inactive.
     pub fn record_trace_exporter(&self, state: Option<&ExporterState>) {
         let initialized = matches!(state, Some(ExporterState::Initialized { .. }));
-        metrics::gauge!(TRACE_EXPORTER_ACTIVE_METRIC).set(if initialized { 1.0 } else { 0.0 });
+        metrics::gauge!(TRACE_EXPORTER_ACTIVE_METRIC).set(f64::from(initialized));
     }
 
     /// Render the Prometheus text exposition, refreshing process metrics

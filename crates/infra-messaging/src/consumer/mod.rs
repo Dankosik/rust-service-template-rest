@@ -537,7 +537,7 @@ fn check_delivery_task_result(
     joined: Option<Result<Result<(), ConsumerError>, JoinError>>,
 ) -> Result<(), ConsumerError> {
     match joined {
-        Some(result) => result.map_err(|_| ConsumerError::TaskEnded)?,
+        Some(result) => result.map_err(|_| ConsumerError::TaskEnded).flatten(),
         None => Ok(()),
     }
 }
