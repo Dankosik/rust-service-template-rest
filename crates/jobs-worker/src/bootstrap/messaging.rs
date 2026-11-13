@@ -20,20 +20,33 @@ use crate::signals::Signals;
 
 const MESSAGING_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Whether the registration consumes messages; when it does, the consumer
-/// configuration must be complete before any dependency opens.
-pub(super) fn consumes_messages(
-    config: &Config,
-    registration: &Registration<'_>,
-) -> Result<bool, WorkerError> {
-    let consumes_messages = registration.messages.has_handlers();
-    // template:begin outbox:worker-bootstrap-postgres-messages-intent
-    let consumes_messages = consumes_messages || registration.postgres_messages.is_some();
-    // template:end outbox:worker-bootstrap-postgres-messages-intent
-    if consumes_messages {
+pub(super) struct RetainedMessages {
+    pub(super) registry: MessagingRegistry,
+    // template:begin outbox:worker-bootstrap-postgres-messages-field
+    pub(super) postgres_messages: Option<crate::PostgresMessages>,
+    // template:end outbox:worker-bootstrap-postgres-messages-field
+}
+
+impl RetainedMessages {
+    pub(super) fn retain(
+        config: &Config,
+        registration: Registration<'_>,
+    ) -> Result<Option<Self>, WorkerError> {
+        let consumes_messages = registration.messages.has_handlers();
+        // template:begin outbox:worker-bootstrap-postgres-messages-intent
+        let consumes_messages = consumes_messages || registration.postgres_messages.is_some();
+        // template:end outbox:worker-bootstrap-postgres-messages-intent
+        if !consumes_messages {
+            return Ok(None);
+        }
         config.messaging.validate_consumer(&config.app.env)?;
+        Ok(Some(Self {
+            registry: registration.messages,
+            // template:begin outbox:worker-bootstrap-postgres-messages-value
+            postgres_messages: registration.postgres_messages,
+            // template:end outbox:worker-bootstrap-postgres-messages-value
+        }))
     }
-    Ok(consumes_messages)
 }
 
 pub(super) async fn connect_messaging(

@@ -163,7 +163,7 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
         budget.remaining(LISTENERS),
     )
     .await;
-    let background_failed = stage(
+    let background_degraded = stage(
         "background_join",
         join_background(&background, budget.remaining(BACKGROUND_JOIN)),
     )
@@ -182,22 +182,22 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
         .await;
     }
     // template:begin jobs:worker-shutdown-native-failures
-    let background_failed = background_failed
+    let background_degraded = background_degraded
         || resources
             .started
             .iter()
             .any(|engine| engine.failed().now_or_never().is_some());
     // template:end jobs:worker-shutdown-native-failures
-    degraded |= background_failed;
-    if background_failed {
+    degraded |= background_degraded;
+    if background_degraded {
         tracing::warn!("background_join_failed");
     } else {
         tracing::info!("background_joined");
     }
     degraded |= close_dependencies(&mut resources, dependency_deadline).await;
     degraded |= background.failure().is_some();
-    if signals.take_pending().is_err() {
-        tracing::error!("stop signal receiver failed during shutdown");
+    if let Err(error) = signals.take_pending() {
+        tracing::error!(error = %error, "stop signal receiver failed during shutdown");
         degraded = true;
     }
     finish_telemetry(
@@ -295,7 +295,10 @@ async fn drain(
         biased;
         messaging_error = joined => messaging_error.map(|error| ("messaging", Some(error))),
         () = tokio::time::sleep_until(deadline) => Some(("budget", None)),
-        result = signals.wait() => Some((if result.is_ok() { "second_signal" } else { "signal_receiver_failed" }, None)),
+        result = signals.wait() => Some(match result {
+            Ok(()) => ("second_signal", None),
+            Err(error) => ("signal_receiver_failed", Some(error.to_string())),
+        }),
     };
     match forced {
         None => {
