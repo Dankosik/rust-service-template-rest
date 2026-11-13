@@ -184,10 +184,7 @@ impl Body for ExactLength {
                 return Poll::Pending;
             }
             polls_remaining -= 1;
-            let polled = match Pin::new(self.inner.get_mut()).poll_frame(context) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(polled) => polled,
-            };
+            let polled = std::task::ready!(Pin::new(self.inner.get_mut()).poll_frame(context));
             match polled {
                 Some(Ok(frame)) => {
                     let Some(data) = frame.data_ref() else {

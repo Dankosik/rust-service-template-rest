@@ -560,7 +560,7 @@ mod tests {
                 endpoint: self.endpoint.clone(),
                 client_id: "fixture-client".to_owned(),
                 client_secret: secrecy::SecretString::from("fixture-secret"),
-                provider_concurrency: NonZeroUsize::new(1).unwrap(),
+                provider_concurrency: NonZeroUsize::MIN,
                 cache,
             }
         }
@@ -701,7 +701,9 @@ mod tests {
     async fn provider_concurrency_above_the_semaphore_limit_is_an_invalid_option() {
         let fixture = Fixture::new().await;
         let mut options = fixture.options(None);
-        options.provider_concurrency = NonZeroUsize::new(Semaphore::MAX_PERMITS + 1).unwrap();
+        options.provider_concurrency = const {
+            NonZeroUsize::new(Semaphore::MAX_PERMITS + 1).expect("one past the limit is nonzero")
+        };
         let Err(error) = IntrospectionVerifier::try_new(options, fixture.provider.clone()) else {
             panic!("an over-limit concurrency was accepted");
         };

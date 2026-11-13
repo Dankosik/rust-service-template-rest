@@ -212,9 +212,8 @@ impl JwtVerifier {
         algorithm: JwtAlgorithm,
     ) -> Result<u64, VerificationError> {
         let checked = self.key_store.current();
-        let miss = match checked.verify(message, signature, kid, algorithm) {
-            Ok(()) => return Ok(checked.generation()),
-            Err(miss) => miss,
+        let Err(miss) = checked.verify(message, signature, kid, algorithm) else {
+            return Ok(checked.generation());
         };
         match self.key_store.refresh_for_signature_miss(&checked).await {
             SignatureRefresh::NewerSet(key_set) => {

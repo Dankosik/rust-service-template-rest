@@ -88,11 +88,11 @@ impl KeySet {
         self.generation
     }
 
-    fn candidates<'a>(
-        &'a self,
-        kid: Option<&'a str>,
+    fn candidates(
+        &self,
+        kid: Option<&str>,
         algorithm: JwtAlgorithm,
-    ) -> impl Iterator<Item = &'a ParsedPublicKey> {
+    ) -> impl Iterator<Item = &ParsedPublicKey> {
         self.keys
             .iter()
             .filter(move |key| kid.is_none_or(|kid| key.kid.as_deref() == Some(kid)))

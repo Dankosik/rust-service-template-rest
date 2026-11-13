@@ -420,7 +420,7 @@ async fn oversized_header_is_431() {
     assert!(
         text.starts_with("HTTP/1.1 431 "),
         "{}",
-        &text[..text.len().min(80)]
+        &text[..text.floor_char_boundary(80)]
     );
     server.drain(Duration::from_secs(1)).await.unwrap();
 }

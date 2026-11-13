@@ -356,7 +356,7 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for EventFields {
 async fn panic_is_a_sanitized_500_problem() {
     let events = Arc::new(Mutex::new(Vec::new()));
     let subscriber = tracing_subscriber::registry().with(EventFields {
-        target: module_path!().trim_end_matches("::tests"),
+        target: module_path!().trim_suffix("::tests"),
         fields: Arc::clone(&events),
     });
     let response = app(&options())

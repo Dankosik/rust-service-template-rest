@@ -76,7 +76,7 @@ async fn set_admits_only_valid_floored_ttls_before_dispatch_and_observation() {
     let namespace = cache.namespace("ttl");
     assert_eq!(namespace.get("ready").await, Ok(None));
     let connections = server.connections();
-    let maximum = Duration::from_millis(i64::MAX as u64);
+    let maximum = Duration::from_millis(i64::MAX.cast_unsigned());
 
     for ttl in [
         Duration::ZERO,

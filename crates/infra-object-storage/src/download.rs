@@ -364,12 +364,10 @@ impl Download {
                 completion.finish();
                 self.timer.abort();
             }
-            match result {
-                Poll::Ready(Ok(ReadStep::Buffered)) => {}
-                Poll::Ready(Ok(ReadStep::Empty(chunk))) => drop(chunk),
-                Poll::Ready(Ok(ReadStep::Chunk(chunk))) => return Poll::Ready(Ok(chunk)),
-                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-                Poll::Pending => return Poll::Pending,
+            match std::task::ready!(result)? {
+                ReadStep::Buffered => {}
+                ReadStep::Empty(chunk) => drop(chunk),
+                ReadStep::Chunk(chunk) => return Poll::Ready(Ok(chunk)),
             }
         }
     }

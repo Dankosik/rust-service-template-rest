@@ -1,6 +1,6 @@
 //! Text and file recipes. File work is synchronous and belongs off async worker threads.
 
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, Write};
 use std::sync::LazyLock;
 
 use bstr::ByteSlice;
@@ -105,7 +105,7 @@ fn spooled_files_roll_to_disk_without_a_custom_memory_disk_state_machine() {
     assert!(!file.is_rolled());
     file.write_all(b" world!").unwrap();
     assert!(file.is_rolled());
-    file.seek(SeekFrom::Start(0)).unwrap();
+    file.rewind().unwrap();
     let mut output = String::new();
     file.read_to_string(&mut output).unwrap();
     assert_eq!(output, "hello world!");

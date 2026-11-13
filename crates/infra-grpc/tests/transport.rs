@@ -3107,7 +3107,7 @@ async fn verifier_fixture() -> (Verifier, ProviderFixture) {
             .unwrap(),
             client_id: "fixture".to_owned(),
             client_secret: SecretString::from("fixture"),
-            provider_concurrency: std::num::NonZeroUsize::new(32).unwrap(),
+            provider_concurrency: const { std::num::NonZeroUsize::new(32).expect("32 is nonzero") },
             cache: Some(IntrospectionCacheOptions::try_new(16, Duration::from_mins(1)).unwrap()),
         },
         fixture,
