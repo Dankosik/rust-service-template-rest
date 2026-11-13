@@ -288,8 +288,8 @@ where
 }
 
 /// [`in_tx_with`] for a caller whose own deadline bounds the work: the wait for
-/// a connection is bounded by `deadline`, as [`acquire_until`](crate::acquire_until)
-/// describes. The deadline bounds only that wait. The closure and the commit
+/// a connection is bounded by `deadline`, as [`acquire_until`] describes. The
+/// deadline bounds only that wait. The closure and the commit
 /// keep their own budgets.
 ///
 /// # Errors

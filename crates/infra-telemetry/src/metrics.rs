@@ -199,9 +199,8 @@ impl Metrics {
         }
     }
 
-    /// Drain histogram samples every [`HISTOGRAM_UPKEEP_INTERVAL`] so the
-    /// recorder does not grow between scrapes. Run under the background task
-    /// tracker.
+    /// Drain histogram samples once a second so the recorder does not grow
+    /// between scrapes. Run under the background task tracker.
     pub async fn upkeep(self, cancel: CancellationToken) {
         let _ = cancel
             .run_until_cancelled(async {
