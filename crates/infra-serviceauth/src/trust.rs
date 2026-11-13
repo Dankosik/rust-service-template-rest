@@ -24,8 +24,8 @@ pub(crate) struct TrustedKey {
     pub(crate) key: ParsedPublicKey,
 }
 
-/// Why a registry was refused. Names only a caller that passed the name
-/// grammar and the 1-based key position, never key material.
+/// Why a registry was refused. Locates a JSON error by position or an entry
+/// by its validated caller name and key position, without exposing key material.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("{place}{reason}")]
 pub struct TrustError {
@@ -38,6 +38,8 @@ pub struct TrustError {
 enum Place {
     #[display("")]
     Document,
+    #[display("line {line}, column {column}: ")]
+    Json { line: usize, column: usize },
     #[display("caller {_0}: ")]
     Caller(ServiceName),
     /// A caller's key by its 1-based position in the caller's `keys`.
@@ -65,8 +67,17 @@ impl TrustRegistry {
     /// caller's JWK Set, or any key that is not an EC P-256
     /// public key for ES256 signatures with a `kid`.
     pub fn parse(document: &str) -> Result<Self, TrustError> {
-        let entries: Entries = serde_json::from_str(document).map_err(|_| {
-            TrustError::document("the trust registry is not one JSON object of JWK Sets")
+        let entries: Entries = serde_json::from_str(document).map_err(|error| {
+            let line = error.line();
+            let column = error.column();
+            if (error.is_syntax() || error.is_eof()) && line > 0 {
+                TrustError::new(
+                    Place::Json { line, column },
+                    "invalid JSON in the trust registry",
+                )
+            } else {
+                TrustError::document("the trust registry is not one JSON object of JWK Sets")
+            }
         })?;
         let entries = entries
             .0
@@ -231,7 +242,7 @@ fn parse_caller(
     let mut keys: Vec<TrustedKey> = Vec::with_capacity(set.keys.len());
     for (index, value) in set.keys.into_iter().enumerate() {
         let key_error = |reason| TrustError::new(Place::Key(caller.clone(), index + 1), reason);
-        let key = admit(value).map_err(key_error)?;
+        let key = admit_key(value).map_err(key_error)?;
         if keys.iter().any(|known| known.kid == key.kid) {
             return Err(key_error("repeats a kid of this caller"));
         }
@@ -240,8 +251,7 @@ fn parse_caller(
     Ok((caller, keys))
 }
 
-/// Admits one public ES256 key with a `kid`.
-fn admit(value: serde_json::Value) -> Result<TrustedKey, &'static str> {
+fn admit_key(value: serde_json::Value) -> Result<TrustedKey, &'static str> {
     // A private (`d`) or symmetric (`k`) member means a secret was distributed.
     let object = value.as_object().ok_or("is not a JSON object")?;
     if object.contains_key("d") || object.contains_key("k") {
@@ -339,6 +349,8 @@ mod tests {
         };
         let cases: Vec<(String, &str)> = vec![
             ("[]".to_owned(), "the trust registry is not one JSON object of JWK Sets"),
+            ("{\n  x".to_owned(), "line 2, column 3: invalid JSON in the trust registry"),
+            ("{\n  \"orders\": {".to_owned(), "line 2, column 13: invalid JSON in the trust registry"),
             ("{}".to_owned(), "the trust registry names no caller"),
             (
                 r#"{"orders": {"keys": []}, "orders": {"keys": []}}"#.to_owned(),
@@ -352,7 +364,7 @@ mod tests {
                 r#"{"Bad": {}, "Bad": {}}"#.to_owned(),
                 "the trust registry repeats a caller",
             ),
-            (r#"{"Orders": {"keys": []}}"#.to_owned(), "a caller name is 1 to 63 lowercase letters, digits and hyphens, not starting or ending with a hyphen"),
+            (r#"{"Orders": {"keys": []}}"#.to_owned(), "a service name is 1 to 63 lowercase letters, digits and hyphens, not starting or ending with a hyphen"),
             (
                 format!(r#"{{"orders": {{"keys": [{jwk}], "keys": [{jwk}]}}}}"#),
                 "caller orders: repeats a member name within its JWK Set",
