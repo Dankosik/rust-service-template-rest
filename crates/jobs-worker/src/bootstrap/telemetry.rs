@@ -8,7 +8,7 @@ use service_config::{Config, LogFormat, TracesSampler};
 
 use super::{METRICS_MAINTENANCE_INTERVAL, WorkerError};
 use crate::background::Background;
-use crate::shutdown::Resources;
+use crate::resources::Resources;
 
 pub(super) fn install_observability(
     config: &Config,

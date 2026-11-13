@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use infra_jobs::StartupError;
 use infra_jobs::operator::{
-    self as jobs, InputError, Inspection, InspectionResult, JobSnapshot, OperatorError,
-    RecoveryTarget,
+    self as jobs, InputError, Inspection, InspectionMode, InspectionResult, JobSnapshot,
+    OperatorError, RecoveryTarget,
 };
 use infra_postgres::{CloseOutcome, ConnectError, Dsn, Isolation, PgPool, TxOptions};
 use migrate::HistoryError;
@@ -21,10 +21,7 @@ use crate::shutdown::{DEPENDENCY_CLOSE, RUNTIME_SHUTDOWN_TIMEOUT};
 use crate::signals::Signals;
 
 pub(crate) enum Request {
-    Inspect {
-        action: &'static str,
-        query: Inspection,
-    },
+    Inspect(Inspection),
     Redrive(RecoveryTarget),
     Discard(RecoveryTarget),
 }
@@ -32,21 +29,18 @@ pub(crate) enum Request {
 impl Request {
     pub(crate) fn try_new(command: OperatorCommand) -> Result<Self, InputError> {
         Ok(match command {
-            OperatorCommand::Inspect { id } => Self::Inspect {
-                action: "inspect",
-                query: Inspection::one(&id)?,
-            },
-            OperatorCommand::Failed { page } => Self::Inspect {
-                action: "failed",
-                query: Inspection::failed(page.after.as_deref(), page.limit)?,
-            },
+            OperatorCommand::Inspect { id } => Self::Inspect(Inspection::one(&id)?),
+            OperatorCommand::Failed { page } => {
+                Self::Inspect(Inspection::failed(page.after.as_deref(), page.limit)?)
+            }
             OperatorCommand::Unhandled {
                 handled_kinds,
                 page,
-            } => Self::Inspect {
-                action: "unhandled",
-                query: Inspection::unhandled(&handled_kinds, page.after.as_deref(), page.limit)?,
-            },
+            } => Self::Inspect(Inspection::unhandled(
+                &handled_kinds,
+                page.after.as_deref(),
+                page.limit,
+            )?),
             OperatorCommand::Redrive(target) => Self::Redrive(recovery_target(&target)?),
             OperatorCommand::Discard(target) => Self::Discard(recovery_target(&target)?),
         })
@@ -54,7 +48,11 @@ impl Request {
 
     fn action(&self) -> &'static str {
         match self {
-            Self::Inspect { action, .. } => action,
+            Self::Inspect(query) => match query.mode() {
+                InspectionMode::One => "inspect",
+                InspectionMode::Failed => "failed",
+                InspectionMode::Unhandled => "unhandled",
+            },
             Self::Redrive(_) => "redrive",
             Self::Discard(_) => "discard",
         }
@@ -62,14 +60,14 @@ impl Request {
 
     fn is_mutation(&self) -> bool {
         match self {
-            Self::Inspect { .. } => false,
+            Self::Inspect(_) => false,
             Self::Redrive(_) | Self::Discard(_) => true,
         }
     }
 
     fn receipt(&self, outcome: Outcome) -> Value {
         let mut body = match self {
-            Self::Inspect { query, .. } => {
+            Self::Inspect(query) => {
                 let mut body = json!({});
                 if let Some(kinds) = query.handled_kinds() {
                     body["handled_kinds"] = json!(kinds);
@@ -188,7 +186,7 @@ impl Request {
 
     async fn execute(&self, pool: &PgPool) -> Result<Executed, OperatorError> {
         match self {
-            Self::Inspect { query, .. } => {
+            Self::Inspect(query) => {
                 let result = infra_postgres::in_tx_with(
                     pool,
                     TxOptions {

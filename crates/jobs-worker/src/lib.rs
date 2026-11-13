@@ -15,6 +15,7 @@ mod cli;
 // template:begin jobs:worker-operator-module
 mod operator;
 // template:end jobs:worker-operator-module
+mod resources;
 mod shutdown;
 mod signals;
 
