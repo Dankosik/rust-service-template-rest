@@ -529,7 +529,7 @@ async fn close_messaging(broker: Option<BrokerResource>, deadline: Instant) -> O
 async fn close_dependencies(resources: &mut Resources, deadline: Instant) -> Outcome {
     let pool_close = async {
         // template:begin jobs:worker-shutdown-close-jobs
-        use crate::bootstrap::postgres::PoolResource;
+        use crate::resources::PoolResource;
 
         if let Some(pool) = resources.pool.as_ref() {
             let pool = match pool {

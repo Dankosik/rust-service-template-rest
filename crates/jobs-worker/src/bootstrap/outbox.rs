@@ -71,8 +71,7 @@ mod tests {
     use crate::background::Background;
     use crate::bootstrap::WorkerError;
     use crate::bootstrap::messaging::RetainedMessages;
-    use crate::bootstrap::postgres::PoolResource;
-    use crate::resources::Resources;
+    use crate::resources::{PoolResource, Resources};
 
     #[tokio::test]
     async fn deferred_message_intent_refuses_missing_consumer_config_before_factory_runs() {

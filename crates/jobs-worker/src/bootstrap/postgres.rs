@@ -9,14 +9,9 @@ use service_config::{Config, PostgresConfig, PostgresSessionBudgets};
 
 use super::{IDENTITY_SUFFIX, METRICS_MAINTENANCE_INTERVAL, RetainedCapabilities, WorkerError};
 use crate::background::Background;
-use crate::resources::Resources;
+use crate::resources::{PoolResource, Resources};
 
 const POSTGRES_IDENTIFIER_LIMIT: usize = 63;
-
-pub(crate) enum PoolResource {
-    Starting(PgPool),
-    Admitted(PgPool),
-}
 
 /// Check the pool capacity, open the pool, and verify the migration history
 /// when a retained capability needs the database.
