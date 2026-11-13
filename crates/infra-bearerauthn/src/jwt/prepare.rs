@@ -158,11 +158,6 @@ async fn discover_jwks_uri(
     })
 }
 
-/// Requests OIDC discovery metadata. A provider that answers that location
-/// with a status other than 200 is asked for RFC 8414 metadata, whose
-/// well-known segment precedes the issuer path. When that location answers 404
-/// it does not exist, so the first status is the startup error's cause: an
-/// OIDC-only provider returning 503 must not be reported as a missing issuer.
 async fn fetch_discovery(
     provider: &ProviderClient,
     issuer: &IssuerUrl,
@@ -173,27 +168,37 @@ async fn fetch_discovery(
     let path = path.trim_suffix('/');
     let mut openid = issuer.url().clone();
     openid.set_path(&format!("{path}/.well-known/openid-configuration"));
-    let bytes = match provider
-        .get_document(&openid, Document::Discovery, Some(deadline))
-        .await
-    {
-        Err(ProviderFailure::Status(first)) => {
+    let discovery = match fetch_metadata(provider, &openid, deadline).await {
+        // A catch-all page can answer the missing OIDC endpoint with 200.
+        Err(
+            first @ (PreparationReason::Fetch(ProviderFailure::Status(_))
+            | PreparationReason::Parse),
+        ) => {
             let mut rfc8414 = issuer.url().clone();
             rfc8414.set_path(&format!("/.well-known/oauth-authorization-server{path}"));
-            match provider
-                .get_document(&rfc8414, Document::Discovery, Some(deadline))
-                .await
-            {
-                Err(ProviderFailure::Status(404)) => Err(ProviderFailure::Status(first)),
+            match fetch_metadata(provider, &rfc8414, deadline).await {
+                // An absent fallback leaves the first failure as the startup cause.
+                Err(PreparationReason::Fetch(ProviderFailure::Status(404))) => Err(first),
                 result => result,
             }
         }
         result => result,
-    }
-    .map_err(|failure| error(PreparationReason::Fetch(failure)))?;
+    };
+    discovery.map_err(error)
+}
+
+async fn fetch_metadata(
+    provider: &ProviderClient,
+    url: &url::Url,
+    deadline: Instant,
+) -> Result<Discovery, PreparationReason> {
+    let bytes = provider
+        .get_document(url, Document::Discovery, Some(deadline))
+        .await
+        .map_err(PreparationReason::Fetch)?;
     serde_json::from_slice::<JsonObject<Discovery>>(&bytes)
         .map(|JsonObject(discovery)| discovery)
-        .map_err(|_| error(PreparationReason::Parse))
+        .map_err(|_| PreparationReason::Parse)
 }
 
 #[derive(Deserialize)]
@@ -344,13 +349,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn discovery_falls_back_to_rfc8414_metadata_and_an_explicit_jwks_uri_skips_it() {
+    async fn unusable_oidc_discovery_falls_back_to_rfc8414_and_explicit_jwks_skips_it() {
         ensure_crypto_provider();
         let key = jwk(&rsa_signing(), Algorithm::RS256, Some("fixture"), true);
         let metadata = format!(
             r#"{{"issuer":"https://{FIXTURE_HOST}:PORT/tenant","jwks_uri":"https://{FIXTURE_HOST}:PORT/keys"}}"#
         );
         let (address, root, requested) = metadata_server(vec![
+            (
+                "/tenant/.well-known/openid-configuration",
+                "<html>Default page</html>".to_owned(),
+            ),
             ("/.well-known/oauth-authorization-server/tenant", metadata),
             ("/keys", serde_json::json!({ "keys": [key] }).to_string()),
         ])
@@ -382,21 +391,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_failing_oidc_location_keeps_its_status_when_rfc8414_is_absent() {
+    async fn a_failing_oidc_location_keeps_its_error_when_rfc8414_is_absent() {
         use crate::{PreparationPhase, PreparationReason, ProviderFailure};
-        let (address, root, requested) = metadata_server(vec![(
-            "/tenant/.well-known/openid-configuration",
-            "HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
-                .to_owned(),
-        )])
-        .await;
-        let error = prepare(address, &root, None).await.err().unwrap();
-        assert_eq!(error.phase(), PreparationPhase::Discovery);
-        assert_eq!(
-            error.reason(),
-            PreparationReason::Fetch(ProviderFailure::Status(503))
-        );
-        assert_eq!(requested.lock().unwrap().len(), 2);
+        for (response, expected) in [
+            (
+                "HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                PreparationReason::Fetch(ProviderFailure::Status(503)),
+            ),
+            ("{}", PreparationReason::Parse),
+        ] {
+            let (address, root, requested) = metadata_server(vec![(
+                "/tenant/.well-known/openid-configuration",
+                response.to_owned(),
+            )])
+            .await;
+            let error = prepare(address, &root, None).await.err().unwrap();
+            assert_eq!(error.phase(), PreparationPhase::Discovery);
+            assert_eq!(error.reason(), expected);
+            assert_eq!(
+                *requested.lock().unwrap(),
+                [
+                    "/tenant/.well-known/openid-configuration",
+                    "/.well-known/oauth-authorization-server/tenant"
+                ]
+            );
+        }
     }
 
     #[test]
