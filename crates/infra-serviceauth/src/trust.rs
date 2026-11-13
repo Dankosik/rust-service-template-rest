@@ -81,27 +81,7 @@ impl TrustRegistry {
         }
         let mut callers = BTreeMap::new();
         for (name, set) in entries {
-            let caller = ServiceName::parse(&name)
-                .map_err(|_| TrustError::document(InvalidServiceName::MESSAGE))?;
-            let caller_error = |reason| TrustError::new(Place::Caller(caller.clone()), reason);
-            let set = set
-                .0
-                .ok_or_else(|| caller_error("repeats a member name within its JWK Set"))?;
-            let set: JwkSet = serde_json::from_value(set)
-                .map_err(|_| caller_error("is not a JWK Set with a keys array"))?;
-            if set.keys.is_empty() {
-                return Err(caller_error("has no key"));
-            }
-            let mut keys: Vec<TrustedKey> = Vec::with_capacity(set.keys.len());
-            for (index, value) in set.keys.into_iter().enumerate() {
-                let key_error =
-                    |reason| TrustError::new(Place::Key(caller.clone(), index + 1), reason);
-                let key = admit(value).map_err(key_error)?;
-                if keys.iter().any(|known| known.kid == key.kid) {
-                    return Err(key_error("repeats a kid of this caller"));
-                }
-                keys.push(key);
-            }
+            let (caller, keys) = parse_caller(&name, set)?;
             callers.insert(caller, keys);
         }
         Ok(Self { callers })
@@ -233,6 +213,33 @@ struct JwkSet {
     keys: Vec<serde_json::Value>,
 }
 
+fn parse_caller(
+    name: &str,
+    set: DuplicateCheckedJson,
+) -> Result<(ServiceName, Vec<TrustedKey>), TrustError> {
+    let caller =
+        ServiceName::parse(name).map_err(|_| TrustError::document(InvalidServiceName::MESSAGE))?;
+    let caller_error = |reason| TrustError::new(Place::Caller(caller.clone()), reason);
+    let set = set
+        .0
+        .ok_or_else(|| caller_error("repeats a member name within its JWK Set"))?;
+    let set: JwkSet = serde_json::from_value(set)
+        .map_err(|_| caller_error("is not a JWK Set with a keys array"))?;
+    if set.keys.is_empty() {
+        return Err(caller_error("has no key"));
+    }
+    let mut keys: Vec<TrustedKey> = Vec::with_capacity(set.keys.len());
+    for (index, value) in set.keys.into_iter().enumerate() {
+        let key_error = |reason| TrustError::new(Place::Key(caller.clone(), index + 1), reason);
+        let key = admit(value).map_err(key_error)?;
+        if keys.iter().any(|known| known.kid == key.kid) {
+            return Err(key_error("repeats a kid of this caller"));
+        }
+        keys.push(key);
+    }
+    Ok((caller, keys))
+}
+
 /// Admits one public ES256 key with a `kid`.
 fn admit(value: serde_json::Value) -> Result<TrustedKey, &'static str> {
     // A private (`d`) or symmetric (`k`) member means a secret was distributed.
@@ -261,13 +268,16 @@ fn admit(value: serde_json::Value) -> Result<TrustedKey, &'static str> {
     {
         return Err("is not a signature key");
     }
-    if common.key_operations.as_ref().is_some_and(|operations| {
-        operations.is_empty()
-            || !operations
-                .iter()
-                .all(|operation| *operation == KeyOperations::Verify)
-    }) {
-        return Err("allows operations other than verify");
+    if let Some(operations) = &common.key_operations {
+        if operations.is_empty() {
+            return Err("key_ops is empty");
+        }
+        if operations
+            .iter()
+            .any(|operation| *operation != KeyOperations::Verify)
+        {
+            return Err("allows operations other than verify");
+        }
     }
     let kid = common.key_id.as_deref().ok_or("has no kid")?;
     let kid = KeyId::parse(kid).map_err(|_| InvalidKeyId::MESSAGE)?;
@@ -362,7 +372,7 @@ mod tests {
             (with(&|jwk| jwk["alg"] = "ES384".into()), "caller orders key 2: names an algorithm other than ES256"),
             (with(&|jwk| jwk["use"] = "enc".into()), "caller orders key 2: is not a signature key"),
             (with(&|jwk| jwk["key_ops"] = serde_json::json!(["verify", "sign"])), "caller orders key 2: allows operations other than verify"),
-            (with(&|jwk| jwk["key_ops"] = serde_json::json!([])), "caller orders key 2: allows operations other than verify"),
+            (with(&|jwk| jwk["key_ops"] = serde_json::json!([])), "caller orders key 2: key_ops is empty"),
             (with(&|jwk| { jwk.as_object_mut().unwrap().remove("kid"); }), "caller orders key 2: has no kid"),
             (with(&|jwk| jwk["kid"] = "two words".into()), "caller orders key 2: the key id is not 1 to 256 visible ASCII characters"),
             (with(&|jwk| { jwk["kid"] = "other".into(); jwk["x"] = "AAAA".into(); }), "caller orders key 2: has malformed coordinates"),

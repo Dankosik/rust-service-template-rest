@@ -42,7 +42,7 @@ impl fmt::Debug for SigningOptions {
 pub enum SigningError {
     #[error("the signing key is not a PKCS#8 PEM EC P-256 private key")]
     InvalidKey,
-    #[error("the receiver is not a valid caller name")]
+    #[error("the receiver is not a valid service name")]
     InvalidReceiver,
     #[error("service authentication is enabled but this service has no signing key")]
     NoSigningKey,
@@ -117,8 +117,8 @@ impl TokenSource {
     ///
     /// # Errors
     /// Returns [`SigningError::InvalidReceiver`] for a name outside the
-    /// caller grammar and [`SigningError::NoSigningKey`] when this service
-    /// verifies callers but was given no signing key.
+    /// [`ServiceName`] grammar and [`SigningError::NoSigningKey`] when this
+    /// service verifies callers but was given no signing key.
     pub fn receiver(&self, receiver: &str) -> Result<ReceiverTokens, SigningError> {
         let audience = ServiceName::parse(receiver).map_err(|_| SigningError::InvalidReceiver)?;
         let signer = match &self.0 {
