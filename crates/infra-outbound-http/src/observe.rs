@@ -67,12 +67,12 @@ enum Outcome {
     Response,
     /// The exchange failed with this `error.type`.
     Failed(&'static str),
-    /// The caller cancelled or dropped the attempt before it ended.
+    /// Caller cancellation or abandonment without an expired deadline taking
+    /// precedence.
     Cancelled,
 }
 
 impl Outcome {
-    /// A cancelled caller is not a provider failure, as a dropped attempt.
     fn from_error(error: &Error) -> Self {
         match error {
             Error::Cancelled => Self::Cancelled,
