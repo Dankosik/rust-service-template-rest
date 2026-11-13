@@ -47,7 +47,7 @@ fn follow_connect_options(engine_pool: &PgPool, listener_pool: &PgPool) {
     listener_pool.set_connect_options(engine_pool.connect_options().as_ref().clone());
 }
 
-async fn listen(shared: &Shared, pool: &PgPool) {
+async fn listen(shared: &Shared, pool: &PgPool) -> ! {
     loop {
         // At most one subscription per poll interval: a connection that
         // served longer is replaced at once, and one the server keeps closing
