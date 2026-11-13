@@ -86,101 +86,59 @@ impl Request {
         body
     }
 
-    /// `cause` is a [`Cause`] here or an [`OperatorError::cause`] from `infra-jobs`.
-    fn failure(&self, outcome: Outcome, cause: &'static str) -> Report {
-        let mut body = self.receipt(outcome);
-        body["cause"] = cause.into();
-        if outcome == Outcome::Unknown {
-            body["next_action"] = "inspect the same id before any deliberate retry".into();
-        }
-        Report {
-            body,
-            success: false,
-        }
-    }
-
     /// The operation was never invoked, so a mutation certainly did not commit.
-    fn failed_before_start(&self, cause: Cause) -> Report {
-        let outcome = if self.is_mutation() {
-            Outcome::Failed
-        } else {
-            Outcome::Unavailable
-        };
-        self.failure(outcome, cause.as_str())
+    fn failed_before_start(&self, cause: Cause) -> FailureReceipt {
+        FailureReceipt {
+            outcome: if self.is_mutation() {
+                Outcome::Failed
+            } else {
+                Outcome::Unavailable
+            },
+            cause: cause.as_str(),
+            detail: FailureDetail::None,
+        }
     }
 
     /// An admission check refused before the operation: `detail` names which
     /// refusal, since each one asks the operator for a different remedy.
-    fn refused(&self, cause: Cause, detail: &'static str) -> Report {
-        let mut report = self.failed_before_start(cause);
-        report.body["detail"] = detail.into();
-        report
+    fn refused(&self, cause: Cause, detail: &'static str) -> FailureReceipt {
+        FailureReceipt {
+            detail: FailureDetail::Admission(detail),
+            ..self.failed_before_start(cause)
+        }
     }
 
     /// The operation may have run, so a mutation's commit is unknown.
-    fn failed_after_start(&self, cause: Cause) -> Report {
-        let outcome = if self.is_mutation() {
-            Outcome::Unknown
-        } else {
-            Outcome::Unavailable
-        };
-        self.failure(outcome, cause.as_str())
+    fn failed_after_start(&self, cause: Cause) -> FailureReceipt {
+        FailureReceipt {
+            outcome: if self.is_mutation() {
+                Outcome::Unknown
+            } else {
+                Outcome::Unavailable
+            },
+            cause: cause.as_str(),
+            detail: FailureDetail::None,
+        }
     }
 
-    fn database_error(&self, error: &OperatorError) -> Report {
+    fn database_error(&self, error: &OperatorError) -> FailureReceipt {
         let outcome = if self.is_mutation() {
             match error {
                 OperatorError::Missing => Outcome::Missing,
                 OperatorError::Stale => Outcome::Stale,
                 OperatorError::Conflict => Outcome::Conflict,
-                _ if error.is_commit_unknown() => Outcome::Unknown,
-                _ => Outcome::Failed,
+                OperatorError::Transaction(_) if error.is_commit_unknown() => Outcome::Unknown,
+                OperatorError::Transaction(_)
+                | OperatorError::Database(_)
+                | OperatorError::InvalidStoredState => Outcome::Failed,
             }
         } else {
             Outcome::Unavailable
         };
-        let mut report = self.failure(outcome, error.cause());
-        report.body["sqlstate"] = json!(error.sqlstate());
-        report
-    }
-
-    fn succeeded(&self, executed: Executed) -> Report {
-        let body = match executed {
-            Executed::Inspected(InspectionResult::One { observed_at, item }) => {
-                let outcome = if item.is_some() {
-                    Outcome::Found
-                } else {
-                    Outcome::Missing
-                };
-                let mut body = self.receipt(outcome);
-                body["observed_at"] = observed_at.into();
-                body["item"] = json!(item.as_ref().map(snapshot));
-                body
-            }
-            Executed::Inspected(InspectionResult::Page {
-                observed_at,
-                scanned,
-                items,
-                next_cursor,
-            }) => {
-                let mut body = self.receipt(Outcome::Ok);
-                body["observed_at"] = observed_at.into();
-                body["scanned"] = scanned.into();
-                body["items"] = items.iter().map(snapshot).collect();
-                body["complete"] = next_cursor.is_none().into();
-                body["next_cursor"] = json!(next_cursor);
-                body
-            }
-            Executed::Redriven { new_version } => {
-                let mut body = self.receipt(Outcome::Redriven);
-                body["new_version"] = new_version.into();
-                body
-            }
-            Executed::Discarded => self.receipt(Outcome::Discarded),
-        };
-        Report {
-            body,
-            success: true,
+        FailureReceipt {
+            outcome,
+            cause: error.cause(),
+            detail: FailureDetail::Database(error.sqlstate().map(std::borrow::Cow::into_owned)),
         }
     }
 
@@ -289,9 +247,90 @@ enum Executed {
     Discarded,
 }
 
+struct FailureReceipt {
+    outcome: Outcome,
+    /// The bounded code from [`Cause`] or [`OperatorError::cause`].
+    cause: &'static str,
+    detail: FailureDetail,
+}
+
+enum FailureDetail {
+    None,
+    Admission(&'static str),
+    Database(Option<String>),
+}
+
 struct Report {
-    body: Value,
-    success: bool,
+    result: Result<Executed, FailureReceipt>,
+    cleanup_incomplete: bool,
+}
+
+impl From<FailureReceipt> for Report {
+    fn from(failure: FailureReceipt) -> Self {
+        Self {
+            result: Err(failure),
+            cleanup_incomplete: false,
+        }
+    }
+}
+
+impl Report {
+    fn into_receipt(self, request: &Request) -> Value {
+        let mut body = match self.result {
+            Ok(Executed::Inspected(InspectionResult::One { observed_at, item })) => {
+                let outcome = if item.is_some() {
+                    Outcome::Found
+                } else {
+                    Outcome::Missing
+                };
+                let mut body = request.receipt(outcome);
+                body["observed_at"] = observed_at.into();
+                body["item"] = json!(item.as_ref().map(snapshot));
+                body
+            }
+            Ok(Executed::Inspected(InspectionResult::Page {
+                observed_at,
+                scanned,
+                items,
+                next_cursor,
+            })) => {
+                let mut body = request.receipt(Outcome::Ok);
+                body["observed_at"] = observed_at.into();
+                body["scanned"] = scanned.into();
+                body["items"] = items.iter().map(snapshot).collect();
+                body["complete"] = next_cursor.is_none().into();
+                body["next_cursor"] = json!(next_cursor);
+                body
+            }
+            Ok(Executed::Redriven { new_version }) => {
+                let mut body = request.receipt(Outcome::Redriven);
+                body["new_version"] = new_version.into();
+                body
+            }
+            Ok(Executed::Discarded) => request.receipt(Outcome::Discarded),
+            Err(FailureReceipt {
+                outcome,
+                cause,
+                detail,
+            }) => {
+                let mut body = request.receipt(outcome);
+                body["cause"] = cause.into();
+                if outcome == Outcome::Unknown {
+                    body["next_action"] = "inspect the same id before any deliberate retry".into();
+                }
+                match detail {
+                    FailureDetail::None => {}
+                    FailureDetail::Admission(detail) => body["detail"] = detail.into(),
+                    FailureDetail::Database(sqlstate) => body["sqlstate"] = json!(sqlstate),
+                }
+                body
+            }
+        };
+        if self.cleanup_incomplete {
+            body["cleanup"] = "incomplete".into();
+        }
+        body
+    }
 }
 
 /// Returns process success, never maps an exit code or retries an operation.
@@ -304,11 +343,13 @@ pub(crate) fn run(options: &LoadOptions, request: &Request) -> bool {
         Ok(config) => run_configured(&config.postgres, request),
         Err(error) => {
             let _ = process_failure(&error);
-            request.failed_before_start(Cause::Configuration)
+            request.failed_before_start(Cause::Configuration).into()
         }
     };
+    let success = report.result.is_ok() && !report.cleanup_incomplete;
+    let receipt = report.into_receipt(request);
     let mut stdout = std::io::stdout().lock();
-    if serde_json::to_writer(&mut stdout, &report.body).is_err()
+    if serde_json::to_writer(&mut stdout, &receipt).is_err()
         || writeln!(stdout).is_err()
         || stdout.flush().is_err()
     {
@@ -317,12 +358,12 @@ pub(crate) fn run(options: &LoadOptions, request: &Request) -> bool {
         );
         return false;
     }
-    report.success
+    success
 }
 
 fn run_configured(config: &PostgresConfig, request: &Request) -> Report {
     if !config.enabled {
-        return request.failed_before_start(Cause::PostgresDisabled);
+        return request.failed_before_start(Cause::PostgresDisabled).into();
     }
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -331,7 +372,7 @@ fn run_configured(config: &PostgresConfig, request: &Request) -> Report {
         Ok(runtime) => runtime,
         Err(error) => {
             let _ = process_failure(&error);
-            return request.failed_before_start(Cause::Runtime);
+            return request.failed_before_start(Cause::Runtime).into();
         }
     };
     let report = runtime.block_on(serve(config, request));
@@ -344,15 +385,15 @@ async fn serve(config: &PostgresConfig, request: &Request) -> Report {
         Ok(signals) => signals,
         Err(error) => {
             let _ = process_failure(&error);
-            return request.failed_before_start(Cause::Signals);
+            return request.failed_before_start(Cause::Signals).into();
         }
     };
     let Ok(raw) = config.required_dsn() else {
-        return request.failed_before_start(Cause::Dsn);
+        return request.failed_before_start(Cause::Dsn).into();
     };
     let Ok(dsn) = Dsn::admit_with(raw.expose_secret(), config.password_file.as_deref()) else {
         // Do not repeat an arbitrary URL parameter from DsnError::Parameter.
-        return request.failed_before_start(Cause::Dsn);
+        return request.failed_before_start(Cause::Dsn).into();
     };
     let options =
         crate::bootstrap::postgres::pool_options(config, NonZeroU32::MIN, "jobs-worker-operator");
@@ -364,19 +405,28 @@ async fn serve(config: &PostgresConfig, request: &Request) -> Report {
     .await
     {
         Ok(Ok(pool)) => pool,
-        Ok(Err(error)) => return request.refused(Cause::DatabaseAdmission, connect_detail(&error)),
-        Err(cause) => return request.failed_before_start(cause),
+        Ok(Err(error)) => {
+            return request
+                .refused(Cause::DatabaseAdmission, connect_detail(&error))
+                .into();
+        }
+        Err(cause) => return request.failed_before_start(cause).into(),
     };
-    let mut report = verify_and_execute(&pool, &mut signals, request).await;
-    if infra_postgres::close(&pool, DEPENDENCY_CLOSE).await != CloseOutcome::Complete {
-        // A missing close acknowledgement never changes a known commit outcome.
-        report.body["cleanup"] = "incomplete".into();
-        report.success = false;
+    let result = verify_and_execute(&pool, &mut signals, request).await;
+    // A missing close acknowledgement never changes a known commit outcome.
+    let cleanup_incomplete =
+        infra_postgres::close(&pool, DEPENDENCY_CLOSE).await != CloseOutcome::Complete;
+    Report {
+        result,
+        cleanup_incomplete,
     }
-    report
 }
 
-async fn verify_and_execute(pool: &PgPool, signals: &mut Signals, request: &Request) -> Report {
+async fn verify_and_execute(
+    pool: &PgPool,
+    signals: &mut Signals,
+    request: &Request,
+) -> Result<Executed, FailureReceipt> {
     match bounded(
         signals,
         migrate::HISTORY_VERIFY_BUDGET,
@@ -385,13 +435,17 @@ async fn verify_and_execute(pool: &PgPool, signals: &mut Signals, request: &Requ
     .await
     {
         Ok(Ok(())) => {}
-        Ok(Err(error)) => return request.refused(Cause::MigrationHistory, history_detail(error)),
-        Err(cause) => return request.failed_before_start(cause),
+        Ok(Err(error)) => {
+            return Err(request.refused(Cause::MigrationHistory, history_detail(error)));
+        }
+        Err(cause) => return Err(request.failed_before_start(cause)),
     }
     match bounded(signals, jobs::STARTUP_TIMEOUT, jobs::check_startup(pool)).await {
         Ok(Ok(())) => {}
-        Ok(Err(error)) => return request.refused(Cause::SessionAdmission, startup_detail(error)),
-        Err(cause) => return request.failed_before_start(cause),
+        Ok(Err(error)) => {
+            return Err(request.refused(Cause::SessionAdmission, startup_detail(error)));
+        }
+        Err(cause) => return Err(request.failed_before_start(cause)),
     }
     let invoked = Cell::new(false);
     let operation = async {
@@ -399,10 +453,9 @@ async fn verify_and_execute(pool: &PgPool, signals: &mut Signals, request: &Requ
         request.execute(pool).await
     };
     match bounded(signals, jobs::OPERATION_TIMEOUT, operation).await {
-        Ok(Ok(executed)) => request.succeeded(executed),
-        Ok(Err(error)) => request.database_error(&error),
-        Err(cause) if invoked.get() => request.failed_after_start(cause),
-        Err(cause) => request.failed_before_start(cause),
+        Ok(result) => result.map_err(|error| request.database_error(&error)),
+        Err(cause) if invoked.get() => Err(request.failed_after_start(cause)),
+        Err(cause) => Err(request.failed_before_start(cause)),
     }
 }
 
@@ -454,17 +507,30 @@ async fn bounded<T>(
 }
 
 fn snapshot(item: &JobSnapshot) -> Value {
+    let JobSnapshot {
+        id,
+        kind,
+        state,
+        version,
+        attempts,
+        failure_reason,
+        created_at,
+        not_before,
+        claim_expires_at,
+        finished_at,
+        recovery_count,
+    } = item;
     json!({
-        "id": item.id.to_string(),
-        "kind": item.kind,
-        "state": item.state.as_str(),
-        "version": item.version,
-        "attempts": item.attempts,
-        "failure_reason": item.failure_reason.as_ref().map(|reason| reason.as_str()),
-        "created_at": item.created_at,
-        "not_before": item.not_before,
-        "claim_expires_at": item.claim_expires_at,
-        "finished_at": item.finished_at,
-        "recovery_count": item.recovery_count,
+        "id": id.to_string(),
+        "kind": kind,
+        "state": state.as_str(),
+        "version": version,
+        "attempts": attempts,
+        "failure_reason": failure_reason.as_ref().map(|reason| reason.as_str()),
+        "created_at": created_at,
+        "not_before": not_before,
+        "claim_expires_at": claim_expires_at,
+        "finished_at": finished_at,
+        "recovery_count": recovery_count,
     })
 }
