@@ -98,10 +98,8 @@ impl LogSnapshot {
 }
 
 bitflags::bitflags! {
-    /// Finite reasons why local completion could not be established. The
-    /// composition root receives them from [`LoggerGuard::shutdown`] in the
-    /// `logger` shutdown stage and uses them for its degraded outcome; because
-    /// that stage is last, they are not written as a record.
+    /// Reasons recorded in [`LoggerShutdown::Incomplete`] when local writer
+    /// completion could not be established.
     #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
     pub struct LoggerShutdownReasons: u32 {
         /// The deadline passed before the writer exited and was joined.
@@ -396,19 +394,16 @@ fn write_records<W: Write>(mut writer: W, records: Receiver<Record>, shared: &Sh
             }
             Err(RecvTimeoutError::Disconnected) => break,
         };
-        if torn {
-            if write_line(&mut writer, b"\n") != Written::Whole {
-                shared.record_sink_error(SinkOperation::Write);
-                dirty = true;
-                continue;
-            }
-            torn = false;
+        if torn && write_line(&mut writer, b"\n") != Written::Whole {
+            shared.record_sink_error(SinkOperation::Write);
+            dirty = true;
+            continue;
         }
         let written = write_line(&mut writer, &record.bytes);
         if written != Written::Whole {
             shared.record_sink_error(SinkOperation::Write);
         }
-        torn |= written == Written::Part;
+        torn = written == Written::Part;
         dirty = true;
     }
     if writer.flush().is_err() {

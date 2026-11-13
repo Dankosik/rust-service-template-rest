@@ -1,9 +1,12 @@
 //! The OTLP span exporter, built from typed configuration and the standard
 //! `OTEL_EXPORTER_OTLP_*` variables.
 //!
-//! The typed endpoint wins over the standard endpoint variables, which the
-//! SDK reads itself. This template always builds OTLP/HTTP protobuf and does
-//! not honor `OTEL_EXPORTER_OTLP_PROTOCOL`.
+//! The typed endpoint wins over the standard endpoint variables. Otherwise the
+//! SDK usually resolves the URL. If `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` holds
+//! only whitespace, we pass an explicit traces URL from the general endpoint
+//! when available so the SDK can use that fallback.
+//! This template always builds OTLP/HTTP protobuf and does not honor
+//! `OTEL_EXPORTER_OTLP_PROTOCOL`.
 //! When the typed endpoint selects the collector, ambient header variables
 //! are refused because the SDK would merge them into the typed request, so
 //! one collector's credential is never sent to another.
