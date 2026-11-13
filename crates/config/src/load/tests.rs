@@ -332,6 +332,27 @@ fn only_numeric_zero_disables_the_http_in_flight_cap() {
 }
 
 #[test]
+fn http_can_limit_connections_below_concurrent_requests() {
+    let cfg = load_from(
+        &LoadOptions::default(),
+        BUILD,
+        env(&[
+            ("APP__HTTP__MAX_CONNECTIONS", "4"),
+            ("APP__HTTP__MAX_IN_FLIGHT", "32"),
+        ]),
+    )
+    .unwrap();
+    assert_eq!(
+        cfg.http.connection_cap().map(std::num::NonZeroU32::get),
+        Some(4)
+    );
+    assert_eq!(
+        cfg.http.in_flight_cap().map(std::num::NonZeroU32::get),
+        Some(32)
+    );
+}
+
+#[test]
 fn precedence_is_defaults_then_files_in_order_then_env() {
     let dir = tempfile::tempdir().unwrap();
     let base = write(

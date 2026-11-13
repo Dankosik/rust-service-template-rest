@@ -366,6 +366,19 @@ fn invalid_configuration_exits_one_with_the_key_named() {
     assert!(stderr.contains("request_timeout"), "stderr: {stderr}");
 }
 
+#[test]
+fn invalid_configuration_exits_one_with_a_broken_stderr_pipe() {
+    let (reader, writer) = std::io::pipe().expect("stderr pipe");
+    drop(reader);
+    let mut child = Service::command(&[("APP__HTTP__REQUEST_TIMEOUT", "not-a-duration")])
+        .stdout(Stdio::null())
+        .stderr(writer)
+        .spawn()
+        .expect("spawn service binary");
+    let status = wait_child(&mut child, Duration::from_secs(5));
+    assert_eq!(status.code(), Some(1));
+}
+
 // template:begin cache:service-cache-lifecycle-admission
 #[test]
 fn a_cache_outage_at_startup_still_becomes_ready() {

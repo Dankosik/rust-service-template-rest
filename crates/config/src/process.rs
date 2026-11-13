@@ -1,19 +1,18 @@
 //! Process failure output for every binary, including those that load no
 //! configuration.
 
+use std::io::{self, Write};
 use std::process::ExitCode;
 
-/// Print `message` to stderr and return [`ExitCode::FAILURE`].
+/// Attempt to write `message` to stderr and return [`ExitCode::FAILURE`]
+/// even if the write fails.
 ///
-/// Does not call `process::exit`, so destructors still run. Use this when
-/// tracing is absent or not yet installed.
+/// Use this before tracing is installed or after it has shut down.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "finite process failure output before tracing or after runtime shutdown"
+)]
 pub fn process_failure(message: impl std::fmt::Display) -> ExitCode {
-    #[expect(
-        clippy::print_stderr,
-        reason = "finite process failure output before tracing or after runtime shutdown"
-    )]
-    {
-        eprintln!("{message}");
-    }
+    let _ = writeln!(io::stderr().lock(), "{message}");
     ExitCode::FAILURE
 }
