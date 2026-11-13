@@ -135,9 +135,6 @@ fn admit_address(
     }
 }
 
-/// Returns the password file to read at each connection, if configured. A
-/// nonempty DSN password and a password file are mutually exclusive. With
-/// neither configured, admission requires unauthenticated access to be allowed.
 fn admit_password(
     settings: &redis::RedisConnectionInfo,
     password_file: Option<PathBuf>,
@@ -154,8 +151,7 @@ fn admit_password(
     }
 }
 
-/// The private root CA and client certificate, read in that order. `None`
-/// when neither is configured, so the client uses the process trust store.
+/// Returning `None` lets the client use the process trust store.
 fn read_tls_certificates(
     root_ca_path: Option<&Path>,
     client_certificate: Option<&ClientCertificate>,

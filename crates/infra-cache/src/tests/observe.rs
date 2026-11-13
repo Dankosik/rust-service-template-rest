@@ -23,8 +23,8 @@ fn redis_errors_map_to_bounded_error_types() {
 
 #[test]
 fn a_failed_command_names_its_cause_on_the_series() {
-    use crate::Operation;
     use crate::connection::ErrorType;
+    use crate::namespace::Operation;
     use crate::observe::{NamespaceHistograms, OperationGuard};
 
     let recorder = observation_recorder();

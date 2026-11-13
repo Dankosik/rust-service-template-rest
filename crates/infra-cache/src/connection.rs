@@ -905,7 +905,6 @@ impl<'a> Rotation<'a> {
                 });
             }
         };
-        self.unreadable_logged = false;
         if password == self.authenticated_password {
             return RefreshOutcome::Unchanged;
         }
@@ -937,9 +936,11 @@ impl<'a> Rotation<'a> {
         let (label, reason) = outcome.labels();
         metrics::counter!(PASSWORD_REFRESHES_METRIC, "outcome" => label, "reason" => reason)
             .increment(1);
+        let read_failed = matches!(outcome, RefreshOutcome::ReadFailed(_));
+        let unreadable_logged = std::mem::replace(&mut self.unreadable_logged, read_failed);
         match outcome {
             RefreshOutcome::ReadFailed(error) => {
-                if !std::mem::replace(&mut self.unreadable_logged, true) {
+                if !unreadable_logged {
                     tracing::warn!(
                         server.address = %server.host,
                         server.port = server.port,
