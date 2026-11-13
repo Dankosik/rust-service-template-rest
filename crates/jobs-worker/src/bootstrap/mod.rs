@@ -332,12 +332,17 @@ async fn prepare(
     postgres::admit_pool(config, &capabilities, background, resources).await?;
     // template:end jobs:worker-bootstrap-admit-pool-call
     // template:begin outbox:worker-bootstrap-activate-postgres-messages
-    capabilities.activate_postgres_messages(resources)?;
+    if let Some(messages) = &mut capabilities.messages {
+        messages.activate_postgres_messages(resources)?;
+    }
     // template:end outbox:worker-bootstrap-activate-postgres-messages
     // template:begin messaging:worker-bootstrap-messaging-connect
     let consumer = messaging::connect_messaging(
         config,
-        capabilities.messages.take(),
+        capabilities
+            .messages
+            .take()
+            .map(|messages| messages.registry),
         &background.cancel,
         resources,
     )
@@ -370,14 +375,11 @@ async fn prepare(
 }
 
 struct RetainedCapabilities {
-    // template:begin outbox:worker-bootstrap-postgres-messages-field
-    postgres_messages: Option<crate::PostgresMessages>,
-    // template:end outbox:worker-bootstrap-postgres-messages-field
     // template:begin jobs:worker-bootstrap-registrations-jobs
     jobs: Option<infra_jobs::Kinds>,
     // template:end jobs:worker-bootstrap-registrations-jobs
     // template:begin messaging:worker-bootstrap-registrations-messaging
-    messages: Option<infra_messaging::Registry>,
+    messages: Option<messaging::RetainedMessages>,
     // template:end messaging:worker-bootstrap-registrations-messaging
 }
 
@@ -411,7 +413,7 @@ fn register_capabilities(
     )]
     let has_messages = false;
     // template:begin jobs:worker-bootstrap-validate-jobs
-    // Taken, not moved, so the messaging check can still borrow the registration.
+    // Leave the registration intact for the messaging projection.
     let jobs = jobs::validate(std::mem::take(&mut registration.jobs))?;
     #[allow(
         unused_variables,
@@ -420,8 +422,7 @@ fn register_capabilities(
     let has_jobs = jobs.is_some();
     // template:end jobs:worker-bootstrap-validate-jobs
     // template:begin messaging:worker-bootstrap-retain-messaging
-    let messages =
-        messaging::consumes_messages(config, &registration)?.then_some(registration.messages);
+    let messages = messaging::RetainedMessages::retain(config, registration)?;
     let has_messages = messages.is_some();
     // template:end messaging:worker-bootstrap-retain-messaging
     // template:begin outbox:worker-bootstrap-outbox-registration
@@ -431,9 +432,6 @@ fn register_capabilities(
         return Err(WorkerError::NoRegistrations);
     }
     Ok(RetainedCapabilities {
-        // template:begin outbox:worker-bootstrap-postgres-messages-value
-        postgres_messages: registration.postgres_messages,
-        // template:end outbox:worker-bootstrap-postgres-messages-value
         // template:begin jobs:worker-bootstrap-registrations-jobs-value
         jobs,
         // template:end jobs:worker-bootstrap-registrations-jobs-value

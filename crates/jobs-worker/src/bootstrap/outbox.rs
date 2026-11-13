@@ -6,6 +6,7 @@ use infra_jobs::Engine;
 use infra_messaging::MessagingError;
 use service_config::Config;
 
+use super::messaging::RetainedMessages;
 use super::{RetainedCapabilities, WorkerError};
 use crate::resources::Resources;
 
@@ -49,17 +50,15 @@ pub(super) async fn publisher(
     Ok(publisher)
 }
 
-impl RetainedCapabilities {
+impl RetainedMessages {
     pub(super) fn activate_postgres_messages(
         &mut self,
         resources: &Resources,
     ) -> Result<(), WorkerError> {
         if let Some(factory) = self.postgres_messages.take() {
             let pool = super::postgres::admitted_pool(resources)?;
-            // `consumes_messages` retained the registry once a factory was registered.
-            let registry = self.messages.as_mut().ok_or(WorkerError::NoRegistrations)?;
-            factory(pool, registry).map_err(WorkerError::Registration)?;
-            registry.require_handlers()?;
+            factory(pool, &mut self.registry).map_err(WorkerError::Registration)?;
+            self.registry.require_handlers()?;
         }
         Ok(())
     }
@@ -70,7 +69,8 @@ mod tests {
     use service_config::Config;
 
     use crate::background::Background;
-    use crate::bootstrap::{RetainedCapabilities, WorkerError};
+    use crate::bootstrap::WorkerError;
+    use crate::bootstrap::messaging::RetainedMessages;
     use crate::resources::Resources;
 
     #[tokio::test]
@@ -124,13 +124,12 @@ mod tests {
             pool: Some(pool.clone()),
             ..Resources::default()
         };
-        let mut capabilities = RetainedCapabilities {
-            jobs: None,
-            messages: Some(registration.messages),
+        let mut messages = RetainedMessages {
+            registry: registration.messages,
             postgres_messages: registration.postgres_messages,
         };
         std::assert_matches!(
-            capabilities.activate_postgres_messages(&resources),
+            messages.activate_postgres_messages(&resources),
             Err(WorkerError::MessagingRegistry(
                 infra_messaging::RegistryError::Empty
             ))
@@ -142,6 +141,6 @@ mod tests {
             "factory uses the retained native pool"
         );
         // The consumed FnOnce is not run again.
-        capabilities.activate_postgres_messages(&resources).unwrap();
+        messages.activate_postgres_messages(&resources).unwrap();
     }
 }
