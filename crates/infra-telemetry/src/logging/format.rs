@@ -232,7 +232,6 @@ impl Scratch {
         }
     }
 
-    /// Records the value written since `start` under `key`.
     fn add_field(&mut self, key: &'static str, start: usize) {
         self.fields.push(Entry {
             key,
@@ -766,8 +765,6 @@ fn write_fields(
         && write_sorted(line, values, spans, Pass::Spans { event }, format)
 }
 
-/// The bytes that close a record: the truncation marker when it lacks
-/// something, the JSON object's brace, and the newline.
 fn record_tail(format: LoggingFormat, truncated: bool) -> &'static [u8] {
     match (format, truncated) {
         (LoggingFormat::Json, false) => b"}\n",
