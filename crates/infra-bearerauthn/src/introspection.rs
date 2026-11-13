@@ -400,7 +400,7 @@ mod tests {
         provider::{ProviderClient, fixture_acceptor, new_fixture_client},
         test_metrics::Diagnostics,
     };
-    use operation_context::OperationContext;
+    use operation_context::{OperationContext, Stopped};
 
     const FIXTURE_HOST: &str = "provider.test";
 
@@ -945,6 +945,79 @@ mod tests {
         verifier.verify(&token).await.unwrap();
         assert_eq!(fixture.calls(), 1);
         fixture.finish().await;
+    }
+
+    #[tokio::test]
+    async fn caller_deadline_and_cancellation_remain_distinct_when_authentication_stops() {
+        let diagnostics = Diagnostics::default();
+        let _recorder = metrics::set_default_local_recorder(&diagnostics);
+        let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+        let _dispatch = tracing::subscriber::set_default(diagnostics.clone());
+        for (drop_on_stop, stopped, inbound, provider) in [
+            (false, Stopped::Deadline, "timeout", "caller_deadline"),
+            (false, Stopped::Cancelled, "cancelled", "cancelled"),
+            (true, Stopped::Deadline, "timeout", "caller_deadline"),
+            (true, Stopped::Cancelled, "cancelled", "cancelled"),
+        ] {
+            let fixture = Fixture::new().await;
+            let verifier = fixture.prepared(None);
+            let _gate = fixture.block_responses();
+            let budget = Duration::from_secs(2);
+            let context = OperationContext::with_timeout(budget);
+            let mut authentication = Box::pin(verifier.authenticate_with_context(
+                [b"Bearer slow".as_slice()],
+                crate::Transport::Http,
+                &context,
+            ));
+            tokio::select! {
+                () = fixture.received() => {},
+                result = &mut authentication => panic!("response must be gated: {result:?}"),
+            }
+            tokio::time::pause();
+            match stopped {
+                Stopped::Deadline => tokio::time::advance(budget).await,
+                Stopped::Cancelled => context.cancel(),
+            }
+            if drop_on_stop {
+                // The transport's deadline layer owns and drops the pending branch.
+                tokio::select! {
+                    biased;
+                    reason = context.wait_stopped() => assert_eq!(reason, stopped),
+                    result = authentication => panic!("transport must stop first: {result:?}"),
+                }
+            } else {
+                assert_eq!(authentication.await, Err(Failure::Unavailable));
+            }
+            tokio::time::resume();
+
+            let counters = std::mem::take(&mut *diagnostics.counters.lock().unwrap());
+            let [(key, 1)] = counters.as_slice() else {
+                panic!("expected one inbound authentication outcome, got {counters:?}");
+            };
+            assert_eq!(key.name(), "authn_verifications_total");
+            for label in ["result", "failure"] {
+                assert!(
+                    key.labels()
+                        .any(|value| value.key() == label && value.value() == inbound)
+                );
+            }
+            let samples = std::mem::take(&mut *diagnostics.histograms.lock().unwrap());
+            let [sample] = samples.as_slice() else {
+                panic!("expected one provider histogram sample, got {samples:?}");
+            };
+            assert_eq!(sample.name(), "authn_provider_request_duration_seconds");
+            assert!(
+                sample
+                    .labels()
+                    .any(|label| label.key() == "outcome" && label.value() == provider)
+            );
+            let spans = std::mem::take(&mut *diagnostics.spans.lock().unwrap());
+            assert!(spans.iter().any(|span| {
+                span.contains("authn.operation=\"introspection\";")
+                    && span.contains(&format!("error.type=\"{provider}\";"))
+            }));
+            fixture.finish().await;
+        }
     }
 
     #[tokio::test]

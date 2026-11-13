@@ -28,13 +28,12 @@ pub struct Limits {
     pub request_timeout: Duration,
     /// Independent bounds on pre-header openings and admitted business calls
     /// through terminal status, shared by router clones. A call over a bound
-    /// waits for a permit, up to [`Limits::max_admission_wait`] and within its
-    /// opening budget, and is refused only when none frees. `None` disables
-    /// both bounds.
+    /// waits for a permit within its opening budget and the shared
+    /// [`Limits::max_admission_wait`]. `None` disables both bounds.
     pub max_in_flight: Option<NonZeroU32>,
-    /// Longest a call over `max_in_flight` waits for a permit. Zero refuses it
-    /// at once. The call's own remaining budget less the refusal reserve also
-    /// bounds the wait.
+    /// Total time a call can wait for permits across both queues. Zero refuses
+    /// a call at once when no permit is available. The remaining opening
+    /// budget less the refusal reserve also bounds the wait.
     pub max_admission_wait: Duration,
     /// Accepted connections at once; `None` accepts without a bound.
     pub max_connections: Option<NonZeroU32>,
@@ -245,7 +244,7 @@ pub(crate) fn opening_context(request: &Request) -> Option<&operation_context::O
 
 /// Longest wait for the rest of a rejected call's request body.
 const REJECT_DRAIN: Duration = Duration::from_millis(100);
-/// Most request bytes read from a rejected call before giving up.
+/// Stop draining after the frame that takes the total past this many bytes.
 const REJECT_DRAIN_BYTES: usize = 64 * 1024;
 
 /// Answers a call rejected before its handler, after reading the rest of its

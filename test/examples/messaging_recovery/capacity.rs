@@ -11,7 +11,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use domain_events::{Event, EventPayload};
 use infra_messaging::{PreparedEvent, Registry, Route};
-use infra_postgres::{Dsn, Isolation, PgPool, PoolOptions, SessionBudgets, TxError, in_tx};
+use infra_postgres::{Dsn, Isolation, PgPool, PoolOptions, SessionSettingsSource, TxError, in_tx};
 use integration_tests::jobs::{Probe, ProbeAction};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json, value::RawValue};
@@ -175,7 +175,7 @@ async fn pool() -> Result<PgPool, Error> {
             max_connections: const { NonZeroU32::new(8).expect("8 is nonzero") },
             application_name: "messaging-recovery-load",
             default_isolation: Isolation::ReadCommitted,
-            session_budgets: SessionBudgets::Startup,
+            session_settings_source: SessionSettingsSource::Startup,
         },
     )
     .await?)

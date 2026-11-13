@@ -282,7 +282,7 @@ fn terminal_fixture() {
             applied: vec![6, 7],
         }),
     };
-    let result = finish_run(runtime, logging, outcome, Some(7), Instant::now());
+    let result = finish_run(Some(runtime), logging, outcome, Some(7), Instant::now());
     // Bypass the test harness's stdout reporting after intentionally breaking
     // that descriptor; the parent owns the child and observes its actual exit.
     std::process::exit(i32::from(result != ExitCode::SUCCESS));

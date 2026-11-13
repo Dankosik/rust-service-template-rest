@@ -6,8 +6,9 @@ use infra_jobs::Engine;
 use infra_messaging::MessagingError;
 use service_config::Config;
 
+use super::messaging::RetainedMessages;
 use super::{RetainedCapabilities, WorkerError};
-use crate::shutdown::Resources;
+use crate::resources::Resources;
 
 pub(super) fn admit_pool_inputs(
     config: &Config,
@@ -26,8 +27,7 @@ pub(super) async fn publisher(
 ) -> Result<Engine, WorkerError> {
     // `connect_messaging` admitted the broker before any engine is built.
     let messaging = resources
-        .messaging
-        .as_ref()
+        .admitted_messaging()
         .ok_or(MessagingError::Connection)?;
     let kinds = infra_messaging::outbox::kinds(messaging.producer())?;
     if ordinary.is_some_and(|ordinary| {
@@ -50,17 +50,15 @@ pub(super) async fn publisher(
     Ok(publisher)
 }
 
-impl RetainedCapabilities {
+impl RetainedMessages {
     pub(super) fn activate_postgres_messages(
         &mut self,
         resources: &Resources,
     ) -> Result<(), WorkerError> {
         if let Some(factory) = self.postgres_messages.take() {
             let pool = super::postgres::admitted_pool(resources)?;
-            // `consumes_messages` retained the registry once a factory was registered.
-            let registry = self.messages.as_mut().ok_or(WorkerError::NoRegistrations)?;
-            factory(pool, registry).map_err(WorkerError::Registration)?;
-            registry.require_handlers()?;
+            factory(pool, &mut self.registry).map_err(WorkerError::Registration)?;
+            self.registry.require_handlers()?;
         }
         Ok(())
     }
@@ -71,8 +69,9 @@ mod tests {
     use service_config::Config;
 
     use crate::background::Background;
-    use crate::bootstrap::{RetainedCapabilities, WorkerError};
-    use crate::shutdown::Resources;
+    use crate::bootstrap::WorkerError;
+    use crate::bootstrap::messaging::RetainedMessages;
+    use crate::resources::{PoolResource, Resources};
 
     #[tokio::test]
     async fn deferred_message_intent_refuses_missing_consumer_config_before_factory_runs() {
@@ -118,20 +117,19 @@ mod tests {
                 max_connections: std::num::NonZeroU32::MIN,
                 application_name: "factory-composition-test",
                 default_isolation: infra_postgres::Isolation::ReadCommitted,
-                session_budgets: infra_postgres::SessionBudgets::Startup,
+                session_settings_source: infra_postgres::SessionSettingsSource::Startup,
             },
         );
         let resources = Resources {
-            pool: Some(pool.clone()),
+            pool: Some(PoolResource::Admitted(pool.clone())),
             ..Resources::default()
         };
-        let mut capabilities = RetainedCapabilities {
-            jobs: None,
-            messages: Some(registration.messages),
+        let mut messages = RetainedMessages {
+            registry: registration.messages,
             postgres_messages: registration.postgres_messages,
         };
         std::assert_matches!(
-            capabilities.activate_postgres_messages(&resources),
+            messages.activate_postgres_messages(&resources),
             Err(WorkerError::MessagingRegistry(
                 infra_messaging::RegistryError::Empty
             ))
@@ -143,6 +141,6 @@ mod tests {
             "factory uses the retained native pool"
         );
         // The consumed FnOnce is not run again.
-        capabilities.activate_postgres_messages(&resources).unwrap();
+        messages.activate_postgres_messages(&resources).unwrap();
     }
 }

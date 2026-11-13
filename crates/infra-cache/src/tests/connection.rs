@@ -120,6 +120,71 @@ async fn a_readonly_reply_reconnects_to_the_new_primary() {
     );
 }
 
+#[tokio::test]
+async fn a_readonly_reply_after_cancellation_reconnects_to_the_new_primary() {
+    use operation_context::OperationContext;
+
+    let server = FakeServer::start().await;
+    let cache = Cache::start(CacheOptions {
+        command_timeout: Duration::from_secs(15),
+        ..options(&format!("redis://{}", server.address), true, true, None)
+    })
+    .expect("start cache");
+    let namespace = cache.namespace("late_readonly");
+    let limit = Duration::from_secs(5);
+    let ttl = Duration::from_secs(1);
+    assert_eq!(
+        tokio::time::timeout(limit, namespace.get("ready")).await,
+        Ok(Ok(None))
+    );
+    server
+        .primary
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let (release, held) = tokio::sync::oneshot::channel();
+    *server
+        .observed
+        .next_set_reply
+        .lock()
+        .expect("SET reply gate lock") = Some(held);
+
+    let context = OperationContext::unbounded();
+    let write = namespace.set_with_context("cancelled", b"value", ttl, &context);
+    tokio::pin!(write);
+    tokio::select! {
+        result = &mut write => panic!("held write completed: {result:?}"),
+        () = server.wait_for(limit, "write must reach the old primary", || {
+            server.command_count("SET", Some("late_readonly:cancelled")) == 1
+        }) => {}
+    }
+    context.cancel();
+    assert_eq!(
+        tokio::time::timeout(limit, write).await,
+        Ok(Err(crate::SetError::Unavailable(crate::Unavailable)))
+    );
+    assert_eq!(server.connections(), 1);
+    assert!(
+        !server.closed_through(1),
+        "early cancellation must leave the socket open"
+    );
+    release
+        .send(())
+        .expect("the old primary is holding its reply");
+
+    server
+        .wait_for(limit, "late READONLY must trigger a reconnect", || {
+            server.connections() == 2 && server.closed_through(1)
+        })
+        .await;
+    assert_eq!(
+        tokio::time::timeout(limit, namespace.set("new", b"value", ttl)).await,
+        Ok(Ok(()))
+    );
+    assert_eq!(
+        server.command_count("SET", Some("late_readonly:cancelled")),
+        1
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_refused_hello_is_reported_as_auth() {
     use health::Probe;
@@ -526,7 +591,7 @@ async fn reliability_full_application_window_leaves_probe_and_maintenance_admiss
 
     let server = FakeServer::start().await;
     let cache = Cache::start(CacheOptions {
-        command_timeout: Duration::from_secs(30),
+        command_timeout: Duration::from_secs(5),
         ..options(&format!("redis://{}", server.address), true, true, None)
     })
     .expect("start cache");
@@ -589,14 +654,19 @@ async fn reliability_full_application_window_leaves_probe_and_maintenance_admiss
         server.command_count("DEL", Some("other_capacity:refused")),
         0
     );
+    server
+        .wait_for(
+            Duration::from_secs(7),
+            "maintenance did not replace the saturated generation",
+            || server.connections() > old,
+        )
+        .await;
     drop(pending_probe);
     drop(pending);
     server
-        .wait_for(
-            Duration::from_secs(4),
-            "saturated generation did not recover",
-            || server.connections() > old && server.closed_through(old),
-        )
+        .wait_for(Duration::from_secs(1), "old socket stayed open", || {
+            server.closed_through(old)
+        })
         .await;
     assert_eq!(namespace.get("recovered").await, Ok(None));
     probe.check().await.expect("probe capacity is reusable");
@@ -669,7 +739,7 @@ async fn reliability_stalled_generations_recover_without_replaying_writes() {
 }
 
 #[tokio::test]
-async fn reliability_a_cancelled_probe_slot_is_retired() {
+async fn reliability_a_probe_reply_timeout_retires_the_connection() {
     use health::Probe;
     use std::task::Poll;
 
@@ -677,15 +747,27 @@ async fn reliability_a_cancelled_probe_slot_is_retired() {
     let recorder = observation_recorder();
     let cache = metrics::with_local_recorder(&recorder, || {
         Cache::start(CacheOptions {
-            command_timeout: Duration::from_secs(30),
+            command_timeout: Duration::from_secs(5),
             ..options(&format!("redis://{}", server.address), true, true, None)
         })
         .expect("start cache")
     });
-    let namespace = cache.namespace("cancelled");
+    let namespace = cache.namespace("probe_timeout");
     let probe = cache.probe();
     assert_eq!(namespace.get("ready").await, Ok(None));
     let old = server.stall_existing();
+    let before = server.command_count("PING", None);
+    let mut pending_probe = probe.check();
+    tokio::select! {
+        biased;
+        result = &mut pending_probe => panic!("silent probe completed before dispatch: {result:?}"),
+        () = server.wait_for(
+            Duration::from_secs(1),
+            "probe did not reach the established socket",
+            || server.command_count("PING", None) > before,
+        ) => {}
+    }
+    assert_work_metrics(&recorder, 1, 0, 0);
     let late_key = "late";
     let peer_key = "peer";
     let mut late = Box::pin(namespace.get(late_key));
@@ -699,25 +781,18 @@ async fn reliability_a_cancelled_probe_slot_is_retired() {
         () = server.wait_for(
             Duration::from_secs(1),
             "peers never reached established socket",
-            || server.command_count("GET", Some(&format!("cancelled:{late_key}"))) == 1
-                && server.command_count("GET", Some(&format!("cancelled:{peer_key}"))) == 1,
-        ) => {}
-    }
-    assert_work_metrics(&recorder, 2, 0, 0);
-    let before = server.command_count("PING", None);
-    let mut cancelled = Box::pin(probe.check());
-    tokio::select! {
-        result = &mut cancelled => panic!("silent command completed before cancellation: {result:?}"),
-        () = server.wait_for(
-            Duration::from_secs(1),
-            "cancelled command never reached established socket",
-            || server.command_count("PING", None) > before,
+            || server.command_count("GET", Some(&format!("probe_timeout:{late_key}"))) == 1
+                && server.command_count("GET", Some(&format!("probe_timeout:{peer_key}"))) == 1,
         ) => {}
     }
     assert_work_metrics(&recorder, 3, 0, 0);
-    drop(cancelled);
+    let error = tokio::time::timeout(Duration::from_secs(6), pending_probe)
+        .await
+        .expect("probe must observe its own reply timeout")
+        .expect_err("the stalled connection did not answer PING");
+    assert_eq!(error.to_string(), "cache ping failed: timeout");
     assert_work_metrics(&recorder, 2, 0, 1);
-    // No yield after drop: peers already observe retirement, and reused
+    // No yield after the timeout: peers already observe retirement, and reused
     // capacity cannot dispatch another command on the old generation.
     assert_eq!(
         poll_once(peer.as_mut()).await,
@@ -751,10 +826,7 @@ async fn reliability_a_cancelled_probe_slot_is_retired() {
         )
         .await;
     assert_eq!(server.active(), 1);
-    probe
-        .check()
-        .await
-        .expect("healthy probe after cancellation");
+    probe.check().await.expect("healthy probe after timeout");
 }
 
 /// A caller that gives up before the command ceiling, by its own shorter
@@ -1103,6 +1175,62 @@ async fn cancellation_after_write_dispatch_leaves_a_stalled_server_to_maintenanc
         .await;
     assert_eq!(namespace.get("recovered").await, Ok(None));
     assert_eq!(server.command_count("SET", Some("cancel_effect:once")), 1);
+}
+
+#[tokio::test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test-owned credential replacement completes before refresh observes it"
+)]
+async fn an_overdue_ping_runs_before_another_slow_password_refresh() {
+    let server = FakeServer::start().await;
+    let initial = ephemeral_password();
+    server.require_password(&initial);
+    let file = tempfile::NamedTempFile::new().expect("password file");
+    std::fs::write(file.path(), initial).expect("initial password");
+    let cache = Cache::start(CacheOptions {
+        command_timeout: Duration::from_secs(10),
+        ..with_password_file(
+            &format!("redis://{}", server.address),
+            file.path().to_path_buf(),
+        )
+    })
+    .expect("start cache");
+    assert_eq!(cache.namespace("refresh").get("ready").await, Ok(None));
+
+    // The server rejects the new password but delays its reply past a full
+    // refresh interval. The connection remains usable and PING is already due.
+    *server.observed.auth_reply_delay.lock().expect("delay lock") = Duration::from_millis(5_500);
+    std::fs::write(file.path(), ephemeral_password()).expect("changed password");
+    server
+        .wait_for(
+            Duration::from_secs(8),
+            "password refresh did not send AUTH",
+            || server.command_count("AUTH", None) == 1,
+        )
+        .await;
+    let ping_followed_auth = || {
+        let commands = server.observed.commands.lock().expect("commands lock");
+        commands
+            .iter()
+            .map(|(_, args)| args[0].as_str())
+            .skip_while(|command| *command != "AUTH")
+            .nth(1)
+            .map(|command| command == "PING")
+    };
+    server
+        .wait_for(
+            Duration::from_secs(8),
+            "no maintenance command followed AUTH",
+            || ping_followed_auth().is_some(),
+        )
+        .await;
+    assert_eq!(
+        ping_followed_auth(),
+        Some(true),
+        "another refresh overtook PING"
+    );
+    assert_eq!(server.connections(), 1);
 }
 
 #[tokio::test]

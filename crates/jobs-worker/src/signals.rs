@@ -4,8 +4,10 @@ use futures_util::FutureExt;
 use tokio::time::Instant;
 
 #[derive(Clone, Copy, Debug, thiserror::Error)]
-#[error("stop signal receiver closed unexpectedly")]
-pub(crate) struct SignalError;
+#[error("stop signal receiver closed unexpectedly ({signal})")]
+pub(crate) struct SignalError {
+    signal: &'static str,
+}
 
 /// Native streams remain owned by the synchronous entrypoint through runtime shutdown.
 pub(crate) struct Signals {
@@ -49,7 +51,7 @@ impl Signals {
         };
         #[cfg(windows)]
         let (notification, name) = (self.ctrl_c.recv().await, "ctrl-c");
-        notification.ok_or(SignalError)?;
+        notification.ok_or(SignalError { signal: name })?;
         self.first_stop.get_or_insert_with(Instant::now);
         tracing::info!(signal = name, "stop requested");
         Ok(())

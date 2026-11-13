@@ -21,14 +21,11 @@ use crate::{JwtType, MAX_TOKEN_LIFETIME_SECONDS, ServiceName, TrustRegistry, uni
 /// Allowance for the clock difference between caller and receiver.
 const LEEWAY_SECONDS: u64 = 30;
 
-/// Most verified tokens remembered at once. An entry lives until its `exp`
-/// plus [`LEEWAY_SECONDS`], and a caller handle signs anew after half of
-/// [`MAX_TOKEN_LIFETIME_SECONDS`], so a receiver holds about three entries per
-/// caller handle.
+/// Target entry count after cache maintenance.
 const MAX_REMEMBERED: u64 = 1024;
 
 /// Service token verification outcomes by closed reason.
-pub const VERIFICATIONS_METRIC: &str = "service_auth_verifications_total";
+const VERIFICATIONS_METRIC: &str = "service_auth_verifications_total";
 
 /// The fixed outcomes a transport maps to its response.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -170,9 +167,9 @@ impl Verifier {
             trust,
             verified: metrics::counter!(VERIFICATIONS_METRIC, "outcome" => "success", "reason" => "verified"),
             refused: EnumMap::default(),
-            // An accepted token is past use by `exp + LEEWAY_SECONDS`, at most
-            // this long after it was remembered; the time bound lets expired
-            // entries leave before the size bound refuses new ones.
+            // A token first accepted one clock allowance before `iat` can
+            // remain valid until one allowance after `exp`. The cache TTL
+            // starts at insertion; every hit checks the token's own window.
             remembered: Cache::builder()
                 .max_capacity(MAX_REMEMBERED)
                 .time_to_live(std::time::Duration::from_secs(
@@ -290,7 +287,6 @@ impl Verifier {
             .map_err(|_| Reason::Claims)?;
         let payload = std::str::from_utf8(&payload).map_err(|_| Reason::Claims)?;
         let claims: Claims<'_> = serde_json::from_str(payload).map_err(|_| Reason::Claims)?;
-        // The key comes only from the caller this token names.
         let issuer = claims.iss.as_deref().ok_or(Reason::Issuer)?;
         let (caller, keys) = self.0.trust.caller(issuer).ok_or(Reason::Issuer)?;
         let key = keys
@@ -368,10 +364,13 @@ fn unix_now() -> Result<u64, Reason> {
 
 /// The header members this crate reads; every other member is ignored, so no
 /// member supplies or fetches a key (`jwk`, `jku`, `x5u` and `x5c` included),
-/// and `kid` chooses only among the keys of the caller `iss` names. A
-/// repeated member, or one of the wrong type, is malformed. `alg` is compared
-/// as the exact string, as RFC 7515 section 4.1.1 requires, so any other value
-/// (`none` and unregistered names included) is an `algorithm` failure.
+/// and `kid` chooses only among the keys of the caller `iss` names. Repeated
+/// recognized members cause a parse error. The `alg` member requires a
+/// string. The `typ` and `kid` members also require strings when non-null
+/// and read `null` as missing. Any value for `crit` counts as present.
+/// `alg` is compared as the exact string, as RFC 7515 section 4.1.1 requires,
+/// so any other string (`none` and unregistered names included) is an
+/// `algorithm` failure.
 #[derive(Deserialize)]
 struct TokenHeader<'a> {
     #[serde(borrow)]
@@ -380,13 +379,14 @@ struct TokenHeader<'a> {
     typ: Option<Cow<'a, str>>,
     #[serde(borrow)]
     kid: Option<Cow<'a, str>>,
-    /// Present in any form, `null` included.
     #[serde(default, deserialize_with = "present")]
     crit: bool,
 }
 
-/// The claims this crate reads; every other claim is ignored. A repeated
-/// claim, or one of the wrong type, is malformed.
+/// The claims this crate reads; every other claim is ignored. Repeating a
+/// recognized claim or giving it the wrong non-null type is a parse error.
+/// A `null` value for `nbf` also causes a parse error. The other claims
+/// read `null` as missing.
 #[derive(Deserialize)]
 struct Claims<'a> {
     #[serde(borrow)]
@@ -397,7 +397,6 @@ struct Claims<'a> {
     aud: Option<Audience<'a>>,
     iat: Option<NumericDate>,
     exp: Option<NumericDate>,
-    /// A `null` or non-numeric `nbf` is malformed, not absent.
     #[serde(default, deserialize_with = "present_numeric_date")]
     nbf: Option<u64>,
 }

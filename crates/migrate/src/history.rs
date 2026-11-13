@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use infra_postgres::sqlstate;
+use infra_postgres::{observed, sqlstate};
 use sqlx::migrate::{AppliedMigration, Migrate, MigrateError, Migration, Migrator};
 use sqlx::postgres::{PgConnection, PgPool};
 
@@ -19,8 +19,7 @@ const UNDEFINED_TABLE: &str = "42P01";
 /// A sanitized reason startup cannot admit the embedded migration history.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum HistoryError {
-    /// At least one embedded migration is not applied yet, including an
-    /// absent history table: the migrator has not run for this release.
+    /// The migrator still needs to apply at least one embedded migration.
     #[error("embedded migrations are pending")]
     Pending,
     /// An applied migration failed or changed, or the history holds an
@@ -41,12 +40,13 @@ pub enum HistoryError {
 ///
 /// Bounded by [`HISTORY_VERIFY_BUDGET`], including acquire. A version above
 /// the newest embedded migration belongs to a later release and is admitted.
-/// An absent table is [`HistoryError::Pending`]; a table outside the session's
-/// `search_path` is [`HistoryError::NotVisible`]. Errors are sanitized.
+/// An absent table is treated as an empty history, so an empty embedded set
+/// can start.
 ///
 /// # Errors
 ///
-/// A bounded, sanitized [`HistoryError`].
+/// A table outside the session's `search_path` is [`HistoryError::NotVisible`].
+/// Connection and query failures are sanitized before they leave this check.
 pub async fn verify_history(pool: &PgPool) -> Result<(), HistoryError> {
     let check = async {
         let mut conn = infra_postgres::acquire(pool, "check migration history").await?;
@@ -67,7 +67,6 @@ pub async fn verify_history(pool: &PgPool) -> Result<(), HistoryError> {
     }
 }
 
-/// What the read-only history read observed.
 enum HistoryRead {
     History(Vec<AppliedMigration>),
     /// No table with the history name exists in any schema.
@@ -105,11 +104,14 @@ async fn history_table_exists_elsewhere(
         .rsplit_once('.')
         .map_or(table, |(_, name)| name)
         .trim_matches('"');
-    sqlx::query_scalar!(
-        r#"SELECT EXISTS (SELECT 1 FROM pg_class WHERE relname = $1 AND relkind = 'r') AS "exists!""#,
-        relation
+    observed(
+        "SELECT pg_class",
+        sqlx::query_scalar!(
+            r#"SELECT EXISTS (SELECT 1 FROM pg_class WHERE relname = $1 AND relkind = 'r') AS "exists!""#,
+            relation
+        )
+        .fetch_one(conn),
     )
-    .fetch_one(conn)
     .await
     .map_err(MigrateError::Execute)
 }
@@ -133,8 +135,6 @@ pub(crate) enum PendingError {
     DuplicateVersion(i64),
 }
 
-/// Embedded migrations the history has not applied yet.
-///
 /// A changed checksum is `VersionMismatch` and an applied version unknown
 /// inside the embedded range is `VersionMissing`, as in `Migrator::run`. A
 /// version above the newest embedded one belongs to a later release and is

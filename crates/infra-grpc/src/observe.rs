@@ -7,11 +7,8 @@
 //! the RPC attributes go to the OpenTelemetry span alone, and nothing is
 //! `Span::record`ed afterwards, since every record re-serializes the fields.
 //!
-//! A call is observed until its status is known. An answer that carries
-//! `grpc-status` in its headers ends there; any other answer is followed
-//! through its body to the trailers, so a stream that fails after its first
-//! message is counted with that failure and its handling time is the whole
-//! call, as grpc-go's interceptors count it.
+//! Native clients report the outcome after tonic validates the response.
+//! Server calls and direct HTTP service users report at the transport boundary.
 
 use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, LazyLock, Once, OnceLock, PoisonError, RwLock};
@@ -25,7 +22,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
 use tracing_opentelemetry_instrumentation_sdk::{otel_trace_span, set_parent_or_fallback};
 
-use crate::call::{ResponseCustody, Side};
+use crate::call::{Observation, ResponseCustody, Side};
 
 const SERVER_STARTED: &str = "grpc_server_started_total";
 const SERVER_HANDLED: &str = "grpc_server_handled_total";
@@ -69,7 +66,7 @@ pub(crate) async fn observe(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    let call = Call::start(&series, &request);
+    let call = Call::start(&series, &request, None);
     let fallback =
         set_parent_or_fallback(call.span(), otel_http::extract_context(request.headers()));
     let answer = AssertUnwindSafe(next.run(request))
@@ -83,9 +80,13 @@ pub(crate) async fn observe(
     }
     .unwrap_or_else(|_panic| crate::status::internal_status().into_http());
     let custody = ResponseCustody::take_from_server_response(&mut response);
-    crate::call::attach(response, call, fallback, custody, |_error| {
-        tonic::Code::Unknown
-    })
+    crate::call::attach(
+        response,
+        Observation::Transport(call),
+        fallback,
+        custody,
+        |_error| tonic::Code::Unknown,
+    )
     .map(axum::body::Body::new)
 }
 
@@ -102,10 +103,14 @@ pub(crate) struct Call {
 }
 
 impl Call {
-    pub(crate) fn start<B>(series: &Arc<Series>, request: &http::Request<B>) -> Self {
+    pub(crate) fn start<B>(
+        series: &Arc<Series>,
+        request: &http::Request<B>,
+        destination: Option<&http::Uri>,
+    ) -> Self {
         let started = Instant::now();
         let handles = series.handles(request);
-        let span = make_span(request, &handles, series.side());
+        let span = make_span(request, &handles, series.side(), destination);
         handles.started.increment(1);
         Self {
             handles,
@@ -153,7 +158,12 @@ impl Drop for Call {
 
 /// The RPC span with its OpenTelemetry attributes, named after the label
 /// path's method: `unknown/unknown` for a path that is no known method.
-fn make_span<B>(request: &http::Request<B>, handles: &Handles, side: Side) -> tracing::Span {
+fn make_span<B>(
+    request: &http::Request<B>,
+    handles: &Handles,
+    side: Side,
+    destination: Option<&http::Uri>,
+) -> tracing::Span {
     let span = otel_trace_span!(
         "GRPC request",
         otel.name = &*handles.span_name,
@@ -162,15 +172,17 @@ fn make_span<B>(request: &http::Request<B>, handles: &Handles, side: Side) -> tr
     span.set_attribute("rpc.system", "grpc");
     span.set_attribute("rpc.service", Arc::clone(&handles.service));
     span.set_attribute("rpc.method", Arc::clone(&handles.method));
-    // Client destination identity is configured by the caller of our adapter;
-    // inbound authority and User-Agent are untrusted request data.
-    if matches!(side, Side::Client) {
-        let (server_address, server_port) = otel_http::http_host_port(request);
-        if !server_address.is_empty() && server_address.len() <= CLIENT_DIAGNOSTIC_BYTES {
-            span.set_attribute("server.address", server_address.to_owned());
-        }
-        if let Some(port) = server_port {
-            span.set_attribute("server.port", port);
+    // Tonic applies the channel's authority after the adapter starts the span.
+    if let Some(destination) = destination {
+        if let Some(host) = destination.host()
+            && !host.is_empty()
+            && host.len() <= CLIENT_DIAGNOSTIC_BYTES
+        {
+            let address = host.trim_start_matches('[').trim_end_matches(']');
+            span.set_attribute("server.address", address.to_owned());
+            if let Some(port) = destination.port_u16() {
+                span.set_attribute("server.port", i64::from(port));
+            }
         }
         let user_agent = otel_http::user_agent(request);
         if !user_agent.is_empty() && user_agent.len() <= CLIENT_DIAGNOSTIC_BYTES {
@@ -622,10 +634,6 @@ mod tests {
                 .body(body)
                 .unwrap()
         };
-        let handler_2 = || async {
-            tonic::Status::invalid_argument("native generated method")
-                .into_http::<tonic::body::Body>()
-        };
         #[expect(
             clippy::disallowed_methods,
             reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
@@ -634,7 +642,11 @@ mod tests {
             .route("/test.Observation/{method}", axum::routing::post(handler_1))
             .route(
                 "/example.v1.EchoService/Unary",
-                axum::routing::post(handler_2),
+                axum::routing::post(client_status_fixture),
+            )
+            .route(
+                "/example.v1.EchoService/ServerStream",
+                axum::routing::post(client_status_fixture),
             );
         let server = infra_http::Server::bind(
             "127.0.0.1:0".parse().unwrap(),
@@ -700,18 +712,99 @@ mod tests {
             crate::Client::try_new(&destination, crate::ClientSecurity::Plaintext, WAIT).unwrap();
         let mut generated =
             grpc_contracts::example::v1::echo_service_client::EchoServiceClient::new(adapter);
-        let status = tokio::time::timeout(
-            WAIT,
-            generated.unary(tonic::Request::new(
-                grpc_contracts::example::v1::UnaryRequest {
-                    message: "native identity".to_owned(),
-                },
-            )),
-        )
+        for (reply, expected) in [
+            ("invalid-argument", tonic::Code::InvalidArgument),
+            ("empty-head", tonic::Code::Internal),
+            ("empty-trailers", tonic::Code::Internal),
+            ("decode-error", tonic::Code::Internal),
+            ("malformed-status-head", tonic::Code::Unknown),
+            ("malformed-status-trailers", tonic::Code::Unknown),
+            ("unsupported-encoding", tonic::Code::Unimplemented),
+        ] {
+            let mut request = tonic::Request::new(grpc_contracts::example::v1::UnaryRequest {
+                message: "native identity".to_owned(),
+            });
+            request
+                .metadata_mut()
+                .insert("x-test-reply", reply.parse().unwrap());
+            let status = tokio::time::timeout(WAIT, generated.unary(request))
+                .await
+                .unwrap()
+                .unwrap_err();
+            assert_eq!(status.code(), expected, "{reply}");
+        }
+        let mut request = tonic::Request::new(grpc_contracts::example::v1::ServerStreamRequest {
+            message: "native streaming identity".to_owned(),
+        });
+        request
+            .metadata_mut()
+            .insert("x-test-reply", "decode-error".parse().unwrap());
+        let mut stream = tokio::time::timeout(WAIT, generated.server_stream(request))
+            .await
+            .unwrap()
+            .unwrap()
+            .into_inner();
+        let status = tokio::time::timeout(WAIT, stream.message())
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(status.code(), tonic::Code::Internal);
+        drop(stream);
+        drop(generated);
+        let parent = tokio_util::sync::CancellationToken::new();
+        let client =
+            crate::Client::try_new(&destination, crate::ClientSecurity::Plaintext, WAIT).unwrap();
+        let mut generated =
+            grpc_contracts::example::v1::echo_service_client::EchoServiceClient::new(client);
+        let mut request = tonic::Request::new(grpc_contracts::example::v1::ServerStreamRequest {
+            message: "unpolled response".to_owned(),
+        });
+        request
+            .metadata_mut()
+            .insert("x-test-reply", "held-stream".parse().unwrap());
+        request
+            .extensions_mut()
+            .insert(operation_context::OperationContext::new(
+                None,
+                parent.clone(),
+            ));
+        let mut held = tokio::time::timeout(WAIT, generated.server_stream(request))
+            .await
+            .unwrap()
+            .unwrap()
+            .into_inner();
+        parent.cancel();
+        let canceled = r#"grpc_client_handled_total{grpc_service="example.v1.EchoService",grpc_method="ServerStream",grpc_code="Canceled"} 1"#;
+        tokio::time::timeout(WAIT, async {
+            while !handle.render().contains(canceled) {
+                tokio::task::yield_now().await;
+            }
+        })
         .await
-        .unwrap()
-        .unwrap_err();
-        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        .expect("transport cancellation must emit a metric without polling the decoded stream");
+        assert_eq!(
+            tokio::time::timeout(WAIT, held.message())
+                .await
+                .unwrap()
+                .unwrap_err()
+                .code(),
+            tonic::Code::Cancelled
+        );
+        drop(held);
+        let mut request = tonic::Request::new(grpc_contracts::example::v1::ServerStreamRequest {
+            message: "empty streaming identity".to_owned(),
+        });
+        request
+            .metadata_mut()
+            .insert("x-test-reply", "empty-head".parse().unwrap());
+        let empty = tokio::time::timeout(WAIT, generated.server_stream(request))
+            .await
+            .unwrap()
+            .unwrap()
+            .into_inner();
+        let empty_ok = r#"grpc_client_handled_total{grpc_service="example.v1.EchoService",grpc_method="ServerStream",grpc_code="OK"} 1"#;
+        assert!(handle.render().contains(empty_ok));
+        drop(empty);
         drop(generated);
         // A call refused before dispatch counts with the status its caller
         // receives, not as abandoned.
@@ -836,18 +929,40 @@ mod tests {
                 "{rendered}"
             );
         }
-        assert!(rendered.contains(r#"grpc_client_started_total{grpc_service="example.v1.EchoService",grpc_method="Unary"} 2"#), "{rendered}");
-        assert!(rendered.contains(r#"grpc_client_handled_total{grpc_service="example.v1.EchoService",grpc_method="Unary",grpc_code="InvalidArgument"} 1"#), "{rendered}");
-        assert!(rendered.contains(r#"grpc_client_handled_total{grpc_service="example.v1.EchoService",grpc_method="Unary",grpc_code="Unavailable"} 1"#), "{rendered}");
+        let unary = r#"grpc_service="example.v1.EchoService",grpc_method="Unary""#;
         assert!(
-            !rendered.contains(r#"grpc_method="Unary",grpc_code="Canceled""#),
+            rendered.contains(&format!("grpc_client_started_total{{{unary}}} 8")),
             "{rendered}"
         );
+        let handled_prefix = format!("grpc_client_handled_total{{{unary},");
+        assert_eq!(
+            rendered
+                .lines()
+                .filter(|line| line.starts_with(&handled_prefix))
+                .count(),
+            5,
+            "{rendered}"
+        );
+        for (code, count) in [
+            ("InvalidArgument", 1),
+            ("Internal", 3),
+            ("Unknown", 2),
+            ("Unimplemented", 1),
+            ("Unavailable", 1),
+        ] {
+            assert!(
+                rendered.contains(&format!(r#"{handled_prefix}grpc_code="{code}"}} {count}"#)),
+                "{rendered}"
+            );
+        }
+        assert!(rendered.contains(r#"grpc_client_handled_total{grpc_service="example.v1.EchoService",grpc_method="ServerStream",grpc_code="Internal"} 1"#), "{rendered}");
+        assert!(rendered.contains(canceled), "{rendered}");
+        assert!(rendered.contains(empty_ok), "{rendered}");
         assert!(rendered.contains(r#"grpc_client_handled_total{grpc_service="test.Observation",grpc_method="Header",grpc_code="Canceled"} 1"#), "{rendered}");
         assert!(rendered.contains(r#"grpc_client_handled_total{grpc_service="test.Observation",grpc_method="Proxy",grpc_code="Unauthenticated"} 1"#), "{rendered}");
         assert!(
             rendered.contains(
-                r#"grpc_client_started_total{grpc_service="unknown",grpc_method="unknown"} 13"#
+                r#"grpc_client_started_total{grpc_service="unknown",grpc_method="unknown"} 14"#
             ),
             "{rendered}"
         );
@@ -894,6 +1009,60 @@ mod tests {
             .await
             .expect("expired call answers without channel progress");
         assert_eq!(result.unwrap_err().code(), tonic::Code::DeadlineExceeded);
+    }
+
+    #[allow(
+        clippy::unused_async,
+        reason = "axum's wire fixture handler must return a future"
+    )]
+    async fn client_status_fixture(headers: http::HeaderMap) -> http::Response<tonic::body::Body> {
+        use http_body::Frame;
+        use tonic::body::Body;
+
+        let reply = headers["x-test-reply"].to_str().unwrap();
+        let trailers = |code, message| {
+            let mut trailers = http::HeaderMap::new();
+            trailers.insert("grpc-status", http::HeaderValue::from_static(code));
+            if let Some(message) = message {
+                trailers.insert("grpc-message", http::HeaderValue::from_static(message));
+            }
+            Frame::trailers(trailers)
+        };
+        let frames = |frame| {
+            Body::new(http_body_util::StreamBody::new(futures_util::stream::iter(
+                [Ok::<_, tonic::Status>(frame)],
+            )))
+        };
+        let mut response = http::Response::builder().header("content-type", "application/grpc");
+        let body = match reply {
+            "invalid-argument" => {
+                return tonic::Status::invalid_argument("native generated method").into_http();
+            }
+            "empty-head" => {
+                response = response.header("grpc-status", "0");
+                Body::empty()
+            }
+            "empty-trailers" => frames(trailers("0", None)),
+            "decode-error" => frames(Frame::data(bytes::Bytes::from_static(&[2, 0, 0, 0, 0]))),
+            "held-stream" => Body::new(http_body_util::StreamBody::new(
+                futures_util::stream::pending::<Result<Frame<bytes::Bytes>, tonic::Status>>(),
+            )),
+            "malformed-status-head" => {
+                response = response
+                    .header("grpc-status", "14")
+                    .header("grpc-message", "%FF");
+                Body::empty()
+            }
+            "malformed-status-trailers" => frames(trailers("14", Some("%FF"))),
+            "unsupported-encoding" => {
+                response = response
+                    .header("grpc-status", "14")
+                    .header("grpc-encoding", "gzip");
+                Body::empty()
+            }
+            _ => panic!("unknown test reply {reply}"),
+        };
+        response.body(body).unwrap()
     }
 
     async fn trailer_status(body: &mut tonic::body::Body) -> tonic::Code {

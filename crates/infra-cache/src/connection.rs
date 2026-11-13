@@ -1,16 +1,17 @@
 //! One owned supervisor; redis-rs owns transport and multiplexing.
 
 use std::future::{Future, poll_fn};
-use std::pin::{Pin, pin};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use backon::BackoffBuilder;
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use metrics::{Counter, Gauge};
 use operation_context::{Deadline, OperationContext, Stopped};
 use redis::aio::MultiplexedConnection;
-use tokio::sync::{Notify, Semaphore, SemaphorePermit};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, SemaphorePermit, mpsc};
 use tokio::task::AbortHandle;
 use tokio::time::{Instant, sleep_until, timeout, timeout_at};
 use tokio_util::sync::CancellationToken;
@@ -41,8 +42,13 @@ const PASSWORD_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 /// Shared by every namespace, including commands waiting for a connection.
 const APPLICATION_SLOTS: usize = 256;
 const PROBE_SLOTS: usize = 1;
+const CALLER_PIPELINE_CAPACITY: usize = APPLICATION_SLOTS + PROBE_SLOTS;
 // One additional producer runs maintenance PING and AUTH serially.
-const PIPELINE_BUFFER_SIZE: usize = APPLICATION_SLOTS + PROBE_SLOTS + 1;
+const PIPELINE_BUFFER_SIZE: usize = CALLER_PIPELINE_CAPACITY + 1;
+
+#[cfg(test)]
+#[path = "tests/full_pipeline.rs"]
+mod full_pipeline_tests;
 
 /// Bounded cause of an unsuccessful cache exchange. Server text is never copied.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, enum_map::Enum)]
@@ -136,9 +142,6 @@ struct Shared {
 
 enum State {
     Connecting,
-    /// The published generation. The driver's disconnect push may cancel its
-    /// `retired` token while the state still names it; [`Shared::acquire`]
-    /// refuses that token and the supervisor's [`Shared::retire`] moves the state.
     Connected(Arc<Generation>),
     /// Observable during backoff; the supervisor keeps retrying.
     SetupFailed(ErrorType),
@@ -147,10 +150,46 @@ enum State {
 
 struct Generation {
     connection: MultiplexedConnection,
-    /// Cancelled by the driver's disconnect push, [`Shared::close`], or
-    /// [`Shared::retire`]. A cancelled token is never handed out, even while
-    /// [`State::Connected`] still names this generation.
+    caller_capacity: Arc<Semaphore>,
+    // Each message owns a caller reservation, which bounds the channel.
+    abandoned: mpsc::UnboundedSender<AbandonedReply>,
+    /// Once cancelled, [`Shared::acquire`] stops handing out this generation
+    /// even while [`State::Connected`] still names it. The supervisor then
+    /// withdraws it through [`Shared::retire`].
     retired: CancellationToken,
+}
+
+struct RetireOnDrop<'a> {
+    shared: &'a Shared,
+    generation: &'a Arc<Generation>,
+}
+
+impl Drop for RetireOnDrop<'_> {
+    fn drop(&mut self) {
+        self.shared.retire(self.generation);
+    }
+}
+
+impl Generation {
+    async fn reserve(&self) -> Result<OwnedSemaphorePermit, ErrorType> {
+        self.caller_capacity
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| ErrorType::Io)
+    }
+}
+
+struct AbandonedReply {
+    reservation: OwnedSemaphorePermit,
+    reply: Pin<Box<dyn Future<Output = ()> + Send>>,
+}
+
+impl AbandonedReply {
+    async fn wait(self) {
+        let _reservation = self.reservation;
+        self.reply.await;
+    }
 }
 
 /// Held from the slot claim until the command ends, including the wait for a
@@ -192,44 +231,48 @@ impl CommandScope {
     }
 }
 
-/// Owns the admission slot until any required retirement finishes.
-struct Exchange<'a, F: Future> {
+/// The reservation outlives the driver's queue entry, including when the
+/// caller leaves before the driver answers.
+struct Exchange<'a, F>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
     shared: &'a Shared,
     generation: &'a Arc<Generation>,
-    _slot: CommandSlot<'a>,
-    reply: ReplyState<'a, F>,
+    reservation: Option<OwnedSemaphorePermit>,
+    reply: ReplyState<F>,
     keeps_generation: fn(&F::Output) -> bool,
-    pending_retirement: PendingReplyRetirement,
+    reply_deadline: Option<Deadline>,
 }
 
-enum PendingReplyRetirement {
-    OnDrop,
-    OnDropIfExpired(Deadline),
-}
-
-enum ReplyState<'a, F> {
-    Unpolled(Pin<&'a mut F>),
-    Pending(Pin<&'a mut F>),
+enum ReplyState<F> {
+    Unpolled(Pin<Box<F>>),
+    Pending(Pin<Box<F>>),
     Keep,
     Retire,
 }
 
-impl<'a, F: Future> Exchange<'a, F> {
+impl<'a, F> Exchange<'a, F>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
     fn new(
         shared: &'a Shared,
         generation: &'a Arc<Generation>,
-        slot: CommandSlot<'a>,
-        reply: Pin<&'a mut F>,
+        reservation: OwnedSemaphorePermit,
+        reply: F,
         keeps_generation: fn(&F::Output) -> bool,
-        pending_retirement: PendingReplyRetirement,
+        reply_deadline: Option<Deadline>,
     ) -> Self {
         Self {
             shared,
             generation,
-            _slot: slot,
-            reply: ReplyState::Unpolled(reply),
+            reservation: Some(reservation),
+            reply: ReplyState::Unpolled(Box::pin(reply)),
             keeps_generation,
-            pending_retirement,
+            reply_deadline,
         }
     }
 
@@ -237,8 +280,8 @@ impl<'a, F: Future> Exchange<'a, F> {
         // Arm retirement before a poll that could unwind into this exchange's drop.
         let mut reply = match std::mem::replace(&mut self.reply, ReplyState::Retire) {
             ReplyState::Unpolled(reply) | ReplyState::Pending(reply) => reply,
-            state @ (ReplyState::Keep | ReplyState::Retire) => {
-                self.reply = state;
+            settled => {
+                self.reply = settled;
                 return Poll::Pending;
             }
         };
@@ -269,7 +312,11 @@ fn command_keeps_generation<T>(reply: &redis::RedisResult<T>) -> bool {
     })
 }
 
-impl<F: Future> Drop for Exchange<'_, F> {
+impl<F> Drop for Exchange<'_, F>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
     fn drop(&mut self) {
         // The unconstrained first poll has room to enqueue, so re-polling
         // can collect a delivered reply without dispatching new work.
@@ -278,20 +325,34 @@ impl<F: Future> Drop for Exchange<'_, F> {
         }
         let retire = match self.reply {
             ReplyState::Unpolled(_) | ReplyState::Keep => false,
-            // A sent command keeps its place in the driver's reply queue until
-            // the reply arrives or the driver shuts down. A peer's ceiling or
-            // the maintenance PING can still retire a stalled connection.
-            ReplyState::Pending(_) => match self.pending_retirement {
-                PendingReplyRetirement::OnDrop => true,
-                PendingReplyRetirement::OnDropIfExpired(deadline) => deadline.expired(),
-            },
+            ReplyState::Pending(_) => self.reply_deadline.is_some_and(Deadline::expired),
             ReplyState::Retire => true,
         };
         if retire {
             self.shared.retire(self.generation);
+        } else if let ReplyState::Pending(reply) =
+            std::mem::replace(&mut self.reply, ReplyState::Keep)
+            && let Some(reservation) = self.reservation.take()
+        {
+            let keeps_generation = self.keeps_generation;
+            let retired = self.generation.retired.clone();
+            let _ = self.generation.abandoned.send(AbandonedReply {
+                reservation,
+                reply: Box::pin(async move {
+                    if !keeps_generation(&reply.await) {
+                        retired.cancel();
+                    }
+                }),
+            });
         }
-        // The slot guard decrements the gauge and releases the local permit after this.
     }
+}
+
+async fn query<T: redis::FromRedisValue>(
+    command: redis::Cmd,
+    mut connection: MultiplexedConnection,
+) -> redis::RedisResult<T> {
+    tokio::task::unconstrained(command.query_async(&mut connection)).await
 }
 
 impl std::fmt::Debug for Link {
@@ -423,14 +484,14 @@ impl Link {
         }
     }
 
-    pub(crate) async fn command<T: redis::FromRedisValue>(
+    pub(crate) async fn command<T: redis::FromRedisValue + Send + 'static>(
         &self,
-        command: &redis::Cmd,
+        command: redis::Cmd,
         scope: &CommandScope,
     ) -> Result<T, CommandError> {
         let context = &scope.context;
         context.check().map_err(CommandError::Stopped)?;
-        let slot = self.claim_slot(&self.application_slots)?;
+        let _slot = self.claim_slot(&self.application_slots)?;
         // Acquisition first: a connected link then never arms the deadline timer.
         let generation = tokio::select! {
             biased;
@@ -440,25 +501,22 @@ impl Link {
         // Acquisition may have completed at the caller's cutoff.
         context.check().map_err(CommandError::Stopped)?;
         let generation = generation?;
-        let query = async {
-            // Yield before arming retirement. The driver has room for every
-            // admitted producer, so its first poll can enqueue without yielding.
+        let exchange = async {
+            // The generation's reservation includes abandoned queries. A free
+            // reservation guarantees room in the redis-rs sender.
+            let reservation = generation.reserve().await?;
             tokio::task::consume_budget().await;
             context.check().map_err(CommandError::Stopped)?;
             if generation.retired.is_cancelled() {
                 return Err(ErrorType::Io.into());
             }
-            let mut connection = generation.connection.clone();
-            let reply = pin!(tokio::task::unconstrained(
-                command.query_async(&mut connection)
-            ));
             let mut exchange = Exchange::new(
                 &self.shared,
                 &generation,
-                slot,
-                reply,
+                reservation,
+                query(command, generation.connection.clone()),
                 command_keeps_generation,
-                PendingReplyRetirement::OnDropIfExpired(scope.ceiling),
+                Some(scope.ceiling),
             );
             let reply = poll_fn(|cx| exchange.poll_reply(cx)).await;
             drop(exchange);
@@ -472,42 +530,49 @@ impl Link {
         // stopping the wait so a stop at the ceiling cannot retire an answered exchange.
         tokio::select! {
             biased;
-            reply = query => reply,
+            reply = exchange => reply,
             stopped = context.wait_stopped() => Err(CommandError::Stopped(stopped)),
             () = generation.retired.cancelled() => Err(ErrorType::Io.into()),
         }
     }
 
     pub(crate) async fn probe(&self, command_timeout: Duration) -> Result<(), ErrorType> {
-        let slot = self.claim_slot(&self.probe_slots)?;
+        let _slot = self.claim_slot(&self.probe_slots)?;
         let generation = self.shared.acquire().await?;
-        // The first PING poll must reach the driver before cancellation can retire it.
+        let budget = command_timeout.max(CONNECTED_PROBE_MIN_BUDGET);
+        let reservation = reply_until(&generation.retired, generation.reserve(), || {
+            Deadline::new(Instant::now(), budget)
+        })
+        .await??;
         tokio::task::consume_budget().await;
-        let command = redis::Cmd::ping();
-        let mut connection = generation.connection.clone();
-        let reply = pin!(tokio::task::unconstrained(
-            command.query_async(&mut connection)
-        ));
+        if generation.retired.is_cancelled() {
+            return Err(ErrorType::Io);
+        }
         let mut exchange = Exchange::new(
             &self.shared,
             &generation,
-            slot,
-            reply,
+            reservation,
+            query(redis::Cmd::ping(), generation.connection.clone()),
             ping_keeps_generation,
-            PendingReplyRetirement::OnDrop,
+            None,
         );
-        reply_until(
-            &generation.retired,
-            poll_fn(|cx| exchange.poll_reply(cx)),
-            || {
-                Deadline::new(
-                    Instant::now(),
-                    command_timeout.max(CONNECTED_PROBE_MIN_BUDGET),
+        let first_poll = poll_fn(|cx| Poll::Ready(exchange.poll_reply(cx))).await;
+        let reply = match first_poll {
+            Poll::Ready(reply) => reply,
+            Poll::Pending => {
+                // Start the deadline after enqueueing PING, so every earlier command
+                // has already started its own budget.
+                let deadline = Deadline::new(Instant::now(), budget);
+                exchange.reply_deadline = Some(deadline);
+                reply_until(
+                    &generation.retired,
+                    poll_fn(|cx| exchange.poll_reply(cx)),
+                    || deadline,
                 )
-            },
-        )
-        .await?
-        .map_err(|error| error_type(&error))
+                .await?
+            }
+        };
+        reply.map_err(|error| error_type(&error))
     }
 
     fn claim_slot<'a>(&'a self, slots: &'a Semaphore) -> Result<CommandSlot<'a>, ErrorType> {
@@ -565,17 +630,16 @@ impl Drop for SupervisorExit {
     }
 }
 
-// The first reply poll can enqueue without yielding. Sample the deadline after
-// that poll so every command ahead in the queue has already started its budget.
+// Check retirement first and poll the work before sampling the deadline.
 async fn reply_until<T>(
     retired: &CancellationToken,
-    reply: impl Future<Output = T>,
+    work: impl Future<Output = T>,
     deadline: impl FnOnce() -> Deadline,
 ) -> Result<T, ErrorType> {
     tokio::select! {
         biased;
         () = retired.cancelled() => Err(ErrorType::Io),
-        reply = reply => Ok(reply),
+        result = work => Ok(result),
         () = async { deadline().wait().await } => Err(ErrorType::Timeout),
     }
 }
@@ -588,6 +652,8 @@ async fn query_until(
     tokio::task::consume_budget().await;
     let mut connection = generation.connection.clone();
     let reply = tokio::task::unconstrained(command.query_async(&mut connection));
+    // Maintenance has a reserved entry, so its first poll enqueues before
+    // the timer starts, after every earlier command has started its budget.
     reply_until(&generation.retired, reply, deadline).await
 }
 
@@ -652,15 +718,26 @@ async fn run_supervisor(
         if !shared.begin_attempt() {
             return;
         }
-        match setup_attempt(server, client, password_file).await {
+        let (abandoned, replies) = mpsc::unbounded_channel();
+        match setup_attempt(server, client, password_file, abandoned).await {
             Ok((generation, rotation)) => {
                 if !shared.publish(generation.clone()) {
                     return;
                 }
                 next_attempt = Instant::now() + MIN_GENERATION_SPACING;
                 backoff = backoff_policy.build();
-                maintain(server, &generation, rotation, command_timeout).await;
-                shared.retire(&generation);
+                let mut drain = std::pin::pin!(drain_abandoned_replies(replies));
+                // Withdraw the generation before the drain releases its
+                // reservations, including on unwind.
+                let _retire = RetireOnDrop {
+                    shared,
+                    generation: &generation,
+                };
+                tokio::select! {
+                    biased;
+                    () = maintain(server, &generation, rotation, command_timeout) => {}
+                    () = &mut drain => {}
+                }
             }
             Err(error) => {
                 if !shared.record_failure(error) {
@@ -686,12 +763,27 @@ async fn run_supervisor(
     }
 }
 
+async fn drain_abandoned_replies(mut replies: mpsc::UnboundedReceiver<AbandonedReply>) {
+    let mut pending = FuturesUnordered::new();
+    loop {
+        tokio::select! {
+            biased;
+            _ = pending.next(), if !pending.is_empty() => {}
+            reply = replies.recv() => match reply {
+                Some(reply) => pending.push(reply.wait()),
+                None => return,
+            }
+        }
+    }
+}
+
 /// One bounded setup attempt. A connection the peer closes before publication
 /// is [`ErrorType::Io`]; the returned generation owns its retirement token.
 async fn setup_attempt<'a>(
     server: &ServerEndpoint,
     client: &redis::Client,
     password_file: Option<&'a PasswordFile>,
+    abandoned: mpsc::UnboundedSender<AbandonedReply>,
 ) -> Result<(Arc<Generation>, Option<Rotation<'a>>), ErrorType> {
     let retired = CancellationToken::new();
     let setup = async {
@@ -709,6 +801,8 @@ async fn setup_attempt<'a>(
         (
             Arc::new(Generation {
                 connection,
+                caller_capacity: Arc::new(Semaphore::new(CALLER_PIPELINE_CAPACITY)),
+                abandoned,
                 retired,
             }),
             rotation,
@@ -788,7 +882,9 @@ async fn maintain(
         tokio::select! {
             biased;
             () = generation.retired.cancelled() => return,
-            () = sleep_until(next_refresh), if rotation.is_some() => {
+            // Keep the start-to-start refresh cadence while letting an older
+            // PING run after a refresh that consumed its entire interval.
+            () = sleep_until(next_refresh), if rotation.is_some() && next_refresh <= next_ping => {
                 // A rejected AUTH must not add its duration to the next refresh.
                 next_refresh = Instant::now() + PASSWORD_REFRESH_INTERVAL;
                 if let Some(rotation) = rotation.as_mut()

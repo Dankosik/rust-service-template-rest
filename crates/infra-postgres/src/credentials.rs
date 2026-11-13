@@ -26,10 +26,10 @@ const REFRESHES_METRIC: &str = "postgres_password_file_refreshes_total";
 /// and server acceptance prevent this cadence from bounding the cutover.
 pub const PASSWORD_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
-/// Give the pool the content of `password_file`, the file
-/// [`Dsn::password_file`](crate::Dsn::password_file) names, for every
-/// connection it opens from then on, every [`PASSWORD_REFRESH_INTERVAL`]
-/// until `cancel` fires.
+/// Read the file named by [`Dsn::password_file`](crate::Dsn::password_file)
+/// every [`PASSWORD_REFRESH_INTERVAL`] until `cancel` fires. The first
+/// successful read and later changes update the options for new connections.
+/// A failed read leaves the last installed options in use.
 pub async fn refresh_password_periodically(
     pool: PgPool,
     password_file: PathBuf,
@@ -70,7 +70,7 @@ impl Refresh {
                 }
                 let options = (*pool.connect_options()).clone().password(&password);
                 pool.set_connect_options(options);
-                // The first read repeats what admission already used.
+                // The first successful read establishes the baseline for reload logs.
                 if self.current.replace(password).is_some() {
                     tracing::info!("postgres_password_reloaded");
                 }

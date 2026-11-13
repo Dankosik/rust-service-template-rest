@@ -29,6 +29,8 @@ pub struct HttpIdempotencyConfig {
 }
 
 impl HttpIdempotencyConfig {
+    pub const RETENTION_KEY: &str = "http_idempotency.retention";
+
     /// The retention an idempotent operation needs before it may be served.
     ///
     /// # Errors
@@ -44,7 +46,7 @@ impl HttpIdempotencyConfig {
             ));
         }
         required(
-            "http_idempotency.retention",
+            Self::RETENTION_KEY,
             self.retention,
             "an idempotent operation is served",
         )
@@ -53,7 +55,7 @@ impl HttpIdempotencyConfig {
     pub(crate) fn validate(&self) -> Result<(), ValidationError> {
         if let Some(retention) = self.retention {
             duration_range(
-                "http_idempotency.retention",
+                Self::RETENTION_KEY,
                 retention,
                 Duration::from_mins(1),
                 Duration::from_hours(30 * 24),

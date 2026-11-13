@@ -418,7 +418,8 @@ mod tests {
                 .expect("the deadline origin fits");
             let idempotency = Idempotency {
                 attempt: Attempt {
-                    store: Store::new(pool.clone(), Duration::from_mins(1)),
+                    store: Store::new(pool.clone(), Duration::from_mins(1))
+                        .expect("retention fits PostgreSQL"),
                     scope: scope(),
                     caller: CallerIdentity {
                         issuer: "issuer".into(),

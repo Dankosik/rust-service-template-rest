@@ -26,6 +26,7 @@ async-trait = { workspace = true }
 backon = { workspace = true, features = ["std"] }
 derive_more = { workspace = true, features = ["debug"] }
 enum-map = { workspace = true, features = ["derive"] }
+futures-util = { workspace = true, features = ["alloc"] }
 health = { workspace = true }
 metrics = { workspace = true }
 redis = { workspace = true, features = [

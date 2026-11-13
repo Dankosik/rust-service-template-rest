@@ -131,7 +131,7 @@ where
     K: Into<OsString>,
     V: Into<OsString>,
 {
-    let mut snapshot: Config = merge(options, environment, AuthnAudienceOverride::Decode)?;
+    let mut snapshot: Config = merge(options, environment, AuthnAudienceHandling::Apply)?;
     snapshot.app.apply_build_info(build);
     snapshot.validate()?;
     Ok(snapshot)
@@ -163,7 +163,7 @@ where
     V: Into<OsString>,
 {
     let mut snapshot: crate::MigrationConfig =
-        merge(options, environment, AuthnAudienceOverride::Skip)?;
+        merge(options, environment, AuthnAudienceHandling::Skip)?;
     snapshot.app.apply_build_info(build);
     snapshot.validate()?;
     Ok(snapshot)
@@ -192,18 +192,18 @@ where
     V: Into<OsString>,
 {
     let snapshot: crate::JobsOperatorConfig =
-        merge(options, environment, AuthnAudienceOverride::Skip)?;
+        merge(options, environment, AuthnAudienceHandling::Skip)?;
     snapshot.validate()?;
     Ok(snapshot)
 }
 // template:end jobs:load-jobs-operator
 
 #[derive(Clone, Copy)]
-enum AuthnAudienceOverride {
-    Decode,
+enum AuthnAudienceHandling {
+    Apply,
     #[allow(
         dead_code,
-        reason = "only the optional migration and jobs operator loaders skip the override"
+        reason = "only the optional migration and jobs operator loaders skip audience handling"
     )]
     Skip,
 }
@@ -214,9 +214,9 @@ fn merge<T, I, K, V>(
     environment: I,
     #[allow(
         unused_variables,
-        reason = "only the authn profile needs list decoding"
+        reason = "audience handling is only present with the authn profile"
     )]
-    authn_audience_override: AuthnAudienceOverride,
+    authn_audience_handling: AuthnAudienceHandling,
 ) -> Result<T, Error>
 where
     T: DeserializeOwned,
@@ -227,8 +227,28 @@ where
     let variables = collect_variables(options.secrets_dir.as_deref(), environment)?;
     let mut builder = config::Config::builder();
     let mut table_keys = BTreeSet::new();
+    // template:begin authn:load-audience-file-kind
+    let mut file_audience_has_datetime = false;
+    // template:end authn:load-audience-file-kind
     for path in options.files() {
-        builder = builder.add_source(scan_file(path, &mut table_keys)?);
+        #[allow(
+            unused_variables,
+            reason = "only the authn profile checks audience types"
+        )]
+        let (file, table) = scan_file(path, &mut table_keys)?;
+        // template:begin authn:load-audience-file-scan
+        if let Some(audience) = table
+            .get("authn")
+            .and_then(|section| section.get("audience"))
+        {
+            // config-rs converts TOML datetimes to strings before serde sees them.
+            file_audience_has_datetime = audience.is_datetime()
+                || audience
+                    .as_array()
+                    .is_some_and(|items| items.iter().any(toml::Value::is_datetime));
+        }
+        // template:end authn:load-audience-file-scan
+        builder = builder.add_source(file);
     }
     if let Some(variable) = variables
         .values()
@@ -240,9 +260,20 @@ where
         });
     }
     // template:begin authn:load-audience-list-decode
-    let audience_list = match authn_audience_override {
-        AuthnAudienceOverride::Decode => variables::audience_list(&variables)?,
-        AuthnAudienceOverride::Skip => None,
+    let audience_list = match authn_audience_handling {
+        AuthnAudienceHandling::Apply => {
+            if file_audience_has_datetime
+                && !variables
+                    .values()
+                    .any(|variable| variable.key == variables::AUDIENCE_KEY)
+            {
+                return Err(Error::Deserialize(
+                    crate::authn::AUDIENCE_INPUT_FORM.to_owned(),
+                ));
+            }
+            variables::audience_list(&variables)?
+        }
+        AuthnAudienceHandling::Skip => None,
     };
     // template:end authn:load-audience-list-decode
     // `Environment::source` keeps keys that still carry the `APP__` prefix;
@@ -312,7 +343,10 @@ impl config::Source for ScannedFile {
     clippy::disallowed_methods,
     reason = "pre-runtime configuration admission owns this file read; startup can wait on the filesystem"
 )]
-fn scan_file(path: &Path, table_keys: &mut BTreeSet<String>) -> Result<ScannedFile, Error> {
+fn scan_file(
+    path: &Path,
+    table_keys: &mut BTreeSet<String>,
+) -> Result<(ScannedFile, toml::Table), Error> {
     let text = std::fs::read_to_string(path).map_err(|error| Error::ReadFile {
         path: path.to_owned(),
         error,
@@ -346,10 +380,13 @@ fn scan_file(path: &Path, table_keys: &mut BTreeSet<String>) -> Result<ScannedFi
             input: path.display().to_string(),
         });
     }
-    Ok(ScannedFile {
-        path: path.to_owned(),
-        text,
-    })
+    Ok((
+        ScannedFile {
+            path: path.to_owned(),
+            text,
+        },
+        table,
+    ))
 }
 
 /// A scalar replacing a table can erase an unknown key before decoding sees it.

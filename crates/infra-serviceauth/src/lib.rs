@@ -19,7 +19,7 @@ use shared_rules::rfc7515;
 
 pub use source::{ReceiverTokens, SigningError, SigningOptions, TokenSource};
 pub use trust::{TrustError, TrustRegistry};
-pub use verify::{Caller, Failure, VERIFICATIONS_METRIC, Verifier};
+pub use verify::{Caller, Failure, Verifier};
 
 /// The longest lifetime a service token may claim, `exp - iat`, in seconds.
 const MAX_TOKEN_LIFETIME_SECONDS: u64 = 60;
@@ -47,7 +47,7 @@ pub struct InvalidServiceName;
 
 impl InvalidServiceName {
     /// The grammar's one wording, shared with the trust registry's refusal.
-    pub(crate) const MESSAGE: &str = "a caller name is 1 to 63 lowercase letters, digits and hyphens, not starting or ending with a hyphen";
+    pub(crate) const MESSAGE: &str = "a service name is 1 to 63 lowercase letters, digits and hyphens, not starting or ending with a hyphen";
 }
 
 impl ServiceName {
@@ -122,7 +122,7 @@ impl JwtType {
     }
 
     #[must_use]
-    pub fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
 
@@ -161,7 +161,7 @@ impl KeyId {
     }
 
     #[must_use]
-    pub fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
 }

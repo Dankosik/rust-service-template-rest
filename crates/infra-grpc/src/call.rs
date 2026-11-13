@@ -117,23 +117,19 @@ fn header_catalog_code(headers: &HeaderMap) -> Option<service_failure::Code> {
     // when they are non-empty; without them its parse, which clones the whole
     // map, is skipped on every successful call.
     headers.get("grpc-status-details-bin")?;
-    // Tonic's details decoder can panic on invalid base64; feature headers
-    // cannot poison the terminal owner or skip its cleanup.
-    std::panic::catch_unwind(|| tonic::Status::from_header_map(headers))
-        .ok()
-        .flatten()
+    tonic::Status::from_header_map(headers)
         .as_ref()
         .and_then(crate::status::catalog_code)
 }
 
-/// How a call ended: its status code and the catalog failure behind it.
-/// Only a server answers with the catalog, so a client's outcome never reads
-/// one, and never runs tonic's details decoder.
+/// The transport outcome and the code derived from the response.
 #[derive(Clone, Copy)]
 struct Outcome {
     code: tonic::Code,
     failure: Option<service_failure::Code>,
-    response_derived: bool,
+    // The credential callback uses the response code even when decoding
+    // status metadata changes the status reported by the client.
+    response_code: Option<tonic::Code>,
 }
 
 impl Outcome {
@@ -141,14 +137,14 @@ impl Outcome {
         Self {
             code,
             failure: None,
-            response_derived: false,
+            response_code: None,
         }
     }
 
     fn of_status(side: Side, status: &tonic::Status) -> Self {
         Self {
             code: status.code(),
-            response_derived: false,
+            response_code: None,
             failure: match side {
                 Side::Server => crate::status::catalog_code(status),
                 Side::Client => None,
@@ -159,23 +155,29 @@ impl Outcome {
     /// The outcome of response headers. A server's own failure is taken from
     /// the status tonic leaves in the extensions when it writes one, which
     /// saves decoding it from the headers again.
-    fn from_response<B>(side: Side, response: &http::Response<B>) -> Option<Self> {
+    fn from_response<B>(observation: &Observation, response: &http::Response<B>) -> Option<Self> {
+        let side = observation.side();
         match (side, response.extensions().get::<tonic::Status>()) {
             (Side::Server, Some(status)) => Some(Self {
-                response_derived: true,
+                response_code: Some(status.code()),
                 ..Self::of_status(side, status)
             }),
-            _ => Self::from_status_headers(side, response.headers()),
+            _ => Self::from_status_headers(observation, response.headers()),
         }
     }
 
     /// Reads the outcome from trailers or the initial headers of a trailers-only answer.
-    fn from_status_headers(side: Side, headers: &HeaderMap) -> Option<Self> {
-        let code = header_status_code(headers)?;
+    fn from_status_headers(observation: &Observation, headers: &HeaderMap) -> Option<Self> {
+        let response_code = header_status_code(headers)?;
         Some(Self {
-            code,
-            response_derived: true,
-            failure: match side {
+            code: match observation {
+                Observation::Transport(call) if matches!(call.side(), Side::Client) => {
+                    crate::protocol::decoded_header_status_code(headers).unwrap_or(response_code)
+                }
+                _ => response_code,
+            },
+            response_code: Some(response_code),
+            failure: match observation.side() {
                 Side::Server => header_catalog_code(headers),
                 Side::Client => None,
             },
@@ -196,9 +198,39 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+pub(crate) enum Observation {
+    Transport(Call),
+    Decoded {
+        span: tracing::Span,
+        observer: tonic::client::ResponseStatusObserver,
+    },
+}
+
+impl Observation {
+    fn side(&self) -> Side {
+        match self {
+            Self::Transport(call) => call.side(),
+            Self::Decoded { .. } => Side::Client,
+        }
+    }
+
+    fn span(&self) -> &tracing::Span {
+        match self {
+            Self::Transport(call) => call.span(),
+            Self::Decoded { span, .. } => span,
+        }
+    }
+
+    fn record_local_stop(&self, status: &tonic::Status) {
+        if let Self::Decoded { observer, .. } = self {
+            observer.stop(status);
+        }
+    }
+}
+
 struct Resources<B> {
     body: B,
-    call: Call,
+    observation: Observation,
     _held: Held,
 }
 
@@ -227,15 +259,17 @@ struct Completion<B: Body> {
 
 impl<B: Body> Completion<B> {
     fn finish(self) {
-        let call = self.open.resources.call;
-        if let Some(failure) = self.outcome.failure {
-            call.failed(failure);
+        match self.open.resources.observation {
+            Observation::Transport(call) => {
+                if let Some(failure) = self.outcome.failure {
+                    call.failed(failure);
+                }
+                call.finish(self.outcome.code);
+            }
+            Observation::Decoded { observer, .. } => observer.finish_stop(),
         }
-        call.finish(self.outcome.code);
-        if self.outcome.response_derived
-            && let Some(on_status) = self.open.on_status
-        {
-            on_status(self.outcome.code);
+        if let (Some(code), Some(on_status)) = (self.outcome.response_code, self.open.on_status) {
+            on_status(code);
         }
         // Remaining fields, including feature destructors, drop outside the lock.
     }
@@ -269,6 +303,9 @@ impl<B: Body> State<B> {
 
     /// Completes with a locally generated status, sent as the trailers.
     fn complete_with(&mut self, status: &tonic::Status) -> Option<Completion<B>> {
+        if let Phase::Open(open) = &self.phase {
+            open.resources.observation.record_local_stop(status);
+        }
         let mut trailers = HeaderMap::new();
         // Locally generated sanitized statuses always encode.
         let _ = status.add_header(&mut trailers);
@@ -289,17 +326,16 @@ impl<B: Body> State<B> {
 
     /// Completes from a frame the body yielded; `None` while the call is open.
     fn complete_from(&mut self, polled: &ResponseFramePoll<B::Error>) -> Option<Completion<B>> {
+        let Phase::Open(open) = &self.phase else {
+            return None;
+        };
         let outcome = match polled {
             Poll::Ready(Some(Ok(frame))) => {
                 let trailers = frame.trailers_ref()?;
-                Outcome::from_status_headers(self.side, trailers).unwrap_or(self.missing_status)
+                Outcome::from_status_headers(&open.resources.observation, trailers)
+                    .unwrap_or(self.missing_status)
             }
-            Poll::Ready(Some(Err(error))) => {
-                let Phase::Open(open) = &self.phase else {
-                    return None;
-                };
-                Outcome::bare((open.error_code)(error))
-            }
+            Poll::Ready(Some(Err(error))) => Outcome::bare((open.error_code)(error)),
             Poll::Ready(None) => self.missing_status,
             Poll::Pending => return None,
         };
@@ -327,7 +363,7 @@ struct ResponseBody<B: Body> {
 
 pub(crate) fn attach<B>(
     mut response: http::Response<B>,
-    call: Call,
+    observation: Observation,
     fallback: Option<opentelemetry::Context>,
     custody: ResponseCustody,
     error_code: fn(&B::Error) -> tonic::Code,
@@ -335,7 +371,7 @@ pub(crate) fn attach<B>(
 where
     B: Body<Data = Bytes> + Unpin + Send + 'static,
 {
-    let side = call.side();
+    let side = observation.side();
     // Check the original lifetime at handoff; headers do not restart it.
     let stopped = custody
         .context
@@ -343,13 +379,14 @@ where
         .and_then(OperationContext::stopped)
         .map(|reason| side.stopped(reason));
     let initial = if let Some(status) = stopped {
+        observation.record_local_stop(&status);
         for name in ["grpc-status", "grpc-message", "grpc-status-details-bin"] {
             response.headers_mut().remove(name);
         }
         let _ = status.add_header(response.headers_mut());
         Some(Outcome::of_status(side, &status))
     } else {
-        Outcome::from_response(side, &response)
+        Outcome::from_response(&observation, &response)
     };
     if response
         .extensions_mut()
@@ -364,13 +401,13 @@ where
         Side::Server => None,
     }
     .map_or(Outcome::bare(tonic::Code::Unknown), |code| Outcome {
-        response_derived: true,
+        response_code: Some(code),
         ..Outcome::bare(code)
     });
     response.map(|body| {
         ResponseBody::start(
             body,
-            call,
+            observation,
             fallback,
             custody,
             error_code,
@@ -386,7 +423,7 @@ where
 {
     fn start(
         body: B,
-        call: Call,
+        observation: Observation,
         fallback: Option<opentelemetry::Context>,
         custody: ResponseCustody,
         error_code: fn(&B::Error) -> tonic::Code,
@@ -394,12 +431,12 @@ where
         missing_status: Outcome,
     ) -> Self {
         let ended = body.is_end_stream();
-        let side = call.side();
+        let side = observation.side();
         let mut state = State {
             phase: Phase::Open(OpenCall {
                 resources: Resources {
                     body,
-                    call,
+                    observation,
                     _held: custody.held,
                 },
                 context: custody.context,
@@ -513,7 +550,7 @@ where
             store_waker(&mut open.waker, context.waker());
             let polled = {
                 let resources = &mut open.resources;
-                let _span = resources.call.span().enter();
+                let _span = resources.observation.span().enter();
                 let _fallback = open.fallback.clone().map(opentelemetry::Context::attach);
                 std::panic::catch_unwind(AssertUnwindSafe(|| {
                     Pin::new(&mut resources.body).poll_frame(context)
@@ -711,6 +748,7 @@ mod tests {
         Call::start(
             &crate::observe::Series::server(["/test.Service/Stream".into()].into_iter().collect()),
             &request,
+            None,
         )
     }
 
@@ -720,7 +758,7 @@ mod tests {
     {
         ResponseBody::start(
             body,
-            call(),
+            Observation::Transport(call()),
             None,
             custody,
             tonic::Status::code,
@@ -969,7 +1007,7 @@ mod tests {
         assert!(call.span().is_disabled());
         let mut body = ResponseBody::start(
             ContextBody(Arc::clone(&seen)),
-            call,
+            Observation::Transport(call),
             Some(fallback),
             ResponseCustody::default(),
             tonic::Status::code,

@@ -18,7 +18,7 @@ use tokio_util::task::TaskTracker;
 pub(crate) struct Background {
     pub(crate) cancel: CancellationToken,
     pub(crate) tracker: TaskTracker,
-    stopped: watch::Sender<Option<&'static str>>,
+    first_failure: watch::Sender<Option<&'static str>>,
     aborts: Arc<Mutex<Vec<AbortHandle>>>,
 }
 
@@ -27,7 +27,7 @@ impl Background {
         Self {
             cancel: CancellationToken::new(),
             tracker: TaskTracker::new(),
-            stopped: watch::Sender::new(None),
+            first_failure: watch::Sender::new(None),
             aborts: Arc::default(),
         }
     }
@@ -39,10 +39,10 @@ impl Background {
     {
         let cancel = self.cancel.child_token();
         let task = start(cancel.clone());
-        let guard = ReportUnlessCancelled {
+        let guard = ReportUnexpectedTaskEnd {
             name,
             cancel,
-            stopped: self.stopped.clone(),
+            first_failure: self.first_failure.clone(),
         };
         let task = self.tracker.spawn(async move {
             let _guard = guard;
@@ -55,12 +55,12 @@ impl Background {
     }
 
     pub(crate) fn failure(&self) -> Option<&'static str> {
-        *self.stopped.borrow()
+        *self.first_failure.borrow()
     }
 
     /// Report a live task's failure while retaining its completion custody.
     pub(crate) fn record_failure(&self, name: &'static str) {
-        record_first(&self.stopped, name);
+        record_first(&self.first_failure, name);
     }
 
     pub(crate) fn abort(&self) {
@@ -74,11 +74,11 @@ impl Background {
         }
     }
 
-    /// Resolve with the name of the first task that ended while its token
-    /// was live. Pending while every task runs.
-    pub(crate) async fn stopped(&self) -> &'static str {
-        let mut stopped = self.stopped.subscribe();
-        if let Ok(seen) = stopped.wait_for(Option::is_some).await
+    /// Wait for the first recorded failure, including one reported by a task
+    /// that is still running.
+    pub(crate) async fn wait_for_failure(&self) -> &'static str {
+        let mut failures = self.first_failure.subscribe();
+        if let Ok(seen) = failures.wait_for(Option::is_some).await
             && let Some(name) = *seen
         {
             return name;
@@ -89,14 +89,13 @@ impl Background {
     }
 }
 
-/// Dropped when its task ends, a panic included.
-struct ReportUnlessCancelled {
+struct ReportUnexpectedTaskEnd {
     name: &'static str,
     cancel: CancellationToken,
-    stopped: watch::Sender<Option<&'static str>>,
+    first_failure: watch::Sender<Option<&'static str>>,
 }
 
-impl Drop for ReportUnlessCancelled {
+impl Drop for ReportUnexpectedTaskEnd {
     fn drop(&mut self) {
         if self.cancel.is_cancelled() && !std::thread::panicking() {
             return;
@@ -106,13 +105,12 @@ impl Drop for ReportUnlessCancelled {
             panicked = std::thread::panicking(),
             "background_task_stopped"
         );
-        record_first(&self.stopped, self.name);
+        record_first(&self.first_failure, self.name);
     }
 }
 
-/// The first reported task names the failure; later ones only log.
-fn record_first(stopped: &watch::Sender<Option<&'static str>>, name: &'static str) {
-    stopped.send_if_modified(|first| {
+fn record_first(failures: &watch::Sender<Option<&'static str>>, name: &'static str) {
+    failures.send_if_modified(|first| {
         if first.is_some() {
             return false;
         }
@@ -132,7 +130,7 @@ mod tests {
         let background = Background::new();
         background.spawn("panics", |_cancel| async { panic!("task defect") });
         assert_eq!(
-            tokio::time::timeout(Duration::from_secs(3), background.stopped())
+            tokio::time::timeout(Duration::from_secs(3), background.wait_for_failure())
                 .await
                 .unwrap(),
             "panics"

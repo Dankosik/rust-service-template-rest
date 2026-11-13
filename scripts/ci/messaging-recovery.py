@@ -886,7 +886,9 @@ class Session:
                         result["unclassified_lines"] += 1
                         continue
                     result["events"][event] = result["events"].get(event, 0) + 1
-                    if event == "effect_failed":
+                    if event == "worker_failed" and fields.get("failure.kind") == "consumer_stopped":
+                        result["events"]["consumer_stopped"] = result["events"].get("consumer_stopped", 0) + 1
+                    elif event == "effect_failed":
                         code = errors.get(fields.get("error"), "unclassified")
                         result["effect_errors"][code] = result["effect_errors"].get(code, 0) + 1
                     elif event == "delivery_failed":

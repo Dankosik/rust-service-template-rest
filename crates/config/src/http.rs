@@ -44,10 +44,12 @@ pub struct HttpConfig {
     /// being accepted. Production-shaped on purpose; local overlays set `0s`.
     #[serde(with = "humantime_serde")]
     pub readiness_propagation_delay: Duration,
-    /// Time a connection may take to deliver a complete request head. hyper
-    /// restarts this timer whenever an HTTP/1 connection goes idle, so it is
-    /// also the HTTP/1 keep-alive idle bound. HTTP/2 idle uses a separate
-    /// PING cadence.
+    /// Separate time limits of this duration apply to protocol detection and
+    /// reading a complete HTTP/1 request head. On the first request, those
+    /// waits can add up to twice this value. The HTTP/1 timer also bounds
+    /// keep-alive idle time. HTTP/2 request headers have a size limit
+    /// (`max_header_bytes`) and no read timeout from this setting. HTTP/2
+    /// idle uses a separate PING cadence.
     #[serde(with = "humantime_serde")]
     pub header_read_timeout: Duration,
     /// Budget through the response head, including admission and request body
@@ -69,6 +71,8 @@ pub struct HttpConfig {
     /// Accepted connections at once. At the cap the accept loop closes the
     /// socket with no HTTP response. Zero accepts without a bound;
     /// [`Self::connection_cap`] gives the adapter form.
+    /// HTTP/2 can run several handlers on one connection, so the two limits
+    /// can be sized independently.
     #[serde(deserialize_with = "crate::de::unsigned_count")]
     pub max_connections: u32,
     /// Age after which a connection is told to finish and close, so its
@@ -191,15 +195,6 @@ impl HttpConfig {
         )?;
         in_flight_range("http.max_in_flight", self.max_in_flight)?;
         connection_count_range("http.max_connections", self.max_connections)?;
-        if self.max_connections != 0 && self.max_connections < self.max_in_flight {
-            return Err(ValidationError::new(
-                "http.max_connections",
-                format!(
-                    "must be >= http.max_in_flight ({}), got {}",
-                    self.max_in_flight, self.max_connections
-                ),
-            ));
-        }
         connection_age_range("http.max_connection_age", self.max_connection_age)
     }
 }
@@ -255,12 +250,7 @@ mod tests {
     }
 
     #[test]
-    fn connection_cap_cannot_undercut_in_flight() {
-        let cfg = HttpConfig {
-            max_connections: 100,
-            ..HttpConfig::default()
-        };
-        assert_eq!(cfg.validate().unwrap_err().key, "http.max_connections");
+    fn connection_cap_defaults_to_4096_and_zero_disables_it() {
         let unbounded = HttpConfig {
             max_connections: 0,
             ..HttpConfig::default()
@@ -270,15 +260,6 @@ mod tests {
         assert_eq!(
             HttpConfig::default().connection_cap().map(NonZeroU32::get),
             Some(4096)
-        );
-        assert_eq!(
-            HttpConfig {
-                max_in_flight: 0,
-                max_connections: 0,
-                ..HttpConfig::default()
-            }
-            .in_flight_cap(),
-            None
         );
     }
 

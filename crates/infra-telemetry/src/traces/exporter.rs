@@ -1,9 +1,12 @@
 //! The OTLP span exporter, built from typed configuration and the standard
 //! `OTEL_EXPORTER_OTLP_*` variables.
 //!
-//! The typed endpoint wins over the standard endpoint variables, which the
-//! SDK reads itself. This template always builds OTLP/HTTP protobuf and does
-//! not honor `OTEL_EXPORTER_OTLP_PROTOCOL`.
+//! The typed endpoint wins over the standard endpoint variables. Otherwise the
+//! SDK usually resolves the URL. If `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` holds
+//! only whitespace, we pass an explicit traces URL from the general endpoint
+//! when available so the SDK can use that fallback.
+//! This template always builds OTLP/HTTP protobuf and does not honor
+//! `OTEL_EXPORTER_OTLP_PROTOCOL`.
 //! When the typed endpoint selects the collector, ambient header variables
 //! are refused because the SDK would merge them into the typed request, so
 //! one collector's credential is never sent to another.
@@ -32,7 +35,7 @@ use opentelemetry_otlp::{
     WithHttpConfig,
 };
 
-use super::{EndpointSource, TracingError, TracingOptions};
+use super::{EndpointSource, TracingError};
 
 /// Standard trust variables, each a path to a PEM file; the traces variant
 /// wins.
@@ -82,14 +85,10 @@ impl Endpoint<'_> {
 /// A blank variable is vacant. The SDK falls back to `localhost:4318` for
 /// an empty one and fails on a blank one, so the decision is made here.
 pub(super) fn resolve_endpoint(
-    options: &TracingOptions,
+    typed_endpoint: Option<&str>,
     env: impl Fn(&str) -> Option<OsString>,
 ) -> Result<Option<Endpoint<'_>>, TracingError> {
-    if let Some(endpoint) = options
-        .otlp_endpoint
-        .as_deref()
-        .filter(|endpoint| !endpoint.trim().is_empty())
-    {
+    if let Some(endpoint) = typed_endpoint.filter(|endpoint| !endpoint.trim().is_empty()) {
         // The SDK reads the traces header variable whenever it holds
         // Unicode, even empty, and the general one only otherwise.
         let name = if env(OTEL_EXPORTER_OTLP_TRACES_HEADERS)
