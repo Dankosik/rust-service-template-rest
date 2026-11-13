@@ -6,10 +6,11 @@ use infra_jobs::Started;
 // template:begin messaging:worker-resources-messaging-import
 use infra_messaging::{ConsumerHandle, Messaging, MessagingStartup};
 // template:end messaging:worker-resources-messaging-import
-// template:begin jobs:worker-resources-postgres-import
-use infra_postgres::PgPool;
-// template:end jobs:worker-resources-postgres-import
 use infra_telemetry::{LoggerGuard, TracerProviderHandle};
+
+// template:begin jobs:worker-resources-postgres-import
+use crate::bootstrap::postgres::PoolResource;
+// template:end jobs:worker-resources-postgres-import
 
 #[derive(Debug, Default)]
 pub(crate) struct Listeners {
@@ -36,7 +37,7 @@ pub(crate) struct Resources {
     pub(crate) broker: Option<BrokerResource>,
     // template:end messaging:worker-shutdown-resources-messaging
     // template:begin jobs:worker-shutdown-resources-pool
-    pub(crate) pool: Option<PgPool>,
+    pub(crate) pool: Option<PoolResource>,
     // template:end jobs:worker-shutdown-resources-pool
     pub(crate) listeners: Listeners,
     pub(crate) readiness: Option<Readiness>,
