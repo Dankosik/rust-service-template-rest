@@ -68,9 +68,11 @@ beside `get`, `set`, and `delete`, sharing bounded connections and observation.
 Feature behavior remains provider-free; composition or a service adapter calls
 `infra-cache` and translates feature-defined requests and results. No raw
 connection or generic cache interface is exposed to a feature. These additional
-capabilities are not in this profile. Readiness remains an opt-in through
-`cache.probe()` in `crates/service/src/bootstrap/mod.rs`. Sentinel, Cluster,
-and pools stay closed without an accepted topology or command requirement.
+capabilities are not in this profile.
+[Cache bootstrap](../../crates/service/src/bootstrap/cache.rs) uses
+`cache.probe()` for the bounded startup check. A service that requires the
+cache can register the probe for readiness. Sentinel, Cluster, and pools stay
+closed without an accepted topology or command requirement.
 
 ## Ownership and proving surfaces
 
