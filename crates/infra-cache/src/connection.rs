@@ -142,9 +142,6 @@ struct Shared {
 
 enum State {
     Connecting,
-    /// The published generation. The driver's disconnect push may cancel its
-    /// `retired` token while the state still names it; [`Shared::acquire`]
-    /// refuses that token and the supervisor's [`Shared::retire`] moves the state.
     Connected(Arc<Generation>),
     /// Observable during backoff; the supervisor keeps retrying.
     SetupFailed(ErrorType),
@@ -156,9 +153,9 @@ struct Generation {
     caller_capacity: Arc<Semaphore>,
     // Each message owns a caller reservation, which bounds the channel.
     abandoned: mpsc::UnboundedSender<AbandonedReply>,
-    /// Cancelled by the driver's disconnect push, [`Shared::close`], or
-    /// [`Shared::retire`]. A cancelled token is never handed out, even while
-    /// [`State::Connected`] still names this generation.
+    /// Once cancelled, [`Shared::acquire`] stops handing out this generation
+    /// even while [`State::Connected`] still names it. The supervisor then
+    /// withdraws it through [`Shared::retire`].
     retired: CancellationToken,
 }
 
@@ -337,10 +334,14 @@ where
             std::mem::replace(&mut self.reply, ReplyState::Keep)
             && let Some(reservation) = self.reservation.take()
         {
+            let keeps_generation = self.keeps_generation;
+            let retired = self.generation.retired.clone();
             let _ = self.generation.abandoned.send(AbandonedReply {
                 reservation,
                 reply: Box::pin(async move {
-                    let _ = reply.await;
+                    if !keeps_generation(&reply.await) {
+                        retired.cancel();
+                    }
                 }),
             });
         }
@@ -881,7 +882,9 @@ async fn maintain(
         tokio::select! {
             biased;
             () = generation.retired.cancelled() => return,
-            () = sleep_until(next_refresh), if rotation.is_some() => {
+            // Keep the start-to-start refresh cadence while letting an older
+            // PING run after a refresh that consumed its entire interval.
+            () = sleep_until(next_refresh), if rotation.is_some() && next_refresh <= next_ping => {
                 // A rejected AUTH must not add its duration to the next refresh.
                 next_refresh = Instant::now() + PASSWORD_REFRESH_INTERVAL;
                 if let Some(rotation) = rotation.as_mut()
