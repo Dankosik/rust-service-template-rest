@@ -932,6 +932,8 @@ mod tests {
         assert!(request.contains("authorization: Basic YSUzQWI6Yytk\r\n"));
 
         let diagnostics = Diagnostics::default();
+        let _registration_anchor =
+            tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         let dispatch = tracing::Dispatch::new(diagnostics.clone());
         for content_type in ["", "content-type: text/plain\r\n"] {
             let response = format!(
