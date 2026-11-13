@@ -205,7 +205,8 @@ impl Consumer {
         })
     }
 
-    /// Starts admission under the root token; admitted work has its own lifetime.
+    /// Starts the pull loop. Cancelling `cancel` stops admitting new deliveries.
+    /// Admitted deliveries keep their handler and settlement allowances during drain.
     #[must_use]
     pub fn start(self, cancel: &CancellationToken) -> ConsumerHandle {
         let stop = cancel.child_token();

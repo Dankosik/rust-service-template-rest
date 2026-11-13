@@ -82,7 +82,7 @@ impl Record {
         })
     }
 
-    fn prepared(&self) -> Result<PreparedEvent> {
+    fn restore_event(&self) -> Result<PreparedEvent> {
         let payload = STANDARD
             .decode(&self.payload_base64)
             .map_err(|_| "payload_encoding")?;
@@ -415,7 +415,7 @@ async fn inspect(args: &[String], resources: &mut Resources) -> Result<()> {
         );
         return Ok(());
     };
-    let (inspection, publication_id, reason) = match record.prepared() {
+    let (inspection, publication_id, reason) = match record.restore_event() {
         Ok(event) => ("restorable", Some(event.publication_id().to_owned()), None),
         Err(reason) => ("malformed_unrestorable", None, Some(reason)),
     };
@@ -519,7 +519,7 @@ async fn redrive(args: &[String], resources: &mut Resources, deadline: Instant) 
         return Err("selection_version");
     }
     let config = owned_connection(&selection, &selection_hash)?;
-    let prepared = selection.record.prepared()?;
+    let prepared = selection.record.restore_event()?;
     if selection.publication_id.as_deref() != Some(prepared.publication_id()) {
         return Err("selection_identity");
     }
@@ -693,9 +693,9 @@ mod tests {
                 "NATS/1.0\r\nMessage-Id: {id}\r\nEvent-Type: {event_type}\r\nEvent-Schema: v2\r\nCreated-At: 2026-09-29T10:00:00Z\r\nOriginal-Subject: orders.created\r\n\r\n"
             ));
             if restorable {
-                assert_eq!(record.prepared().unwrap().message_id(), "event-1");
+                assert_eq!(record.restore_event().unwrap().message_id(), "event-1");
             } else {
-                assert_eq!(record.prepared(), Err("unrestorable"));
+                assert_eq!(record.restore_event(), Err("unrestorable"));
             }
         }
     }
