@@ -51,8 +51,9 @@ pub struct TracingOptions {
     pub service_name: String,
     pub service_version: String,
     pub vcs_revision: String,
-    /// Reported as `service.instance.id`; `None` reports the host name, and
-    /// blank omits the attribute.
+    /// Overrides the SDK's detected `service.instance.id`. `None` uses the
+    /// hostname. A blank value leaves any value from
+    /// `OTEL_RESOURCE_ATTRIBUTES` in place.
     pub instance_id: Option<String>,
     pub deployment_environment: String,
     pub sampler: ResolvedSampler,
@@ -74,8 +75,7 @@ pub enum EndpointSource {
 }
 
 impl EndpointSource {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
+    const fn as_str(self) -> &'static str {
         match self {
             Self::Typed => "typed",
             Self::Environment => "environment",
