@@ -20,7 +20,7 @@ mod maintenance;
 use std::time::Duration;
 
 use infra_postgres::{Isolation, TxOptions};
-use sqlx::postgres::{PgPool, types::PgInterval};
+use sqlx::postgres::PgPool;
 
 pub use attempt::{
     AttemptError, Attempted, CallerIdentity, CallerKind, Digest, HeaderPair, Record, ScopeKey,
@@ -38,14 +38,19 @@ const READ_COMMITTED: TxOptions = TxOptions {
     read_only: false,
 };
 
+// Leave room for adding the interval to the server timestamp. An interval
+// near the wire-format limit can encode successfully and still overflow there.
+const MAX_RETENTION_DAYS: u64 = 36_500;
+const MAX_RETENTION: Duration = Duration::from_hours(MAX_RETENTION_DAYS * 24);
+
 #[derive(Clone, Debug)]
 pub struct Store {
     pool: PgPool,
-    retention: PgInterval,
+    retention: Duration,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("retention exceeds the PostgreSQL interval range in microseconds")]
+#[error("retention exceeds the maximum of {MAX_RETENTION_DAYS} days")]
 pub struct InvalidRetention;
 
 impl Store {
@@ -56,17 +61,14 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// Returns [`InvalidRetention`] when the whole microseconds exceed the
-    /// range of a PostgreSQL interval's time component.
+    /// Returns [`InvalidRetention`] when the duration exceeds 36,500 days.
     pub fn new(pool: PgPool, retention: Duration) -> Result<Self, InvalidRetention> {
-        let microseconds = i64::try_from(retention.as_micros()).map_err(|_| InvalidRetention)?;
+        if retention > MAX_RETENTION {
+            return Err(InvalidRetention);
+        }
         Ok(Self {
             pool,
-            retention: PgInterval {
-                months: 0,
-                days: 0,
-                microseconds,
-            },
+            retention: Duration::new(retention.as_secs(), retention.subsec_micros() * 1_000),
         })
     }
 }
@@ -76,14 +78,20 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn a_retention_outside_the_postgres_interval_range_is_rejected() {
+    async fn retention_is_bounded_before_the_store_can_run_work() {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgres://localhost/unused")
             .expect("lazy pool does no I/O");
-        let max = Duration::from_micros(i64::MAX.unsigned_abs());
+        let max = Duration::from_hours(36_500 * 24);
         assert!(Store::new(pool.clone(), max).is_ok());
-        let rejected = Store::new(pool.clone(), max + Duration::from_micros(1));
-        assert_eq!(rejected.unwrap_err(), InvalidRetention);
+        for too_long in [
+            max + Duration::from_nanos(1),
+            Duration::from_micros(i64::MAX.unsigned_abs()),
+            Duration::from_secs(10_000_000_000_000),
+        ] {
+            let rejected = Store::new(pool.clone(), too_long);
+            assert_eq!(rejected.unwrap_err(), InvalidRetention);
+        }
         pool.close().await;
     }
 }

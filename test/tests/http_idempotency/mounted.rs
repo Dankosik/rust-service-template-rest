@@ -1761,15 +1761,13 @@ async fn p9_postgres_timeouts_allow_a_same_key_retry(pool: PgPool) {
         ("lock_timeout", "55P03", 1),
         ("transaction_timeout", "25P04", 2),
     ] {
-        pool.execute(
-            format!(
-                "DO $$ BEGIN EXECUTE format(\
-                 'ALTER DATABASE %I SET lock_timeout = 0', current_database()); \
-                 EXECUTE format('ALTER DATABASE %I SET %I = %L', \
-                 current_database(), '{setting}', '1s'); END $$"
-            )
-            .as_str(),
-        )
+        pool.execute(sqlx::AssertSqlSafe(format!(
+            "DO $$ BEGIN \
+             EXECUTE format('ALTER DATABASE %I SET lock_timeout = 0', current_database()); \
+             EXECUTE format('ALTER DATABASE %I SET transaction_timeout = 0', current_database()); \
+             EXECUTE format('ALTER DATABASE %I SET %I = %L', current_database(), '{setting}', '1s'); \
+             END $$"
+        )))
         .await
         .expect("set the timeout for new sessions");
         let mounted = Mounted::new(template_pool(&dsn, 1).await, BUDGET).await;

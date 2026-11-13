@@ -19,13 +19,13 @@
 //! record is never replaced, so it needs no second read.
 
 use std::fmt;
+use std::time::Duration;
 
 use bytes::Bytes;
 use infra_postgres::{
     Tx, TxError, failure_cause, in_tx_with, in_tx_with_acquire_deadline, is_transient, observed,
     sqlstate,
 };
-use sqlx::postgres::types::PgInterval;
 
 use crate::{READ_COMMITTED, Store};
 
@@ -369,7 +369,7 @@ async fn write(
     caller: &CallerIdentity,
     fingerprint: &Digest,
     record: &Record,
-    retention: PgInterval,
+    retention: Duration,
 ) -> Result<(), AttemptError> {
     // Replaces only an expired row; a live row leaves no row affected.
     let written = observed(
@@ -392,7 +392,7 @@ async fn write(
             caller.issuer,
             caller.kind.as_str(),
             caller.value,
-            retention,
+            retention as _,
         )
         .execute(tx),
     )
@@ -485,8 +485,6 @@ fn refused(phase: &'static str, class: AttemptError, cause: &'static str) -> Att
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use super::*;
 
     #[test]
