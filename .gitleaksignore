@@ -12,10 +12,10 @@ dcbea6eb9989f772e96e18fcb0f606d812f1a614:env/nats/credential-rotation.conf:jwt:8
 dcbea6eb9989f772e96e18fcb0f606d812f1a614:env/nats/credential-rotation.conf:jwt:16
 dcbea6eb9989f772e96e18fcb0f606d812f1a614:env/nats/credential-rotation.conf:jwt:19
 
-# aws-smithy-http-client 1.4.2 published localhost TLS test key, documented by
+# aws-smithy-http-client 1.5.1 published localhost TLS test key, documented by
 # its regeneration script and byte-matched to the official crate archive.
 # server.rsa SHA256: 3b09634bf7c6dda3ae5e628b0fffbde48baad919d23a93067a44f11ac7d5e674
-# crate archive SHA256: 7bd25384a4e437aa8d8f339afad4b69e786b936a7cb10db668a7aaf66717b1a8
+# crate archive SHA256: aeca69f65362f7375891008ea525fd440ad6db1836458ac188c87b126804114e
 800a1c02fd0a076f3e56649d03588690f860e5c3:vendor/aws-smithy-http-client/tests/server.rsa:private-key:1
 # Intentionally public synthetic rotation users/configuration, documented by
 # env/nats/auth-rotation/README.md at this exact historical commit. Their trust

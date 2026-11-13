@@ -203,7 +203,7 @@ mod tests {
     #[test]
     fn an_overbound_captured_tracestate_loses_long_then_trailing_members() {
         let long = format!("long={}", "l".repeat(TRACESTATE_LONG_MEMBER_BYTES));
-        let short: Vec<String> = (0..60).map(|index| format!("v{index:02}=abcd")).collect();
+        let short = Vec::from_fn(60, |index| format!("v{index:02}=abcd"));
         let captured = Carrier {
             trace_parent: Some(PARENT.to_owned()),
             trace_state: Some(format!("first=1,{long},{}", short.join(","))),

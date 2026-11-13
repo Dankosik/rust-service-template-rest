@@ -1552,18 +1552,16 @@ async fn the_configured_limit_sheds_the_next_call_without_starving_health() {
     .unwrap();
 
     let held = fixture.echo_client();
-    let calls: Vec<_> = (0..2)
-        .map(|_| {
-            let mut client = held.clone();
-            tokio::spawn(async move {
-                client
-                    .unary(request(UnaryRequest {
-                        message: "hold".to_owned(),
-                    }))
-                    .await
-            })
+    let calls = Vec::from_fn(2, |_| {
+        let mut client = held.clone();
+        tokio::spawn(async move {
+            client
+                .unary(request(UnaryRequest {
+                    message: "hold".to_owned(),
+                }))
+                .await
         })
-        .collect();
+    });
     fixture.echo.hold.wait_for(2).await;
 
     let exhausted = timeout(

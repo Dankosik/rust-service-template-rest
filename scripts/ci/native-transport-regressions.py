@@ -66,7 +66,7 @@ TARGETS = (
         "jetstream::consumer::pull::batch_completion_tests::partial_and_empty_batches_keep_their_existing_termination",
         "jetstream::consumer::pull::batch_completion_tests::completion_preserves_the_existing_watchdog",
     )),
-    NativeTarget("aws-smithy-http-client", "1.4.2", ("rustls-aws-lc", "hyper-rustls/aws-lc-rs"), (
+    NativeTarget("aws-smithy-http-client", "1.5.1", ("rustls-aws-lc", "hyper-rustls/aws-lc-rs"), (
         "client::test::same_family_candidate_fallback_and_inner_timeout_classification",
     )),
     NativeTarget("hyper-util", "0.1.21", ("client-legacy", "tokio"), (

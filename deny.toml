@@ -13,15 +13,6 @@ all-features = false
 
 [advisories]
 yanked = "deny"
-# Every ignore names the crate, why it is acceptable, and what reopens it.
-ignore = [
-    # pin-utils is archived, with no known vulnerability. Only aws-smithy-http
-    # 0.64.1 and aws-smithy-runtime 1.15.0 use it. Their releases without it
-    # need aws-smithy-http-client 1.5, whose vendored patch is rebased with the
-    # AWS SDK family bump (vendor/aws-smithy-http-client/PATCHES.md).
-    # Reopens at that bump, or if the advisory reports a vulnerability.
-    { id = "RUSTSEC-2026-0441", reason = "unmaintained only; removed by the next AWS SDK family bump" },
-]
 
 [licenses]
 # Permissive licenses that the current graph uses; cargo-deny warns on an

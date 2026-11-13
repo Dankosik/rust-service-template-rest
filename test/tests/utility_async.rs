@@ -39,7 +39,7 @@ async fn fanout_is_bounded_without_spawning_one_task_per_item() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(values, (0..12).map(|id| id * 2).collect::<Vec<_>>());
+    assert_eq!(values, Vec::from_fn(12, |id| id * 2));
     assert!(peak.load(Ordering::SeqCst) <= 3);
     assert!(peak.load(Ordering::SeqCst) > 1);
     assert_eq!(active.load(Ordering::SeqCst), 0);

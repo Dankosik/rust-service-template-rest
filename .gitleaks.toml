@@ -328,8 +328,8 @@ regexes = [
 
 
 # template:begin object-storage:gitleaks-object-storage-fixtures
-# Public aws-smithy-http-client 1.4.2 fixtures, verified against archive SHA256:
-# 7bd25384a4e437aa8d8f339afad4b69e786b936a7cb10db668a7aaf66717b1a8
+# Public aws-smithy-http-client 1.5.1 fixtures, verified against archive SHA256:
+# aeca69f65362f7375891008ea525fd440ad6db1836458ac188c87b126804114e
 # Exceptions require exact path AND exact detected bytes for the named rule.
 # Gitleaks 8.30.1 private-key matches the complete PEM block; a changed or
 # additional key is still detected. Remove these exceptions with the vendor.
