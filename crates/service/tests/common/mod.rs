@@ -4,20 +4,17 @@ use std::time::{Duration, Instant};
 
 /// The status and body of one GET; an error status is a response, not an error.
 pub(crate) fn get(url: &str) -> Result<(u16, String), ureq::Error> {
-    match ureq::get(url)
+    ureq::get(url)
         .config()
         .timeout_global(Some(Duration::from_secs(3)))
         .http_status_as_error(false)
         .build()
         .call()
-    {
-        Ok(mut response) => {
+        .map(|mut response| {
             let status = response.status().as_u16();
             let body = response.body_mut().read_to_string().unwrap_or_default();
-            Ok((status, body))
-        }
-        Err(err) => Err(err),
-    }
+            (status, body)
+        })
 }
 
 #[expect(

@@ -1026,10 +1026,7 @@ async fn p4_population_distinguishes_unknown_empty_and_locked_expired_records(po
             }
         })
         .await;
-        assert_eq!(
-            gauge("postgres_maintenance_present"),
-            if expired { 1.0 } else { 0.0 }
-        );
+        assert_eq!(gauge("postgres_maintenance_present"), f64::from(expired));
         assert_eq!(
             gauge("postgres_maintenance_oldest_timestamp_seconds"),
             expected_oldest.unwrap_or(0.0)

@@ -717,7 +717,7 @@ async fn mounted_percent_decoded_endpoint_reaches_signature_rejection(pool: PgPo
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "the fixture occupies the only pool permit to observe HTTP acquisition cancellation"
 )]

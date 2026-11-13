@@ -1103,7 +1103,7 @@ async fn authentication_and_scope_authorization_work_without_a_composer() {
                 .lines()
                 .filter_map(|line| {
                     let series = line.strip_prefix(name)?;
-                    if !series.starts_with('{') && !series.starts_with(' ') {
+                    if !series.starts_with(['{', ' ']) {
                         return None;
                     }
                     let (_, value) = series.rsplit_once(' ')?;

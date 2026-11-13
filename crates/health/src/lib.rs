@@ -536,7 +536,7 @@ impl Readiness {
             }
             // Written under the lock so it cannot overwrite a concurrent drain.
             let ready = !state.draining && state.progress_loss().is_none() && next.verdict.is_ok();
-            metrics::gauge!(READY_METRIC).set(if ready { 1.0 } else { 0.0 });
+            metrics::gauge!(READY_METRIC).set(f64::from(ready));
             metrics::gauge!(LAST_COMPLETED_METRIC).set(completed_at);
             state.last_check = Some(next);
         });

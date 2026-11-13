@@ -122,7 +122,7 @@ impl OAuthConfig {
     const EXCHANGE_CACHE_CAPACITY_RANGE: std::ops::RangeInclusive<u32> = 1..=65_536;
     /// Matches introspection's default while bounding distinct token attempts.
     const DEFAULT_PROVIDER_CONCURRENCY: std::num::NonZeroU32 =
-        const { std::num::NonZeroU32::new(32).expect("32 is nonzero") };
+        std::num::NonZeroU32::new(32).expect("32 is nonzero");
 }
 
 const fn default_exchange_cache_capacity() -> u32 {

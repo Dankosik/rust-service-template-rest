@@ -667,7 +667,7 @@ fn decode_chunks(mut input: &[u8]) -> Result<Vec<u8>> {
     let mut output = Vec::new();
     loop {
         let end = input
-            .windows(2)
+            .array_windows()
             .position(|pair| pair == b"\r\n")
             .ok_or("invalid chunk header")?;
         let size = usize::from_str_radix(
@@ -683,11 +683,14 @@ fn decode_chunks(mut input: &[u8]) -> Result<Vec<u8>> {
         if size == 0 {
             return Ok(output);
         }
-        if size > input.len().saturating_sub(2) || &input[size..size + 2] != b"\r\n" {
+        let Some((chunk, rest)) = input.split_at_checked(size) else {
             return Err("incomplete chunk".into());
-        }
-        output.extend_from_slice(&input[..size]);
-        input = &input[size + 2..];
+        };
+        let Some(rest) = rest.strip_prefix(b"\r\n") else {
+            return Err("incomplete chunk".into());
+        };
+        output.extend_from_slice(chunk);
+        input = rest;
     }
 }
 
