@@ -66,38 +66,6 @@ impl ServiceAuthConfig {
         }
     }
 
-    /// This service's signing key, if it has one: `key_id` and `private_key`
-    /// are set together or not at all.
-    ///
-    /// # Errors
-    ///
-    /// Returns the key of the pair that is missing when only one is set.
-    pub fn signing_key(&self) -> Result<Option<ServiceSigningKey<'_>>, ValidationError> {
-        let Self::Jwt {
-            key_id,
-            private_key,
-            ..
-        } = self
-        else {
-            return Ok(None);
-        };
-        match (key_id, private_key) {
-            (Some(key_id), Some(private_key)) => Ok(Some(ServiceSigningKey {
-                key_id,
-                private_key,
-            })),
-            (Some(_), None) => Err(missing(
-                "service_auth.private_key",
-                "service_auth.key_id is set",
-            )),
-            (None, Some(_)) => Err(missing(
-                "service_auth.key_id",
-                "service_auth.private_key is set",
-            )),
-            (None, None) => Ok(None),
-        }
-    }
-
     pub(crate) fn validate(
         &self,
         app_env: &str,
@@ -117,7 +85,8 @@ impl ServiceAuthConfig {
                 name,
                 jwt_type,
                 trust,
-                ..
+                key_id,
+                private_key,
             } => {
                 for (key, value) in [
                     ("service_auth.name", name),
@@ -126,20 +95,47 @@ impl ServiceAuthConfig {
                 ] {
                     required_when(key, value, "service_auth.mode = jwt")?;
                 }
-                self.signing_key()?;
+                ServiceSigningKey::from_optional_parts(key_id.as_deref(), private_key.as_ref())?;
                 Ok(())
             }
         }
     }
 }
 
-/// The signing key [`ServiceAuthConfig::signing_key`] admitted.
 #[derive(Clone, Copy, Debug)]
 pub struct ServiceSigningKey<'a> {
     /// The `kid` receivers hold the public key under.
     pub key_id: &'a str,
     /// PKCS#8 PEM of the EC P-256 signing key.
     pub private_key: &'a SecretString,
+}
+
+impl<'a> ServiceSigningKey<'a> {
+    /// Returns `None` when both parts are absent and the service only verifies callers.
+    ///
+    /// # Errors
+    ///
+    /// Names the missing configuration key when only one part is set.
+    pub fn from_optional_parts(
+        key_id: Option<&'a str>,
+        private_key: Option<&'a SecretString>,
+    ) -> Result<Option<Self>, ValidationError> {
+        match (key_id, private_key) {
+            (Some(key_id), Some(private_key)) => Ok(Some(Self {
+                key_id,
+                private_key,
+            })),
+            (Some(_), None) => Err(missing(
+                "service_auth.private_key",
+                "service_auth.key_id is set",
+            )),
+            (None, Some(_)) => Err(missing(
+                "service_auth.key_id",
+                "service_auth.private_key is set",
+            )),
+            (None, None) => Ok(None),
+        }
+    }
 }
 
 #[cfg(test)]

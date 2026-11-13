@@ -287,18 +287,10 @@ impl AuthnConfig {
     ///
     /// # Errors
     ///
-    /// Returns an error when the mode is not `oidc-introspection` or the
-    /// secret is absent.
-    pub fn required_introspection_client_secret(&self) -> Result<&SecretString, ValidationError> {
-        let secret = if let Self::OidcIntrospection {
-            introspection_client_secret,
-            ..
-        } = self
-        {
-            introspection_client_secret.as_ref()
-        } else {
-            None
-        };
+    /// Names the variable to set when the secret is absent.
+    pub fn require_introspection_client_secret(
+        secret: Option<&SecretString>,
+    ) -> Result<&SecretString, ValidationError> {
         crate::validate::required(
             "authn.introspection_client_secret",
             secret,
@@ -337,6 +329,7 @@ impl AuthnConfig {
                 issuer,
                 introspection_endpoint,
                 introspection_client_id,
+                introspection_client_secret,
                 cache_capacity,
                 cache_ttl,
                 ..
@@ -354,7 +347,7 @@ impl AuthnConfig {
                     introspection_client_id,
                     "authn.mode = oidc-introspection",
                 )?;
-                self.required_introspection_client_secret()?;
+                Self::require_introspection_client_secret(introspection_client_secret.as_ref())?;
                 crate::validate::int_range(
                     "authn.cache_capacity",
                     *cache_capacity as u64,
