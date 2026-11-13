@@ -202,10 +202,10 @@ pub fn prepare_pool(dsn: &Dsn, options: &PoolOptions<'_>) -> PgPool {
     crate::observe::describe();
     let mut settings = Vec::new();
     if options.session_budgets == SessionBudgets::Startup {
-        settings.push(("statement_timeout", to_runtime_param(STATEMENT_TIMEOUT)));
+        settings.push(("statement_timeout", format_pg_duration(STATEMENT_TIMEOUT)));
         settings.push((
             "idle_in_transaction_session_timeout",
-            to_runtime_param(IDLE_IN_TRANSACTION_TIMEOUT),
+            format_pg_duration(IDLE_IN_TRANSACTION_TIMEOUT),
         ));
         if let Some(level) = options.default_isolation.as_sql() {
             settings.push(("default_transaction_isolation", level.to_owned()));
@@ -463,13 +463,13 @@ pub async fn connect_session(
     let settings = [
         (
             "statement_timeout",
-            to_runtime_param(options.statement_timeout),
+            format_pg_duration(options.statement_timeout),
         ),
         (
             "idle_in_transaction_session_timeout",
-            to_runtime_param(options.idle_in_transaction_timeout),
+            format_pg_duration(options.idle_in_transaction_timeout),
         ),
-        ("lock_timeout", to_runtime_param(options.lock_timeout)),
+        ("lock_timeout", format_pg_duration(options.lock_timeout)),
     ]
     .into_iter()
     .chain(
@@ -527,7 +527,7 @@ fn session_connect_options<'a>(
 /// `statement_timeout`, `idle_in_transaction_session_timeout`, and
 /// `lock_timeout` — that is not a zero-length bound.
 #[must_use]
-pub fn to_runtime_param(duration: Duration) -> String {
+pub fn format_pg_duration(duration: Duration) -> String {
     format!("{}ms", duration.as_nanos().div_ceil(1_000_000))
 }
 
@@ -551,10 +551,10 @@ mod tests {
 
     #[test]
     fn runtime_params_round_up_and_name_the_unit() {
-        assert_eq!(to_runtime_param(Duration::from_secs(8)), "8000ms");
-        assert_eq!(to_runtime_param(Duration::from_micros(1_500)), "2ms");
-        assert_eq!(to_runtime_param(Duration::from_nanos(1)), "1ms");
-        assert_eq!(to_runtime_param(Duration::ZERO), "0ms");
+        assert_eq!(format_pg_duration(Duration::from_secs(8)), "8000ms");
+        assert_eq!(format_pg_duration(Duration::from_micros(1_500)), "2ms");
+        assert_eq!(format_pg_duration(Duration::from_nanos(1)), "1ms");
+        assert_eq!(format_pg_duration(Duration::ZERO), "0ms");
     }
 
     #[test]

@@ -311,14 +311,17 @@ impl MaintenanceAttempt<'_> {
         self.succeeded_at(sample, MaintenanceClock::now());
     }
 
-    /// Whether the local clocks agree across the attempt and the sample's
-    /// times fall inside it.
-    fn accepts(&self, sample: PopulationSample, received: MaintenanceClock) -> bool {
+    fn validated_receipt_time(
+        &self,
+        sample: PopulationSample,
+        received: MaintenanceClock,
+    ) -> Option<f64> {
+        let received_at = received.wall?;
         let PopulationSample {
             observed_at_unix_seconds: observed_at,
             oldest_at_unix_seconds: oldest,
         } = sample;
-        self.requested.agrees_with(self.observer.previous_clock)
+        let valid = self.requested.agrees_with(self.observer.previous_clock)
             && received.agrees_with(self.requested)
             && observed_at.is_finite()
             && observed_at > 0.0
@@ -326,19 +329,18 @@ impl MaintenanceAttempt<'_> {
                 .requested
                 .wall
                 .is_some_and(|start| observed_at >= start - CLOCK_TOLERANCE_SECONDS)
-            && received
-                .wall
-                .is_some_and(|end| observed_at <= end + CLOCK_TOLERANCE_SECONDS)
+            && observed_at <= received_at + CLOCK_TOLERANCE_SECONDS
             && oldest
-                .is_none_or(|oldest| oldest.is_finite() && oldest > 0.0 && oldest <= observed_at)
+                .is_none_or(|oldest| oldest.is_finite() && oldest > 0.0 && oldest <= observed_at);
+        valid.then_some(received_at)
     }
 
     /// An invalid sample is a failed attempt that keeps the last-good one.
     fn succeeded_at(mut self, sample: PopulationSample, received: MaintenanceClock) {
-        if !self.accepts(sample, received) {
+        let Some(received_at) = self.validated_receipt_time(sample, received) else {
             self.failed_at(MaintenanceFailure::ClockInvalid, received);
             return;
-        }
+        };
         let PopulationSample {
             observed_at_unix_seconds: observed_at,
             oldest_at_unix_seconds: oldest,
@@ -353,7 +355,7 @@ impl MaintenanceAttempt<'_> {
             .set(if oldest.is_some() { 1.0 } else { 0.0 });
         self.observer.oldest.set(oldest.unwrap_or(0.0));
         self.observer.clock_valid.set(1.0);
-        self.observer.last_success.set(received.wall.unwrap_or(0.0));
+        self.observer.last_success.set(received_at);
         self.observer.last_attempt_success.set(1.0);
         self.outcome = AttemptOutcome::Succeeded;
         self.observer.observations(self.outcome).increment(1);

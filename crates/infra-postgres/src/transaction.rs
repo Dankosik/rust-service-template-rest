@@ -25,7 +25,7 @@ use tracing::Instrument;
 
 use crate::error::sqlstate;
 use crate::observe::{self, TransactionObservation, TransactionOutcome, observed};
-use crate::pool::{acquire, acquire_until, to_runtime_param};
+use crate::pool::{acquire, acquire_until, format_pg_duration};
 
 /// The stage that failed and what is known about the commit outcome.
 #[derive(Debug, thiserror::Error)]
@@ -103,7 +103,7 @@ pub async fn set_statement_timeout(tx: &mut Tx<'_>, timeout: Duration) -> Result
         "set statement timeout",
         sqlx::query!(
             "SELECT set_config('statement_timeout', $1, true)",
-            to_runtime_param(timeout)
+            format_pg_duration(timeout)
         )
         .fetch_one(&mut *tx),
     )
