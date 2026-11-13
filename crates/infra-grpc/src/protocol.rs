@@ -71,10 +71,19 @@ pub(crate) fn set_grpc_timeout(headers: &mut HeaderMap, remaining: Duration) {
     }
 }
 
-/// The code inferred from the response head. Without an initial `grpc-status`,
-/// the HTTP mapping is provisional until the stream ends.
+/// Decodes the initial response headers using tonic's status rules. If they
+/// omit `grpc-status`, the HTTP mapping is provisional until the stream ends.
+/// For generated clients, metrics reflect the RPC outcome after decoding the
+/// response.
 pub fn client_response_code<B>(response: &http::Response<B>) -> Option<tonic::Code> {
-    header_status_code(response.headers()).or_else(|| http_status_code(response.status()))
+    decoded_header_status_code(response.headers()).or_else(|| http_status_code(response.status()))
+}
+
+pub(crate) fn decoded_header_status_code(headers: &HeaderMap) -> Option<tonic::Code> {
+    if headers.contains_key("grpc-message") || headers.contains_key("grpc-status-details-bin") {
+        return tonic::Status::from_header_map(headers).map(|status| status.code());
+    }
+    header_status_code(headers)
 }
 
 pub(crate) fn header_status_code(headers: &HeaderMap) -> Option<tonic::Code> {

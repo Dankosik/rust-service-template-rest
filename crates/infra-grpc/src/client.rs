@@ -8,13 +8,14 @@ use http::{Request, Response};
 use hyper_util::client::legacy::connect::HttpConnector;
 use secrecy::{ExposeSecret as _, SecretString};
 use tonic::body::Body;
+use tonic::client::{ResponseStatusObserver as DecodedStatusObserver, TrackResponseStatus};
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
 use tower::{Service as _, ServiceExt as _};
 use tracing::Instrument as _;
 use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
 
 use crate::Error;
-use crate::call::{Held, ResponseCustody, ResponseStatusObserver, Side};
+use crate::call::{Held, Observation, ResponseCustody, ResponseStatusObserver, Side};
 use operation_context::{Deadline, OperationContext};
 use shared_rules::error_chain::DisplayErrorChain;
 use tokio::time::Instant;
@@ -77,9 +78,9 @@ impl ClientTimeout {
 /// One lazy, shared channel for a configured dependency.
 ///
 /// Construction performs neither DNS nor network I/O. Each call injects the
-/// current trace context and records the client span and metrics when the
-/// call's status arrives: in the response headers of a Trailers-Only answer,
-/// otherwise in the trailers that end the response stream.
+/// current trace context. Tonic clients record span and metrics from the
+/// decoded RPC outcome. Direct HTTP service callers observe the response
+/// status as their body yields it.
 ///
 /// An [`OperationContext`] in the request extensions, such as the one a
 /// handler received, also bounds the call: the earliest of its deadline and
@@ -298,10 +299,12 @@ impl PreparedCall {
         self.send_inner(|_| Ok(()), None).await
     }
 
-    /// Like [`Self::send`], with a synchronous callback for the response status.
-    /// It runs once for the gRPC status in the response headers or trailers.
-    /// If the body ends without one, a non-200 HTTP status supplies the code.
-    /// Local failures and bodies abandoned before a status is available skip it.
+    /// Like [`Self::send`], with a synchronous callback that runs once for the
+    /// code carried by the peer's `grpc-status` in the response headers or
+    /// trailers. If the response ends without that header, the callback
+    /// receives the code mapped from a non-200 HTTP status.
+    /// Local failures and bodies abandoned before a status is available skip
+    /// the callback. Generated-client metrics use the decoded RPC outcome.
     ///
     /// # Errors
     ///
@@ -342,7 +345,8 @@ impl PreparedCall {
             call,
             guard,
         } = self;
-        let (parts, body) = request.into_parts();
+        let (mut parts, body) = request.into_parts();
+        let track_decoded_status = parts.extensions.remove::<TrackResponseStatus>().is_some();
         let (body, upload) = crate::call::upload(body);
         let mut request = Request::from_parts(parts, body);
         let stopped = |reason| Side::Client.stopped(reason);
@@ -367,22 +371,32 @@ impl PreparedCall {
         .instrument(call.span().clone())
         .await;
         match result {
-            Ok(response) => Ok(crate::call::attach(
-                response,
-                call,
-                None,
-                ResponseCustody {
-                    on_status,
-                    context: Some(lifetime),
-                    held: Held {
-                        permit: None,
-                        upload: Some(upload),
-                        cancel_on_drop: Some(guard),
+            Ok(mut response) => {
+                let observation = if track_decoded_status {
+                    let span = call.span().clone();
+                    let observer = DecodedStatusObserver::new(move |code| call.finish(code));
+                    response.extensions_mut().insert(observer.clone());
+                    Observation::Decoded { span, observer }
+                } else {
+                    Observation::Transport(call)
+                };
+                Ok(crate::call::attach(
+                    response,
+                    observation,
+                    None,
+                    ResponseCustody {
+                        on_status,
+                        context: Some(lifetime),
+                        held: Held {
+                            permit: None,
+                            upload: Some(upload),
+                            cancel_on_drop: Some(guard),
+                        },
                     },
-                },
-                tonic::Status::code,
-            )
-            .map(Body::new)),
+                    tonic::Status::code,
+                )
+                .map(Body::new))
+            }
             Err(status) => {
                 call.finish(status.code());
                 Err(status)
