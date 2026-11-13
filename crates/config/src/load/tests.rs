@@ -277,7 +277,7 @@ fn malformed_toml_reports_its_position_without_echoing_input() {
 fn a_replaced_file_does_not_change_the_admitted_source() {
     let dir = tempfile::tempdir().unwrap();
     let path = write(&dir, "base.toml", "[log]\nlevel = \"debug\"\n");
-    let source = scan_file(&path, &mut BTreeSet::new()).unwrap();
+    let (source, _) = scan_file(&path, &mut BTreeSet::new()).unwrap();
     write(&dir, "base.toml", "[log]\nlevel = \"info\"\n");
 
     let merged = config::Config::builder()
