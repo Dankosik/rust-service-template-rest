@@ -244,7 +244,7 @@ pub(crate) fn opening_context(request: &Request) -> Option<&operation_context::O
 
 /// Longest wait for the rest of a rejected call's request body.
 const REJECT_DRAIN: Duration = Duration::from_millis(100);
-/// Most request bytes read from a rejected call before giving up.
+/// Stop draining after the frame that takes the total past this many bytes.
 const REJECT_DRAIN_BYTES: usize = 64 * 1024;
 
 /// Answers a call rejected before its handler, after reading the rest of its

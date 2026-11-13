@@ -1814,6 +1814,58 @@ async fn opened_stream_without_caller_deadline_outlives_both_opening_caps() {
 }
 
 #[tokio::test]
+async fn metadata_edits_cannot_change_the_prepared_deadline_on_the_wire() {
+    let peer = |request: axum::extract::Request| async move {
+        let mut response = Status::new(Code::Ok, "").into_http::<axum::body::Body>();
+        if let Some(timeout) = request.headers().get("grpc-timeout") {
+            response
+                .headers_mut()
+                .insert("grpc-timeout", timeout.clone());
+        }
+        response
+    };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the loopback peer echoes the timeout it received over HTTP/2"
+    )]
+    let app = axum::Router::new().route(ECHO_SERVICE_UNARY, axum::routing::post(peer));
+    let server = Server::bind(loopback(), app, server_options(limits()))
+        .await
+        .unwrap();
+    let client = plaintext_client(server.local_addr());
+    for original in [None, Some("30S")] {
+        let mut request = http::Request::builder()
+            .method("POST")
+            .uri(ECHO_SERVICE_UNARY)
+            .header("content-type", "application/grpc")
+            .body(tonic::body::Body::empty())
+            .unwrap();
+        if let Some(original) = original {
+            request
+                .headers_mut()
+                .insert("grpc-timeout", http::HeaderValue::from_static(original));
+        }
+        let mut prepared = client.prepare_call(request);
+        prepared
+            .headers_mut()
+            .insert("grpc-timeout", http::HeaderValue::from_static("1H"));
+        let response = timeout(WAIT, prepared.send()).await.unwrap().unwrap();
+        assert_eq!(response.headers()["grpc-status"], "0");
+        if original.is_some() {
+            let forwarded = infra_grpc::grpc_timeout(response.headers()).unwrap();
+            assert!((Duration::from_secs(20)..=Duration::from_secs(30)).contains(&forwarded));
+        } else {
+            assert!(!response.headers().contains_key("grpc-timeout"));
+        }
+    }
+    drop(client);
+    assert_eq!(
+        server.drain(Duration::from_secs(1)).await.unwrap(),
+        Drained::Complete
+    );
+}
+
+#[tokio::test]
 async fn supplied_caller_deadline_expires_open_stream_and_recovers_capacity() {
     let fixture = Fixture::limited(1).await;
     let adapter = infra_grpc::Client::with_timeout_policy(
