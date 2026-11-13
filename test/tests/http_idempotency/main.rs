@@ -107,7 +107,8 @@ async fn template_pool(dsn: &Dsn, max_connections: u32) -> PgPool {
 /// the store over it.
 async fn replica(dsn: &Dsn) -> (PgPool, Store) {
     let pool = template_pool(dsn, 3).await;
-    (pool.clone(), Store::new(pool, RETENTION))
+    let store = Store::new(pool.clone(), RETENTION).expect("retention fits PostgreSQL");
+    (pool, store)
 }
 
 /// Make every later session on the per-test database read-only by default;
@@ -702,7 +703,7 @@ async fn p4_an_expired_key_can_execute_while_a_replay_is_in_flight(pool: PgPool)
         .expect("the proxy port");
     let proxied = Dsn::admit(url.as_str()).expect("the proxied DSN is admitted");
     let replay_pool = template_pool(&proxied, 1).await;
-    let replaying = Store::new(replay_pool.clone(), RETENTION);
+    let replaying = Store::new(replay_pool.clone(), RETENTION).expect("retention fits PostgreSQL");
     let (writer_pool, writer) = replica(&dsn).await;
     let original = success(r#"{"id":1}"#);
     let replacement = success(r#"{"id":2}"#);
@@ -738,7 +739,8 @@ async fn p4_a_retention_with_a_sub_microsecond_part_writes_its_record(pool: PgPo
     let store_pool = template_pool(&dsn_for(&pool).await, 1).await;
     // Configuration accepts nanosecond units; `sqlx` binds an interval only
     // in whole microseconds.
-    let store = Store::new(store_pool.clone(), Duration::new(3_600, 123_456_789));
+    let store = Store::new(store_pool.clone(), Duration::new(3_600, 123_456_789))
+        .expect("retention fits PostgreSQL");
     let record = success(r#"{"id":1}"#);
     let written = execute(&store, SCOPE, INPUT, &record, &Work::default()).await;
     assert_eq!(committed(written), record);
@@ -832,7 +834,7 @@ async fn p4_cleanup_keeps_confirmed_progress_after_failure_and_counts_waiting_ca
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
     let _local = metrics::set_default_local_recorder(&recorder);
     let store_pool = template_pool(&dsn_for(&pool).await, 1).await;
-    let store = Store::new(store_pool.clone(), RETENTION);
+    let store = Store::new(store_pool.clone(), RETENTION).expect("retention fits PostgreSQL");
     seed(&pool, SEED_EXPIRED, 501).await;
     // The oldest 500 rows form the first committed batch. The remaining row
     // rejects deletion, so the second transaction must not count as progress.
@@ -1003,7 +1005,7 @@ async fn p4_population_distinguishes_unknown_empty_and_locked_expired_records(po
             .await
             .expect("the sole slot");
         let cancel = CancellationToken::new();
-        let store = Store::new(store_pool.clone(), RETENTION);
+        let store = Store::new(store_pool.clone(), RETENTION).expect("retention fits PostgreSQL");
         let mut task = Box::pin(store.run_cleanup(cancel.clone()));
         assert!(futures_util::poll!(&mut task).is_pending());
         assert_eq!(gauge("postgres_maintenance_observer_enabled"), 1.0);
