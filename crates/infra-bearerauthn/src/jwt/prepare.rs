@@ -177,7 +177,8 @@ async fn fetch_discovery(
             let mut rfc8414 = issuer.url().clone();
             rfc8414.set_path(&format!("/.well-known/oauth-authorization-server{path}"));
             match fetch_metadata(provider, &rfc8414, deadline).await {
-                // An absent fallback leaves the first failure as the startup cause.
+                // A fallback 404 indicates absent RFC 8414 metadata. Keep the
+                // OIDC error so an outage such as a 503 stays visible at startup.
                 Err(PreparationReason::Fetch(ProviderFailure::Status(404))) => Err(first),
                 result => result,
             }
