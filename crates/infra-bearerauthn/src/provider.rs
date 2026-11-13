@@ -325,7 +325,8 @@ impl<'a> Exchange<'a> {
         mode: ExchangeMode<'a>,
     ) -> Result<Vec<u8>, ProviderFailure> {
         let require_json_content_type = matches!(mode, ExchangeMode::Introspection(_));
-        let receive = receive(request, require_json_content_type).instrument(self.span.clone());
+        let receive =
+            receive(request, require_json_content_type, &self.span).instrument(self.span.clone());
         let result = match mode {
             ExchangeMode::Introspection(context) => {
                 self.caller = Some(context);
@@ -353,12 +354,6 @@ impl<'a> Exchange<'a> {
 
     fn finish(mut self, failure: Option<ProviderFailure>) {
         self.finished = true;
-        let status = match failure {
-            None => Some(reqwest::StatusCode::OK.as_u16()),
-            Some(ProviderFailure::Status(status)) => Some(status),
-            Some(_) => None,
-        };
-        self.span.record("http.response.status_code", status);
         self.record(failure.map(ProviderFailure::label));
     }
 
@@ -396,11 +391,14 @@ const fn stopped_label(stopped: Stopped) -> &'static str {
 async fn receive(
     request: reqwest::RequestBuilder,
     require_json_content_type: bool,
+    span: &tracing::Span,
 ) -> Result<Vec<u8>, ProviderFailure> {
     let transport = |error| ProviderFailure::from_transport(&error);
     let mut response = request.send().await.map_err(transport)?;
-    if response.status() != reqwest::StatusCode::OK {
-        return Err(ProviderFailure::Status(response.status().as_u16()));
+    let status = response.status();
+    span.record("http.response.status_code", status.as_u16());
+    if status != reqwest::StatusCode::OK {
+        return Err(ProviderFailure::Status(status.as_u16()));
     }
     if require_json_content_type && !has_json_content_type(&response) {
         return Err(ProviderFailure::MediaType);
@@ -911,6 +909,10 @@ mod tests {
     // template:begin oidc-introspection:authn-provider-post-form-tls-test
     #[tokio::test]
     async fn introspection_fixture_transport_uses_trusted_private_tls_for_form_posts() {
+        use tracing::instrument::WithSubscriber as _;
+
+        use crate::test_metrics::Diagnostics;
+
         let response = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 16\r\n\r\n{\"active\":false}".to_vec();
         let (address, root, server) = tls_server(response, false).await;
         let body = fixture_client(address, &root)
@@ -929,6 +931,10 @@ mod tests {
         // Each component is form-encoded before the Basic scheme encodes the pair.
         assert!(request.contains("authorization: Basic YSUzQWI6Yytk\r\n"));
 
+        let diagnostics = Diagnostics::default();
+        let _registration_anchor =
+            tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+        let dispatch = tracing::Dispatch::new(diagnostics.clone());
         for content_type in ["", "content-type: text/plain\r\n"] {
             let response = format!(
                 "HTTP/1.1 200 OK\r\n{content_type}content-length: 16\r\n\r\n{{\"active\":false}}"
@@ -944,10 +950,24 @@ mod tests {
                         "token=opaque".to_owned(),
                         &operation_context::OperationContext::with_timeout(super::PROVIDER_TIMEOUT),
                     )
+                    .with_subscriber(dispatch.clone())
                     .await,
                 Err(ProviderFailure::MediaType),
             );
             server.await.unwrap();
+        }
+        let spans = diagnostics.spans.lock().unwrap();
+        let provider_spans = spans
+            .iter()
+            .filter(|span| span.starts_with("span=authn_provider;"))
+            .collect::<Vec<_>>();
+        assert_eq!(provider_spans.len(), 2);
+        for span in provider_spans {
+            assert!(span.contains("http.response.status_code=200;"), "{span}");
+            assert!(
+                span.contains("error.type=\"provider_media_type\";"),
+                "{span}"
+            );
         }
     }
     // template:end oidc-introspection:authn-provider-post-form-tls-test
