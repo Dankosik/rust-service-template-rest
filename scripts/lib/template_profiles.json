@@ -992,7 +992,7 @@
       {"path": "crates/jobs-worker/src/lib.rs", "ids": ["worker-operator-module",
           "worker-operator-dispatch",
           "worker-registration-jobs", "worker-lib-test-postgres-refusal"]},
-      {"path": "crates/jobs-worker/src/resources.rs", "ids": ["worker-resources-jobs-import", "worker-resources-postgres-import", "worker-shutdown-resources-started", "worker-shutdown-resources-pool"]},
+      {"path": "crates/jobs-worker/src/resources.rs", "ids": ["worker-resources-jobs-import", "worker-resources-postgres-import", "worker-shutdown-resources-started", "worker-shutdown-resources-pool", "worker-resources-postgres-pool"]},
       {"path": "crates/jobs-worker/src/shutdown.rs", "ids": ["worker-shutdown-drain-has-jobs", "worker-shutdown-native-failures", "worker-shutdown-jobs-imports", "worker-shutdown-postgres-imports", "worker-shutdown-stop-jobs", "worker-shutdown-drain-jobs", "worker-shutdown-drain-start-log", "worker-shutdown-drain-forced-log", "worker-shutdown-finish-jobs", "worker-shutdown-close-jobs", "worker-shutdown-close-pool", "worker-shutdown-finish-attempts"]},
       {"path": "crates/jobs-worker/tests/process.rs", "ids": ["worker-process-jobs-expectation",
           "worker-operator-process-tests"]},
