@@ -184,9 +184,9 @@ async fn run_population_sampling(shared: &Shared, cancel: &CancellationToken) {
 
 #[derive(Clone, Copy)]
 enum Population {
-    /// Completed jobs past retention; `oldest` is when the oldest one expired.
+    /// The oldest completed job is dated by when its retention expired.
     Completed,
-    /// Retained failed jobs; `oldest` is when the oldest one failed.
+    /// The oldest retained failed job is dated by when it failed.
     Failed,
 }
 
@@ -213,8 +213,8 @@ async fn read_population(
                 sqlx::query_as!(
                     PopulationSample,
                     "WITH sampled AS (SELECT statement_timestamp() AS observed_at) \
-                     SELECT EXTRACT(EPOCH FROM sampled.observed_at)::double precision AS \"observed_at!\", \
-                            EXTRACT(EPOCH FROM oldest.finished_at)::double precision AS \"oldest?\" \
+                     SELECT EXTRACT(EPOCH FROM sampled.observed_at)::double precision AS \"observed_at_unix_seconds!\", \
+                            EXTRACT(EPOCH FROM oldest.finished_at)::double precision AS \"oldest_at_unix_seconds?\" \
                      FROM sampled LEFT JOIN LATERAL ( \
                          SELECT finished_at FROM background_jobs \
                          WHERE state = 'failed' \
@@ -229,8 +229,8 @@ async fn read_population(
                 sqlx::query_as!(
                     PopulationSample,
                     "WITH sampled AS (SELECT statement_timestamp() AS observed_at) \
-                     SELECT EXTRACT(EPOCH FROM sampled.observed_at)::double precision AS \"observed_at!\", \
-                            EXTRACT(EPOCH FROM oldest.finished_at + $1::interval)::double precision AS \"oldest?\" \
+                     SELECT EXTRACT(EPOCH FROM sampled.observed_at)::double precision AS \"observed_at_unix_seconds!\", \
+                            EXTRACT(EPOCH FROM oldest.finished_at + $1::interval)::double precision AS \"oldest_at_unix_seconds?\" \
                      FROM sampled LEFT JOIN LATERAL ( \
                          SELECT finished_at FROM background_jobs \
                          WHERE state = 'completed' AND finished_at <= sampled.observed_at - $1::interval \
