@@ -174,8 +174,8 @@ fn a_finished_span_reaches_the_collector_with_the_typed_headers() {
         handle.exporter_state,
         ExporterState::Initialized {
             endpoint_source: EndpointSource::Typed,
-            certificate_file: false,
-            client_certificate: false,
+            has_certificate_file: false,
+            has_client_certificate: false,
         }
     );
 

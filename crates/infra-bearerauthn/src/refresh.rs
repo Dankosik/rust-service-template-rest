@@ -290,14 +290,13 @@ mod tests {
         },
         test_metrics::Diagnostics,
     };
-    use futures_util::FutureExt as _;
     use jsonwebtoken::Algorithm;
     use std::assert_matches;
     use std::{
         future::Future,
         pin::Pin,
         sync::Arc,
-        task::Poll,
+        task::{Context, Poll, Waker},
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
     use tokio_util::sync::CancellationToken;
@@ -628,14 +627,15 @@ mod tests {
         );
 
         store.request_periodic();
-        let during_fetch = store.refresh_for_signature_miss(&checked).now_or_never();
+        let during_fetch = std::pin::pin!(store.refresh_for_signature_miss(&checked))
+            .poll(&mut Context::from_waker(Waker::noop()));
         store.finish(
             2,
             Err(KeySetFailure::Fetch(crate::ProviderFailure::Timeout)),
         );
         let after_failure = store.refresh_for_signature_miss(&checked).await;
 
-        assert_matches!(during_fetch, Some(SignatureRefresh::NewerSet(keys)) if keys.has_kid("new"));
+        assert_matches!(during_fetch, Poll::Ready(SignatureRefresh::NewerSet(keys)) if keys.has_kid("new"));
         assert_matches!(after_failure, SignatureRefresh::NewerSet(keys) if keys.has_kid("new"));
     }
 

@@ -7,7 +7,7 @@ use service_config::Config;
 
 use super::{READINESS_PROGRESS, WorkerError};
 use crate::background::Background;
-use crate::shutdown::{Listeners, Resources};
+use crate::resources::{Listeners, Resources};
 
 /// One probe per dependency that admission opened.
 pub(super) fn readiness_probes(resources: &Resources) -> Vec<Box<dyn Probe>> {

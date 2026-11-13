@@ -525,7 +525,7 @@ async fn start(
     dependencies.object_storage = object_storage::open(config)?;
     // template:end object-storage:service-bootstrap-object-storage-startup
     // template:begin http-idempotency:bootstrap-http-idempotency-composer
-    let mut composer = idempotency::prepare(config, dependencies.postgres.as_ref());
+    let mut composer = idempotency::prepare(config, dependencies.postgres.as_ref())?;
     // template:end http-idempotency:bootstrap-http-idempotency-composer
     // template:begin inbound-webhooks:bootstrap-webhooks-prepare
     let webhook_state = webhooks::prepare(config, dependencies.postgres.as_ref(), background)?;

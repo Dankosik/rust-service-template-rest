@@ -291,7 +291,11 @@ async fn finish_telemetry(
                 false
             }
             ProviderShutdown::Incomplete(reasons) => {
-                tracing::warn!(reasons = reasons.bits(), "trace_shutdown_incomplete");
+                tracing::warn!(
+                    reasons = reasons.bits(),
+                    reason_flags = ?reasons,
+                    "trace_shutdown_incomplete"
+                );
                 true
             }
         }

@@ -2569,6 +2569,7 @@ dependencies = [
  "base64 0.23.1",
  "derive_more",
  "enum-map",
+ "futures-util",
  "health",
  "metrics",
  "metrics-exporter-prometheus",
@@ -5886,8 +5887,6 @@ checksum = "7d56353a2a665ad0f41a421187180aab746c8c325620617ad883a99a1cbe66d2"
 [[package]]
 name = "tonic"
 version = "0.14.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cd1fa9b1a51188f3266a823208078315811269d06d272c3a61be0b9a194194ff"
 dependencies = [
  "async-trait",
  "axum",

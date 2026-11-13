@@ -25,9 +25,9 @@ use tracing::Instrument;
 
 use crate::error::sqlstate;
 use crate::observe::{self, TransactionObservation, TransactionOutcome, observed};
-use crate::pool::{acquire, acquire_until, to_runtime_param};
+use crate::pool::{acquire, acquire_until, format_pg_duration};
 
-/// Why a transaction did not commit, split by what is known about the outcome.
+/// The stage that failed and what is known about the commit outcome.
 #[derive(Debug, thiserror::Error)]
 pub enum TxError {
     /// Nothing ran.
@@ -90,7 +90,8 @@ impl Tx<'_> {
     }
 }
 
-/// Bound every later statement of `tx` by `timeout`.
+/// Set the timeout for later statements in `tx`. [`Duration::ZERO`] disables it.
+///
 /// `set_config(..., is_local = true)` lasts until the transaction ends, so
 /// PostgreSQL restores the session timeout itself on commit, rollback, or a
 /// dropped connection.
@@ -103,7 +104,7 @@ pub async fn set_statement_timeout(tx: &mut Tx<'_>, timeout: Duration) -> Result
         "set statement timeout",
         sqlx::query!(
             "SELECT set_config('statement_timeout', $1, true)",
-            to_runtime_param(timeout)
+            format_pg_duration(timeout)
         )
         .fetch_one(&mut *tx),
     )

@@ -8,7 +8,7 @@ use service_config::{Config, LogFormat, TracesSampler};
 
 use super::{METRICS_MAINTENANCE_INTERVAL, WorkerError};
 use crate::background::Background;
-use crate::shutdown::Resources;
+use crate::resources::Resources;
 
 pub(super) fn install_observability(
     config: &Config,
@@ -54,7 +54,7 @@ pub(super) fn spawn_metrics_tasks(metrics: &Metrics, background: &Background) {
     });
 }
 
-pub(super) fn tracing_options(config: &Config, identity: &str) -> TracingOptions {
+fn tracing_options(config: &Config, identity: &str) -> TracingOptions {
     let otel = &config.observability.otel;
     let sampler = match otel.traces_sampler {
         TracesSampler::AlwaysOn => infra_telemetry::ResolvedSampler::AlwaysOn,

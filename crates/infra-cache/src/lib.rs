@@ -269,8 +269,10 @@ impl Cache {
 
 /// `PING` probe. The name is `cache`. Failure text is `cache ping failed: <error.type>` only.
 ///
-/// The caller's startup/readiness budget can cancel the probe. A PING that
-/// can finish normally gets enough time for commands already ahead of it.
+/// The caller's startup/readiness budget can cancel the probe. Cancelling
+/// while PING is still pending before its reply deadline leaves the connection
+/// available to other commands. A probe that reaches its own reply deadline
+/// with PING still pending retires the connection.
 #[derive(Clone, Debug)]
 pub struct CacheProbe {
     cache: Cache,

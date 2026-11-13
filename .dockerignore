@@ -20,6 +20,9 @@ vendor/*
 !vendor/aws-smithy-http-client/
 # template:end object-storage:dockerignore-object-storage-vendor
 !vendor/hyper-util/
+# template:begin grpc:dockerignore-tonic-vendor
+!vendor/tonic/
+# template:end grpc:dockerignore-tonic-vendor
 !crates/
 # `sqlx::query!` reads its statement metadata at compile time.
 !.sqlx/

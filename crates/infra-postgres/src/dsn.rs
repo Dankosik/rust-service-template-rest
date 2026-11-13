@@ -221,8 +221,6 @@ fn read_password(path: &Path) -> Result<String, DsnError> {
     password_from(content)
 }
 
-/// The password in a password file's content: the file's secret value, which
-/// must not be empty.
 pub(crate) fn password_from(content: String) -> Result<String, DsnError> {
     let password = shared_rules::secret_file::value(content);
     if password.is_empty() {
@@ -300,12 +298,9 @@ fn check_parameters(url: &Url) -> Result<(), DsnError> {
 /// a pathological string cannot flood a log line.
 fn bounded(key: &str) -> String {
     const MAX: usize = 32;
-    if key.chars().count() <= MAX {
-        key.to_owned()
-    } else {
-        let mut cut: String = key.chars().take(MAX).collect();
-        cut.push('…');
-        cut
+    match key.char_indices().nth(MAX) {
+        Some((end, _)) => format!("{}…", &key[..end]),
+        None => key.to_owned(),
     }
 }
 

@@ -371,18 +371,24 @@ async fn write(
     record: &Record,
     retention: Duration,
 ) -> Result<(), AttemptError> {
-    // Replaces only an expired row; a live row leaves no row affected.
+    // Lock the old row before starting retention, even if concurrent cleanup
+    // deletes it and the write takes the insert path. The conflict clause
+    // still protects a row written after this statement's snapshot.
     let written = observed(
         "write idempotency record",
         sqlx::query!(
-            "INSERT INTO http_idempotency_records AS r \
+            "WITH locked AS MATERIALIZED ( \
+                 SELECT expires_at FROM http_idempotency_records \
+                 WHERE scope_key = $1 FOR UPDATE) \
+             INSERT INTO http_idempotency_records AS r \
              (scope_key, fingerprint, status, headers, body, issuer, caller_kind, caller_value, \
               expires_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, statement_timestamp() + $9) \
+             SELECT $1, $2, $3, $4, $5, $6, $7, $8, clock_timestamp() + $9 \
+             WHERE NOT EXISTS (SELECT 1 FROM locked WHERE expires_at > statement_timestamp()) \
              ON CONFLICT (scope_key) DO UPDATE SET fingerprint = EXCLUDED.fingerprint, \
              status = EXCLUDED.status, headers = EXCLUDED.headers, body = EXCLUDED.body, \
              issuer = EXCLUDED.issuer, caller_kind = EXCLUDED.caller_kind, \
-             caller_value = EXCLUDED.caller_value, expires_at = EXCLUDED.expires_at \
+             caller_value = EXCLUDED.caller_value, expires_at = clock_timestamp() + $9 \
              WHERE r.expires_at <= statement_timestamp()",
             scope.0.as_slice(),
             fingerprint.as_slice(),
@@ -528,7 +534,7 @@ mod tests {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgres://localhost/unused")
             .unwrap();
-        let store = Store::new(pool.clone(), Duration::from_mins(1));
+        let store = Store::new(pool.clone(), Duration::from_mins(1)).unwrap();
         for (issuer, value) in [
             ("https://issuer.example", "sub\0ject"),
             ("iss\0uer", "subject"),

@@ -590,6 +590,10 @@ class EffectFailureEvidence(unittest.TestCase):
             controller.private_text(session.path / "publisher.log", json.dumps({
                 "level": "INFO", "message": "jobs_worker_ready", "credential": "private-value"}) + "\n")
             controller.private_text(session.path / "consumer.log", "\n".join(json.dumps(fields) for fields in (
+                {"message": "jobs worker failed", "failure.kind": "consumer_stopped"},
+                {"message": "jobs worker failed", "error": "private-value"},
+                {"message": "messaging consumer stopped"},
+                {"message": "messaging_consumer_stopped"},
                 {"message": "messaging_recovery_effect_failed", "error": "durable effect statement failed", "dsn": "private-value"},
                 {"message": "messaging_recovery_effect_failed", "error": "private-value"},
                 {"message": "messaging_delivery_failed", "outcome": "undecodable", "payload": "private-value"},
@@ -644,6 +648,8 @@ class EffectFailureEvidence(unittest.TestCase):
             self.assertEqual((publisher["running"], publisher["exit_code"], publisher["exit_status"]), (False, None, "unavailable"))
             consumer = sections["workers"]["roles"]["consumer"]
             self.assertTrue(consumer["identity_match"] and consumer["running"])
+            self.assertEqual(consumer["log"]["events"]["worker_failed"], 2)
+            self.assertEqual(consumer["log"]["events"]["consumer_stopped"], 3)
             self.assertEqual(consumer["log"]["effect_errors"], {"statement_failed": 1, "unclassified": 1})
             self.assertEqual(consumer["log"]["delivery_outcomes"], {"undecodable": 1})
             self.assertEqual(consumer["log"]["events"]["pull_failed"], 8)

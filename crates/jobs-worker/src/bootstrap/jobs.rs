@@ -6,7 +6,7 @@ use service_config::Config;
 
 use super::{Ended, WorkerError, pending_end};
 use crate::background::Background;
-use crate::shutdown::Resources;
+use crate::resources::Resources;
 use crate::signals::Signals;
 
 pub(super) fn validate(kinds: KindsBuilder) -> Result<Option<Kinds>, WorkerError> {
@@ -54,28 +54,31 @@ pub(super) fn start_engines(
             return Some(ended);
         }
         resources
-            .started
+            .started_engines
             .push(engine.start(&background.tracker, &background.cancel));
     }
-    tracing::info!(engines = resources.started.len(), "jobs_claiming_started");
+    tracing::info!(
+        engines = resources.started_engines.len(),
+        "jobs_claiming_started"
+    );
     None
 }
 
 pub(super) fn engine_failure(resources: &Resources) -> Option<WorkerError> {
     resources
-        .started
+        .started_engines
         .iter()
         .any(|engine| engine.failed().now_or_never().is_some())
         .then_some(WorkerError::EngineStopped)
 }
 
 pub(super) async fn engine_stopped(resources: &Resources) {
-    if resources.started.is_empty() {
+    if resources.started_engines.is_empty() {
         std::future::pending::<()>().await;
     } else {
         futures_util::future::select_all(
             resources
-                .started
+                .started_engines
                 .iter()
                 .map(|engine| Box::pin(engine.failed())),
         )

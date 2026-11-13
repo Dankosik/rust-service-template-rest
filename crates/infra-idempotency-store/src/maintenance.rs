@@ -3,8 +3,8 @@
 use std::time::Duration;
 
 use infra_postgres::{
-    Cleanup, CleanupError, CleanupPass, MaintenanceFailure, PassEnd, PopulationSample, Tx,
-    failure_cause, in_observation_tx, observed, run_scheduled_cleanup, sqlstate,
+    Cleanup, CleanupError, CleanupPass, CleanupPassResult, MaintenanceFailure, PopulationSample,
+    Tx, failure_cause, in_observation_tx, observed, run_scheduled_cleanup, sqlstate,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -80,13 +80,13 @@ impl Store {
     /// cause. Earlier batches stay committed. A timeout leaves the batch's
     /// commit outcome unconfirmed.
     pub async fn remove_expired(&self) -> Result<u64, CleanupError> {
-        self.cleanup_pass(None).await.map(|(removed, _)| removed)
+        self.cleanup_pass(None).await.map(|pass| pass.removed_rows)
     }
 
     async fn cleanup_pass(
         &self,
         cancel: Option<&CancellationToken>,
-    ) -> Result<(u64, PassEnd), CleanupError> {
+    ) -> Result<CleanupPassResult, CleanupError> {
         CleanupPass::start(Cleanup::HttpIdempotency)
             .run_until_short_batch(
                 &self.pool,
@@ -99,7 +99,7 @@ impl Store {
             .await
     }
 
-    async fn delete_expired_batch(tx: &mut Tx<'_>) -> Result<u64, sqlx::Error> {
+    async fn delete_expired_batch(tx: &mut Tx<'_>, batch_limit: u32) -> Result<u64, sqlx::Error> {
         // The tuple locator is consumed under its row lock within this statement.
         let deleted = observed(
             "delete expired idempotency records",
@@ -110,7 +110,7 @@ impl Store {
                          ORDER BY expires_at LIMIT $1 FOR UPDATE SKIP LOCKED) \
                          DELETE FROM http_idempotency_records AS r USING batch \
                          WHERE r.ctid = batch.ctid AND r.expires_at <= statement_timestamp()",
-                i64::from(CLEANUP_BATCH_ROWS),
+                i64::from(batch_limit),
             )
             .execute(tx),
         )
@@ -138,7 +138,7 @@ impl Store {
             Cleanup::HttpIdempotency,
             CLEANUP_RUNS_METRIC,
             &cancel,
-            || async { self.cleanup_pass(Some(&cancel)).await.map(|(_, end)| end) },
+            || async { self.cleanup_pass(Some(&cancel)).await.map(|pass| pass.end) },
             || self.sample_expired_population(),
         )
         .await;
@@ -162,8 +162,8 @@ impl Store {
             )
             .await?;
             Ok(PopulationSample {
-                observed_at: sample.observed_at,
-                oldest: sample.oldest,
+                observed_at_unix_seconds: sample.observed_at,
+                oldest_at_unix_seconds: sample.oldest,
             })
         })
         .await

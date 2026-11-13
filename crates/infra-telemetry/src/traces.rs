@@ -51,8 +51,9 @@ pub struct TracingOptions {
     pub service_name: String,
     pub service_version: String,
     pub vcs_revision: String,
-    /// Reported as `service.instance.id`; `None` reports the host name, and
-    /// blank omits the attribute.
+    /// Overrides the SDK's detected `service.instance.id`. `None` uses the
+    /// hostname. A blank value leaves any value from
+    /// `OTEL_RESOURCE_ATTRIBUTES` in place.
     pub instance_id: Option<String>,
     pub deployment_environment: String,
     pub sampler: ResolvedSampler,
@@ -74,8 +75,7 @@ pub enum EndpointSource {
 }
 
 impl EndpointSource {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
+    const fn as_str(self) -> &'static str {
         match self {
             Self::Typed => "typed",
             Self::Environment => "environment",
@@ -91,9 +91,9 @@ pub enum ExporterState {
         endpoint_source: EndpointSource,
         /// The collector is verified against the certificate file of a
         /// standard variable, not the platform trust store.
-        certificate_file: bool,
+        has_certificate_file: bool,
         /// A client certificate from the standard variables is presented.
-        client_certificate: bool,
+        has_client_certificate: bool,
     },
     Disabled,
     /// An endpoint resolved but the exporter could not be built.
@@ -114,12 +114,12 @@ impl ExporterState {
         match self {
             ExporterState::Initialized {
                 endpoint_source,
-                certificate_file,
-                client_certificate,
+                has_certificate_file,
+                has_client_certificate,
             } => tracing::info!(
                 endpoint_source = endpoint_source.as_str(),
-                certificate_file,
-                client_certificate,
+                certificate_file = has_certificate_file,
+                client_certificate = has_client_certificate,
                 "trace exporter initialized"
             ),
             ExporterState::Disabled => {}
@@ -195,7 +195,7 @@ fn tracer_provider(
     env: impl Fn(&str) -> Option<OsString>,
     trust: &CollectorTrust,
 ) -> Result<TracerProviderHandle, TracingError> {
-    let endpoint = resolve_endpoint(options, &env)?;
+    let endpoint = resolve_endpoint(options.otlp_endpoint.as_deref(), &env)?;
     let headers = match options.otlp_headers.as_ref() {
         Some(raw) => parse_headers(raw.expose_secret())?,
         None => HashMap::new(),
@@ -222,8 +222,8 @@ fn tracer_provider(
                 );
                 ExporterState::Initialized {
                     endpoint_source: endpoint.source(),
-                    certificate_file: trust.certificate.is_some(),
-                    client_certificate: trust.client_certificate.is_some(),
+                    has_certificate_file: trust.certificate.is_some(),
+                    has_client_certificate: trust.client_certificate.is_some(),
                 }
             }
             // The error's text may name files and SDK details, which stay
@@ -340,7 +340,7 @@ pub enum ProviderShutdown {
 
 bitflags::bitflags! {
     /// Finite failure observations; no exporter error text is retained.
-    /// Operators see [`Self::bits`] in the `telemetry` shutdown stage.
+    /// The `telemetry` shutdown stage logs the named flags alongside [`Self::bits`].
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
     pub struct ProviderShutdownReasons: u32 {
         /// An SDK operation during the drain (an export, or the exporter's or

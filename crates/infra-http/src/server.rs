@@ -495,11 +495,9 @@ async fn accept_loop<F, Fut, IO>(
             None => None,
             Some(Ok(permit)) => Some(permit),
             Some(Err(_)) => {
-                // Over the cap: close without a response. Excess callers
-                // otherwise wait in the kernel backlog, which is what the
-                // headroom over max_in_flight is for: a connection reset here
-                // gets no answer, while a shed request gets 503 with
-                // Retry-After.
+                // At the connection cap, close the socket without an HTTP
+                // response. The router can return 503 with Retry-After when
+                // it sheds a request at its handler limit.
                 metrics::counter!(CONNECTIONS_REFUSED_METRIC).increment(1);
                 tracing::debug!(%peer, "http_connection_refused");
                 drop(stream);

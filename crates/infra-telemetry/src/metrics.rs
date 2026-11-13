@@ -3,9 +3,8 @@
 //! One recorder per process. HTTP server metrics come from the HTTP adapter,
 //! process metrics from `metrics-process`, runtime metrics from
 //! `tokio-metrics`; this module owns the recorder, the periodic upkeep, the
-//! scheduler progress sampler, and the scrape route. Each crate that emits a histogram
-//! owns its name and buckets; a histogram nobody registered gets
-//! [`DEFAULT_BUCKETS`].
+//! scheduler progress sampler, and the scrape route. Each crate that emits a
+//! histogram owns its name and any override of the default buckets.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -57,8 +56,6 @@ struct ProgressSample {
 }
 
 impl Progress {
-    /// Describes the scheduler metrics and sets their values before the
-    /// first sample.
     fn describe_and_initialize() {
         metrics::describe_histogram!(
             SCHEDULER_LAG_METRIC,
@@ -110,6 +107,8 @@ impl Progress {
 pub enum MetricsError {
     #[error("install metrics recorder: {0}")]
     Install(#[from] BuildError),
+    #[error("configure histogram buckets for {metric}: {source}")]
+    HistogramBuckets { metric: String, source: BuildError },
 }
 
 #[derive(Clone, Debug)]
@@ -120,17 +119,24 @@ pub struct Metrics {
 }
 
 impl Metrics {
-    /// Installs the process-global recorder. Histograms without a
-    /// `(metric, buckets)` entry get the Prometheus client default buckets.
+    /// Installs the process-global recorder. The built-in scheduler lag buckets
+    /// take precedence over any valid entry for `runtime_scheduler_lag_seconds`.
+    /// Other histograms use the supplied buckets or the Prometheus client
+    /// defaults.
     ///
     /// # Errors
     ///
-    /// Returns [`MetricsError::Install`] when a recorder is already
-    /// installed or the buckets are invalid.
+    /// Returns [`MetricsError::Install`] when a recorder cannot be installed,
+    /// or [`MetricsError::HistogramBuckets`] for an invalid histogram override.
     pub fn install(histograms: &[(&str, &[f64])]) -> Result<Self, MetricsError> {
         let mut builder = PrometheusBuilder::new().set_buckets(DEFAULT_BUCKETS)?;
         for &(name, buckets) in histograms {
-            builder = builder.set_buckets_for_metric(Matcher::Full(name.to_owned()), buckets)?;
+            builder = builder
+                .set_buckets_for_metric(Matcher::Full(name.to_owned()), buckets)
+                .map_err(|source| MetricsError::HistogramBuckets {
+                    metric: name.to_owned(),
+                    source,
+                })?;
         }
         let handle = builder
             .set_buckets_for_metric(
@@ -248,9 +254,26 @@ async fn render(State(metrics): State<Metrics>) -> Response {
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error;
+
     use futures_util::FutureExt;
 
     use super::*;
+
+    #[test]
+    fn invalid_histogram_buckets_report_the_metric_and_cause() {
+        let error = Metrics::install(&[("request_latency_seconds", &[])])
+            .expect_err("empty histogram buckets must fail");
+
+        assert!(error.to_string().contains("request_latency_seconds"));
+        let source = error
+            .source()
+            .expect("histogram configuration error source");
+        std::assert_matches!(
+            source.downcast_ref::<BuildError>(),
+            Some(BuildError::EmptyBucketsOrQuantiles)
+        );
+    }
 
     fn value(exposition: &str, series: &str) -> f64 {
         exposition

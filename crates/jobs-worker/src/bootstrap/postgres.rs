@@ -3,13 +3,13 @@
 use std::num::NonZeroU32;
 
 use health::Probe;
-use infra_postgres::{Dsn, PgPool, PoolOptions, PostgresProbe, SessionBudgets};
+use infra_postgres::{Dsn, PgPool, PoolOptions, PostgresProbe, SessionSettingsSource};
 use secrecy::ExposeSecret;
 use service_config::{Config, PostgresConfig, PostgresSessionBudgets};
 
 use super::{IDENTITY_SUFFIX, METRICS_MAINTENANCE_INTERVAL, RetainedCapabilities, WorkerError};
 use crate::background::Background;
-use crate::shutdown::Resources;
+use crate::resources::{PoolResource, Resources};
 
 const POSTGRES_IDENTIFIER_LIMIT: usize = 63;
 
@@ -51,6 +51,7 @@ pub(super) async fn admit_pool(
     admit_inputs()?;
     let pool = open_pool(config, background, resources).await?;
     migrate::verify_history(&pool).await?;
+    resources.pool = Some(PoolResource::Admitted(pool));
     Ok(())
 }
 
@@ -70,7 +71,7 @@ async fn open_pool(
         &application_name,
     );
     let pool = infra_postgres::prepare_pool(&dsn, &options);
-    resources.pool = Some(pool.clone());
+    resources.pool = Some(PoolResource::Starting(pool.clone()));
     infra_postgres::admit_pool(&pool, &options).await?;
     tracing::info!(
         postgres.host = dsn.host(),
@@ -107,9 +108,9 @@ pub(crate) fn pool_options<'a>(
         max_connections,
         application_name,
         default_isolation: infra_postgres::Isolation::ReadCommitted,
-        session_budgets: match config.session_budgets {
-            PostgresSessionBudgets::Startup => SessionBudgets::Startup,
-            PostgresSessionBudgets::Server => SessionBudgets::Server,
+        session_settings_source: match config.session_budgets {
+            PostgresSessionBudgets::Startup => SessionSettingsSource::Startup,
+            PostgresSessionBudgets::Server => SessionSettingsSource::Server,
         },
     }
 }
@@ -119,15 +120,16 @@ fn application_name(service_name: &str) -> String {
     format!("{}{IDENTITY_SUFFIX}", &service_name[..end])
 }
 
-/// The pool [`admit_pool`] opened; every capability that needs it runs after
-/// admission.
 pub(super) fn admitted_pool(resources: &Resources) -> Result<PgPool, WorkerError> {
-    resources.pool.clone().ok_or(WorkerError::PostgresDisabled)
+    match resources.pool.as_ref() {
+        Some(PoolResource::Admitted(pool)) => Ok(pool.clone()),
+        Some(PoolResource::Starting(_)) | None => Err(WorkerError::PostgresDisabled),
+    }
 }
 
 pub(super) fn probe(resources: &Resources) -> Option<Box<dyn Probe>> {
-    let pool = resources.pool.as_ref()?;
-    Some(Box::new(PostgresProbe::new(pool.clone())))
+    let pool = admitted_pool(resources).ok()?;
+    Some(Box::new(PostgresProbe::new(pool)))
 }
 
 #[cfg(test)]

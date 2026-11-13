@@ -800,8 +800,11 @@ mod tests {
             Some(json!(u64::MAX)),
             Some(json!(1e30)),
             Some((now - 100).into()),
-            Some((now - 25).into()),
-            Some((now + 25).into()),
+            // Inside the 30 s leeway and 20 s from its edge. At the edge this
+            // crate (exclusive `exp`, RFC 7519) and jsonwebtoken disagree for
+            // one second, and `now` ages while the corpus is signed.
+            Some((now - 10).into()),
+            Some((now + 10).into()),
             Some((now + 100).into()),
             Some(json!(now as f64 + 100.4)),
             Some(json!(now as f64 - 1000.6)),

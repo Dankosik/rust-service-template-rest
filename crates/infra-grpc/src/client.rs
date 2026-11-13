@@ -8,13 +8,14 @@ use http::{Request, Response};
 use hyper_util::client::legacy::connect::HttpConnector;
 use secrecy::{ExposeSecret as _, SecretString};
 use tonic::body::Body;
+use tonic::client::{ResponseStatusObserver as DecodedStatusObserver, TrackResponseStatus};
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
 use tower::{Service as _, ServiceExt as _};
 use tracing::Instrument as _;
 use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
 
 use crate::Error;
-use crate::call::{Held, ResponseCustody, ResponseStatusObserver, Side};
+use crate::call::{Held, Observation, ResponseCustody, ResponseStatusObserver, Side};
 use operation_context::{Deadline, OperationContext};
 use shared_rules::error_chain::DisplayErrorChain;
 use tokio::time::Instant;
@@ -77,17 +78,19 @@ impl ClientTimeout {
 /// One lazy, shared channel for a configured dependency.
 ///
 /// Construction performs neither DNS nor network I/O. Each call injects the
-/// current trace context and records the client span and metrics when the
-/// call's status arrives: in the response headers of a Trailers-Only answer,
-/// otherwise in the trailers that end the response stream.
+/// current trace context. Tonic clients record span and metrics from the
+/// decoded RPC outcome. Direct HTTP service callers observe the response
+/// status as their body yields it.
 ///
 /// An [`OperationContext`] in the request extensions, such as the one a
 /// handler received, also bounds the call: the earliest of its deadline and
 /// this client's wins for opening and lifetime, and its cancellation cancels
 /// the call.
-#[derive(Clone, Debug)]
+#[derive(Clone, derive_more::Debug)]
 pub struct Client {
     channel: Channel,
+    #[debug(skip)]
+    destination: http::Uri,
     timeout: ClientTimeout,
     series: Arc<crate::observe::Series>,
 }
@@ -166,6 +169,7 @@ impl Client {
             // This path places tonic's connect timer outside TLS as well as
             // DNS/TCP, so the shared channel can release a stalled full dial.
             channel: endpoint.connect_with_connector_lazy(connector),
+            destination: endpoint.uri().clone(),
             timeout,
             series: crate::observe::Series::client(),
         })
@@ -242,7 +246,7 @@ impl Client {
             caller.map(|budget| Deadline::new(origin, budget)),
             parent_deadline,
         );
-        let call = crate::observe::Call::start(&self.series, &request);
+        let call = crate::observe::Call::start(&self.series, &request, Some(&self.destination));
         otel_http::inject_context(
             &tracing_opentelemetry_instrumentation_sdk::find_context_from_tracing(call.span()),
             request.headers_mut(),
@@ -273,7 +277,8 @@ impl PreparedCall {
         &self.opening
     }
 
-    /// Metadata for credentials; changing it cannot reset the selected cutoffs.
+    /// Metadata for credentials. Dispatch derives the wire `grpc-timeout`
+    /// from the original caller and parent deadlines.
     pub fn headers_mut(&mut self) -> &mut http::HeaderMap {
         self.request.headers_mut()
     }
@@ -294,10 +299,12 @@ impl PreparedCall {
         self.send_inner(|_| Ok(()), None).await
     }
 
-    /// Like [`Self::send`], with a synchronous callback for the response status.
-    /// It runs once for the gRPC status in the response headers or trailers.
-    /// If the body ends without one, a non-200 HTTP status supplies the code.
-    /// Local failures and bodies abandoned before a status is available skip it.
+    /// Like [`Self::send`], with a synchronous callback that runs once for the
+    /// code carried by the peer's `grpc-status` in the response headers or
+    /// trailers. If the response ends without that header, the callback
+    /// receives the code mapped from a non-200 HTTP status.
+    /// Local failures and bodies abandoned before a status is available skip
+    /// the callback. Generated-client metrics use the decoded RPC outcome.
     ///
     /// # Errors
     ///
@@ -338,7 +345,8 @@ impl PreparedCall {
             call,
             guard,
         } = self;
-        let (parts, body) = request.into_parts();
+        let (mut parts, body) = request.into_parts();
+        let track_decoded_status = parts.extensions.remove::<TrackResponseStatus>().is_some();
         let (body, upload) = crate::call::upload(body);
         let mut request = Request::from_parts(parts, body);
         let stopped = |reason| Side::Client.stopped(reason);
@@ -352,9 +360,7 @@ impl PreparedCall {
                     opening.check().map_err(stopped)?;
                     prepare_dispatch(request.headers_mut())?;
                     opening.check().map_err(stopped)?;
-                    if let Some(forwarded) = forwarded {
-                        forward_timeout(request.headers_mut(), forwarded)?;
-                    }
+                    apply_forwarded_timeout(request.headers_mut(), forwarded)?;
                     ready.call(request).await.map_err(transport_status)
                 } => result,
             };
@@ -365,22 +371,32 @@ impl PreparedCall {
         .instrument(call.span().clone())
         .await;
         match result {
-            Ok(response) => Ok(crate::call::attach(
-                response,
-                call,
-                None,
-                ResponseCustody {
-                    on_status,
-                    context: Some(lifetime),
-                    held: Held {
-                        permit: None,
-                        upload: Some(upload),
-                        cancel_on_drop: Some(guard),
+            Ok(mut response) => {
+                let observation = if track_decoded_status {
+                    let span = call.span().clone();
+                    let observer = DecodedStatusObserver::new(move |code| call.finish(code));
+                    response.extensions_mut().insert(observer.clone());
+                    Observation::Decoded { span, observer }
+                } else {
+                    Observation::Transport(call)
+                };
+                Ok(crate::call::attach(
+                    response,
+                    observation,
+                    None,
+                    ResponseCustody {
+                        on_status,
+                        context: Some(lifetime),
+                        held: Held {
+                            permit: None,
+                            upload: Some(upload),
+                            cancel_on_drop: Some(guard),
+                        },
                     },
-                },
-                tonic::Status::code,
-            )
-            .map(Body::new)),
+                    tonic::Status::code,
+                )
+                .map(Body::new))
+            }
             Err(status) => {
                 call.finish(status.code());
                 Err(status)
@@ -389,8 +405,15 @@ impl PreparedCall {
     }
 }
 
-fn forward_timeout(headers: &mut http::HeaderMap, caller: Deadline) -> Result<(), tonic::Status> {
-    let remaining = caller.remaining();
+fn apply_forwarded_timeout(
+    headers: &mut http::HeaderMap,
+    forwarded: Option<Deadline>,
+) -> Result<(), tonic::Status> {
+    let Some(deadline) = forwarded else {
+        headers.remove(crate::protocol::GRPC_TIMEOUT);
+        return Ok(());
+    };
+    let remaining = deadline.remaining();
     if remaining.is_zero() {
         return Err(Side::Client.deadline());
     }
@@ -463,14 +486,14 @@ mod tests {
         );
         tokio::time::advance(Duration::from_secs(1)).await;
         let mut headers = http::HeaderMap::new();
-        forward_timeout(&mut headers, Deadline::new(origin, supplied)).unwrap();
+        apply_forwarded_timeout(&mut headers, Some(Deadline::new(origin, supplied))).unwrap();
         assert_eq!(crate::grpc_timeout(&headers), Some(Duration::from_secs(4)));
         assert_eq!(opening.remaining(), Duration::from_secs(1));
         assert_eq!(full.unwrap().remaining(), Duration::from_secs(1));
         assert_eq!(long.unwrap().remaining(), Duration::from_secs(4));
         tokio::time::advance(Duration::from_secs(4)).await;
         assert_eq!(
-            forward_timeout(&mut headers, Deadline::new(origin, supplied))
+            apply_forwarded_timeout(&mut headers, Some(Deadline::new(origin, supplied)))
                 .unwrap_err()
                 .code(),
             tonic::Code::DeadlineExceeded
@@ -482,7 +505,7 @@ mod tests {
         assert!(opening.expired());
         assert!(!Deadline::new(origin, largest_wire).expired());
         // A finite parent budget past the wire maximum is sent as that maximum.
-        forward_timeout(&mut headers, Deadline::new(origin, Duration::MAX)).unwrap();
+        apply_forwarded_timeout(&mut headers, Some(Deadline::new(origin, Duration::MAX))).unwrap();
         assert_eq!(headers[crate::protocol::GRPC_TIMEOUT], "99999999H");
     }
 

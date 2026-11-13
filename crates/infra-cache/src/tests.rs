@@ -281,6 +281,9 @@ async fn serve_resp(
         if !reply_delay.is_zero() {
             tokio::time::sleep(reply_delay).await;
         }
+        if arguments.first().is_some_and(|command| command == "SET") {
+            socket.observed.wait_for_set_reply_release().await;
+        }
         if write.write_all(reply).await.is_err() {
             return;
         }
@@ -310,12 +313,24 @@ struct SocketObservations {
     username: std::sync::Mutex<Option<String>>,
     auth_reply_delay: std::sync::Mutex<Duration>,
     ping_reply_delays: std::sync::Mutex<std::collections::VecDeque<Duration>>,
+    next_set_reply: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
     /// Reply delay of a `GET` whose key ends in `:slow`.
     slow_get_delay: std::sync::Mutex<Duration>,
     changed: tokio::sync::Notify,
 }
 
 impl SocketObservations {
+    async fn wait_for_set_reply_release(&self) {
+        let release = self
+            .next_set_reply
+            .lock()
+            .expect("SET reply gate lock")
+            .take();
+        if let Some(release) = release {
+            let _ = release.await;
+        }
+    }
+
     /// How long the fake server holds the reply to `arguments`.
     fn reply_delay(&self, arguments: &[String]) -> Duration {
         match arguments.first().map(String::as_str) {
