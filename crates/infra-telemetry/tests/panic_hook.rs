@@ -25,7 +25,7 @@ fn panic_payloads_and_thread_identity_are_withheld() {
     for format in ["json", "text"] {
         let capture = tempfile::NamedTempFile::new().expect("capture file");
         let mut child = Command::new(std::env::current_exe().expect("test executable"))
-            .args(["--exact", TEST_NAME, "--nocapture", "--quiet"])
+            .args(["--exact", TEST_NAME, "--no-capture", "--quiet"])
             .env(CHILD_FORMAT, format)
             .stdout(Stdio::from(
                 capture.as_file().try_clone().expect("stdout capture"),

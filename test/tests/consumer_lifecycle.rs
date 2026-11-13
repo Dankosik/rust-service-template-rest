@@ -251,7 +251,7 @@ impl Actor {
 
     async fn stop(mut self) {
         kill(
-            Pid::from_raw(i32::try_from(self.child.id()).unwrap()),
+            Pid::from_raw(self.child.id().cast_signed()),
             Signal::SIGTERM,
         )
         .unwrap();

@@ -11,7 +11,7 @@
 //! Server calls and direct HTTP service users report at the transport boundary.
 
 use std::panic::AssertUnwindSafe;
-use std::sync::{Arc, Once, OnceLock, PoisonError, RwLock};
+use std::sync::{Arc, LazyLock, Once, OnceLock, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
 use foldhash::{HashMap, HashSet};
@@ -242,7 +242,11 @@ pub(crate) fn register_shed() {
 const UNKNOWN_PATH: &str = "";
 const CLIENT_METHOD_LIMIT: usize = 256;
 const CLIENT_COMPONENT_LIMIT: usize = 256;
-static CLIENT_SERIES: OnceLock<Arc<Series>> = OnceLock::new();
+static CLIENT_SERIES: LazyLock<Arc<Series>> = LazyLock::new(|| {
+    Arc::new(Series::new(Kind::Client {
+        admitted: RwLock::default(),
+    }))
+});
 
 /// Metric handles by call path, registered on first use so a call does not
 /// rebuild label strings and look its series up in the recorder. The server
@@ -303,11 +307,7 @@ impl Series {
     }
 
     pub(crate) fn client() -> Arc<Self> {
-        Arc::clone(CLIENT_SERIES.get_or_init(|| {
-            Arc::new(Self::new(Kind::Client {
-                admitted: RwLock::default(),
-            }))
-        }))
+        Arc::clone(&CLIENT_SERIES)
     }
 
     fn new(kind: Kind) -> Self {

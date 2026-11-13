@@ -117,7 +117,7 @@ async fn open_pool() -> Result<PgPool, ReceiverError> {
     Ok(infra_postgres::connect(
         &dsn,
         &PoolOptions {
-            max_connections: NonZeroU32::new(2).ok_or("invalid fixture capacity")?,
+            max_connections: const { NonZeroU32::new(2).expect("2 is nonzero") },
             application_name: "reading-counter-fixture",
             default_isolation: Isolation::ServerDefault,
             session_settings_source: SessionSettingsSource::Startup,

@@ -273,11 +273,7 @@ struct EngineRun {
 }
 
 async fn start(pool: &PgPool, registry: Kinds) -> EngineRun {
-    let engine = Engine::new(
-        pool.clone(),
-        registry,
-        NonZeroU32::new(1).expect("one publisher slot"),
-    );
+    let engine = Engine::new(pool.clone(), registry, NonZeroU32::MIN);
     engine
         .check_startup()
         .await

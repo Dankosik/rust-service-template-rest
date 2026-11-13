@@ -2545,7 +2545,7 @@ async fn x11_retention_deletes_only_old_completed_rows_and_keeps_failed_kinds(po
     let engine = Engine::new(
         jobs.clone(),
         probe_registry(2, DEFAULT_TIMEOUT),
-        NonZeroU32::new(1).expect("one worker"),
+        NonZeroU32::MIN,
     );
     let deleted = engine.remove_expired().await.expect("retention");
     let after = super::job_count(&jobs).await;
@@ -2937,7 +2937,7 @@ async fn x12_cancelled_retention_leaves_no_short_timeout_in_the_pool(pool: PgPoo
     let engine = Engine::new(
         jobs.clone(),
         probe_registry(2, DEFAULT_TIMEOUT),
-        NonZeroU32::new(1).expect("one worker"),
+        NonZeroU32::MIN,
     );
     #[expect(
         clippy::disallowed_methods,
@@ -3037,7 +3037,7 @@ async fn w2_check_startup_accepts_a_migrated_writer_and_refuses_read_only(pool: 
     let engine = Engine::new(
         writer.clone(),
         probe_registry(2, DEFAULT_TIMEOUT),
-        NonZeroU32::new(1).expect("one worker"),
+        NonZeroU32::MIN,
     );
     assert_eq!(engine.check_startup().await, Ok(()));
     make_read_only(&pool).await;
@@ -3045,7 +3045,7 @@ async fn w2_check_startup_accepts_a_migrated_writer_and_refuses_read_only(pool: 
     let read_only = Engine::new(
         reader.clone(),
         probe_registry(2, DEFAULT_TIMEOUT),
-        NonZeroU32::new(1).expect("one worker"),
+        NonZeroU32::MIN,
     );
     assert_eq!(
         read_only.check_startup().await,

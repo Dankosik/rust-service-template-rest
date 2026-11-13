@@ -335,7 +335,7 @@ test-object-storage-conformance: ## Live-provider conformance; PROVIDER=amazon_s
 	@case "$(PROVIDER)" in amazon_s3|cloudflare_r2|railway|s3_compatible) ;; *) printf '%s requires PROVIDER=amazon_s3|cloudflare_r2|railway|s3_compatible\n' "$@" >&2; exit 2 ;; esac
 	@test "$(OBJECT_STORAGE_CONFORMANCE_WRITES)" = allow || { printf 'refusing %s: it writes to a real bucket; set OBJECT_STORAGE_CONFORMANCE_WRITES=allow\n' "$@" >&2; exit 2; }
 	$(VALIDATION_LOCK) env OBJECT_STORAGE_CONFORMANCE_WRITES=allow OBJECT_STORAGE_CONFORMANCE_PROVIDER=$(PROVIDER) \
-		$(BUILD_CARGO) test -p infra-object-storage --features integration --test conformance $(CARGO_FLAGS) -- --ignored --nocapture
+		$(BUILD_CARGO) test -p infra-object-storage --features integration --test conformance $(CARGO_FLAGS) -- --ignored --no-capture
 
 fmt: ## Format every crate
 	$(CARGO) $(CARGO_FLAGS) fmt --all

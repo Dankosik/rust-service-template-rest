@@ -161,7 +161,10 @@ async fn read_headers<S: tokio::io::AsyncRead + Unpin>(stream: &mut S) -> Vec<u8
     let mut request = Vec::new();
     let mut chunk = [0_u8; 256];
     let header_end = loop {
-        if let Some(position) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+        if let Some(position) = request
+            .array_windows()
+            .position(|bytes| bytes == b"\r\n\r\n")
+        {
             break position + 4;
         }
         let read = stream
@@ -221,7 +224,7 @@ async fn reply_peer(
 
 fn header(headers: &[u8], name: &str) -> String {
     let header_end = headers
-        .windows(4)
+        .array_windows()
         .position(|bytes| bytes == b"\r\n\r\n")
         .map_or(headers.len(), |position| position + 4);
     let text =
@@ -237,7 +240,7 @@ fn header(headers: &[u8], name: &str) -> String {
 
 fn request_body(request: &[u8]) -> &[u8] {
     let boundary = request
-        .windows(4)
+        .array_windows()
         .position(|bytes| bytes == b"\r\n\r\n")
         .expect("request header boundary");
     &request[boundary + 4..]

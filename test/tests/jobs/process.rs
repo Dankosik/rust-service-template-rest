@@ -246,20 +246,17 @@ fn read_stderr(child: &mut Child) -> String {
 fn get(url: &str) -> Result<(u16, String), ureq::Error> {
     // Without a bound, a listener that accepts and never answers would hold
     // `poll_until` past its deadline.
-    match ureq::get(url)
+    ureq::get(url)
         .config()
         .timeout_global(Some(Duration::from_secs(3)))
         .http_status_as_error(false)
         .build()
         .call()
-    {
-        Ok(mut response) => {
+        .map(|mut response| {
             let status = response.status().as_u16();
             let body = response.body_mut().read_to_string().unwrap_or_default();
-            Ok((status, body))
-        }
-        Err(err) => Err(err),
-    }
+            (status, body)
+        })
 }
 
 #[expect(
@@ -810,7 +807,7 @@ async fn ready_worker_runs_a_job_and_exits_0_on_sigterm(pool: PgPool) {
 
 #[cfg(unix)]
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "the external fixture confirms SIGSTOP then deliberately holds the owned worker past its completion bound"
 )]

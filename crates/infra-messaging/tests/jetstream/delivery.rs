@@ -426,7 +426,7 @@ async fn pulls_reserve_handler_slots_and_drain_leaves_unadmitted_messages_at_the
     let fixture = Fixture::create(false).await;
     let cancel = CancellationToken::new();
     let consumer_options = ConsumerOptions {
-        concurrency: std::num::NonZeroUsize::new(2).expect("two is nonzero"),
+        concurrency: const { std::num::NonZeroUsize::new(2).expect("2 is nonzero") },
         ..consumer_options(&fixture)
     };
     let messaging = Box::pin(Messaging::connect(

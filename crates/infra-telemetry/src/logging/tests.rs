@@ -402,7 +402,7 @@ fn in_diagnostic_child() -> bool {
                 .args([
                     "--exact",
                     "logging::tests::sdk_diagnostics_keep_numeric_facts_without_raw_output",
-                    "--nocapture",
+                    "--no-capture",
                 ])
                 .env(CHILD, "1")
                 .stdout(std::process::Stdio::piped())

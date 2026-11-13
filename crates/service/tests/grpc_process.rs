@@ -447,7 +447,7 @@ async fn serve_oidc(
             let mut stream = acceptor.accept(stream).await.expect("OIDC TLS handshake");
             let mut request = Vec::new();
             let mut chunk = [0_u8; 4096];
-            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            while !request.array_windows().any(|window| window == b"\r\n\r\n") {
                 let read = stream.read(&mut chunk).await.expect("read OIDC request");
                 assert!(read > 0, "OIDC request ended before headers");
                 request.extend_from_slice(&chunk[..read]);
@@ -1093,7 +1093,7 @@ fn registered_feature_work_joins_and_reports_primary_or_cleanup_failure() {
         command.args([
             "--exact",
             "registered_background_fixture",
-            "--nocapture",
+            "--no-capture",
             "--test-threads=1",
         ]);
         let mut example = Example::spawn_command(

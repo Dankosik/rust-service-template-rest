@@ -172,7 +172,7 @@ async fn pool() -> Result<PgPool, Error> {
     Ok(infra_postgres::connect(
         &dsn,
         &PoolOptions {
-            max_connections: NonZeroU32::new(8).ok_or("invalid fixture pool limit")?,
+            max_connections: const { NonZeroU32::new(8).expect("8 is nonzero") },
             application_name: "messaging-recovery-load",
             default_isolation: Isolation::ReadCommitted,
             session_settings_source: SessionSettingsSource::Startup,

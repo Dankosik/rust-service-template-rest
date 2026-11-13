@@ -236,7 +236,7 @@ pub(crate) async fn read_request_headers<S: tokio::io::AsyncRead + Unpin>(
 ) -> Vec<u8> {
     let mut headers = Vec::new();
     let mut chunk = [0_u8; 256];
-    while !headers.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+    while !headers.array_windows().any(|bytes| bytes == b"\r\n\r\n") {
         let read = stream
             .read(&mut chunk)
             .await

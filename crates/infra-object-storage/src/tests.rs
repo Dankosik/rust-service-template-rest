@@ -979,7 +979,7 @@ pub(super) fn in_tracing_child(test_name: &str) -> bool {
         return true;
     }
     let mut child = std::process::Command::new(std::env::current_exe().expect("test executable"))
-        .args(["--exact", test_name, "--nocapture"])
+        .args(["--exact", test_name, "--no-capture"])
         .env(CHILD, test_name)
         .stdout(std::process::Stdio::piped())
         .spawn()
@@ -1458,7 +1458,7 @@ async fn answer_tls_s3(mut stream: tokio_rustls::server::TlsStream<tokio::net::T
 
     let mut request = Vec::new();
     let mut buffer = [0_u8; 1024];
-    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+    while !request.array_windows().any(|window| window == b"\r\n\r\n") {
         let read = stream.read(&mut buffer).await.unwrap();
         assert_ne!(read, 0, "TLS client closed before its request");
         request.extend_from_slice(&buffer[..read]);

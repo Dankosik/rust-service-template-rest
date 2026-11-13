@@ -75,7 +75,7 @@ fn replace_credentials(path: &std::path::Path, credentials: &[u8]) {
 #[ignore = "requires the runner-owned JWT auth fixture"]
 #[expect(
     clippy::print_stdout,
-    reason = "the runner captures bounded phase and cleanup receipts with --nocapture"
+    reason = "the runner captures bounded phase and cleanup receipts with --no-capture"
 )]
 #[expect(
     clippy::too_many_lines,

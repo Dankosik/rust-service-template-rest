@@ -816,9 +816,9 @@ fn write_sorted(
         line.append(value);
         if line.failed {
             line.rewind(kept);
-            if value.first() == Some(&b'"') {
+            if let Some(inner) = value.strip_circumfix(b"\"", b"\"") {
                 write_key(line, field.key, format);
-                write_cut_string(line, value);
+                write_cut_string(line, inner);
                 if line.failed {
                     line.rewind(kept);
                 }
@@ -829,11 +829,10 @@ fn write_sorted(
     true
 }
 
-/// As much of the JSON string `value`, quotes included, as the line has room
-/// for, closed. It is cut between characters and between escape sequences, so
-/// what is written is a valid string.
-fn write_cut_string(line: &mut Bytes, value: &[u8]) {
-    let inner = &value[1..value.len() - 1];
+/// As much of the JSON string body `inner` as the line has room for, between
+/// quotes. It is cut between characters and between escape sequences, so what
+/// is written is a valid string.
+fn write_cut_string(line: &mut Bytes, inner: &[u8]) {
     let room = line.room().saturating_sub(2);
     let mut end = 0;
     while end < inner.len() {

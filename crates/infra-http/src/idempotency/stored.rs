@@ -124,11 +124,8 @@ impl ReplayableResponse {
                 value: value.as_bytes().to_vec(),
             })
             .collect();
-        #[expect(
-            clippy::cast_possible_wrap,
-            reason = "StatusCode only represents 100 through 999"
-        )]
-        let status = self.status.as_u16() as i16;
+        // StatusCode only represents 100 through 999, so the sign never flips.
+        let status = self.status.as_u16().cast_signed();
         Record {
             status,
             headers,

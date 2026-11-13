@@ -1521,7 +1521,7 @@ async fn rejected_ready_empty_frames_cooperate_with_other_tasks() {
     });
     let mut request = opening_request(UNARY_PATH, None, "");
     *request.body_mut() = axum::body::Body::from_stream(futures_util::stream::iter(
-        (0..1024).map(|_| Ok::<_, std::convert::Infallible>(bytes::Bytes::new())),
+        std::iter::repeat_n(Ok::<_, std::convert::Infallible>(bytes::Bytes::new()), 1024),
     ));
     let response = timeout(WAIT, app.oneshot(request)).await.unwrap().unwrap();
     assert_eq!(

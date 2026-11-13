@@ -267,7 +267,7 @@ PY
 	# This selects exactly one ignored test. Both the harness output and the
 	# independently written terminal receipt are required; zero tests is failure.
 	cargo test --locked -p integration-tests --features integration --test consumer_lifecycle \
-		historical_actors_survive_native_restore -- --ignored --exact --nocapture 2>&1 | tee "${LIFECYCLE_EVIDENCE}/rehearsal.log"
+		historical_actors_survive_native_restore -- --ignored --exact --no-capture 2>&1 | tee "${LIFECYCLE_EVIDENCE}/rehearsal.log"
 	python3 - "${LIFECYCLE_EVIDENCE}" <<'PY'
 import json, pathlib, sys
 p = pathlib.Path(sys.argv[1])

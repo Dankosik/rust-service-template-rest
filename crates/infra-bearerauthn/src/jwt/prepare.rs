@@ -278,7 +278,7 @@ mod tests {
                     let mut stream = acceptor.accept(stream).await.unwrap();
                     let mut request = Vec::new();
                     let mut chunk = [0_u8; 4096];
-                    while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+                    while !request.array_windows().any(|part| part == b"\r\n\r\n") {
                         let read = stream.read(&mut chunk).await.unwrap();
                         assert_ne!(read, 0);
                         request.extend_from_slice(&chunk[..read]);

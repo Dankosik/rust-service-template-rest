@@ -29,7 +29,7 @@ exercised through the admitted `Dsn` exactly as the binaries use them
 embedded-history admission/refusal, session-budget verification, the pooled
 path, and password rotation. A caller that owns the compose lifecycle itself
 (`INTEGRATION_COMPOSE_MANAGED=1`) provides both URLs. Extra arguments reach `cargo test`:
-`bash scripts/ci/test-integration-db.sh migrations_apply -- --nocapture`.
+`bash scripts/ci/test-integration-db.sh migrations_apply -- --no-capture`.
 Without Docker the target refuses with exit 2; `REQUIRE_DOCKER=1` (what CI
 sets) turns that into a failure, because a skipped required test is not a
 pass.
@@ -74,7 +74,7 @@ four-second probe budget and three-failure threshold. A query on the held
 connection still succeeds while readiness is lost, distinguishing responsive
 saturation from the silent-relay cases above. Release must restore a useful
 transaction and readiness without restart or pool growth. The test prints
-elapsed readiness-loss and post-release recovery times with `--nocapture`;
+elapsed readiness-loss and post-release recovery times with `--no-capture`;
 health's existing focused tests own the threshold and staleness arithmetic.
 These are authored checks until run against the assembled candidate, and local
 recovery does not establish production capacity or fleet stability.
@@ -83,7 +83,7 @@ Run the PostgreSQL target once under the existing runner to cover these cases
 alongside return/finality proof:
 
 ```bash
-bash scripts/ci/test-integration-db.sh --test postgres -- --nocapture
+bash scripts/ci/test-integration-db.sh --test postgres -- --no-capture
 ```
 
 For a later workload-sizing observation, first apply the deployment-wide
@@ -200,7 +200,7 @@ Run it only through the existing admitted PostgreSQL runner at assembled final
 validation:
 
 ```bash
-bash scripts/ci/test-integration-db.sh --test postgres -- --nocapture
+bash scripts/ci/test-integration-db.sh --test postgres -- --no-capture
 ```
 <!-- template:end postgres-grpc-consumers:docs-postgres-validation-consumers -->
 

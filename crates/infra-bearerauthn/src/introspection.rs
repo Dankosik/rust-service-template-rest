@@ -406,7 +406,7 @@ mod tests {
 
     /// The head has ended and the `content-length` body has arrived.
     fn complete_request(request: &[u8]) -> bool {
-        let Some(head_end) = request.windows(4).position(|part| part == b"\r\n\r\n") else {
+        let Some(head_end) = request.array_windows().position(|part| part == b"\r\n\r\n") else {
             return false;
         };
         let head = String::from_utf8_lossy(&request[..head_end]).to_ascii_lowercase();

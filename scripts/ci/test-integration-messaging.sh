@@ -162,7 +162,7 @@ auth_log="${receipt_dir}/auth-test.log"
 auth_status=0
 if NATS_AUTH_URL="${owned_url}" NATS_AUTH_CREDS_A="${fixture_dir}/user-a.creds" NATS_AUTH_CREDS_B="${fixture_dir}/user-b.creds" \
 	cargo test --locked -p infra-messaging --features integration --test jetstream \
-	credentials::credentials_file_rotation_is_authenticated_by_the_broker -- --ignored --exact --nocapture >"${auth_log}" 2>&1; then
+	credentials::credentials_file_rotation_is_authenticated_by_the_broker -- --ignored --exact --no-capture >"${auth_log}" 2>&1; then
 	if ! grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out;' "${auth_log}"; then
 		echo "JWT rotation proof did not execute exactly one passing, nonignored test" >&2
 		auth_status=1
@@ -185,7 +185,7 @@ rotation_log="${receipt_dir}/credential-rotation-test.log"
 rotation_status=0
 if NATS_AUTH_URL="${owned_url}" cargo test --locked -p infra-messaging --features integration \
 	--test credential_rotation expired_old_credentials_are_refused_and_file_replacement_recovers_the_client \
-	-- --exact --nocapture >"${rotation_log}" 2>&1; then
+	-- --exact --no-capture >"${rotation_log}" 2>&1; then
 	if ! grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out;' "${rotation_log}"; then
 		echo "credential expiry/reread proof did not execute exactly one passing test" >&2
 		rotation_status=1

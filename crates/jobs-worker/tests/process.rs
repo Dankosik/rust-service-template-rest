@@ -30,7 +30,7 @@ fn output_with_env(args: &[&str], env: &[(&str, &str)]) -> Output {
 }
 
 #[test]
-#[allow(
+#[expect(
     clippy::disallowed_methods,
     reason = "synchronous process fixture inspects its local template marker before teardown"
 )]
@@ -357,7 +357,7 @@ fn blocked_stdout_preserves_primary_startup_failure() {
             "--exact",
             "blocked_stdout_worker_child",
             "--ignored",
-            "--nocapture",
+            "--no-capture",
         ])
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())

@@ -348,7 +348,7 @@ async fn read_request(stream: &mut TcpStream) -> CapturedRequest {
             request.len() <= 2 * 1024 * 1024,
             "fixture request exceeded bound"
         );
-        if let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+        if let Some(end) = request.array_windows().position(|part| part == b"\r\n\r\n") {
             break end + 4;
         }
     };

@@ -135,7 +135,10 @@ async fn request_body(socket: &mut TcpStream) -> Result<Vec<u8>, ReceiverError> 
     // framing instead of building a second general HTTP protocol stack.
     let mut request = Vec::with_capacity(2048);
     let header_end = loop {
-        if let Some(index) = request.windows(4).position(|value| value == b"\r\n\r\n") {
+        if let Some(index) = request
+            .array_windows()
+            .position(|value| value == b"\r\n\r\n")
+        {
             break index + 4;
         }
         if request.len() >= 16 * 1024 {

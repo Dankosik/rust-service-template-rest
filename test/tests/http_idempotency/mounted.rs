@@ -390,7 +390,7 @@ impl Provider {
                     .expect("fixture endpoint URL"),
                 client_id: "fixture-client".to_owned(),
                 client_secret: SecretString::from("fixture-secret"),
-                provider_concurrency: NonZeroUsize::new(16).expect("fixture capacity"),
+                provider_concurrency: const { NonZeroUsize::new(16).expect("16 is nonzero") },
                 cache,
             },
             transport,
@@ -492,7 +492,7 @@ async fn read_token<S: AsyncRead + Unpin>(stream: &mut S) -> Option<String> {
 /// have arrived.
 fn request_body(request: &[u8]) -> Option<&[u8]> {
     let head_end = request
-        .windows(4)
+        .array_windows()
         .position(|window| window == b"\r\n\r\n")?
         + 4;
     let head = std::str::from_utf8(&request[..head_end]).ok()?;

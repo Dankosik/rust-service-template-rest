@@ -506,7 +506,7 @@ impl RunningProcessor {
         let engine = Engine::new(
             pool.clone(),
             kinds.validate().expect("webhook processor registry"),
-            std::num::NonZeroU32::new(1).expect("one worker"),
+            std::num::NonZeroU32::MIN,
         );
         let cancel = CancellationToken::new();
         let tracker = TaskTracker::new();
