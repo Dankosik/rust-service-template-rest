@@ -204,6 +204,8 @@ async fn dropping_a_probe_waiting_for_capacity_keeps_the_peer_command() {
 
 #[tokio::test(start_paused = true)]
 async fn dropping_a_dispatched_probe_keeps_the_peer_command() {
+    const EXPECTED_REQUESTS: &[u8] = b"*1\r\n$4\r\nPING\r\n*2\r\n$3\r\nGET\r\n$9\r\ntest:peer\r\n";
+
     let mut pipeline = FullPipeline::new().await;
     let namespace = pipeline.cache.namespace("test");
     let probe = pipeline.cache.probe();
@@ -213,13 +215,12 @@ async fn dropping_a_dispatched_probe_keeps_the_peer_command() {
     poll_pending(peer.as_mut()).await;
 
     pipeline.poll_driver(Waker::noop());
-    let expected = b"*1\r\n$4\r\nPING\r\n*2\r\n$3\r\nGET\r\n$9\r\ntest:peer\r\n";
-    let mut actual = [0; expected.len()];
+    let mut actual = [0; EXPECTED_REQUESTS.len()];
     timeout(BUDGET, pipeline.server.read_exact(&mut actual))
         .await
         .expect("PING and GET reach the server before cancellation")
         .expect("read requests");
-    assert_eq!(&actual, expected);
+    assert_eq!(actual.as_slice(), EXPECTED_REQUESTS);
 
     drop(check);
     poll_pending(peer.as_mut()).await;
