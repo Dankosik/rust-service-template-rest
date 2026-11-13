@@ -3,7 +3,7 @@
 use std::num::NonZeroU32;
 
 use health::Probe;
-use infra_postgres::{Dsn, PgPool, PoolOptions, PostgresProbe, SessionBudgets};
+use infra_postgres::{Dsn, PgPool, PoolOptions, PostgresProbe, SessionSettingsSource};
 use secrecy::ExposeSecret;
 use service_config::{Config, PostgresConfig, PostgresSessionBudgets};
 
@@ -107,9 +107,9 @@ pub(crate) fn pool_options<'a>(
         max_connections,
         application_name,
         default_isolation: infra_postgres::Isolation::ReadCommitted,
-        session_budgets: match config.session_budgets {
-            PostgresSessionBudgets::Startup => SessionBudgets::Startup,
-            PostgresSessionBudgets::Server => SessionBudgets::Server,
+        session_settings_source: match config.session_budgets {
+            PostgresSessionBudgets::Startup => SessionSettingsSource::Startup,
+            PostgresSessionBudgets::Server => SessionSettingsSource::Server,
         },
     }
 }

@@ -30,9 +30,9 @@ pub use maintenance::{
 };
 pub use observe::{HISTOGRAMS, observed, record_metrics, record_metrics_periodically};
 pub use pool::{
-    ACQUIRE_TIMEOUT, CloseOutcome, ConnectError, PoolOptions, SessionBudgets, SessionOptions,
-    acquire, acquire_until, admit_pool, close, connect, connect_session, format_pg_duration,
-    prepare_pool,
+    ACQUIRE_TIMEOUT, CloseOutcome, ConnectError, PoolOptions, SessionOptions,
+    SessionSettingsSource, acquire, acquire_until, admit_pool, close, connect, connect_session,
+    format_pg_duration, prepare_pool,
 };
 pub use probe::PostgresProbe;
 pub use sqlx::postgres::PgPool;

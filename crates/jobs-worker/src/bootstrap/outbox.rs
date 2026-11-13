@@ -117,7 +117,7 @@ mod tests {
                 max_connections: std::num::NonZeroU32::MIN,
                 application_name: "factory-composition-test",
                 default_isolation: infra_postgres::Isolation::ReadCommitted,
-                session_budgets: infra_postgres::SessionBudgets::Startup,
+                session_settings_source: infra_postgres::SessionSettingsSource::Startup,
             },
         );
         let resources = Resources {

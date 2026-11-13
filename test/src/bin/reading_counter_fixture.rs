@@ -4,7 +4,7 @@ use std::{
     collections::BTreeMap, ffi::OsString, num::NonZeroU32, process::ExitCode, time::Duration,
 };
 
-use infra_postgres::{Dsn, Isolation, PoolOptions, SessionBudgets};
+use infra_postgres::{Dsn, Isolation, PoolOptions, SessionSettingsSource};
 use infra_webhooks::{
     outbound::{Dispatcher, Endpoint, Producer},
     protocol::KeyRing,
@@ -120,7 +120,7 @@ async fn open_pool() -> Result<PgPool, ReceiverError> {
             max_connections: NonZeroU32::new(2).ok_or("invalid fixture capacity")?,
             application_name: "reading-counter-fixture",
             default_isolation: Isolation::ServerDefault,
-            session_budgets: SessionBudgets::Startup,
+            session_settings_source: SessionSettingsSource::Startup,
         },
     )
     .await?)
