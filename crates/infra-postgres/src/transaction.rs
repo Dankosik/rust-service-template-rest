@@ -27,7 +27,7 @@ use crate::error::sqlstate;
 use crate::observe::{self, TransactionObservation, TransactionOutcome, observed};
 use crate::pool::{acquire, acquire_until, to_runtime_param};
 
-/// Why a transaction did not commit, split by what is known about the outcome.
+/// The stage that failed and what is known about the commit outcome.
 #[derive(Debug, thiserror::Error)]
 pub enum TxError {
     /// Nothing ran.

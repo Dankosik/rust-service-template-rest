@@ -162,8 +162,8 @@ impl Store {
             )
             .await?;
             Ok(PopulationSample {
-                observed_at: sample.observed_at,
-                oldest: sample.oldest,
+                observed_at_unix_seconds: sample.observed_at,
+                oldest_at_unix_seconds: sample.oldest,
             })
         })
         .await
