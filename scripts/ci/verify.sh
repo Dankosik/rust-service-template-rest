@@ -278,7 +278,8 @@ if '--version' in sys.argv:
     if os.environ.get('CONTEXT_UNLINK_CARGO') == '1':
         pathlib.Path(__file__).unlink()
 else:
-    pathlib.Path('context-command-ran').write_text(json.dumps({'wrapper': os.environ.get('RUSTC_WRAPPER')}))
+    pathlib.Path('context-command-ran').write_text(json.dumps({'wrapper': os.environ.get('RUSTC_WRAPPER'),
+                                                           'makeflags': os.environ.get('MAKEFLAGS')}))
     if os.environ.get('CONTEXT_CANCEL_HELPER') == '1':
         os.kill(os.getppid(), signal.SIGTERM)
         sys.exit(0)
@@ -327,9 +328,13 @@ config.rmdir()
 
 # Inherited wrappers remain intact even when unprojectable; a failed child
 # merely printing storage words is not positive resource-exhaustion evidence.
-inherited = execute(RUSTC_WRAPPER=str(sys.executable))
+# `make --keep-going` exports MAKEFLAGS="k ..."; a build script appending it
+# after its own options must not read `k` as a target.
+inherited = execute(RUSTC_WRAPPER=str(sys.executable), MAKEFLAGS='k -- TC=1')
 assert inherited.returncode == 7
-assert json.loads((root / 'context-command-ran').read_text())['wrapper'] == str(sys.executable)
+ran = json.loads((root / 'context-command-ran').read_text())
+assert ran['wrapper'] == str(sys.executable)
+assert ran['makeflags'] == '-k -- TC=1'
 assert '"class":"command_failed"' in inherited.stderr
 assert '"class":"resource_exhausted"' not in inherited.stderr
 (root / 'context-command-ran').unlink()
