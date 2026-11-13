@@ -27,17 +27,23 @@ impl AdmissionLimit {
     }
 }
 
+#[derive(Clone, Copy)]
+struct OpeningWait(Duration);
+
 /// Admission before authentication. Only the opening future owns this permit;
 /// response headers release it independently of call custody.
 pub(super) async fn admit_opening(
     State(limit): State<AdmissionLimit>,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Response {
     let patience = patience(&request, limit.max_wait);
-    let Some(_permit) = acquire(limit.permits, patience).await else {
+    let Some((_permit, waited)) = acquire(limit.permits, patience).await else {
         return reject_at_capacity(request).await;
     };
+    if !waited.is_zero() {
+        request.extensions_mut().insert(OpeningWait(waited));
+    }
     next.run(request).await
 }
 
@@ -48,8 +54,12 @@ pub(super) async fn admit_business_call(
     request: Request,
     next: Next,
 ) -> Response {
-    let patience = patience(&request, limit.max_wait);
-    let Some(permit) = acquire(limit.permits, patience).await else {
+    let waited = request
+        .extensions()
+        .get::<OpeningWait>()
+        .map_or(Duration::ZERO, |wait| wait.0);
+    let patience = patience(&request, limit.max_wait.saturating_sub(waited));
+    let Some((permit, _)) = acquire(limit.permits, patience).await else {
         return reject_at_capacity(request).await;
     };
     let mut response = next.run(request).await;
@@ -68,9 +78,12 @@ fn patience(request: &Request, max_wait: Duration) -> Duration {
 
 /// A call that waits is served once capacity frees within its budget.
 /// Refusing it earlier would refuse work the process could still do.
-async fn acquire(permits: Arc<Semaphore>, patience: Duration) -> Option<OwnedSemaphorePermit> {
+async fn acquire(
+    permits: Arc<Semaphore>,
+    patience: Duration,
+) -> Option<(OwnedSemaphorePermit, Duration)> {
     if let Ok(permit) = Arc::clone(&permits).try_acquire_owned() {
-        return Some(permit);
+        return Some((permit, Duration::ZERO));
     }
     if patience.is_zero() {
         return None;
@@ -78,14 +91,15 @@ async fn acquire(permits: Arc<Semaphore>, patience: Duration) -> Option<OwnedSem
 
     let waiting = crate::observe::AdmissionWaiting::start();
     let started = tokio::time::Instant::now();
-    let permit = tokio::time::timeout(patience, permits.acquire_owned())
-        .await
+    let permit = tokio::time::timeout(patience, permits.acquire_owned()).await;
+    let waited = started.elapsed();
+    drop(waiting);
+    permit
         .ok()
         .and_then(Result::ok)
         // Tokio's timeout can return a ready permit after the wait budget.
-        .filter(|_| started.elapsed() < patience);
-    drop(waiting);
-    permit
+        .filter(|_| waited < patience)
+        .map(|permit| (permit, waited))
 }
 
 #[derive(Clone)]
