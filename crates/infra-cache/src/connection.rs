@@ -15,12 +15,12 @@ use tokio::task::AbortHandle;
 use tokio::time::{Instant, sleep_until, timeout, timeout_at};
 use tokio_util::sync::CancellationToken;
 
-use crate::ServerEndpoint;
 use crate::credentials::PasswordFile;
 use crate::observe::{
     ADMISSION_REFUSED_METRIC, COMMANDS_IN_FLIGHT_METRIC, PASSWORD_REFRESHES_METRIC,
     RETIREMENTS_METRIC,
 };
+use crate::{CacheError, ServerEndpoint};
 
 /// Bounds one whole setup attempt: password read, dial, TLS, and `HELLO`.
 /// The same limit applies while the server is making progress.
@@ -729,12 +729,7 @@ async fn credentialed_client<'a>(
     // Not `auth`: an unreadable mount must not look like a revoked
     // password, which an operator would answer by rotating the secret.
     let password = file.read().await.map_err(|error| {
-        tracing::warn!(
-            server.address = %server.host,
-            server.port = server.port,
-            %error,
-            "cache_password_file_unreadable"
-        );
+        warn_password_file_unreadable(server, &error);
         ErrorType::Other
     })?;
     let info = admitted.get_connection_info().clone();
@@ -746,6 +741,15 @@ async fn credentialed_client<'a>(
     let client =
         redis::Client::open(info.set_redis_settings(settings)).map_err(|_| ErrorType::Other)?;
     Ok((client, Some(Rotation::new(file, password))))
+}
+
+fn warn_password_file_unreadable(server: &ServerEndpoint, error: &CacheError) {
+    tracing::warn!(
+        server.address = %server.host,
+        server.port = server.port,
+        %error,
+        "cache_password_file_unreadable"
+    );
 }
 
 async fn connect(
@@ -826,7 +830,7 @@ struct Rotation<'a> {
 }
 
 enum RefreshOutcome {
-    ReadFailed(crate::CacheError),
+    ReadFailed(CacheError),
     Unchanged,
     AuthAccepted,
     /// The server refused the new password; the authenticated session stays.
@@ -900,7 +904,7 @@ impl<'a> Rotation<'a> {
             Ok(Ok(password)) => password,
             Ok(Err(error)) => return RefreshOutcome::ReadFailed(error),
             Err(_elapsed) => {
-                return RefreshOutcome::ReadFailed(crate::CacheError::PasswordFile {
+                return RefreshOutcome::ReadFailed(CacheError::PasswordFile {
                     kind: std::io::ErrorKind::TimedOut,
                 });
             }
@@ -941,12 +945,7 @@ impl<'a> Rotation<'a> {
         match outcome {
             RefreshOutcome::ReadFailed(error) => {
                 if !unreadable_logged {
-                    tracing::warn!(
-                        server.address = %server.host,
-                        server.port = server.port,
-                        %error,
-                        "cache_password_file_unreadable"
-                    );
+                    warn_password_file_unreadable(server, error);
                 }
             }
             RefreshOutcome::Unchanged => {}
