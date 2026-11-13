@@ -6,7 +6,7 @@ use health::Probe;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 
 use super::*;
-use crate::CacheNamespace;
+use crate::{Cache, CacheNamespace};
 
 const BUDGET: Duration = Duration::from_secs(30);
 
