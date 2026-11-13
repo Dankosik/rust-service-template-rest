@@ -255,12 +255,13 @@ fn pending_failure(resources: &Resources, background: &Background) -> Option<Wor
     if let Some(task) = background.failure() {
         return Some(WorkerError::BackgroundStopped(task));
     }
+    let Listeners {
+        health,
+        diagnostics,
+    } = &resources.listeners;
     for (name, server) in [
-        (Listeners::HEALTH, resources.listeners.health.as_ref()),
-        (
-            Listeners::DIAGNOSTICS,
-            resources.listeners.diagnostics.as_ref(),
-        ),
+        (Listeners::HEALTH, health.as_ref()),
+        (Listeners::DIAGNOSTICS, diagnostics.as_ref()),
     ] {
         if let Some(server) = server
             && server.accept_failure().now_or_never().is_some()

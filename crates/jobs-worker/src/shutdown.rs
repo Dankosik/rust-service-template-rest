@@ -401,14 +401,18 @@ async fn finish_attempts(started: &Started, deadline: Instant) {
 // template:end jobs:worker-shutdown-finish-attempts
 
 async fn close_listeners(listeners: Listeners, budget: Duration) -> Outcome {
-    let (health, diagnostics) = tokio::join!(
-        stage(Listeners::HEALTH, close_health(listeners.health, budget)),
+    let Listeners {
+        health,
+        diagnostics,
+    } = listeners;
+    let (health_outcome, diagnostics_outcome) = tokio::join!(
+        stage(Listeners::HEALTH, close_health(health, budget)),
         stage(
             Listeners::DIAGNOSTICS,
-            close_diagnostics(listeners.diagnostics, budget)
+            close_diagnostics(diagnostics, budget)
         ),
     );
-    health.combine(diagnostics)
+    health_outcome.combine(diagnostics_outcome)
 }
 
 async fn close_health(server: Option<Server>, budget: Duration) -> Outcome {
@@ -525,7 +529,12 @@ async fn close_messaging(broker: Option<BrokerResource>, deadline: Instant) -> O
 async fn close_dependencies(resources: &mut Resources, deadline: Instant) -> Outcome {
     let pool_close = async {
         // template:begin jobs:worker-shutdown-close-jobs
+        use crate::bootstrap::postgres::PoolResource;
+
         if let Some(pool) = resources.pool.as_ref() {
+            let pool = match pool {
+                PoolResource::Starting(pool) | PoolResource::Admitted(pool) => pool,
+            };
             return close_pool(pool, deadline.saturating_duration_since(Instant::now())).await;
         }
         // template:end jobs:worker-shutdown-close-jobs

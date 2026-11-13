@@ -13,6 +13,11 @@ use crate::resources::Resources;
 
 const POSTGRES_IDENTIFIER_LIMIT: usize = 63;
 
+pub(crate) enum PoolResource {
+    Starting(PgPool),
+    Admitted(PgPool),
+}
+
 /// Check the pool capacity, open the pool, and verify the migration history
 /// when a retained capability needs the database.
 pub(super) async fn admit_pool(
@@ -51,6 +56,7 @@ pub(super) async fn admit_pool(
     admit_inputs()?;
     let pool = open_pool(config, background, resources).await?;
     migrate::verify_history(&pool).await?;
+    resources.pool = Some(PoolResource::Admitted(pool));
     Ok(())
 }
 
@@ -70,7 +76,7 @@ async fn open_pool(
         &application_name,
     );
     let pool = infra_postgres::prepare_pool(&dsn, &options);
-    resources.pool = Some(pool.clone());
+    resources.pool = Some(PoolResource::Starting(pool.clone()));
     infra_postgres::admit_pool(&pool, &options).await?;
     tracing::info!(
         postgres.host = dsn.host(),
@@ -119,15 +125,16 @@ fn application_name(service_name: &str) -> String {
     format!("{}{IDENTITY_SUFFIX}", &service_name[..end])
 }
 
-/// The pool [`admit_pool`] opened; every capability that needs it runs after
-/// admission.
 pub(super) fn admitted_pool(resources: &Resources) -> Result<PgPool, WorkerError> {
-    resources.pool.clone().ok_or(WorkerError::PostgresDisabled)
+    match resources.pool.as_ref() {
+        Some(PoolResource::Admitted(pool)) => Ok(pool.clone()),
+        Some(PoolResource::Starting(_)) | None => Err(WorkerError::PostgresDisabled),
+    }
 }
 
 pub(super) fn probe(resources: &Resources) -> Option<Box<dyn Probe>> {
-    let pool = resources.pool.as_ref()?;
-    Some(Box::new(PostgresProbe::new(pool.clone())))
+    let pool = admitted_pool(resources).ok()?;
+    Some(Box::new(PostgresProbe::new(pool)))
 }
 
 #[cfg(test)]

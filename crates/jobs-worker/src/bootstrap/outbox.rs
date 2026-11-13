@@ -71,6 +71,7 @@ mod tests {
     use crate::background::Background;
     use crate::bootstrap::WorkerError;
     use crate::bootstrap::messaging::RetainedMessages;
+    use crate::bootstrap::postgres::PoolResource;
     use crate::resources::Resources;
 
     #[tokio::test]
@@ -121,7 +122,7 @@ mod tests {
             },
         );
         let resources = Resources {
-            pool: Some(pool.clone()),
+            pool: Some(PoolResource::Admitted(pool.clone())),
             ..Resources::default()
         };
         let mut messages = RetainedMessages {
