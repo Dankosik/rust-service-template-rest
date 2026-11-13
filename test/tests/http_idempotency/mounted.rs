@@ -1050,7 +1050,8 @@ async fn outer_http_timeout_cancels_inflight_verification_and_owns_504() {
         scrape
             .lines()
             .any(|line| line.starts_with("authn_verifications_total{")
-                && line.contains("result=\"cancelled\"")
+                && line.contains("result=\"timeout\"")
+                && line.contains("failure=\"timeout\"")
                 && line.ends_with(" 1")),
         "{scrape}"
     );

@@ -59,6 +59,13 @@ enum Outcome {
 }
 
 impl Outcome {
+    const fn from_stopped(stopped: Stopped) -> Self {
+        match stopped {
+            Stopped::Deadline => Self::TimedOut,
+            Stopped::Cancelled => Self::Cancelled,
+        }
+    }
+
     const fn labels(self) -> (&'static str, &'static str) {
         match self {
             Self::Success => ("success", "none"),
@@ -111,9 +118,9 @@ impl Verifier {
     /// [`Failure::Malformed`]. No value or a single value with a valid scheme
     /// other than Bearer is [`Failure::Missing`].
     /// Records exactly one `authn_verifications_total` outcome labelled with
-    /// `transport`: `timeout` when the context's deadline expires, `cancelled`
-    /// when the context is cancelled or the caller drops the future, so an
-    /// operator can tell a slow provider from a departed client.
+    /// `transport`: `timeout` when the context's deadline has expired, including
+    /// when the transport drops this future to enforce it. Cancellation and
+    /// abandonment before the deadline are recorded as `cancelled`.
     ///
     /// # Errors
     /// Returns [`Failure::Unavailable`] when the context stops; otherwise returns
@@ -125,6 +132,7 @@ impl Verifier {
         context: &OperationContext,
     ) -> Result<Principal, Failure> {
         let outcome = OutcomeGuard {
+            context,
             transport,
             recorded: false,
         };
@@ -143,12 +151,13 @@ impl Verifier {
     }
 }
 
-struct OutcomeGuard {
+struct OutcomeGuard<'a> {
+    context: &'a OperationContext,
     transport: Transport,
     recorded: bool,
 }
 
-impl OutcomeGuard {
+impl OutcomeGuard<'_> {
     fn finish(mut self, counters: &TransportSuccessCounters, result: &Result<Principal, Failure>) {
         match result {
             Ok(_) => counters.get(self.transport).increment(1),
@@ -158,20 +167,20 @@ impl OutcomeGuard {
     }
 
     fn stop(mut self, stopped: Stopped) -> Failure {
-        let outcome = match stopped {
-            Stopped::Deadline => Outcome::TimedOut,
-            Stopped::Cancelled => Outcome::Cancelled,
-        };
-        counter(self.transport, outcome).increment(1);
+        counter(self.transport, Outcome::from_stopped(stopped)).increment(1);
         self.recorded = true;
         Failure::Unavailable
     }
 }
 
-impl Drop for OutcomeGuard {
+impl Drop for OutcomeGuard<'_> {
     fn drop(&mut self) {
         if !self.recorded {
-            counter(self.transport, Outcome::Cancelled).increment(1);
+            let outcome = self
+                .context
+                .stopped()
+                .map_or(Outcome::Cancelled, Outcome::from_stopped);
+            counter(self.transport, outcome).increment(1);
         }
     }
 }
