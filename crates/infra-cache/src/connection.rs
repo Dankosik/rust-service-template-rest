@@ -246,12 +246,7 @@ where
     reservation: Option<OwnedSemaphorePermit>,
     reply: ReplyState<F>,
     keeps_generation: fn(&F::Output) -> bool,
-    pending_retirement: PendingReplyRetirement,
-}
-
-enum PendingReplyRetirement {
-    OnDrop,
-    OnDropIfExpired(Deadline),
+    reply_deadline: Option<Deadline>,
 }
 
 enum ReplyState<F> {
@@ -272,7 +267,7 @@ where
         reservation: OwnedSemaphorePermit,
         reply: F,
         keeps_generation: fn(&F::Output) -> bool,
-        pending_retirement: PendingReplyRetirement,
+        reply_deadline: Option<Deadline>,
     ) -> Self {
         Self {
             shared,
@@ -280,7 +275,7 @@ where
             reservation: Some(reservation),
             reply: ReplyState::Unpolled(Box::pin(reply)),
             keeps_generation,
-            pending_retirement,
+            reply_deadline,
         }
     }
 
@@ -333,10 +328,7 @@ where
         }
         let retire = match self.reply {
             ReplyState::Unpolled(_) | ReplyState::Keep => false,
-            ReplyState::Pending(_) => match self.pending_retirement {
-                PendingReplyRetirement::OnDrop => true,
-                PendingReplyRetirement::OnDropIfExpired(deadline) => deadline.expired(),
-            },
+            ReplyState::Pending(_) => self.reply_deadline.is_some_and(Deadline::expired),
             ReplyState::Retire => true,
         };
         if retire {
@@ -523,7 +515,7 @@ impl Link {
                 reservation,
                 query(command, generation.connection.clone()),
                 command_keeps_generation,
-                PendingReplyRetirement::OnDropIfExpired(scope.ceiling),
+                Some(scope.ceiling),
             );
             let reply = poll_fn(|cx| exchange.poll_reply(cx)).await;
             drop(exchange);
@@ -552,23 +544,34 @@ impl Link {
         })
         .await??;
         tokio::task::consume_budget().await;
+        if generation.retired.is_cancelled() {
+            return Err(ErrorType::Io);
+        }
         let mut exchange = Exchange::new(
             &self.shared,
             &generation,
             reservation,
             query(redis::Cmd::ping(), generation.connection.clone()),
             ping_keeps_generation,
-            PendingReplyRetirement::OnDrop,
+            None,
         );
-        // Start a fresh reply budget so waiting for capacity cannot cut short
-        // commands queued ahead of PING.
-        reply_until(
-            &generation.retired,
-            poll_fn(|cx| exchange.poll_reply(cx)),
-            || Deadline::new(Instant::now(), budget),
-        )
-        .await?
-        .map_err(|error| error_type(&error))
+        let first_poll = poll_fn(|cx| Poll::Ready(exchange.poll_reply(cx))).await;
+        let reply = match first_poll {
+            Poll::Ready(reply) => reply,
+            Poll::Pending => {
+                // Start the deadline after enqueueing PING, so every earlier command
+                // has already started its own budget.
+                let deadline = Deadline::new(Instant::now(), budget);
+                exchange.reply_deadline = Some(deadline);
+                reply_until(
+                    &generation.retired,
+                    poll_fn(|cx| exchange.poll_reply(cx)),
+                    || deadline,
+                )
+                .await?
+            }
+        };
+        reply.map_err(|error| error_type(&error))
     }
 
     fn claim_slot<'a>(&'a self, slots: &'a Semaphore) -> Result<CommandSlot<'a>, ErrorType> {
