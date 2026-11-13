@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 
-use super::super::tests::{env, options};
+use super::super::tests::env;
 use super::*;
 
 #[test]
 fn typed_endpoint_wins_and_refuses_ambient_credentials() {
-    let typed = options("http://collector:4318");
+    let typed = Some("http://collector:4318");
     let collector = Some(Endpoint::Typed("http://collector:4318"));
-    assert_eq!(resolve_endpoint(&typed, env(&[])).unwrap(), collector);
+    assert_eq!(resolve_endpoint(typed, env(&[])).unwrap(), collector);
     for (pairs, refused) in [
         (
             &[(OTEL_EXPORTER_OTLP_HEADERS, "a=b")][..],
@@ -19,7 +19,7 @@ fn typed_endpoint_wins_and_refuses_ambient_credentials() {
         ),
     ] {
         std::assert_matches!(
-                resolve_endpoint(&typed, env(pairs)),
+                resolve_endpoint(typed, env(pairs)),
                 Err(TracingError::AmbientCredential { name }) if name == refused
             ,
             "{pairs:?}"
@@ -30,7 +30,7 @@ fn typed_endpoint_wins_and_refuses_ambient_credentials() {
     for traces in ["", " "] {
         assert_eq!(
             resolve_endpoint(
-                &typed,
+                typed,
                 env(&[
                     (OTEL_EXPORTER_OTLP_TRACES_HEADERS, traces),
                     (OTEL_EXPORTER_OTLP_HEADERS, "a=b"),
@@ -43,50 +43,41 @@ fn typed_endpoint_wins_and_refuses_ambient_credentials() {
     // Trust variables are not read by the exporter, so they cannot carry
     // a credential to the typed collector.
     assert_eq!(
-        resolve_endpoint(
-            &typed,
-            env(&[("OTEL_EXPORTER_OTLP_CERTIFICATE", "/ca.pem")])
-        )
-        .unwrap(),
+        resolve_endpoint(typed, env(&[("OTEL_EXPORTER_OTLP_CERTIFICATE", "/ca.pem")])).unwrap(),
         collector
     );
     // Ambient endpoint variables are fine beside a typed endpoint; the
     // typed one wins inside the SDK.
     assert_eq!(
-        resolve_endpoint(
-            &typed,
-            env(&[(OTEL_EXPORTER_OTLP_ENDPOINT, "http://other")])
-        )
-        .unwrap(),
+        resolve_endpoint(typed, env(&[(OTEL_EXPORTER_OTLP_ENDPOINT, "http://other")])).unwrap(),
         collector
     );
 }
 
 #[test]
 fn environment_endpoint_enables_export_and_nothing_disables_it() {
-    let untyped = options("");
     let root = (OTEL_EXPORTER_OTLP_ENDPOINT, "http://collector:4318");
-    assert_eq!(resolve_endpoint(&untyped, env(&[])).unwrap(), None);
+    assert_eq!(resolve_endpoint(None, env(&[])).unwrap(), None);
     assert_eq!(
-        resolve_endpoint(&untyped, env(&[root])).unwrap(),
+        resolve_endpoint(None, env(&[root])).unwrap(),
         Some(Endpoint::Environment)
     );
     // A blank typed endpoint is vacant, so the environment's is used.
     assert_eq!(
-        resolve_endpoint(&options("  "), env(&[root])).unwrap(),
+        resolve_endpoint(Some("  "), env(&[root])).unwrap(),
         Some(Endpoint::Environment)
     );
     // Ambient credentials are the platform's business when the platform
     // also supplies the endpoint.
     assert_eq!(
-        resolve_endpoint(&untyped, env(&[root, (OTEL_EXPORTER_OTLP_HEADERS, "a=b")])).unwrap(),
+        resolve_endpoint(None, env(&[root, (OTEL_EXPORTER_OTLP_HEADERS, "a=b")])).unwrap(),
         Some(Endpoint::Environment)
     );
     // The SDK would read a blank traces variable and fail, so the root is
     // handed over; with no root a blank variable leaves export disabled.
     assert_eq!(
         resolve_endpoint(
-            &untyped,
+            None,
             env(&[(OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, " "), root])
         )
         .unwrap(),
@@ -95,7 +86,7 @@ fn environment_endpoint_enables_export_and_nothing_disables_it() {
         ))
     );
     assert_eq!(
-        resolve_endpoint(&untyped, env(&[(OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, " ")])).unwrap(),
+        resolve_endpoint(None, env(&[(OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, " ")])).unwrap(),
         None
     );
     assert_eq!(

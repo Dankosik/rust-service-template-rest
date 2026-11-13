@@ -45,13 +45,16 @@ const MAX_SPAN_FIELDS: usize = 64;
 const MAX_ACTIVE_CALLBACKS: usize = 32;
 /// Spans holding a field cache at once; one more is left without one.
 const MAX_CACHED_SPANS: usize = 1024;
+const TRACE_ID_FIELD: &str = "trace_id";
+const SPAN_ID_FIELD: &str = "span_id";
+const TRACE_FLAGS_FIELD: &str = "trace_flags";
 const RESERVED: [&str; 7] = [
     "level",
     "target",
     "timestamp",
-    "trace_id",
-    "span_id",
-    "trace_flags",
+    TRACE_ID_FIELD,
+    SPAN_ID_FIELD,
+    TRACE_FLAGS_FIELD,
     "truncated",
 ];
 static ACTIVE_CALLBACKS: AtomicUsize = AtomicUsize::new(0);
@@ -619,11 +622,16 @@ impl FormatLayer {
         if !ids.is_valid() {
             return;
         }
-        write_hex_field(line, "trace_id", &ids.trace_id().to_bytes(), self.format);
-        write_hex_field(line, "span_id", &ids.span_id().to_bytes(), self.format);
         write_hex_field(
             line,
-            "trace_flags",
+            TRACE_ID_FIELD,
+            &ids.trace_id().to_bytes(),
+            self.format,
+        );
+        write_hex_field(line, SPAN_ID_FIELD, &ids.span_id().to_bytes(), self.format);
+        write_hex_field(
+            line,
+            TRACE_FLAGS_FIELD,
             &[ids.trace_flags().to_u8()],
             self.format,
         );

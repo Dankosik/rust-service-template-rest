@@ -32,7 +32,7 @@ use opentelemetry_otlp::{
     WithHttpConfig,
 };
 
-use super::{EndpointSource, TracingError, TracingOptions};
+use super::{EndpointSource, TracingError};
 
 /// Standard trust variables, each a path to a PEM file; the traces variant
 /// wins.
@@ -82,14 +82,10 @@ impl Endpoint<'_> {
 /// A blank variable is vacant. The SDK falls back to `localhost:4318` for
 /// an empty one and fails on a blank one, so the decision is made here.
 pub(super) fn resolve_endpoint(
-    options: &TracingOptions,
+    typed_endpoint: Option<&str>,
     env: impl Fn(&str) -> Option<OsString>,
 ) -> Result<Option<Endpoint<'_>>, TracingError> {
-    if let Some(endpoint) = options
-        .otlp_endpoint
-        .as_deref()
-        .filter(|endpoint| !endpoint.trim().is_empty())
-    {
+    if let Some(endpoint) = typed_endpoint.filter(|endpoint| !endpoint.trim().is_empty()) {
         // The SDK reads the traces header variable whenever it holds
         // Unicode, even empty, and the general one only otherwise.
         let name = if env(OTEL_EXPORTER_OTLP_TRACES_HEADERS)
