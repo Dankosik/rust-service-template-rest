@@ -513,7 +513,8 @@
       "docs/decisions/grpc-decisions.md",
       "scripts/ci/grpc-check.sh",
       "scripts/grpc-generate.sh",
-      "tools/grpc-codegen/"
+      "tools/grpc-codegen/",
+      "vendor/tonic/"
     ],
     "markers": [
       {"path": "env/monitoring/service.rules.yml", "id": "monitoring-grpc-slo"},
@@ -524,9 +525,12 @@
         "ids": [
           "workspace-grpc-generator",
           "workspace-grpc-crates",
-          "workspace-grpc-dependencies"
+          "workspace-grpc-dependencies",
+          "workspace-tonic-patch"
         ]
       },
+      {"path": ".dockerignore", "id": "dockerignore-tonic-vendor"},
+      {"path": "build/docker/Dockerfile", "id": "docker-tonic-vendor"},
       {
         "path": "crates/service/src/lib.rs",
         "ids": [

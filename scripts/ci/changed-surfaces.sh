@@ -259,6 +259,10 @@ classify() {
 			mark rust_source cargo_dependencies runtime_image
 			[[ ${source_only} != true ]] || mark module_initializer initializer_runtime
 			;;
+		vendor/tonic/*)
+			mark rust_source cargo_dependencies runtime_image
+			[[ ${source_only} != true ]] || mark module_initializer initializer_runtime
+			;;
 		esac
 		# Both checks use the whole declared workspace; a new clone can match
 		# unchanged source. Standalone tool workspaces are not scanned as Rust.

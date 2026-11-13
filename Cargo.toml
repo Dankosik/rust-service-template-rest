@@ -5,6 +5,7 @@ exclude = [
     "vendor/hotpath",
 # template:begin grpc:workspace-grpc-generator
     "tools/grpc-codegen",
+    "vendor/tonic",
 # template:end grpc:workspace-grpc-generator
 # template:begin postgres:workspace-postgres-vendor-exclude
     "vendor/sqlx-core",
@@ -345,3 +346,7 @@ aws-smithy-http-client = { path = "vendor/aws-smithy-http-client" }
 # template:end object-storage:workspace-object-storage-patch
 # Same-family TCP opportunity repair; provenance and retirement: vendor/hyper-util/PATCHES.md.
 hyper-util = { path = "vendor/hyper-util" }
+# template:begin grpc:workspace-tonic-patch
+# The client dispatcher reports decoded RPC outcomes. See vendor/tonic/PATCHES.md.
+tonic = { path = "vendor/tonic" }
+# template:end grpc:workspace-tonic-patch
