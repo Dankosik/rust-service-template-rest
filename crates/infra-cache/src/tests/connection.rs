@@ -526,7 +526,7 @@ async fn reliability_full_application_window_leaves_probe_and_maintenance_admiss
 
     let server = FakeServer::start().await;
     let cache = Cache::start(CacheOptions {
-        command_timeout: Duration::from_secs(30),
+        command_timeout: Duration::from_secs(5),
         ..options(&format!("redis://{}", server.address), true, true, None)
     })
     .expect("start cache");
@@ -589,14 +589,19 @@ async fn reliability_full_application_window_leaves_probe_and_maintenance_admiss
         server.command_count("DEL", Some("other_capacity:refused")),
         0
     );
+    server
+        .wait_for(
+            Duration::from_secs(7),
+            "maintenance did not replace the saturated generation",
+            || server.connections() > old,
+        )
+        .await;
     drop(pending_probe);
     drop(pending);
     server
-        .wait_for(
-            Duration::from_secs(4),
-            "saturated generation did not recover",
-            || server.connections() > old && server.closed_through(old),
-        )
+        .wait_for(Duration::from_secs(1), "old socket stayed open", || {
+            server.closed_through(old)
+        })
         .await;
     assert_eq!(namespace.get("recovered").await, Ok(None));
     probe.check().await.expect("probe capacity is reusable");
@@ -669,7 +674,7 @@ async fn reliability_stalled_generations_recover_without_replaying_writes() {
 }
 
 #[tokio::test]
-async fn reliability_a_cancelled_probe_slot_is_retired() {
+async fn reliability_a_probe_reply_timeout_retires_the_connection() {
     use health::Probe;
     use std::task::Poll;
 
@@ -677,15 +682,27 @@ async fn reliability_a_cancelled_probe_slot_is_retired() {
     let recorder = observation_recorder();
     let cache = metrics::with_local_recorder(&recorder, || {
         Cache::start(CacheOptions {
-            command_timeout: Duration::from_secs(30),
+            command_timeout: Duration::from_secs(5),
             ..options(&format!("redis://{}", server.address), true, true, None)
         })
         .expect("start cache")
     });
-    let namespace = cache.namespace("cancelled");
+    let namespace = cache.namespace("probe_timeout");
     let probe = cache.probe();
     assert_eq!(namespace.get("ready").await, Ok(None));
     let old = server.stall_existing();
+    let before = server.command_count("PING", None);
+    let mut pending_probe = probe.check();
+    tokio::select! {
+        biased;
+        result = &mut pending_probe => panic!("silent probe completed before dispatch: {result:?}"),
+        () = server.wait_for(
+            Duration::from_secs(1),
+            "probe did not reach the established socket",
+            || server.command_count("PING", None) > before,
+        ) => {}
+    }
+    assert_work_metrics(&recorder, 1, 0, 0);
     let late_key = "late";
     let peer_key = "peer";
     let mut late = Box::pin(namespace.get(late_key));
@@ -699,25 +716,18 @@ async fn reliability_a_cancelled_probe_slot_is_retired() {
         () = server.wait_for(
             Duration::from_secs(1),
             "peers never reached established socket",
-            || server.command_count("GET", Some(&format!("cancelled:{late_key}"))) == 1
-                && server.command_count("GET", Some(&format!("cancelled:{peer_key}"))) == 1,
-        ) => {}
-    }
-    assert_work_metrics(&recorder, 2, 0, 0);
-    let before = server.command_count("PING", None);
-    let mut cancelled = Box::pin(probe.check());
-    tokio::select! {
-        result = &mut cancelled => panic!("silent command completed before cancellation: {result:?}"),
-        () = server.wait_for(
-            Duration::from_secs(1),
-            "cancelled command never reached established socket",
-            || server.command_count("PING", None) > before,
+            || server.command_count("GET", Some(&format!("probe_timeout:{late_key}"))) == 1
+                && server.command_count("GET", Some(&format!("probe_timeout:{peer_key}"))) == 1,
         ) => {}
     }
     assert_work_metrics(&recorder, 3, 0, 0);
-    drop(cancelled);
+    let error = tokio::time::timeout(Duration::from_secs(6), pending_probe)
+        .await
+        .expect("probe must observe its own reply timeout")
+        .expect_err("the stalled connection did not answer PING");
+    assert_eq!(error.to_string(), "cache ping failed: timeout");
     assert_work_metrics(&recorder, 2, 0, 1);
-    // No yield after drop: peers already observe retirement, and reused
+    // No yield after the timeout: peers already observe retirement, and reused
     // capacity cannot dispatch another command on the old generation.
     assert_eq!(
         poll_once(peer.as_mut()).await,
@@ -751,10 +761,7 @@ async fn reliability_a_cancelled_probe_slot_is_retired() {
         )
         .await;
     assert_eq!(server.active(), 1);
-    probe
-        .check()
-        .await
-        .expect("healthy probe after cancellation");
+    probe.check().await.expect("healthy probe after timeout");
 }
 
 /// A caller that gives up before the command ceiling, by its own shorter
