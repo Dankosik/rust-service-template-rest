@@ -598,9 +598,7 @@ async fn reliability_full_application_window_leaves_probe_and_maintenance_admiss
     let namespace = cache.namespace("capacity");
     assert_eq!(namespace.get("ready").await, Ok(None));
     let old = server.stall_existing();
-    let mut pending: Vec<_> = (0..256)
-        .map(|_| Box::pin(namespace.get("pending")))
-        .collect();
+    let mut pending = Vec::from_fn(256, |_| Box::pin(namespace.get("pending")));
     tokio::select! {
         () = std::future::poll_fn(|context| {
             for command in &mut pending {

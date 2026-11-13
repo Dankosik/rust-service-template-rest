@@ -483,7 +483,7 @@ async fn a_connection_past_its_age_closes_once_idle_and_new_ones_are_served() {
 #[test]
 fn a_connection_age_is_spread_within_a_tenth() {
     let age = Duration::from_mins(30);
-    let spreads: Vec<Duration> = (0..64).map(|_| spread(age)).collect();
+    let spreads = Vec::from_fn(64, |_| spread(age));
     assert!(
         spreads
             .iter()

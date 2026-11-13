@@ -1,19 +1,17 @@
-# aws-smithy-http-client 1.4.2 TCP timeout propagation
+# aws-smithy-http-client 1.5.1 TCP timeout propagation
 
 Upstream reviewed: 1.5.1
 
-On 2026-10-26, 1.5.0 and 1.5.1 still build the TCP connector without the
-configured connect timeout (`base_connector_with_resolver`), and their
-connector fixes concern the opt-in Hyper pool this service does not select.
-The 1.5 line is a coordinated compatibility release with `aws-sdk-s3` and
-`aws-config`; the rebase lands with that SDK bump, not alone.
+This release moves the AWS SDK family off the archived `pin-utils` dependency.
+The published Hyper 1.x connector still omits the configured TCP timeout.
+The SDK retains the existing Hyper 1.x connector and its behavior version.
 
-Source: the published `aws-smithy-http-client-1.4.2.crate` archive, verified
-before extraction against the registry checksum in Cargo.lock:
-`7bd25384a4e437aa8d8f339afad4b69e786b936a7cb10db668a7aaf66717b1a8`.
-The published archive contains no `.cargo_vcs_info.json`; an exact upstream
-revision is unavailable. Upstream is
+Source: the published `aws-smithy-http-client-1.5.1.crate` archive, verified
+before extraction against the crates.io registry checksum:
+`aeca69f65362f7375891008ea525fd440ad6db1836458ac188c87b126804114e`.
+The published archive contains no `.cargo_vcs_info.json`. Upstream is
 [smithy-rs](https://github.com/smithy-lang/smithy-rs).
+
 Published license files remain unchanged. Runtime package versions stay pinned;
 the standalone manifest additionally selects the shared Hyper path patch, and
 its lock is deliberately Cargo-authored to match the exercised production graph.
@@ -80,13 +78,13 @@ sole added file.
 
 | File | Published SHA256 | Patched SHA256 |
 | --- | --- | --- |
-| `src/client.rs` | `609df0b07b555808ff1692567ec3efb41a64d95633d5b50c1c6d77e05633d105` | `6a56f0515c6d69933cf7aef6f81550b50b3c0d26e0b40b6bfeca50cfc1ec78fd` |
+| `src/client.rs` | `e595d6283eddff0ff1c3901498cd76b36138617e22494e09f93988a2e89c5f3d` | `dcf1e84900511500ee10a6837fd594e02850f1d72b4a7d8161e0408dc28fb4e5` |
 | `tests/regen-certificates.sh` | `8d3d8299ffde64c4bc9b706c44ac5de252a0b2736c31f733a3a99c52f2a1837c` | `99a9f35c949d758d7ffeaba334dc3e1e18a9bfcd7975eb934ad555177203374e` |
 
 ```diff
 --- a/src/client.rs
 +++ b/src/client.rs
-@@ -268,6 +268,11 @@
+@@ -306,6 +306,11 @@
      fn base_connector_with_resolver<R>(&self, resolver: R) -> HyperHttpConnector<R> {
          let mut conn = HyperHttpConnector::new_with_resolver(resolver);
          conn.set_nodelay(self.enable_tcp_nodelay);
@@ -98,7 +96,7 @@ sole added file.
          #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
          if let Some(interface) = &self.interface {
              conn.set_interface(interface);
-@@ -1318,6 +1323,124 @@
+@@ -1416,6 +1421,124 @@
          assert_elapsed!(now, Duration::from_secs(1));
      }
  
@@ -235,5 +233,5 @@ sole added file.
 
 ## Current standalone lock identity
 
-- Before this composition: `6aedb743839fbb2c162f7fced17fc9111bcd22f305991fcc2263e20818845b79`.
-- Current standalone lock: `53a94a1e3a3e9d6f9d34c6f43a5fd4c08225c76c970ba6c4152a40f28e97ab69`.
+- Before this composition: `1dde30cc6aa8fd2da5c5357e44f63060f11f4e6ecdd5cf0d92f7d7cc6b6c7030`.
+- Current standalone lock: `68eda96631884aa387478d6e8caa8c04060b73e08bba159d727054f2d02de671`.

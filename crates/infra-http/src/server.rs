@@ -277,10 +277,10 @@ impl Server {
                 .await
                 .ok()
                 .and_then(|seen| *seen);
-            match seen {
-                Some(failure) => failure,
-                None => std::future::pending().await,
-            }
+            let Some(failure) = seen else {
+                return std::future::pending().await;
+            };
+            failure
         }
     }
 

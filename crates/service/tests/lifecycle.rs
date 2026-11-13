@@ -319,9 +319,9 @@ fn a_full_application_listener_refuses_probes_with_or_without_diagnostics() {
             clippy::disallowed_types,
             reason = "synchronous process fixture retains these connections until its listener-capacity assertion ends"
         )]
-        let held: Vec<std::net::TcpStream> = (0..2)
-            .map(|_| std::net::TcpStream::connect(&api).expect("hold a connection"))
-            .collect();
+        let held: Vec<std::net::TcpStream> = Vec::from_fn(2, |_| {
+            std::net::TcpStream::connect(&api).expect("hold a connection")
+        });
         let deadline = Instant::now() + Duration::from_secs(2);
         while get(&app_live).is_ok() {
             assert!(

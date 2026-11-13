@@ -552,9 +552,10 @@ async fn close_waits_for_the_terminal_connection_event() {
             };
             let premature = before_release.is_some();
             release_tx.send(()).expect("release terminal callback");
-            let outcome = match before_release {
-                Some(outcome) => outcome,
-                None => closing.await,
+            let outcome = if let Some(outcome) = before_release {
+                outcome
+            } else {
+                closing.await
             };
             (premature, outcome)
         });

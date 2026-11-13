@@ -531,9 +531,7 @@ fn span_capacity(format: LoggingFormat) {
     let (records, snapshot) = capture(format, || {
         // These are independent roots, so the event field-table ceiling
         // cannot be mistaken for cache-slot admission failure.
-        let mut spans: Vec<_> = (0..1024)
-            .map(|item| tracing::info_span!(parent: None, "held", item))
-            .collect();
+        let mut spans = Vec::from_fn(1024, |item| tracing::info_span!(parent: None, "held", item));
         tracing::info!(parent: spans.last().expect("1024th span"), "at_span_capacity");
         let rejected = tracing::info_span!(parent: None, "over_capacity", item = 1024);
         tracing::info!(parent: &rejected, "explicit_parent_must_be_dropped");

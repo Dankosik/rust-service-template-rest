@@ -198,7 +198,7 @@ fn finished_exports_are_counted_by_outcome() {
                 timeout,
                 drain: Arc::default(),
             }
-            .export((0..spans).map(|_| span()).collect())
+            .export(Vec::from_fn(spans, |_| span()))
             .now_or_never()
             .expect("the fixed exporter is ready");
         };
