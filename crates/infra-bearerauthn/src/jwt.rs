@@ -1122,7 +1122,7 @@ mod tests {
                     1
                 };
             } else if character == '"' {
-                in_string = !in_string;
+                in_string.toggle();
             } else if in_string && character.is_ascii_alphabetic() {
                 write!(escaped, "\\u{:04x}", u32::from(character)).unwrap();
                 continue;

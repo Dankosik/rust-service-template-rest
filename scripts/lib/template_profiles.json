@@ -50,13 +50,13 @@
       "scripts/ci/migration-history-check.sh",
       "scripts/ci/sqlx-prepare.sh",
       ".sqlx/",
-      ".cargo/config.toml",
       "make/profile-postgres.mk",
       "env/monitoring/postgres-maintenance.rules.yml",
       "scripts/tests/postgres-maintenance-rules.yml"
     ],
     "markers": [
       {"path": "README.md", "id": "readme-postgres-profile"},
+      {"path": ".cargo/config.toml", "id": "cargo-sqlx-offline"},
       {"path": "env/monitoring/service.rules.yml", "id": "monitoring-postgres-pool"},
       {"path": "scripts/tests/service-rules.yml", "id": "monitoring-postgres-fixture"},
       {"path": "docs/alerting.md", "id": "docs-alerting-postgres-runbooks"},

@@ -32,7 +32,7 @@
 # Declared once for the stages that cook and build the service package.
 ARG SERVICE_PACKAGE=service
 
-FROM rust:1.99.0-slim-trixie@sha256:2752b332db73fdbb7dc576f06c82ed1f312005784ef913d7e04a28f5f55dc581 AS chef
+FROM rust:1.100.0-slim-trixie@sha256:e9d95b74296f7126a83ae3d041aeaba1ff4c478f13abc5cc034fcf7c131c3d4a AS chef
 WORKDIR /src
 # jemalloc (the service allocator) builds with configure and make; slim has
 # gcc only. curl and xz fetch and unpack the build tools below.

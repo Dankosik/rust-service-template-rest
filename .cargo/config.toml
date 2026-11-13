@@ -1,6 +1,16 @@
+# Dependabot already waits 7 days before proposing a new release; this applies
+# the same delay to `cargo add` and `cargo update` run by hand, so a freshly
+# published, possibly compromised version never enters Cargo.lock unreviewed.
+# Versions already in Cargo.lock stay usable. To take an urgent security fix
+# sooner: `CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow cargo update -p <crate>`.
+[registry]
+global-min-publish-age = "7 days"
+
+# template:begin postgres:cargo-sqlx-offline
 # `sqlx::query!` checks each statement against the metadata committed in
 # `.sqlx/` instead of a live database, so a build never depends on
 # `DATABASE_URL`, which the database tests export for another purpose.
 # `make sqlx-prepare` regenerates the metadata against a migrated database.
 [env]
 SQLX_OFFLINE = "true"
+# template:end postgres:cargo-sqlx-offline

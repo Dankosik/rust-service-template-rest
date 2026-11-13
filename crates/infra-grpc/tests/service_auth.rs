@@ -275,8 +275,7 @@ fn reason(status: &Status) -> String {
     use tonic_types::StatusExt as _;
     status
         .get_details_error_info()
-        .map(|info| info.reason)
-        .unwrap_or_default()
+        .map_or_default(|info| info.reason)
 }
 
 #[tokio::test]

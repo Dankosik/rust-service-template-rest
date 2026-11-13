@@ -365,7 +365,7 @@ fn traces_url(endpoint: &str) -> String {
 /// The SDK's rule for `OTEL_EXPORTER_OTLP_ENDPOINT`: `/v1/traces` appended
 /// to the root as written.
 fn root_traces_url(root: &str) -> String {
-    format!("{}/v1/traces", root.strip_suffix('/').unwrap_or(root))
+    format!("{}/v1/traces", root.trim_suffix('/'))
 }
 
 /// `key=value,key=value` into a map. Blank entries are skipped; any other

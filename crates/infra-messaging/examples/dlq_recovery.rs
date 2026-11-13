@@ -125,7 +125,7 @@ fn stored_headers(encoded: &str) -> Result<HeaderMap> {
         // Remove only the wire separator so restore can reject identity
         // whitespace that the receiving NATS parser would otherwise trim.
         let mut value = if preserve_identity {
-            value.strip_prefix(' ').unwrap_or(value)
+            value.trim_prefix(' ')
         } else {
             value.trim()
         }

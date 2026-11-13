@@ -491,7 +491,7 @@ impl Visit for Capture<'_> {
             if name.starts_with("log.") {
                 return;
             }
-            let name = name.strip_prefix("r#").unwrap_or(name);
+            let name = name.trim_prefix("r#");
             self.push(name, &format_args!("{value:?}"));
         } else {
             self.push_text(name, format_args!("{value:?}"));

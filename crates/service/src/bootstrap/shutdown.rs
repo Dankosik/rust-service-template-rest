@@ -496,13 +496,9 @@ mod tests {
         let (started, running) = tokio::sync::oneshot::channel();
         let (dropped, mut completed) = tokio::sync::oneshot::channel();
         background.spawn("ignores_cancel", async move {
-            struct OnDrop(Option<tokio::sync::oneshot::Sender<()>>);
-            impl Drop for OnDrop {
-                fn drop(&mut self) {
-                    let _ = self.0.take().unwrap().send(());
-                }
-            }
-            let _guard = OnDrop(Some(dropped));
+            let _guard = std::mem::DropGuard::new(dropped, |dropped| {
+                let _ = dropped.send(());
+            });
             let _ = started.send(());
             std::future::pending::<()>().await;
         });

@@ -623,6 +623,12 @@ def run(command):
         os.execvpe("bash", ["bash", str(lock), "--", sys.executable, str(Path(__file__).resolve()), "--run", "--", *command], os.environ)
     if custody.returncode:
         return custody.returncode
+    # GNU make may start MAKEFLAGS with dashless single-letter options (`k`
+    # from --keep-going). tikv-jemalloc-sys appends MAKEFLAGS after Cargo's
+    # jobserver options, where that word becomes a make target.
+    makeflags = os.environ.get("MAKEFLAGS", "")
+    if makeflags[:1] not in ("", "-", " "):
+        os.environ["MAKEFLAGS"] = "-" + makeflags
     context = Context(command).resolve()
     description = context.describe()
     evidence("build_context", description)

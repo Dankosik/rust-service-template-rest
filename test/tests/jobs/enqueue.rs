@@ -541,7 +541,7 @@ async fn e2_a_closure_error_after_enqueue_leaves_no_job(pool: PgPool) {
         &result,
         Err(AttemptError::Rejected),
         "{}",
-        result.as_ref().err().map(explain).unwrap_or_default()
+        result.as_ref().err().map_or_default(explain)
     );
     assert_eq!(super::job_count(&jobs).await, 0);
     super::close_pools(&[&jobs]).await;
@@ -814,7 +814,7 @@ async fn e4_a_missing_schema_returns_42p01_and_aborts_the_transaction(pool: PgPo
         &result,
         Err(AttemptError::Rejected),
         "{}",
-        result.as_ref().err().map(explain).unwrap_or_default()
+        result.as_ref().err().map_or_default(explain)
     );
     super::close_pools(&[&jobs]).await;
 }
@@ -855,7 +855,7 @@ async fn e4_a_read_only_transaction_returns_25006_and_writes_nothing(pool: PgPoo
         &result,
         Err(AttemptError::Rejected),
         "{}",
-        result.as_ref().err().map(explain).unwrap_or_default()
+        result.as_ref().err().map_or_default(explain)
     );
     assert_eq!(super::job_count(&jobs).await, 0);
     super::close_pools(&[&jobs]).await;
@@ -1241,7 +1241,7 @@ async fn e6_snapshot_isolation_40001_when_a_live_job_is_inserted_after_the_snaps
             &result,
             Err(AttemptError::Rejected),
             "{isolation:?} {}",
-            result.as_ref().err().map(explain).unwrap_or_default()
+            result.as_ref().err().map_or_default(explain)
         );
         assert_eq!(rows_for_key(&jobs, Note::NAME, &key).await, 1);
     }
@@ -1280,7 +1280,7 @@ async fn e6_repeatable_read_40001_when_a_claim_write_commits_after_the_snapshot(
         &result,
         Err(AttemptError::Rejected),
         "{}",
-        result.as_ref().err().map(explain).unwrap_or_default()
+        result.as_ref().err().map_or_default(explain)
     );
     assert_eq!(states_for_key(&jobs, key).await, vec!["running".to_owned()]);
     super::close_pools(&[&jobs]).await;
@@ -1334,7 +1334,7 @@ async fn e6_repeatable_read_inflight_claim_keeps_commit_and_rollback_oracles(poo
                 &result,
                 Err(AttemptError::Rejected),
                 "{label}: {}",
-                result.as_ref().err().map(explain).unwrap_or_default()
+                result.as_ref().err().map_or_default(explain)
             );
             assert_eq!(
                 states_for_key(&jobs, &key).await,

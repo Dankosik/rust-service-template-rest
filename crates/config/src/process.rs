@@ -7,7 +7,6 @@ use std::process::ExitCode;
 ///
 /// Does not call `process::exit`, so destructors still run. Use this when
 /// tracing is absent or not yet installed.
-#[must_use]
 pub fn process_failure(message: impl std::fmt::Display) -> ExitCode {
     #[expect(
         clippy::print_stderr,

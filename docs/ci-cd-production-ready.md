@@ -253,7 +253,9 @@ Dependabot updates Cargo dependencies, GitHub Actions in workflows and in the
 composite publication action, the Dockerfile `FROM` and Compose image digests,
 and the Railway SDK under `.railway`; the tool manifest and the vendored forks
 are bumped by hand, prompted by the weekly `dependency-drift` issue
-([Vendored forks](#vendored-forks)).
+([Vendored forks](#vendored-forks)). Cargo applies the same 7-day cooldown to
+hand-run resolution through `registry.global-min-publish-age` in
+`.cargo/config.toml`.
 
 Candidate history admission scans `HEAD` and every reachable ancestor,
 including merged-parent ancestry, with native `--log-opts=HEAD`. The target

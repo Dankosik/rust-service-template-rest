@@ -332,6 +332,20 @@ class Native(unittest.TestCase):
             self.assertTrue(artifact.is_file(), f"the lint-reported {package} artifact must still exist")
         return artifacts
 
+    def dependency_search_path(self):
+        """`-L` options for every library `make lint` reported. Cargo 1.100
+        gives each compilation unit its own output directory, so a crate's
+        dependencies no longer sit beside its own artifact."""
+        receipt = ROOT / ".ci" / "clippy-artifacts.jsonl"
+        directories = set()
+        for line in receipt.read_text().splitlines():
+            message = json.loads(line)
+            if message.get("reason") == "compiler-artifact":
+                directories.update(Path(filename).parent for filename in message["filenames"]
+                                   if filename.endswith((".rmeta", ".rlib", ".so", ".dylib")))
+        return tuple(option for directory in sorted(directories)
+                     for option in ("-L", f"dependency={directory}"))
+
     def blocking_probe(self, root, code, expected=None, extern=(), *, allow_type_diagnostic=False):
         """Exercise the real pinned lint, never a source-text substitute."""
         driver = subprocess.check_output(["rustup", "which", "clippy-driver"], cwd=ROOT, text=True).strip()
@@ -431,7 +445,7 @@ pub fn startup() { let _ = std::fs::read("fixture"); }
         candidates = self.lint_artifacts("reqwest", ("blocking", "json"))
         self.assertEqual(len(candidates), 1, "lint must report one locked reqwest blocking+json metadata artifact")
         artifact = candidates.pop()
-        extern = ("--extern", f"reqwest={artifact}", "-L", f"dependency={artifact.parent}")
+        extern = ("--extern", f"reqwest={artifact}", *self.dependency_search_path())
         with tempfile.TemporaryDirectory(prefix="quality-blocking-http-") as temporary:
             root = Path(temporary)
             # The selected artifact carries the features these paths need.
@@ -473,7 +487,7 @@ pub fn startup() { let _ = std::fs::read("fixture"); }
                 (root / "clippy.toml").write_text(self.strict_policy(f"{name}::"))
                 for artifact in self.lint_artifacts(package, features, profile_owned=profile_owned):
                     self.blocking_probe(root, code, "clippy::disallowed_methods",
-                                        ("--extern", f"{name}={artifact}", "-L", f"dependency={artifact.parent}"))
+                                        ("--extern", f"{name}={artifact}", *self.dependency_search_path()))
 
     def test_detector_scope_and_new_clone(self):
         with tempfile.TemporaryDirectory(prefix="quality-native-") as temporary:
