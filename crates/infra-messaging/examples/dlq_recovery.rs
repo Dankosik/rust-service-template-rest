@@ -211,11 +211,15 @@ struct Grant {
     operation: String,
 }
 
+enum Publisher {
+    Starting(Box<MessagingStartup>),
+    Admitted(Messaging),
+}
+
 #[derive(Default)]
 struct Resources {
     native: Option<(async_nats::Client, watch::Receiver<bool>)>,
-    startup: Option<MessagingStartup>,
-    messaging: Option<Messaging>,
+    publisher: Option<Publisher>,
 }
 
 impl Resources {
@@ -258,13 +262,12 @@ impl Resources {
 
     async fn close(self, deadline: Instant) -> bool {
         let cancel = CancellationToken::new();
-        let mut complete = true;
-        if let Some(messaging) = self.messaging {
-            complete &= messaging.close(deadline, &cancel).await == CloseOutcome::Complete;
-        }
-        if let Some(startup) = self.startup {
-            complete &= startup.close(deadline, &cancel).await == CloseOutcome::Complete;
-        }
+        let publisher_close = match self.publisher {
+            Some(Publisher::Starting(startup)) => startup.close(deadline, &cancel).await,
+            Some(Publisher::Admitted(messaging)) => messaging.close(deadline, &cancel).await,
+            None => CloseOutcome::Complete,
+        };
+        let mut complete = publisher_close == CloseOutcome::Complete;
         if let Some((client, mut closed)) = self.native {
             let wait = async {
                 if !*closed.borrow() {
@@ -412,9 +415,9 @@ async fn inspect(args: &[String], resources: &mut Resources) -> Result<()> {
         );
         return Ok(());
     };
-    let (inspection, publication_id) = match record.prepared() {
-        Ok(event) => ("restorable", Some(event.publication_id().to_owned())),
-        Err(_) => ("malformed_unrestorable", None),
+    let (inspection, publication_id, reason) = match record.prepared() {
+        Ok(event) => ("restorable", Some(event.publication_id().to_owned()), None),
+        Err(reason) => ("malformed_unrestorable", None, Some(reason)),
     };
     let selection = Selection {
         version: 1,
@@ -433,6 +436,9 @@ async fn inspect(args: &[String], resources: &mut Resources) -> Result<()> {
         "publication": Publication::NotAttempted,
         "retirement": Retirement::Retained,
     });
+    if let Some(reason) = reason {
+        report["reason"] = json!(reason);
+    }
     if include_payload {
         report["payload_base64"] = json!(selection.record.payload_base64);
     }
@@ -534,32 +540,35 @@ async fn redrive(args: &[String], resources: &mut Resources, deadline: Instant) 
     // and lifecycle checks. Retrying ambiguity prepares exactly the same ID.
     if state.publication != Publication::Confirmed {
         let rejected = state.publication.after_rejection();
-        let startup = resources.startup.insert(
-            Messaging::prepare(
-                MessagingOptions {
-                    connection_name: "dlq-recovery-redrive".into(),
-                    servers: config.servers,
-                    credentials: config.credentials_file.map(Credentials::File),
-                    root_ca_path: config.root_ca_path,
-                    allow_plaintext: false,
-                    tls_first: false,
-                    source_stream: config.source_stream.clone(),
-                    max_payload_bytes: config.max_payload_bytes,
-                    consumer: None,
-                },
-                deadline,
-                CancellationToken::new(),
-            )
-            .map_err(|_| "publisher_configuration")?,
-        );
+        let startup = Messaging::prepare(
+            MessagingOptions {
+                connection_name: "dlq-recovery-redrive".into(),
+                servers: config.servers,
+                credentials: config.credentials_file.map(Credentials::File),
+                root_ca_path: config.root_ca_path,
+                allow_plaintext: false,
+                tls_first: false,
+                source_stream: config.source_stream.clone(),
+                max_payload_bytes: config.max_payload_bytes,
+                consumer: None,
+            },
+            deadline,
+            CancellationToken::new(),
+        )
+        .map_err(|_| "publisher_configuration")?;
+        let Publisher::Starting(startup) = resources
+            .publisher
+            .insert(Publisher::Starting(Box::new(startup)))
+        else {
+            return Err("publisher_configuration");
+        };
         let Ok(messaging) = startup.admit().await else {
             state.publication = rejected;
             finish(&state_path, &state)?;
             return Ok(());
         };
         let producer = messaging.producer();
-        resources.messaging = Some(messaging);
-        resources.startup = None;
+        resources.publisher = Some(Publisher::Admitted(messaging));
         // Persist `ambiguous` before dispatch. A crash after this write must
         // leave evidence that publication may have happened; writing after
         // `publish` would report `not_attempted` for a possible publication.

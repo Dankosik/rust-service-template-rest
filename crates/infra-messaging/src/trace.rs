@@ -12,6 +12,14 @@ pub(crate) const TRACEPARENT: HeaderName = HeaderName::from_static(TRACEPARENT_K
 pub(crate) const TRACESTATE: HeaderName = HeaderName::from_static(TRACESTATE_KEY);
 const TRACEPARENT_MAX_BYTES: usize = 256;
 const TRACESTATE_MAX_BYTES: usize = 512;
+const TRACE_HEADERS: [(&str, HeaderName, usize); 2] = [
+    (TRACEPARENT_KEY, TRACEPARENT, TRACEPARENT_MAX_BYTES),
+    (TRACESTATE_KEY, TRACESTATE, TRACESTATE_MAX_BYTES),
+];
+
+fn trace_header(key: &str) -> Option<(&'static str, HeaderName, usize)> {
+    TRACE_HEADERS.into_iter().find(|(name, _, _)| *name == key)
+}
 
 /// Writes `span`'s context into a publication's headers. A span that is not
 /// recorded writes nothing.
@@ -42,10 +50,8 @@ struct HeaderInjector<'a>(&'a mut HeaderMap);
 
 impl Injector for HeaderInjector<'_> {
     fn set(&mut self, key: &str, value: String) {
-        let (name, max_bytes) = match key {
-            TRACEPARENT_KEY => (TRACEPARENT, TRACEPARENT_MAX_BYTES),
-            TRACESTATE_KEY => (TRACESTATE, TRACESTATE_MAX_BYTES),
-            _ => return,
+        let Some((_, name, max_bytes)) = trace_header(key) else {
+            return;
         };
         // A header value is written to the wire as is, so it must not carry a
         // line break.
@@ -64,18 +70,14 @@ struct HeaderExtractor<'a>(&'a HeaderMap);
 
 impl Extractor for HeaderExtractor<'_> {
     fn get(&self, key: &str) -> Option<&str> {
-        let name = match key {
-            TRACEPARENT_KEY => TRACEPARENT,
-            TRACESTATE_KEY => TRACESTATE,
-            _ => return None,
-        };
+        let (_, name, _) = trace_header(key)?;
         self.0.get(name).map(async_nats::HeaderValue::as_str)
     }
 
     fn keys(&self) -> Vec<&str> {
-        [TRACEPARENT_KEY, TRACESTATE_KEY]
+        TRACE_HEADERS
             .into_iter()
-            .filter(|key| self.get(key).is_some())
+            .filter_map(|(key, name, _)| self.0.get(name).map(|_| key))
             .collect()
     }
 }

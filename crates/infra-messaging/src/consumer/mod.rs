@@ -290,7 +290,7 @@ impl Consumer {
             let loss_check = tokio::select! {
                 biased;
                 () = stop.cancelled() => break 'pulls,
-                loss_check = durable_is_lost(&self.pull) => loss_check,
+                loss_check = check_durable_loss(&self.pull) => loss_check,
             };
             match loss_check {
                 Ok(false) => {}
@@ -470,7 +470,7 @@ impl Consumer {
                                     release_message(&message, stop).await;
                                     return Ok(BatchEnd::Stopped);
                                 }
-                                loss_check = durable_is_lost(&self.pull) => loss_check,
+                                loss_check = check_durable_loss(&self.pull) => loss_check,
                             };
                             match loss_check {
                                 Ok(false) => {}
@@ -520,7 +520,6 @@ impl Consumer {
 enum BatchEnd {
     /// Every reserved slot received a delivery.
     Filled,
-    /// The consumer was asked to stop.
     Stopped,
     /// The batch ended before filling its slots.
     Closed,
@@ -544,13 +543,13 @@ fn check_delivery_task_result(
 
 /// An unanswered lookup does not confirm loss of the admitted durable.
 async fn durable_confirmed_lost(pull: &PullConsumer) -> bool {
-    matches!(durable_is_lost(pull).await, Ok(true))
+    matches!(check_durable_loss(pull).await, Ok(true))
 }
 
 /// Whether the broker answers that the durable, or its stream, no longer
 /// exists, or was replaced with another creation or a push consumer.
 /// A failed or unanswered lookup is not that answer.
-async fn durable_is_lost(pull: &PullConsumer) -> Result<bool, ConsumerInfoError> {
+async fn check_durable_loss(pull: &PullConsumer) -> Result<bool, ConsumerInfoError> {
     // The native response timeout starts after the client's command queue admits the request.
     let result = tokio::time::timeout(BROKER_OPERATION_BUDGET, pull.get_info())
         .await
