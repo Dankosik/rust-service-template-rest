@@ -216,7 +216,7 @@ impl CacheNamespace {
 
     /// One observed command under the caller's already-bounded context.
     /// `outcome` names a successful reply.
-    async fn run<T: redis::FromRedisValue>(
+    async fn run<T: redis::FromRedisValue + Send + 'static>(
         &self,
         scope: &CommandScope,
         operation: Operation,
@@ -230,7 +230,7 @@ impl CacheNamespace {
             &self.cache.link.server,
         );
         // One context cutoff includes preparation, connection wait, and exactly one dispatch.
-        match self.cache.link.command(&command, scope).await {
+        match self.cache.link.command(command, scope).await {
             Ok(value) => {
                 if operation.is_read()
                     && let Some(stopped) = scope.context.stopped()
