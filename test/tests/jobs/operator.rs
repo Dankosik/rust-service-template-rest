@@ -344,6 +344,9 @@ async fn worker_operator_commands_commit_with_postgres_only_and_emit_safe_receip
     for (args, code, outcome) in cases {
         let receipt = run_operator(url.as_str(), args, *code).await;
         assert_eq!(receipt["outcome"], *outcome);
+        if args[0] == "inspect" {
+            assert_eq!(receipt["id"], args[1]);
+        }
         if args[0] == "failed" {
             assert_eq!(receipt["complete"], false);
             assert_eq!(

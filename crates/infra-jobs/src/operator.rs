@@ -220,6 +220,14 @@ impl Inspection {
         }
     }
 
+    #[must_use]
+    pub const fn job_id(&self) -> Option<JobId> {
+        match &self.0 {
+            Selection::One(id) => Some(*id),
+            Selection::Page { .. } => None,
+        }
+    }
+
     /// The admitted sorted, deduplicated fleet kinds for an unhandled inspection.
     /// Other inspection modes carry no declared handled set.
     #[must_use]

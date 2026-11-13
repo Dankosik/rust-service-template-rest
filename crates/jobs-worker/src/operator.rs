@@ -69,6 +69,9 @@ impl Request {
         let mut body = match self {
             Self::Inspect(query) => {
                 let mut body = json!({});
+                if let Some(id) = query.job_id() {
+                    body["id"] = id.to_string().into();
+                }
                 if let Some(kinds) = query.handled_kinds() {
                     body["handled_kinds"] = json!(kinds);
                 }
