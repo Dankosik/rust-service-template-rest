@@ -2466,7 +2466,7 @@ async fn reflection_lists_only_registered_services_in_both_versions() {
         let MessageResponse::FileDescriptorResponse(files) = next().await else {
             panic!("a described symbol is answered with its file descriptor");
         };
-        assert!(!files.file_descriptor_proto.is_empty());
+        assert_ne!(files.file_descriptor_proto, [] as [Vec<u8>; 0]);
     }
 
     // Older tools ask only for the version `v1` replaced.
