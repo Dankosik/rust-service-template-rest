@@ -227,12 +227,11 @@ fn observe_attempt(handles: Option<&KindMetrics>, attempt: &AttemptId, transitio
             tracing::info!(job.id = %attempt.job_id, job.kind = attempt.kind, job.attempt = attempt.number, outcome, error = error_field(summary), "job_attempt_failed");
         }
         Transition::Fail { summary, .. } => {
-            tracing::warn!(job.id = %attempt.job_id, job.kind = attempt.kind, job.attempt = attempt.number, job.failure_reason = outcome, error = summary.as_str(), "job_failed");
+            tracing::warn!(job.id = %attempt.job_id, job.kind = attempt.kind, job.attempt = attempt.number, outcome, job.failure_reason = outcome, error = summary.as_str(), "job_failed");
         }
     }
 }
 
-/// A summary as an event's `error` field, absent when there is none.
 fn error_field(summary: &str) -> Option<&str> {
     (!summary.is_empty()).then_some(summary)
 }
