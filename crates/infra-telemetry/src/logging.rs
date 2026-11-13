@@ -70,8 +70,11 @@ pub enum LoggingError {
 /// [`LoggingError::WorkerStart`] when the writer thread cannot start,
 /// [`LoggingError::AlreadyInstalled`] when a global subscriber exists (seen
 /// as the current default, so call it outside a scoped default), and
-/// [`LoggingError::LogLoggerInstalled`] when a `log` logger exists; on an
-/// error nothing is installed.
+/// [`LoggingError::LogLoggerInstalled`] when a `log` logger exists.
+///
+/// The global `log` bridge is installed first. If another subscriber takes the
+/// global slot before this function installs its own, the function returns
+/// [`LoggingError::AlreadyInstalled`] and leaves the bridge installed.
 #[expect(
     clippy::disallowed_methods,
     reason = "startup transfers the stdout handle to the owned writer thread; callbacks perform no sink IO"

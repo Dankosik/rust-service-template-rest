@@ -81,27 +81,7 @@ impl TrustRegistry {
         }
         let mut callers = BTreeMap::new();
         for (name, set) in entries {
-            let caller = ServiceName::parse(&name)
-                .map_err(|_| TrustError::document(InvalidServiceName::MESSAGE))?;
-            let caller_error = |reason| TrustError::new(Place::Caller(caller.clone()), reason);
-            let set = set
-                .0
-                .ok_or_else(|| caller_error("repeats a member name within its JWK Set"))?;
-            let set: JwkSet = serde_json::from_value(set)
-                .map_err(|_| caller_error("is not a JWK Set with a keys array"))?;
-            if set.keys.is_empty() {
-                return Err(caller_error("has no key"));
-            }
-            let mut keys: Vec<TrustedKey> = Vec::with_capacity(set.keys.len());
-            for (index, value) in set.keys.into_iter().enumerate() {
-                let key_error =
-                    |reason| TrustError::new(Place::Key(caller.clone(), index + 1), reason);
-                let key = admit(value).map_err(key_error)?;
-                if keys.iter().any(|known| known.kid == key.kid) {
-                    return Err(key_error("repeats a kid of this caller"));
-                }
-                keys.push(key);
-            }
+            let (caller, keys) = parse_caller(&name, set)?;
             callers.insert(caller, keys);
         }
         Ok(Self { callers })
@@ -135,7 +115,7 @@ impl fmt::Debug for TrustRegistry {
 
 /// The document's members in order, or the first repeated member: a repeat
 /// is a refusal, since JSON parsers disagree about which duplicate wins.
-struct Entries(Result<Vec<(String, Unique)>, String>);
+struct Entries(Result<Vec<(String, DuplicateCheckedJson)>, String>);
 
 impl<'de> Deserialize<'de> for Entries {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -146,12 +126,12 @@ impl<'de> Deserialize<'de> for Entries {
                 formatter.write_str("an object of JWK Sets")
             }
             fn visit_map<A: de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-                let mut entries: Vec<(String, Unique)> = Vec::new();
+                let mut entries: Vec<(String, DuplicateCheckedJson)> = Vec::new();
                 let mut repeated = None;
                 // Read to the end even after a repeat: serde_json's `end_map`
                 // refuses a visitor that stops early, and `parse` turns any
                 // serde error into the unnamed document error.
-                while let Some((name, value)) = map.next_entry::<String, Unique>()? {
+                while let Some((name, value)) = map.next_entry::<String, DuplicateCheckedJson>()? {
                     if repeated.is_none() && entries.iter().any(|(known, _)| *known == name) {
                         repeated = Some(name.clone());
                     }
@@ -167,51 +147,51 @@ impl<'de> Deserialize<'de> for Entries {
 /// A JSON value, or `None` when an object anywhere in it repeats a member
 /// name: [`serde_json::Value`] silently keeps the last duplicate, which would
 /// drop a key set or a `kid` the operator wrote.
-struct Unique(Option<serde_json::Value>);
+struct DuplicateCheckedJson(Option<serde_json::Value>);
 
-impl<'de> Deserialize<'de> for Unique {
+impl<'de> Deserialize<'de> for DuplicateCheckedJson {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         struct Visitor;
         impl<'de> de::Visitor<'de> for Visitor {
-            type Value = Unique;
+            type Value = DuplicateCheckedJson;
             fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
                 formatter.write_str("a JSON value")
             }
-            fn visit_bool<E>(self, value: bool) -> Result<Unique, E> {
-                Ok(Unique(Some(value.into())))
+            fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
+                Ok(DuplicateCheckedJson(Some(value.into())))
             }
-            fn visit_i64<E>(self, value: i64) -> Result<Unique, E> {
-                Ok(Unique(Some(value.into())))
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
+                Ok(DuplicateCheckedJson(Some(value.into())))
             }
-            fn visit_u64<E>(self, value: u64) -> Result<Unique, E> {
-                Ok(Unique(Some(value.into())))
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
+                Ok(DuplicateCheckedJson(Some(value.into())))
             }
-            fn visit_f64<E>(self, value: f64) -> Result<Unique, E> {
-                Ok(Unique(Some(value.into())))
+            fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E> {
+                Ok(DuplicateCheckedJson(Some(value.into())))
             }
-            fn visit_str<E>(self, value: &str) -> Result<Unique, E> {
-                Ok(Unique(Some(value.into())))
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(DuplicateCheckedJson(Some(value.into())))
             }
-            fn visit_string<E>(self, value: String) -> Result<Unique, E> {
-                Ok(Unique(Some(value.into())))
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
+                Ok(DuplicateCheckedJson(Some(value.into())))
             }
-            fn visit_unit<E>(self) -> Result<Unique, E> {
-                Ok(Unique(Some(serde_json::Value::Null)))
+            fn visit_unit<E>(self) -> Result<Self::Value, E> {
+                Ok(DuplicateCheckedJson(Some(serde_json::Value::Null)))
             }
-            fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Unique, A::Error> {
+            fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
                 let mut items = Some(Vec::new());
-                while let Some(Unique(item)) = seq.next_element()? {
+                while let Some(DuplicateCheckedJson(item)) = seq.next_element()? {
                     items = items.zip(item).map(|(mut items, item)| {
                         items.push(item);
                         items
                     });
                 }
-                Ok(Unique(items.map(serde_json::Value::Array)))
+                Ok(DuplicateCheckedJson(items.map(serde_json::Value::Array)))
             }
             // Reads to the end after a repeat, for the reason `Entries` does.
-            fn visit_map<A: de::MapAccess<'de>>(self, mut map: A) -> Result<Unique, A::Error> {
+            fn visit_map<A: de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
                 let mut members = Some(serde_json::Map::new());
-                while let Some((name, Unique(value))) = map.next_entry::<String, Unique>()? {
+                while let Some((name, DuplicateCheckedJson(value))) = map.next_entry()? {
                     members = members
                         .filter(|members| !members.contains_key(&name))
                         .zip(value)
@@ -220,7 +200,7 @@ impl<'de> Deserialize<'de> for Unique {
                             members
                         });
                 }
-                Ok(Unique(members.map(serde_json::Value::Object)))
+                Ok(DuplicateCheckedJson(members.map(serde_json::Value::Object)))
             }
         }
         deserializer.deserialize_any(Visitor)
@@ -231,6 +211,33 @@ impl<'de> Deserialize<'de> for Unique {
 #[derive(Deserialize)]
 struct JwkSet {
     keys: Vec<serde_json::Value>,
+}
+
+fn parse_caller(
+    name: &str,
+    set: DuplicateCheckedJson,
+) -> Result<(ServiceName, Vec<TrustedKey>), TrustError> {
+    let caller =
+        ServiceName::parse(name).map_err(|_| TrustError::document(InvalidServiceName::MESSAGE))?;
+    let caller_error = |reason| TrustError::new(Place::Caller(caller.clone()), reason);
+    let set = set
+        .0
+        .ok_or_else(|| caller_error("repeats a member name within its JWK Set"))?;
+    let set: JwkSet = serde_json::from_value(set)
+        .map_err(|_| caller_error("is not a JWK Set with a keys array"))?;
+    if set.keys.is_empty() {
+        return Err(caller_error("has no key"));
+    }
+    let mut keys: Vec<TrustedKey> = Vec::with_capacity(set.keys.len());
+    for (index, value) in set.keys.into_iter().enumerate() {
+        let key_error = |reason| TrustError::new(Place::Key(caller.clone(), index + 1), reason);
+        let key = admit(value).map_err(key_error)?;
+        if keys.iter().any(|known| known.kid == key.kid) {
+            return Err(key_error("repeats a kid of this caller"));
+        }
+        keys.push(key);
+    }
+    Ok((caller, keys))
 }
 
 /// Admits one public ES256 key with a `kid`.
@@ -261,13 +268,16 @@ fn admit(value: serde_json::Value) -> Result<TrustedKey, &'static str> {
     {
         return Err("is not a signature key");
     }
-    if common.key_operations.as_ref().is_some_and(|operations| {
-        operations.is_empty()
-            || !operations
-                .iter()
-                .all(|operation| *operation == KeyOperations::Verify)
-    }) {
-        return Err("allows operations other than verify");
+    if let Some(operations) = &common.key_operations {
+        if operations.is_empty() {
+            return Err("key_ops is empty");
+        }
+        if operations
+            .iter()
+            .any(|operation| *operation != KeyOperations::Verify)
+        {
+            return Err("allows operations other than verify");
+        }
     }
     let kid = common.key_id.as_deref().ok_or("has no kid")?;
     let kid = KeyId::parse(kid).map_err(|_| InvalidKeyId::MESSAGE)?;
@@ -362,7 +372,7 @@ mod tests {
             (with(&|jwk| jwk["alg"] = "ES384".into()), "caller orders key 2: names an algorithm other than ES256"),
             (with(&|jwk| jwk["use"] = "enc".into()), "caller orders key 2: is not a signature key"),
             (with(&|jwk| jwk["key_ops"] = serde_json::json!(["verify", "sign"])), "caller orders key 2: allows operations other than verify"),
-            (with(&|jwk| jwk["key_ops"] = serde_json::json!([])), "caller orders key 2: allows operations other than verify"),
+            (with(&|jwk| jwk["key_ops"] = serde_json::json!([])), "caller orders key 2: key_ops is empty"),
             (with(&|jwk| { jwk.as_object_mut().unwrap().remove("kid"); }), "caller orders key 2: has no kid"),
             (with(&|jwk| jwk["kid"] = "two words".into()), "caller orders key 2: the key id is not 1 to 256 visible ASCII characters"),
             (with(&|jwk| { jwk["kid"] = "other".into(); jwk["x"] = "AAAA".into(); }), "caller orders key 2: has malformed coordinates"),

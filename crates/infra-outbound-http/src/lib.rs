@@ -75,7 +75,8 @@ pub enum BuildError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// The URL is not an absolute URL on the client's origin.
+    /// The request URL is not an absolute URL on the client's origin or
+    /// the caller supplied a `Host` header.
     #[error("outbound HTTP target is invalid")]
     InvalidTarget,
     /// A deadline or [`Limits::operation_timeout`] ended the operation.
@@ -307,8 +308,11 @@ impl Client {
     /// check after request preparation and immediately before transport handoff.
     ///
     /// # Errors
-    /// Returns [`Error::DispatchRefused`] when the check returns `false`, or
-    /// the same errors as [`Self::execute_with_response_status`].
+    ///
+    /// Returns [`Error::DispatchRefused`] when the check returns `false` and
+    /// the operation is still active. A timeout or cancellation observed
+    /// after the check takes precedence. Also returns the errors documented
+    /// by [`Self::execute_with_response_status`].
     pub async fn execute_with_dispatch_check(
         &self,
         request: Request<Bytes>,
@@ -378,17 +382,7 @@ impl Client {
             attempt.record_status(response.status());
             on_status(response.status());
             stops.check()?;
-            let body_limit = self.limits.response_body_bytes;
-            if hyper::body::Body::size_hint(response.body())
-                .exact()
-                .is_some_and(|length| length > body_limit as u64)
-            {
-                return Err(Error::ResponseBodyTooLarge);
-            }
-
-            let (parts, body) = response.into_parts();
-            let body = collect_body(body, body_limit, stops).await?;
-            Ok(Response::from_parts(parts, body))
+            buffer_response(response, self.limits.response_body_bytes, stops).await
         };
         tokio::select! {
             biased;
@@ -428,11 +422,19 @@ impl StopScopes<'_> {
     }
 }
 
-async fn collect_body(
-    body: hyper::body::Incoming,
+async fn buffer_response(
+    response: Response<hyper::body::Incoming>,
     limit: usize,
     stops: &StopScopes<'_>,
-) -> Result<Bytes, Error> {
+) -> Result<Response<Bytes>, Error> {
+    if hyper::body::Body::size_hint(response.body())
+        .exact()
+        .is_some_and(|length| length > limit as u64)
+    {
+        return Err(Error::ResponseBodyTooLarge);
+    }
+
+    let (parts, body) = response.into_parts();
     let mut body = Limited::new(body, limit);
     let mut collected = Vec::new();
     loop {
@@ -446,7 +448,9 @@ async fn collect_body(
         // A frame's `Bytes` can share a large read buffer, so each frame
         // is dropped here, before the next poll.
     }
-    Ok(Bytes::from(collected))
+    let buffered = Bytes::from(collected);
+    drop(body);
+    Ok(Response::from_parts(parts, buffered))
 }
 
 fn stopped_error(stopped: Stopped) -> Error {
@@ -456,10 +460,9 @@ fn stopped_error(stopped: Stopped) -> Error {
     }
 }
 
-/// Appends `data`, growing `collected` twofold like `Vec` but never past
-/// `limit`; [`Limited`] admits at most `limit` bytes in total. The buffer is
-/// not presized from `Content-Length`, so a declared length cannot hold memory
-/// for bytes the provider never sends.
+/// Requests at most `limit` bytes of capacity, which the allocator may round up.
+/// [`Limited`] bounds the total bytes appended. Capacity grows as data arrives,
+/// so a declared `Content-Length` cannot reserve memory for unsent bytes.
 fn append_within(collected: &mut Vec<u8>, data: &[u8], limit: usize) {
     let required = collected.len().saturating_add(data.len());
     if required > collected.capacity() {

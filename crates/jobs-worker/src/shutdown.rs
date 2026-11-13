@@ -84,6 +84,11 @@ pub(crate) enum Outcome {
     Degraded,
 }
 
+enum DrainOutcome {
+    NoCleanupNeeded,
+    NeedsAttemptCleanup,
+}
+
 /// The process deadline: `grace` after the first stop, or after now when
 /// no stop arrived.
 pub(crate) fn stop_deadline(first_stop: Option<Instant>, grace: Duration) -> Instant {
@@ -168,16 +173,18 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
         false
     })
     .await;
-    let forced = stage(
+    let drain_outcome = stage_or(
         "drain",
         drain(&mut resources, http.drain_timeout, &budget, signals),
+        DrainOutcome::NeedsAttemptCleanup,
     )
     .await;
-    degraded |= forced;
-    if forced {
-        degraded |= stage(
+    if matches!(drain_outcome, DrainOutcome::NeedsAttemptCleanup) {
+        degraded = true;
+        stage_or(
             "attempt_cleanup",
             clean_up_after_forced_drain(&mut resources, budget.stage_deadline(ATTEMPT_CLEANUP)),
+            (),
         )
         .await;
     }
@@ -235,11 +242,15 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
 
 /// Run one teardown stage. `true`, or an unwind, votes for a degraded stop.
 async fn stage(name: &'static str, operation: impl Future<Output = bool>) -> bool {
-    if let Ok(degraded) = AssertUnwindSafe(operation).catch_unwind().await {
-        degraded
+    stage_or(name, operation, true).await
+}
+
+async fn stage_or<T>(name: &'static str, operation: impl Future<Output = T>, on_panic: T) -> T {
+    if let Ok(outcome) = AssertUnwindSafe(operation).catch_unwind().await {
+        outcome
     } else {
         tracing::error!(stage = name, "shutdown_stage_panicked");
-        true
+        on_panic
     }
 }
 
@@ -268,7 +279,7 @@ async fn drain(
     drain_timeout: Duration,
     budget: &Budget,
     signals: &mut Signals,
-) -> bool {
+) -> DrainOutcome {
     #[allow(unused_variables, reason = "retained profiles supply started work")]
     let work_started = false;
     // template:begin jobs:worker-shutdown-drain-has-jobs
@@ -278,7 +289,7 @@ async fn drain(
     let work_started = work_started || resources.consumer.is_some();
     // template:end messaging:worker-shutdown-drain-has-messaging
     if !work_started {
-        return false;
+        return DrainOutcome::NoCleanupNeeded;
     }
     let drain_budget = budget.remaining(drain_timeout);
     tracing::info!(
@@ -321,7 +332,7 @@ async fn drain(
     match forced {
         None => {
             tracing::info!("drain_completed");
-            false
+            DrainOutcome::NoCleanupNeeded
         }
         Some((reason, error)) => {
             tracing::warn!(
@@ -336,12 +347,12 @@ async fn drain(
                 error,
                 "drain_forced"
             );
-            true
+            DrainOutcome::NeedsAttemptCleanup
         }
     }
 }
 
-async fn clean_up_after_forced_drain(resources: &mut Resources, deadline: Instant) -> bool {
+async fn clean_up_after_forced_drain(resources: &mut Resources, deadline: Instant) {
     let jobs = async {
         // template:begin jobs:worker-shutdown-finish-jobs
         futures_util::future::join_all(
@@ -370,9 +381,7 @@ async fn clean_up_after_forced_drain(resources: &mut Resources, deadline: Instan
     .is_err()
     {
         tracing::warn!("attempt cleanup completion unconfirmed");
-        return true;
     }
-    false
 }
 
 // template:begin jobs:worker-shutdown-finish-attempts
