@@ -214,7 +214,6 @@ pub(super) struct Output {
 
 impl Output {
     pub(super) fn submit(&self, record: Record) {
-        // `None` when admission is closed.
         let sent = {
             let closed = self
                 .shared
