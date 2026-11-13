@@ -80,8 +80,8 @@ mod tests {
         assert!(PgInterval::try_from(kept).is_ok());
 
         assert_eq!(
-            truncate_to_microseconds(Duration::from_secs(60)),
-            Duration::from_secs(60)
+            truncate_to_microseconds(Duration::from_mins(1)),
+            Duration::from_mins(1)
         );
         assert_eq!(
             truncate_to_microseconds(Duration::new(59, 999_999_999)),

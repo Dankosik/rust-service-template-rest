@@ -604,14 +604,11 @@ async fn oversized_dead_letter_stops_the_consumer_and_keeps_the_source_unacknowl
     let failure = timeout(Duration::from_secs(5), handle.failed())
         .await
         .expect("a conclusively oversized DLQ transfer must surface a terminal failure");
-    assert!(matches!(
-        failure,
-        ConsumerError::DeadLetterTooLarge { sequence: 1 }
-    ));
-    assert!(matches!(
+    std::assert_matches!(failure, ConsumerError::DeadLetterTooLarge { sequence: 1 });
+    std::assert_matches!(
         handle.finish(deadline()).await,
         Err(ConsumerError::DeadLetterTooLarge { sequence: 1 })
-    ));
+    );
     wait_for_source_unacked(&fixture).await;
     assert_eq!(
         fixture

@@ -21,7 +21,7 @@ pub(crate) const MAX_KIND_LEN: usize = 64;
 pub(crate) const DEFAULT_MAX_ATTEMPTS: u16 = 25;
 /// The largest attempt budget a [`Policy`] may declare.
 pub const MAX_ATTEMPTS: u16 = 25;
-pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_mins(1);
 /// Delay of [`JobError::unavailable`], in microseconds. A refunded attempt does
 /// not count, so the delay cannot grow with attempts as the retry backoff
 /// (`retry_or_exhaust` in `crate::attempt::outcome`) does; 10 s sits between
@@ -30,7 +30,7 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 pub(crate) const UNAVAILABLE_DELAY_MICROS: i64 = 10_000_000;
 pub const MIN_TIMEOUT: Duration = Duration::from_secs(1);
 /// The longest attempt timeout a [`Policy`] may declare.
-pub const MAX_TIMEOUT: Duration = Duration::from_secs(3600);
+pub const MAX_TIMEOUT: Duration = Duration::from_hours(1);
 
 const MAX_DELAY_DAYS: u64 = 36_500;
 /// The longest delay [`crate::EnqueueOptions::delay`] and

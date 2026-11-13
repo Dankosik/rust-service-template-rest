@@ -201,7 +201,7 @@ async fn dropping_server_forces_in_flight_connection_cleanup() {
 async fn cancelling_drain_forces_in_flight_connection_cleanup() {
     let (server, peer) = pending_request().await;
     let graceful = server.connection_shutdown.finish.clone();
-    let draining = tokio::spawn(server.drain(Duration::from_secs(60)));
+    let draining = tokio::spawn(server.drain(Duration::from_mins(1)));
     tokio::time::timeout(Duration::from_secs(2), graceful.cancelled())
         .await
         .unwrap();

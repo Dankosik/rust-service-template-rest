@@ -379,7 +379,7 @@ async fn scheduled_cleanup_counts_a_timed_out_batch_and_runs_the_next_pass() {
         },
         || std::future::ready(Err(MaintenanceFailure::Statement)),
     );
-    tokio::time::timeout(Duration::from_secs(180), cleanup)
+    tokio::time::timeout(Duration::from_mins(3), cleanup)
         .await
         .expect("the stalled batch must not stop later scheduled passes");
 

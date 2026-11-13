@@ -57,7 +57,7 @@ fn returned(record: Record) -> (Record, Record) {
 }
 
 const APP: &str = "integration-tests-idempotency";
-const RETENTION: Duration = Duration::from_secs(3_600);
+const RETENTION: Duration = Duration::from_hours(1);
 const WAIT: Duration = Duration::from_secs(10);
 /// Pause between retries while a dropped attempt's transaction ends.
 const RETRY_PAUSE: Duration = Duration::from_millis(20);

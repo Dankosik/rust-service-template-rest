@@ -50,7 +50,7 @@ impl HealthConfig {
             "health.refresh_interval",
             self.refresh_interval,
             Duration::from_millis(100),
-            Duration::from_secs(300),
+            Duration::from_mins(5),
         )?;
         duration_range(
             "health.probe_budget",

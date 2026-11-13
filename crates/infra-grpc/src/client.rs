@@ -140,7 +140,7 @@ impl Client {
             .connect_timeout(CONNECT_TIMEOUT)
             // gRPC's keepalive guide asks clients not to ping much more
             // often than once a minute, and only while a call is open.
-            .http2_keep_alive_interval(Duration::from_secs(60))
+            .http2_keep_alive_interval(Duration::from_mins(1))
             .keep_alive_timeout(Duration::from_secs(20))
             // The listener's fixed windows; see `infra_http::HTTP2_CONNECTION_WINDOW`.
             .initial_connection_window_size(infra_http::HTTP2_CONNECTION_WINDOW)
@@ -160,7 +160,7 @@ impl Client {
         let mut connector = HttpConnector::new();
         connector.enforce_http(false);
         connector.set_nodelay(true);
-        connector.set_keepalive(Some(Duration::from_secs(60)));
+        connector.set_keepalive(Some(Duration::from_mins(1)));
         connector.set_connect_timeout(Some(CONNECT_TIMEOUT));
         Ok(Self {
             // This path places tonic's connect timer outside TLS as well as

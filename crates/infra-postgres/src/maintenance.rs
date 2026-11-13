@@ -32,7 +32,7 @@ pub const MAINTENANCE_OBSERVATION_INTERVAL: Duration = Duration::from_secs(30);
 const MAINTENANCE_OBSERVATION_BUDGET: Duration = Duration::from_secs(8);
 
 /// Delay between scheduled cleanup passes.
-const CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
+const CLEANUP_INTERVAL: Duration = Duration::from_mins(1);
 
 /// Matches the jobs retention backstop, with room for pool acquisition, the
 /// cleanup statement, and transaction acknowledgement.

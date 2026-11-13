@@ -214,7 +214,7 @@ fn grpc_limits_reject_negative_toml_floats(#[case] key: &str) {
         env(&[]),
     )
     .unwrap_err();
-    assert!(matches!(&err, Error::Deserialize(_)), "{err}");
+    assert_matches!(&err, Error::Deserialize(_), "{err}");
     assert!(err.to_string().contains(&format!("grpc.{key}")), "{err}");
 }
 

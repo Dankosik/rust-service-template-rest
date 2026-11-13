@@ -380,7 +380,7 @@ impl Fixture {
         let readiness = Readiness::new(
             Vec::new(),
             RefreshPolicy {
-                interval: Duration::from_secs(60),
+                interval: Duration::from_mins(1),
                 probe_budget: Duration::from_secs(1),
                 failure_threshold: 1,
             },
@@ -958,7 +958,7 @@ fn opening_app_waiting(
     let readiness = Readiness::new(
         Vec::new(),
         RefreshPolicy {
-            interval: Duration::from_secs(60),
+            interval: Duration::from_mins(1),
             probe_budget: Duration::from_secs(1),
             failure_threshold: 1,
         },
@@ -2965,7 +2965,7 @@ async fn verifier_fixture() -> (Verifier, ProviderFixture) {
             client_id: "fixture".to_owned(),
             client_secret: SecretString::from("fixture"),
             provider_concurrency: std::num::NonZeroUsize::new(32).unwrap(),
-            cache: Some(IntrospectionCacheOptions::try_new(16, Duration::from_secs(60)).unwrap()),
+            cache: Some(IntrospectionCacheOptions::try_new(16, Duration::from_mins(1)).unwrap()),
         },
         fixture,
     )

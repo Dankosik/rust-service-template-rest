@@ -151,11 +151,11 @@ pub(crate) fn pending<'m>(
         .iter()
         .filter(|migration| !migration.migration_type.is_down_migration())
         .collect();
-    if let Some(pair) = embedded
-        .windows(2)
-        .find(|pair| pair[0].version == pair[1].version)
+    if let Some([_, duplicate]) = embedded
+        .array_windows()
+        .find(|[earlier, later]| earlier.version == later.version)
     {
-        return Err(PendingError::DuplicateVersion(pair[1].version));
+        return Err(PendingError::DuplicateVersion(duplicate.version));
     }
     let newest = embedded.iter().map(|migration| migration.version).max();
     for applied in history {

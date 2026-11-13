@@ -115,7 +115,7 @@ mod tests {
     fn an_unconfigured_boundary_with_every_key_set_reports_the_store_unavailable() {
         let mut config = Config::default();
         config.postgres.enabled = true;
-        config.http_idempotency.retention = Some(Duration::from_secs(3600));
+        config.http_idempotency.retention = Some(Duration::from_hours(1));
         let refused = unconfigured(&config);
         std::assert_matches!(
             &refused,

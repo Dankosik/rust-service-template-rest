@@ -219,9 +219,7 @@ impl ProtocolError {
 }
 
 pub(crate) fn ensure_body_size(body: &[u8]) -> Result<(), ProtocolError> {
-    (body.len() <= MAX_BODY_BYTES)
-        .then_some(())
-        .ok_or(ProtocolError::BodyTooLarge)
+    (body.len() <= MAX_BODY_BYTES).ok_or(ProtocolError::BodyTooLarge)
 }
 
 fn unambiguous_header<'a>(
@@ -239,16 +237,13 @@ fn unambiguous_header<'a>(
 /// The length bound every message identity meets, signed or not.
 pub(crate) fn ensure_message_id_len(message_id: &[u8]) -> Result<(), ProtocolError> {
     (!message_id.is_empty() && message_id.len() <= MAX_MESSAGE_ID_BYTES)
-        .then_some(())
         .ok_or(ProtocolError::InvalidMessageId)
 }
 
 /// A signed identity also excludes the `.` that delimits the signed content.
 fn ensure_message_id(message_id: &[u8]) -> Result<(), ProtocolError> {
     ensure_message_id_len(message_id)?;
-    (!message_id.contains(&b'.'))
-        .then_some(())
-        .ok_or(ProtocolError::InvalidMessageId)
+    (!message_id.contains(&b'.')).ok_or(ProtocolError::InvalidMessageId)
 }
 
 fn parse_timestamp(value: &HeaderValue) -> Result<i64, ProtocolError> {
@@ -267,7 +262,6 @@ fn ensure_timestamp_window(timestamp: i64, now: SystemTime) -> Result<(), Protoc
         Err(error) => -i128::from(error.duration().as_secs()),
     };
     (i128::from(timestamp).abs_diff(now) <= u128::from(TIMESTAMP_TOLERANCE_SECONDS))
-        .then_some(())
         .ok_or(ProtocolError::TimestampOutOfWindow)
 }
 

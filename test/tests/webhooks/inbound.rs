@@ -338,11 +338,10 @@ async fn concurrent_verified_copies_converge_on_one_receipt_and_job(pool: PgPool
             admission_deadline(),
         ),
     );
-    assert!(
-        matches!(one, Ok(ReceiptOutcome::Accepted)) && matches!(two, Ok(ReceiptOutcome::Duplicate))
-            || matches!(one, Ok(ReceiptOutcome::Duplicate))
-                && matches!(two, Ok(ReceiptOutcome::Accepted)),
-        "outcomes were {one:?} and {two:?}"
+    std::assert_matches!(
+        (&one, &two),
+        (Ok(ReceiptOutcome::Accepted), Ok(ReceiptOutcome::Duplicate))
+            | (Ok(ReceiptOutcome::Duplicate), Ok(ReceiptOutcome::Accepted))
     );
     assert_eq!(receipt_count(&pool).await, 1);
     assert_eq!(job_count(&pool).await, 1);

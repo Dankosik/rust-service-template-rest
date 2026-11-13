@@ -33,8 +33,7 @@ pub mod oidc_introspection {
     use std::{ops::RangeInclusive, time::Duration};
 
     pub const CACHE_CAPACITY: RangeInclusive<usize> = 1..=1024;
-    pub const CACHE_TTL: RangeInclusive<Duration> =
-        Duration::from_secs(1)..=Duration::from_secs(300);
+    pub const CACHE_TTL: RangeInclusive<Duration> = Duration::from_secs(1)..=Duration::from_mins(5);
 }
 // template:end oidc-introspection:introspection-cache-ranges
 pub mod otel_http;

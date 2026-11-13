@@ -26,7 +26,7 @@ pub const POLL_INTERVAL: Duration = Duration::from_secs(1);
 ///
 /// The cancellation margin and the time from starting pool acquisition to
 /// starting the attempt reduce the time left to write its outcome after a timeout.
-pub const LEASE_RESERVE: Duration = Duration::from_secs(60);
+pub const LEASE_RESERVE: Duration = Duration::from_mins(1);
 /// How far the worker's own cancellation leads the database expiry, so the
 /// supervisor stops writing before another worker can rescue the lease.
 pub(crate) const CANCEL_MARGIN: Duration = Duration::from_secs(2);

@@ -605,7 +605,7 @@ mod tests {
             axum::Router::new().route("/hang", axum::routing::get(handler_1)),
             &crate::HardenOptions {
                 max_body_bytes: 64,
-                request_timeout: Duration::from_secs(60),
+                request_timeout: Duration::from_mins(1),
                 max_in_flight: std::num::NonZeroU32::new(2),
                 log_health_probes: false,
             },

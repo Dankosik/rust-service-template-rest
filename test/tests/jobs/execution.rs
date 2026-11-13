@@ -300,10 +300,10 @@ async fn numeric_payloads_keep_handler_distinctions(pool: PgPool) {
         (receive.recv().await, receive.recv().await)
     })
     .await;
-    assert!(matches!(
+    std::assert_matches!(
         (first, second),
         (Some(true), Some(false)) | (Some(false), Some(true))
-    ));
+    );
     finish(run, &[&jobs]).await;
 }
 
@@ -316,10 +316,10 @@ async fn an_expired_checkout_does_not_use_an_idle_connection(pool: PgPool) {
             .expect("connection"),
     );
     let deadline = tokio::time::Instant::now() - Duration::from_millis(1);
-    assert!(matches!(
+    std::assert_matches!(
         infra_postgres::acquire_until(&jobs, "expired checkout", deadline).await,
         Err(sqlx::Error::PoolTimedOut)
-    ));
+    );
     super::close_pools(&[&jobs]).await;
 }
 
@@ -2667,7 +2667,7 @@ async fn x12_future_not_before_is_not_claimed_until_it_passes(pool: PgPool) {
                         action: ProbeAction::Succeed,
                     },
                     EnqueueOptions {
-                        delay: Duration::from_secs(3_600),
+                        delay: Duration::from_hours(1),
                         unique_key: None,
                     },
                 )

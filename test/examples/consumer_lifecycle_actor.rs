@@ -85,7 +85,7 @@ mod fixture {
             .build()
             .expect("fixture runtime");
         runtime.block_on(async {
-            Box::pin(timeout(Duration::from_secs(180), command()))
+            Box::pin(timeout(Duration::from_mins(3), command()))
                 .await
                 .expect("finite actor command");
         });
@@ -113,7 +113,7 @@ mod fixture {
                 &migrate::RunOptions::defaults(
                     &dsn,
                     "consumer-lifecycle-migrate",
-                    Duration::from_secs(120),
+                    Duration::from_mins(2),
                 ),
             )
             .await

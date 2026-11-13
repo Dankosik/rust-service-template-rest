@@ -216,7 +216,7 @@ async fn contract(storage: &ObjectStorage, object: &ObjectKey) {
 
     let http = reqwest::Client::new();
     let url = storage
-        .presign_get(object, Duration::from_secs(60))
+        .presign_get(object, Duration::from_mins(1))
         .await
         .unwrap();
     assert_eq!(http.get(url.expose()).send().await.unwrap().status(), 200);

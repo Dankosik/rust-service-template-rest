@@ -418,7 +418,7 @@ mod tests {
                 .expect("the deadline origin fits");
             let idempotency = Idempotency {
                 attempt: Attempt {
-                    store: Store::new(pool.clone(), Duration::from_secs(60)),
+                    store: Store::new(pool.clone(), Duration::from_mins(1)),
                     scope: scope(),
                     caller: CallerIdentity {
                         issuer: "issuer".into(),

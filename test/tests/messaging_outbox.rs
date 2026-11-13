@@ -85,7 +85,7 @@ struct Fixture {
 
 impl Fixture {
     async fn create() -> Self {
-        Self::create_with_window(false, Duration::from_secs(60)).await
+        Self::create_with_window(false, Duration::from_mins(1)).await
     }
 
     async fn create_with_consumer(with_consumer: bool) -> Self {

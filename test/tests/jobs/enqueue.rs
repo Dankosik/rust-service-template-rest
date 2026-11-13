@@ -872,7 +872,7 @@ async fn e5_a_one_hour_delay_is_the_statement_time_plus_one_hour(pool: PgPool) {
                     text: "later".to_owned(),
                 },
                 EnqueueOptions {
-                    delay: Duration::from_secs(3_600),
+                    delay: Duration::from_hours(1),
                     unique_key: None,
                 },
             )

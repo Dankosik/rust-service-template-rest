@@ -17,7 +17,7 @@ use crate::history::{PendingError, applied_history, pending};
 /// than a request, and a statement that holds a table lock must not run for
 /// as long as [`RunOptions::deadline`] allows. [`apply_outside_transaction`]
 /// lifts it.
-const STATEMENT_TIMEOUT: Duration = Duration::from_secs(120);
+const STATEMENT_TIMEOUT: Duration = Duration::from_mins(2);
 /// Session `lock_timeout`, which also bounds the wait for the advisory
 /// session lock another migrator may hold. [`apply_outside_transaction`]
 /// lifts it.

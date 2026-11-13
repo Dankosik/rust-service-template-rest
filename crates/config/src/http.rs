@@ -135,7 +135,7 @@ impl HttpConfig {
 
     pub(crate) fn validate(&self) -> Result<(), ValidationError> {
         let second = Duration::from_secs(1);
-        let ten_minutes = Duration::from_secs(600);
+        let ten_minutes = Duration::from_mins(10);
         duration_range("http.grace_period", self.grace_period, second, ten_minutes)?;
         duration_range(
             "http.drain_timeout",
@@ -167,7 +167,7 @@ impl HttpConfig {
             "http.header_read_timeout",
             self.header_read_timeout,
             Duration::from_millis(100),
-            Duration::from_secs(300),
+            Duration::from_mins(5),
         )?;
         request_timeout_range("http.request_timeout", self.request_timeout)?;
         request_budget_fits_drain(

@@ -334,7 +334,7 @@ async fn audit(output_path: &Path) -> Result<(), Error> {
         .request_timeout(Some(Duration::from_secs(3)))
         .connect(servers.split(',').collect::<Vec<_>>())
         .await?;
-    let result = tokio::time::timeout(Duration::from_secs(120), async {
+    let result = tokio::time::timeout(Duration::from_mins(2), async {
         let info = client.request("$JS.API.STREAM.INFO.RECOVERY", "{}".into()).await?;
         let info: Value = serde_json::from_slice(&info.payload)?;
         let first = info["state"]["first_seq"].as_u64().ok_or("missing stream sequence")?;

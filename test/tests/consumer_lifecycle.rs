@@ -229,7 +229,7 @@ impl Actor {
     }
 
     async fn wait(&mut self) -> Option<i32> {
-        let code = timeout(Duration::from_secs(180), async {
+        let code = timeout(Duration::from_mins(3), async {
             loop {
                 if let Some(status) = self.child.try_wait().unwrap() {
                     break status.code();

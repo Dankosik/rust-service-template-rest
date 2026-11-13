@@ -55,7 +55,7 @@ impl HttpIdempotencyConfig {
             duration_range(
                 "http_idempotency.retention",
                 retention,
-                Duration::from_secs(60),
+                Duration::from_mins(1),
                 Duration::from_hours(30 * 24),
             )?;
         }

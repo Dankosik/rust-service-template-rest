@@ -253,13 +253,10 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for TrackedPath<T> {
         let mut path = error.path().iter();
         match (path.next(), path.next()) {
             (None, _) => {
-                if let Some(field) = message
-                    .strip_prefix("missing field `")
-                    .and_then(|field| field.strip_suffix('`'))
-                {
+                if let Some(field) = message.strip_circumfix("missing field `", '`') {
                     return Ok(Self(Err(PathIssue::MissingField(field.to_owned()))));
                 }
-                if message.starts_with("duplicate field `") && message.ends_with('`') {
+                if message.strip_circumfix("duplicate field `", '`').is_some() {
                     return Ok(Self(Err(PathIssue::DuplicateField)));
                 }
             }

@@ -19,7 +19,7 @@ fn defaults_are_vacant() {
 #[case::minutes("5m", Duration::from_mins(5))]
 #[case::hours_and_minutes("2h 30m", Duration::from_mins(2 * 60 + 30))]
 #[case::days_no_space("7days", Duration::from_hours(7 * 24))]
-#[case::padded_with_whitespace("  1h  ", Duration::from_secs(3600))]
+#[case::padded_with_whitespace("  1h  ", Duration::from_hours(1))]
 fn accepted_forms_parse_to_the_named_duration(#[case] text: &str, #[case] expected: Duration) {
     let config = parse(&format!("retention = {text:?}")).unwrap();
     assert_eq!(config.retention, Some(expected));
@@ -72,11 +72,11 @@ fn required_retention_names_the_retention_once_postgres_is_enabled() {
 #[test]
 fn required_retention_succeeds_once_both_are_set() {
     let config = HttpIdempotencyConfig {
-        retention: Some(Duration::from_secs(3600)),
+        retention: Some(Duration::from_hours(1)),
     };
     assert_eq!(
         config.required_retention(true).unwrap(),
-        Duration::from_secs(3600)
+        Duration::from_hours(1)
     );
 }
 

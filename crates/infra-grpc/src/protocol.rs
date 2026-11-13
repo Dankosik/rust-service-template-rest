@@ -108,8 +108,8 @@ mod tests {
     #[test]
     fn grpc_timeout_follows_the_protocol_grammar() {
         let cases = [
-            ("1H", Some(Duration::from_secs(3600))),
-            ("2M", Some(Duration::from_secs(120))),
+            ("1H", Some(Duration::from_hours(1))),
+            ("2M", Some(Duration::from_mins(2))),
             ("5S", Some(Duration::from_secs(5))),
             ("250m", Some(Duration::from_millis(250))),
             ("7u", Some(Duration::from_micros(7))),
