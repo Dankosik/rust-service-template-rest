@@ -24,8 +24,8 @@ use crate::session::StartupError;
 pub const POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// Recovery reserve added to each kind's attempt timeout.
 ///
-/// The cancellation margin and the time from sending the claim to starting
-/// the attempt reduce the time left to write its outcome after a timeout.
+/// The cancellation margin and the time from starting pool acquisition to
+/// starting the attempt reduce the time left to write its outcome after a timeout.
 pub const LEASE_RESERVE: Duration = Duration::from_secs(60);
 /// How far the worker's own cancellation leads the database expiry, so the
 /// supervisor stops writing before another worker can rescue the lease.

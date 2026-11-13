@@ -212,12 +212,15 @@ async fn statement_turn<'a>(
 }
 
 enum ClaimRound {
-    Known { sent: Instant, rows: Vec<Drawn> },
+    Known {
+        claim_started_at: Instant,
+        rows: Vec<Drawn>,
+    },
     Failed(OperationError),
 }
 
 async fn send_claim(shared: &Shared, requested: i64) -> ClaimRound {
-    let sent = Instant::now();
+    let claim_started_at = Instant::now();
     let result = backstop(async {
         let mut connection = infra_postgres::acquire(&shared.pool, "claim jobs")
             .await
@@ -225,9 +228,12 @@ async fn send_claim(shared: &Shared, requested: i64) -> ClaimRound {
         Ok(claim(&mut connection, shared, requested).await?)
     })
     .await;
-    metrics::histogram!(CLAIM_DURATION_METRIC).record(sent.elapsed().as_secs_f64());
+    metrics::histogram!(CLAIM_DURATION_METRIC).record(claim_started_at.elapsed().as_secs_f64());
     match result {
-        Ok(rows) => ClaimRound::Known { sent, rows },
+        Ok(rows) => ClaimRound::Known {
+            claim_started_at,
+            rows,
+        },
         Err(error) => ClaimRound::Failed(error),
     }
 }
@@ -417,11 +423,11 @@ fn policy_binds(registry: &crate::Kinds, requested: i64) -> PolicyBinds<'_> {
     binds
 }
 
-/// The claim's lease past the statement timestamp, and past the send instant
-/// for the local deadline: the kind's timeout plus [`LEASE_RESERVE`].
+/// The kind's timeout plus [`LEASE_RESERVE`], shared by the database lease
+/// and the local deadline.
 ///
-/// The statement and the local deadline share this offset, so the local
-/// deadline keeps its [`CANCEL_MARGIN`] lead over the database expiry.
+/// The database counts from the statement timestamp. The worker counts from
+/// before pool acquisition so it can stop writing before the lease expires.
 fn lease_offset(timeout: Duration) -> Duration {
     timeout.saturating_add(LEASE_RESERVE)
 }
@@ -445,7 +451,10 @@ fn finish_round(
     failure: &CancellationToken,
 ) -> Next {
     match round {
-        ClaimRound::Known { sent, rows } => {
+        ClaimRound::Known {
+            claim_started_at,
+            rows,
+        } => {
             observe_recovery(shared, Operation::Claim);
             let next = if rows.len() == requested {
                 Next::Now
@@ -454,7 +463,7 @@ fn finish_round(
             } else {
                 Next::Soon
             };
-            dispatch_known(shared, slots, rows, sent, stop, failure);
+            dispatch_known(shared, slots, rows, claim_started_at, stop, failure);
             next
         }
         ClaimRound::Failed(error) => {
@@ -468,7 +477,7 @@ fn dispatch_known(
     shared: &Arc<Shared>,
     slots: &mut OwnedSemaphorePermit,
     rows: Vec<Drawn>,
-    sent: Instant,
+    claim_started_at: Instant,
     stop: &CancellationToken,
     failure: &CancellationToken,
 ) {
@@ -489,7 +498,7 @@ fn dispatch_known(
                 lease_offset,
                 queue_wait_seconds,
             } => {
-                let deadline = local_deadline(sent, lease_offset);
+                let deadline = local_deadline(claim_started_at, lease_offset);
                 let Some(slot) = slots.split(1) else {
                     tracing::error!(
                         job.id = %attempt.job_id,
@@ -533,13 +542,13 @@ fn dispatch_known(
     }
 }
 
-/// The point this worker stops writing: the send instant plus the statement's
-/// own lease offset, [`CANCEL_MARGIN`] earlier than the database expiry another
-/// worker may rescue at.
-fn local_deadline(sent: Instant, lease_offset: Duration) -> Instant {
-    sent.checked_add(lease_offset)
+/// Stop writing before another worker can rescue the claim. Starting before
+/// pool acquisition leaves at least [`CANCEL_MARGIN`] before database expiry.
+fn local_deadline(claim_started_at: Instant, lease_offset: Duration) -> Instant {
+    claim_started_at
+        .checked_add(lease_offset)
         .and_then(|deadline| deadline.checked_sub(CANCEL_MARGIN))
-        .unwrap_or(sent)
+        .unwrap_or(claim_started_at)
 }
 
 enum Drawn {
@@ -549,7 +558,7 @@ enum Drawn {
         generation: i64,
         payload: String,
         trace: Carrier,
-        /// The lease past the send instant, the same value the statement bound.
+        /// The same offset bound by the claim statement.
         lease_offset: Duration,
         queue_wait_seconds: f64,
     },
