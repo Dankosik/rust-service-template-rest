@@ -9,7 +9,7 @@ use shared_rules::{
     otel_http::{OTHER_METHOD, request_method},
 };
 
-use crate::{Error, policy::Origin};
+use crate::{Error, StopScopes, policy::Origin};
 
 /// OpenTelemetry `http.client.request.duration`, in the recorder's
 /// Prometheus naming.
@@ -93,13 +93,13 @@ impl Outcome {
     }
 }
 
-/// One polled outbound attempt. The guard retains only bounded configured
-/// identity, the caller's static template, and outcome state, never caller
-/// request data or transport errors.
+/// One polled outbound attempt. The guard borrows the stop scopes so it
+/// can record the cause when its parent drops the exchange.
 ///
 /// [`Attempt::finish`] borrows the result and logs a transport failure's
 /// causes once; the guard itself keeps none.
-pub(crate) struct Attempt {
+pub(crate) struct Attempt<'a> {
+    stops: &'a StopScopes<'a>,
     started: Instant,
     method: &'static str,
     template: Option<&'static str>,
@@ -109,8 +109,13 @@ pub(crate) struct Attempt {
     finalized: bool,
 }
 
-impl Attempt {
-    pub(crate) fn start(method: &Method, template: Option<UrlTemplate>, server: &Server) -> Self {
+impl<'a> Attempt<'a> {
+    pub(crate) fn start(
+        method: &Method,
+        template: Option<UrlTemplate>,
+        server: &Server,
+        stops: &'a StopScopes<'a>,
+    ) -> Self {
         let method = request_method(method.as_str());
         let template = template.map(|UrlTemplate(template)| template);
         let span = tracing::info_span!(
@@ -127,6 +132,7 @@ impl Attempt {
             otel.status_code = tracing::field::Empty,
         );
         Self {
+            stops,
             started: Instant::now(),
             method,
             template,
@@ -232,10 +238,14 @@ impl Attempt {
     }
 }
 
-impl Drop for Attempt {
+impl Drop for Attempt<'_> {
     fn drop(&mut self) {
         if !self.finalized {
-            self.emit(Outcome::Cancelled);
+            let outcome = match self.stops.check() {
+                Ok(()) => Outcome::Cancelled,
+                Err(error) => Outcome::from_error(&error),
+            };
+            self.emit(outcome);
         }
     }
 }

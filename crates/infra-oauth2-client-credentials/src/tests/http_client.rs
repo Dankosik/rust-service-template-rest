@@ -45,6 +45,57 @@ async fn a_client_requiring_a_subject_refuses_a_request_without_one_before_any_i
 }
 
 #[tokio::test]
+async fn token_http_telemetry_distinguishes_deadline_from_cancellation() {
+    let fixture = Fixture::new().await;
+    let _gate = fixture.block_tokens();
+    for (deadline_expires, expected_error, outbound_outcome) in [
+        (true, AcquisitionError::Timeout, "error"),
+        (false, AcquisitionError::Cancelled, "cancelled"),
+    ] {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let _recorder = metrics::set_default_local_recorder(&recorder);
+        let client = fixture
+            .credentials(&[], None)
+            .http(fixture.resource_client());
+        let budget = Duration::from_secs(2);
+        let context = OperationContext::with_timeout(budget);
+        let mut exchange = Box::pin(client.execute_with_context(fixture.request(), &context));
+        tokio::select! {
+            () = fixture.token_received() => {},
+            result = &mut exchange => panic!("response must be gated: {result:?}"),
+        }
+        if deadline_expires {
+            advance(budget).await;
+        } else {
+            context.cancel();
+        }
+        let Err(Error::Acquisition(error)) = exchange.await else {
+            panic!("expected a stopped token acquisition");
+        };
+        assert_eq!(error, expected_error);
+
+        let scrape = recorder.handle().render();
+        let mut counts = scrape
+            .lines()
+            .filter(|line| line.starts_with("http_client_request_duration_seconds_count{"));
+        let sample = counts.next().expect("the token HTTP request was observed");
+        assert!(counts.next().is_none());
+        assert!(sample.ends_with(" 1"), "{sample}");
+        assert!(
+            sample.contains(&format!("outbound_outcome=\"{outbound_outcome}\"")),
+            "{sample}"
+        );
+        if deadline_expires {
+            assert!(sample.contains("error_type=\"timeout\""), "{sample}");
+        } else {
+            assert!(!sample.contains("error_type="), "{sample}");
+        }
+    }
+    assert!(fixture.resource_requests().is_empty());
+    fixture.finish().await;
+}
+
+#[tokio::test]
 async fn an_elapsed_deadline_wins_over_request_cancellation_during_token_wait() {
     let fixture = Fixture::new().await;
     let gate = fixture.block_tokens();
