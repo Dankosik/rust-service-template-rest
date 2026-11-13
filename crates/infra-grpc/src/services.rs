@@ -4,12 +4,13 @@ use std::convert::Infallible;
 use foldhash::{HashMap, HashSet};
 use prost::Message as _;
 use tonic::server::NamedService as _;
+use tonic_reflection::pb::{v1, v1alpha};
 
 use crate::Error;
 use crate::health::HealthServer;
 use crate::protocol::{method_path, split_method_path};
 
-const REFLECTION_SERVICE: &str = tonic_reflection::pb::v1::server_reflection_server::SERVICE_NAME;
+const REFLECTION_SERVICE: &str = v1::server_reflection_server::SERVICE_NAME;
 
 /// Registered generated services and the contracts that describe them.
 /// Health is attached later, outside the business concurrency limit and
@@ -126,7 +127,8 @@ impl Services {
     /// it was described, so `grpcurl` and `buf curl` can call the service
     /// without its schema files. Both protocol versions are served,
     /// `grpc.reflection.v1` and the `v1alpha` it replaced, as grpc-go serves
-    /// them: older tools ask only for `v1alpha`. Health is described too.
+    /// them: older tools ask only for `v1alpha`. The service list includes
+    /// registered services, health and both reflection endpoints.
     /// Reflection is a business route: admitted, limited and deadline-bound
     /// like every other registered service.
     ///
@@ -142,21 +144,31 @@ impl Services {
 
     /// Builds the reflection servers requested by [`Services::add_reflection`].
     pub(crate) fn attach_reflection(&mut self) -> Result<(), Error> {
-        self.learn(tonic_reflection::pb::v1::FILE_DESCRIPTOR_SET)?;
-        self.learn(tonic_reflection::pb::v1alpha::FILE_DESCRIPTOR_SET)?;
-        // Each version lists the other, as grpc-go's registration does;
-        // the builder would add only the one it builds.
+        self.learn(v1::FILE_DESCRIPTOR_SET)?;
+        self.learn(v1alpha::FILE_DESCRIPTOR_SET)?;
         let builder = || {
             let builder = tonic_reflection::server::Builder::configure()
                 .include_reflection_service(false)
-                .register_encoded_file_descriptor_set(tonic_reflection::pb::v1::FILE_DESCRIPTOR_SET)
-                .register_encoded_file_descriptor_set(
-                    tonic_reflection::pb::v1alpha::FILE_DESCRIPTOR_SET,
-                )
+                .register_encoded_file_descriptor_set(v1::FILE_DESCRIPTOR_SET)
+                .register_encoded_file_descriptor_set(v1alpha::FILE_DESCRIPTOR_SET)
                 .register_encoded_file_descriptor_set(tonic_health::pb::FILE_DESCRIPTOR_SET);
-            self.descriptor_sets.iter().fold(builder, |builder, set| {
+            let builder = self.descriptor_sets.iter().fold(builder, |builder, set| {
                 builder.register_encoded_file_descriptor_set(set)
-            })
+            });
+            // Tonic lists every described service by default. Explicit names
+            // limit ListServices while retaining all descriptors for lookup.
+            self.names
+                .iter()
+                .copied()
+                .chain([
+                    HealthServer::NAME,
+                    REFLECTION_SERVICE,
+                    v1alpha::server_reflection_server::SERVICE_NAME,
+                ])
+                .fold(
+                    builder,
+                    tonic_reflection::server::Builder::with_service_name,
+                )
         };
         let v1 = builder()
             .build_v1()

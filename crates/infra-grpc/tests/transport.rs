@@ -256,6 +256,10 @@ impl EchoService for Echo {
             message: message.clone(),
         })]);
         Ok(Response::new(match message.as_str() {
+            "hold-before-headers" => {
+                self.hold.wait().await;
+                Box::pin(first.chain(futures_util::stream::pending()))
+            }
             "hold-after-first" => {
                 let hold = Arc::clone(&self.hold);
                 let dropped = NotifyOnDrop(Arc::clone(&self.stream_dropped));
@@ -348,7 +352,14 @@ impl Fixture {
 
     /// A TLS listener at one controlled loopback address.
     async fn tls_at(pki: &Pki, address: SocketAddr) -> Self {
-        Self::open_with_at(true, Some((pki, false)), limits(), address).await
+        Self::open_with_at(
+            true,
+            Some((pki, false)),
+            limits(),
+            address,
+            grpc_contracts::FILE_DESCRIPTOR_SET,
+        )
+        .await
     }
 
     /// A plaintext listener that sheds above `max_in_flight` business calls.
@@ -365,7 +376,14 @@ impl Fixture {
     }
 
     async fn open_with(seed: bool, tls: Option<(&Pki, bool)>, limits: Limits) -> Self {
-        Self::open_with_at(seed, tls, limits, loopback()).await
+        Self::open_with_at(
+            seed,
+            tls,
+            limits,
+            loopback(),
+            grpc_contracts::FILE_DESCRIPTOR_SET,
+        )
+        .await
     }
 
     async fn open_with_at(
@@ -373,6 +391,7 @@ impl Fixture {
         tls: Option<(&Pki, bool)>,
         limits: Limits,
         address: SocketAddr,
+        descriptor_set: &'static [u8],
     ) -> Self {
         // template:begin authn:grpc-transport-test-auth-fixture
         let (verifier, provider) = verifier_fixture().await;
@@ -395,8 +414,8 @@ impl Fixture {
             .add_reflection()
             .expect("reflection registers once");
         services
-            .describe(grpc_contracts::FILE_DESCRIPTOR_SET)
-            .expect("the committed contract decodes");
+            .describe(descriptor_set)
+            .expect("the fixture contract decodes");
         services
             .add(EchoServiceServer::new(echo.clone()))
             .expect("echo registers once");
@@ -1397,6 +1416,53 @@ async fn a_call_waits_no_longer_than_the_admission_wait() {
     provider.stop().await;
 }
 
+#[tokio::test]
+async fn both_admission_queues_share_the_call_wait_limit() {
+    use tower::ServiceExt as _;
+
+    let (verifier, provider) = verifier_fixture().await;
+    let echo = Echo::new();
+    let app = opening_app_waiting(verifier, &echo, 1, Duration::from_secs(1));
+    let mut holding = Box::pin(app.clone().oneshot(opening_request(
+        "/example.v1.EchoService/ServerStream",
+        Some(ACCEPTED),
+        "hold-before-headers",
+    )));
+    timeout(WAIT, async {
+        tokio::select! {
+            () = echo.hold.wait_for(1) => {},
+            result = &mut holding => panic!("the stream must hold its opening: {result:?}"),
+        }
+    })
+    .await
+    .unwrap();
+
+    tokio::time::pause();
+    let started = tokio::time::Instant::now();
+    let mut waiting = Box::pin(app.oneshot(opening_request(UNARY_PATH, Some(ACCEPTED), "queued")));
+    assert!(futures_util::poll!(waiting.as_mut()).is_pending());
+    tokio::time::advance(Duration::from_millis(750)).await;
+
+    // The headers release opening capacity while the stream still holds terminal capacity.
+    echo.hold.release();
+    let held = timeout(Duration::from_millis(100), holding)
+        .await
+        .expect("the held stream returns headers")
+        .unwrap();
+    assert!(Status::from_header_map(held.headers()).is_none());
+
+    let response = timeout(Duration::from_millis(300), waiting)
+        .await
+        .expect("the second queue uses the remaining wait budget")
+        .unwrap();
+    assert!(started.elapsed() >= Duration::from_secs(1));
+    assert_at_capacity(&Status::from_header_map(response.headers()).unwrap());
+    assert_seen(&echo, &[Seen::ServerStream]);
+    drop(held);
+    tokio::time::resume();
+    provider.stop().await;
+}
+
 /// A zero admission wait refuses a call over the limit at once, without a wait
 /// to record, though its budget would allow one.
 #[tokio::test]
@@ -2334,8 +2400,33 @@ fn a_destination_scheme_that_disagrees_with_security_is_rejected() {
 }
 
 #[tokio::test]
-async fn reflection_describes_the_committed_contract_and_health() {
-    let fixture = Fixture::plaintext().await;
+async fn reflection_lists_only_registered_services_in_both_versions() {
+    use prost::Message as _;
+
+    const UNREGISTERED: &str = "example.v1.Unregistered";
+    let mut contract =
+        prost_types::FileDescriptorSet::decode(grpc_contracts::FILE_DESCRIPTOR_SET).unwrap();
+    let file = contract
+        .file
+        .iter_mut()
+        .find(|file| file.package() == "example.v1")
+        .unwrap();
+    let mut unregistered = file
+        .service
+        .iter()
+        .find(|service| service.name() == "EchoService")
+        .unwrap()
+        .clone();
+    unregistered.name = Some("Unregistered".to_owned());
+    file.service.push(unregistered);
+    let descriptor_set = Box::leak(contract.encode_to_vec().into_boxed_slice());
+    let fixture = Fixture::open_with_at(true, None, limits(), loopback(), descriptor_set).await;
+    let expected_names = [
+        ECHO_SERVICE,
+        "grpc.health.v1.Health",
+        "grpc.reflection.v1.ServerReflection",
+        "grpc.reflection.v1alpha.ServerReflection",
+    ];
     let mut client = ServerReflectionClient::new(plaintext_client(fixture.address));
     let ask = |message_request| ServerReflectionRequest {
         host: String::new(),
@@ -2345,6 +2436,9 @@ async fn reflection_describes_the_committed_contract_and_health() {
         ask(MessageRequest::ListServices(String::new())),
         ask(MessageRequest::FileContainingSymbol(
             ECHO_SERVICE.to_owned(),
+        )),
+        ask(MessageRequest::FileContainingSymbol(
+            UNREGISTERED.to_owned(),
         )),
     ]);
     let mut answers = client
@@ -2364,18 +2458,16 @@ async fn reflection_describes_the_committed_contract_and_health() {
     let MessageResponse::ListServicesResponse(listed) = next().await else {
         panic!("list services is answered with a service list");
     };
-    let names: Vec<&str> = listed.service.iter().map(|s| s.name.as_str()).collect();
-    assert!(names.contains(&ECHO_SERVICE), "{names:?}");
-    assert!(names.contains(&"grpc.health.v1.Health"), "{names:?}");
-    for version in ["v1", "v1alpha"] {
-        let reflection = format!("grpc.reflection.{version}.ServerReflection");
-        assert!(names.contains(&reflection.as_str()), "{names:?}");
-    }
+    let mut names: Vec<&str> = listed.service.iter().map(|s| s.name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(names, expected_names);
 
-    let MessageResponse::FileDescriptorResponse(files) = next().await else {
-        panic!("a known symbol is answered with its file descriptor");
-    };
-    assert_ne!(files.file_descriptor_proto, [] as [Vec<u8>; 0]);
+    for _ in 0..2 {
+        let MessageResponse::FileDescriptorResponse(files) = next().await else {
+            panic!("a described symbol is answered with its file descriptor");
+        };
+        assert_ne!(files.file_descriptor_proto, [] as [Vec<u8>; 0]);
+    }
 
     // Older tools ask only for the version `v1` replaced.
     let mut older = v1alpha::server_reflection_client::ServerReflectionClient::new(
@@ -2402,10 +2494,9 @@ async fn reflection_describes_the_committed_contract_and_health() {
     else {
         panic!("list services is answered with a service list");
     };
-    assert!(
-        listed.service.iter().any(|s| s.name == ECHO_SERVICE),
-        "{listed:?}"
-    );
+    let mut names: Vec<&str> = listed.service.iter().map(|s| s.name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(names, expected_names);
     fixture.stop().await;
 }
 
