@@ -150,11 +150,15 @@ struct RouteEntry {
 
 impl std::fmt::Debug for Registry {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let subjects: HashMap<_, _> = self
-            .routes
-            .iter()
-            .map(|(key, entry)| (key, &entry.route.subject))
-            .collect();
+        let subjects = std::fmt::from_fn(|f| {
+            f.debug_map()
+                .entries(
+                    self.routes
+                        .iter()
+                        .map(|(key, entry)| (key, &entry.route.subject)),
+                )
+                .finish()
+        });
         formatter
             .debug_struct("Registry")
             .field("routes", &subjects)
@@ -442,6 +446,29 @@ mod tests {
             })
             .unwrap();
         registry
+    }
+
+    #[test]
+    fn registry_debug_shows_route_subjects_and_counts() {
+        let registry = registry();
+        let compact = format!("{registry:?}");
+        let pretty = format!("{registry:#?}");
+        assert!(compact.contains("routes: {RouteKey {"));
+        assert!(pretty.contains("routes: {\n        RouteKey {\n"));
+        for output in [&compact, &pretty] {
+            for value in [
+                "order.created",
+                "orders.created",
+                "order.shipped",
+                "orders.shipped",
+                "documented_count: 0",
+                "handler_count: 1",
+            ] {
+                assert!(output.contains(value), "{output}");
+            }
+            assert!(!output.contains("schema:"), "{output}");
+            assert!(!output.contains("handler:"), "{output}");
+        }
     }
 
     async fn dispatch(
