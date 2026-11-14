@@ -12,7 +12,8 @@ use redis::Value;
 use tokio::io::{AsyncRead, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Notify, mpsc, oneshot};
-use tokio::task::{JoinHandle, JoinSet};
+use tokio::task::JoinSet;
+use tokio_util::task::AbortOnDropHandle;
 
 use super::{cache_url, observation_recorder, options, upstream_addr};
 
@@ -137,8 +138,9 @@ async fn frame(stream: &mut TcpStream) -> redis::RedisResult<(Value, Vec<u8>)> {
 
 struct AuthRelay {
     port: u16,
+    // Request abort before dropping the stop sender during fixture teardown.
+    task: AbortOnDropHandle<()>,
     stop: Option<oneshot::Sender<()>>,
-    task: JoinHandle<()>,
 }
 
 impl AuthRelay {
@@ -174,8 +176,8 @@ impl AuthRelay {
         (
             Self {
                 port,
+                task: AbortOnDropHandle::new(task),
                 stop: Some(stop),
-                task,
             },
             events,
         )
@@ -200,12 +202,6 @@ async fn next_exchange(events: &mut mpsc::Receiver<Exchange>) -> Exchange {
         .await
         .expect("adapter did not complete authentication against Valkey")
         .expect("authentication relay stopped")
-}
-
-impl Drop for AuthRelay {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
 }
 
 async fn relay_connection(
