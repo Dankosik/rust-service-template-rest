@@ -738,21 +738,6 @@ fn write_body(
     line.append(record_tail(format, truncated));
 }
 
-/// Whether every field was written, within room for the record's tail: the
-/// event's, then its spans'.
-fn write_fields(
-    line: &mut Bytes,
-    values: &[u8],
-    event: &[Entry],
-    spans: &[Entry],
-    truncated: bool,
-    format: LoggingFormat,
-) -> bool {
-    line.limit = MAX_RECORD_BYTES - record_tail(format, truncated).len();
-    write_sorted(line, values, event, Pass::Event, format)
-        && write_sorted(line, values, spans, Pass::Spans { event }, format)
-}
-
 fn record_tail(format: LoggingFormat, truncated: bool) -> &'static [u8] {
     match (format, truncated) {
         (LoggingFormat::Json, false) => b"}\n",
@@ -762,40 +747,28 @@ fn record_tail(format: LoggingFormat, truncated: bool) -> &'static [u8] {
     }
 }
 
-/// Which fields a [`write_sorted`] pass writes, and which value of a key wins.
-#[derive(Clone, Copy)]
-enum Pass<'a> {
-    /// The event's own fields: the last value captured for a key wins.
-    Event,
-    /// Span fields, copied leaf first: the nearest span's value wins, and a
-    /// key the event has is the event's.
-    Spans { event: &'a [Entry] },
-}
-
-/// Whether every field was written. `fields` and a pass's `event` are sorted
-/// by key, then capture order. The first that does not fit is written cut
-/// when it is a string, and left out otherwise; every later field stays out.
-/// No key is left without its value.
-fn write_sorted(
+/// Both slices are sorted by key, then capture order. Spans were captured leaf first.
+fn write_fields(
     line: &mut Bytes,
     values: &[u8],
-    fields: &[Entry],
-    pass: Pass<'_>,
+    event: &[Entry],
+    spans: &[Entry],
+    truncated: bool,
     format: LoggingFormat,
 ) -> bool {
-    for (index, field) in fields.iter().enumerate() {
-        let shadowed = match pass {
-            Pass::Event => fields
-                .get(index + 1)
-                .is_some_and(|next| next.key == field.key),
-            Pass::Spans { event } => {
-                (index > 0 && fields[index - 1].key == field.key)
-                    || event
-                        .binary_search_by_key(&field.key, |entry| entry.key)
-                        .is_ok()
-            }
-        };
-        if shadowed || RESERVED.contains(&field.key) {
+    line.limit = MAX_RECORD_BYTES - record_tail(format, truncated).len();
+    let same_key = |a: &Entry, b: &Entry| a.key == b.key;
+    let event_fields = event.chunk_by(same_key).filter_map(<[_]>::last);
+    let span_fields = spans
+        .chunk_by(same_key)
+        .filter_map(<[_]>::first)
+        .filter(|field| {
+            event
+                .binary_search_by_key(&field.key, |entry| entry.key)
+                .is_err()
+        });
+    for field in event_fields.chain(span_fields) {
+        if RESERVED.contains(&field.key) {
             continue;
         }
         let kept = line.len();
