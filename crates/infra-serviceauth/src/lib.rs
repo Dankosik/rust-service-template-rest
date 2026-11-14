@@ -253,7 +253,7 @@ mod tests {
     mod grammar {
         use super::*;
         use proptest::prelude::*;
-        use regex::Regex;
+        use regex::regex;
 
         proptest! {
             #![proptest_config(ProptestConfig::with_cases(64))]
@@ -266,7 +266,7 @@ mod tests {
                     "[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?",
                 ],
             ) {
-                let label = Regex::new("^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$").unwrap();
+                let label = regex!("^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$");
                 let parsed = ServiceName::parse(&value);
                 prop_assert_eq!(parsed.is_ok(), label.is_match(&value));
                 if let Ok(name) = parsed {
@@ -282,7 +282,7 @@ mod tests {
                     "[!-~ \t\u{7f}\u{e9}]{0,8}",
                 ],
             ) {
-                let visible = Regex::new("^[!-~]{1,256}$").unwrap();
+                let visible = regex!("^[!-~]{1,256}$");
                 let parsed = KeyId::parse(&value);
                 prop_assert_eq!(parsed.is_ok(), visible.is_match(&value));
                 if let Ok(kid) = parsed {
@@ -298,10 +298,9 @@ mod tests {
                     "[aA][pP]{2}[a-zA-Z]{0,8}/[A-Za-z0-9!#$&^_.+-]{0,130}",
                 ],
             ) {
-                let media_subtype = Regex::new(
-                    "^((?i-u:application)/)?[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}$",
-                )
-                .unwrap();
+                let media_subtype = regex!(
+                    "^((?i-u:application)/)?[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}$"
+                );
                 let parsed = JwtType::parse(&value);
                 prop_assert_eq!(parsed.is_ok(), media_subtype.is_match(&value));
                 if let Ok(typ) = parsed {

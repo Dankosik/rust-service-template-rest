@@ -202,17 +202,17 @@ async fn capture_attempt(
     ) else {
         return ControlFlow::Break(wiring_failure(&operation_id, "caller_missing"));
     };
-    let Some(key) = identity::decode_key(
+    let Some(scope) = identity::decode_key(
         parts
             .headers
             .get_all(KEY_HEADER)
             .iter()
             .map(HeaderValue::as_bytes),
-    ) else {
+    )
+    .map(|key| identity::scope_key(&caller, &key)) else {
         Outcome::InvalidKey.record();
         return ControlFlow::Break(invalid_key());
     };
-    let scope = identity::scope_key(&caller, &key);
     let context = parts.extensions.get::<RequestContext>();
     let collected = match read_body(context, buffer_body(body)).await {
         Ok(collected) => collected,

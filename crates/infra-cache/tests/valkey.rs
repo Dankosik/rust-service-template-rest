@@ -26,11 +26,12 @@ use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
 use secrecy::SecretString;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::task::{JoinHandle, JoinSet};
+use tokio::task::JoinSet;
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use tokio_rustls::rustls::server::WebPkiClientVerifier;
 use tokio_rustls::rustls::{RootCertStore, ServerConfig};
+use tokio_util::task::AbortOnDropHandle;
 
 const COMMAND_TIMEOUT: Duration = Duration::from_millis(200);
 const TIMEOUT_BOUND: Duration = Duration::from_millis(450);
@@ -85,8 +86,9 @@ fn connect_url(url: &str, command_timeout: Duration) -> Cache {
 
 struct Proxy {
     port: u16,
+    // Request abort before dropping the stop sender during fixture teardown.
+    task: AbortOnDropHandle<()>,
     stop: Option<tokio::sync::oneshot::Sender<()>>,
-    task: JoinHandle<()>,
 }
 
 impl Proxy {
@@ -111,13 +113,11 @@ impl Proxy {
         acceptor: Option<TlsAcceptor>,
     ) -> Self {
         let (stop, stop_rx) = tokio::sync::oneshot::channel();
-        let task = tokio::spawn(async move {
-            run_proxy(listener, upstream, acceptor, stop_rx).await;
-        });
+        let task = tokio::spawn(run_proxy(listener, upstream, acceptor, stop_rx));
         Self {
             port,
+            task: AbortOnDropHandle::new(task),
             stop: Some(stop),
-            task,
         }
     }
 
@@ -140,12 +140,6 @@ impl Proxy {
         self.stop().await;
         let listener = bind_port(self.port).await;
         *self = Self::spawn(listener, self.port, upstream, Some(acceptor));
-    }
-}
-
-impl Drop for Proxy {
-    fn drop(&mut self) {
-        self.task.abort();
     }
 }
 

@@ -1,35 +1,21 @@
 use super::super::output::{self, LogSnapshot, LoggerShutdown};
+use super::super::tests::Buffer;
 use super::*;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing_subscriber::Registry;
 use tracing_subscriber::layer::SubscriberExt as _;
 
-#[derive(Clone, Default)]
-struct Sink(Arc<Mutex<Vec<u8>>>);
-
-impl io::Write for Sink {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.0.lock().expect("sink lock").extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
 fn capture(format: LoggingFormat, emit: impl FnOnce()) -> (String, LogSnapshot) {
-    let sink = Sink::default();
-    let (output, guard) = output::start(sink.clone()).expect("writer starts");
+    let buffer = Buffer::default();
+    let (output, guard) = output::start(buffer.clone()).expect("writer starts");
     let dispatch = Dispatch::new(Registry::default().with(FormatLayer::new(output, format)));
     tracing::dispatcher::with_default(&dispatch, emit);
     let result = guard.shutdown(Instant::now() + Duration::from_secs(2));
     let LoggerShutdown::Completed(snapshot) = result else {
         panic!("memory sink drain failed: {result:?}");
     };
-    let records =
-        String::from_utf8(sink.0.lock().expect("sink lock").clone()).expect("UTF-8 output");
-    (records, snapshot)
+    (buffer.records(), snapshot)
 }
 
 fn payload(value: &str) {
@@ -461,8 +447,8 @@ fn callback_capacity(format: LoggingFormat) {
         }
     }
 
-    let sink = Sink::default();
-    let (output, guard) = output::start(sink.clone()).expect("writer starts");
+    let buffer = Buffer::default();
+    let (output, guard) = output::start(buffer.clone()).expect("writer starts");
     let dispatch = Dispatch::new(Registry::default().with(FormatLayer::new(output, format)));
     let (entered, observed) = mpsc::sync_channel(32);
     let release = Arc::new((Mutex::new(false), Condvar::new()));
@@ -501,7 +487,7 @@ fn callback_capacity(format: LoggingFormat) {
         "busy rejects before formatting"
     );
     assert!(
-        sink.0.lock().expect("sink lock").is_empty(),
+        buffer.records().is_empty(),
         "no incomplete record reaches the writer"
     );
     *release.0.lock().expect("callback release lock") = true;
@@ -514,8 +500,7 @@ fn callback_capacity(format: LoggingFormat) {
     let LoggerShutdown::Completed(snapshot) = result else {
         panic!("capacity writer drain failed: {result:?}");
     };
-    let records =
-        String::from_utf8(sink.0.lock().expect("sink lock").clone()).expect("UTF-8 output");
+    let records = buffer.records();
     assert_eq!(records.lines().count(), 33);
     assert_eq!(records.matches("held_callback").count(), 32);
     assert!(records.contains("after_callback_release"));

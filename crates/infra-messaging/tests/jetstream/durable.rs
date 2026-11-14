@@ -325,14 +325,9 @@ async fn an_unanswered_identity_check_blocks_pulls_without_losing_the_consumer()
         .unwrap();
     refuse_info.store(true, Ordering::SeqCst);
     let mut handle = consumer.start(&cancel);
-    timeout(Duration::from_secs(3), async {
-        let mut cadence = tokio::time::interval(Duration::from_millis(20));
-        while !relay.dropped_ack.load(Ordering::SeqCst) {
-            cadence.tick().await;
-        }
-    })
-    .await
-    .expect("the broker answered the identity query but its reply was withheld");
+    timeout(Duration::from_secs(3), relay.dropped_ack.cancelled())
+        .await
+        .expect("the broker answered the identity query but its reply was withheld");
     assert!(
         messaging.probe().check().await.is_ok(),
         "the NATS connection itself is healthy"

@@ -129,8 +129,7 @@ impl<'c> Executor<'c> for &'c mut Tx<'_> {
         self.proven_alive = false;
         Box::pin(Proving {
             statement: self.conn.fetch_many(query),
-            failed: false,
-            proven_alive: &mut self.proven_alive,
+            proof_to_restore: Some(&mut self.proven_alive),
         })
     }
 
@@ -172,12 +171,9 @@ impl<'c> Executor<'c> for &'c mut Tx<'_> {
     }
 }
 
-/// A statement's result stream that restores the proof once the stream ends
-/// without having yielded an error.
 struct Proving<'e, T> {
     statement: DriverStream<'e, T>,
-    failed: bool,
-    proven_alive: &'e mut bool,
+    proof_to_restore: Option<&'e mut bool>,
 }
 
 impl<T> Stream for Proving<'_, T> {
@@ -188,9 +184,12 @@ impl<T> Stream for Proving<'_, T> {
         let item = ready!(this.statement.as_mut().poll_next(cx));
         match &item {
             Some(Ok(_)) => {}
-            Some(Err(_)) => this.failed = true,
-            // The stream also ends after an error it yielded.
-            None => *this.proven_alive = !this.failed,
+            Some(Err(_)) => this.proof_to_restore = None,
+            None => {
+                if let Some(proven_alive) = this.proof_to_restore.take() {
+                    *proven_alive = true;
+                }
+            }
         }
         Poll::Ready(item)
     }
@@ -410,8 +409,7 @@ mod tests {
         let mut proven_alive = false;
         let mut statement = Proving {
             statement: Box::pin(stream::iter(items)),
-            failed: false,
-            proven_alive: &mut proven_alive,
+            proof_to_restore: Some(&mut proven_alive),
         };
         for _ in 0..take {
             let _ = statement.next().await;
@@ -431,6 +429,16 @@ mod tests {
         let failed = || vec![Ok(1), Err(sqlx::Error::Protocol("failed".into()))];
         assert!(!proof_after(failed(), 2).await);
         assert!(!proof_after(failed(), 3).await);
+
+        let mut proven_alive = false;
+        let mut statement = Proving::<()> {
+            statement: Box::pin(stream::pending()),
+            proof_to_restore: Some(&mut proven_alive),
+        };
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        assert!(Pin::new(&mut statement).poll_next(&mut cx).is_pending());
+        drop(statement);
+        assert!(!proven_alive);
     }
 
     #[test]

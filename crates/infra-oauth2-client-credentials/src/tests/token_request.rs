@@ -42,7 +42,10 @@ async fn client_credentials_request_has_no_authorization_header_and_expected_fie
         }),
     );
     let response = fixture
-        .credentials(&["read", "write"], Some("https://api.example/resource"))
+        .credentials(
+            &["write", "read+all", "write"],
+            Some("https://api.example/resource"),
+        )
         .http(fixture.resource_client())
         .execute(fixture.request(), deadline(Duration::from_secs(10)))
         .await
@@ -74,7 +77,7 @@ async fn client_credentials_request_has_no_authorization_header_and_expected_fie
         CLIENT_ASSERTION_TYPE
     );
     assert_ne!(form_value(&pairs, "client_assertion"), "");
-    assert_eq!(form_value(&pairs, "scope"), "read write");
+    assert_eq!(form_value(&pairs, "scope"), "write read+all write");
     assert_eq!(
         form_value(&pairs, "audience"),
         "https://api.example/resource"

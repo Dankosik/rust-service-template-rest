@@ -1,7 +1,6 @@
 //! Text and file recipes. File work is synchronous and belongs off async worker threads.
 
 use std::io::{Read, Seek, Write};
-use std::sync::LazyLock;
 
 use bstr::ByteSlice;
 use heck::{ToKebabCase, ToSnakeCase};
@@ -12,14 +11,12 @@ use unicode_segmentation::UnicodeSegmentation;
 
 #[test]
 fn names_and_text_patterns_use_existing_utilities() {
-    static JOB_ID: LazyLock<regex::Regex> =
-        LazyLock::new(|| regex::Regex::new(r"^job-([0-9]+)$").unwrap());
-
     assert_eq!("XMLHttpRequest".to_snake_case(), "xml_http_request");
     assert_eq!("UserProfile".to_kebab_case(), "user-profile");
-    let captures = JOB_ID.captures("job-123").unwrap();
+    let job_id = regex::regex!(r"^job-([0-9]+)$");
+    let captures = job_id.captures("job-123").unwrap();
     assert_eq!(&captures[1], "123");
-    assert!(JOB_ID.captures("job-123-extra").is_none());
+    assert!(job_id.captures("job-123-extra").is_none());
     assert_eq!(strsim::levenshtein("config", "confg"), 1);
 }
 

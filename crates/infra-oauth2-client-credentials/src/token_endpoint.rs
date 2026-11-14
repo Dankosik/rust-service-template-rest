@@ -34,7 +34,7 @@ pub(crate) struct TokenEndpoint {
     url: Url,
     uri: Uri,
     http: Client,
-    scopes: Vec<String>,
+    scope: Option<String>,
     audience: Option<String>,
     signer: Signer,
     permits: Semaphore,
@@ -44,7 +44,7 @@ impl TokenEndpoint {
     pub(crate) fn new(
         url: Url,
         http: Client,
-        scopes: Vec<String>,
+        scopes: &[String],
         audience: Option<String>,
         signer: Signer,
         permits: usize,
@@ -64,7 +64,7 @@ impl TokenEndpoint {
             url,
             uri,
             http,
-            scopes,
+            scope: joined_scopes(scopes),
             audience,
             signer,
             permits: Semaphore::new(permits),
@@ -139,9 +139,8 @@ impl TokenEndpoint {
         deadline: Instant,
     ) -> Result<Token, AcquisitionError> {
         let assertion = self.signer.sign()?;
-        let scope = joined_scopes(&self.scopes);
         let mut fields = grant.form_fields();
-        if let Some(scope) = scope.as_deref() {
+        if let Some(scope) = self.scope.as_deref() {
             fields.push(("scope", scope));
         }
         if let Some(audience) = self.audience.as_deref() {

@@ -441,16 +441,13 @@ async fn a_dropped_idle_connection_reconnects_before_the_next_call() {
     assert_eq!(server.connections(), 1);
 
     server.hang_up();
-    // No cache call from here on: the client must notice the closed socket
-    // and dial again on its own.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    while server.connections() < 2 {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the client waited for a call before it reconnected"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    server
+        .wait_for(
+            Duration::from_secs(5),
+            "the client waited for a call before it reconnected",
+            || server.connections() >= 2,
+        )
+        .await;
     assert_eq!(namespace.get("key").await, Ok(None));
 }
 
@@ -472,15 +469,13 @@ async fn a_replaced_connection_dials_without_waiting_for_a_call() {
         Err(crate::SetError::Unavailable(crate::Unavailable))
     );
 
-    // No cache call from here on: recovery must dial on its own.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    while server.connections() < 2 {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the replaced connection waited for a call before it dialed"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    server
+        .wait_for(
+            Duration::from_secs(5),
+            "the replaced connection waited for a call before it dialed",
+            || server.connections() >= 2,
+        )
+        .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -488,15 +483,13 @@ async fn the_first_connection_dials_without_waiting_for_a_call() {
     let server = FakeServer::start().await;
     let _cache = admitted(&format!("redis://{}", server.address), true, true);
 
-    // No cache call at all: admission itself must start the connection.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    while server.connections() < 1 {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the first connection waited for a call before it dialed"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    server
+        .wait_for(
+            Duration::from_secs(5),
+            "the first connection waited for a call before it dialed",
+            || server.connections() >= 1,
+        )
+        .await;
 }
 
 fn assert_work_metrics(

@@ -1,9 +1,6 @@
-use std::{borrow::Cow, fmt};
+use std::fmt;
 
-use serde::{
-    Deserialize,
-    de::value::{Error as DeserializeError, StrDeserializer},
-};
+use serde::Deserialize;
 
 /// Safe admission failure identifying only the failed input and its static cause.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -76,15 +73,10 @@ pub enum Rejection {
 impl Rejection {
     pub(crate) fn from_body(body: &[u8]) -> Self {
         #[derive(Deserialize)]
-        struct ErrorResponse<'a> {
-            #[serde(borrow)]
-            error: Cow<'a, str>,
+        struct ErrorResponse {
+            error: Rejection,
         }
-        let Ok(response) = serde_json::from_slice::<ErrorResponse<'_>>(body) else {
-            return Self::Other;
-        };
-        Self::deserialize(StrDeserializer::<DeserializeError>::new(&response.error))
-            .unwrap_or(Self::Other)
+        serde_json::from_slice::<ErrorResponse>(body).map_or(Self::Other, |response| response.error)
     }
 
     /// The registered wire code, or `None` for [`Self::Other`].

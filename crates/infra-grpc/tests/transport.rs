@@ -2558,6 +2558,10 @@ fn bytes_that_are_not_a_descriptor_set_are_rejected() {
 fn conflicting_descriptors_for_the_same_service_are_rejected() {
     use prost::Message as _;
 
+    fn encode(set: &prost_types::FileDescriptorSet) -> &'static [u8] {
+        Box::leak(set.encode_to_vec().into_boxed_slice())
+    }
+
     let mut services = described();
     let mut descriptor =
         prost_types::FileDescriptorSet::decode(grpc_contracts::FILE_DESCRIPTOR_SET).unwrap();
@@ -2568,9 +2572,16 @@ fn conflicting_descriptors_for_the_same_service_are_rejected() {
         .find(|service| service.name() == "EchoService")
         .unwrap();
     echo.method.retain(|method| method.name() != "Unary");
-    let conflicting = Box::leak(descriptor.encode_to_vec().into_boxed_slice());
+    let unnamed_file = prost_types::FileDescriptorProto {
+        service: vec![prost_types::ServiceDescriptorProto {
+            method: vec![prost_types::MethodDescriptorProto::default()],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    descriptor.file.insert(0, unnamed_file);
     assert_eq!(
-        services.describe(conflicting),
+        services.describe(encode(&descriptor)),
         Err(Error::ConflictingServiceDescription(
             "example.v1.EchoService".to_owned()
         ))
@@ -2578,6 +2589,34 @@ fn conflicting_descriptors_for_the_same_service_are_rejected() {
     services
         .describe(grpc_contracts::FILE_DESCRIPTOR_SET)
         .expect("the rejected set did not replace the original description");
+    descriptor.file.truncate(1);
+    descriptor.file[0].service[0]
+        .method
+        .push(prost_types::MethodDescriptorProto {
+            name: Some("Ping".to_owned()),
+            ..Default::default()
+        });
+    services
+        .describe(encode(&descriptor))
+        .expect("the later conflict did not register an earlier service");
+    let file = &mut descriptor.file[0];
+    file.package = Some(String::new());
+    let service = &mut file.service[0];
+    service.name = Some(String::new());
+    service.method.remove(0);
+    assert_eq!(
+        services.describe(encode(&descriptor)),
+        Err(Error::ConflictingServiceDescription(String::new()))
+    );
+    descriptor.file[0].service[0]
+        .method
+        .push(prost_types::MethodDescriptorProto {
+            name: Some(String::new()),
+            ..Default::default()
+        });
+    services
+        .describe(encode(&descriptor))
+        .expect("explicit default names and reordered methods describe the same service");
 }
 
 #[test]

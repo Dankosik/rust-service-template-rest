@@ -7,20 +7,21 @@ use std::time::{Duration, Instant};
 
 use futures_util::FutureExt as _;
 use infra_jobs::{
-    DEFAULT_TIMEOUT, DrainEnd, Engine, EnqueueError, EnqueueOptions, Enqueued, Job, JobError,
-    JobKind, KindsBuilder, LEASE_RESERVE, LivePayloadComparison, MIN_TIMEOUT, POLL_INTERVAL,
-    Policy, StartupError, compare_live_payload, enqueue,
+    DEFAULT_TIMEOUT, DrainEnd, Engine, EnqueueOptions, Enqueued, Job, JobError, JobKind,
+    KindsBuilder, LEASE_RESERVE, LivePayloadComparison, MIN_TIMEOUT, POLL_INTERVAL, Policy,
+    StartupError, compare_live_payload, enqueue,
 };
 use infra_postgres::{Dsn, PgPool, TxError, in_tx};
 use integration_tests::jobs::{self, Probe, ProbeAction};
 use integration_tests::{DATABASE_URL, dsn_for, url_for};
 use serde::{Deserialize, Serialize};
 use sqlx::{AssertSqlSafe, Postgres, Row, Transaction};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, watch};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use url::Url;
 
+use super::AttemptError;
 use super::commit_proxy::{CommitProxy, Fault};
 
 const POLL: Duration = Duration::from_millis(50);
@@ -68,43 +69,8 @@ impl JobKind for NumericPayload {
     const NAME: &'static str = "test.numeric_payload";
 }
 
-#[derive(Debug)]
-enum Step {
-    Enqueue(EnqueueError),
-    Query(sqlx::Error),
-    Tx(TxError),
-    Rejected,
-}
-
-impl From<TxError> for Step {
-    fn from(err: TxError) -> Self {
-        Self::Tx(err)
-    }
-}
-
-impl From<EnqueueError> for Step {
-    fn from(err: EnqueueError) -> Self {
-        Self::Enqueue(err)
-    }
-}
-
-impl From<sqlx::Error> for Step {
-    fn from(err: sqlx::Error) -> Self {
-        Self::Query(err)
-    }
-}
-
-fn explain(err: &Step) -> String {
-    match err {
-        Step::Enqueue(err) => format!("enqueue failed: {err}"),
-        Step::Query(err) => format!("query failed: {err}"),
-        Step::Tx(err) => format!("transaction failed: {err}"),
-        Step::Rejected => "the caller rejected the transaction".to_owned(),
-    }
-}
-
-fn must<T>(result: Result<T, Step>, what: &str) -> T {
-    result.unwrap_or_else(|err| panic!("{what}: {}", explain(&err)))
+fn must<T>(result: Result<T, AttemptError>, what: &str) -> T {
+    result.unwrap_or_else(|err| panic!("{what}: {err}"))
 }
 
 #[derive(Debug)]
@@ -396,7 +362,7 @@ async fn hold_claim_transition(pool: &PgPool) -> Transaction<'_, Postgres> {
 
 async fn enqueue_one(pool: &PgPool, action: ProbeAction) -> String {
     let id = must(
-        in_tx(pool, async |tx| -> Result<_, Step> {
+        in_tx(pool, async |tx| -> Result<_, AttemptError> {
             Ok(created(
                 enqueue(tx, &Probe { action }, EnqueueOptions::default()).await?,
             ))
@@ -409,7 +375,7 @@ async fn enqueue_one(pool: &PgPool, action: ProbeAction) -> String {
 
 async fn enqueue_many(pool: &PgPool, action: ProbeAction, count: i64) -> Vec<String> {
     must(
-        in_tx(pool, async |tx| -> Result<Vec<String>, Step> {
+        in_tx(pool, async |tx| -> Result<Vec<String>, AttemptError> {
             let mut ids = Vec::new();
             for _ in 0..count {
                 ids.push(
@@ -662,7 +628,7 @@ async fn x1_a_locked_earliest_job_is_skipped_by_a_one_slot_worker(pool: PgPool) 
     set_not_before(&jobs, &locked, 10).await;
     for token in [1, 2] {
         must(
-            in_tx(&jobs, async |tx| -> Result<(), Step> {
+            in_tx(&jobs, async |tx| -> Result<(), AttemptError> {
                 let _ = enqueue(tx, &Stranded { token }, EnqueueOptions::default()).await?;
                 Ok(())
             })
@@ -758,7 +724,7 @@ async fn x1_unregistered_kind_stays_pending(pool: PgPool) {
     let jobs = open(&pool, 1).await;
     prepare(&jobs).await;
     let stranded = must(
-        in_tx(&jobs, async |tx| -> Result<String, Step> {
+        in_tx(&jobs, async |tx| -> Result<String, AttemptError> {
             Ok(
                 created(enqueue(tx, &Stranded { token: 1 }, EnqueueOptions::default()).await?)
                     .to_string(),
@@ -909,68 +875,67 @@ async fn x2_wake_notification_claims_before_the_next_poll(pool: PgPool) {
 
 /// Observe actual completed claim rounds, including empty rounds, without
 /// adding a test hook to the engine or making database latency the oracle.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct WakeObservations {
-    rounds: Mutex<HashMap<tokio::task::Id, usize>>,
-    pickups: AtomicUsize,
-    changed: Notify,
+    state: watch::Sender<WakeState>,
+}
+
+#[derive(Default)]
+struct WakeState {
+    rounds: HashMap<tokio::task::Id, usize>,
+    pickups: usize,
 }
 
 impl WakeObservations {
     fn snapshot(&self) -> HashMap<tokio::task::Id, usize> {
-        self.rounds.lock().unwrap().clone()
+        self.state.borrow().rounds.clone()
     }
 
     async fn started(&self, engines: usize) {
-        while self.snapshot().len() < engines {
-            self.changed.notified().await;
-        }
+        self.wait_for(|state| state.rounds.len() >= engines).await;
     }
 
     async fn after(&self, previous: &HashMap<tokio::task::Id, usize>) {
-        loop {
-            let current = self.snapshot();
-            if previous
+        self.wait_for(|state| {
+            previous
                 .iter()
-                .all(|(task, count)| current.get(task).is_some_and(|now| now > count))
-            {
-                return;
-            }
-            self.changed.notified().await;
-        }
+                .all(|(task, count)| state.rounds.get(task).is_some_and(|now| now > count))
+        })
+        .await;
     }
 
     async fn pickup(&self) {
-        while self.pickups.load(Ordering::SeqCst) == 0 {
-            self.changed.notified().await;
-        }
+        self.wait_for(|state| state.pickups > 0).await;
+    }
+
+    async fn wait_for(&self, observed: impl FnMut(&WakeState) -> bool) {
+        self.state
+            .subscribe()
+            .wait_for(observed)
+            .await
+            .expect("the recorder holds the observation sender");
     }
 }
 
 #[derive(Default)]
 struct WakeRecorder {
-    observations: Arc<WakeObservations>,
+    observations: WakeObservations,
 }
 
 struct WakeHistogram {
-    observations: Arc<WakeObservations>,
+    observations: WakeObservations,
     claim_round: bool,
 }
 
 impl metrics::HistogramFn for WakeHistogram {
     fn record(&self, _value: f64) {
-        if self.claim_round {
-            *self
-                .observations
-                .rounds
-                .lock()
-                .unwrap()
-                .entry(tokio::task::id())
-                .or_default() += 1;
-        } else {
-            self.observations.pickups.fetch_add(1, Ordering::SeqCst);
-        }
-        self.observations.changed.notify_one();
+        self.observations.state.send_modify(|state| {
+            if self.claim_round {
+                *state.rounds.entry(tokio::task::id()).or_default() += 1;
+            } else {
+                state.pickups += 1;
+            }
+        });
     }
 }
 
@@ -1014,7 +979,7 @@ impl metrics::Recorder for WakeRecorder {
             return metrics::Histogram::noop();
         }
         metrics::Histogram::from_arc(Arc::new(WakeHistogram {
-            observations: Arc::clone(&self.observations),
+            observations: self.observations.clone(),
             claim_round: key.name() == infra_jobs::CLAIM_DURATION_METRIC,
         }))
     }
@@ -1398,7 +1363,7 @@ async fn k1_a_kinds_max_running_leaves_the_other_slots_to_other_kinds(pool: PgPo
         open: tokio::sync::Semaphore::new(0),
     });
     must(
-        in_tx(&jobs, async |tx| -> Result<(), Step> {
+        in_tx(&jobs, async |tx| -> Result<(), AttemptError> {
             for token in 0..3 {
                 let _ = created(enqueue(tx, &Gate { token }, EnqueueOptions::default()).await?);
             }
@@ -1484,14 +1449,12 @@ async fn e2_uncommitted_enqueue_is_not_run(pool: PgPool) {
     let run = start(&jobs, probe_registry(2, DEFAULT_TIMEOUT), 1);
     let entered = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
-    let id_slot = Arc::new(Mutex::new(None));
     let holder = {
         let entered = Arc::clone(&entered);
         let release = Arc::clone(&release);
-        let id_slot = Arc::clone(&id_slot);
         let caller = caller.clone();
         tokio::spawn(async move {
-            in_tx(&caller, async move |tx| -> Result<(), Step> {
+            in_tx(&caller, async move |tx| -> Result<String, AttemptError> {
                 let id = created(
                     enqueue(
                         tx,
@@ -1502,10 +1465,9 @@ async fn e2_uncommitted_enqueue_is_not_run(pool: PgPool) {
                     )
                     .await?,
                 );
-                *id_slot.lock().expect("id") = Some(id.to_string());
                 entered.notify_one();
                 release.notified().await;
-                Ok(())
+                Ok(id.to_string())
             })
             .await
         })
@@ -1527,17 +1489,12 @@ async fn e2_uncommitted_enqueue_is_not_run(pool: PgPool) {
         })
         .await;
     }
-    must(
+    let id = must(
         super::bounded("the holder commits", holder)
             .await
             .expect("the holder joins"),
         "the enqueue commits",
     );
-    let id = id_slot
-        .lock()
-        .expect("id")
-        .clone()
-        .expect("the committed id");
     let view = completed(&jobs, &id).await;
     assert_eq!(view.attempts, 1);
     finish(run, &[&jobs, &caller]).await;
@@ -1616,7 +1573,7 @@ async fn x5_superseded_attempt_does_not_change_the_row(pool: PgPool) {
     });
     let registry = gate_registry(Arc::clone(&gate));
     let id = must(
-        in_tx(&jobs, async |tx| -> Result<String, Step> {
+        in_tx(&jobs, async |tx| -> Result<String, AttemptError> {
             Ok(
                 created(enqueue(tx, &Gate { token: 1 }, EnqueueOptions::default()).await?)
                     .to_string(),
@@ -1744,23 +1701,23 @@ fn transactional_gate_registry(gate: Arc<TransactionGateState>) -> infra_jobs::K
         move |job: Job<TransactionGate>| {
             let gate = Arc::clone(&gate);
             async move {
-                let completed = in_tx(job.pool(), async |tx| -> Result<(), Step> {
+                let completed = in_tx(job.pool(), async |tx| -> Result<(), AttemptError> {
                     sqlx::query("INSERT INTO job_effects (job_id) VALUES ($1::uuid)")
                         .bind(job.id().to_string())
                         .execute(&mut *tx)
                         .await
-                        .map_err(Step::Query)?;
+                        .map_err(AttemptError::Query)?;
                     gate.business_written.notify_one();
                     gate.complete.notified().await;
                     job.complete_in_tx(tx).await.map_err(|error| match error {
-                        infra_jobs::CompleteError::Database(error) => Step::Query(error),
-                        infra_jobs::CompleteError::StaleClaim => Step::Rejected,
+                        infra_jobs::CompleteError::Database(error) => AttemptError::Query(error),
+                        infra_jobs::CompleteError::StaleClaim => AttemptError::Rejected,
                     })
                 })
                 .await;
                 completed.map_err(|error| match error {
-                    Step::Tx(TxError::CommitUnknown(error)) => JobError::retryable(error),
-                    error => JobError::retryable(explain(&error)),
+                    AttemptError::Tx(TxError::CommitUnknown(error)) => JobError::retryable(error),
+                    error => JobError::retryable(error),
                 })
             }
         },
@@ -1793,7 +1750,7 @@ async fn x3_unknown_outcome_retries_its_fenced_write_without_rerunning_the_handl
         runs: AtomicUsize::new(0),
     });
     let id = must(
-        in_tx(&jobs, async |tx| -> Result<String, Step> {
+        in_tx(&jobs, async |tx| -> Result<String, AttemptError> {
             Ok(
                 created(enqueue(tx, &Gate { token: 1 }, EnqueueOptions::default()).await?)
                     .to_string(),
@@ -1832,7 +1789,7 @@ async fn x6_stale_transactional_completion_rolls_back_prior_business_writes(pool
         complete: Notify::new(),
     });
     let id = must(
-        in_tx(&jobs, async |tx| -> Result<String, Step> {
+        in_tx(&jobs, async |tx| -> Result<String, AttemptError> {
             Ok(created(
                 enqueue(tx, &TransactionGate { token: 1 }, EnqueueOptions::default()).await?,
             )
@@ -1926,7 +1883,7 @@ async fn uncertain_transactional_complete_uses_ordinary_fenced_retry(pool: &PgPo
         complete: Notify::new(),
     });
     let id = must(
-        in_tx(&jobs, async |tx| -> Result<String, Step> {
+        in_tx(&jobs, async |tx| -> Result<String, AttemptError> {
             Ok(created(
                 enqueue(tx, &TransactionGate { token: 1 }, EnqueueOptions::default()).await?,
             )
@@ -2013,7 +1970,7 @@ async fn w4_known_result_beats_forced_release_while_its_write_waits(pool: PgPool
         open: Notify::new(),
     });
     let id = must(
-        in_tx(&jobs, async |tx| -> Result<String, Step> {
+        in_tx(&jobs, async |tx| -> Result<String, AttemptError> {
             Ok(
                 created(enqueue(tx, &Gate { token: 1 }, EnqueueOptions::default()).await?)
                     .to_string(),
@@ -2042,7 +1999,7 @@ async fn w4_known_result_beats_forced_release_while_its_write_waits(pool: PgPool
     super::wait_for_lock_waiter(&jobs).await;
 
     let pending = must(
-        in_tx(&jobs, async |tx| -> Result<String, Step> {
+        in_tx(&jobs, async |tx| -> Result<String, AttemptError> {
             Ok(
                 created(enqueue(tx, &Gate { token: 2 }, EnqueueOptions::default()).await?)
                     .to_string(),
@@ -2096,17 +2053,17 @@ async fn x5_rolled_back_generation_never_returns(pool: PgPool) {
     prepare(&jobs).await;
     let drawn = Arc::new(Mutex::new(0_i64));
     let slot = Arc::clone(&drawn);
-    let rolled = in_tx(&jobs, async move |tx| -> Result<(), Step> {
+    let rolled = in_tx(&jobs, async move |tx| -> Result<(), AttemptError> {
         let value: i64 = sqlx::query_scalar("SELECT nextval('background_jobs_claim_generation')")
             .fetch_one(&mut *tx)
             .await?;
         *slot.lock().expect("generation") = value;
-        Err(Step::Rejected)
+        Err(AttemptError::Rejected)
     })
     .await;
     match rolled {
-        Err(Step::Rejected) => {}
-        Err(err) => panic!("the generation draw should roll back: {}", explain(&err)),
+        Err(AttemptError::Rejected) => {}
+        Err(err) => panic!("the generation draw should roll back: {err}"),
         Ok(()) => panic!("the generation draw committed"),
     }
     let drawn = *drawn.lock().expect("generation");
@@ -2651,7 +2608,7 @@ async fn x12_future_not_before_is_not_claimed_until_it_passes(pool: PgPool) {
     let jobs = open(&pool, 1).await;
     prepare(&jobs).await;
     let id = must(
-        in_tx(&jobs, async |tx| -> Result<String, Step> {
+        in_tx(&jobs, async |tx| -> Result<String, AttemptError> {
             Ok(created(
                 enqueue(
                     tx,
@@ -2730,7 +2687,7 @@ async fn force_cancel_cooperative(
         entered: Notify::new(),
     });
     let id = must(
-        in_tx(&jobs, async |tx| -> Result<String, Step> {
+        in_tx(&jobs, async |tx| -> Result<String, AttemptError> {
             Ok(
                 created(enqueue(tx, &Gate { token: 1 }, EnqueueOptions::default()).await?)
                     .to_string(),
@@ -2802,7 +2759,7 @@ async fn x1_stop_allows_an_already_dispatched_claim_to_settle(pool: PgPool) {
         open: Notify::new(),
     });
     let id = must(
-        in_tx(&jobs, async |tx| -> Result<String, Step> {
+        in_tx(&jobs, async |tx| -> Result<String, AttemptError> {
             Ok(
                 created(enqueue(tx, &Gate { token: 1 }, EnqueueOptions::default()).await?)
                     .to_string(),
@@ -2845,7 +2802,7 @@ async fn x1_spent_forced_cleanup_leaves_a_late_acknowledged_claim_for_expiry(poo
         open: Notify::new(),
     });
     let id = must(
-        in_tx(&jobs, async |tx| -> Result<String, Step> {
+        in_tx(&jobs, async |tx| -> Result<String, AttemptError> {
             Ok(
                 created(enqueue(tx, &Gate { token: 1 }, EnqueueOptions::default()).await?)
                     .to_string(),

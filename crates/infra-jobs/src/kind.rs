@@ -473,16 +473,14 @@ impl Default for KindsBuilder {
 
 impl fmt::Debug for KindsBuilder {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let names = fmt::from_fn(|f| {
+            f.debug_list()
+                .entries(self.entries.iter().map(|entry| entry.name))
+                .finish()
+        });
         formatter
             .debug_struct("KindsBuilder")
-            .field(
-                "names",
-                &self
-                    .entries
-                    .iter()
-                    .map(|entry| entry.name)
-                    .collect::<Vec<_>>(),
-            )
+            .field("names", &names)
             .finish_non_exhaustive()
     }
 }
@@ -512,11 +510,7 @@ impl fmt::Debug for Kinds {
             .debug_struct("Kinds")
             .field(
                 "names",
-                &self
-                    .entries
-                    .iter()
-                    .map(|entry| entry.name)
-                    .collect::<Vec<_>>(),
+                &fmt::from_fn(|f| f.debug_list().entries(self.names()).finish()),
             )
             .finish_non_exhaustive()
     }
@@ -692,7 +686,7 @@ mod tests {
         fn kind_name_check_matches_the_documented_pattern(
             name in "[a-zA-Z0-9._ /é-]{0,70}|[a-z][a-z0-9._-]{0,63}",
         ) {
-            let documented = regex::Regex::new(r"^[a-z][a-z0-9._-]{0,63}$").unwrap();
+            let documented = regex::regex!(r"^[a-z][a-z0-9._-]{0,63}$");
             proptest::prop_assert_eq!(is_valid_kind_name(&name), documented.is_match(&name));
         }
     }
@@ -808,8 +802,20 @@ mod tests {
         kinds
             .register(Policy::default(), |_: Job<Alpha>| async { Ok(()) })
             .register(Policy::default(), |_: Job<Beta>| async { Ok(()) });
+        let builder_output = [format!("{kinds:?}"), format!("{kinds:#?}")];
         let registry = kinds.validate().unwrap();
         assert_eq!(registry.names().collect::<Vec<_>>(), ["alpha", "beta"]);
+        for output in builder_output
+            .into_iter()
+            .chain([format!("{registry:?}"), format!("{registry:#?}")])
+        {
+            let (_, after_alpha) = output
+                .split_once("\"alpha\"")
+                .expect("first registered kind");
+            assert!(after_alpha.contains("\"beta\""), "{output}");
+            assert!(!output.contains("policy"), "{output}");
+            assert!(!output.contains("dispatch"), "{output}");
+        }
     }
 
     #[test]
