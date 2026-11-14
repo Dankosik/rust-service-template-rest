@@ -1,7 +1,7 @@
 //! An open download: the object's body, read to its confirmed end.
 
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll, Waker};
 
 use aws_sdk_s3::primitives::{ByteStream, ByteStreamError};
@@ -247,21 +247,6 @@ impl State {
     }
 }
 
-/// Captured before the spawned timer can first poll. An unexpected timer exit
-/// still frees retained body custody instead of depending on another read.
-struct TimerExit(Weak<Mutex<State>>);
-
-impl Drop for TimerExit {
-    fn drop(&mut self) {
-        if let Some(shared) = self.0.upgrade() {
-            terminate(
-                &shared,
-                Termination::Fallback(Outcome::Failure(LocalFailure::DownloadTimerExited.into())),
-            );
-        }
-    }
-}
-
 enum Termination {
     Stopped(Stopped),
     Fallback(Outcome),
@@ -307,11 +292,21 @@ impl Download {
                 _permit: permit,
             }),
         }));
-        let exit = TimerExit(Arc::downgrade(&shared));
+        // Capture before the timer can first poll so an unexpected exit frees custody.
+        let exit = std::mem::DropGuard::new(Arc::downgrade(&shared), |weak| {
+            if let Some(shared) = weak.upgrade() {
+                terminate(
+                    &shared,
+                    Termination::Fallback(Outcome::Failure(
+                        LocalFailure::DownloadTimerExited.into(),
+                    )),
+                );
+            }
+        });
         let timer_context = context;
         let timer = tokio::spawn(async move {
             let stopped = timer_context.wait_stopped().await;
-            if let Some(shared) = exit.0.upgrade() {
+            if let Some(shared) = exit.upgrade() {
                 terminate(&shared, Termination::Stopped(stopped));
             }
         });

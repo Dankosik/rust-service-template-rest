@@ -99,33 +99,21 @@ impl Drop for Permit {
     }
 }
 
-/// A callback admitted to format: not reentrant on its thread, and within
-/// [`MAX_ACTIVE_CALLBACKS`].
-struct FormatGuard {
-    _permit: Permit,
-}
-
-impl FormatGuard {
-    fn enter() -> Result<Self, DropReason> {
-        // A thread whose local is gone is treated as already formatting.
-        let already = FORMATTING
-            .try_with(|active| active.replace(true))
-            .unwrap_or(true);
-        if already {
-            return Err(DropReason::Reentrant);
-        }
-        let Some(permit) = Permit::take(&ACTIVE_CALLBACKS, MAX_ACTIVE_CALLBACKS) else {
-            let _ = FORMATTING.try_with(|active| active.set(false));
-            return Err(DropReason::Busy);
-        };
-        Ok(Self { _permit: permit })
+fn enter_format() -> Result<impl Drop, DropReason> {
+    // A thread whose local is gone is treated as already formatting.
+    let already = FORMATTING
+        .try_with(|active| active.replace(true))
+        .unwrap_or(true);
+    if already {
+        return Err(DropReason::Reentrant);
     }
-}
-
-impl Drop for FormatGuard {
-    fn drop(&mut self) {
+    let Some(permit) = Permit::take(&ACTIVE_CALLBACKS, MAX_ACTIVE_CALLBACKS) else {
         let _ = FORMATTING.try_with(|active| active.set(false));
-    }
+        return Err(DropReason::Busy);
+    };
+    Ok(std::mem::DropGuard::new(permit, |_permit| {
+        let _ = FORMATTING.try_with(|active| active.set(false));
+    }))
 }
 
 /// Grows with what is written; `limit` bounds it, escaped strings and
@@ -502,8 +490,8 @@ impl Visit for Capture<'_> {
 }
 
 impl FormatLayer {
-    fn admit(&self) -> Option<FormatGuard> {
-        match FormatGuard::enter() {
+    fn admit(&self) -> Option<impl Drop> {
+        match enter_format() {
             Ok(guard) => Some(guard),
             Err(reason) => {
                 self.output.record_drop(reason);

@@ -10,6 +10,7 @@
 //! Native clients report the outcome after tonic validates the response.
 //! Server calls and direct HTTP service users report at the transport boundary.
 
+use std::mem::DropGuard;
 use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, LazyLock, Once, OnceLock, PoisonError, RwLock};
 use std::time::{Duration, Instant};
@@ -206,29 +207,15 @@ pub(crate) fn record_shed() {
     metrics::counter!(SERVER_SHED).increment(1);
 }
 
-/// One call waiting for an admission permit, counted in the waiting gauge and
-/// recorded in the wait histogram when it is dropped, whichever way the wait
-/// ends, cancellation included.
-pub(crate) struct AdmissionWaiting {
-    started: tokio::time::Instant,
-}
-
-impl AdmissionWaiting {
-    pub(crate) fn start() -> Self {
-        describe();
-        metrics::gauge!(SERVER_ADMISSION_WAITING).increment(1.0);
-        Self {
-            started: tokio::time::Instant::now(),
-        }
-    }
-}
-
-impl Drop for AdmissionWaiting {
-    fn drop(&mut self) {
+/// Keep the guard through admission waiting so cancellation records the wait too.
+#[must_use]
+pub(crate) fn admission_waiting() -> impl Drop {
+    describe();
+    metrics::gauge!(SERVER_ADMISSION_WAITING).increment(1.0);
+    DropGuard::new(tokio::time::Instant::now(), |started| {
         metrics::gauge!(SERVER_ADMISSION_WAITING).decrement(1.0);
-        metrics::histogram!(SERVER_ADMISSION_WAIT_SECONDS)
-            .record(self.started.elapsed().as_secs_f64());
-    }
+        metrics::histogram!(SERVER_ADMISSION_WAIT_SECONDS).record(started.elapsed().as_secs_f64());
+    })
 }
 
 /// Publishes the shed counter at zero, so a scrape tells "never shed" from

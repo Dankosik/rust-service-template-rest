@@ -137,14 +137,6 @@ impl Drop for EngineRun {
     }
 }
 
-struct Release(Arc<Notify>);
-
-impl Drop for Release {
-    fn drop(&mut self) {
-        self.0.notify_one();
-    }
-}
-
 fn created(enqueued: Enqueued) -> infra_jobs::JobId {
     match enqueued {
         Enqueued::Created(id) => id,
@@ -1519,7 +1511,7 @@ async fn e2_uncommitted_enqueue_is_not_run(pool: PgPool) {
         })
     };
     {
-        let _guard = Release(Arc::clone(&release));
+        let _guard = std::mem::DropGuard::new(Arc::clone(&release), |notify| notify.notify_one());
         super::bounded(
             "the enqueue is inside the open transaction",
             entered.notified(),

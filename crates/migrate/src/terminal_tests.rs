@@ -12,7 +12,7 @@ use std::os::fd::OwnedFd;
     reason = "terminal subprocess fixture owns a synchronous socket pair through child teardown"
 )]
 use std::os::unix::net::UnixStream;
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::mpsc;
 
 use migrate::RunError;
@@ -20,15 +20,6 @@ use migrate::RunError;
 use super::*;
 
 const FIXTURE: &str = "MIGRATE_TERMINAL_FIXTURE";
-
-struct Process(Child);
-
-impl Drop for Process {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
 
 #[derive(Clone, Copy)]
 enum Sink {
@@ -50,7 +41,7 @@ fn run_fixture(scenario: &str, sink: Sink) -> (i32, String, String, Duration) {
     reader
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
-    let mut child = Process(
+    let mut child = std::mem::DropGuard::new(
         Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "tests::terminal_fixture", "--no-capture"])
             .env(FIXTURE, scenario)
@@ -59,6 +50,10 @@ fn run_fixture(scenario: &str, sink: Sink) -> (i32, String, String, Duration) {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap(),
+        |mut child| {
+            let _ = child.kill();
+            let _ = child.wait();
+        },
     );
     let mut reader = BufReader::new(reader);
     loop {
@@ -101,9 +96,9 @@ fn run_fixture(scenario: &str, sink: Sink) -> (i32, String, String, Duration) {
     };
     drop(writer);
     let started = Instant::now();
-    child.0.stdin.take().unwrap().write_all(b"go\n").unwrap();
+    child.stdin.take().unwrap().write_all(b"go\n").unwrap();
     let status = loop {
-        if let Some(status) = child.0.try_wait().unwrap() {
+        if let Some(status) = child.try_wait().unwrap() {
             break status;
         }
         assert!(
@@ -123,7 +118,6 @@ fn run_fixture(scenario: &str, sink: Sink) -> (i32, String, String, Duration) {
     }
     let mut stderr = String::new();
     child
-        .0
         .stderr
         .take()
         .unwrap()
