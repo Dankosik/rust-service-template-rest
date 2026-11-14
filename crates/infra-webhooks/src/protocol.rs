@@ -443,7 +443,7 @@ mod tests {
     #[test]
     fn accepts_a_predecessor_signature_after_bad_candidates_in_repeated_fields() {
         let keys = KeyRing::from_encoded(UPSTREAM_KEY, Some(ARBITRARY_BYTES_KEY)).unwrap();
-        let mut headers = headers("msg_test", "1700000000", "v2,nope");
+        let mut headers = headers("msg_test", "+01700000000", "v2,nope");
         let field = [
             b"v1,\xff\t".as_slice(),
             ARBITRARY_BYTES_SIGNATURE.as_bytes(),
