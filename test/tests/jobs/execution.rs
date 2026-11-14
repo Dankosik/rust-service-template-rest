@@ -16,7 +16,7 @@ use integration_tests::jobs::{self, Probe, ProbeAction};
 use integration_tests::{DATABASE_URL, dsn_for, url_for};
 use serde::{Deserialize, Serialize};
 use sqlx::{AssertSqlSafe, Postgres, Row, Transaction};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, watch};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use url::Url;
@@ -875,68 +875,67 @@ async fn x2_wake_notification_claims_before_the_next_poll(pool: PgPool) {
 
 /// Observe actual completed claim rounds, including empty rounds, without
 /// adding a test hook to the engine or making database latency the oracle.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct WakeObservations {
-    rounds: Mutex<HashMap<tokio::task::Id, usize>>,
-    pickups: AtomicUsize,
-    changed: Notify,
+    state: watch::Sender<WakeState>,
+}
+
+#[derive(Default)]
+struct WakeState {
+    rounds: HashMap<tokio::task::Id, usize>,
+    pickups: usize,
 }
 
 impl WakeObservations {
     fn snapshot(&self) -> HashMap<tokio::task::Id, usize> {
-        self.rounds.lock().unwrap().clone()
+        self.state.borrow().rounds.clone()
     }
 
     async fn started(&self, engines: usize) {
-        while self.snapshot().len() < engines {
-            self.changed.notified().await;
-        }
+        self.wait_for(|state| state.rounds.len() >= engines).await;
     }
 
     async fn after(&self, previous: &HashMap<tokio::task::Id, usize>) {
-        loop {
-            let current = self.snapshot();
-            if previous
+        self.wait_for(|state| {
+            previous
                 .iter()
-                .all(|(task, count)| current.get(task).is_some_and(|now| now > count))
-            {
-                return;
-            }
-            self.changed.notified().await;
-        }
+                .all(|(task, count)| state.rounds.get(task).is_some_and(|now| now > count))
+        })
+        .await;
     }
 
     async fn pickup(&self) {
-        while self.pickups.load(Ordering::SeqCst) == 0 {
-            self.changed.notified().await;
-        }
+        self.wait_for(|state| state.pickups > 0).await;
+    }
+
+    async fn wait_for(&self, observed: impl FnMut(&WakeState) -> bool) {
+        self.state
+            .subscribe()
+            .wait_for(observed)
+            .await
+            .expect("the recorder holds the observation sender");
     }
 }
 
 #[derive(Default)]
 struct WakeRecorder {
-    observations: Arc<WakeObservations>,
+    observations: WakeObservations,
 }
 
 struct WakeHistogram {
-    observations: Arc<WakeObservations>,
+    observations: WakeObservations,
     claim_round: bool,
 }
 
 impl metrics::HistogramFn for WakeHistogram {
     fn record(&self, _value: f64) {
-        if self.claim_round {
-            *self
-                .observations
-                .rounds
-                .lock()
-                .unwrap()
-                .entry(tokio::task::id())
-                .or_default() += 1;
-        } else {
-            self.observations.pickups.fetch_add(1, Ordering::SeqCst);
-        }
-        self.observations.changed.notify_one();
+        self.observations.state.send_modify(|state| {
+            if self.claim_round {
+                *state.rounds.entry(tokio::task::id()).or_default() += 1;
+            } else {
+                state.pickups += 1;
+            }
+        });
     }
 }
 
@@ -980,7 +979,7 @@ impl metrics::Recorder for WakeRecorder {
             return metrics::Histogram::noop();
         }
         metrics::Histogram::from_arc(Arc::new(WakeHistogram {
-            observations: Arc::clone(&self.observations),
+            observations: self.observations.clone(),
             claim_round: key.name() == infra_jobs::CLAIM_DURATION_METRIC,
         }))
     }
