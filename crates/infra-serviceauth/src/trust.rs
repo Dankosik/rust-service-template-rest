@@ -231,6 +231,7 @@ fn parse_caller(
     let mut set = set
         .0
         .ok_or_else(|| caller_error("repeats a member name within its JWK Set"))?;
+    // RFC 7517 section 5 requires ignoring unrecognized JWK Set members.
     let Some(serde_json::Value::Array(entries)) =
         set.as_object_mut().and_then(|set| set.remove("keys"))
     else {
