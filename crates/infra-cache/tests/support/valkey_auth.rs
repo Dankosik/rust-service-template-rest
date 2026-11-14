@@ -169,8 +169,7 @@ impl AuthRelay {
                     }
                 }
             }
-            connections.abort_all();
-            while connections.join_next().await.is_some() {}
+            connections.shutdown().await;
         });
         (
             Self {
