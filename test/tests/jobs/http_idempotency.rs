@@ -1,5 +1,5 @@
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use infra_idempotency_store::{
@@ -21,14 +21,15 @@ impl JobKind for WidgetWelcome {
     const NAME: &'static str = "widgets.welcome";
 }
 
-/// What a test's work returns: `Ok` commits the record and hands it back.
-type Committing<R> = Result<(Record, Record), R>;
-
-type Outcome<R> = Result<Attempted<Record, R>, AttemptError>;
+type Committing<C = Record> = Result<(Record, C), ()>;
 
 /// A record to commit that the attempt also hands back as its value.
 fn returned(record: Record) -> (Record, Record) {
     (record.clone(), record)
+}
+
+fn with_enqueued(record: Record, enqueued: Enqueued) -> (Record, (Record, Enqueued)) {
+    (record.clone(), (record, enqueued))
 }
 
 const SCOPE: Digest = [0x11; 32];
@@ -149,9 +150,9 @@ async fn row_is(pool: &PgPool, id: &str, widget: u64) -> bool {
     .expect("the job row")
 }
 
-fn committed(outcome: Outcome<()>) -> Record {
+fn committed<C: std::fmt::Debug>(outcome: Result<Attempted<C, ()>, AttemptError>) -> C {
     match outcome {
-        Ok(Attempted::Committed(record)) => record,
+        Ok(Attempted::Committed(value)) => value,
         other => panic!("expected a commit, got {other:?}"),
     }
 }
@@ -160,22 +161,21 @@ fn committed(outcome: Outcome<()>) -> Record {
 async fn e1_e3_a_committed_attempt_enqueues_once(pool: PgPool) {
     let (first, second) = replicas(&pool).await;
     let record = success(r#"{"widget":7}"#);
-    let seen = Mutex::new(None);
     let outcome = first
         .store
         .attempt(
             &ScopeKey::from_digest(SCOPE),
             &caller(),
             &INPUT,
-            async |tx: &mut Tx<'_>| -> Committing<()> {
+            async |tx: &mut Tx<'_>| -> Committing<_> {
                 let enqueued = enqueue_widget(tx, WIDGET).await;
-                *seen.lock().expect("seen") = Some(enqueued);
-                Ok(returned(record.clone()))
+                Ok(with_enqueued(record.clone(), enqueued))
             },
         )
         .await;
-    assert_eq!(committed(outcome), record);
-    let id = created_id(seen.lock().expect("seen").expect("the work enqueued"));
+    let (committed_record, enqueued) = committed(outcome);
+    assert_eq!(committed_record, record);
+    let id = created_id(enqueued);
     assert_eq!(super::job_count(&pool).await, 1);
     assert!(row_is(&pool, &id, WIDGET).await);
     super::close_pools(&[&first.pool, &second.pool]).await;
@@ -192,7 +192,7 @@ async fn e3_a_replayed_attempt_enqueues_nothing(pool: PgPool) {
             &ScopeKey::from_digest(SCOPE),
             &caller(),
             &INPUT,
-            async |tx: &mut Tx<'_>| -> Committing<()> {
+            async |tx: &mut Tx<'_>| -> Committing {
                 runs.fetch_add(1, Ordering::SeqCst);
                 let enqueued = enqueue_widget(tx, WIDGET).await;
                 std::assert_matches!(enqueued, Enqueued::Created(_));
@@ -208,7 +208,7 @@ async fn e3_a_replayed_attempt_enqueues_nothing(pool: PgPool) {
             &ScopeKey::from_digest(SCOPE),
             &caller(),
             &INPUT,
-            async |tx: &mut Tx<'_>| -> Committing<()> {
+            async |tx: &mut Tx<'_>| -> Committing {
                 runs.fetch_add(1, Ordering::SeqCst);
                 let _enqueued = enqueue_widget(tx, WIDGET).await;
                 Ok(returned(success(r#"{"widget":8}"#)))
@@ -234,7 +234,7 @@ async fn e3_a_rolled_back_attempt_enqueues_nothing(pool: PgPool) {
             &ScopeKey::from_digest(SCOPE),
             &caller(),
             &INPUT,
-            async |tx: &mut Tx<'_>| -> Committing<()> {
+            async |tx: &mut Tx<'_>| -> Committing {
                 runs.fetch_add(1, Ordering::SeqCst);
                 let enqueued = enqueue_widget(tx, WIDGET).await;
                 std::assert_matches!(enqueued, Enqueued::Created(_), "{enqueued:?}");
@@ -253,7 +253,6 @@ async fn e3_an_in_progress_attempt_enqueues_nothing(pool: PgPool) {
     let (first, second) = replicas(&pool).await;
     let record = success(r#"{"widget":7}"#);
     let runs = AtomicUsize::new(0);
-    let seen = Mutex::new(None);
     let hold = Hold::new();
     let scope = ScopeKey::from_digest(SCOPE);
     let first_caller = caller();
@@ -264,12 +263,11 @@ async fn e3_an_in_progress_attempt_enqueues_nothing(pool: PgPool) {
             &scope,
             &first_caller,
             &INPUT,
-            async |tx: &mut Tx<'_>| -> Committing<()> {
+            async |tx: &mut Tx<'_>| -> Committing<_> {
                 runs.fetch_add(1, Ordering::SeqCst);
                 let enqueued = enqueue_widget(tx, WIDGET).await;
-                *seen.lock().expect("seen") = Some(enqueued);
                 hold.pass().await;
-                Ok(returned(record.clone()))
+                Ok(with_enqueued(record.clone(), enqueued))
             },
         ),
         async {
@@ -280,7 +278,7 @@ async fn e3_an_in_progress_attempt_enqueues_nothing(pool: PgPool) {
                     &scope,
                     &second_caller,
                     &INPUT,
-                    async |tx: &mut Tx<'_>| -> Committing<()> {
+                    async |tx: &mut Tx<'_>| -> Committing {
                         runs.fetch_add(1, Ordering::SeqCst);
                         let _enqueued = enqueue_widget(tx, WIDGET).await;
                         Ok(returned(record.clone()))
@@ -293,8 +291,9 @@ async fn e3_an_in_progress_attempt_enqueues_nothing(pool: PgPool) {
             hold.release();
         },
     );
-    assert_eq!(committed(held), record);
-    let id = created_id(seen.lock().expect("seen").expect("the held work enqueued"));
+    let (committed_record, enqueued) = committed(held);
+    assert_eq!(committed_record, record);
+    let id = created_id(enqueued);
     assert_eq!(runs.load(Ordering::SeqCst), 1);
     assert_eq!(super::job_count(&pool).await, 1);
     assert!(row_is(&pool, &id, WIDGET).await);
@@ -312,7 +311,7 @@ async fn e6_another_scope_gets_duplicate_and_still_commits(pool: PgPool) {
             &ScopeKey::from_digest(SCOPE),
             &caller(),
             &INPUT,
-            async |tx: &mut Tx<'_>| -> Committing<()> {
+            async |tx: &mut Tx<'_>| -> Committing {
                 let enqueued = enqueue_widget(tx, WIDGET).await;
                 std::assert_matches!(enqueued, Enqueued::Created(_));
                 Ok(returned(record.clone()))
@@ -321,27 +320,21 @@ async fn e6_another_scope_gets_duplicate_and_still_commits(pool: PgPool) {
         .await;
     assert_eq!(committed(first_outcome), record);
 
-    let seen = Mutex::new(None);
     let second_outcome = second
         .store
         .attempt(
             &ScopeKey::from_digest(OTHER),
             &caller(),
             &INPUT,
-            async |tx: &mut Tx<'_>| -> Committing<()> {
+            async |tx: &mut Tx<'_>| -> Committing<_> {
                 let enqueued = enqueue_widget(tx, WIDGET).await;
-                *seen.lock().expect("seen") = Some(enqueued);
-                Ok(returned(other.clone()))
+                Ok(with_enqueued(other.clone(), enqueued))
             },
         )
         .await;
-    assert_eq!(committed(second_outcome), other);
-    assert_eq!(
-        seen.lock()
-            .expect("seen")
-            .expect("the second work enqueued"),
-        Enqueued::Duplicate
-    );
+    let (committed_record, enqueued) = committed(second_outcome);
+    assert_eq!(committed_record, other);
+    assert_eq!(enqueued, Enqueued::Duplicate);
     assert_eq!(super::job_count(&pool).await, 1);
     super::close_pools(&[&first.pool, &second.pool]).await;
 }
@@ -354,12 +347,9 @@ async fn e6_a_concurrent_enqueue_waits_then_duplicate_and_both_commit(pool: PgPo
     let record = success(r#"{"widget":7}"#);
     let other = success(r#"{"widget":7,"scope":"other"}"#);
     let hold = Arc::new(Hold::new());
-    let seen_first = Arc::new(Mutex::new(None));
-    let seen_second = Arc::new(Mutex::new(None));
     hold.arm();
 
     let first_hold = Arc::clone(&hold);
-    let first_seen = Arc::clone(&seen_first);
     let first_record = record.clone();
     let first_task = tokio::spawn(async move {
         first
@@ -368,18 +358,16 @@ async fn e6_a_concurrent_enqueue_waits_then_duplicate_and_both_commit(pool: PgPo
                 &ScopeKey::from_digest(SCOPE),
                 &caller(),
                 &INPUT,
-                async |tx: &mut Tx<'_>| -> Committing<()> {
+                async |tx: &mut Tx<'_>| -> Committing<_> {
                     let enqueued = enqueue_widget(tx, WIDGET).await;
-                    *first_seen.lock().expect("seen") = Some(enqueued);
                     first_hold.pass().await;
-                    Ok(returned(first_record))
+                    Ok(with_enqueued(first_record, enqueued))
                 },
             )
             .await
     });
     hold.entered().await;
 
-    let second_seen = Arc::clone(&seen_second);
     let second_record = other.clone();
     let second_task = tokio::spawn(async move {
         second
@@ -388,10 +376,9 @@ async fn e6_a_concurrent_enqueue_waits_then_duplicate_and_both_commit(pool: PgPo
                 &ScopeKey::from_digest(OTHER),
                 &caller(),
                 &INPUT,
-                async |tx: &mut Tx<'_>| -> Committing<()> {
+                async |tx: &mut Tx<'_>| -> Committing<_> {
                     let enqueued = enqueue_widget(tx, WIDGET).await;
-                    *second_seen.lock().expect("seen") = Some(enqueued);
-                    Ok(returned(second_record))
+                    Ok(with_enqueued(second_record, enqueued))
                 },
             )
             .await
@@ -408,21 +395,12 @@ async fn e6_a_concurrent_enqueue_waits_then_duplicate_and_both_commit(pool: PgPo
     let first_outcome = super::bounded("the first attempt", first_task)
         .await
         .expect("the first attempt joins");
-    assert_eq!(committed(first_outcome), record);
-    assert_eq!(committed(second_outcome), other);
-    let id = created_id(
-        seen_first
-            .lock()
-            .expect("seen")
-            .expect("the first work enqueued"),
-    );
-    assert_eq!(
-        seen_second
-            .lock()
-            .expect("seen")
-            .expect("the second work enqueued"),
-        Enqueued::Duplicate
-    );
+    let (first_record, first_enqueued) = committed(first_outcome);
+    let (second_record, second_enqueued) = committed(second_outcome);
+    assert_eq!(first_record, record);
+    assert_eq!(second_record, other);
+    let id = created_id(first_enqueued);
+    assert_eq!(second_enqueued, Enqueued::Duplicate);
     assert_eq!(super::job_count(&pool).await, 1);
     assert!(row_is(&pool, &id, WIDGET).await);
     super::close_pools(&[&first_pool, &second_pool]).await;
