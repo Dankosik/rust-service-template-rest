@@ -181,6 +181,47 @@
           }
         }
       ]
+    },
+    {
+      "id": "P5",
+      "kind": "production",
+      "reason": "Independently composed inbound and outbound HTTP adapters keep status codes at static addresses so their metrics can borrow the numeric labels. Reconsider when http exposes static numeric labels or Rust supports const array construction with std::array::from_fn.",
+      "occurrences": [
+        {
+          "path": "crates/infra-http/src/observe.rs",
+          "original_lines": [
+            422,
+            437
+          ],
+          "max_tokens": 119,
+          "before": {
+            "text": "rted status, including extension codes.\n",
+            "boundary": false
+          },
+          "source": "static STATUS_CODES: [StatusCode; 900] = {\n    let mut codes = [StatusCode::CONTINUE; 900];\n    let mut code = 100_u16;\n    while code <= 999 {\n        codes[(code - 100) as usize] = match StatusCode::from_u16(code) {\n            Ok(status) => status,\n            Err(_) => panic!(\"status table contains an invalid code\"),\n        };\n        code += 1;\n    }\n    codes\n};\n\nfn status_label(status: StatusCode) -> &'static str {\n    STATUS_CODES[usize::from(status.as_u16() - 100)].as_str()\n}",
+          "after": {
+            "text": "\n\nfn suppresses_access_log(log_health_pr",
+            "boundary": false
+          }
+        },
+        {
+          "path": "crates/infra-outbound-http/src/observe.rs",
+          "original_lines": [
+            288,
+            303
+          ],
+          "max_tokens": 119,
+          "before": {
+            "text": "ension codes as well as standard codes.\n",
+            "boundary": false
+          },
+          "source": "static STATUS_CODES: [StatusCode; 900] = {\n    let mut codes = [StatusCode::CONTINUE; 900];\n    let mut code = 100_u16;\n    while code <= 999 {\n        codes[(code - 100) as usize] = match StatusCode::from_u16(code) {\n            Ok(status) => status,\n            Err(_) => panic!(\"status table contains an invalid code\"),\n        };\n        code += 1;\n    }\n    codes\n};\n\nfn status_label(status: StatusCode) -> &'static str {\n    STATUS_CODES[usize::from(status.as_u16() - 100)].as_str()\n}",
+          "after": {
+            "text": "\n\n/// The class of a transport failure, ",
+            "boundary": false
+          }
+        }
+      ]
     }
   ]
 }
