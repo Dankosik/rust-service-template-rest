@@ -426,10 +426,8 @@ impl Shared {
             return settled;
         }
         loop {
-            // Register before examining state so publication cannot be missed.
+            // Construction captures any subsequent notify_waiters(), even before the first poll.
             let changed = self.changed.notified();
-            tokio::pin!(changed);
-            changed.as_mut().enable();
             if let Some(settled) = self.settled() {
                 return settled;
             }
