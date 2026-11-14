@@ -65,16 +65,20 @@ pub(crate) enum Fault {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Armed {
     fault: Fault,
-    statement: Option<&'static str>,
-    autocommit: bool,
+    boundary: Boundary,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Boundary {
+    Commit(Option<&'static str>),
+    Autocommit(&'static str),
 }
 
 impl From<Fault> for Armed {
     fn from(fault: Fault) -> Self {
         Self {
             fault,
-            statement: None,
-            autocommit: false,
+            boundary: Boundary::Commit(None),
         }
     }
 }
@@ -83,8 +87,7 @@ impl From<(Fault, &'static str)> for Armed {
     fn from((fault, statement): (Fault, &'static str)) -> Self {
         Self {
             fault,
-            statement: Some(statement),
-            autocommit: false,
+            boundary: Boundary::Commit(Some(statement)),
         }
     }
 }
@@ -235,8 +238,7 @@ impl CommitProxy {
     pub(crate) fn arm_autocommit(&self, fault: Fault, statement: &'static str) {
         *lock(&self.arming) = Arming::Armed(Armed {
             fault,
-            statement: Some(statement),
-            autocommit: true,
+            boundary: Boundary::Autocommit(statement),
         });
     }
 
@@ -490,18 +492,20 @@ impl Frontend {
             }
             return None;
         };
-        if let (Some(statement), Some(sql)) = (armed.statement, sql) {
+        let (statement, at_boundary) = match armed.boundary {
+            Boundary::Commit(statement) => (statement, commit),
+            Boundary::Autocommit(statement) => (
+                Some(statement),
+                matches!(message.first(), Some(b'Q' | b'S')),
+            ),
+        };
+        if let (Some(statement), Some(sql)) = (statement, sql) {
             self.matched |= std::str::from_utf8(sql).is_ok_and(|sql| sql.contains(statement));
         }
-        let boundary = if armed.autocommit {
-            matches!(message.first(), Some(b'Q' | b'S')) && self.matched
-        } else {
-            commit
-        };
-        if !boundary {
+        if !at_boundary {
             return None;
         }
-        let matches = armed.statement.is_none() || self.matched;
+        let matches = statement.is_none() || self.matched;
         self.matched = false;
         if !matches {
             return None;
