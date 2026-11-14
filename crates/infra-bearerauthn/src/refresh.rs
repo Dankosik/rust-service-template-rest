@@ -8,7 +8,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use tokio::sync::{Notify, watch};
+use tokio::sync::watch;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
@@ -89,7 +89,6 @@ enum Admission {
 
 pub(crate) struct KeyStore {
     state: watch::Sender<State>,
-    wake: Notify,
     last_acquisition: metrics::Gauge,
 }
 
@@ -114,7 +113,6 @@ impl KeyStore {
         last_acquisition.set(acquisition_timestamp(SystemTime::now()));
         Arc::new(Self {
             state,
-            wake: Notify::new(),
             last_acquisition,
         })
     }
@@ -157,11 +155,7 @@ impl KeyStore {
         });
         let ticket = match admission {
             Admission::Answer(answer) => return answer,
-            Admission::Join(ticket) => ticket,
-            Admission::Request(ticket) => {
-                self.wake.notify_one();
-                ticket
-            }
+            Admission::Join(ticket) | Admission::Request(ticket) => ticket,
         };
         // wait_for checks the current snapshot too, covering a fetch that finished
         // before this subscription. Dropping this waiter leaves the worker running.
@@ -244,11 +238,16 @@ pub(crate) async fn run_refresh_worker(
     cancel: CancellationToken,
 ) {
     let mut next_refresh = Instant::now() + refresh_period();
+    let mut pending = store.state.subscribe();
     'worker: loop {
         tokio::select! {
             biased;
             () = cancel.cancelled() => break,
-            () = store.wake.notified() => {}
+            result = pending.wait_for(|state| state.pending().is_some()) => {
+                if result.is_err() {
+                    break;
+                }
+            }
             () = tokio::time::sleep_until(next_refresh) => {
                 store.request_periodic();
                 next_refresh = Instant::now() + refresh_period();
@@ -381,7 +380,6 @@ mod tests {
             crate::EndpointUrl::parse(&format!("https://jwks.test:{}/keys", address.port()))
                 .unwrap();
         store.request_periodic();
-        store.wake.notify_one();
         let worker = tokio::spawn(super::run_refresh_worker(
             store.clone(),
             provider,
