@@ -1450,14 +1450,12 @@ async fn e2_uncommitted_enqueue_is_not_run(pool: PgPool) {
     let run = start(&jobs, probe_registry(2, DEFAULT_TIMEOUT), 1);
     let entered = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
-    let id_slot = Arc::new(Mutex::new(None));
     let holder = {
         let entered = Arc::clone(&entered);
         let release = Arc::clone(&release);
-        let id_slot = Arc::clone(&id_slot);
         let caller = caller.clone();
         tokio::spawn(async move {
-            in_tx(&caller, async move |tx| -> Result<(), AttemptError> {
+            in_tx(&caller, async move |tx| -> Result<String, AttemptError> {
                 let id = created(
                     enqueue(
                         tx,
@@ -1468,10 +1466,9 @@ async fn e2_uncommitted_enqueue_is_not_run(pool: PgPool) {
                     )
                     .await?,
                 );
-                *id_slot.lock().expect("id") = Some(id.to_string());
                 entered.notify_one();
                 release.notified().await;
-                Ok(())
+                Ok(id.to_string())
             })
             .await
         })
@@ -1493,17 +1490,12 @@ async fn e2_uncommitted_enqueue_is_not_run(pool: PgPool) {
         })
         .await;
     }
-    must(
+    let id = must(
         super::bounded("the holder commits", holder)
             .await
             .expect("the holder joins"),
         "the enqueue commits",
     );
-    let id = id_slot
-        .lock()
-        .expect("id")
-        .clone()
-        .expect("the committed id");
     let view = completed(&jobs, &id).await;
     assert_eq!(view.attempts, 1);
     finish(run, &[&jobs, &caller]).await;
