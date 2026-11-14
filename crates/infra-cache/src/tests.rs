@@ -375,8 +375,6 @@ impl FakeServer {
         tokio::time::timeout(budget, async {
             loop {
                 let changed = self.observed.changed.notified();
-                tokio::pin!(changed);
-                changed.as_mut().enable();
                 if ready() {
                     break;
                 }
