@@ -33,6 +33,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
+use bytes::BytesMut;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Notify, watch};
@@ -438,7 +439,7 @@ async fn relay(
 
 #[derive(Debug, Default)]
 struct Frontend {
-    pending: Vec<u8>,
+    pending: BytesMut,
     /// The untyped startup message has passed; every later one is typed.
     started: bool,
     /// Prepared statements may be reused without another Parse message.
@@ -449,11 +450,11 @@ struct Frontend {
 }
 
 impl Frontend {
-    fn take_message(&mut self) -> Option<Result<Vec<u8>, Malformed>> {
+    fn take_message(&mut self) -> Option<Result<BytesMut, Malformed>> {
         let framed = frame(&self.pending, self.started)?;
         Some(framed.map(|length| {
             self.started = true;
-            self.pending.drain(..length).collect()
+            self.pending.split_to(length)
         }))
     }
 
@@ -581,4 +582,27 @@ fn ready_for_query(bytes: &[u8]) -> Result<Option<usize>, Malformed> {
 /// The arming state; a relay that panicked cannot leave it inconsistent.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+#[test]
+fn frontend_preserves_frame_boundaries_across_fragmented_and_coalesced_reads() {
+    let startup = b"\0\0\0\x09\0\x03\0\0\0";
+    let sync = b"S\0\0\0\x04";
+    let query = b"Q\0\0\0\x06x\0";
+    let mut frontend = Frontend::default();
+
+    for fragment in [&startup[..2], &startup[2..6]] {
+        frontend.pending.extend_from_slice(fragment);
+        assert!(frontend.take_message().is_none());
+    }
+    for fragment in [&startup[6..], sync.as_slice(), sync.as_slice(), &query[..5]] {
+        frontend.pending.extend_from_slice(fragment);
+    }
+    for expected in [startup.as_slice(), sync.as_slice(), sync.as_slice()] {
+        assert_eq!(frontend.take_message().unwrap().unwrap().as_ref(), expected);
+    }
+    assert!(frontend.take_message().is_none());
+    frontend.pending.extend_from_slice(&query[5..]);
+    assert_eq!(frontend.take_message().unwrap().unwrap().as_ref(), query);
+    assert!(frontend.take_message().is_none());
 }
