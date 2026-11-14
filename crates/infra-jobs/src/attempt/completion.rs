@@ -81,38 +81,26 @@ impl QueuedCompletion {
     }
 }
 
-/// Dropping a waiting supervisor removes only its own queued registration.
-/// Once taken by the writer, the batch owns retirement instead.
-struct CompletionRegistration<'a> {
-    group: &'a CompletionGroup,
-    fence: ClaimFence,
-}
-
-impl Drop for CompletionRegistration<'_> {
-    fn drop(&mut self) {
-        let retired = {
-            let mut queued = self.group.lock_queue();
-            queued
-                .iter()
-                .position(|entry| entry.fence == self.fence)
-                .map(|index| queued.swap_remove(index))
-        };
-        drop(retired);
-    }
-}
-
 impl CompletionGroup {
-    fn register(
-        &self,
+    /// Dropping a waiting supervisor removes only its own queued registration.
+    /// Once taken by the writer, the batch owns retirement instead.
+    fn register<'a>(
+        &'a self,
         fence: ClaimFence,
         slots: &Arc<AttemptSlots>,
         memberships: &MembershipGauge,
-    ) -> (
-        CompletionRegistration<'_>,
-        oneshot::Receiver<CompletionReply>,
-    ) {
+    ) -> (impl Drop + use<'a>, oneshot::Receiver<CompletionReply>) {
         let (reply, response) = oneshot::channel();
-        let registration = CompletionRegistration { group: self, fence };
+        let registration = std::mem::DropGuard::new(fence, |fence| {
+            let retired = {
+                let mut queued = self.lock_queue();
+                queued
+                    .iter()
+                    .position(|entry| entry.fence == fence)
+                    .map(|index| queued.swap_remove(index))
+            };
+            drop(retired);
+        });
         let queued = QueuedCompletion {
             fence,
             membership: memberships.join(),

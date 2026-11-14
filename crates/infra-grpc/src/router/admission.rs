@@ -89,7 +89,7 @@ async fn acquire(
         return None;
     }
 
-    let waiting = crate::observe::AdmissionWaiting::start();
+    let waiting = crate::observe::admission_waiting();
     let started = tokio::time::Instant::now();
     let permit = tokio::time::timeout(patience, permits.acquire_owned()).await;
     let waited = started.elapsed();

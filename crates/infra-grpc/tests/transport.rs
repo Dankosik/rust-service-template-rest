@@ -262,7 +262,7 @@ impl EchoService for Echo {
             }
             "hold-after-first" => {
                 let hold = Arc::clone(&self.hold);
-                let dropped = NotifyOnDrop(Arc::clone(&self.stream_dropped));
+                let dropped = notify_on_drop(Arc::clone(&self.stream_dropped));
                 Box::pin(first.chain(futures_util::stream::once(async move {
                     let _dropped = dropped;
                     hold.wait().await;
@@ -272,7 +272,7 @@ impl EchoService for Echo {
                 })))
             }
             "flood" => {
-                let dropped = NotifyOnDrop(Arc::clone(&self.stream_dropped));
+                let dropped = notify_on_drop(Arc::clone(&self.stream_dropped));
                 Box::pin(async_stream::stream! {
                     let _dropped = dropped;
                     loop {
@@ -300,7 +300,7 @@ impl EchoService for Echo {
     ) -> Result<Response<Self::BidiStreamStream>, Status> {
         self.observe(&request, Seen::BidiStream);
         let input = request.into_inner();
-        let dropped = NotifyOnDrop(Arc::clone(&self.stream_dropped));
+        let dropped = notify_on_drop(Arc::clone(&self.stream_dropped));
         Ok(Response::new(Box::pin(async_stream::stream! {
             let _dropped = dropped;
             let mut input = input;
@@ -318,12 +318,8 @@ impl EchoService for Echo {
 }
 
 /// Source destruction, including while no further message is polled.
-struct NotifyOnDrop(Arc<Notify>);
-
-impl Drop for NotifyOnDrop {
-    fn drop(&mut self) {
-        self.0.notify_one();
-    }
+fn notify_on_drop(notify: Arc<Notify>) -> impl Drop {
+    std::mem::DropGuard::new(notify, |notify| notify.notify_one())
 }
 
 struct Fixture {
@@ -1680,7 +1676,7 @@ async fn duplex_progresses_before_request_eof_and_drop_stops_upload_and_recovers
     let mut client = fixture.echo_client();
     let (sender, receiver) = tokio::sync::mpsc::channel(1);
     let upload_dropped = Arc::new(Notify::new());
-    let dropped = NotifyOnDrop(Arc::clone(&upload_dropped));
+    let dropped = notify_on_drop(Arc::clone(&upload_dropped));
     let upload = async_stream::stream! {
         let _dropped = dropped;
         let mut receiver = receiver;
@@ -2786,7 +2782,7 @@ async fn a_stream_is_counted_with_the_status_that_ended_it() {
 fn stalled_unary_response(
     send_data: bool,
     peer_polled: Arc<Notify>,
-    dropped: NotifyOnDrop,
+    dropped: impl Send + 'static,
 ) -> http::Response<axum::body::Body> {
     let first = send_data.then(|| {
         Ok::<_, std::convert::Infallible>(http_body::Frame::data(bytes::Bytes::from(grpc_frame(
@@ -2817,7 +2813,7 @@ async fn client_budget_includes_unary_data_and_trailers_after_peer_headers() {
             let body_dropped = Arc::clone(&body_dropped);
             move || {
                 let peer_polled = Arc::clone(&peer_polled);
-                let dropped = NotifyOnDrop(Arc::clone(&body_dropped));
+                let dropped = notify_on_drop(Arc::clone(&body_dropped));
                 async move { stalled_unary_response(send_data, peer_polled, dropped) }
             }
         };

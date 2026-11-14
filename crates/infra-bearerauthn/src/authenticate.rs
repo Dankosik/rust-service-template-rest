@@ -1,5 +1,7 @@
 //! The inbound bearer boundary shared by every transport.
 
+use std::mem::DropGuard;
+
 use operation_context::{OperationContext, Stopped};
 
 use crate::{Failure, Principal, Verifier, parse_bearer};
@@ -131,56 +133,31 @@ impl Verifier {
         transport: Transport,
         context: &OperationContext,
     ) -> Result<Principal, Failure> {
-        let outcome = OutcomeGuard {
-            context,
-            transport,
-            recorded: false,
-        };
+        let outcome = DropGuard::new(transport, |transport| {
+            let outcome = context
+                .stopped()
+                .map_or(Outcome::Cancelled, Outcome::from_stopped);
+            counter(transport, outcome).increment(1);
+        });
         if let Err(stopped) = context.check() {
-            return Err(outcome.stop(stopped));
+            counter(transport, Outcome::from_stopped(stopped)).increment(1);
+            DropGuard::dismiss(outcome);
+            return Err(Failure::Unavailable);
         }
         let result = match parse_bearer(authorization) {
             Ok(token) => self.verify_with_context(&token, context).await,
             Err(failure) => Err(failure),
         };
         if let Err(stopped) = context.check() {
-            return Err(outcome.stop(stopped));
+            counter(transport, Outcome::from_stopped(stopped)).increment(1);
+            DropGuard::dismiss(outcome);
+            return Err(Failure::Unavailable);
         }
-        outcome.finish(&self.counters.transport, &result);
+        match &result {
+            Ok(_) => self.counters.transport.get(transport).increment(1),
+            Err(failure) => counter(transport, Outcome::Failure(*failure)).increment(1),
+        }
+        DropGuard::dismiss(outcome);
         result
-    }
-}
-
-struct OutcomeGuard<'a> {
-    context: &'a OperationContext,
-    transport: Transport,
-    recorded: bool,
-}
-
-impl OutcomeGuard<'_> {
-    fn finish(mut self, counters: &TransportSuccessCounters, result: &Result<Principal, Failure>) {
-        match result {
-            Ok(_) => counters.get(self.transport).increment(1),
-            Err(failure) => counter(self.transport, Outcome::Failure(*failure)).increment(1),
-        }
-        self.recorded = true;
-    }
-
-    fn stop(mut self, stopped: Stopped) -> Failure {
-        counter(self.transport, Outcome::from_stopped(stopped)).increment(1);
-        self.recorded = true;
-        Failure::Unavailable
-    }
-}
-
-impl Drop for OutcomeGuard<'_> {
-    fn drop(&mut self) {
-        if !self.recorded {
-            let outcome = self
-                .context
-                .stopped()
-                .map_or(Outcome::Cancelled, Outcome::from_stopped);
-            counter(self.transport, outcome).increment(1);
-        }
     }
 }
