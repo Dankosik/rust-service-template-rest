@@ -4,6 +4,8 @@
 //! a persistent format: changing them changes identity against live records.
 //! Preserve the exact framing pinned by the scope/request test vectors.
 
+use std::borrow::Cow;
+
 use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderMap, HeaderName, Method, Uri};
 use infra_idempotency_store::{CallerIdentity, CallerKind, Digest, ScopeKey};
@@ -37,12 +39,9 @@ pub(super) fn caller_identity(
     })
 }
 
-/// Decode exactly one raw Idempotency-Key field value.
-///
 /// An initial quote selects the Structured Fields grammar permanently. Other
-/// values keep the compatible visible-ASCII grammar. Neither branch exposes
-/// the raw input to diagnostics or callers.
-pub(super) fn decode_key<'a>(values: impl IntoIterator<Item = &'a [u8]>) -> Option<Vec<u8>> {
+/// values keep the compatible visible-ASCII grammar.
+pub(super) fn decode_key<'a>(values: impl IntoIterator<Item = &'a [u8]>) -> Option<Cow<'a, [u8]>> {
     let mut values = values.into_iter();
     let value = trim_ows(values.next()?);
     if values.next().is_some() {
@@ -56,9 +55,9 @@ pub(super) fn decode_key<'a>(values: impl IntoIterator<Item = &'a [u8]>) -> Opti
         if !item.params.is_empty() {
             return None;
         }
-        value.as_str().as_bytes().to_vec()
+        Cow::Owned(String::from(value).into_bytes())
     } else if value.iter().all(|byte| (0x21..=0x7e).contains(byte)) {
-        value.to_vec()
+        Cow::Borrowed(value)
     } else {
         return None;
     };
@@ -190,10 +189,13 @@ mod tests {
 
     #[test]
     fn key_decoding_accepts_raw_and_structured_string_forms() {
-        assert_eq!(decode_key([b"a/b=".as_slice()]), Some(b"a/b=".to_vec()));
         assert_eq!(
-            decode_key([b" \t\"a b\\\\c\"\t ".as_slice()]),
-            Some(b"a b\\c".to_vec())
+            decode_key([b" \ta/b=\t".as_slice()]).as_deref(),
+            Some(b"a/b=".as_slice())
+        );
+        assert_eq!(
+            decode_key([b" \t\"a b\\\\c\"\t ".as_slice()]).as_deref(),
+            Some(b"a b\\c".as_slice())
         );
         assert_eq!(
             decode_key([b"\"same\"".as_slice()]),
@@ -337,10 +339,8 @@ mod tests {
             let field = sfv::ItemSerializer::new()
                 .bare_item(sfv::StringRef::from_str(&key).unwrap())
                 .finish();
-            proptest::prop_assert_eq!(
-                decode_key([field.as_bytes()]),
-                Some(key.into_bytes())
-            );
+            let decoded = decode_key([field.as_bytes()]);
+            proptest::prop_assert_eq!(decoded.as_deref(), Some(key.as_bytes()));
         }
     }
 }
