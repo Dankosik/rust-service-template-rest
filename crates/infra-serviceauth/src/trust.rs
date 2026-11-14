@@ -119,7 +119,10 @@ impl fmt::Debug for TrustRegistry {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("TrustRegistry")
-            .field("callers", &self.callers.keys().collect::<Vec<_>>())
+            .field(
+                "callers",
+                &fmt::from_fn(|f| f.debug_list().entries(self.callers.keys()).finish()),
+            )
             .finish()
     }
 }
@@ -305,6 +308,25 @@ fn admit_key(value: serde_json::Value) -> Result<TrustedKey, &'static str> {
 mod tests {
     use super::*;
     use crate::test_support::TestKey;
+
+    #[test]
+    fn registry_debug_discloses_the_caller_but_hides_key_rotation() {
+        let original = TestKey::new("orders/1").jwk();
+        let replacement = TestKey::new("orders/2").jwk();
+        let registry = |keys: &[serde_json::Value]| {
+            TrustRegistry::parse(&serde_json::json!({"orders": {"keys": keys}}).to_string())
+                .unwrap()
+        };
+        let single = registry(std::slice::from_ref(&original));
+        let rotating = registry(&[original, replacement]);
+        for (before, after) in [
+            (format!("{single:?}"), format!("{rotating:?}")),
+            (format!("{single:#?}"), format!("{rotating:#?}")),
+        ] {
+            assert!(before.contains("\"orders\""));
+            assert_eq!(before, after);
+        }
+    }
 
     #[test]
     fn admits_each_callers_keys_under_its_own_name() {
