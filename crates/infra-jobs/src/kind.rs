@@ -692,7 +692,7 @@ mod tests {
         fn kind_name_check_matches_the_documented_pattern(
             name in "[a-zA-Z0-9._ /é-]{0,70}|[a-z][a-z0-9._-]{0,63}",
         ) {
-            let documented = regex::Regex::new(r"^[a-z][a-z0-9._-]{0,63}$").unwrap();
+            let documented = regex::regex!(r"^[a-z][a-z0-9._-]{0,63}$");
             proptest::prop_assert_eq!(is_valid_kind_name(&name), documented.is_match(&name));
         }
     }
