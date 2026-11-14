@@ -677,7 +677,7 @@ async fn lost_broker_ack_retries_then_republishes_the_same_immutable_identity(po
         "lost broker ACK spends an attempt and retains a pending outbox intent",
         async || {
             let row = job(&jobs, &key).await;
-            (relay.dropped_ack.load(Ordering::SeqCst)
+            (relay.dropped_ack.is_cancelled()
                 && row.state == "pending"
                 && row.attempts >= 1
                 && row.error_summary.is_some())

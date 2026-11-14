@@ -1,6 +1,5 @@
 //! Wire faults over the real broker; no publication or settlement is simulated.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -14,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 pub(crate) struct AckDroppingRelay {
     pub(crate) url: String,
-    pub(crate) dropped_ack: Arc<AtomicBool>,
+    pub(crate) dropped_ack: CancellationToken,
     task: JoinHandle<()>,
 }
 
@@ -243,15 +242,15 @@ impl AckDroppingRelay {
             .expect("relay listener");
         let address = listener.local_addr().expect("relay address");
         let target = relay_target(&std::env::var("NATS_URL").expect("NATS_URL"));
-        let dropped_ack = Arc::new(AtomicBool::new(false));
-        let dropped = Arc::clone(&dropped_ack);
+        let dropped_ack = CancellationToken::new();
+        let dropped = dropped_ack.clone();
         let task = tokio::spawn(async move {
             let (client, _) = listener.accept().await.expect("relay client");
             let broker = TcpStream::connect(target).await.expect("relay broker");
             let (client_read, client_write) = client.into_split();
             let (broker_read, broker_write) = broker.into_split();
-            let requests = relay_frames(client_read, broker_write, to_broker, Arc::clone(&dropped));
-            let replies = relay_frames(broker_read, client_write, to_client, dropped);
+            let requests = relay_frames(client_read, broker_write, to_broker, &dropped);
+            let replies = relay_frames(broker_read, client_write, to_client, &dropped);
             // Closing either peer ends both directions, with no detached relay task.
             tokio::select! {
                 result = requests => result.expect("relay requests"),
@@ -266,14 +265,9 @@ impl AckDroppingRelay {
     }
 
     pub(crate) async fn wait_for_drop(&self) {
-        timeout(Duration::from_secs(5), async {
-            let mut cadence = tokio::time::interval(Duration::from_millis(10));
-            while !self.dropped_ack.load(Ordering::SeqCst) {
-                cadence.tick().await;
-            }
-        })
-        .await
-        .expect("configured ACK crosses the relay");
+        timeout(Duration::from_secs(5), self.dropped_ack.cancelled())
+            .await
+            .expect("configured ACK crosses the relay");
     }
 
     pub(crate) async fn join(self) {
@@ -282,7 +276,7 @@ impl AckDroppingRelay {
             .expect("relay finishes after client close")
             .expect("relay task completes");
         assert!(
-            self.dropped_ack.load(Ordering::SeqCst),
+            self.dropped_ack.is_cancelled(),
             "configured ACK was withheld"
         );
     }
@@ -314,7 +308,7 @@ async fn relay_frames(
     reader: impl AsyncRead + Unpin,
     mut writer: impl AsyncWrite + Unpin,
     mut withhold: impl FnMut(&[u8], &[u8]) -> bool,
-    dropped: Arc<AtomicBool>,
+    dropped: &CancellationToken,
 ) -> std::io::Result<()> {
     let mut reader = BufReader::new(reader);
     loop {
@@ -331,7 +325,7 @@ async fn relay_frames(
         let mut ending = [0; 2];
         reader.read_exact(&mut ending).await?;
         if withhold(&line, &payload) {
-            dropped.store(true, Ordering::SeqCst);
+            dropped.cancel();
         } else {
             writer.write_all(&line).await?;
             writer.write_all(&payload).await?;
