@@ -473,16 +473,14 @@ impl Default for KindsBuilder {
 
 impl fmt::Debug for KindsBuilder {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let names = fmt::from_fn(|f| {
+            f.debug_list()
+                .entries(self.entries.iter().map(|entry| entry.name))
+                .finish()
+        });
         formatter
             .debug_struct("KindsBuilder")
-            .field(
-                "names",
-                &self
-                    .entries
-                    .iter()
-                    .map(|entry| entry.name)
-                    .collect::<Vec<_>>(),
-            )
+            .field("names", &names)
             .finish_non_exhaustive()
     }
 }
@@ -512,11 +510,7 @@ impl fmt::Debug for Kinds {
             .debug_struct("Kinds")
             .field(
                 "names",
-                &self
-                    .entries
-                    .iter()
-                    .map(|entry| entry.name)
-                    .collect::<Vec<_>>(),
+                &fmt::from_fn(|f| f.debug_list().entries(self.names()).finish()),
             )
             .finish_non_exhaustive()
     }
@@ -808,8 +802,20 @@ mod tests {
         kinds
             .register(Policy::default(), |_: Job<Alpha>| async { Ok(()) })
             .register(Policy::default(), |_: Job<Beta>| async { Ok(()) });
+        let builder_output = [format!("{kinds:?}"), format!("{kinds:#?}")];
         let registry = kinds.validate().unwrap();
         assert_eq!(registry.names().collect::<Vec<_>>(), ["alpha", "beta"]);
+        for output in builder_output
+            .into_iter()
+            .chain([format!("{registry:?}"), format!("{registry:#?}")])
+        {
+            let (_, after_alpha) = output
+                .split_once("\"alpha\"")
+                .expect("first registered kind");
+            assert!(after_alpha.contains("\"beta\""), "{output}");
+            assert!(!output.contains("policy"), "{output}");
+            assert!(!output.contains("dispatch"), "{output}");
+        }
     }
 
     #[test]
