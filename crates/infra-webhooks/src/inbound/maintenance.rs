@@ -19,8 +19,6 @@ use super::Receiver;
 /// restores can bring a delivery back after cleanup deletes its receipt.
 const RECEIPT_RETENTION: Duration = Duration::from_hours(14 * 24);
 
-const RETENTION_SECONDS: i64 = RECEIPT_RETENTION.as_secs().cast_signed();
-
 const CLEANUP_BATCH_ROWS: u32 = 500;
 
 /// Periodic receipt cleanup runs, by `completed` or `failed`.
@@ -69,9 +67,9 @@ impl Receiver {
             sqlx::query!(
                 "DELETE FROM webhook_receipts WHERE (endpoint_id, message_id) IN \
                          (SELECT endpoint_id, message_id FROM webhook_receipts \
-                         WHERE received_at < statement_timestamp() - $1::bigint * interval '1 second' \
+                         WHERE received_at < statement_timestamp() - $1::interval \
                          ORDER BY received_at LIMIT $2 FOR UPDATE SKIP LOCKED)",
-                RETENTION_SECONDS,
+                RECEIPT_RETENTION as _,
                 i64::from(batch_limit),
             )
             .execute(tx),
@@ -110,26 +108,23 @@ impl Receiver {
 
     async fn sample_population(&self) -> Result<PopulationSample, MaintenanceFailure> {
         in_observation_tx(&self.pool, async |tx| {
-            let sample = observed(
+            observed(
                 "observe expired webhook receipts",
-                sqlx::query!(
-                    r#"SELECT extract(epoch FROM observation.observed_at)::float8 AS "observed_at!",
-                                  extract(epoch FROM oldest.received_at + $1::bigint * interval '1 second')::float8 AS "oldest?"
+                sqlx::query_as!(
+                    PopulationSample,
+                    r#"SELECT extract(epoch FROM observation.observed_at)::float8 AS "observed_at_unix_seconds!",
+                                  extract(epoch FROM oldest.received_at + $1::interval)::float8 AS "oldest_at_unix_seconds?"
                            FROM (SELECT statement_timestamp() AS observed_at) observation
                            LEFT JOIN LATERAL (
                                SELECT received_at FROM webhook_receipts
-                               WHERE received_at < observation.observed_at - $1::bigint * interval '1 second'
+                               WHERE received_at < observation.observed_at - $1::interval
                                ORDER BY received_at LIMIT 1
                            ) oldest ON true"#,
-                    RETENTION_SECONDS,
+                    RECEIPT_RETENTION as _,
                 )
                 .fetch_one(&mut *tx),
             )
-            .await?;
-            Ok(PopulationSample {
-                observed_at_unix_seconds: sample.observed_at,
-                oldest_at_unix_seconds: sample.oldest,
-            })
+            .await
         })
         .await
     }

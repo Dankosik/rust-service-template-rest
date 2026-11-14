@@ -221,12 +221,6 @@ impl<'de> Deserialize<'de> for DuplicateCheckedJson {
     }
 }
 
-/// A JWK Set; other members are ignored, as RFC 7517 section 5 requires.
-#[derive(Deserialize)]
-struct JwkSet {
-    keys: Vec<serde_json::Value>,
-}
-
 fn parse_caller(
     name: &str,
     set: DuplicateCheckedJson,
@@ -234,16 +228,19 @@ fn parse_caller(
     let caller =
         ServiceName::parse(name).map_err(|_| TrustError::document(InvalidServiceName::MESSAGE))?;
     let caller_error = |reason| TrustError::new(Place::Caller(caller.clone()), reason);
-    let set = set
+    let mut set = set
         .0
         .ok_or_else(|| caller_error("repeats a member name within its JWK Set"))?;
-    let set: JwkSet = serde_json::from_value(set)
-        .map_err(|_| caller_error("is not a JWK Set with a keys array"))?;
-    if set.keys.is_empty() {
+    let Some(serde_json::Value::Array(entries)) =
+        set.as_object_mut().and_then(|set| set.remove("keys"))
+    else {
+        return Err(caller_error("is not a JWK Set with a keys array"));
+    };
+    if entries.is_empty() {
         return Err(caller_error("has no key"));
     }
-    let mut keys: Vec<TrustedKey> = Vec::with_capacity(set.keys.len());
-    for (index, value) in set.keys.into_iter().enumerate() {
+    let mut keys: Vec<TrustedKey> = Vec::with_capacity(entries.len());
+    for (index, value) in entries.into_iter().enumerate() {
         let key_error = |reason| TrustError::new(Place::Key(caller.clone(), index + 1), reason);
         let key = admit_key(value).map_err(key_error)?;
         if keys.iter().any(|known| known.kid == key.kid) {
@@ -357,6 +354,24 @@ mod tests {
             );
             let caller = verifier.verify(token.as_bytes(), || Ok(1_000)).unwrap();
             assert_eq!(caller.name().as_str(), issuer, "{}", key.kid());
+        }
+    }
+
+    #[test]
+    fn a_jwk_set_requires_a_named_keys_array() {
+        let key = TestKey::new("orders/1").jwk();
+        let object = serde_json::json!({"orders": {"keys": [&key]}}).to_string();
+        assert!(TrustRegistry::parse(&object).is_ok());
+        for invalid in [
+            serde_json::json!({"orders": [[&key]]}),
+            serde_json::json!({"orders": {"keys": &key}}),
+            serde_json::json!({"orders": {"other": [&key]}}),
+        ] {
+            let error = TrustRegistry::parse(&invalid.to_string()).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "caller orders: is not a JWK Set with a keys array"
+            );
         }
     }
 

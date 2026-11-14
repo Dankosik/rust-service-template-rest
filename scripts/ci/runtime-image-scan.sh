@@ -68,9 +68,9 @@ resource=
 container=
 [[ ${mode} != filesystem ]] || exit 0
 
-# All packages and severities survive into admission. Trivy 0.74 supports
-# --ignore-unfixed only on image, where it filters vulnerabilities, not Packages.
-# Security mode retains the existing fixable-only policy; SBOM keeps all statuses.
+# Admission requires the full package inventory. The security scan filters
+# vulnerabilities with --ignore-unfixed before conversion. The SBOM input
+# retains all vulnerability statuses.
 scan_policy=(--list-all-pkgs=true)
 if [[ ${mode} == security ]]; then scan_policy+=(--ignore-unfixed); fi
 bash "${root}/scripts/ci/validation-lock.sh" --container-run -- docker run --rm \

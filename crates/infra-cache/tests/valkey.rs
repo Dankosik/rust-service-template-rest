@@ -19,7 +19,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use base64::Engine;
 use health::Probe;
 use infra_cache::{Cache, CacheOptions, ClientCertificate, HISTOGRAMS, Unavailable};
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
@@ -264,13 +263,10 @@ fn write_pem_block(label: &str, der: &[u8]) -> tempfile::NamedTempFile {
 }
 
 fn pem_block(label: &str, der: &[u8]) -> String {
-    let encoded = base64::engine::general_purpose::STANDARD.encode(der);
-    let mut body = String::new();
-    for line in encoded.as_bytes().chunks(64) {
-        body.push_str(std::str::from_utf8(line).expect("base64 is ascii"));
-        body.push('\n');
-    }
-    format!("-----BEGIN {label}-----\n{body}-----END {label}-----\n")
+    pem::encode_config(
+        &pem::Pem::new(label, der),
+        pem::EncodeConfig::new().set_line_ending(pem::LineEnding::LF),
+    )
 }
 
 /// A client CA and a client-auth leaf it signed, the leaf and its key as PEM files.

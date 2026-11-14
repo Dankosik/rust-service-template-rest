@@ -18,25 +18,16 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 const CURRENT_KEY: &str = "whsec_QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=";
 const PREVIOUS_KEY: &str = "whsec_QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=";
 
-#[derive(Debug)]
+#[derive(Debug, derive_more::From, derive_more::Display)]
 enum Step {
+    #[from(skip)]
+    #[display("delivery: {_0}")]
     Delivery(OutboundError),
+    #[display("transaction: {_0}")]
     Transaction(TxError),
+    #[from(skip)]
+    #[display("caller rejected the transaction")]
     Rejected,
-}
-
-impl From<TxError> for Step {
-    fn from(error: TxError) -> Self {
-        Self::Transaction(error)
-    }
-}
-
-fn explain(error: &Step) -> String {
-    match error {
-        Step::Delivery(error) => format!("delivery: {error}"),
-        Step::Transaction(error) => format!("transaction: {error}"),
-        Step::Rejected => "caller rejected the transaction".to_owned(),
-    }
 }
 
 fn outbound(endpoint_ids: &[&str]) -> Producer {
@@ -81,7 +72,7 @@ async fn enqueue(pool: &PgPool, outbound: &Producer, endpoint: &str, body: &[u8]
             .map_err(Step::Delivery)
     })
     .await
-    .unwrap_or_else(|error| panic!("delivery commits: {}", explain(&error)));
+    .unwrap_or_else(|error| panic!("delivery commits: {error}"));
     id.to_string()
 }
 

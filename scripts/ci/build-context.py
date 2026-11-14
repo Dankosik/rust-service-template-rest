@@ -53,10 +53,7 @@ def path_id(path):
 
 def file_digest(path):
     with path.open("rb") as source:
-        result = hashlib.sha256()
-        for block in iter(lambda: source.read(1024 * 1024), b""):
-            result.update(block)
-        return result.hexdigest()
+        return hashlib.file_digest(source, "sha256").hexdigest()
 
 
 def resolve_path(value, base):

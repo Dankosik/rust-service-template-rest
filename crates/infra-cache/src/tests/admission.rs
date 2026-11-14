@@ -133,24 +133,35 @@ fn a_root_ca_with_a_certificate_header_and_invalid_base64_is_invalid() {
     assert!(!format!("{err} {err:?}").contains("hunter2"));
 }
 
-/// A PEM file holding one block of `der` under `label`.
 #[expect(
     clippy::disallowed_methods,
     reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
 )]
 fn write_pem(label: &str, der: &[u8]) -> tempfile::NamedTempFile {
-    use base64::Engine;
-
-    let encoded = base64::engine::general_purpose::STANDARD.encode(der);
-    let mut body = String::new();
-    for line in encoded.as_bytes().chunks(64) {
-        body.push_str(std::str::from_utf8(line).expect("base64 is ascii"));
-        body.push('\n');
-    }
-    let pem = format!("-----BEGIN {label}-----\n{body}-----END {label}-----\n");
+    let pem = pem::encode_config(
+        &pem::Pem::new(label, der),
+        pem::EncodeConfig::new().set_line_ending(pem::LineEnding::LF),
+    );
     let file = tempfile::NamedTempFile::new().expect("temp pem");
     std::fs::write(file.path(), pem).expect("write pem");
     file
+}
+
+#[test]
+fn pem_fixtures_preserve_labels_and_wrap_at_64_columns_with_lf() {
+    let empty = write_pem("CERTIFICATE", &[]);
+    assert_eq!(
+        std::io::read_to_string(empty.reopen().unwrap()).unwrap(),
+        "-----BEGIN CERTIFICATE-----\n-----END CERTIFICATE-----\n",
+    );
+    let key = write_pem("PRIVATE KEY", &[0; 49]);
+    assert_eq!(
+        std::io::read_to_string(key.reopen().unwrap()).unwrap(),
+        format!(
+            "-----BEGIN PRIVATE KEY-----\n{}\nAA==\n-----END PRIVATE KEY-----\n",
+            "A".repeat(64)
+        ),
+    );
 }
 
 /// A self-signed certificate and its PKCS #8 key, each in its own PEM file.

@@ -353,7 +353,8 @@ classify() {
 		clippy.toml | rustfmt.toml | Cargo.toml) mark lint_config ;;
 		esac
 		case "${file}" in
-		.redocly.yaml | api/openapi/* | crates/infra-http/src/webhooks.rs | crates/service/src/api.rs) mark openapi ;;
+		.redocly.yaml | api/openapi/* | crates/infra-http/src/webhooks.rs | crates/service/src/api.rs | \
+		scripts/ci/openapi-artifact.py | scripts/tests/openapi-generation.py) mark openapi ;;
 		esac
 		# template:begin grpc:classifier-grpc-schema
 		case "${file}" in
@@ -798,6 +799,9 @@ HOOK
 	assert_case api/openapi/service.yaml \
 		"openapi" \
 		"rust_source documentation"
+	for file in scripts/ci/openapi-artifact.py scripts/tests/openapi-generation.py; do
+		assert_case "${file}" "openapi python" "rust_source documentation"
+	done
 	# template:begin grpc:classifier-grpc-tests
 	for file in api/proto/example/v1/echo.proto crates/grpc-contracts/src/generated/example.v1.rs tools/grpc-codegen/Cargo.toml buf.yaml; do
 		assert_case "${file}" "grpc_schema" "openapi runtime_image"

@@ -1,10 +1,12 @@
 # Migrations
 
-Forward-only SQL migrations for the PostgreSQL profile, embedded into the
-`migrate` binary by `crates/migrate` at compile time and applied by
-`sqlx::migrate::Migrator` under a session lock. A service's own migrations
-arrive with its first durable feature; with an empty set, the runner proves
-the empty-history path.
+The PostgreSQL `migrate` binary takes its forward-only migration inventory
+from the `sqlx::migrate::Migrator` embedded by `crates/migrate` at compile
+time. On one PostgreSQL connection, the runner takes a session lock, checks
+applied history, and uses SQLx's `Migrate` operations to apply pending
+migrations. The runner reports progress for each migration. A service's own
+migrations arrive with its first durable feature. With an empty set, the
+runner checks the empty-history path.
 
 <!-- template:begin http-idempotency:migrations-readme-http-idempotency -->
 The HTTP idempotency pack creates `http_idempotency_records` in

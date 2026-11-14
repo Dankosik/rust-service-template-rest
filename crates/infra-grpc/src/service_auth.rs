@@ -6,7 +6,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use axum::extract::Request;
+use axum::extract::{Request, State};
 use axum::middleware::Next;
 use axum::response::Response;
 use foldhash::HashMap;
@@ -85,7 +85,7 @@ impl CallerAdmission {
 /// Without one, no rule is checked. Either way the `Authorization` metadata
 /// never reaches the handler.
 pub(crate) async fn admit_caller(
-    admission: Arc<CallerAdmission>,
+    State(admission): State<Arc<CallerAdmission>>,
     mut request: Request,
     next: Next,
 ) -> Response {

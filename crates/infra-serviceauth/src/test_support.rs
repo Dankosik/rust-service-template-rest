@@ -16,6 +16,10 @@ use base64::{
     Engine as _,
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
+use jsonwebtoken::{
+    Algorithm, DecodingKey,
+    jwk::{Jwk, PublicKeyUse},
+};
 
 /// A generated EC P-256 key and its `kid`.
 pub struct TestKey {
@@ -55,19 +59,14 @@ impl TestKey {
         &self.kid
     }
 
-    /// The public JWK a trust registry publishes.
     #[must_use]
     pub fn jwk(&self) -> serde_json::Value {
-        let point = self.pair.public_key().as_ref();
-        serde_json::json!({
-            "kty": "EC",
-            "crv": "P-256",
-            "kid": self.kid,
-            "alg": "ES256",
-            "use": "sig",
-            "x": URL_SAFE_NO_PAD.encode(&point[1..33]),
-            "y": URL_SAFE_NO_PAD.encode(&point[33..65]),
-        })
+        let key = DecodingKey::from_ec_der(self.pair.public_key().as_ref());
+        let mut jwk =
+            Jwk::from_decoding_key(&key, Some(Algorithm::ES256)).expect("P-256 public key");
+        jwk.common.key_id = Some(self.kid.clone());
+        jwk.common.public_key_use = Some(PublicKeyUse::Signature);
+        serde_json::to_value(jwk).expect("public JWK serialization")
     }
 
     /// The PKCS#8 private key as the environment carries it.
@@ -116,4 +115,26 @@ pub fn registry(callers: &[(&str, &[&TestKey])]) -> String {
         document.insert((*name).to_owned(), serde_json::json!({ "keys": keys }));
     }
     serde_json::Value::Object(document).to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use aws_lc_rs::signature::KeyPair as _;
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+
+    use super::TestKey;
+
+    #[test]
+    fn registry_key_publishes_only_the_signers_public_coordinates_and_metadata() {
+        let key = TestKey::new("orders/1");
+        let point = key.pair.public_key().as_ref();
+        assert_eq!(
+            key.jwk(),
+            serde_json::json!({
+                "kty": "EC", "crv": "P-256", "alg": "ES256", "use": "sig", "kid": "orders/1",
+                "x": URL_SAFE_NO_PAD.encode(&point[1..33]),
+                "y": URL_SAFE_NO_PAD.encode(&point[33..]),
+            }),
+        );
+    }
 }

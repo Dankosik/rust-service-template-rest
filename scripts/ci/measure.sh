@@ -115,7 +115,8 @@ import sys
 
 log, route, revision, tree, started, finished, status, cpu, rss, command = sys.argv[1:]
 def digest(path):
-    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    with Path(path).open("rb") as source:
+        return hashlib.file_digest(source, "sha256").hexdigest()
 metric = {
     "route": route, "source_revision": revision, "source_tree": tree,
     "run_id": os.getenv("GITHUB_RUN_ID"), "producing_attempt": os.getenv("GITHUB_RUN_ATTEMPT"),

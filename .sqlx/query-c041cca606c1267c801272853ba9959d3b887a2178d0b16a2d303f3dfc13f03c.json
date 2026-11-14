@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO webhook_receipts (endpoint_id, message_id) VALUES ($1, $2) ON CONFLICT (endpoint_id, message_id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Bytea"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c041cca606c1267c801272853ba9959d3b887a2178d0b16a2d303f3dfc13f03c"
+}

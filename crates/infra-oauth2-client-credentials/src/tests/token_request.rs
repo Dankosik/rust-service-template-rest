@@ -29,6 +29,20 @@ fn decode_assertion(
     (header, data.claims)
 }
 
+fn assert_token_form(body: &[u8], grant_fields: &str) {
+    let body = std::str::from_utf8(body).unwrap();
+    let (fields, assertion) = body.split_once("&client_assertion=").unwrap();
+    assert_eq!(
+        fields,
+        format!(
+            "{grant_fields}&client_id=client%3Aid\
+             &client_assertion_type=urn%3Aietf%3Aparams%3Aoauth%3Aclient-assertion-type%3Ajwt-bearer"
+        )
+    );
+    assert!(!assertion.contains('&'));
+    assert!(jsonwebtoken::decode_header(assertion).is_ok());
+}
+
 #[tokio::test]
 async fn client_credentials_request_has_no_authorization_header_and_expected_fields() {
     let fixture = Fixture::new().await;
@@ -44,7 +58,7 @@ async fn client_credentials_request_has_no_authorization_header_and_expected_fie
     let response = fixture
         .credentials(
             &["write", "read+all", "write"],
-            Some("https://api.example/resource"),
+            Some("https://api.example/é?a=b&c=d"),
         )
         .http(fixture.resource_client())
         .execute(fixture.request(), deadline(Duration::from_secs(10)))
@@ -54,33 +68,10 @@ async fn client_credentials_request_has_no_authorization_header_and_expected_fie
     let token = fixture.token_requests().pop().unwrap();
     assert_eq!(token.target, TOKEN_PATH);
     assert!(token.header("authorization").is_none());
-    let pairs = form_pairs(&token.body);
-    let keys = pairs.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>();
-    assert_eq!(
-        keys,
-        [
-            "grant_type",
-            "scope",
-            "audience",
-            "client_id",
-            "client_assertion_type",
-            "client_assertion",
-        ]
-    );
-    assert_eq!(
-        form_value(&pairs, "grant_type"),
-        GRANT_TYPE_CLIENT_CREDENTIALS
-    );
-    assert_eq!(form_value(&pairs, "client_id"), "client:id");
-    assert_eq!(
-        form_value(&pairs, "client_assertion_type"),
-        CLIENT_ASSERTION_TYPE
-    );
-    assert_ne!(form_value(&pairs, "client_assertion"), "");
-    assert_eq!(form_value(&pairs, "scope"), "write read+all write");
-    assert_eq!(
-        form_value(&pairs, "audience"),
-        "https://api.example/resource"
+    assert_token_form(
+        &token.body,
+        "grant_type=client_credentials&scope=write+read%2Ball+write\
+         &audience=https%3A%2F%2Fapi.example%2F%C3%A9%3Fa%3Db%26c%3Dd",
     );
     assert_eq!(
         fixture.resource_requests()[0].header("authorization"),
@@ -98,16 +89,9 @@ async fn optional_scope_and_audience_are_omitted_from_the_client_credentials_for
         .execute(fixture.request(), deadline(Duration::from_secs(10)))
         .await
         .unwrap();
-    let pairs = form_pairs(&fixture.token_requests()[0].body);
-    let keys = pairs.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>();
-    assert_eq!(
-        keys,
-        [
-            "grant_type",
-            "client_id",
-            "client_assertion_type",
-            "client_assertion"
-        ]
+    assert_token_form(
+        &fixture.token_requests()[0].body,
+        "grant_type=client_credentials",
     );
     fixture.finish().await;
 }
@@ -155,50 +139,24 @@ async fn token_exchange_request_has_expected_form_fields() {
     let fixture = Fixture::new().await;
     fixture.token_json("200 OK", &exchange_response("exchanged"));
     fixture
-        .credentials(&["read"], Some("https://api.example/resource"))
+        .credentials(&["read"], Some("https://api.example/é"))
         .http(fixture.resource_client())
         .execute(
-            fixture.on_behalf_of_request("subject-token"),
+            fixture.on_behalf_of_request("subject+/="),
             deadline(Duration::from_secs(10)),
         )
         .await
         .unwrap();
     let token = fixture.token_requests().pop().unwrap();
     assert!(token.header("authorization").is_none());
-    let pairs = form_pairs(&token.body);
-    let keys = pairs.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>();
-    assert_eq!(
-        keys,
-        [
-            "grant_type",
-            "subject_token",
-            "subject_token_type",
-            "requested_token_type",
-            "scope",
-            "audience",
-            "client_id",
-            "client_assertion_type",
-            "client_assertion",
-        ]
+    assert_token_form(
+        &token.body,
+        "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange\
+         &subject_token=subject%2B%2F%3D\
+         &subject_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Aaccess_token\
+         &requested_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Aaccess_token\
+         &scope=read&audience=https%3A%2F%2Fapi.example%2F%C3%A9",
     );
-    assert_eq!(form_value(&pairs, "grant_type"), GRANT_TYPE_TOKEN_EXCHANGE);
-    assert_eq!(form_value(&pairs, "subject_token"), "subject-token");
-    assert_eq!(form_value(&pairs, "subject_token_type"), ACCESS_TOKEN_TYPE);
-    assert_eq!(
-        form_value(&pairs, "requested_token_type"),
-        ACCESS_TOKEN_TYPE
-    );
-    assert_eq!(form_value(&pairs, "scope"), "read");
-    assert_eq!(
-        form_value(&pairs, "audience"),
-        "https://api.example/resource"
-    );
-    assert_eq!(form_value(&pairs, "client_id"), "client:id");
-    assert_eq!(
-        form_value(&pairs, "client_assertion_type"),
-        CLIENT_ASSERTION_TYPE
-    );
-    assert_ne!(form_value(&pairs, "client_assertion"), "");
     assert_eq!(
         fixture.resource_requests()[0].header("authorization"),
         Some("Bearer exchanged")

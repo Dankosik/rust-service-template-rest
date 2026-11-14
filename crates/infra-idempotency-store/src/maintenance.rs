@@ -146,11 +146,12 @@ impl Store {
 
     async fn sample_expired_population(&self) -> Result<PopulationSample, MaintenanceFailure> {
         in_observation_tx(&self.pool, async |tx| {
-            let sample = observed(
+            observed(
                 "observe expired idempotency records",
-                sqlx::query!(
-                    "SELECT extract(epoch FROM clock.observed_at)::float8 AS \"observed_at!\", \
-                     extract(epoch FROM oldest.expires_at)::float8 AS \"oldest?\" \
+                sqlx::query_as!(
+                    PopulationSample,
+                    "SELECT extract(epoch FROM clock.observed_at)::float8 AS \"observed_at_unix_seconds!\", \
+                     extract(epoch FROM oldest.expires_at)::float8 AS \"oldest_at_unix_seconds?\" \
                      FROM (SELECT statement_timestamp() AS observed_at) AS clock \
                      LEFT JOIN LATERAL ( \
                          SELECT expires_at FROM http_idempotency_records \
@@ -160,11 +161,7 @@ impl Store {
                 )
                 .fetch_one(&mut *tx),
             )
-            .await?;
-            Ok(PopulationSample {
-                observed_at_unix_seconds: sample.observed_at,
-                oldest_at_unix_seconds: sample.oldest,
-            })
+            .await
         })
         .await
     }

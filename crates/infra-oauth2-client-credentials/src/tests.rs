@@ -57,9 +57,7 @@ const RESOURCE_PATH: &str = "/resource";
 const ASSERTION_AUDIENCE: &str = "https://issuer.example";
 /// Independent of the crate's own constants, so a typo in one does not hide
 /// behind an identical typo in the other.
-const GRANT_TYPE_CLIENT_CREDENTIALS: &str = "client_credentials";
 const GRANT_TYPE_TOKEN_EXCHANGE: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
-const CLIENT_ASSERTION_TYPE: &str = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
 const ACCESS_TOKEN_TYPE: &str = "urn:ietf:params:oauth:token-type:access_token";
 
 #[derive(Clone, Debug)]

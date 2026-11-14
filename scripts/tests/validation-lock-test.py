@@ -5,13 +5,16 @@ import json
 import hashlib
 import os
 from pathlib import Path
+import runpy
 import signal
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -20,6 +23,7 @@ sys.path.insert(0, str(ROOT / "scripts/lib"))
 from template_state import load_lock
 
 ENTRY = ROOT / "scripts/ci/validation-lock.sh"
+atomic_json = runpy.run_path(str(ENTRY.with_suffix(".py")))["atomic_json"]
 LOCK_ENV = ("VALIDATION_LOCK_DIR", "VALIDATION_LOCK_DOMAIN",
             "VALIDATION_LOCK_TOKEN", "VALIDATION_LOCK_HELD")
 
@@ -431,6 +435,61 @@ class ValidationLockTests(unittest.TestCase):
                                 stdout=log, stderr=log, start_new_session=True)
         self.processes.append(proc)
         return proc
+
+    def test_ticket_collision_preserves_competing_file_and_publishes_privately(self):
+        ticket = self.base / "ticket.json"
+        competing = []
+        native_open = os.open
+
+        def collide(path, flags, *args, **kwargs):
+            if flags & os.O_EXCL and not competing:
+                other = Path(path)
+                with other.open("xb") as stream:
+                    stream.write(b"competing writer")
+                competing.append(other)
+            return native_open(path, flags, *args, **kwargs)
+
+        with patch.object(os, "open", collide):
+            atomic_json(ticket, {"next": 3})
+        self.assertEqual(competing[0].read_bytes(), b"competing writer")
+        self.assertEqual(list(self.base.glob("*.json")), [ticket])
+        self.assertEqual(json.loads(ticket.read_bytes()), {"next": 3})
+        self.assertEqual(stat.S_IMODE(ticket.stat().st_mode), 0o600)
+
+    def test_failed_ticket_update_preserves_previous_ticket_and_removes_temporary(self):
+        ticket = self.base / "ticket.json"
+        ticket.write_bytes(b'{"next":2}')
+        for operation in ("fsync", "replace"):
+            with self.subTest(operation=operation):
+                with patch.object(os, operation, side_effect=OSError(operation)):
+                    with self.assertRaisesRegex(OSError, operation):
+                        atomic_json(ticket, {"next": 3})
+                self.assertEqual(list(self.base.iterdir()), [ticket])
+                self.assertEqual(ticket.read_bytes(), b'{"next":2}')
+        with self.assertRaises(TypeError):
+            atomic_json(ticket, {"next": object()})
+        self.assertEqual(list(self.base.iterdir()), [ticket])
+        self.assertEqual(ticket.read_bytes(), b'{"next":2}')
+
+    def test_directory_sync_failure_leaves_published_ticket_and_reused_name_intact(self):
+        ticket = self.base / "ticket.json"
+        native_replace, native_sync = os.replace, os.fsync
+
+        def replace(source, target):
+            native_replace(source, target)
+            with Path(source).open("xb") as stream:
+                stream.write(b"new owner")
+
+        def sync(fd):
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                raise OSError("directory sync")
+            native_sync(fd)
+
+        with patch.object(os, "replace", replace), patch.object(os, "fsync", sync):
+            with self.assertRaisesRegex(OSError, "directory sync"):
+                atomic_json(ticket, {"next": 3})
+        self.assertEqual(json.loads(ticket.read_bytes()), {"next": 3})
+        self.assertEqual([p.read_bytes() for p in self.base.iterdir() if p != ticket], [b"new owner"])
 
     def run_cli(self, *args, env=None, timeout=10):
         return subprocess.run(["bash", str(ENTRY), *args], cwd=ROOT,

@@ -36,23 +36,11 @@ from template_state import (
     manifest_entries,
     _contains_profile_marker,
     _manifest_files,
+    _regular_file,
     parse_json_bytes,
     parse_manifest,
     safe_relative,
     selected_adapters,
-    selected_http_idempotency,
-    selected_inbound_webhooks,
-    selected_jobs,
-    selected_cache,
-    selected_object_storage,
-    selected_service_auth,
-    selected_messaging,
-    selected_outbox,
-    selected_outbound_auth,
-    selected_outbound_http,
-    selected_grpc,
-    selected_profiles,
-    selected_webhooks,
     snapshot_tree,
     verify_plan,
     write_plan,
@@ -195,15 +183,6 @@ class _JsonScanner:
         if self.index == start:
             raise Refusal("settings JSON has an invalid value")
         return JsonNode("number", start, self.index)
-
-
-def _regular(path: Path, label: str) -> None:
-    try:
-        mode = path.lstat().st_mode
-    except FileNotFoundError:
-        raise Refusal(f"{label} is missing") from None
-    if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
-        raise Refusal(f"{label} is not a regular file")
 
 
 def _relative(path: Path, root: Path) -> str:
@@ -376,10 +355,10 @@ def _selected_manifest(snapshot: Path, manifest: Sequence[str], selected: set[st
 def _validate_source_inputs(snapshot: Path, selected: set[str], manifest: Sequence[str]) -> None:
     listed = {entry.rstrip("/") for entry in manifest}
     for helper in SOURCE_HELPERS:
-        _regular(snapshot / helper, helper)
+        _regular_file(snapshot / helper, helper)
     for adapter in selected:
         for path in ADAPTERS[adapter].canonical:
-            _regular(snapshot / path, path)
+            _regular_file(snapshot / path, path)
             if path not in listed:
                 raise Refusal(f"adapter canonical source is absent from manifest: {path}")
     skills = snapshot / ".agents/skills"
@@ -419,7 +398,7 @@ def _project_portable(snapshot: Path, target_lock: dict) -> bool:
         # Older portable sources were already pure and have no renderer API.
         return False
     for helper in PROFILE_PROJECTION_HELPERS:
-        _regular(snapshot / helper, helper)
+        _regular_file(snapshot / helper, helper)
     # Load the admitted source's initializer and state together, never a derived
     # target's stale one-shot helper. No Cargo, identity rewrite, or pack removal
     # belongs to this portable projection.
@@ -568,7 +547,7 @@ def _strict_json(text: str, label: str) -> JsonNode:
 def _setting_source_token(snapshot: Path, adapter: str) -> str:
     relative, parent_key, leaf_key = _SETTING_LEAVES[adapter]
     path = snapshot / relative
-    _regular(path, relative)
+    _regular_file(path, relative)
     try:
         text = path.read_bytes().decode("utf-8")
     except UnicodeDecodeError as error:
@@ -604,7 +583,7 @@ def _render_setting(snapshot: Path, stage: Path, adapter: str) -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes((json.dumps({parent_key: {leaf_key: json.loads(token)}}, indent=2) + "\n").encode("utf-8"))
         return
-    _regular(destination, relative)
+    _regular_file(destination, relative)
     try:
         text = destination.read_bytes().decode("utf-8")
     except UnicodeDecodeError as error:
@@ -633,12 +612,12 @@ def _render_setting(snapshot: Path, stage: Path, adapter: str) -> None:
 
 def _required_authorities(root: Path) -> None:
     for relative in REQUIRED_AUTHORITIES:
-        _regular(root / relative, f"required local authority {relative}")
+        _regular_file(root / relative, f"required local authority {relative}")
 
 
 def _standard_targets(snapshot: Path) -> set[str]:
     path = snapshot / "make/template.mk"
-    _regular(path, "make/template.mk")
+    _regular_file(path, "make/template.mk")
     try:
         text = path.read_text(encoding="utf-8")
     except UnicodeDecodeError as error:
@@ -705,12 +684,12 @@ def _make_rules(path: Path, *, allowed_includes: set[str] | None = None) -> set[
 def _admit_make(snapshot: Path, target: Path) -> None:
     standard = _standard_targets(snapshot)
     service = target / "make/service.mk"
-    _regular(service, "make/service.mk")
+    _regular_file(service, "make/service.mk")
     service_rules = _make_rules(service)
     if any("%" in rule or rule in standard for rule in service_rules):
         raise Refusal("make/service.mk overrides or patterns a portable standard target")
     root_make = target / "Makefile"
-    _regular(root_make, "Makefile")
+    _regular_file(root_make, "Makefile")
     root_rules = _make_rules(
         root_make,
         allowed_includes={"include make/service.mk", "include make/template.mk", "-include make/source.mk"},
@@ -873,19 +852,9 @@ def _run(arguments: argparse.Namespace) -> int:
             raise Refusal("source snapshot revision changed during admission")
         target_lock = load_lock(target, required=True)
         assert target_lock is not None
-        _database, harness = selected_profiles(target)
-        selected_outbound_http(target)
-        selected_outbound_auth(target)
-        selected_grpc(target)
-        selected_http_idempotency(target)
-        selected_jobs(target)
-        selected_messaging(target)
-        selected_cache(target)
-        selected_object_storage(target)
-        selected_service_auth(target)
-        selected_outbox(target)
-        selected_webhooks(target)
-        selected_inbound_webhooks(target)
+        if target_lock["state"] != "complete":
+            raise Refusal("template.lock is incomplete; inspect the init-produced diff and use a fresh template checkout")
+        harness = target_lock["profiles"]["agent_harness"]
         selected = set(selected_adapters(harness))
         profile_projection = _project_portable(snapshot, target_lock)
         manifest = parse_manifest(

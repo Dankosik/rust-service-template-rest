@@ -23,6 +23,7 @@ import stat
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 
 PROTOCOL = 2
@@ -79,12 +80,19 @@ def child_signals(previous_mask=None):
         signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
 
 
-def safe_open(path, flags=os.O_RDONLY):
-    fd = os.open(path, flags | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+def check_metadata_fd(fd):
     st = os.fstat(fd)
     if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid():
-        os.close(fd)
         raise Refusal("ownership-unavailable: unsafe metadata file")
+
+
+def safe_open(path, flags=os.O_RDONLY):
+    fd = os.open(path, flags | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        check_metadata_fd(fd)
+    except BaseException:
+        os.close(fd)
+        raise
     return fd
 
 
@@ -96,18 +104,22 @@ def read_json(path):
 
 def atomic_json(path, value):
     path = Path(path)
-    tmp = path.with_name(path.name + "." + secrets.token_hex(8))
+    fd, tmp = tempfile.mkstemp(suffix=".tmp", dir=path.parent)
     try:
-        fd = safe_open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
-        with os.fdopen(fd, "w") as stream:
-            json.dump(value, stream, separators=(",", ":"))
-            stream.flush()
-            os.fsync(stream.fileno())
+        try:
+            check_metadata_fd(fd)
+            with os.fdopen(fd, "w", closefd=False) as stream:
+                json.dump(value, stream, separators=(",", ":"))
+                stream.flush()
+                os.fsync(fd)
+        finally:
+            os.close(fd)
         os.replace(tmp, path)
-        sync_dir(path.parent)
-    finally:
+    except BaseException:
         with contextlib.suppress(FileNotFoundError):
-            tmp.unlink()
+            os.unlink(tmp)
+        raise
+    sync_dir(path.parent)
 
 
 def sync_dir(path):

@@ -20,6 +20,22 @@ controller = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(controller)
 
 
+class RecoveryManifest(unittest.TestCase):
+    def test_oversized_replacement_is_rejected_before_json_parsing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "manifest.json"
+            path.write_bytes(b"{}".ljust(4 * 1024 * 1024, b" "))
+            self.assertEqual(controller.load(path), {})
+            original = path.stat()
+            replacement = path.with_suffix(".new")
+            with replacement.open("wb") as stream:
+                stream.truncate(original.st_size + 1)
+            replacement.replace(path)
+            with mock.patch.object(Path, "stat", return_value=original):
+                with self.assertRaisesRegex(controller.Refused, "manifest_too_large"):
+                    controller.load(path)
+
+
 class ResourceAdmission(unittest.TestCase):
     @staticmethod
     def sample(**changes):
@@ -738,8 +754,19 @@ unrelated_secret{key="private-test-value"} 1
     def test_partial_observation_write_does_not_invent_a_completed_offer(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "load.jsonl"
-            path.write_bytes(b'{"id":"confirmed"}\n{"id":"interrupted"')
+            self.assertEqual(capacity.complete_lines(path), [])
+            path.write_bytes(b'{"id":"confirmed"}\n{"id":"interrupted"'.ljust(16 * 1024 * 1024, b" "))
             self.assertEqual(capacity.complete_lines(path), [{"id": "confirmed"}])
+            original = path.stat()
+            with path.open("ab") as stream:
+                stream.write(b"}")
+            with mock.patch.object(Path, "stat", return_value=original):
+                with self.assertRaisesRegex(ValueError, "observation_file_limit"):
+                    capacity.complete_lines(path)
+            path.write_bytes(b"{}\n")
+            with mock.patch.object(Path, "open", side_effect=FileNotFoundError):
+                with self.assertRaises(FileNotFoundError):
+                    capacity.complete_lines(path)
 # template:end outbox:capacity-measurement-tests
 
 

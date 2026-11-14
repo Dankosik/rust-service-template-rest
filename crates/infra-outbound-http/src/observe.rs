@@ -183,20 +183,16 @@ impl<'a> Attempt<'a> {
 
     fn emit(&self, outcome: Outcome) {
         let status_label = self.status.map(status_label);
-        // An HTTP error status is its own `error.type`, sharing the status label.
         let error_type = match outcome {
-            Outcome::Response => self
-                .status
-                .filter(|status| is_error_status(*status))
-                .and(status_label.clone()),
-            Outcome::Failed(class) => Some(SharedString::from(class)),
-            Outcome::Cancelled => None,
+            Outcome::Response if self.status.is_some_and(is_error_status) => status_label,
+            Outcome::Failed(class) => Some(class),
+            Outcome::Response | Outcome::Cancelled => None,
         };
         // One call: a formatting layer may re-serialize every field per record.
         tracing::record_all!(
             self.span,
             http.response.status_code = self.status.map(|status| status.as_u16()),
-            error.type = error_type.as_deref(),
+            error.type = error_type,
             outbound.outcome = outcome.as_str(),
             otel.status_code = error_type.is_some().then_some("ERROR"),
         );
@@ -211,8 +207,8 @@ impl<'a> Attempt<'a> {
     fn labels(
         &self,
         outcome: Outcome,
-        status_label: Option<SharedString>,
-        error_type: Option<SharedString>,
+        status_label: Option<&'static str>,
+        error_type: Option<&'static str>,
     ) -> Vec<Label> {
         let mut labels = Vec::with_capacity(
             4 + usize::from(self.template.is_some())
@@ -287,43 +283,23 @@ fn is_error_status(status: StatusCode) -> bool {
     status.as_u16() >= 400
 }
 
-/// Every code `StatusCode` admits, 100 through 999, as three ASCII digits each.
-/// `StatusCode::as_str` borrows a table like this one only for `&self`, so a
-/// `'static` label would otherwise need an allocation per response.
-const STATUS_DIGITS: &str = {
-    const BYTES: [u8; 2700] = {
-        let mut digits = [0; 2700];
-        let mut offset = 0;
-        let mut hundreds = b'1';
-        while hundreds <= b'9' {
-            let mut tens = b'0';
-            while tens <= b'9' {
-                let mut ones = b'0';
-                while ones <= b'9' {
-                    digits[offset] = hundreds;
-                    digits[offset + 1] = tens;
-                    digits[offset + 2] = ones;
-                    offset += 3;
-                    ones += 1;
-                }
-                tens += 1;
-            }
-            hundreds += 1;
-        }
-        digits
-    };
-    match std::str::from_utf8(&BYTES) {
-        Ok(digits) => digits,
-        Err(_) => "",
+// StatusCode::as_str borrows its receiver. Static addresses let metrics
+// retain those labels for extension codes as well as standard codes.
+static STATUS_CODES: [StatusCode; 900] = {
+    let mut codes = [StatusCode::CONTINUE; 900];
+    let mut code = 100_u16;
+    while code <= 999 {
+        codes[(code - 100) as usize] = match StatusCode::from_u16(code) {
+            Ok(status) => status,
+            Err(_) => panic!("status table contains an invalid code"),
+        };
+        code += 1;
     }
+    codes
 };
 
-fn status_label(status: StatusCode) -> SharedString {
-    let offset = usize::from(status.as_u16() - 100) * 3;
-    STATUS_DIGITS.get(offset..offset + 3).map_or_else(
-        || SharedString::from(Arc::<str>::from(status.as_str())),
-        SharedString::from,
-    )
+fn status_label(status: StatusCode) -> &'static str {
+    STATUS_CODES[usize::from(status.as_u16() - 100)].as_str()
 }
 
 /// The class of a transport failure, read from the typed causes the libraries

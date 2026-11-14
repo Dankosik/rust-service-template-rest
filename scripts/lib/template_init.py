@@ -14,7 +14,7 @@ import subprocess
 import sys
 import tempfile
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -34,6 +34,7 @@ from template_state import (
     OUTBOX_CHOICES,
     LOCK_NAME,
     LOCK_SCHEMA_VERSION,
+    LockSnapshot,
     TEMPLATE_REPOSITORY,
     PlannedLink,
     PlannedWrite,
@@ -49,11 +50,8 @@ from template_state import (
     jobs_requirement,
     outbox_requirement,
     service_auth_requirement,
-    lock_has_explicit_authn,
-    lock_has_explicit_http_idempotency,
-    lock_has_explicit_jobs,
-    lock_has_explicit_outbound_http,
     load_lock,
+    load_lock_snapshot,
     manifest_entries,
     _manifest_files,
     OUTBOUND_HTTP_CHOICES,
@@ -192,27 +190,7 @@ def parse_inputs(arguments: argparse.Namespace) -> InitInputs:
     if inputs.grpc not in GRPC_CHOICES:
         raise Refusal("GRPC is unsupported")
     if inputs.outbound_auth == "oauth2-client-credentials":
-        inputs = InitInputs(
-            service_name=inputs.service_name,
-            repository=inputs.repository,
-            description=inputs.description,
-            codeowner=inputs.codeowner,
-            database=inputs.database,
-            authn=inputs.authn,
-            outbound_http="bounded",
-            outbound_auth=inputs.outbound_auth,
-            grpc=inputs.grpc,
-            http_idempotency=inputs.http_idempotency,
-            jobs=inputs.jobs,
-            messaging=inputs.messaging,
-            outbox=inputs.outbox,
-            webhooks=inputs.webhooks,
-            inbound_webhooks=inputs.inbound_webhooks,
-            cache=inputs.cache,
-            object_storage=inputs.object_storage,
-            service_auth=inputs.service_auth,
-            agent_harness=inputs.agent_harness,
-        )
+        inputs = replace(inputs, outbound_http="bounded")
     if inputs.http_idempotency not in HTTP_IDEMPOTENCY_CHOICES:
         raise Refusal("HTTP_IDEMPOTENCY is unsupported")
     if inputs.agent_harness not in HARNESS_CHOICES:
@@ -360,8 +338,47 @@ _SOURCE_TEMPLATE_PROFILE_INVENTORY_KEYS = (_POSTGRES_SUSTAINED_PROFILE_INVENTORY
     | {"source-template"})
 _TEST_DIGEST_PROFILE_INVENTORY_KEYS = _SOURCE_TEMPLATE_PROFILE_INVENTORY_KEYS | {"test-digest"}
 _SERVICE_AUTH_PROFILE_INVENTORY_KEYS = _TEST_DIGEST_PROFILE_INVENTORY_KEYS | {"service-auth"}
-# The laboratory-bearing key sets above are supported historical replay input only.
+# Initialization admits the old laboratory inventories. Only replay retains the retired pack.
 _LABORATORY_RETIRED_PROFILE_INVENTORY_KEYS = _SERVICE_AUTH_PROFILE_INVENTORY_KEYS - {"postgres-sustained"}
+
+_UNCONDITIONAL_PROFILE_INVENTORIES = frozenset({
+    _JSONWEBTOKEN_PROFILE_INVENTORY_KEYS,
+    _OBJECT_STORAGE_PROFILE_INVENTORY_KEYS,
+    _RUNTIME_PROGRESS_PROFILE_INVENTORY_KEYS,
+    _TEST_METRICS_PROFILE_INVENTORY_KEYS,
+    _SOURCE_TEMPLATE_PROFILE_INVENTORY_KEYS,
+    _TEST_DIGEST_PROFILE_INVENTORY_KEYS,
+    _SERVICE_AUTH_PROFILE_INVENTORY_KEYS,
+    _LABORATORY_RETIRED_PROFILE_INVENTORY_KEYS,
+    _POSTGRES_SUSTAINED_PROFILE_INVENTORY_KEYS,
+    _OPERATIONAL_RECOVERY_PROFILE_INVENTORY_KEYS,
+    _JOBS_REFERENCE_PROFILE_INVENTORY_KEYS,
+    _CACHE_PROFILE_INVENTORY_KEYS,
+    _GRPC_PROFILE_INVENTORY_KEYS,
+    _OUTBOX_LEGACY_OUTBOUND_AUTH_PROFILE_INVENTORY_KEYS,
+    _OUTBOX_OUTBOUND_AUTH_PROFILE_INVENTORY_KEYS,
+    _SHARED_CONFIG_URL_LEGACY_PROFILE_INVENTORY_KEYS,
+    _SHARED_CONFIG_URL_PROFILE_INVENTORY_KEYS,
+    _OUTBOX_LEGACY_PROFILE_INVENTORY_KEYS,
+    _OUTBOX_PROFILE_INVENTORY_KEYS,
+    _MESSAGING_PROFILE_INVENTORY_KEYS,
+    _OUTBOUND_AUTH_PROFILE_INVENTORY_KEYS,
+    _TRUSTED_ORIGIN_PROFILE_INVENTORY_KEYS,
+})
+
+# The first refusal and the order of marker processing must be independent of JSON key order.
+_PROFILE_SECTION_ORDER = (
+    "source-template",
+    "authn", "oidc-jwt", "oidc-introspection",
+    "outbound-http", "request-budget", "egress-dns", "outbound-auth", "client-integrations",
+    "grpc", "grpc-none", "grpc-authn", "grpc-transport-tests", "grpc-jwt", "outbound-auth-grpc",
+    "runtime-progress", "test-digest", "service-auth", "test-metrics", "postgres-sustained",
+    "jobs-reference", "config-url", "tls-fixtures", "http-idempotency", "http-idempotency-mounted",
+    "postgres-grpc-consumers", "postgres-grpc-auth", "test-introspection-fixtures",
+    "jobs", "jobs-http-idempotency", "webhooks-common", "webhooks", "inbound-webhooks",
+    "messaging", "worker", "service-secrets", "integration", "jobs-messaging", "outbox",
+    "cache", "object-storage", "rustls", "jsonwebtoken",
+)
 
 
 def _profile_data(
@@ -381,214 +398,20 @@ def _profile_data(
     if not isinstance(raw, dict) or raw.get("schema_version") != 1:
         raise Refusal("template profile inventory has an unsupported schema")
     keys = frozenset(raw)
-    include_cache = False
-    include_object_storage = False
-    if keys in (
-        _JSONWEBTOKEN_PROFILE_INVENTORY_KEYS,
-        _OBJECT_STORAGE_PROFILE_INVENTORY_KEYS,
-        _RUNTIME_PROGRESS_PROFILE_INVENTORY_KEYS,
-        _TEST_METRICS_PROFILE_INVENTORY_KEYS,
-        _SOURCE_TEMPLATE_PROFILE_INVENTORY_KEYS,
-        _TEST_DIGEST_PROFILE_INVENTORY_KEYS,
-        _SERVICE_AUTH_PROFILE_INVENTORY_KEYS,
-        _LABORATORY_RETIRED_PROFILE_INVENTORY_KEYS,
-        _POSTGRES_SUSTAINED_PROFILE_INVENTORY_KEYS,
-        _OPERATIONAL_RECOVERY_PROFILE_INVENTORY_KEYS,
-        _JOBS_REFERENCE_PROFILE_INVENTORY_KEYS,
-    ):
-        include_authn = True
-        include_outbound = True
-        include_outbound_auth = True
-        include_grpc = True
-        include_tls_fixtures = True
-        include_http_idempotency = True
-        include_jobs = True
-        include_webhooks = True
-        include_messaging = True
-        include_outbox = True
-        include_cache = True
-        include_object_storage = keys in (
-            _OBJECT_STORAGE_PROFILE_INVENTORY_KEYS,
-            _RUNTIME_PROGRESS_PROFILE_INVENTORY_KEYS,
-            _TEST_METRICS_PROFILE_INVENTORY_KEYS,
-            _SOURCE_TEMPLATE_PROFILE_INVENTORY_KEYS,
-            _TEST_DIGEST_PROFILE_INVENTORY_KEYS,
-            _SERVICE_AUTH_PROFILE_INVENTORY_KEYS,
-            _LABORATORY_RETIRED_PROFILE_INVENTORY_KEYS,
-            _POSTGRES_SUSTAINED_PROFILE_INVENTORY_KEYS,
-            _OPERATIONAL_RECOVERY_PROFILE_INVENTORY_KEYS,
-            _JOBS_REFERENCE_PROFILE_INVENTORY_KEYS,
+    if not (
+        keys in _UNCONDITIONAL_PROFILE_INVENTORIES
+        or historical_egress and keys in (
+            _OUTBOUND_AUTH_PROFILE_INVENTORY_KEYS | {"egress-dns"},
+            _WEBHOOKS_PROFILE_INVENTORY_KEYS,
+            _JOBS_PROFILE_INVENTORY_KEYS,
+            _OUTBOUND_PROFILE_INVENTORY_KEYS,
         )
-    elif keys == _CACHE_PROFILE_INVENTORY_KEYS:
-        include_authn = True
-        include_outbound = True
-        include_outbound_auth = True
-        include_grpc = True
-        include_tls_fixtures = True
-        include_http_idempotency = True
-        include_jobs = True
-        include_webhooks = True
-        include_messaging = True
-        include_outbox = True
-        include_cache = True
-    elif keys == _GRPC_PROFILE_INVENTORY_KEYS:
-        include_authn = True
-        include_outbound = True
-        include_outbound_auth = True
-        include_grpc = True
-        include_tls_fixtures = True
-        include_http_idempotency = True
-        include_jobs = True
-        include_webhooks = True
-        include_messaging = True
-        include_outbox = True
-    elif keys in (
-        _OUTBOX_LEGACY_OUTBOUND_AUTH_PROFILE_INVENTORY_KEYS,
-        _OUTBOX_OUTBOUND_AUTH_PROFILE_INVENTORY_KEYS,
-        _SHARED_CONFIG_URL_LEGACY_PROFILE_INVENTORY_KEYS,
-        _SHARED_CONFIG_URL_PROFILE_INVENTORY_KEYS,
+        or historical_jobs and historical_egress and keys == _HTTP_IDEMPOTENCY_PROFILE_INVENTORY_KEYS - {"tls-fixtures"}
+        or historical_jobs and keys == _HTTP_IDEMPOTENCY_PROFILE_INVENTORY_KEYS
+        or historical_http_idempotency and keys == _TLS_FIXTURE_PROFILE_INVENTORY_KEYS
+        or historical_outbound and keys == _CURRENT_PROFILE_INVENTORY_KEYS
+        or historical_authn and keys == _LEGACY_PROFILE_INVENTORY_KEYS
     ):
-        include_authn = True
-        include_outbound = True
-        include_outbound_auth = True
-        include_tls_fixtures = True
-        include_http_idempotency = True
-        include_jobs = True
-        include_webhooks = True
-        include_grpc = False
-        include_messaging = True
-        include_outbox = True
-    elif keys in (_OUTBOX_LEGACY_PROFILE_INVENTORY_KEYS, _OUTBOX_PROFILE_INVENTORY_KEYS):
-        include_authn = True
-        include_outbound = True
-        include_outbound_auth = False
-        include_tls_fixtures = True
-        include_http_idempotency = True
-        include_jobs = True
-        include_webhooks = True
-        include_grpc = False
-        include_messaging = True
-        include_outbox = True
-    elif keys == _MESSAGING_PROFILE_INVENTORY_KEYS:
-        include_authn = True
-        include_outbound = True
-        include_outbound_auth = False
-        include_tls_fixtures = True
-        include_http_idempotency = True
-        include_jobs = True
-        include_webhooks = True
-        include_grpc = False
-        include_messaging = True
-        include_outbox = False
-    elif keys == _OUTBOUND_AUTH_PROFILE_INVENTORY_KEYS or (
-        historical_egress and keys == (_OUTBOUND_AUTH_PROFILE_INVENTORY_KEYS | {"egress-dns"})
-    ):
-        include_authn = True
-        include_outbound = True
-        include_outbound_auth = True
-        include_grpc = False
-        include_tls_fixtures = True
-        include_http_idempotency = True
-        include_jobs = True
-        include_webhooks = True
-        include_messaging = False
-        include_outbox = False
-    elif keys == _TRUSTED_ORIGIN_PROFILE_INVENTORY_KEYS or (
-        historical_egress and keys == _WEBHOOKS_PROFILE_INVENTORY_KEYS
-    ):
-        include_authn = True
-        include_outbound = True
-        include_outbound_auth = False
-        include_grpc = False
-        include_tls_fixtures = True
-        include_http_idempotency = True
-        include_jobs = True
-        include_webhooks = True
-        include_messaging = False
-        include_outbox = False
-    elif historical_egress and keys == _JOBS_PROFILE_INVENTORY_KEYS:
-        include_authn = True
-        include_outbound = True
-        include_outbound_auth = False
-        include_grpc = False
-        include_tls_fixtures = True
-        include_http_idempotency = True
-        include_jobs = True
-        include_webhooks = False
-        include_messaging = False
-        include_outbox = False
-    elif historical_jobs and historical_egress and keys == (
-        _HTTP_IDEMPOTENCY_PROFILE_INVENTORY_KEYS - {"tls-fixtures"}
-    ):
-        # Exact HTTP-idempotency/DNS generation, before jobs or TLS fixtures.
-        include_authn = True
-        include_outbound = True
-        include_outbound_auth = False
-        include_grpc = False
-        include_tls_fixtures = False
-        include_http_idempotency = True
-        include_jobs = False
-        include_webhooks = False
-        include_messaging = False
-        include_outbox = False
-    elif historical_jobs and keys == _HTTP_IDEMPOTENCY_PROFILE_INVENTORY_KEYS:
-        include_authn = True
-        include_outbound = True
-        include_outbound_auth = False
-        include_grpc = False
-        include_tls_fixtures = True
-        include_http_idempotency = True
-        include_jobs = False
-        include_webhooks = False
-        include_messaging = False
-        include_outbox = False
-    elif historical_http_idempotency and keys == _TLS_FIXTURE_PROFILE_INVENTORY_KEYS:
-        include_authn = True
-        include_outbound = True
-        include_outbound_auth = False
-        include_grpc = False
-        include_tls_fixtures = True
-        include_http_idempotency = False
-        include_jobs = False
-        include_webhooks = False
-        include_messaging = False
-        include_outbox = False
-    elif historical_egress and keys == _OUTBOUND_PROFILE_INVENTORY_KEYS:
-        # Exact outbound-HTTP/DNS generation, before TLS fixtures or jobs.
-        # Accepted only for byte-preserving replay, never current projection.
-        include_authn = True
-        include_outbound = True
-        include_outbound_auth = False
-        include_grpc = False
-        include_tls_fixtures = False
-        include_http_idempotency = False
-        include_jobs = False
-        include_webhooks = False
-        include_messaging = False
-        include_outbox = False
-    elif historical_outbound and keys == _CURRENT_PROFILE_INVENTORY_KEYS:
-        include_authn = True
-        include_outbound = False
-        include_outbound_auth = False
-        include_grpc = False
-        include_tls_fixtures = False
-        include_http_idempotency = False
-        include_jobs = False
-        include_webhooks = False
-        include_messaging = False
-        include_outbox = False
-    elif historical_authn and keys == _LEGACY_PROFILE_INVENTORY_KEYS:
-        include_authn = False
-        include_outbound = False
-        include_outbound_auth = False
-        include_grpc = False
-        include_tls_fixtures = False
-        include_http_idempotency = False
-        include_jobs = False
-        include_webhooks = False
-        include_messaging = False
-        include_outbox = False
-    else:
         raise Refusal("template profile inventory has an unsupported schema")
     source_only = _path_list(raw["source_only"], "source_only")
     postgres = raw["postgres"]
@@ -596,192 +419,14 @@ def _profile_data(
         raise Refusal("template PostgreSQL inventory has an unsupported shape")
     removals = {"postgres": tuple(_path_list(postgres["remove_when_none"], "remove_when_none"))}
     markers = _markers("postgres", postgres["markers"])
-    if "source-template" in keys:
-        section = raw["source-template"]
+    for profile in _PROFILE_SECTION_ORDER:
+        if profile not in keys:
+            continue
+        section = raw[profile]
         if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
-            raise Refusal("template source-template inventory has an unsupported shape")
-        # Source-only commands and guide links are never a consumer profile.
-        removals["source-template"] = tuple(
-            _path_list(section["remove_when_unselected"], "source-template remove_when_unselected")
-        )
-        markers.extend(_markers("source-template", section["markers"]))
-    if include_authn:
-        for profile in ("authn", "oidc-jwt", "oidc-introspection"):
-            section = raw[profile]
-            if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
-                raise Refusal(f"template {profile} inventory has an unsupported shape")
-            removals[profile] = tuple(_path_list(section["remove_when_unselected"], f"{profile} remove_when_unselected"))
-            markers.extend(_markers(profile, section["markers"]))
-    if include_outbound:
-        # Only replay can consume an exact older inventory containing DNS.
-        outbound_profiles = ("outbound-http", "request-budget")
-        if "egress-dns" in keys:
-            outbound_profiles += ("egress-dns",)
-        for profile in outbound_profiles:
-            section = raw[profile]
-            if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
-                raise Refusal(f"template {profile} inventory has an unsupported shape")
-            removals[profile] = tuple(_path_list(section["remove_when_unselected"], f"{profile} remove_when_unselected"))
-            markers.extend(_markers(profile, section["markers"]))
-    if include_outbound_auth:
-        section = raw["outbound-auth"]
-        if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
-            raise Refusal("template outbound-auth inventory has an unsupported shape")
-        removals["outbound-auth"] = tuple(
-            _path_list(section["remove_when_unselected"], "outbound-auth remove_when_unselected")
-        )
-        markers.extend(_markers("outbound-auth", section["markers"]))
-    if "client-integrations" in keys:
-        section = raw["client-integrations"]
-        if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
-            raise Refusal("template client-integrations inventory has an unsupported shape")
-        removals["client-integrations"] = tuple(
-            _path_list(section["remove_when_unselected"], "client-integrations remove_when_unselected")
-        )
-        markers.extend(_markers("client-integrations", section["markers"]))
-    if include_grpc:
-        for profile in ("grpc", "grpc-none", "grpc-authn", "grpc-transport-tests", "grpc-jwt", "outbound-auth-grpc"):
-            section = raw[profile]
-            if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
-                raise Refusal(f"template {profile} inventory has an unsupported shape")
-            removals[profile] = tuple(_path_list(section["remove_when_unselected"], f"{profile} remove_when_unselected"))
-            markers.extend(_markers(profile, section["markers"]))
-    if "runtime-progress" in keys:
-        section = raw["runtime-progress"]
-        if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
-            raise Refusal("template runtime-progress inventory has an unsupported shape")
-        removals["runtime-progress"] = tuple(
-            _path_list(section["remove_when_unselected"], "runtime-progress remove_when_unselected")
-        )
-        markers.extend(_markers("runtime-progress", section["markers"]))
-    if "test-digest" in keys:
-        section = raw["test-digest"]
-        if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
-            raise Refusal("template test-digest inventory has an unsupported shape")
-        removals["test-digest"] = tuple(
-            _path_list(section["remove_when_unselected"], "test-digest remove_when_unselected")
-        )
-        markers.extend(_markers("test-digest", section["markers"]))
-    if "service-auth" in keys:
-        section = raw["service-auth"]
-        if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
-            raise Refusal("template service-auth inventory has an unsupported shape")
-        removals["service-auth"] = tuple(
-            _path_list(section["remove_when_unselected"], "service-auth remove_when_unselected")
-        )
-        markers.extend(_markers("service-auth", section["markers"]))
-    if "test-metrics" in keys:
-        section = raw["test-metrics"]
-        if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
-            raise Refusal("template test-metrics inventory has an unsupported shape")
-        removals["test-metrics"] = tuple(
-            _path_list(section["remove_when_unselected"], "test-metrics remove_when_unselected")
-        )
-        markers.extend(_markers("test-metrics", section["markers"]))
-    if "postgres-sustained" in keys:
-        section = raw["postgres-sustained"]
-        if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
-            raise Refusal("template postgres-sustained inventory has an unsupported shape")
-        removals["postgres-sustained"] = tuple(
-            _path_list(section["remove_when_unselected"], "postgres-sustained remove_when_unselected")
-        )
-        markers.extend(_markers("postgres-sustained", section["markers"]))
-    if "jobs-reference" in keys:
-        section = raw["jobs-reference"]
-        if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
-            raise Refusal("template jobs-reference inventory has an unsupported shape")
-        removals["jobs-reference"] = tuple(
-            _path_list(section["remove_when_unselected"], "jobs-reference remove_when_unselected")
-        )
-        markers.extend(_markers("jobs-reference", section["markers"]))
-    if "config-url" in keys:
-        section = raw["config-url"]
-        if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
-            raise Refusal("template config-url inventory has an unsupported shape")
-        removals["config-url"] = tuple(
-            _path_list(section["remove_when_unselected"], "config-url remove_when_unselected")
-        )
-        markers.extend(_markers("config-url", section["markers"]))
-    if include_tls_fixtures:
-        section = raw["tls-fixtures"]
-        if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
-            raise Refusal("template tls-fixtures inventory has an unsupported shape")
-        removals["tls-fixtures"] = tuple(
-            _path_list(section["remove_when_unselected"], "tls-fixtures remove_when_unselected")
-        )
-        markers.extend(_markers("tls-fixtures", section["markers"]))
-    if include_http_idempotency:
-        for profile in ("http-idempotency", "http-idempotency-mounted"):
-            section = raw[profile]
-            if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
-                raise Refusal(f"template {profile} inventory has an unsupported shape")
-            removals[profile] = tuple(_path_list(section["remove_when_unselected"], f"{profile} remove_when_unselected"))
-            markers.extend(_markers(profile, section["markers"]))
-    if _OPERATIONAL_RECOVERY_PROFILE_INVENTORY_KEYS <= keys:
-        for profile in ("postgres-grpc-consumers", "postgres-grpc-auth", "test-introspection-fixtures"):
-            section = raw[profile]
-            if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
-                raise Refusal(f"template {profile} inventory has an unsupported shape")
-            removals[profile] = tuple(_path_list(section["remove_when_unselected"], f"{profile} remove_when_unselected"))
-            markers.extend(_markers(profile, section["markers"]))
-    if include_jobs:
-        for profile in ("jobs", "jobs-http-idempotency"):
-            section = raw[profile]
-            if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
-                raise Refusal(f"template {profile} inventory has an unsupported shape")
-            removals[profile] = tuple(_path_list(section["remove_when_unselected"], f"{profile} remove_when_unselected"))
-            markers.extend(_markers(profile, section["markers"]))
-    if include_webhooks:
-        for profile in ("webhooks-common", "webhooks", "inbound-webhooks"):
-            section = raw[profile]
-            if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
-                raise Refusal(f"template {profile} inventory has an unsupported shape")
-            removals[profile] = tuple(_path_list(section["remove_when_unselected"], f"{profile} remove_when_unselected"))
-            markers.extend(_markers(profile, section["markers"]))
-    if include_messaging:
-        messaging_profiles = ("messaging", "worker", "service-secrets", "integration")
-        if "jobs-messaging" in keys:
-            messaging_profiles += ("jobs-messaging",)
-        for profile in messaging_profiles:
-            section = raw[profile]
-            if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
-                raise Refusal(f"template {profile} inventory has an unsupported shape")
-            removals[profile] = tuple(_path_list(section["remove_when_unselected"], f"{profile} remove_when_unselected"))
-            markers.extend(_markers(profile, section["markers"]))
-    if include_outbox:
-        section = raw["outbox"]
-        if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
-            raise Refusal("template outbox inventory has an unsupported shape")
-        removals["outbox"] = tuple(_path_list(section["remove_when_unselected"], "outbox remove_when_unselected"))
-        markers.extend(_markers("outbox", section["markers"]))
-    if include_cache:
-        section = raw["cache"]
-        if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
-            raise Refusal("template cache inventory has an unsupported shape")
-        removals["cache"] = tuple(_path_list(section["remove_when_unselected"], "cache remove_when_unselected"))
-        markers.extend(_markers("cache", section["markers"]))
-    if include_object_storage:
-        section = raw["object-storage"]
-        if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
-            raise Refusal("template object-storage inventory has an unsupported shape")
-        removals["object-storage"] = tuple(
-            _path_list(section["remove_when_unselected"], "object-storage remove_when_unselected")
-        )
-        markers.extend(_markers("object-storage", section["markers"]))
-    if "rustls" in keys:
-        section = raw["rustls"]
-        if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
-            raise Refusal("template rustls inventory has an unsupported shape")
-        removals["rustls"] = tuple(_path_list(section["remove_when_unselected"], "rustls remove_when_unselected"))
-        markers.extend(_markers("rustls", section["markers"]))
-    if "jsonwebtoken" in keys:
-        section = raw["jsonwebtoken"]
-        if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
-            raise Refusal("template jsonwebtoken inventory has an unsupported shape")
-        removals["jsonwebtoken"] = tuple(
-            _path_list(section["remove_when_unselected"], "jsonwebtoken remove_when_unselected")
-        )
-        markers.extend(_markers("jsonwebtoken", section["markers"]))
+            raise Refusal(f"template {profile} inventory has an unsupported shape")
+        removals[profile] = tuple(_path_list(section["remove_when_unselected"], f"{profile} remove_when_unselected"))
+        markers.extend(_markers(profile, section["markers"]))
     identity = raw["identity"]
     if not isinstance(identity, list):
         raise Refusal("template identity inventory has an unsupported shape")
@@ -1184,7 +829,10 @@ def _lock_bytes(inputs: InitInputs, revision: str, state: str) -> bytes:
     return (json.dumps(_lock(inputs, revision, state), indent=2, ensure_ascii=False) + "\n").encode("utf-8")
 
 
-def _postconditions(root: Path, inputs: InitInputs, profiles: ProfileData, *, initial: bool = False) -> None:
+def _postconditions(
+    root: Path, inputs: InitInputs, profiles: ProfileData, *, initial: bool = False,
+    replay_lock: LockSnapshot | None = None,
+) -> None:
     try:
         workspace = tomllib.loads((root / "Cargo.toml").read_text(encoding="utf-8"))
         service_manifest = tomllib.loads((root / "crates/service/Cargo.toml").read_text(encoding="utf-8"))
@@ -1220,7 +868,7 @@ def _postconditions(root: Path, inputs: InitInputs, profiles: ProfileData, *, in
             raise Refusal(f"unselected adapter output remains: {adapter}")
     parse_manifest(
         root, harness=inputs.agent_harness, target_repository=inputs.repository,
-        initializing=initial,
+        initializing=initial, _replay_lock=replay_lock,
     )
     _validate_generated_ownership(root, inputs.agent_harness)
     for relative in sorted({path for _profile, path, _marker_id in profiles.markers}):
@@ -1304,24 +952,22 @@ def _validate_generated_ownership(root: Path, harness: str) -> None:
                 raise Refusal("selected Codex generated ownership shape is invalid")
 
 
-def _replay(root: Path, inputs: InitInputs) -> int:
-    lock = load_lock(root, required=True)
-    assert lock is not None
+def _replay(root: Path, inputs: InitInputs, snapshot: LockSnapshot) -> int:
+    lock = snapshot.normalized
     if lock["state"] != "complete":
         raise Refusal("template.lock is incomplete; inspect the init-produced diff and use a fresh template checkout")
     if lock["identity"] != inputs.identity() or lock["profiles"] != inputs.profiles():
         raise Refusal("template initialization choices differ from the complete template.lock")
+    explicit = snapshot.explicit_profiles
     profiles = _profile_data(
         root,
-        historical_authn=not lock_has_explicit_authn(root, required=True),
-        historical_outbound=lock_has_explicit_authn(root, required=True)
-        and not lock_has_explicit_outbound_http(root, required=True),
-        historical_http_idempotency=lock_has_explicit_outbound_http(root, required=True)
-        and not lock_has_explicit_http_idempotency(root, required=True),
-        historical_jobs=not lock_has_explicit_jobs(root, required=True),
+        historical_authn="authn" not in explicit,
+        historical_outbound="authn" in explicit and "outbound_http" not in explicit,
+        historical_http_idempotency="outbound_http" in explicit and "http_idempotency" not in explicit,
+        historical_jobs="jobs" not in explicit,
         historical_egress=True,
     )
-    _postconditions(root, inputs, profiles)
+    _postconditions(root, inputs, profiles, replay_lock=snapshot)
     print("template init: matching complete lock; no changes")
     return 0
 
@@ -1665,9 +1311,9 @@ def _collect_plan(
 def initialize(arguments: argparse.Namespace) -> int:
     inputs = parse_inputs(arguments)
     root = git_root(arguments.repo)
-    existing = load_lock(root)
+    existing = load_lock_snapshot(root)
     if existing is not None:
-        return _replay(root, inputs)
+        return _replay(root, inputs, existing)
     _tracked_checkout_is_clean(root)
     revision = git_head(root)
     with tempfile.TemporaryDirectory(prefix="template-init-") as temporary:

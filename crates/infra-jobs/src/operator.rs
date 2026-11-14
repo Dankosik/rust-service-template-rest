@@ -533,11 +533,9 @@ async fn lock_job_row(tx: &mut Tx<'_>, id: JobId) -> Result<(), OperatorError> {
     Ok(())
 }
 
-/// A live job that holds the redrive's unique key is a caller-visible conflict;
-/// every other database failure stays a database failure.
 fn conflict_or_database(error: sqlx::Error) -> OperatorError {
     let live_key_conflict = error.as_database_error().is_some_and(|database| {
-        database.code().as_deref() == Some("23505")
+        database.is_unique_violation()
             && database.constraint() == Some("background_jobs_live_unique_key")
     });
     if live_key_conflict {

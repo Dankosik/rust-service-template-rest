@@ -104,6 +104,10 @@ self_test() (
 	output=$(printf '%s\n' crates/mid/build.rs | bash "${script}")
 	grep -qx 'test_packages=mid top' <<<"${output}"
 
+	# Independent roots and overlapping reverse closures form one sorted set.
+	output=$(printf '%s\n' crates/alone/src/lib.rs crates/mid/build.rs crates/mid/src/lib.rs crates/top/src/lib.rs | bash "${script}")
+	grep -qx 'test_packages=alone mid top' <<<"${output}"
+
 	# The package name comes from the manifest, not the directory.
 	output=$(printf '%s\n' crates/cfg/src/lib.rs | bash "${script}")
 	grep -qx 'changed_packages=fixture-config' <<<"${output}"
@@ -211,15 +215,17 @@ command -v "${cargo_bin}" >/dev/null 2>&1 || fall_back cargo_unavailable
 affected_list=${tmp}/affected
 : >"${affected_list}"
 if [[ -s ${production_list} ]]; then
+	invert_args=()
+	LC_ALL=C sort -u -o "${production_list}" "${production_list}"
 	while IFS= read -r package; do
-		[[ -n ${package} ]] || continue
-		"${cargo_bin}" tree --locked --workspace -i "${package}" -e normal,build,dev --prefix none |
-			awk '{ print $1 }' >>"${affected_list}" || fall_back cargo_tree_error
-	done < <(LC_ALL=C sort -u "${production_list}")
+		invert_args+=(--invert "${package}")
+	done <"${production_list}"
+	"${cargo_bin}" tree --locked --workspace "${invert_args[@]}" -e normal,build,dev --prefix none |
+		awk 'NF { print $1 }' >"${affected_list}" || fall_back cargo_tree_error
 fi
 cat "${test_only_list}" >>"${affected_list}"
 
-total=$("${cargo_bin}" tree --locked --workspace --depth 0 --prefix none 2>/dev/null | awk '{ print $1 }' | LC_ALL=C sort -u | grep -c . || true)
+total=$("${cargo_bin}" tree --locked --workspace --depth 0 --prefix none 2>/dev/null | awk 'NF { print $1 }' | LC_ALL=C sort -u | wc -l) || fall_back cargo_tree_error
 count=$(LC_ALL=C sort -u "${affected_list}" | grep -c . || true)
 if ((total == 0)); then
 	fall_back cargo_tree_error

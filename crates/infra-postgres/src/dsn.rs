@@ -14,8 +14,8 @@
 //! no password, so there is still exactly one.
 
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
 
+use sqlx::ConnectOptions;
 use sqlx::postgres::{PgConnectOptions, PgSslMode};
 use url::Url;
 
@@ -142,10 +142,7 @@ impl Dsn {
         require_components(&url, password_file.is_some())?;
         check_parameters(&url)?;
 
-        // The text holds every component and only known parameters, so what
-        // `sqlx` parses is what the operator wrote. The remaining rules read
-        // the driver's own interpretation instead of repeating its parser.
-        let options = PgConnectOptions::from_str(raw).map_err(|_| DsnError::Unusable)?;
+        let options = PgConnectOptions::from_url(&url).map_err(|_| DsnError::Unusable)?;
         if options.get_socket().is_some() {
             return Err(DsnError::Socket);
         }

@@ -103,6 +103,33 @@ def clone(source: Path, destination: Path) -> None:
         raise AssertionError(result.stderr)
 
 
+def check_role_carrier_bytes(target: Path) -> None:
+    relative = ".claude/agents/worker-agent.md"
+    carrier = target / relative
+    original = carrier.read_bytes()
+    command = ["bash", "scripts/agent-roles-sync.sh", "--check"]
+
+    def must_be_stale() -> None:
+        checked = run(command, cwd=target)
+        if checked.returncode == 0 or f"{relative} is stale" not in checked.stderr:
+            raise AssertionError(f"role check failed to reject changed or unreadable carrier: {checked.stderr}")
+
+    for changed in (original + b"\x00suffix", original.removesuffix(b"\n")):
+        carrier.write_bytes(changed)
+        must_be_stale()
+    carrier.write_bytes(original)
+    original_mode = carrier.stat().st_mode
+    carrier.chmod(0)
+    try:
+        if not os.access(carrier, os.R_OK):
+            must_be_stale()
+    finally:
+        carrier.chmod(original_mode)
+    checked = run(command, cwd=target)
+    if checked.returncode:
+        raise AssertionError(f"role check refused restored carrier: {checked.stderr}")
+
+
 def init(
     source: Path, target: Path, *extra: str, environment: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
@@ -1027,6 +1054,7 @@ def check(source: Path) -> None:
                       f"symlink={path.is_symlink()} children={sorted(p.name for p in path.iterdir())}")
         if not (target / "template.lock").is_file() or not (target / "CLAUDE.md").is_file():
             raise AssertionError("initialized output omitted retained local state or selected carrier")
+        check_role_carrier_bytes(target)
         lifecycle_source = (target / "crates/service/tests/lifecycle.rs").read_text(encoding="utf-8")
         if 'env!("CARGO_BIN_EXE_safety-api")' not in lifecycle_source:
             raise AssertionError("lifecycle test lost the exact hyphenated Cargo binary environment key")
@@ -1061,6 +1089,19 @@ def check(source: Path) -> None:
         if historical_repeat.returncode or state(target) != historical_before:
             raise AssertionError("previous DNS inventory replay was not byte-preserving")
         historical_inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+        reordered = dict(historical_inventory)
+        del reordered["authn"]
+        reordered["outbound-http"] = None
+        reordered["authn"] = None
+        inventory_path.write_text(json.dumps(reordered), encoding="utf-8")
+        invalid_before = state(target)
+        invalid_repeat = init(source, target, "--database", "none", "--agent-harness", "claude")
+        if (
+            invalid_repeat.returncode == 0
+            or "template authn inventory has an unsupported shape" not in invalid_repeat.stderr
+            or state(target) != invalid_before
+        ):
+            raise AssertionError("historical replay lost the canonical first refusal for reordered profiles")
         historical_inventory["unknown-pack"] = {"remove_when_unselected": [], "markers": []}
         inventory_path.write_text(json.dumps(historical_inventory, indent=2) + "\n", encoding="utf-8")
         unknown_before = state(target)

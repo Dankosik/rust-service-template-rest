@@ -152,8 +152,12 @@ def sha(data):
 
 
 def load(path):
-    require(path.stat().st_size <= 4 * 1024 * 1024, "manifest_too_large")
-    return json.loads(path.read_bytes())
+    limit = 4 * 1024 * 1024
+    require(path.stat().st_size <= limit, "manifest_too_large")
+    with path.open("rb") as source:
+        raw = source.read(limit + 1)
+    require(len(raw) <= limit, "manifest_too_large")
+    return json.loads(raw)
 
 
 def atomic(path, value, exclusive=False):

@@ -2572,6 +2572,7 @@ dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
  "operation-context",
+ "pem 4.0.0",
  "rcgen",
  "redis",
  "rustls",
@@ -2635,6 +2636,7 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-opentelemetry-instrumentation-sdk",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]

@@ -76,9 +76,13 @@ def expected_body(expected):
 def complete_lines(path):
     if not path.exists():
         return []
-    if path.stat().st_size > 16 * 1024 * 1024:
+    limit = 16 * 1024 * 1024
+    if path.stat().st_size > limit:
         raise ValueError("observation_file_limit")
-    raw = path.read_bytes()
+    with path.open("rb") as source:
+        raw = source.read(limit + 1)
+    if len(raw) > limit:
+        raise ValueError("observation_file_limit")
     return [json.loads(line) for line in raw[:raw.rfind(b"\n") + 1].splitlines()]
 
 

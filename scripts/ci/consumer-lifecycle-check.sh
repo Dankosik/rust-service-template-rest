@@ -53,8 +53,11 @@ archive_manifest() {
 import hashlib, json, pathlib, sys
 action, root = sys.argv[1], pathlib.Path(sys.argv[2])
 archives = root / "archives"
-observed = {str(p.relative_to(archives)): hashlib.sha256(p.read_bytes()).hexdigest()
-            for p in sorted(archives.rglob("*")) if p.is_file()}
+observed = {}
+for archive in sorted(archives.rglob("*")):
+    if archive.is_file():
+        with archive.open("rb") as source:
+            observed[str(archive.relative_to(archives))] = hashlib.file_digest(source, "sha256").hexdigest()
 path = root / "archives.sha256.json"
 if action == "write":
     path.write_text(json.dumps(observed, indent=2) + "\n")
@@ -150,7 +153,9 @@ prepare_actor() {
 import hashlib, json, pathlib, subprocess, sys
 p, label, revision, pristine, cargo_target_dir = pathlib.Path(sys.argv[1]), *sys.argv[2:6]
 root = p / "consumers" / label
-sha = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+def sha(path):
+    with path.open("rb") as source:
+        return hashlib.file_digest(source, "sha256").hexdigest()
 record = {"upstream": revision, "pristine_commit": pristine,
           "pristine_tree": subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD^{tree}"], text=True).strip(),
           "lock_sha256": sha(root / "Cargo.lock"), "toolchain": (root / "rust-toolchain.toml").read_text(),

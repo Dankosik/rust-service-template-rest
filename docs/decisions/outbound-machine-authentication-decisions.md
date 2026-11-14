@@ -293,12 +293,12 @@ the rule for every variable, a second decoder was a parallel path and was
 removed. With it went its refusal of a number where text is expected:
 config-rs converts scalars here as in every section, and validation still
 checks the result. `algorithm` is decoded by hand to answer a refused
-value with the accepted ones. `provider_concurrency` has a field-local
-untagged typed/text scalar decoder inside the OAuth markers. It preserves the
-scalar kind through config-rs, whose ordinary unsigned conversion rounds
-floating-point values; fractions, booleans, negatives, and values outside u32
-are rejected, and validation refuses zero. The loader retains value-free
-errors. No optional introspection-profile decoder dependency is introduced.
+value with the accepted ones. The OAuth field `provider_concurrency` uses
+the shared `crate::de::deserialize_scalar` decoder with `NonZeroU32`.
+It preserves the scalar kind because config-rs's ordinary unsigned conversion
+rounds floating-point values. Decoding rejects fractions, booleans, zero,
+negatives, and values above the `u32` maximum. The loader retains value-free
+errors, and the decoder is available independently of the introspection profile.
 
 Runtime errors separate caller Authorization conflict, a missing required
 subject, acquisition failure, and existing resource transport failure. Acquisition reasons and all public

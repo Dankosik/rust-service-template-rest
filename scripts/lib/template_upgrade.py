@@ -650,6 +650,7 @@ def parser() -> argparse.ArgumentParser:
     commands = result.add_subparsers(dest="command", required=True)
     for name in ("adopt", "prepare"):
         command = commands.add_parser(name)
+        command.set_defaults(handler=prepare)
         command.add_argument("--consumer", type=Path, required=True)
         command.add_argument("--source", type=Path, required=True, help="explicitly trusted local template repository; its selected code will execute")
         command.add_argument("--revision", required=True, help="exact full source commit ID")
@@ -659,8 +660,13 @@ def parser() -> argparse.ArgumentParser:
             origin = command.add_mutually_exclusive_group(required=True)
             origin.add_argument("--initial-commit")
             origin.add_argument("--reconstruct", action="store_true")
-    for name in ("status", "accept", "abort"):
+    for name, handler in (
+        ("status", lambda args: status(state.git_root(args.candidate))),
+        ("accept", accept),
+        ("abort", lambda args: abort(state.git_root(args.candidate))),
+    ):
         command = commands.add_parser(name)
+        command.set_defaults(handler=handler)
         command.add_argument("--candidate", type=Path, required=True)
         if name == "accept":
             command.add_argument("--review", type=Path, required=True)
@@ -694,14 +700,7 @@ def main() -> int:
         os.environ.clear()
         os.environ.update(clean)
         try:
-            if args.command in {"adopt", "prepare"}:
-                result = prepare(args)
-            elif args.command == "accept":
-                result = accept(args)
-            elif args.command == "abort":
-                result = abort(state.git_root(args.candidate))
-            else:
-                result = status(state.git_root(args.candidate))
+            result = args.handler(args)
             print(json.dumps(result, indent=2, ensure_ascii=False))
             return 0
         except (state.Refusal, state.ToolFailure, OSError, UnicodeError, ValueError, KeyError, TypeError) as error:

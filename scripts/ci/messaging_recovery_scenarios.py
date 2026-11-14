@@ -6,6 +6,7 @@ restored outbox or stream bytes; an oracle copy is never a publication source.
 
 import base64
 from datetime import datetime, timezone
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -24,6 +25,11 @@ def header(raw, name):
 
 def record_meaning(raw):
     return {key: raw.get(key, "") for key in ("subject", "seq", "time", "hdrs", "data")}
+
+
+def archive_digest(path):
+    with path.open("rb") as source:
+        return hashlib.file_digest(source, "sha256").hexdigest()
 
 
 class Rehearsal:
@@ -281,7 +287,7 @@ class Rehearsal:
             s.client_exec("pg_restore", "--list", target)
         after = self.observation()
         self.c.require(before == after, "backup_boundary_was_not_quiescent")
-        files = {str(file.relative_to(directory)): self.c.sha(file.read_bytes()) for file in directory.rglob("*") if file.is_file()}
+        files = {str(file.relative_to(directory)): archive_digest(file) for file in directory.rglob("*") if file.is_file()}
         metadata = {"version": 1, "generation": s.data["generation"], "boundary": before,
                     "archive_sha256": files, "backup_seconds": time.monotonic() - started}
         self.c.atomic(directory / "boundary.json", metadata, exclusive=True)
@@ -303,7 +309,7 @@ class Rehearsal:
         restore_dir.mkdir(mode=0o700)
         for role, path in originals.items():
             for relative, digest in expected[role]["archive_sha256"].items():
-                self.c.require(self.c.sha((path / relative).read_bytes()) == digest, "native_archive_changed")
+                self.c.require(archive_digest(path / relative) == digest, "native_archive_changed")
             shutil.copytree(path, restore_dir / role)
         with s.operation("native-restore"):
             self.c.require(not s.data["topology_frozen"], "restore_lifetime_frozen")

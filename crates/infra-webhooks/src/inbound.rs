@@ -238,18 +238,17 @@ impl Receiver {
             async |tx| -> Result<ReceiptOutcome, ReceiptFailure> {
                 let inserted = observed(
                     "insert webhook receipt",
-                    sqlx::query_scalar!(
+                    sqlx::query!(
                         "INSERT INTO webhook_receipts (endpoint_id, message_id) \
                          VALUES ($1, $2) \
-                         ON CONFLICT (endpoint_id, message_id) DO NOTHING \
-                         RETURNING message_id",
+                         ON CONFLICT (endpoint_id, message_id) DO NOTHING",
                         endpoint_id,
                         message_id.as_ref(),
                     )
-                    .fetch_optional(&mut *tx),
+                    .execute(&mut *tx),
                 )
                 .await?;
-                if inserted.is_none() {
+                if inserted.rows_affected() == 0 {
                     return Ok(ReceiptOutcome::Duplicate);
                 }
                 let incoming =

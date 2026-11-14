@@ -229,21 +229,14 @@ async fn serve_resp(
                     .expect("username lock")
                     .as_ref()
                     .is_none_or(|expected| arguments.get(arguments.len() - 2) == Some(expected));
-                if accepted {
-                    socket
-                        .observed
-                        .auth_successes
-                        .fetch_add(1, Ordering::SeqCst);
-                    socket.observed.changed.notify_waiters();
-                    b"+OK\r\n"
+                let (counter, reply): (_, &[u8]) = if accepted {
+                    (&socket.observed.auth_successes, b"+OK\r\n")
                 } else {
-                    socket
-                        .observed
-                        .auth_rejections
-                        .fetch_add(1, Ordering::SeqCst);
-                    socket.observed.changed.notify_waiters();
-                    auth_error.as_bytes()
-                }
+                    (&socket.observed.auth_rejections, auth_error.as_bytes())
+                };
+                counter.fetch_add(1, Ordering::SeqCst);
+                socket.observed.changed.notify_waiters();
+                reply
             }
             Some("GET")
                 if arguments

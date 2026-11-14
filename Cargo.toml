@@ -101,6 +101,7 @@ async-nats = { version = "=0.50.0", default-features = false }
 nkeys = { version = "0.4.5", default-features = false }
 # template:end messaging:workspace-messaging-client
 # template:begin cache:workspace-cache-client
+pem = { version = "=4.0.0", default-features = false }
 redis = { version = "1.7.1", default-features = false }
 # Keepalive retries are a socket2 method; redis does not re-export the type.
 socket2 = { version = "0.6.5", default-features = false }
