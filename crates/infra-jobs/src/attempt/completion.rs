@@ -167,10 +167,10 @@ impl CompletionBatch {
     }
 
     fn finish(mut self, results: Vec<CompletionReply>) {
-        let replies: Vec<_> = self.retire().into_iter().zip(results).collect();
+        let replies = self.retire();
         // Also close pruned replies only after every entry and SQL buffer is gone.
         drop(self);
-        for (reply, result) in replies {
+        for (reply, result) in replies.into_iter().zip(results) {
             let _ = reply.send(result);
         }
     }
