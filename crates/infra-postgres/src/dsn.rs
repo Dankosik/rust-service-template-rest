@@ -564,9 +564,8 @@ mod tests {
         reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
     )]
     fn a_password_file_is_the_only_password_source_when_set() {
-        let dir = std::env::temp_dir().join(format!("dsn-password-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("password");
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("password");
         let without_password = "postgres://app@db.internal:5432/app?sslmode=require";
         let admit = |raw: &str| Dsn::admit_from(raw, Some(&file), |_| false);
 
@@ -590,10 +589,9 @@ mod tests {
         assert_eq!(ipv6.password_file(), Some(file.as_path()));
         assert_eq!(ipv6.ssl_mode_name(), "verify-full");
 
-        // Trailing line breaks are dropped; spaces are part of the password.
         std::fs::write(&file, " p w \r\n").unwrap();
         assert_eq!(read_password(&file).unwrap(), " p w ");
-        std::fs::remove_dir_all(&dir).unwrap();
+        dir.close().unwrap();
     }
 
     #[test]

@@ -2890,6 +2890,7 @@ dependencies = [
  "metrics-exporter-prometheus",
  "shared-rules",
  "sqlx",
+ "tempfile",
  "thiserror",
  "tokio",
  "tokio-util",
