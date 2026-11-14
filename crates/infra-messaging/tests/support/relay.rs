@@ -1,13 +1,13 @@
 //! Wire faults over the real broker; no publication or settlement is simulated.
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
@@ -18,6 +18,13 @@ pub(crate) struct AckDroppingRelay {
     task: JoinHandle<()>,
 }
 
+#[derive(Default)]
+struct AuthObservations {
+    first_closed: bool,
+    refused: bool,
+    latest_public_user: Option<String>,
+}
+
 /// One NATS connection relay that observes a broker authorization refusal and
 /// retains only the latest public CONNECT subject. It neither validates nor
 /// supplies authentication.
@@ -25,9 +32,7 @@ pub(crate) struct AuthObservingRelay {
     pub(crate) url: String,
     close_first: CancellationToken,
     stop: CancellationToken,
-    first_closed: Arc<AtomicBool>,
-    refusals: Arc<AtomicUsize>,
-    connections: Arc<Mutex<Vec<String>>>,
+    observations: watch::Sender<AuthObservations>,
     task: JoinHandle<()>,
 }
 
@@ -40,22 +45,10 @@ impl AuthObservingRelay {
         let target = relay_target(target_url);
         let close_first = CancellationToken::new();
         let stop = CancellationToken::new();
-        let first_closed = Arc::new(AtomicBool::new(false));
-        let refusals = Arc::new(AtomicUsize::new(0));
-        let connections = Arc::new(Mutex::new(Vec::new()));
-        let (
-            close_for_task,
-            stop_for_task,
-            completion_flag,
-            refusals_for_task,
-            connections_for_task,
-        ) = (
-            close_first.clone(),
-            stop.clone(),
-            Arc::clone(&first_closed),
-            Arc::clone(&refusals),
-            Arc::clone(&connections),
-        );
+        let observations = watch::Sender::<AuthObservations>::default();
+        let observed = observations.clone();
+        let close_for_task = close_first.clone();
+        let stop_for_task = stop.clone();
         let task = tokio::spawn(async move {
             let mut first = true;
             loop {
@@ -72,17 +65,10 @@ impl AuthObservingRelay {
                 } else {
                     CancellationToken::new()
                 };
-                relay_authenticated_connection(
-                    client,
-                    broker,
-                    &stop_for_task,
-                    &close,
-                    Arc::clone(&refusals_for_task),
-                    Arc::clone(&connections_for_task),
-                )
-                .await;
+                relay_authenticated_connection(client, broker, &stop_for_task, &close, &observed)
+                    .await;
                 if first {
-                    completion_flag.store(true, Ordering::SeqCst);
+                    observed.send_modify(|state| state.first_closed = true);
                     first = false;
                 }
             }
@@ -91,61 +77,55 @@ impl AuthObservingRelay {
             url: format!("nats://{address}"),
             close_first,
             stop,
-            first_closed,
-            refusals,
-            connections,
+            observations,
             task,
         }
     }
 
     pub(crate) async fn close_old_connection(&self) {
         self.close_first.cancel();
-        timeout(Duration::from_secs(5), async {
-            while !self.first_closed.load(Ordering::SeqCst) {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("relay closes the original authenticated connection");
+        self.wait_for(
+            Duration::from_secs(5),
+            |state| state.first_closed,
+            "relay closes the original authenticated connection",
+        )
+        .await;
     }
 
     pub(crate) async fn wait_for_broker_refusal(&self) {
-        timeout(Duration::from_secs(10), async {
-            while self.refusals.load(Ordering::SeqCst) == 0 {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("broker forwards an authentication refusal");
+        self.wait_for(
+            Duration::from_secs(10),
+            |state| state.refused,
+            "broker forwards an authentication refusal",
+        )
+        .await;
     }
 
     pub(crate) async fn wait_for_latest_public_user(&self, user: &str) {
-        timeout(Duration::from_secs(10), async {
-            loop {
-                let matches = {
-                    let observed = self
-                        .connections
-                        .lock()
-                        .expect("authentication relay connection lock");
-                    observed.last().is_some_and(|observed| observed == user)
-                };
-                if matches {
-                    return;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("relay observes the expected public user on its live connection");
+        self.wait_for(
+            Duration::from_secs(10),
+            |state| state.latest_public_user.as_deref() == Some(user),
+            "relay observes the expected public user on its live connection",
+        )
+        .await;
+    }
+
+    async fn wait_for(
+        &self,
+        bound: Duration,
+        observed: impl FnMut(&AuthObservations) -> bool,
+        diagnostic: &'static str,
+    ) {
+        let mut updates = self.observations.subscribe();
+        timeout(bound, updates.wait_for(observed))
+            .await
+            .expect(diagnostic)
+            .expect("relay holds the observation sender");
     }
 
     #[must_use]
     pub(crate) fn latest_public_user(&self) -> Option<String> {
-        self.connections
-            .lock()
-            .expect("authentication relay connection lock")
-            .last()
-            .cloned()
+        self.observations.borrow().latest_public_user.clone()
     }
 
     pub(crate) async fn finish(self) {
@@ -365,8 +345,7 @@ async fn relay_authenticated_connection(
     broker: TcpStream,
     stop: &CancellationToken,
     close: &CancellationToken,
-    refusals: Arc<AtomicUsize>,
-    connections: Arc<Mutex<Vec<String>>>,
+    observations: &watch::Sender<AuthObservations>,
 ) {
     let (client_read, client_write) = client.into_split();
     let (broker_read, broker_write) = broker.into_split();
@@ -378,10 +357,7 @@ async fn relay_authenticated_connection(
             return Ok::<(), std::io::Error>(());
         }
         if let Some(user) = public_user_from_connect(&connect) {
-            connections
-                .lock()
-                .expect("authentication relay connection lock")
-                .push(user);
+            observations.send_modify(|state| state.latest_public_user = Some(user));
         }
         broker_write.write_all(&connect).await?;
         tokio::io::copy(&mut client_read, &mut broker_write)
@@ -397,7 +373,7 @@ async fn relay_authenticated_connection(
                 return Ok::<(), std::io::Error>(());
             }
             if is_broker_auth_refusal(&line) {
-                refusals.fetch_add(1, Ordering::SeqCst);
+                observations.send_modify(|state| state.refused = true);
             }
             client_write.write_all(&line).await?;
             if let Some(length) = payload_length(&line) {
