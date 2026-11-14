@@ -278,6 +278,7 @@ fn tag(key: &SigningKey, message_id: &[u8], timestamp: i64, body: &[u8]) -> hmac
 }
 
 fn matches_v1_signature(headers: &HeaderMap, expected: &hmac::Tag) -> bool {
+    // Reserve base64's conservative decoded-length bound, including padding slack.
     let mut scratch = [0; ENCODED_TAG_BYTES / 4 * 3];
     headers
         .get_all(WEBHOOK_SIGNATURE)

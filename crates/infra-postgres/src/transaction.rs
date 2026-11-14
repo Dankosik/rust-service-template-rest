@@ -129,7 +129,7 @@ impl<'c> Executor<'c> for &'c mut Tx<'_> {
         self.proven_alive = false;
         Box::pin(Proving {
             statement: self.conn.fetch_many(query),
-            proven_alive: Some(&mut self.proven_alive),
+            proof_to_restore: Some(&mut self.proven_alive),
         })
     }
 
@@ -173,7 +173,7 @@ impl<'c> Executor<'c> for &'c mut Tx<'_> {
 
 struct Proving<'e, T> {
     statement: DriverStream<'e, T>,
-    proven_alive: Option<&'e mut bool>,
+    proof_to_restore: Option<&'e mut bool>,
 }
 
 impl<T> Stream for Proving<'_, T> {
@@ -184,9 +184,9 @@ impl<T> Stream for Proving<'_, T> {
         let item = ready!(this.statement.as_mut().poll_next(cx));
         match &item {
             Some(Ok(_)) => {}
-            Some(Err(_)) => this.proven_alive = None,
+            Some(Err(_)) => this.proof_to_restore = None,
             None => {
-                if let Some(proven_alive) = this.proven_alive.take() {
+                if let Some(proven_alive) = this.proof_to_restore.take() {
                     *proven_alive = true;
                 }
             }
@@ -409,7 +409,7 @@ mod tests {
         let mut proven_alive = false;
         let mut statement = Proving {
             statement: Box::pin(stream::iter(items)),
-            proven_alive: Some(&mut proven_alive),
+            proof_to_restore: Some(&mut proven_alive),
         };
         for _ in 0..take {
             let _ = statement.next().await;
@@ -433,7 +433,7 @@ mod tests {
         let mut proven_alive = false;
         let mut statement = Proving::<()> {
             statement: Box::pin(stream::pending()),
-            proven_alive: Some(&mut proven_alive),
+            proof_to_restore: Some(&mut proven_alive),
         };
         let mut cx = Context::from_waker(std::task::Waker::noop());
         assert!(Pin::new(&mut statement).poll_next(&mut cx).is_pending());

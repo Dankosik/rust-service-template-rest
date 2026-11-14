@@ -728,11 +728,11 @@ fn write_body(
     spans.sort_unstable_by_key(|field| (field.key, field.start));
     let header = line.len();
     let mut truncated = truncated;
-    if !write_fields(line, values, event, spans, truncated, format) && !truncated {
+    if !write_all_fields(line, values, event, spans, truncated, format) && !truncated {
         truncated = true;
         line.rewind(header);
         // What fits is written; the marker says the rest is missing.
-        write_fields(line, values, event, spans, truncated, format);
+        write_all_fields(line, values, event, spans, truncated, format);
     }
     line.limit = MAX_RECORD_BYTES;
     line.append(record_tail(format, truncated));
@@ -748,7 +748,7 @@ fn record_tail(format: LoggingFormat, truncated: bool) -> &'static [u8] {
 }
 
 /// Both slices are sorted by key, then capture order. Spans were captured leaf first.
-fn write_fields(
+fn write_all_fields(
     line: &mut Bytes,
     values: &[u8],
     event: &[Entry],
