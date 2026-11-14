@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
 use secrecy::SecretString;
+use tokio_util::task::AbortOnDropHandle;
 
 use crate::{Cache, CacheError, CacheOptions, ClientCertificate};
 
@@ -76,7 +77,7 @@ struct FakeServer {
     auth_attempts: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     primary: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     connections: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    sessions: std::sync::Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    sessions: std::sync::Arc<std::sync::Mutex<Vec<AbortOnDropHandle<()>>>>,
     observed: std::sync::Arc<SocketObservations>,
     listener: tokio::task::JoinHandle<()>,
 }
@@ -109,7 +110,7 @@ impl FakeServer {
                 let id = accepted.fetch_add(1, Ordering::SeqCst) + 1;
                 let socket = ObservedSocket::new(id, events.clone());
                 let recorded = generation.load(Ordering::SeqCst);
-                let session = tokio::spawn(serve_resp(
+                let session = AbortOnDropHandle::new(tokio::spawn(serve_resp(
                     stream,
                     accept.clone(),
                     expected.clone(),
@@ -117,7 +118,7 @@ impl FakeServer {
                     recorded,
                     generation.clone(),
                     socket,
-                ));
+                )));
                 open.lock().expect("sessions lock").push(session);
             }
         });
@@ -136,9 +137,7 @@ impl FakeServer {
 
     /// Close every open connection; the listener keeps accepting.
     fn hang_up(&self) {
-        for session in self.sessions.lock().expect("sessions lock").drain(..) {
-            session.abort();
-        }
+        self.sessions.lock().expect("sessions lock").clear();
     }
 
     /// Accept only this password from now on.
