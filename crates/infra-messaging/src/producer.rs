@@ -17,7 +17,7 @@ use crate::prepared::PreparedEvent;
 use crate::wire::{encode_prepared, validate_header_bytes};
 
 outcome_label! {
-    pub(crate) enum PublishOutcome {
+    enum PublishOutcome {
         Acknowledged => "acknowledged",
         Rejected => "rejected",
         Ambiguous => "ambiguous",

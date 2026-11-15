@@ -185,6 +185,10 @@ impl CleanupPass {
     /// or the owner cancels between batches. Count only acknowledged commits;
     /// earlier confirmed batches stay committed on failure. A short batch does
     /// not establish that the eligible population is empty.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "each cleanup owner supplies its pool, transaction options, cancellation, batch cap, metric, log event, and delete query"
+    )]
     pub async fn run_until_short_batch<F>(
         mut self,
         pool: &PgPool,
@@ -192,6 +196,7 @@ impl CleanupPass {
         cancel: Option<&CancellationToken>,
         batch_limit: u32,
         removed_metric: &'static str,
+        failure_message: &'static str,
         delete: F,
     ) -> Result<CleanupPassResult, CleanupError>
     where
@@ -205,7 +210,9 @@ impl CleanupPass {
                     end: PassEnd::Cancelled,
                 });
             }
-            let rows = self.run_batch(pool, options, batch_limit, delete).await?;
+            let rows = self
+                .run_batch(pool, options, batch_limit, failure_message, delete)
+                .await?;
             metrics::counter!(removed_metric).increment(rows);
             removed_rows += rows;
             if rows < u64::from(batch_limit) {
@@ -223,25 +230,26 @@ impl CleanupPass {
         pool: &PgPool,
         options: TxOptions,
         batch_limit: u32,
+        failure_message: &'static str,
         delete: F,
     ) -> Result<u64, CleanupError>
     where
         F: AsyncFnOnce(&mut Tx<'_>, u32) -> Result<u64, sqlx::Error>,
     {
-        self.await_batch(in_tx_with(
-            pool,
-            options,
-            async |tx| -> Result<u64, BatchError> {
+        self.await_batch(
+            failure_message,
+            in_tx_with(pool, options, async |tx| -> Result<u64, BatchError> {
                 // The server still bounds its statements if the client stops waiting.
                 set_statement_timeout(tx, CLEANUP_STATEMENT_TIMEOUT).await?;
                 delete(tx, batch_limit).await.map_err(BatchError::from)
-            },
-        ))
+            }),
+        )
         .await
     }
 
     async fn await_batch(
         &mut self,
+        failure_message: &'static str,
         batch: impl Future<Output = Result<u64, BatchError>>,
     ) -> Result<u64, CleanupError> {
         let failure = match tokio::time::timeout(CLEANUP_BATCH_BUDGET, batch).await {
@@ -250,18 +258,13 @@ impl CleanupPass {
                 return Ok(rows);
             }
             Ok(Err(BatchError { class, driver })) => {
-                let message = match self.cleanup {
-                    Cleanup::HttpIdempotency => "http_idempotency_cleanup_failed",
-                    Cleanup::WebhookReceipts => "webhook_receipt_cleanup_failed",
-                    Cleanup::Jobs => "postgres_cleanup_batch_failed",
-                };
                 tracing::warn!(
                     target: LOG_TARGET,
                     cleanup = self.cleanup.label(),
                     failure = %class,
                     sqlstate = sqlstate(&driver).as_deref(),
                     cause = failure_cause(&driver),
-                    "{message}"
+                    "{failure_message}"
                 );
                 class
             }

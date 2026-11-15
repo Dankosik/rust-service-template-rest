@@ -453,11 +453,7 @@ mod tests {
     }
 
     async fn poll_waiting_worker(mut worker: Pin<&mut impl Future<Output = ()>>) {
-        assert!(
-            std::future::poll_fn(|cx| Poll::Ready(worker.as_mut().poll(cx)))
-                .await
-                .is_pending()
-        );
+        assert!(futures_util::poll!(worker.as_mut()).is_pending());
     }
 
     async fn finish_worker_fetch(
@@ -492,11 +488,7 @@ mod tests {
 
             let checked = store.current();
             let mut unknown = std::pin::pin!(store.refresh_for_signature_miss(&checked));
-            assert!(
-                std::future::poll_fn(|cx| Poll::Ready(unknown.as_mut().poll(cx)))
-                    .await
-                    .is_pending()
-            );
+            assert!(futures_util::poll!(unknown.as_mut()).is_pending());
             finish_worker_fetch(worker.as_mut(), &store, period * 2 + 1).await;
             assert_matches!(unknown.await, SignatureRefresh::Unavailable);
 

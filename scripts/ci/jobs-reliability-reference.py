@@ -593,7 +593,8 @@ class Scenario:
             sample["process_rss_kib_cpu_percent_cpu_time"] = result.stdout.decode().strip()
             if not self.worker.paused:
                 try:
-                    with urllib.request.urlopen(self.metrics, timeout=1) as response:
+                    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                    with opener.open(self.metrics, timeout=1) as response:
                         body = response.read(2 * 1024 * 1024).decode()
                     wanted = ("jobs_", "db_client_connection_", "postgres_transaction_")
                     sample["metrics"] = [line for line in body.splitlines() if line.startswith(wanted)]

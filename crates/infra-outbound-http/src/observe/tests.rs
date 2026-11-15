@@ -1,5 +1,4 @@
 use std::{
-    error::Error as _,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -416,7 +415,7 @@ async fn exercise_transport_failures() -> Vec<String> {
     let root_cause = |result: Result<http::Response<Bytes>, Error>| {
         let error = result.expect_err("transport failure");
         std::assert_matches!(error, Error::Transport { .. }, "{error:?}");
-        std::iter::successors(error.source(), |cause| (*cause).source())
+        shared_rules::error_chain::sources(&error)
             .last()
             .expect("transport source")
             .to_string()

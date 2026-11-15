@@ -19,7 +19,8 @@
 //! `OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE` with
 //! `OTEL_EXPORTER_OTLP_CLIENT_KEY` presents a client certificate. Each has
 //! a traces variant that wins. The SDK's OTLP/HTTP exporter reads none of
-//! them, so this module builds the exporter's HTTP client when one is set.
+//! them, and its default client follows ambient proxies and redirects, so
+//! this module always builds the exporter's HTTP client.
 
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
@@ -225,9 +226,7 @@ pub(super) fn span_exporter(
     if let Some(compression) = compression(env)? {
         builder = builder.with_compression(compression);
     }
-    if let Some(client) = collector_client(trust, timeout)? {
-        builder = builder.with_http_client(client);
-    }
+    builder = builder.with_http_client(collector_client(trust, timeout)?);
     Ok(builder.build()?)
 }
 
@@ -262,10 +261,7 @@ fn compression(
 fn collector_client(
     trust: &CollectorTrust,
     timeout: Duration,
-) -> Result<Option<reqwest::blocking::Client>, ExporterError> {
-    if *trust == CollectorTrust::default() {
-        return Ok(None);
-    }
+) -> Result<reqwest::blocking::Client, ExporterError> {
     // The blocking client starts its own runtime thread and waits for it,
     // which an async worker must not do; the SDK builds its client the same
     // way.
@@ -276,7 +272,6 @@ fn collector_client(
             .join()
             .map_err(|_| ExporterError::ClientThreadPanicked)?
     })
-    .map(Some)
 }
 
 #[expect(
@@ -289,8 +284,12 @@ fn trusting_client(
     timeout: Duration,
 ) -> Result<reqwest::blocking::Client, ExporterError> {
     // The SDK sets its timeout on the client it builds, so a supplied
-    // client carries the same one.
-    let mut builder = reqwest::blocking::Client::builder().timeout(timeout);
+    // client carries the same one while refusing ambient proxies and redirects.
+    let mut builder = reqwest::blocking::Client::builder()
+        .timeout(timeout)
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .referer(false);
     if let Some(file) = &trust.certificate {
         let certificates = reqwest::Certificate::from_pem_bundle(&file.read()?)
             .map_err(|source| file.unusable(source))?;

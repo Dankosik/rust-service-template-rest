@@ -49,53 +49,42 @@ def check(root: Path) -> None:
     entries = state.manifest_entries(root)
     owned = set(entries)
     profile = json.loads((root / "scripts/lib/template_profiles.json").read_text(encoding="utf-8"))
-    expected_profiles = {
-        "postgres": "remove_when_none",
-        "authn": "remove_when_unselected",
-        "oidc-jwt": "remove_when_unselected",
-        "oidc-introspection": "remove_when_unselected",
-        "outbound-auth": "remove_when_unselected",
-        "outbound-http": "remove_when_unselected",
-        "tls-fixtures": "remove_when_unselected",
-        "request-budget": "remove_when_unselected",
-        "http-idempotency": "remove_when_unselected",
-        "http-idempotency-mounted": "remove_when_unselected",
-        "jobs": "remove_when_unselected",
-        "jobs-http-idempotency": "remove_when_unselected",
-        "messaging": "remove_when_unselected",
-        "worker": "remove_when_unselected",
-        "service-secrets": "remove_when_unselected",
-        "outbox": "remove_when_unselected",
-        "config-url": "remove_when_unselected",
-        "integration": "remove_when_unselected",
-        "cache": "remove_when_unselected",
-        "object-storage": "remove_when_unselected",
-        "service-auth": "remove_when_unselected",
-        "rustls": "remove_when_unselected",
-        "jsonwebtoken": "remove_when_unselected",
-        "webhooks-common": "remove_when_unselected",
-        "webhooks": "remove_when_unselected",
-        "inbound-webhooks": "remove_when_unselected",
-    }
-    for name, removal_key in expected_profiles.items():
+    non_profile_keys = {"schema_version", "source_only", "identity", "cargo_lock"}
+    if not isinstance(profile, dict) or not non_profile_keys.issubset(profile):
+        raise AssertionError("profile inventory is missing top-level metadata keys")
+    section_names = sorted(set(profile) - non_profile_keys)
+    if not section_names:
+        raise AssertionError("profile inventory contains no profile sections")
+    for name in section_names:
+        removal_key = "remove_when_none" if name == "postgres" else "remove_when_unselected"
         section = profile.get(name)
         if not isinstance(section, dict) or set(section) != {removal_key, "markers"}:
             raise AssertionError(f"profile inventory has no exact {name} section")
         removals = section[removal_key]
         markers = section["markers"]
-        if not isinstance(removals, list) or not isinstance(markers, list) or not markers:
+        if not isinstance(removals, list) or not isinstance(markers, list):
             raise AssertionError(f"profile inventory has an incomplete {name} projection")
-        if name not in {"request-budget", "tls-fixtures", "service-secrets", "config-url", "rustls", "jsonwebtoken"} and not removals:
-            raise AssertionError(f"profile inventory has no removable {name} output")
         for relative in removals:
+            if not isinstance(relative, str) or not relative:
+                raise AssertionError(f"profile inventory has malformed {name} removal")
             plain = relative.rstrip("/")
             if any(plain == entry.rstrip("/") or plain.startswith(f"{entry.rstrip('/')}/") for entry in entries):
                 raise AssertionError(f"manifest leaks profile-specific {name} output: {relative}")
         for marker in markers:
-            if not isinstance(marker, dict) or set(marker) not in ({"path", "id"}, {"path", "ids"}):
+            if (
+                not isinstance(marker, dict)
+                or set(marker) not in ({"path", "id"}, {"path", "ids"})
+                or not isinstance(marker.get("path"), str)
+                or not marker["path"]
+            ):
                 raise AssertionError(f"profile inventory has malformed {name} marker")
             marker_ids = [marker["id"]] if "id" in marker else marker["ids"]
-            if not isinstance(marker_ids, list) or not marker_ids or len(marker_ids) != len(set(marker_ids)):
+            if (
+                not isinstance(marker_ids, list)
+                or not marker_ids
+                or any(not isinstance(item, str) or not item for item in marker_ids)
+                or len(marker_ids) != len(set(marker_ids))
+            ):
                 raise AssertionError(f"profile inventory has duplicate {name} marker ids")
     for broad_owner in ("make/", "docs/", "scripts/", "crates/", "scripts/tests/template-sync-canary.py"):
         if not state._protected_manifest_owner(broad_owner):

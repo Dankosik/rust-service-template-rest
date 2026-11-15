@@ -1,18 +1,21 @@
 use std::time::{Duration, Instant};
 
-/// The status and body of one GET; an error status is a response, not an error.
-pub(crate) fn get(url: &str) -> Result<(u16, String), ureq::Error> {
-    ureq::get(url)
-        .config()
+pub(crate) fn agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .proxy(None)
         .timeout_global(Some(Duration::from_secs(3)))
         .http_status_as_error(false)
         .build()
-        .call()
-        .map(|mut response| {
-            let status = response.status().as_u16();
-            let body = response.body_mut().read_to_string().unwrap_or_default();
-            (status, body)
-        })
+        .new_agent()
+}
+
+/// The status and body of one GET; an error status is a response, not an error.
+pub(crate) fn get(url: &str) -> Result<(u16, String), ureq::Error> {
+    agent().get(url).call().map(|mut response| {
+        let status = response.status().as_u16();
+        let body = response.body_mut().read_to_string().unwrap_or_default();
+        (status, body)
+    })
 }
 
 #[expect(

@@ -1,5 +1,3 @@
-//! Cargo builds the binary and sets `CARGO_BIN_EXE_service` for integration tests.
-
 #![expect(
     clippy::expect_used,
     clippy::unwrap_used,
@@ -691,10 +689,8 @@ fn inert_inbound_webhook_route_rejects_unknown_endpoint_without_signature_work()
         .to_owned();
     service.await_record("service_ready");
 
-    let status = ureq::post(&format!("http://{api}/webhooks/unknown"))
-        .config()
-        .http_status_as_error(false)
-        .build()
+    let status = common::agent()
+        .post(&format!("http://{api}/webhooks/unknown"))
         .send_empty()
         .expect("webhook response")
         .status()
@@ -760,7 +756,8 @@ fn disabled_authentication_leaves_public_probes_unaffected() {
         .to_owned();
     service.await_record("service_ready");
 
-    let response = ureq::get(&format!("http://{api}/health/live"))
+    let response = common::agent()
+        .get(&format!("http://{api}/health/live"))
         .header("Authorization", "not a bearer credential")
         .call()
         .expect("public liveness response");

@@ -27,7 +27,18 @@ command -v cargo-sqlx >/dev/null 2>&1 || {
 # The metadata format belongs to the driver and the tool alike.
 # shellcheck source=tools/versions.env
 . tools/versions.env
-driver=$(sed -n 's/^sqlx = { version = "\([^"]*\)".*/\1/p' Cargo.toml)
+driver=$(env -u PYTHONPATH -u PYTHONHOME PYTHONDONTWRITEBYTECODE=1 python3 -B - Cargo.toml <<'PY'
+import sys
+import tomllib
+from pathlib import Path
+
+data = tomllib.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+sqlx = data.get("workspace", {}).get("dependencies", {}).get("sqlx")
+version = sqlx if isinstance(sqlx, str) else (sqlx.get("version") if isinstance(sqlx, dict) else None)
+if isinstance(version, str):
+    print(version)
+PY
+)
 [[ ${driver} == "${SQLX_CLI_VERSION}" ]] || {
 	echo "Cargo.toml pins sqlx ${driver:-<none>}, tools/versions.env pins sqlx-cli ${SQLX_CLI_VERSION}; move them together" >&2
 	exit 2

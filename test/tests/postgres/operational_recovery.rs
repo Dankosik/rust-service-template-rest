@@ -3,15 +3,18 @@ use std::{net::SocketAddr, num::NonZeroU32, time::Duration};
 use axum::{extract::State, http::StatusCode, response::IntoResponse as _, routing::get};
 use health::{Readiness, RefreshPolicy};
 use infra_http::{Drained, HardenOptions, Server, ServerOptions};
-use infra_postgres::{PgPool, PostgresProbe};
+use infra_postgres::{CloseOutcome, PgPool, PostgresProbe};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
     net::{TcpListener, TcpStream},
     sync::watch,
-    task::JoinHandle,
+    task::{JoinError, JoinHandle, JoinSet},
     time::{Instant, timeout},
 };
-use tokio_util::{sync::CancellationToken, task::TaskTracker};
+use tokio_util::{
+    sync::{CancellationToken, DropGuard},
+    task::AbortOnDropHandle,
+};
 use tracing::instrument::WithSubscriber as _;
 
 use super::{PoolEvents, dsn_at, dsn_for, server_address, template_pool};
@@ -120,6 +123,7 @@ impl Instance {
             address,
             events,
             client: reqwest::Client::builder()
+                .no_proxy()
                 .timeout(CALL)
                 .pool_max_idle_per_host(0)
                 .build()
@@ -275,7 +279,18 @@ impl Instance {
             Drained::Complete
         );
         assert_eq!(self.pool.options().get_max_connections(), 1);
-        timeout(CALL, self.pool.close()).await.unwrap();
+        assert_eq!(
+            infra_postgres::close(&self.pool, CALL).await,
+            CloseOutcome::Complete
+        );
+    }
+}
+
+fn propagate_link_panic(result: Result<(), JoinError>) {
+    if let Err(err) = result
+        && err.is_panic()
+    {
+        std::panic::resume_unwind(err.into_panic());
     }
 }
 
@@ -286,7 +301,8 @@ struct DependencyLink {
     address: SocketAddr,
     available: watch::Sender<bool>,
     cancel: CancellationToken,
-    tasks: TaskTracker,
+    _cancel_guard: DropGuard,
+    task: AbortOnDropHandle<()>,
 }
 
 impl DependencyLink {
@@ -295,31 +311,41 @@ impl DependencyLink {
         let address = listener.local_addr().unwrap();
         let (available, initial) = watch::channel(true);
         let cancel = CancellationToken::new();
-        let tasks = TaskTracker::new();
-        tasks.spawn({
+        let cancel_guard = cancel.clone().drop_guard();
+        let task = tokio::spawn({
             let cancel = cancel.clone();
-            let tasks = tasks.clone();
             async move {
+                let mut connections = JoinSet::new();
                 loop {
-                    let accepted = tokio::select! {
+                    tokio::select! {
                         () = cancel.cancelled() => break,
-                        result = listener.accept() => result.unwrap(),
-                    };
-                    if !*initial.borrow() { continue; }
-                    let mut online = initial.clone();
-                    let cancel = cancel.clone();
-                    tasks.spawn(async move {
-                        let (mut client, _) = accepted;
-                        tokio::select! {
-                            () = cancel.cancelled() => {},
-                            _ = online.wait_for(|available| !*available) => {},
-                            () = async {
-                                if let Ok(mut server) = TcpStream::connect(upstream).await {
-                                    let _ = tokio::io::copy_bidirectional(&mut client, &mut server).await;
-                                }
-                            } => {},
+                        Some(result) = connections.join_next(), if !connections.is_empty() => {
+                            propagate_link_panic(result);
                         }
-                    });
+                        result = listener.accept() => {
+                            let accepted = result.unwrap();
+                            if !*initial.borrow() {
+                                continue;
+                            }
+                            let mut online = initial.clone();
+                            let cancel = cancel.clone();
+                            connections.spawn(async move {
+                                let (mut client, _) = accepted;
+                                tokio::select! {
+                                    () = cancel.cancelled() => {},
+                                    _ = online.wait_for(|available| !*available) => {},
+                                    () = async {
+                                        if let Ok(mut server) = TcpStream::connect(upstream).await {
+                                            let _ = tokio::io::copy_bidirectional(&mut client, &mut server).await;
+                                        }
+                                    } => {},
+                                }
+                            });
+                        }
+                    }
+                }
+                while let Some(result) = connections.join_next().await {
+                    propagate_link_panic(result);
                 }
             }
         });
@@ -327,7 +353,8 @@ impl DependencyLink {
             address,
             available,
             cancel,
-            tasks,
+            _cancel_guard: cancel_guard,
+            task: AbortOnDropHandle::new(task),
         }
     }
 
@@ -335,16 +362,14 @@ impl DependencyLink {
         self.available.send_replace(!interrupted);
     }
 
-    async fn stop(self) {
+    async fn stop(mut self) {
         self.cancel.cancel();
-        self.tasks.close();
-        timeout(CALL, self.tasks.wait()).await.unwrap();
-    }
-}
-
-impl Drop for DependencyLink {
-    fn drop(&mut self) {
-        self.cancel.cancel();
+        let result = timeout(CALL, &mut self.task).await;
+        if result.is_err() {
+            self.task.abort();
+            let _ = (&mut self.task).await;
+        }
+        propagate_link_panic(result.unwrap());
     }
 }
 

@@ -19,7 +19,7 @@ mod mounted;
 use std::fmt::Write as _;
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use futures_util::FutureExt as _;
@@ -29,9 +29,9 @@ use infra_idempotency_store::{
     CallerKind, CleanupError, Digest, HeaderPair, Record, ScopeKey, StartupError, Store,
 };
 use infra_postgres::{Dsn, Isolation, PgPool, Tx};
-use integration_tests::{DATABASE_URL, close_pools, dsn_for, url_for};
+use integration_tests::{close_pools, dsn_for};
 use sqlx::Executor as _;
-use tokio::sync::Notify;
+use tokio::sync::watch;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -195,31 +195,55 @@ fn caller(value: &str) -> CallerIdentity {
     }
 }
 
-#[derive(Debug, Default)]
-struct Hold {
-    armed: AtomicBool,
-    entered: Notify,
-    release: Notify,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HoldPhase {
+    Idle,
+    Armed,
+    Entered,
+    Released,
+}
+
+#[derive(Debug)]
+struct Hold(watch::Sender<HoldPhase>);
+
+impl Default for Hold {
+    fn default() -> Self {
+        let (tx, _) = watch::channel(HoldPhase::Idle);
+        Self(tx)
+    }
 }
 
 impl Hold {
     fn arm(&self) {
-        self.armed.store(true, Ordering::SeqCst);
+        self.0.send_replace(HoldPhase::Armed);
     }
 
     async fn pass(&self) {
-        if self.armed.swap(false, Ordering::SeqCst) {
-            self.entered.notify_one();
-            self.release.notified().await;
+        if self.0.send_if_modified(|phase| {
+            if *phase == HoldPhase::Armed {
+                *phase = HoldPhase::Entered;
+                true
+            } else {
+                false
+            }
+        }) {
+            let mut rx = self.0.subscribe();
+            let _ = rx.wait_for(|phase| *phase == HoldPhase::Released).await;
         }
     }
 
     async fn entered(&self) {
-        bounded("the held work to enter", self.entered.notified()).await;
+        let mut rx = self.0.subscribe();
+        bounded(
+            "the held work to enter",
+            rx.wait_for(|phase| matches!(phase, HoldPhase::Entered | HoldPhase::Released)),
+        )
+        .await
+        .expect("hold sender stays open");
     }
 
     fn release(&self) {
-        self.release.notify_one();
+        self.0.send_replace(HoldPhase::Released);
     }
 }
 
@@ -726,22 +750,7 @@ async fn p4_waiting_for_an_expired_row_preserves_retention_and_replay(pool: PgPo
 async fn p4_an_expired_key_can_execute_while_a_replay_is_in_flight(pool: PgPool) {
     create_effects(&pool).await;
     let dsn = dsn_for(&pool).await;
-    assert_eq!(dsn.ssl_mode_name(), "disable", "the proxy frames plaintext");
-    let host = dsn.host().trim_matches(['[', ']']);
-    let address = bounded(
-        "resolve the database",
-        tokio::net::lookup_host((host, dsn.port())),
-    )
-    .await
-    .expect("the database address resolves")
-    .next()
-    .expect("the database has an address");
-    let proxy = CommitProxy::start(address).await;
-    let mut url = url_for(&pool, DATABASE_URL).await;
-    url.set_ip_host(proxy.address().ip()).expect("the proxy IP");
-    url.set_port(Some(proxy.address().port()))
-        .expect("the proxy port");
-    let proxied = Dsn::admit(url.as_str()).expect("the proxied DSN is admitted");
+    let (proxy, proxied) = CommitProxy::start_for(&pool).await;
     let replay_pool = template_pool(&proxied, 1).await;
     let replaying = Store::new(replay_pool.clone(), RETENTION).expect("retention fits PostgreSQL");
     let (writer_pool, writer) = replica(&dsn).await;

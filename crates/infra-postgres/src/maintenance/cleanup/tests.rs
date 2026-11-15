@@ -151,12 +151,14 @@ async fn scheduled_cleanup_counts_a_timed_out_batch_and_runs_the_next_pass() {
                 match pass_number {
                     1 => {
                         let mut pass = CleanupPass::start(Cleanup::Jobs);
-                        pass.await_batch(std::future::pending()).await?;
+                        pass.await_batch("test_cleanup_failed", std::future::pending())
+                            .await?;
                         Ok::<_, CleanupError>(PassEnd::Completed)
                     }
                     2 => {
                         let mut pass = CleanupPass::start(Cleanup::Jobs);
-                        pass.await_batch(std::future::ready(Ok(7))).await?;
+                        pass.await_batch("test_cleanup_failed", std::future::ready(Ok(7)))
+                            .await?;
                         pass.completed();
                         Ok(PassEnd::Completed)
                     }

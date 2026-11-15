@@ -143,20 +143,20 @@ fn help_exits_zero_and_prints_usage() {
 // template:begin inbound-webhooks:worker-webhooks-inbound-process-tests
 #[test]
 fn configured_inbound_endpoint_refuses_without_a_consumer_before_database_admission() {
-    let output = Command::new(env!("CARGO_BIN_EXE_jobs-worker"))
-        .env_clear()
-        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-        .env("APP__POSTGRES__ENABLED", "true")
-        .env(
-            "APP__POSTGRES__DSN",
-            "postgres://app:pw@127.0.0.1:1/app?sslmode=disable",
-        )
-        .env(
-            "APP__INBOUND_WEBHOOKS__ENDPOINTS__PARTNER__ACTIVE_KEY",
-            "partner_v1",
-        )
-        .output()
-        .expect("spawn jobs-worker");
+    let output = output_with_env(
+        &[],
+        &[
+            ("APP__POSTGRES__ENABLED", "true"),
+            (
+                "APP__POSTGRES__DSN",
+                "postgres://app:pw@127.0.0.1:1/app?sslmode=disable",
+            ),
+            (
+                "APP__INBOUND_WEBHOOKS__ENDPOINTS__PARTNER__ACTIVE_KEY",
+                "partner_v1",
+            ),
+        ],
+    );
     assert!(
         output.stderr.is_empty(),
         "no duplicate synchronous fallback: {:?}",
@@ -363,32 +363,37 @@ fn operator_help_is_available_before_configuration() {
 fn blocked_stdout_preserves_primary_startup_failure() {
     use std::process::Stdio;
     use std::time::{Duration, Instant};
-    let mut child = Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "blocked_stdout_worker_child",
-            "--ignored",
-            "--no-capture",
-        ])
-        .env_clear()
-        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-        .env("TELEMETRY_BLOCKED_WORKER_CHILD", "1")
-        .env("APP__LOG__FORMAT", "json")
-        .env("APP__RUNTIME__WORKER_THREADS", "2")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+    let mut child = std::mem::DropGuard::new(
+        Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "blocked_stdout_worker_child",
+                "--ignored",
+                "--no-capture",
+            ])
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("TELEMETRY_BLOCKED_WORKER_CHILD", "1")
+            .env("APP__LOG__FORMAT", "json")
+            .env("APP__RUNTIME__WORKER_THREADS", "2")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+        |mut child| {
+            let _ = child.kill();
+            let _ = child.wait();
+        },
+    );
     let deadline = Instant::now() + Duration::from_secs(10);
     let status = loop {
         if let Some(status) = child.try_wait().unwrap() {
             break status;
         }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("worker entrypoint waited for the unread stdout pipe");
-        }
+        assert!(
+            Instant::now() < deadline,
+            "worker entrypoint waited for the unread stdout pipe"
+        );
         std::thread::sleep(Duration::from_millis(10));
     };
     assert_eq!(

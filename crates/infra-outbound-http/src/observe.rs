@@ -35,16 +35,14 @@ pub struct UrlTemplate(pub &'static str);
 #[derive(Clone, Debug)]
 pub(crate) struct Server {
     address: SharedString,
-    port: u16,
     port_label: SharedString,
 }
 
 impl Server {
     pub(crate) fn new(origin: &Origin) -> Self {
         Self {
-            address: Arc::<str>::from(origin.host()).into(),
-            port: origin.port(),
-            port_label: Arc::<str>::from(origin.port().to_string()).into(),
+            address: SharedString::from(origin.host_arc()),
+            port_label: SharedString::from(Arc::<str>::from(origin.port().to_string())),
         }
     }
 }
@@ -79,29 +77,29 @@ impl Outcome {
     }
 }
 
-/// One polled outbound attempt. The guard borrows the stop scopes so it
-/// can record the cause when its parent drops the exchange.
+/// One polled outbound attempt. [`Attempt::start`] returns a drop guard that
+/// borrows the stop scopes so it can record the cause when its parent drops
+/// the exchange.
 ///
 /// [`Attempt::finish`] borrows the result and logs a transport failure's
-/// causes once; the guard itself keeps none.
-pub(crate) struct Attempt<'a> {
-    stops: &'a StopScopes<'a>,
+/// causes once; the attempt itself keeps none.
+pub(crate) struct Attempt {
     started: Instant,
     method: &'static str,
     template: Option<&'static str>,
     server: Server,
     status: Option<StatusCode>,
     span: Span,
-    finalized: bool,
 }
 
-impl<'a> Attempt<'a> {
-    pub(crate) fn start(
+impl Attempt {
+    pub(crate) fn start<'a>(
         method: &Method,
         template: Option<UrlTemplate>,
         server: &Server,
+        port: u16,
         stops: &'a StopScopes<'a>,
-    ) -> Self {
+    ) -> std::mem::DropGuard<Self, impl FnOnce(Self) + use<'a>> {
         let method = request_method(method.as_str());
         let template = template.map(|UrlTemplate(template)| template);
         let span = tracing::info_span!(
@@ -111,22 +109,29 @@ impl<'a> Attempt<'a> {
             http.request.method = method,
             url.template = template,
             server.address = &*server.address,
-            server.port = server.port,
+            server.port = port,
             http.response.status_code = tracing::field::Empty,
             error.type = tracing::field::Empty,
             outbound.outcome = tracing::field::Empty,
             otel.status_code = tracing::field::Empty,
         );
-        Self {
-            stops,
-            started: Instant::now(),
-            method,
-            template,
-            server: server.clone(),
-            status: None,
-            span,
-            finalized: false,
-        }
+        std::mem::DropGuard::new(
+            Self {
+                started: Instant::now(),
+                method,
+                template,
+                server: server.clone(),
+                status: None,
+                span,
+            },
+            move |attempt| {
+                let outcome = match stops.check() {
+                    Ok(()) => Outcome::Cancelled,
+                    Err(error) => Outcome::from_error(&error),
+                };
+                attempt.emit(outcome);
+            },
+        )
     }
 
     pub(crate) fn span(&self) -> Span {
@@ -146,8 +151,7 @@ impl<'a> Attempt<'a> {
         self.status = Some(status);
     }
 
-    pub(crate) fn finish<T>(mut self, result: &Result<T, Error>) {
-        self.finalized = true;
+    pub(crate) fn finish<T>(self, result: &Result<T, Error>) {
         self.emit(
             result
                 .as_ref()
@@ -217,18 +221,6 @@ impl<'a> Attempt<'a> {
             labels.push(Label::new("error.type", error_type));
         }
         labels
-    }
-}
-
-impl Drop for Attempt<'_> {
-    fn drop(&mut self) {
-        if !self.finalized {
-            let outcome = match self.stops.check() {
-                Ok(()) => Outcome::Cancelled,
-                Err(error) => Outcome::from_error(&error),
-            };
-            self.emit(outcome);
-        }
     }
 }
 

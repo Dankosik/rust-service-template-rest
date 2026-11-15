@@ -268,8 +268,7 @@ impl config::Source for ScannedFile {
 
     fn collect(&self) -> Result<config::Map<String, config::Value>, config::ConfigError> {
         let uri = self.path.to_string_lossy().into_owned();
-        let text = self.text.trim_prefix('\u{feff}');
-        config::Format::parse(&config::FileFormat::Toml, Some(&uri), text).map_err(|cause| {
+        config::Format::parse(&config::FileFormat::Toml, Some(&uri), &self.text).map_err(|cause| {
             config::ConfigError::FileParse {
                 uri: Some(uri),
                 cause,

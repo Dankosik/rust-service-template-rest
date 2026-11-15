@@ -6,6 +6,7 @@
 
 use std::future::Future;
 use std::hash::{BuildHasher as _, Hasher as _, RandomState};
+use std::mem::DropGuard;
 use std::net::SocketAddr;
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -140,26 +141,6 @@ pub(crate) struct ConnectionInfo {
 impl ConnectionInfo {
     pub(crate) fn was_forced(&self) -> bool {
         self.forced.load(Ordering::Relaxed)
-    }
-}
-
-struct ReportAcceptFailure {
-    finish: CancellationToken,
-    failure: watch::Sender<Option<AcceptFailure>>,
-}
-
-impl Drop for ReportAcceptFailure {
-    fn drop(&mut self) {
-        let failure = if std::thread::panicking() {
-            Some(AcceptFailure::Panicked)
-        } else if !self.finish.is_cancelled() {
-            Some(AcceptFailure::Ended)
-        } else {
-            None
-        };
-        if let Some(failure) = failure {
-            self.failure.send_replace(Some(failure));
-        }
     }
 }
 
@@ -418,10 +399,21 @@ where
         metrics::counter!(CONNECTIONS_REFUSED_METRIC).increment(0);
     }
     let (failure, accept_failure) = watch::channel(None);
-    let guard = ReportAcceptFailure {
-        finish: connection_shutdown.finish.clone(),
-        failure,
-    };
+    let guard = DropGuard::new(
+        (connection_shutdown.finish.clone(), failure),
+        |(finish, failure)| {
+            let observed = if std::thread::panicking() {
+                Some(AcceptFailure::Panicked)
+            } else if !finish.is_cancelled() {
+                Some(AcceptFailure::Ended)
+            } else {
+                None
+            };
+            if let Some(observed) = observed {
+                failure.send_replace(Some(observed));
+            }
+        },
+    );
     let accept = accept_loop(
         listener,
         app,

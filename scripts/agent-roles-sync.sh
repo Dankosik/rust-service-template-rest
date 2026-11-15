@@ -61,10 +61,7 @@ source_link=$(find "${sources}" "${repo}/.agents/role-classes" -type l -print -q
 [[ -z "${source_link}" ]] || fail "${source_link#"${repo}/"} is a symlink"
 
 read_role() {
-	local file=$1 line value in_body=false body_found=false
-	local name_count=0 description_count=0 class_count=0 claude_model_count=0 qwen_model_count=0
-	local cursor_model_count=0 grok_model_count=0 grok_effort_count=0 output_schema_count=0
-	local claude_effort_count=0
+	local file=$1 parsed_file="${tmp}/parsed-role" err_file="${tmp}/parsed-role.err"
 	name=''
 	description=''
 	class=''
@@ -77,42 +74,82 @@ read_role() {
 	output_schema=''
 	body=''
 	read_role_error=''
-	while IFS= read -r line || [[ -n ${line} ]]; do
-		case "${line}" in
-		'name = "'*'"') value=${line#*\"}; name=${value%\"}; ((name_count += 1)) ;;
-		'description = "'*'"') value=${line#*\"}; description=${value%\"}; ((description_count += 1)) ;;
-		'class = "'*'"') value=${line#*\"}; class=${value%\"}; ((class_count += 1)) ;;
-		'claude_model = "'*'"') value=${line#*\"}; claude_model=${value%\"}; ((claude_model_count += 1)) ;;
-		'claude_effort = "'*'"') value=${line#*\"}; claude_effort=${value%\"}; ((claude_effort_count += 1)) ;;
-		'qwen_model = "'*'"') value=${line#*\"}; qwen_model=${value%\"}; ((qwen_model_count += 1)) ;;
-		'cursor_model = "'*'"') value=${line#*\"}; cursor_model=${value%\"}; ((cursor_model_count += 1)) ;;
-		'grok_model = "'*'"') value=${line#*\"}; grok_model=${value%\"}; ((grok_model_count += 1)) ;;
-		'grok_effort = "'*'"') value=${line#*\"}; grok_effort=${value%\"}; ((grok_effort_count += 1)) ;;
-		'output_schema = "'*'"') value=${line#*\"}; output_schema=${value%\"}; ((output_schema_count += 1)) ;;
-		esac
-		if [[ ${in_body} == true ]]; then
-			if [[ ${line} == '"""' ]]; then
-				in_body=false
-				body_found=true
-			else
-				body+=$'\n'"${line}"
-			fi
-		elif [[ ${line} == 'instructions = """' ]]; then
-			in_body=true
-		fi
-	done <"${file}"
-	if ((name_count > 1 || description_count > 1 || class_count > 1 || claude_model_count > 1 ||
-		qwen_model_count > 1 || cursor_model_count > 1 || grok_model_count > 1 || grok_effort_count > 1 ||
-		output_schema_count > 1 || claude_effort_count > 1)); then
-		read_role_error=metadata
+	if ! env -u PYTHONPATH -u PYTHONHOME PYTHONDONTWRITEBYTECODE=1 python3 -B - "${file}" >"${parsed_file}" 2>"${err_file}" <<'PY'
+import sys
+import tomllib
+from pathlib import Path
+
+ALLOWED_KEYS = (
+    "name",
+    "description",
+    "class",
+    "claude_model",
+    "claude_effort",
+    "qwen_model",
+    "cursor_model",
+    "grok_model",
+    "grok_effort",
+    "output_schema",
+    "instructions",
+)
+
+raw = Path(sys.argv[1]).read_bytes()
+if b"\r" in raw:
+    print("contains carriage returns (CRLF)", file=sys.stderr)
+    sys.exit(1)
+try:
+    text = raw.decode("utf-8")
+except UnicodeDecodeError as exc:
+    print(f"invalid UTF-8: {exc}", file=sys.stderr)
+    sys.exit(1)
+try:
+    data = tomllib.loads(text)
+except tomllib.TOMLDecodeError as exc:
+    print(f"invalid TOML: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+unknown = sorted(set(data) - set(ALLOWED_KEYS))
+if unknown:
+    print(f"has unsupported role metadata keys: {', '.join(unknown)}", file=sys.stderr)
+    sys.exit(1)
+for key, value in data.items():
+    if not isinstance(value, str):
+        print(f"role key {key} must be a string", file=sys.stderr)
+        sys.exit(1)
+if "instructions" not in data:
+    print("has no instructions block", file=sys.stderr)
+    sys.exit(1)
+body = data["instructions"].rstrip("\n")
+if not body:
+    print("has an empty instructions block", file=sys.stderr)
+    sys.exit(1)
+
+values = [data.get(key, "") for key in ALLOWED_KEYS[:-1]] + [body]
+if any("\0" in item for item in values):
+    print("contains NUL bytes", file=sys.stderr)
+    sys.exit(1)
+sys.stdout.buffer.write(("\0".join(values) + "\0").encode("utf-8"))
+PY
+	then
+		read_role_error=$(<"${err_file}")
 		return 1
 	fi
-	if [[ ${body_found} != true ]]; then
-		read_role_error=body
+	{
+		IFS= read -r -d '' name &&
+			IFS= read -r -d '' description &&
+			IFS= read -r -d '' class &&
+			IFS= read -r -d '' claude_model &&
+			IFS= read -r -d '' claude_effort &&
+			IFS= read -r -d '' qwen_model &&
+			IFS= read -r -d '' cursor_model &&
+			IFS= read -r -d '' grok_model &&
+			IFS= read -r -d '' grok_effort &&
+			IFS= read -r -d '' output_schema &&
+			IFS= read -r -d '' body
+	} <"${parsed_file}" || {
+		read_role_error="has an incomplete parsed role payload"
 		return 1
-	fi
-	body=${body#$'\n'}
-	while [[ ${body} == *$'\n' ]]; do body=${body%$'\n'}; done
+	}
 }
 
 validate_name() {
@@ -151,10 +188,7 @@ role_names=()
 shopt -s nullglob
 for source_file in "${sources}"/*.toml; do
 	if ! read_role "${source_file}"; then
-		if [[ ${read_role_error} == metadata ]]; then
-			fail "${source_file#"${repo}/"} has duplicate role metadata"
-		fi
-		fail "${source_file#"${repo}/"} has no closed instructions block"
+		fail "${source_file#"${repo}/"} ${read_role_error}"
 	fi
 
 	validate_name "${name}" "${source_file}"

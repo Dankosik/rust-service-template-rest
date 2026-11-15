@@ -54,7 +54,21 @@ runs:
       run: |
         set -euo pipefail
         test "$(git rev-parse HEAD)" = "${CANDIDATE_SHA}"
-        crate_version=$(cargo pkgid --locked --manifest-path crates/service/Cargo.toml | sed -E 's/.*#([^@]+@)?//')
+        crate_version=$(
+          python3 -B -E - <<'PY'
+        import sys
+        import tomllib
+
+        with open("crates/service/Cargo.toml", "rb") as handle:
+            version = tomllib.load(handle).get("package", {}).get("version")
+        if isinstance(version, dict) and version.get("workspace") is True:
+            with open("Cargo.toml", "rb") as handle:
+                version = tomllib.load(handle).get("workspace", {}).get("package", {}).get("version")
+        if not isinstance(version, str) or not version:
+            sys.exit("publish-image: unable to resolve crates/service/Cargo.toml package.version")
+        print(version)
+        PY
+        )
         test -n "${crate_version}"
         bash ./scripts/ci/publish-image-metadata.sh metadata \
           "${MODE}" \
@@ -94,6 +108,7 @@ runs:
       id: build
       shell: bash
       env:
+        APP_VERSION: ${{ steps.meta.outputs.version }}
         VCS_REF: ${{ inputs.candidate_sha }}
         SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
         PRIMARY_IMAGE: ${{ steps.meta.outputs.primary_image }}

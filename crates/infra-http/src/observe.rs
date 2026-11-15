@@ -5,6 +5,7 @@
 //! nothing is `Span::record`ed afterwards, since every record re-serializes
 //! the span's fields.
 
+use std::mem::DropGuard;
 use std::sync::{Arc, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
@@ -129,18 +130,22 @@ pub(crate) async fn observe(
         .as_ref()
         .map_or(UNMATCHED_ROUTE, MatchedPath::as_str);
     let log_access = !suppresses_access_log(log_health_probes, method, route);
-    let active = Active::start(&series, method_label);
-    let mut pending = Pending {
-        log_access,
-        series: &series,
-        method_label,
-        route,
-        request_id: request_id_text,
-        span: &span,
-        started,
-        answered: false,
-        connection,
-    };
+    let gauge = series.active_gauge(method_label);
+    gauge.increment(1);
+    let active = DropGuard::new(gauge, |gauge| gauge.decrement(1));
+    let pending = DropGuard::new(
+        Pending {
+            log_access,
+            series: &series,
+            method_label,
+            route,
+            request_id: request_id_text,
+            span: &span,
+            started,
+            connection,
+        },
+        Pending::abandon,
+    );
 
     let traced = next.run(request).instrument(span.clone());
     let response = match fallback {
@@ -160,7 +165,7 @@ pub(crate) async fn observe(
         .get::<Problem>()
         .map(|problem| problem.code().as_str());
     let termination = extensions.get::<AdmissionShed>().map(|_| "load_shed");
-    pending.answer(status, problem_code, termination);
+    DropGuard::dismiss(pending).record(status, problem_code, termination);
     update_span_from_response(&span, status);
     if let Some(id) = &request_id {
         response
@@ -179,22 +184,27 @@ struct Pending<'a> {
     request_id: Option<&'a str>,
     span: &'a tracing::Span,
     started: Instant,
-    answered: bool,
     connection: Option<ConnectionInfo>,
 }
 
 impl Pending<'_> {
-    fn answer(
-        &mut self,
-        status: StatusCode,
-        problem_code: Option<&str>,
-        termination: Option<&str>,
-    ) {
-        self.answered = true;
-        self.record(status, problem_code, termination);
+    fn abandon(self) {
+        if self
+            .connection
+            .as_ref()
+            .is_some_and(ConnectionInfo::was_forced)
+        {
+            self.record(
+                StatusCode::SERVICE_UNAVAILABLE,
+                None,
+                Some("server_shutdown"),
+            );
+        } else {
+            self.record(CLIENT_CLOSED_REQUEST, None, None);
+        }
     }
 
-    fn record(&self, status: StatusCode, problem_code: Option<&str>, termination: Option<&str>) {
+    fn record(self, status: StatusCode, problem_code: Option<&str>, termination: Option<&str>) {
         let elapsed = self.started.elapsed();
         self.series
             .record_duration(self.method_label, self.route, status, elapsed);
@@ -214,27 +224,6 @@ impl Pending<'_> {
                 "http_request"
             );
         });
-    }
-}
-
-impl Drop for Pending<'_> {
-    fn drop(&mut self) {
-        if self.answered {
-            return;
-        }
-        if self
-            .connection
-            .as_ref()
-            .is_some_and(ConnectionInfo::was_forced)
-        {
-            self.record(
-                StatusCode::SERVICE_UNAVAILABLE,
-                None,
-                Some("server_shutdown"),
-            );
-        } else {
-            self.record(CLIENT_CLOSED_REQUEST, None, None);
-        }
     }
 }
 
@@ -289,22 +278,6 @@ fn update_span_from_response(span: &tracing::Span, status: StatusCode) {
         // The conventions name a failed response by its status code.
         span.set_attribute("error.type", status.as_str().to_owned());
         span.set_status(opentelemetry::trace::Status::error(""));
-    }
-}
-
-struct Active(Gauge);
-
-impl Active {
-    fn start(series: &Series, method: &'static str) -> Self {
-        let gauge = series.active_gauge(method);
-        gauge.increment(1);
-        Self(gauge)
-    }
-}
-
-impl Drop for Active {
-    fn drop(&mut self) {
-        self.0.decrement(1);
     }
 }
 

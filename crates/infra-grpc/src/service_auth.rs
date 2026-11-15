@@ -96,12 +96,19 @@ pub(crate) async fn admit_caller(
     let Some(context) = crate::router::opening_context(&request).cloned() else {
         return crate::status::internal_status().into_http();
     };
+    if let Some(reason) = context.stopped() {
+        return crate::call::Side::Server.stopped(reason).into_http();
+    }
     let authorization = request
         .headers()
         .get_all(AUTHORIZATION)
         .iter()
         .map(http::HeaderValue::as_bytes);
-    let caller = match verifier.authenticate(authorization) {
+    let result = verifier.authenticate(authorization);
+    if let Some(reason) = context.stopped() {
+        return crate::call::Side::Server.stopped(reason).into_http();
+    }
+    let caller = match result {
         Ok(caller) => caller,
         Err(failure) => return crate::router::reject(request, verification_status(failure)).await,
     };
@@ -202,5 +209,169 @@ impl tower::Service<http::Request<Body>> for ServiceTokenClient {
             },
             None,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::convert::Infallible;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    use bytes::Bytes;
+    use futures_util::StreamExt as _;
+    use infra_serviceauth::{
+        JwtType, TrustRegistry,
+        test_support::{TestKey, registry},
+    };
+    use operation_context::OperationContext;
+    use tower::ServiceExt as _;
+
+    use super::*;
+
+    const METHOD: &str = "/example.v1.EchoService/Unary";
+    const TYPE: &str = "example-svc+jwt";
+
+    fn orders_only_router() -> (axum::Router, String, Arc<AtomicBool>) {
+        let orders = TestKey::new("orders/2026-10");
+        let billing = TestKey::new("billing/2026-10");
+        let trust = TrustRegistry::parse(&registry(&[
+            ("orders", &[&orders]),
+            ("billing", &[&billing]),
+        ]))
+        .unwrap();
+        let verifier = Verifier::new(
+            ServiceName::parse("catalog").unwrap(),
+            JwtType::parse(TYPE).unwrap(),
+            trust,
+        );
+        let mut rules = HashMap::default();
+        rules.insert(
+            METHOD.to_owned(),
+            Box::from([ServiceName::parse("orders").unwrap()]),
+        );
+        let admission = Arc::new(CallerAdmission::new(Some(verifier), rules));
+
+        let reached_handler = Arc::new(AtomicBool::new(false));
+        let handler_flag = Arc::clone(&reached_handler);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
+        )]
+        let app = axum::Router::new()
+            .route(
+                METHOD,
+                axum::routing::post(move || {
+                    let handler_flag = Arc::clone(&handler_flag);
+                    async move {
+                        handler_flag.store(true, Ordering::SeqCst);
+                        tonic::Status::ok("").into_http::<Body>()
+                    }
+                }),
+            )
+            .layer(axum::middleware::from_fn_with_state(
+                admission,
+                admit_caller,
+            ));
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let billing_token = billing.sign(
+            &serde_json::json!({"alg": "ES256", "typ": TYPE, "kid": billing.kid()}),
+            &serde_json::json!({
+                "iss": "billing",
+                "sub": "billing",
+                "aud": "catalog",
+                "iat": now,
+                "exp": now + 60,
+            }),
+        );
+        (app, format!("Bearer {billing_token}"), reached_handler)
+    }
+
+    #[tokio::test]
+    async fn stopped_context_returns_stopped_status_without_counting_not_admitted() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _recorder = metrics::set_default_local_recorder(&recorder);
+        let (app, bearer, reached_handler) = orders_only_router();
+
+        let body_polls = Arc::new(AtomicUsize::new(0));
+        let make_request = |context: OperationContext, authorization: Option<&str>| {
+            let polls = Arc::clone(&body_polls);
+            let stream = futures_util::stream::iter(0..2).map(move |_| {
+                polls.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, Infallible>(Bytes::from_static(b"frame"))
+            });
+            let mut builder = http::Request::post(METHOD);
+            if let Some(value) = authorization {
+                builder = builder.header(AUTHORIZATION, value);
+            }
+            let mut request = builder.body(axum::body::Body::from_stream(stream)).unwrap();
+            request.extensions_mut().insert(context);
+            request
+        };
+
+        for authorization in [Some(bearer.as_str()), None] {
+            let response = app
+                .clone()
+                .oneshot(make_request(
+                    OperationContext::with_timeout(Duration::ZERO),
+                    authorization,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(
+                tonic::Status::from_header_map(response.headers())
+                    .unwrap()
+                    .code(),
+                tonic::Code::DeadlineExceeded
+            );
+        }
+
+        let cancelled_context = OperationContext::unbounded();
+        cancelled_context.cancellation().cancel();
+        let cancelled = app
+            .clone()
+            .oneshot(make_request(cancelled_context, Some(&bearer)))
+            .await
+            .unwrap();
+        assert_eq!(
+            tonic::Status::from_header_map(cancelled.headers())
+                .unwrap()
+                .code(),
+            tonic::Code::Cancelled
+        );
+
+        assert!(!reached_handler.load(Ordering::SeqCst));
+        assert_eq!(body_polls.load(Ordering::SeqCst), 0);
+        let rendered = handle.render();
+        assert!(
+            rendered
+                .contains(r#"service_auth_calls_total{caller="billing",outcome="not_admitted"} 0"#),
+            "{rendered}"
+        );
+
+        let live = app
+            .oneshot(make_request(
+                OperationContext::with_timeout(Duration::from_secs(5)),
+                Some(&bearer),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            tonic::Status::from_header_map(live.headers())
+                .unwrap()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+        let rendered = handle.render();
+        assert!(
+            rendered
+                .contains(r#"service_auth_calls_total{caller="billing",outcome="not_admitted"} 1"#),
+            "{rendered}"
+        );
     }
 }

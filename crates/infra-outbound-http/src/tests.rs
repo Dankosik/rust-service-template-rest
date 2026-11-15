@@ -1,6 +1,4 @@
-use std::{
-    error::Error as _, fmt::Write as _, net::SocketAddr, sync::Arc, task::Context, time::Duration,
-};
+use std::{fmt::Write as _, net::SocketAddr, sync::Arc, task::Context, time::Duration};
 
 use bytes::Bytes;
 use http::{Request, Version, header};
@@ -878,11 +876,9 @@ async fn transport_source_redacts_request_and_response_content() {
         .execute(request, deadline())
         .await
         .expect_err("truncated response fails");
-    let mut diagnostics = format!("{error:?} {error}");
-    let mut source = error.source();
-    while let Some(current) = source {
-        write!(diagnostics, " {current:?} {current}").expect("format diagnostics");
-        source = current.source();
+    let mut diagnostics = String::new();
+    for cause in shared_rules::error_chain::causes(&error) {
+        write!(diagnostics, "{cause:?} {cause} ").expect("format diagnostics");
     }
     for sentinel in [
         "sentinel-path",

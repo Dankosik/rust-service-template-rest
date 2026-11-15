@@ -97,7 +97,14 @@ impl TokenEndpoint {
         deadline: Instant,
     ) -> Result<Token, AcquisitionError> {
         let started = Instant::now();
-        let mut metric = AttemptMetric::new(grant.metric_label(), deadline);
+        let metric = std::mem::DropGuard::new(grant.metric_label(), |grant| {
+            let outcome = if Instant::now() >= deadline {
+                AcquisitionError::Timeout.label()
+            } else {
+                AcquisitionError::Cancelled.label()
+            };
+            record_acquisition(grant, outcome);
+        });
         let result = tokio::time::timeout_at(deadline, async {
             let _permit = self.admit_attempt(deadline)?;
             self.request_token(grant, started, deadline).await
@@ -111,7 +118,15 @@ impl TokenEndpoint {
         } else {
             result
         };
-        metric.finish(&result);
+        let grant = std::mem::DropGuard::dismiss(metric);
+        record_acquisition(
+            grant,
+            result
+                .as_ref()
+                .err()
+                .copied()
+                .map_or("success", AcquisitionError::label),
+        );
         result
     }
 
@@ -295,43 +310,11 @@ fn token_from_response(
     Token::bearer(&response.access_token, started, response.expires_in)
 }
 
-struct AttemptMetric {
-    grant: &'static str,
-    outcome: Option<&'static str>,
-    deadline: Instant,
-}
-
-impl AttemptMetric {
-    fn new(grant: &'static str, deadline: Instant) -> Self {
-        Self {
-            grant,
-            outcome: None,
-            deadline,
-        }
-    }
-
-    fn finish<T>(&mut self, result: &Result<T, AcquisitionError>) {
-        self.outcome = Some(
-            result
-                .as_ref()
-                .err()
-                .map_or("success", |error| error.label()),
-        );
-    }
-}
-
-impl Drop for AttemptMetric {
-    fn drop(&mut self) {
-        let outcome = self.outcome.unwrap_or(if Instant::now() >= self.deadline {
-            AcquisitionError::Timeout.label()
-        } else {
-            AcquisitionError::Cancelled.label()
-        });
-        metrics::counter!(
-            ACQUISITIONS_TOTAL,
-            "grant" => self.grant,
-            "outcome" => outcome,
-        )
-        .increment(1);
-    }
+fn record_acquisition(grant: &'static str, outcome: &'static str) {
+    metrics::counter!(
+        ACQUISITIONS_TOTAL,
+        "grant" => grant,
+        "outcome" => outcome,
+    )
+    .increment(1);
 }

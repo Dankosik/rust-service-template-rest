@@ -89,6 +89,20 @@ fn providers_accept_only_their_own_keys() {
 }
 
 #[test]
+fn cloudflare_r2_trims_blank_and_auto_regions() {
+    let mut r2 = railway();
+    r2.provider = ObjectStorageProvider::CloudflareR2;
+    for accepted in ["", "   ", "auto", " auto ", "\tauto\n"] {
+        r2.region = accepted.to_owned();
+        r2.validate("production").unwrap();
+    }
+    for rejected in ["eu-central-1", " eu-central-1 ", "AUTO"] {
+        r2.region = rejected.to_owned();
+        assert_eq!(key_of(&r2, "production"), "object_storage.region");
+    }
+}
+
+#[test]
 fn workload_identity_is_amazon_only_and_takes_no_access_key() {
     let mut amazon = railway();
     amazon.provider = ObjectStorageProvider::AmazonS3;

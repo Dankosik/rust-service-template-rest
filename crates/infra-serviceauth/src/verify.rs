@@ -385,20 +385,56 @@ struct Claims<'a> {
     nbf: Option<u64>,
 }
 
-/// `aud` as RFC 7519 allows it: one string or an array of strings.
-#[derive(Deserialize)]
-#[serde(untagged)]
+/// `aud` as RFC 7519 allows it: one string or an array of strings. Only a
+/// single audience can match, and `#[serde(untagged)]` would buffer into owned
+/// storage instead of borrowing from the payload.
+#[derive(Debug)]
 enum Audience<'a> {
-    One(#[serde(borrow)] Cow<'a, str>),
-    Many(#[serde(borrow)] Vec<Cow<'a, str>>),
+    Single(Cow<'a, str>),
+    Other,
 }
+
+impl<'de: 'a, 'a> Deserialize<'de> for Audience<'a> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor<'a>(std::marker::PhantomData<Audience<'a>>);
+        impl<'de: 'a, 'a> de::Visitor<'de> for Visitor<'a> {
+            type Value = Audience<'a>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a string or an array of strings")
+            }
+
+            fn visit_borrowed_str<E: de::Error>(self, value: &'de str) -> Result<Self::Value, E> {
+                Ok(Audience::Single(Cow::Borrowed(value)))
+            }
+
+            fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(Audience::Single(Cow::Owned(value.to_owned())))
+            }
+
+            fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                let Some(first) = seq.next_element::<BorrowableString<'de>>()? else {
+                    return Ok(Audience::Other);
+                };
+                if seq.next_element::<BorrowableString<'de>>()?.is_none() {
+                    return Ok(Audience::Single(first.0));
+                }
+                while seq.next_element::<BorrowableString<'de>>()?.is_some() {}
+                Ok(Audience::Other)
+            }
+        }
+        deserializer.deserialize_any(Visitor(std::marker::PhantomData))
+    }
+}
+
+/// A bare [`Cow<str>`](Cow) element always deserializes as owned; `#[serde(borrow)]`
+/// lets an escape-free string borrow from the payload.
+#[derive(Deserialize)]
+struct BorrowableString<'a>(#[serde(borrow)] Cow<'a, str>);
 
 impl Audience<'_> {
     fn is_only(&self, name: &str) -> bool {
-        match self {
-            Self::One(audience) => audience == name,
-            Self::Many(audiences) => matches!(audiences.as_slice(), [audience] if audience == name),
-        }
+        matches!(self, Self::Single(audience) if audience == name)
     }
 }
 
@@ -711,6 +747,55 @@ mod tests {
             claims["exp"] = (NOW + 90).into();
         });
         assert_eq!(case.check(&token), Ok("orders".to_owned()));
+    }
+
+    #[test]
+    fn audience_borrows_strings_decodes_escapes_and_checks_trailing_array_types() {
+        let single: Claims<'_> = serde_json::from_str(
+            r#"{"iss":"orders","sub":"orders","aud":"catalog","iat":1800000000,"exp":1800000060}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            single.aud,
+            Some(Audience::Single(Cow::Borrowed("catalog")))
+        ));
+
+        let singleton: Claims<'_> = serde_json::from_str(
+            r#"{"iss":"orders","sub":"orders","aud":["catalog"],"iat":1800000000,"exp":1800000060}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            singleton.aud,
+            Some(Audience::Single(Cow::Borrowed("catalog")))
+        ));
+
+        let escaped_payload = format!(
+            r#"{{"iss":"orders","sub":"orders","aud":"cata\u006cog","iat":{NOW},"exp":{}}}"#,
+            NOW + 60
+        );
+        let escaped_claims: Claims<'_> = serde_json::from_str(&escaped_payload).unwrap();
+        assert!(matches!(
+            escaped_claims.aud.as_ref(),
+            Some(Audience::Single(Cow::Owned(value))) if value == "catalog"
+        ));
+
+        let case = Case::new();
+        let escaped_token = case.orders.sign_raw(
+            Case::header(&case.orders).to_string().as_bytes(),
+            escaped_payload.as_bytes(),
+        );
+        assert_eq!(case.check(&escaped_token), Ok("orders".to_owned()));
+
+        let empty_aud = case.signed(|_, claims| claims["aud"] = serde_json::json!([]));
+        assert_eq!(case.check(&empty_aud), Err(Reason::Audience));
+
+        let multi_aud =
+            case.signed(|_, claims| claims["aud"] = serde_json::json!(["catalog", "other"]));
+        assert_eq!(case.check(&multi_aud), Err(Reason::Audience));
+
+        let mixed_aud =
+            case.signed(|_, claims| claims["aud"] = serde_json::json!(["catalog", "extra", 123]));
+        assert_eq!(case.check(&mixed_aud), Err(Reason::Claims));
     }
 
     #[test]

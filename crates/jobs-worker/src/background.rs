@@ -36,11 +36,20 @@ impl Background {
     {
         let cancel = self.cancel.child_token();
         let task = start(cancel.clone());
-        let guard = ReportUnexpectedTaskEnd {
-            name,
-            cancel,
-            first_failure: self.first_failure.clone(),
-        };
+        let guard = std::mem::DropGuard::new(
+            (name, cancel, self.first_failure.clone()),
+            |(name, cancel, first_failure)| {
+                if cancel.is_cancelled() && !std::thread::panicking() {
+                    return;
+                }
+                tracing::error!(
+                    task = name,
+                    panicked = std::thread::panicking(),
+                    "background_task_stopped"
+                );
+                record_first(&first_failure, name);
+            },
+        );
         let task = self.tracker.spawn(async move {
             let _guard = guard;
             task.await;
@@ -80,26 +89,6 @@ impl Background {
         // `self` owns the sender, so the receiver cannot close while `self`
         // is borrowed; this only keeps the function total.
         std::future::pending().await
-    }
-}
-
-struct ReportUnexpectedTaskEnd {
-    name: &'static str,
-    cancel: CancellationToken,
-    first_failure: watch::Sender<Option<&'static str>>,
-}
-
-impl Drop for ReportUnexpectedTaskEnd {
-    fn drop(&mut self) {
-        if self.cancel.is_cancelled() && !std::thread::panicking() {
-            return;
-        }
-        tracing::error!(
-            task = self.name,
-            panicked = std::thread::panicking(),
-            "background_task_stopped"
-        );
-        record_first(&self.first_failure, self.name);
     }
 }
 

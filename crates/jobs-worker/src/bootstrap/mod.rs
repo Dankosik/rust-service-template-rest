@@ -575,23 +575,30 @@ mod tests {
         const CHILD: &str = "WORKER_LIFECYCLE_SIGNAL_TEST_CHILD";
         if std::env::var_os(CHILD).is_none() {
             let thread = std::thread::current();
-            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-                .args(["--exact", thread.name().unwrap()])
-                .env(CHILD, "1")
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn()
-                .unwrap();
+            let mut child = std::mem::DropGuard::new(
+                std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", thread.name().unwrap()])
+                    .env(CHILD, "1")
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .unwrap(),
+                |mut child| {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                },
+            );
             let deadline = std::time::Instant::now() + Duration::from_secs(10);
             while child.try_wait().unwrap().is_none() {
-                if std::time::Instant::now() >= deadline {
-                    child.kill().unwrap();
-                    child.wait().unwrap();
-                    panic!("isolated signal case did not finish");
-                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "isolated signal case did not finish"
+                );
                 std::thread::sleep(Duration::from_millis(10));
             }
-            let output = child.wait_with_output().unwrap();
+            let output = std::mem::DropGuard::dismiss(child)
+                .wait_with_output()
+                .unwrap();
             assert!(
                 output.status.success(),
                 "{}\n{}",

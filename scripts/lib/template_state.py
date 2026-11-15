@@ -1194,31 +1194,64 @@ def write_plan(root: Path, writes: Iterable[PlannedWrite | PlannedLink], removal
     verify_plan(root, (*regular_writes, *link_writes), removal_paths)
 
 
+PROFILE_FIELDS = (
+    "database",
+    "authn",
+    "outbound_http",
+    "outbound_auth",
+    "grpc",
+    "http_idempotency",
+    "jobs",
+    "messaging",
+    "outbox",
+    "webhooks",
+    "inbound_webhooks",
+    "cache",
+    "object_storage",
+    "service_auth",
+    "agent_harness",
+)
+
+
+def selected_profile_map(root: Path) -> dict[str, str]:
+    root = Path(root)
+    lock = load_lock(root)
+    if lock is None:
+        return {
+            "database": "postgres",
+            "authn": "none",
+            "outbound_http": "bounded" if (root / "crates/infra-outbound-http").is_dir() else "none",
+            "outbound_auth": "oauth2-client-credentials" if (root / "crates/infra-oauth2-client-credentials").is_dir() else "none",
+            "grpc": "enabled" if (root / "crates/infra-grpc").is_dir() else "none",
+            "http_idempotency": "postgres" if (root / "crates/infra-idempotency-store").is_dir() else "none",
+            "jobs": "postgres" if (root / "crates/infra-jobs").is_dir() else "none",
+            "messaging": "nats-jetstream" if (root / "crates/infra-messaging").is_dir() else "none",
+            "outbox": "postgres" if (root / "crates/infra-messaging/src/outbox.rs").is_file() else "none",
+            "webhooks": "durable" if (root / "crates/infra-webhooks/src/outbound.rs").is_file() else "none",
+            "inbound_webhooks": "standard-webhooks" if (root / "crates/infra-webhooks/src/inbound.rs").is_file() else "none",
+            "cache": "redis" if (root / "crates/infra-cache").is_dir() else "none",
+            "object_storage": "s3" if (root / "crates/infra-object-storage").is_dir() else "none",
+            "service_auth": "jwt" if (root / "crates/infra-serviceauth").is_dir() else "none",
+            "agent_harness": "all",
+        }
+    if lock["state"] != "complete":
+        raise Refusal("template.lock is incomplete; inspect the init-produced diff and use a fresh template checkout")
+    return dict(lock["profiles"])
+
+
 def _profile_command(arguments: argparse.Namespace) -> int:
     try:
         root = Path(arguments.repo)
         if root.is_symlink() or not root.is_dir():
             raise Refusal("repository directory is unsafe")
         root = root.resolve(strict=True)
-        database, harness = selected_profiles(root)
-        value = {
-            "database": database,
-            "authn": selected_authn(root),
-            "outbound_http": selected_outbound_http(root),
-            "outbound_auth": selected_outbound_auth(root),
-            "grpc": selected_grpc(root),
-            "http_idempotency": selected_http_idempotency(root),
-            "jobs": selected_jobs(root),
-            "messaging": selected_messaging(root),
-            "cache": selected_cache(root),
-            "object_storage": selected_object_storage(root),
-            "service_auth": selected_service_auth(root),
-            "outbox": selected_outbox(root),
-            "webhooks": selected_webhooks(root),
-            "inbound_webhooks": selected_inbound_webhooks(root),
-            "agent_harness": harness,
-        }[arguments.field]
-        print(value)
+        values = selected_profile_map(root)
+        if arguments.field is not None:
+            print(values[arguments.field])
+            return 0
+        requested = PROFILE_FIELDS if arguments.all else tuple(arguments.fields)
+        for field in requested:
+            print(f"{field}={values[field]}")
         return 0
     except (Refusal, ToolFailure) as error:
         print(f"template state: {error}", file=sys.stderr)
@@ -1230,13 +1263,10 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     profile = commands.add_parser("profile", help="print selected profile data")
     profile.add_argument("--repo", required=True, type=Path)
-    profile.add_argument(
-        "--field", required=True,
-        choices=(
-            "database", "authn", "outbound_http", "outbound_auth", "grpc", "http_idempotency", "jobs", "messaging",
-            "outbox", "webhooks", "inbound_webhooks", "cache", "object_storage", "service_auth", "agent_harness",
-        ),
-    )
+    selection = profile.add_mutually_exclusive_group(required=True)
+    selection.add_argument("--field", choices=PROFILE_FIELDS)
+    selection.add_argument("--fields", nargs="+", choices=PROFILE_FIELDS)
+    selection.add_argument("--all", action="store_true")
     profile.set_defaults(handler=_profile_command)
     return parser
 

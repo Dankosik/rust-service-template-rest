@@ -5,11 +5,18 @@
 # does not duplicate their wire validation or transfer-id implementation.
 set -euo pipefail
 
-readonly source_url="${GO_WIRE_SOURCE_URL:-https://github.com/Dankosik/go-service-template-rest.git}"
+readonly compat_source_url="https://github.com/Dankosik/go-service-template-rest"
+readonly source_url="${GO_WIRE_SOURCE_URL:-${compat_source_url}.git}"
 readonly source_revision="a50f43cf869b86accb3fdba24d758cc2d15a02df"
 readonly wire_hash="c98d7c1db43f515e072e91416cf1baa6d0da5c898337d62be9fef3173ed9fe88"
 readonly dead_letter_hash="4063580a0322974331c13f3de19e3296b0c40d1785cbbf98d695dc74ef5b953c"
 readonly event_hash="add1371aa3ef73b26a9f1eb08d9b992f48969d4a8f6dbd256d81d6d1a058e556"
+
+export COMPAT_SOURCE_URL="$compat_source_url"
+export COMPAT_SOURCE_REVISION="$source_revision"
+export COMPAT_WIRE_HASH="$wire_hash"
+export COMPAT_DEAD_LETTER_HASH="$dead_letter_hash"
+export COMPAT_EVENT_HASH="$event_hash"
 
 usage() {
   printf '%s\n' "usage: $0 generate|check|verify-rust [fixture-file] [rust-export-file]" >&2
@@ -28,6 +35,14 @@ esac
 fixture_dir="$(dirname "$fixture_file")"
 mkdir -p "$fixture_dir"
 fixture_file="$(cd "$fixture_dir" && pwd)/$(basename "$fixture_file")"
+if [[ "$mode" == "verify-rust" ]]; then
+  [[ -f "$rust_export_file" ]] || {
+    printf 'Rust export file does not exist: %s\n' "$rust_export_file" >&2
+    exit 1
+  }
+  rust_export_dir="$(dirname "$rust_export_file")"
+  rust_export_file="$(cd "$rust_export_dir" && pwd)/$(basename "$rust_export_file")"
+fi
 scratch="$(mktemp -d "${TMPDIR:-/tmp}/go-wire.XXXXXX")"
 cleanup() { rm -rf "$scratch"; }
 trap cleanup EXIT
@@ -171,19 +186,29 @@ func TestGoWireCompatibilityBridge(t *testing.T) {
 	if mode == "verify-rust" { verifyRustExport(t, os.Getenv("GO_WIRE_RUST_EXPORT")) }
 }
 
+func expectedProvenance(t *testing.T) compatProvenance {
+	t.Helper()
+	required := func(key string) string {
+		value := os.Getenv(key)
+		if value == "" { t.Fatalf("%s is required", key) }
+		return value
+	}
+	return compatProvenance{
+		Repository: required("COMPAT_SOURCE_URL"),
+		Revision:   required("COMPAT_SOURCE_REVISION"),
+		Files: map[string]string{
+			"internal/infra/natsjs/message_wire.go":       required("COMPAT_WIRE_HASH"),
+			"internal/infra/natsjs/message_deadletter.go": required("COMPAT_DEAD_LETTER_HASH"),
+			"internal/domainevent/event.go":               required("COMPAT_EVENT_HASH"),
+		},
+	}
+}
+
 func generatedFixtures(t *testing.T) compatFixtureSet {
 	t.Helper()
 	return compatFixtureSet{
 		Version: compatFixtureVersion,
-		Provenance: compatProvenance{
-			Repository: "https://github.com/Dankosik/go-service-template-rest",
-			Revision: "a50f43cf869b86accb3fdba24d758cc2d15a02df",
-			Files: map[string]string{
-				"internal/infra/natsjs/message_wire.go": "c98d7c1db43f515e072e91416cf1baa6d0da5c898337d62be9fef3173ed9fe88",
-				"internal/infra/natsjs/message_deadletter.go": "4063580a0322974331c13f3de19e3296b0c40d1785cbbf98d695dc74ef5b953c",
-				"internal/domainevent/event.go": "add1371aa3ef73b26a9f1eb08d9b992f48969d4a8f6dbd256d81d6d1a058e556",
-			},
-		},
+		Provenance: expectedProvenance(t),
 		Cases: []compatFixtureCase{
 			generateFixture(t, "fractional_raw_bytes", "events.created", "message-fraction", "publication-fraction", "example.created", 1, "2026-09-26T12:34:56.123456789Z", []byte(`{"amount":1.00,"escaped":"\\u0041","items":[true,false]}`), "2026-09-26T18:04:56.123456789+05:30"),
 			generateFixture(t, "identity_schema_boundary", "events.boundary", strings.Repeat("m", 256), strings.Repeat("p", 256), strings.Repeat("t", 256), 65535, "2026-09-26T12:34:56Z", []byte(`{"raw": "spacing is preserved"}`), "2026-09-26T12:34:56.5+00:00"),
@@ -257,15 +282,7 @@ func verifyFixture(t *testing.T, fixture compatFixtureCase) {
 
 func verifyProvenance(t *testing.T, provenance compatProvenance) {
 	t.Helper()
-	want := compatProvenance{
-		Repository: "https://github.com/Dankosik/go-service-template-rest",
-		Revision: "a50f43cf869b86accb3fdba24d758cc2d15a02df",
-		Files: map[string]string{
-			"internal/infra/natsjs/message_wire.go": "c98d7c1db43f515e072e91416cf1baa6d0da5c898337d62be9fef3173ed9fe88",
-			"internal/infra/natsjs/message_deadletter.go": "4063580a0322974331c13f3de19e3296b0c40d1785cbbf98d695dc74ef5b953c",
-			"internal/domainevent/event.go": "add1371aa3ef73b26a9f1eb08d9b992f48969d4a8f6dbd256d81d6d1a058e556",
-		},
-	}
+	want := expectedProvenance(t)
 	if !reflect.DeepEqual(provenance, want) { t.Fatalf("fixture provenance drifted\\n got %#v\\nwant %#v", provenance, want) }
 }
 

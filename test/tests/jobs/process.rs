@@ -1,10 +1,9 @@
-use std::io::{BufRead, BufReader};
-use std::process::{Child, Command, Stdio};
+use std::process::Stdio;
 // template:begin outbox:test-jobs-process-nats-imports
 use std::sync::atomic::{AtomicU64, Ordering};
 // template:end outbox:test-jobs-process-nats-imports
-use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::sync::LazyLock;
+use std::time::Duration;
 
 // template:begin outbox:test-jobs-process-nats-imports-2
 use async_nats::jetstream::{self, stream};
@@ -15,7 +14,11 @@ use integration_tests::jobs::{CREATE_PROBE_ATTEMPTS, Probe, ProbeAction};
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 use sqlx::Row;
-use url::Url;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use tokio::process::{Child, Command};
+use tokio::sync::mpsc;
+use tokio::time::{Instant, sleep, timeout, timeout_at};
+use tokio_util::task::AbortOnDropHandle;
 
 const RECORD_BOUND: Duration = Duration::from_secs(20);
 const EXIT_BOUND: Duration = Duration::from_secs(20);
@@ -80,8 +83,10 @@ fn nats_url() -> String {
 
 struct Worker {
     child: Child,
-    lines: mpsc::Receiver<String>,
-    stdout: Option<std::thread::JoinHandle<std::io::Result<String>>>,
+    pid: u32,
+    lines: mpsc::UnboundedReceiver<String>,
+    stdout: AbortOnDropHandle<std::io::Result<String>>,
+    stderr: AbortOnDropHandle<std::io::Result<String>>,
 }
 
 impl Worker {
@@ -112,97 +117,107 @@ impl Worker {
             // template:end outbox:test-jobs-process-nats-environment
             .envs(env.iter().copied())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
         let mut child = command.spawn().expect("spawn jobs-worker-fixture");
-        let stdout = child.stdout.take().expect("piped stdout");
-        let (tx, lines) = mpsc::channel();
-        let stdout = std::thread::spawn(move || {
+        let pid = child.id().expect("spawned worker has PID");
+        let stdout_pipe = child.stdout.take().expect("piped stdout");
+        let stderr_pipe = child.stderr.take().expect("piped stderr");
+        let (tx, lines) = mpsc::unbounded_channel();
+        let stdout = tokio::spawn(async move {
             let mut captured = String::new();
-            for line in BufReader::new(stdout).lines() {
-                let line = line?;
+            let mut reader = BufReader::new(stdout_pipe).lines();
+            while let Some(line) = reader.next_line().await? {
                 captured.push_str(&line);
                 captured.push('\n');
                 let _ = tx.send(line);
             }
             Ok(captured)
         });
+        let stderr = tokio::spawn(async move {
+            let mut captured = String::new();
+            let mut reader = stderr_pipe;
+            reader.read_to_string(&mut captured).await?;
+            Ok(captured)
+        });
         Self {
             child,
+            pid,
             lines,
-            stdout: Some(stdout),
+            stdout: AbortOnDropHandle::new(stdout),
+            stderr: AbortOnDropHandle::new(stderr),
         }
     }
 
-    fn await_record(&self, message: &str) -> serde_json::Value {
-        self.await_record_matching(message, |_| true)
+    async fn await_record(&mut self, message: &str) -> serde_json::Value {
+        self.await_record_matching(message, |_| true).await
     }
 
-    fn await_record_matching(
-        &self,
+    async fn await_record_matching(
+        &mut self,
         message: &str,
         matches: impl Fn(&serde_json::Value) -> bool,
     ) -> serde_json::Value {
-        let deadline = Instant::now() + RECORD_BOUND;
-        loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            let line = self.lines.recv_timeout(remaining).unwrap_or_else(|_| {
-                panic!("no {message:?} record before the deadline");
-            });
-            let Ok(record) = serde_json::from_str::<serde_json::Value>(&line) else {
-                panic!("stdout must be one JSON object per line, got {line:?}");
-            };
-            if record["message"] == message && matches(&record) {
-                return record;
+        timeout(RECORD_BOUND, async {
+            loop {
+                let Some(line) = self.lines.recv().await else {
+                    panic!("worker stdout closed before {message:?} record");
+                };
+                let Ok(record) = serde_json::from_str::<serde_json::Value>(&line) else {
+                    panic!("stdout must be one JSON object per line, got {line:?}");
+                };
+                if record["message"] == message && matches(&record) {
+                    return record;
+                }
             }
-        }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("no {message:?} record before the deadline"))
     }
 
     fn terminate(&self) {
-        kill(
-            Pid::from_raw(self.child.id().cast_signed()),
-            Signal::SIGTERM,
-        )
-        .expect("send SIGTERM");
+        kill(Pid::from_raw(self.pid.cast_signed()), Signal::SIGTERM).expect("send SIGTERM");
     }
 
     #[expect(
-        clippy::disallowed_methods,
         clippy::print_stderr,
-        reason = "bounded process fixture polling reports captured shutdown records on nonzero exit"
+        reason = "bounded process fixture reports captured shutdown records on nonzero exit"
     )]
-    fn wait(mut self) -> (Option<i32>, String, String) {
+    async fn wait(mut self) -> (Option<i32>, String, String) {
         let deadline = Instant::now() + EXIT_BOUND;
-        let code = loop {
-            match self.child.try_wait() {
-                Ok(Some(status)) => break status.code(),
-                Ok(None) if Instant::now() >= deadline => {
-                    reap(&mut self.child);
-                    let stderr = read_stderr(&mut self.child);
-                    let stdout = self
-                        .lines
-                        .try_iter()
-                        .take(256)
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    panic!(
-                        "worker did not exit within {EXIT_BOUND:?}; stderr: {stderr}; remaining stdout:\n{stdout}"
-                    );
+        let status = if let Ok(result) = timeout(EXIT_BOUND, self.child.wait()).await {
+            result.expect("wait for the worker")
+        } else {
+            let _ = self.child.kill().await;
+            let stderr = timeout(Duration::from_secs(2), &mut self.stderr)
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .and_then(Result::ok)
+                .unwrap_or_default();
+            let mut remaining = Vec::new();
+            while let Ok(line) = self.lines.try_recv() {
+                remaining.push(line);
+                if remaining.len() == 256 {
+                    break;
                 }
-                Ok(None) => std::thread::sleep(POLL),
-                Err(err) => panic!("wait for the worker: {err}"),
             }
-        };
-        let stderr = read_stderr(&mut self.child);
-        let stdout = self.stdout.take().expect("stdout collector is owned");
-        while !stdout.is_finished() {
-            assert!(
-                Instant::now() < deadline,
-                "worker stdout did not reach EOF within {EXIT_BOUND:?}; stderr: {stderr}"
+            let stdout = remaining.join("\n");
+            panic!(
+                "worker did not exit within {EXIT_BOUND:?}; stderr: {stderr}; remaining stdout:\n{stdout}"
             );
-            std::thread::sleep(POLL);
-        }
-        let stdout = stdout
-            .join()
+        };
+        let code = status.code();
+        let stderr = timeout_at(deadline, &mut self.stderr)
+            .await
+            .expect("worker stderr reaches EOF within bound")
+            .expect("stderr collector joins")
+            .expect("stderr pipe is read completely");
+        let stdout = timeout_at(deadline, &mut self.stdout)
+            .await
+            .unwrap_or_else(|_| {
+                panic!("worker stdout did not reach EOF within {EXIT_BOUND:?}; stderr: {stderr}")
+            })
             .expect("stdout collector joins")
             .expect("stdout pipe is read completely");
         if code != Some(0) {
@@ -212,65 +227,41 @@ impl Worker {
     }
 }
 
-impl Drop for Worker {
-    fn drop(&mut self) {
-        if matches!(self.child.try_wait(), Ok(None)) {
-            reap(&mut self.child);
-        }
-        if let Some(reader) = self.stdout.take() {
-            let _ = reader.join();
-        }
-    }
-}
+static HTTP: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(3))
+        .pool_max_idle_per_host(0)
+        .build()
+        .expect("HTTP fixture client")
+});
 
-fn reap(child: &mut Child) {
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
-fn read_stderr(child: &mut Child) -> String {
-    let mut stderr = String::new();
-    if let Some(mut pipe) = child.stderr.take() {
-        let _ = std::io::Read::read_to_string(&mut pipe, &mut stderr);
-    }
-    stderr
-}
-
-fn get(url: &str) -> Result<(u16, String), ureq::Error> {
+async fn get(url: &str) -> Result<(u16, String), reqwest::Error> {
     // Without a bound, a listener that accepts and never answers would hold
     // `poll_until` past its deadline.
-    ureq::get(url)
-        .config()
-        .timeout_global(Some(Duration::from_secs(3)))
-        .http_status_as_error(false)
-        .build()
-        .call()
-        .map(|mut response| {
-            let status = response.status().as_u16();
-            let body = response.body_mut().read_to_string().unwrap_or_default();
-            (status, body)
-        })
+    let response = HTTP.get(url).send().await?;
+    let status = response.status().as_u16();
+    let body = response.text().await.unwrap_or_default();
+    Ok((status, body))
 }
 
-#[expect(
-    clippy::disallowed_methods,
-    reason = "synchronous fixture polling waits for owned child or thread completion within its existing timeout"
-)]
-fn poll_until(url: &str, want_status: u16, within: Duration) -> bool {
-    let deadline = Instant::now() + within;
-    while Instant::now() < deadline {
-        if let Ok((status, _)) = get(url)
-            && status == want_status
-        {
-            return true;
+async fn poll_until(url: &str, want_status: u16, within: Duration) -> bool {
+    timeout(within, async {
+        loop {
+            if let Ok((status, _)) = get(url).await
+                && status == want_status
+            {
+                return;
+            }
+            sleep(POLL).await;
         }
-        std::thread::sleep(POLL);
-    }
-    false
+    })
+    .await
+    .is_ok()
 }
 
-fn listener_addr(worker: &Worker, message: &str) -> String {
-    worker.await_record(message)["addr"]
+async fn listener_addr(worker: &mut Worker, message: &str) -> String {
+    worker.await_record(message).await["addr"]
         .as_str()
         .unwrap_or_else(|| panic!("{message} record has no addr"))
         .to_owned()
@@ -300,23 +291,24 @@ fn completed_probe_metrics(body: &str) -> bool {
             .all(|expected| body.lines().any(|line| line == *expected))
 }
 
-#[expect(
-    clippy::disallowed_methods,
-    reason = "synchronous fixture polling waits for owned child or thread completion within its existing timeout"
-)]
-fn await_completed_probe_metrics(url: &str) {
-    let deadline = Instant::now() + METRICS_BOUND;
+async fn await_completed_probe_metrics(url: &str) {
     let mut scraped = String::new();
-    while Instant::now() < deadline {
-        if let Ok((status, body)) = get(url) {
-            scraped = body;
-            if status == 200 && completed_probe_metrics(&scraped) {
-                return;
+    let completed = timeout(METRICS_BOUND, async {
+        loop {
+            if let Ok((status, body)) = get(url).await {
+                scraped = body;
+                if status == 200 && completed_probe_metrics(&scraped) {
+                    return;
+                }
             }
+            sleep(POLL).await;
         }
-        std::thread::sleep(POLL);
-    }
-    panic!("metrics never showed the completed probe attempt:\n{scraped}");
+    })
+    .await;
+    assert!(
+        completed.is_ok(),
+        "metrics never showed the completed probe attempt:\n{scraped}"
+    );
 }
 
 fn population_gauge(body: &str, metric: &str, population: &str) -> Option<f64> {
@@ -377,49 +369,53 @@ fn capped_probe_sample(body: &str, failed_kinds: &[&str]) -> bool {
         })
 }
 
-#[expect(
-    clippy::disallowed_methods,
-    reason = "synchronous fixture polling waits for owned child or thread completion within its existing timeout"
-)]
-fn await_capped_probe_sample(
+async fn await_capped_probe_sample(
     url: &str,
     failed_kinds: &[&str],
     completed_eligible_at: f64,
     unknown_failed_at: f64,
 ) {
-    let deadline = Instant::now() + METRICS_BOUND;
     let mut scraped = String::new();
-    while Instant::now() < deadline {
-        if let Ok((status, body)) = get(url) {
-            scraped = body;
-            let populations = [
-                ("jobs", completed_eligible_at),
-                ("failed_jobs", unknown_failed_at),
-            ];
-            if status == 200
-                && capped_probe_sample(&scraped, failed_kinds)
-                && populations.iter().all(|(population, oldest)| {
-                    population_gauge(
-                        &scraped,
-                        "postgres_maintenance_last_attempt_success",
-                        population,
-                    ) == Some(1.0)
-                        && population_gauge(&scraped, "postgres_maintenance_present", population)
-                            == Some(1.0)
-                        && population_gauge(
+    let sampled = timeout(METRICS_BOUND, async {
+        loop {
+            if let Ok((status, body)) = get(url).await {
+                scraped = body;
+                let populations = [
+                    ("jobs", completed_eligible_at),
+                    ("failed_jobs", unknown_failed_at),
+                ];
+                if status == 200
+                    && capped_probe_sample(&scraped, failed_kinds)
+                    && populations.iter().all(|(population, oldest)| {
+                        population_gauge(
                             &scraped,
-                            "postgres_maintenance_oldest_timestamp_seconds",
+                            "postgres_maintenance_last_attempt_success",
                             population,
-                        )
-                        .is_some_and(|value| (value - oldest).abs() < 0.01)
-                })
-            {
-                return;
+                        ) == Some(1.0)
+                            && population_gauge(
+                                &scraped,
+                                "postgres_maintenance_present",
+                                population,
+                            ) == Some(1.0)
+                            && population_gauge(
+                                &scraped,
+                                "postgres_maintenance_oldest_timestamp_seconds",
+                                population,
+                            )
+                            .is_some_and(|value| (value - oldest).abs() < 0.01)
+                    })
+                {
+                    return;
+                }
             }
+            sleep(POLL).await;
         }
-        std::thread::sleep(POLL);
-    }
-    panic!("metrics never showed the capped queue sample:\n{scraped}");
+    })
+    .await;
+    assert!(
+        sampled.is_ok(),
+        "metrics never showed the capped queue sample:\n{scraped}"
+    );
 }
 
 fn operation_failed(body: &str, operation: &str) -> bool {
@@ -435,27 +431,28 @@ fn operation_failed(body: &str, operation: &str) -> bool {
     })
 }
 
-#[expect(
-    clippy::disallowed_methods,
-    reason = "synchronous fixture polling waits for owned child or thread completion within its existing timeout"
-)]
-fn await_failed_operation(url: &str, operation: &str) {
-    let deadline = Instant::now() + METRICS_BOUND;
+async fn await_failed_operation(url: &str, operation: &str) {
     let mut scraped = String::new();
-    while Instant::now() < deadline {
-        if let Ok((status, body)) = get(url) {
-            scraped = body;
-            if status == 200 && operation_failed(&scraped, operation) {
-                return;
+    let counted = timeout(METRICS_BOUND, async {
+        loop {
+            if let Ok((status, body)) = get(url).await {
+                scraped = body;
+                if status == 200 && operation_failed(&scraped, operation) {
+                    return;
+                }
             }
+            sleep(POLL).await;
         }
-        std::thread::sleep(POLL);
-    }
-    panic!("metrics never counted a failed {operation}:\n{scraped}");
+    })
+    .await;
+    assert!(
+        counted.is_ok(),
+        "metrics never counted a failed {operation}:\n{scraped}"
+    );
 }
 
 async fn wake_listener(pool: &PgPool, except: Option<i32>) -> i32 {
-    tokio::time::timeout(JOB_BOUND, async {
+    timeout(JOB_BOUND, async {
         loop {
             let pid: Option<i32> = sqlx::query_scalar(
                 "SELECT pid FROM pg_stat_activity \
@@ -469,7 +466,7 @@ async fn wake_listener(pool: &PgPool, except: Option<i32>) -> i32 {
             if let Some(pid) = pid {
                 return pid;
             }
-            tokio::time::sleep(DB_POLL).await;
+            sleep(DB_POLL).await;
         }
     })
     .await
@@ -498,49 +495,44 @@ fn queue_observation(body: &str) -> std::collections::BTreeMap<String, u64> {
         .collect()
 }
 
-#[expect(
-    clippy::disallowed_methods,
-    reason = "synchronous fixture polling waits for owned child or thread completion within its existing timeout"
-)]
-fn await_failed_sample_with_last_good_values(
+async fn await_failed_sample_with_last_good_values(
     url: &str,
     before: &std::collections::BTreeMap<String, u64>,
 ) {
     // The independent global loop waits 30 seconds after the preceding pair.
-    let deadline = Instant::now() + Duration::from_secs(45);
     let mut scraped = String::new();
-    while Instant::now() < deadline {
-        if let Ok((status, body)) = get(url) {
-            scraped = body;
-            if status == 200
-                && operation_failed(&scraped, "sample")
-                && ["jobs", "failed_jobs"].iter().all(|population| {
-                    population_gauge(
-                        &scraped,
-                        "postgres_maintenance_last_attempt_success",
-                        population,
-                    ) == Some(0.0)
-                })
-                && queue_observation(&scraped) == *before
-            {
-                return;
+    let retained = timeout(Duration::from_secs(45), async {
+        loop {
+            if let Ok((status, body)) = get(url).await {
+                scraped = body;
+                if status == 200
+                    && operation_failed(&scraped, "sample")
+                    && ["jobs", "failed_jobs"].iter().all(|population| {
+                        population_gauge(
+                            &scraped,
+                            "postgres_maintenance_last_attempt_success",
+                            population,
+                        ) == Some(0.0)
+                    })
+                    && queue_observation(&scraped) == *before
+                {
+                    return;
+                }
             }
+            sleep(POLL).await;
         }
-        std::thread::sleep(POLL);
-    }
-    panic!("metrics never retained the last good sample after a failure:\n{scraped}");
+    })
+    .await;
+    assert!(
+        retained.is_ok(),
+        "metrics never retained the last good sample after a failure:\n{scraped}"
+    );
 }
 
 async fn child_database_url(pool: &PgPool) -> String {
-    let database: String = sqlx::query_scalar("SELECT current_database()")
-        .fetch_one(pool)
+    integration_tests::url_for(pool, integration_tests::DATABASE_URL)
         .await
-        .expect("current_database()");
-    let raw = std::env::var(integration_tests::DATABASE_URL)
-        .expect("DATABASE_URL must be set for integration tests");
-    let mut url = Url::parse(&raw).expect("DATABASE_URL is a URL");
-    url.set_path(&database);
-    url.as_str().to_owned()
+        .into()
 }
 
 async fn prepare(pool: &PgPool) {
@@ -646,17 +638,17 @@ async fn assert_claimable(pool: &PgPool, id: &str) {
     assert_eq!(rows, 1, "the in-flight attempt row remains");
 }
 
-fn assert_refused(worker: Worker, needle: &str) {
-    let failure = worker.await_record("jobs worker failed");
+async fn assert_refused(mut worker: Worker, needle: &str) {
+    let failure = worker.await_record("jobs worker failed").await;
     assert!(
         failure["error"]
             .as_str()
             .is_some_and(|error| error.contains(needle)),
         "{failure}"
     );
-    let finishing = worker.await_record("shutdown_finishing");
+    let finishing = worker.await_record("shutdown_finishing").await;
     assert_eq!(finishing["logger_pending"], true);
-    let (code, stderr, stdout) = worker.wait();
+    let (code, stderr, stdout) = worker.wait().await;
     assert_eq!(code, Some(1), "stderr: {stderr}; stdout:\n{stdout}");
     assert!(
         stderr.is_empty(),
@@ -680,7 +672,8 @@ async fn postgres_disabled_exits_1(pool: PgPool) {
     assert_refused(
         worker,
         "postgres.enabled must be true to run the jobs worker",
-    );
+    )
+    .await;
     // template:begin outbox:test-jobs-process-nats-fixture-cleanup
     nats.cleanup().await;
     // template:end outbox:test-jobs-process-nats-fixture-cleanup
@@ -702,7 +695,8 @@ async fn missing_migration_history_exits_1_before_jobs_admission(pool: PgPool) {
     assert_refused(
         worker,
         "postgres migration history: embedded migrations are pending",
-    );
+    )
+    .await;
     // template:begin outbox:test-jobs-process-nats-fixture-cleanup-2
     nats.cleanup().await;
     // template:end outbox:test-jobs-process-nats-fixture-cleanup-2
@@ -721,7 +715,8 @@ async fn ordinary_jobs_and_outbox_require_n_plus_five_connections(pool: PgPool) 
     assert_refused(
         worker,
         "must be at least jobs.max_workers + 5 (6) for the outbox worker, got 5",
-    );
+    )
+    .await;
     nats.cleanup().await;
 }
 // template:end outbox:test-jobs-process-outbox-capacity
@@ -736,7 +731,7 @@ async fn deferred_message_failure_closes_the_admitted_worker_pool(pool: PgPool) 
         ("panic", "worker lifecycle panicked; payload withheld"),
         ("empty", "typed message handlers are invalid"),
     ] {
-        let worker = Worker::spawn(
+        let mut worker = Worker::spawn(
             &database_url,
             &nats,
             &[
@@ -746,15 +741,15 @@ async fn deferred_message_failure_closes_the_admitted_worker_pool(pool: PgPool) 
                 ("APP__MESSAGING__DLQ_SUBJECT", "test.factory.dlq"),
             ],
         );
-        worker.await_record("postgres_pool_opened");
-        let failure = worker.await_record("jobs worker failed");
+        worker.await_record("postgres_pool_opened").await;
+        let failure = worker.await_record("jobs worker failed").await;
         assert!(
             failure["error"].as_str().unwrap().contains(expected),
             "{failure}"
         );
-        worker.await_record("postgres_pool_closed");
-        worker.await_record("shutdown_finishing");
-        let (code, stderr, stdout) = worker.wait();
+        worker.await_record("postgres_pool_closed").await;
+        worker.await_record("shutdown_finishing").await;
+        let (code, stderr, stdout) = worker.wait().await;
         assert_eq!(code, Some(1), "stderr: {stderr}; stdout:\n{stdout}");
         assert!(
             stderr.is_empty(),
@@ -773,35 +768,38 @@ async fn ready_worker_runs_a_job_and_exits_0_on_sigterm(pool: PgPool) {
     // template:begin outbox:test-jobs-process-nats-fixture-use-3
     let nats = NatsFixture::create().await;
     // template:end outbox:test-jobs-process-nats-fixture-use-3
-    let worker = Worker::spawn(
+    let mut worker = Worker::spawn(
         &database_url,
         // template:begin outbox:test-jobs-process-nats-fixture-argument-3
         &nats,
         // template:end outbox:test-jobs-process-nats-fixture-argument-3
         &[],
     );
-    let api = listener_addr(&worker, "http listener bound");
-    let diagnostics = listener_addr(&worker, "diagnostics listener bound");
-    worker.await_record("jobs_worker_ready");
+    let api = listener_addr(&mut worker, "http listener bound").await;
+    let diagnostics = listener_addr(&mut worker, "diagnostics listener bound").await;
+    worker.await_record("jobs_worker_ready").await;
 
     let ready = format!("http://{api}/health/ready");
     assert!(
-        poll_until(&ready, 200, READY_BOUND),
+        poll_until(&ready, 200, READY_BOUND).await,
         "worker never became ready at {ready}"
     );
-    let (status, body) = get(&format!("http://{api}/health/live")).expect("GET /health/live");
+    let (status, body) = get(&format!("http://{api}/health/live"))
+        .await
+        .expect("GET /health/live");
     assert_eq!((status, body.as_str()), (200, "ok"));
-    let (status, _) = get(&format!("http://{api}/api")).expect("GET /api");
+    let (status, _) = get(&format!("http://{api}/api")).await.expect("GET /api");
     assert_eq!(status, 404);
-    let (status, body) =
-        get(&format!("http://{diagnostics}/health/live")).expect("GET diagnostics /health/live");
+    let (status, body) = get(&format!("http://{diagnostics}/health/live"))
+        .await
+        .expect("GET diagnostics /health/live");
     assert_eq!((status, body.as_str()), (200, "ok"));
 
     wait_completed(&pool, &id).await;
-    await_completed_probe_metrics(&format!("http://{diagnostics}/metrics"));
+    await_completed_probe_metrics(&format!("http://{diagnostics}/metrics")).await;
 
     worker.terminate();
-    let (code, stderr, stdout) = worker.wait();
+    let (code, stderr, stdout) = worker.wait().await;
     assert_eq!(code, Some(0), "stderr: {stderr}; stdout:\n{stdout}");
     // template:begin outbox:test-jobs-process-nats-fixture-cleanup-3
     nats.cleanup().await;
@@ -810,10 +808,6 @@ async fn ready_worker_runs_a_job_and_exits_0_on_sigterm(pool: PgPool) {
 
 #[cfg(unix)]
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
-#[expect(
-    clippy::disallowed_methods,
-    reason = "the external fixture confirms SIGSTOP then deliberately holds the owned worker past its completion bound"
-)]
 async fn resumed_worker_exits_one_after_progress_loss_without_diagnostics(pool: PgPool) {
     use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
 
@@ -822,7 +816,7 @@ async fn resumed_worker_exits_one_after_progress_loss_without_diagnostics(pool: 
     // template:begin outbox:test-jobs-process-progress-nats-create
     let nats = NatsFixture::create().await;
     // template:end outbox:test-jobs-process-progress-nats-create
-    let worker = Worker::spawn(
+    let mut worker = Worker::spawn(
         &database_url,
         // template:begin outbox:test-jobs-process-progress-nats-argument
         &nats,
@@ -833,8 +827,8 @@ async fn resumed_worker_exits_one_after_progress_loss_without_diagnostics(pool: 
             ("APP__HEALTH__PROBE_BUDGET", "500ms"),
         ],
     );
-    worker.await_record("jobs_worker_ready");
-    let pid = Pid::from_raw(worker.child.id().cast_signed());
+    worker.await_record("jobs_worker_ready").await;
+    let pid = Pid::from_raw(worker.pid.cast_signed());
     kill(pid, Signal::SIGSTOP).expect("suspend admitted worker");
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
@@ -842,15 +836,15 @@ async fn resumed_worker_exits_one_after_progress_loss_without_diagnostics(pool: 
             WaitStatus::Stopped(_, Signal::SIGSTOP) => break,
             WaitStatus::StillAlive => {
                 assert!(Instant::now() < deadline, "worker did not stop");
-                std::thread::sleep(Duration::from_millis(10));
+                sleep(Duration::from_millis(10)).await;
             }
             other => panic!("unexpected child state: {other:?}"),
         }
     }
     // The admitted completion bound is 2 s. No reader or scrape drives detection.
-    std::thread::sleep(Duration::from_secs(3));
+    sleep(Duration::from_secs(3)).await;
     kill(pid, Signal::SIGCONT).expect("resume admitted worker");
-    let (code, stderr, stdout) = worker.wait();
+    let (code, stderr, stdout) = worker.wait().await;
     assert_eq!(code, Some(1), "{stdout}\n{stderr}");
     let records: Vec<serde_json::Value> = stdout
         .lines()
@@ -889,21 +883,22 @@ async fn background_task_that_ends_stops_the_worker_with_exit_1(pool: PgPool) {
     // template:begin outbox:test-jobs-process-nats-fixture-use-6
     let nats = NatsFixture::create().await;
     // template:end outbox:test-jobs-process-nats-fixture-use-6
-    let worker = Worker::spawn(
+    let mut worker = Worker::spawn(
         &database_url,
         // template:begin outbox:test-jobs-process-nats-fixture-argument-6
         &nats,
         // template:end outbox:test-jobs-process-nats-fixture-argument-6
         &[(integration_tests::jobs::BACKGROUND_TASK_RETURNS, "1")],
     );
-    let stopped = worker.await_record("background_task_stopped");
+    let stopped = worker.await_record("background_task_stopped").await;
     assert_eq!(stopped["task"], "fixture", "{stopped}");
     assert_eq!(stopped["panicked"], false, "{stopped}");
     // The refusal assertion observes the final staged record before exit.
     assert_refused(
         worker,
         "background task fixture stopped without a stop signal",
-    );
+    )
+    .await;
     // template:begin outbox:test-jobs-process-nats-fixture-cleanup-6
     nats.cleanup().await;
     // template:end outbox:test-jobs-process-nats-fixture-cleanup-6
@@ -917,14 +912,14 @@ async fn handler_panic_is_recorded_by_location_and_never_by_message(pool: PgPool
     // template:begin outbox:test-jobs-process-nats-fixture-use-7
     let nats = NatsFixture::create().await;
     // template:end outbox:test-jobs-process-nats-fixture-use-7
-    let worker = Worker::spawn(
+    let mut worker = Worker::spawn(
         &database_url,
         // template:begin outbox:test-jobs-process-nats-fixture-argument-7
         &nats,
         // template:end outbox:test-jobs-process-nats-fixture-argument-7
         &[],
     );
-    let panicked = worker.await_record("panicked");
+    let panicked = worker.await_record("panicked").await;
     assert!(
         panicked["panic.file"]
             .as_str()
@@ -940,7 +935,7 @@ async fn handler_panic_is_recorded_by_location_and_never_by_message(pool: PgPool
 
     // The panic is a retried attempt: the worker keeps running and stops cleanly.
     worker.terminate();
-    let (code, stderr, stdout) = worker.wait();
+    let (code, stderr, stdout) = worker.wait().await;
     assert_eq!(code, Some(0), "stderr: {stderr}; stdout:\n{stdout}");
     assert!(
         !stderr.contains("probe panicked"),
@@ -959,7 +954,7 @@ async fn supervisor_payload_drop_failure_preserves_live_and_cleanup_exit_policy(
     let nats = NatsFixture::create().await;
     // template:end outbox:test-jobs-process-supervisor-nats-fixture
     for cleanup in [false, true] {
-        let worker = Worker::spawn(
+        let mut worker = Worker::spawn(
             &database_url,
             // template:begin outbox:test-jobs-process-supervisor-nats-argument
             &nats,
@@ -970,7 +965,7 @@ async fn supervisor_payload_drop_failure_preserves_live_and_cleanup_exit_policy(
                 ("APP__HTTP__REQUEST_TIMEOUT", "500ms"),
             ],
         );
-        worker.await_record("jobs_worker_ready");
+        worker.await_record("jobs_worker_ready").await;
         let action = if cleanup {
             ProbeAction::DropPanic { secondary: true }
         } else {
@@ -980,13 +975,13 @@ async fn supervisor_payload_drop_failure_preserves_live_and_cleanup_exit_policy(
         if cleanup {
             wait_running(&pool, &id).await;
             worker.terminate();
-            worker.await_record("job_handler_drop_panicked");
+            worker.await_record("job_handler_drop_panicked").await;
         }
-        let stopped = worker.await_record("jobs_engine_task_stopped");
+        let stopped = worker.await_record("jobs_engine_task_stopped").await;
         assert_eq!(stopped["task"], "attempt", "{stopped}");
         assert_eq!(stopped["panicked"], true, "{stopped}");
         if !cleanup {
-            let failed = worker.await_record("jobs worker failed");
+            let failed = worker.await_record("jobs worker failed").await;
             assert!(
                 failed["error"]
                     .as_str()
@@ -994,7 +989,7 @@ async fn supervisor_payload_drop_failure_preserves_live_and_cleanup_exit_policy(
                 "{failed}"
             );
         }
-        let (code, stderr, stdout) = worker.wait();
+        let (code, stderr, stdout) = worker.wait().await;
         assert_eq!(
             code,
             Some(if cleanup { 3 } else { 1 }),
@@ -1090,22 +1085,23 @@ async fn worker_metrics_publish_a_capped_fresh_registered_sample(pool: PgPool) {
     .await
     .expect("claim and cleanup skip these rows while observation still sees them");
     assert_eq!(deleted.rows_affected(), 1_003);
-    let worker = Worker::spawn(
+    let mut worker = Worker::spawn(
         &database_url,
         // template:begin outbox:test-jobs-process-nats-fixture-argument-4
         &nats,
         // template:end outbox:test-jobs-process-nats-fixture-argument-4
         &[],
     );
-    let diagnostics = listener_addr(&worker, "diagnostics listener bound");
-    worker.await_record("jobs_worker_ready");
+    let diagnostics = listener_addr(&mut worker, "diagnostics listener bound").await;
+    worker.await_record("jobs_worker_ready").await;
     let metrics = format!("http://{diagnostics}/metrics");
     await_capped_probe_sample(
         &metrics,
         &failed_kinds,
         completed_eligible_at,
         unknown_failed_at,
-    );
+    )
+    .await;
     locked.commit().await.expect("release the sampled jobs");
     // Make the data statement fail immediately; a table lock could instead
     // stall a claim holding the shared engine permit before the sample runs.
@@ -1113,16 +1109,16 @@ async fn worker_metrics_publish_a_capped_fresh_registered_sample(pool: PgPool) {
         .execute(&pool)
         .await
         .expect("the disposable fixture table becomes unavailable");
-    let (_, before) = get(&metrics).expect("the last good metrics scrape");
+    let (_, before) = get(&metrics).await.expect("the last good metrics scrape");
     let before = queue_observation(&before);
-    await_failed_sample_with_last_good_values(&metrics, &before);
+    await_failed_sample_with_last_good_values(&metrics, &before).await;
     sqlx::query("ALTER TABLE unavailable_background_jobs RENAME TO background_jobs")
         .execute(&pool)
         .await
         .expect("the disposable fixture table is restored");
 
     worker.terminate();
-    let (code, stderr, stdout) = worker.wait();
+    let (code, stderr, stdout) = worker.wait().await;
     assert_eq!(code, Some(0), "stderr: {stderr}; stdout:\n{stdout}");
     // template:begin outbox:test-jobs-process-nats-fixture-cleanup-4
     nats.cleanup().await;
@@ -1135,18 +1131,18 @@ async fn worker_counts_a_lost_wake_listener_and_listens_again(pool: PgPool) {
     // template:begin outbox:test-jobs-process-nats-fixture-use-8
     let nats = NatsFixture::create().await;
     // template:end outbox:test-jobs-process-nats-fixture-use-8
-    let worker = Worker::spawn(
+    let mut worker = Worker::spawn(
         &database_url,
         // template:begin outbox:test-jobs-process-nats-fixture-argument-8
         &nats,
         // template:end outbox:test-jobs-process-nats-fixture-argument-8
         &[],
     );
-    let diagnostics = listener_addr(&worker, "diagnostics listener bound");
-    worker.await_record("jobs_worker_ready");
+    let diagnostics = listener_addr(&mut worker, "diagnostics listener bound").await;
+    worker.await_record("jobs_worker_ready").await;
     let metrics = format!("http://{diagnostics}/metrics");
     let first = wake_listener(&pool, None).await;
-    let (_, before) = get(&metrics).expect("a metrics scrape");
+    let (_, before) = get(&metrics).await.expect("a metrics scrape");
     assert!(!operation_failed(&before, "listen"), "{before}");
 
     // The server's closing error is not a notification, so the driver
@@ -1157,11 +1153,11 @@ async fn worker_counts_a_lost_wake_listener_and_listens_again(pool: PgPool) {
         .await
         .expect("the listener's backend is terminated");
     assert!(terminated);
-    await_failed_operation(&metrics, "listen");
+    await_failed_operation(&metrics, "listen").await;
     wake_listener(&pool, Some(first)).await;
 
     worker.terminate();
-    let (code, stderr, stdout) = worker.wait();
+    let (code, stderr, stdout) = worker.wait().await;
     assert_eq!(code, Some(0), "stderr: {stderr}; stdout:\n{stdout}");
     // template:begin outbox:test-jobs-process-nats-fixture-cleanup-8
     nats.cleanup().await;
@@ -1176,7 +1172,7 @@ async fn attempt_that_outlives_a_short_drain_exits_3_and_is_claimable(pool: PgPo
     // template:begin outbox:test-jobs-process-nats-fixture-use-5
     let nats = NatsFixture::create().await;
     // template:end outbox:test-jobs-process-nats-fixture-use-5
-    let worker = Worker::spawn(
+    let mut worker = Worker::spawn(
         &database_url,
         // template:begin outbox:test-jobs-process-nats-fixture-argument-5
         &nats,
@@ -1188,23 +1184,25 @@ async fn attempt_that_outlives_a_short_drain_exits_3_and_is_claimable(pool: PgPo
         ],
     );
     // template:begin outbox:test-jobs-process-shared-engines
-    let started = worker.await_record("jobs_claiming_started");
+    let started = worker.await_record("jobs_claiming_started").await;
     assert_eq!(started["engines"], 2, "{started}");
     // template:end outbox:test-jobs-process-shared-engines
-    worker.await_record("jobs_worker_ready");
+    worker.await_record("jobs_worker_ready").await;
     wait_running(&pool, &id).await;
     worker.terminate();
-    let forced = worker.await_record("drain_forced");
+    let forced = worker.await_record("drain_forced").await;
     assert_eq!(forced["reason"], "budget", "{forced}");
-    let destroyed = worker.await_record("job_handler_drop_panicked");
+    let destroyed = worker.await_record("job_handler_drop_panicked").await;
     assert!(!destroyed.to_string().contains("handler-drop-secret"));
-    let released = worker.await_record_matching("attempts_finished", |record| {
-        record["cancelled"] == 1 && record["released"] == 1
-    });
+    let released = worker
+        .await_record_matching("attempts_finished", |record| {
+            record["cancelled"] == 1 && record["released"] == 1
+        })
+        .await;
     assert_eq!(released["cancelled"], 1, "{released}");
     assert_eq!(released["released"], 1, "{released}");
     assert_eq!(released["timed_out"], false, "{released}");
-    let (code, stderr, stdout) = worker.wait();
+    let (code, stderr, stdout) = worker.wait().await;
     assert_eq!(code, Some(3), "stderr: {stderr}; stdout:\n{stdout}");
     assert!(
         !stderr.contains("handler-drop-secret"),

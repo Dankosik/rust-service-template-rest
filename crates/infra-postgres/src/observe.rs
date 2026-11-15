@@ -207,60 +207,47 @@ pub async fn observed<T>(
             otel.status_code = tracing::field::Empty,
         )
     };
-    let mut statement_end = StatementEnd {
-        started: Instant::now(),
-        span: span.clone(),
-        summary,
-        error_type: Some(SharedString::const_str(CANCELLED)),
-    };
+    let guard = std::mem::DropGuard::new((Instant::now(), span.clone()), |(started, span)| {
+        record_statement_error(started, &span, summary, SharedString::const_str(CANCELLED));
+    });
     let result = statement.instrument(span).await;
-    statement_end.error_type = match &result {
-        Ok(_) => None,
-        Err(error) => Some(match sqlstate(error) {
-            Some(code) => {
-                statement_end
-                    .span
-                    .record("db.response.status_code", code.as_ref());
-                SharedString::from(code.into_owned())
-            }
-            None => SharedString::const_str(failure_cause(error)),
-        }),
-    };
+    let (started, span) = std::mem::DropGuard::dismiss(guard);
+    match &result {
+        Ok(_) => metrics::histogram!(
+            OPERATION_DURATION_METRIC,
+            "db.system.name" => "postgresql",
+            "db.query.summary" => summary
+        )
+        .record(started.elapsed().as_secs_f64()),
+        Err(error) => {
+            let error_type = match sqlstate(error) {
+                Some(code) => {
+                    span.record("db.response.status_code", code.as_ref());
+                    SharedString::from(code.into_owned())
+                }
+                None => SharedString::const_str(failure_cause(error)),
+            };
+            record_statement_error(started, &span, summary, error_type);
+        }
+    }
     result
 }
 
-/// One statement being observed. Dropping it records the end it holds;
-/// until the statement answers, that is `cancelled`.
-struct StatementEnd {
+fn record_statement_error(
     started: Instant,
-    span: Span,
+    span: &Span,
     summary: &'static str,
-    error_type: Option<SharedString>,
-}
-
-impl Drop for StatementEnd {
-    fn drop(&mut self) {
-        let elapsed = self.started.elapsed().as_secs_f64();
-        match self.error_type.take() {
-            None => metrics::histogram!(
-                OPERATION_DURATION_METRIC,
-                "db.system.name" => "postgresql",
-                "db.query.summary" => self.summary
-            )
-            .record(elapsed),
-            Some(error_type) => {
-                self.span.record("error.type", error_type.as_ref());
-                self.span.record("otel.status_code", "ERROR");
-                metrics::histogram!(
-                    OPERATION_DURATION_METRIC,
-                    "db.system.name" => "postgresql",
-                    "db.query.summary" => self.summary,
-                    "error.type" => error_type
-                )
-                .record(elapsed);
-            }
-        }
-    }
+    error_type: SharedString,
+) {
+    span.record("error.type", error_type.as_ref());
+    span.record("otel.status_code", "ERROR");
+    metrics::histogram!(
+        OPERATION_DURATION_METRIC,
+        "db.system.name" => "postgresql",
+        "db.query.summary" => summary,
+        "error.type" => error_type
+    )
+    .record(started.elapsed().as_secs_f64());
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

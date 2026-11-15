@@ -72,12 +72,16 @@ def expected_binaries(root: Path) -> dict[str, tuple[str, str, str]]:
 
 def check_outputs(root: Path, expected: dict[str, tuple[str, str, str]]) -> None:
     path = root / "build/docker/Dockerfile"
+    text = path.read_text()
+    if re.search(r"^[ \t]*#\s*escape\s*=", text, re.M | re.I):
+        raise Refusal(f"{path}: unsupported escape directive")
+    stripped = re.sub(r"(?m)^[ \t]*#.*(?:\r?\n|$)", "", text)
     arguments: dict[str, str] = {}
     builds: dict[str, tuple[str, str]] = {}
     copies: list[list[str]] = []
     stage = ""
-    for line in re.sub(r"\\\n", " ", path.read_text()).splitlines():
-        if not line.strip() or line.lstrip().startswith("#"):
+    for line in re.sub(r"\\[ \t]*\r?\n", " ", stripped).splitlines():
+        if not line.strip():
             continue
         parts = shlex.split(line)
         instruction = parts[0].upper()

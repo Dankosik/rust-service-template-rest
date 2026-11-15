@@ -1,4 +1,3 @@
-use std::marker::PhantomData;
 use std::time::Duration;
 
 use enum_map::{Enum, EnumMap};
@@ -35,7 +34,6 @@ pub(crate) use outcome_label;
 #[debug("Outcomes")]
 pub(crate) struct Outcomes<O: OutcomeLabel> {
     handles: EnumMap<O, (metrics::Counter, metrics::Histogram)>,
-    outcome: PhantomData<O>,
 }
 
 impl<O: OutcomeLabel> Outcomes<O> {
@@ -60,10 +58,7 @@ impl<O: OutcomeLabel> Outcomes<O> {
                 metrics::histogram!(duration, labels),
             )
         });
-        Self {
-            handles,
-            outcome: PhantomData,
-        }
+        Self { handles }
     }
 
     pub(crate) fn record(&self, outcome: O, elapsed: Duration) {

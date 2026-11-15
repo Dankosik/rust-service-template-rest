@@ -48,13 +48,13 @@ impl FullPipeline {
         let supervisor = finished.abort_handle();
         finished.await.expect("fixture has no running supervisor");
         let cache = Cache {
-            command_timeout: BUDGET,
             link: Arc::new(Link {
                 server: ServerEndpoint {
                     host: "duplex".into(),
                     port: 0,
                     tls: false,
                 },
+                command_timeout: BUDGET,
                 shared,
                 application_slots: Semaphore::new(APPLICATION_SLOTS),
                 probe_slots: Semaphore::new(PROBE_SLOTS),

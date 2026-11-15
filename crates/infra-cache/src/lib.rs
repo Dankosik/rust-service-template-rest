@@ -135,7 +135,6 @@ pub struct ServerEndpoint {
 #[derive(Clone, Debug)]
 pub struct Cache {
     link: Arc<Link>,
-    command_timeout: Duration,
 }
 
 impl Cache {
@@ -159,7 +158,6 @@ impl Cache {
         observe::describe();
         Ok(Self {
             link: Arc::new(Link::start(server, client, password_file, command_timeout)),
-            command_timeout,
         })
     }
 
@@ -193,13 +191,9 @@ impl health::Probe for CacheProbe {
     }
 
     async fn check(&self) -> Result<(), health::ProbeError> {
-        self.cache
-            .link
-            .probe(self.cache.command_timeout)
-            .await
-            .map_err(|error| {
-                health::ProbeError::new(format!("cache ping failed: {}", error.label()))
-            })
+        self.cache.link.probe().await.map_err(|error| {
+            health::ProbeError::new(format!("cache ping failed: {}", error.label()))
+        })
     }
 }
 

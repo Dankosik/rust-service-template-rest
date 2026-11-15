@@ -210,7 +210,7 @@ fn stopped_response(reason: Stopped, upload: Option<Version>) -> Response {
     match (reason, upload) {
         (Stopped::Deadline, Some(version)) => upload_timeout_response(version),
         (Stopped::Deadline, None) => budget_expired_response(),
-        (Stopped::Cancelled, _) => Problem::new(Code::ServiceUnavailable).into_response(),
+        (Stopped::Cancelled, _) => cancelled_response(),
     }
 }
 
@@ -234,6 +234,10 @@ pub(crate) fn budget_expired_response() -> Response {
     Problem::new(Code::GatewayTimeout)
         .detail("request budget expired before a response could be committed")
         .into_response()
+}
+
+pub(crate) fn cancelled_response() -> Response {
+    Problem::new(Code::ServiceUnavailable).into_response()
 }
 
 #[cfg(test)]

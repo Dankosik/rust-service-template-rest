@@ -14,110 +14,29 @@ names=(
 	agent_instructions documentation validation_system module_initializer initializer_runtime initializer_artifacts no_validation_required
 )
 
-profile_database() {
-	local root database
+load_profiles() {
+	local root raw key value
 	root=$(pwd)
-	database=$(python3 "${root}/scripts/lib/template_state.py" profile --repo "${root}" --field database) || {
-		echo "cannot resolve selected database profile" >&2
+	raw=$(env -u PYTHONPATH -u PYTHONHOME PYTHONDONTWRITEBYTECODE=1 python3 -B "${root}/scripts/lib/template_state.py" profile --repo "${root}" --fields database messaging cache object_storage outbound_auth outbox) || {
+		echo "cannot resolve selected template profiles" >&2
 		return 2
 	}
-	case "${database}" in
-	none | postgres) printf '%s\n' "${database}" ;;
-	*)
-		echo "invalid selected database profile: ${database}" >&2
-		return 2
-		;;
-	esac
-}
-
-profile_cache() {
-	local root cache
-	root=$(pwd)
-	cache=$(python3 "${root}/scripts/lib/template_state.py" profile --repo "${root}" --field cache) || {
-		echo "cannot resolve selected cache profile" >&2
-		return 2
-	}
-	case "${cache}" in
-	none | redis) printf '%s\n' "${cache}" ;;
-	*)
-		echo "invalid selected cache profile: ${cache}" >&2
-		return 2
-		;;
-	esac
-}
-
-profile_object_storage() {
-	local root object_storage
-	root=$(pwd)
-	object_storage=$(python3 "${root}/scripts/lib/template_state.py" profile --repo "${root}" --field object_storage) || {
-		echo "cannot resolve selected object storage profile" >&2
-		return 2
-	}
-	case "${object_storage}" in
-	none | s3) printf '%s\n' "${object_storage}" ;;
-	*)
-		echo "invalid selected object storage profile: ${object_storage}" >&2
-		return 2
-		;;
-	esac
-}
-
-profile_outbound_auth() {
-	local root outbound_auth
-	root=$(pwd)
-	outbound_auth=$(python3 "${root}/scripts/lib/template_state.py" profile --repo "${root}" --field outbound_auth) || {
-		echo "cannot resolve selected outbound auth profile" >&2
-		return 2
-	}
-	case "${outbound_auth}" in
-	none | oauth2-client-credentials) printf '%s\n' "${outbound_auth}" ;;
-	*)
-		echo "invalid selected outbound auth profile: ${outbound_auth}" >&2
-		return 2
-		;;
-	esac
-}
-
-profile_messaging() {
-	local root messaging
-	root=$(pwd)
-	messaging=$(python3 "${root}/scripts/lib/template_state.py" profile --repo "${root}" --field messaging) || {
-		echo "cannot resolve selected messaging profile" >&2
-		return 2
-	}
-	case "${messaging}" in
-	none | nats-jetstream) printf '%s\n' "${messaging}" ;;
-	*)
-		echo "invalid selected messaging profile: ${messaging}" >&2
-		return 2
-		;;
-	esac
-}
-
-profile_outbox() {
-	local root outbox
-	root=$(pwd)
-	outbox=$(python3 "${root}/scripts/lib/template_state.py" profile --repo "${root}" --field outbox) || {
-		echo "cannot resolve selected outbox profile" >&2
-		return 2
-	}
-	case "${outbox}" in
-	none | postgres) printf '%s\n' "${outbox}" ;;
-	*)
-		echo "invalid selected outbox profile: ${outbox}" >&2
-		return 2
-		;;
-	esac
+	while IFS='=' read -r key value; do
+		case "${key}" in
+		database | messaging | cache | object_storage | outbound_auth | outbox)
+			printf -v "${key}" '%s' "${value}"
+			;;
+		*)
+			echo "unexpected profile field from template_state.py: ${key}" >&2
+			return 2
+			;;
+		esac
+	done <<<"${raw}"
 }
 
 all_surfaces() {
-	local database messaging cache object_storage outbound_auth outbox source_only=false
-	database=$(profile_database)
-	messaging=$(profile_messaging)
-	cache=$(profile_cache)
-	object_storage=$(profile_object_storage)
-	outbound_auth=$(profile_outbound_auth)
-	outbox=$(profile_outbox)
+	local database='' messaging='' cache='' object_storage='' outbound_auth='' outbox='' source_only=false
+	load_profiles || return $?
 	[[ -f make/source.mk ]] && source_only=true
 	reset
 	mark "${names[@]}"
@@ -176,13 +95,8 @@ has_line() {
 }
 
 classify() {
-	local file matched database messaging cache object_storage outbound_auth outbox source_only=false p9_retained=false
-	database=$(profile_database)
-	messaging=$(profile_messaging)
-	cache=$(profile_cache)
-	object_storage=$(profile_object_storage)
-	outbound_auth=$(profile_outbound_auth)
-	outbox=$(profile_outbox)
+	local file matched database='' messaging='' cache='' object_storage='' outbound_auth='' outbox='' source_only=false p9_retained=false
+	load_profiles || return $?
 	[[ -f make/source.mk ]] && source_only=true
 	[[ -f test/tests/http_idempotency/mounted.rs ]] && p9_retained=true
 	reset
@@ -223,7 +137,7 @@ classify() {
 			[[ ${source_only} != true ]] || mark module_initializer initializer_runtime
 			;;
 		scripts/ci/hotpath-*.py) mark cargo_dependencies ;;
-		scripts/ci/openapi-artifact.py)
+		scripts/ci/cargo-artifact.py)
 			# The profiler and historical actor are source-only; recovery stays manual.
 			[[ ${source_only} != true ]] || mark cargo_dependencies module_initializer
 			;;
@@ -335,7 +249,7 @@ classify() {
 		esac
 		case "${file}" in
 		.redocly.yaml | api/openapi/* | crates/infra-http/src/webhooks.rs | crates/service/src/api.rs | \
-		scripts/ci/openapi-artifact.py) mark openapi ;;
+		scripts/ci/cargo-artifact.py) mark openapi ;;
 		esac
 		# template:begin grpc:classifier-grpc-schema
 		case "${file}" in
@@ -777,7 +691,7 @@ HOOK
 	assert_case api/openapi/service.yaml \
 		"openapi" \
 		"rust_source documentation"
-	assert_case scripts/ci/openapi-artifact.py "openapi python cargo_dependencies module_initializer" "rust_source documentation"
+	assert_case scripts/ci/cargo-artifact.py "openapi python cargo_dependencies module_initializer" "rust_source documentation"
 	# template:begin grpc:classifier-grpc-tests
 	for file in api/proto/example/v1/echo.proto crates/grpc-contracts/src/generated/example.v1.rs tools/grpc-codegen/Cargo.toml buf.yaml; do
 		assert_case "${file}" "grpc_schema" "openapi runtime_image"
@@ -1119,6 +1033,18 @@ PY_LOCK
 	has_line "${output}" 'initializer_runtime=false'
 	has_line "${output}" 'initializer_artifacts=false'
 
+	cp "${derived_fixture}/template.lock" "${derived_fixture}/template.lock.before-corrupt"
+	printf '{invalid-json\n' >"${derived_fixture}/template.lock"
+	set +e
+	(cd "${derived_fixture}" && bash scripts/ci/changed-surfaces.sh --all >/dev/null 2>&1)
+	corrupt_status=$?
+	set -e
+	mv "${derived_fixture}/template.lock.before-corrupt" "${derived_fixture}/template.lock"
+	[[ ${corrupt_status} -eq 2 ]] || {
+		echo "expected exit code 2 on invalid template.lock, got ${corrupt_status}" >&2
+		return 1
+	}
+
 	if output="$(printf '%s\n' unknown/new-owner.xyz | (cd "${classifier_root}" && bash scripts/ci/changed-surfaces.sh) 2>&1)"; then
 		echo "unknown paths must fail closed" >&2
 		return 1
@@ -1131,11 +1057,11 @@ PY_LOCK
 	if [[ -f ${root}/scripts/ci/service-changed-surfaces.sh ]]; then
 		cp "${root}/scripts/ci/service-changed-surfaces.sh" "${classifier_root}/scripts/ci/service-changed-surfaces.sh"
 	fi
-	output="$(git -C "${root}" ls-files | while IFS= read -r file; do
-		if [[ -e ${root}/${file} || -L ${root}/${file} ]]; then
-			printf '%s\n' "${file}"
-		fi
-	done | (cd "${classifier_root}" && bash scripts/ci/changed-surfaces.sh))"
+	output="$(
+		git -C "${root}" ls-files | while IFS= read -r file; do
+			if [[ -e ${root}/${file} || -L ${root}/${file} ]]; then printf '%s\n' "${file}"; fi
+		done | (cd "${classifier_root}" && bash scripts/ci/changed-surfaces.sh)
+	)"
 	has_line "${output}" 'classified=true'
 
 	# The union keeps a surface either classifier selects. When HEAD predates

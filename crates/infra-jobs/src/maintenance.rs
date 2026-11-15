@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use infra_postgres::{
     Cleanup, CleanupPass, CleanupSchedule, MAINTENANCE_OBSERVATION_INTERVAL, MaintenanceFailure,
-    MaintenanceObserver, MaintenancePopulation, PopulationSample, in_observation_tx, in_tx,
-    observed,
+    MaintenanceObserver, MaintenancePopulation, PassEnd, PopulationSample, in_observation_tx,
+    in_tx, observed,
 };
 use metrics::Unit;
 use tokio::time::MissedTickBehavior;
@@ -37,11 +37,6 @@ pub(crate) async fn remove_expired(shared: &Shared) -> Result<u64, OperationErro
         .map(|(removed, _)| removed)
 }
 
-enum PassEnd {
-    Finished,
-    Cancelled,
-}
-
 async fn remove_expired_with_cancel(
     shared: &Shared,
     cancel: Option<&CancellationToken>,
@@ -59,7 +54,7 @@ async fn remove_expired_with_cancel(
         removed = removed.saturating_add(batch);
         if batch < u64::from(RETENTION_BATCH_ROWS) {
             pass.completed();
-            return Ok((removed, PassEnd::Finished));
+            return Ok((removed, PassEnd::Completed));
         }
     }
 }
@@ -74,7 +69,7 @@ pub(crate) async fn run_retention(shared: Arc<Shared>, cancel: CancellationToken
             }
             match remove_expired_with_cancel(&shared, Some(&cancel)).await {
                 Ok((_, PassEnd::Cancelled)) => return,
-                Ok((_, PassEnd::Finished)) => observe_recovery(&shared, Operation::Retention),
+                Ok((_, PassEnd::Completed)) => observe_recovery(&shared, Operation::Retention),
                 Err(error) => observe_failure(&shared, Operation::Retention, &error),
             }
         }

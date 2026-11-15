@@ -1704,8 +1704,13 @@ async fn an_unpolled_get_expires_and_admits_fresh_work() {
     let consumer =
         Stub::start(move |_, _| Response::new(Body::new(held.lock().unwrap().take().unwrap())))
             .await;
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
     let clean = tokio::time::timeout(Duration::from_secs(3), async {
-        match reqwest::get(format!("{}/download", consumer.endpoint)).await {
+        match client
+            .get(format!("{}/download", consumer.endpoint))
+            .send()
+            .await
+        {
             Ok(response) => response.bytes().await.is_ok(),
             Err(_) => false,
         }

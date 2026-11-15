@@ -19,8 +19,18 @@ MAX_PARAGRAPH_WORDS = 125
 WORKFLOW_MAX_WORDS = 600
 DECISION_KEYS = {"name", "description"}
 WORKFLOW_KEYS = {"name", "description", "metadata", "disable-model-invocation"}
-WORKFLOW_METADATA = {"invocation": {"role", "user"}, "kind": {"carrier", "workflow"}}
+WORKFLOW_METADATA_KEYS = {"invocation", "kind"}
+WORKFLOW_METADATA_PAIRS = {("user", "workflow"), ("role", "carrier")}
 NAME = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
+
+
+def _unquote_scalar(raw_value: str) -> str:
+    value = raw_value.strip()
+    if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
+        return value[1:-1]
+    if value.startswith('"') or value.endswith('"'):
+        raise ValueError(f"unbalanced quotes in frontmatter value: {raw_value!r}")
+    return value
 
 
 def parse_frontmatter(text: str) -> tuple[dict[str, object], str]:
@@ -29,27 +39,39 @@ def parse_frontmatter(text: str) -> tuple[dict[str, object], str]:
     end = text.find("\n---\n", 4)
     if end < 0:
         raise ValueError("unterminated frontmatter")
+    header = text[4:end]
+    if "\r" in header:
+        raise ValueError("frontmatter contains carriage returns (CRLF)")
     fields: dict[str, object] = {}
     parent: str | None = None
-    for line in text[4:end].splitlines():
+    for line in header.splitlines():
         if not line.strip():
             continue
         indented = line.startswith((" ", "\t"))
-        key, sep, value = line.strip().partition(":")
-        if not sep:
+        key, sep, raw_value = line.strip().partition(":")
+        if not sep or not key.strip():
             raise ValueError(f"frontmatter line is not `key: value`: {line!r}")
-        key, value = key.strip(), value.strip().strip('"')
+        key = key.strip()
+        value = _unquote_scalar(raw_value)
         if indented:
             if parent != "metadata":
                 raise ValueError(f"only `metadata` may hold nested keys, got {line!r}")
-            fields["metadata"][key] = value  # type: ignore[index]
+            nested = fields["metadata"]
+            assert isinstance(nested, dict)
+            if key in nested:
+                raise ValueError(f"duplicate metadata key: {key!r}")
+            nested[key] = value
             continue
-        if value:
+        if key in fields:
+            raise ValueError(f"duplicate frontmatter key: {key!r}")
+        if key == "metadata":
+            if raw_value.strip():
+                raise ValueError("`metadata` must be a nested mapping, not a scalar")
+            fields["metadata"] = {}
+            parent = "metadata"
+        else:
             fields[key] = value
             parent = None
-        else:
-            fields[key] = {}
-            parent = key
     return fields, text[end + 5 :]
 
 
@@ -71,12 +93,15 @@ def check_description(
     problems: list[str] = []
     if fields.get("name") != name or not NAME.match(name):
         problems.append(f"{name}: frontmatter name must equal the lowercase-hyphen directory name")
-    description = str(fields.get("description", ""))
+    raw_description = fields.get("description", "")
+    description = raw_description if isinstance(raw_description, str) else ""
     if not description:
         problems.append(f"{name}: empty description")
         return problems
     if require_use_trigger and "Use " not in description:
-        problems.append(f"{name}: description must state its trigger with `Use when`, `Use for`, `Use to`, or `Use only`")
+        problems.append(
+            f"{name}: description must state its trigger with `Use when`, `Use for`, `Use to`, or `Use only`"
+        )
     if len(re.findall(r"[.!?](\s|$)", description)) > 2:
         problems.append(f"{name}: description longer than two sentences")
     if len(description) > 1024:
@@ -130,33 +155,70 @@ def check_workflow_body(name: str, body: str) -> list[str]:
     return problems
 
 
-def check_entries(name: str, skill_dir: Path, workflow: bool) -> list[str]:
+def check_openai_carrier(name: str, skill_dir: Path) -> list[str]:
+    agents_dir = skill_dir / "agents"
+    policy = agents_dir / "openai.yaml"
+    if agents_dir.is_symlink() or policy.is_symlink() or not policy.is_file():
+        return [f"{name}: workflow skills require a regular file at agents/openai.yaml"]
+    try:
+        content = policy.read_text(encoding="utf-8")
+    except UnicodeDecodeError as err:
+        return [f"{name}: agents/openai.yaml is not valid UTF-8: {err}"]
+    if "\r" in content:
+        return [f"{name}: agents/openai.yaml contains carriage returns (CRLF)"]
+    if "  allow_implicit_invocation: false" not in content.splitlines():
+        return [f"{name}: agents/openai.yaml must set `allow_implicit_invocation: false`"]
+    return []
+
+
+def check_entries(
+    name: str,
+    skill_dir: Path,
+    workflow: bool,
+    skill_text: str,
+    root_license: bytes | None,
+) -> list[str]:
     problems: list[str] = []
     license_file = skill_dir / "LICENSE"
     if not license_file.is_file():
         problems.append(f"{name}: missing LICENSE beside SKILL.md")
-    elif ROOT_LICENSE.is_file() and license_file.read_bytes() != ROOT_LICENSE.read_bytes():
+    elif root_license is not None and license_file.read_bytes() != root_license:
         problems.append(f"{name}: LICENSE differs from the repository LICENSE")
+    links = set(re.findall(r"\]\(([^)#]+)(?:#[^)]*)?\)", skill_text)) if not workflow else set()
     for entry in sorted(skill_dir.iterdir()):
         if entry.name in {"SKILL.md", "LICENSE"}:
             continue
         if entry.name == "references" and entry.is_dir():
-            for stray in entry.rglob("*"):
+            for stray in sorted(entry.rglob("*")):
                 if stray.is_file() and stray.suffix != ".md":
                     problems.append(f"{name}: references/ holds {stray.relative_to(skill_dir)}; only Markdown belongs there")
                 elif not workflow and stray.is_file():
                     target = stray.relative_to(skill_dir).as_posix()
-                    links = re.findall(r"\]\(([^)#]+)(?:#[^)]*)?\)", (skill_dir / "SKILL.md").read_text())
                     if target not in links:
                         problems.append(f"{name}: {target} has no selecting link in SKILL.md")
             continue
-        if workflow and entry.name == "agents" and entry.is_dir():
+        if workflow and entry.name == "agents" and entry.is_dir() and not entry.is_symlink():
             if sorted(p.name for p in entry.iterdir()) != ["openai.yaml"]:
                 problems.append(f"{name}: agents/ may hold only the Codex carrier openai.yaml")
             continue
         allowed = "SKILL.md, LICENSE, references/*.md, agents/openai.yaml" if workflow else "SKILL.md, LICENSE, references/*.md"
         problems.append(f"{name}: unexpected entry {entry.name}; a skill is {allowed} only")
+    if workflow:
+        problems.extend(check_openai_carrier(name, skill_dir))
     return problems
+
+
+def check_workflow_metadata(name: str, metadata: object, prefix: str = "") -> list[str]:
+    label = f"{name}: {prefix}" if prefix else f"{name}: "
+    if not isinstance(metadata, dict) or set(metadata) != WORKFLOW_METADATA_KEYS:
+        return [f"{label}metadata must hold exactly {sorted(WORKFLOW_METADATA_KEYS)}"]
+    pair = (metadata.get("invocation"), metadata.get("kind"))
+    if pair not in WORKFLOW_METADATA_PAIRS:
+        return [
+            f"{label}metadata (invocation, kind) must be ('user', 'workflow') or ('role', 'carrier'), "
+            f"got ({pair[0]!r}, {pair[1]!r})"
+        ]
+    return []
 
 
 def check_service_owned(name: str, skill_dir: Path) -> list[str]:
@@ -169,8 +231,8 @@ def check_service_owned(name: str, skill_dir: Path) -> list[str]:
     if skill.is_symlink() or not skill.is_file():
         return [f"{name}: .service-owned requires a real SKILL.md"]
     try:
-        fields, _ = parse_frontmatter(skill.read_text())
-    except ValueError as err:
+        fields, _ = parse_frontmatter(skill.read_text(encoding="utf-8"))
+    except (UnicodeDecodeError, ValueError) as err:
         return [f"{name}: .service-owned SKILL.md {err}"]
 
     problems.extend(
@@ -178,33 +240,41 @@ def check_service_owned(name: str, skill_dir: Path) -> list[str]:
     )
     metadata = fields.get("metadata")
     if metadata is not None:
-        if not isinstance(metadata, dict) or set(metadata) != set(WORKFLOW_METADATA):
-            problems.append(f"{name}: .service-owned metadata must hold exactly {sorted(WORKFLOW_METADATA)}")
-        else:
-            for key, allowed in WORKFLOW_METADATA.items():
-                if metadata.get(key) not in allowed:
-                    problems.append(f"{name}: .service-owned metadata.{key} must be one of {sorted(allowed)}, got {metadata.get(key)!r}")
+        meta_problems = check_workflow_metadata(name, metadata, prefix=".service-owned ")
+        problems.extend(meta_problems)
+        if not meta_problems:
+            if fields.get("disable-model-invocation") != "true":
+                problems.append(f"{name}: .service-owned workflow skills set `disable-model-invocation: true`")
+            problems.extend(check_openai_carrier(name, skill_dir))
+    elif fields.get("disable-model-invocation") == "true":
+        problems.append(f"{name}: .service-owned model skills must not set `disable-model-invocation: true`")
     return problems
 
 
-def check(skill_dir: Path, lock: dict[str, object] | None) -> list[str]:
+def check(
+    skill_dir: Path,
+    lock: dict[str, object] | None,
+    root_license: bytes | None,
+) -> tuple[str, list[str]]:
     name = skill_dir.name
     marker = skill_dir / ".service-owned"
     if marker.exists() or marker.is_symlink():
         if lock is None:
-            return [f"{name}: canonical source must not contain .service-owned"]
+            return "service-owned", [f"{name}: canonical source must not contain .service-owned"]
         if lock["state"] != "complete":
-            return [f"{name}: .service-owned requires a complete initialized template.lock"]
-        return check_service_owned(name, skill_dir)
+            return "service-owned", [f"{name}: .service-owned requires a complete initialized template.lock"]
+        return "service-owned", check_service_owned(name, skill_dir)
     skill = skill_dir / "SKILL.md"
-    if not skill.is_file():
-        return [f"{name}: missing SKILL.md"]
+    if skill.is_symlink() or not skill.is_file():
+        return "decision", [f"{name}: missing SKILL.md"]
     try:
-        fields, body = parse_frontmatter(skill.read_text())
-    except ValueError as err:
-        return [f"{name}: {err}"]
+        skill_text = skill.read_text(encoding="utf-8")
+        fields, body = parse_frontmatter(skill_text)
+    except (UnicodeDecodeError, ValueError) as err:
+        return "decision", [f"{name}: {err}"]
 
     workflow = "metadata" in fields
+    kind = "workflow" if workflow else "decision"
     problems = check_description(
         name,
         fields,
@@ -213,13 +283,7 @@ def check(skill_dir: Path, lock: dict[str, object] | None) -> list[str]:
     if workflow:
         if set(fields) != WORKFLOW_KEYS:
             problems.append(f"{name}: workflow frontmatter keys must be exactly {sorted(WORKFLOW_KEYS)}, got {sorted(fields)}")
-        metadata = fields.get("metadata")
-        if not isinstance(metadata, dict) or set(metadata) != set(WORKFLOW_METADATA):
-            problems.append(f"{name}: metadata must hold exactly {sorted(WORKFLOW_METADATA)}")
-        else:
-            for key, allowed in WORKFLOW_METADATA.items():
-                if metadata.get(key) not in allowed:
-                    problems.append(f"{name}: metadata.{key} must be one of {sorted(allowed)}, got {metadata.get(key)!r}")
+        problems.extend(check_workflow_metadata(name, fields.get("metadata")))
         if fields.get("disable-model-invocation") != "true":
             problems.append(f"{name}: workflow skills set `disable-model-invocation: true`")
         problems += check_workflow_body(name, body)
@@ -227,8 +291,8 @@ def check(skill_dir: Path, lock: dict[str, object] | None) -> list[str]:
         if set(fields) != DECISION_KEYS:
             problems.append(f"{name}: frontmatter keys must be exactly {sorted(DECISION_KEYS)}, got {sorted(fields)}")
         problems += check_decision_body(name, body)
-    problems += check_entries(name, skill_dir, workflow)
-    return problems
+    problems += check_entries(name, skill_dir, workflow, skill_text, root_license)
+    return kind, problems
 
 
 def main() -> int:
@@ -240,15 +304,22 @@ def main() -> int:
     except ValueError as err:
         print(f"template.lock: {err}", file=sys.stderr)
         return 1
+    root_license = ROOT_LICENSE.read_bytes() if ROOT_LICENSE.is_file() else None
     dirs = sorted(p for p in SKILLS.iterdir() if p.is_dir())
-    problems = [problem for skill_dir in dirs for problem in check(skill_dir, lock)]
+    counts = {"decision": 0, "workflow": 0, "service-owned": 0}
+    problems: list[str] = []
+    for skill_dir in dirs:
+        kind, skill_problems = check(skill_dir, lock, root_license)
+        counts[kind] += 1
+        problems.extend(skill_problems)
     for problem in problems:
         print(problem, file=sys.stderr)
     if problems:
         return 1
-    template_dirs = [d for d in dirs if not ((d / ".service-owned").exists() or (d / ".service-owned").is_symlink())]
-    workflow = sum(1 for d in template_dirs if "metadata:" in (d / "SKILL.md").read_text().split("\n---\n", 1)[0])
-    print(f"{len(dirs)} skills ok ({len(template_dirs) - workflow} decision, {workflow} workflow, {len(dirs) - len(template_dirs)} service-owned)")
+    print(
+        f"{len(dirs)} skills ok ({counts['decision']} decision, "
+        f"{counts['workflow']} workflow, {counts['service-owned']} service-owned)"
+    )
     return 0
 
 

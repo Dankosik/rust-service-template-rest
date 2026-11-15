@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::mem::DropGuard;
 
 use infra_http::Server;
 use tokio::{sync::watch, task::JoinSet, time::Instant};
@@ -92,26 +93,6 @@ impl std::fmt::Debug for BackgroundFailureReporter {
     }
 }
 
-struct Completion {
-    reporter: BackgroundFailureReporter,
-    cancel: CancellationToken,
-    failed: bool,
-}
-
-impl Drop for Completion {
-    fn drop(&mut self) {
-        let panicked = std::thread::panicking();
-        if self.failed || panicked || !self.cancel.is_cancelled() {
-            tracing::error!(
-                task = self.reporter.name,
-                panicked,
-                "background_task_stopped"
-            );
-            self.reporter.record(panicked);
-        }
-    }
-}
-
 /// Private composition owner; dependencies must outlive every registered future.
 pub(crate) struct Background {
     tasks: JoinSet<()>,
@@ -152,17 +133,20 @@ impl Background {
         name: &'static str,
         future: impl Future<Output = Result<(), E>> + Send + 'static,
     ) {
-        let guard = Completion {
-            reporter: BackgroundFailureReporter {
-                name,
-                failure: self.failure.clone(),
-            },
-            cancel: self.cancel.clone(),
-            failed: false,
+        let reporter = BackgroundFailureReporter {
+            name,
+            failure: self.failure.clone(),
         };
+        let cancel = self.cancel.clone();
+        let mut guard = DropGuard::new(false, move |failed| {
+            let panicked = std::thread::panicking();
+            if failed || panicked || !cancel.is_cancelled() {
+                tracing::error!(task = reporter.name, panicked, "background_task_stopped");
+                reporter.record(panicked);
+            }
+        });
         self.tasks.spawn(async move {
-            let mut guard = guard;
-            guard.failed = future.await.is_err();
+            *guard = future.await.is_err();
         });
     }
 

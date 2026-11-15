@@ -176,7 +176,7 @@ mod effect {
 use domain_events::Event;
 use effect::{Applied, EffectError, Increment};
 use infra_postgres::{Dsn, Isolation, PgPool, TxError, TxOptions, in_tx_with};
-use integration_tests::{DATABASE_URL, dsn_for, url_for};
+use integration_tests::dsn_for;
 use std::time::Duration;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
@@ -399,18 +399,6 @@ async fn concurrent_identity_waits_for_commit_or_rollback_before_deciding(pool: 
 #[sqlx::test]
 async fn unknown_commit_is_unresolved_until_later_same_identity_arbitration(pool: PgPool) {
     schema(&pool).await;
-    let direct = dsn_for(&pool).await;
-    assert_eq!(
-        direct.ssl_mode_name(),
-        "disable",
-        "the existing wire proxy requires plaintext fixture PostgreSQL"
-    );
-    let host = direct.host().trim_start_matches('[').trim_end_matches(']');
-    let server = tokio::net::lookup_host((host, direct.port()))
-        .await
-        .unwrap()
-        .next()
-        .unwrap();
     for (index, fault) in [
         commit_proxy::Fault::ForwardThenDrop,
         commit_proxy::Fault::DropBeforeForward,
@@ -418,11 +406,8 @@ async fn unknown_commit_is_unresolved_until_later_same_identity_arbitration(pool
     .into_iter()
     .enumerate()
     {
-        let proxy = commit_proxy::CommitProxy::start(server).await;
-        let mut url = url_for(&pool, DATABASE_URL).await;
-        url.set_ip_host(proxy.address().ip()).unwrap();
-        url.set_port(Some(proxy.address().port())).unwrap();
-        let business = pool_at(&Dsn::admit(url.as_str()).unwrap()).await;
+        let (proxy, proxied) = commit_proxy::CommitProxy::start_for(&pool).await;
+        let business = pool_at(&proxied).await;
         let original = event(&format!("uncertain-{index}"), 5);
         proxy.arm(fault);
         let error = timeout(WAIT, effect::attempt(&business, &original))

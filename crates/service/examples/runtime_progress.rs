@@ -4,6 +4,7 @@
 //! admission. The external driver owns offered load and the provider peers.
 
 use std::convert::Infallible;
+use std::mem::DropGuard;
 use std::pin::Pin;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -311,40 +312,6 @@ impl Drop for ActiveCpu {
     }
 }
 
-struct CpuWaiter {
-    counts: Arc<Counts>,
-    id: u64,
-    finished: bool,
-}
-
-impl Drop for CpuWaiter {
-    fn drop(&mut self) {
-        if !self.finished {
-            self.counts.cpu_cancelled.fetch_add(1, Ordering::SeqCst);
-            if self.counts.active_id.load(Ordering::SeqCst) == self.id {
-                self.counts.cancelled_id.store(self.id, Ordering::SeqCst);
-                self.counts
-                    .cpu_cancelled_active
-                    .fetch_add(1, Ordering::SeqCst);
-            }
-        }
-    }
-}
-
-struct UploadWork {
-    counts: Arc<Counts>,
-    finished: bool,
-}
-
-impl Drop for UploadWork {
-    fn drop(&mut self) {
-        self.counts.upload_active.fetch_sub(1, Ordering::SeqCst);
-        if !self.finished {
-            self.counts.upload_cancelled.fetch_add(1, Ordering::SeqCst);
-        }
-    }
-}
-
 #[derive(Clone)]
 struct Echo {
     cpu: Arc<Cpu>,
@@ -365,15 +332,17 @@ impl EventPayload for PrimitivePayload<'_> {
 impl Echo {
     async fn cpu(&self) -> Result<String, Status> {
         let (id, result) = self.cpu.submit()?;
-        let mut waiter = CpuWaiter {
-            counts: Arc::clone(&self.counts),
-            id,
-            finished: false,
-        };
+        let waiter = DropGuard::new(&self.counts, move |counts| {
+            counts.cpu_cancelled.fetch_add(1, Ordering::SeqCst);
+            if counts.active_id.load(Ordering::SeqCst) == id {
+                counts.cancelled_id.store(id, Ordering::SeqCst);
+                counts.cpu_cancelled_active.fetch_add(1, Ordering::SeqCst);
+            }
+        });
         let result = result
             .await
             .map_err(|_| Status::internal("CPU observer ended"))?;
-        waiter.finished = true;
+        DropGuard::dismiss(waiter);
         std::hint::black_box(result?);
         Ok("ok".to_owned())
     }
@@ -384,10 +353,13 @@ impl Echo {
         self.counts
             .upload_max_active
             .fetch_max(active, Ordering::SeqCst);
-        let mut work = UploadWork {
-            counts: Arc::clone(&self.counts),
-            finished: false,
-        };
+        let counts = &self.counts;
+        let mut work = DropGuard::new(false, move |finished| {
+            counts.upload_active.fetch_sub(1, Ordering::SeqCst);
+            if !finished {
+                counts.upload_cancelled.fetch_add(1, Ordering::SeqCst);
+            }
+        });
         // The driver caps offers at two; the adopted adapter also has two
         // non-waiting slots. This generator ends after exactly 4097 frames.
         let frames = futures_util::stream::iter((0..=EMPTY_FRAMES).map(|frame| {
@@ -401,7 +373,7 @@ impl Echo {
         let key = ObjectKey::try_new("runtime-progress")
             .map_err(|_| Status::internal("fixture key rejected"))?;
         let result = self.storage.put(&key, body, PutOptions::default()).await;
-        work.finished = true;
+        *work = true;
         if let Ok(()) = result {
             self.counts.upload_completed.fetch_add(1, Ordering::SeqCst);
             Ok("ok".to_owned())

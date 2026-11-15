@@ -428,12 +428,6 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn an_expired_unknown_key_waiter_leaves_refresh_available_to_a_live_caller() {
-        use std::{
-            future::{Future, poll_fn},
-            task::Poll,
-            time::Duration,
-        };
-
         use operation_context::OperationContext;
 
         let engine = verifier(rsa_key_set("old", None), &[JwtAlgorithm::Rs256]);
@@ -452,16 +446,8 @@ mod tests {
         let live = OperationContext::with_timeout(Duration::from_secs(1));
         let mut first = Box::pin(verifier.verify_with_context(&token, &short));
         let mut survivor = Box::pin(verifier.verify_with_context(&token, &live));
-        assert!(
-            poll_fn(|cx| Poll::Ready(first.as_mut().poll(cx)))
-                .await
-                .is_pending()
-        );
-        assert!(
-            poll_fn(|cx| Poll::Ready(survivor.as_mut().poll(cx)))
-                .await
-                .is_pending()
-        );
+        assert!(futures_util::poll!(first.as_mut()).is_pending());
+        assert!(futures_util::poll!(survivor.as_mut()).is_pending());
         tokio::time::advance(Duration::from_millis(11)).await;
         assert_eq!(first.await, Err(Failure::Unavailable));
         assert_eq!(keys.pending(), Some(1));
@@ -475,18 +461,12 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_signing_key_rotated_under_the_same_kid_is_picked_up_on_demand() {
-        use std::{future::Future, task::Poll};
-
         let (installed, rotated) = (ec_signing(), ec_signing());
         let verifier = ec_verifier(&installed, "stable");
         verifier.key_store.permit_unknown_refresh_for_test();
         let token = ec_token(&rotated, "stable", &serde_json::json!({}));
         let mut call = std::pin::pin!(verify_at(&verifier, &token, 1_000));
-        std::future::poll_fn(|cx| {
-            assert!(call.as_mut().poll(cx).is_pending());
-            Poll::Ready(())
-        })
-        .await;
+        assert!(futures_util::poll!(call.as_mut()).is_pending());
         let ticket = verifier.key_store.pending().unwrap();
         let replacement = key_set(
             &[jwk(&rotated, Algorithm::ES256, Some("stable"), true)],
@@ -1292,8 +1272,6 @@ mod tests {
 
     #[test]
     fn authentication_metrics_preserve_success_failure_timeout_and_cancellation_labels() {
-        use std::{future::Future, task::Poll};
-
         let diagnostics = Diagnostics::default();
         let engine = verifier(rsa_key_set("fixture", None), &[JwtAlgorithm::Rs256]);
         engine.key_store.permit_unknown_refresh_for_test();
@@ -1354,11 +1332,7 @@ mod tests {
                 );
                 let mut pending =
                     Box::pin(verifier.authenticate([unknown_header.as_bytes()], Transport::Http));
-                std::future::poll_fn(|cx| {
-                    assert!(pending.as_mut().poll(cx).is_pending());
-                    Poll::Ready(())
-                })
-                .await;
+                assert!(futures_util::poll!(pending.as_mut()).is_pending());
                 drop(pending);
             });
         });

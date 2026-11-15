@@ -274,6 +274,40 @@ fn malformed_toml_reports_its_position_without_echoing_input() {
 }
 
 #[test]
+fn utf8_bom_loads_once_and_rejects_a_second_bom() {
+    let dir = tempfile::tempdir().unwrap();
+    let single = LoadOptions {
+        config: Some(write(
+            &dir,
+            "bom.toml",
+            "\u{feff}[log]\nlevel = \"debug\"\n",
+        )),
+        ..LoadOptions::default()
+    };
+    let cfg = load_from(&single, BUILD, env(&[])).unwrap();
+    assert_eq!(cfg.log.level, "debug");
+
+    let double_path = write(
+        &dir,
+        "double-bom.toml",
+        "\u{feff}\u{feff}[log]\nlevel = \"debug\"\n",
+    );
+    let double = LoadOptions {
+        config: Some(double_path.clone()),
+        ..LoadOptions::default()
+    };
+    let error = load_from(&double, BUILD, env(&[])).unwrap_err();
+    assert_matches!(&error, Error::ParseFile { path, .. } if path == &double_path, "{error}");
+    assert!(
+        error
+            .to_string()
+            .trim_end()
+            .ends_with("double-bom.toml: invalid TOML at byte 6"),
+        "{error}"
+    );
+}
+
+#[test]
 fn a_replaced_file_does_not_change_the_admitted_source() {
     let dir = tempfile::tempdir().unwrap();
     let path = write(&dir, "base.toml", "[log]\nlevel = \"debug\"\n");

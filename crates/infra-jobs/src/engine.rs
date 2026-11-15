@@ -362,11 +362,7 @@ fn spawn_guarded(
     token: CancellationToken,
     failure: CancellationToken,
 ) {
-    let guard = TaskGuard {
-        task: run.label(),
-        token: token.clone(),
-        failure: failure.clone(),
-    };
+    let guard = task_guard(run.label(), token.clone(), failure.clone());
     tracker.spawn(async move {
         let _guard = guard;
         match run {
@@ -515,23 +511,21 @@ impl Drop for SupervisorGuard {
 /// The worker's staged shutdown owns the order in which work stops after this
 /// guard signals failure. [`SupervisorGuard`] also stops claiming when the
 /// attempt it guards can no longer settle its claim.
-struct TaskGuard {
+fn task_guard(
     task: &'static str,
     token: CancellationToken,
     failure: CancellationToken,
-}
-
-impl Drop for TaskGuard {
-    fn drop(&mut self) {
-        if std::thread::panicking() || !self.token.is_cancelled() {
+) -> std::mem::DropGuard<(), impl FnOnce(())> {
+    std::mem::DropGuard::new((), move |()| {
+        if std::thread::panicking() || !token.is_cancelled() {
             tracing::error!(
-                task = self.task,
+                task = task,
                 panicked = std::thread::panicking(),
                 "jobs_engine_task_stopped"
             );
-            self.failure.cancel();
+            failure.cancel();
         }
-    }
+    })
 }
 
 const CLEANUP_OVERFLOW_FALLBACK: Duration = Duration::from_hours(24 * 365);
@@ -1011,11 +1005,7 @@ mod tests {
         let token = CancellationToken::new();
         token.cancel();
         let failure = CancellationToken::new();
-        let guard = TaskGuard {
-            task: "fixture",
-            token: token.clone(),
-            failure: failure.clone(),
-        };
+        let guard = task_guard("fixture", token.clone(), failure.clone());
         let task = tokio::spawn(async move {
             let _guard = guard;
             panic!("engine cleanup defect");
@@ -1024,11 +1014,7 @@ mod tests {
         assert!(failure.is_cancelled());
 
         let normal_failure = CancellationToken::new();
-        drop(TaskGuard {
-            task: "normal",
-            token,
-            failure: normal_failure.clone(),
-        });
+        drop(task_guard("normal", token, normal_failure.clone()));
         assert!(!normal_failure.is_cancelled());
     }
 

@@ -8,7 +8,7 @@
 
 #[allow(
     dead_code,
-    reason = "the shared transport also supplies commit-ack faults to the jobs integration target"
+    reason = "shared transport across postgres, http_idempotency, webhooks, messaging_recovery, and jobs integration targets"
 )]
 #[path = "support/commit_proxy.rs"]
 mod commit_proxy;
@@ -176,14 +176,7 @@ async fn dsn_at(pool: &PgPool, address: SocketAddr) -> Dsn {
 }
 
 async fn proxied_pool(pool: &PgPool, max_connections: u32) -> (CommitProxy, PgPool) {
-    let dsn = dsn_for(pool).await;
-    assert_eq!(
-        dsn.ssl_mode_name(),
-        "disable",
-        "the test proxy frames the plaintext protocol"
-    );
-    let proxy = CommitProxy::start(server_address(&dsn).await).await;
-    let proxied = dsn_at(pool, proxy.address()).await;
+    let (proxy, proxied) = CommitProxy::start_for(pool).await;
     (proxy, template_pool(&proxied, max_connections).await)
 }
 
@@ -250,14 +243,11 @@ enum AppError {
 
 #[sqlx::test(migrations = false)]
 async fn silent_session_readback_rejects_admission_before_the_relay_is_released(pool: PgPool) {
-    let direct = dsn_for(&pool).await;
-    assert_eq!(direct.ssl_mode_name(), "disable");
     for session_settings_source in [
         SessionSettingsSource::Startup,
         SessionSettingsSource::Server,
     ] {
-        let proxy = CommitProxy::start(server_address(&direct).await).await;
-        let dsn = dsn_at(&pool, proxy.address()).await;
+        let (proxy, dsn) = CommitProxy::start_for(&pool).await;
         proxy.arm_autocommit(Fault::ForwardThenSilence, "pg_settings");
         let options = PoolOptions {
             max_connections: NonZeroU32::MIN,
@@ -303,9 +293,7 @@ async fn silent_session_readback_rejects_admission_before_the_relay_is_released(
 #[sqlx::test(migrations = false)]
 async fn pending_session_admission_keeps_a_closeable_pool_and_bounds_its_wait(pool: PgPool) {
     for expire in [false, true] {
-        let dsn = dsn_for(&pool).await;
-        let proxy = CommitProxy::start(server_address(&dsn).await).await;
-        let proxied = dsn_at(&pool, proxy.address()).await;
+        let (proxy, proxied) = CommitProxy::start_for(&pool).await;
         let options = PoolOptions {
             max_connections: NonZeroU32::MIN,
             application_name: APP,
@@ -1879,7 +1867,8 @@ mod postgres_tls_material;
 // Keep it in this target so the pool, DSN and native TLS path remain the owners.
 struct PostgresTlsRelay {
     cancel: CancellationToken,
-    tasks: tokio_util::task::TaskTracker,
+    _cancel_guard: tokio_util::sync::DropGuard,
+    task: tokio_util::task::AbortOnDropHandle<()>,
     server_names: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 }
 
@@ -1890,15 +1879,10 @@ struct PostgresTlsMaterial {
 
 impl PostgresTlsMaterial {
     fn new() -> Self {
-        use base64::Engine as _;
         use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
         use tokio_rustls::rustls;
 
         let material = postgres_tls_material::TlsMaterial::new("localhost");
-        let root = format!(
-            "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
-            base64::engine::general_purpose::STANDARD.encode(&material.root),
-        );
         let tls = rustls::ServerConfig::builder_with_provider(std::sync::Arc::new(
             rustls::crypto::aws_lc_rs::default_provider(),
         ))
@@ -1911,9 +1895,17 @@ impl PostgresTlsMaterial {
         )
         .unwrap();
         Self {
-            root,
+            root: material.root_pem,
             acceptor: tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(tls)),
         }
+    }
+}
+
+fn propagate_tls_relay_panic(result: Result<(), tokio::task::JoinError>) {
+    if let Err(err) = result
+        && err.is_panic()
+    {
+        std::panic::resume_unwind(err.into_panic());
     }
 }
 
@@ -1924,27 +1916,39 @@ impl PostgresTlsRelay {
         acceptor: tokio_rustls::TlsAcceptor,
     ) -> Self {
         let cancel = CancellationToken::new();
-        let tasks = tokio_util::task::TaskTracker::new();
+        let cancel_guard = cancel.clone().drop_guard();
         let server_names = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let run_cancel = cancel.clone();
-        let run_tasks = tasks.clone();
         let run_names = server_names.clone();
-        tasks.spawn(async move {
-            while let Some(accepted) = run_cancel.run_until_cancelled(listener.accept()).await {
-                let (socket, _) = accepted.unwrap();
-                let acceptor = acceptor.clone();
-                let connection_cancel = run_cancel.child_token();
-                let names = run_names.clone();
-                run_tasks.spawn(async move {
-                    let _ = connection_cancel
-                        .run_until_cancelled(Self::forward(socket, target, acceptor, names))
-                        .await;
-                });
+        let task = tokio::spawn(async move {
+            let mut connections = tokio::task::JoinSet::new();
+            loop {
+                tokio::select! {
+                    () = run_cancel.cancelled() => break,
+                    Some(result) = connections.join_next(), if !connections.is_empty() => {
+                        propagate_tls_relay_panic(result);
+                    }
+                    accepted = listener.accept() => {
+                        let (socket, _) = accepted.unwrap();
+                        let acceptor = acceptor.clone();
+                        let connection_cancel = run_cancel.child_token();
+                        let names = run_names.clone();
+                        connections.spawn(async move {
+                            let _ = connection_cancel
+                                .run_until_cancelled(Self::forward(socket, target, acceptor, names))
+                                .await;
+                        });
+                    }
+                }
+            }
+            while let Some(result) = connections.join_next().await {
+                propagate_tls_relay_panic(result);
             }
         });
         Self {
             cancel,
-            tasks,
+            _cancel_guard: cancel_guard,
+            task: tokio_util::task::AbortOnDropHandle::new(task),
             server_names,
         }
     }
@@ -1974,12 +1978,14 @@ impl PostgresTlsRelay {
         Ok(())
     }
 
-    async fn stop(self) {
+    async fn stop(mut self) {
         self.cancel.cancel();
-        self.tasks.close();
-        tokio::time::timeout(Duration::from_secs(3), self.tasks.wait())
-            .await
-            .expect("all TLS relay tasks terminate");
+        let result = tokio::time::timeout(Duration::from_secs(3), &mut self.task).await;
+        if result.is_err() {
+            self.task.abort();
+            let _ = (&mut self.task).await;
+        }
+        propagate_tls_relay_panic(result.expect("all TLS relay tasks terminate"));
         assert!(
             self.server_names
                 .lock()

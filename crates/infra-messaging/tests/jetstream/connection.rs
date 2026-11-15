@@ -72,8 +72,8 @@ impl OutageRelay {
 /// same port, so `localhost` must make a new native dial to reach it.
 struct TlsRotationRelay {
     stop: CancellationToken,
-    accepted: Arc<AtomicUsize>,
-    rejected: Arc<AtomicUsize>,
+    accepted: tokio::sync::watch::Receiver<usize>,
+    rejected: tokio::sync::watch::Receiver<usize>,
     task: JoinHandle<()>,
 }
 
@@ -98,10 +98,9 @@ impl TlsRotationRelay {
 
     fn start(listener: TcpListener, acceptor: tokio_rustls::TlsAcceptor) -> Self {
         let stop = CancellationToken::new();
-        let accepted = Arc::new(AtomicUsize::new(0));
-        let rejected = Arc::new(AtomicUsize::new(0));
-        let (stopped, accepted_by_relay, rejected_by_relay) =
-            (stop.clone(), Arc::clone(&accepted), Arc::clone(&rejected));
+        let (accepted_tx, accepted) = tokio::sync::watch::channel(0);
+        let (rejected_tx, rejected) = tokio::sync::watch::channel(0);
+        let stopped = stop.clone();
         let target = relay_target(&nats_url());
         let task = tokio::spawn(async move {
             loop {
@@ -111,10 +110,10 @@ impl TlsRotationRelay {
                 };
                 let (socket, _) = accepted_socket.expect("TLS relay accepts a connection");
                 let Ok(client) = acceptor.accept(socket).await else {
-                    rejected_by_relay.fetch_add(1, Ordering::SeqCst);
+                    rejected_tx.send_modify(|n| *n += 1);
                     continue;
                 };
-                accepted_by_relay.fetch_add(1, Ordering::SeqCst);
+                accepted_tx.send_modify(|n| *n += 1);
                 let mut broker = TcpStream::connect(&target)
                     .await
                     .expect("TLS relay reaches the fixture broker");
@@ -133,24 +132,18 @@ impl TlsRotationRelay {
         }
     }
 
-    async fn wait_for_rejected_handshake(&self) {
-        timeout(Duration::from_secs(10), async {
-            while self.rejected.load(Ordering::SeqCst) == 0 {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .expect("old root rejects the replacement TLS identity");
+    async fn wait_for_rejected_handshake(&mut self) {
+        timeout(Duration::from_secs(10), self.rejected.wait_for(|&n| n > 0))
+            .await
+            .expect("old root rejects the replacement TLS identity")
+            .expect("TLS relay stays running");
     }
 
-    async fn wait_for_authenticated_connection(&self) {
-        timeout(Duration::from_secs(10), async {
-            while self.accepted.load(Ordering::SeqCst) == 0 {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .expect("replacement root admits a fresh TLS connection");
+    async fn wait_for_authenticated_connection(&mut self) {
+        timeout(Duration::from_secs(10), self.accepted.wait_for(|&n| n > 0))
+            .await
+            .expect("replacement root admits a fresh TLS connection")
+            .expect("TLS relay stays running");
     }
 
     async fn finish(self) {
@@ -178,7 +171,6 @@ fn trust_options(servers: Vec<String>) -> MessagingOptions {
 
 fn tls_identity(name: &str) -> (String, tokio_rustls::TlsAcceptor) {
     use async_nats::rustls::{ServerConfig, pki_types::PrivatePkcs8KeyDer};
-    use base64::Engine as _;
     use rcgen::{BasicConstraints, CertificateParams, CertifiedIssuer, IsCa, KeyPair};
 
     let mut ca = CertificateParams::default();
@@ -190,8 +182,7 @@ fn tls_identity(name: &str) -> (String, tokio_rustls::TlsAcceptor) {
         .expect("server name")
         .signed_by(&key, &issuer)
         .expect("server certificate");
-    let encoded = base64::engine::general_purpose::STANDARD.encode(issuer.der());
-    let root = format!("-----BEGIN CERTIFICATE-----\n{encoded}\n-----END CERTIFICATE-----\n");
+    let root = issuer.pem();
     let server = ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(
@@ -429,11 +420,11 @@ async fn tls_root_ca_file_is_reread_for_a_same_client_reconnect_to_a_new_localho
     let messaging = Messaging::connect(options, deadline(), cancel.clone())
         .await
         .expect("the IPv4 relay is admitted with private CA A");
-    assert_eq!(first.accepted.load(Ordering::SeqCst), 1);
+    assert_eq!(*first.accepted.borrow(), 1);
 
     first.finish().await;
     let (ca_b, tls_b) = tls_identity("localhost");
-    let replacement = TlsRotationRelay::start_v6(port, tls_b).await;
+    let mut replacement = TlsRotationRelay::start_v6(port, tls_b).await;
     replacement.wait_for_rejected_handshake().await;
     assert!(
         messaging.probe().check().await.is_err(),

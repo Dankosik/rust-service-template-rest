@@ -2,7 +2,7 @@ use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
 use futures_util::FutureExt as _;
-use infra_postgres::{Dsn, PgPool, in_tx};
+use infra_postgres::{PgPool, in_tx};
 use infra_webhooks::outbound::Producer;
 use integration_tests::reading_counter::{
     self as reading, Channel, Error, Operation, PreparedRequest,
@@ -41,11 +41,11 @@ async fn counts(pool: &PgPool) -> (i64, i64, i64) {
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn batch_cli_bounds_actual_input_before_acceptance(pool: PgPool) {
     use std::io;
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     use std::time::Duration;
 
     use tokio::io::AsyncWriteExt;
-    use tokio::net::unix::pipe;
+    use tokio::process::Command;
 
     const LIMIT: usize = 128 * 1024 + 256;
     reading::migrate(&pool).await.unwrap();
@@ -55,30 +55,35 @@ async fn batch_cli_bounds_actual_input_before_acceptance(pool: PgPool) {
         batch.resize(size, b' ');
         // The pipe has zero metadata length in both cases. Both byte sequences
         // are valid JSON, so the size decision is observable in the database.
-        let (mut writer, reader) = pipe::pipe().unwrap();
         let mut child = Command::new(env!("CARGO_BIN_EXE_reading-counter-fixture"))
             .args(["accept", "--operations-file", "/dev/stdin"])
             .env_clear()
             .env("DATABASE_URL", db.as_str())
-            .stdin(reader.into_blocking_fd().unwrap())
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
+            .kill_on_drop(true)
             .spawn()
             .unwrap();
-        let completed = tokio::time::timeout(Duration::from_secs(40), async {
-            writer.write_all(&batch).await?;
-            drop(writer);
-            while child.try_wait()?.is_none() {
-                tokio::time::sleep(super::POLL).await;
-            }
-            Ok::<_, io::Error>(())
+        let mut stdin = child.stdin.take().unwrap();
+        let output = tokio::time::timeout(Duration::from_secs(40), async {
+            let (write_result, wait_result) = tokio::join!(
+                async {
+                    let result = stdin.write_all(&batch).await;
+                    drop(stdin);
+                    match result {
+                        Ok(()) => Ok(()),
+                        Err(err) if err.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+                        Err(err) => Err(err),
+                    }
+                },
+                child.wait_with_output(),
+            );
+            write_result?;
+            wait_result
         })
-        .await;
-        if !matches!(completed, Ok(Ok(()))) {
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("batch process did not complete: {completed:?}");
-        }
-        let output = child.wait_with_output().unwrap();
+        .await
+        .expect("batch process completes within bound")
+        .expect("batch process I/O completes");
         assert_eq!(output.status.code(), Some(code));
         let receipt: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         if code == 1 {
@@ -222,18 +227,7 @@ async fn marker_arbitration_keeps_aggregate_atomic_and_returns_the_first_result(
 }
 
 async fn proxied_pool(pool: &PgPool) -> (CommitProxy, PgPool) {
-    let dsn = integration_tests::dsn_for(pool).await;
-    assert_eq!(dsn.ssl_mode_name(), "disable");
-    let server = tokio::net::lookup_host((dsn.host(), dsn.port()))
-        .await
-        .unwrap()
-        .next()
-        .unwrap();
-    let proxy = CommitProxy::start(server).await;
-    let mut url = integration_tests::url_for(pool, integration_tests::DATABASE_URL).await;
-    url.set_ip_host(proxy.address().ip()).unwrap();
-    url.set_port(Some(proxy.address().port())).unwrap();
-    let proxied = Dsn::admit(url.as_str()).unwrap();
+    let (proxy, proxied) = CommitProxy::start_for(pool).await;
     let admitted = super::template_pool(&proxied, 2).await;
     (proxy, admitted)
 }

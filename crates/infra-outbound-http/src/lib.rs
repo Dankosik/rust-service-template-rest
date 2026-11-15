@@ -281,7 +281,13 @@ impl Client {
         let mut request = policy::admit_request(&self.origin, request)?;
 
         let template = request.extensions_mut().remove::<UrlTemplate>();
-        let mut attempt = observe::Attempt::start(request.method(), template, &self.server, &stops);
+        let mut attempt = observe::Attempt::start(
+            request.method(),
+            template,
+            &self.server,
+            self.origin.port(),
+            &stops,
+        );
         if self.propagate_trace_context {
             attempt.inject_trace_context(request.headers_mut());
         }
@@ -293,7 +299,7 @@ impl Client {
             .exchange(request, &stops, &mut attempt, check, on_status)
             .await
             .and_then(|response| stops.check().map(|()| response));
-        attempt.finish(&result);
+        std::mem::DropGuard::dismiss(attempt).finish(&result);
         result
     }
 
@@ -301,7 +307,7 @@ impl Client {
         &self,
         request: Request<Bytes>,
         stops: &StopScopes<'_>,
-        attempt: &mut observe::Attempt<'_>,
+        attempt: &mut observe::Attempt,
         check: impl FnOnce() -> bool + Send,
         on_status: impl FnOnce(StatusCode) + Send,
     ) -> Result<Response<Bytes>, Error> {

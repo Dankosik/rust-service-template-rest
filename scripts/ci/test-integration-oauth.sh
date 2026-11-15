@@ -8,9 +8,8 @@ if ! bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --assert-held; then
 	exec bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" -- bash "${ROOT_DIR}/scripts/ci/test-integration-oauth.sh" "$@"
 fi
 
-# Bumped by hand: the proof runs outside Compose, so Dependabot does not see
-# this pin. The adapter guide records the version its compatibility row names.
-KEYCLOAK_IMAGE=quay.io/keycloak/keycloak:26.8.0@sha256:b0f60d489d51c5d113390bdf5461d4c06e6051be026c05549f2e1e10ec352bcc
+# shellcheck source=tools/versions.env
+. "${ROOT_DIR}/tools/versions.env"
 READY_TIMEOUT_SECONDS=180
 
 container=
