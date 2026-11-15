@@ -224,7 +224,7 @@ LOCK
 		output=$(ALLOW_FULL=1 bash "${script}" --plan --files scripts/ci/initializer-matrix.py)
 		grep -q '^  make template-init-check$' <<<"$(plan_section commands)"
 		grep -q '^  make template-init-artifacts ARTIFACT_GRAPHS=1,7,47,65$' <<<"$(plan_section ci-owned)"
-		output=$(bash "${script}" --files scripts/tests/fixtures/template-profiles-b206.json)
+		output=$(bash "${script}" --files scripts/tests/template-fixture.json)
 		grep -q '^verification not applicable locally: CI owns make template-init-check' <<<"${output}"
 		output=$(ALLOW_HEAVY=1 bash "${script}" --plan --files crates/infra-messaging/src/lib.rs)
 		grep -q '^  make template-init-artifacts ARTIFACT_GRAPHS=47,65$' <<<"$(plan_section commands)"
@@ -316,7 +316,7 @@ MAKE
 
 	if [[ -f ${ROOT_DIR}/make/source.mk ]]; then
 		: >make/source.mk
-		output=$(VERIFY_FORCE=1 bash "${script}" --files .agents/roles/worker-agent.toml scripts/tests/fixtures/template-profiles-b206.json)
+		output=$(VERIFY_FORCE=1 bash "${script}" --files .agents/roles/worker-agent.toml scripts/tests/template-fixture.json)
 		grep -q '^status: partially_verified$' <<<"${output}"
 		grep -q '^ci_owned: make template-init-check;make template-init-artifacts ARTIFACT_GRAPHS=1,7,47,65$' <<<"${output}"
 		rm make/source.mk
@@ -624,9 +624,6 @@ if is_true db_integration; then
 	add_command make test-integration-db "database adapter, runner, or database proof changed" "make test-integration-db" docker true true
 	if [[ ${ci_mode} == none ]]; then
 		add_command make integration-compile "no CI compiles the integration suites the change does not run" "make integration-compile" cpu false false
-	fi
-	if [[ -f make/source.mk ]]; then
-		add_command make jobs-reliability-reference "database adapter, runner, or the jobs reference changed" "make jobs-reliability-reference" docker true true
 	fi
 	add_command make sqlx-check "a checked statement, a migration, or the query metadata changed" "make sqlx-check" docker true true
 fi

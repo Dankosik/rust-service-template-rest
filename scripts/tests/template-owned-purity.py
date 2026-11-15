@@ -49,7 +49,7 @@ def check(root: Path) -> None:
     entries = state.manifest_entries(root)
     owned = set(entries)
     profile = json.loads((root / "scripts/lib/template_profiles.json").read_text(encoding="utf-8"))
-    non_profile_keys = {"schema_version", "source_only", "identity", "cargo_lock"}
+    non_profile_keys = {"schema_version", "source_only", "identity"}
     if not isinstance(profile, dict) or not non_profile_keys.issubset(profile):
         raise AssertionError("profile inventory is missing top-level metadata keys")
     section_names = sorted(set(profile) - non_profile_keys)

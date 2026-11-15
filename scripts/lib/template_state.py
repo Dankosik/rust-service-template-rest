@@ -284,54 +284,7 @@ def inbound_webhooks_requirement(database: str, jobs: str) -> str | None:
 
 
 def validate_profiles(value: object) -> dict[str, str]:
-    if not isinstance(value, dict) or set(value) not in (
-        {"database", "agent_harness"},
-        {"database", "authn", "agent_harness"},
-        {"database", "authn", "outbound_http", "agent_harness"},
-        {"database", "authn", "outbound_http", "http_idempotency", "agent_harness"},
-        {"database", "authn", "outbound_http", "http_idempotency", "jobs", "agent_harness"},
-        {
-            "database", "authn", "outbound_http", "http_idempotency", "jobs", "webhooks",
-            "inbound_webhooks", "agent_harness",
-        },
-        {
-            "database", "authn", "outbound_http", "http_idempotency", "jobs", "webhooks",
-            "inbound_webhooks", "messaging", "agent_harness",
-        },
-        {
-            "database", "authn", "outbound_http", "http_idempotency", "jobs", "webhooks",
-            "inbound_webhooks", "messaging", "outbox", "agent_harness",
-        },
-        {
-            "database", "authn", "outbound_http", "outbound_auth", "http_idempotency", "jobs", "webhooks",
-            "inbound_webhooks", "agent_harness",
-        },
-        {
-            "database", "authn", "outbound_http", "outbound_auth", "grpc", "http_idempotency", "jobs",
-            "webhooks", "inbound_webhooks", "agent_harness",
-        },
-        {
-            "database", "authn", "outbound_http", "outbound_auth", "http_idempotency", "jobs", "messaging",
-            "outbox", "webhooks", "inbound_webhooks", "agent_harness",
-        },
-        {
-            "database", "authn", "outbound_http", "outbound_auth", "grpc", "http_idempotency", "jobs",
-            "messaging", "outbox", "webhooks", "inbound_webhooks", "agent_harness",
-        },
-        {
-            "database", "authn", "outbound_http", "outbound_auth", "grpc", "http_idempotency", "jobs",
-            "messaging", "outbox", "webhooks", "inbound_webhooks", "cache", "agent_harness",
-        },
-        {
-            "database", "authn", "outbound_http", "outbound_auth", "grpc", "http_idempotency", "jobs",
-            "messaging", "outbox", "webhooks", "inbound_webhooks", "cache", "object_storage", "agent_harness",
-        },
-        {
-            "database", "authn", "outbound_http", "outbound_auth", "grpc", "http_idempotency", "jobs",
-            "messaging", "outbox", "webhooks", "inbound_webhooks", "cache", "object_storage", "service_auth",
-            "agent_harness",
-        },
-    ):
+    if not isinstance(value, dict) or not ({"database", "agent_harness"} <= set(value) <= set(PROFILE_FIELDS)):
         raise Refusal("profiles has an unsupported shape")
     database = value["database"]
     authn = value.get("authn", "none")
@@ -474,13 +427,7 @@ def _regular_file(path: Path, label: str) -> None:
         raise Refusal(f"{label} is not a regular file")
 
 
-@dataclass(frozen=True)
-class LockSnapshot:
-    normalized: dict[str, Any]
-    explicit_profiles: frozenset[str]
-
-
-def load_lock_snapshot(root: Path, required: bool = False) -> LockSnapshot | None:
+def load_lock(root: Path, required: bool = False) -> dict[str, Any] | None:
     path = Path(root) / LOCK_NAME
     if not path.exists() and not path.is_symlink():
         if required:
@@ -488,188 +435,7 @@ def load_lock_snapshot(root: Path, required: bool = False) -> LockSnapshot | Non
         return None
     _regular_file(path, LOCK_NAME)
     raw = parse_json_bytes(path.read_bytes(), LOCK_NAME)
-    normalized = validate_lock(raw)
-    assert isinstance(raw, dict)
-    return LockSnapshot(normalized, frozenset(raw["profiles"]))
-
-
-def load_lock(root: Path, required: bool = False) -> dict[str, Any] | None:
-    snapshot = load_lock_snapshot(root, required)
-    return None if snapshot is None else snapshot.normalized
-
-
-def _lock_has_explicit_profile(root: Path, required: bool, name: str) -> bool:
-    snapshot = load_lock_snapshot(root, required)
-    return snapshot is not None and name in snapshot.explicit_profiles
-
-
-def lock_has_explicit_authn(root: Path, required: bool = False) -> bool:
-    return _lock_has_explicit_profile(root, required, "authn")
-
-
-def lock_has_explicit_outbound_http(root: Path, required: bool = False) -> bool:
-    return _lock_has_explicit_profile(root, required, "outbound_http")
-
-
-def lock_has_explicit_outbound_auth(root: Path, required: bool = False) -> bool:
-    return _lock_has_explicit_profile(root, required, "outbound_auth")
-
-
-def lock_has_explicit_http_idempotency(root: Path, required: bool = False) -> bool:
-    return _lock_has_explicit_profile(root, required, "http_idempotency")
-
-
-def lock_has_explicit_jobs(root: Path, required: bool = False) -> bool:
-    return _lock_has_explicit_profile(root, required, "jobs")
-
-
-def lock_has_explicit_webhooks(root: Path, required: bool = False) -> bool:
-    return _lock_has_explicit_profile(root, required, "webhooks")
-
-
-def lock_has_explicit_inbound_webhooks(root: Path, required: bool = False) -> bool:
-    return _lock_has_explicit_profile(root, required, "inbound_webhooks")
-
-
-def selected_profiles(root: Path) -> tuple[str, str]:
-    lock = load_lock(root)
-    if lock is None:
-        return ("postgres", "all")
-    if lock["state"] != "complete":
-        raise Refusal("template.lock is incomplete; inspect the init-produced diff and use a fresh template checkout")
-    profiles = lock["profiles"]
-    return (profiles["database"], profiles["agent_harness"])
-
-
-def selected_authn(root: Path) -> str:
-    lock = load_lock(root)
-    if lock is None:
-        # The source contains all optional implementations, but has not made a
-        # derived-service profile selection.
-        return "none"
-    if lock["state"] != "complete":
-        raise Refusal("template.lock is incomplete; inspect the init-produced diff and use a fresh template checkout")
-    return lock["profiles"]["authn"]
-
-
-def selected_outbound_http(root: Path) -> str:
-    root = Path(root)
-    lock = load_lock(root)
-    if lock is None:
-        return "bounded" if (root / "crates/infra-outbound-http").is_dir() else "none"
-    if lock["state"] != "complete":
-        raise Refusal("template.lock is incomplete; inspect the init-produced diff and use a fresh template checkout")
-    return lock["profiles"]["outbound_http"]
-
-
-def selected_outbound_auth(root: Path) -> str:
-    root = Path(root)
-    lock = load_lock(root)
-    if lock is None:
-        return "oauth2-client-credentials" if (root / "crates/infra-oauth2-client-credentials").is_dir() else "none"
-    if lock["state"] != "complete":
-        raise Refusal("template.lock is incomplete; inspect the init-produced diff and use a fresh template checkout")
-    return lock["profiles"]["outbound_auth"]
-
-
-def selected_grpc(root: Path) -> str:
-    root = Path(root)
-    lock = load_lock(root)
-    if lock is None:
-        return "enabled" if (root / "crates/infra-grpc").is_dir() else "none"
-    if lock["state"] != "complete":
-        raise Refusal("template.lock is incomplete; inspect the init-produced diff and use a fresh template checkout")
-    return lock["profiles"]["grpc"]
-
-
-def selected_http_idempotency(root: Path) -> str:
-    root = Path(root)
-    lock = load_lock(root)
-    if lock is None:
-        return "postgres" if (root / "crates/infra-idempotency-store").is_dir() else "none"
-    if lock["state"] != "complete":
-        raise Refusal("template.lock is incomplete; inspect the init-produced diff and use a fresh template checkout")
-    return lock["profiles"]["http_idempotency"]
-
-
-def selected_jobs(root: Path) -> str:
-    root = Path(root)
-    lock = load_lock(root)
-    if lock is None:
-        return "postgres" if (root / "crates/infra-jobs").is_dir() else "none"
-    if lock["state"] != "complete":
-        raise Refusal("template.lock is incomplete; inspect the init-produced diff and use a fresh template checkout")
-    return lock["profiles"]["jobs"]
-
-
-def selected_messaging(root: Path) -> str:
-    root = Path(root)
-    lock = load_lock(root)
-    if lock is None:
-        return "nats-jetstream" if (root / "crates/infra-messaging").is_dir() else "none"
-    if lock["state"] != "complete":
-        raise Refusal("template.lock is incomplete; inspect the init-produced diff and use a fresh template checkout")
-    return lock["profiles"]["messaging"]
-
-
-def selected_cache(root: Path) -> str:
-    root = Path(root)
-    lock = load_lock(root)
-    if lock is None:
-        return "redis" if (root / "crates/infra-cache").is_dir() else "none"
-    if lock["state"] != "complete":
-        raise Refusal("template.lock is incomplete; inspect the init-produced diff and use a fresh template checkout")
-    return lock["profiles"]["cache"]
-
-
-def selected_object_storage(root: Path) -> str:
-    root = Path(root)
-    lock = load_lock(root)
-    if lock is None:
-        return "s3" if (root / "crates/infra-object-storage").is_dir() else "none"
-    if lock["state"] != "complete":
-        raise Refusal("template.lock is incomplete; inspect the init-produced diff and use a fresh template checkout")
-    return lock["profiles"]["object_storage"]
-
-
-def selected_service_auth(root: Path) -> str:
-    root = Path(root)
-    lock = load_lock(root)
-    if lock is None:
-        return "jwt" if (root / "crates/infra-serviceauth").is_dir() else "none"
-    if lock["state"] != "complete":
-        raise Refusal("template.lock is incomplete; inspect the init-produced diff and use a fresh template checkout")
-    return lock["profiles"]["service_auth"]
-
-
-def selected_outbox(root: Path) -> str:
-    root = Path(root)
-    lock = load_lock(root)
-    if lock is None:
-        return "postgres" if (root / "crates/infra-messaging/src/outbox.rs").is_file() else "none"
-    if lock["state"] != "complete":
-        raise Refusal("template.lock is incomplete; inspect the init-produced diff and use a fresh template checkout")
-    return lock["profiles"]["outbox"]
-
-
-def selected_webhooks(root: Path) -> str:
-    root = Path(root)
-    lock = load_lock(root)
-    if lock is None:
-        return "durable" if (root / "crates/infra-webhooks/src/outbound.rs").is_file() else "none"
-    if lock["state"] != "complete":
-        raise Refusal("template.lock is incomplete; inspect the init-produced diff and use a fresh template checkout")
-    return lock["profiles"]["webhooks"]
-
-
-def selected_inbound_webhooks(root: Path) -> str:
-    root = Path(root)
-    lock = load_lock(root)
-    if lock is None:
-        return "standard-webhooks" if (root / "crates/infra-webhooks/src/inbound.rs").is_file() else "none"
-    if lock["state"] != "complete":
-        raise Refusal("template.lock is incomplete; inspect the init-produced diff and use a fresh template checkout")
-    return lock["profiles"]["inbound_webhooks"]
+    return validate_lock(raw)
 
 
 def selected_adapters(harness: str) -> tuple[str, ...]:
@@ -761,9 +527,9 @@ def _protected_manifest_owner(entry: str) -> bool:
 
 
 def _derived_service_skill_roots(
-    root: Path, *, initializing: bool = False, replay_lock: LockSnapshot | None = None,
+    root: Path, *, initializing: bool = False, replay_lock: dict[str, Any] | None = None,
 ) -> frozenset[Path]:
-    lock = replay_lock.normalized if replay_lock is not None else load_lock(root)
+    lock = replay_lock if replay_lock is not None else load_lock(root)
     if lock is not None and lock["state"] != "complete" and not initializing:
         raise Refusal("template.lock is incomplete; inspect the init-produced diff and use a fresh template checkout")
     skills = root / ".agents/skills"
@@ -844,7 +610,7 @@ def manifest_entries(snapshot_root: Path) -> tuple[str, ...]:
 
 def parse_manifest(
     snapshot_root: Path, *, harness: str = "all", target_repository: str | None = None,
-    initializing: bool = False, _replay_lock: LockSnapshot | None = None,
+    initializing: bool = False, _replay_lock: dict[str, Any] | None = None,
 ) -> tuple[str, ...]:
     entries = manifest_entries(snapshot_root)
     if target_repository is not None and not isinstance(target_repository, str):

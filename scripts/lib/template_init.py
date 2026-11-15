@@ -33,7 +33,6 @@ from template_state import (
     OUTBOX_CHOICES,
     LOCK_NAME,
     LOCK_SCHEMA_VERSION,
-    LockSnapshot,
     TEMPLATE_REPOSITORY,
     PlannedLink,
     PlannedWrite,
@@ -50,7 +49,6 @@ from template_state import (
     outbox_requirement,
     service_auth_requirement,
     load_lock,
-    load_lock_snapshot,
     manifest_entries,
     _manifest_files,
     OUTBOUND_HTTP_CHOICES,
@@ -239,178 +237,31 @@ def parse_inputs(arguments: argparse.Namespace) -> InitInputs:
     return inputs
 
 
-_LEGACY_PROFILE_INVENTORY_KEYS = frozenset(
-    {"schema_version", "source_only", "postgres", "identity", "cargo_lock"}
-)
-_CURRENT_PROFILE_INVENTORY_KEYS = frozenset(
-    {
-        "schema_version",
-        "source_only",
-        "postgres",
-        "authn",
-        "oidc-jwt",
-        "oidc-introspection",
-        "identity",
-        "cargo_lock",
-    }
-)
-_OUTBOUND_PROFILE_INVENTORY_KEYS = frozenset(
-    {
-        *_CURRENT_PROFILE_INVENTORY_KEYS,
-        "outbound-http",
-        "egress-dns",
-        "request-budget",
-    }
-)
-_TLS_FIXTURE_PROFILE_INVENTORY_KEYS = frozenset(
-    {
-        *_OUTBOUND_PROFILE_INVENTORY_KEYS,
-        "tls-fixtures",
-    }
-)
-_HTTP_IDEMPOTENCY_PROFILE_INVENTORY_KEYS = frozenset(
-    {
-        *_TLS_FIXTURE_PROFILE_INVENTORY_KEYS,
-        "http-idempotency",
-        "http-idempotency-mounted",
-    }
-)
-_JOBS_PROFILE_INVENTORY_KEYS = frozenset(
-    {
-        *_HTTP_IDEMPOTENCY_PROFILE_INVENTORY_KEYS,
-        "jobs",
-        "jobs-http-idempotency",
-    }
-)
-_WEBHOOKS_PROFILE_INVENTORY_KEYS = frozenset(
-    {
-        *_JOBS_PROFILE_INVENTORY_KEYS,
-        "webhooks-common",
-        "webhooks",
-        "inbound-webhooks",
-    }
-)
-_MESSAGING_PROFILE_INVENTORY_KEYS = frozenset(
-    {
-        *(_WEBHOOKS_PROFILE_INVENTORY_KEYS - {"egress-dns"}),
-        "messaging",
-        "worker",
-        "service-secrets",
-        "jobs-messaging",
-        "integration",
-    }
-)
-_OUTBOX_LEGACY_PROFILE_INVENTORY_KEYS = frozenset(
-    {*(_MESSAGING_PROFILE_INVENTORY_KEYS - {"jobs-messaging"}), "outbox"}
-)
-_OUTBOX_PROFILE_INVENTORY_KEYS = frozenset({*_MESSAGING_PROFILE_INVENTORY_KEYS, "outbox"})
-
-
-# The DNS-bearing key sets above are supported historical replay input only.
-_TRUSTED_ORIGIN_PROFILE_INVENTORY_KEYS = _WEBHOOKS_PROFILE_INVENTORY_KEYS - {"egress-dns"}
-_OUTBOUND_AUTH_PROFILE_INVENTORY_KEYS = _TRUSTED_ORIGIN_PROFILE_INVENTORY_KEYS | {"outbound-auth"}
-_OUTBOX_LEGACY_OUTBOUND_AUTH_PROFILE_INVENTORY_KEYS = _OUTBOX_LEGACY_PROFILE_INVENTORY_KEYS | {"outbound-auth"}
-_OUTBOX_OUTBOUND_AUTH_PROFILE_INVENTORY_KEYS = _OUTBOX_PROFILE_INVENTORY_KEYS | {"outbound-auth"}
-_SHARED_CONFIG_URL_LEGACY_PROFILE_INVENTORY_KEYS = _OUTBOX_LEGACY_OUTBOUND_AUTH_PROFILE_INVENTORY_KEYS | {"config-url"}
-_SHARED_CONFIG_URL_PROFILE_INVENTORY_KEYS = _OUTBOX_OUTBOUND_AUTH_PROFILE_INVENTORY_KEYS | {"config-url"}
-_GRPC_PROFILE_INVENTORY_KEYS = _SHARED_CONFIG_URL_PROFILE_INVENTORY_KEYS | {
-    "grpc",
-    "grpc-none",
-    "grpc-authn",
-    "grpc-transport-tests",
-    "grpc-jwt",
-    "outbound-auth-grpc",
-    "client-integrations",
-}
-_CACHE_PROFILE_INVENTORY_KEYS = _GRPC_PROFILE_INVENTORY_KEYS | {"cache", "rustls"}
-_JSONWEBTOKEN_PROFILE_INVENTORY_KEYS = _CACHE_PROFILE_INVENTORY_KEYS | {"jsonwebtoken"}
-_OBJECT_STORAGE_PROFILE_INVENTORY_KEYS = _JSONWEBTOKEN_PROFILE_INVENTORY_KEYS | {"object-storage"}
-_RUNTIME_PROGRESS_PROFILE_INVENTORY_KEYS = _OBJECT_STORAGE_PROFILE_INVENTORY_KEYS | {"runtime-progress"}
-_TEST_METRICS_PROFILE_INVENTORY_KEYS = _RUNTIME_PROGRESS_PROFILE_INVENTORY_KEYS | {"test-metrics"}
-_POSTGRES_SUSTAINED_PROFILE_INVENTORY_KEYS = _TEST_METRICS_PROFILE_INVENTORY_KEYS | {"postgres-sustained"}
-_OPERATIONAL_RECOVERY_PROFILE_INVENTORY_KEYS = _TEST_METRICS_PROFILE_INVENTORY_KEYS | {
-    "postgres-grpc-consumers", "postgres-grpc-auth", "test-introspection-fixtures",
-}
-_JOBS_REFERENCE_PROFILE_INVENTORY_KEYS = _TEST_METRICS_PROFILE_INVENTORY_KEYS | {"jobs-reference"}
-_SOURCE_TEMPLATE_PROFILE_INVENTORY_KEYS = (_POSTGRES_SUSTAINED_PROFILE_INVENTORY_KEYS
-    | _OPERATIONAL_RECOVERY_PROFILE_INVENTORY_KEYS | _JOBS_REFERENCE_PROFILE_INVENTORY_KEYS
-    | {"source-template"})
-_TEST_DIGEST_PROFILE_INVENTORY_KEYS = _SOURCE_TEMPLATE_PROFILE_INVENTORY_KEYS | {"test-digest"}
-_SERVICE_AUTH_PROFILE_INVENTORY_KEYS = _TEST_DIGEST_PROFILE_INVENTORY_KEYS | {"service-auth"}
-# Initialization admits the old laboratory inventories. Only replay retains the retired pack.
-_LABORATORY_RETIRED_PROFILE_INVENTORY_KEYS = _SERVICE_AUTH_PROFILE_INVENTORY_KEYS - {"postgres-sustained"}
-
-_UNCONDITIONAL_PROFILE_INVENTORIES = frozenset({
-    _JSONWEBTOKEN_PROFILE_INVENTORY_KEYS,
-    _OBJECT_STORAGE_PROFILE_INVENTORY_KEYS,
-    _RUNTIME_PROGRESS_PROFILE_INVENTORY_KEYS,
-    _TEST_METRICS_PROFILE_INVENTORY_KEYS,
-    _SOURCE_TEMPLATE_PROFILE_INVENTORY_KEYS,
-    _TEST_DIGEST_PROFILE_INVENTORY_KEYS,
-    _SERVICE_AUTH_PROFILE_INVENTORY_KEYS,
-    _LABORATORY_RETIRED_PROFILE_INVENTORY_KEYS,
-    _POSTGRES_SUSTAINED_PROFILE_INVENTORY_KEYS,
-    _OPERATIONAL_RECOVERY_PROFILE_INVENTORY_KEYS,
-    _JOBS_REFERENCE_PROFILE_INVENTORY_KEYS,
-    _CACHE_PROFILE_INVENTORY_KEYS,
-    _GRPC_PROFILE_INVENTORY_KEYS,
-    _OUTBOX_LEGACY_OUTBOUND_AUTH_PROFILE_INVENTORY_KEYS,
-    _OUTBOX_OUTBOUND_AUTH_PROFILE_INVENTORY_KEYS,
-    _SHARED_CONFIG_URL_LEGACY_PROFILE_INVENTORY_KEYS,
-    _SHARED_CONFIG_URL_PROFILE_INVENTORY_KEYS,
-    _OUTBOX_LEGACY_PROFILE_INVENTORY_KEYS,
-    _OUTBOX_PROFILE_INVENTORY_KEYS,
-    _MESSAGING_PROFILE_INVENTORY_KEYS,
-    _OUTBOUND_AUTH_PROFILE_INVENTORY_KEYS,
-    _TRUSTED_ORIGIN_PROFILE_INVENTORY_KEYS,
-})
-
 # The first refusal and the order of marker processing must be independent of JSON key order.
 _PROFILE_SECTION_ORDER = (
     "source-template",
     "authn", "oidc-jwt", "oidc-introspection",
-    "outbound-http", "request-budget", "egress-dns", "outbound-auth", "client-integrations",
-    "grpc", "grpc-none", "grpc-authn", "grpc-transport-tests", "grpc-jwt", "outbound-auth-grpc",
-    "runtime-progress", "test-digest", "service-auth", "test-metrics", "postgres-sustained",
+    "outbound-http", "request-budget", "outbound-auth", "client-integrations",
+    "grpc", "grpc-authn", "grpc-transport-tests", "grpc-jwt", "outbound-auth-grpc",
+    "runtime-progress", "test-digest", "service-auth", "test-metrics",
     "jobs-reference", "config-url", "tls-fixtures", "http-idempotency", "http-idempotency-mounted",
     "postgres-grpc-consumers", "postgres-grpc-auth", "test-introspection-fixtures",
     "jobs", "jobs-http-idempotency", "webhooks-common", "webhooks", "inbound-webhooks",
-    "messaging", "worker", "service-secrets", "integration", "jobs-messaging", "outbox",
+    "messaging", "worker", "service-secrets", "integration", "outbox",
     "cache", "object-storage", "rustls", "jsonwebtoken",
+)
+_PROFILE_INVENTORY_KEYS = frozenset(
+    {"schema_version", "source_only", "postgres", *_PROFILE_SECTION_ORDER, "identity"}
 )
 
 
-def _profile_data(
-    snapshot: Path,
-    *,
-    historical_authn: bool = False,
-    historical_outbound: bool = False,
-    historical_http_idempotency: bool = False,
-    historical_jobs: bool = False,
-    historical_egress: bool = False,
-) -> ProfileData:
+def _profile_data(snapshot: Path) -> ProfileData:
     profile_path = snapshot / _PROFILE_FILE
     try:
         raw = parse_json_bytes(profile_path.read_bytes(), _PROFILE_FILE)
     except FileNotFoundError:
         raise Refusal("template profile inventory is missing") from None
-    if not isinstance(raw, dict) or raw.get("schema_version") != 1:
-        raise Refusal("template profile inventory has an unsupported schema")
-    keys = frozenset(raw)
-    if not (
-        keys in _UNCONDITIONAL_PROFILE_INVENTORIES
-        or historical_egress and keys in (
-            _OUTBOUND_AUTH_PROFILE_INVENTORY_KEYS | {"egress-dns"},
-            _WEBHOOKS_PROFILE_INVENTORY_KEYS,
-            _JOBS_PROFILE_INVENTORY_KEYS,
-            _OUTBOUND_PROFILE_INVENTORY_KEYS,
-        )
-        or historical_jobs and historical_egress and keys == _HTTP_IDEMPOTENCY_PROFILE_INVENTORY_KEYS - {"tls-fixtures"}
-        or historical_jobs and keys == _HTTP_IDEMPOTENCY_PROFILE_INVENTORY_KEYS
-        or historical_http_idempotency and keys == _TLS_FIXTURE_PROFILE_INVENTORY_KEYS
-        or historical_outbound and keys == _CURRENT_PROFILE_INVENTORY_KEYS
-        or historical_authn and keys == _LEGACY_PROFILE_INVENTORY_KEYS
-    ):
+    if not isinstance(raw, dict) or raw.get("schema_version") != 1 or frozenset(raw) != _PROFILE_INVENTORY_KEYS:
         raise Refusal("template profile inventory has an unsupported schema")
     source_only = _path_list(raw["source_only"], "source_only")
     postgres = raw["postgres"]
@@ -419,8 +270,6 @@ def _profile_data(
     removals = {"postgres": tuple(_path_list(postgres["remove_when_none"], "remove_when_none"))}
     markers = _markers("postgres", postgres["markers"])
     for profile in _PROFILE_SECTION_ORDER:
-        if profile not in keys:
-            continue
         section = raw[profile]
         if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
             raise Refusal(f"template {profile} inventory has an unsupported shape")
@@ -430,10 +279,6 @@ def _profile_data(
     if not isinstance(identity, list):
         raise Refusal("template identity inventory has an unsupported shape")
     _validate_identity_inventory(identity)
-    # Every inventory shape carries this key, including the ones older derived
-    # services hold. Cargo prunes the lock now, so nothing reads the value.
-    if raw["cargo_lock"] != {"schema_version": 1}:
-        raise Refusal("template Cargo.lock inventory has an unsupported shape")
     if len(markers) != len(set(markers)):
         raise Refusal("template marker inventory has duplicate profile entries")
     return ProfileData(tuple(source_only), removals, tuple(markers), tuple(identity))
@@ -590,8 +435,6 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
             selected.add("grpc-jwt")
         if inputs.outbound_auth == "oauth2-client-credentials":
             selected.add("outbound-auth-grpc")
-    else:
-        selected.add("grpc-none")
     if (
         inputs.grpc == "enabled"
         and inputs.authn == "oidc-jwt"
@@ -638,8 +481,6 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
             selected.add("jobs-http-idempotency")
     if inputs.messaging == "nats-jetstream":
         selected.add("messaging")
-        if inputs.jobs == "postgres":
-            selected.add("jobs-messaging")
     if inputs.outbox == "postgres":
         selected.add("outbox")
         if inputs.jobs == "postgres" and inputs.webhooks == "durable":
@@ -820,7 +661,7 @@ def _lock_bytes(inputs: InitInputs, revision: str, state: str) -> bytes:
 
 def _postconditions(
     root: Path, inputs: InitInputs, profiles: ProfileData, *, initial: bool = False,
-    replay_lock: LockSnapshot | None = None,
+    replay_lock: dict[str, Any] | None = None,
 ) -> None:
     try:
         workspace = tomllib.loads((root / "Cargo.toml").read_text(encoding="utf-8"))
@@ -843,10 +684,7 @@ def _postconditions(
         for relative in profiles.source_only:
             if (root / relative.rstrip("/")).exists():
                 raise Refusal(f"source-only output remains: {relative}")
-    selected_profiles = _selected_marker_profiles(inputs)
-    if not initial:
-        selected_profiles |= _retired_pack_profiles(inputs, profiles)
-    _validate_profile_packs(root, profiles, selected_profiles)
+    _validate_profile_packs(root, profiles, _selected_marker_profiles(inputs))
     selected = set(selected_adapters(inputs.agent_harness))
     for adapter, pack in ADAPTERS.items():
         paths = (*pack.canonical, *pack.generated, *pack.settings)
@@ -870,20 +708,6 @@ def _postconditions(
                     raise Refusal("initialized output retains an executable profile marker")
         except UnicodeDecodeError as error:
                 raise Refusal(f"profile marker surface is not UTF-8: {relative}") from error
-
-
-def _retired_pack_profiles(inputs: InitInputs, profiles: ProfileData) -> set[str]:
-    retired: set[str] = set()
-    if "egress-dns" in profiles.removals and inputs.outbound_http == "bounded":
-        retired.add("egress-dns")
-    if (
-        "postgres-sustained" in profiles.removals
-        and inputs.jobs == "postgres"
-        and inputs.http_idempotency == "postgres"
-        and inputs.inbound_webhooks == "standard-webhooks"
-    ):
-        retired.add("postgres-sustained")
-    return retired
 
 
 def _validate_profile_packs(root: Path, profiles: ProfileData, selected: set[str]) -> None:
@@ -935,22 +759,13 @@ def _validate_generated_ownership(root: Path, harness: str) -> None:
                 raise Refusal("selected Codex generated ownership shape is invalid")
 
 
-def _replay(root: Path, inputs: InitInputs, snapshot: LockSnapshot) -> int:
-    lock = snapshot.normalized
+def _replay(root: Path, inputs: InitInputs, lock: dict[str, Any]) -> int:
     if lock["state"] != "complete":
         raise Refusal("template.lock is incomplete; inspect the init-produced diff and use a fresh template checkout")
     if lock["identity"] != inputs.identity() or lock["profiles"] != inputs.profiles():
         raise Refusal("template initialization choices differ from the complete template.lock")
-    explicit = snapshot.explicit_profiles
-    profiles = _profile_data(
-        root,
-        historical_authn="authn" not in explicit,
-        historical_outbound="authn" in explicit and "outbound_http" not in explicit,
-        historical_http_idempotency="outbound_http" in explicit and "http_idempotency" not in explicit,
-        historical_jobs="jobs" not in explicit,
-        historical_egress=True,
-    )
-    _postconditions(root, inputs, profiles, replay_lock=snapshot)
+    profiles = _profile_data(root)
+    _postconditions(root, inputs, profiles, replay_lock=lock)
     print("template init: matching complete lock; no changes")
     return 0
 
@@ -1139,24 +954,6 @@ def _dependency_sections(manifest: dict[str, Any]) -> list[dict[str, Any]]:
     return sections
 
 
-def _declared_dependencies(manifest: dict[str, Any]) -> set[str]:
-    names: set[str] = set()
-    for section in _dependency_sections(manifest):
-        for alias, definition in section.items():
-            if not isinstance(alias, str):
-                raise Refusal("Cargo manifest dependency name is invalid")
-            if isinstance(definition, str):
-                names.add(alias)
-                continue
-            if not isinstance(definition, dict):
-                raise Refusal("Cargo manifest dependency declaration is invalid")
-            package = definition.get("package", alias)
-            if not isinstance(package, str):
-                raise Refusal("Cargo manifest dependency package is invalid")
-            names.add(package)
-    return names
-
-
 def _member_manifests(snapshot: Path) -> list[Path]:
     manifests = [*sorted(snapshot.glob("crates/*/Cargo.toml")), snapshot / "test/Cargo.toml"]
     return [path for path in manifests if path.is_file() and not path.is_symlink()]
@@ -1280,7 +1077,7 @@ def _collect_plan(
 def initialize(arguments: argparse.Namespace) -> int:
     inputs = parse_inputs(arguments)
     root = git_root(arguments.repo)
-    existing = load_lock_snapshot(root)
+    existing = load_lock(root)
     if existing is not None:
         return _replay(root, inputs, existing)
     _tracked_checkout_is_clean(root)

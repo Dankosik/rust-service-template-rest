@@ -4,8 +4,6 @@
     "make/source.mk",
     "scripts/ci/template-init-check.sh",
     "scripts/ci/initializer-matrix.py",
-    "scripts/ci/hotpath-mcp-check.py",
-    "scripts/tests/fixtures/",
     "scripts/tests/template-owned-purity.py",
     "scripts/tests/template-profile-projections.py",
     "scripts/tests/template-init-safety.py",
@@ -13,7 +11,6 @@
     "scripts/tests/template-upgrade.py",
     "scripts/template-upgrade.sh",
     "scripts/lib/template_upgrade.py",
-    "scripts/ci/jobs-reliability-reference.py",
     "specs/",
     "docs/assets/banner.png",
     "docs/template-upgrade.md"
@@ -21,7 +18,6 @@
   "source-template": {
     "remove_when_unselected": [],
     "markers": [
-      {"path": ".github/workflows/ci.yml", "ids": ["ci-jobs-reliability-job", "ci-required-jobs-reliability-need"]},
       {"path": "README.md", "ids": ["readme-banner", "readme-template-overview"]}
     ]
   },
@@ -480,9 +476,6 @@
       "encoding": "json_string"
     }
   ],
-  "cargo_lock": {
-    "schema_version": 1
-  },
   "grpc": {
     "remove_when_unselected": [
       "api/proto/",
@@ -676,10 +669,6 @@
       {"path": "scripts/ci/changed-surfaces.sh", "ids": ["classifier-runtime-progress-surface", "classifier-runtime-progress-inputs", "classifier-runtime-progress-tests", "classifier-runtime-progress-count"]},
       {"path": "scripts/ci/verify.sh", "id": "verify-runtime-progress"}
     ]
-  },
-  "grpc-none": {
-    "remove_when_unselected": [],
-    "markers": []
   },
   "grpc-authn": {
     "remove_when_unselected": [
@@ -1094,10 +1083,6 @@
       {"path": ".github/dependabot.yml", "ids": ["dependabot-compose"]},
       {"path": ".github/workflows/ci.yml", "ids": ["ci-integration-job", "ci-required-integration-need"]}
     ]
-  },
-  "jobs-messaging": {
-    "remove_when_unselected": [],
-    "markers": []
   },
   "outbox": {
     "remove_when_unselected": [

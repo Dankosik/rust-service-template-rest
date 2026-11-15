@@ -136,7 +136,6 @@ classify() {
 			mark rust_source cargo_dependencies runtime_image
 			[[ ${source_only} != true ]] || mark module_initializer initializer_runtime
 			;;
-		scripts/ci/hotpath-*.py) mark cargo_dependencies ;;
 		scripts/ci/cargo-artifact.py)
 			# The profiler and historical actor are source-only; recovery stays manual.
 			[[ ${source_only} != true ]] || mark cargo_dependencies module_initializer
@@ -187,7 +186,7 @@ classify() {
 		# statement and every migration can invalidate.
 	if [[ ${database} == postgres ]]; then case "${file}" in
 		crates/infra-postgres/* | crates/infra-idempotency-store/* | crates/infra-jobs/* | crates/infra-webhooks/* | crates/jobs-worker/* | crates/migrate/* | test/* | env/docker-compose.yml | env/pgbouncer/* | scripts/ci/test-integration-db.sh | scripts/lib/compose-postgres.sh | \
-		migrations/*.sql | .sqlx/* | crates/*/.sqlx/* | .cargo/config.toml | scripts/ci/sqlx-prepare.sh | scripts/ci/jobs-reliability-reference.py)
+		migrations/*.sql | .sqlx/* | crates/*/.sqlx/* | .cargo/config.toml | scripts/ci/sqlx-prepare.sh)
 			mark db_integration
 			;;
 		esac
@@ -279,7 +278,6 @@ classify() {
 		esac
 		case "${file}" in
 		.github/workflows/* | .github/actions/* | .github/codeql/*) mark github_workflows ;;
-		scripts/ci/image-results.py) mark github_workflows validation_system ;;
 		.github/dependabot.yml) mark dependency_automation ;;
 		esac
 		case "${file}" in
@@ -322,7 +320,7 @@ classify() {
 		api/openapi/* | env/config/* | .github/workflows/ci.yml | \
 		scripts/init-module.sh | scripts/template-sync.sh | scripts/template-upgrade.sh | scripts/lib/template_*.py | scripts/lib/template_profiles.json | \
 		template-owned.paths | \
-		scripts/ci/template-init-check.sh | scripts/ci/initializer-matrix.py | scripts/tests/template-* | scripts/tests/fixtures/template-profiles-b206.json | scripts/tests/fixtures/historical_profiles.py | \
+		scripts/ci/template-init-check.sh | scripts/ci/initializer-matrix.py | scripts/tests/template-* | \
 		crates/config/src/* | crates/config/Cargo.toml | crates/service/src/* | crates/service/tests/* | crates/service/Cargo.toml | \
 		crates/infra-bearerauthn/* | crates/infra-outbound-http/* | crates/infra-idempotency-store/* | crates/infra-webhooks/* | crates/infra-http/Cargo.toml | crates/infra-http/src/authn.rs | crates/infra-http/src/context.rs | crates/infra-http/src/idempotency/* | crates/infra-http/src/harden.rs | crates/infra-http/src/harden/* | crates/infra-http/src/lib.rs | crates/infra-http/src/problem.rs | crates/infra-http/src/webhooks.rs | \
 		crates/infra-postgres/* | crates/migrate/* | crates/infra-jobs/* | crates/jobs-worker/* | crates/domain-events/* | crates/infra-messaging/* | crates/infra-cache/* | \
@@ -345,7 +343,7 @@ classify() {
 		.dockerignore | build/docker/Dockerfile | scripts/ci/image-inputs-check.py | scripts/tests/image-inputs-check.py | README.md | SECURITY.md | .gitleaks.toml | lychee.toml | \
 		.github/CODEOWNERS | .github/ISSUE_TEMPLATE/* | .github/dependabot.yml | \
 		.github/workflows/cd.yml | .github/actions/publish-image/action.yml | .github/actions/rust-toolchain/action.yml | \
-		scripts/ci/changed-surfaces.sh | scripts/ci/verify.sh | scripts/ci/image-results.py | scripts/ci/runtime-image-build.sh | scripts/ci/runtime-image-inventory.py | scripts/ci/runtime-image-scan.sh | scripts/tests/runtime-image-inventory.py | \
+		scripts/ci/changed-surfaces.sh | scripts/ci/verify.sh | scripts/ci/runtime-image-build.sh | scripts/ci/runtime-image-inventory.py | scripts/ci/runtime-image-scan.sh | scripts/tests/runtime-image-inventory.py | \
 		scripts/ci/validation-lock.sh | scripts/ci/validation-lock.py | scripts/tests/validation-lock-test.py | \
 		.agents/* | AGENTS.md | CLAUDE.md | QWEN.md | Grok.md | opencode.json | \
 		.claude/* | .codex/* | .cursor/* | .qwen/* | .grok/* | .opencode/* | \
@@ -547,9 +545,6 @@ HOOK
 	assert_case crates/infra-jobs/src/lib.rs \
 		"rust_source db_integration module_initializer initializer_runtime" \
 		"cargo_dependencies migrations documentation"
-	assert_case scripts/ci/jobs-reliability-reference.py \
-		"db_integration" \
-		"rust_source cargo_dependencies migrations module_initializer initializer_runtime"
 	assert_case crates/jobs-worker/src/main.rs \
 		"rust_source db_integration module_initializer initializer_runtime" \
 		"cargo_dependencies migrations documentation"
@@ -720,8 +715,6 @@ HOOK
 	for file in scripts/ci/image-inputs-check.py scripts/tests/image-inputs-check.py; do
 		assert_case "${file}" "documentation validation_system module_initializer" "runtime_image initializer_runtime cargo_dependencies"
 	done
-	assert_case scripts/ci/image-results.py \
-		"github_workflows validation_system module_initializer" "runtime_image initializer_runtime cargo_dependencies"
 	assert_case scripts/ci/runtime-image-inventory.py \
 		"runtime_image validation_system module_initializer initializer_artifacts" "initializer_runtime cargo_dependencies"
 	assert_case scripts/ci/runtime-image-scan.sh \
@@ -814,7 +807,6 @@ HOOK
 			"rust_source cargo_dependencies runtime_image module_initializer initializer_runtime" \
 			"migrations dependency_policy"
 	done
-	assert_case scripts/ci/hotpath-mcp-check.py "cargo_dependencies" "rust_source runtime_image validation_system"
 	for file in vendor/sqlx-core/src/pool/connection.rs vendor/sqlx-core/Cargo.toml vendor/sqlx-core/PATCHES.md; do
 		assert_case "${file}" \
 			"rust_source cargo_dependencies db_integration runtime_image module_initializer initializer_runtime" \
@@ -880,9 +872,6 @@ HOOK
 	assert_case scripts/template-upgrade.sh \
 		"module_initializer initializer_runtime shell" \
 		"rust_source cargo_dependencies github_workflows db_integration"
-	for file in scripts/tests/fixtures/template-profiles-b206.json scripts/tests/fixtures/historical_profiles.py; do
-		assert_case "${file}" "module_initializer initializer_runtime" "rust_source cargo_dependencies shell github_workflows db_integration"
-	done
 	for file in changed-surfaces git-changed-paths affected-crates verify validation-lock measure; do
 		assert_case "scripts/ci/${file}.sh" \
 			"validation_system shell" \

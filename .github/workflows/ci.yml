@@ -4,7 +4,7 @@ name: ci
 # reports; `make verify` reads the same classifier. `required` is the one
 # status to protect: it fails on any failed or cancelled gate and accepts a
 # gate the surfaces did not select. Pull requests run the gate; the long
-# proofs (initializer, images, runtime progress, jobs reliability) run after
+# proofs (initializer, images, runtime progress) run after
 # merge, on main, and .github/workflows/main-health.yml reports a red main and
 # moves the `green` branch. A push to main replaces its pending run, so one run
 # can cover several merges: it classifies the diff from `green`, not from the
@@ -450,13 +450,6 @@ jobs:
       - name: Optional profiling configurations
         if: '!cancelled()'
         run: bash ./scripts/ci/measure.sh quality-profiling -- make profiling-check
-      - name: Preserve profiling compatibility receipt
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: profile-mcp-${{ github.sha }}
-          path: .ci/profile-mcp
-          if-no-files-found: ignore
 
   quality-validation:
     needs: [changes, secrets]
@@ -662,11 +655,6 @@ jobs:
     timeout-minutes: 90
     env:
       IMAGE_LANE: source
-    outputs:
-      artifact-id: ${{ steps.proof.outputs.artifact-id }}
-      artifact-digest: ${{ steps.proof.outputs.artifact-digest }}
-      artifact-url: ${{ steps.proof.outputs.artifact-url }}
-      producing-attempt: ${{ steps.provenance.outputs.attempt }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -677,9 +665,6 @@ jobs:
         with:
           use: false
           cleanup: false
-      - name: Record producing attempt
-        id: provenance
-        run: printf 'attempt=%s\n' "${GITHUB_RUN_ATTEMPT}" >>"${GITHUB_OUTPUT}"
       # No BuildKit cache import or export: the lane runs for image, manifest
       # and lockfile changes, which change the cooked recipe anyway, and the
       # exported stage never survived the repository's 10 GB cache budget
@@ -735,7 +720,6 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
           overwrite: false
-        id: proof
 
   image-derived:
     needs: changes
@@ -758,22 +742,12 @@ jobs:
       matrix: ${{ fromJSON(needs.changes.outputs.artifact_matrix || '{"include":[]}') }}
     env:
       IMAGE_LANE: derived
-    outputs:
-      # A matrix job's outputs come from whichever leg finished last; the
-      # `image` aggregate reads them as one leg's proof beside the result.
-      artifact-id: ${{ steps.proof.outputs.artifact-id }}
-      artifact-digest: ${{ steps.proof.outputs.artifact-digest }}
-      artifact-url: ${{ steps.proof.outputs.artifact-url }}
-      producing-attempt: ${{ steps.provenance.outputs.attempt }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Set up Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-      - name: Record producing attempt
-        id: provenance
-        run: printf 'attempt=%s\n' "${GITHUB_RUN_ATTEMPT}" >>"${GITHUB_OUTPUT}"
       - name: Install initializer toolchain
         uses: ./.github/actions/rust-toolchain # zizmor: ignore[self-repository]
       - name: Cargo caches
@@ -805,25 +779,6 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
           overwrite: false
-        id: proof
-
-  image:
-    needs:
-      - changes
-      - image-source
-      - image-derived
-    if: always()
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Admit selected image lanes
-        env:
-          IMAGE_NEEDS: ${{ toJSON(needs) }}
-          IMAGE_DEFERRED: ${{ needs.changes.outputs.post_merge != 'true' }}
-        run: python3 scripts/ci/image-results.py
 
   # template:begin runtime-progress:ci-runtime-progress-job
   runtime-progress:
@@ -987,48 +942,6 @@ jobs:
           if-no-files-found: error
   # template:end integration:ci-integration-job
 
-  # template:begin source-template:ci-jobs-reliability-job
-  jobs-reliability:
-    # The source template's recovery and upgrade reference beside the
-    # database suite: three release builds and fixed fault windows that used
-    # to lengthen `integration` by about eighteen minutes. It owns its own
-    # Compose project through `make jobs-reliability-reference`.
-    needs: changes
-    if: needs.changes.outputs.db_integration == 'true' && needs.changes.outputs.post_merge == 'true'
-    name: jobs reliability reference
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    env:
-      COMPOSE_PROJECT_NAME: jobs-reliability-reference
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          # The derived rehearsal adopts an exact older baseline.
-          fetch-depth: 0
-          # Bind its runtime/adoption receipt to the PR candidate itself.
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-          persist-credentials: false
-      - name: Install pinned toolchain
-        uses: ./.github/actions/rust-toolchain # zizmor: ignore[self-repository]
-      - name: Cargo caches
-        # The source candidate's release dependencies; the derived checkouts
-        # build in their own targets outside the workspace.
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.2 # zizmor: ignore[cache-poisoning]
-        with:
-          cache-bin: "false"
-          shared-key: jobs-reliability
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-      - name: Recovery and upgrade reference
-        run: bash ./scripts/ci/measure.sh jobs-reliability -- make jobs-reliability-reference
-      - name: Upload jobs reliability diagnosis
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: jobs-reliability-reference
-          path: target/jobs-reliability-reference/
-          if-no-files-found: ignore
-  # template:end source-template:ci-jobs-reliability-job
-
   # template:begin outbound-auth:ci-oauth-integration-job
   oauth-integration:
     needs: [changes, secrets]
@@ -1161,16 +1074,14 @@ jobs:
       - security
       - secrets
       - delivery
-      - image
+      - image-source
+      - image-derived
       # template:begin runtime-progress:ci-required-runtime-progress-need
       - runtime-progress
       # template:end runtime-progress:ci-required-runtime-progress-need
       # template:begin integration:ci-required-integration-need
       - integration
       # template:end integration:ci-required-integration-need
-      # template:begin source-template:ci-required-jobs-reliability-need
-      - jobs-reliability
-      # template:end source-template:ci-required-jobs-reliability-need
       # template:begin outbound-auth:ci-required-oauth-integration-need
       - oauth-integration
       # template:end outbound-auth:ci-required-oauth-integration-need

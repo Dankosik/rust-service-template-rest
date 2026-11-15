@@ -179,36 +179,6 @@ endif
 help: ## List available commands
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_-]+:.*## / {printf "  %-20s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
-OUTBOUND_HTTP ?= none
-export OUTBOUND_HTTP
-
-HTTP_IDEMPOTENCY ?= none
-export HTTP_IDEMPOTENCY
-
-JOBS ?= none
-export JOBS
-
-MESSAGING ?= none
-export MESSAGING
-
-CACHE ?= none
-export CACHE
-
-OBJECT_STORAGE ?= none
-export OBJECT_STORAGE
-
-SERVICE_AUTH ?= none
-export SERVICE_AUTH
-
-OUTBOX ?= none
-export OUTBOX
-
-WEBHOOKS ?= none
-export WEBHOOKS
-
-INBOUND_WEBHOOKS ?= none
-export INBOUND_WEBHOOKS
-
 template-init: ## Initialize the service identity and selected profiles once
 	@bash scripts/init-module.sh --repo .
 
@@ -227,14 +197,6 @@ profiling-check: ## Compile the optional hotpath profiling configurations of the
 	$(CARGO) check $(CARGO_FLAGS) --manifest-path crates/service/Cargo.toml --all-targets --features hotpath
 	$(CARGO) check $(CARGO_FLAGS) --manifest-path crates/service/Cargo.toml --all-targets --features $(HOTPATH_PROFILE_FEATURES)
 	$(CARGO) tree $(CARGO_FLAGS) --manifest-path crates/service/Cargo.toml --features $(HOTPATH_PROFILE_FEATURES) -e features -i hotpath
-	@if [ -f scripts/ci/hotpath-mcp-check.py ]; then \
-		set -eu; \
-		work=$$(mktemp -d "$${TMPDIR:-/tmp}/profiling-check.XXXXXXXX"); \
-		trap 'rm -rf "$$work"' 0; trap 'exit 1' HUP INT TERM; \
-		$(CARGO) build $(CARGO_FLAGS) -p $(SERVICE_PACKAGE) --bin $(SERVICE_BIN) --features hotpath,hotpath-alloc,hotpath-mcp --message-format=json-render-diagnostics >"$$work/messages"; \
-		service=$$(python3 scripts/ci/cargo-artifact.py --manifest crates/service/Cargo.toml --name $(SERVICE_BIN) --kind bin <"$$work/messages"); \
-		python3 scripts/ci/hotpath-mcp-check.py "$$service"; \
-	fi
 
 test-package: $(filter $(TOOLS_ROOT)/%,$(CARGO_NEXTEST)) ## Run one crate's tests; requires PKG=<crate name>
 	@test -n "$(PKG)" || { echo "test-package requires PKG=<crate name>" >&2; exit 2; }
@@ -457,8 +419,6 @@ publish-image-metadata-check: ## Self-test of the publication naming and tag pro
 
 # template:begin grpc:make-grpc-targets
 .PHONY: grpc-generate grpc-check
-GRPC ?= none
-export GRPC
 BUF ?= go run github.com/bufbuild/buf/cmd/buf@v$(BUF_VERSION)
 export BUF
 
@@ -534,7 +494,6 @@ verify-check: ## Self-test of scripts/ci/verify.sh
 	$(VERIFY) --self-test
 	python3 scripts/tests/image-inputs-check.py
 	python3 scripts/tests/runtime-image-inventory.py
-	@if test -f scripts/ci/image-results.py; then python3 scripts/ci/image-results.py --self-test; fi
 	@if test -f make/source.mk; then python3 scripts/ci/initializer-matrix.py --self-test; bash scripts/ci/template-init-check.sh --self-test; fi
 
 changed-surfaces-check: ## Self-test of the surface classifier

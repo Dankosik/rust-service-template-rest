@@ -25,7 +25,7 @@ job names, triggers, tool pins, and gate definitions. Cross-file policies:
   rule. Both accept intentionally skipped surface gates (docs-only PRs run no
   Rust jobs); conflicting merges fail post-merge via [Red main](#red-main).
 - **PR vs post-merge:** PRs run surface-selected gates (`post_merge=false`);
-  `initializer`, `image`, `runtime-progress`, `jobs-reliability`, and CodeQL
+  `initializer`, `image-source`, `image-derived`, `runtime-progress`, and CodeQL
   Rust run post-merge on `main`. Schedules, tags, and `workflow_dispatch` select
   every surface.
 - **Prerequisites:** Enable Dependabot alerts in derived repos so Dependency
@@ -52,7 +52,7 @@ job names, triggers, tool pins, and gate definitions. Cross-file policies:
 <!-- template:begin postgres:docs-ci-postgres-gates -->
 - **PostgreSQL:** `quality` checks forward-only migrations, Squawk lint on
   added files, and embedded rules; `integration` runs `test-integration-db` and
-  `make sqlx-check`; `image` runs the `/migrate` rehearsal on migration edits.
+  `make sqlx-check`; `image-source` runs the `/migrate` rehearsal on migration edits.
 <!-- template:end postgres:docs-ci-postgres-gates -->
 <!-- template:begin messaging:docs-ci-messaging-gates -->
 - **Messaging:** `messaging_integration` runs the Compose NATS suite and
@@ -184,7 +184,7 @@ each reopen condition.
 | `main` pushes diff from `green`; concurrency replaces pending `main` runs | Diffing from `before` only | Prevents replaced pending runs from dropping commits |
 | `Swatinem/rust-cache`: single toolchain via `.github/actions/rust-toolchain`, `save-if` on `main` after full build, `ZSTD_CLEVEL=12`, `[profile.dev]` line-tables-only + dep `debug = false` in `Cargo.toml` | Keeping runner `stable`; partial saves; runner Cargo config | `rust-cache` hashes all toolchains and path lists; first save owns a key until `Cargo.lock` changes, fitting the 10 GB budget |
 | `initializer` runs balanced `core`/`full` cache families (max 4 parts; `image-derived` max 2), unified `vendor/` mtimes, one `CARGO_TARGET_DIR` | Per-graph targets; unbounded matrix | Avoids rebuilding `[patch]` crates per clone and leaves ~6 runners for PRs |
-| `quality-profiles`, `quality-validation`, and `jobs-reliability` (no fat LTO) split into own jobs | Monolithic `quality` / `integration` | Removes non-artifact checks from critical path |
+| `quality-profiles` and `quality-validation` split into own jobs | Monolithic `quality` | Removes non-artifact checks from critical path |
 | `REPOSITORY_CI ?= none` mode in `make/service.mk` | Implicit CI mode | Gives CI-less Railway repos a complete `make verify` (`ci_mode: none`) receipt |
 
 <!-- template:begin postgres:docs-ci-postgres-routing -->

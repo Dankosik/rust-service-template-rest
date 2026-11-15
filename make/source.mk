@@ -4,13 +4,6 @@
 SOURCE_CHECK_TARGETS := template-owned-purity-check template-init-check template-quality-projections
 
 .PHONY: template-owned-purity-check template-init-check template-init-projections template-quality-projections template-init-artifacts
-.PHONY: jobs-reliability-reference
-
-# Its own CI job beside the database suite (`jobs-reliability`), selected by
-# the same surface; it owns a Compose PostgreSQL and NATS for the run.
-jobs-reliability-reference: ## Exact-commit jobs recovery and initialized-service upgrade reference; ALLOW_HEAVY=1, REQUIRE_DOCKER=1 to fail without Docker
-	$(HEAVY_GUARD)
-	$(VALIDATION_LOCK) bash scripts/ci/test-integration-db.sh --jobs-reliability-reference
 
 template-owned-purity-check: ## Check source-only manifest and portability boundaries
 	python3 scripts/tests/template-owned-purity.py --repo .

@@ -7,15 +7,6 @@ cd "${ROOT_DIR}"
 if ! bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --assert-held; then
 	exec bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" -- bash "${ROOT_DIR}/scripts/ci/test-integration-db.sh" "$@"
 fi
-reference=false
-if [[ ${1:-} == --jobs-reliability-reference ]]; then
-	shift
-	reference=true
-	if (($#)) || [[ ! -f make/source.mk ]]; then
-		echo "the jobs reliability reference is source-only and takes no test filter" >&2
-		exit 2
-	fi
-fi
 # shellcheck source=scripts/lib/compose-postgres.sh
 source scripts/lib/compose-postgres.sh
 
@@ -60,10 +51,6 @@ elif [[ -z ${DATABASE_URL:-} || -z ${PGBOUNCER_DATABASE_URL:-} ]]; then
 	exit 2
 fi
 
-if [[ ${reference} == true ]]; then
-	python3 scripts/ci/jobs-reliability-reference.py --candidate "${JOBS_REFERENCE_CANDIDATE:-$(git rev-parse HEAD)}"
-else
-	service_db_before_tests
-	cargo test --locked -p integration-tests --features integration "$@"
-	service_db_after_tests "$@"
-fi
+service_db_before_tests
+cargo test --locked -p integration-tests --features integration "$@"
+service_db_after_tests "$@"
