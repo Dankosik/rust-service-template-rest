@@ -7,7 +7,7 @@ A persisted `tasks.md` contains only execution-changing state:
 status: draft | ready | blocked | done
 Completion: <observable successful condition>
 Blocked stop: <unavailable required input and owner; omit when none>
-Global constraints: <shared execution constraints; omit when none>
+Global constraints: <active execution instructions and shared constraints; omit when none>
 
 ## Tasks
 
@@ -21,7 +21,8 @@ Global constraints: <shared execution constraints; omit when none>
 
 Every persisted task has one [Task Packet V1](task-packet-v1.md). Keep detailed
 sources, boundaries, proof, writable surfaces, exclusive locks, and reopen
-conditions in that packet, not in the index. `Global constraints` references
+conditions in that packet, not in the index. `Global constraints` holds active
+execution instructions (replaced in place when guidance changes) and references
 accepted owners instead of copying their full constraints.
 
 Execution identifies the unit's current Lead; record the returned identity
