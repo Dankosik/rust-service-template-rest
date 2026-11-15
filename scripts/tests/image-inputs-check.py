@@ -230,6 +230,18 @@ class Coverage(unittest.TestCase):
                 self.run_check(refusal)
         (self.root / IAC).write_text(image.replace("image(process.env.IMAGE)", "image(process.env.IMAGE) || github(repo)"))
         self.run_check("expected exactly one literal policy form")
+        (self.root / IAC).with_name("release.ts").write_text(
+            'export const releaseImage = "acme/api";\n'
+            'export { github as repositorySource } from "railway/iac";\n')
+        release_import = (
+            'import { releaseImage } from "./release.ts";\n'
+            'import { image, service } from "railway/iac";\n'
+            'export default service("api", { source: image(releaseImage) });\n')
+        (self.root / IAC).write_text(release_import)
+        self.assertIn(f"{IAC} deploys a published image", self.run_check())
+        foreign_provider = release_import.replace("{ releaseImage }", "{ releaseImage, repositorySource as image }")
+        (self.root / IAC).write_text(foreign_provider.replace("{ image, service }", "{ service }"))
+        self.run_check("table build.watchPatterns: expected exactly one literal policy form")
         with_release = (
             'import { github, image, service } from "railway/iac";\n'
             'const release = { source: image(process.env.IMAGE) };\n'

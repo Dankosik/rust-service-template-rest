@@ -192,7 +192,7 @@ def private_text(path, text):
         output.write(text)
 
 
-def unreaped_exit_code(pid, until):
+def unreaped_exit_code(pid):
     # The waitable leader reserves its PID/PGID until all refusal decisions finish.
     if hasattr(os, "waitid"):
         status = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
@@ -200,12 +200,22 @@ def unreaped_exit_code(pid, until):
             return None
         # Darwin waitid can report exit bits beyond the byte that Popen returns.
         return (status.si_status & 255) if status.si_code == os.CLD_EXITED else -status.si_status
-    # Darwin ps exposes the wait status in hex on Python versions without waitid.
+    # Older Darwin Python lacks waitid. Poll exit before checking the command
+    # deadline. Only reading an exited child's status gets a separate timeout.
+    exited = select.kevent(pid, filter=select.KQ_FILTER_PROC, flags=select.KQ_EV_ADD, fflags=select.KQ_NOTE_EXIT)
+    with contextlib.closing(select.kqueue()) as events:
+        try:
+            events.control([exited], 0, 0)
+        except ProcessLookupError:
+            pass  # Already exited before registration; the PID is still reserved.
+        else:
+            if not events.control(None, 1, 0):
+                return None
     try:
         status = subprocess.run(["/bin/ps", "-p", str(pid), "-o", "stat=,xstat="],
-                                capture_output=True, timeout=max(0, until - time.monotonic()))
+                                capture_output=True, timeout=2)
     except subprocess.TimeoutExpired:
-        raise Refused("native_command_deadline") from None
+        raise Refused("native_exit_status_unavailable") from None
     require(status.returncode == 0, "native_exit_status_unavailable")
     state, raw = status.stdout.split()
     return os.waitstatus_to_exitcode(int(raw, 16)) if state.startswith(b"Z") else None
@@ -244,7 +254,7 @@ def wait_command(process, input, stdout, stderr, until, tick):
     next_check = 0
     while True:
         if not pending:
-            code = unreaped_exit_code(process.pid, until)
+            code = unreaped_exit_code(process.pid)
             if code is not None:
                 return code
         now = time.monotonic()

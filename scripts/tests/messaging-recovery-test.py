@@ -68,6 +68,11 @@ class RecoveryManifest(unittest.TestCase):
 
 
 class NativeCommand(unittest.TestCase):
+    def test_final_deadline_poll_distinguishes_finished_and_running_commands(self):
+        self.assertEqual(controller.run(["/bin/sleep", "0.05"], timeout=0.15, input=b""), (0, b""))
+        with self.assertRaisesRegex(controller.Refused, "native_command_deadline"):
+            controller.run(["/bin/sleep", "5"], timeout=0.15, input=b"")
+
     def test_pipe_carries_exact_bytes_through_eof(self):
         command = [sys.executable, "-c", "import os, stat, sys; assert stat.S_ISFIFO(os.fstat(0).st_mode); "
                    "sys.stdout.buffer.write(sys.stdin.buffer.read())"]

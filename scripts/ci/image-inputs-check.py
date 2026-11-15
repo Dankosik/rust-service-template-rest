@@ -74,11 +74,32 @@ def selected_image_service(code: str) -> bool:
     identifier = r"[A-Za-z_$][\w$]*"
     primitives = {"service", "image", "defineRailway", "project"}
     imported = set()
+    other_bindings = set()
     statements = [part for part in top_level_parts(code, ";") if part]
     for statement in statements[:-1]:
-        names = re.fullmatch(r'import\s*\{([\w\s,]+)\}\s*from\s*"railway/iac"', statement)
-        if names:
-            imported.update(name.strip() for name in names[1].split(","))
+        if re.fullmatch(r'import\s*"(?:railway/iac)?"', statement):
+            continue
+        module = re.fullmatch(
+            rf'import\b\s*(?P<type>type\s+)?(?:(?P<default>{identifier})\s*,?\s*)?'
+            rf'(?:\{{(?P<named>[^{{}}]*)\}}|\*\s+as\s+(?P<namespace>{identifier}))?\s*'
+            r'\bfrom\s*"(?P<sdk>railway/iac)?"', statement, re.S)
+        if module:
+            if module["type"]:
+                continue
+            other_bindings.update(name for name in (module["default"], module["namespace"]) if name)
+            for item in (module["named"] or "").split(","):
+                if not item.strip():
+                    continue
+                binding = re.fullmatch(rf"(?:(type)\s+)?({identifier})(?:\s+as\s+({identifier}))?", item.strip())
+                if not binding:
+                    return False
+                if binding[1]:
+                    continue
+                local = binding[3] or binding[2]
+                if module["sdk"] and local == binding[2]:
+                    imported.add(local)
+                else:
+                    other_bindings.add(local)
             continue
         declaration = re.fullmatch(rf"(?:export\s+)?const\s+({identifier})\s*=\s*([^=;]+)", statement, re.S)
         if not declaration or declaration[1] in primitives:
@@ -98,7 +119,7 @@ def selected_image_service(code: str) -> bool:
         selected = project["service"]
         required.update(("defineRailway", "project"))
     # A module with bindings must establish the origin of the SDK primitives.
-    if len(statements) > 1 and not required <= imported:
+    if len(statements) > 1 and not required <= imported - other_bindings:
         return False
     options = re.fullmatch(rf'service\s*\(\s*(?:{identifier}|"")\s*,\s*\{{(.*)\}}\s*,?\s*\)', selected, re.S)
     if not options:
