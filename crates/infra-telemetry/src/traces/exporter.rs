@@ -384,7 +384,7 @@ pub(super) fn parse_headers(raw: &str) -> Result<HashMap<String, String>, Tracin
         let (name, value) = (name.trim(), value.trim());
         if HeaderName::from_bytes(name.as_bytes()).is_err()
             || HeaderValue::from_str(value).is_err()
-            || decoded_otlp_header(value)
+            || decoded_otlp_header_value(value)
                 .is_some_and(|decoded| HeaderValue::try_from(decoded).is_err())
         {
             return Err(invalid);
@@ -397,7 +397,7 @@ pub(super) fn parse_headers(raw: &str) -> Result<HashMap<String, String>, Tracin
 // opentelemetry-otlp 0.33.1 decodes each pair after '%' with from_str_radix
 // (including a leading '+'). A malformed pair or invalid UTF-8 anywhere makes
 // with_headers send the entire original value, which was already checked.
-fn decoded_otlp_header(value: &str) -> Option<String> {
+fn decoded_otlp_header_value(value: &str) -> Option<String> {
     let (prefix, escapes) = value.split_once('%')?;
     let mut decoded = Vec::with_capacity(value.len());
     decoded.extend_from_slice(prefix.as_bytes());

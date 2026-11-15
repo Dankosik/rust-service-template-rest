@@ -303,7 +303,7 @@ impl IntrospectionVerifier {
             .map_err(|_| VerificationError::unavailable(VerificationReason::Capacity))?;
         let response = self
             .provider
-            .post_form_json(
+            .post_introspection_form_json(
                 self.endpoint.url(),
                 &self.client_id,
                 self.client_secret.expose_secret(),

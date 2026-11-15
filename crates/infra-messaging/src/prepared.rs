@@ -94,9 +94,8 @@ impl PreparedEvent {
         let occurred_at = event.occurred_at.to_offset(time::UtcOffset::UTC);
         crate::wire::validate_outbound_identity(&event.id)?;
         let key = route_key::<T>();
-        if key.event_type.trim().len() != key.event_type.len() {
-            return Err(EnvelopeError::Identity);
-        }
+        // route_key checks the event type's length and control characters at compile time.
+        crate::wire::validate_outbound_whitespace(key.event_type)?;
         if crate::wire::is_zero_time(occurred_at) {
             return Err(EnvelopeError::CreatedAtRequired);
         }

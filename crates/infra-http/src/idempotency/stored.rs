@@ -160,6 +160,7 @@ pub(super) fn decode(record: Record) -> Result<ReplayableResponse, Undecodable> 
         .headers
         .into_iter()
         .map(|pair| {
+            // The spelling captured from REPLAYABLE is part of the persisted record format.
             let name = REPLAYABLE
                 .into_iter()
                 .find(|name| name.as_str() == pair.name)

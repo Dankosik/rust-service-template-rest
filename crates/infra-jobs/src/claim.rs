@@ -220,13 +220,13 @@ enum ClaimRound {
     Failed(OperationError),
 }
 
-async fn send_claim(shared: &Shared, policy: &PolicyBinds, requested: i64) -> ClaimRound {
+async fn send_claim(shared: &Shared, policy: &PolicyBinds<'_>, requested: i64) -> ClaimRound {
     let claim_started_at = Instant::now();
     let result = backstop(async {
         let mut connection = infra_postgres::acquire(&shared.pool, "claim jobs")
             .await
             .map_err(OperationError::Acquire)?;
-        Ok(claim(&mut connection, shared, policy, requested).await?)
+        Ok(claim(&mut connection, shared.worker_id, policy, requested).await?)
     })
     .await;
     metrics::histogram!(CLAIM_DURATION_METRIC).record(claim_started_at.elapsed().as_secs_f64());
@@ -270,11 +270,11 @@ async fn send_claim(shared: &Shared, policy: &PolicyBinds, requested: i64) -> Cl
 )]
 async fn claim(
     connection: &mut PgConnection,
-    shared: &Shared,
-    policy: &PolicyBinds,
+    worker_id: uuid::Uuid,
+    policy: &PolicyBinds<'_>,
     requested: i64,
 ) -> Result<Vec<Drawn>, sqlx::Error> {
-    let claim_limits: Vec<_> = shared
+    let claim_limits: Vec<_> = policy
         .registry
         .iter()
         .map(|registered| {
@@ -388,25 +388,26 @@ async fn claim(
             &policy.max_attempts,
             &policy.lease_offsets_micros,
             requested,
-            shared.worker_id,
+            worker_id,
             &claim_limits,
             rescued_summary,
         )
-        .try_map(|row| row.into_drawn(&shared.registry))
+        .try_map(|row| row.into_drawn(policy.registry))
         .fetch_all(&mut *connection),
     )
     .await
 }
 
 // These columns and each round's live claim limits must share registry order.
-struct PolicyBinds {
+struct PolicyBinds<'a> {
+    registry: &'a crate::Kinds,
     names: Vec<&'static str>,
     max_attempts: Vec<i16>,
     lease_offsets_micros: Vec<i64>,
 }
 
-impl PolicyBinds {
-    fn new(registry: &crate::Kinds) -> Self {
+impl<'a> PolicyBinds<'a> {
+    fn new(registry: &'a crate::Kinds) -> Self {
         let (names, max_attempts, lease_offsets_micros) = registry
             .iter()
             .map(|registered| {
@@ -418,6 +419,7 @@ impl PolicyBinds {
             })
             .collect();
         Self {
+            registry,
             names,
             max_attempts,
             lease_offsets_micros,

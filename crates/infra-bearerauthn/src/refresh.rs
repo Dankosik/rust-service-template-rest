@@ -238,12 +238,12 @@ pub(crate) async fn run_refresh_worker(
     cancel: CancellationToken,
 ) {
     let mut next_refresh = Instant::now() + refresh_period();
-    let mut pending = store.state.subscribe();
+    let mut state_changes = store.state.subscribe();
     'worker: loop {
         tokio::select! {
             biased;
             () = cancel.cancelled() => break,
-            result = pending.wait_for(|state| state.pending().is_some()) => {
+            result = state_changes.wait_for(|state| state.pending().is_some()) => {
                 if result.is_err() {
                     break;
                 }

@@ -218,7 +218,7 @@ impl ProviderClient {
     // template:begin oidc-introspection:authn-provider-post-form-json
     /// Posts a form with client-secret Basic authentication, form-encoding each
     /// credential component first as RFC 6749 section 2.3.1 requires.
-    pub(crate) async fn post_form_json(
+    pub(crate) async fn post_introspection_form_json(
         &self,
         url: &Url,
         client_id: &str,
@@ -912,7 +912,7 @@ mod tests {
         let response = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 16\r\n\r\n{\"active\":false}".to_vec();
         let (address, root, server) = tls_server(response, false).await;
         let body = fixture_client(address, &root)
-            .post_form_json(
+            .post_introspection_form_json(
                 &fixture_url(address),
                 "a:b",
                 "c d",
@@ -939,7 +939,7 @@ mod tests {
             let (address, root, server) = tls_server(response, false).await;
             assert_eq!(
                 fixture_client(address, &root)
-                    .post_form_json(
+                    .post_introspection_form_json(
                         &fixture_url(address),
                         "fixture",
                         "secret",
