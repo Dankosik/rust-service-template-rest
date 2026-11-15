@@ -5,19 +5,18 @@ use axum_test::TestServer;
 use bytes::Bytes;
 use http::{HeaderMap, HeaderValue, StatusCode};
 use infra_jobs::{Engine, JobError, KindsBuilder, Policy};
-use infra_postgres::{Dsn, PgPool, Tx};
+use infra_postgres::{PgPool, Tx};
 use infra_webhooks::inbound::{
     Consumer, Consumers, Incoming, Processor, ReceiptOutcome, ReceiveError, Receiver, Rejection,
     Verifier, async_trait,
 };
 use infra_webhooks::protocol::KeyRing;
-use integration_tests::{DATABASE_URL, dsn_for};
+use integration_tests::dsn_for;
 use sqlx::Row;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use tokio::sync::Notify;
-use tokio_util::sync::CancellationToken;
+use tokio_util::sync::{CancellationToken, DropGuard};
 use tokio_util::task::TaskTracker;
-use url::Url;
 
 use super::commit_proxy::{CommitProxy, Fault};
 
@@ -130,27 +129,7 @@ async fn job_count(pool: &PgPool) -> i64 {
 }
 
 async fn proxied_pool(pool: &PgPool) -> (CommitProxy, PgPool) {
-    let dsn = dsn_for(pool).await;
-    assert_eq!(
-        dsn.ssl_mode_name(),
-        "disable",
-        "the proxy is plaintext only"
-    );
-    let host = dsn.host().trim_start_matches('[').trim_end_matches(']');
-    let server = tokio::net::lookup_host((host, dsn.port()))
-        .await
-        .expect("server resolves")
-        .next()
-        .expect("server address");
-    let proxy = CommitProxy::start(server).await;
-    let raw = std::env::var(DATABASE_URL).expect("DATABASE_URL is set");
-    let mut url = Url::parse(&raw).expect("DATABASE_URL is a URL");
-    url.set_path(dsn.database());
-    url.set_ip_host(proxy.address().ip())
-        .expect("proxy is an IP host");
-    url.set_port(Some(proxy.address().port()))
-        .expect("proxy port");
-    let proxied = Dsn::admit(url.as_str()).expect("proxied DSN");
+    let (proxy, proxied) = CommitProxy::start_for(pool).await;
     (proxy, super::template_pool(&proxied, 3).await)
 }
 
@@ -491,13 +470,7 @@ struct RunningProcessor {
     started: infra_jobs::Started,
     cancel: CancellationToken,
     tracker: TaskTracker,
-}
-
-impl Drop for RunningProcessor {
-    fn drop(&mut self) {
-        self.cancel.cancel();
-        self.tracker.close();
-    }
+    _cancel_guard: DropGuard,
 }
 
 impl RunningProcessor {
@@ -512,10 +485,13 @@ impl RunningProcessor {
         let cancel = CancellationToken::new();
         let tracker = TaskTracker::new();
         let started = engine.start(&tracker, &cancel);
+        tracker.close();
+        let cancel_guard = cancel.clone().drop_guard();
         Self {
             started,
             cancel,
             tracker,
+            _cancel_guard: cancel_guard,
         }
     }
 
@@ -527,7 +503,6 @@ impl RunningProcessor {
 
     async fn close(self, pools: &[&PgPool]) {
         self.cancel.cancel();
-        self.tracker.close();
         super::bounded("the processor tasks join", self.tracker.wait()).await;
         super::close_pools(pools).await;
     }

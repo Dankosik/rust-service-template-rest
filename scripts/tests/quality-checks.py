@@ -534,7 +534,14 @@ compose_pgbouncer_host_dsn() { echo pgbouncer; }
     def test_tool_pins_require_successful_version_output(self) -> None:
         name = "tools-check.sh"
         shutil.copy(ROOT / "scripts/ci" / name, self.root / "scripts/ci")
-        for path in ("tools/versions.env", "build/docker/Dockerfile", "rust-toolchain.toml"):
+        for path in (
+            "tools/versions.env",
+            "build/docker/Dockerfile",
+            "rust-toolchain.toml",
+            ".cargo/config.toml",
+            "scripts/ci/dependency-drift.sh",
+            ".github/dependabot.yml",
+        ):
             target = self.root / path
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(ROOT / path, target)
@@ -547,6 +554,11 @@ compose_pgbouncer_host_dsn() { echo pgbouncer; }
             with self.subTest(empty=empty, status=status):
                 result = self.check_script(name, EMPTY_BANNER=empty, VERSION_STATUS=status)
                 self.assertEqual(result.returncode == 0, success, result.stderr)
+        cargo_cfg = self.root / ".cargo/config.toml"
+        cargo_cfg.write_text(cargo_cfg.read_text().replace('"7 days"', '"3 days"'))
+        result = self.check_script(name, EMPTY_BANNER="0", VERSION_STATUS="0")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("global-min-publish-age", result.stderr)
 
 
 if __name__ == "__main__":

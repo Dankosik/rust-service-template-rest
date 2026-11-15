@@ -9,8 +9,9 @@ repository.workspace = true
 publish.workspace = true
 
 # template:begin postgres:test-postgres-tls-dependency-scan
-# cargo-shear 1.14.0 misses the PostgreSQL test's #[path] inclusion of
-# test/fixtures/tls.rs. Remove this exception when it follows that source.
+# cargo-shear 1.14.0 misses #[path] inclusions of test/fixtures/tls.rs in
+# test/tests/postgres.rs and test/tests/http_idempotency/mounted.rs. Remove this
+# exception when it follows those sources.
 [package.metadata.cargo-shear]
 ignored = ["rcgen"]
 # template:end postgres:test-postgres-tls-dependency-scan
@@ -20,9 +21,9 @@ workspace = true
 
 # template:begin postgres:test-integration-feature
 [features]
-# Utility recipes run with `make test` and need no Docker or external service.
-# PostgreSQL tests alone require `integration`, a live DATABASE_URL, and a
-# PGBOUNCER_DATABASE_URL in front of the same server.
+# Non-Docker targets run with `make test`. `integration` targets require a live
+# DATABASE_URL and PGBOUNCER_DATABASE_URL in front of the same server, plus
+# NATS_URL when messaging/outbox is retained.
 integration = []
 # template:end postgres:test-integration-feature
 
@@ -124,7 +125,7 @@ bstr = { workspace = true, features = ["std"] }
 heck = { workspace = true }
 bytes = { workspace = true, features = ["std"] }
 tokio-util = { workspace = true, features = ["io", "rt"] }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sync", "io-util", "net", "test-util"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sync", "io-util", "net", "process", "test-util"] }
 futures-util = { workspace = true, features = ["std", "async-await"] }
 infra-http = { workspace = true }
 axum-test = { workspace = true }
@@ -140,7 +141,7 @@ itertools = { workspace = true, features = ["use_std"] }
 health = { workspace = true }
 tracing = { workspace = true }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs", "tls12"] }
-rcgen = { workspace = true, features = ["aws_lc_rs"] }
+rcgen = { workspace = true, features = ["pem", "aws_lc_rs"] }
 # template:end postgres:test-postgres-health-dependency
 # template:begin postgres:test-migrate-dependency
 migrate = { workspace = true }
@@ -169,7 +170,6 @@ async-trait = { workspace = true }
 # template:end http-idempotency-mounted:test-http-idempotency-mounted-dependencies
 # template:begin jobs:test-jobs-dev-dependencies
 nix = { workspace = true, features = ["signal"] }
-ureq = { workspace = true }
 # template:end jobs:test-jobs-dev-dependencies
 
 # template:begin jobs:test-jobs-worker-fixture

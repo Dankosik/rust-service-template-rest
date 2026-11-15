@@ -1,14 +1,18 @@
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use bytes::BytesMut;
+use infra_postgres::{Dsn, PgPool};
+use integration_tests::{DATABASE_URL, dsn_for, url_for};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Notify, watch};
-use tokio_util::sync::CancellationToken;
-use tokio_util::task::TaskTracker;
+use tokio::sync::watch;
+use tokio::task::{JoinError, JoinSet};
+use tokio_util::sync::{CancellationToken, DropGuard};
+use tokio_util::task::AbortOnDropHandle;
 
 const COMMIT: &[u8] = b"COMMIT";
 
@@ -89,50 +93,59 @@ pub(crate) enum ReadyBoundary {
 }
 
 #[derive(Debug)]
-struct ReadyHold {
-    state: Mutex<ReadyHoldState>,
-    held: tokio::sync::Notify,
-    release: tokio::sync::Notify,
-}
+struct ReadyHold(watch::Sender<ReadyHoldState>);
 
 impl ReadyHold {
+    fn new() -> Self {
+        let (tx, _) = watch::channel(ReadyHoldState::Idle);
+        Self(tx)
+    }
+
     fn arm(&self, boundary: ReadyBoundary) {
-        *lock(&self.state) = ReadyHoldState::Armed(boundary);
+        self.0.send_replace(ReadyHoldState::Armed(boundary));
     }
 
     fn claim(&self, boundary: ReadyBoundary) -> bool {
-        let mut state = lock(&self.state);
-        if *state != ReadyHoldState::Armed(boundary) {
-            return false;
-        }
-        *state = ReadyHoldState::Claimed;
-        true
+        self.0.send_if_modified(|state| {
+            if *state == ReadyHoldState::Armed(boundary) {
+                *state = ReadyHoldState::Claimed;
+                true
+            } else {
+                false
+            }
+        })
     }
 
     fn hold(&self) {
-        let mut state = lock(&self.state);
-        assert_eq!(*state, ReadyHoldState::Claimed);
-        *state = ReadyHoldState::Held;
-        self.held.notify_one();
+        self.0.send_modify(|state| {
+            assert_eq!(*state, ReadyHoldState::Claimed);
+            *state = ReadyHoldState::Held;
+        });
     }
 
     async fn held(&self) {
-        tokio::time::timeout(READY_HOLD_BUDGET, self.held.notified())
-            .await
-            .expect("PostgreSQL answers the held request within its budget");
-        assert_eq!(*lock(&self.state), ReadyHoldState::Held);
+        let mut rx = self.0.subscribe();
+        tokio::time::timeout(
+            READY_HOLD_BUDGET,
+            rx.wait_for(|state| *state == ReadyHoldState::Held),
+        )
+        .await
+        .expect("PostgreSQL answers the held request within its budget")
+        .expect("ready hold sender stays open");
     }
 
     fn release(&self) {
-        assert_eq!(*lock(&self.state), ReadyHoldState::Held);
-        *lock(&self.state) = ReadyHoldState::Released;
-        self.release.notify_one();
+        self.0.send_modify(|state| {
+            assert_eq!(*state, ReadyHoldState::Held);
+            *state = ReadyHoldState::Released;
+        });
     }
 
     async fn wait_for_release(&self, cancel: &CancellationToken) -> bool {
+        let mut rx = self.0.subscribe();
         tokio::select! {
             () = cancel.cancelled() => false,
-            () = self.release.notified() => true,
+            result = rx.wait_for(|state| *state == ReadyHoldState::Released) => result.is_ok(),
         }
     }
 }
@@ -140,7 +153,8 @@ impl ReadyHold {
 #[derive(Debug)]
 struct Silence {
     signal: watch::Sender<()>,
-    reached: Notify,
+    entered: watch::Sender<usize>,
+    fault_baseline: AtomicUsize,
 }
 
 #[derive(Debug)]
@@ -150,7 +164,8 @@ pub(crate) struct CommitProxy {
     ready_hold: Arc<ReadyHold>,
     silence: Arc<Silence>,
     cancel: CancellationToken,
-    tasks: TaskTracker,
+    _cancel_guard: DropGuard,
+    task: AbortOnDropHandle<()>,
 }
 
 impl CommitProxy {
@@ -160,26 +175,23 @@ impl CommitProxy {
             .expect("the proxy listens");
         let address = listener.local_addr().expect("the proxy's address");
         let arming = Arc::new(Mutex::new(Arming::Idle));
-        let ready_hold = Arc::new(ReadyHold {
-            state: Mutex::new(ReadyHoldState::Idle),
-            held: tokio::sync::Notify::new(),
-            release: tokio::sync::Notify::new(),
-        });
+        let ready_hold = Arc::new(ReadyHold::new());
         let (signal, _) = watch::channel(());
+        let (entered, _) = watch::channel(0);
         let silence = Arc::new(Silence {
             signal,
-            reached: Notify::new(),
+            entered,
+            fault_baseline: AtomicUsize::new(0),
         });
         let cancel = CancellationToken::new();
-        let tasks = TaskTracker::new();
-        tasks.spawn(accept(
+        let cancel_guard = cancel.clone().drop_guard();
+        let task = tokio::spawn(accept(
             listener,
             server,
             Arc::clone(&arming),
             Arc::clone(&ready_hold),
             Arc::clone(&silence),
             cancel.clone(),
-            tasks.clone(),
         ));
         Self {
             address,
@@ -187,8 +199,33 @@ impl CommitProxy {
             ready_hold,
             silence,
             cancel,
-            tasks,
+            _cancel_guard: cancel_guard,
+            task: AbortOnDropHandle::new(task),
         }
+    }
+
+    pub(crate) async fn start_for(pool: &PgPool) -> (Self, Dsn) {
+        let dsn = dsn_for(pool).await;
+        assert_eq!(
+            dsn.ssl_mode_name(),
+            "disable",
+            "the commit proxy frames the plaintext protocol"
+        );
+        let host = dsn.host().trim_matches(['[', ']']);
+        let server = tokio::time::timeout(JOIN_BUDGET, tokio::net::lookup_host((host, dsn.port())))
+            .await
+            .expect("the server address resolves within budget")
+            .expect("the server address resolves")
+            .next()
+            .expect("the server has an address");
+        let proxy = Self::start(server).await;
+        let mut url = url_for(pool, DATABASE_URL).await;
+        url.set_ip_host(proxy.address().ip())
+            .expect("the proxy address is a host");
+        url.set_port(Some(proxy.address().port()))
+            .expect("the proxy URL accepts a port");
+        let proxied = Dsn::admit(url.as_str()).expect("the proxied DSN is admitted");
+        (proxy, proxied)
     }
 
     pub(crate) fn address(&self) -> SocketAddr {
@@ -198,12 +235,18 @@ impl CommitProxy {
     /// Act once on the next `COMMIT`. A bare [`Fault`] matches any connection;
     /// `(fault, sql_substring)` selects a transaction sending that SQL after arming.
     pub(crate) fn arm(&self, fault: impl Into<Armed>) {
+        self.silence
+            .fault_baseline
+            .store(*self.silence.entered.borrow(), Ordering::Release);
         *lock(&self.arming) = Arming::Armed(fault.into());
     }
 
     /// Act once on the matching autocommit statement's completion boundary.
     /// Extended queries commit at Sync; simple queries complete in their own message.
     pub(crate) fn arm_autocommit(&self, fault: Fault, statement: &'static str) {
+        self.silence
+            .fault_baseline
+            .store(*self.silence.entered.borrow(), Ordering::Release);
         *lock(&self.arming) = Arming::Armed(Armed {
             fault,
             boundary: Boundary::Autocommit(statement),
@@ -237,29 +280,42 @@ impl CommitProxy {
     /// Already-silent sockets stay open; later connections relay normally.
     pub(crate) async fn silence_connection(&self) {
         assert_eq!(self.silence.signal.receiver_count(), 1);
+        let mut entered = self.silence.entered.subscribe();
+        let before = *entered.borrow_and_update();
         self.silence.signal.send_replace(());
-        self.silenced().await;
+        tokio::time::timeout(READY_HOLD_BUDGET, entered.wait_for(|n| *n > before))
+            .await
+            .expect("the relay reaches the silent boundary")
+            .expect("silence counter sender stays open");
     }
 
     /// Wait until a fault has stopped forwarding without closing either socket.
     pub(crate) async fn silenced(&self) {
-        tokio::time::timeout(READY_HOLD_BUDGET, self.silence.reached.notified())
+        let target = self.silence.fault_baseline.load(Ordering::Acquire);
+        let mut entered = self.silence.entered.subscribe();
+        tokio::time::timeout(READY_HOLD_BUDGET, entered.wait_for(|n| *n > target))
             .await
-            .expect("the relay reaches the silent boundary");
+            .expect("the relay reaches the silent boundary")
+            .expect("silence counter sender stays open");
     }
 
-    pub(crate) async fn shutdown(self) {
+    pub(crate) async fn shutdown(mut self) {
         self.cancel.cancel();
-        self.tasks.close();
-        tokio::time::timeout(JOIN_BUDGET, self.tasks.wait())
-            .await
-            .expect("the commit proxy's tasks join");
+        let result = tokio::time::timeout(JOIN_BUDGET, &mut self.task).await;
+        if result.is_err() {
+            self.task.abort();
+            let _ = (&mut self.task).await;
+        }
+        let join = result.expect("the commit proxy's tasks join");
+        propagate_join_panic(join);
     }
 }
 
-impl Drop for CommitProxy {
-    fn drop(&mut self) {
-        self.cancel.cancel();
+fn propagate_join_panic(result: Result<(), JoinError>) {
+    if let Err(err) = result
+        && err.is_panic()
+    {
+        std::panic::resume_unwind(err.into_panic());
     }
 }
 
@@ -270,26 +326,33 @@ async fn accept(
     ready_hold: Arc<ReadyHold>,
     silence: Arc<Silence>,
     cancel: CancellationToken,
-    tasks: TaskTracker,
 ) {
+    let mut connections = JoinSet::new();
     loop {
-        let client = tokio::select! {
-            () = cancel.cancelled() => return,
-            accepted = listener.accept() => match accepted {
-                Ok((client, _)) => client,
-                Err(_) => return,
-            },
-        };
-        let went_silent = silence.signal.subscribe();
-        tasks.spawn(relay(
-            client,
-            server,
-            Arc::clone(&arming),
-            Arc::clone(&ready_hold),
-            Arc::clone(&silence),
-            went_silent,
-            cancel.clone(),
-        ));
+        tokio::select! {
+            () = cancel.cancelled() => break,
+            Some(result) = connections.join_next(), if !connections.is_empty() => {
+                propagate_join_panic(result);
+            }
+            accepted = listener.accept() => {
+                let Ok((client, _)) = accepted else {
+                    break;
+                };
+                let went_silent = silence.signal.subscribe();
+                connections.spawn(relay(
+                    client,
+                    server,
+                    Arc::clone(&arming),
+                    Arc::clone(&ready_hold),
+                    Arc::clone(&silence),
+                    went_silent,
+                    cancel.clone(),
+                ));
+            }
+        }
+    }
+    while let Some(result) = connections.join_next().await {
+        propagate_join_panic(result);
     }
 }
 
@@ -320,7 +383,7 @@ async fn relay(
             () = cancel.cancelled() => return,
             _ = went_silent.changed() => {
                 drop(went_silent);
-                silence.reached.notify_one();
+                silence.entered.send_modify(|n| *n += 1);
                 cancel.cancelled().await;
                 return;
             }
@@ -371,7 +434,7 @@ async fn relay(
                     }
                     if fault == Fault::ForwardThenSilence {
                         drop(went_silent);
-                        silence.reached.notify_one();
+                        silence.entered.send_modify(|n| *n += 1);
                         cancel.cancelled().await;
                     }
                     return;

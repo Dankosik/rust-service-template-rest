@@ -178,8 +178,11 @@ class Inventory(unittest.TestCase):
 
     def test_docker_selection_must_agree_with_manifests(self) -> None:
         dockerfile = self.root / "build/docker/Dockerfile"
-        dockerfile.write_text(dockerfile.read_text().replace("ARG SERVICE_PACKAGE=orders-api", "ARG SERVICE_PACKAGE=wrong-api"))
+        original = dockerfile.read_text()
+        dockerfile.write_text(original.replace("ARG SERVICE_PACKAGE=orders-api", "ARG SERVICE_PACKAGE=wrong-api"))
         self.run_check("disagree with selected manifest")
+        dockerfile.write_text(original + "\n# trailing backslash in comment \\\nCOPY --from=missing /out/rogue /service\n")
+        self.run_check("ambiguous output /service")
 
     def install_docker_fixture(self) -> None:
         binary = self.root / "bin/docker"

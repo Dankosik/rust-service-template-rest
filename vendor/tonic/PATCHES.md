@@ -1,11 +1,13 @@
 # tonic 0.14.8 client response observation
 
-Upstream reviewed: 0.14.8
+Upstream reviewed: 0.14.9
 
 The published archive has SHA-256
 `cd1fa9b1a51188f3266a823208078315811269d06d272c3a61be0b9a194194ff`
 and records source revision `541379959bf197057a7c04eeca7f1d976f5ba7c6`.
 README links to upstream workspace files point to the upstream repository.
+Upstream `0.14.9`'s transport-only changes do not add a client response
+completion hook.
 
 The generated clients use tonic's decoder and cardinality rules after the
 underlying HTTP service returns. The patch lets that dispatcher tell the

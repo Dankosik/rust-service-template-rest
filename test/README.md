@@ -6,7 +6,8 @@ proof is available only when the local PostgreSQL profile is retained.
 <!-- template:begin postgres:test-readme-postgres -->
 `make test` compiles `integration-tests` with the `integration` feature off and
 runs non-Docker targets; `--features integration` targets require live
-`DATABASE_URL` and `PGBOUNCER_DATABASE_URL`.
+`DATABASE_URL` and `PGBOUNCER_DATABASE_URL` (plus `NATS_URL` when
+`messaging=nats-jetstream`).
 
 - `fixtures/migrations/<scenario>/` holds migration-runner test fixtures and is
   not part of the service schema in `migrations/`.
@@ -17,13 +18,10 @@ Process and container proof for the built image stays in
 <!-- template:end postgres:test-readme-postgres -->
 
 <!-- template:begin http-idempotency:test-readme-http-idempotency -->
-With the HTTP idempotency profile retained, the same command also runs
-`tests/http_idempotency/`. Its store and mounted-router cases prove real
-PostgreSQL arbitration, equal replay/mismatch, rollback and expiry, same-key
-retry after uncertainty, 25P02 mapping, byte-preserving seven-header replay,
-and caller metadata, using `tests/support/commit_proxy.rs` for lost or corrupt
-`COMMIT` acknowledgements and SQL readback reconciliation. The mounted HTTP
-proof runs where the introspection engine is retained.
+With the HTTP idempotency profile retained, `tests/http_idempotency/` uses
+`tests/support/commit_proxy.rs` for lost or corrupt `COMMIT` acknowledgements
+and SQL readback reconciliation; mounted HTTP proof runs where the
+introspection engine is retained.
 <!-- template:end http-idempotency:test-readme-http-idempotency -->
 <!-- template:begin jobs:test-readme-jobs -->
 

@@ -33,14 +33,38 @@ fi
 
 vcs_ref=${VCS_REF:-$(git rev-parse HEAD 2>/dev/null || echo unknown)}
 source_date_epoch=${SOURCE_DATE_EPOCH:-$(git log -1 --format=%ct 2>/dev/null || echo 0)}
-package_id=
-if command -v cargo >/dev/null 2>&1; then
-	package_id=$(cargo pkgid --locked --manifest-path crates/service/Cargo.toml 2>/dev/null || true)
+service_package=${SERVICE_PACKAGE:-}
+app_version=${APP_VERSION:-}
+if [[ -z ${service_package} || -z ${app_version} ]]; then
+	metadata=$(
+		python3 -B -E - <<'PY'
+import sys
+import tomllib
+
+with open("crates/service/Cargo.toml", "rb") as handle:
+    package = tomllib.load(handle).get("package", {})
+name = package.get("name")
+version = package.get("version")
+if isinstance(version, dict) and version.get("workspace") is True:
+    with open("Cargo.toml", "rb") as handle:
+        version = tomllib.load(handle).get("workspace", {}).get("package", {}).get("version")
+if not isinstance(name, str) or not name:
+    sys.exit("runtime-image-build: crates/service/Cargo.toml declares no package.name")
+if not isinstance(version, str) or not version:
+    sys.exit("runtime-image-build: unable to resolve crates/service/Cargo.toml package.version")
+print(name)
+print(version)
+PY
+	)
+	manifest_package=${metadata%%$'\n'*}
+	manifest_version=${metadata#*$'\n'}
+	service_package=${service_package:-${manifest_package}}
+	app_version=${app_version:-${manifest_version}}
 fi
-service_package=${SERVICE_PACKAGE:-$(printf '%s' "${package_id}" | sed -n 's/.*#\([^@]*\)@.*/\1/p')}
-service_package=${service_package:-service}
-app_version=${APP_VERSION:-$(printf '%s' "${package_id}" | sed -E 's/.*#([^@]+@)?//')}
-app_version=${app_version:-unknown}
+[[ -n ${service_package} && -n ${app_version} ]] || {
+	echo "runtime-image-build: service package and version must be non-empty" >&2
+	exit 1
+}
 
 arguments+=(
 	--build-arg "CARGO_CHEF_VERSION=${CARGO_CHEF_VERSION}"

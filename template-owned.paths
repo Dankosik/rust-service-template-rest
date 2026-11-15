@@ -44,7 +44,7 @@ scripts/ci/affected-crates.sh
 scripts/ci/changed-surfaces.sh
 scripts/ci/git-changed-paths.sh
 scripts/ci/measure.sh
-scripts/ci/openapi-artifact.py
+scripts/ci/cargo-artifact.py
 scripts/ci/publish-image-metadata.sh
 scripts/ci/runtime-image-build.sh
 scripts/ci/runtime-image-check.sh

@@ -79,26 +79,9 @@ cargo test --locked --package "${package}" --example runtime_progress \
 # dev-dependency features.
 cargo build --locked --release --package "${package}" --example runtime_progress --test runtime_progress \
 	--message-format=json >"${inputs}/release-build.jsonl" 2> >(tee "${inputs}/release-build.stderr" >&2)
-driver=$(python3 - "${inputs}/release-build.jsonl" "${inputs}/image/runtime_progress" <<'PY'
-import json
-import pathlib
-import shutil
-import sys
-artifacts = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
-def executables(kind: str) -> list[str]:
-    return [entry["executable"] for entry in artifacts
-            if entry.get("reason") == "compiler-artifact"
-            and entry["target"]["name"] == "runtime_progress"
-            and kind in entry["target"]["kind"] and entry.get("executable")]
-specimens, drivers = executables("example"), executables("test")
-if len(specimens) != 1:
-    raise SystemExit("release build did not identify exactly one runtime_progress specimen")
-if len(drivers) != 1:
-    raise SystemExit("release build did not identify exactly one runtime_progress test executable")
-shutil.copy2(specimens[0], sys.argv[2])
-print(drivers[0])
-PY
-)
+specimen=$(python3 scripts/ci/cargo-artifact.py --manifest crates/service/Cargo.toml --name runtime_progress --kind example <"${inputs}/release-build.jsonl")
+driver=$(python3 scripts/ci/cargo-artifact.py --manifest crates/service/Cargo.toml --name runtime_progress --kind test <"${inputs}/release-build.jsonl")
+cp "${specimen}" "${inputs}/image/runtime_progress"
 sha256sum "${inputs}/image/runtime_progress" >"${inputs}/binary.sha256"
 builder_args=()
 [[ -z ${VALIDATION_BUILDER_NAME:-} ]] || builder_args=(--builder "${VALIDATION_BUILDER_NAME}")

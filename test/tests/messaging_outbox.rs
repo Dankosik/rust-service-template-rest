@@ -34,7 +34,7 @@ use integration_tests::{close_pools, dsn_for};
 use sqlx::Row;
 use tokio::sync::Notify;
 use tokio::time::{Instant, timeout};
-use tokio_util::sync::CancellationToken;
+use tokio_util::sync::{CancellationToken, DropGuard};
 use tokio_util::task::TaskTracker;
 
 #[path = "../../crates/infra-messaging/tests/support/relay.rs"]
@@ -263,6 +263,7 @@ struct EngineRun {
     started: infra_jobs::Started,
     tracker: TaskTracker,
     cancel: CancellationToken,
+    _cancel_guard: DropGuard,
 }
 
 async fn start(pool: &PgPool, registry: Kinds) -> EngineRun {
@@ -274,10 +275,13 @@ async fn start(pool: &PgPool, registry: Kinds) -> EngineRun {
     let tracker = TaskTracker::new();
     let cancel = CancellationToken::new();
     let started = engine.start(&tracker, &cancel);
+    tracker.close();
+    let cancel_guard = cancel.clone().drop_guard();
     EngineRun {
         started,
         tracker,
         cancel,
+        _cancel_guard: cancel_guard,
     }
 }
 
@@ -287,7 +291,6 @@ async fn finish(run: EngineRun, pools: &[&PgPool]) {
         .await
         .expect("the engine drains");
     run.cancel.cancel();
-    run.tracker.close();
     timeout(WAIT, run.tracker.wait())
         .await
         .expect("engine background tasks join");

@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, sync::Arc};
 
 use bytes::Bytes;
 use http::{HeaderValue, Method, Request, Uri, Version, header, uri::Scheme};
@@ -11,7 +11,7 @@ use crate::{BuildError, Error};
 #[derive(Clone)]
 pub(crate) struct Origin {
     scheme: Scheme,
-    host: Box<str>,
+    host: Arc<str>,
     port: u16,
     host_header: HeaderValue,
 }
@@ -30,14 +30,14 @@ impl Origin {
             HeaderValue::from_str(url.authority()).map_err(|_| BuildError::InvalidOrigin)?;
         Ok(Self {
             scheme,
-            host: host.into(),
+            host: Arc::from(host),
             port,
             host_header,
         })
     }
 
-    pub(crate) fn host(&self) -> &str {
-        &self.host
+    pub(crate) fn host_arc(&self) -> Arc<str> {
+        Arc::clone(&self.host)
     }
 
     pub(crate) fn port(&self) -> u16 {

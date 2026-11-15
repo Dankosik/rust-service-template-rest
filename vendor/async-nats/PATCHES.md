@@ -1,6 +1,6 @@
 # async-nats 0.50.0: bounded native ownership and pull completion
 
-Upstream reviewed: 0.50.0
+Upstream reviewed: 0.52.0
 
 The template dependency owner carries same-version request/ACK custody,
 transport-recovery changes and a narrow native Batch completion repair. The
@@ -74,9 +74,10 @@ level writes the password, token, user JWT and nonce signature to the log
 pipeline. `src/lib.rs` carries upstream commit
 [4e70300](https://github.com/nats-io/nats.rs/commit/4e70300dcd7542441a303af2dae846a7c757a98d)
 unchanged: a manual `Debug` that redacts those four fields, and its
-`tests::connect_info_debug_redacts_secrets` regression. The commit is on
-upstream `main` in the unpublished 0.51.0 release commit; rebasing onto 0.51.0
-drops this section.
+`tests::connect_info_debug_redacts_secrets` regression. Upstream `0.51.0`–`0.52.0`
+ship commit `4e70300` (already carried here), while multiplexer pruning, ACK
+receiver/permit custody, and bounded initial-connect/close-lease recovery
+remain unmerged upstream; rebasing onto `0.51.0` or later drops this section.
 
 ## Composed transport-recovery extension
 

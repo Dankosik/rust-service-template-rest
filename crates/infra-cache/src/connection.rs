@@ -104,6 +104,7 @@ pub(crate) fn error_type(error: &redis::RedisError) -> ErrorType {
 
 pub(crate) struct Link {
     pub(crate) server: ServerEndpoint,
+    pub(crate) command_timeout: Duration,
     shared: Arc<Shared>,
     application_slots: Semaphore,
     /// Separate from the application slots so application load cannot
@@ -145,17 +146,6 @@ struct Generation {
     retired: CancellationToken,
 }
 
-struct RetireOnDrop<'a> {
-    shared: &'a Shared,
-    generation: &'a Arc<Generation>,
-}
-
-impl Drop for RetireOnDrop<'_> {
-    fn drop(&mut self) {
-        self.shared.retire(self.generation);
-    }
-}
-
 impl Generation {
     async fn reserve(&self) -> Result<OwnedSemaphorePermit, ErrorType> {
         self.caller_capacity
@@ -175,17 +165,6 @@ impl AbandonedReply {
     async fn wait(self) {
         let _reservation = self.reservation;
         self.reply.await;
-    }
-}
-
-struct CommandSlot<'a> {
-    _permit: SemaphorePermit<'a>,
-    in_flight: &'a Gauge,
-}
-
-impl Drop for CommandSlot<'_> {
-    fn drop(&mut self) {
-        self.in_flight.decrement(1.0);
     }
 }
 
@@ -341,6 +320,7 @@ impl std::fmt::Debug for Link {
         formatter
             .debug_struct("Link")
             .field("server", &self.server)
+            .field("command_timeout", &self.command_timeout)
             .finish_non_exhaustive()
     }
 }
@@ -449,6 +429,7 @@ impl Link {
             tokio::spawn(supervise(exit, client, password_file, command_timeout)).abort_handle();
         Self {
             server,
+            command_timeout,
             shared,
             application_slots: Semaphore::new(APPLICATION_SLOTS),
             probe_slots: Semaphore::new(PROBE_SLOTS),
@@ -510,10 +491,10 @@ impl Link {
         }
     }
 
-    pub(crate) async fn probe(&self, command_timeout: Duration) -> Result<(), ErrorType> {
+    pub(crate) async fn probe(&self) -> Result<(), ErrorType> {
         let _slot = self.claim_slot(&self.probe_slots)?;
         let generation = self.shared.acquire().await?;
-        let budget = command_timeout.max(CONNECTED_PROBE_MIN_BUDGET);
+        let budget = self.command_timeout.max(CONNECTED_PROBE_MIN_BUDGET);
         let reservation = reply_until(&generation.retired, generation.reserve(), || {
             Deadline::new(Instant::now(), budget)
         })
@@ -549,16 +530,21 @@ impl Link {
         reply.map_err(|error| error_type(&error))
     }
 
-    fn claim_slot<'a>(&'a self, slots: &'a Semaphore) -> Result<CommandSlot<'a>, ErrorType> {
+    fn claim_slot<'a>(
+        &'a self,
+        slots: &'a Semaphore,
+    ) -> Result<
+        std::mem::DropGuard<SemaphorePermit<'a>, impl FnOnce(SemaphorePermit<'a>) + 'a>,
+        ErrorType,
+    > {
         let permit = slots.try_acquire().map_err(|_| {
             self.admission_refused.increment(1);
             ErrorType::Other
         })?;
         self.commands_in_flight.increment(1.0);
-        Ok(CommandSlot {
-            _permit: permit,
-            in_flight: &self.commands_in_flight,
-        })
+        Ok(std::mem::DropGuard::new(permit, |_permit| {
+            self.commands_in_flight.decrement(1.0);
+        }))
     }
 }
 
@@ -702,10 +688,8 @@ async fn run_supervisor(
                 let mut drain = std::pin::pin!(drain_abandoned_replies(replies));
                 // Withdraw the generation before the drain releases its
                 // reservations, including on unwind.
-                let _retire = RetireOnDrop {
-                    shared,
-                    generation: &generation,
-                };
+                let _retire =
+                    std::mem::DropGuard::new(&generation, |generation| shared.retire(generation));
                 tokio::select! {
                     biased;
                     () = maintain(server, &generation, rotation, command_timeout) => {}

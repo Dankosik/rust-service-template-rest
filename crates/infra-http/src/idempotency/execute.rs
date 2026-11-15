@@ -1,5 +1,6 @@
 use std::fmt;
 use std::future::Future;
+use std::mem::DropGuard;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -158,10 +159,7 @@ impl Idempotency {
             deadline,
             outcome,
         } = self.attempt;
-        let guard = OutcomeGuard {
-            outcome: &outcome,
-            recorded: false,
-        };
+        let guard = DropGuard::new(&outcome, |outcome| outcome.record(Outcome::Abandoned));
         let attempted = match deadline.attempt_end() {
             None => Err(AttemptError::Unavailable),
             Some(attempt_end) => {
@@ -244,7 +242,11 @@ impl Answer {
         }
     }
 
-    async fn settle(self, deadline: Instant, guard: OutcomeGuard<'_>) -> Response {
+    async fn settle<'a>(
+        self,
+        deadline: Instant,
+        guard: DropGuard<&'a AttemptOutcome, impl FnOnce(&'a AttemptOutcome)>,
+    ) -> Response {
         if self.yield_to_request_timeout && Instant::now() >= deadline {
             // Let the request deadline enforced by `context::opening` produce
             // the final 504 for an expired boundary failure: it drops this
@@ -252,7 +254,7 @@ impl Answer {
             // work and replay responses bypass this wait.
             return std::future::pending().await;
         }
-        guard.record(self.outcome);
+        DropGuard::dismiss(guard).record(self.outcome);
         self.response
     }
 }
@@ -365,26 +367,6 @@ impl AttemptOutcome {
     pub(super) fn record(&self, outcome: Outcome) {
         if !self.0.swap(true, Ordering::Relaxed) {
             outcome.record();
-        }
-    }
-}
-
-struct OutcomeGuard<'a> {
-    outcome: &'a AttemptOutcome,
-    recorded: bool,
-}
-
-impl OutcomeGuard<'_> {
-    fn record(mut self, outcome: Outcome) {
-        self.recorded = true;
-        self.outcome.record(outcome);
-    }
-}
-
-impl Drop for OutcomeGuard<'_> {
-    fn drop(&mut self) {
-        if !self.recorded {
-            self.outcome.record(Outcome::Abandoned);
         }
     }
 }

@@ -6,7 +6,7 @@ use axum::http::request::Parts;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use infra_bearerauthn::{Failure, Principal, Transport, Verifier};
-use operation_context::Stopped;
+use operation_context::{OperationContext, Stopped};
 use service_failure::INSUFFICIENT_SCOPE_DETAIL;
 use utoipa::{IntoResponses, ToResponse};
 use utoipa_axum::router::OpenApiRouter;
@@ -149,50 +149,57 @@ async fn authenticate(
 async fn authenticate_protected(
     verifier: &Verifier,
     alternatives: &[Box<[String]>],
-    mut request: Request,
+    request: Request,
     next: Next,
 ) -> Response {
     let Some(context) = request.extensions().get::<crate::RequestContext>().cloned() else {
         return wiring_failure("context_missing");
     };
-    let authorization = request
-        .headers()
-        .get_all(AUTHORIZATION)
-        .iter()
-        .map(axum::http::HeaderValue::as_bytes);
-    let result = verifier
-        .authenticate_with_context(authorization, Transport::Http, context.operation())
-        .await;
+    let result = {
+        let authorization = request
+            .headers()
+            .get_all(AUTHORIZATION)
+            .iter()
+            .map(axum::http::HeaderValue::as_bytes);
+        verifier
+            .authenticate_with_context(authorization, Transport::Http, context.operation())
+            .await
+    };
+    settle_protected(context.operation(), result, alternatives, request, next).await
+}
+
+async fn settle_protected(
+    operation: &OperationContext,
+    result: Result<Principal, Failure>,
+    alternatives: &[Box<[String]>],
+    mut request: Request,
+    next: Next,
+) -> Response {
     // The opening deadline or cancellation wins over the verifier's
-    // unavailable result, the scope check, and handler start: a stopped
-    // request answers 504 (deadline) or 503 (cancelled) and never reaches the
-    // handler. Each check follows a step that can outlive the cutoff.
-    if let Some(stopped) = context.operation().stopped() {
+    // unavailable result and handler start: a stopped request answers 504
+    // (deadline) or 503 (cancelled) and never reaches the handler.
+    if let Some(stopped) = operation.stopped() {
         return stopped_response(stopped);
     }
     let principal = match result {
         Ok(principal) => principal,
         Err(failure) => return failure_response(failure),
     };
-    let granted = grants_any(alternatives, &principal);
-    if let Some(stopped) = context.operation().stopped() {
-        return stopped_response(stopped);
-    }
-    if !granted {
+    if !grants_any(alternatives, &principal) {
         return insufficient_scope_response();
+    }
+    if let Some(stopped) = operation.stopped() {
+        return stopped_response(stopped);
     }
     request.headers_mut().remove(AUTHORIZATION);
     request.extensions_mut().insert(principal);
-    if let Some(stopped) = context.operation().stopped() {
-        return stopped_response(stopped);
-    }
     next.run(request).await
 }
 
 fn stopped_response(stopped: Stopped) -> Response {
     match stopped {
         Stopped::Deadline => crate::context::budget_expired_response(),
-        Stopped::Cancelled => failure_response(Failure::Unavailable),
+        Stopped::Cancelled => crate::context::cancelled_response(),
     }
 }
 
@@ -281,4 +288,55 @@ pub enum ProtectedOperationProblemResponses {
     Unavailable(#[ref_response] AuthenticationUnavailable),
     #[response(status = 504)]
     Timeout(#[ref_response] GatewayTimeout),
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use axum::body::Body;
+    use axum::http::StatusCode;
+    use axum::http::header::CONTENT_TYPE;
+    use http_body_util::BodyExt as _;
+    use tower::ServiceExt as _;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn cancelled_operation_context_answers_service_unavailable_not_authentication_unavailable()
+     {
+        let reached_handler = Arc::new(AtomicBool::new(false));
+        let handler_flag = Arc::clone(&reached_handler);
+        let context = OperationContext::unbounded();
+        context.cancellation().cancel();
+
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
+        )]
+        let app = Router::new()
+            .route(
+                "/",
+                axum::routing::get(move || async move {
+                    handler_flag.store(true, Ordering::SeqCst);
+                    StatusCode::OK
+                }),
+            )
+            .layer(middleware::from_fn(move |request, next| {
+                let context = context.clone();
+                async move {
+                    settle_protected(&context, Err(Failure::Unavailable), &[], request, next).await
+                }
+            }));
+
+        let response = app.oneshot(Request::new(Body::empty())).await.unwrap();
+        assert!(!reached_handler.load(Ordering::SeqCst));
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(!response.headers().contains_key(WWW_AUTHENTICATE));
+        assert_eq!(response.headers()[CONTENT_TYPE], "application/problem+json");
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let problem: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(problem["code"], "service_unavailable");
+    }
 }

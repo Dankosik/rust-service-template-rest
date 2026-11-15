@@ -1028,12 +1028,9 @@ fn tls_health_and_http_share_the_example_sigterm_lifecycle() {
         "process echo"
     );
     // The handling time is a histogram, as grpc-ecosystem dashboards query it.
-    let metrics = ureq::get(&format!("http://{diagnostics}/metrics"))
-        .call()
-        .expect("metrics scrape")
-        .into_body()
-        .read_to_string()
-        .expect("metrics text");
+    let (status, metrics) =
+        common::get(&format!("http://{diagnostics}/metrics")).expect("metrics scrape");
+    assert_eq!(status, 200);
     assert!(
         metrics.contains(
             r#"grpc_server_handling_seconds_bucket{grpc_service="example.v1.EchoService",grpc_method="Unary",le="0.005"}"#

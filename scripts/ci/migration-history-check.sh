@@ -170,6 +170,44 @@ HOOK
 		echo "self-test: secondary migration did not reach the linter" >&2
 		exit 1
 	}
+
+	local bounds="${fixture}/bounds-repo"
+	git -C "${fixture}" init -q "${bounds}"
+	git -C "${bounds}" config user.name migration-history
+	git -C "${bounds}" config user.email migration-history@example.invalid
+	mkdir -p "${bounds}/migrations"
+	printf '# empty baseline\n' >"${bounds}/migrations/README.md"
+	git -C "${bounds}" add .
+	git -C "${bounds}" commit -qm empty-baseline
+	run_bounds() { env -u BASE_REF -u MIGRATION_DIR "MIGRATION_REPO_ROOT=${bounds}" "MIGRATION_LINTER=${linter}" bash "${script}"; }
+
+	printf 'SELECT 0;\n' >"${bounds}/migrations/0_init.sql"
+	run_bounds >/dev/null || {
+		echo "self-test: initial 0_init.sql on an empty base failed" >&2
+		exit 1
+	}
+	printf 'SELECT 1;\n' >"${bounds}/migrations/01_a.sql"
+	printf 'SELECT 1;\n' >"${bounds}/migrations/1_b.sql"
+	if run_bounds >/dev/null 2>&1; then
+		echo "self-test: 01_a.sql vs 1_b.sql integer duplicate passed" >&2
+		exit 1
+	fi
+	rm "${bounds}/migrations/01_a.sql" "${bounds}/migrations/1_b.sql"
+	printf 'SELECT 1;\n' >"${bounds}/migrations/9223372036854775806_near_max.sql"
+	git -C "${bounds}" add migrations/0_init.sql migrations/9223372036854775806_near_max.sql
+	git -C "${bounds}" commit -qm near-max
+	printf 'SELECT 2;\n' >"${bounds}/migrations/9223372036854775807_i64_max.sql"
+	run_bounds >/dev/null || {
+		echo "self-test: 19-digit i64::MAX migration after i64::MAX-1 failed" >&2
+		exit 1
+	}
+	rm "${bounds}/migrations/9223372036854775807_i64_max.sql"
+	printf 'SELECT 3;\n' >"${bounds}/migrations/9223372036854775808_overflow.sql"
+	if run_bounds >/dev/null 2>&1; then
+		echo "self-test: > i64::MAX migration version passed" >&2
+		exit 1
+	fi
+	rm "${bounds}/migrations/9223372036854775808_overflow.sql"
 	echo "migration history self-test passed"
 }
 
@@ -252,35 +290,75 @@ if [[ -s ${temporary}/refused ]]; then
 	exit 1
 fi
 
-migration_versions() {
-	local file name
-	while IFS= read -r -d '' file; do
-		if is_migration "${file}"; then
-			name=${file##*/}
-			printf '%s\t%q\n' "${name%%_*}" "${file}"
-		fi
-	done
-}
-prior_max=$(
-	git ls-tree -r --name-only -z "${base}" -- "${migration_dir}/" | migration_versions |
-		LC_ALL=C awk '$1 + 0 > max { max = $1 + 0 } END { print max + 0 }'
-)
+git ls-tree -r --name-only -z "${base}" -- "${migration_dir}/" >"${temporary}/base"
 if [[ ${include_untracked} == true ]]; then
 	git ls-files -z --others --exclude-standard -- "${migration_dir}/" >>"${temporary}/added"
 fi
-migration_versions <"${temporary}/added" >"${temporary}/versions"
-out_of_order=$(LC_ALL=C awk -F'\t' -v max="${prior_max}" '$1 + 0 <= max { print $2 }' "${temporary}/versions")
-if [[ -n ${out_of_order} ]]; then
-	echo "migration history: new migrations must be newer than prior version ${prior_max} (${scope})" >&2
-	printf '%s\n' "${out_of_order}" >&2
-	exit 1
-fi
-duplicates=$(LC_ALL=C awk -F'\t' 'seen[$1]++ { print $1 }' "${temporary}/versions")
-if [[ -n ${duplicates} ]]; then
-	echo "migration history: new migration versions must be unique (${scope})" >&2
-	printf '%s\n' "${duplicates}" >&2
-	exit 1
-fi
+env -u PYTHONPATH -u PYTHONHOME PYTHONDONTWRITEBYTECODE=1 python3 -B - "${temporary}/base" "${temporary}/added" "${scope}" <<'PY'
+import os
+import re
+import shlex
+import sys
+from pathlib import Path
+
+MAX_I64 = (1 << 63) - 1
+MIGRATION_RE = re.compile(r"^([0-9]+)_.+\.sql$")
+
+base_path, added_path, scope = sys.argv[1], sys.argv[2], sys.argv[3]
+
+
+def read_entries(path: str) -> list[tuple[int, str]]:
+    raw = Path(path).read_bytes()
+    seen_paths: set[bytes] = set()
+    entries: list[tuple[int, str]] = []
+    for item in raw.split(b"\0"):
+        if not item or item in seen_paths:
+            continue
+        seen_paths.add(item)
+        text = os.fsdecode(item)
+        name = text.rsplit("/", 1)[-1]
+        match = MIGRATION_RE.match(name)
+        if not match:
+            continue
+        entries.append((int(match.group(1), 10), text))
+    return entries
+
+
+base_entries = read_entries(base_path)
+added_entries = read_entries(added_path)
+
+overflow = [path for ver, path in (*base_entries, *added_entries) if not (0 <= ver <= MAX_I64)]
+if overflow:
+    print(
+        f"migration history: migration version must fit in signed 64-bit integer 0..={MAX_I64} ({scope})",
+        file=sys.stderr,
+    )
+    for path in overflow:
+        print(shlex.quote(path), file=sys.stderr)
+    sys.exit(1)
+
+prior_max = max((ver for ver, _ in base_entries), default=None)
+if prior_max is not None:
+    out_of_order = [path for ver, path in added_entries if ver <= prior_max]
+    if out_of_order:
+        print(
+            f"migration history: new migrations must be newer than prior version {prior_max} ({scope})",
+            file=sys.stderr,
+        )
+        for path in out_of_order:
+            print(shlex.quote(path), file=sys.stderr)
+        sys.exit(1)
+
+by_version: dict[int, list[str]] = {}
+for ver, path in added_entries:
+    by_version.setdefault(ver, []).append(path)
+duplicates = {ver: paths for ver, paths in by_version.items() if len(paths) > 1}
+if duplicates:
+    print(f"migration history: new migration versions must be unique ({scope})", file=sys.stderr)
+    for ver in sorted(duplicates):
+        print(f"{ver}\t" + " ".join(shlex.quote(p) for p in duplicates[ver]), file=sys.stderr)
+    sys.exit(1)
+PY
 
 echo "migration history is append-only (${scope})"
 

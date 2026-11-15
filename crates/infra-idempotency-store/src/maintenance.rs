@@ -77,6 +77,7 @@ impl Store {
                 cancel,
                 CLEANUP_BATCH_ROWS,
                 CLEANUP_REMOVED_METRIC,
+                "http_idempotency_cleanup_failed",
                 Self::delete_expired_batch,
             )
             .await

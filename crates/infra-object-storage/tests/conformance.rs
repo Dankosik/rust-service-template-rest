@@ -112,30 +112,38 @@ impl Target {
             );
         config = match &self.provider {
             Provider::AmazonS3 { region, .. } => {
-                config.region(aws_sdk_s3::config::Region::new(region.clone()))
+                let region = region.trim();
+                config.region(aws_sdk_s3::config::Region::new(region.to_owned()))
             }
             Provider::CloudflareR2 { endpoint } => config
                 .region(aws_sdk_s3::config::Region::new("auto"))
                 .endpoint_url(endpoint),
-            Provider::Railway { endpoint, region } | Provider::Local { endpoint, region } => config
-                .region(aws_sdk_s3::config::Region::new(if region.is_empty() {
-                    "auto".to_owned()
-                } else {
-                    region.clone()
-                }))
-                .endpoint_url(endpoint),
+            Provider::Railway { endpoint, region } => {
+                let region = region.trim();
+                config
+                    .region(aws_sdk_s3::config::Region::new(if region.is_empty() {
+                        "auto".to_owned()
+                    } else {
+                        region.to_owned()
+                    }))
+                    .endpoint_url(endpoint)
+            }
             Provider::S3Compatible {
                 endpoint,
                 region,
                 path_style,
-            } => config
-                .region(aws_sdk_s3::config::Region::new(if region.is_empty() {
-                    "us-east-1".to_owned()
-                } else {
-                    region.clone()
-                }))
-                .force_path_style(*path_style)
-                .endpoint_url(endpoint),
+            } => {
+                let region = region.trim();
+                config
+                    .region(aws_sdk_s3::config::Region::new(if region.is_empty() {
+                        "us-east-1".to_owned()
+                    } else {
+                        region.to_owned()
+                    }))
+                    .force_path_style(*path_style)
+                    .endpoint_url(endpoint)
+            }
+            Provider::Local { .. } => unreachable!("Target::from_env rejects local"),
         };
         aws_sdk_s3::Client::from_conf(config.build())
     }

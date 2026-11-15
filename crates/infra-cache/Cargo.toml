@@ -38,7 +38,7 @@ shared-rules = { workspace = true }
 socket2 = { workspace = true, features = ["all"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "net", "rt", "sync", "time"] }
-tokio-util = { workspace = true, features = ["rt"] }
+tokio-util = { workspace = true }
 tracing = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
@@ -48,7 +48,8 @@ tracing-subscriber = { workspace = true, features = ["std", "fmt", "registry"] }
 base64 = { workspace = true, features = ["std"] }
 metrics-exporter-prometheus = { workspace = true }
 pem = { workspace = true }
-rcgen = { workspace = true, features = ["aws_lc_rs"] }
+rcgen = { workspace = true, features = ["pem", "aws_lc_rs"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "test-util", "time"] }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }
+tokio-util = { workspace = true, features = ["rt"] }

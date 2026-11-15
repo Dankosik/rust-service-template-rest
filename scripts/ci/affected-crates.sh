@@ -30,15 +30,19 @@ join_sorted() {
 
 package_name() {
 	local manifest=$1
-	awk '
-		/^\[/ { in_package = ($0 == "[package]") }
-		in_package && $1 == "name" {
-			sub(/^[^=]*=[[:space:]]*"/, "")
-			sub(/".*$/, "")
-			print
-			exit
-		}
-	' "${manifest}"
+	env -u PYTHONPATH -u PYTHONHOME PYTHONDONTWRITEBYTECODE=1 python3 -B - "${manifest}" <<'PY'
+import sys
+import tomllib
+from pathlib import Path
+
+try:
+    data = tomllib.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+    sys.exit(0)
+name = data.get("package", {}).get("name")
+if isinstance(name, str) and name:
+    print(name)
+PY
 }
 
 self_test() (
@@ -49,27 +53,30 @@ self_test() (
 	cp "${ROOT_DIR}/scripts/ci/affected-crates.sh" "${fixture}/scripts/ci/"
 	script=${fixture}/scripts/ci/affected-crates.sh
 	cd "${fixture}"
-	printf '[workspace]\nresolver = "2"\nmembers = ["crates/*"]\n' >Cargo.toml
-	# leaf <- mid <- (dev) top; leaf <- extra; leaf <- cfg (named fixture-config); alone
+	printf '[workspace]\nresolver = "2"\nmembers = ["crates/*", "test"]\n' >Cargo.toml
+	# leaf <- mid <- (dev) top; leaf <- extra; leaf <- cfg (named fixture-config); leaf <- integration-tests; alone
 	for crate in leaf mid top extra cfg alone; do
 		mkdir -p "crates/${crate}/src"
 		: >"crates/${crate}/src/lib.rs"
 	done
+	mkdir -p test/src
+	: >test/src/lib.rs
 	printf '[package]\nname = "leaf"\nversion = "0.1.0"\nedition = "2021"\n' >crates/leaf/Cargo.toml
 	printf '[package]\nname = "mid"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\nleaf = { path = "../leaf" }\n' >crates/mid/Cargo.toml
 	printf '[package]\nname = "top"\nversion = "0.1.0"\nedition = "2021"\n\n[dev-dependencies]\nmid = { path = "../mid" }\n' >crates/top/Cargo.toml
 	printf '[package]\nname = "extra"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\nleaf = { path = "../leaf" }\n' >crates/extra/Cargo.toml
-	printf '[package]\nname = "fixture-config"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\nleaf = { path = "../leaf" }\n' >crates/cfg/Cargo.toml
+	printf '[package] # inline comment\nname = '\''fixture-config'\''\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\nleaf = { path = "../leaf" }\n' >crates/cfg/Cargo.toml
 	printf '[package]\nname = "alone"\nversion = "0.1.0"\nedition = "2021"\n' >crates/alone/Cargo.toml
+	printf '[package]\nname = "integration-tests"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\nleaf = { path = "../crates/leaf" }\n' >test/Cargo.toml
 	cargo generate-lockfile --offline --quiet
 
-	output=$(printf '%s\n' README.md crates/leaf/README.md | bash "${script}")
+	output=$(printf '%s\n' README.md crates/leaf/README.md test/README.md | bash "${script}")
 	grep -qx 'changed_packages=' <<<"${output}"
 	grep -qx 'lint_packages=' <<<"${output}"
 	grep -qx 'test_packages=' <<<"${output}"
 	grep -qx 'fallback=false' <<<"${output}"
 
-	for file in Cargo.toml Cargo.lock rust-toolchain.toml crates/leaf/Cargo.toml; do
+	for file in Cargo.toml Cargo.lock rust-toolchain.toml crates/leaf/Cargo.toml test/Cargo.toml; do
 		output=$(printf '%s\n' "${file}" | bash "${script}")
 		grep -qx 'fallback=true' <<<"${output}"
 		grep -qx 'fallback_reason=workspace_manifest' <<<"${output}"
@@ -101,6 +108,14 @@ self_test() (
 	grep -qx 'changed_packages=alone mid' <<<"${output}"
 	grep -qx 'lint_packages=alone mid' <<<"${output}"
 	grep -qx 'test_packages=alone mid' <<<"${output}"
+
+	for file in test/src/lib.rs test/tests/postgres.rs test/examples/actor.rs test/fixtures/schema.sql; do
+		output=$(printf '%s\n' "${file}" | bash "${script}")
+		grep -qx 'changed_packages=integration-tests' <<<"${output}"
+		grep -qx 'lint_packages=integration-tests' <<<"${output}"
+		grep -qx 'test_packages=integration-tests' <<<"${output}"
+		grep -qx 'fallback=false' <<<"${output}"
+	done
 
 	output=$(printf '%s\n' crates/leaf/src/lib.rs | bash "${script}")
 	grep -qx 'changed_packages=leaf' <<<"${output}"
@@ -158,7 +173,7 @@ test_only_list=${tmp}/test-only
 while IFS= read -r file; do
 	[[ -n ${file} ]] || continue
 	case "${file}" in
-	Cargo.toml | Cargo.lock | rust-toolchain.toml | crates/*/Cargo.toml) fall_back workspace_manifest ;;
+	Cargo.toml | Cargo.lock | rust-toolchain.toml | crates/*/Cargo.toml | test/Cargo.toml) fall_back workspace_manifest ;;
 	esac
 	case "${file}" in
 	crates/*/src/* | crates/*/tests/* | crates/*/*.rs)
@@ -171,6 +186,18 @@ while IFS= read -r file; do
 		printf '%s\n' "${package}" >>"${changed_list}"
 		case "${file}" in
 		crates/*/tests/*) printf '%s\n' "${package}" >>"${test_only_list}" ;;
+		*) printf '%s\n' "${package}" >>"${production_list}" ;;
+		esac
+		;;
+	test/*.md) ;;
+	test/*)
+		manifest=test/Cargo.toml
+		[[ -f ${manifest} ]] || fall_back missing_manifest
+		package=$(package_name "${manifest}")
+		[[ -n ${package} ]] || fall_back missing_manifest
+		printf '%s\n' "${package}" >>"${changed_list}"
+		case "${file}" in
+		test/tests/*) printf '%s\n' "${package}" >>"${test_only_list}" ;;
 		*) printf '%s\n' "${package}" >>"${production_list}" ;;
 		esac
 		;;

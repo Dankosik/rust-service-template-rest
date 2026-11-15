@@ -12,6 +12,7 @@ import urllib.request
 MCP_URL = 'http://127.0.0.1:6771/mcp'
 MCP_TOKEN = 'profiling-ci-only'
 TOOLS = ('profiler_status', 'server', 'functions_timing', 'mutexes')
+LOOPBACK = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 def mcp_receipt():
@@ -30,7 +31,7 @@ def mcp_receipt():
         if session:
             headers['Mcp-Session-Id'] = session
         request = urllib.request.Request(MCP_URL, json.dumps(payload).encode(), headers, method='POST')
-        with urllib.request.urlopen(request, timeout=15) as response:
+        with LOOPBACK.open(request, timeout=15) as response:
             session = response.headers.get('Mcp-Session-Id', session)
             if notification or response.status == 202:
                 return None
@@ -96,7 +97,7 @@ with (evidence / 'service.log').open('wb') as log:
             if server.poll() is not None:
                 raise RuntimeError(f'profile service exited early: {server.returncode}')
             try:
-                with urllib.request.urlopen('http://127.0.0.1:8080/health/ready', timeout=1) as response:
+                with LOOPBACK.open('http://127.0.0.1:8080/health/ready', timeout=1) as response:
                     if response.status == 200:
                         break
             except OSError:
@@ -106,7 +107,7 @@ with (evidence / 'service.log').open('wb') as log:
             raise RuntimeError('profile service readiness timeout')
         request = urllib.request.Request(MCP_URL, b'{}', {'Content-Type': 'application/json'}, method='POST')
         try:
-            urllib.request.urlopen(request, timeout=3)
+            LOOPBACK.open(request, timeout=3)
         except urllib.error.HTTPError as error:
             assert error.code == 401, error.code
         else:

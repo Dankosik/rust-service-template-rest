@@ -29,8 +29,8 @@ use infra_http::idempotency::{
 use infra_http::problem::SANITIZED_DETAIL;
 use infra_http::{Code, HardenOptions, Problem, REQUEST_ID_HEADER, VerifiedPrincipal, harden};
 use infra_idempotency_store::Store;
-use infra_postgres::{Dsn, PgPool};
-use integration_tests::{DATABASE_URL, dsn_for, url_for};
+use infra_postgres::PgPool;
+use integration_tests::dsn_for;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusRecorder};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
@@ -38,13 +38,14 @@ use serde_json::{Value, json};
 use sqlx::Executor as _;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::task::{JoinError, JoinSet};
 use tokio::time::Instant;
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::rustls::crypto::aws_lc_rs;
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
-use tokio_util::sync::CancellationToken;
-use tokio_util::task::TaskTracker;
+use tokio_util::sync::{CancellationToken, DropGuard};
+use tokio_util::task::AbortOnDropHandle;
 use utoipa::ToSchema;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
@@ -309,7 +310,8 @@ struct Provider {
     requests: Arc<AtomicUsize>,
     held: Arc<tokio::sync::Notify>,
     cancel: CancellationToken,
-    tasks: TaskTracker,
+    _cancel_guard: DropGuard,
+    task: AbortOnDropHandle<()>,
 }
 
 impl Provider {
@@ -321,14 +323,13 @@ impl Provider {
         let material = TlsMaterial::new(FIXTURE_HOST);
         let acceptor = TlsAcceptor::from(Arc::new(tls_config(&material)));
         let cancel = CancellationToken::new();
-        let tasks = TaskTracker::new();
+        let cancel_guard = cancel.clone().drop_guard();
         let requests = Arc::new(AtomicUsize::new(0));
         let held = Arc::new(tokio::sync::Notify::new());
-        tasks.spawn(serve(
+        let task = tokio::spawn(serve(
             listener,
             acceptor,
             cancel.clone(),
-            tasks.clone(),
             requests.clone(),
             held.clone(),
         ));
@@ -338,7 +339,8 @@ impl Provider {
             requests,
             held,
             cancel,
-            tasks,
+            _cancel_guard: cancel_guard,
+            task: AbortOnDropHandle::new(task),
         }
     }
 
@@ -370,10 +372,22 @@ impl Provider {
         .expect("the introspection verifier")
     }
 
-    async fn stop(self) {
+    async fn stop(mut self) {
         self.cancel.cancel();
-        self.tasks.close();
-        bounded("the provider's tasks to join", self.tasks.wait()).await;
+        let result = tokio::time::timeout(WAIT, &mut self.task).await;
+        if result.is_err() {
+            self.task.abort();
+            let _ = (&mut self.task).await;
+        }
+        propagate_provider_panic(result.expect("the provider's tasks to join"));
+    }
+}
+
+fn propagate_provider_panic(result: Result<(), JoinError>) {
+    if let Err(err) = result
+        && err.is_panic()
+    {
+        std::panic::resume_unwind(err.into_panic());
     }
 }
 
@@ -393,27 +407,34 @@ async fn serve(
     listener: TcpListener,
     acceptor: TlsAcceptor,
     cancel: CancellationToken,
-    tasks: TaskTracker,
     requests: Arc<AtomicUsize>,
     held: Arc<tokio::sync::Notify>,
 ) {
+    let mut connections = JoinSet::new();
     loop {
-        let socket = tokio::select! {
-            () = cancel.cancelled() => return,
-            accepted = listener.accept() => match accepted {
-                Ok((socket, _)) => socket,
-                Err(_) => return,
-            },
-        };
-        let acceptor = acceptor.clone();
-        let cancel = cancel.clone();
-        let requests = requests.clone();
-        let held = held.clone();
-        tasks.spawn(async move {
-            cancel
-                .run_until_cancelled(answer(&acceptor, socket, &requests, &held))
-                .await;
-        });
+        tokio::select! {
+            () = cancel.cancelled() => break,
+            Some(result) = connections.join_next(), if !connections.is_empty() => {
+                propagate_provider_panic(result);
+            }
+            accepted = listener.accept() => {
+                let Ok((socket, _)) = accepted else {
+                    break;
+                };
+                let acceptor = acceptor.clone();
+                let cancel = cancel.clone();
+                let requests = requests.clone();
+                let held = held.clone();
+                connections.spawn(async move {
+                    cancel
+                        .run_until_cancelled(answer(&acceptor, socket, &requests, &held))
+                        .await;
+                });
+            }
+        }
+    }
+    while let Some(result) = connections.join_next().await {
+        propagate_provider_panic(result);
     }
 }
 
@@ -1741,23 +1762,7 @@ async fn uncertain_commit(pool: PgPool, fault: Fault) {
     let recorder = PrometheusBuilder::new().build_recorder();
     let _local = metrics::set_default_local_recorder(&recorder);
     create_widgets(&pool).await;
-    let dsn = dsn_for(&pool).await;
-    assert_eq!(dsn.ssl_mode_name(), "disable", "the proxy frames plaintext");
-    let host = dsn.host().trim_start_matches('[').trim_end_matches(']');
-    let address = bounded(
-        "resolve the database",
-        tokio::net::lookup_host((host, dsn.port())),
-    )
-    .await
-    .expect("the database address resolves")
-    .next()
-    .expect("the database has an address");
-    let proxy = CommitProxy::start(address).await;
-    let mut url = url_for(&pool, DATABASE_URL).await;
-    url.set_ip_host(proxy.address().ip()).expect("the proxy IP");
-    url.set_port(Some(proxy.address().port()))
-        .expect("the proxy port");
-    let proxied = Dsn::admit(url.as_str()).expect("the proxied DSN is admitted");
+    let (proxy, proxied) = CommitProxy::start_for(&pool).await;
     let mounted = Mounted::new(template_pool(&proxied, 4).await, BUDGET).await;
     let input = json!({"name": "gizmo", "color": "red"});
 

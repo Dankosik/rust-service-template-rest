@@ -58,6 +58,21 @@ comparison require updated producers and workers. Existing JSONB-only rows
 retain their stored representation, including any normalization that already
 occurred.
 <!-- template:end jobs:migrations-readme-jobs -->
+<!-- template:begin inbound-webhooks:migrations-readme-inbound-webhooks -->
+The inbound webhooks pack creates `webhook_receipts` in
+`20260926022945_create_webhook_receipts.sql` with digest-backed identity and
+payload columns, and cuts over to exact native receipt custody in
+`20260926130000_native_webhook_receipts.sql`. The cutover migration takes
+`LOCK TABLE webhook_receipts IN ACCESS EXCLUSIVE MODE`, refuses duplicate
+`(endpoint_id COLLATE "C", message_id)` rows, switches `endpoint_id` to `C`
+collation, adds `received_at timestamptz NOT NULL DEFAULT now()`, promotes
+`(endpoint_id, message_id)` (`webhook_receipts_exact_identity`) to the primary
+key while dropping `identity_hash` and `body_sha256`, and indexes `received_at`
+for retention pruning. Stop pre-cutover receivers before running
+`20260926130000_native_webhook_receipts.sql` and keep old receivers stopped
+during and after cutover; neither the service nor worker alters schema at
+runtime.
+<!-- template:end inbound-webhooks:migrations-readme-inbound-webhooks -->
 
 Rules enforced by `cargo test -p migrate` over the embedded set and by
 `make migration-check` over the change:

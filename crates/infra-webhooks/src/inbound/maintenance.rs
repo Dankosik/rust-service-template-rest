@@ -48,6 +48,7 @@ impl Receiver {
                 cancel,
                 CLEANUP_BATCH_ROWS,
                 CLEANUP_REMOVED_METRIC,
+                "webhook_receipt_cleanup_failed",
                 Self::delete_expired_batch,
             )
             .await

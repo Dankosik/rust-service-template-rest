@@ -271,15 +271,13 @@ enum ExchangeMode<'a> {
 
 /// One provider exchange: its client span and its duration sample. Only the
 /// configured host and port are recorded, never a path, query or credential.
-struct Exchange<'a> {
-    caller: Option<&'a OperationContext>,
+struct Exchange {
     operation: &'static str,
     started: Instant,
     span: tracing::Span,
-    finished: bool,
 }
 
-impl<'a> Exchange<'a> {
+impl Exchange {
     fn start(operation: &'static str, method: &'static str, url: &Url) -> Self {
         let span = tracing::info_span!(
             "authn_provider",
@@ -294,30 +292,40 @@ impl<'a> Exchange<'a> {
             otel.status_code = tracing::field::Empty,
         );
         Self {
-            caller: None,
             operation,
             started: Instant::now(),
             span,
-            finished: false,
         }
     }
 
     async fn run(
-        mut self,
+        self,
         request: reqwest::RequestBuilder,
-        mode: ExchangeMode<'a>,
+        mode: ExchangeMode<'_>,
     ) -> Result<Vec<u8>, ProviderFailure> {
+        let span = self.span.clone();
+        let caller = match mode {
+            ExchangeMode::Introspection(context) => Some(context),
+            ExchangeMode::Document { .. } => None,
+        };
+        let guard = std::mem::DropGuard::new(self, |exchange| {
+            exchange.record(
+                &span,
+                Some(
+                    caller
+                        .and_then(OperationContext::stopped)
+                        .map_or("cancelled", stopped_label),
+                ),
+            );
+        });
         let require_json_content_type = matches!(mode, ExchangeMode::Introspection(_));
-        let receive =
-            receive(request, require_json_content_type, &self.span).instrument(self.span.clone());
+        let receive = receive(request, require_json_content_type, &span).instrument(span.clone());
         let result = match mode {
             ExchangeMode::Introspection(context) => {
-                self.caller = Some(context);
                 tokio::select! {
                     biased;
                     stopped = context.wait_stopped() => {
-                        self.finished = true;
-                        self.record(Some(stopped_label(stopped)));
+                        std::mem::DropGuard::dismiss(guard).record(&span, Some(stopped_label(stopped)));
                         return Err(ProviderFailure::Timeout);
                     }
                     () = tokio::time::sleep(PROVIDER_TIMEOUT) => Err(ProviderFailure::Timeout),
@@ -331,19 +339,17 @@ impl<'a> Exchange<'a> {
                 .unwrap_or(Err(ProviderFailure::Timeout)),
             ExchangeMode::Document { deadline: None } => receive.await,
         };
-        self.finish(result.as_ref().err().copied());
+        std::mem::DropGuard::dismiss(guard).record(
+            &span,
+            result.as_ref().err().copied().map(ProviderFailure::label),
+        );
         result
     }
 
-    fn finish(mut self, failure: Option<ProviderFailure>) {
-        self.finished = true;
-        self.record(failure.map(ProviderFailure::label));
-    }
-
-    fn record(&self, failure: Option<&'static str>) {
+    fn record(&self, span: &tracing::Span, failure: Option<&'static str>) {
         if let Some(failure) = failure {
-            self.span.record("error.type", failure);
-            self.span.record("otel.status_code", "ERROR");
+            span.record("error.type", failure);
+            span.record("otel.status_code", "ERROR");
         }
         let outcome = failure.unwrap_or("success");
         metrics::histogram!(
@@ -352,15 +358,6 @@ impl<'a> Exchange<'a> {
             "outcome" => outcome
         )
         .record(self.started.elapsed().as_secs_f64());
-    }
-}
-
-impl Drop for Exchange<'_> {
-    fn drop(&mut self) {
-        if !self.finished {
-            let stopped = self.caller.and_then(OperationContext::stopped);
-            self.record(Some(stopped.map_or("cancelled", stopped_label)));
-        }
     }
 }
 

@@ -38,6 +38,6 @@ uuid = { workspace = true, features = ["std", "v4", "v7"] }
 
 [dev-dependencies]
 proptest = { workspace = true, features = ["std"] }
-regex = { workspace = true, features = ["std", "unicode"] }
+regex = { workspace = true, features = ["std"] }
 serde = { workspace = true, features = ["derive"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util", "macros"] }

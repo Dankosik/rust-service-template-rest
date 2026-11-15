@@ -166,7 +166,7 @@ each reopen condition.
 | Workflows | `actionlint` (host tools off); `zizmor` (`GH_TOKEN`) | — | Catches cache poisoning and unsafe triggers; `cd.yml` keeps scoped inline ignores |
 | Dockerfile | `docker buildx build --check` + `# check=error=true` | `hadolint` | Built into BuildKit; `# check=error=true` fails Railway builds too |
 | Static analysis | CodeQL Rust (`build-mode: none`, shipped code via `.github/codeql/rust.yml`) post-merge; Actions on PRs | Default setup; analyzing tests | Excluding tests and `vendor/` examples cut analysis from ~15.5 to ~7 min while keeping SQLx models |
-| Image & SBOM | Trivy container (`HIGH,CRITICAL`, `--ignore-unfixed`) + CycloneDX SBOM | `grype`/`syft`; `cargo-cyclonedx`; `trivy-action` | One container checks CVEs and emits the 194-component SBOM |
+| Image & SBOM | Trivy container (`HIGH,CRITICAL`, `--ignore-unfixed`) + CycloneDX SBOM over the verified local image ID before push | `grype`/`syft`; `cargo-cyclonedx`; `trivy-action` | One container checks CVEs and emits the 194-component SBOM |
 | Links | Offline `lychee` container (`--include-fragments`) | `cargo install` lychee; `lychee-action`; `mlc` | Offline fragment checks prevent network flakiness |
 | Test runner | `cargo-nextest` + `cargo test --doc`; `cargo test` for DB | Serial `cargo test` | Workspace `cargo test` ran 54 binaries serially in 127 s vs parallel `nextest` |
 | Runtime progress | `make runtime-progress-proof` post-merge (100 ms / 100 ms 1-CPU cgroup v2 quota, `worker_threads=1`, 90%+ occupancy + `cpu.stat` throttling + uncooperative negative control) | Unthrottled host test | Forces cheap unary traffic, uploads, stdout backpressure, and CPU load onto one worker so starvation cannot hide behind spare host cores |

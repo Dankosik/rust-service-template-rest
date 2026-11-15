@@ -47,7 +47,7 @@ tikv-jemallocator = { workspace = true }
 rlimit = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "net", "time", "sync"] }
 tokio-util = { workspace = true, features = ["rt"] }
-tracing = { workspace = true, features = ["std", "attributes"] }
+tracing = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

@@ -105,14 +105,6 @@ const CLAIM_LIKE: &str = "UPDATE background_jobs \
          claim_expires_at = statement_timestamp() + interval '30 seconds' \
      WHERE kind = $1 AND unique_key = $2 AND state = 'pending'";
 
-struct Unblock(Arc<Notify>);
-
-impl Drop for Unblock {
-    fn drop(&mut self) {
-        self.0.notify_one();
-    }
-}
-
 fn created(enqueued: Enqueued) -> JobId {
     match enqueued {
         Enqueued::Created(id) => id,
@@ -984,7 +976,7 @@ async fn e6_repeatable_read_writes_when_a_live_holder_became_terminal_after_the_
     let _holder = commit_note(&jobs, key).await;
     let snapshot = Arc::new(Notify::new());
     let go = Arc::new(Notify::new());
-    let _unblock = Unblock(Arc::clone(&go));
+    let _unblock = std::mem::DropGuard::new(Arc::clone(&go), |notify| notify.notify_one());
     let caller = spawn_snapshot_caller(
         jobs.clone(),
         Isolation::RepeatableRead,
@@ -1175,7 +1167,7 @@ async fn e6_snapshot_isolation_40001_when_a_live_job_is_inserted_after_the_snaps
         let key = format!("inserted-{}", isolation_name(isolation));
         let snapshot = Arc::new(Notify::new());
         let go = Arc::new(Notify::new());
-        let _unblock = Unblock(Arc::clone(&go));
+        let _unblock = std::mem::DropGuard::new(Arc::clone(&go), |notify| notify.notify_one());
         let caller = spawn_snapshot_caller(
             jobs.clone(),
             isolation,
@@ -1222,7 +1214,7 @@ async fn e6_repeatable_read_40001_when_a_claim_write_commits_after_the_snapshot(
     let _holder = commit_note(&jobs, key).await;
     let snapshot = Arc::new(Notify::new());
     let go = Arc::new(Notify::new());
-    let _unblock = Unblock(Arc::clone(&go));
+    let _unblock = std::mem::DropGuard::new(Arc::clone(&go), |notify| notify.notify_one());
     let caller = spawn_snapshot_caller(
         jobs.clone(),
         Isolation::RepeatableRead,
@@ -1261,7 +1253,7 @@ async fn e6_repeatable_read_inflight_claim_keeps_commit_and_rollback_oracles(poo
         let _holder = commit_note(&jobs, &key).await;
         let snapshot = Arc::new(Notify::new());
         let go = Arc::new(Notify::new());
-        let _unblock = Unblock(Arc::clone(&go));
+        let _unblock = std::mem::DropGuard::new(Arc::clone(&go), |notify| notify.notify_one());
         let action = if commits {
             AfterSnapshot::Serialization
         } else {
@@ -1396,7 +1388,7 @@ async fn e6_compare_live_payload_keeps_the_live_key_locked_until_commit(pool: Pg
     let _holder = commit_note(&jobs, &key).await;
     let compared = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
-    let _unblock = Unblock(Arc::clone(&release));
+    let _unblock = std::mem::DropGuard::new(Arc::clone(&release), |notify| notify.notify_one());
     let caller = tokio::spawn({
         let jobs = jobs.clone();
         let key = key.clone();
@@ -1450,7 +1442,7 @@ async fn e6_compare_live_payload_reports_a_lost_live_key_after_duplicate(pool: P
     let _holder = commit_note(&jobs, &key).await;
     let duplicated = Arc::new(Notify::new());
     let compare = Arc::new(Notify::new());
-    let _unblock = Unblock(Arc::clone(&compare));
+    let _unblock = std::mem::DropGuard::new(Arc::clone(&compare), |notify| notify.notify_one());
     let caller = tokio::spawn({
         let jobs = jobs.clone();
         let key = key.clone();

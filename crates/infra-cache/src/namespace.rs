@@ -150,11 +150,11 @@ impl CacheNamespace {
     }
 
     fn command_scope(&self, context: &OperationContext) -> CommandScope {
-        CommandScope::under(context, self.cache.command_timeout)
+        CommandScope::under(context, self.cache.link.command_timeout)
     }
 
     fn standalone_command_scope(&self) -> CommandScope {
-        CommandScope::standalone(self.cache.command_timeout)
+        CommandScope::standalone(self.cache.link.command_timeout)
     }
 
     async fn run<T: redis::FromRedisValue + Send + 'static>(

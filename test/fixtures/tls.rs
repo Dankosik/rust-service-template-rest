@@ -9,7 +9,16 @@ use rcgen::{
 pub(crate) struct TlsMaterial {
     pub(crate) cert: Vec<u8>,
     pub(crate) key: Vec<u8>,
+    #[allow(
+        dead_code,
+        reason = "shared #[path] fixture; PEM-root callers read root_pem instead of DER root"
+    )]
     pub(crate) root: Vec<u8>,
+    #[allow(
+        dead_code,
+        reason = "shared #[path] fixture; DER-root callers read root instead of root_pem"
+    )]
+    pub(crate) root_pem: String,
 }
 
 impl TlsMaterial {
@@ -33,6 +42,7 @@ impl TlsMaterial {
             cert: certificate.der().to_vec(),
             key: leaf_key.serialize_der(),
             root: issuer.der().to_vec(),
+            root_pem: issuer.pem(),
         }
     }
 }

@@ -34,6 +34,7 @@ done <"${manifest}"
 
 # shellcheck source=tools/versions.env
 . "${manifest}"
+[[ ${GO_VERSION:-} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "GO_VERSION in ${manifest} is not X.Y.Z: ${GO_VERSION:-<unset>}"
 
 # The binary make passed in (a path under the Git common directory locally,
 # a PATH name in CI) must exist and report the pinned version.
@@ -67,7 +68,17 @@ done
 
 # Every FROM that names an image (not a stage) is pinned by digest, and the
 # builder's rust tag is the channel the workspace pins.
-channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' "${toolchain}")
+channel=$(env -u PYTHONPATH -u PYTHONHOME PYTHONDONTWRITEBYTECODE=1 python3 -B - "${toolchain}" <<'PY'
+import sys
+import tomllib
+from pathlib import Path
+
+data = tomllib.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+channel = data.get("toolchain", {}).get("channel")
+if isinstance(channel, str):
+    print(channel)
+PY
+)
 [[ -n ${channel} ]] || fail "${toolchain} declares no channel"
 stages=$(sed -n 's/^FROM .* AS \([A-Za-z0-9_-]*\)$/\1/p' "${dockerfile}")
 builder_seen=false
@@ -84,5 +95,73 @@ while IFS= read -r image; do
 done < <(sed -n 's/^FROM \([^ ]*\).*/\1/p' "${dockerfile}")
 [[ ${builder_seen} == true ]] || fail "${dockerfile} has no rust:<version> builder stage"
 echo "tools-check: ${dockerfile} defaults and base images agree with ${manifest} and ${toolchain}"
+
+# 7-day publish-age cooldown agreement across Cargo, dependency-drift, and Dependabot.
+[[ -f .cargo/config.toml ]] || fail "missing .cargo/config.toml"
+[[ -f scripts/ci/dependency-drift.sh ]] || fail "missing scripts/ci/dependency-drift.sh"
+if ! cooldown_err=$(env -u PYTHONPATH -u PYTHONHOME PYTHONDONTWRITEBYTECODE=1 python3 -B - <<'PY' 2>&1
+import re
+import sys
+import tomllib
+from pathlib import Path
+
+cargo_cfg = tomllib.loads(Path(".cargo/config.toml").read_text(encoding="utf-8"))
+cargo_age = cargo_cfg.get("registry", {}).get("global-min-publish-age")
+if cargo_age != "7 days":
+    print(f".cargo/config.toml registry.global-min-publish-age is {cargo_age!r}, expected '7 days'", file=sys.stderr)
+    sys.exit(1)
+
+drift_text = Path("scripts/ci/dependency-drift.sh").read_text(encoding="utf-8")
+drift_matches = re.findall(r"(?m)^cooldown_days=([0-9]+)$", drift_text)
+if drift_matches != ["7"]:
+    print(f"scripts/ci/dependency-drift.sh cooldown_days is {drift_matches!r}, expected ['7']", file=sys.stderr)
+    sys.exit(1)
+
+dependabot = Path(".github/dependabot.yml")
+if dependabot.is_file():
+    ecosystems = 0
+    current_cooldowns: list[str] = []
+    in_updates = False
+    in_cooldown = False
+    for raw_line in dependabot.read_text(encoding="utf-8").splitlines():
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if not raw_line.startswith(" "):
+            in_updates = stripped == "updates:"
+            in_cooldown = False
+            continue
+        if not in_updates:
+            continue
+        if re.match(r"^  -\s+package-ecosystem:", raw_line):
+            if ecosystems > 0 and current_cooldowns != ["7"]:
+                print(
+                    f".github/dependabot.yml update entry #{ecosystems} has cooldown.default-days {current_cooldowns!r}, expected ['7']",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            ecosystems += 1
+            current_cooldowns = []
+            in_cooldown = False
+        elif re.match(r"^    [A-Za-z0-9_-]+:", raw_line):
+            in_cooldown = stripped == "cooldown:"
+        elif in_cooldown:
+            match = re.match(r"^      default-days:\s*(\S+)\s*$", raw_line)
+            if match:
+                current_cooldowns.append(match.group(1).strip("\"'"))
+    if ecosystems == 0:
+        print(".github/dependabot.yml declares no package-ecosystem entries", file=sys.stderr)
+        sys.exit(1)
+    if current_cooldowns != ["7"]:
+        print(
+            f".github/dependabot.yml update entry #{ecosystems} has cooldown.default-days {current_cooldowns!r}, expected ['7']",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+PY
+); then
+	fail "${cooldown_err}"
+fi
+echo "tools-check: 7-day publish-age cooldown agrees across Cargo, dependency-drift, and Dependabot"
 
 echo "tools-check: ${manifest} passed (${#names[@]} pins)"

@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -10,7 +9,7 @@ use infra_jobs::{EnqueueOptions, Enqueued, JobKind, enqueue};
 use infra_postgres::{Dsn, PgPool, Tx};
 use integration_tests::dsn_for;
 use serde::{Deserialize, Serialize};
-use tokio::sync::Notify;
+use tokio::sync::oneshot;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct WidgetWelcome {
@@ -47,41 +46,6 @@ impl Replica {
         let store =
             Store::new(pool.clone(), Duration::from_hours(1)).expect("retention fits PostgreSQL");
         Self { pool, store }
-    }
-}
-
-struct Hold {
-    armed: std::sync::atomic::AtomicBool,
-    entered: Notify,
-    release: Notify,
-}
-
-impl Hold {
-    fn new() -> Self {
-        Self {
-            armed: std::sync::atomic::AtomicBool::new(false),
-            entered: Notify::new(),
-            release: Notify::new(),
-        }
-    }
-
-    fn arm(&self) {
-        self.armed.store(true, Ordering::SeqCst);
-    }
-
-    async fn pass(&self) {
-        if self.armed.swap(false, Ordering::SeqCst) {
-            self.entered.notify_one();
-            self.release.notified().await;
-        }
-    }
-
-    async fn entered(&self) {
-        super::bounded("the held work to enter", self.entered.notified()).await;
-    }
-
-    fn release(&self) {
-        self.release.notify_one();
     }
 }
 
@@ -252,11 +216,11 @@ async fn e3_an_in_progress_attempt_enqueues_nothing(pool: PgPool) {
     let (first, second) = replicas(&pool).await;
     let record = success(r#"{"widget":7}"#);
     let runs = AtomicUsize::new(0);
-    let hold = Hold::new();
+    let (entered_tx, entered_rx) = oneshot::channel::<()>();
+    let (release_tx, release_rx) = oneshot::channel::<()>();
     let scope = ScopeKey::from_digest(SCOPE);
     let first_caller = caller();
     let second_caller = caller();
-    hold.arm();
     let (held, ()) = tokio::join!(
         first.store.attempt(
             &scope,
@@ -265,12 +229,15 @@ async fn e3_an_in_progress_attempt_enqueues_nothing(pool: PgPool) {
             async |tx: &mut Tx<'_>| -> Committing<_> {
                 runs.fetch_add(1, Ordering::SeqCst);
                 let enqueued = enqueue_widget(tx, WIDGET).await;
-                hold.pass().await;
+                entered_tx.send(()).expect("the entered receiver waits");
+                release_rx.await.expect("the release sender sends");
                 Ok(with_enqueued(record.clone(), enqueued))
             },
         ),
         async {
-            hold.entered().await;
+            super::bounded("the held work to enter", entered_rx)
+                .await
+                .expect("the held work enters");
             let refused = second
                 .store
                 .attempt(
@@ -287,7 +254,7 @@ async fn e3_an_in_progress_attempt_enqueues_nothing(pool: PgPool) {
             std::assert_matches!(refused, Ok(Attempted::InProgress), "{refused:?}");
             assert_eq!(runs.load(Ordering::SeqCst), 1);
             assert_eq!(super::job_count(&pool).await, 0);
-            hold.release();
+            release_tx.send(()).expect("the held work waits");
         },
     );
     let (committed_record, enqueued) = committed(held);
@@ -345,10 +312,9 @@ async fn e6_a_concurrent_enqueue_waits_then_duplicate_and_both_commit(pool: PgPo
     let second_pool = second.pool.clone();
     let record = success(r#"{"widget":7}"#);
     let other = success(r#"{"widget":7,"scope":"other"}"#);
-    let hold = Arc::new(Hold::new());
-    hold.arm();
+    let (entered_tx, entered_rx) = oneshot::channel::<()>();
+    let (release_tx, release_rx) = oneshot::channel::<()>();
 
-    let first_hold = Arc::clone(&hold);
     let first_record = record.clone();
     let first_task = tokio::spawn(async move {
         first
@@ -357,15 +323,18 @@ async fn e6_a_concurrent_enqueue_waits_then_duplicate_and_both_commit(pool: PgPo
                 &ScopeKey::from_digest(SCOPE),
                 &caller(),
                 &INPUT,
-                async |tx: &mut Tx<'_>| -> Committing<_> {
+                async move |tx: &mut Tx<'_>| -> Committing<_> {
                     let enqueued = enqueue_widget(tx, WIDGET).await;
-                    first_hold.pass().await;
+                    entered_tx.send(()).expect("the entered receiver waits");
+                    release_rx.await.expect("the release sender sends");
                     Ok(with_enqueued(first_record, enqueued))
                 },
             )
             .await
     });
-    hold.entered().await;
+    super::bounded("the held work to enter", entered_rx)
+        .await
+        .expect("the held work enters");
 
     let second_record = other.clone();
     let second_task = tokio::spawn(async move {
@@ -386,7 +355,7 @@ async fn e6_a_concurrent_enqueue_waits_then_duplicate_and_both_commit(pool: PgPo
     let second_outcome = super::join_after_lock_wait(
         &pool,
         async {
-            hold.release();
+            release_tx.send(()).expect("the held work waits");
         },
         second_task,
     )

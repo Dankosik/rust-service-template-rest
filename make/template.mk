@@ -225,6 +225,14 @@ profiling-check: ## Compile the optional hotpath profiling configurations of the
 	$(CARGO) check $(CARGO_FLAGS) --manifest-path crates/service/Cargo.toml --all-targets --features hotpath
 	$(CARGO) check $(CARGO_FLAGS) --manifest-path crates/service/Cargo.toml --all-targets --features $(HOTPATH_PROFILE_FEATURES)
 	$(CARGO) tree $(CARGO_FLAGS) --manifest-path crates/service/Cargo.toml --features $(HOTPATH_PROFILE_FEATURES) -e features -i hotpath
+	@if [ -f scripts/ci/hotpath-mcp-check.py ]; then \
+		set -eu; \
+		work=$$(mktemp -d "$${TMPDIR:-/tmp}/profiling-check.XXXXXXXX"); \
+		trap 'rm -rf "$$work"' 0; trap 'exit 1' HUP INT TERM; \
+		$(CARGO) build $(CARGO_FLAGS) -p $(SERVICE_PACKAGE) --bin $(SERVICE_BIN) --features hotpath,hotpath-alloc,hotpath-mcp --message-format=json-render-diagnostics >"$$work/messages"; \
+		service=$$(python3 scripts/ci/cargo-artifact.py --manifest crates/service/Cargo.toml --name $(SERVICE_BIN) --kind bin <"$$work/messages"); \
+		python3 scripts/ci/hotpath-mcp-check.py "$$service"; \
+	fi
 
 test-package: $(filter $(TOOLS_ROOT)/%,$(CARGO_NEXTEST)) ## Run one crate's tests; requires PKG=<crate name>
 	@test -n "$(PKG)" || { echo "test-package requires PKG=<crate name>" >&2; exit 2; }
@@ -470,7 +478,7 @@ openapi-generate: ## Regenerate api/openapi/service.yaml from the Rust contract
 		work=$$(mktemp -d "$$(dirname "$(OPENAPI_FILE)")/.openapi.XXXXXXXX"); \
 		trap 'rm -rf "$$work"' 0; trap 'exit 1' HUP INT TERM; \
 		$(CARGO) build -q --workspace --bin openapi $(CARGO_FLAGS) --message-format=json-render-diagnostics >"$$work/messages"; \
-		generator=$$(python3 scripts/ci/openapi-artifact.py <"$$work/messages"); \
+		generator=$$(python3 scripts/ci/cargo-artifact.py --manifest crates/service/Cargo.toml --name openapi --kind bin <"$$work/messages"); \
 		"$$generator" >"$$work/service.yaml"; \
 		mv "$$work/service.yaml" "$(OPENAPI_FILE)"
 

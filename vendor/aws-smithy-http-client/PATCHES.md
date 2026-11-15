@@ -1,9 +1,11 @@
 # aws-smithy-http-client 1.5.1 TCP timeout propagation
 
-Upstream reviewed: 1.5.1
+Upstream reviewed: 1.5.2
 
 This release moves the AWS SDK family off the archived `pin-utils` dependency.
-The published Hyper 1.x connector still omits the configured TCP timeout.
+The published Hyper 1.x connector still omits the configured TCP timeout, and
+upstream `1.5.2` only adjusts connection-pool partitioning while still omitting
+TCP `connect_timeout` propagation in `src/client.rs`.
 The SDK retains the existing Hyper 1.x connector and its behavior version.
 
 Source: the published `aws-smithy-http-client-1.5.1.crate` archive, verified

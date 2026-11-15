@@ -57,7 +57,7 @@ impl EchoService for Echo {
         request: Request<ServerStreamRequest>,
     ) -> Result<Response<Self::ServerStreamStream>, Status> {
         let message = accepted(request.into_inner().message)?;
-        Ok(Response::new(Box::pin(tokio_stream::iter([Ok(
+        Ok(Response::new(Box::pin(futures_util::stream::iter([Ok(
             ServerStreamResponse { message },
         )]))))
     }

@@ -14,7 +14,7 @@ mod tls;
 #[path = "support/valkey_auth.rs"]
 mod valkey_auth;
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -23,7 +23,6 @@ use health::Probe;
 use infra_cache::{Cache, CacheOptions, ClientCertificate, HISTOGRAMS, Unavailable};
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
 use secrecy::SecretString;
-use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinSet;
 use tokio_rustls::TlsAcceptor;
@@ -131,41 +130,28 @@ impl Proxy {
 
     async fn restart_plain(&mut self, upstream: SocketAddr) {
         self.stop().await;
-        let listener = bind_port(self.port).await;
+        let listener = bind_port(Ipv4Addr::LOCALHOST.into(), self.port).await;
         *self = Self::spawn(listener, self.port, upstream, None);
     }
 
     async fn restart_tls(&mut self, upstream: SocketAddr, acceptor: TlsAcceptor) {
         self.stop().await;
-        let listener = bind_port(self.port).await;
+        let listener = bind_port(Ipv4Addr::LOCALHOST.into(), self.port).await;
         *self = Self::spawn(listener, self.port, upstream, Some(acceptor));
     }
 }
 
-async fn bind_port(port: u16) -> TcpListener {
+async fn bind_port(host: IpAddr, port: u16) -> TcpListener {
+    let addr = SocketAddr::new(host, port);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     loop {
-        match TcpListener::bind(("127.0.0.1", port)).await {
+        match TcpListener::bind(addr).await {
             Ok(listener) => return listener,
             Err(error) if tokio::time::Instant::now() < deadline => {
                 let _ = error;
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
-            Err(error) => panic!("rebind {port}: {error}"),
-        }
-    }
-}
-
-async fn bind_ipv6_port(port: u16) -> TcpListener {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-    loop {
-        match TcpListener::bind(("::1", port)).await {
-            Ok(listener) => return listener,
-            Err(error) if tokio::time::Instant::now() < deadline => {
-                let _ = error;
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-            Err(error) => panic!("rebind IPv6 {port}: {error}"),
+            Err(error) => panic!("rebind {addr}: {error}"),
         }
     }
 }
@@ -189,7 +175,6 @@ async fn run_proxy(
             }
         }
     }
-    connections.abort_all();
 }
 
 async fn proxy_one(mut inbound: TcpStream, upstream: SocketAddr, acceptor: Option<TlsAcceptor>) {
@@ -204,17 +189,9 @@ async fn proxy_one(mut inbound: TcpStream, upstream: SocketAddr, acceptor: Optio
             let Ok(mut inbound) = acceptor.accept(inbound).await else {
                 return;
             };
-            let _ = copy_both(&mut inbound, &mut outbound).await;
+            let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
         }
     }
-}
-
-async fn copy_both<A, B>(left: &mut A, right: &mut B) -> std::io::Result<()>
-where
-    A: AsyncRead + AsyncWrite + Unpin,
-    B: AsyncRead + AsyncWrite + Unpin,
-{
-    tokio::io::copy_bidirectional(left, right).await.map(|_| ())
 }
 
 fn tls_acceptor(material: &tls::TlsMaterial) -> TlsAcceptor {
@@ -486,7 +463,7 @@ async fn a_recovered_tls_dial_keeps_the_hostname_while_the_endpoint_changes() {
     let port = proxy.port;
     proxy.stop().await;
     proxy = Proxy::spawn(
-        bind_ipv6_port(port).await,
+        bind_port(Ipv6Addr::LOCALHOST.into(), port).await,
         port,
         upstream,
         Some(tls_acceptor(&material)),

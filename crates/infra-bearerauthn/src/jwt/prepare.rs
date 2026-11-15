@@ -495,7 +495,7 @@ mod tests {
 
     #[test]
     fn provider_telemetry_distinguishes_startup_deadline_from_abandonment() {
-        use std::{future::Future, task::Poll, time::Duration};
+        use std::time::Duration;
 
         use crate::ProviderFailure;
 
@@ -525,11 +525,7 @@ mod tests {
                     let url = format!("https://{FIXTURE_HOST}:{}/keys", address.port());
                     let url = url::Url::parse(&url).unwrap();
                     let mut pending = Box::pin(provider.get_document(&url, Document::Jwks, None));
-                    std::future::poll_fn(|cx| {
-                        assert!(pending.as_mut().poll(cx).is_pending());
-                        Poll::Ready(())
-                    })
-                    .await;
+                    assert!(futures_util::poll!(pending.as_mut()).is_pending());
                     drop(pending);
 
                     let deadline = tokio::time::Instant::now() + Duration::from_millis(100);

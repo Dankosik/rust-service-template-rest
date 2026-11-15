@@ -45,17 +45,49 @@ links_root="${harness_root}/skills"
 # design (docs/skill-authoring.md): they are model-invoked methods. Workflow
 # skills declare invocation and kind explicitly.
 read_metadata() {
-	local file=$1 line invocation_count=0 kind_count=0
+	local file=$1 line first_line='' closed=false in_metadata=false invocation_count=0 kind_count=0
 	metadata_invocation=''
 	metadata_kind=''
 	metadata_disables_model=false
-	while IFS= read -r line || [[ -n ${line} ]]; do
-		case "${line}" in
-		"  invocation: "*) metadata_invocation=${line#"  invocation: "}; ((invocation_count += 1)) ;;
-		"  kind: "*) metadata_kind=${line#"  kind: "}; ((kind_count += 1)) ;;
-		'disable-model-invocation: true') metadata_disables_model=true ;;
-		esac
-	done <"${file}"
+	IFS= read -r first_line <"${file}" || true
+	if [[ "${first_line}" != '---' ]]; then
+		metadata_invocation=model
+		metadata_kind=method
+		return 0
+	fi
+	{
+		IFS= read -r _
+		while IFS= read -r line || [[ -n ${line} ]]; do
+			if [[ "${line}" == '---' ]]; then
+				closed=true
+				break
+			fi
+			if [[ "${line}" == ' '* || "${line}" == $'\t'* ]]; then
+				[[ ${in_metadata} == true ]] || continue
+				case "${line}" in
+				"  invocation: "*)
+					metadata_invocation=${line#"  invocation: "}
+					metadata_invocation=${metadata_invocation%\"}
+					metadata_invocation=${metadata_invocation#\"}
+					((invocation_count += 1))
+					;;
+				"  kind: "*)
+					metadata_kind=${line#"  kind: "}
+					metadata_kind=${metadata_kind%\"}
+					metadata_kind=${metadata_kind#\"}
+					((kind_count += 1))
+					;;
+				esac
+			else
+				in_metadata=false
+				case "${line}" in
+				'metadata:') in_metadata=true ;;
+				'disable-model-invocation: true') metadata_disables_model=true ;;
+				esac
+			fi
+		done
+	} <"${file}"
+	[[ ${closed} == true ]] || return 1
 	if ((invocation_count == 0 && kind_count == 0)); then
 		metadata_invocation=model
 		metadata_kind=method
@@ -85,7 +117,7 @@ validate_metadata() {
 		[[ ${metadata_disables_model} == true ]] ||
 			fail "${file#"${repo}/"} must disable implicit harness invocation"
 		policy="${entry}/agents/openai.yaml"
-		[[ -f "${policy}" ]] ||
+		[[ ! -L "${entry}/agents" && ! -L "${policy}" && -f "${policy}" ]] ||
 			fail "${policy#"${repo}/"} is required for ${invocation} invocation"
 		has_exact_line '  allow_implicit_invocation: false' "${policy}" ||
 			fail "${policy#"${repo}/"} must disable implicit Codex invocation"

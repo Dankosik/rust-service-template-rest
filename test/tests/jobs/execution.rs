@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::num::NonZeroU32;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures_util::FutureExt as _;
@@ -17,9 +17,8 @@ use integration_tests::{DATABASE_URL, dsn_for, url_for};
 use serde::{Deserialize, Serialize};
 use sqlx::{AssertSqlSafe, Postgres, Row, Transaction};
 use tokio::sync::{Notify, watch};
-use tokio_util::sync::CancellationToken;
+use tokio_util::sync::{CancellationToken, DropGuard};
 use tokio_util::task::TaskTracker;
-use url::Url;
 
 use super::AttemptError;
 use super::commit_proxy::{CommitProxy, Fault};
@@ -94,13 +93,7 @@ struct EngineRun {
     started: infra_jobs::Started,
     tracker: TaskTracker,
     cancel: CancellationToken,
-}
-
-impl Drop for EngineRun {
-    fn drop(&mut self) {
-        self.cancel.cancel();
-        self.tracker.close();
-    }
+    _cancel_guard: DropGuard,
 }
 
 fn created(enqueued: Enqueued) -> infra_jobs::JobId {
@@ -146,10 +139,13 @@ fn start(pool: &PgPool, registry: infra_jobs::Kinds, workers: u32) -> EngineRun 
     let tracker = TaskTracker::new();
     let cancel = CancellationToken::new();
     let started = engine.start(&tracker, &cancel);
+    tracker.close();
+    let cancel_guard = cancel.clone().drop_guard();
     EngineRun {
         started,
         tracker,
         cancel,
+        _cancel_guard: cancel_guard,
     }
 }
 
@@ -158,27 +154,7 @@ async fn open(pool: &PgPool, workers: u32) -> PgPool {
 }
 
 async fn proxied_pool(pool: &PgPool, workers: u32) -> (CommitProxy, PgPool) {
-    let dsn = dsn_for(pool).await;
-    assert_eq!(
-        dsn.ssl_mode_name(),
-        "disable",
-        "the commit proxy frames the plaintext protocol"
-    );
-    let host = dsn.host().trim_start_matches('[').trim_end_matches(']');
-    let server = tokio::net::lookup_host((host, dsn.port()))
-        .await
-        .expect("the server address resolves")
-        .next()
-        .expect("the server has an address");
-    let proxy = CommitProxy::start(server).await;
-    let raw = std::env::var(DATABASE_URL).expect("DATABASE_URL is set");
-    let mut url = Url::parse(&raw).expect("DATABASE_URL is a URL");
-    url.set_path(dsn.database());
-    url.set_ip_host(proxy.address().ip())
-        .expect("the proxy address is a host");
-    url.set_port(Some(proxy.address().port()))
-        .expect("the proxy URL accepts a port");
-    let proxied = Dsn::admit(url.as_str()).expect("the proxied DSN is admitted");
+    let (proxy, proxied) = CommitProxy::start_for(pool).await;
     (proxy, super::template_pool(&proxied, workers).await)
 }
 
@@ -191,7 +167,6 @@ async fn prepare(pool: &PgPool) {
 
 async fn join(run: EngineRun, pools: &[&PgPool]) {
     run.cancel.cancel();
-    run.tracker.close();
     super::bounded("background tasks", run.tracker.wait()).await;
     super::close_pools(pools).await;
 }
@@ -2048,13 +2023,11 @@ async fn w4_known_result_beats_forced_release_while_its_write_waits(pool: PgPool
 async fn x5_rolled_back_generation_never_returns(pool: PgPool) {
     let jobs = open(&pool, 1).await;
     prepare(&jobs).await;
-    let drawn = Arc::new(Mutex::new(0_i64));
-    let slot = Arc::clone(&drawn);
-    let rolled = in_tx(&jobs, async move |tx| -> Result<(), AttemptError> {
-        let value: i64 = sqlx::query_scalar("SELECT nextval('background_jobs_claim_generation')")
+    let mut drawn = 0_i64;
+    let rolled = in_tx(&jobs, async |tx| -> Result<(), AttemptError> {
+        drawn = sqlx::query_scalar("SELECT nextval('background_jobs_claim_generation')")
             .fetch_one(&mut *tx)
             .await?;
-        *slot.lock().expect("generation") = value;
         Err(AttemptError::Rejected)
     })
     .await;
@@ -2063,7 +2036,6 @@ async fn x5_rolled_back_generation_never_returns(pool: PgPool) {
         Err(err) => panic!("the generation draw should roll back: {err}"),
         Ok(()) => panic!("the generation draw committed"),
     }
-    let drawn = *drawn.lock().expect("generation");
     assert!(drawn > 0);
     let id = enqueue_one(&jobs, ProbeAction::Succeed).await;
     let run = start(&jobs, probe_registry(2, DEFAULT_TIMEOUT), 1);

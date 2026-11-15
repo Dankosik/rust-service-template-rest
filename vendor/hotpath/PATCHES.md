@@ -1,8 +1,11 @@
 # hotpath 0.28.4: supported MCP dependency repair
 
-Upstream reviewed: 0.29.2
+Upstream reviewed: 0.31.2
 
-On 2026-10-26 every release through 0.29.2 still requires `rmcp ^1.4`.
+On 2026-11-15 every cooldown-eligible release through 0.31.2 still requires
+`rmcp ^1.4`; `0.31.3` (`rmcp ^3.10`, published 2026-11-14) remains inside the
+7-day publish-age cooldown while the `0.28.4` profiler-version pin stays in
+effect.
 
 This excluded dependency preserves the user's exact profiler version0.28.4.
 It is copied from the published crates.io source:

@@ -90,7 +90,6 @@ similar = { workspace = true, features = ["text"] }
 grpc-contracts = { workspace = true }
 service-failure = { workspace = true }
 tonic = { workspace = true, features = ["codegen", "channel", "tls-aws-lc"] }
-tokio-stream = { workspace = true, features = ["sync"] }
 # template:end grpc:service-grpc-example-dependencies
 # template:begin runtime-progress:service-runtime-progress-dependencies
 # The non-shipped quota example calls the adopted serializer with a finite

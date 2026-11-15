@@ -137,7 +137,7 @@ impl ObjectStorageConfig {
             app_env,
         )?;
         if self.provider == ObjectStorageProvider::CloudflareR2
-            && !matches!(self.region.as_str(), "" | "auto")
+            && !matches!(self.region.trim(), "" | "auto")
         {
             return Err(ValidationError::new(
                 "object_storage.region",

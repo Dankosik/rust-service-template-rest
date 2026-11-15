@@ -2,7 +2,7 @@ use infra_jobs::operator::{
     self, Inspection, InspectionResult, JobState, OperatorError, RecoveryTarget,
 };
 use infra_jobs::{EnqueueOptions, Enqueued, JobKind, enqueue};
-use infra_postgres::{Dsn, Isolation, PgPool, TxOptions, in_tx, in_tx_with};
+use infra_postgres::{Isolation, PgPool, TxOptions, in_tx, in_tx_with};
 use integration_tests::{DATABASE_URL, dsn_for, url_for};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -238,45 +238,34 @@ mod outbox {
 }
 // template:end outbox:test-jobs-operator-outbox
 
-#[expect(
-    clippy::disallowed_methods,
-    reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
-)]
 async fn run_operator(url: &str, args: &[&str], code: i32) -> Value {
-    use std::process::{Command, Stdio};
-    use std::time::{Duration, Instant};
+    use std::process::Stdio;
+    use std::time::Duration;
+
+    use tokio::process::Command;
 
     // Use the existing fixture's shipped run(args, register) path. A
     // one-connection pool and absent broker configuration cannot start
     // an ordinary worker, but suffice for this admitted command mode.
-    let stdout = tempfile::NamedTempFile::new().unwrap();
-    let stderr = tempfile::NamedTempFile::new().unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_jobs-worker-fixture"))
+    let child = Command::new(env!("CARGO_BIN_EXE_jobs-worker-fixture"))
         .args(args)
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("APP__POSTGRES__ENABLED", "true")
         .env("APP__POSTGRES__DSN", url)
         .env("APP__POSTGRES__MAX_CONNECTIONS", "1")
-        .stdout(Stdio::from(stdout.reopen().unwrap()))
-        .stderr(Stdio::from(stderr.reopen().unwrap()))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
         .spawn()
         .expect("the existing worker fixture starts");
-    let deadline = Instant::now() + Duration::from_secs(40);
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => tokio::time::sleep(super::POLL).await,
-            wait => {
-                let _ = child.kill();
-                let _ = child.wait();
-                panic!("operator failed to exit within its bound: {wait:?}");
-            }
-        }
-    };
-    let output = std::fs::read_to_string(stdout.path()).unwrap();
-    let diagnostic = std::fs::read_to_string(stderr.path()).unwrap();
-    assert_eq!(status.code(), Some(code), "{diagnostic}");
+    let completed = tokio::time::timeout(Duration::from_secs(40), child.wait_with_output())
+        .await
+        .expect("operator exits within its bound")
+        .expect("operator wait completes");
+    let output = String::from_utf8(completed.stdout).unwrap();
+    let diagnostic = String::from_utf8(completed.stderr).unwrap();
+    assert_eq!(completed.status.code(), Some(code), "{diagnostic}");
     assert!(!output.contains(SECRET) && !diagnostic.contains(SECRET));
     assert!(!output.contains(url) && !diagnostic.contains(url));
     let receipt: Value = serde_json::from_str(&output).expect("one JSON receipt only");
@@ -606,19 +595,7 @@ async fn concurrent_enqueue_owns_the_live_key_and_rolls_back_the_entire_redrive(
 }
 
 async fn proxied_pool(pool: &PgPool) -> (CommitProxy, PgPool) {
-    let dsn = dsn_for(pool).await;
-    assert_eq!(dsn.ssl_mode_name(), "disable");
-    let host = dsn.host().trim_start_matches('[').trim_end_matches(']');
-    let server = tokio::net::lookup_host((host, dsn.port()))
-        .await
-        .unwrap()
-        .next()
-        .unwrap();
-    let proxy = CommitProxy::start(server).await;
-    let mut url = url_for(pool, DATABASE_URL).await;
-    url.set_ip_host(proxy.address().ip()).unwrap();
-    url.set_port(Some(proxy.address().port())).unwrap();
-    let dsn = Dsn::admit(url.as_str()).unwrap();
+    let (proxy, dsn) = CommitProxy::start_for(pool).await;
     let jobs = super::template_pool(&dsn, 1).await;
     (proxy, jobs)
 }

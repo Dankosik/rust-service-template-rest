@@ -25,7 +25,7 @@ worktree_paths() {
 		tracked_paths "${base_ref}...HEAD" || return
 		tracked_paths || return
 		tracked_paths --cached || return
-		git ls-files --others --exclude-standard
+		git ls-files -z --others --exclude-standard | LC_ALL=C tr '\0' '\n'
 	} | LC_ALL=C sort -u
 }
 
@@ -62,6 +62,8 @@ self_test() {
 	grep -qx 'notes.md' <<<"${output}"
 	grep -qx 'crates/new/src/lib.rs' <<<"${output}"
 	cp "${repo}/crates/new/src/lib.rs" "${repo}/copy with space\\.rs"
+	output=$(cd "${repo}" && bash "${script}" --worktree HEAD)
+	[[ ${output} == $'copy with space\\.rs\nnotes.md' ]]
 	git -C "${repo}" add .
 	git -C "${repo}" commit -qm copy
 	output=$(cd "${repo}" && bash "${script}" --diff HEAD~1 HEAD)

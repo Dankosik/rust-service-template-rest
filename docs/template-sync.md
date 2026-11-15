@@ -234,18 +234,6 @@ adopted by sync. Reopen if a maintained tool meets this contract at lower cost.
 
 ## Validation boundary
 
-<!-- template:begin webhooks-common:docs-template-sync-webhooks -->
-## Webhook profile projection
-
-`WEBHOOKS` (`--webhooks`, `none` | `durable`) and `INBOUND_WEBHOOKS`
-(`--inbound-webhooks`, `none` | `standard-webhooks`) default to `none`; both
-require `DATABASE=postgres` and `JOBS=postgres`, and outbound additionally
-requires `OUTBOUND_HTTP=bounded`. Retained capabilities are runtime-inert until
-configured. The lock records both choices (historical locks default to `none`,
-no post-init migration), and the initializer prunes unselected directional
-crates, migrations, routes, docs, and worker registrations.
-<!-- template:end webhooks-common:docs-template-sync-webhooks -->
-
 Use `make help` and the [validation router](validation-routing.md) for ordinary
 development. The source template additionally owns
 `make template-owned-purity-check` and `ALLOW_FULL=1 make template-init-check`
@@ -263,3 +251,15 @@ without Cargo builds; `--source-checks` keeps source safety/purity/sync checks.
 These source runners are stripped from generated services. Local results do not
 claim CI, publication, or deployment; [CI/CD policy](ci-cd-production-ready.md)
 remains release authority.
+
+<!-- template:begin webhooks-common:docs-template-sync-webhooks -->
+## Webhook profile projection
+
+`WEBHOOKS` (`--webhooks`, `none` | `durable`) and `INBOUND_WEBHOOKS`
+(`--inbound-webhooks`, `none` | `standard-webhooks`) default to `none`; both
+require `DATABASE=postgres` and `JOBS=postgres`, and outbound additionally
+requires `OUTBOUND_HTTP=bounded`. Retained capabilities are runtime-inert until
+configured. The lock records both choices (historical locks default to `none`,
+no post-init migration), and the initializer prunes unselected directional
+crates, migrations, routes, docs, and worker registrations.
+<!-- template:end webhooks-common:docs-template-sync-webhooks -->

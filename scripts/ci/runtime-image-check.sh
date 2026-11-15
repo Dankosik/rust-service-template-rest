@@ -35,7 +35,6 @@ service_runtime_image_configure() {
 	[[ ${role} == service ]] || { echo "unknown image role" >&2; return 2; }
 }
 service_runtime_image_observe() { :; }
-# Repository role configuration adds to the same hardened lifecycle and custody.
 if [[ -f scripts/ci/service-runtime-image.sh ]]; then
 	# shellcheck source=/dev/null
 	source scripts/ci/service-runtime-image.sh
@@ -154,14 +153,26 @@ service_runtime_image_observe
 # It must refuse before dependency I/O with the default configuration and no
 # network, so the image check observes the retained binary without requiring a
 # broker or database.
-jobs=$(python3 "${root}/scripts/lib/template_state.py" profile --repo "${root}" --field jobs) || {
-	echo "cannot resolve the selected jobs profile" >&2
+profile_lines=$(env -u PYTHONPATH -u PYTHONHOME PYTHONDONTWRITEBYTECODE=1 python3 -B "${root}/scripts/lib/template_state.py" profile --repo "${root}" --fields jobs messaging webhooks inbound_webhooks outbox) || {
+	echo "cannot resolve selected worker profiles" >&2
 	exit 2
 }
-messaging=$(python3 "${root}/scripts/lib/template_state.py" profile --repo "${root}" --field messaging) || {
-	echo "cannot resolve the selected messaging profile" >&2
-	exit 2
-}
+jobs=''
+messaging=''
+webhooks=''
+inbound_webhooks=''
+outbox=''
+while IFS='=' read -r key value; do
+	case "${key}" in
+	jobs | messaging | webhooks | inbound_webhooks | outbox)
+		printf -v "${key}" '%s' "${value}"
+		;;
+	*)
+		echo "unexpected profile field from template_state.py: ${key}" >&2
+		exit 2
+		;;
+	esac
+done <<<"${profile_lines}"
 if [[ ${jobs} == postgres || ${messaging} == nats-jetstream ]]; then
 	worker="${container}-jobs-worker"
 	docker create --name "${worker}" --label "runtime-check=${container}" \
@@ -172,9 +183,6 @@ if [[ ${jobs} == postgres || ${messaging} == nats-jetstream ]]; then
 		--entrypoint /jobs-worker \
 		"${image}" >/dev/null
 	expected="no job kind or typed message handler is registered: register this service's retained capabilities in crates/jobs-worker/src/main.rs"
-	webhooks=$(python3 "${root}/scripts/lib/template_state.py" profile --repo "${root}" --field webhooks)
-	inbound_webhooks=$(python3 "${root}/scripts/lib/template_state.py" profile --repo "${root}" --field inbound_webhooks)
-	outbox=$(python3 "${root}/scripts/lib/template_state.py" profile --repo "${root}" --field outbox)
 	if [[ ${webhooks} != none || ${inbound_webhooks} != none || ${outbox} == postgres ]]; then
 		expected='postgres.enabled must be true to run the jobs worker'
 	fi

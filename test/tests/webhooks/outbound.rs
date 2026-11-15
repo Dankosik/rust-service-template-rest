@@ -13,7 +13,10 @@ use tokio::{
     net::TcpListener,
     task::JoinHandle,
 };
-use tokio_util::{sync::CancellationToken, task::TaskTracker};
+use tokio_util::{
+    sync::{CancellationToken, DropGuard},
+    task::TaskTracker,
+};
 
 const CURRENT_KEY: &str = "whsec_QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=";
 const PREVIOUS_KEY: &str = "whsec_QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=";
@@ -87,13 +90,7 @@ struct RunningDispatcher {
     cancel: CancellationToken,
     tracker: TaskTracker,
     started: infra_jobs::Started,
-}
-
-impl Drop for RunningDispatcher {
-    fn drop(&mut self) {
-        self.cancel.cancel();
-        self.tracker.close();
-    }
+    _cancel_guard: DropGuard,
 }
 
 impl RunningDispatcher {
@@ -108,16 +105,18 @@ impl RunningDispatcher {
         let cancel = CancellationToken::new();
         let tracker = TaskTracker::new();
         let started = engine.start(&tracker, &cancel);
+        tracker.close();
+        let cancel_guard = cancel.clone().drop_guard();
         Self {
             cancel,
             tracker,
             started,
+            _cancel_guard: cancel_guard,
         }
     }
 
     async fn stop(self) {
         self.cancel.cancel();
-        self.tracker.close();
         super::bounded("the delivery tasks join", self.tracker.wait()).await;
     }
 }
