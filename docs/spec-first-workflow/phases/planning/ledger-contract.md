@@ -42,7 +42,8 @@ soon as each `Implemented` result integrates:
   capacity for integration and recovery.
 - **Scoped stops**: Pause only conflicting writers on a write overlap and only
   downstream consumers on an invalidated contract, updating locators and locks
-  in place while unrelated tasks continue.
+  in place (continuing a Lead in place on a parent-granted disjoint scope
+  expansion for the same outcome) while unrelated tasks continue.
 
 ## Acceptance Transition
 
@@ -77,9 +78,11 @@ Run one consolidated final validation stage across the ledger:
   selected by [Review](../../shared/review.md); pass local `Accepted` once local
   mandatory criteria and blocking findings close while reporting requested
   external outcomes separately.
-- **Repairs and verdict**: Route defects back to their implementation Leads,
-  rerun only invalidated checks, and have the Orchestrator record the resulting
-  verdict directly.
+- **Repairs and verdict**: Route defects back to their implementation Leads
+  (granting one Lead a combined writable scope across both sides of an
+  `INTEGRATION_DEFECT` seam while no conflicting writer is active), rerun only
+  invalidated checks, and have the Orchestrator record the resulting verdict
+  directly.
 
 Mark `done` once final `Accepted` closes Completion, then apply
 [Cleanup](../../shared/cleanup.md).

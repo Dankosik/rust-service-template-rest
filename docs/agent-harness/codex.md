@@ -88,9 +88,10 @@ spawning a fresh agent. Never wait on an idle lane or blindly repeat uncertain
 dispatch; reconcile once from native status, ledger, and Git candidate identity.
 
 For isolated work, validate worktree and base before accepting bytes. An
-`Implemented` Worktree Lead returns an Acceptance Result with fixed candidate
-and exact `HANDOFF_READY`; the Orchestrator or root-local Lead lands it
-serially without re-adjudicating.
+`Implemented` Worktree Lead returns [Acceptance
+Result](../spec-first-workflow/interfaces/acceptance-result-v1.md) with a fixed
+`candidate`; the Orchestrator or root-local Lead lands it serially without
+re-adjudicating.
 
 ## Review And Recovery
 
