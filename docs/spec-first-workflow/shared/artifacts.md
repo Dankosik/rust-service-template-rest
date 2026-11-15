@@ -17,16 +17,22 @@ Task-local artifacts live under `specs/<task>/`:
 | Several units/dependencies or durable execution state exist | `tasks.md`, `tasks/<ID>-<slug>.md` | Index order/status/results and each task's outcome/boundary/acceptance |
 | Evidence must be reused or refreshed | `research/*.md` | Findings, limits, conflicts, decision effect |
 | Deployment/migration/backfill has a real sequence | `rollout.md` | Operational gates, recovery, observables |
-| Cross-session coordination cannot be recovered from those artifacts | `workflow-plan.md` | Current phase, active artifacts, blockers, next action |
+| Pre-ledger cross-phase or cross-session coordination cannot be recovered from those artifacts | `workflow-plan.md` | Goal, active execution instructions, current phase/owner locator, cross-phase decisions and consequences, unfinished work/next action |
 
 Task artifacts preserve accepted behavior, design, and scope; current workflow
-owners govern execution timing.
+owners govern execution timing. Keep at most one active coordination record:
+when persisted, `workflow-plan.md` holds pre-ledger coordination and is deleted
+once Planning persists `tasks.md` (carrying any active execution instructions
+into `Global constraints`).
 
-When an accepted instruction changes scope, completion criteria, or execution
-policy, replace the affected active text in its owning artifact and consumed
-task packets. Do not leave conflicting requirements active beneath a newer
-addendum. Preserve unaffected decisions, effect authority, and valid evidence;
-mark superseded records historical and remove them from the active read path.
+When new guidance or a mid-task decision changes scope, contracts, completion
+criteria, or execution policy, reconcile it against work already underway:
+replace the affected active text in its owning artifact and consumed task
+packets, and record its consequences for dependent units, writable scopes/locks,
+and invalidated proof. Do not leave conflicting requirements active beneath a
+newer addendum. Preserve unaffected decisions, effect authority, and valid
+evidence; mark superseded records historical and remove them from the active
+read path.
 
 Keep current outcome, exclusions, remaining work, and next action in their
 existing owners. Link to historical evidence when needed instead of copying

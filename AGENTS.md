@@ -79,8 +79,8 @@ quote the requirement, explain its applicability, and separate explicit rules
 from interpretation.
 
 Treat mid-task corrections and side questions as updates to the active outcome:
-answer, incorporate the delta, and resume unless the user cancels or replaces
-the outcome.
+answer, reconcile the delta and its consequences against work already underway,
+and resume unless the user cancels or replaces the outcome.
 
 ### Reporting
 
@@ -198,6 +198,7 @@ explicit verification and phase-only boundaries.
 | A non-obvious technical decision must survive the current session | `docs/decisions/` or [Backend Library Selection](docs/backend-library-selection.md) |
 | A change reverses or adopts a rejected choice from a decision artifact | Proceed only if its reopen condition is met or the user explicitly requests it, updating the record in the same change |
 | Instructions, tools, roles, or skills change | [Prompt Maintenance](docs/prompt-maintenance.md); [Skill Authoring](docs/skill-authoring.md) for skills; then `make check-instructions` |
+| Context compaction, interruption, or session/actor handoff | [Resume](docs/spec-first-workflow/shared/resume.md) |
 | Drafting a handoff prompt for another session, phase, or repository entry skill | [Prompt Composition](docs/prompt-composition.md) |
 | Operating a repository role carrier, multi-phase delegation tree, or durable Goal, or selecting harness model/effort tiers | [Agent Harness](docs/agent-harness.md) |
 | Build or container compile time slows iteration, or workstation build caching is configured | [Build Speed](docs/build-speed.md) |
