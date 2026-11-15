@@ -40,9 +40,12 @@ soon as each `Implemented` result integrates:
   is integrated and its lanes have joined, re-reading the new packet and keeping
   at most one active writable scope per Lead while reserving Orchestrator
   capacity for integration and recovery.
-- **Scoped stops**: Pause only conflicting writers on a write overlap and only
-  downstream consumers on an invalidated contract, updating locators and locks
-  in place while unrelated tasks continue.
+- **Scoped stops and steering**: On a write overlap, invalidated contract, or
+  reconciled decision/guidance delta, update the owning artifacts and ledger in
+  place, pause only conflicting writers or invalidated consumers, and notify
+  affected live Leads one-to-one (or replace them when outcome, scope, or
+  capability changes) under [Agent Harness](../../../agent-harness.md#context-and-lifetime)
+  while unrelated tasks continue.
 
 ## Acceptance Transition
 
