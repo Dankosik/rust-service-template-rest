@@ -2,19 +2,18 @@
 
 Status: **Unresolved — production promotion is blocked until the owning
 service accepts every applicable field.** Use `N/A` only with a concrete
-reason. This file becomes service-owned with the first production feature
-and is not a template-wide source of deployment defaults; the defaults the
-template does fix (probes, budgets, exit codes, image, grace period) are
-named where they are enforced and linked from each section.
+reason. This file becomes service-owned with the first production feature;
+`crates/config`, `crates/service/src/bootstrap`, `api/openapi/service.yaml`,
+and each retained `crates/infra-*` adapter own the template's runtime defaults,
+limits, probes, and exit codes.
 
 ## Service scope
 
 - Business capabilities: Unresolved.
 - Authoritative facts and data owners: Unresolved.
-- Public and internal interfaces: Unresolved. The template serves
-  `GET /health/live`, `GET /health/ready`, and the operations in
-  `api/openapi/service.yaml` on the application listener, and `/metrics` and
-  `GET /health/live` on the separate diagnostics listener.
+- Public and internal interfaces: Unresolved (`api/openapi/service.yaml` and
+  `crates/service/src/bootstrap` define the scaffold's application and private
+  diagnostics listeners).
 
 ## Dependency contract
 
@@ -22,156 +21,69 @@ named where they are enforced and linked from each section.
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Unresolved | Unresolved | Unresolved | Unresolved | Unresolved | Unresolved | Unresolved | Unresolved | Unresolved |
 
-A dependency whose loss makes the instance unable to serve registers a
-readiness probe; every operation's deadline fits inside
-`http.request_timeout`.
+Register a readiness probe only for dependencies whose loss makes the replica
+unable to serve, and budget every downstream deadline inside
+`http.request_timeout` (or the caller's gRPC deadline).
 
-## Capacity envelope
+## Capacity and resource envelope
 
 - Expected and burst arrival rate: Unresolved.
-- Service time, payload bounds, and expected concurrency: Unresolved. The
-  template caps `http.max_in_flight`, `http.max_connections`,
-  `http.max_body_bytes`, and `http.max_header_bytes`
-  (`crates/config/src/http.rs`);
-  a service raises them from measurements, not defaults.
+- Service time, payload bounds, and expected concurrency: Unresolved (size
+  `crates/config` listener, body, header, and in-flight limits from workload
+  measurements rather than scaffold defaults).
 - First capacity ceiling and required headroom: Unresolved.
 - Database connections, worker concurrency, and queue-age objective: N/A for
-  the health-only scaffold; reopen when the service retains those
-  capabilities.
+  the health-only scaffold; when retained, budget across peak API/worker
+  replicas, rolling overlap, dedicated `LISTEN` sessions, migrator/admin
+  reserves, and pooler front/back limits.
 - Surviving capacity after one failure-domain loss: Unresolved.
-- Comparable workload evidence: Unresolved.
-- Source capacity with cold, expired or unavailable caches, including
-  concurrent loaders, waiters, payload storage and application replicas:
-  N/A for the health-only scaffold; reopen when cached state is adopted.
-
-## Resource ownership for retained capabilities
-
-When a service retains or adopts a capability, accept its workload and resource
-scope alongside the capacity envelope above. These obligations supply no
-service-specific limits, fairness classes or measured capacity; unresolved
-business choices stay unresolved. `crates/config`, the composition root in
-`crates/service/src/bootstrap`, and each retained capability crate own the
-applicable runtime rules.
-
-- HTTP ingress admission and its timer end at the handler's response head.
-  A feature that streams a response owns body lifetime, slow-reader limits and
-  release through actual completion or cancellation; a head limit is not a body
-  or RSS bound. Native gRPC uses independent opening and terminal-call counts
-  with the same configured value, shared by router clones. Health bypasses
-  those business counts; neither transport's admission is a fleet quota.
-- With bearer authentication or outbound machine credentials, distinguish
-  retained cache entries/bytes, coalesced followers, active provider attempts
-  and all callers. Provider concurrency does not bound every waiter. A caller
-  outside bounded ingress or jobs owns its own admission. Token-provider
-  completion does not release the consuming resource operation: a workload
-  class owns capacity through that resource's actual EOF or terminal outcome.
-  Carry the original consuming deadline through waits, authentication,
-  attempts and backoff; a new stage does not grant a fresh budget.
-- With PostgreSQL, retain SQLx's native finite acquisition and pool bound;
-  request-scoped acquisition spends the remaining HTTP deadline with its
-  response reserve, capped at 100 ms and at half the original request budget.
-  Keep transactions short and avoid holding
-  a connection across unrelated provider work. Readiness shares the pool and
-  may withdraw a saturated replica. A timeout or cancellation at an effect
-  boundary does not prove rollback; handle uncertain commit/effect outcomes
-  through the persistence contract. Another pool needs an accepted capacity
-  reservation, not an assumption that it eliminates waiters.
-- With jobs, outbound webhooks or outbox delivery, active worker/per-kind
-  capacity is distinct from durable backlog count, bytes and age. Accept
-  admission, expiry, replay and tenant/endpoint fairness from the real workload;
-  do not infer them from worker concurrency. Expiry cannot erase an unresolved
-  accepted obligation. A count-then-insert check alone is not fleet admission.
-- Account for peak replicas, rolling-deployment overlap, API and worker pools,
-  dedicated LISTEN sessions, migrations/admin reserve and pooler front/back
-  connections. Sum provider attempts across independently constructed clients
-  and replicas. With messaging, local active/reserved pulls and durable pending
-  ACK capacity do not bound total broker backlog or storage; accept effective
-  retention, byte/message limits and recovery capacity with the broker owner.
-- A service adding CPU-heavy or blocking business work owns admission before
-  submission, bounding queued plus running work, and holds capacity until the
-  actual work ends. Name cancellation, panic/completion observation and shutdown
-  ownership; dropping an async waiter does not stop a started blocking closure.
-  The template adds no CPU workload, executor or reserved diagnostics capacity.
+- Cold/unavailable cache source capacity (loaders, waiters, replicas): N/A for
+  the health-only scaffold; reopen when cached state is adopted.
+- Streaming, background, and blocking work: bound body lifetimes, durable queue
+  backlog/retention, and CPU/blocking task permits through actual execution
+  completion rather than request-head admission alone.
 
 ## Consistency and durability
 
 - Transaction and read guarantees: Unresolved.
-- Asynchronous propagation, replay, deduplication, and retention: Unresolved.
-  For each durable handler, name its logical effect identity and scope,
-  transaction boundary or recipient idempotency contract, permitted replay
-  lifetime, effect-identity retention, and ambiguous-outcome reconciliation.
-  Queue completion, a lease, or an admission receipt does not establish a
-  single external action. Retained failures, redrive, and restore must fit
-  that same effect contract.
-- RPO and RTO per authoritative store and for the recovered service: Unresolved.
-- Backup custody, retention, access/key custody and restore-compatible versions:
-  Unresolved.
-- Deduplication horizon across retries, replay, rollback and restored work:
-  Unresolved.
-- Cached facts, authoritative source, permitted staleness, TTL and negative
-  retention, invalidation after writes, rejection of late fills, and
-  coherence across application replicas: N/A for the health-only scaffold;
-  reopen when cached state is adopted. Authenticated services also accept
-  token-revocation and signing-key-removal lag and name an emergency trust
-  removal owner. Library expiry and coalescing do not choose these policies.
+- Asynchronous propagation, replay, deduplication, and retention: Unresolved
+  (for each durable job, event, or webhook handler, define logical effect
+  identity, idempotency/reconciliation boundary, and retention horizon).
+- RPO, RTO, backup/key custody, and restore-compatible versions: Unresolved.
+- Cache staleness, TTL, invalidation, and token/key revocation lag: N/A for the
+  health-only scaffold; reopen when cached state or authentication is enabled.
 
 ## Edge and trust
 
-- TLS termination and trusted proxy topology: Unresolved. The service
-  speaks plain HTTP; TLS terminates at the platform edge.
-- Gateway retry and fleet rate-limit owners: Unresolved. A request above
-  `http.max_in_flight` waits for a permit for up to `http.request_timeout`, then
-  is shed with `503` + `Retry-After: 1`; the service has no rate limiter.
-- Metrics listener reachability: Unresolved. The shipped
-  `observability.metrics.addr` binds IPv4 all-interfaces (`0.0.0.0`); deployment keeps it
-  private.
-- Egress, identity, and authorization authorities: Unresolved for the service's
-  domain. The template ships optional `infra-bearerauthn` (global bearer default
-  with explicit `security: []` for public operations), `infra-serviceauth`,
-  `infra-oauth2-client-credentials`, and `infra-outbound-http` profiles; each
-  derived service supplies its trusted issuers, audiences, callers, and egress
-  policies.
+- TLS termination and trusted proxy topology: Unresolved.
+- Gateway retry and fleet rate-limit owners: Unresolved (the service sheds
+  in-flight overload per replica rather than enforcing fleet rate limits).
+- Diagnostics/metrics listener network isolation: Unresolved (keep the
+  diagnostics port unreachable from untrusted networks).
+- Egress, identity, and authorization authorities (trusted issuers, audiences,
+  callers, and destination origins): Unresolved.
 
 ## Operation and recovery
 
-- SLI, SLO, and alert queries: Unresolved for service-specific thresholds.
-  [`env/monitoring/service.rules.yml`](../env/monitoring/service.rules.yml)
-  provides default multi-window burn-rate Prometheus rules and ticket alerts over
-  the emitted HTTP, gRPC, runtime, and worker metrics; each derived service tunes
-  job selectors, objectives, and route exclusions.
-- Runbook and manual intervention paths: Unresolved for service-owned data and
-  dependencies; [Alerting](alerting.md#runbooks) covers the shipped alert
-  runbooks.
-- Rollback authority and mixed-version window: Unresolved. A published
-  image is rolled back by digest ([Railway Deployment Profile](railway-deployment-profile.md#rollback)).
-- Shutdown: the template exits `0` after a clean staged teardown, `3` when a
-  stage overran, `1` on startup failure, inside the 45 s grace period
-  (`crates/service/src/bootstrap`); a
-  platform grace shorter than that is a contract violation.
-- Reconciliation policy, missing-data disposition and authority to resume writes:
+- SLI, SLO, and alert thresholds: Unresolved for service-specific routes and
+  objectives ([`env/monitoring/service.rules.yml`](../env/monitoring/service.rules.yml)
+  and [Alerting](alerting.md#runbooks) own shipped defaults).
+- Rollback authority and mixed-version compatibility window: Unresolved
+  ([Railway Deployment Profile](railway-deployment-profile.md#rollback)).
+- Platform termination grace: must equal or exceed `http.grace_period` validated
+  by `crates/service/src/bootstrap`.
+- Reconciliation policy, missing-data disposition, and observed restore proof:
   Unresolved.
-- Observed restore proof (candidate/configuration, retained store identities,
-  recovery point, elapsed time and reconciled effects): Unresolved. A backup plan,
-  startup identity or readiness result alone is not this proof.
 
-Independent stores have no coordinated snapshot guarantee. Older PostgreSQL with
-newer broker state can erase dedup history and repeat effects; newer PostgreSQL
-with older broker state can lose events already recorded as published. Restored
-database references plus overwritten object keys can retrieve the wrong bytes.
-Reconciliation cannot universally reconstruct missing data.
+Independent stores (PostgreSQL, JetStream, object storage) have no coordinated
+snapshot guarantee. Any multi-store recovery runbook must:
 
-The service's recovery runbook must make this sequence concrete:
-
-1. Fence producers, worker claims, writes and external effects, including old
-   replicas and retention owners.
-2. Restore the selected retained application artifact, compatible configuration
-   and independently retained stores into an isolated environment. Preserve
-   identity/secret custody and migration history, sequences and consumer state.
-3. Reconcile business identities, already-applied effects, deduplication and
-   publication state, and object references against expected content digests.
-   Resolve missing data or explicitly retain the fence.
-4. Invalidate saved tokens, commands and receipts prepared before restoration;
-   re-inspect current identities before authorizing any recovery action.
-5. Record observed recovery evidence. The service owner admits resumed writes
-   only after its compatibility and reconciliation criteria pass; any unresolved
-   store or custody mismatch keeps them fenced.
+1. Fence producers, worker claims, retention owners, and external effects.
+2. Restore the verified artifact, compatible configuration, and stores into an
+   isolated environment while preserving migration history, sequences, and
+   consumer state.
+3. Reconcile business identities, applied effects, deduplication records, and
+   object digests before lifting the fence.
+4. Invalidate pre-restore tokens, operator commands, and receipts, re-inspecting
+   live state before resuming writes.
+5. Record observed recovery timing and reconciled gaps.

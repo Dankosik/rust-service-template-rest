@@ -203,8 +203,7 @@ A worker has published no successful queue sample for over two minutes, or
 none since it started. Its queue gauges keep their last values, so
 `JobsQueueBacklog` cannot see a backlog that grows there. Check
 `jobs_worker_operation_failures_total{operation="sample"}` and the
-`jobs_operation_failed` log for its `sqlstate` or `cause`; the sample has a
-two-second statement timeout.
+`jobs_operation_failed` log for its `sqlstate` or `cause`.
 
 ### JobsDeadLettered
 

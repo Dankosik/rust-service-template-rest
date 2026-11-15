@@ -2,23 +2,24 @@
 
 Use this router for explicit verification leaves beyond the ordinary local
 budget. [AGENTS.md](../AGENTS.md#validation-budget) owns ordinary local
-completion (including [Instruction Validation](validation/instructions.md) on
-`make check-instructions` and offline link checks on `make docs-check`);
-[`make/template.mk`](../make/template.mk) owns command composition (`make help`),
-and [`scripts/ci/changed-surfaces.sh`](../scripts/ci/changed-surfaces.sh) is the
+completion (including `make check-instructions` and offline link checks on
+`make docs-check`); [`make/template.mk`](../make/template.mk) owns command
+composition (`make help`), and
+[`scripts/ci/changed-surfaces.sh`](../scripts/ci/changed-surfaces.sh) is the
 classifier shared by CI and `make verify`.
 
 ## Explicit verification and external gates
 
-Load a leaf only for a matching verification requirement or diagnostic.
+Load a leaf only for a matching verification requirement or diagnostic;
+[`make/template.mk`](../make/template.mk) owns exact invocations and flags.
 
-| Required claim | Load | Existing command |
+| Required claim | Policy owner | Existing command |
 | --- | --- | --- |
-| OpenAPI drift or compatibility | [Generated Contracts](validation/generated.md) | `make openapi-check`, `make openapi-breaking BASE_OPENAPI=<file>` |
-| Advisories, licenses, unused deps, secrets, workflows, image CVEs | [Security](validation/security.md) | matching security target |
+| Generated contract drift or compatibility | Canonical Rust/proto sources (never edit generated outputs directly) | `make openapi-generate`, `make openapi-check`, `make openapi-breaking BASE_OPENAPI=<file>`; when gRPC is retained, `make grpc-generate` and `make grpc-check` |
+| Advisories, licenses, unused deps, secrets, workflows | [`deny.toml`](../deny.toml), [`.gitleaks.toml`](../.gitleaks.toml), [`.gitleaksignore`](../.gitleaksignore) (every waiver requires exact scope, reason, and reopen trigger; never exclude whole paths or `.ci`) | `make deny`, `make dependency-drift`, `make unused-deps`, `make secret-scan BASE_REF=origin/main`, `ALLOW_HEAVY=1 make secret-scan-history`, `make zizmor` |
 | Clone admission or crate dependency direction | [`quality/architecture.json`](../quality/architecture.json), [`.jscpd.json`](../.jscpd.json) | `make duplication-check`, `make architecture-check`, `make quality-check-self-test`; source-only `make template-quality-projections` |
-| CI workflows, shell/Python scripts, tool pins, Dockerfile, publication | [Delivery](validation/delivery.md) | matching delivery target |
-| Runtime image build, lifecycle, scan, or SBOM | [Containers](validation/containers.md) | `ALLOW_HEAVY=1 make runtime-image-build` and required scenario |
+| CI workflows, shell/Python scripts, tool pins, Dockerfile, publication | [`tools/versions.env`](../tools/versions.env) (single pin source checked against `Dockerfile` and cooldowns) | `make actionlint`, `make shellcheck`, `make python-lint`, `make tools-check`, `make dockerfile-check`, `make publish-image-metadata-check` |
+| Runtime image build, lifecycle, scan, or SBOM | [`scripts/ci/runtime-image-check.sh`](../scripts/ci/runtime-image-check.sh), [`scripts/ci/runtime-image-scan.sh`](../scripts/ci/runtime-image-scan.sh) (verified against one immutable local image ID and `cargo-auditable` inventory for every retained binary) | `ALLOW_HEAVY=1 make runtime-image-build`, `ALLOW_HEAVY=1 make runtime-image-check`, `ALLOW_HEAVY=1 make container-security`, `ALLOW_HEAVY=1 make container-sbom` |
 | Real PostgreSQL transactions, locks, commit outcome, readiness, or migrations | [PostgreSQL](validation/postgres.md) | `ALLOW_HEAVY=1 make test-integration-db`, `make migration-check`, `ALLOW_HEAVY=1 make migration-validate` |
 
 CI and publication gates keep their own admission scope

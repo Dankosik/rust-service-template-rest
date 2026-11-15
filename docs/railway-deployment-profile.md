@@ -136,18 +136,13 @@ other platforms do re-poll readiness and it costs 15 s of an idle container.
 
 ## Grace budget
 
-The service bootstrap checks that `http.grace_period` covers `http.drain_timeout`
-(`25s`, including the `15s` readiness propagation delay) plus the `18.5s` teardown
-tail (diagnostics, background join, dependency close, shared trace/logger cleanup,
-0.5 s SDK join slack, and 1 s runtime shutdown). The default `http.grace_period`
-and Railway's `drainingSeconds` are both `45s`, leaving 1.5 seconds beyond the
-`43.5s` bound before `SIGKILL`.
-If a derived service changes the application budget, rederive the platform grace from that
-owner and rerun `make runtime-image-check`, which sends `docker stop --time
-45` and requires exit `0`. Other platforms need the equivalent explicit stop
-grace (`docker stop --time 45`, Compose `stop_grace_period: 45s`, Kubernetes
-`terminationGracePeriodSeconds: 50`); a shorter grace can `SIGKILL` the
-service mid-drain.
+`crates/service/src/bootstrap` validates that `http.grace_period` covers
+`http.drain_timeout` (including readiness propagation delay) plus the staged
+teardown tail. Keep Railway's `deploy.drainingSeconds` in `.railway/railway.ts`
+(and `docker stop --time`, Compose `stop_grace_period`, or Kubernetes
+`terminationGracePeriodSeconds`) at or above `http.grace_period`, and rerun
+`ALLOW_HEAVY=1 make runtime-image-check` whenever either budget changes; a
+shorter platform grace can `SIGKILL` the process mid-drain.
 
 ## Operator-owned configuration
 

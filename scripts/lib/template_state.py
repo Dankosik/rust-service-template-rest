@@ -92,8 +92,6 @@ REQUIRED_AUTHORITIES = frozenset(
         "quality/duplication-baseline.json",
         "quality/architecture.json",
         "docs/repo-architecture.md",
-        "docs/validation/containers.md",
-        "docs/validation/delivery.md",
         "docs/validation/postgres.md",
         "docs/ci-cd-production-ready.md",
     }
@@ -722,8 +720,6 @@ _PROTECTED_MANIFEST_FILES = frozenset(
         "docs/railway-deployment-profile.md",
         "docs/production-contract.md",
         "docs/validation/postgres.md",
-        "docs/validation/containers.md",
-        "docs/validation/delivery.md",
         "make/source.mk",
         "scripts/ci/template-init-check.sh",
         "scripts/ci/initializer-matrix.py",
