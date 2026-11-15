@@ -21,7 +21,7 @@ and its bound, operator signal for each failure, degradation, or recovery path,
 proof feasibility, release closure, and necessity of each included
 component/edge/store/dependency.
 
-Consume current [Rust Ownership Review](../rubrics/rust-ownership-review.md) receipts
+Consume current [Rust Ownership Review](rust-code-ownership-design.md#rust-ownership-review) receipts
 without repeating their lenses.
 
 `PASS` requires every reconstructed trace and triggered lens to be supported

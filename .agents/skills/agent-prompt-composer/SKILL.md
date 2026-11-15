@@ -9,12 +9,7 @@ disable-model-invocation: true
 
 # Agent Prompt Composer
 
-Turn the user's input into a work message you could send to a capable colleague.
-Apply [Prompt Composition](../../../docs/prompt-composition.md) for the writing
-principles and handoff boundaries. Make the request understandable without
-prescribing the receiver's method or forcing the text into a template.
-
-Load [examples](references/example-transformations.md) only when tone or the
-amount of detail is unclear. Return the ready-to-send message. Use
-[Intake](../../../docs/spec-first-workflow/phases/intake.md) only when a missing
-user-owned decision materially changes what is being requested.
+Apply [Prompt Composition](../../../docs/prompt-composition.md) to turn the
+user's input into a clear, ready-to-send work message for a capable colleague.
+Use [Intake](../../../docs/spec-first-workflow/phases/intake.md) only when a
+missing user-owned decision materially changes the request.

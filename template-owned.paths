@@ -28,7 +28,6 @@ docs/validation-routing.md
 docs/build-speed.md
 docs/validation/instructions.md
 docs/validation/generated.md
-docs/validation/rust.md
 docs/validation/security.md
 Makefile
 make/template.mk

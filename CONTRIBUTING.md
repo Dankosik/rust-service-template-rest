@@ -146,7 +146,7 @@ real defect still requires correction.
 
 ## Pull requests and repository policy
 
-- Keep pull-request scope focused and reversible; one roadmap stage or one
+- Keep pull-request scope focused and reversible; one coherent change or one
   profile per series.
 - When committing, keep each commit focused on one coherent outcome and order
   dependent changes so they can be reviewed in sequence. Commit frequency and

@@ -1,138 +1,65 @@
 # Validation Routing
 
-Use this router for mixed surfaces or a verification claim beyond the
-ordinary local budget. [AGENTS.md](../AGENTS.md#validation-budget) owns
-ordinary local completion. This router selects existing commands; a file path,
-a domain label, or an available command does not create a local acceptance
-gate. `make/template.mk` owns command composition (`make help` lists every
-target), and `scripts/ci/changed-surfaces.sh` is the one classifier CI and
-`make verify` share.
+Use this router for mixed surfaces or verification beyond the ordinary local
+budget. [AGENTS.md](../AGENTS.md#validation-budget) owns ordinary local
+completion; [`make/template.mk`](../make/template.mk) owns command composition
+(`make help`), and
+[`scripts/ci/changed-surfaces.sh`](../scripts/ci/changed-surfaces.sh) is the
+classifier shared by CI and `make verify`.
 
 ## Ordinary local completion
 
 | Changed surface | Load | Local validation |
 | --- | --- | --- |
-| Rust behavior, tests, or crate manifests | [Rust](validation/rust.md) | matching build and relevant tests |
-| Agent instructions, roles, skills, or their carriers | [Instructions](validation/instructions.md) | static consistency review and `make check-instructions` |
-| Documentation | — | `make docs-check`: every relative link and `#fragment` resolves (lychee, offline, pinned container) |
+| Rust behavior, tests, or crate manifests | [AGENTS.md](../AGENTS.md#validation-budget) | matching build and relevant tests |
+| Agent instructions, roles, skills, or carriers | [Instructions](validation/instructions.md) | static review and `make check-instructions` |
+| Documentation | — | `make docs-check` (offline `lychee` link/fragment check) |
 
-Stop when that boundary passes. Unrun optional image, security, or
-publication checks do not block local completion; a missing required build or
-test execution is not a pass.
+Stop when that boundary passes. Unrun optional checks do not block local
+completion; a missing required build or test execution is not a pass.
 
 ## Explicit verification and external gates
 
-Load a leaf only for a matching verification requirement or diagnostic
-question. Regenerating a changed contract is implementation work; this table
-does not make every available check mandatory locally.
+Load a leaf only for a matching verification requirement or diagnostic.
 
 | Required claim | Load | Existing command |
 | --- | --- | --- |
-| OpenAPI document drift or compatibility | [Generated Contracts](validation/generated.md) | `make openapi-check`, `make openapi-breaking BASE_OPENAPI=<file>` |
-| Dependency advisories, licenses, unused dependencies, secrets, workflow security, image vulnerabilities | [Security](validation/security.md) | matching security target |
-| Bounded clone admission or declared crate direction | [`quality/architecture.json`](../quality/architecture.json), [`.jscpd.json`](../.jscpd.json) | `make duplication-check`, `make architecture-check`, `make quality-check-self-test`; source-only `make template-quality-projections` |
-| CI workflows, shell scripts, tool pins, Dockerfile lint, publication naming | [Delivery](validation/delivery.md) | matching delivery leaf |
-| Runtime image build, lifecycle, scan, or SBOM | [Containers](validation/containers.md) | `ALLOW_HEAVY=1 make runtime-image-build` and the required scenario |
-| Observed transaction, locking, commit-outcome, readiness, or migration behavior on a real PostgreSQL; the image's migration rehearsal | [PostgreSQL](validation/postgres.md) | `ALLOW_HEAVY=1 make test-integration-db`, `make migration-check`, `ALLOW_HEAVY=1 make migration-validate` |
+| OpenAPI drift or compatibility | [Generated Contracts](validation/generated.md) | `make openapi-check`, `make openapi-breaking BASE_OPENAPI=<file>` |
+| Advisories, licenses, unused deps, secrets, workflows, image CVEs | [Security](validation/security.md) | matching security target |
+| Clone admission or crate dependency direction | [`quality/architecture.json`](../quality/architecture.json), [`.jscpd.json`](../.jscpd.json) | `make duplication-check`, `make architecture-check`, `make quality-check-self-test`; source-only `make template-quality-projections` |
+| CI workflows, shell/Python scripts, tool pins, Dockerfile, publication | [Delivery](validation/delivery.md) | matching delivery target |
+| Runtime image build, lifecycle, scan, or SBOM | [Containers](validation/containers.md) | `ALLOW_HEAVY=1 make runtime-image-build` and required scenario |
+| Real PostgreSQL transactions, locks, commit outcome, readiness, or migrations | [PostgreSQL](validation/postgres.md) | `ALLOW_HEAVY=1 make test-integration-db`, `make migration-check`, `ALLOW_HEAVY=1 make migration-validate` |
 
-Existing CI and publication gates keep their own admission scope
-([CI/CD Production Readiness](ci-cd-production-ready.md)). Do not change the
-classifier or reproduce a gate locally merely to finish development. An
-explicit request for green CI, a runtime scenario, or a release still requires
-that result; local completion alone does not complete it.
+CI and publication gates keep their own admission scope
+([CI/CD Production Readiness](ci-cd-production-ready.md)).
 
 ## `make plan` and `make verify`
 
-`make plan` prints the route the changed surfaces select: the files, every
-surface's verdict, the commands with their reason, cost class, and whether
-they need Docker, the CI-owned steps, and the surfaces with nothing to run. It
-is a diagnosis, not a gate, and does not authorize the plan.
+`make plan` runs [`scripts/ci/verify.sh`](../scripts/ci/verify.sh) `--plan` to
+print changed files, surfaces, planned commands, CI-owned steps, and no-op
+surfaces. `make verify` runs local steps under the Git-common validation lock
+([`scripts/ci/validation-lock.py`](../scripts/ci/validation-lock.py)) and
+records attempts and reusable receipts under `<git-common-dir>/codex/verify`
+(`VERIFY_FORCE=1` bypasses reuse; receipts require lock admission and
+projectable [`scripts/ci/build-context.py`](../scripts/ci/build-context.py)
+state; failures never auto-clean artifacts or caches).
 
-Heavy steps (the image gates, the database-backed proof, the migration
-rehearsal) and the source initializer matrix are CI-owned: CI runs them on
-every surface that selects them, so `make verify` names them instead of
-occupying the workstation. `ALLOW_HEAVY=1` and `ALLOW_FULL=1` keep them local.
+- **CI mode:** By default (`github-actions`), heavy steps and the source
+  initializer matrix stay CI-owned (`status: partially_verified`). Setting
+  `REPOSITORY_CI ?= none` in `make/service.mk` runs all local/heavy/CI-only
+  checks under `ALLOW_HEAVY=1` and `ALLOW_FULL=1` (`ci_mode: none`), listing
+  GitHub-hosted gaps under `not_applicable`.
+- **Rust selection:**
+  [`scripts/ci/affected-crates.sh`](../scripts/ci/affected-crates.sh) selects
+  changed crates and reverse dependents (`cargo tree -i`), falling back to the
+  workspace for manifests, lockfiles, toolchains, non-`crates/` Rust, or >=80%
+  closures.
+- **Readability surfaces:** `duplication` and `architecture` require Python,
+  Cargo, rustup, and `npx`, running `make lint` once before
+  `make quality-check-self-test`.
 
-A repository without CI sets `REPOSITORY_CI ?= none` in `make/service.mk`; the
-variable of that name overrides the file for one run, and a `service.mk`
-without the key means `github-actions`. Then no step is CI-owned. `make verify`
-passes `ALLOW_HEAVY=1` and `ALLOW_FULL=1` to the commands it runs, never sets
-`CI`, checks a Rust change with the workspace route a push gets (`make lint`,
-`make build`, `make test`; `make fmt-check` follows a dependency change too),
-and adds what only CI ran: the secret scan of the commits since the merge base
-on every run, `make profiling-check`, `make openapi-breaking-since` against the
-merge base, `make grpc-generator-deny`, `make messaging-go-compat`, and, beside
-the database suite, `make integration-compile`. In the source template the
-database surface also selects `make jobs-reliability-reference`, which CI runs
-as its own job. GitHub-hosted checks without a local command are listed
-under `not_applicable` with what stays unproven: CodeQL, Dependency Review,
-publication and signing, the scheduled full-history secret scan, and the
-dispatch-only messaging recovery. The receipt records `ci_mode: none` and its
-status is `verified` or a failure, never `partially_verified`. Such a run
-needs Docker, Go and the time of every selected step.
-
-`make verify` runs the route's local steps under the Git-common validation lock
-and records them. Before executing it checks the binaries the plan needs, and
-Docker when a local step is container-backed. Each run writes an attempt
-record under `<git-common-dir>/codex/verify` with the plan, candidate
-fingerprint, environment, resolved build context, and per-step state; only a complete passing run
-writes a receipt, keyed by the changed files' content and modes, HEAD, the
-plan, and the environment. Publication waits for the lock supervisor to confirm
-command and process-group completion with no pending external-work tickets.
-Nested verification retains a staged result and pending-custody attempt until
-its parent finishes; it does not publish a reusable receipt. An identical rerun
-reuses a receipt only after verified lock admission and matching known build
-context (`VERIFY_FORCE=1` bypasses reuse). Unknown inherited context, including
-unsupported wrapper/output configuration shapes, never borrows or publishes an
-exact-context pass. Receipts from the former custody protocol are rerun. A step that changes the candidate invalidates
-the attempt; a failed or interrupted attempt keeps its evidence and grants
-nothing. The receipt names the commands, inputs, environment, duration, and
-the surfaces that had no executable check. While CI-owned steps remain it
-records `status: partially_verified`, lists them under `ci_owned`, and names
-CI as the next owner; a route with only CI-owned steps runs nothing locally.
-
-Build context is schema-versioned and includes the selected wrapper executable
-content/version, Cargo/compiler versions, relevant configuration fingerprints,
-and canonical output/cache role fingerprints. Capacity observations, temporary
-server sockets and native statistics are evidence, not receipt-key material.
-The helper re-observes available bytes on each selected filesystem before work,
-after lock admission, on a receipt hit and before publication. An optional
-`BUILD_MIN_FREE_BYTES` requirement is retained and checked anew; unavailable
-measurement is distinct from zero space. Without that requirement there is no
-guessed reserve, but an exhausted or unwritable selected location refuses
-admission. Owned I/O reporting ENOSPC/EDQUOT records `resource_exhausted`;
-unclassified child failures retain their exit and current storage observations.
-A test printing storage words does not establish a resource failure. Partial
-artifacts and pending steps remain available; nothing automatically cleans,
-moves outputs, prunes caches or retries the build.
-
-On pull requests the same classifier selects the affected crates through
-`scripts/ci/affected-crates.sh`: a changed crate plus every workspace crate
-that depends on it (`cargo tree -i` over normal, build, and dev edges), with a
-crate's `tests/` directory reselecting only that crate. A manifest, lockfile,
-or toolchain change, a Rust file outside `crates/`, or a closure covering 80%
-of the workspace runs the workspace instead. `make lint-changed PKGS=…` and
-`make test-changed PKGS=…` consume the list it prints.
-
-The `duplication` surface scans the complete handwritten workspace scope,
-including unchanged source that can match a new copy. The `architecture`
-surface checks the complete declared main graph. Source selects duplication;
-manifest, lockfile, toolchain, tool pins and shared checker integration select
-both. Each policy/checker selects its own gate and the shared checker self-test;
-boundary documentation selects architecture. Unrelated documentation retains
-its existing route. In the source template either surface also selects the
-four checker projection representatives, without per-harness builds.
-
-Both surfaces require Python, Cargo, rustup and `npx` because their shared
-self-test exercises the real tools. The selected plan runs one workspace lint
-before that self-test so its native dependency probe consumes an exact Cargo
-compiler-artifact receipt. This replaces an overlapping affected-crate lint;
-tests still follow their affected scope. Missing prerequisites block verification.
-Policy/config/checker inputs join the receipt fingerprint; the version manifest
-joins the environment identity. A passing report never modifies admission.
-
-`ALLOW_FULL=1 make check` remains the explicit deterministic full-repository
-gate, never a default follow-up. `ALLOW_HEAVY=1` guards the image targets,
-the database-backed proof, the migration rehearsal, and the history-wide
-secret scan. CI sets `CI=true`, which satisfies both; do not set it locally
-to impersonate CI.
+`ALLOW_FULL=1` guards `make check` and `make template-init-check`;
+`ALLOW_HEAVY=1` guards the container-backed, history-wide, and heavy integration
+targets in [`make/template.mk`](../make/template.mk) and
+[`make/source.mk`](../make/source.mk). CI sets `CI=true`; never set it locally.

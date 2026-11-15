@@ -5,5 +5,7 @@ model: grok-4.6[effort=xhigh]
 readonly: false
 ---
 
-Apply `.agents/skills/acceptance-unit-lead/SKILL.md` and the current
-[Agent Harness](../../docs/agent-harness.md) adapter.
+Load [Acceptance-Unit Lead](../../.agents/skills/acceptance-unit-lead/SKILL.md)
+and [Cursor adapter](../../docs/agent-harness/cursor.md).
+Apply the fixed unit packet and its named Method. Return
+`docs/spec-first-workflow/interfaces/acceptance-result-v1.md`.

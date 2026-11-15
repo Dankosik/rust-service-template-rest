@@ -39,16 +39,12 @@ reviewer preference, selected command, or agent-authored packet does not expand
 local acceptance. Loading a domain method supplies expertise, not new gates.
 
 Preserve genuine user-established requirements, including explicitly requested
-migration execution, runtime observation, green CI, or release. Reconcile old
-agent-added checks with this policy in existing task state; do not treat their
-presence or prior artifact acceptance as evidence of user intent. An empty
-additional-check list means none, not work to discover more. No new approval
-round is needed to omit agent-invented extras.
+migration execution, runtime observation, green CI, or release.
 
 Do not create temporary applications, smoke runners, compose stacks, remote
 environments, provider sandboxes, permanent workflows, or validation matrices
 solely to establish local completion. Small unit fixtures, existing test doubles,
-and in-process `httptest` remain normal test authoring. Use existing suitable
+and in-process router or service tests remain normal test authoring. Use existing suitable
 tools for a concrete diagnostic question; do not promote the diagnostic into a
 new completion requirement. New verification infrastructure needs an explicitly
 accepted task requirement, not a broad security, integrity, or concurrency label.
@@ -83,11 +79,7 @@ Preserve actual safety and authority requirements.
 ## Design Proof
 
 Specification closes behavior and its nearest feasible falsifier; Technical
-Design supports the mechanism, invariants, and feasible proof. The executor
-chooses concrete cases, fixtures, assertions, and commands while writing code.
-Neither a test-case matrix nor completed product tests are pre-Implementation
-inputs. Unwritten tests and unavailable optional infrastructure do not block
-Planning or implementation from accepted behavior and design. A proposed live
+Design supports the mechanism, invariants, and feasible proof. A proposed live
 falsifier is not automatically a mandatory live acceptance scenario.
 Evidence needed to resolve an actual mechanism choice remains with Technical
 Design; do not claim measured existing behavior from design rationale alone.
@@ -97,8 +89,7 @@ Design; do not claim measured existing behavior from design rationale alone.
 Attach commit or tree identity only across a checkout or integration boundary;
 the current bounded diff is enough for local work. Retain actual commands,
 inputs, environment, result, and exercised scope, using [Evidence Result
-V1](../interfaces/evidence-result-v1.md) for final verification claims.
-Implementation handoffs remain `Implemented` without a proof receipt.
+V1](#evidence-result-v1) for final verification claims.
 [Implementation](../phases/implementation.md#feedback-during-coding) owns coding
 feedback and the single assembled final-validation boundary.
 
@@ -134,3 +125,30 @@ for that scope. Missing optional proof does not prevent local `Accepted`.
 When an external outcome remains requested, report local completion separately
 without declaring the whole request complete. Verification reports evidence
 and material gaps; repair and genuinely required recovery stay with their owners.
+
+## Evidence Result V1
+
+Return one record per claim:
+
+```text
+claim: <assertion>
+candidate: <commit/tree/bounded diff identity>
+scope: <package/files/behavior>
+command: <exact command>
+inputs: <changed paths or stable input identity>
+environment: <relevant tags/services/toolchain>
+result: pass | fail | blocked
+duration: <wall time>
+status: verified | partially_verified | not_verified
+gap_or_next_owner: <none, unverified remainder, or owner>
+```
+
+A summary inherits the weakest status among the claims it covers. When required
+proof cannot run, record the intended proof, reason, narrower evidence, and
+unverified remainder.
+
+[Execution Evidence](#execution-evidence) owns reuse eligibility for scoped
+results and whole-candidate receipts. Keep a reused record's original candidate
+and exercised scope. The Lead validates its applicability to the current claim;
+a reviewer reuses valid evidence or runs a missing or distinct adversarial
+falsifier.

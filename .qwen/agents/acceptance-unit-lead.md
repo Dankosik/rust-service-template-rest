@@ -17,6 +17,6 @@ tools:
 ---
 
 Load [Acceptance-Unit Lead](../../.agents/skills/acceptance-unit-lead/SKILL.md)
-and the selected [harness adapter](../../docs/agent-harness/qwen-code.md).
+and [Qwen Code adapter](../../docs/agent-harness/qwen-code.md).
 Apply the fixed unit packet and its named Method. Return
 `docs/spec-first-workflow/interfaces/acceptance-result-v1.md`.

@@ -1,16 +1,14 @@
 ---
 name: rust-verification
-description: "Evidence boundary. Use for Rust service verification-only work, or when deciding whether existing evidence supports a requested claim at its stated scope."
+description: "Evidence boundary. Use for verification-only work or deciding whether existing evidence supports a claim at its stated scope."
 ---
 
 # Rust Verification
 
-**Evidence boundary.** A proof covers exactly the behavior it would fail on, and a claim cannot be wider than that boundary. Name the observable whose absence would make the selected proof fail before running it. Honor supplied requirements and preserve settled choices outside the requested change; resolve only what the task leaves open.
+**Evidence boundary.** A proof covers exactly the behavior it would fail on, and a claim cannot be wider than that boundary. Name the observable whose absence would make the selected proof fail before running it.
 
-Each command in this workspace proves a bounded thing. The format check proves formatting. The lint gate proves clippy shape at pedantic, not behavior. The build proves the workspace compiles, not that it runs. Tests prove the behavior their executed cases observe; the workspace suite also includes process tests for startup, probes, metrics, SIGTERM drain, and exit codes. CI owns its selected gates; a local full check neither replaces their results nor becomes an implicit completion requirement. A manual run with the local baseline file observes the startup summary and the shutdown sequence in the log. The skills check proves the shape of instructions, not their effect on a model.
+Workspace checks prove bounded surfaces: `make lint` checks clippy shape at pedantic, not runtime behavior; `make check-skills` checks instruction shape, not model effect; workspace process tests cover startup, probes, metrics, `SIGTERM` drain, and exit codes; a manual baseline run observes the startup summary and shutdown sequence in logs.
 
-A passing command proves only the surfaces it observed. File presence, a compile, a test filter that matched nothing, a skipped process test, or an unrelated aggregate cannot carry a claim. A test that passes with a sleep as synchronization has not proven ordering. The dependency tree proves resolution, not runtime behavior. Nothing local proves CI, a container, a collector receiving spans, or production behavior; say so rather than implying it.
+A passing command proves only the surfaces it observed. File presence, a compile, a test filter that matched nothing, a skipped process test, or an unrelated aggregate cannot carry a claim. A test that passes with a sleep as synchronization has not proven ordering, and the dependency tree proves resolution rather than runtime behavior. Nothing local proves CI, a container, a collector receiving spans, or production behavior; say so rather than implying it.
 
-Record the exact command, its preconditions, whether the result was fresh or reused, and the scope actually exercised. Reuse a passing result while its inputs, configuration, toolchain, and environment are unchanged. Ordinary local completion stops at the build and relevant tests the repository contract sets; do not add runs for confidence, and do not build an environment to close an optional gap. A known real defect in scope still requires a fix.
-
-For verification-only work, do not edit files. Finish when each requested claim is supported at its stated scope or returned with the exact missing proof and its owner. Never weaken an explicitly requested CI, runtime, or deployment result into local success, and never present a serial self-review as independent review.
+Record the exact command, its preconditions, whether the result was fresh or reused, and the scope actually exercised. Reuse a passing result while its inputs, configuration, toolchain, and environment are unchanged. For verification-only work, do not edit files; return unsupported claims with their exact missing proof and owner, never weaken a requested CI, runtime, or deployment result into local success, and never present a serial self-review as independent review.

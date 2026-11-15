@@ -36,11 +36,6 @@ routes results; it does not perform phase work or accept implementation units.
 including before an Implementation ledger exists. An explicit phase-only or
 research-only request stops at that reviewed boundary.
 
-Test cases, fixtures, assertions, and test commands are chosen by the executor
-while implementing each task. They require no preceding phase, approved test
-plan, or separate review. Implementation's final-validation boundary owns when
-the tests run.
-
 Traverse applicable macro phases in table order. Skip one only when Phase
 Selection evidence shows that its decision is already closed or untriggered;
 never fold its open decision into a neighboring phase or the same phase actor.
@@ -61,10 +56,8 @@ Evaluate these triggers before loading a phase owner:
 
 Intake is required for new structured work unless a complete Intent already
 exists. Specification and Planning are required for structured work unless
-ready equivalent authority already supplies their output. Do not backfill
-active work whose accepted upstream authority predates Intent: that authority
-remains its requester-meaning input, including on a narrow reopen. Missing or
-changed requester meaning still reopens Intake. Other phases are conditional.
+ready equivalent authority already supplies their output. Missing or changed
+requester meaning still reopens Intake. Other phases are conditional.
 Load only the selected owner; do not load a phase merely to
 declare it unnecessary. Record `skipped` only when a durable [Transition
 result](spec-first-workflow/shared/transition.md) needs that disposition.
@@ -76,7 +69,7 @@ Load a conditional owner immediately before its trigger:
 | Trigger | Owner |
 | --- | --- |
 | Decide whether or what to persist | [Artifacts](spec-first-workflow/shared/artifacts.md) |
-| Interpret or update artifact status | [Artifact Lifecycle V1](spec-first-workflow/interfaces/artifact-lifecycle-v1.md) |
+| Interpret or update artifact status | [Artifact Lifecycle V1](spec-first-workflow/shared/artifacts.md#artifact-lifecycle-v1) |
 | Dispatch a non-implementation read-only lane | [Read-Only Delegation](spec-first-workflow/shared/read-only-delegation.md) |
 | Decide or run independent review | [Review](spec-first-workflow/shared/review.md) |
 | Resume after interruption or actor/session change | [Resume](spec-first-workflow/shared/resume.md) |

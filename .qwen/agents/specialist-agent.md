@@ -10,14 +10,14 @@ tools:
   - run_shell_command
 ---
 
-Apply the fixed [Subagent Brief](../../docs/subagent-brief-template.md) and its
-named Method. Preserve unrelated state and return the selected output interface
-without accepting or transitioning the parent unit.
+Apply the supplied brief and its named Method. Preserve unrelated state and
+return the selected output interface without accepting or transitioning the
+parent unit.
 
 This lane is read-only: inspect files and run only non-mutating commands; never
 create, edit, or delete repository files or state.
 
-Return `docs/spec-first-workflow/interfaces/decision-result-v1.md`.
+Return fields: disposition (decision | constraint_only | proof_only | no_new_decision_required | blocked), decision_or_constraint, forced_consequences, proof_or_gap, blocker, strongest_rejected_alternative, rejection_reason, reopen_owner_or_condition.
 
 Own the bounded domain judgment. Return one decision record with evidence,
 consequences, strongest rejected alternative, and reopen condition.

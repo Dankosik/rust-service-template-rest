@@ -124,38 +124,19 @@ or verify live Railway settings.
 
 ## The build
 
-The image build holds no credential. BuildKit prints the value of an `ARG`
-that a `RUN` line references in the step name the build log keeps, and
-Railway's Dockerfile builds have no secret mounts, so no `ARG` may carry a
-secret; `make dockerfile-check` runs BuildKit's checks, which refuse a
-secret-named `ARG` or `ENV`. A private dependency enters as its locked release
-instead of a fetch with a token, from `vendor-private/` with its source in
-`.cargo/config.toml`; [Build Speed](build-speed.md#deployment-builds) owns the
-steps, including both watch-pattern forms above. Public crates still come from
-crates.io under the `Cargo.lock` checksums.
+The image build holds no credential: `make dockerfile-check` refuses
+secret-named `ARG` or `ENV` declarations, and private dependencies enter via
+`vendor-private/` and `.cargo/config.toml` ([Build
+Speed](build-speed.md#deployment-builds)).
 
-With the build argument `IMAGE_TESTS=unit` the build runs the workspace's
-unit tests (`cargo test --workspace --lib --bins`) in a debug stage of their
-own that the runtime stage depends on: a failing test fails the build, and
-Railway keeps serving the previous deployment. They need no database, Docker
-or network beyond loopback; integration suites and process tests stay in
-`make test`, the database proof and CI. The default, `none`, skips the work,
-and any other value fails the build. The first test build compiles the
-dependency graph a second time, in the debug profile; later builds reuse that
-layer. `IMAGE_TESTS=unit ALLOW_HEAVY=1 make runtime-image-build` runs the same
-gate locally.
-
-The IaC file leaves `IMAGE_TESTS` unset, so a Railway build skips the stage:
-the repository's CI tests the affected crates before a merge and runs
-`make test` on `main`. On a 4-vCPU builder the stage made each source-change
-build 65–70 s slower (about 280 s to 350 s) and cost 379 s once per lockfile
-change, and a timing-sensitive test failed one of four gated builds after an
-unrelated change. A repository without CI (`REPOSITORY_CI = none`) sets the
-service variable `IMAGE_TESTS=unit` and declares it in the IaC `env`; Railway
-passes it to the `ARG` of that name, and nothing reads it at run time.
-Railway's "Wait for CI" stays an operator choice: it holds each deployment
-until every workflow on the commit ends, here including the post-merge heavy
-proofs, and skips the deployment after two hours when Actions never run.
+`ARG IMAGE_TESTS` defaults to `none`, skipping the debug `cargo test
+--workspace --lib --bins` stage in Railway builds because PR and `main` CI run
+those tests. A repository without CI (`REPOSITORY_CI = none`) sets
+`IMAGE_TESTS=unit` in its Railway service variables and declares it in IaC
+`env` (`IMAGE_TESTS=unit ALLOW_HEAVY=1 make runtime-image-build` runs the same
+gate locally). Railway's "Wait for CI" stays an operator choice: it holds each
+deployment until every workflow on the commit ends, including post-merge heavy
+proofs, and skips after two hours when Actions never run.
 
 ## Rollout
 
@@ -201,9 +182,9 @@ effective `runtime.worker_threads` in the process's startup record.
 The template deliberately does not choose: the Railway project, environment,
 service, branch, domain, or region; secrets and connection references;
 replica count, CPU, memory, autoscaling, or spend; private reachability for
-the separate metrics listener, whose shipped `:9090` address binds every
-interface; alerting or an external uptime check; release approval, rollback
-authority, and retention.
+the separate metrics listener, whose shipped `0.0.0.0:9090` address binds
+every IPv4 interface (set `[::]:9090` if IPv6 scraping is needed); alerting or
+an external uptime check; release approval, rollback authority, and retention.
 
 Enable Railway "Wait for CI" only when promotion must wait for every
 workflow on the commit ([the build](#the-build) has its cost). Treat the

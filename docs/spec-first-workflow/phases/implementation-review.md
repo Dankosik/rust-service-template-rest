@@ -6,8 +6,8 @@ implementation falsifiers and verdicts.
 
 ## Final Delivery
 
-Review one fixed delivery candidate. It may contain the entire task ledger;
-multiple implemented tasks do not require separate handoffs or verdicts.
+Review one fixed delivery candidate containing the assembled task ledger or
+unit.
 
 Try to disprove the postcondition and important constraints on the real path,
 retained scope, dependencies, and claim-scoped proof. Consume the accepted

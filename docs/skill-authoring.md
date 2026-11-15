@@ -12,11 +12,11 @@ directory:
 - **Workflow skills** (`orchestrator`, `acceptance-unit-lead`,
   `spec-first-brainstorming`, `spec-document-designer`, `idea-refine`,
   `planning-and-task-breakdown`, `grilling`, `agent-prompt-composer`,
-  `thermo-nuclear-code-quality-review`) are ported from the Go template with
-  path changes only. They are carriers for the [workflow](spec-first-workflow.md)
-  and the [harness](agent-harness.md): a user or a role invokes them, never
-  the model on its own, and their bodies link to the phase, interface, and
-  contract documents instead of restating them. See [Workflow skills](#workflow-skills).
+  `thermo-nuclear-code-quality-review`) are carriers for the
+  [workflow](spec-first-workflow.md) and the [harness](agent-harness.md): a
+  user or a role invokes them, never the model on its own, and their bodies link
+  to the phase, interface, and contract documents instead of restating them. See
+  [Workflow skills](#workflow-skills).
 
 ## Files
 
@@ -51,17 +51,15 @@ layers).
 
 ## Body
 
-One H1 heading, then at least four prose paragraphs of 250–1000 words in
+One H1 heading, then at least three prose paragraphs of 150–1000 words in
 total. The ceiling guards context cost, not completeness: a rule no compiler or
 lint enforces earns its words. Keep the method in prose; use links to select a supporting reference or
 locate a canonical project example. Substantial code, lists, and tables belong
 in the selected reference rather than the entrypoint. The first paragraph opens with the
-leading concept in bold, states the method in one or two sentences, and ends
-with the standing clause: honor supplied requirements and preserve settled
-choices outside the requested change; resolve only what the task leaves
-open. Each following paragraph is one decision cluster: the judgment, the
-non-obvious criteria that change it, and the plausible wrong default, written
-as observable triggers and actions rather than prohibitions.
+leading concept in bold and states the method in one or two sentences. Each
+following paragraph is one decision cluster: the judgment, the non-obvious
+criteria that change it, and the plausible wrong default, written as observable
+triggers and actions rather than prohibitions.
 
 Ground service-specific decisions in conditional links to their current owners
 so an agent extends the existing path. Do not copy a changing inventory of
@@ -72,14 +70,8 @@ does not need another prose rule; choosing the right invariant or type still
 may. Rules that must always apply belong in `AGENTS.md`, not in a skill that
 may not be selected.
 
-Separate a transferable method from this service's conventions. Apply a named
-repository owner only when working in that repository; a standalone crate must
-not inherit its crate graph, specs tree, telemetry, or validation machinery.
-Keep the core decision and completion condition usable when no project policy
-or sibling skill is supplied. Put portable decision examples inside the skill's
-own references directory; repository examples are conditional pointers, not
-required files in an independently installed skill. Preserve the current
-project's authority and constraints rather than inventing replacements.
+Keep the core decision usable without sibling skills or repository-specific
+files, and apply named repository paths only when working in this repository.
 
 Judge correctness against accepted requirements and applicable language,
 protocol, and provider contracts. Existing code and tests describe the current
@@ -97,11 +89,9 @@ moving a check or hiding a failure behind an abstraction does not remove its
 responsibility. Teach the invariant the mechanism establishes and the work
 that still belongs to its caller.
 
-The closing paragraph separates review from implementation: review explains
-the risk and the smallest justified change without editing; implementation
-finishes with the focused proof for the changed behaviour and reports what
-was exercised. Name what the skill does not require, so a mention of a tool
-or technique is not read as a completion gate.
+When a skill mentions an optional diagnostic tool or exhaustive technique,
+state that it is not a mandatory completion gate; do not repeat general review
+or validation-budget prose.
 
 ## Evidence And Scope
 
@@ -166,15 +156,14 @@ code whose ongoing correctness depends on that owner.
 ## Change And Proof
 
 A skill edit is an instruction change: `make check-skills` proves shape, and
-a read-through of the skills that share a trigger proves they still
-discriminate. Behavioural comparison on realistic tasks belongs to the
-evaluation fixtures that arrive with the harness stage; structural validity
-does not establish better model behaviour.
+a read-through of skills that share a trigger proves they still discriminate.
+Structural validity does not establish better model behaviour; see
+[Prompt Maintenance](prompt-maintenance.md#change-and-proof) for behavioral
+comparison rules.
 
-Skills for a capability arrive with that capability's stage
-(`rust-api-contract` came with the OpenAPI contract, `rust-sqlx` comes with
-PostgreSQL, `rust-tonic` with gRPC); do not add a skill for code that does
-not exist.
+Skills for a capability arrive with that capability (`rust-api-contract` with
+the OpenAPI contract, `rust-sqlx` with PostgreSQL); do not add a skill for
+code that does not exist.
 
 ## Workflow skills
 
