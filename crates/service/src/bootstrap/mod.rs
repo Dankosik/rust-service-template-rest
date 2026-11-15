@@ -37,7 +37,7 @@ mod shutdown;
 mod signals;
 mod telemetry;
 // template:begin inbound-webhooks:bootstrap-webhooks-module
-mod webhooks;
+mod inbound_webhooks;
 // template:end inbound-webhooks:bootstrap-webhooks-module
 
 use std::ffi::OsString;
@@ -528,7 +528,8 @@ async fn start(
     let mut composer = idempotency::prepare(config, dependencies.postgres.as_ref())?;
     // template:end http-idempotency:bootstrap-http-idempotency-composer
     // template:begin inbound-webhooks:bootstrap-webhooks-prepare
-    let webhook_state = webhooks::prepare(config, dependencies.postgres.as_ref(), background)?;
+    let webhook_state =
+        inbound_webhooks::prepare(config, dependencies.postgres.as_ref(), background)?;
     // template:end inbound-webhooks:bootstrap-webhooks-prepare
     let readiness = serving.readiness.insert(Readiness::new(
         probes,

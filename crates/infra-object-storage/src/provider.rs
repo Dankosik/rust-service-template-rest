@@ -3,8 +3,8 @@
 
 use url::Url;
 
-use crate::body::UploadSource;
 use crate::error::ConfigError;
+use crate::put_body::UploadSource;
 
 /// Where the bucket lives. Each provider carries only the fields it accepts.
 #[derive(Clone, Debug, PartialEq, Eq)]

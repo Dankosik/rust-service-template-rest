@@ -20,7 +20,6 @@
 //! slot at the reader's pace within the fixed operation deadline; use
 //! collected bytes or a presigned URL for a reader that may be slow.
 
-mod body;
 mod call;
 mod content_type;
 mod credentials;
@@ -29,6 +28,7 @@ mod error;
 mod key;
 mod observe;
 mod provider;
+mod put_body;
 mod response_limit;
 
 #[cfg(test)]
@@ -49,7 +49,6 @@ use aws_smithy_http_client::tls;
 use operation_context::OperationContext;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-pub use self::body::PutBody;
 use self::call::{call_policy, within};
 pub use self::content_type::{ContentType, InvalidContentType};
 pub use self::credentials::CredentialSource;
@@ -60,6 +59,7 @@ pub use self::key::{InvalidObjectKey, ObjectKey};
 pub use self::observe::HISTOGRAMS;
 use self::observe::{Histograms, Operation, OperationGuard};
 pub use self::provider::Provider;
+pub use self::put_body::PutBody;
 use self::response_limit::ResponseLimit;
 
 /// A transfer with no progress for this long fails; the pinned behavior
