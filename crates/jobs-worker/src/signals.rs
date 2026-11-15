@@ -8,6 +8,7 @@ pub(crate) struct SignalError {
 }
 
 /// Native streams remain owned by the synchronous entrypoint through runtime shutdown.
+/* jscpd:ignore-start */
 pub(crate) struct Signals {
     #[cfg(unix)]
     terminate: tokio::signal::unix::Signal,
@@ -39,6 +40,7 @@ impl Signals {
             })
         }
     }
+    /* jscpd:ignore-end */
 
     pub(crate) async fn wait(&mut self) -> Result<(), SignalError> {
         #[cfg(unix)]

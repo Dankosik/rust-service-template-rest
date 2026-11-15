@@ -89,7 +89,6 @@ REQUIRED_AUTHORITIES = frozenset(
         "Cargo.toml",
         "rust-toolchain.toml",
         ".jscpd.json",
-        "quality/duplication-baseline.json",
         "quality/architecture.json",
         "docs/repo-architecture.md",
         "docs/validation/postgres.md",

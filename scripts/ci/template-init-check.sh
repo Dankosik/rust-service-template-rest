@@ -205,7 +205,6 @@ recorder_self_test() {
 	for invalid in 2 48 '1,7,7' '1,65,64'; do
 		if validate_artifact_graphs "${invalid}"; then echo "noncanonical artifact selection accepted" >&2; return 1; fi
 	done
-	bash "${ROOT_DIR}/scripts/ci/measure.sh" --self-test
 	snapshot_failure_self_test "${fixture}"
 	artifact_recorder_self_test "${fixture}"
 	printf 'template initializer graph selection self-test: pass\n'

@@ -33,6 +33,7 @@ VERIFY := bash scripts/ci/verify.sh
 NPX_COOLDOWN_DAYS := 7
 NPX_ENV = npm_config_prefer_offline=true npm_config_ignore_scripts=true npm_config_audit=false npm_config_fund=false npm_config_update_notifier=false npm_config_before="$$(env -u PYTHONPATH -u PYTHONHOME PYTHONDONTWRITEBYTECODE=1 python3 -B -c 'import datetime as d; print((d.datetime.now(d.timezone.utc)-d.timedelta(days=$(NPX_COOLDOWN_DAYS))).strftime("%Y-%m-%dT%H:%M:%SZ"))')"
 REDOCLY_CLI ?= npx --yes @redocly/cli@$(REDOCLY_CLI_VERSION)
+JSCPD ?= npx --yes jscpd@$(JSCPD_VERSION)
 OASDIFF ?= go run github.com/oasdiff/oasdiff@v$(OASDIFF_VERSION)
 
 # Pinned Cargo tools. Locally each one is built once from crates.io into its
@@ -128,11 +129,12 @@ MESSAGING_PROFILE_TARGETS := test-integration-messaging messaging-go-compat
 CACHE_PROFILE_TARGETS := test-integration-cache
 OBJECT_STORAGE_PROFILE_TARGETS := test-integration-object-storage test-object-storage-conformance
 OUTBOUND_AUTH_PROFILE_TARGETS := test-integration-oauth
-DATABASE_PROFILE := $(strip $(shell python3 scripts/lib/template_state.py profile --repo . --field database))
-MESSAGING_PROFILE := $(strip $(shell python3 scripts/lib/template_state.py profile --repo . --field messaging))
-CACHE_PROFILE := $(strip $(shell python3 scripts/lib/template_state.py profile --repo . --field cache))
-OBJECT_STORAGE_PROFILE := $(strip $(shell python3 scripts/lib/template_state.py profile --repo . --field object_storage))
-OUTBOUND_AUTH_PROFILE := $(strip $(shell python3 scripts/lib/template_state.py profile --repo . --field outbound_auth))
+_TEMPLATE_PROFILES := $(shell PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/lib/template_state.py profile --repo . --fields database messaging cache object_storage outbound_auth)
+DATABASE_PROFILE := $(patsubst database=%,%,$(filter database=%,$(_TEMPLATE_PROFILES)))
+MESSAGING_PROFILE := $(patsubst messaging=%,%,$(filter messaging=%,$(_TEMPLATE_PROFILES)))
+CACHE_PROFILE := $(patsubst cache=%,%,$(filter cache=%,$(_TEMPLATE_PROFILES)))
+OBJECT_STORAGE_PROFILE := $(patsubst object_storage=%,%,$(filter object_storage=%,$(_TEMPLATE_PROFILES)))
+OUTBOUND_AUTH_PROFILE := $(patsubst outbound_auth=%,%,$(filter outbound_auth=%,$(_TEMPLATE_PROFILES)))
 ifeq ($(DATABASE_PROFILE),postgres)
 include make/profile-postgres.mk
 ACTIVE_TEMPLATE_STANDARD_TARGETS := $(TEMPLATE_STANDARD_TARGETS)
@@ -216,7 +218,7 @@ mutants: $(filter $(TOOLS_ROOT)/%,$(CARGO_MUTANTS) $(CARGO_NEXTEST)) ## List the
 	@test -n "$(PKG)" || { echo "mutants requires PKG=<crate name>" >&2; exit 2; }
 	$(VALIDATION_LOCK) $(NEXTEST_PATH) $(CARGO_MUTANTS) mutants --test-tool nextest --package $(PKG) $(if $(FILE),--file $(FILE)) --cargo-arg=--locked --output target/mutants
 
-native-transport-regressions: ## Locked serial native transport graph and regression receipt
+native-transport-regressions: ## Run locked serial native transport regressions
 	$(VALIDATION_LOCK) python3 scripts/ci/native-transport-regressions.py
 
 test-integration-messaging: ## JetStream adapter proof against a throwaway Compose NATS; ALLOW_HEAVY=1, REQUIRE_DOCKER=1 to fail without Docker
@@ -372,9 +374,15 @@ actionlint: ## Lint GitHub Actions workflows
 zizmor: $(filter $(TOOLS_ROOT)/%,$(ZIZMOR)) ## Audit GitHub Actions workflows for security weaknesses; GH_TOKEN enables the online audits
 	$(ZIZMOR) --persona regular .github
 
-shellcheck: ## ShellCheck every shell script through the pinned container
+shellcheck: ## ShellCheck every shell script through the pinned container (or local shellcheck when Docker is unavailable)
 	@test -n "$(SHELL_FILES)" || { echo "no shell scripts found; skipping ShellCheck"; exit 0; }; \
-	docker run --rm --read-only --network none -v "$(CURDIR):/src:ro" -w /src "$(SHELLCHECK_IMAGE)" -x -- $(SHELL_FILES)
+	if [ "$(CI)" = "true" ] || (command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1); then \
+		docker run --rm --read-only --network none -v "$(CURDIR):/src:ro" -w /src "$(SHELLCHECK_IMAGE)" -x -- $(SHELL_FILES); \
+	elif command -v shellcheck >/dev/null 2>&1; then \
+		shellcheck -x -- $(SHELL_FILES); \
+	else \
+		echo "$@ requires Docker ($(SHELLCHECK_IMAGE)) or local shellcheck" >&2; exit 2; \
+	fi
 
 python-lint: ## Lint the Python scripts for defects with the pinned ruff
 	@command -v uvx >/dev/null 2>&1 || command -v pipx >/dev/null 2>&1 || { echo "$@ requires uv or pipx for ruff@$(RUFF_VERSION)" >&2; exit 2; }
@@ -384,9 +392,15 @@ python-lint: ## Lint the Python scripts for defects with the pinned ruff
 # contract; external URLs are not, and checking them would make the gate flaky.
 docs-check: ## Image-input watch coverage and relative Markdown links/fragments
 	python3 scripts/ci/image-inputs-check.py
-	@test -n "$(MARKDOWN_FILES)" || { echo "no Markdown files found; skipping link check"; exit 0; }
-	docker run --rm --read-only --network none -v "$(CURDIR):/src:ro" -w /src --entrypoint lychee "$(LYCHEE_IMAGE)" \
-		--offline --include-fragments --no-progress --root-dir /src -- $(MARKDOWN_FILES)
+	@test -n "$(MARKDOWN_FILES)" || { echo "no Markdown files found; skipping link check"; exit 0; }; \
+	if [ "$(CI)" = "true" ] || (command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1); then \
+		docker run --rm --read-only --network none -v "$(CURDIR):/src:ro" -w /src --entrypoint lychee "$(LYCHEE_IMAGE)" \
+			--offline --include-fragments --no-progress --root-dir /src -- $(MARKDOWN_FILES); \
+	elif command -v lychee >/dev/null 2>&1; then \
+		lychee --offline --include-fragments --no-progress --root-dir "$(CURDIR)" -- $(MARKDOWN_FILES); \
+	else \
+		echo "$@ requires Docker ($(LYCHEE_IMAGE)) or local lychee" >&2; exit 2; \
+	fi
 
 dockerfile-check: ## Native BuildKit Dockerfile checks
 	$(VALIDATION_LOCK) bash scripts/ci/runtime-image-build.sh --check
@@ -464,8 +478,9 @@ openapi-breaking-since: ## Compare the document with its committed version at BA
 	@base=$$(mktemp) && trap 'rm -f "$$base"' EXIT && git show "$(BASE_REF):$(OPENAPI_FILE)" >"$$base" && \
 		$(MAKE) --no-print-directory openapi-breaking BASE_OPENAPI="$$base"
 
-duplication-check: ## Reject new substantial Rust clones outside reviewed admissions
-	python3 scripts/ci/duplication-check.py
+duplication-check: ## Reject substantial Rust clones outside inline jscpd ignores
+	@command -v npx >/dev/null 2>&1 || { echo "duplication-check requires Node.js (npx) for jscpd@$(JSCPD_VERSION)" >&2; exit 2; }
+	$(NPX_ENV) $(JSCPD) --config .jscpd.json .
 
 architecture-check: ## Enforce declared workspace dependency directions
 	python3 scripts/ci/architecture-check.py

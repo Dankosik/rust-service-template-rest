@@ -6,6 +6,7 @@ use tokio::time::Instant;
 pub(crate) struct SignalError;
 
 /// Native streams stay owned through the runtime's final shutdown.
+/* jscpd:ignore-start */
 pub(crate) struct Signals {
     #[cfg(unix)]
     terminate: tokio::signal::unix::Signal,
@@ -37,6 +38,7 @@ impl Signals {
             })
         }
     }
+    /* jscpd:ignore-end */
 
     pub(crate) fn first_stop(&self) -> Option<Instant> {
         self.first_stop

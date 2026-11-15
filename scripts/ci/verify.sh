@@ -41,8 +41,8 @@ fingerprint_candidate() {
 		cat "${files_path}"
 		printf '%s\n' tools/versions.env
 		if [[ ${surface_duplication:-false} == true || ${surface_architecture:-false} == true ]]; then
-			printf '%s\n' .jscpd.json quality/duplication-baseline.json quality/architecture.json \
-				scripts/ci/duplication-check.py scripts/ci/architecture-check.py scripts/tests/quality-checks.py
+			printf '%s\n' .jscpd.json quality/architecture.json \
+				scripts/ci/architecture-check.py scripts/tests/quality-checks.py
 		fi
 	)
 	: >"${tmp}/file-hashes"
@@ -99,7 +99,7 @@ assert_failed() {
 
 self_test() (
 	unset VALIDATION_LOCK_TOKEN VALIDATION_LOCK_DOMAIN VALIDATION_LOCK_HELD VALIDATION_LOCK_DIR
-	local output fixture scratch script attempt_path receipts_before crate path
+	local output fixture scratch script attempt_path receipts_before crate
 	plan_section() { sed -n "/^$1:\$/,/^[^ ]/p" <<<"${output}"; }
 	fixture=$(mktemp -d)
 	trap 'rm -rf -- "${fixture}"' EXIT
@@ -192,11 +192,10 @@ LOCK
 		[[ $(fingerprint_candidate) != "${original}" ]] || assert_failed
 		rm deleted
 		[[ $(fingerprint_candidate) == "${original}" ]] || assert_failed
-		mkdir quality
-		printf '{"cases": []}\n' >quality/duplication-baseline.json
+		printf '{"threshold": 0}\n' >.jscpd.json
 		surface_duplication=true
 		original=$(fingerprint_candidate)
-		printf '{"cases": ["changed"]}\n' >quality/duplication-baseline.json
+		printf '{"threshold": 1}\n' >.jscpd.json
 		[[ $(fingerprint_candidate) != "${original}" ]] || assert_failed
 	)
 	bash "${ROOT_DIR}/scripts/ci/git-changed-paths.sh" --self-test
@@ -241,12 +240,10 @@ EOF
 	if grep -q 'template-init-check\|template-init-artifacts' <<<"${output}"; then return 1; fi
 	rm template.lock
 
-	for path in .jscpd.json quality/duplication-baseline.json scripts/ci/duplication-check.py; do
-		output=$(bash "${script}" --plan --files "${path}")
-		grep -q '^  make duplication-check$' <<<"${output}"
-		grep -q '^  make quality-check-self-test$' <<<"${output}"
-		if grep -q '^  make architecture-check$' <<<"${output}"; then return 1; fi
-	done
+	output=$(bash "${script}" --plan --files .jscpd.json)
+	grep -q '^  make duplication-check$' <<<"${output}"
+	grep -q '^  make quality-check-self-test$' <<<"${output}"
+	if grep -q '^  make architecture-check$' <<<"${output}"; then return 1; fi
 	output=$(bash "${script}" --plan --files quality/architecture.json)
 	grep -q '^  make architecture-check$' <<<"${output}"
 	grep -q '^  make quality-check-self-test$' <<<"${output}"

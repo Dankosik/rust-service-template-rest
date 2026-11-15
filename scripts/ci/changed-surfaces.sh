@@ -17,6 +17,20 @@ names=(
 load_profiles() {
 	local root raw key value
 	root=$(pwd)
+	if [[ ! -e "${root}/template.lock" && ! -L "${root}/template.lock" && ! -L "${root}" && -d "${root}" ]]; then
+		database=postgres
+		messaging=none
+		[[ -d "${root}/crates/infra-messaging" ]] && messaging=nats-jetstream
+		cache=none
+		[[ -d "${root}/crates/infra-cache" ]] && cache=redis
+		object_storage=none
+		[[ -d "${root}/crates/infra-object-storage" ]] && object_storage=s3
+		outbound_auth=none
+		[[ -d "${root}/crates/infra-oauth2-client-credentials" ]] && outbound_auth=oauth2-client-credentials
+		outbox=none
+		[[ -f "${root}/crates/infra-messaging/src/outbox.rs" ]] && outbox=postgres
+		return 0
+	fi
 	raw=$(env -u PYTHONPATH -u PYTHONHOME PYTHONDONTWRITEBYTECODE=1 python3 -B "${root}/scripts/lib/template_state.py" profile --repo "${root}" --fields database messaging cache object_storage outbound_auth outbox) || {
 		echo "cannot resolve selected template profiles" >&2
 		return 2
@@ -177,7 +191,7 @@ classify() {
 			;;
 		esac
 		case "${file}" in
-		.jscpd.json | quality/duplication-baseline.json | scripts/ci/duplication-check.py) mark duplication ;;
+		.jscpd.json) mark duplication ;;
 		quality/architecture.json | scripts/ci/architecture-check.py) mark architecture ;;
 		esac
 		# Database-backed proof: the adapter, the runner, the test crate and
@@ -306,7 +320,7 @@ classify() {
 		.editorconfig | .gitattributes | .gitignore | LICENSE | .github/CODEOWNERS | .github/ISSUE_TEMPLATE/*) mark no_validation_required ;;
 		esac
 		case "${file}" in
-		template.lock | template-owned.paths | scripts/lib/template_*.py | scripts/lib/template_profiles.json | Makefile | make/*.mk | scripts/ci/runtime-image-inventory.py | scripts/ci/runtime-image-scan.sh | scripts/tests/runtime-image-inventory.py | scripts/ci/image-inputs-check.py | scripts/tests/image-inputs-check.py | scripts/ci/changed-surfaces.sh | scripts/ci/git-changed-paths.sh | scripts/ci/affected-crates.sh | scripts/ci/verify.sh | scripts/ci/validation-lock.sh | scripts/ci/validation-lock.py | scripts/tests/validation-lock-test.py | scripts/ci/measure.sh)
+		template.lock | template-owned.paths | scripts/lib/template_*.py | scripts/lib/template_profiles.json | Makefile | make/*.mk | scripts/ci/runtime-image-inventory.py | scripts/ci/runtime-image-scan.sh | scripts/tests/runtime-image-inventory.py | scripts/ci/image-inputs-check.py | scripts/tests/image-inputs-check.py | scripts/ci/changed-surfaces.sh | scripts/ci/git-changed-paths.sh | scripts/ci/affected-crates.sh | scripts/ci/verify.sh | scripts/ci/validation-lock.sh | scripts/ci/validation-lock.py | scripts/tests/validation-lock-test.py)
 			mark validation_system
 			;;
 		esac
@@ -339,7 +353,7 @@ classify() {
 			;;
 		# template:end service-auth:classifier-service-auth-initializer
 		env/monitoring/*.rules.yml | scripts/tests/*-rules.yml | scripts/ci/monitoring-rules.sh | \
-		.jscpd.json | ruff.toml | quality/*.json | scripts/ci/duplication-check.py | scripts/ci/architecture-check.py | scripts/tests/quality-checks.py | \
+		.jscpd.json | ruff.toml | quality/*.json | scripts/ci/architecture-check.py | scripts/tests/quality-checks.py | \
 		.dockerignore | build/docker/Dockerfile | scripts/ci/image-inputs-check.py | scripts/tests/image-inputs-check.py | README.md | SECURITY.md | .gitleaks.toml | lychee.toml | \
 		.github/CODEOWNERS | .github/ISSUE_TEMPLATE/* | .github/dependabot.yml | \
 		.github/workflows/cd.yml | .github/actions/publish-image/action.yml | .github/actions/rust-toolchain/action.yml | \
@@ -443,7 +457,7 @@ union_classify() (
 
 assert_case() {
 	local file=$1 true_names=$2 false_names=$3 output name
-	output="$(printf '%s\n' "${file}" | (cd "${classifier_root}" && bash scripts/ci/changed-surfaces.sh))"
+	output="$(cd "${classifier_root}" && classify <<<"${file}")"
 	for name in ${true_names}; do
 		has_line "${output}" "${name}=true" || {
 			printf '%s: expected %s=true\n%s\n' "${file}" "${name}" "${output}" >&2
@@ -489,9 +503,7 @@ HOOK
 	for file in crates/config/build.rs crates/health/src/lib.rs test/tests/probes.rs; do
 		assert_case "${file}" "duplication" "architecture"
 	done
-	for file in .jscpd.json quality/duplication-baseline.json scripts/ci/duplication-check.py; do
-		assert_case "${file}" "duplication" "architecture"
-	done
+	assert_case .jscpd.json "duplication" "architecture"
 	for file in quality/architecture.json scripts/ci/architecture-check.py; do
 		assert_case "${file}" "architecture" "duplication"
 	done
@@ -872,7 +884,7 @@ HOOK
 	assert_case scripts/template-upgrade.sh \
 		"module_initializer initializer_runtime shell" \
 		"rust_source cargo_dependencies github_workflows db_integration"
-	for file in changed-surfaces git-changed-paths affected-crates verify validation-lock measure; do
+	for file in changed-surfaces git-changed-paths affected-crates verify validation-lock; do
 		assert_case "scripts/ci/${file}.sh" \
 			"validation_system shell" \
 			"tool_manifest rust_source initializer_runtime"

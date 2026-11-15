@@ -1237,6 +1237,19 @@ def check_quality(source: Path) -> None:
             initializer, "postgres", "none", "none", "none", "postgres", "none", "standard-webhooks", "core",
         )),
     )
+    versions = (source / "tools/versions.env").read_text(encoding="utf-8")
+    jscpd_matches = re.findall(r"^JSCPD_VERSION=([0-9]+\.[0-9]+\.[0-9]+)$", versions, re.M)
+    if len(jscpd_matches) != 1:
+        raise initializer.Refusal("tools/versions.env must declare one JSCPD_VERSION")
+    jscpd_ver = jscpd_matches[0]
+    jscpd_env = dict(
+        os.environ,
+        npm_config_prefer_offline="true",
+        npm_config_ignore_scripts="true",
+        npm_config_audit="false",
+        npm_config_fund="false",
+        npm_config_update_notifier="false",
+    )
     def check(temporary: str, name: str, inputs) -> None:
         tree = Path(temporary) / name
         _project(source, candidate, initializer, inputs, tree)
@@ -1246,12 +1259,12 @@ def check_quality(source: Path) -> None:
         commands = (
             ["git", "init", "-q"],
             [sys.executable, "scripts/ci/architecture-check.py", "--root", os.fspath(tree)],
-            [sys.executable, "scripts/ci/duplication-check.py", "--root", os.fspath(tree)],
+            ["npx", "--yes", f"jscpd@{jscpd_ver}", "--config", ".jscpd.json", "."],
         )
         if name in {"inbound-only", "outbound-only"}:
             commands += (["cargo", "check", "--tests", "-p", "infra-webhooks", "--locked"],)
         for command in commands:
-            result = subprocess.run(command, cwd=tree, capture_output=True, text=True, check=False)
+            result = subprocess.run(command, cwd=tree, env=jscpd_env, capture_output=True, text=True, check=False)
             if result.returncode:
                 raise initializer.Refusal(
                     f"quality projection {name}: {' '.join(command)} failed ({result.returncode})\n"

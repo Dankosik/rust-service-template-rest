@@ -6,7 +6,6 @@
 !.env.example
 
 .artifacts/
-/.ci/native-transport/
 /sbom.cdx.json
 *.profraw
 *.profdata

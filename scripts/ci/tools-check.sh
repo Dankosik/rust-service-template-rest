@@ -119,7 +119,6 @@ if drift_matches != ["7"]:
 
 for owner, pattern in (
     ("make/template.mk", r"(?m)^NPX_COOLDOWN_DAYS\s*:=\s*([0-9]+)$"),
-    ("scripts/ci/duplication-check.py", r"(?m)^NPX_COOLDOWN_DAYS\s*=\s*([0-9]+)$"),
     ("scripts/ci/migration-history-check.sh", r"(?m)^\s*npx_cooldown_days=([0-9]+)$"),
 ):
     candidate = Path(owner)
