@@ -44,7 +44,7 @@ the factual authority; read them for how something works.
 | `env/config/*.toml`, `APP__SECTION__KEY`, `--config`, `--config-overlay`, `--secrets-dir` | Inputs whose precedence and secret rules `crates/config/src/load.rs` implements |
 | `crates/health` | The readiness verdict `/health/ready` serves and the drain flag teardown flips |
 | `crates/service-failure` | The closed catalog of failure codes; each transport owns its wire projection |
-| `crates/shared-rules` | Pure, std-only rules that several crates apply identically; callers keep their policy and error mapping ([decisions](decisions/shared-rules-decisions.md)) |
+| `crates/shared-rules` | Pure, std-only rules that several crates apply identically under `crates/shared-rules/src/lib.rs`; callers keep their policy and error mapping |
 <!-- template:begin grpc:docs-architecture-grpc-source -->
 | `api/proto/`, `tools/grpc-codegen` | Committed prost/tonic contracts under `crates/grpc-contracts`, checked against the PR base |
 | `crates/infra-grpc` | Tonic routes on a separate socket served by `infra_http::Server`, clients, health projection and server TLS |

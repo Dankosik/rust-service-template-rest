@@ -649,10 +649,6 @@
         "id": "docs-architecture-grpc-source"
       },
       {
-        "path": "docs/validation/generated.md",
-        "id": "docs-validation-grpc-generated"
-      },
-      {
         "path": "docs/ci-cd-production-ready.md",
         "id": "docs-ci-grpc-gates"
       },
@@ -1079,7 +1075,6 @@
     ],
     "markers": [
       {"path": "docs/ci-cd-production-ready.md", "ids": ["docs-ci-jobs-worker-image"]},
-      {"path": "docs/validation/containers.md", "ids": ["docs-containers-jobs-worker-check"]},
       {"path": "Cargo.toml", "ids": ["workspace-worker-crate"]},
       {"path": "build/docker/Dockerfile", "ids": ["docker-jobs-worker-build", "docker-jobs-worker-output", "docker-jobs-worker-runtime"]}
     ]

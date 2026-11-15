@@ -1,29 +1,19 @@
 # Synthetic NATS JWT rotation fixture
 
-The existing messaging runner uses this configuration only in its own temporary
-Compose project. The ordinary `NATS_URL` broker is never changed. The configuration
-trusts an isolated operator, resolves its two accounts from memory and enables
-64 MiB of JetStream file storage for the `transport-recovery` account. That account
-allows eight streams, eight consumers, sixteen connections and 128 subscriptions.
-It rejects bearer users. Users A and B require a signed server challenge; their
-credentials have no expiry or activation bound.
+`scripts/ci/test-integration-messaging.sh` uses this isolated NATS operator and
+memory-resolver configuration in its own temporary Compose project; the shared
+`NATS_URL` broker is never modified.
 
-These checked-in credentials are intentionally public synthetic test inputs.
-They have authority only under this fixture's isolated operator. No operator,
-account or system-user seed is retained. The temporary producer store and its
-signing keys were removed after generation. The Rust test constructs an invalid
-tuple from B's valid JWT and A's seed at runtime; it never logs credentials or
-signatures. The real broker must reject that tuple before the same reconnecting
-client can authenticate B and perform fresh useful work.
+These checked-in credentials are intentionally public synthetic test inputs
+trusted only by this fixture's isolated operator. No operator, account, or
+system-user seed is retained; the temporary producer store and signing keys were
+deleted after generation.
 
 ## Producer and public identities
 
-Generated on 2026-10-07 with the installed official
-[`nsc`](https://nats-io.github.io/nsc/). Its version flag reports `0.0.0-dev`;
-`go version -m` identifies `github.com/nats-io/nsc/v2 v2.15.0`, module checksum
-`h1:3qOeZ7iX2q3Ae9GrsgE6Z7EgW2uYa0Tr4y97z7l2pKE=`, built with Go 1.26.1,
-`github.com/nats-io/jwt/v2 v2.8.2` and `github.com/nats-io/nkeys v0.4.16`.
-It is a one-time fixture producer, not a runtime or CI dependency.
+Generated once with official [`nsc`](https://nats-io.github.io/nsc/) (`v2.15.0`)
+for the digest-pinned NATS server in [`env/docker-compose.yml`](../../docker-compose.yml)
+(modeled on upstream [`operator.conf`](https://github.com/nats-io/nats-server/blob/v2.15.2/test/configs/operator.conf)):
 
 | Identity | Public NKey |
 | --- | --- |
@@ -33,17 +23,12 @@ It is a one-time fixture producer, not a runtime or CI dependency.
 | User A | `UDBCQIADO7SFCGGE5FNGOTL66SCF6F3FL6WWOT75R36TCLHAVKM6TACY` |
 | User B | `UDKZULILKPV3BALVMY6JQ63JRXETGP3E4EF4REATS2YFC43HLFIZPCXC` |
 
-Use the digest-pinned NATS server image from
-[`env/docker-compose.yml`](../../docker-compose.yml). The upstream
-[`operator.conf` fixture](https://github.com/nats-io/nats-server/blob/v2.15.2/test/configs/operator.conf)
-illustrates the operator and memory-resolver configuration.
-
 ## Regeneration
 
-Run from the repository root with an already available official `nsc`. Each
-invocation explicitly uses the newly created store. Regeneration produces new
-public identities; update the table above when deliberately replacing the trust
-root. Never import a real operator or retain the producer store.
+Run from the repository root with official `nsc` installed. Regeneration creates
+new public identities and JWTs—update the table above and the exact literal
+allowlists in [`.gitleaks.toml`](../../../.gitleaks.toml) together, and never
+import a real operator or retain `$fixture_store`:
 
 ```bash
 set -euo pipefail
@@ -76,33 +61,3 @@ CONFIG
 cat "$fixture_store/server.conf" >>"$fixture_dir/nats-server.conf"
 chmod 644 "$fixture_dir/nats-server.conf" "$fixture_dir/user-a.creds" "$fixture_dir/user-b.creds"
 ```
-
-## Existing runner and evidence
-
-`make test-integration-messaging` runs ordinary suites followed by the private
-JWT phase, including when `NATS_URL` supplies a shared ordinary broker. It stops
-its owned ordinary phase before starting the auth configuration. The narrow
-mode uses the same script and existing validation lock:
-
-```bash
-bash scripts/ci/validation-lock.sh -- bash scripts/ci/test-integration-messaging.sh --auth-only
-```
-
-The existing `--no-run` Cargo mode compiles both test executables, including the
-auth case, before entering any broker lifecycle. It needs no Docker and supplies
-no authentication proof. CI uses it with `NATS_URL=compile-only` to warm its cache.
-
-The runner requires Docker, binds its owned broker to an ephemeral loopback
-port and invokes exactly the ignored-outside-mode test
-`credentials::credentials_file_rotation_is_authenticated_by_the_broker`. It supplies
-`NATS_AUTH_URL`, `NATS_AUTH_CREDS_A` and `NATS_AUTH_CREDS_B`; absent inputs and zero
-executed cases cannot pass. `nsc` is not used during execution.
-
-`MESSAGING_RECEIPT_DIR` can name a task-owned output directory; otherwise the
-script creates one in the system temporary directory and prints its path.
-`auth-test.log` records the selected test result, `compose.log` records owned
-startup/teardown, and `lifecycle.txt` records phase exits and cleanup readback.
-Cleanup requires a successful `down -v` and no remaining containers, networks
-or volumes carrying that exact project label. A teardown failure remains a
-failed/unobserved result and never replaces an earlier primary test failure.
-No runtime result is inferred from fixture generation or these source files.

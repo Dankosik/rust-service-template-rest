@@ -21,6 +21,9 @@
 //! each caller. A function that gains a parameter or flag for one caller goes
 //! back to its callers. A module whose remaining consumers all belong to one
 //! template profile carries that profile's marker, so it leaves with them.
+//! Catch-all utility crates, per-rule micro-crates, and `#[path]` file sharing
+//! are rejected so dependency fan-in stays `std`-only and checked by
+//! `quality/architecture.json`.
 
 pub mod error_chain;
 pub mod hyper {

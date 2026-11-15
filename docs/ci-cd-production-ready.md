@@ -161,16 +161,16 @@ each reopen condition.
 | Policy (`deny.toml`) | `cargo-deny` over Linux gnu targets, `allow-wildcard-paths = true`, `multiple-versions = "warn"`, zero advisory ignores | `cargo-audit`; `cargo-vet` | Excludes macOS-only crates; path deps need `allow-wildcard-paths` |
 | Unused deps | `cargo-shear` on workspace and initializer graphs | `cargo-machete`; `cargo-udeps` | Catches orphaned deps in profile graphs (55/68 failed before pruning) |
 | Test adequacy | `cargo-mutants` local-only (`make mutants PKG=<crate>`) | PR mutation gate; `mutagen` | 71 mutants in `infra-grpc/router.rs` took 17 min; survivors guide assertions |
-| Binary inventory | `cargo auditable build` | Plain `cargo build` | Embeds 178 `pkg:cargo` crates for Trivy inside `/service` |
+| Binary inventory | `cargo auditable build` | Plain `cargo build` | Embeds `pkg:cargo` dependency metadata for Trivy inside shipped binaries |
 | Vendored forks | `make dependency-drift` in `security`; weekly `--upstream` issue | `cargo-deny` alone; failing PRs | Path deps bypass `cargo-deny`/Dependabot; upstream releases prompt review |
 | Vulnerabilities | `actions/dependency-review-action` (`high`, PRs only) | — | Requires repository dependency graph (Dependabot alerts enabled) |
 | Secrets | Gitleaks over range (PR/push) or `HEAD` ancestry (tags, dispatch, schedule, shallow-refused); `.gitleaks.toml` + `.gitleaksignore` | `--all` as gate; baseline file | Keeps full ancestry without masking new commits or worktrees |
 | Workflows | `actionlint` (host tools off); `zizmor` (`GH_TOKEN`) | — | Catches cache poisoning and unsafe triggers; `cd.yml` keeps scoped inline ignores |
 | Dockerfile | `docker buildx build --check` + `# check=error=true` | `hadolint` | Built into BuildKit; `# check=error=true` fails Railway builds too |
 | Static analysis | CodeQL Rust (`build-mode: none`, shipped code via `.github/codeql/rust.yml`) post-merge; Actions on PRs | Default setup; analyzing tests | Excluding tests and `vendor/` examples cut analysis from ~15.5 to ~7 min while keeping SQLx models |
-| Image & SBOM | Trivy container (`HIGH,CRITICAL`, `--ignore-unfixed`) + CycloneDX SBOM over the verified local image ID before push | `grype`/`syft`; `cargo-cyclonedx`; `trivy-action` | One container checks CVEs and emits the 194-component SBOM |
+| Image & SBOM | Trivy container (`HIGH,CRITICAL`, `--ignore-unfixed`) + CycloneDX SBOM over the verified local image ID before push | `grype`/`syft`; `cargo-cyclonedx`; `trivy-action` | One container checks CVEs and emits the admitted per-binary CycloneDX SBOM |
 | Links | Offline `lychee` container (`--include-fragments`) | `cargo install` lychee; `lychee-action`; `mlc` | Offline fragment checks prevent network flakiness |
-| Test runner | `cargo-nextest` + `cargo test --doc`; `cargo test` for DB | Serial `cargo test` | Workspace `cargo test` ran 54 binaries serially in 127 s vs parallel `nextest` |
+| Test runner | `cargo-nextest` + `cargo test --doc`; `cargo test` for DB | Serial `cargo test` | Workspace `cargo test` ran test binaries serially (127 s in 2026-11-02 audit) vs parallel `nextest` |
 | Runtime progress | `make runtime-progress-proof` post-merge (100 ms / 100 ms 1-CPU cgroup v2 quota, `worker_threads=1`, 90%+ occupancy + `cpu.stat` throttling + uncooperative negative control) | Unthrottled host test | Forces cheap unary traffic, uploads, stdout backpressure, and CPU load onto one worker so starvation cannot hide behind spare host cores |
 
 ### Routing and pipeline invariants
@@ -232,7 +232,8 @@ With PostgreSQL retained, the image builds `/migrate` with embedded migrations;
 <!-- template:end postgres:docs-ci-migrator-image -->
 <!-- template:begin worker:docs-ci-jobs-worker-image -->
 With jobs or messaging retained, the image builds `/jobs-worker`
-(`--entrypoint /jobs-worker`); [Container Validation](validation/containers.md)
+(`--entrypoint /jobs-worker`);
+[`scripts/ci/runtime-image-check.sh`](../scripts/ci/runtime-image-check.sh)
 checks retained/absent entrypoints and startup refusals.
 <!-- template:end worker:docs-ci-jobs-worker-image -->
 
@@ -246,7 +247,7 @@ favor of IaC.
 
 | Decision | Rejected | Why |
 | --- | --- | --- |
-| Ship `.railway/railway.ts` + `.railway/package.json` (`railway` 3.16.0) using partials and linked context | Document-only snippet | Ready for `railway config apply` without template project IDs while preserving operator variables |
+| Ship `.railway/railway.ts` + `.railway/package.json` using partials and linked context | Document-only snippet | Ready for `railway config apply` without template project IDs while preserving operator variables |
 | `ARG IMAGE_TESTS=none` skips unit tests unless set (`IMAGE_TESTS=unit` for `REPOSITORY_CI = none`) | Always running `unit`; Railway "Wait for CI" | Avoids +65–70 s/build (+379 s/lockfile) and timing flakes when CI already tests; "Wait for CI" blocks on post-merge jobs |
 | Private deps via `vendor-private/` + `.cargo/config.toml` | `ARG` tokens or secret mounts | Railway lacks secret mounts and BuildKit logs `ARG` values |
 

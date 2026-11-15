@@ -38,7 +38,7 @@
       "role": "shared-rules",
       "allow_dependents": {
         "reason": "Each listed crate applies a rule that another crate must apply identically, with no other common owner.",
-        "authority": "docs/decisions/shared-rules-decisions.md",
+        "authority": "crates/shared-rules/src/lib.rs",
         "members": [
           "crates/config/Cargo.toml",
           "crates/infra-bearerauthn/Cargo.toml",
