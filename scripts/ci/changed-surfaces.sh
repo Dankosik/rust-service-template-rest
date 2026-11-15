@@ -259,6 +259,7 @@ classify() {
 		esac
 		case "${file}" in
 		tools/grpc-codegen/Cargo.toml | tools/grpc-codegen/Cargo.lock) mark cargo_dependencies ;;
+		tools/grpc-codegen/deny.toml) mark dependency_policy ;;
 		esac
 		# template:end grpc:classifier-grpc-schema
 		case "${file}" in
@@ -696,6 +697,7 @@ HOOK
 	for file in api/proto/example/v1/echo.proto crates/grpc-contracts/src/generated/example.v1.rs tools/grpc-codegen/Cargo.toml buf.yaml; do
 		assert_case "${file}" "grpc_schema" "openapi runtime_image"
 	done
+	assert_case tools/grpc-codegen/deny.toml "grpc_schema dependency_policy" "cargo_dependencies rust_source"
 	# template:end grpc:classifier-grpc-tests
 	for file in env/monitoring/service.rules.yml scripts/tests/service-rules.yml scripts/ci/monitoring-rules.sh; do
 		assert_case "${file}" "monitoring_rules module_initializer" "db_integration rust_source initializer_runtime"

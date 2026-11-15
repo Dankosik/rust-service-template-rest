@@ -1,0 +1,35 @@
+# cargo-deny policy for the standalone protobuf generator workspace.
+# Kept separate from root `deny.toml` so license and duplicate-version bounds
+# stay exact for this smaller build-only graph without unmatched-allowance noise.
+
+[graph]
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
+all-features = false
+
+[advisories]
+unmaintained = "all"
+unsound = "all"
+yanked = "deny"
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "deny"
+skip = [
+    { crate = "hashbrown@0.15", reason = "petgraph 0.8 via prost-build has not moved to hashbrown 0.17" },
+]
+wildcards = "deny"
+allow-wildcard-paths = true
+highlight = "all"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

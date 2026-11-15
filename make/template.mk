@@ -30,6 +30,8 @@ HEAVY_GUARD = @if [ "$(ALLOW_HEAVY)" != "1" ] && [ "$(CI)" != "true" ]; then pri
 VALIDATION_LOCK := bash scripts/ci/validation-lock.sh --
 VERIFY := bash scripts/ci/verify.sh
 
+NPX_COOLDOWN_DAYS := 7
+NPX_ENV = npm_config_prefer_offline=true npm_config_ignore_scripts=true npm_config_audit=false npm_config_fund=false npm_config_update_notifier=false npm_config_before="$$(env -u PYTHONPATH -u PYTHONHOME PYTHONDONTWRITEBYTECODE=1 python3 -B -c 'import datetime as d; print((d.datetime.now(d.timezone.utc)-d.timedelta(days=$(NPX_COOLDOWN_DAYS))).strftime("%Y-%m-%dT%H:%M:%SZ"))')"
 REDOCLY_CLI ?= npx --yes @redocly/cli@$(REDOCLY_CLI_VERSION)
 OASDIFF ?= go run github.com/oasdiff/oasdiff@v$(OASDIFF_VERSION)
 
@@ -303,9 +305,11 @@ test-object-storage-conformance: ## Live-provider conformance; PROVIDER=amazon_s
 
 fmt: ## Format every crate
 	$(CARGO) $(CARGO_FLAGS) fmt --all
+	@if [ -f tools/grpc-codegen/Cargo.toml ]; then $(CARGO) $(CARGO_FLAGS) fmt --manifest-path tools/grpc-codegen/Cargo.toml --all; fi
 
 fmt-check: ## Fail when formatting differs from rustfmt output
 	$(CARGO) $(CARGO_FLAGS) fmt --all --check
+	@if [ -f tools/grpc-codegen/Cargo.toml ]; then $(CARGO) $(CARGO_FLAGS) fmt --manifest-path tools/grpc-codegen/Cargo.toml --all --check; fi
 
 # Retained profiles extend this without changing portable lint semantics.
 INTEGRATION_LINT_FEATURES ?=
@@ -378,6 +382,7 @@ dependency-drift: ## Vendored forks: patch applied, no advisory on the base, ups
 
 unused-deps: $(filter $(TOOLS_ROOT)/%,$(CARGO_SHEAR)) ## Fail on a declared dependency no crate uses (cargo-shear)
 	$(CARGO_SHEAR) --locked
+	@if [ -f tools/grpc-codegen/Cargo.toml ]; then $(CARGO_SHEAR) --locked tools/grpc-codegen; fi
 
 secret-scan: ## Gitleaks over the worktree (locally) and the commits since BASE_REF
 	$(call REQUIRE_GO,gitleaks@v$(GITLEAKS_VERSION))
@@ -467,7 +472,7 @@ grpc-check: ## Check protobuf format, lint, generation drift and PR-base compati
 	$(VALIDATION_LOCK) bash scripts/ci/grpc-check.sh
 
 grpc-generator-deny: $(filter $(TOOLS_ROOT)/%,$(CARGO_DENY)) ## Advisories, licenses, bans, and sources over the standalone generator's locked graph
-	$(CARGO_DENY) --manifest-path tools/grpc-codegen/Cargo.toml --config deny.toml --locked check
+	$(CARGO_DENY) --manifest-path tools/grpc-codegen/Cargo.toml --config tools/grpc-codegen/deny.toml --locked check
 # template:end grpc:make-grpc-targets
 
 # `cargo run -p` resolved the package's own feature set and rebuilt about a
@@ -487,7 +492,7 @@ openapi-check: openapi-lint ## Fail when the committed document is stale or fail
 
 openapi-lint: ## Lint and validate the committed document with Redocly CLI
 	@command -v npx >/dev/null 2>&1 || { echo "openapi-lint requires Node.js (npx) for @redocly/cli@$(REDOCLY_CLI_VERSION)" >&2; exit 2; }
-	REDOCLY_SUPPRESS_UPDATE_NOTICE=true REDOCLY_TELEMETRY=off npm_config_prefer_offline=true $(REDOCLY_CLI) lint --config .redocly.yaml $(OPENAPI_FILE)
+	REDOCLY_SUPPRESS_UPDATE_NOTICE=true REDOCLY_TELEMETRY=off $(NPX_ENV) $(REDOCLY_CLI) lint --config .redocly.yaml $(OPENAPI_FILE)
 
 openapi-breaking: ## Compare the document with BASE_OPENAPI=<file> for breaking changes
 	@test -n "$(BASE_OPENAPI)" || { echo "openapi-breaking requires BASE_OPENAPI=<path to the base document>" >&2; exit 2; }

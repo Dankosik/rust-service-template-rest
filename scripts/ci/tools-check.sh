@@ -96,7 +96,7 @@ done < <(sed -n 's/^FROM \([^ ]*\).*/\1/p' "${dockerfile}")
 [[ ${builder_seen} == true ]] || fail "${dockerfile} has no rust:<version> builder stage"
 echo "tools-check: ${dockerfile} defaults and base images agree with ${manifest} and ${toolchain}"
 
-# 7-day publish-age cooldown agreement across Cargo, dependency-drift, and Dependabot.
+# 7-day publish-age cooldown agreement across Cargo, npx, dependency-drift, and Dependabot.
 [[ -f .cargo/config.toml ]] || fail "missing .cargo/config.toml"
 [[ -f scripts/ci/dependency-drift.sh ]] || fail "missing scripts/ci/dependency-drift.sh"
 if ! cooldown_err=$(env -u PYTHONPATH -u PYTHONHOME PYTHONDONTWRITEBYTECODE=1 python3 -B - <<'PY' 2>&1
@@ -116,6 +116,18 @@ drift_matches = re.findall(r"(?m)^cooldown_days=([0-9]+)$", drift_text)
 if drift_matches != ["7"]:
     print(f"scripts/ci/dependency-drift.sh cooldown_days is {drift_matches!r}, expected ['7']", file=sys.stderr)
     sys.exit(1)
+
+for owner, pattern in (
+    ("make/template.mk", r"(?m)^NPX_COOLDOWN_DAYS\s*:=\s*([0-9]+)$"),
+    ("scripts/ci/duplication-check.py", r"(?m)^NPX_COOLDOWN_DAYS\s*=\s*([0-9]+)$"),
+    ("scripts/ci/migration-history-check.sh", r"(?m)^\s*npx_cooldown_days=([0-9]+)$"),
+):
+    candidate = Path(owner)
+    if candidate.is_file():
+        matches = re.findall(pattern, candidate.read_text(encoding="utf-8"))
+        if matches != ["7"]:
+            print(f"{owner} npx cooldown days is {matches!r}, expected ['7']", file=sys.stderr)
+            sys.exit(1)
 
 dependabot = Path(".github/dependabot.yml")
 if dependabot.is_file():
@@ -162,6 +174,6 @@ PY
 ); then
 	fail "${cooldown_err}"
 fi
-echo "tools-check: 7-day publish-age cooldown agrees across Cargo, dependency-drift, and Dependabot"
+echo "tools-check: 7-day publish-age cooldown agrees across Cargo, npx, dependency-drift, and Dependabot"
 
 echo "tools-check: ${manifest} passed (${#names[@]} pins)"

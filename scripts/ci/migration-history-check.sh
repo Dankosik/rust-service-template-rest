@@ -388,7 +388,18 @@ else
 		echo "migration lint requires Node.js (npx) for squawk-cli@${SQUAWK_CLI_VERSION}" >&2
 		exit 2
 	}
-	linter=(env npm_config_prefer_offline=true npx --yes "squawk-cli@${SQUAWK_CLI_VERSION}")
+	npx_cooldown_days=7
+	npx_before=$(env -u PYTHONPATH -u PYTHONHOME PYTHONDONTWRITEBYTECODE=1 python3 -B -c "import datetime as d; print((d.datetime.now(d.timezone.utc)-d.timedelta(days=${npx_cooldown_days})).strftime('%Y-%m-%dT%H:%M:%SZ'))")
+	linter=(
+		env
+		npm_config_prefer_offline=true
+		npm_config_ignore_scripts=true
+		npm_config_audit=false
+		npm_config_fund=false
+		npm_config_update_notifier=false
+		"npm_config_before=${npx_before}"
+		npx --yes "squawk-cli@${SQUAWK_CLI_VERSION}"
+	)
 fi
 # The runner publishes lock_timeout and statement_timeout for the session, so
 # a file does not set them; smallint is this template's type for a bounded

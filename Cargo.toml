@@ -124,8 +124,8 @@ futures-util = { version = "0.3", default-features = false }
 axum = { version = "0.8.9", default-features = false }
 hyper = { version = "1.11.1", default-features = false }
 hyper-util = { version = "=0.1.21", default-features = false }
-http-body = "1.1.0"
-http-body-util = "0.1.5"
+http-body = { version = "1.1.0", default-features = false }
+http-body-util = { version = "0.1.5", default-features = false }
 http = { version = "1.5.0", default-features = false }
 mime = { version = "0.3.17", default-features = false }
 tokio = { version = "1.53.1", default-features = false }
@@ -160,11 +160,11 @@ serde_json = { version = "1", default-features = false }
 # that path for `invalid_params`.
 serde_path_to_error = { version = "0.1.20", default-features = false }
 toml = { version = "1.1.6", default-features = false }
-humantime = "2.4.0"
-humantime-serde = "1.1.1"
+humantime = { version = "2.4.0", default-features = false }
+humantime-serde = { version = "1.1.1", default-features = false }
 bytesize = { version = "2.7.0", default-features = false }
 secrecy = { version = "0.10.3", default-features = false }
-gethostname = "1.1.0"
+gethostname = { version = "1.1.0", default-features = false }
 
 # Diagnostics. The OpenTelemetry family
 # moves together; tracing-opentelemetry is one minor ahead.
@@ -248,7 +248,7 @@ vergen-gitcl = { version = "10.0.3", default-features = false }
 
 axum-test = { version = "21.1.0", default-features = false }
 rstest = { version = "0.28.0", default-features = false }
-tempfile = "3"
+tempfile = { version = "3", default-features = false }
 nix = { version = "0.31.3", default-features = false }
 ureq = { version = "3.4.2", default-features = false }
 # template:begin tls-fixtures:workspace-tls-fixtures

@@ -540,6 +540,8 @@ compose_pgbouncer_host_dsn() { echo pgbouncer; }
             "rust-toolchain.toml",
             ".cargo/config.toml",
             "scripts/ci/dependency-drift.sh",
+            "make/template.mk",
+            "scripts/ci/duplication-check.py",
             ".github/dependabot.yml",
         ):
             target = self.root / path
@@ -554,6 +556,13 @@ compose_pgbouncer_host_dsn() { echo pgbouncer; }
             with self.subTest(empty=empty, status=status):
                 result = self.check_script(name, EMPTY_BANNER=empty, VERSION_STATUS=status)
                 self.assertEqual(result.returncode == 0, success, result.stderr)
+        dup_py = self.root / "scripts/ci/duplication-check.py"
+        original_dup = dup_py.read_text()
+        dup_py.write_text(original_dup.replace("NPX_COOLDOWN_DAYS = 7", "NPX_COOLDOWN_DAYS = 3"))
+        result = self.check_script(name, EMPTY_BANNER="0", VERSION_STATUS="0")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("npx cooldown days", result.stderr)
+        dup_py.write_text(original_dup)
         cargo_cfg = self.root / ".cargo/config.toml"
         cargo_cfg.write_text(cargo_cfg.read_text().replace('"7 days"', '"3 days"'))
         result = self.check_script(name, EMPTY_BANNER="0", VERSION_STATUS="0")

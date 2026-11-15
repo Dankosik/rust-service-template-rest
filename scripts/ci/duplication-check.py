@@ -5,6 +5,7 @@ jscpd owns detection. This adapter interprets native byte coordinates, never
 Rust syntax or tokens. Reports are disposable; policy is never rewritten.
 """
 import argparse
+import datetime
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -13,13 +14,31 @@ import subprocess
 import sys
 import tempfile
 
+NPX_COOLDOWN_DAYS = 7
+
 
 class CheckError(ValueError):
     pass
 
 
-def run(command, root):
-    result = subprocess.run(command, cwd=root, capture_output=True, text=True)
+def npx_env():
+    cutoff = (
+        datetime.datetime.now(datetime.timezone.utc)
+        - datetime.timedelta(days=NPX_COOLDOWN_DAYS)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return {
+        **os.environ,
+        "npm_config_prefer_offline": "true",
+        "npm_config_ignore_scripts": "true",
+        "npm_config_audit": "false",
+        "npm_config_fund": "false",
+        "npm_config_update_notifier": "false",
+        "npm_config_before": cutoff,
+    }
+
+
+def run(command, root, env=None):
+    result = subprocess.run(command, cwd=root, env=env, capture_output=True, text=True)
     if result.returncode:
         raise CheckError(f"{command[0]} failed ({result.returncode}): {result.stderr or result.stdout}")
     return result.stdout
@@ -81,7 +100,7 @@ def native_command(root):
     if len(matches) != 1:
         raise CheckError("tools/versions.env must declare one JSCPD_VERSION")
     command = ["npx", "--yes", f"jscpd@{matches[0]}"]
-    actual = run(command + ["--version"], root).strip()
+    actual = run(command + ["--version"], root, env=npx_env()).strip()
     if actual not in {matches[0], f"jscpd {matches[0]}"}:
         raise CheckError(f"jscpd version mismatch: expected {matches[0]}, got {actual!r}")
     return command
@@ -109,7 +128,7 @@ def scan(root, paths, destination, command, config):
     effective = dict(config, path=[str(root / path) for path in paths], absolute=True)
     config_path = destination / "scan-config.json"
     config_path.write_text(json.dumps(effective))
-    output = run(command + ["--config", str(config_path), "--output", str(destination)], root)
+    output = run(command + ["--config", str(config_path), "--output", str(destination)], root, env=npx_env())
     print(output, end="")
     if not report.is_file():
         raise CheckError(f"jscpd did not write {report}")
