@@ -103,6 +103,7 @@ pub(crate) async fn run_claim_loop(
 ) {
     let mut ticker = tokio::time::interval(POLL_INTERVAL);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let policy = PolicyBinds::new(&shared.registry);
     let mut next = Next::Idle;
     let mut last_claim = Instant::now();
     loop {
@@ -137,7 +138,7 @@ pub(crate) async fn run_claim_loop(
                 return;
             }
             last_claim = Instant::now();
-            send_claim(&shared, slot_count(requested)).await
+            send_claim(&shared, &policy, slot_count(requested)).await
         };
         next = finish_round(&shared, &mut slots, requested, round, &stop, &failure);
     }
@@ -219,13 +220,13 @@ enum ClaimRound {
     Failed(OperationError),
 }
 
-async fn send_claim(shared: &Shared, requested: i64) -> ClaimRound {
+async fn send_claim(shared: &Shared, policy: &PolicyBinds<'_>, requested: i64) -> ClaimRound {
     let claim_started_at = Instant::now();
     let result = backstop(async {
         let mut connection = infra_postgres::acquire(&shared.pool, "claim jobs")
             .await
             .map_err(OperationError::Acquire)?;
-        Ok(claim(&mut connection, shared, requested).await?)
+        Ok(claim(&mut connection, shared.worker_id, policy, requested).await?)
     })
     .await;
     metrics::histogram!(CLAIM_DURATION_METRIC).record(claim_started_at.elapsed().as_secs_f64());
@@ -269,10 +270,22 @@ async fn send_claim(shared: &Shared, requested: i64) -> ClaimRound {
 )]
 async fn claim(
     connection: &mut PgConnection,
-    shared: &Shared,
+    worker_id: uuid::Uuid,
+    policy: &PolicyBinds<'_>,
     requested: i64,
 ) -> Result<Vec<Drawn>, sqlx::Error> {
-    let binds = policy_binds(&shared.registry, requested);
+    let claim_limits: Vec<_> = policy
+        .registry
+        .iter()
+        .map(|registered| {
+            registered
+                .running_slots
+                .as_ref()
+                .map_or(requested, |slots| {
+                    requested.min(slot_count(slots.available_permits()))
+                })
+        })
+        .collect();
     let rescued_summary = "lease expired; rescued";
     observed(
         "claim jobs",
@@ -371,56 +384,47 @@ async fn claim(
                        job.trace_context AS trace_parent, job.trace_state, job.error_summary, \
                        EXTRACT(EPOCH FROM statement_timestamp() - job.not_before)::double precision \
                            AS \"queue_wait_seconds!\"",
-            &binds.names as _,
-            &binds.max_attempts,
-            &binds.lease_offsets_micros,
+            &policy.names as _,
+            &policy.max_attempts,
+            &policy.lease_offsets_micros,
             requested,
-            shared.worker_id,
-            &binds.claim_limits,
+            worker_id,
+            &claim_limits,
             rescued_summary,
         )
-        .try_map(|row| row.into_drawn(&shared.registry))
+        .try_map(|row| row.into_drawn(policy.registry))
         .fetch_all(&mut *connection),
     )
     .await
 }
 
-/// The per-kind policy the claim statement unnests, one parallel array per
-/// column.
-struct PolicyBinds<'registry> {
-    names: Vec<&'registry str>,
+// These columns and each round's live claim limits must share registry order.
+struct PolicyBinds<'a> {
+    registry: &'a crate::Kinds,
+    names: Vec<&'static str>,
     max_attempts: Vec<i16>,
     lease_offsets_micros: Vec<i64>,
-    claim_limits: Vec<i64>,
 }
 
-/// Each kind's name, attempt budget, lease offset, and how many rows this claim
-/// may draw of it.
-fn policy_binds(registry: &crate::Kinds, requested: i64) -> PolicyBinds<'_> {
-    let mut binds = PolicyBinds {
-        names: Vec::new(),
-        max_attempts: Vec::new(),
-        lease_offsets_micros: Vec::new(),
-        claim_limits: Vec::new(),
-    };
-    for registered in registry.iter() {
-        binds.names.push(registered.name);
-        binds
-            .max_attempts
-            .push(i16::try_from(registered.policy.max_attempts).unwrap_or(i16::MAX));
-        binds
-            .lease_offsets_micros
-            .push(saturating_micros(lease_offset(registered.policy.timeout)));
-        binds.claim_limits.push(
-            registered
-                .running_slots
-                .as_ref()
-                .map_or(requested, |slots| {
-                    requested.min(slot_count(slots.available_permits()))
-                }),
-        );
+impl<'a> PolicyBinds<'a> {
+    fn new(registry: &'a crate::Kinds) -> Self {
+        let (names, max_attempts, lease_offsets_micros) = registry
+            .iter()
+            .map(|registered| {
+                (
+                    registered.name,
+                    i16::try_from(registered.policy.max_attempts).unwrap_or(i16::MAX),
+                    saturating_micros(lease_offset(registered.policy.timeout)),
+                )
+            })
+            .collect();
+        Self {
+            registry,
+            names,
+            max_attempts,
+            lease_offsets_micros,
+        }
     }
-    binds
 }
 
 /// The kind's timeout plus [`LEASE_RESERVE`], shared by the database lease

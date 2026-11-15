@@ -19,18 +19,18 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use base64::Engine;
 use health::Probe;
 use infra_cache::{Cache, CacheOptions, ClientCertificate, HISTOGRAMS, Unavailable};
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
 use secrecy::SecretString;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::task::{JoinHandle, JoinSet};
+use tokio::task::JoinSet;
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use tokio_rustls::rustls::server::WebPkiClientVerifier;
 use tokio_rustls::rustls::{RootCertStore, ServerConfig};
+use tokio_util::task::AbortOnDropHandle;
 
 const COMMAND_TIMEOUT: Duration = Duration::from_millis(200);
 const TIMEOUT_BOUND: Duration = Duration::from_millis(450);
@@ -85,8 +85,9 @@ fn connect_url(url: &str, command_timeout: Duration) -> Cache {
 
 struct Proxy {
     port: u16,
+    // Request abort before dropping the stop sender during fixture teardown.
+    task: AbortOnDropHandle<()>,
     stop: Option<tokio::sync::oneshot::Sender<()>>,
-    task: JoinHandle<()>,
 }
 
 impl Proxy {
@@ -111,13 +112,11 @@ impl Proxy {
         acceptor: Option<TlsAcceptor>,
     ) -> Self {
         let (stop, stop_rx) = tokio::sync::oneshot::channel();
-        let task = tokio::spawn(async move {
-            run_proxy(listener, upstream, acceptor, stop_rx).await;
-        });
+        let task = tokio::spawn(run_proxy(listener, upstream, acceptor, stop_rx));
         Self {
             port,
+            task: AbortOnDropHandle::new(task),
             stop: Some(stop),
-            task,
         }
     }
 
@@ -140,12 +139,6 @@ impl Proxy {
         self.stop().await;
         let listener = bind_port(self.port).await;
         *self = Self::spawn(listener, self.port, upstream, Some(acceptor));
-    }
-}
-
-impl Drop for Proxy {
-    fn drop(&mut self) {
-        self.task.abort();
     }
 }
 
@@ -270,13 +263,10 @@ fn write_pem_block(label: &str, der: &[u8]) -> tempfile::NamedTempFile {
 }
 
 fn pem_block(label: &str, der: &[u8]) -> String {
-    let encoded = base64::engine::general_purpose::STANDARD.encode(der);
-    let mut body = String::new();
-    for line in encoded.as_bytes().chunks(64) {
-        body.push_str(std::str::from_utf8(line).expect("base64 is ascii"));
-        body.push('\n');
-    }
-    format!("-----BEGIN {label}-----\n{body}-----END {label}-----\n")
+    pem::encode_config(
+        &pem::Pem::new(label, der),
+        pem::EncodeConfig::new().set_line_ending(pem::LineEnding::LF),
+    )
 }
 
 /// A client CA and a client-auth leaf it signed, the leaf and its key as PEM files.
@@ -574,7 +564,7 @@ async fn a_rebuilt_cache_reads_the_replaced_ca_after_recovery() {
 #[tokio::test]
 async fn an_untrusted_ca_is_unavailable() {
     let material = tls::TlsMaterial::new("localhost");
-    let ca = write_pem(&material.untrusted_root);
+    let ca = write_pem(tls::new_issuer().der());
     let upstream = upstream_addr(&cache_url());
     let proxy = Proxy::tls(upstream, tls_acceptor(&material)).await;
     let cache = Cache::start(options(

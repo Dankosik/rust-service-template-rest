@@ -65,16 +65,19 @@ impl Services {
         let set = prost_types::FileDescriptorSet::decode(encoded_file_descriptor_set)
             .map_err(|_| Error::InvalidFileDescriptorSet)?;
         let mut described: HashMap<String, Vec<String>> = HashMap::default();
-        for file in &set.file {
-            for service in &file.service {
-                let name = match file.package() {
-                    "" => service.name().to_owned(),
-                    package => format!("{package}.{}", service.name()),
+        for file in set.file {
+            let package = file.package.as_deref().unwrap_or_default();
+            for service in file.service {
+                let name = service.name.unwrap_or_default();
+                let name = if package.is_empty() {
+                    name
+                } else {
+                    format!("{package}.{name}")
                 };
                 let methods: Vec<_> = service
                     .method
-                    .iter()
-                    .map(|method| method.name().to_owned())
+                    .into_iter()
+                    .map(|method| method.name.unwrap_or_default())
                     .collect();
                 if let Some(previous) = described.get(&name).or_else(|| self.described.get(&name)) {
                     if previous != &methods

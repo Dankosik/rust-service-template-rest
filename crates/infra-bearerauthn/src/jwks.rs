@@ -76,8 +76,8 @@ pub(crate) struct KeySet {
     generation: u64,
 }
 
-/// Source of [`KeySet::generation`]; one counter for the process, so no two
-/// parsed sets ever share a value.
+/// Parsed sets in this process have distinct [`KeySet::generation`] values
+/// until the counter wraps.
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 impl KeySet {
@@ -422,17 +422,12 @@ pub(crate) mod tests {
         kid: Option<&str>,
         alg: bool,
     ) -> serde_json::Value {
-        let mut jwk =
-            serde_json::to_value(Jwk::from_encoding_key(signing, algorithm).unwrap()).unwrap();
-        let object = jwk.as_object_mut().unwrap();
-        object.remove("kid");
+        let mut jwk = Jwk::from_encoding_key(signing, algorithm).unwrap();
+        jwk.common.key_id = kid.map(str::to_owned);
         if !alg {
-            object.remove("alg");
+            jwk.common.key_algorithm = None;
         }
-        if let Some(kid) = kid {
-            object.insert("kid".to_owned(), kid.into());
-        }
-        jwk
+        serde_json::to_value(jwk).unwrap()
     }
 
     pub(crate) fn key_set(keys: &[serde_json::Value], configured: &[JwtAlgorithm]) -> Arc<KeySet> {

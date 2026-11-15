@@ -51,6 +51,19 @@ const WAIT: Duration = Duration::from_secs(10);
 /// Pause between polls for a lock waiter.
 const POLL: Duration = Duration::from_millis(20);
 
+#[derive(Debug, derive_more::From, derive_more::Display)]
+enum AttemptError {
+    #[display("enqueue failed: {_0}")]
+    Enqueue(infra_jobs::EnqueueError),
+    #[display("query failed: {_0}")]
+    Query(sqlx::Error),
+    #[from(skip)]
+    #[display("the caller rejected the transaction")]
+    Rejected,
+    #[display("transaction failed: {_0}")]
+    Tx(infra_postgres::TxError),
+}
+
 pub(crate) async fn template_pool(dsn: &Dsn, max_connections: u32) -> PgPool {
     integration_tests::template_pool(dsn, APP, max_connections, Isolation::ReadCommitted).await
 }

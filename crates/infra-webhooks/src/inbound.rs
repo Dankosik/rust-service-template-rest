@@ -13,8 +13,6 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use base64::display::Base64Display;
-use base64::engine::general_purpose::STANDARD;
 use bytes::Bytes;
 use foldhash::HashMap;
 use http::header::CONTENT_TYPE;
@@ -23,12 +21,13 @@ use infra_jobs::{EnqueueError, EnqueueOptions, Enqueued, JobKind, enqueue};
 use infra_postgres::{
     Isolation, TxError, TxOptions, failure_cause, in_tx_with_acquire_deadline, observed, sqlstate,
 };
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 use serde_with::base64::Base64;
-use serde_with::{SerializeAs, serde_as};
+use serde_with::serde_as;
 use sqlx::postgres::PgPool;
 use tokio::time::Instant;
 
+use crate::StreamingBase64;
 use crate::protocol::{KeyRing, ProtocolError, ensure_body_size, ensure_message_id_len};
 
 pub use infra_postgres::CleanupError;
@@ -238,18 +237,17 @@ impl Receiver {
             async |tx| -> Result<ReceiptOutcome, ReceiptFailure> {
                 let inserted = observed(
                     "insert webhook receipt",
-                    sqlx::query_scalar!(
+                    sqlx::query!(
                         "INSERT INTO webhook_receipts (endpoint_id, message_id) \
                          VALUES ($1, $2) \
-                         ON CONFLICT (endpoint_id, message_id) DO NOTHING \
-                         RETURNING message_id",
+                         ON CONFLICT (endpoint_id, message_id) DO NOTHING",
                         endpoint_id,
                         message_id.as_ref(),
                     )
-                    .fetch_optional(&mut *tx),
+                    .execute(&mut *tx),
                 )
                 .await?;
-                if inserted.is_none() {
+                if inserted.rows_affected() == 0 {
                     return Ok(ReceiptOutcome::Duplicate);
                 }
                 let incoming =
@@ -412,15 +410,6 @@ pub struct Incoming {
     content_type: Option<Vec<u8>>,
     #[serde_as(serialize_as = "StreamingBase64", deserialize_as = "Base64")]
     body: Bytes,
-}
-
-/// Stream Base64 into JSON without an intermediate String.
-struct StreamingBase64;
-
-impl<T: AsRef<[u8]>> SerializeAs<T> for StreamingBase64 {
-    fn serialize_as<S: Serializer>(source: &T, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.collect_str(&Base64Display::new(source.as_ref(), &STANDARD))
-    }
 }
 
 const fn incoming_version() -> u8 {

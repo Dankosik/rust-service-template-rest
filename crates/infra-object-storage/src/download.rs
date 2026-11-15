@@ -229,11 +229,8 @@ impl State {
                     }
                 }
             }
-            Poll::Ready(Some(Err(error))) if error::is_checksum_mismatch(&error) => {
-                self.close_failed_with_item(LocalFailure::ChecksumMismatch.into(), Err(error))
-            }
             Poll::Ready(Some(Err(error))) => {
-                self.close_failed_with_item(LocalFailure::DownloadBody.into(), Err(error))
+                self.close_failed_with_item(error::from_download_body(&error), Err(error))
             }
             Poll::Ready(None) if resources.remaining == 0 => {
                 let chunk = resources.final_chunk.take();

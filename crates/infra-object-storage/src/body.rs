@@ -233,39 +233,21 @@ impl Body for ExactLength {
 
 #[cfg(test)]
 mod tests {
-
     use std::collections::VecDeque;
+    use std::convert::Infallible;
     use std::sync::atomic::AtomicUsize;
     use std::task::{Wake, Waker};
 
+    use futures_util::stream;
+    use http_body_util::StreamBody;
+
     use super::*;
 
-    /// A body that yields its frames one per poll, like a network stream.
-    struct Frames(VecDeque<Frame<Bytes>>);
-
-    impl Body for Frames {
-        type Data = Bytes;
-        type Error = std::convert::Infallible;
-
-        fn poll_frame(
-            mut self: Pin<&mut Self>,
-            _: &mut Context<'_>,
-        ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
-            Poll::Ready(self.0.pop_front().map(Ok))
-        }
-    }
-
-    fn frames(chunks: &[&'static [u8]]) -> Frames {
-        Frames(
-            chunks
-                .iter()
-                .map(|chunk| Frame::data(Bytes::from_static(chunk)))
-                .collect(),
-        )
-    }
-
     /// Poll the way hyper does: stop as soon as `len` bytes are through.
-    fn send(len: u64, body: Frames) -> (Result<u64, ()>, bool) {
+    fn send<const N: usize>(len: u64, chunks: [&'static [u8]; N]) -> (Result<u64, ()>, bool) {
+        let frames =
+            chunks.map(|chunk| Ok::<_, Infallible>(Frame::data(Bytes::from_static(chunk))));
+        let body = StreamBody::new(stream::iter(frames));
         let (mut body, mismatch) = ExactLength::wrap_with_mismatch_flag(len, body);
         let waker = std::task::Waker::noop();
         let mut context = Context::from_waker(waker);
@@ -284,21 +266,21 @@ mod tests {
 
     #[test]
     fn an_exact_body_passes_in_any_framing() {
-        assert_eq!(send(8, frames(&[b"abcdefgh"])), (Ok(8), false));
-        assert_eq!(send(8, frames(&[b"abcd", b"", b"efgh"])), (Ok(8), false));
-        assert_eq!(send(0, frames(&[])), (Ok(0), false));
+        assert_eq!(send(8, [b"abcdefgh"]), (Ok(8), false));
+        assert_eq!(send(8, [b"abcd", b"", b"efgh"]), (Ok(8), false));
+        assert_eq!(send(0, []), (Ok(0), false));
     }
 
     #[test]
     fn a_frame_past_the_declared_length_fails_the_body() {
         // The first frame completes the length; hyper would stop there.
-        assert_eq!(send(4, frames(&[b"abcd", b"efgh"])), (Err(()), true));
-        assert_eq!(send(4, frames(&[b"abcdefgh"])), (Err(()), true));
+        assert_eq!(send(4, [b"abcd", b"efgh"]), (Err(()), true));
+        assert_eq!(send(4, [b"abcdefgh"]), (Err(()), true));
     }
 
     #[test]
     fn a_short_body_fails_the_body() {
-        assert_eq!(send(8, frames(&[b"abcd"])), (Err(()), true));
+        assert_eq!(send(8, [b"abcd"]), (Err(()), true));
     }
 
     #[derive(Default)]
@@ -470,9 +452,9 @@ mod tests {
     fn trailers_follow_the_held_frame() {
         let mut trailers = axum::http::HeaderMap::new();
         trailers.insert("x-checksum", axum::http::HeaderValue::from_static("1"));
-        let body = Frames(VecDeque::from([
-            Frame::data(Bytes::from_static(b"abcd")),
-            Frame::trailers(trailers),
+        let body = StreamBody::new(stream::iter([
+            Ok::<_, Infallible>(Frame::data(Bytes::from_static(b"abcd"))),
+            Ok(Frame::trailers(trailers)),
         ]));
         let (mut body, mismatch) = ExactLength::wrap_with_mismatch_flag(4, body);
         let waker = std::task::Waker::noop();

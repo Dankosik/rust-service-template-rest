@@ -24,7 +24,7 @@ use infra_grpc::{Client, ClientSecurity, ClientTimeout};
 use operation_context::OperationContext;
 use tokio::{
     net::TcpListener,
-    sync::{Notify, oneshot},
+    sync::{Notify, oneshot, watch},
     task::{JoinHandle, JoinSet},
     time::Instant,
 };
@@ -42,8 +42,7 @@ struct Peer {
     authorizations: Arc<Mutex<Vec<String>>>,
     timeouts: Arc<Mutex<Vec<Duration>>>,
     started: Arc<Notify>,
-    release: Arc<Notify>,
-    released: Arc<std::sync::atomic::AtomicBool>,
+    released: watch::Sender<bool>,
 }
 
 impl Peer {
@@ -53,8 +52,7 @@ impl Peer {
             authorizations: Arc::new(Mutex::new(Vec::new())),
             timeouts: Arc::new(Mutex::new(Vec::new())),
             started: Arc::new(Notify::new()),
-            release: Arc::new(Notify::new()),
-            released: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            released: watch::Sender::new(false),
         }
     }
 
@@ -67,10 +65,11 @@ impl Peer {
 
     async fn wait_to_answer(&self) {
         self.started.notify_waiters();
-        let notified = self.release.notified();
-        if !self.released.load(Ordering::Acquire) {
-            notified.await;
-        }
+        self.released
+            .subscribe()
+            .wait_for(|released| *released)
+            .await
+            .expect("peer owns the release gate");
     }
 }
 
@@ -148,8 +147,7 @@ impl Resource {
     }
 
     fn release(&self) {
-        self.peer.released.store(true, Ordering::Release);
-        self.peer.release.notify_waiters();
+        self.peer.released.send_replace(true);
     }
 
     async fn started(&self) {

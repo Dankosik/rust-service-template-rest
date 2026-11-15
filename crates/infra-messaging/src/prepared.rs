@@ -8,6 +8,7 @@ use serde::Serialize;
 use time::OffsetDateTime;
 
 use crate::error::EnvelopeError;
+use crate::registry::{Registry, route_key};
 
 /// Serialized, routed event intent. Retrying never reserializes or reroutes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -32,12 +33,25 @@ pub(crate) struct PreparedEventParts {
     pub(crate) payload: Bytes,
 }
 
+impl Registry {
+    /// Uses the registered subject with the bounds of [`PreparedEvent::prepare`].
+    ///
+    /// # Errors
+    /// Rejects a missing route before invoking the payload serializer.
+    pub fn prepare<T: EventPayload + Serialize>(
+        &self,
+        event: &Event<T>,
+        max_payload_bytes: usize,
+    ) -> Result<PreparedEvent, EnvelopeError> {
+        let subject = self.subject_for::<T>().ok_or(EnvelopeError::MissingRoute {
+            event_type: T::EVENT_TYPE,
+            schema_version: T::SCHEMA_VERSION,
+        })?;
+        PreparedEvent::prepare_with_valid_subject(subject.clone(), event, max_payload_bytes)
+    }
+}
+
 impl PreparedEvent {
-    /// Serializes one typed occurrence without connecting to a broker.
-    ///
-    /// This is shared by direct publication, outbox storage and the
-    /// broker-independent Go compatibility proof.
-    ///
     /// Serialization runs once and synchronously. Retained JSON is bounded by
     /// `max_payload_bytes`; excess output is counted until serialization ends,
     /// preserving a later serializer error. Custom serializers must be finite,
@@ -56,19 +70,18 @@ impl PreparedEvent {
         event: &Event<T>,
         max_payload_bytes: usize,
     ) -> Result<Self, EnvelopeError> {
-        Self::prepare_routed(Subject::from(subject.into()), event, max_payload_bytes)
+        let subject = Subject::from(subject.into());
+        if !crate::wire::valid_subject(&subject) {
+            return Err(EnvelopeError::Subject);
+        }
+        Self::prepare_with_valid_subject(subject, event, max_payload_bytes)
     }
 
-    /// [`Self::prepare`] for a subject a route already owns, shared without a copy.
-    pub(crate) fn prepare_routed<T: EventPayload + Serialize>(
+    fn prepare_with_valid_subject<T: EventPayload + Serialize>(
         subject: Subject,
         event: &Event<T>,
         max_payload_bytes: usize,
     ) -> Result<Self, EnvelopeError> {
-        let key = crate::registry::route_key::<T>();
-        if !crate::wire::valid_subject(&subject) {
-            return Err(EnvelopeError::Subject);
-        }
         let mut payload = PayloadWriter::new(max_payload_bytes);
         json_payload::to_writer(&mut payload, &event.payload)
             .map_err(|_| EnvelopeError::Serialization)?;
@@ -80,7 +93,9 @@ impl PreparedEvent {
         }
         let occurred_at = event.occurred_at.to_offset(time::UtcOffset::UTC);
         crate::wire::validate_outbound_identity(&event.id)?;
-        crate::wire::validate_outbound_identity(key.event_type)?;
+        let key = route_key::<T>();
+        // route_key checks the event type's length and control characters at compile time.
+        crate::wire::validate_outbound_whitespace(key.event_type)?;
         if crate::wire::is_zero_time(occurred_at) {
             return Err(EnvelopeError::CreatedAtRequired);
         }

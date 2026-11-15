@@ -70,9 +70,7 @@ COPY --from=build /app /app
 
 class Coverage(unittest.TestCase):
     def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory(prefix="image-inputs-check-")
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory(prefix="image-inputs-check-")))
         for relative, text in FIXTURE.items():
             target = self.root / relative
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -218,10 +216,55 @@ class Coverage(unittest.TestCase):
         self.run_check("unsupported context instruction 'ADD tools/tool.tgz /tmp/'")
 
     def test_published_image_leaves_no_context_to_watch(self) -> None:
-        (self.root / IAC).write_text('export default service("api", { source: image(process.env.IMAGE) });\n')
+        image = 'export default service("api", { source: image(process.env.IMAGE) });\n'
+        (self.root / IAC).write_text(image)
         policy = (self.root / POLICY).read_text()
         (self.root / POLICY).write_text("\n".join(line for line in policy.splitlines() if not line.startswith("| `build.")) + "\n")
         self.assertIn(f"{IAC} deploys a published image", self.run_check())
+        for setting, refusal in (('buildCommand: "make"', "unsupported buildCommand"),
+                                 ('...overrides', "unsupported computed/spread"),
+                                 ('[key]: value', "unsupported computed/spread"),
+                                 ('build: {}', "expected exactly one literal policy form")):
+            with self.subTest(setting=setting):
+                (self.root / IAC).write_text(image.replace("source:", f"{setting}, source:"))
+                self.run_check(refusal)
+        (self.root / IAC).write_text(image.replace("image(process.env.IMAGE)", "image(process.env.IMAGE) || github(repo)"))
+        self.run_check("expected exactly one literal policy form")
+        (self.root / IAC).with_name("release.ts").write_text(
+            'export const releaseImage = "acme/api";\n'
+            'export { github as repositorySource } from "railway/iac";\n')
+        release_import = (
+            'import { releaseImage } from "./release.ts";\n'
+            'import { image, service } from "railway/iac";\n'
+            'export default service("api", { source: image(releaseImage) });\n')
+        (self.root / IAC).write_text(release_import)
+        self.assertIn(f"{IAC} deploys a published image", self.run_check())
+        foreign_provider = release_import.replace("{ releaseImage }", "{ releaseImage, repositorySource as image }")
+        (self.root / IAC).write_text(foreign_provider.replace("{ image, service }", "{ service }"))
+        self.run_check("table build.watchPatterns: expected exactly one literal policy form")
+        with_release = (
+            'import { github, image, service } from "railway/iac";\n'
+            'const release = { source: image(process.env.IMAGE) };\n'
+            'const source = github("acme/api");\n'
+            'export default service("api", { source });\n')
+        (self.root / IAC).write_text(with_release)
+        self.run_check("table build.watchPatterns: expected exactly one literal policy form")
+        (self.root / IAC).write_text(with_release.replace("{ source }", "{ source: image(process.env.IMAGE) }"))
+        self.assertIn(f"{IAC} deploys a published image", self.run_check())
+        project = """import { defineRailway, github, image, project, service } from "railway/iac";
+const name = "api";
+export const partial = name;
+const other = service("source-build", { source: github("acme/api") });
+export default defineRailway((ctx) => {
+  const web = service(name, { deploy: { healthcheckPath: "/ready" }, source: image(process.env.IMAGE) });
+  return project(ctx.projectName ?? name, { resources: [web] });
+});
+"""
+        (self.root / IAC).write_text(project)
+        self.assertIn(f"{IAC} deploys a published image", self.run_check())
+        (self.root / IAC).write_text(project.replace("resources: [web]", "resources: [other]"))
+        self.run_check("table build.watchPatterns: expected exactly one literal policy form")
+        (self.root / IAC).write_text(image)
         (self.root / POLICY).write_text(policy)
         self.run_check("expected exactly one IaC builder setting")
 

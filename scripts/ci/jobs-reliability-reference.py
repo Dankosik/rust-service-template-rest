@@ -9,6 +9,7 @@ remain on failure, and no failed bound is enlarged or treated as a skip.
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import hashlib
 import json
 import os
@@ -91,7 +92,8 @@ def require(condition: bool, message: str) -> None:
 
 
 def digest(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    with path.open("rb") as source:
+        return hashlib.file_digest(source, "sha256").hexdigest()
 
 
 def encode(value: object) -> str:
@@ -628,9 +630,7 @@ class Scenario:
             articles = self.run.query(database, "SELECT coalesce(json_agg(t),'[]'::json) FROM "
                 f"(SELECT article_id,read_count FROM reading_articles WHERE scope={sql_literal(self.scope)} "
                 f"AND channel={sql_literal(channel)}) t")
-            counts = {}
-            for operation in selected:
-                counts[operation["article_id"]] = counts.get(operation["article_id"], 0) + 1
+            counts = Counter(operation["article_id"] for operation in selected)
             require({row["article_id"]: row["read_count"] for row in articles} == counts,
                     f"{channel}: aggregate does not equal one effect per logical operation")
             evidence[channel] = {"effects": effects, "aggregates": articles}
@@ -645,8 +645,11 @@ class Scenario:
             state = self.receipt["samples"][-1]["queue"]
             require(state["failed"] == 0, "positive scenario exhausted or permanently failed a job")
             require(self.worker is not None and self.worker.process.poll() is None, "worker exited during recovery")
-            counts = [len(self.effects(db, channel)) for channel, db in
-                      (("local", self.producer), ("outbox", self.receiver_db), ("webhook", self.receiver_db))]
+            counts = [
+                self.run.query(database, "SELECT count(*) FROM reading_effects "
+                               f"WHERE scope={sql_literal(self.scope)} AND channel={sql_literal(channel)}")
+                for channel, database in (("local", self.producer), ("outbox", self.receiver_db), ("webhook", self.receiver_db))
+            ]
             self.receipt["samples"][-1]["unknown_effect_readbacks"] = 0
             if time.monotonic() >= next_progress:
                 self.run.progress("scenario", self.label, "recovery_wait")
@@ -1051,7 +1054,7 @@ def transport_replay(run: Run, binary: Path) -> None:
                   wall_clock_elapsed_claim=False)
     scenario.start_worker()
     deadline = min(scenario.deadline, time.monotonic() + 15)
-    while scenario.state()["rows"]:
+    while run.query(scenario.producer, "SELECT count(*) FROM background_jobs"):
         require(time.monotonic() < deadline, "actual engine retention did not remove completed transports")
         time.sleep(0.1)
     scenario.stop_worker()

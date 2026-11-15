@@ -290,7 +290,7 @@ pub(crate) fn sanitized_internal_error() -> Response {
 pub mod responses {
     use utoipa::{IntoResponses, OpenApi, ToResponse};
 
-    use super::{InvalidParam, Problem};
+    use super::Problem;
 
     /// request is malformed or invalid
     #[derive(Debug, ToResponse)]
@@ -339,7 +339,7 @@ pub mod responses {
     /// keeps its own when it merges this one.
     #[derive(OpenApi)]
     #[openapi(components(
-        schemas(Problem, InvalidParam),
+        schemas(Problem),
         responses(BadRequest, RequestEntityTooLarge, InternalServerError
             // template:begin authn:http-authentication-problem-components
             , crate::authn::AuthenticationMalformed, crate::authn::AuthenticationUnauthorized,

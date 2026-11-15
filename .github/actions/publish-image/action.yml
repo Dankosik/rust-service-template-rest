@@ -91,6 +91,7 @@ runs:
     # GHCR rather than in the Actions cache, whose 10 GB budget the Cargo
     # caches already fill and which evicted CI's exported image cache.
     - name: Build image
+      id: build
       shell: bash
       env:
         VCS_REF: ${{ inputs.candidate_sha }}
@@ -100,45 +101,46 @@ runs:
         RUNTIME_IMAGE_CACHE_TO: type=registry,ref=${{ steps.meta.outputs.image_repo }}:buildcache,mode=max,image-manifest=true,oci-mediatypes=true,compression=zstd
         VALIDATION_BUILDER_NAME: ${{ steps.buildx.outputs.name }}
         VALIDATION_BUILDER_EXCLUSIVE: "1"
-      run: make runtime-image-build RUNTIME_IMAGE="${PRIMARY_IMAGE}"
+      run: |
+        set -euo pipefail
+        metadata_dir=$(mktemp -d "${RUNNER_TEMP}/runtime-export.XXXXXXXX")
+        trap 'rm -rf -- "${metadata_dir}"' EXIT
+        export RUNTIME_IMAGE_METADATA_FILE="${metadata_dir}/metadata.json"
+        make runtime-image-build RUNTIME_IMAGE="${PRIMARY_IMAGE}"
+        bash ./scripts/ci/publish-image-metadata.sh identify "${PRIMARY_IMAGE}" "${RUNTIME_IMAGE_METADATA_FILE}" >>"${GITHUB_OUTPUT}"
 
     - name: Runtime image lifecycle
       shell: bash
       env:
-        PRIMARY_IMAGE: ${{ steps.meta.outputs.primary_image }}
+        IMAGE_ID: ${{ steps.build.outputs.image_id }}
         CANDIDATE_SHA: ${{ inputs.candidate_sha }}
-      run: make runtime-image-check RUNTIME_IMAGE="${PRIMARY_IMAGE}" RUNTIME_EXPECTED_COMMIT="${CANDIDATE_SHA}"
+      run: make runtime-image-check RUNTIME_IMAGE="${IMAGE_ID}" RUNTIME_EXPECTED_COMMIT="${CANDIDATE_SHA}"
 
     - name: Scan image with Trivy
       shell: bash
       env:
-        PRIMARY_IMAGE: ${{ steps.meta.outputs.primary_image }}
+        IMAGE_ID: ${{ steps.build.outputs.image_id }}
         TRIVY_DB_REPOSITORY: ${{ inputs.trivy_db_repository }}
-      run: make container-security CONTAINER_IMAGE="${PRIMARY_IMAGE}"
+      run: make container-security CONTAINER_IMAGE="${IMAGE_ID}"
 
     - name: Generate SBOM (CycloneDX)
       shell: bash
       env:
-        PRIMARY_IMAGE: ${{ steps.meta.outputs.primary_image }}
+        IMAGE_ID: ${{ steps.build.outputs.image_id }}
         TRIVY_DB_REPOSITORY: ${{ inputs.trivy_db_repository }}
-      run: make container-sbom CONTAINER_IMAGE="${PRIMARY_IMAGE}" SBOM_OUTPUT=sbom.cdx.json
+      run: make container-sbom CONTAINER_IMAGE="${IMAGE_ID}" SBOM_OUTPUT=sbom.cdx.json
 
-    - name: Push candidate image
-      shell: bash
-      env:
-        PRIMARY_IMAGE: ${{ steps.meta.outputs.primary_image }}
-      run: docker push "${PRIMARY_IMAGE}"
-
-    - name: Resolve pushed digest
+    - name: Push candidate and confirm its registry identity
       id: digest
       shell: bash
       env:
         PRIMARY_IMAGE: ${{ steps.meta.outputs.primary_image }}
+        IMAGE_ID: ${{ steps.build.outputs.image_id }}
+        ID_KIND: ${{ steps.build.outputs.id_kind }}
       run: |
         set -euo pipefail
-        digest="$(docker image inspect "${PRIMARY_IMAGE}" --format '{{index .RepoDigests 0}}' | cut -d'@' -f2)"
-        test -n "${digest}"
-        echo "digest=${digest}" >>"${GITHUB_OUTPUT}"
+        digest=$(bash ./scripts/ci/publish-image-metadata.sh push "${PRIMARY_IMAGE}" "${IMAGE_ID}" "${ID_KIND}")
+        printf 'digest=%s\n' "${digest}" >>"${GITHUB_OUTPUT}"
 
     - name: Sign container image (keyless)
       shell: bash
@@ -215,13 +217,13 @@ runs:
       shell: bash
       env:
         IMAGE_REPO: ${{ steps.meta.outputs.image_repo }}
-        PRIMARY_IMAGE: ${{ steps.meta.outputs.primary_image }}
+        IMAGE_ID: ${{ steps.build.outputs.image_id }}
         DIGEST: ${{ steps.digest.outputs.digest }}
         PROMOTE_TAGS: ${{ steps.meta.outputs.promote_tags }}
       run: |
         bash ./scripts/ci/publish-image-metadata.sh promote \
           "${IMAGE_REPO}" \
-          "${PRIMARY_IMAGE}" \
+          "${IMAGE_ID}" \
           "${DIGEST}" \
           "${PROMOTE_TAGS}" \
           "${GITHUB_STEP_SUMMARY}"

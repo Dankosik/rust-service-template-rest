@@ -36,23 +36,11 @@ from template_state import (
     manifest_entries,
     _contains_profile_marker,
     _manifest_files,
-    parse_json_bytes,
+    _regular_file,
+    parse_json_text,
     parse_manifest,
     safe_relative,
     selected_adapters,
-    selected_http_idempotency,
-    selected_inbound_webhooks,
-    selected_jobs,
-    selected_cache,
-    selected_object_storage,
-    selected_service_auth,
-    selected_messaging,
-    selected_outbox,
-    selected_outbound_auth,
-    selected_outbound_http,
-    selected_grpc,
-    selected_profiles,
-    selected_webhooks,
     snapshot_tree,
     verify_plan,
     write_plan,
@@ -197,15 +185,6 @@ class _JsonScanner:
         return JsonNode("number", start, self.index)
 
 
-def _regular(path: Path, label: str) -> None:
-    try:
-        mode = path.lstat().st_mode
-    except FileNotFoundError:
-        raise Refusal(f"{label} is missing") from None
-    if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
-        raise Refusal(f"{label} is not a regular file")
-
-
 def _relative(path: Path, root: Path) -> str:
     return path.relative_to(root).as_posix()
 
@@ -246,7 +225,7 @@ def _node(root: Path, relative: str, *, links: bool) -> Node | None:
 
 
 def _tree(root: Path, scope: Scope, *, links: bool) -> dict[str, Node]:
-    """Return an lstat-only selected tree, including the directory root."""
+    """Walk the selected tree, including its root. Existence probes follow links before lstat classifies each node."""
 
     safe_relative(scope.relative, allow_directory=scope.directory)
     stem = scope.relative.rstrip("/")
@@ -285,8 +264,7 @@ def _read_git(root: Path, args: Sequence[str]) -> bytes:
     try:
         result = subprocess.run(
             ["git", "-C", os.fspath(root), *args],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
             env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
         )
@@ -299,22 +277,19 @@ def _read_git(root: Path, args: Sequence[str]) -> bytes:
 
 def _status_paths(root: Path) -> tuple[str, ...]:
     raw = _read_git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching"])
-    records = [record for record in raw.split(b"\0") if record]
+    records = (record for record in raw.split(b"\0") if record)
     paths: list[str] = []
-    index = 0
-    while index < len(records):
-        record = records[index]
+    for record in records:
         if len(record) < 4 or record[2:3] != b" ":
             raise Refusal("git status returned an invalid record")
         status = record[:2]
         path = record[3:].decode("utf-8", "surrogateescape")
         paths.append(path)
         if status[:1] in {b"R", b"C"} or status[1:] in {b"R", b"C"}:
-            index += 1
-            if index >= len(records):
+            original = next(records, None)
+            if original is None:
                 raise Refusal("git status returned an incomplete rename")
-            paths.append(records[index].decode("utf-8", "surrogateescape"))
-        index += 1
+            paths.append(original.decode("utf-8", "surrogateescape"))
     return tuple(paths)
 
 
@@ -324,8 +299,7 @@ def _check_ignored_destinations(root: Path, paths: Iterable[str]) -> None:
         try:
             result = subprocess.run(
                 ["git", "-C", os.fspath(root), "check-ignore", "-q", "--no-index", "--", relative],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                capture_output=True,
                 check=False,
                 env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
             )
@@ -376,10 +350,10 @@ def _selected_manifest(snapshot: Path, manifest: Sequence[str], selected: set[st
 def _validate_source_inputs(snapshot: Path, selected: set[str], manifest: Sequence[str]) -> None:
     listed = {entry.rstrip("/") for entry in manifest}
     for helper in SOURCE_HELPERS:
-        _regular(snapshot / helper, helper)
+        _regular_file(snapshot / helper, helper)
     for adapter in selected:
         for path in ADAPTERS[adapter].canonical:
-            _regular(snapshot / path, path)
+            _regular_file(snapshot / path, path)
             if path not in listed:
                 raise Refusal(f"adapter canonical source is absent from manifest: {path}")
     skills = snapshot / ".agents/skills"
@@ -393,7 +367,7 @@ def _validate_source_inputs(snapshot: Path, selected: set[str], manifest: Sequen
 def _run_helper(snapshot: Path, arguments: Sequence[str]) -> None:
     command = ["bash", os.fspath(snapshot / arguments[0]), *arguments[1:]]
     try:
-        result = subprocess.run(command, cwd=snapshot, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        result = subprocess.run(command, cwd=snapshot, capture_output=True, check=False)
     except OSError as error:
         raise ToolFailure("required snapshot helper is unavailable") from error
     if result.returncode:
@@ -419,7 +393,7 @@ def _project_portable(snapshot: Path, target_lock: dict) -> bool:
         # Older portable sources were already pure and have no renderer API.
         return False
     for helper in PROFILE_PROJECTION_HELPERS:
-        _regular(snapshot / helper, helper)
+        _regular_file(snapshot / helper, helper)
     # Load the admitted source's initializer and state together, never a derived
     # target's stale one-shot helper. No Cargo, identity rewrite, or pack removal
     # belongs to this portable projection.
@@ -435,7 +409,7 @@ def _project_portable(snapshot: Path, target_lock: dict) -> bool:
             [sys.executable, "-B", "-c", script, os.fspath(snapshot)],
             cwd=snapshot / "scripts/lib",
             input=json.dumps(target_lock).encode("utf-8"),
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+            capture_output=True, check=False,
         )
     except OSError as error:
         raise ToolFailure("committed profile projection helper is unavailable") from error
@@ -561,14 +535,14 @@ def _remove_unselected_from_stage(stage: Path, selected: set[str]) -> None:
 
 
 def _strict_json(text: str, label: str) -> JsonNode:
-    parse_json_bytes(text.encode("utf-8"), label)
+    parse_json_text(text, label)
     return _JsonScanner(text).parse()
 
 
 def _setting_source_token(snapshot: Path, adapter: str) -> str:
     relative, parent_key, leaf_key = _SETTING_LEAVES[adapter]
     path = snapshot / relative
-    _regular(path, relative)
+    _regular_file(path, relative)
     try:
         text = path.read_bytes().decode("utf-8")
     except UnicodeDecodeError as error:
@@ -604,7 +578,7 @@ def _render_setting(snapshot: Path, stage: Path, adapter: str) -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes((json.dumps({parent_key: {leaf_key: json.loads(token)}}, indent=2) + "\n").encode("utf-8"))
         return
-    _regular(destination, relative)
+    _regular_file(destination, relative)
     try:
         text = destination.read_bytes().decode("utf-8")
     except UnicodeDecodeError as error:
@@ -633,12 +607,12 @@ def _render_setting(snapshot: Path, stage: Path, adapter: str) -> None:
 
 def _required_authorities(root: Path) -> None:
     for relative in REQUIRED_AUTHORITIES:
-        _regular(root / relative, f"required local authority {relative}")
+        _regular_file(root / relative, f"required local authority {relative}")
 
 
 def _standard_targets(snapshot: Path) -> set[str]:
     path = snapshot / "make/template.mk"
-    _regular(path, "make/template.mk")
+    _regular_file(path, "make/template.mk")
     try:
         text = path.read_text(encoding="utf-8")
     except UnicodeDecodeError as error:
@@ -705,12 +679,12 @@ def _make_rules(path: Path, *, allowed_includes: set[str] | None = None) -> set[
 def _admit_make(snapshot: Path, target: Path) -> None:
     standard = _standard_targets(snapshot)
     service = target / "make/service.mk"
-    _regular(service, "make/service.mk")
+    _regular_file(service, "make/service.mk")
     service_rules = _make_rules(service)
     if any("%" in rule or rule in standard for rule in service_rules):
         raise Refusal("make/service.mk overrides or patterns a portable standard target")
     root_make = target / "Makefile"
-    _regular(root_make, "Makefile")
+    _regular_file(root_make, "Makefile")
     root_rules = _make_rules(
         root_make,
         allowed_includes={"include make/service.mk", "include make/template.mk", "-include make/source.mk"},
@@ -849,19 +823,7 @@ def _run(arguments: argparse.Namespace) -> int:
     target = git_root(Path(arguments.repo))
     if source == target:
         raise Refusal("source and target must be distinct Git roots")
-    source_inside_target = False
-    target_inside_source = False
-    try:
-        source.relative_to(target)
-        source_inside_target = True
-    except ValueError:
-        pass
-    try:
-        target.relative_to(source)
-        target_inside_source = True
-    except ValueError:
-        pass
-    if source_inside_target or target_inside_source:
+    if source.is_relative_to(target) or target.is_relative_to(source):
         raise Refusal("source and target Git roots may not overlap")
 
     revision = git_head(source)
@@ -873,19 +835,9 @@ def _run(arguments: argparse.Namespace) -> int:
             raise Refusal("source snapshot revision changed during admission")
         target_lock = load_lock(target, required=True)
         assert target_lock is not None
-        _database, harness = selected_profiles(target)
-        selected_outbound_http(target)
-        selected_outbound_auth(target)
-        selected_grpc(target)
-        selected_http_idempotency(target)
-        selected_jobs(target)
-        selected_messaging(target)
-        selected_cache(target)
-        selected_object_storage(target)
-        selected_service_auth(target)
-        selected_outbox(target)
-        selected_webhooks(target)
-        selected_inbound_webhooks(target)
+        if target_lock["state"] != "complete":
+            raise Refusal("template.lock is incomplete; inspect the init-produced diff and use a fresh template checkout")
+        harness = target_lock["profiles"]["agent_harness"]
         selected = set(selected_adapters(harness))
         profile_projection = _project_portable(snapshot, target_lock)
         manifest = parse_manifest(

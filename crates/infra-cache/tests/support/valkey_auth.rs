@@ -3,7 +3,7 @@
 use std::io::Write;
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -11,8 +11,9 @@ use infra_cache::Cache;
 use redis::Value;
 use tokio::io::{AsyncRead, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Notify, mpsc, oneshot};
-use tokio::task::{JoinHandle, JoinSet};
+use tokio::sync::{mpsc, oneshot, watch};
+use tokio::task::JoinSet;
+use tokio_util::task::AbortOnDropHandle;
 
 use super::{cache_url, observation_recorder, options, upstream_addr};
 
@@ -137,8 +138,9 @@ async fn frame(stream: &mut TcpStream) -> redis::RedisResult<(Value, Vec<u8>)> {
 
 struct AuthRelay {
     port: u16,
+    // Request abort before dropping the stop sender during fixture teardown.
+    task: AbortOnDropHandle<()>,
     stop: Option<oneshot::Sender<()>>,
-    task: JoinHandle<()>,
 }
 
 impl AuthRelay {
@@ -169,14 +171,13 @@ impl AuthRelay {
                     }
                 }
             }
-            connections.abort_all();
-            while connections.join_next().await.is_some() {}
+            connections.shutdown().await;
         });
         (
             Self {
                 port,
+                task: AbortOnDropHandle::new(task),
                 stop: Some(stop),
-                task,
             },
             events,
         )
@@ -201,12 +202,6 @@ async fn next_exchange(events: &mut mpsc::Receiver<Exchange>) -> Exchange {
         .await
         .expect("adapter did not complete authentication against Valkey")
         .expect("authentication relay stopped")
-}
-
-impl Drop for AuthRelay {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
 }
 
 async fn relay_connection(
@@ -264,36 +259,32 @@ async fn relay_connection(
 
 #[derive(Clone, Default)]
 struct CapturedLogs {
-    bytes: Arc<Mutex<Vec<u8>>>,
-    changed: Arc<Notify>,
+    bytes: watch::Sender<Vec<u8>>,
 }
 
 impl CapturedLogs {
     fn rendered(&self) -> String {
-        String::from_utf8(self.bytes.lock().expect("logs lock").clone()).expect("UTF-8 logs")
+        String::from_utf8(self.bytes.borrow().clone()).expect("UTF-8 logs")
     }
 
     async fn wait_for(&self, message: &str) {
-        tokio::time::timeout(EXCHANGE_BOUND, async {
-            loop {
-                if self.rendered().contains(message) {
-                    return;
-                }
-                self.changed.notified().await;
-            }
-        })
+        tokio::time::timeout(
+            EXCHANGE_BOUND,
+            self.bytes.subscribe().wait_for(|bytes| {
+                std::str::from_utf8(bytes)
+                    .expect("UTF-8 logs")
+                    .contains(message)
+            }),
+        )
         .await
-        .expect("adapter did not observe the server's authentication result");
+        .expect("adapter did not observe the server's authentication result")
+        .expect("capture owns the log sender");
     }
 }
 
 impl Write for CapturedLogs {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.bytes
-            .lock()
-            .expect("logs lock")
-            .extend_from_slice(bytes);
-        self.changed.notify_one();
+        self.bytes.send_modify(|logs| logs.extend_from_slice(bytes));
         Ok(bytes.len())
     }
 

@@ -460,20 +460,9 @@ mod tests {
     use super::classify_topology;
     use crate::error::MessagingError;
 
-    #[derive(Debug)]
-    struct Wrapper(Box<dyn std::error::Error + 'static>);
-
-    impl std::fmt::Display for Wrapper {
-        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            formatter.write_str("stream lookup failed")
-        }
-    }
-
-    impl std::error::Error for Wrapper {
-        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-            Some(&*self.0)
-        }
-    }
+    #[derive(Debug, thiserror::Error)]
+    #[error("stream lookup failed")]
+    struct Wrapper(#[source] Box<dyn std::error::Error + 'static>);
 
     #[test]
     fn a_timed_out_request_is_found_at_any_depth() {

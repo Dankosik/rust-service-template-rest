@@ -1,6 +1,7 @@
 //! Request opening and explicitly continuing response work have distinct lifetimes.
 
 use std::future::Future;
+use std::mem::DropGuard;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -44,17 +45,11 @@ pub(crate) async fn read_body<F: Future>(context: Option<&RequestContext>, read:
         .and_then(|context| context.upload_reads.as_deref())
         .map(|reads| {
             reads.fetch_add(1, Ordering::Relaxed);
-            UploadRead(reads)
+            DropGuard::new(reads, |reads| {
+                reads.fetch_sub(1, Ordering::Relaxed);
+            })
         });
     read.await
-}
-
-struct UploadRead<'a>(&'a AtomicUsize);
-
-impl Drop for UploadRead<'_> {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::Relaxed);
-    }
 }
 
 /// Cancellation lineage for work deliberately continuing after response headers.

@@ -333,9 +333,13 @@ fn population_gauge(body: &str, metric: &str, population: &str) -> Option<f64> {
         .and_then(|value| value.parse().ok())
 }
 
-fn capped_scheduled_probe_sample(body: &str, failed_kinds: &[&str]) -> bool {
+const OLDEST_DUE_UNIX_SECONDS: f64 = 946_684_800.0;
+
+fn capped_probe_sample(body: &str, failed_kinds: &[&str]) -> bool {
     let mut scheduled = false;
-    let mut timestamp = false;
+    let mut available = false;
+    let mut observed_at = None;
+    let mut oldest_age = None;
     for line in body.lines() {
         let value = line
             .split_ascii_whitespace()
@@ -343,15 +347,18 @@ fn capped_scheduled_probe_sample(body: &str, failed_kinds: &[&str]) -> bool {
             .and_then(|text| text.parse::<f64>().ok());
         if line.starts_with("jobs_live_jobs{")
             && line.contains("kind=\"test.probe\"")
-            && line.contains("state=\"scheduled\"")
             && value == Some(1_000.0)
         {
-            scheduled = true;
+            scheduled |= line.contains("state=\"scheduled\"");
+            available |= line.contains("state=\"available\"");
         }
-        if line.starts_with("jobs_observation_timestamp_seconds ")
-            && value.is_some_and(|seen| seen > 0.0)
+        if line.starts_with("jobs_observation_timestamp_seconds ") {
+            observed_at = value;
+        }
+        if line.starts_with("jobs_oldest_available_age_seconds{")
+            && line.contains("kind=\"test.probe\"")
         {
-            timestamp = true;
+            oldest_age = value;
         }
     }
     let failed: Vec<_> = body
@@ -359,7 +366,10 @@ fn capped_scheduled_probe_sample(body: &str, failed_kinds: &[&str]) -> bool {
         .filter(|line| line.starts_with("jobs_failed_jobs{"))
         .collect();
     scheduled
-        && timestamp
+        && available
+        && observed_at.zip(oldest_age).is_some_and(|(time, age)| {
+            age > 0.0 && (time - age - OLDEST_DUE_UNIX_SECONDS).abs() < 0.001
+        })
         && failed.len() == failed_kinds.len()
         && failed_kinds.iter().all(|kind| {
             let label = format!("kind=\"{kind}\"");
@@ -378,7 +388,7 @@ fn capped_scheduled_probe_sample(body: &str, failed_kinds: &[&str]) -> bool {
     clippy::disallowed_methods,
     reason = "synchronous fixture polling waits for owned child or thread completion within its existing timeout"
 )]
-fn await_capped_scheduled_probe_sample(
+fn await_capped_probe_sample(
     url: &str,
     failed_kinds: &[&str],
     completed_eligible_at: f64,
@@ -394,7 +404,7 @@ fn await_capped_scheduled_probe_sample(
                 ("failed_jobs", unknown_failed_at),
             ];
             if status == 200
-                && capped_scheduled_probe_sample(&scraped, failed_kinds)
+                && capped_probe_sample(&scraped, failed_kinds)
                 && populations.iter().all(|(population, oldest)| {
                     population_gauge(
                         &scraped,
@@ -416,7 +426,7 @@ fn await_capped_scheduled_probe_sample(
         }
         std::thread::sleep(POLL);
     }
-    panic!("metrics never showed the capped scheduled sample:\n{scraped}");
+    panic!("metrics never showed the capped queue sample:\n{scraped}");
 }
 
 fn operation_failed(body: &str, operation: &str) -> bool {
@@ -1018,14 +1028,17 @@ async fn worker_metrics_publish_a_capped_fresh_registered_sample(pool: PgPool) {
     let inserted = sqlx::query(
         "INSERT INTO background_jobs (id, kind, payload, state, not_before) \
          SELECT gen_random_uuid(), $1, jsonb_build_object('action', 'succeed'), 'pending', \
-                statement_timestamp() + interval '1 hour' \
-         FROM generate_series(1, 1001)",
+                CASE WHEN seq <= 1001 THEN statement_timestamp() + interval '1 hour' \
+                     WHEN seq <= 2001 THEN statement_timestamp() - interval '1 hour' \
+                     ELSE to_timestamp($2) END \
+         FROM generate_series(1, 2003) AS seq",
     )
     .bind(Probe::NAME)
+    .bind(OLDEST_DUE_UNIX_SECONDS)
     .execute(&pool)
     .await
-    .expect("the scheduled jobs");
-    assert_eq!(inserted.rows_affected(), 1_001);
+    .expect("scheduled and due jobs with two tied oldest entries");
+    assert_eq!(inserted.rows_affected(), 2_003);
     let database_url = child_database_url(&pool).await;
     let failed_kinds = vec![Probe::NAME];
     // template:begin outbox:test-jobs-process-nats-fixture-use-4
@@ -1071,14 +1084,19 @@ async fn worker_metrics_publish_a_capped_fresh_registered_sample(pool: PgPool) {
     .expect("completed backlog");
     #[expect(
         clippy::disallowed_methods,
-        reason = "the fixture holds a completed row lock through the worker sample and rolls it back explicitly"
+        reason = "uncommitted deletes hold row locks through both worker samples"
     )]
-    let mut locked = pool.begin().await.expect("hold completed row");
-    sqlx::query("SELECT id FROM background_jobs WHERE id = $1 FOR UPDATE")
-        .bind(completed_id)
-        .execute(&mut *locked)
-        .await
-        .expect("cleanup skips the locked row, observation must still see it");
+    let mut locked = pool.begin().await.expect("hold sampled jobs");
+    let deleted = sqlx::query(
+        "DELETE FROM background_jobs WHERE id = $1 \
+         OR (kind = $2 AND state = 'pending' AND not_before <= statement_timestamp())",
+    )
+    .bind(completed_id)
+    .bind(Probe::NAME)
+    .execute(&mut *locked)
+    .await
+    .expect("claim and cleanup skip these rows while observation still sees them");
+    assert_eq!(deleted.rows_affected(), 1_003);
     let worker = Worker::spawn(
         &database_url,
         // template:begin outbox:test-jobs-process-nats-fixture-argument-4
@@ -1089,13 +1107,13 @@ async fn worker_metrics_publish_a_capped_fresh_registered_sample(pool: PgPool) {
     let diagnostics = listener_addr(&worker, "diagnostics listener bound");
     worker.await_record("jobs_worker_ready");
     let metrics = format!("http://{diagnostics}/metrics");
-    await_capped_scheduled_probe_sample(
+    await_capped_probe_sample(
         &metrics,
         &failed_kinds,
         completed_eligible_at,
         unknown_failed_at,
     );
-    locked.rollback().await.expect("release the completed row");
+    locked.commit().await.expect("release the sampled jobs");
     // Make the data statement fail immediately; a table lock could instead
     // stall a claim holding the shared engine permit before the sample runs.
     sqlx::query("ALTER TABLE background_jobs RENAME TO unavailable_background_jobs")

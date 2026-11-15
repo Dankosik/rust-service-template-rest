@@ -3,6 +3,7 @@
 the part that runs each graph.
 
     initializer-matrix.py --all            every graph (push, tag, schedule)
+    initializer-matrix.py --union BASE < changed-paths  diff classified at base and head
     initializer-matrix.py < changed-paths  graphs the diff can affect
     initializer-matrix.py --self-test
 
@@ -24,6 +25,8 @@ workflows) selects every graph.
 from __future__ import annotations
 
 import argparse
+from collections import Counter
+from functools import cache
 import json
 import subprocess
 import sys
@@ -76,7 +79,7 @@ def family(part: str) -> str:
 def graphs() -> dict[int, dict[str, str]]:
     listing = subprocess.run(
         ["bash", str(ROOT / "scripts/ci/template-init-check.sh"), "--repo", str(ROOT), "--list-graphs"],
-        check=True, capture_output=True, text=True,
+        check=True, stdout=subprocess.PIPE, text=True,
     ).stdout
     inventory = {}
     for line in listing.splitlines():
@@ -99,44 +102,52 @@ def kept(path: str, removed: tuple[str, ...]) -> bool:
     return not any(path == entry.rstrip("/") or path.startswith(entry.rstrip("/") + "/") for entry in removed)
 
 
-def selects_runtime(paths: list[str], surface: str = "initializer_runtime") -> bool:
-    """The classifier's initializer_runtime verdict for these paths together."""
-
+def initializer_surfaces(paths: list[str], base: str | None) -> set[str]:
     if not paths:
-        return False
-    surfaces = subprocess.run(
-        ["bash", str(ROOT / "scripts/ci/changed-surfaces.sh")],
-        input="".join(f"{path}\n" for path in paths), capture_output=True, text=True, cwd=ROOT,
-    ).stdout
-    return f"{surface}=true" in surfaces.splitlines()
+        return set()
+    command = ["bash", str(ROOT / "scripts/ci/changed-surfaces.sh")]
+    if base is not None:
+        command.extend(("--union", base))
+    result = subprocess.run(command, input="".join(f"{path}\n" for path in paths),
+                            stdout=subprocess.PIPE, text=True, cwd=ROOT)
+    if result.returncode:
+        sys.stderr.write(result.stdout)
+        raise SystemExit(result.returncode)
+    verdicts = result.stdout.splitlines()
+    return {surface for surface in ("initializer_runtime", "initializer_artifacts") if f"{surface}=true" in verdicts}
 
 
 def select(paths: list[str] | None, inventory: dict[int, dict[str, str]],
-           surface: str = "initializer_runtime") -> set[int]:
-    if paths is None:
-        return set(inventory)
-    if selects_runtime([path for path in paths if not path.startswith(NARROWABLE)], surface):
-        return set(inventory)
-    narrowable = [path for path in paths if path.startswith(NARROWABLE) and selects_runtime([path], surface)]
-    profiles = template_init._profile_data(ROOT)
-    return {
-        number for number, graph in inventory.items()
-        if any(kept(path, removed_paths(profiles, graph)) for path in narrowable)
-    }
+           base: str | None = None, artifacts_only: bool = False) -> tuple[set[int], list[int]]:
+    candidates = {"initializer_artifacts": set(ARTIFACT_GRAPHS)}
+    missing = candidates["initializer_artifacts"] - inventory.keys()
+    if missing:
+        raise SystemExit(f"initializer inventory lacks release representatives: {sorted(missing)}")
+    if not artifacts_only:
+        candidates["initializer_runtime"] = set(inventory)
+    broad = (candidates.keys() if paths is None else
+             initializer_surfaces([path for path in paths if not path.startswith(NARROWABLE)], base))
+    selected = {surface: numbers if surface in broad else set() for surface, numbers in candidates.items()}
+    narrow = candidates.keys() - broad
+    if narrow and paths:
+        profiles = template_init._profile_data(ROOT)
 
+        @cache
+        def removals(number: int) -> tuple[str, ...]:
+            return removed_paths(profiles, inventory[number])
 
-def select_artifacts(paths: list[str] | None, inventory: dict[int, dict[str, str]]) -> list[int]:
-    """The retained-binary seams, narrowed with the runtime planner's removal policy."""
-    representatives = {number: inventory[number] for number in ARTIFACT_GRAPHS}
-    return sorted(select(paths, representatives, "initializer_artifacts"))
+        for path in dict.fromkeys(path for path in paths if path.startswith(NARROWABLE)):
+            for surface in initializer_surfaces([path], base) & narrow:
+                selected[surface].update(number for number in candidates[surface] if kept(path, removals(number)))
+    return selected.get("initializer_runtime", set()), sorted(selected["initializer_artifacts"])
 
 
 def matrix(selected: set[int], inventory: dict[int, dict[str, str]]) -> dict[str, list[dict[str, str | bool]]]:
-    assigned = [number for numbers in PARTS.values() for number in numbers]
-    if sorted(assigned) != sorted(inventory):
-        missing = sorted(set(inventory) - set(assigned))
-        extra = sorted(set(assigned) - set(inventory))
-        duplicate = sorted({number for number in assigned if assigned.count(number) > 1})
+    assigned = Counter(number for numbers in PARTS.values() for number in numbers)
+    if assigned != Counter(inventory.keys()):
+        missing = sorted(inventory.keys() - assigned.keys())
+        extra = sorted(assigned.keys() - inventory.keys())
+        duplicate = sorted(number for number, count in assigned.items() if count > 1)
         raise SystemExit(f"initializer parts must hold every graph once: missing={missing} unknown={extra} duplicate={duplicate}")
     include: list[dict[str, str | bool]] = [{"part": "source", "cache": "source", "save": True}]
     for part, numbers in PARTS.items():
@@ -172,12 +183,12 @@ def self_test(inventory: dict[int, dict[str, str]]) -> None:
         "scripts/lib/template_init.py": everything,
     }
     for path, expected in cases.items():
-        actual = select([path], inventory)
+        actual, _ = select([path], inventory)
         if actual != expected:
             raise SystemExit(f"{path}: selected {sorted(actual)}, expected {sorted(expected)}")
-    if select(["README.md"], inventory):
+    if select(["README.md"], inventory)[0]:
         raise SystemExit("README.md selected a runtime graph")
-    if select(["README.md", "crates/infra-cache/src/lib.rs"], inventory) != cases["crates/infra-cache/src/lib.rs"]:
+    if select(["README.md", "crates/infra-cache/src/lib.rs"], inventory)[0] != cases["crates/infra-cache/src/lib.rs"]:
         raise SystemExit("projected text widened a narrowed selection")
     full = matrix(everything, inventory)["include"]
     if [row["part"] for row in full] != ["source", *PARTS]:
@@ -210,10 +221,10 @@ def self_test(inventory: dict[int, dict[str, str]]) -> None:
         "scripts/lib/template_init.py": [1, 7, 47, 65],
     }
     for path, expected in artifact_cases.items():
-        actual = select_artifacts([path], inventory)
+        _, actual = select([path], inventory, artifacts_only=True)
         if actual != expected:
             raise SystemExit(f"{path}: artifact graphs {actual}, expected {expected}")
-    if select_artifacts(["README.md", "crates/infra-cache/src/lib.rs"], inventory) != [65]:
+    if select(["README.md", "crates/infra-cache/src/lib.rs"], inventory, artifacts_only=True)[1] != [65]:
         raise SystemExit("prose widened the artifact selection")
     parts = {number: part for part, numbers in PARTS.items() for number in numbers}
     if sorted(number for leg in ARTIFACT_LEGS for number in leg) != sorted(ARTIFACT_GRAPHS):
@@ -232,6 +243,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--all", action="store_true")
+    mode.add_argument("--union", metavar="BASE", help="use the same base and head classifiers as the diff")
     mode.add_argument("--self-test", action="store_true")
     parser.add_argument("--artifacts-only", action="store_true", help="emit only the shared artifact graph selection")
     arguments = parser.parse_args()
@@ -239,13 +251,12 @@ def main() -> int:
     if arguments.self_test:
         self_test(inventory)
         return 0
-    paths = None if arguments.all else [line.strip() for line in sys.stdin if line.strip()]
-    artifacts = select_artifacts(paths, inventory)
+    paths = None if arguments.all else [path for line in sys.stdin if (path := line.rstrip("\n"))]
+    selected, artifacts = select(paths, inventory, arguments.union, arguments.artifacts_only)
     print(f"artifact_graphs={','.join(map(str, artifacts))}")
     if arguments.artifacts_only:
         return 0
     print(f"artifact_matrix={json.dumps(artifact_matrix(artifacts), separators=(',', ':'))}")
-    selected = select(paths, inventory)
     print(f"initializer_matrix={json.dumps(matrix(selected, inventory), separators=(',', ':'))}")
     print(f"initializer_graphs={len(selected)}")
     return 0

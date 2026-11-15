@@ -47,7 +47,8 @@ if [[ ${INTEGRATION_COMPOSE_MANAGED:-} != 1 ]]; then
 	trap 'exit 129' HUP
 	compose_postgres_up service-db
 	compose_pgbouncer_up
-	if [[ $(python3 scripts/lib/template_state.py profile --repo . --field messaging) == nats-jetstream ]]; then
+	messaging=$(python3 scripts/lib/template_state.py profile --repo . --field messaging)
+	if [[ ${messaging} == nats-jetstream ]]; then
 		if ! NATS_PORT=0 compose_postgres up -d --wait nats; then
 			NATS_PORT=0 compose_postgres ps --all || true
 			NATS_PORT=0 compose_postgres logs --no-color --tail 100 nats || true

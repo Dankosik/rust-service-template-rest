@@ -10,12 +10,14 @@ pinned Trivy itself, offline, without an image build or vulnerability DB.
 from __future__ import annotations
 
 import copy
+import io
 import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 
@@ -46,9 +48,7 @@ def runtime_result(path: str, name: str, version: str) -> dict:
 
 class Inventory(unittest.TestCase):
     def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory(prefix="inventory-test-")
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory(prefix="inventory-test-")))
         for relative in ("scripts/ci/runtime-image-inventory.py", "scripts/ci/runtime-image-scan.sh",
                          "scripts/ci/validation-lock.sh", "scripts/ci/validation-lock.py",
                          "scripts/lib/template_state.py", "tools/versions.env"):
@@ -217,6 +217,14 @@ elif args[0] == "ps":
         if state["Name"] == "/" + name: print(state["Id"])
 elif args[0] == "inspect":
     print(json.dumps([json.loads((containers / identity).read_text()) for identity in args[1:]]))
+elif args[:2] == ["container", "inspect"]:
+    assert (containers / args[-1]).is_file()
+    print(os.environ.get("FIXTURE_MOUNTS", "[]"))
+elif args[0] == "export":
+    assert (containers / args[1]).is_file()
+    with (root / "rootfs.tar").open("rb") as archive:
+        shutil.copyfileobj(archive, sys.stdout.buffer)
+    sys.exit(int(os.environ.get("EXPORT_EXIT", "0")))
 elif args[:2] == ["image", "inspect"]: print(os.environ["FIXTURE_IMAGE"])
 elif args[0] == "create":
     assert args[-1] == os.environ["FIXTURE_IMAGE"]
@@ -248,6 +256,13 @@ else: sys.exit(2)
 
     def run_scan(self, mode: str, *, binaries: list[str] | None = None, **extra: str) -> subprocess.CompletedProcess:
         self.report_path.write_text(json.dumps(self.report))
+        binaries = self.paths if binaries is None else binaries
+        with tarfile.open(self.root / "rootfs.tar", "w") as archive:
+            for path in binaries:
+                info = tarfile.TarInfo(path.lstrip("/"))
+                info.mode = 0o755
+                info.size = len(b"executable")
+                archive.addfile(info, io.BytesIO(b"executable"))
         # Exercise the real queue in a private domain. Only Docker is stubbed;
         # the owner produces its own process and resource terminal evidence.
         environment = {key: value for key, value in os.environ.items() if not key.startswith("VALIDATION_LOCK_")}
@@ -256,7 +271,7 @@ else: sys.exit(2)
                               env={**environment, "VALIDATION_LOCK_DIR": str(self.root / "validation.lock"),
                                    "PATH": f"{self.root / 'bin'}:{os.environ['PATH']}",
                                    "FIXTURE_ROOT": str(self.root), "FIXTURE_IMAGE": IMAGE_ID,
-                                   "FIXTURE_BINARIES": json.dumps(self.paths if binaries is None else binaries), **extra})
+                                   "FIXTURE_BINARIES": json.dumps(binaries), **extra})
 
     def test_missing_and_pruned_files_refuse_before_scanning(self) -> None:
         self.install_docker_fixture()
@@ -264,13 +279,57 @@ else: sys.exit(2)
             with self.subTest(path=path):
                 result = self.run_scan("sbom", binaries=[entry for entry in self.paths if entry != path])
                 self.assertNotEqual(result.returncode, 0)
-                self.assertIn(f"{path}: retained binary is absent", result.stderr)
+                self.assertIn(f"{path}: could not copy retained binary", result.stderr)
         self.select(database="none", jobs="none", messaging="none")
         result = self.run_scan("sbom", binaries=["/service", "/jobs-worker"])
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("/jobs-worker: pruned binary is present", result.stderr)
         calls = [json.loads(line) for line in (self.root / "calls.jsonl").read_text().splitlines()]
         self.assertFalse(any(call[0] == "run" for call in calls))
+
+    def test_pruned_proof_requires_a_successful_export_and_unmasked_paths(self) -> None:
+        self.install_docker_fixture()
+        self.select(database="none", jobs="none", messaging="none")
+        unrelated = json.dumps([{"Destination": "/var/data"}])
+        result = self.run_scan("filesystem", FIXTURE_MOUNTS=unrelated)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result = self.run_scan("filesystem", EXPORT_EXIT="23")
+        self.assertNotEqual(result.returncode, 0)
+        for mount in ("/", "/jobs-worker", "/migrate/cache"):
+            with self.subTest(mount=mount):
+                result = self.run_scan("filesystem", FIXTURE_MOUNTS=json.dumps([{"Destination": mount}]))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("mount prevents", result.stderr)
+
+    def test_incomplete_archives_and_pruned_entries_refuse(self) -> None:
+        mounts = self.root / "mounts.json"
+        mounts.write_text("[]")
+        command = [sys.executable, str(self.root / "scripts/ci/runtime-image-inventory.py"),
+                   "--rootfs-mounts", str(mounts), "--pruned", "/migrate"]
+        service = tarfile.TarInfo("service")
+        service.size = tarfile.BLOCKSIZE
+        header = service.tobuf()
+        member = header + b"s" * service.size
+        zero = bytes(tarfile.BLOCKSIZE)
+        archives = {
+            "truncated data": header + b"s",
+            "partial header": member + b"h",
+            "damaged header": member + b"h" * tarfile.BLOCKSIZE + zero * 2,
+            "missing terminator": member,
+            "single end block": member + zero,
+            "data after terminator": member + zero * 2 + member,
+            "partial padding block": member + zero * 2 + b"\x00",
+        }
+        for name, kind in (("./migrate", tarfile.SYMTYPE), ("migrate/child", tarfile.REGTYPE),
+                           ("/migrate/", tarfile.DIRTYPE)):
+            entry = tarfile.TarInfo(name)
+            entry.type = kind
+            archives[name] = member + entry.tobuf() + zero * 2
+        for case, contents in archives.items():
+            with self.subTest(case=case):
+                result = subprocess.run(command, input=contents, capture_output=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(b"runtime-image-inventory:", result.stderr)
 
     def test_scan_freezes_image_and_converts_only_admitted_reports(self) -> None:
         self.install_docker_fixture()
@@ -280,6 +339,7 @@ else: sys.exit(2)
         self.assertEqual(output.read_text(), "converted-report")
         calls = [json.loads(line) for line in (self.root / "calls.jsonl").read_text().splitlines()]
         self.assertEqual(sum(call[:2] == ["image", "inspect"] for call in calls), 1)
+        self.assertFalse(any(call[0] == "export" for call in calls))
         scan = next(call for call in calls if call[0] == "run" and "convert" not in call)
         self.assertIn("--list-all-pkgs=true", scan)
         self.assertEqual(scan[-1], IMAGE_ID)

@@ -114,20 +114,38 @@ if compgen -G 'migrations/*.sql' >/dev/null; then
 	echo "service refused missing migration history before migration"
 fi
 
-first=$(run_migrate first)
-printf '%s\n' "${first}"
-grep -Fq '"message":"migration_run"' <<<"${first}" || {
-	echo "first migration run logged no migration_run record" >&2
-	exit 1
-}
-grep -Eq '"outcome":"(success|no_change)"' <<<"${first}" || {
-	echo "first migration run did not succeed" >&2
-	exit 1
+check_migration_log() {
+	python3 -c '
+import json
+import sys
+
+first = sys.argv[1] == "first"
+seen = False
+for line in sys.stdin:
+    try:
+        event = json.loads(line)
+    except ValueError:
+        continue
+    if not isinstance(event, dict) or event.get("message") != "migration_run":
+        continue
+    seen = True
+    outcome = event.get("outcome")
+    if outcome == "no_change" or (first and outcome == "success"):
+        sys.exit(0)
+if not first:
+    sys.exit("second migration run was not a no_change")
+if not seen:
+    sys.exit("first migration run logged no migration_run record")
+sys.exit("first migration run did not succeed")
+' "$1"
 }
 
+first=$(run_migrate first)
+printf '%s\n' "${first}"
+check_migration_log first <<<"${first}"
+
 second=$(run_migrate second)
-grep -Fq '"outcome":"no_change"' <<<"${second}" || {
-	echo "second migration run was not a no_change" >&2
+check_migration_log second <<<"${second}" || {
 	printf '%s\n' "${second}" >&2
 	exit 1
 }

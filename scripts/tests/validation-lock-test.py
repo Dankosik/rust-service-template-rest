@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
 """Blackbox queue/lifetime contracts; no Cargo, Docker, or shared lock access."""
 
+import errno
+import fcntl
 import json
 import hashlib
 import os
 from pathlib import Path
+import runpy
 import signal
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -20,6 +25,8 @@ sys.path.insert(0, str(ROOT / "scripts/lib"))
 from template_state import load_lock
 
 ENTRY = ROOT / "scripts/ci/validation-lock.sh"
+validation = runpy.run_path(str(ENTRY.with_suffix(".py")))
+atomic_json = validation["atomic_json"]
 LOCK_ENV = ("VALIDATION_LOCK_DIR", "VALIDATION_LOCK_DOMAIN",
             "VALIDATION_LOCK_TOKEN", "VALIDATION_LOCK_HELD")
 
@@ -88,6 +95,12 @@ RELAY_INTERRUPTION = """
 import errno, json, os, pathlib, signal, time
 base = pathlib.Path(os.environ['TEST_RELAY_DIR'])
 mode = os.environ['TEST_RELAY_MODE']
+if mode == 'joined-relay':
+    # Beyond float's exact integer range every odd tick exposes a conversion
+    # through float seconds. Both clocks still advance with real elapsed time.
+    native_clock_ns = time.monotonic_ns
+    time.monotonic_ns = lambda: (2**54 + native_clock_ns()) | 1
+    time.monotonic = lambda: time.monotonic_ns() / 1_000_000_000
 def target():
     path = base / 'target.sid'
     return path.exists() and os.getsid(0) == int(path.read_text())
@@ -384,6 +397,9 @@ elif args and args[0] == 'wait':
         sys.exit(1)
     print(0)
 elif args and args[0] == 'rm':
+    if (root / 'fail-rm-once').exists():
+        (root / 'fail-rm-once').unlink()
+        sys.exit(1)
     if state is not None and state['State']['Running'] and not any(arg in args for arg in ('-f', '--force')):
         sys.exit(1)
     if state is not None:
@@ -431,6 +447,97 @@ class ValidationLockTests(unittest.TestCase):
                                 stdout=log, stderr=log, start_new_session=True)
         self.processes.append(proc)
         return proc
+
+    def test_ticket_collision_preserves_competing_file_and_publishes_privately(self):
+        ticket = self.base / "ticket.json"
+        competing = []
+        native_open = os.open
+
+        def collide(path, flags, *args, **kwargs):
+            if flags & os.O_EXCL and not competing:
+                other = Path(path)
+                with other.open("xb") as stream:
+                    stream.write(b"competing writer")
+                competing.append(other)
+            return native_open(path, flags, *args, **kwargs)
+
+        with patch.object(os, "open", collide):
+            atomic_json(ticket, {"next": 3})
+        self.assertEqual(competing[0].read_bytes(), b"competing writer")
+        self.assertEqual(list(self.base.glob("*.json")), [ticket])
+        self.assertEqual(json.loads(ticket.read_bytes()), {"next": 3})
+        self.assertEqual(stat.S_IMODE(ticket.stat().st_mode), 0o600)
+
+    def test_failed_ticket_update_preserves_previous_ticket_and_removes_temporary(self):
+        ticket = self.base / "ticket.json"
+        ticket.write_bytes(b'{"next":2}')
+        for operation in ("fsync", "replace"):
+            with self.subTest(operation=operation):
+                with patch.object(os, operation, side_effect=OSError(operation)):
+                    with self.assertRaisesRegex(OSError, operation):
+                        atomic_json(ticket, {"next": 3})
+                self.assertEqual(list(self.base.iterdir()), [ticket])
+                self.assertEqual(ticket.read_bytes(), b'{"next":2}')
+        with self.assertRaises(TypeError):
+            atomic_json(ticket, {"next": object()})
+        self.assertEqual(list(self.base.iterdir()), [ticket])
+        self.assertEqual(ticket.read_bytes(), b'{"next":2}')
+
+    def test_failed_scope_fork_releases_both_pipes_and_keeps_the_lease_unheld(self):
+        pipe_fds = []
+        native_pipe = os.pipe
+        lease = self.base / "command.lease"
+
+        def pipe():
+            pair = native_pipe()
+            pipe_fds.extend(pair)
+            return pair
+
+        with patch.object(os, "pipe", pipe), patch.object(os, "fork", side_effect=OSError("fork failed")):
+            with self.assertRaisesRegex(OSError, "fork failed"):
+                validation["prepare_scope"]([], {}, self.base / "receipt", lease, "boot")
+        for fd in pipe_fds:
+            with self.assertRaises(OSError) as closed:
+                os.fstat(fd)
+            self.assertEqual(closed.exception.errno, errno.EBADF)
+        self.assertFalse(validation["lease_held"](lease))
+
+    def test_failed_queue_unlock_does_not_leave_a_live_ticket(self):
+        queue = validation["Queue"](self.gate)
+        self.addCleanup(os.close, queue.mutex)
+        native_flock = fcntl.flock
+
+        def flock(fd, operation):
+            native_flock(fd, operation)
+            if fd == queue.mutex and operation == fcntl.LOCK_UN:
+                raise OSError("unlock failed")
+
+        with patch.object(fcntl, "flock", flock):
+            with self.assertRaisesRegex(OSError, "unlock failed"):
+                queue.register_ticket(["make", "test"])
+        ticket, = queue.tickets.glob("*.json")
+        self.assertFalse(validation["lease_held"](ticket.with_suffix(".lease")))
+        self.assertEqual(queue.status()["tickets"], [])
+
+    def test_directory_sync_failure_leaves_published_ticket_and_reused_name_intact(self):
+        ticket = self.base / "ticket.json"
+        native_replace, native_sync = os.replace, os.fsync
+
+        def replace(source, target):
+            native_replace(source, target)
+            with Path(source).open("xb") as stream:
+                stream.write(b"new owner")
+
+        def sync(fd):
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                raise OSError("directory sync")
+            native_sync(fd)
+
+        with patch.object(os, "replace", replace), patch.object(os, "fsync", sync):
+            with self.assertRaisesRegex(OSError, "directory sync"):
+                atomic_json(ticket, {"next": 3})
+        self.assertEqual(json.loads(ticket.read_bytes()), {"next": 3})
+        self.assertEqual([p.read_bytes() for p in self.base.iterdir() if p != ticket], [b"new owner"])
 
     def run_cli(self, *args, env=None, timeout=10):
         return subprocess.run(["bash", str(ENTRY), *args], cwd=ROOT,
@@ -667,6 +774,34 @@ fi
         self.finish_controller(owner)
         self.assertIsNone(self.status()["gate"])
 
+    def test_guardian_retries_failed_removal_of_stopped_owned_container(self):
+        native, env = self.docker_fixture()
+        owner = self.controller(env={**env, "TEST_DOCKER_APP_EXIT": "0", "TEST_DOCKER_SIGNAL_MASK": "1"})
+        token = self.status()["gate"]["token"]
+        name = "retry-" + token[:12]
+        registered = self.control("--resource-register", "container", name)
+        self.assertEqual(registered["code"], 0, registered)
+        resource = registered["stdout"].strip()
+        run = self.control("--resource-run", resource, "--", "docker", "run", "--name", name, "--label",
+                           "dev.rust-service.validation-owner=" + token, "fixture")
+        self.assertEqual(run["code"], 0, run)
+        statefile = native / "container.json"
+        stopped = json.loads(statefile.read_bytes())
+        self.assertFalse(stopped["State"]["Running"])
+
+        (native / "fail-rm-once").touch()
+        self.assertNotEqual(self.control("--resource-cleanup", resource)["code"], 0)
+        record, = self.status()["gate"]["resources"]
+        self.assertEqual((record["token"], record["id"], record["state"]), (resource, stopped["Id"], "closing"))
+        self.assertEqual(json.loads(statefile.read_bytes()), stopped)
+        self.assertNotEqual(self.control("--assert-complete")["code"], 0)
+
+        self.finish_controller(owner)
+        calls = [json.loads(line)["args"] for line in (native / "signal-masks.jsonl").read_text().splitlines()]
+        self.assertEqual([args for args in calls if args[0] == "rm"], [["rm", "-f", stopped["Id"]]] * 2)
+        self.assertFalse(statefile.exists())
+        self.assertIsNone(self.status()["gate"])
+
     def test_reused_member_hint_cannot_signal_foreign_kernel_session(self):
         hook, env = self.relay_environment("foreign-hint")
         foreign_base = self.base / "foreign"
@@ -758,7 +893,7 @@ fi
                 self.releases.extend((base.with_suffix(".release"), extra_base.with_suffix(".release")))
                 if mode == "fork-failure":
                     # A separate group is needed to reach an actual relay fork.
-                    program = "import subprocess,os,sys; subprocess.Popen([sys.executable,'-c',sys.argv[2],sys.argv[3]],preexec_fn=os.setpgrp)\n" + TERM_COUNT
+                    program = "import subprocess,sys; subprocess.Popen([sys.executable,'-c',sys.argv[2],sys.argv[3]],process_group=0)\n" + TERM_COUNT
                     owner = self.launch("--", sys.executable, "-c", program, str(base), HOLD, str(extra_base), env=env)
                     self.eventually(extra_base.with_suffix(".ready").exists, "additional group did not start")
                 else:
@@ -788,7 +923,7 @@ fi
         base = self.base / "root-work"
         group_base = self.base / "group-work"
         self.releases.extend((base.with_suffix(".release"), group_base.with_suffix(".release")))
-        program = "import subprocess,os,sys; subprocess.Popen([sys.executable,'-c',sys.argv[2],sys.argv[3]],preexec_fn=os.setpgrp)\n" + TERM_COUNT
+        program = "import subprocess,sys; subprocess.Popen([sys.executable,'-c',sys.argv[2],sys.argv[3]],process_group=0)\n" + TERM_COUNT
         owner = self.launch("--", sys.executable, "-c", program, str(base), HOLD, str(group_base), env=env)
         self.eventually(group_base.with_suffix(".ready").exists, "owned additional group did not start")
         scope = self.status()["gate"]["scope"]
@@ -804,6 +939,10 @@ fi
         # Root's 10+5 budget expires while an already-admitted relay is paused.
         # Its closed writer cannot revoke this performer or prove final absence.
         self.assertEqual(owner.wait(timeout=17), 128 + signal.SIGTERM)
+        first, escalation = (line.split() for line in (hook / "grants").read_text().splitlines())
+        self.assertEqual(first[:3], ["QSC1", "1", str(int(signal.SIGTERM))])
+        self.assertEqual(int(first[3]) % 2, 1)
+        self.assertEqual(escalation, ["QSC1", "2", str(int(signal.SIGKILL)), first[3]])
         self.assertFalse(self.process_terminal(relay_pid))
         self.assertEqual(self.run_cli("--reconcile").returncode, 1)
         self.assertIsNotNone(self.status()["gate"])
@@ -1408,18 +1547,37 @@ subprocess.run(['docker', 'run', '-d', '--name', name, '--label',
         if mode == "malformed":
             blob = blob[:-1]
         history = {"Ref": "testref", "FrontendAttrs": {"vcs:revision": candidate},
-                   "CreatedAt": {"seconds": 1792545594, "nanos": 0},
-                   "CompletedAt": {"seconds": 1792545653, "nanos": 0},
+                   "CreatedAt": {"seconds": 1792545652, "nanos": 1},
+                   "CompletedAt": {"seconds": 1792545652, "nanos": 3},
                    "error": {"code": code, "message": message},
                    "externalError": {"media_type": "application/vnd.googeapis.google.rpc.status+proto",
                                      "digest": "sha256:" + hashlib.sha256(blob).hexdigest(), "size": len(blob)},
                    "numTotalSteps": 1, "numCompletedSteps": 1}
-        progress = {"vertexes": [{"digest": digest, "name": "RUN false", "error": message,
-                                  "started": "2026-10-21T01:20:52Z", "completed": "2026-10-21T01:20:52.9Z"}]}
-        if mode == "candidate":
+        vertex = {"digest": digest, "name": "RUN false", "error": message,
+                  "started": "2026-10-21T02:20:52.000000001+01:00", "completed": "2026-10-21T01:20:52.000000003Z"}
+        progress = {"vertexes": [vertex]}
+        if mode == "exec":
+            # Go omits a zero nanos scalar on a whole-second timestamp.
+            history["CompletedAt"] = {"seconds": 1792545653}
+        elif mode == "candidate":
             history["FrontendAttrs"]["vcs:revision"] = "0" * 40
         elif mode == "incomplete":
             history.pop("CompletedAt")
+        elif mode == "bool-nanos":
+            history["CreatedAt"]["nanos"] = False
+        elif mode == "float-seconds":
+            history["CreatedAt"]["seconds"] = 1792545652.0
+        elif mode == "out-of-range-seconds":
+            history["CompletedAt"]["seconds"] = 253402300800
+        elif mode == "out-of-range-nanos":
+            history["CompletedAt"]["nanos"] = 1000000000
+        elif mode == "progress-before-history":
+            vertex["started"] = "2026-10-21T01:20:52Z"
+        elif mode == "progress-inverted":
+            vertex["started"] = "2026-10-21T01:20:52.000000002Z"
+            vertex["completed"] = "2026-10-21T01:20:52.000000001Z"
+        elif mode == "progress-after-history":
+            vertex["completed"] = "2026-10-21T01:20:52.000000004Z"
         elif mode == "digest":
             history["externalError"]["digest"] = "sha256:" + "0" * 64
         elif mode == "export-progress":
@@ -1443,6 +1601,8 @@ subprocess.run(['docker', 'run', '-d', '--name', name, '--label',
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(receipt.read_bytes(), before)
         self.assertEqual(json.loads(before), {"exit": 1, "terminal": False})
+        retained = json.loads((receipt.parent / "state.json").read_bytes())["resources"][0]
+        self.assertEqual(retained["provider_terminal"]["completed_at"], {"seconds": 1792545653})
         self.assertIsNone(self.status()["gate"])
         self.assert_builder_removed(native)
         self.assertEqual(self.run_cli(*self.marker_command("next"), env=env).returncode, 0)
@@ -1455,7 +1615,8 @@ subprocess.run(['docker', 'run', '-d', '--name', name, '--label',
         resource = gate["resources"][0]
         for mode in ("export", "export-progress", "cancel", "candidate", "incomplete", "version",
                      "digest", "malformed", "wrong-vertex", "exit-code-duplicate", "exit-code-zero",
-                     "exit-code-text"):
+                     "exit-code-text", "bool-nanos", "float-seconds", "out-of-range-seconds",
+                     "out-of-range-nanos", "progress-before-history", "progress-inverted", "progress-after-history"):
             with self.subTest(mode=mode):
                 self.build_failure_history(native, gate["candidate"], mode)
                 result = self.run_cli("--reconcile-buildkit", resource["token"], env=env)

@@ -13,7 +13,7 @@ use tokio::{
     sync::{Semaphore, SemaphorePermit},
     time::Instant,
 };
-use url::Url;
+use url::{Url, form_urlencoded::Serializer};
 
 use crate::{AcquisitionError, ConfigurationError, Rejection, assertion::Signer, token::Token};
 
@@ -31,10 +31,9 @@ const ACQUISITIONS_TOTAL: &str = "oauth2_token_acquisitions_total";
 /// The authorization server's token endpoint as both grants reach it: one
 /// signed, bounded, counted request per attempt, with no reuse of its own.
 pub(crate) struct TokenEndpoint {
-    url: Url,
     uri: Uri,
     http: Client,
-    scopes: Vec<String>,
+    scope: Option<String>,
     audience: Option<String>,
     signer: Signer,
     permits: Semaphore,
@@ -44,27 +43,23 @@ impl TokenEndpoint {
     pub(crate) fn new(
         url: Url,
         http: Client,
-        scopes: Vec<String>,
+        scopes: &[String],
         audience: Option<String>,
         signer: Signer,
         permits: usize,
     ) -> Result<Self, ConfigurationError> {
-        let uri = url
-            .as_str()
-            .parse::<Uri>()
-            .map_err(|_| ConfigurationError {
-                key: "token_url",
-                reason: "must be a valid HTTPS URL",
-            })?;
+        let uri = Uri::try_from(String::from(url)).map_err(|_| ConfigurationError {
+            key: "token_url",
+            reason: "must be a valid HTTPS URL",
+        })?;
         metrics::describe_counter!(
             ACQUISITIONS_TOTAL,
             "OAuth2 token attempts by grant and closed terminal outcome"
         );
         Ok(Self {
-            url,
             uri,
             http,
-            scopes,
+            scope: joined_scopes(scopes),
             audience,
             signer,
             permits: Semaphore::new(permits),
@@ -72,7 +67,7 @@ impl TokenEndpoint {
     }
 
     pub(crate) fn host(&self) -> Option<&str> {
-        self.url.host_str()
+        self.uri.host()
     }
 
     /// Performs one client-credentials token request and records its outcome.
@@ -129,37 +124,37 @@ impl TokenEndpoint {
             .map_err(|_| AcquisitionError::AtCapacity)
     }
 
-    /// Sends one token request for `grant`: its own parameters, then scope
-    /// and audience, then client authentication, the order RFC 7523's
-    /// example uses.
     async fn request_token(
         &self,
         grant: Grant<'_>,
         started: Instant,
         deadline: Instant,
     ) -> Result<Token, AcquisitionError> {
+        let body = self.form_body(grant)?;
+        let response = self.post_form(body, deadline).await?;
+        token_from_response(&response, started, grant.expected_issued_type())
+    }
+
+    fn form_body(&self, grant: Grant<'_>) -> Result<String, AcquisitionError> {
         let assertion = self.signer.sign()?;
-        let scope = joined_scopes(&self.scopes);
-        let mut fields = grant.form_fields();
-        if let Some(scope) = scope.as_deref() {
-            fields.push(("scope", scope));
+        let mut form = Serializer::new(String::new());
+        grant.append_fields(&mut form);
+        if let Some(scope) = self.scope.as_deref() {
+            form.append_pair("scope", scope);
         }
         if let Some(audience) = self.audience.as_deref() {
-            fields.push(("audience", audience));
+            form.append_pair("audience", audience);
         }
-        fields.extend(self.signer.form_fields(&assertion));
-        let response = self.post_form(&fields, deadline).await?;
-        token_from_response(&response, started, grant.expected_issued_type())
+        Ok(form
+            .extend_pairs(self.signer.form_fields(&assertion))
+            .finish())
     }
 
     async fn post_form(
         &self,
-        fields: &[(&str, &str)],
+        body: String,
         deadline: Instant,
     ) -> Result<TokenResponse, AcquisitionError> {
-        let body = url::form_urlencoded::Serializer::new(String::new())
-            .extend_pairs(fields)
-            .finish();
         let request = Request::post(self.uri.clone())
             .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
             .header(ACCEPT, "application/json")
@@ -184,17 +179,16 @@ enum Grant<'subject> {
     TokenExchange { subject: &'subject SecretString },
 }
 
-impl<'subject> Grant<'subject> {
-    fn form_fields(self) -> Vec<(&'static str, &'subject str)> {
+impl Grant<'_> {
+    fn append_fields(self, form: &mut Serializer<'_, String>) {
         match self {
-            Self::ClientCredentials => vec![("grant_type", GRANT_CLIENT_CREDENTIALS)],
-            Self::TokenExchange { subject } => vec![
-                ("grant_type", GRANT_TOKEN_EXCHANGE),
-                ("subject_token", subject.expose_secret()),
-                ("subject_token_type", TOKEN_TYPE_ACCESS_TOKEN),
-                ("requested_token_type", TOKEN_TYPE_ACCESS_TOKEN),
-            ],
-        }
+            Self::ClientCredentials => form.append_pair("grant_type", GRANT_CLIENT_CREDENTIALS),
+            Self::TokenExchange { subject } => form
+                .append_pair("grant_type", GRANT_TOKEN_EXCHANGE)
+                .append_pair("subject_token", subject.expose_secret())
+                .append_pair("subject_token_type", TOKEN_TYPE_ACCESS_TOKEN)
+                .append_pair("requested_token_type", TOKEN_TYPE_ACCESS_TOKEN),
+        };
     }
 
     /// The `grant` metric label; shorter than the URN token exchange sends as

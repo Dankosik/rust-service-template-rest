@@ -266,9 +266,14 @@ impl Engine {
 
 impl fmt::Debug for Engine {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let kinds = fmt::from_fn(|f| {
+            f.debug_list()
+                .entries(self.shared.registry.names())
+                .finish()
+        });
         formatter
             .debug_struct("Engine")
-            .field("kinds", &self.shared.registry.names().collect::<Vec<_>>())
+            .field("kinds", &kinds)
             .field("max_workers", &self.shared.max_workers)
             .finish_non_exhaustive()
     }
@@ -755,6 +760,29 @@ mod tests {
 
     impl crate::JobKind for Publisher {
         const NAME: &'static str = "publisher";
+    }
+
+    #[tokio::test]
+    async fn engine_debug_shows_registered_kinds_and_worker_limit() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/unused")
+            .unwrap();
+        let mut kinds = crate::KindsBuilder::new();
+        kinds.register(crate::Policy::default(), |_: crate::Job<Publisher>| async {
+            Ok(())
+        });
+        kinds.register(crate::Policy::default(), |_: crate::Job<Ordinary>| async {
+            Ok(())
+        });
+        let engine = Engine::new(pool, kinds.validate().unwrap(), NonZeroU32::MIN);
+        for output in [format!("{engine:?}"), format!("{engine:#?}")] {
+            let (_, remaining) = output
+                .split_once("\"publisher\"")
+                .expect("first registered kind");
+            assert!(remaining.contains("\"ordinary\""), "{output}");
+            assert!(output.contains("max_workers: 1"), "{output}");
+            assert!(output.contains(".."), "{output}");
+        }
     }
 
     #[tokio::test(start_paused = true)]

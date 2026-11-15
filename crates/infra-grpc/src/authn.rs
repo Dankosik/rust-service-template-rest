@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use axum::extract::Request;
+use axum::extract::{Request, State};
 use axum::middleware::Next;
 use axum::response::Response;
 use foldhash::HashMap;
@@ -11,9 +11,13 @@ use crate::Failure;
 use crate::call::Side;
 use crate::router::{opening_context, reject};
 
+type BearerState = (
+    infra_bearerauthn::Verifier,
+    Arc<HashMap<String, Box<[String]>>>,
+);
+
 pub(crate) async fn authenticate(
-    verifier: infra_bearerauthn::Verifier,
-    scopes: Arc<HashMap<String, Box<[String]>>>,
+    State((verifier, scopes)): State<BearerState>,
     mut request: Request,
     next: Next,
 ) -> Response {

@@ -1251,8 +1251,9 @@ async fn opening_timeout_releases_capacity_and_zero_disables_both_counts() {
             Status::from_header_map(response.headers()).unwrap().code(),
             Code::DeadlineExceeded
         );
+        assert_eq!(provider.calls.load(Ordering::Acquire), 1);
+        // New requests may finish while shutdown still owns the held connection.
         *provider.gate.lock().unwrap() = None;
-        gate.release();
         let mut held = Vec::new();
         for _ in 0..=usize::from(capacity == 0) {
             let response = timeout(
@@ -2558,6 +2559,10 @@ fn bytes_that_are_not_a_descriptor_set_are_rejected() {
 fn conflicting_descriptors_for_the_same_service_are_rejected() {
     use prost::Message as _;
 
+    fn encode(set: &prost_types::FileDescriptorSet) -> &'static [u8] {
+        Box::leak(set.encode_to_vec().into_boxed_slice())
+    }
+
     let mut services = described();
     let mut descriptor =
         prost_types::FileDescriptorSet::decode(grpc_contracts::FILE_DESCRIPTOR_SET).unwrap();
@@ -2568,9 +2573,16 @@ fn conflicting_descriptors_for_the_same_service_are_rejected() {
         .find(|service| service.name() == "EchoService")
         .unwrap();
     echo.method.retain(|method| method.name() != "Unary");
-    let conflicting = Box::leak(descriptor.encode_to_vec().into_boxed_slice());
+    let unnamed_file = prost_types::FileDescriptorProto {
+        service: vec![prost_types::ServiceDescriptorProto {
+            method: vec![prost_types::MethodDescriptorProto::default()],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    descriptor.file.insert(0, unnamed_file);
     assert_eq!(
-        services.describe(conflicting),
+        services.describe(encode(&descriptor)),
         Err(Error::ConflictingServiceDescription(
             "example.v1.EchoService".to_owned()
         ))
@@ -2578,6 +2590,34 @@ fn conflicting_descriptors_for_the_same_service_are_rejected() {
     services
         .describe(grpc_contracts::FILE_DESCRIPTOR_SET)
         .expect("the rejected set did not replace the original description");
+    descriptor.file.truncate(1);
+    descriptor.file[0].service[0]
+        .method
+        .push(prost_types::MethodDescriptorProto {
+            name: Some("Ping".to_owned()),
+            ..Default::default()
+        });
+    services
+        .describe(encode(&descriptor))
+        .expect("the later conflict did not register an earlier service");
+    let file = &mut descriptor.file[0];
+    file.package = Some(String::new());
+    let service = &mut file.service[0];
+    service.name = Some(String::new());
+    service.method.remove(0);
+    assert_eq!(
+        services.describe(encode(&descriptor)),
+        Err(Error::ConflictingServiceDescription(String::new()))
+    );
+    descriptor.file[0].service[0]
+        .method
+        .push(prost_types::MethodDescriptorProto {
+            name: Some(String::new()),
+            ..Default::default()
+        });
+    services
+        .describe(encode(&descriptor))
+        .expect("explicit default names and reordered methods describe the same service");
 }
 
 #[test]
@@ -3120,38 +3160,41 @@ async fn verifier_fixture() -> (Verifier, ProviderFixture) {
 }
 
 async fn answer_introspection(
-    mut stream: tokio_rustls::server::TlsStream<TcpStream>,
+    stream: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     silent: &AtomicBool,
     gate: &Mutex<Option<Arc<Hold>>>,
     calls: &AtomicUsize,
 ) {
-    // The form body can arrive after the request head.
-    let mut request = [0_u8; 4096];
-    let mut read = 0;
-    let contains =
-        |seen: &[u8], needle: &[u8]| seen.windows(needle.len()).any(|window| window == needle);
-    while !contains(&request[..read], b"token=") {
-        match stream.read(&mut request[read..]).await {
-            Ok(more) if more > 0 => read += more,
-            _ => break,
-        }
-    }
-    calls.fetch_add(1, Ordering::Release);
-    let held = gate.lock().unwrap().clone();
-    if let Some(held) = held {
-        held.wait().await;
-    }
-    if silent.load(Ordering::Acquire) {
-        std::future::pending::<()>().await;
-    }
-    let unscoped = contains(&request[..read], b"token=unscoped");
-    let response = introspection_response(unscoped);
-    let _ = stream.write_all(response.as_bytes()).await;
-    let _ = stream.shutdown().await;
+    use http_body_util::BodyExt as _;
+
+    let (read, write) = tokio::io::split(stream);
+    let io = hyper_util::rt::TokioIo::new(tokio::io::join(read.take(4096), write));
+    let service =
+        hyper::service::service_fn(|request: http::Request<hyper::body::Incoming>| async move {
+            let body = request.into_body().collect().await?.to_bytes();
+            let unscoped = url::form_urlencoded::parse(&body)
+                .any(|(name, value)| name == "token" && value == UNSCOPED);
+            calls.fetch_add(1, Ordering::Release);
+            let held = gate.lock().unwrap().clone();
+            if let Some(held) = held {
+                held.wait().await;
+            }
+            if silent.load(Ordering::Acquire) {
+                std::future::pending::<()>().await;
+            }
+            Ok::<_, hyper::Error>(introspection_response(unscoped))
+        });
+    let _ = hyper::server::conn::http1::Builder::new()
+        // Even empty fields occupy at least four wire bytes each.
+        .max_headers(1024)
+        .keep_alive(false)
+        .half_close(true)
+        .header_read_timeout(None)
+        .serve_connection(io, service)
+        .await;
 }
 
-/// An active token, with the `echo.read` scope unless `unscoped`.
-fn introspection_response(unscoped: bool) -> String {
+fn introspection_response(unscoped: bool) -> http::Response<http_body_util::Full<bytes::Bytes>> {
     let scope = if unscoped { "" } else { "echo.read" };
     let expiry = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -3161,10 +3204,82 @@ fn introspection_response(unscoped: bool) -> String {
     let body = format!(
         r#"{{"active":true,"iss":"https://issuer.example","aud":"api","exp":{expiry},"sub":"subject","scope":"{scope}"}}"#
     );
-    format!(
-        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-        body.len()
+    http::Response::builder()
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .body(http_body_util::Full::new(body.into()))
+        .unwrap()
+}
+
+async fn introspection_exchange(prefix: &str, suffix: &str) -> (usize, String) {
+    let (mut client, server) = tokio::io::duplex(8192);
+    let silent = AtomicBool::new(false);
+    let gate = Mutex::new(None);
+    let calls = AtomicUsize::new(0);
+    let mut connection = std::pin::pin!(answer_introspection(server, &silent, &gate, &calls));
+    client.write_all(prefix.as_bytes()).await.unwrap();
+    if !suffix.is_empty() {
+        assert!(futures_util::poll!(connection.as_mut()).is_pending());
+        assert_eq!(calls.load(Ordering::Acquire), 0, "partial form counted");
+        client.write_all(suffix.as_bytes()).await.unwrap();
+    }
+    client.shutdown().await.unwrap();
+    timeout(WAIT, connection).await.expect("provider finished");
+    let mut response = String::new();
+    client.read_to_string(&mut response).await.unwrap();
+    (calls.load(Ordering::Acquire), response)
+}
+
+#[tokio::test]
+async fn introspection_classifies_the_complete_decoded_token() {
+    for (suffix, scope) in [
+        ("unscoped", ""),
+        ("%75nscoped&other=1", ""),
+        ("unscoped-longer", "echo.read"),
+        ("accepted&other_token=unscoped", "echo.read"),
+    ] {
+        let length = "token=".len() + suffix.len();
+        let prefix = format!(
+            "POST / HTTP/1.1\r\nHost: provider.test\r\nContent-Length: {length}\r\n\r\ntoken="
+        );
+        let (calls, response) = introspection_exchange(&prefix, suffix).await;
+        assert_eq!(calls, 1);
+        assert!(response.starts_with("HTTP/1.1 200 "), "{response}");
+        assert!(
+            response.contains(&format!(r#""scope":"{scope}""#)),
+            "{response}"
+        );
+    }
+    let (calls, response) = introspection_exchange(
+        "POST / HTTP/1.1\r\nHost: provider.test\r\nContent-Length: 14\r\n\r\ntoken=",
+        "",
     )
+    .await;
+    assert_eq!(calls, 0);
+    assert!(!response.starts_with("HTTP/1.1 200 "));
+}
+
+#[tokio::test]
+async fn introspection_wire_limit_includes_headers_and_body() {
+    for extra_headers in [0, 150] {
+        let headers = "X:\r\n".repeat(extra_headers);
+        for total in [4096, 4097] {
+            // Both resulting body sizes have four content-length digits.
+            let head =
+                format!("POST / HTTP/1.1\r\nHost: provider.test\r\n{headers}Content-Length: ");
+            let body_len = total - head.len() - "0000\r\n\r\n".len();
+            let body = "token=unscoped&pad=";
+            let pad = "x".repeat(body_len - body.len());
+            let request = format!("{head}{body_len}\r\n\r\n{body}{pad}");
+            assert_eq!(request.len(), total);
+            let (calls, response) = introspection_exchange(&request, "").await;
+            assert_eq!(calls, usize::from(total == 4096));
+            assert_eq!(
+                response.starts_with("HTTP/1.1 200 "),
+                total == 4096,
+                "{response}"
+            );
+        }
+    }
 }
 
 fn provider_tls_config(pki: &Pki) -> rustls::ServerConfig {

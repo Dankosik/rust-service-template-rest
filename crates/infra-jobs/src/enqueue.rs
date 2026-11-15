@@ -125,19 +125,16 @@ pub async fn enqueue<K: JobKind>(
     let prepared = prepare(payload, options)?;
     let trace = trace_context::capture();
     let id = JobId::new_v7();
-    // The conflict target, its WHERE, `COLLATE "C"`, and the state literals
-    // repeat the partial unique index `background_jobs_live_unique_key` word
-    // for word: PostgreSQL infers the arbiter index only from a match, and
-    // `compare_live_payload` must find the row that index holds.
-    let row = observed(
+    // PostgreSQL infers background_jobs_live_unique_key from the columns and
+    // live-row predicate. The index inherits unique_key's C collation.
+    let inserted = observed(
         "enqueue job",
         sqlx::query!(
             "INSERT INTO background_jobs (id, kind, payload, payload_text, unique_key, not_before, trace_context, trace_state) \
              VALUES ($7, $1, $2::text::jsonb, $2, $3::text COLLATE \"C\", \
                      statement_timestamp() + ($4::bigint * interval '1 microsecond'), $5, $6) \
              ON CONFLICT (kind, unique_key) WHERE unique_key IS NOT NULL AND state IN ('pending', 'running') \
-             DO NOTHING \
-             RETURNING 1 AS created",
+             DO NOTHING",
             K::NAME,
             prepared.payload,
             prepared.unique_key,
@@ -146,12 +143,12 @@ pub async fn enqueue<K: JobKind>(
             trace.trace_state(),
             id.0,
         )
-        .fetch_optional(&mut *tx),
+        .execute(&mut *tx),
     )
     .await?;
-    let Some(_created) = row else {
+    if inserted.rows_affected() == 0 {
         return Ok(Enqueued::Duplicate);
-    };
+    }
     if prepared.delay_micros == 0 && take_wake_slot(K::NAME, Instant::now()) {
         observed(
             "wake job workers",

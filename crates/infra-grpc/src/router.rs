@@ -103,10 +103,10 @@ pub fn router(
     // template:begin service-auth:grpc-router-admit-callers
     // Inside bearer authentication. Without a service-token verifier,
     // admission only removes `Authorization` before the handler.
-    let business = business.layer(axum::middleware::from_fn(move |request, next| {
-        let admission = std::sync::Arc::clone(&admission);
-        async move { crate::service_auth::admit_caller(admission, request, next).await }
-    }));
+    let business = business.layer(axum::middleware::from_fn_with_state(
+        admission,
+        crate::service_auth::admit_caller,
+    ));
     // template:end service-auth:grpc-router-admit-callers
     // template:begin authn:grpc-router-authenticate
     let scopes = std::sync::Arc::new(std::mem::take(&mut services.scopes));
@@ -119,11 +119,10 @@ pub fn router(
         business
     } else {
         match verifier {
-            Some(verifier) => business.layer(axum::middleware::from_fn(move |request, next| {
-                let verifier = verifier.clone();
-                let scopes = std::sync::Arc::clone(&scopes);
-                async move { crate::authn::authenticate(verifier, scopes, request, next).await }
-            })),
+            Some(verifier) => business.layer(axum::middleware::from_fn_with_state(
+                (verifier, scopes),
+                crate::authn::authenticate,
+            )),
             None => return Err(Error::UnauthenticatedBusinessCalls),
         }
     };

@@ -116,7 +116,7 @@ fn parse_cursor(cursor: &str) -> Result<JobId, InputError> {
         .strip_prefix(CURSOR_PREFIX)
         .ok_or(InputError::Cursor)?;
     let id = parse_id(text).map_err(|_| InputError::Cursor)?;
-    if id.to_string() != text {
+    if text.bytes().any(|byte| byte.is_ascii_uppercase()) {
         return Err(InputError::Cursor);
     }
     Ok(id)
@@ -533,11 +533,9 @@ async fn lock_job_row(tx: &mut Tx<'_>, id: JobId) -> Result<(), OperatorError> {
     Ok(())
 }
 
-/// A live job that holds the redrive's unique key is a caller-visible conflict;
-/// every other database failure stays a database failure.
 fn conflict_or_database(error: sqlx::Error) -> OperatorError {
     let live_key_conflict = error.as_database_error().is_some_and(|database| {
-        database.code().as_deref() == Some("23505")
+        database.is_unique_violation()
             && database.constraint() == Some("background_jobs_live_unique_key")
     });
     if live_key_conflict {
@@ -555,9 +553,10 @@ fn conflict_or_database(error: sqlx::Error) -> OperatorError {
 /// propagate out of the caller's transaction so that recovery is rolled back.
 pub async fn redrive(tx: &mut Tx<'_>, target: &RecoveryTarget) -> Result<Redriven, OperatorError> {
     lock_job_row(tx, target.id).await?;
-    let row = observed(
+    observed(
         "redrive failed job",
-        sqlx::query!(
+        sqlx::query_as!(
+            Redriven,
             r#"
         UPDATE background_jobs SET
             recovery_history = recovery_history || jsonb_build_array(jsonb_build_object(
@@ -570,7 +569,7 @@ pub async fn redrive(tx: &mut Tx<'_>, target: &RecoveryTarget) -> Result<Redrive
             claim_expires_at = NULL, attempted_by = NULL, finished_at = NULL,
             failure_reason = NULL, error_summary = NULL, errors = '[]'
         WHERE id = $1 AND kind = $2 AND claim_generation = $3 AND state = 'failed'
-        RETURNING claim_generation::text AS "version!"
+        RETURNING claim_generation::text AS "new_version!: String"
         "#,
             target.id.0,
             target.kind,
@@ -580,10 +579,7 @@ pub async fn redrive(tx: &mut Tx<'_>, target: &RecoveryTarget) -> Result<Redrive
     )
     .await
     .map_err(conflict_or_database)?
-    .ok_or(OperatorError::Stale)?;
-    Ok(Redriven {
-        new_version: row.version,
-    })
+    .ok_or(OperatorError::Stale)
 }
 
 /// Permanently abandon one exact failed cycle. The result remains provisional
@@ -635,6 +631,7 @@ mod tests {
             i64::MAX
         );
         assert_eq!(RecoveryTarget::try_new(ID, "a", "0").unwrap().version(), 0);
+        assert!(RecoveryTarget::try_new(&ID.to_ascii_uppercase(), "a", "0").is_ok());
     }
 
     #[test]
@@ -664,6 +661,8 @@ mod tests {
             format!("v2:{ID}"),
             format!("v1:{}", ID.to_uppercase()),
             format!("v1:{}", ID.replace('-', "")),
+            "v1:0123456-789ab-cdef-0123-456789abcdef".to_owned(),
+            "v1:00000000-0000-0000-0000-000000000000".to_owned(),
         ] {
             std::assert_matches!(
                 Inspection::failed(Some(&cursor), 100),

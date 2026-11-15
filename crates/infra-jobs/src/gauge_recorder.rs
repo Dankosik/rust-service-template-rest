@@ -1,31 +1,14 @@
 //! A metrics recorder that keeps gauge values, for tests that read them back.
 
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
-use metrics::{
-    Counter, Gauge, GaugeFn, Histogram, Key, KeyName, Metadata, Recorder, SharedString, Unit,
-};
+use metrics::atomics::AtomicU64;
+use metrics::{Counter, Gauge, Histogram, Key, KeyName, Metadata, Recorder, SharedString, Unit};
 
 #[derive(Default)]
-struct RecordedGauge(Mutex<f64>);
-
-impl GaugeFn for RecordedGauge {
-    fn increment(&self, value: f64) {
-        *self.0.lock().unwrap() += value;
-    }
-
-    fn decrement(&self, value: f64) {
-        *self.0.lock().unwrap() -= value;
-    }
-
-    fn set(&self, value: f64) {
-        *self.0.lock().unwrap() = value;
-    }
-}
-
-#[derive(Default)]
-pub(crate) struct Gauges(Mutex<HashMap<Key, Arc<RecordedGauge>>>);
+pub(crate) struct Gauges(Mutex<HashMap<Key, Arc<AtomicU64>>>);
 
 impl Gauges {
     pub(crate) fn get(&self, name: &'static str, kind: Option<&'static str>) -> f64 {
@@ -33,7 +16,7 @@ impl Gauges {
             Some(kind) => Key::from_parts(name, &[("kind", kind)]),
             None => Key::from_name(name),
         };
-        *self.0.lock().unwrap()[&key].0.lock().unwrap()
+        f64::from_bits(self.0.lock().unwrap()[&key].load(Ordering::Acquire))
     }
 }
 

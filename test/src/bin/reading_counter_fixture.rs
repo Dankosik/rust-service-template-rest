@@ -174,13 +174,18 @@ async fn accept(pool: &PgPool, args: &mut Arguments) -> Result<bool, ReceiverErr
     let subject = args.optional("--subject", "reading.accepted");
     let endpoint = args.optional("--endpoint", ENDPOINT);
     let operations = if let Some(path) = args.flags.remove("--operations-file") {
-        // The fixed batch bound applies before deserializing or opening a Tx.
+        const MAX_BATCH_BYTES: usize = 128 * 1024 + 256;
         let file = tokio::fs::File::open(path).await?;
-        if file.metadata().await?.len() > 128 * 1024 + 256 {
+        if file.metadata().await?.len() > MAX_BATCH_BYTES as u64 {
             return Err("batch exceeds size bound".into());
         }
         let mut bytes = Vec::new();
-        file.take(128 * 1024 + 257).read_to_end(&mut bytes).await?;
+        file.take(MAX_BATCH_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)
+            .await?;
+        if bytes.len() > MAX_BATCH_BYTES {
+            return Err("batch exceeds size bound".into());
+        }
         let values: Vec<Operation> = serde_json::from_slice(&bytes)?;
         if values.is_empty() || values.len() > 128 {
             return Err("batch requires 1..=128 operations".into());

@@ -44,6 +44,58 @@ async fn counts(pool: &PgPool) -> (i64, i64, i64) {
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
+async fn batch_cli_bounds_actual_input_before_acceptance(pool: PgPool) {
+    use std::io;
+    use std::process::{Command, Stdio};
+    use std::time::Duration;
+
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::unix::pipe;
+
+    const LIMIT: usize = 128 * 1024 + 256;
+    reading::migrate(&pool).await.unwrap();
+    let db = integration_tests::url_for(&pool, integration_tests::DATABASE_URL).await;
+    for (size, code, requests) in [(LIMIT + 1, 1, 0), (LIMIT, 0, 1)] {
+        let mut batch = serde_json::to_vec(&[operation(11)]).unwrap();
+        batch.resize(size, b' ');
+        // The pipe has zero metadata length in both cases. Both byte sequences
+        // are valid JSON, so the size decision is observable in the database.
+        let (mut writer, reader) = pipe::pipe().unwrap();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_reading-counter-fixture"))
+            .args(["accept", "--operations-file", "/dev/stdin"])
+            .env_clear()
+            .env("DATABASE_URL", db.as_str())
+            .stdin(reader.into_blocking_fd().unwrap())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let completed = tokio::time::timeout(Duration::from_secs(40), async {
+            writer.write_all(&batch).await?;
+            drop(writer);
+            while child.try_wait()?.is_none() {
+                tokio::time::sleep(super::POLL).await;
+            }
+            Ok::<_, io::Error>(())
+        })
+        .await;
+        if !matches!(completed, Ok(Ok(()))) {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("batch process did not complete: {completed:?}");
+        }
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(output.status.code(), Some(code));
+        let receipt: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        if code == 1 {
+            assert_eq!(receipt["error"], "batch exceeds size bound");
+        } else {
+            assert_eq!(receipt["status"], "accepted");
+        }
+        assert_eq!(counts(&pool).await.0, requests);
+    }
+}
+
+#[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn acceptance_commits_three_intents_once_or_rolls_them_all_back(pool: PgPool) {
     let admitted = setup(&pool).await;
     let outbound = Producer::new(["reading".to_owned()]);

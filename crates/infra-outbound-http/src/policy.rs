@@ -15,8 +15,7 @@ pub(crate) struct Origin {
     scheme: Scheme,
     host: Box<str>,
     port: u16,
-    /// The `Host` value hyper would derive from every admitted URI. The origin
-    /// is fixed, so it is formatted once.
+    /// The `Host` value hyper would derive from every admitted URI.
     host_header: HeaderValue,
 }
 
@@ -30,12 +29,8 @@ impl Origin {
         let (Some(host), Some(port)) = (url.host_str(), url.port_or_known_default()) else {
             return Err(BuildError::InvalidOrigin);
         };
-        // `Url::port` omits the scheme's default port, as the `Host` header does.
-        let host_header = match url.port() {
-            Some(port) => HeaderValue::from_str(&format!("{host}:{port}")),
-            None => HeaderValue::from_str(host),
-        }
-        .map_err(|_| BuildError::InvalidOrigin)?;
+        let host_header =
+            HeaderValue::from_str(url.authority()).map_err(|_| BuildError::InvalidOrigin)?;
         Ok(Self {
             scheme,
             host: host.into(),

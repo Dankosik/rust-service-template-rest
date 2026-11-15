@@ -13,12 +13,14 @@ checkout. The portable manifest does not gain runtime ownership.
 
 ## Initialize a service
 
-Work in a clean Git checkout with Python 3.11+, Git, the pinned Rust toolchain,
-and fetch the committed lockfile's dependency inputs while connected. Then
-initialization uses offline, locked Cargo metadata and the existing OpenAPI
-generator before changing the checkout. Missing tools, dependencies or unsupported
-source shapes refuse without target writes; do not recover by resolving an
-unlocked graph.
+Start with a clean Git checkout, Python 3.11+, Git and the pinned Rust toolchain.
+Fetch the dependencies in the committed lockfile while connected. The initializer
+runs `cargo metadata --offline` in a staged copy so Cargo can prune the projected
+lockfile. It checks each remaining package's name, version, source and checksum
+against the template lock, allowing the renamed local service package. It then
+formats the staged Rust code and runs the OpenAPI generator with
+`--locked --offline` before changing the checkout. Missing tools or dependencies and
+unsupported source shapes stop initialization before target writes.
 
 ```sh
 cargo fetch --locked
@@ -438,8 +440,8 @@ A change to projected text alone runs `make template-init-projections`.
 `bash scripts/ci/template-init-check.sh --projections-only` runs the canonical
 projection checks without Cargo or full/heavy admission; these are not public-CLI
 initializations or builds. `--source-checks` keeps the source safety/purity/sync
-route. The public initializer always performs its complete locked metadata,
-formatting and OpenAPI preflight before changing a target. These source runners
+route. The public initializer always prunes and checks the staged lockfile,
+formats the code and generates OpenAPI before changing a target. These source runners
 are removed from generated services, so standard checks cannot recurse into them.
 
 Local results describe their fixed candidate and commands. They do not claim a

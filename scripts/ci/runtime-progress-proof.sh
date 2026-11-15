@@ -47,14 +47,12 @@ cleanup() {
 	done
 	for resource in "${container_resources[@]}"; do
 		bash scripts/ci/validation-lock.sh --resource-cleanup "${resource}" || cleanup_failed=true
-		bash scripts/ci/validation-lock.sh --resource-complete "${resource}" || cleanup_failed=true
 	done
 	if [[ -n ${image_id} && ${cleanup_failed} == false ]]; then
 		timeout 10s docker image rm "${image}" >"${inputs}/image-cleanup.log" 2>&1 || cleanup_failed=true
 	fi
 	if [[ -n ${builder_resource} ]]; then
 		bash scripts/ci/validation-lock.sh --resource-cleanup "${builder_resource}" || cleanup_failed=true
-		bash scripts/ci/validation-lock.sh --resource-complete "${builder_resource}" || cleanup_failed=true
 	fi
 	if [[ ${cleanup_failed} == true && ${status} == 0 ]]; then status=1; fi
 	printf '%s\n' "${status}" >"${inputs}/runner-exit-code"
@@ -124,7 +122,6 @@ bash scripts/ci/validation-lock.sh --resource-run "${builder_resource}" -- \
 	--build-arg "RUNTIME_PROGRESS_RUN=${run_id}" \
 	--tag "${image}" "${inputs}/image" 2>&1 | tee "${inputs}/image-build.log"
 bash scripts/ci/validation-lock.sh --resource-cleanup "${builder_resource}"
-bash scripts/ci/validation-lock.sh --resource-complete "${builder_resource}"
 builder_resource=
 image_id=$(docker image inspect --format '{{.Id}}' "${image}")
 docker image inspect "${image_id}" >"${inputs}/image-inspect.json"

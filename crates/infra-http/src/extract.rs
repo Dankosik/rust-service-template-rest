@@ -355,7 +355,9 @@ fn body_pointer(path: &serde_path_to_error::Path) -> Option<String> {
     for segment in path {
         pointer.push('/');
         match segment {
-            Segment::Seq { index } => pointer.push_str(&index.to_string()),
+            Segment::Seq { index } => {
+                pointer.push_str(index.format_into(&mut std::fmt::NumBuffer::new()));
+            }
             Segment::Map { key } | Segment::Enum { variant: key } => {
                 pointer.push_str(&shared_rules::rfc6901::escape(key));
             }
@@ -783,12 +785,17 @@ mod tests {
                 reason = "serde reads the member; the test only checks rejections"
             )]
             #[serde(rename = "a/b~c")]
-            inner: u32,
+            inner: Vec<u32>,
         }
-        let mut deserializer = serde_json::Deserializer::from_str(r#"{"a/b~c":"x"}"#);
-        let error = serde_path_to_error::deserialize::<_, Outer>(&mut deserializer)
-            .err()
-            .expect("the member does not fit");
-        assert_eq!(body_pointer(error.path()).as_deref(), Some("/a~1b~0c"));
+        for (input, pointer) in [
+            (r#"{"a/b~c":["x"]}"#, "/a~1b~0c/0"),
+            (r#"{"a/b~c":[0,1,2,3,4,5,6,7,8,9,"x"]}"#, "/a~1b~0c/10"),
+        ] {
+            let mut deserializer = serde_json::Deserializer::from_str(input);
+            let error = serde_path_to_error::deserialize::<_, Outer>(&mut deserializer)
+                .err()
+                .expect("the member does not fit");
+            assert_eq!(body_pointer(error.path()).as_deref(), Some(pointer));
+        }
     }
 }

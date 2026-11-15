@@ -367,10 +367,8 @@ fn root_traces_url(root: &str) -> String {
     format!("{}/v1/traces", root.trim_suffix('/'))
 }
 
-/// `key=value,key=value` into a map. Blank entries are skipped; any other
-/// entry must be a valid header name and value, so a typo fails startup
-/// instead of silently dropping a credential. The SDK percent-decodes
-/// values. Errors name the entry position, never its content.
+/// The SDK silently drops unusable headers. Check each entry before duplicate
+/// names overwrite it and report only its position, since it may be a credential.
 pub(super) fn parse_headers(raw: &str) -> Result<HashMap<String, String>, TracingError> {
     let mut headers = HashMap::new();
     for (index, entry) in raw.split(',').enumerate() {
@@ -384,13 +382,31 @@ pub(super) fn parse_headers(raw: &str) -> Result<HashMap<String, String>, Tracin
             return Err(invalid);
         };
         let (name, value) = (name.trim(), value.trim());
-        if HeaderName::from_bytes(name.as_bytes()).is_err() || HeaderValue::from_str(value).is_err()
+        if HeaderName::from_bytes(name.as_bytes()).is_err()
+            || HeaderValue::from_str(value).is_err()
+            || decoded_otlp_header_value(value)
+                .is_some_and(|decoded| HeaderValue::try_from(decoded).is_err())
         {
             return Err(invalid);
         }
         headers.insert(name.to_owned(), value.to_owned());
     }
     Ok(headers)
+}
+
+// opentelemetry-otlp 0.33.1 decodes each pair after '%' with from_str_radix
+// (including a leading '+'). A malformed pair or invalid UTF-8 anywhere makes
+// with_headers send the entire original value, which was already checked.
+fn decoded_otlp_header_value(value: &str) -> Option<String> {
+    let (prefix, escapes) = value.split_once('%')?;
+    let mut decoded = Vec::with_capacity(value.len());
+    decoded.extend_from_slice(prefix.as_bytes());
+    for part in escapes.split('%') {
+        let (digits, literal) = part.split_at_checked(2)?;
+        decoded.push(u8::from_str_radix(digits, 16).ok()?);
+        decoded.extend_from_slice(literal.as_bytes());
+    }
+    String::from_utf8(decoded).ok()
 }
 
 #[cfg(test)]

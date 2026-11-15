@@ -196,7 +196,7 @@ impl Credentials {
         let endpoint = TokenEndpoint::new(
             endpoint,
             token_http,
-            options.scopes,
+            &options.scopes,
             options.audience,
             signer,
             permits,

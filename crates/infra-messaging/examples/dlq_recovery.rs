@@ -273,10 +273,11 @@ impl Resources {
                 if !*closed.borrow() {
                     client.drain().await.map_err(|_| "drain")?;
                 }
-                while !*closed.borrow_and_update() {
-                    closed.changed().await.map_err(|_| "close_unobserved")?;
-                }
-                Ok::<(), &'static str>(())
+                closed
+                    .wait_for(|observed| *observed)
+                    .await
+                    .map(drop)
+                    .map_err(|_| "close_unobserved")
             };
             complete &= matches!(tokio::time::timeout_at(deadline, wait).await, Ok(Ok(())));
         }

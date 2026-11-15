@@ -4,10 +4,9 @@
 //! framing, timestamp admission, and HMAC verification. It deliberately has
 //! no knowledge of endpoints, JSON, persistence, or HTTP routing.
 
-use std::fmt::Write as _;
+use std::fmt::NumBuffer;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use arrayvec::ArrayString;
 use aws_lc_rs::{constant_time, hmac};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bytes::Bytes;
@@ -24,10 +23,7 @@ const SIGNATURE_PREFIX: &str = "v1,";
 const MIN_KEY_BYTES: usize = 24;
 const MAX_KEY_BYTES: usize = 64;
 const TAG_BYTES: usize = 32;
-/// A tag in padded Standard base64: four characters per started three bytes.
-const ENCODED_TAG_BYTES: usize = TAG_BYTES.div_ceil(3) * 4;
-/// `i64::MIN` in decimal, the longest canonical timestamp.
-const MAX_TIMESTAMP_TEXT_BYTES: usize = 20;
+const ENCODED_TAG_BYTES: usize = base64::encoded_len(TAG_BYTES, true).expect("HMAC tag fits");
 
 /// The longest `webhook-id` accepted by verification.
 pub const MAX_MESSAGE_ID_BYTES: usize = 255;
@@ -118,8 +114,6 @@ impl KeyRing {
         Ok(signatures)
     }
 
-    /// Verify signed headers and raw body against this key ring.
-    ///
     /// The expected tag is computed once per key, so the work is at most two
     /// HMACs over the body however many candidates the caller supplies.
     ///
@@ -139,16 +133,12 @@ impl KeyRing {
         let timestamp = parse_timestamp(unambiguous_header(headers, WEBHOOK_TIMESTAMP)?)?;
         ensure_timestamp_window(timestamp, now)?;
 
-        let mut values = headers.get_all(WEBHOOK_SIGNATURE).iter().peekable();
-        if values.peek().is_none() {
+        if !headers.contains_key(WEBHOOK_SIGNATURE) {
             return Err(ProtocolError::MissingHeader);
         }
-        let candidates: Vec<Vec<u8>> = values.flat_map(v1_candidates).collect();
         let matches = |key: &SigningKey| {
             let expected = tag(key, message_id.as_bytes(), timestamp, body);
-            candidates.iter().any(|candidate| {
-                constant_time::verify_slices_are_equal(expected.as_ref(), candidate).is_ok()
-            })
+            matches_v1_signature(headers, &expected)
         };
         if matches(&self.active) || self.previous.as_ref().is_some_and(matches) {
             return Ok(VerifiedMessage {
@@ -274,24 +264,25 @@ fn tag(key: &SigningKey, message_id: &[u8], timestamp: i64, body: &[u8]) -> hmac
     let mut context = hmac::Context::with_key(&key.0);
     context.update(message_id);
     context.update(b".");
-    let mut text = ArrayString::<MAX_TIMESTAMP_TEXT_BYTES>::new();
-    // The capacity holds every i64, so formatting cannot fail.
-    let _ = write!(text, "{timestamp}");
-    context.update(text.as_bytes());
+    context.update(timestamp.format_into(&mut NumBuffer::new()).as_bytes());
     context.update(b".");
     context.update(body);
     context.sign()
 }
 
-/// The decoded tags of the well-formed v1 candidates in one header value.
-fn v1_candidates(value: &HeaderValue) -> impl Iterator<Item = Vec<u8>> {
-    value
-        .as_bytes()
-        .split(u8::is_ascii_whitespace)
-        .filter_map(|candidate| {
-            STANDARD
-                .decode(candidate.strip_prefix(SIGNATURE_PREFIX.as_bytes())?)
-                .ok()
+fn matches_v1_signature(headers: &HeaderMap, expected: &hmac::Tag) -> bool {
+    // Reserve base64's conservative decoded-length bound, including padding slack.
+    let mut scratch = [0; ENCODED_TAG_BYTES / 4 * 3];
+    headers
+        .get_all(WEBHOOK_SIGNATURE)
+        .iter()
+        .flat_map(|value| value.as_bytes().split(u8::is_ascii_whitespace))
+        .filter_map(|token| token.strip_prefix(SIGNATURE_PREFIX.as_bytes()))
+        .any(|encoded| {
+            encoded.len() == ENCODED_TAG_BYTES
+                && matches!(STANDARD.decode_slice(encoded, &mut scratch), Ok(TAG_BYTES))
+                && constant_time::verify_slices_are_equal(expected.as_ref(), &scratch[..TAG_BYTES])
+                    .is_ok()
         })
 }
 
@@ -418,6 +409,29 @@ mod tests {
     }
 
     #[test]
+    fn signs_canonical_decimal_seconds_across_the_signed_range() {
+        use aws_lc_rs::hmac;
+
+        let key = hmac::Key::new(
+            hmac::HMAC_SHA256,
+            &STANDARD.decode(ARBITRARY_BYTES_KEY).unwrap(),
+        );
+        let keys = KeyRing::from_encoded(ARBITRARY_BYTES_KEY, None).unwrap();
+        for (timestamp, frame) in [
+            (i64::MIN, b"id.-9223372036854775808.raw".as_slice()),
+            (-1, b"id.-1.raw"),
+            (0, b"id.0.raw"),
+            (i64::MAX, b"id.9223372036854775807.raw"),
+        ] {
+            let tag = hmac::sign(&key, frame);
+            assert_eq!(
+                keys.signatures(b"id", timestamp, b"raw").unwrap(),
+                format!("v1,{}", STANDARD.encode(tag))
+            );
+        }
+    }
+
+    #[test]
     fn rotation_signs_with_both_keys_and_accepts_an_isolated_predecessor_candidate() {
         let keys = KeyRing::from_encoded(ARBITRARY_BYTES_KEY, Some(UPSTREAM_KEY)).unwrap();
         let predecessor = KeyRing::from_encoded(UPSTREAM_KEY, None).unwrap();
@@ -444,16 +458,73 @@ mod tests {
     }
 
     #[test]
-    fn accepts_a_valid_v1_candidate_even_with_other_versions_or_bad_candidates() {
-        let keys = KeyRing::from_encoded(ARBITRARY_BYTES_KEY, None).unwrap();
-        let body = b"raw\0bytes";
-        let good = keys.signatures(b"msg_1", 1, body).unwrap();
-        let headers = headers("msg_1", "+0001", &format!("v2,nope {good} v1,not-base64"));
+    fn accepts_a_predecessor_signature_after_bad_candidates_in_repeated_fields() {
+        let keys = KeyRing::from_encoded(UPSTREAM_KEY, Some(ARBITRARY_BYTES_KEY)).unwrap();
+        let mut headers = headers("msg_test", "+01700000000", "v2,nope");
+        let field = [
+            b"v1,\xff\t".as_slice(),
+            ARBITRARY_BYTES_SIGNATURE.as_bytes(),
+        ]
+        .concat();
+        headers.append(
+            "webhook-signature",
+            HeaderValue::from_bytes(&field).unwrap(),
+        );
 
         assert!(
-            keys.verify(&headers, body, UNIX_EPOCH + Duration::from_secs(1))
-                .is_ok()
+            keys.verify(
+                &headers,
+                ARBITRARY_BYTES_BODY,
+                UNIX_EPOCH + Duration::from_secs(1_700_000_000)
+            )
+            .is_ok()
         );
+    }
+
+    #[test]
+    fn distinguishes_an_empty_signature_field_from_a_missing_field() {
+        let keys = KeyRing::from_encoded(UPSTREAM_KEY, None).unwrap();
+        let mut headers = headers("msg_1", "0", "");
+        assert_eq!(
+            keys.verify(&headers, b"", UNIX_EPOCH),
+            Err(ProtocolError::InvalidSignature)
+        );
+        headers.remove("webhook-signature");
+        assert_eq!(
+            keys.verify(&headers, b"", UNIX_EPOCH),
+            Err(ProtocolError::MissingHeader)
+        );
+    }
+
+    #[test]
+    fn rejects_incomplete_and_extended_tags_even_after_decoding_another_candidate() {
+        let keys = KeyRing::from_encoded(ARBITRARY_BYTES_KEY, None).unwrap();
+        let encoded = ARBITRARY_BYTES_SIGNATURE.strip_prefix("v1,").unwrap();
+        let tag = STANDARD.decode(encoded).unwrap();
+        let mut wrong = tag.clone();
+        wrong[0] ^= 1;
+        let first = STANDARD.encode(wrong);
+        let mut extended = tag.clone();
+        extended.push(0);
+        for candidate in [
+            STANDARD.encode(&tag[..31]),
+            STANDARD.encode(extended),
+            format!("{}!", encoded.strip_suffix('=').unwrap()),
+        ] {
+            let fields = headers(
+                "msg_test",
+                "1700000000",
+                &format!("v1,{first} v1,{candidate}"),
+            );
+            assert_eq!(
+                keys.verify(
+                    &fields,
+                    ARBITRARY_BYTES_BODY,
+                    UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+                ),
+                Err(ProtocolError::InvalidSignature)
+            );
+        }
     }
 
     // The header limit admits thousands of candidates, so the HMAC work must

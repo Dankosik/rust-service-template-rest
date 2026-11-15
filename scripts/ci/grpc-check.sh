@@ -6,7 +6,7 @@ set -euo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "${root}"
 base=${GRPC_BASE_REF:-${BASE_REF:-origin/main}}
-git rev-parse --verify "${base}^{commit}" >/dev/null || {
+base_commit=$(git rev-parse --verify "${base}^{commit}") || {
   echo "grpc-check: comparison base is unavailable: ${base}" >&2
   exit 2
 }
@@ -21,10 +21,11 @@ bash scripts/grpc-generate.sh "${temporary}/generated"
 diff -r crates/grpc-contracts/src/generated "${temporary}/generated"
 
 # A valid base without this capability is an explicit first addition.
-if [[ -n "$(git ls-tree --name-only "${base}" -- api/proto)" ]]; then
+base_proto=$(git ls-tree --name-only "${base_commit}" -- api/proto)
+if [[ -n ${base_proto} ]]; then
   # Buf reads the base straight from Git and needs the full commit id. Imports
   # are not the owned wire contract.
-  "${buf[@]}" breaking --against ".git#ref=$(git rev-parse "${base}^{commit}")" --exclude-imports
+  "${buf[@]}" breaking --against ".git#ref=${base_commit}" --exclude-imports
 else
   echo "grpc-check: ${base} has no protobuf contract; first addition, compatibility baseline absent"
 fi

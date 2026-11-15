@@ -124,9 +124,11 @@ def metadata(manifest: Path, triple: str, feature_flags: list[str] = ()) -> dict
 
 def graph(manifest: Path, triple: str, selection: list[str], edges: str) -> dict[tuple[str, str], set[str]]:
     result = run(["cargo", "tree", "--locked", "--manifest-path", str(manifest), "--target", triple,
-                  "--prefix", "none", "--format", "{p}|{f}", "--no-dedupe", "-e", edges, *selection])
+                  "--prefix", "none", "--format", "{p}|{f}", "--color", "never", "-e", edges, *selection])
     nodes: dict[tuple[str, str], set[str]] = {}
     for line in result.stdout.splitlines():
+        if line.endswith(" (*)"):
+            continue
         match = re.fullmatch(r"([A-Za-z0-9_-]+) v([^ ]+)(?: .*?)?\|(.*)", line.strip())
         if match:
             nodes.setdefault((match[1], match[2]), set()).update(filter(None, match[3].split(",")))

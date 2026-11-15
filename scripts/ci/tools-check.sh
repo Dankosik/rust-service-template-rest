@@ -46,12 +46,13 @@ done <"${manifest}"
 # The binary make passed in (a path under the Git common directory locally,
 # a PATH name in CI) must exist and report the pinned version.
 check_cargo_tool() {
-	local var=$1 crate=$2 version=$3 binary reported
+	local var=$1 crate=$2 version=$3 binary banner reported='<none>'
 	binary=${!var:-}
 	[[ -n ${binary} ]] || fail "${var} is unset; run through make tools-check"
 	command -v "${binary}" >/dev/null 2>&1 || fail "${crate} ${version} is not installed at ${binary}"
-	reported=$("${binary}" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1 || true)
-	[[ ${reported} == "${version}" ]] || fail "${binary} reports ${crate} ${reported:-<none>}, ${manifest} pins ${version}"
+	banner=$("${binary}" --version 2>/dev/null) || fail "${binary} --version failed"
+	if [[ ${banner} =~ [0-9]+\.[0-9]+\.[0-9]+ ]]; then reported=${BASH_REMATCH[0]}; fi
+	[[ ${reported} == "${version}" ]] || fail "${binary} reports ${crate} ${reported}, ${manifest} pins ${version}"
 	echo "tools-check: ${crate} ${version} resolves at ${binary}"
 }
 

@@ -63,8 +63,7 @@ def run(repo: Path, args: list[str], *, data: bytes | None = None,
     command = ["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
                "-c", "core.attributesFile=/dev/null", "-c", "core.autocrlf=false",
                "-c", "commit.gpgSign=false", "-c", "gc.auto=0", "-C", str(repo), *args]
-    result = subprocess.run(command, input=data, stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, env=env, check=False)
+    result = subprocess.run(command, input=data, capture_output=True, env=env, check=False)
     if result.returncode not in allowed:
         raise state.Refusal(f"Git {args[0]} failed (exit {result.returncode}): "
                             + result.stderr.decode(errors="replace")[:2048])
@@ -138,7 +137,7 @@ def import_commit(source: Path, target: Path, revision: str) -> None:
             raise state.Refusal("cannot copy complete local Git history; obtain missing objects first")
         packed.seek(0)
         result = subprocess.run(["git", "-C", str(target), "index-pack", "--stdin"],
-                                stdin=packed, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+                                stdin=packed, capture_output=True, check=False)
         if result.returncode:
             raise state.Refusal("cannot import copied Git history")
     if rev(target, revision + "^{commit}") != revision:
@@ -203,7 +202,7 @@ def render(source: Path, revision: str, lock: dict[str, Any], target: Path,
         # allow old revisions to ignore later selectors normalized to none.
         env.update({key.upper(): value for group in choices(lock).values() for key, value in group.items()})
         outcome = subprocess.run(["bash", str(stage / "scripts/init-module.sh"), "--repo", str(stage)],
-                                 cwd=stage, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+                                 cwd=stage, env=env, capture_output=True, check=False)
         if outcome.returncode:
             raise state.Refusal("complete public initialization failed; make the historical pinned "
                                 "toolchain and locked offline dependencies available:\n"
@@ -427,7 +426,7 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
     if args.destination.is_symlink():
         raise state.Refusal("candidate destination may not be a symlink")
     destination = args.destination.resolve()
-    if destination.is_symlink() or destination == consumer or destination.is_relative_to(consumer):
+    if destination.is_symlink() or destination.is_relative_to(consumer):
         raise state.Refusal("candidate must be a separate repository outside the original consumer")
     if destination.exists():
         _, previous = load_attempt(destination)
@@ -474,22 +473,24 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
         preserved = {name: blob(destination, head, name) for name in (state.LOCK_NAME, CONTROL)}
         merge_target = index_tree(destination, baseline["tree"], preserved)
         outcome = run(destination, ["merge-tree", "--write-tree", "-z", "--messages", f"--merge-base={old}", head, merge_target], allowed=(0, 1))
-        sections = outcome.stdout.split(b"\0")
-        merged_tree = object_id(sections.pop(0).decode())
+        sections = iter(outcome.stdout.split(b"\0"))
+        merged_tree = object_id(next(sections).decode())
         conflicts = []
-        while sections and sections[0]:
-            item = sections.pop(0)
+        stages = []
+        for item in sections:
+            if not item:
+                break
             metadata, raw_path = item.split(b"\t", 1)
             mode, oid, stage_number = metadata.decode().split()
             name = raw_path.decode()
             state.safe_relative(name)
             conflicts.append({"mode": mode, "object": object_id(oid), "stage": int(stage_number), "path": name})
+            stages.append(item)
         entries(destination, merged_tree)
         git(destination, ["read-tree", "--reset", "-u", merged_tree])
         if conflicts:
             removal = b"".join(f"0 {'0' * len(head)}\t{name}".encode() + b"\0" for name in sorted({item["path"] for item in conflicts}))
-            stages = b"".join(f"{item['mode']} {item['object']} {item['stage']}\t{item['path']}".encode() + b"\0" for item in conflicts)
-            git(destination, ["update-index", "-z", "--index-info"], data=removal + stages)
+            git(destination, ["update-index", "-z", "--index-info"], data=removal + b"\0".join(stages) + b"\0")
         (attempt_dir / "merge-output").write_bytes(outcome.stdout)
         attempt.update({"merge_exit": outcome.returncode, "conflicts": conflicts,
                         "merge_tree": merged_tree, "migration_issues": migration_issues(destination, head, old, baseline["commit"])})
@@ -650,6 +651,7 @@ def parser() -> argparse.ArgumentParser:
     commands = result.add_subparsers(dest="command", required=True)
     for name in ("adopt", "prepare"):
         command = commands.add_parser(name)
+        command.set_defaults(handler=prepare)
         command.add_argument("--consumer", type=Path, required=True)
         command.add_argument("--source", type=Path, required=True, help="explicitly trusted local template repository; its selected code will execute")
         command.add_argument("--revision", required=True, help="exact full source commit ID")
@@ -659,8 +661,13 @@ def parser() -> argparse.ArgumentParser:
             origin = command.add_mutually_exclusive_group(required=True)
             origin.add_argument("--initial-commit")
             origin.add_argument("--reconstruct", action="store_true")
-    for name in ("status", "accept", "abort"):
+    for name, handler in (
+        ("status", lambda args: status(state.git_root(args.candidate))),
+        ("accept", accept),
+        ("abort", lambda args: abort(state.git_root(args.candidate))),
+    ):
         command = commands.add_parser(name)
+        command.set_defaults(handler=handler)
         command.add_argument("--candidate", type=Path, required=True)
         if name == "accept":
             command.add_argument("--review", type=Path, required=True)
@@ -694,14 +701,7 @@ def main() -> int:
         os.environ.clear()
         os.environ.update(clean)
         try:
-            if args.command in {"adopt", "prepare"}:
-                result = prepare(args)
-            elif args.command == "accept":
-                result = accept(args)
-            elif args.command == "abort":
-                result = abort(state.git_root(args.candidate))
-            else:
-                result = status(state.git_root(args.candidate))
+            result = args.handler(args)
             print(json.dumps(result, indent=2, ensure_ascii=False))
             return 0
         except (state.Refusal, state.ToolFailure, OSError, UnicodeError, ValueError, KeyError, TypeError) as error:

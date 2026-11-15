@@ -411,13 +411,6 @@ sync_generated() {
 	shopt -u nullglob
 }
 
-same_text() {
-	local left='' right=''
-	IFS= read -r -d '' left <"$1" || true
-	IFS= read -r -d '' right <"$2" || true
-	[[ ${left} == "${right}" ]]
-}
-
 check_generated() {
 	local harness="$1" extension="$2" target role actual expected
 	check_extra "${harness}" "${extension}"
@@ -427,7 +420,7 @@ check_generated() {
 		actual="${target}/${role}.${extension}"
 		expected="${tmp}/${harness}/${role}.${extension}"
 		[[ -f "${actual}" ]] || fail "${actual#"${repo}/"} is missing"
-		if ! same_text "${expected}" "${actual}"; then
+		if ! cmp -s "${expected}" "${actual}"; then
 			diff -u "${actual}" "${expected}" >&2 || true
 			fail "${actual#"${repo}/"} is stale; run scripts/agent-roles-sync.sh --apply"
 		fi

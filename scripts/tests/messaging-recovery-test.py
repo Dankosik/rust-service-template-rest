@@ -10,6 +10,9 @@ from pathlib import Path
 import tempfile
 import subprocess
 import runpy
+import select
+import socket
+import stat
 import sys
 import time
 import unittest
@@ -18,6 +21,135 @@ from unittest import mock
 SPEC = importlib.util.spec_from_file_location("messaging_recovery", Path(__file__).resolve().parents[1] / "ci/messaging-recovery.py")
 controller = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(controller)
+
+
+class RecoveryManifest(unittest.TestCase):
+    def test_publication_leaves_a_reused_temporary_name_intact(self):
+        native_sync = os.fsync
+        for exclusive in (False, True):
+            for fail_sync in (False, True):
+                with self.subTest(exclusive=exclusive, fail_sync=fail_sync), tempfile.TemporaryDirectory() as directory:
+                    destination = Path(directory) / "receipt.json"
+                    pending = None
+
+                    def sync(fd):
+                        nonlocal pending
+                        if stat.S_ISDIR(os.fstat(fd).st_mode):
+                            with pending.open("xb") as replacement:
+                                replacement.write(b"new owner")
+                            if fail_sync:
+                                raise OSError("directory sync")
+                        else:
+                            pending, = destination.parent.iterdir()
+                        native_sync(fd)
+
+                    with mock.patch.object(os, "fsync", sync):
+                        if fail_sync:
+                            with self.assertRaisesRegex(OSError, "directory sync"):
+                                controller.atomic(destination, {"operation": 1}, exclusive)
+                        else:
+                            controller.atomic(destination, {"operation": 1}, exclusive)
+                    self.assertEqual(controller.load(destination), {"operation": 1})
+                    self.assertEqual(pending.read_bytes(), b"new owner")
+
+    def test_oversized_replacement_is_rejected_before_json_parsing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "manifest.json"
+            path.write_bytes(b"{}".ljust(4 * 1024 * 1024, b" "))
+            self.assertEqual(controller.load(path), {})
+            original = path.stat()
+            replacement = path.with_suffix(".new")
+            with replacement.open("wb") as stream:
+                stream.truncate(original.st_size + 1)
+            replacement.replace(path)
+            with mock.patch.object(Path, "stat", return_value=original):
+                with self.assertRaisesRegex(controller.Refused, "manifest_too_large"):
+                    controller.load(path)
+
+
+class NativeCommand(unittest.TestCase):
+    def test_final_deadline_poll_distinguishes_finished_and_running_commands(self):
+        self.assertEqual(controller.run(["/bin/sleep", "0.05"], timeout=0.15, input=b""), (0, b""))
+        with self.assertRaisesRegex(controller.Refused, "native_command_deadline"):
+            controller.run(["/bin/sleep", "5"], timeout=0.15, input=b"")
+
+    def test_pipe_carries_exact_bytes_through_eof(self):
+        command = [sys.executable, "-c", "import os, stat, sys; assert stat.S_ISFIFO(os.fstat(0).st_mode); "
+                   "sys.stdout.buffer.write(sys.stdin.buffer.read())"]
+        for payload in (b"", bytes(range(256)) * 4096):
+            with self.subTest(length=len(payload)):
+                self.assertEqual(controller.run(command, input=payload), (0, payload))
+
+    def test_deadline_during_input_ticks_and_stops_the_owned_group(self):
+        program = """
+import os, signal, sys, time
+if os.fork() == 0:
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    with open(sys.argv[1], 'wb', buffering=0) as witness:
+        witness.write(b'x')
+        time.sleep(8)
+else:
+    time.sleep(8)
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            fifo = Path(directory) / "witness"
+            os.mkfifo(fifo)
+            with os.fdopen(os.open(fifo, os.O_RDONLY | os.O_NONBLOCK), "rb", buffering=0) as witness:
+                tick = mock.Mock()
+                with self.assertRaisesRegex(controller.Refused, "native_command_deadline") as failure:
+                    controller.run([sys.executable, "-c", program, str(fifo)], input=b"x" * (2 * 1024 * 1024),
+                                   timeout=1.5, tick=tick, command_class="fixture")
+                self.assertEqual(failure.exception.command_class, "fixture")
+                self.assertGreaterEqual(tick.call_count, 2)
+                self.assertEqual(witness.read(1), b"x")
+                self.assertTrue(select.select([witness], [], [], 1)[0])
+                self.assertEqual(witness.read(1), b"")
+
+    def test_backpressured_input_preserves_output_limit_and_broken_pipe(self):
+        for action, failure in (("os.write(2, b'x' * (4 * 1024 * 1024 + 1))", controller.Refused),
+                                ("os.close(0)", BrokenPipeError)):
+            with self.subTest(action=action), tempfile.TemporaryDirectory() as directory:
+                private = Path(directory) / "output"
+                command = [sys.executable, "-c", f"import os, time; os.write(1, b'partial'); {action}; time.sleep(5)"]
+                with contextlib.redirect_stderr(io.StringIO()) as diagnostic, self.assertRaises(failure) as raised:
+                    controller.run(command, input=b"x" * (2 * 1024 * 1024), private_output=private,
+                                   private_output_limit=64)
+                self.assertEqual(diagnostic.getvalue(), "")
+                if failure is controller.Refused:
+                    self.assertEqual(str(raised.exception), "native_output_limit")
+                self.assertIn(b"partial", private.read_bytes())
+                self.assertLessEqual(private.stat().st_size, 64)
+
+    def test_terminal_refusal_closes_descendant_connection_after_leader_exits(self):
+        program = """
+import os, socket, sys
+assert sys.stdin.buffer.read() == b'input'
+with socket.socket(socket.AF_UNIX) as connection:
+    connection.settimeout(15)
+    connection.connect(sys.argv[1])
+    if os.fork() == 0:
+        connection.recv(1)
+        os._exit(0)
+    if sys.argv[2] == '0':
+        os.ftruncate(2, 4 * 1024 * 1024 + 1)
+    os._exit(int(sys.argv[2]))
+"""
+        for code, reason in ((0, "native_output_limit"), (17, "native_command_failed")):
+            with (self.subTest(code=code), tempfile.TemporaryDirectory() as directory,
+                  socket.socket(socket.AF_UNIX) as server):
+                address = str(Path(directory) / "witness")
+                server.bind(address)
+                server.listen()
+                server.settimeout(1)
+                with (contextlib.redirect_stderr(io.StringIO()) as diagnostic,
+                      self.assertRaisesRegex(controller.Refused, reason) as failure):
+                    controller.run([sys.executable, "-c", program, address, str(code)], input=b"input",
+                                   command_class="fixture", timeout=5)
+                with server.accept()[0] as peer:
+                    peer.settimeout(1)
+                    self.assertEqual(peer.recv(1), b"")
+                self.assertEqual((failure.exception.command_class, failure.exception.exit_code), ("fixture", code))
+                self.assertEqual(diagnostic.getvalue(), "")
 
 
 class ResourceAdmission(unittest.TestCase):
@@ -111,9 +243,7 @@ class ResourceAdmission(unittest.TestCase):
 
 class Custody(unittest.TestCase):
     def setUp(self):
-        self.directory = tempfile.TemporaryDirectory()
-        self.addCleanup(self.directory.cleanup)
-        path = Path(self.directory.name)
+        path = Path(self.enterContext(tempfile.TemporaryDirectory()))
         generation = "a" * 24
         controller.atomic(path / "session.json", {
             "version": 1, "generation": generation, "project": "messaging-recovery-" + generation,
@@ -130,7 +260,7 @@ class Custody(unittest.TestCase):
         # but never manufactures registration or terminal custody receipts.
         root = Path(__file__).resolve().parents[2]
         fixture = runpy.run_path(str(root / "scripts/tests/validation-lock-test.py"))
-        base = Path(self.directory.name)
+        base = self.session.path
         binary = base / "bin/docker"
         binary.parent.mkdir()
         binary.write_text(fixture["DOCKER"])
@@ -281,14 +411,13 @@ session.stop()
                                "Error": "withheld-value", "Health": {"Status": "unhealthy",
                                                                        "Log": [{"Output": "withheld-value"}]}}}]
         with mock.patch.object(controller, "native_json", return_value=observed) as inspect, \
-                mock.patch.object(self.session, "capture_broker_fatals", return_value={}):
-            with self.assertRaisesRegex(controller.Refused, "capture_failed"):
-                with self.session.startup_diagnostics():
+                mock.patch.object(self.session, "capture_broker_fatals", return_value={}), \
+                mock.patch.object(self.session, "capture_resources", side_effect=controller.Refused("capture_failed")) as capture:
+            with self.assertRaisesRegex(controller.Refused, "native_command_failed"):
+                with self.session.startup_diagnostics(), self.session.capture_startup_resources():
                     self.session.startup_phase("broker_up")
-                    self.session.remember_startup_failure(controller.Refused(
-                        "native_command_failed", command_class="docker_compose", exit_code=1))
-                    self.session.startup_phase("resource_capture")
-                    raise controller.Refused("capture_failed", command_class="docker_inspect", exit_code=2)
+                    raise controller.Refused("native_command_failed", command_class="docker_compose", exit_code=1)
+        capture.assert_called_once_with()
         inspect.assert_called_once_with(["docker", "inspect", "owned-container"], timeout=5)
         evidence = next((self.session.path / "evidence").glob("*-startup-failure.json")).read_text()
         self.assertNotIn("withheld-value", evidence)
@@ -450,21 +579,15 @@ session.stop()
                 self.assertNotIn("withheld-secret", json.dumps(report))
 
     def test_native_exit_metadata_and_private_output_do_not_expose_argv(self):
-        process = mock.MagicMock()
-        process.__enter__.return_value = process
-        process.poll.return_value = 17
-        process.returncode = 17
-
-        def spawn(_command, **kwargs):
-            kwargs["stdout"].write(b"private stdout value")
-            kwargs["stderr"].write(b"private stderr value" + b"x" * 256)
-            return process
-
+        command = [sys.executable, "-c", "import os; os.write(1, b'private stdout value'); "
+                   "os.write(2, b'private stderr value' + b'x' * 256); os._exit(17)", "private-argument"]
         output = self.session.path / "native-config-test.output"
-        with mock.patch.object(controller.subprocess, "Popen", side_effect=spawn):
+        with (mock.patch.object(os, "killpg", side_effect=PermissionError),
+              contextlib.redirect_stderr(io.StringIO()) as diagnostic):
             with self.assertRaisesRegex(controller.Refused, "native_command_failed") as failure:
-                controller.run(["private-program", "private-argument"], command_class="nats_config_test",
-                               private_output=output, private_output_limit=64)
+                controller.run(command, command_class="nats_config_test", private_output=output, private_output_limit=64)
+        self.assertEqual(json.loads(diagnostic.getvalue()),
+                         {"event": "native_command_cleanup_unconfirmed", "command_class": "nats_config_test"})
         self.assertEqual(failure.exception.command_class, "nats_config_test")
         self.assertEqual(failure.exception.exit_code, 17)
         self.assertNotIn("private", str(failure.exception))
@@ -706,6 +829,22 @@ class EffectFailureEvidence(unittest.TestCase):
 
 
 class CapacityAccounting(unittest.TestCase):
+    def test_saved_plans_start_fifteen_seconds_after_the_current_whole_millisecond(self):
+        measurement = capacity.Measurement.__new__(capacity.Measurement)
+        measurement.c = controller
+        measurement.path = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        session = mock.Mock(path=measurement.path / "baseline")
+        session.path.mkdir()
+        for sample_ns, expected_ms in ((1_792_545_652_000_999_999, 1_792_545_667_000),
+                                       (1_792_545_652_001_000_000, 1_792_545_667_001)):
+            with self.subTest(sample_ns=sample_ns), \
+                    mock.patch.object(time, "time_ns", return_value=sample_ns), \
+                    mock.patch.object(time, "time", return_value=sample_ns / 1e9):
+                measurement.prepare_plan(session)
+                retained = (measurement.path / "measurement-plan.json").read_bytes()
+                self.assertEqual(json.loads(retained)["start_unix_ms"], expected_ms)
+                self.assertEqual((session.path / "measurement-plan.json").read_bytes(), retained)
+
     def test_rates_use_observed_intervals_and_distinct_durable_boundaries(self):
         before = {"observed_unix": 10.0, "offered": 10, "admitted": 9, "puback_confirmed": 8, "applied": 5}
         after = {"observed_unix": 14.0, "offered": 30, "admitted": 21, "puback_confirmed": 20, "applied": 17}
@@ -738,8 +877,19 @@ unrelated_secret{key="private-test-value"} 1
     def test_partial_observation_write_does_not_invent_a_completed_offer(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "load.jsonl"
-            path.write_bytes(b'{"id":"confirmed"}\n{"id":"interrupted"')
+            self.assertEqual(capacity.complete_lines(path), [])
+            path.write_bytes(b'{"id":"confirmed"}\n{"id":"interrupted"'.ljust(16 * 1024 * 1024, b" "))
             self.assertEqual(capacity.complete_lines(path), [{"id": "confirmed"}])
+            original = path.stat()
+            with path.open("ab") as stream:
+                stream.write(b"}")
+            with mock.patch.object(Path, "stat", return_value=original):
+                with self.assertRaisesRegex(ValueError, "observation_file_limit"):
+                    capacity.complete_lines(path)
+            path.write_bytes(b"{}\n")
+            with mock.patch.object(Path, "open", side_effect=FileNotFoundError):
+                with self.assertRaises(FileNotFoundError):
+                    capacity.complete_lines(path)
 # template:end outbox:capacity-measurement-tests
 
 

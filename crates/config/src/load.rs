@@ -208,7 +208,6 @@ enum AuthnAudienceHandling {
     Skip,
 }
 
-/// Merge the files and the `APP__` variables, then decode the result.
 fn merge<T, I, K, V>(
     options: &LoadOptions,
     environment: I,
@@ -276,20 +275,15 @@ where
         AuthnAudienceHandling::Skip => None,
     };
     // template:end authn:load-audience-list-decode
-    // `Environment::source` keeps keys that still carry the `APP__` prefix;
-    // inserting the stripped key would make every override disappear.
-    let (source, variable_keys): (config::Map<String, String>, Vec<String>) = variables
-        .into_iter()
-        .map(|(name, variable)| ((name, variable.value), variable.key))
-        .unzip();
-    let builder = builder.add_source(
-        config::Environment::with_prefix(ENV_PREFIX)
-                .prefix_separator(ENV_SEPARATOR)
-                .separator(ENV_SEPARATOR)
-                // An empty value is still an explicit override; validation decides.
-                .ignore_empty(false)
-                .source(Some(source)),
-    );
+    let environment_origin = String::from("the environment");
+    let mut variable_keys = Vec::with_capacity(variables.len());
+    for variable in variables.into_values() {
+        let value = config::Value::new(Some(&environment_origin), variable.value);
+        builder = builder
+            .set_override(&variable.key, value)
+            .map_err(Error::Merge)?;
+        variable_keys.push(variable.key);
+    }
     // template:begin authn:load-audience-list-override
     let builder = builder
         .set_override_option(variables::AUDIENCE_KEY, audience_list)
@@ -300,7 +294,7 @@ where
     let carrier = if options.secrets_dir.is_some() {
         "the environment or the secrets directory"
     } else {
-        "the environment"
+        &environment_origin
     };
     merged
         .try_deserialize()

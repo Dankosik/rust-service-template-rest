@@ -14,8 +14,8 @@
 //! no password, so there is still exactly one.
 
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
 
+use sqlx::ConnectOptions;
 use sqlx::postgres::{PgConnectOptions, PgSslMode};
 use url::Url;
 
@@ -142,10 +142,7 @@ impl Dsn {
         require_components(&url, password_file.is_some())?;
         check_parameters(&url)?;
 
-        // The text holds every component and only known parameters, so what
-        // `sqlx` parses is what the operator wrote. The remaining rules read
-        // the driver's own interpretation instead of repeating its parser.
-        let options = PgConnectOptions::from_str(raw).map_err(|_| DsnError::Unusable)?;
+        let options = PgConnectOptions::from_url(&url).map_err(|_| DsnError::Unusable)?;
         if options.get_socket().is_some() {
             return Err(DsnError::Socket);
         }
@@ -564,9 +561,8 @@ mod tests {
         reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
     )]
     fn a_password_file_is_the_only_password_source_when_set() {
-        let dir = std::env::temp_dir().join(format!("dsn-password-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("password");
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("password");
         let without_password = "postgres://app@db.internal:5432/app?sslmode=require";
         let admit = |raw: &str| Dsn::admit_from(raw, Some(&file), |_| false);
 
@@ -590,10 +586,9 @@ mod tests {
         assert_eq!(ipv6.password_file(), Some(file.as_path()));
         assert_eq!(ipv6.ssl_mode_name(), "verify-full");
 
-        // Trailing line breaks are dropped; spaces are part of the password.
         std::fs::write(&file, " p w \r\n").unwrap();
         assert_eq!(read_password(&file).unwrap(), " p w ");
-        std::fs::remove_dir_all(&dir).unwrap();
+        dir.close().unwrap();
     }
 
     #[test]

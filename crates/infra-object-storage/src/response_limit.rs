@@ -34,7 +34,7 @@ impl Intercept for ResponseLimit {
             Self::ErrorBody => !success,
         };
         if limited {
-            let body = std::mem::replace(response.body_mut(), SdkBody::taken());
+            let body = response.take_body();
             *response.body_mut() = bounded(body);
         }
         Ok(())

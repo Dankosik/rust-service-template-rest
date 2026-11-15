@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use serde_json::{Value, json};
 use utoipa::ToSchema;
 use utoipa::openapi::RefOr;
@@ -160,18 +161,17 @@ fn message(
 }
 
 fn payload_schema_reference(name: &str) -> String {
-    let token = shared_rules::rfc6901::escape(name);
-    let mut reference = String::from("#/$defs/");
+    const FRAGMENT_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC
+        .remove(b'-')
+        .remove(b'.')
+        .remove(b'_')
+        .remove(b'~');
     // RFC 6901 §6 applies URI fragment encoding after JSON Pointer escaping.
-    for byte in token.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
-            reference.push(char::from(byte));
-        } else {
-            reference.push('%');
-            reference.push_str(const_hex::Buffer::<1>::new().format_upper(&[byte]));
-        }
-    }
-    reference
+    let token = shared_rules::rfc6901::escape(name);
+    format!(
+        "#/$defs/{}",
+        utf8_percent_encode(&token, FRAGMENT_ENCODE_SET)
+    )
 }
 
 /// Visit only JSON Schema subschemas. Annotation and extension values, including
@@ -277,7 +277,7 @@ mod tests {
 
     impl utoipa::ToSchema for CustomSchemaName {
         fn name() -> std::borrow::Cow<'static, str> {
-            "Order%41/Étape~draft".into()
+            "Order%41/Étape~draft-._ +".into()
         }
     }
 
@@ -289,8 +289,14 @@ mod tests {
         let schema =
             &document["channels"]["orders"]["messages"]["order.custom.v1"]["payload"]["schema"];
 
-        assert_eq!(schema["$ref"], "#/$defs/Order%2541~1%C3%89tape~0draft");
-        assert_eq!(schema["$defs"]["Order%41/Étape~draft"]["type"], "object");
+        assert_eq!(
+            schema["$ref"],
+            "#/$defs/Order%2541~1%C3%89tape~0draft-._%20%2B"
+        );
+        assert_eq!(
+            schema["$defs"]["Order%41/Étape~draft-._ +"]["type"],
+            "object"
+        );
     }
 
     #[test]

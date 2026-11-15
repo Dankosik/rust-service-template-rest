@@ -4,10 +4,8 @@
 # starts under the hardened run flags, /health/ready answers, the startup
 # record carries the expected commit, and SIGTERM ends the process with exit
 # code 0 inside the 45 s grace budget.
-# A final step takes its /jobs-worker expectation from the repository's jobs
-# selection: where the pack is retained, the image must carry the entrypoint
-# and it must refuse to start before any database I/O; otherwise the image
-# must not carry it.
+# The filesystem preflight checks pruned paths on the same fixed image. A
+# retained /jobs-worker must also refuse startup before dependency I/O.
 #
 #   runtime-image-check.sh IMAGE [EXPECTED_COMMIT]
 #   RUNTIME_IMAGE_NETWORK      Docker network to join (a compose project's)
@@ -122,26 +120,42 @@ if [[ ${ready} != true ]]; then
 fi
 
 logs=$(docker logs "${container}" 2>&1)
-starting=$(grep -F "\"message\":\"${starting_event}\"" <<<"${logs}" | head -n 1 || true)
-if [[ -z ${starting} ]]; then
-	echo "runtime image logged no ${starting_event} record" >&2
-	printf '%s\n' "${logs}" >&2
-	exit 1
-fi
-if [[ -n ${expected_commit} ]] && ! grep -Fq "\"app.commit\":\"${expected_commit}\"" <<<"${starting}"; then
-	echo "runtime image did not report app.commit ${expected_commit}" >&2
-	printf '%s\n' "${starting}" >&2
-	exit 1
-fi
-echo "runtime image ready: $(grep -oE '"app\.(version|commit)":"[^"]*"' <<<"${starting}" | tr '\n' ' ')"
-if [[ -n ${RUNTIME_IMAGE_POSTGRES_DSN:-} ]]; then
-	grep -Fq '"message":"postgres_pool_opened"' <<<"${logs}" || {
-		echo "runtime image did not open the postgres pool" >&2
-		printf '%s\n' "${logs}" >&2
-		exit 1
-	}
-	echo "runtime image opened the postgres pool"
-fi
+python3 -c '
+import json
+import sys
+
+starting_event, expected_commit, require_pool = sys.argv[1:]
+logs = sys.stdin.read()
+starting = None
+pool_opened = False
+for line in logs.split("\n"):
+    try:
+        event = json.loads(line)
+    except ValueError:
+        continue
+    if not isinstance(event, dict):
+        continue
+    if event.get("message") == starting_event and starting is None:
+        starting = event
+        starting_line = line
+    if event.get("message") == "postgres_pool_opened":
+        pool_opened = True
+
+if starting is None:
+    print(f"runtime image logged no {starting_event} record", file=sys.stderr)
+    sys.exit(logs.rstrip("\n"))
+if expected_commit and starting.get("app.commit") != expected_commit:
+    print(f"runtime image did not report app.commit {expected_commit}", file=sys.stderr)
+    sys.exit(starting_line)
+identity = (f"{json.dumps(key)}:{json.dumps(value)}" for key, value in starting.items()
+            if key in ("app.version", "app.commit") and isinstance(value, str))
+print("runtime image ready:", " ".join(identity))
+if require_pool:
+    if not pool_opened:
+        print("runtime image did not open the postgres pool", file=sys.stderr)
+        sys.exit(logs.rstrip("\n"))
+    print("runtime image opened the postgres pool")
+' "${starting_event}" "${expected_commit}" "${RUNTIME_IMAGE_POSTGRES_DSN:+true}" <<<"${logs}"
 
 stop_started=$(date +%s)
 docker stop --time 45 "${container}" >/dev/null
@@ -201,9 +215,5 @@ if [[ ${jobs} == postgres || ${messaging} == nats-jetstream ]]; then
 	fi
 	echo "jobs-worker refused before dependency I/O: ${refusal}"
 else
-	if docker cp "${container}:/jobs-worker" - >/dev/null 2>&1; then
-		echo "runtime image has /jobs-worker without a retained worker profile" >&2
-		exit 1
-	fi
 	echo "no worker profile is retained; the image has no /jobs-worker entrypoint"
 fi

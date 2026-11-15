@@ -526,9 +526,13 @@ grpc-generator-deny: $(filter $(TOOLS_ROOT)/%,$(CARGO_DENY)) ## Advisories, lice
 # hundred dependencies the workspace build already holds (41 s in CI);
 # `build --workspace` reuses them.
 openapi-generate: ## Regenerate api/openapi/service.yaml from the Rust contract
-	@$(BUILD_CARGO) build -q --workspace --bin openapi $(CARGO_FLAGS)
-	@tmp="$$(mktemp)" && target=$$($(CARGO) metadata --format-version 1 --no-deps $(CARGO_FLAGS) | python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])') && \
-		"$$target/debug/openapi" > "$$tmp" && mv "$$tmp" $(OPENAPI_FILE)
+	@set -eu; \
+		work=$$(mktemp -d "$$(dirname "$(OPENAPI_FILE)")/.openapi.XXXXXXXX"); \
+		trap 'rm -rf "$$work"' 0; trap 'exit 1' HUP INT TERM; \
+		$(BUILD_CARGO) build -q --workspace --bin openapi $(CARGO_FLAGS) --message-format=json-render-diagnostics >"$$work/messages"; \
+		generator=$$(python3 scripts/ci/openapi-artifact.py <"$$work/messages"); \
+		"$$generator" >"$$work/service.yaml"; \
+		mv "$$work/service.yaml" "$(OPENAPI_FILE)"
 
 openapi-check: openapi-lint ## Fail when the committed document is stale or fails lint
 	$(BUILD_CARGO) test -p $(SERVICE_BIN) $(CARGO_FLAGS) --test openapi

@@ -110,7 +110,7 @@ mod tests {
                 "[A-Za-z0-9._~-]{0,140}".prop_map(String::into_bytes),
             ],
         ) {
-            let documented = regex::bytes::Regex::new(r"(?-u)^[A-Za-z0-9._~-]{1,128}$").unwrap();
+            let documented = regex::bytes::regex!(r"(?-u)^[A-Za-z0-9._~-]{1,128}$");
             proptest::prop_assert_eq!(is_valid(&value), documented.is_match(&value));
         }
     }

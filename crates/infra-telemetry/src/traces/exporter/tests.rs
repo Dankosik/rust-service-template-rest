@@ -147,6 +147,9 @@ fn malformed_header_entries_fail_by_position() {
         ("a=b,=novalue", 2),
         ("a=b,,bad name=x", 3),
         ("a=line\nbreak", 1),
+        ("a=b,,auth=private%0A,auth=replacement", 3),
+        ("auth=private%+A", 1),
+        ("auth=private%00", 1),
     ] {
         let err = parse_headers(raw).unwrap_err();
         std::assert_matches!(err, TracingError::InvalidHeader { position: p } if p == position,

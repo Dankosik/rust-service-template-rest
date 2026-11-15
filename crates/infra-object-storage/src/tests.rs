@@ -1,3 +1,4 @@
+use std::convert::Infallible;
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -8,7 +9,7 @@ use axum::extract::Request;
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::Response;
 use bytes::Bytes;
-use http_body_util::BodyExt;
+use http_body_util::{BodyExt, StreamBody};
 use secrecy::SecretString;
 
 use crate::error::{Failure, LocalFailure};
@@ -271,22 +272,12 @@ fn key() -> ObjectKey {
     ObjectKey::try_new("results/op-1.json").unwrap()
 }
 
-/// Deliberately omits a size hint so the HTTP stub sends chunked DATA.
-struct FragmentedBody(Bytes);
-
-impl http_body::Body for FragmentedBody {
-    type Data = Bytes;
-    type Error = std::convert::Infallible;
-
-    fn poll_frame(
-        mut self: std::pin::Pin<&mut Self>,
-        _: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Result<http_body::Frame<Bytes>, Self::Error>>> {
-        let length = self.0.len().min(8192);
-        std::task::Poll::Ready(
-            (length != 0).then(|| Ok(http_body::Frame::data(self.0.split_to(length)))),
-        )
-    }
+fn fragmented_body(mut bytes: Bytes) -> Body {
+    Body::from_stream(async_stream::stream! {
+        while !bytes.is_empty() {
+            yield Ok::<_, Infallible>(bytes.split_to(bytes.len().min(8192)));
+        }
+    })
 }
 
 #[tokio::test]
@@ -314,7 +305,7 @@ async fn collected_s3_replies_keep_native_errors_at_the_limit_and_are_lost_above
                         .status(status)
                         .header("content-type", "application/xml")
                         .header("x-amz-request-id", "bounded-response")
-                        .body(Body::new(FragmentedBody(payload.clone())))
+                        .body(fragmented_body(payload.clone()))
                         .unwrap()
                 })
                 .await;
@@ -484,24 +475,16 @@ async fn a_stream_that_differs_from_its_length_is_rejected() {
 async fn empty_stream_preparation_and_response_share_one_put_timeout() {
     // Each phase fits alone; together they exceed the two-second call budget.
     // Delays model slow input/provider I/O, rather than synchronize test tasks.
-    struct DelayedEof(std::pin::Pin<Box<tokio::time::Sleep>>);
-
-    impl http_body::Body for DelayedEof {
-        type Data = Bytes;
-        type Error = std::convert::Infallible;
-
-        fn poll_frame(
-            mut self: std::pin::Pin<&mut Self>,
-            context: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<Option<Result<http_body::Frame<Bytes>, Self::Error>>> {
-            std::future::Future::poll(self.0.as_mut(), context).map(|()| None)
-        }
-    }
-
     let delay = Duration::from_millis(1500);
     let stub = Stub::start_with_delay(delay, |_, _| ok_empty()).await;
     let storage = stub.storage(|options| options.max_concurrency = 1);
-    let body = DelayedEof(Box::pin(tokio::time::sleep(delay)));
+    let mut sleep = Box::pin(tokio::time::sleep(delay));
+    let body = StreamBody::new(futures_util::stream::poll_fn(move |context| {
+        sleep
+            .as_mut()
+            .poll(context)
+            .map(|()| None::<Result<http_body::Frame<Bytes>, Infallible>>)
+    }));
     let result = tokio::time::timeout(
         Duration::from_secs(5),
         storage.put(&key(), PutBody::stream(0, body), PutOptions::default()),
@@ -559,7 +542,7 @@ async fn get_reads_the_body_and_validates_a_returned_checksum() {
                 .header("last-modified", "Tue, 29 Sep 2026 12:00:00 GMT")
                 .header("x-amz-checksum-crc64nvme", &checksum)
                 .header("x-amz-checksum-type", "FULL_OBJECT")
-                .body(Body::new(FragmentedBody(payload.clone())))
+                .body(fragmented_body(payload.clone()))
                 .unwrap()
         })
         .await;
@@ -624,6 +607,47 @@ async fn get_with_a_wrong_checksum_fails_integrity_at_the_end() {
     };
     assert_eq!(failure, ObjectStorageError::Integrity);
     assert!(received < 11, "{received}");
+}
+
+#[tokio::test]
+async fn get_distinguishes_short_eof_from_an_interrupted_body() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    // HTTP ends a 204 body at the headers, even if the provider claims a
+    // positive length. For a 200 with the same headers, closing early is a
+    // transport error before the SDK's content-length check sees EOF.
+    for (status, expected) in [
+        ("204 No Content", ObjectStorageError::Integrity),
+        ("200 OK", ObjectStorageError::Unavailable),
+    ] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut options = options(Provider::Local {
+            endpoint: format!("http://{}", listener.local_addr().unwrap()),
+            region: String::new(),
+        });
+        options.operation_timeout = Duration::from_secs(30);
+        let storage = ObjectStorage::try_new(options).unwrap();
+        let reply = async {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut lines = BufReader::new(&mut socket).lines();
+            while !lines.next_line().await.unwrap().unwrap().is_empty() {}
+            let response =
+                format!("HTTP/1.1 {status}\r\nContent-Length: 3\r\nConnection: close\r\n\r\n");
+            socket.write_all(response.as_bytes()).await.unwrap();
+            socket
+        };
+        let key = key();
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            let (download, socket) = tokio::join!(storage.get(&key), reply);
+            let download = download.unwrap();
+            assert_eq!(download.metadata().size, 3);
+            drop(socket);
+            download.into_bytes().await
+        })
+        .await
+        .unwrap();
+        assert_eq!(result, Err(expected), "{status}");
+    }
 }
 
 #[tokio::test]

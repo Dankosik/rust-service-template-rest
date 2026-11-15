@@ -5,8 +5,6 @@ use rcgen::{
     KeyUsagePurpose,
 };
 
-/// One generated CA, a matching DNS-SAN leaf and key, and an unrelated CA.
-///
 /// Every certificate keeps rcgen's default validity window, so nothing
 /// checked in or computed from the test clock can expire.
 #[derive(Debug)]
@@ -14,11 +12,6 @@ pub(crate) struct TlsMaterial {
     pub(crate) cert: Vec<u8>,
     pub(crate) key: Vec<u8>,
     pub(crate) root: Vec<u8>,
-    #[allow(
-        dead_code,
-        reason = "only the outbound TLS-rejection fixture consumes this shared field"
-    )]
-    pub(crate) untrusted_root: Vec<u8>,
 }
 
 impl TlsMaterial {
@@ -43,13 +36,11 @@ impl TlsMaterial {
         let certificate = leaf
             .signed_by(&leaf_key, &issuer)
             .expect("sign TLS fixture leaf certificate");
-        let unrelated = new_issuer();
 
         Self {
             cert: certificate.der().to_vec(),
             key: leaf_key.serialize_der(),
             root: issuer.der().to_vec(),
-            untrusted_root: unrelated.der().to_vec(),
         }
     }
 }
@@ -58,7 +49,7 @@ impl TlsMaterial {
     clippy::expect_used,
     reason = "fixture setup failures are test failures"
 )]
-fn new_issuer() -> CertifiedIssuer<'static, KeyPair> {
+pub(crate) fn new_issuer() -> CertifiedIssuer<'static, KeyPair> {
     let mut params = CertificateParams::default();
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];

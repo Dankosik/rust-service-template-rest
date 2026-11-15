@@ -4,15 +4,13 @@ use std::sync::Arc;
 
 use domain_events::{Event, EventPayload};
 use operation_context::OperationContext;
-use serde::Serialize;
 use serde::de::DeserializeOwned;
 // Every key is a compile-time constant, so a caller cannot choose colliding
 // keys; SipHash would cost two thirds of each lookup.
 use foldhash::HashMap;
 
 use crate::contract::{PayloadSchema, payload_schema};
-use crate::error::{EnvelopeError, HandlerError};
-use crate::prepared::PreparedEvent;
+use crate::error::HandlerError;
 use crate::wire::{InboundEnvelope, valid_subject};
 use bytes::Bytes;
 use time::OffsetDateTime;
@@ -150,11 +148,15 @@ struct RouteEntry {
 
 impl std::fmt::Debug for Registry {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let subjects: HashMap<_, _> = self
-            .routes
-            .iter()
-            .map(|(key, entry)| (key, &entry.route.subject))
-            .collect();
+        let subjects = std::fmt::from_fn(|f| {
+            f.debug_map()
+                .entries(
+                    self.routes
+                        .iter()
+                        .map(|(key, entry)| (key, &entry.route.subject)),
+                )
+                .finish()
+        });
         formatter
             .debug_struct("Registry")
             .field("routes", &subjects)
@@ -256,22 +258,6 @@ impl Registry {
         Ok(())
     }
 
-    /// Prepares one routed typed event without requiring a live broker.
-    ///
-    /// # Errors
-    /// Rejects an unregistered route or an event outside the payload/wire bound.
-    pub fn prepare<T: EventPayload + Serialize>(
-        &self,
-        event: &Event<T>,
-        max_payload_bytes: usize,
-    ) -> Result<PreparedEvent, EnvelopeError> {
-        let subject = self.subject_for::<T>().ok_or(EnvelopeError::MissingRoute {
-            event_type: T::EVENT_TYPE,
-            schema_version: T::SCHEMA_VERSION,
-        })?;
-        PreparedEvent::prepare_routed(subject.clone(), event, max_payload_bytes)
-    }
-
     /// Whether a handler is registered. Routes alone do not count: a
     /// registry with routes and no handler only publishes.
     #[must_use]
@@ -291,7 +277,7 @@ impl Registry {
         }
     }
 
-    fn subject_for<T: EventPayload>(&self) -> Option<&async_nats::Subject> {
+    pub(crate) fn subject_for<T: EventPayload>(&self) -> Option<&async_nats::Subject> {
         self.routes
             .get(&route_key::<T>())
             .map(|entry| &entry.route.subject)
@@ -345,6 +331,8 @@ mod tests {
     use bytes::Bytes;
 
     use super::*;
+    use crate::error::EnvelopeError;
+    use crate::prepared::PreparedEvent;
 
     #[derive(serde::Deserialize)]
     struct Created {
@@ -402,7 +390,7 @@ mod tests {
     #[test]
     fn admission_refuses_a_type_that_nats_would_trim() {
         #[derive(serde::Serialize)]
-        struct Padded;
+        struct Padded(f64);
 
         impl EventPayload for Padded {
             const EVENT_TYPE: &'static str = "order.shipped\u{a0}";
@@ -414,15 +402,21 @@ mod tests {
             Registry::try_new([route]),
             Err(RegistryError::InvalidEventType { .. })
         );
-        let event = Event {
-            id: "event-1".to_owned(),
-            occurred_at: time::OffsetDateTime::UNIX_EPOCH.to_utc(),
-            payload: Padded,
-        };
-        std::assert_matches!(
-            PreparedEvent::prepare("orders.shipped", &event, 1024),
-            Err(EnvelopeError::Identity)
-        );
+        for (value, limit, expected) in [
+            (f64::NAN, 0, EnvelopeError::Serialization),
+            (1.0, 0, EnvelopeError::PayloadTooLarge),
+            (1.0, 1024, EnvelopeError::Identity),
+        ] {
+            let event = Event {
+                id: "event-1".to_owned(),
+                occurred_at: time::OffsetDateTime::UNIX_EPOCH.to_utc(),
+                payload: Padded(value),
+            };
+            assert_eq!(
+                PreparedEvent::prepare("orders.shipped", &event, limit),
+                Err(expected)
+            );
+        }
     }
 
     /// Routes both types and handles `Created`, rejecting a zero quantity.
@@ -442,6 +436,29 @@ mod tests {
             })
             .unwrap();
         registry
+    }
+
+    #[test]
+    fn registry_debug_shows_route_subjects_and_counts() {
+        let registry = registry();
+        let compact = format!("{registry:?}");
+        let pretty = format!("{registry:#?}");
+        assert!(compact.contains("routes: {RouteKey {"));
+        assert!(pretty.contains("routes: {\n        RouteKey {\n"));
+        for output in [&compact, &pretty] {
+            for value in [
+                "order.created",
+                "orders.created",
+                "order.shipped",
+                "orders.shipped",
+                "documented_count: 0",
+                "handler_count: 1",
+            ] {
+                assert!(output.contains(value), "{output}");
+            }
+            assert!(!output.contains("schema:"), "{output}");
+            assert!(!output.contains("handler:"), "{output}");
+        }
     }
 
     async fn dispatch(

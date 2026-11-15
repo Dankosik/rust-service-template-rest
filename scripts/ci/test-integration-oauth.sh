@@ -44,6 +44,66 @@ cleanup() {
 	exit "${status}"
 }
 
+wait_for_keycloak() {
+	python3 - "${READY_TIMEOUT_SECONDS}" "${OAUTH_TEST_KEYCLOAK_URL}/realms/master" "${container}" <<'PY'
+import signal
+import subprocess
+import sys
+import time
+
+deadline = time.monotonic() + int(sys.argv[1])
+interrupted = 0
+waiting = False
+
+
+def interrupt(signum, _frame):
+    global interrupted
+    interrupted = signum
+    # Defer an interrupt during launch until the child is under cleanup.
+    if waiting:
+        raise SystemExit(128 + signum)
+
+
+def remaining():
+    if interrupted:
+        raise SystemExit(128 + interrupted)
+    seconds = deadline - time.monotonic()
+    if seconds <= 0:
+        raise SystemExit(1)
+    return seconds
+
+
+def probe(*command, stderr=None):
+    global waiting
+    remaining()
+    with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=stderr) as child:
+        try:
+            waiting = True
+            output, _ = child.communicate(timeout=remaining())
+        except subprocess.TimeoutExpired:
+            raise SystemExit(1)
+        finally:
+            waiting = False
+            if child.returncode is None:
+                child.kill()
+    remaining()
+    return child.returncode, output
+
+
+for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+    signal.signal(sig, interrupt)
+
+while True:
+    status, _ = probe("curl", "-fsS", "-o", "/dev/null", sys.argv[2], stderr=subprocess.DEVNULL)
+    if status == 0:
+        break
+    status, running = probe("docker", "inspect", "--format", "{{.State.Running}}", sys.argv[3])
+    if status != 0 or running.strip() != b"true":
+        raise SystemExit(1)
+    time.sleep(min(2, remaining()))
+PY
+}
+
 if [[ -z ${OAUTH_TEST_KEYCLOAK_URL:-} ]]; then
 	require_docker
 	trap cleanup EXIT
@@ -66,15 +126,11 @@ if [[ -z ${OAUTH_TEST_KEYCLOAK_URL:-} ]]; then
 		exit 1
 	fi
 	OAUTH_TEST_KEYCLOAK_URL="http://127.0.0.1:${port}"
-	deadline=$((SECONDS + READY_TIMEOUT_SECONDS))
-	until curl -fsS -o /dev/null "${OAUTH_TEST_KEYCLOAK_URL}/realms/master" 2>/dev/null; do
-		if ((SECONDS >= deadline)) || [[ $(docker inspect --format '{{.State.Running}}' "${container}") != true ]]; then
-			echo "Keycloak did not become ready within ${READY_TIMEOUT_SECONDS}s" >&2
-			docker logs --tail 100 "${container}" >&2 || true
-			exit 1
-		fi
-		sleep 2
-	done
+	if ! wait_for_keycloak; then
+		echo "Keycloak did not become ready within ${READY_TIMEOUT_SECONDS}s" >&2
+		docker logs --tail 100 "${container}" >&2 || true
+		exit 1
+	fi
 fi
 export OAUTH_TEST_KEYCLOAK_URL
 cargo test --locked -p infra-oauth2-client-credentials --features integration tests::keycloak "$@"

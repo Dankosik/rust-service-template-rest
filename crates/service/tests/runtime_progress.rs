@@ -299,8 +299,7 @@ async fn serve_peer(
             }
         }
     }
-    connections.abort_all();
-    while connections.join_next().await.is_some() {}
+    connections.shutdown().await;
 }
 
 /// HTTP/1 requests are finite. Handles transport chunks separately from S3's

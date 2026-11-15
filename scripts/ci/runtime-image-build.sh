@@ -12,6 +12,7 @@
 #   SOURCE_DATE_EPOCH        binary mtime (default: HEAD commit time, else 0)
 #   RUNTIME_IMAGE_CACHE_FROM / RUNTIME_IMAGE_CACHE_TO
 #                            buildx cache specs, e.g. type=registry,ref=<repo>:buildcache
+#   RUNTIME_IMAGE_METADATA_FILE  receipt from the final loaded image exporter
 #   IMAGE_TESTS              unit runs the unit-test gate inside the build (default none)
 #
 # Tool versions inside the image come from tools/versions.env as build
@@ -44,12 +45,8 @@ builder_resource=
 cleanup() {
 	local status=$?
 	trap - EXIT INT TERM HUP
-	if [[ -n ${builder_resource} ]]; then
-		if ! bash scripts/ci/validation-lock.sh --resource-cleanup "${builder_resource}"; then
-			[[ ${status} != 0 ]] || status=1
-		elif ! bash scripts/ci/validation-lock.sh --resource-complete "${builder_resource}"; then
-			[[ ${status} != 0 ]] || status=1
-		fi
+	if [[ -n ${builder_resource} ]] && ! bash scripts/ci/validation-lock.sh --resource-cleanup "${builder_resource}"; then
+		[[ ${status} != 0 ]] || status=1
 	fi
 	exit "${status}"
 }
@@ -106,5 +103,6 @@ if [[ -n ${RUNTIME_IMAGE_CACHE_TO:-} ]]; then
 	bash scripts/ci/validation-lock.sh --resource-run "${builder_resource}" -- \
 		docker buildx build --builder "${builder_name}" "${arguments[@]}" --target cooked --cache-to "${RUNTIME_IMAGE_CACHE_TO}" .
 fi
+[[ -z ${RUNTIME_IMAGE_METADATA_FILE:-} ]] || arguments+=(--metadata-file "${RUNTIME_IMAGE_METADATA_FILE}")
 bash scripts/ci/validation-lock.sh --resource-run "${builder_resource}" -- \
 	docker buildx build --builder "${builder_name}" --load "${arguments[@]}" -t "${image}" .

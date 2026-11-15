@@ -121,25 +121,33 @@ impl TokenSource {
     /// service verifies callers but was given no signing key.
     pub fn receiver(&self, receiver: &str) -> Result<ReceiverTokens, SigningError> {
         let audience = ServiceName::parse(receiver).map_err(|_| SigningError::InvalidReceiver)?;
-        let signer = match &self.0 {
-            Signing::Disabled => None,
+        let state = match &self.0 {
+            Signing::Disabled => ReceiverState::Disabled(audience),
             Signing::WithoutKey => return Err(SigningError::NoSigningKey),
-            Signing::Key(signer) => Some(Arc::clone(signer)),
+            Signing::Key(signer) => ReceiverState::Active(Arc::new(ActiveReceiver {
+                signer: Arc::clone(signer),
+                audience,
+                cached: Mutex::new(None),
+            })),
         };
-        Ok(ReceiverTokens {
-            signer,
-            audience,
-            cached: Arc::new(Mutex::new(None)),
-        })
+        Ok(ReceiverTokens(state))
     }
 }
 
 /// Tokens for one receiver. Cloning shares the cached token.
 #[derive(Clone)]
-pub struct ReceiverTokens {
-    signer: Option<Arc<Signer>>,
+pub struct ReceiverTokens(ReceiverState);
+
+#[derive(Clone)]
+enum ReceiverState {
+    Disabled(ServiceName),
+    Active(Arc<ActiveReceiver>),
+}
+
+struct ActiveReceiver {
+    signer: Arc<Signer>,
     audience: ServiceName,
-    cached: Arc<Mutex<Option<Cached>>>,
+    cached: Mutex<Option<Cached>>,
 }
 
 struct Cached {
@@ -149,10 +157,14 @@ struct Cached {
 
 impl fmt::Debug for ReceiverTokens {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (audience, signing) = match &self.0 {
+            ReceiverState::Disabled(audience) => (audience, false),
+            ReceiverState::Active(active) => (&active.audience, true),
+        };
         formatter
             .debug_struct("ReceiverTokens")
-            .field("receiver", &self.audience)
-            .field("signing", &self.signer.is_some())
+            .field("receiver", audience)
+            .field("signing", &signing)
             .finish_non_exhaustive()
     }
 }
@@ -166,14 +178,16 @@ impl ReceiverTokens {
     /// Unix epoch, or [`SigningError::Signing`] if signing a new token or
     /// converting it to an authorization header fails.
     pub fn authorization(&self) -> Result<Option<HeaderValue>, SigningError> {
-        let Some(signer) = &self.signer else {
+        let ReceiverState::Active(active) = &self.0 else {
             return Ok(None);
         };
         let now = unix_seconds().ok_or(SigningError::Clock)?;
-        self.authorization_at(signer, now).map(Some)
+        active.authorization_at(now).map(Some)
     }
+}
 
-    fn authorization_at(&self, signer: &Signer, now: u64) -> Result<HeaderValue, SigningError> {
+impl ActiveReceiver {
+    fn authorization_at(&self, now: u64) -> Result<HeaderValue, SigningError> {
         let mut cached = self.cached.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(token) = cached
             .as_ref()
@@ -181,7 +195,7 @@ impl ReceiverTokens {
         {
             return Ok(token.authorization.clone());
         }
-        let token = signer.sign(self.audience.as_str(), now)?;
+        let token = self.signer.sign(self.audience.as_str(), now)?;
         let mut authorization =
             HeaderValue::try_from(format!("Bearer {token}")).map_err(|_| SigningError::Signing)?;
         authorization.set_sensitive(true);
@@ -242,11 +256,11 @@ mod tests {
         }
     }
 
-    /// The handle's `Authorization` value at `now`, from its signer.
     fn at(tokens: &ReceiverTokens, now: u64) -> HeaderValue {
-        tokens
-            .authorization_at(tokens.signer.as_deref().unwrap(), now)
-            .unwrap()
+        let ReceiverState::Active(active) = &tokens.0 else {
+            panic!("expected an active receiver");
+        };
+        active.authorization_at(now).unwrap()
     }
 
     fn token(header: &HeaderValue) -> String {
@@ -306,23 +320,20 @@ mod tests {
     #[test]
     fn a_handle_reuses_its_token_for_half_its_lifetime() {
         let key = TestKey::new("orders/2026-10");
-        let catalog = TokenSource::try_new(options(&key))
-            .unwrap()
-            .receiver("catalog")
-            .unwrap();
+        let source = TokenSource::try_new(options(&key)).unwrap();
+        let catalog = source.receiver("catalog").unwrap();
         let first = at(&catalog, NOW);
         let shared = catalog.clone();
         assert_eq!(at(&shared, NOW + 29), first);
+        let inventory = source.receiver("inventory").unwrap();
+        assert_ne!(at(&inventory, NOW + 29), first);
+        let another_catalog = source.receiver("catalog").unwrap();
+        assert_ne!(at(&another_catalog, NOW + 29), first);
+        assert_eq!(at(&catalog, NOW + 29), first);
         let renewed = at(&catalog, NOW + 30);
         assert_ne!(renewed, first);
         // A clock that steps back signs anew rather than reuse a future token.
         assert_ne!(at(&catalog, NOW + 10), renewed);
-        // Handles for another receiver keep their own token.
-        let llm = TokenSource::try_new(options(&key))
-            .unwrap()
-            .receiver("inventory")
-            .unwrap();
-        assert_ne!(at(&llm, NOW), first);
     }
 
     #[test]
@@ -347,6 +358,11 @@ mod tests {
         );
         let disabled = TokenSource::disabled().receiver("catalog").unwrap();
         assert_eq!(disabled.authorization(), Ok(None));
+        assert!(format!("{disabled:?}").contains("catalog"));
+        assert_eq!(
+            TokenSource::disabled().receiver("Catalog").unwrap_err(),
+            SigningError::InvalidReceiver
+        );
         let catalog = source.receiver("catalog").unwrap();
         assert!(catalog.authorization().unwrap().is_some());
         for debug in [

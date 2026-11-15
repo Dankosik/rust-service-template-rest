@@ -1,4 +1,3 @@
-use std::collections::VecDeque;
 use std::future::Future as _;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -6,7 +5,7 @@ use std::task::Waker;
 use std::time::Duration;
 
 use http_body::Body as _;
-use http_body_util::BodyExt as _;
+use http_body_util::{BodyExt as _, StreamBody};
 use tokio::sync::{Semaphore, oneshot};
 use tokio::task::AbortHandle;
 use tokio::time::Instant;
@@ -15,35 +14,15 @@ use super::*;
 use crate::observe::{Histograms, Operation};
 use crate::tests::{Records, in_tracing_child};
 
-struct GatedBody {
-    chunks: VecDeque<Bytes>,
-    eof: oneshot::Receiver<()>,
-}
-
-impl http_body::Body for GatedBody {
-    type Data = Bytes;
-    type Error = std::io::Error;
-
-    fn poll_frame(
-        mut self: Pin<&mut Self>,
-        context: &mut Context<'_>,
-    ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
-        if let Some(chunk) = self.chunks.pop_front() {
-            return Poll::Ready(Some(Ok(Frame::data(chunk))));
-        }
-        std::task::ready!(Pin::new(&mut self.eof).poll(context)).unwrap();
-        Poll::Ready(None)
-    }
-}
-
 fn download(timeout: Duration) -> (Download, Arc<Semaphore>, oneshot::Sender<()>) {
     let admission = Arc::new(Semaphore::new(1));
     let permit = Arc::clone(&admission).try_acquire_owned().unwrap();
     let (send_eof, eof) = oneshot::channel();
-    let body = GatedBody {
-        chunks: [Bytes::from_static(b"abc"), Bytes::from_static(b"de")].into(),
-        eof,
-    };
+    let body = StreamBody::new(async_stream::stream! {
+        yield Ok::<_, std::convert::Infallible>(Frame::data(Bytes::from_static(b"abc")));
+        yield Ok(Frame::data(Bytes::from_static(b"de")));
+        eof.await.unwrap();
+    });
     let metadata = ObjectMetadata {
         size: 5,
         content_type: None,

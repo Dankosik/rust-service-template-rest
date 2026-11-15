@@ -5,6 +5,7 @@ import os
 import pathlib
 import signal
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -91,7 +92,7 @@ env.update({
     'HOTPATH_OUTPUT_FORMAT': 'json', 'HOTPATH_OUTPUT_PATH': str(evidence / 'profile.json'),
 })
 with (evidence / 'service.log').open('wb') as log:
-    server = subprocess.Popen(['target/debug/service'], env=env, stdout=log, stderr=subprocess.STDOUT)
+    server = subprocess.Popen([sys.argv[1]], env=env, stdout=log, stderr=subprocess.STDOUT)
     try:
         for _ in range(150):
             if server.poll() is not None:

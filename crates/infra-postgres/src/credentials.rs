@@ -116,9 +116,8 @@ mod tests {
     async fn the_pool_follows_the_file_and_keeps_its_password_while_the_file_is_unreadable() {
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let _recorder = metrics::set_default_local_recorder(&recorder);
-        let dir = std::env::temp_dir().join(format!("pg-password-refresh-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("password");
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("password");
         std::fs::write(&file, "first\n").unwrap();
         let dsn = Dsn::admit_with(
             "postgres://app@127.0.0.1:1/app?sslmode=disable",
@@ -157,7 +156,7 @@ mod tests {
         refresh.step(&pool, &file).await;
         assert!(!refresh.unreadable);
         assert_eq!(password(&pool).as_deref(), Some("third"));
-        std::fs::remove_dir_all(&dir).unwrap();
+        dir.close().unwrap();
         let scrape = recorder.handle().render();
         let mut samples: Vec<_> = scrape
             .lines()

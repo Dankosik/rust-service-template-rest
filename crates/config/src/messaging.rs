@@ -6,7 +6,7 @@
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
-use bytesize::ByteSize;
+use bytesize::{ByteSize, KIB, MIB};
 use secrecy::SecretString;
 use serde::Deserialize;
 use url::Url;
@@ -17,11 +17,11 @@ use crate::validate::{ValidationError, int_range, missing, non_blank, required};
 
 /// Header bytes one delivery may add to its payload: `HEADER_LIMIT_BYTES` of
 /// the `infra-messaging` wire decoder. Metadata is budgeted separately.
-const DELIVERY_OVERHEAD_BYTES: u64 = 8 * 1024;
+const DELIVERY_OVERHEAD_BYTES: u64 = 8 * KIB;
 /// Payload and header MiB held at once: `PUBLICATION_WINDOW_BYTES` of
 /// `infra-messaging`, so an admitted payload also fits one publication.
 const MAX_RESIDENT_DELIVERY_MIB: u64 = 64;
-const MAX_RESIDENT_DELIVERY_BYTES: u64 = MAX_RESIDENT_DELIVERY_MIB * 1024 * 1024;
+const MAX_RESIDENT_DELIVERY_BYTES: u64 = MAX_RESIDENT_DELIVERY_MIB * MIB;
 
 const PRODUCER_ACTIVE: &str = "a producer is active";
 const CONSUMER_ACTIVE: &str = "a consumer is active";
@@ -229,7 +229,7 @@ impl MessagingConfig {
                     "{} × (messaging.max_payload_bytes {} + {} KiB headers) = {resident} bytes exceeds the {MAX_RESIDENT_DELIVERY_MIB} MiB resident delivery bound",
                     self.consumer_concurrency,
                     self.max_payload_bytes.as_u64(),
-                    DELIVERY_OVERHEAD_BYTES / 1024,
+                    DELIVERY_OVERHEAD_BYTES / KIB,
                 ),
             ));
         }

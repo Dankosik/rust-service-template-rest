@@ -474,26 +474,108 @@ fn example_binary() -> PathBuf {
             // any other selection rebuilt about a hundred crates in the test.
             let selection = std::env::var("TEST_PACKAGE_SELECTION")
                 .unwrap_or_else(|_| "--workspace".to_owned());
-            let status = Command::new(env!("CARGO"))
+            let output = Command::new(env!("CARGO"))
                 .current_dir(&root)
-                .args(["build", "--locked", "--example", "grpc"])
+                .args([
+                    "build",
+                    "--locked",
+                    "--example",
+                    "grpc",
+                    "--message-format=json-render-diagnostics",
+                ])
                 .args(selection.split_whitespace())
-                .status()
+                .stderr(Stdio::inherit())
+                .output()
                 .expect("build gRPC example");
-            assert!(status.success(), "gRPC example build failed: {status}");
-            let target = std::env::var_os("CARGO_TARGET_DIR")
-                .map_or_else(|| root.join("target"), PathBuf::from);
-            target.join("debug/examples/grpc")
+            assert!(
+                output.status.success(),
+                "gRPC example build failed: {}",
+                output.status
+            );
+            grpc_example_executable(
+                &output.stdout,
+                concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"),
+            )
+            .unwrap_or_else(|count| {
+                panic!("expected one service gRPC example executable from Cargo, got {count}")
+            })
         })
         .clone()
 }
 
+fn grpc_example_executable(messages: &[u8], manifest: &str) -> Result<PathBuf, usize> {
+    let mut executables = Vec::new();
+    for line in messages.split(|&byte| byte == b'\n') {
+        let Ok(message) = serde_json::from_slice::<serde_json::Value>(line) else {
+            continue;
+        };
+        if message["reason"] == "compiler-artifact"
+            && message["manifest_path"] == manifest
+            && message["target"]["name"] == "grpc"
+            && message["target"]["kind"] == serde_json::json!(["example"])
+            && message["profile"]["test"].as_bool() == Some(false)
+            && let Some(path) = message["executable"].as_str().map(std::path::Path::new)
+            && path.is_absolute()
+        {
+            executables.push(path.to_owned());
+        }
+    }
+    match executables.as_slice() {
+        [path] => Ok(path.clone()),
+        paths => Err(paths.len()),
+    }
+}
+
+#[test]
+fn grpc_process_requires_one_executable_from_the_selected_build() {
+    const MANIFEST: &str = "/workspace/crates/service/Cargo.toml";
+    const EXECUTABLE: &str = "/configured-target/triple/debug/examples/grpc";
+    let artifact = serde_json::json!({
+        "reason": "compiler-artifact", "manifest_path": MANIFEST,
+        "target": {"name": "grpc", "kind": ["example"]}, "profile": {"test": false},
+        "executable": EXECUTABLE, "fresh": true,
+    });
+    let mut messages = String::new();
+    for (pointer, value) in [
+        ("/reason", serde_json::json!("compiler-message")),
+        (
+            "/manifest_path",
+            serde_json::json!("/workspace/other/Cargo.toml"),
+        ),
+        ("/target/kind", serde_json::json!(["bin"])),
+        ("/target/name", serde_json::json!("different")),
+        ("/profile/test", serde_json::json!(true)),
+        (
+            "/executable",
+            serde_json::json!("target/debug/examples/grpc"),
+        ),
+    ] {
+        let mut unrelated = artifact.clone();
+        *unrelated.pointer_mut(pointer).unwrap() = value;
+        messages.push_str(&unrelated.to_string());
+        messages.push('\n');
+    }
+    assert_eq!(
+        grpc_example_executable(messages.as_bytes(), MANIFEST),
+        Err(0)
+    );
+    messages.push_str(&artifact.to_string());
+    assert_eq!(
+        grpc_example_executable(messages.as_bytes(), MANIFEST),
+        Ok(PathBuf::from(EXECUTABLE))
+    );
+    messages.push('\n');
+    messages.push_str(&artifact.to_string());
+    assert_eq!(
+        grpc_example_executable(messages.as_bytes(), MANIFEST),
+        Err(2)
+    );
+}
+
 fn tls_material() -> (String, String) {
-    let key = rcgen::KeyPair::generate().expect("generate TLS key");
-    let params =
-        rcgen::CertificateParams::new(vec!["127.0.0.1".to_owned()]).expect("certificate names");
-    let certificate = params.self_signed(&key).expect("self-sign certificate");
-    (certificate.pem(), key.serialize_pem())
+    let identity = rcgen::generate_simple_self_signed(["127.0.0.1".to_owned()])
+        .expect("self-sign certificate");
+    (identity.cert.pem(), identity.signing_key.serialize_pem())
 }
 
 fn health_check(address: &str, certificate: String) -> Result<i32, tonic::Status> {

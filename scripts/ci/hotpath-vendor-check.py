@@ -16,7 +16,7 @@ omitted = {'Cargo.lock', 'Cargo.toml.orig'}
 checked = 0
 published_paths = set()
 with tarfile.open(fileobj=io.BytesIO(archive), mode='r:gz') as source:
-    for entry in source.getmembers():
+    for entry in source:
         if not entry.isfile():
             continue
         relative = pathlib.PurePosixPath(entry.name).relative_to('hotpath-0.28.4')

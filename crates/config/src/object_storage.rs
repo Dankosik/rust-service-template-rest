@@ -12,7 +12,7 @@
 
 use std::time::Duration;
 
-use bytesize::ByteSize;
+use bytesize::{ByteSize, GIB, MIB};
 use secrecy::SecretString;
 use serde::Deserialize;
 
@@ -22,7 +22,7 @@ use crate::validate::{ValidationError, duration_range, int_range, non_blank, req
 
 /// Largest object without multipart: R2's single-upload limit (5 GiB minus
 /// 5 MiB), the smallest documented across the supported providers.
-const MAX_OBJECT_BYTES_CEILING: u64 = 5 * 1024 * 1024 * 1024 - 5 * 1024 * 1024;
+const MAX_OBJECT_BYTES_CEILING: u64 = 5 * GIB - 5 * MIB;
 
 /// Where the bucket lives.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]

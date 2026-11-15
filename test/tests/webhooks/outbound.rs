@@ -18,25 +18,16 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 const CURRENT_KEY: &str = "whsec_QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=";
 const PREVIOUS_KEY: &str = "whsec_QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=";
 
-#[derive(Debug)]
+#[derive(Debug, derive_more::From, derive_more::Display)]
 enum Step {
+    #[from(skip)]
+    #[display("delivery: {_0}")]
     Delivery(OutboundError),
+    #[display("transaction: {_0}")]
     Transaction(TxError),
+    #[from(skip)]
+    #[display("caller rejected the transaction")]
     Rejected,
-}
-
-impl From<TxError> for Step {
-    fn from(error: TxError) -> Self {
-        Self::Transaction(error)
-    }
-}
-
-fn explain(error: &Step) -> String {
-    match error {
-        Step::Delivery(error) => format!("delivery: {error}"),
-        Step::Transaction(error) => format!("transaction: {error}"),
-        Step::Rejected => "caller rejected the transaction".to_owned(),
-    }
 }
 
 fn outbound(endpoint_ids: &[&str]) -> Producer {
@@ -81,7 +72,7 @@ async fn enqueue(pool: &PgPool, outbound: &Producer, endpoint: &str, body: &[u8]
             .map_err(Step::Delivery)
     })
     .await
-    .unwrap_or_else(|error| panic!("delivery commits: {}", explain(&error)));
+    .unwrap_or_else(|error| panic!("delivery commits: {error}"));
     id.to_string()
 }
 
@@ -500,7 +491,8 @@ async fn reclaim_repeats_the_external_delivery_and_fences_the_late_completion(po
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn legacy_job_uses_current_path_and_rotated_keys_despite_invalid_saved_routing(pool: PgPool) {
     let body = b"\0{\"event\":\"legacy\"}\xff";
-    let configured = outbound(&["partner"]);
+    let configured = outbound(&["partner", "oversized"]);
+    let refused = enqueue(&pool, &configured, "oversized", body).await;
     let id = enqueue(&pool, &configured, "partner", body).await;
     sqlx::query(
         "UPDATE background_jobs SET payload_text = NULL, payload = jsonb_build_object(\
@@ -514,18 +506,35 @@ async fn legacy_job_uses_current_path_and_rotated_keys_despite_invalid_saved_rou
     .expect("obsolete routing values do not constrain the legacy common payload");
 
     let (address, captured, peer) = reply_peer(200, 0).await;
+    let oversized = format!("/{}", "a".repeat(65_534));
     let running = RunningDispatcher::start(
         &pool,
-        dispatcher(&[("partner", "/current?binding=live")], address),
+        dispatcher(
+            &[
+                ("oversized", &oversized),
+                ("partner", "/current%2Fpath?binding=live%26well"),
+            ],
+            address,
+        ),
         1,
     );
+    job_is(&pool, &refused, "failed", 1).await;
+    let (reason, summary): (String, String) = sqlx::query_as(
+        "SELECT failure_reason, error_summary FROM background_jobs WHERE id::text = $1",
+    )
+    .bind(&refused)
+    .fetch_one(&pool)
+    .await
+    .expect("permanent refusal is recorded on the oversized endpoint's delivery");
+    assert_eq!(reason, "permanent");
+    assert_eq!(summary, "invalid_payload");
     job_is(&pool, &id, "completed", 1).await;
     let request = super::bounded("fixture request capture", captured)
         .await
         .expect("fixture captures request");
     assert!(
-        request.starts_with(b"POST /current?binding=live HTTP/1.1\r\n"),
-        "current endpoint path replaces obsolete persisted routing"
+        request.starts_with(b"POST /current%2Fpath?binding=live%26well HTTP/1.1\r\n"),
+        "escaped path and query from the current endpoint replace obsolete routing"
     );
     let timestamp = header(&request, "webhook-timestamp")
         .parse::<i64>()

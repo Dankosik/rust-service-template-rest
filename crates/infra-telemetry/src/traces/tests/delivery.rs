@@ -167,7 +167,9 @@ fn a_finished_span_reaches_the_collector_with_the_typed_headers() {
     let collector = Collector::start(exchange);
     // A collector root: the exporter must post to `/v1/traces` under it.
     let mut options = options(&format!("http://{}", collector.addr));
-    options.otlp_headers = Some(SecretString::from("x-tenant=t1"));
+    options.otlp_headers = Some(SecretString::from(
+        "x-tenant=t%201+2,x-once=%250A,x-bad-escape=%0A%ZZ,x-bad-utf8=%0A%FF",
+    ));
     let handle = tracer_provider(&options, |_| None, &CollectorTrust::default())
         .expect("the provider builds");
     assert_eq!(
@@ -192,7 +194,10 @@ fn a_finished_span_reaches_the_collector_with_the_typed_headers() {
         request.header("content-type"),
         Some("application/x-protobuf")
     );
-    assert_eq!(request.header("x-tenant"), Some("t1"));
+    assert_eq!(request.header("x-tenant"), Some("t 1+2"));
+    assert_eq!(request.header("x-once"), Some("%0A"));
+    assert_eq!(request.header("x-bad-escape"), Some("%0A%ZZ"));
+    assert_eq!(request.header("x-bad-utf8"), Some("%0A%FF"));
     let export = request.export();
     assert_eq!(request.span_names(), ["delivered span"]);
     let [resource_spans] = export.resource_spans.as_slice() else {

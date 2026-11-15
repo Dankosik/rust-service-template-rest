@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Emit unique changed paths, including both sides of renames and copies.
+# Emit unique changed paths. Renames include both names. A copy from an
+# unchanged path contributes only the added name.
 #
 #   git-changed-paths.sh --worktree BASE_REF   commits since the merge base, the
 #                                              index, the worktree, untracked files
@@ -12,19 +13,8 @@ usage() {
 	exit 2
 }
 
-expand_name_status() {
-	local status path
-	while IFS= read -r -d '' status; do
-		[[ -n ${status} ]] || continue
-		IFS= read -r -d '' path || return 0
-		[[ -n ${path} ]] && printf '%s\n' "${path}"
-		case "${status}" in
-		R* | C*)
-			IFS= read -r -d '' path || return 0
-			[[ -n ${path} ]] && printf '%s\n' "${path}"
-			;;
-		esac
-	done
+tracked_paths() {
+	git diff --name-only -z --no-renames "$@" | LC_ALL=C tr '\0' '\n'
 }
 
 require_commit() {
@@ -39,9 +29,9 @@ worktree_paths() {
 	local base_ref=$1
 	require_commit "${base_ref}"
 	{
-		git diff --name-status -z --find-renames "${base_ref}...HEAD" | expand_name_status
-		git diff --name-status -z --find-renames | expand_name_status
-		git diff --cached --name-status -z --find-renames | expand_name_status
+		tracked_paths "${base_ref}...HEAD" || return
+		tracked_paths || return
+		tracked_paths --cached || return
 		git ls-files --others --exclude-standard
 	} | LC_ALL=C sort -u
 }
@@ -50,7 +40,7 @@ diff_paths() {
 	local base=$1 head=$2
 	require_commit "${base}"
 	require_commit "${head}"
-	git diff --name-status -z --find-renames "${base}" "${head}" | expand_name_status | LC_ALL=C sort -u
+	tracked_paths "${base}" "${head}" | LC_ALL=C sort -u
 }
 
 self_test() {
@@ -78,6 +68,16 @@ self_test() {
 	output=$(cd "${repo}" && bash "${script}" --worktree HEAD~1)
 	grep -qx 'notes.md' <<<"${output}"
 	grep -qx 'crates/new/src/lib.rs' <<<"${output}"
+	cp "${repo}/crates/new/src/lib.rs" "${repo}/copy with space\\.rs"
+	git -C "${repo}" add .
+	git -C "${repo}" commit -qm copy
+	output=$(cd "${repo}" && bash "${script}" --diff HEAD~1 HEAD)
+	[[ ${output} == $'copy with space\\.rs\nnotes.md' ]]
+	printf 'staged\n' >"${repo}/notes.md"
+	git -C "${repo}" add notes.md
+	printf 'untracked\n' >"${repo}/notes.md"
+	output=$(cd "${repo}" && bash "${script}" --worktree HEAD)
+	[[ ${output} == notes.md ]]
 }
 
 case "${1:-}" in

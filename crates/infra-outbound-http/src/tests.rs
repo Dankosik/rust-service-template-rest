@@ -37,8 +37,7 @@ async fn tls_trust_and_hostname_failures_remain_transport_errors() {
     let material = TlsMaterial::new(FIXTURE_HOST);
     let (address, server) =
         tls_server(&material, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
-    let mut untrusted = TlsMaterial::new(FIXTURE_HOST);
-    untrusted.root = material.untrusted_root.clone();
+    let untrusted = TlsMaterial::new(FIXTURE_HOST);
     std::assert_matches!(
         fixture_client(address, &untrusted)
             .execute(request(), deadline())

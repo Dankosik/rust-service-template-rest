@@ -5,7 +5,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use http::{Request, header};
+use http::{Request, StatusCode, header};
 
 use crate::{Error, Limits, UrlTemplate, test_support::*, tls::TlsMaterial};
 
@@ -17,6 +17,14 @@ const REQUEST_SENTINELS: [&str; 6] = [
     "sentinel-value",
     "SENTINEL-METHOD",
 ];
+
+#[test]
+fn every_response_status_has_its_three_digit_label() {
+    for code in 100..=999 {
+        let status = StatusCode::from_u16(code).expect("valid HTTP status");
+        assert_eq!(super::status_label(status), code.to_string());
+    }
+}
 
 async fn exercise_completed_attempts() {
     let material = TlsMaterial::new(FIXTURE_HOST);
@@ -428,8 +436,7 @@ async fn exercise_transport_failures() -> Vec<String> {
 
     let (address, server) =
         tls_server(&material, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
-    let mut untrusted = TlsMaterial::new(FIXTURE_HOST);
-    untrusted.root = material.untrusted_root.clone();
+    let untrusted = TlsMaterial::new(FIXTURE_HOST);
     let untrusted = fixture_client(address, &untrusted)
         .execute(sensitive_request(), deadline())
         .await;

@@ -168,6 +168,10 @@ def parse_json_bytes(raw: bytes, label: str) -> Any:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as error:
         raise Refusal(f"{label} is not UTF-8") from error
+    return parse_json_text(text, label)
+
+
+def parse_json_text(text: str, label: str) -> Any:
     try:
         return json.loads(
             text,
@@ -510,135 +514,63 @@ def _regular_file(path: Path, label: str) -> None:
         raise Refusal(f"{label} is not a regular file")
 
 
-def load_lock(root: Path, required: bool = False) -> dict[str, Any] | None:
-    """Load and validate the local one-shot lock without following a symlink."""
+@dataclass(frozen=True)
+class LockSnapshot:
+    normalized: dict[str, Any]
+    explicit_profiles: frozenset[str]
 
+
+def load_lock_snapshot(root: Path, required: bool = False) -> LockSnapshot | None:
     path = Path(root) / LOCK_NAME
     if not path.exists() and not path.is_symlink():
         if required:
             raise Refusal("template.lock is required")
         return None
     _regular_file(path, LOCK_NAME)
-    return validate_lock(parse_json_bytes(path.read_bytes(), LOCK_NAME))
+    raw = parse_json_bytes(path.read_bytes(), LOCK_NAME)
+    normalized = validate_lock(raw)
+    assert isinstance(raw, dict)
+    return LockSnapshot(normalized, frozenset(raw["profiles"]))
+
+
+def load_lock(root: Path, required: bool = False) -> dict[str, Any] | None:
+    """Load and validate the local one-shot lock without following a symlink."""
+
+    snapshot = load_lock_snapshot(root, required)
+    return None if snapshot is None else snapshot.normalized
+
+
+def _lock_has_explicit_profile(root: Path, required: bool, name: str) -> bool:
+    snapshot = load_lock_snapshot(root, required)
+    return snapshot is not None and name in snapshot.explicit_profiles
 
 
 def lock_has_explicit_authn(root: Path, required: bool = False) -> bool:
-    """Tell a normalized lock from a historical lock without changing its bytes."""
-
-    path = Path(root) / LOCK_NAME
-    if not path.exists() and not path.is_symlink():
-        if required:
-            raise Refusal("template.lock is required")
-        return False
-    _regular_file(path, LOCK_NAME)
-    raw = parse_json_bytes(path.read_bytes(), LOCK_NAME)
-    validate_lock(raw)
-    assert isinstance(raw, dict)
-    profiles = raw["profiles"]
-    assert isinstance(profiles, dict)
-    return "authn" in profiles
+    return _lock_has_explicit_profile(root, required, "authn")
 
 
 def lock_has_explicit_outbound_http(root: Path, required: bool = False) -> bool:
-    """Tell a current lock from historical lock shapes without changing bytes."""
-
-    path = Path(root) / LOCK_NAME
-    if not path.exists() and not path.is_symlink():
-        if required:
-            raise Refusal("template.lock is required")
-        return False
-    _regular_file(path, LOCK_NAME)
-    raw = parse_json_bytes(path.read_bytes(), LOCK_NAME)
-    validate_lock(raw)
-    assert isinstance(raw, dict)
-    profiles = raw["profiles"]
-    assert isinstance(profiles, dict)
-    return "outbound_http" in profiles
+    return _lock_has_explicit_profile(root, required, "outbound_http")
 
 
 def lock_has_explicit_outbound_auth(root: Path, required: bool = False) -> bool:
-    """Tell a current lock from pre-OAuth lock shapes without changing bytes."""
-
-    path = Path(root) / LOCK_NAME
-    if not path.exists() and not path.is_symlink():
-        if required:
-            raise Refusal("template.lock is required")
-        return False
-    _regular_file(path, LOCK_NAME)
-    raw = parse_json_bytes(path.read_bytes(), LOCK_NAME)
-    validate_lock(raw)
-    assert isinstance(raw, dict)
-    profiles = raw["profiles"]
-    assert isinstance(profiles, dict)
-    return "outbound_auth" in profiles
+    return _lock_has_explicit_profile(root, required, "outbound_auth")
 
 
 def lock_has_explicit_http_idempotency(root: Path, required: bool = False) -> bool:
-    """Tell a current lock from historical lock shapes without changing bytes."""
-
-    path = Path(root) / LOCK_NAME
-    if not path.exists() and not path.is_symlink():
-        if required:
-            raise Refusal("template.lock is required")
-        return False
-    _regular_file(path, LOCK_NAME)
-    raw = parse_json_bytes(path.read_bytes(), LOCK_NAME)
-    validate_lock(raw)
-    assert isinstance(raw, dict)
-    profiles = raw["profiles"]
-    assert isinstance(profiles, dict)
-    return "http_idempotency" in profiles
+    return _lock_has_explicit_profile(root, required, "http_idempotency")
 
 
 def lock_has_explicit_jobs(root: Path, required: bool = False) -> bool:
-    """Tell a current lock from historical lock shapes without changing bytes."""
-
-    path = Path(root) / LOCK_NAME
-    if not path.exists() and not path.is_symlink():
-        if required:
-            raise Refusal("template.lock is required")
-        return False
-    _regular_file(path, LOCK_NAME)
-    raw = parse_json_bytes(path.read_bytes(), LOCK_NAME)
-    validate_lock(raw)
-    assert isinstance(raw, dict)
-    profiles = raw["profiles"]
-    assert isinstance(profiles, dict)
-    return "jobs" in profiles
+    return _lock_has_explicit_profile(root, required, "jobs")
 
 
 def lock_has_explicit_webhooks(root: Path, required: bool = False) -> bool:
-    """Tell a current lock from the prior shape without rewriting it."""
-
-    path = Path(root) / LOCK_NAME
-    if not path.exists() and not path.is_symlink():
-        if required:
-            raise Refusal("template.lock is required")
-        return False
-    _regular_file(path, LOCK_NAME)
-    raw = parse_json_bytes(path.read_bytes(), LOCK_NAME)
-    validate_lock(raw)
-    assert isinstance(raw, dict)
-    profiles = raw["profiles"]
-    assert isinstance(profiles, dict)
-    return "webhooks" in profiles
+    return _lock_has_explicit_profile(root, required, "webhooks")
 
 
 def lock_has_explicit_inbound_webhooks(root: Path, required: bool = False) -> bool:
-    """Tell a current lock from the prior shape without rewriting it."""
-
-    path = Path(root) / LOCK_NAME
-    if not path.exists() and not path.is_symlink():
-        if required:
-            raise Refusal("template.lock is required")
-        return False
-    _regular_file(path, LOCK_NAME)
-    raw = parse_json_bytes(path.read_bytes(), LOCK_NAME)
-    validate_lock(raw)
-    assert isinstance(raw, dict)
-    profiles = raw["profiles"]
-    assert isinstance(profiles, dict)
-    return "inbound_webhooks" in profiles
+    return _lock_has_explicit_profile(root, required, "inbound_webhooks")
 
 
 def selected_profiles(root: Path) -> tuple[str, str]:
@@ -903,10 +835,12 @@ def _protected_manifest_owner(entry: str) -> bool:
     )
 
 
-def _derived_service_skill_roots(root: Path, *, initializing: bool = False) -> frozenset[Path]:
+def _derived_service_skill_roots(
+    root: Path, *, initializing: bool = False, replay_lock: LockSnapshot | None = None,
+) -> frozenset[Path]:
     """Admit the narrow local-skill reservation only in a complete derived tree."""
 
-    lock = load_lock(root)
+    lock = replay_lock.normalized if replay_lock is not None else load_lock(root)
     if lock is not None and lock["state"] != "complete" and not initializing:
         raise Refusal("template.lock is incomplete; inspect the init-produced diff and use a fresh template checkout")
     skills = root / ".agents/skills"
@@ -991,7 +925,7 @@ def manifest_entries(snapshot_root: Path) -> tuple[str, ...]:
 
 def parse_manifest(
     snapshot_root: Path, *, harness: str = "all", target_repository: str | None = None,
-    initializing: bool = False,
+    initializing: bool = False, _replay_lock: LockSnapshot | None = None,
 ) -> tuple[str, ...]:
     """Validate ownership; selected outputs may omit unselected adapter inputs.
 
@@ -1004,7 +938,9 @@ def parse_manifest(
     if target_repository is not None and not isinstance(target_repository, str):
         raise Refusal("target repository identity is invalid")
     selected = set(selected_adapters(harness))
-    service_skill_roots = _derived_service_skill_roots(Path(snapshot_root), initializing=initializing)
+    service_skill_roots = _derived_service_skill_roots(
+        Path(snapshot_root), initializing=initializing, replay_lock=_replay_lock,
+    )
     unselected_inputs = {
         path
         for adapter, pack in ADAPTERS.items()
@@ -1063,8 +999,7 @@ def git(root: Path, args: Sequence[str], *, input_bytes: bytes | None = None) ->
         result = subprocess.run(
             command,
             input=input_bytes,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
             env=environment,
         )
@@ -1174,7 +1109,7 @@ def _generated_skill_link(path: str, contents: bytes) -> str | None:
 
 
 def snapshot_tree(root: Path, destination: Path, revision: str | None = None) -> str:
-    """Materialize regular tracked blobs from one immutable commit into destination."""
+    """Materialize tracked files and admitted generated skill links from one immutable commit."""
 
     root = git_root(root)
     revision = revision or git_head(root)
@@ -1207,15 +1142,6 @@ def snapshot_tree(root: Path, destination: Path, revision: str | None = None) ->
         shutil.rmtree(destination, ignore_errors=True)
         raise
     return revision
-
-
-def _has_symlink_parent(root: Path, relative: str) -> bool:
-    current = root
-    for part in Path(relative).parts[:-1]:
-        current = current / part
-        if current.is_symlink():
-            return True
-    return False
 
 
 def ensure_safe_destination(root: Path, relative: str, *, missing_ok: bool = True) -> Path:
@@ -1264,10 +1190,7 @@ def atomic_write(path: Path, data: bytes, mode: int) -> None:
         os.chmod(temporary, mode)
         os.replace(temporary, path)
     except Exception:
-        try:
-            os.unlink(temporary)
-        except FileNotFoundError:
-            pass
+        Path(temporary).unlink(missing_ok=True)
         raise
 
 

@@ -241,10 +241,14 @@ fn validate_identity(value: &str) -> Result<(), EnvelopeError> {
     valid_identity(value).ok_or(EnvelopeError::Identity)
 }
 
-/// The NATS reader trims surrounding whitespace before handing off a header.
 pub(crate) fn validate_outbound_identity(value: &str) -> Result<(), EnvelopeError> {
     validate_identity(value)?;
-    (value.trim() == value).ok_or(EnvelopeError::Identity)
+    validate_outbound_whitespace(value)
+}
+
+/// The NATS reader trims surrounding whitespace before handing off a header.
+pub(crate) fn validate_outbound_whitespace(value: &str) -> Result<(), EnvelopeError> {
+    (value.trim().len() == value.len()).ok_or(EnvelopeError::Identity)
 }
 
 /// JSON Schema spelling of the control-character rule in [`valid_identity`].

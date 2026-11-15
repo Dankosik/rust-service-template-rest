@@ -13,6 +13,7 @@ use infra_webhooks::inbound::{
 use infra_webhooks::protocol::KeyRing;
 use integration_tests::{DATABASE_URL, dsn_for};
 use sqlx::Row;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -1148,16 +1149,32 @@ async fn receipt_population_sample(pool: &PgPool) -> String {
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
-async fn observation_includes_locked_receipts_and_becomes_empty_after_cleanup(pool: PgPool) {
-    let oldest: f64 = sqlx::query_scalar(
+async fn observation_includes_locked_receipts_and_becomes_empty_after_cleanup(
+    options: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let pool = options
+        .after_connect(|conn, _| {
+            Box::pin(async move {
+                sqlx::query("SET TIME ZONE 'America/New_York'")
+                    .execute(conn)
+                    .await?;
+                Ok(())
+            })
+        })
+        .connect_with(connect)
+        .await
+        .expect("pool spanning the spring daylight-saving transition");
+    let received_at: f64 = sqlx::query_scalar(
         "INSERT INTO webhook_receipts (endpoint_id, message_id, received_at) \
-         VALUES ('partner', $1, now() - interval '15 days') \
-         RETURNING extract(epoch FROM received_at + interval '14 days')::float8",
+         VALUES ('partner', $1, timestamptz '2024-03-03 12:00:00-05') \
+         RETURNING extract(epoch FROM received_at)::float8",
     )
     .bind(vec![1_u8])
     .fetch_one(&pool)
     .await
-    .expect("expired receipt eligibility time");
+    .expect("receipt predating the spring clock change");
+    let oldest = received_at + Duration::from_hours(14 * 24).as_secs_f64();
     sqlx::query(
         "INSERT INTO webhook_receipts (endpoint_id, message_id, received_at) \
          VALUES ('partner', $1, now() - interval '13 days')",

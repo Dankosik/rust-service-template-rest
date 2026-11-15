@@ -43,10 +43,12 @@ tokio-util = { workspace = true, features = ["rt"] }
 tracing = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
+futures-util = { workspace = true, features = ["async-await"] }
 tracing-log = { workspace = true, features = ["std", "log-tracer"] }
 tracing-subscriber = { workspace = true, features = ["std", "fmt", "registry"] }
 base64 = { workspace = true, features = ["std"] }
 metrics-exporter-prometheus = { workspace = true }
+pem = { workspace = true }
 rcgen = { workspace = true, features = ["aws_lc_rs"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "test-util", "time"] }

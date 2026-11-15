@@ -53,10 +53,7 @@ def path_id(path):
 
 def file_digest(path):
     with path.open("rb") as source:
-        result = hashlib.sha256()
-        for block in iter(lambda: source.read(1024 * 1024), b""):
-            result.update(block)
-        return result.hexdigest()
+        return hashlib.file_digest(source, "sha256").hexdigest()
 
 
 def resolve_path(value, base):
@@ -443,8 +440,7 @@ class Context:
                     refusal, role = refusal or "location_unwritable", role or name
                 filesystem = str(info.st_dev)
                 if filesystem not in filesystems:
-                    space = os.statvfs(ancestor)
-                    filesystems[filesystem] = space.f_bavail * space.f_frsize
+                    filesystems[filesystem] = shutil.disk_usage(ancestor).free
                 available = filesystems[filesystem]
                 observed.update(filesystem=filesystem, available_bytes=available, state="observed")
                 if available == 0:
@@ -467,13 +463,14 @@ class Context:
 
 
 def evidence(kind, value):
-    line = kind + ": " + json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n"
     destination = os.environ.get("BUILD_CONTEXT_EVIDENCE")
-    if destination:
-        with open(destination, "a") as retained:
-            retained.write(line)
     # Retained context has complete safe fingerprints. Terminal progress stays
     # bounded and never repeats the config-source inventory at every leaf.
+    if destination or kind != "build_context":
+        line = kind + ": " + json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n"
+        if destination:
+            with open(destination, "a") as retained:
+                retained.write(line)
     if kind == "build_context":
         visible = {key: value[key] for key in ("schema", "identity", "mode", "known", "admission", "reason", "role", "key", "minimum_free_bytes", "resources")}
         line = kind + ": " + json.dumps(visible, sort_keys=True, separators=(",", ":")) + "\n"

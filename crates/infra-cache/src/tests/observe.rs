@@ -222,60 +222,15 @@ async fn a_silent_server_records_timeout() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_reply_inside_the_command_timeout_is_not_cut_short() {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("slow listener");
-    let address = listener.local_addr().expect("listener address");
-    tokio::spawn(async move {
-        let Ok((mut stream, _)) = listener.accept().await else {
-            return;
-        };
-        // Commands arrive pipelined (setup, the background `PING`, the `GET`)
-        // and each is answered in order; only a read that holds `GET` is slow.
-        let mut request = [0; 512];
-        loop {
-            let read = stream.read(&mut request).await.unwrap_or(0);
-            if read == 0 {
-                return;
-            }
-            let mut reply = Vec::new();
-            let mut slow = false;
-            let mut lines = request[..read].split(|&b| b == b'\n');
-            while let Some(line) = lines.next() {
-                if line.first() != Some(&b'*') {
-                    continue;
-                }
-                // The argument count is followed by the name's length, then the name.
-                let _length = lines.next();
-                if lines.next().is_some_and(|name| name.starts_with(b"GET")) {
-                    slow = true;
-                    reply.extend_from_slice(b"$-1\r\n");
-                } else {
-                    reply.extend_from_slice(b"+OK\r\n");
-                }
-            }
-            if slow {
-                tokio::time::sleep(Duration::from_millis(700)).await;
-            }
-            if stream.write_all(&reply).await.is_err() {
-                return;
-            }
-        }
-    });
+    let server = FakeServer::start().await;
+    *server.observed.slow_get_delay.lock().expect("delay lock") = Duration::from_millis(700);
     let cache = Cache::start(CacheOptions {
-        dsn: SecretString::from(format!("redis://{address}")),
-        password_file: None,
-        root_ca_path: None,
-        client_certificate: None,
-        allow_plaintext: true,
-        allow_unauthenticated: true,
         command_timeout: Duration::from_secs(1),
+        ..options(&format!("redis://{}", server.address), true, true, None)
     })
     .expect("start connect");
 
-    assert_eq!(cache.namespace("slow").get("key").await, Ok(None));
+    assert_eq!(cache.namespace("slow").get("slow").await, Ok(None));
 }
 
 #[tokio::test]

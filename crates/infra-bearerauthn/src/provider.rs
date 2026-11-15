@@ -218,12 +218,12 @@ impl ProviderClient {
     // template:begin oidc-introspection:authn-provider-post-form-json
     /// Posts a form with client-secret Basic authentication, form-encoding each
     /// credential component first as RFC 6749 section 2.3.1 requires.
-    pub(crate) async fn post_form_json(
+    pub(crate) async fn post_introspection_form_json(
         &self,
         url: &Url,
         client_id: &str,
         client_secret: &str,
-        form_body: String,
+        form: &[(&str, &str)],
         context: &OperationContext,
     ) -> Result<Vec<u8>, ProviderFailure> {
         context.check().map_err(|_| ProviderFailure::Timeout)?;
@@ -233,11 +233,7 @@ impl ProviderClient {
             .client
             .post(url.clone())
             .basic_auth(&client_id, Some(&client_secret))
-            .header(
-                header::CONTENT_TYPE,
-                header::HeaderValue::from_static("application/x-www-form-urlencoded"),
-            )
-            .body(form_body);
+            .form(form);
         context.check().map_err(|_| ProviderFailure::Timeout)?;
         let result = Exchange::start("introspection", "POST", url)
             .run(request, ExchangeMode::Introspection(context))
@@ -916,11 +912,11 @@ mod tests {
         let response = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 16\r\n\r\n{\"active\":false}".to_vec();
         let (address, root, server) = tls_server(response, false).await;
         let body = fixture_client(address, &root)
-            .post_form_json(
+            .post_introspection_form_json(
                 &fixture_url(address),
                 "a:b",
                 "c d",
-                "token=opaque".to_owned(),
+                &[("token", "opaque")],
                 &operation_context::OperationContext::with_timeout(super::PROVIDER_TIMEOUT),
             )
             .await
@@ -943,11 +939,11 @@ mod tests {
             let (address, root, server) = tls_server(response, false).await;
             assert_eq!(
                 fixture_client(address, &root)
-                    .post_form_json(
+                    .post_introspection_form_json(
                         &fixture_url(address),
                         "fixture",
                         "secret",
-                        "token=opaque".to_owned(),
+                        &[("token", "opaque")],
                         &operation_context::OperationContext::with_timeout(super::PROVIDER_TIMEOUT),
                     )
                     .with_subscriber(dispatch.clone())

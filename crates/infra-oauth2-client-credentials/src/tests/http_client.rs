@@ -219,7 +219,7 @@ async fn token_failures_are_sanitized_and_never_dispatch_the_resource() {
         (
             response(
                 "400 Bad Request",
-                br#"{"error":"invalid_client","error_description":"provider-secret-body"}"#,
+                br#"{"error":"invalid\u005fclient","error_description":"provider-secret-body"}"#,
             ),
             AcquisitionError::Rejected(Rejection::InvalidClient),
         ),
