@@ -1,6 +1,6 @@
 # Prompt Composition
 
-Read this owner when writing a prompt for another agent, session, phase, or
+Read this owner when drafting a handoff prompt for another session, phase, or
 repository-native entry skill.
 
 Write as if sending a work message to a capable colleague who will carry out
@@ -56,10 +56,11 @@ task. In Grok Build, the primary-session message launches the work. OpenCode
 discovers `.agents/skills` through the `skill` tool; `/orchestrator` binds the
 Orchestrator carrier.
 
-Use the [Subagent Brief Template](subagent-brief-template.md) for information
-needed by a delegated lane and [Transition](spec-first-workflow/shared/transition.md)
-for boundary state. Required machine fields and exact protocol tokens keep
-their existing contracts; the accompanying request can still use natural prose.
+Include the outcome, authoritative inputs, writable or read-only boundary, and
+stop condition needed by a delegated lane, and use
+[Transition](spec-first-workflow/shared/transition.md) for boundary state.
+Required machine fields and exact protocol tokens keep their existing contracts;
+the accompanying request can still use natural prose.
 
 ## Completion
 

@@ -29,8 +29,10 @@ job names, triggers, tool pins, and gate definitions. Cross-file policies:
   Rust run post-merge on `main`. Schedules, tags, and `workflow_dispatch` select
   every surface.
 - **Prerequisites:** Enable Dependabot alerts in derived repos so Dependency
-  Review has a graph. GHCR publication (`cd.yml`) requires
-  `ENABLE_GHCR_PUBLISH == 'true'`; release tags must equal `v<crate version>`.
+  Review has a graph, and confirm `.github/CODEOWNERS` names real principals
+  with repository access before requiring code-owner review. GHCR publication
+  (`cd.yml`) requires `ENABLE_GHCR_PUBLISH == 'true'`; release tags must equal
+  `v<crate version>`.
 - **Source initializer:** `initializer_runtime` runs `make template-init-check`
   planned by
   [`scripts/ci/initializer-matrix.py`](../scripts/ci/initializer-matrix.py)
@@ -237,7 +239,10 @@ checks retained/absent entrypoints and startup refusals.
 ### Publication and deployment
 
 `cd.yml` uses a composite action to keep the Fulcio identity
-`…/.github/workflows/cd.yml@<ref>`. `railway.toml` is deprecated in favor of IaC.
+`https://github.com/<owner>/<repo>/.github/workflows/cd.yml@<ref>` for consumer
+verification (`cosign verify --certificate-identity …` and `gh attestation
+verify oci://<image> --repo <owner>/<repo>`). `railway.toml` is deprecated in
+favor of IaC.
 
 | Decision | Rejected | Why |
 | --- | --- | --- |

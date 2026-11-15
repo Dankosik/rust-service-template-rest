@@ -170,18 +170,6 @@
         "ids": ["compose-postgres-header", "compose-postgres-service"]
       },
       {
-        "path": "CONTRIBUTING.md",
-        "id": "contributing-postgres-prerequisites"
-      },
-      {
-        "path": "CONTRIBUTING.md",
-        "id": "contributing-postgres-proof"
-      },
-      {
-        "path": "test/README.md",
-        "id": "test-readme-postgres"
-      },
-      {
         "path": "docs/repo-architecture.md",
         "id": "docs-architecture-schema"
       },
@@ -936,7 +924,6 @@
       {"path": "crates/service/tests/openapi.rs", "ids": ["service-openapi-http-idempotency-contract"]},
       {"path": "test/Cargo.toml", "ids": ["test-http-idempotency-dependencies"]},
       {"path": "test/tests/webhooks/inbound.rs", "ids": ["test-webhook-cutoff-metric-recorder", "test-webhook-cutoff-metric-assertions"]},
-      {"path": "test/README.md", "ids": ["test-readme-http-idempotency"]},
       {"path": "env/config/local.toml", "ids": ["local-config-http-idempotency"]},
       {"path": "migrations/README.md", "ids": ["migrations-readme-http-idempotency"]},
       {"path": "docs/template-sync.md", "ids": ["docs-template-init-http-idempotency", "docs-template-init-http-idempotency-sync"]},
@@ -1004,7 +991,6 @@
       {"path": "crates/config/src/observability.rs", "ids": ["otel-jobs-worker-identity-doc"]},
       {"path": "test/Cargo.toml", "ids": ["test-jobs-dependencies", "test-jobs-dev-dependencies", "test-jobs-worker-fixture"]},
       {"path": "test/src/lib.rs", "ids": ["test-lib-jobs-module"]},
-      {"path": "test/README.md", "ids": ["test-readme-jobs"]},
       {"path": "env/config/local.toml", "ids": ["local-config-jobs"]},
       {"path": "migrations/README.md", "ids": ["migrations-readme-jobs"]},
       {"path": "docs/template-sync.md", "ids": ["docs-template-init-jobs", "docs-template-init-jobs-sync"]},
@@ -1082,7 +1068,6 @@
       {"path": "env/config/local.toml", "ids": ["local-config"]},
       {"path": "env/docker-compose.yml", "ids": ["compose-nats-service"]},
       {"path": "README.md", "ids": ["docs-readme-messaging-profile"]},
-      {"path": "CONTRIBUTING.md", "ids": ["contributing-messaging-prerequisites", "contributing-messaging-proof"]},
       {"path": "docs/template-sync.md", "ids": ["docs-template-init-messaging", "docs-template-init-messaging-lock"]},
       {"path": "docs/backend-library-selection.md", "ids": ["docs-library-selection-messaging", "docs-library-selection-messaging-rejection"]},
       {"path": "docs/ci-cd-production-ready.md", "ids": ["docs-ci-messaging-gates"]}
@@ -1395,7 +1380,6 @@
       {"path": "env/docker-compose.yml", "ids": ["compose-valkey-service"]},
       {"path": "deny.toml", "ids": ["deny-cache-license"]},
       {"path": "README.md", "ids": ["docs-readme-cache-profile"]},
-      {"path": "CONTRIBUTING.md", "ids": ["contributing-cache-prerequisites", "contributing-cache-proof"]},
       {"path": "docs/decisions/cache-decisions.md", "ids": ["docs-cache-decisions"]},
       {"path": "docs/template-sync.md", "ids": ["docs-template-init-cache", "docs-template-init-cache-lock"]},
       {"path": "docs/backend-library-selection.md", "ids": ["docs-library-selection-cache", "docs-library-selection-cache-rejection"]},
@@ -1435,7 +1419,6 @@
       {"path": "env/config/local.toml", "ids": ["local-config"]},
       {"path": "env/docker-compose.yml", "ids": ["compose-versitygw-service"]},
       {"path": "README.md", "ids": ["docs-readme-object-storage-profile"]},
-      {"path": "CONTRIBUTING.md", "ids": ["contributing-object-storage-prerequisites", "contributing-object-storage-proof"]},
       {"path": "docs/decisions/object-storage-decisions.md", "ids": ["docs-object-storage-decisions"]},
       {"path": "docs/template-sync.md", "ids": ["docs-template-init-object-storage", "docs-template-init-object-storage-lock"]},
       {"path": "docs/backend-library-selection.md", "ids": ["docs-library-selection-object-storage", "docs-library-selection-object-storage-rejection"]},

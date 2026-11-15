@@ -12,7 +12,9 @@ with the continuation owner before dependent work while keeping checkout
 state and user or native authority intact. Skip bootstrap turns when owners are
 unchanged.
 
-Send only [Subagent Brief Template](subagent-brief-template.md) fields.
+Brief each delegated lane with its checkable outcome, relevant context and
+paths, writable scope when mutating, and stop or proof boundary without copying
+repository-wide rules.
 Share the checkout across read-only lanes, and across concurrent mutable units
 or lanes when writable owners and locks are disjoint; serialize overlapping
 mutations, reserving isolated worktrees for concurrent conflicting edits where

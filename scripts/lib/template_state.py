@@ -710,7 +710,6 @@ _PROTECTED_MANIFEST_FILES = frozenset(
         "Cargo.lock",
         "rust-toolchain.toml",
         "README.md",
-        "CONTRIBUTING.md",
         "SECURITY.md",
         ".gitleaks.toml",
         ".jscpd.json",

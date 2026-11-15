@@ -12,10 +12,10 @@ availability alone does not authorize use.
 - Under [Transition](../spec-first-workflow/shared/transition.md#cross-phase-continuation),
   map phase actors to fresh collaboration subagents and the continuation owner
   to the root.
-- Subagents inherit the parent's working context. For another checkout, apply
-  [Repository Boundaries](../spec-first-workflow/shared/repository-boundaries.md)
-  and target it in commands/navigation; brief paths or command `cwd` do not
-  reload that project's config, roles, or tools.
+- Subagents inherit the parent's working context. For a neighboring repository,
+  apply [Authority](../../AGENTS.md#authority) and target it in
+  commands/navigation; brief paths or command `cwd` do not reload that project's
+  config, roles, or tools.
 - For each ready ledger unit, spawn a general-purpose subagent with
   [Implementation](../spec-first-workflow/phases/implementation.md) as Method
   and that packet as boundary (it is Acceptance-Unit Lead; `worker-agent` and

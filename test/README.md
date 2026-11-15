@@ -3,33 +3,6 @@
 This service retains this crate for utility-recipe tests. PostgreSQL-specific
 proof is available only when the local PostgreSQL profile is retained.
 
-<!-- template:begin postgres:test-readme-postgres -->
-`make test` compiles `integration-tests` with the `integration` feature off and
-runs non-Docker targets; `--features integration` targets require live
-`DATABASE_URL` and `PGBOUNCER_DATABASE_URL` (plus `NATS_URL` when
-`messaging=nats-jetstream`).
-
-- `fixtures/migrations/<scenario>/` holds migration-runner test fixtures and is
-  not part of the service schema in `migrations/`.
-
-Selection and claims: [PostgreSQL Validation](../docs/validation/postgres.md).
-Process and container proof for the built image stays in
-`crates/service/tests/` and `scripts/ci/runtime-image-check.sh`.
-<!-- template:end postgres:test-readme-postgres -->
-
-<!-- template:begin http-idempotency:test-readme-http-idempotency -->
-With the HTTP idempotency profile retained, `tests/http_idempotency/` uses
-`tests/support/commit_proxy.rs` for lost or corrupt `COMMIT` acknowledgements
-and SQL readback reconciliation; mounted HTTP proof runs where the
-introspection engine is retained.
-<!-- template:end http-idempotency:test-readme-http-idempotency -->
-<!-- template:begin jobs:test-readme-jobs -->
-
-With the jobs pack retained, `tests/jobs/` runs the process suite against the
-test-only `jobs-worker-fixture` binary while the shipped binary's refusal test
-stays in `crates/jobs-worker/tests/`.
-<!-- template:end jobs:test-readme-jobs -->
-
 <!-- template:begin jobs-reference:test-readme-reading-reference -->
 ## Reading-counter recovery reference
 
