@@ -105,7 +105,7 @@ socket2 = { version = "0.6.5", default-features = false }
 # move these pins together in one reviewed change
 # (docs/decisions/object-storage-decisions.md). Default features select the legacy
 # hyper 0.14, rustls 0.21, and ring stack; keep them off.
-aws-sdk-s3 = { version = "=1.153.0", default-features = false }
+aws-sdk-s3 = { version = "=1.155.0", default-features = false }
 # Workload identity for amazon_s3 only: the web identity, container, and
 # instance metadata credential providers. Its default features add SSO,
 # credential_process, and a second HTTPS client; keep them off.
@@ -116,7 +116,7 @@ aws-smithy-checksums = { version = "=0.65.0", default-features = false }
 aws-smithy-runtime = { version = "=1.16.1", default-features = false }
 # Existing SDK types used by adapter tests through the supported interceptor API.
 aws-smithy-runtime-api = { version = "=1.19.2", default-features = false }
-aws-smithy-types = { version = "=1.9.1", default-features = false }
+aws-smithy-types = { version = "=1.9.3", default-features = false }
 # A request body (axum's `Body`) is not `Sync`; the SDK requires one.
 sync_wrapper = { version = "1.0.2", default-features = false }
 # template:end object-storage:workspace-object-storage-client
