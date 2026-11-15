@@ -11,6 +11,7 @@ import tempfile
 import subprocess
 import runpy
 import select
+import socket
 import stat
 import sys
 import time
@@ -105,13 +106,45 @@ else:
             with self.subTest(action=action), tempfile.TemporaryDirectory() as directory:
                 private = Path(directory) / "output"
                 command = [sys.executable, "-c", f"import os, time; os.write(1, b'partial'); {action}; time.sleep(5)"]
-                with self.assertRaises(failure) as raised:
+                with contextlib.redirect_stderr(io.StringIO()) as diagnostic, self.assertRaises(failure) as raised:
                     controller.run(command, input=b"x" * (2 * 1024 * 1024), private_output=private,
                                    private_output_limit=64)
+                self.assertEqual(diagnostic.getvalue(), "")
                 if failure is controller.Refused:
                     self.assertEqual(str(raised.exception), "native_output_limit")
                 self.assertIn(b"partial", private.read_bytes())
                 self.assertLessEqual(private.stat().st_size, 64)
+
+    def test_terminal_refusal_closes_descendant_connection_after_leader_exits(self):
+        program = """
+import os, socket, sys
+assert sys.stdin.buffer.read() == b'input'
+with socket.socket(socket.AF_UNIX) as connection:
+    connection.settimeout(15)
+    connection.connect(sys.argv[1])
+    if os.fork() == 0:
+        connection.recv(1)
+        os._exit(0)
+    if sys.argv[2] == '0':
+        os.ftruncate(2, 4 * 1024 * 1024 + 1)
+    os._exit(int(sys.argv[2]))
+"""
+        for code, reason in ((0, "native_output_limit"), (17, "native_command_failed")):
+            with (self.subTest(code=code), tempfile.TemporaryDirectory() as directory,
+                  socket.socket(socket.AF_UNIX) as server):
+                address = str(Path(directory) / "witness")
+                server.bind(address)
+                server.listen()
+                server.settimeout(1)
+                with (contextlib.redirect_stderr(io.StringIO()) as diagnostic,
+                      self.assertRaisesRegex(controller.Refused, reason) as failure):
+                    controller.run([sys.executable, "-c", program, address, str(code)], input=b"input",
+                                   command_class="fixture", timeout=5)
+                with server.accept()[0] as peer:
+                    peer.settimeout(1)
+                    self.assertEqual(peer.recv(1), b"")
+                self.assertEqual((failure.exception.command_class, failure.exception.exit_code), ("fixture", code))
+                self.assertEqual(diagnostic.getvalue(), "")
 
 
 class ResourceAdmission(unittest.TestCase):
@@ -541,21 +574,15 @@ session.stop()
                 self.assertNotIn("withheld-secret", json.dumps(report))
 
     def test_native_exit_metadata_and_private_output_do_not_expose_argv(self):
-        process = mock.MagicMock()
-        process.__enter__.return_value = process
-        process.poll.return_value = 17
-        process.returncode = 17
-
-        def spawn(_command, **kwargs):
-            kwargs["stdout"].write(b"private stdout value")
-            kwargs["stderr"].write(b"private stderr value" + b"x" * 256)
-            return process
-
+        command = [sys.executable, "-c", "import os; os.write(1, b'private stdout value'); "
+                   "os.write(2, b'private stderr value' + b'x' * 256); os._exit(17)", "private-argument"]
         output = self.session.path / "native-config-test.output"
-        with mock.patch.object(controller.subprocess, "Popen", side_effect=spawn):
+        with (mock.patch.object(os, "killpg", side_effect=PermissionError),
+              contextlib.redirect_stderr(io.StringIO()) as diagnostic):
             with self.assertRaisesRegex(controller.Refused, "native_command_failed") as failure:
-                controller.run(["private-program", "private-argument"], command_class="nats_config_test",
-                               private_output=output, private_output_limit=64)
+                controller.run(command, command_class="nats_config_test", private_output=output, private_output_limit=64)
+        self.assertEqual(json.loads(diagnostic.getvalue()),
+                         {"event": "native_command_cleanup_unconfirmed", "command_class": "nats_config_test"})
         self.assertEqual(failure.exception.command_class, "nats_config_test")
         self.assertEqual(failure.exception.exit_code, 17)
         self.assertNotIn("private", str(failure.exception))

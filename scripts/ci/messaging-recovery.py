@@ -192,6 +192,45 @@ def private_text(path, text):
         output.write(text)
 
 
+def unreaped_exit_code(pid, until):
+    # The waitable leader reserves its PID/PGID until all refusal decisions finish.
+    if hasattr(os, "waitid"):
+        status = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        if status is None:
+            return None
+        # Darwin waitid can report exit bits beyond the byte that Popen returns.
+        return (status.si_status & 255) if status.si_code == os.CLD_EXITED else -status.si_status
+    # Darwin ps exposes the wait status in hex on Python versions without waitid.
+    try:
+        status = subprocess.run(["/bin/ps", "-p", str(pid), "-o", "stat=,xstat="],
+                                capture_output=True, timeout=max(0, until - time.monotonic()))
+    except subprocess.TimeoutExpired:
+        raise Refused("native_command_deadline") from None
+    require(status.returncode == 0, "native_exit_status_unavailable")
+    state, raw = status.stdout.split()
+    return os.waitstatus_to_exitcode(int(raw, 16)) if state.startswith(b"Z") else None
+
+
+def stop_command_group(process):
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+        time.sleep(2)
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        # Darwin returns EPERM for a group containing only its zombie leader.
+        # After reaping it, only an absence probe is safe: the PGID can be reused.
+        if process.poll() is None:
+            raise
+        try:
+            os.killpg(process.pid, 0)
+        except ProcessLookupError:
+            return
+        raise
+    process.wait(timeout=2)
+
+
 def wait_command(process, input, stdout, stderr, until, tick):
     pending = memoryview(input) if input is not None else b""
     if pending:
@@ -203,7 +242,11 @@ def wait_command(process, input, stdout, stderr, until, tick):
         process.stdin.close()
 
     next_check = 0
-    while pending or process.poll() is None:
+    while True:
+        if not pending:
+            code = unreaped_exit_code(process.pid, until)
+            if code is not None:
+                return code
         now = time.monotonic()
         require(now < until, "native_command_deadline")
         if now >= next_check:
@@ -228,6 +271,24 @@ def wait_command(process, input, stdout, stderr, until, tick):
             time.sleep(delay)
 
 
+def save_command_output(path, remaining, stdout, stderr):
+    if path is None:
+        return
+    # Parser text can contain configuration values. It is bounded, private
+    # and outside the evidence upload whitelist.
+    with contextlib.suppress(OSError), path.open("xb") as output:
+        os.chmod(path, 0o600)
+        for stream in (stdout, stderr):
+            if remaining is not None and remaining <= 0:
+                break
+            stream.seek(0)
+            raw = stream.read(4 * 1024 * 1024 if remaining is None else remaining - 1)
+            output.write(raw)
+            output.write(b"\n")
+            if remaining is not None:
+                remaining -= len(raw) + 1
+
+
 def run(command, *, timeout=30, env=None, input=None, check=True, tick=None, command_class=None,
         private_output=None, private_output_limit=None, validation_control=False):
     """Finite native command; suppress provider stderr and secret-bearing argv."""
@@ -238,11 +299,20 @@ def run(command, *, timeout=30, env=None, input=None, check=True, tick=None, com
                              ("compose", "exec", "inspect", "image", "network", "volume", "ps")}.get(command[1], "docker")
     with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
         until = time.monotonic() + timeout
-        with subprocess.Popen(command, stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
-                              stdout=stdout, stderr=stderr, env=env, start_new_session=not validation_control) as process:
+        process = subprocess.Popen(command, stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
+                                   stdout=stdout, stderr=stderr, env=env, start_new_session=not validation_control)
+        try:
+            code = wait_command(process, input, stdout, stderr, until, tick)
+            save_command_output(private_output, private_output_limit, stdout, stderr)
+            private_output = None
+            stdout.seek(0)
+            data = stdout.read(4 * 1024 * 1024 + 1)
+            require(len(data) <= 4 * 1024 * 1024 and os.fstat(stderr.fileno()).st_size <= 4 * 1024 * 1024,
+                    "native_output_limit")
+            require(not check or code == 0, "native_command_failed")
+            return process.wait(), data
+        except BaseException as error:
             try:
-                wait_command(process, input, stdout, stderr, until, tick)
-            except BaseException as error:
                 if validation_control:
                     # The queue owns the native observer and terminal readback.
                     if process.poll() is None:
@@ -253,41 +323,18 @@ def run(command, *, timeout=30, env=None, input=None, check=True, tick=None, com
                             process.kill()
                             process.wait(timeout=2)
                 elif process.returncode is None:
-                    # Keep the leader unreaped until both signals have been
-                    # sent. Its descendants may outlive it and ignore TERM.
-                    with contextlib.suppress(ProcessLookupError):
-                        os.killpg(process.pid, signal.SIGTERM)
-                        time.sleep(2)
-                        os.killpg(process.pid, signal.SIGKILL)
-                    process.wait(timeout=2)
-                if isinstance(error, Refused):
-                    error.command_class = command_class
-                    error.exit_code = process.returncode
-                raise
-            finally:
-                if private_output is not None:
-                    # Parser text can contain configuration values. It is bounded,
-                    # private and outside the evidence upload whitelist.
-                    with contextlib.suppress(OSError):
-                        with private_output.open("xb") as output:
-                            os.chmod(private_output, 0o600)
-                            remaining = private_output_limit
-                            for stream in (stdout, stderr):
-                                if remaining is not None and remaining <= 0:
-                                    break
-                                stream.seek(0)
-                                raw = stream.read(4 * 1024 * 1024 if remaining is None else remaining - 1)
-                                output.write(raw)
-                                output.write(b"\n")
-                                if remaining is not None:
-                                    remaining -= len(raw) + 1
-            stdout.seek(0)
-            data = stdout.read(4 * 1024 * 1024 + 1)
-            if len(data) > 4 * 1024 * 1024 or os.fstat(stderr.fileno()).st_size > 4 * 1024 * 1024:
-                raise Refused("native_output_limit", command_class=command_class, exit_code=process.returncode)
-            if check and process.returncode != 0:
-                raise Refused("native_command_failed", command_class=command_class, exit_code=process.returncode)
-            return process.returncode, data
+                    stop_command_group(process)
+            except (OSError, subprocess.TimeoutExpired):
+                print(json.dumps({"event": "native_command_cleanup_unconfirmed", "command_class": command_class}),
+                      file=sys.stderr)
+            if isinstance(error, Refused):
+                error.command_class = command_class
+                error.exit_code = process.returncode
+            save_command_output(private_output, private_output_limit, stdout, stderr)
+            raise
+        finally:
+            if process.stdin is not None:
+                process.stdin.close()
 
 
 def validation(*args, **kwargs):

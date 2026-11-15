@@ -47,24 +47,72 @@ def watch_set(values: list[str], owner: str) -> set[str]:
     return set(values)
 
 
-def single_image_source(code: str) -> bool:
-    """The sole source property must have an image call as its entire value."""
-    sources = list(re.finditer(r"\bsource\s*:\s*", code))
-    if len(sources) != 1:
+def top_level_parts(code: str, separator: str) -> list[str]:
+    """Split masked IaC only between complete expressions at this depth."""
+    closing = {"(": ")", "[": "]", "{": "}"}
+    stack: list[str] = []
+    parts = []
+    declaration = re.compile(r"[ \t]*(?:import|const|export)\b")
+    start = 0
+    for i, char in enumerate(code):
+        if char in closing:
+            stack.append(closing[char])
+        elif char in ")]}":
+            if not stack or char != stack.pop():
+                return []
+        elif not stack and (char == separator or (
+                separator == ";" and char == "\n" and declaration.match(code, i + 1))):
+            parts.append(code[start:i].strip())
+            start = i + 1
+    if code[start:].strip():
+        parts.append(code[start:].strip())
+    return [] if stack else parts
+
+
+def selected_image_service(code: str) -> bool:
+    """Recognize the direct export or the sole service returned in project resources."""
+    identifier = r"[A-Za-z_$][\w$]*"
+    primitives = {"service", "image", "defineRailway", "project"}
+    imported = set()
+    statements = [part for part in top_level_parts(code, ";") if part]
+    for statement in statements[:-1]:
+        names = re.fullmatch(r'import\s*\{([\w\s,]+)\}\s*from\s*"railway/iac"', statement)
+        if names:
+            imported.update(name.strip() for name in names[1].split(","))
+            continue
+        declaration = re.fullmatch(rf"(?:export\s+)?const\s+({identifier})\s*=\s*([^=;]+)", statement, re.S)
+        if not declaration or declaration[1] in primitives:
+            return False
+    if not statements or not (export := re.fullmatch(r"export\s+default\s+(.+)", statements[-1], re.S)):
         return False
-    value = code[sources[0].end():]
-    call = re.match(r"image\s*\(", value)
-    if call is None:
+    selected = export[1]
+    required = {"service", "image"}
+    if selected.startswith("defineRailway"):
+        project = re.fullmatch(
+            rf"defineRailway\s*\(\s*\(\s*(?P<context>{identifier})?\s*\)\s*=>\s*\{{\s*"
+            rf"const\s+(?P<resource>{identifier})\s*=\s*(?P<service>.+?)\s*(?:;|\n)\s*"
+            r"return\s+project\s*\(\s*[\w.$?\"\s]+,\s*\{\s*resources\s*:\s*\[\s*(?P=resource)\s*,?\s*\]"
+            r"\s*,?\s*\}\s*,?\s*\)\s*;?\s*\}\s*\)", selected, re.S)
+        if not project or project["context"] in primitives or project["resource"] in primitives:
+            return False
+        selected = project["service"]
+        required.update(("defineRailway", "project"))
+    # A module with bindings must establish the origin of the SDK primitives.
+    if len(statements) > 1 and not required <= imported:
         return False
-    depth = 1
-    for i in range(call.end(), len(value)):
-        if value[i] == "(":
-            depth += 1
-        elif value[i] == ")":
-            depth -= 1
-            if depth == 0:
-                return value[i + 1:].lstrip().startswith((",", "}"))
-    return False
+    options = re.fullmatch(rf'service\s*\(\s*(?:{identifier}|"")\s*,\s*\{{(.*)\}}\s*,?\s*\)', selected, re.S)
+    if not options:
+        return False
+    sources = []
+    for field in top_level_parts(options[1], ","):
+        prop = re.fullmatch(rf"({identifier})(?:\s*:\s*(.+))?", field, re.S)
+        if not prop:
+            return False
+        if prop[1] == "source":
+            sources.append(prop[2] or "")
+    if len(sources) != 1 or not (image := re.fullmatch(r"image\s*\((.*)\)", sources[0], re.S)):
+        return False
+    return bool(top_level_parts(image[1], ","))
 
 
 def policy_watches(root: Path) -> tuple[set[str] | None, str]:
@@ -89,6 +137,8 @@ def policy_watches(root: Path) -> tuple[set[str] | None, str]:
     # A string such as "[::]:8080" is a value, not a computed key.
     def mask_value(match: re.Match[str]) -> str:
         key = match[0][1:-1]
+        if key == "railway/iac":
+            return '"railway/iac"'
         if key.isidentifier() and re.match(r"\s*:", program[match.end():]):
             return key
         return '""'
@@ -103,9 +153,9 @@ def policy_watches(root: Path) -> tuple[set[str] | None, str]:
     for key in ("rootDirectory", "context", "buildContext", "additionalContexts", "dockerContext", "buildCommand"):
         if has_setting(key) or re.search(r"^\|[^|]*\b" + key + r"\b", text, re.M):
             raise Refusal(f"{source}: unsupported {key}; coverage requires the repository root build context")
-    if (source == IAC and single_image_source(code)
+    if (source == IAC and not re.search(r"^\|\s*`?build\.", text, re.M)
             and not any(has_setting(key) for key in ("build", "builder", "dockerfilePath", "watchPatterns"))
-            and not re.search(r"^\|\s*`?build\.", text, re.M)):
+            and selected_image_service(code)):
         return None, source
     table_patterns = table("build.watchPatterns")
     if not re.fullmatch(r"\s*`[^`]+`(?:\s*,\s*`[^`]+`)*\s*", table_patterns):
