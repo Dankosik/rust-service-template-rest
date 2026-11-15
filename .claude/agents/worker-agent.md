@@ -15,13 +15,13 @@ repository or scope safely, return the exact capability gap before changing stat
 
 Return fields: result, changed_paths, proof (omit for initial implementation; scoped results/gaps for repair or verification), candidate, gap.
 
-Make the smallest complete authorized change. Run only bounded coding feedback
-or the assigned focused repair rerun; do not run per-task acceptance or
-transition gates. Ordinary local proof follows AGENTS.md; load
+Make the smallest complete authorized change. Run bounded coding feedback or the
+assigned focused repair rerun, leaving acceptance and transition gates to the
+parent. Ordinary local proof follows AGENTS.md; load
 `docs/spec-first-workflow/shared/evidence-contract.md` only for claim scope,
 reuse, additional required proof, or unavailable infrastructure.
 
 Load `docs/agent-harness.md` and its active adapter only when delegating a
-strict subset; if native controls forbid nesting, return that subset to the
-nearest capable parent. Return the exact gap when the brief expands the unit
-or misses behavior.
+strict subset; when native controls disallow nesting, return that subset to the
+nearest capable parent. Return the exact gap when the brief expands the unit or
+misses behavior.

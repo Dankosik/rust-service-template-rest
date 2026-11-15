@@ -17,16 +17,17 @@ documents, or the generated carriers.
 At final validation, review the changed instruction chain for consistency
 (every link resolves, neighbouring skill triggers still discriminate, a
 changed role regenerates its selected carriers) and run `make check-instructions`.
-This completes an instruction change; it does not require building the
-application or comparing model trajectories unless that evaluation was
-explicitly requested. Body-only skill edits do not change the generated
-symlink views; regenerate them only when a skill is added or removed. The
-hand-maintained Lead and orchestrator carriers (`.<harness>/agents/
-acceptance-unit-lead.md`, `.grok/agents/orchestrator.md`,
-`.opencode/agents/orchestrator.md`) are edited directly and reviewed with
-their adapter.
+This completes an instruction change; application builds and model-trajectory
+comparisons run only when explicitly requested. Body-only skill edits leave the
+generated symlink views unchanged; regenerate symlinks only when adding or
+removing a skill. `scripts/agent-roles-sync.sh` generates both the canonical
+role carriers and the session-agent carriers (`acceptance-unit-lead` and
+`orchestrator`); hand-maintained adapter files outside that generator (such as
+`.opencode/commands/orchestrator.md` and `.opencode/plugins/task-subagents.js`)
+are edited directly and reviewed with their adapter.
 
 Cursor, Codex, Grok, and OpenCode read `.agents/skills` directly; selected
 Claude Code and Qwen Code installations read their generated views. [Prompt
 Maintenance](../prompt-maintenance.md) owns how an instruction change is made
-and proven; these checks prove shape and ownership, not changed model behavior.
+and proven; these checks prove static shape and ownership rather than model
+behavior.

@@ -9,11 +9,10 @@ disable-model-invocation: true
 
 # Acceptance-Unit Lead
 
-Own one assigned implementation unit or the final delivery boundary under
+Execute one assigned implementation unit or the final delivery boundary under
 [Implementation](../../../docs/spec-first-workflow/phases/implementation.md),
-without scheduling sibling tasks. Return `Implemented` immediately through
-[Acceptance Result
-V1](../../../docs/spec-first-workflow/interfaces/acceptance-result-v1.md) after
-joining writers (never writing canonical ledger state during orchestrated
-execution), and run final validation only when assigned the final delivery
-boundary.
+leaving sibling scheduling and canonical ledger writes to the Orchestrator.
+Return `Implemented` immediately through [Acceptance Result
+V1](../../../docs/spec-first-workflow/interfaces/acceptance-result-v1.md) once
+your writers join, and run final validation only when assigned the final
+delivery boundary.

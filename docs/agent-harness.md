@@ -6,34 +6,34 @@ how the harness provides it.
 
 ## Delegation Interface
 
-Across checkout or actor changes, keep workflow revision and instruction
-locators, verify effective model/effort natively, and resolve material drift
-with the continuation owner before dependent work (never mix policies,
-bulk-sync active checkouts, or override user/native authority). Unchanged
-owners need no bootstrap turn.
+Across checkout or actor changes, carry workflow revision and instruction
+locators, verify effective model and effort natively, and resolve material drift
+with the continuation owner before dependent work while keeping checkout
+state and user or native authority intact. Skip bootstrap turns when owners are
+unchanged.
 
 Send only [Subagent Brief Template](subagent-brief-template.md) fields.
-Read-only lanes share the checkout. Concurrent mutable units/lanes share a
-checkout only when mutable owners and locks are disjoint; otherwise serialize,
-or isolate only when cheaper than waiting—never for sequential work, cheap
-disjoint units, or read-only review.
+Share the checkout across read-only lanes, and across concurrent mutable units
+or lanes when writable owners and locks are disjoint; serialize overlapping
+mutations, reserving isolated worktrees for concurrent conflicting edits where
+isolation costs less than waiting.
 
-Count the active tree (Leads, mutable descendants, review/validation lanes)
+Count the active tree (Leads, mutable descendants, review and validation lanes)
 against capacity, reserving slots for review, unlock, and landing.
 
-Silence is not a stall; trigger [Parent-Owned
+Trigger [Parent-Owned
 Recovery](spec-first-workflow/shared/transition.md#parent-owned-recovery) on
-native failure, missed checkpoint, or repeated uninformative attempts. Before
-replacing a parent, reassigning scope, or resetting a stalled subtree, preserve
-edits/findings, reconcile state, and confirm descendant termination natively.
+native failure, missed checkpoint, or repeated uninformative attempts rather
+than quiet execution time. Before replacing a parent, reassigning scope, or
+resetting a stalled subtree, preserve edits and findings, reconcile state, and
+confirm descendant termination natively.
 
-Carry model, effort, isolation, identity, and lifecycle in tool fields. Select
-capability from remaining judgment, uncertainty, protected risks, and
-interacting invariants—not locks or unwritten tests. Use balanced settings for
-closed work; raise capability when signals disagree or a causal attempt/review
-exposes a missed invariant (not for expected test failures or syntax/setup
-errors), and keep it through repair. Children use the cheapest permitted
-settings; preserve user-selected models.
+Pass model, effort, isolation, identity, and lifecycle in native tool fields.
+Choose capability from open judgment, uncertainty, protected risks, and
+interacting invariants: use balanced settings for closed work, raise capability
+when signals conflict or an attempt/review exposes a missed invariant (retaining
+it through repair), and run children on the lightest sufficient settings while
+honoring user-selected models.
 
 Use `evidence-agent`, `specialist-agent`, `worker-agent`, `reviewer-agent`, or
 `adjudicator-agent`; put expertise or review lenses in `Method` and quality tiers

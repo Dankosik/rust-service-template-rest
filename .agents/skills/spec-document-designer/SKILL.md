@@ -1,6 +1,6 @@
 ---
 name: spec-document-designer
-description: "Spec authoring: Use for delegated spec.md synthesis or repair from accepted inputs. Own falsifiable behavior; Skip phase and review ownership."
+description: "Synthesize or repair spec.md into falsifiable behavior rules, unchanged invariants, and explicit dispositions from accepted inputs."
 metadata:
   invocation: user
   kind: workflow
@@ -9,10 +9,9 @@ disable-model-invocation: true
 
 # Spec Document Designer
 
-Must read [Specification](../../../docs/spec-first-workflow/phases/specification.md).
-Trace every item of Specification's accepted requester-meaning input,
-decision-changing evidence implication,
-runtime/generated authority, unchanged invariant, and proof expectation into a
-falsifiable rule or explicit unchanged, non-goal, or blocked disposition. Stop
-before review only when Specification's ready condition is met or a named
-user/external decision blocks it.
+Read and apply [Specification](../../../docs/spec-first-workflow/phases/specification.md).
+Trace every accepted requester-meaning input, decision-changing evidence
+implication, runtime or generated authority, unchanged invariant, and proof
+expectation into a falsifiable rule or an explicit unchanged, non-goal, or
+blocked disposition. Complete once Specification's ready condition holds, or
+return the named user or external decision blocking it.

@@ -1,6 +1,6 @@
 ---
 name: agent-prompt-composer
-description: "Task messages: Use when asked to turn rough input into a clear repository task or handoff. Write as to a capable colleague, preserving intent and leaving execution choices to them."
+description: "Turn rough notes into a clear, self-contained repository task or handoff message that preserves intent and leaves execution choices to the recipient."
 metadata:
   invocation: user
   kind: workflow

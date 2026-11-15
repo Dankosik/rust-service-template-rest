@@ -1,20 +1,30 @@
 # Workflow Router
 
-Select the smallest non-direct execution path and current decision owner. This
-file defines routing, not phase methods. If [AGENTS.md](../AGENTS.md#direct-work)
-selected Direct Work, stop routing here.
+Select the smallest non-direct execution path and current decision owner. If
+[AGENTS.md](../AGENTS.md#direct-work) selected Direct Work, stop routing here.
+
+## Terms
+
+| Term | Meaning |
+| --- | --- |
+| `Direct Work` | Single-owner local execution under `AGENTS.md` with no workflow artifacts or ledger. |
+| `Unit` | One coherent repository deliverable and its acceptance criteria inside Planning or Implementation. |
+| `Acceptance-Unit Lead` | Session or subagent actor owning one assigned `Unit` (or final delivery validation). |
+| `Ledger Orchestrator` | Single routing owner (`LEDGER_ORCHESTRATOR`) that schedules `Unit`s and writes canonical `tasks.md` state. |
+| `Lane` | Bounded delegated worker (`worker-agent`, `specialist-agent`, `evidence-agent`) executing a strict subset for its parent. |
+| `Ready Frontier` | Set of tasks in `tasks.md` whose consumed contracts, writable scopes, and authority are ready to start immediately. |
+| `Implemented` vs `Accepted` | `Implemented` means code and tests landed with writers joined (unlocking downstream coding); `Accepted` means final assembled validation and required review passed. |
 
 ## Path
 
 Use `structured` when accepted decisions or proof must survive the current
-reasoning pass. Use `orchestrated` only when coordination is material: several
+reasoning pass. Use `orchestrated` when coordination is material: several
 independent owners, separate mutable candidates, required fresh context,
 hard-to-reverse decisions, dirty-checkout isolation, or durable multi-session
 execution.
 
-A bounded read-only lane does not by itself make work orchestrated. Path is not
-a quality tier. Re-route only when current evidence changes coordination,
-ownership, reversibility, or proof.
+Keep a single bounded read-only lane on `structured`, and re-route only when
+current evidence changes coordination, ownership, reversibility, or proof.
 
 ## Macro Phases
 
@@ -25,20 +35,18 @@ ownership, reversibility, or proof.
 | Planning | Planning and required Task Review / Readiness |
 | Implementation | Parallel implementation, then final validation and any required delivery review |
 
-Research is a standalone macro phase only when the accepted boundary is
-`research only`; otherwise it supports the active phase. Review, repair, and
-the smallest upstream reopen remain inside the active macro phase. Each phase
-actor owns at most one macro phase. For a request spanning phases, the current
-root retains responsibility as the continuation coordinator and delegates the
-selected phase to a fresh actor through the authorized harness. The coordinator
-routes results; it does not perform phase work or accept implementation units.
-[Transition](spec-first-workflow/shared/transition.md) owns continuation,
-including before an Implementation ledger exists. An explicit phase-only or
-research-only request stops at that reviewed boundary.
+Treat Research as a standalone macro phase only when the accepted boundary is
+`research only`; otherwise run it inside the active phase alongside review,
+repair, and the smallest upstream reopen. Assign at most one macro phase per
+phase actor. When a request spans phases, the root session acts solely as
+continuation coordinator—routing results under
+[Transition](spec-first-workflow/shared/transition.md) and delegating each
+selected macro phase to a fresh actor through the authorized harness—stopping at
+any explicit phase-only or research-only boundary.
 
-Traverse applicable macro phases in table order. Skip one only when Phase
-Selection evidence shows that its decision is already closed or untriggered;
-never fold its open decision into a neighboring phase or the same phase actor.
+Traverse applicable macro phases in table order, skipping a phase only when
+Phase Selection evidence shows its decision is already closed or untriggered
+while keeping open decisions in their owning phase and actor.
 
 ## Phase Selection
 
@@ -55,12 +63,11 @@ Evaluate these triggers before loading a phase owner:
 | One accepted implementation unit is ready and authorized | [Implementation](spec-first-workflow/phases/implementation.md) |
 
 Intake is required for new structured work unless a complete Intent already
-exists. Specification and Planning are required for structured work unless
-ready equivalent authority already supplies their output. Missing or changed
-requester meaning still reopens Intake. Other phases are conditional.
-Load only the selected owner; do not load a phase merely to
-declare it unnecessary. Record `skipped` only when a durable [Transition
-result](spec-first-workflow/shared/transition.md) needs that disposition.
+exists; Specification and Planning are required unless ready equivalent
+authority already supplies their output. Reopen Intake whenever requester
+meaning is missing or changed. Load only the triggered owner, recording
+`skipped` solely when a durable [Transition
+result](spec-first-workflow/shared/transition.md) requires that disposition.
 
 ## Conditional Owners
 

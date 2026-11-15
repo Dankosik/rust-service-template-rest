@@ -1,6 +1,6 @@
 ---
 name: idea-refine
-description: "Idea convergence: Use when a raw or solution-led idea lacks one buildable direction. Own problem/outcome/MVP/assumptions/decision; Skip engineering-ready work."
+description: "Converge a raw or solution-led idea into one primary operator problem, falsifiable assumptions, and an MVP boundary ready for Intake."
 metadata:
   invocation: user
   kind: workflow
@@ -10,19 +10,18 @@ disable-model-invocation: true
 # Idea Refine
 
 Drive convergence by turning a feature, tool, or vendor pitch into one concrete
-user or operator situation (who cannot decide or act, at which moment, and at
-what cost) and selecting the single primary operator whose success determines
-MVP correctness.
+user or operator situation (who is blocked from deciding or acting, at which
+moment, and at what cost) and selecting the single primary operator whose
+success determines MVP correctness.
 
 - State success as observable behavior, outcome, or risk reduction inside the
   team's span of influence (for prevention, measure risk shrinking rather than
-  recovery usage; numeric targets need supplied evidence or an explicit
+  recovery usage; pair numeric targets with supplied evidence or an explicit
   discovery-placeholder label).
-- Compare `2-3` genuinely distinct directions (not minor variants) and converge
-  on the one that tests the riskiest value assumption with the least
-  irreversible scope; treat `MVP` as the smallest slice that proves that core
-  bet and write `Not Doing` as concrete excluded functionality, audiences,
-  integrations, and guarantees rather than generic `"advanced features"`.
+- Compare `2-3` genuinely distinct directions and converge on the one that tests
+  the riskiest value assumption with the least irreversible scope; define `MVP`
+  as the smallest slice proving that core bet, and list concrete excluded
+  functionality, audiences, integrations, and guarantees under `Not Doing`.
 - Write each key assumption as a falsifiable `"we believe..."` bet paired with an
   observable kill, shrink, or pivot trigger (marking anecdote as weak
   evidence); cover ordinary missing detail with labeled safe assumptions and ask
@@ -30,8 +29,8 @@ MVP correctness.
   privacy, safety, or destructive action).
 
 Disposition alternatives as selected, eliminated with evidence, or blocked by
-one named open decision. Hand off the converged direction (without smuggling
-architecture, schema, API, or task breakdowns) to
+one named open decision. Hand off the converged problem-and-MVP direction to
 [Intake](../../../docs/spec-first-workflow/phases/intake.md) to capture as
-[Intent](../../../docs/spec-first-workflow/interfaces/intent.md), or return the
-material decision that still prevents convergence.
+[Intent](../../../docs/spec-first-workflow/interfaces/intent.md) (leaving
+architecture, schema, API, and task breakdowns to downstream phases), or return
+the material decision blocking convergence.

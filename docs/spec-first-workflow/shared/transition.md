@@ -3,35 +3,32 @@
 Use when a result may move or reopen a macro phase, or cross an actor/session
 boundary.
 
-Move only when the current owner is `ready`, every triggered decision has a
-disposition, required review permits movement, and the next owner can act
-without inventing product meaning, mechanism, ownership, or authority.
-An untriggered phase may be `skipped` without loading or reviewing it. Ordinary
-inline movement needs no receipt; a durable macro-phase boundary returns
-[Transition Result V1](#transition-result-v1).
+Move once the current owner is `ready`, every triggered decision has a
+disposition, required review permits movement, and the next owner has explicit
+product meaning, mechanism, ownership, and authority. Mark untriggered phases
+`skipped` directly, use inline movement within a session, and emit [Transition
+Result V1](#transition-result-v1) at durable macro-phase boundaries.
 
 Carry only the current result, authoritative locators, movement evidence,
-candidate identity when relevant, proof boundary, exact blocker/next action,
-and reopen condition. Package a next-session prompt through [Prompt
-Composition](../../prompt-composition.md). Same-phase repair or context rollover
-reports resume state without pretending movement occurred.
+candidate identity when relevant, proof boundary, exact blocker or next action,
+and reopen condition. Package next-session prompts through [Prompt
+Composition](../../prompt-composition.md), and report same-phase repair or
+context rollover as resume state.
 
 For a persisted Implementation ledger, the [Planning Ledger
 Contract](../phases/planning/ledger-contract.md#acceptance-transition) owns the
-immediate `Implemented`, `Accepted`, or `Blocked` transition. A fixed inline unit creates no
-synthetic ledger transition.
+immediate `Implemented`, `Accepted`, or `Blocked` transition, while fixed inline
+units move directly.
 
-Reopen only the smallest owner invalidated by current evidence and preserve
-unaffected decisions and proof. Stop at an explicit phase boundary, unavailable
-required external input, new authority boundary, or required durable handoff.
-That stop applies to the current phase actor; an explicit user stop still
-bounds the whole request.
+Reopen only the smallest owner invalidated by current evidence while preserving
+unaffected decisions and proof. Pause the current phase actor at an explicit
+phase boundary, unavailable required external input, new authority boundary, or
+required durable handoff; stop the whole request on an explicit user stop.
 
-A mechanical locator or receipt refresh after an accepted repair does not
-reopen unaffected decisions. Check the exact delta, update current identities,
-and retain the earlier verdict only for its unchanged semantic scope. Changed
-meaning, mechanism, oracle, risk, or dependency admission still requires its
-owner and applicable review; a changed hash alone is not that decision.
+On a mechanical locator or receipt refresh after an accepted repair, inspect the
+exact delta, update current identities, and retain the earlier verdict for
+unchanged semantic scope; route any change in meaning, mechanism, oracle, risk,
+or dependency admission through its owner and review.
 
 ## Cross-Phase Continuation
 
