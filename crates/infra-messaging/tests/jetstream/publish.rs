@@ -1,5 +1,3 @@
-//! Publication acknowledgement, refusal, and ambiguity.
-
 use super::*;
 
 #[tokio::test]

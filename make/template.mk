@@ -1,8 +1,5 @@
 # Portable standard commands shared by every service derived from this
 # template. Service-specific commands belong in make/service.mk, never here.
-#
-# `--locked` refuses to update Cargo.lock implicitly, so a build never
-# silently resolves different versions than the committed lockfile.
 
 SHELL := /bin/sh
 .DEFAULT_GOAL := help
@@ -38,8 +35,6 @@ BUILD_CARGO = python3 scripts/ci/build-context.py --run -- $(CARGO)
 # passes the event's base commit.
 BASE_REF ?= origin/main
 export BASE_REF
-# Crate list for lint-changed and test-changed, as scripts/ci/affected-crates.sh
-# prints it: PKGS="health infra-http".
 PKGS ?=
 REQUIRE_PKGS = @test -n "$(strip $(PKGS))" || { printf '%s requires PKGS="<crate> <crate>"\n' "$@" >&2; exit 2; }
 # Not security boundaries: they stop an agent from launching a costly command
@@ -55,10 +50,6 @@ HEAVY_GUARD = @if [ "$(ALLOW_HEAVY)" != "1" ] && [ "$(CI)" != "true" ]; then pri
 VALIDATION_LOCK := bash scripts/ci/validation-lock.sh --
 VERIFY := bash scripts/ci/verify.sh
 
-# The OpenAPI document is generated from the Rust contract by the `openapi`
-# binary and committed; `make test` refuses a stale copy. Redocly CLI lints
-# the committed file (Node.js via npx), oasdiff compares it with the
-# pull-request base (Go via `go run`).
 REDOCLY_CLI ?= npx --yes @redocly/cli@$(REDOCLY_CLI_VERSION)
 OASDIFF ?= go run github.com/oasdiff/oasdiff@v$(OASDIFF_VERSION)
 
@@ -106,12 +97,10 @@ ACTIONLINT ?= go run github.com/rhysd/actionlint/cmd/actionlint@v$(ACTIONLINT_VE
 # runners, which have it preinstalled.
 RUFF ?= $(if $(shell command -v uvx 2>/dev/null),uvx ruff@$(RUFF_VERSION),pipx run ruff==$(RUFF_VERSION))
 AST_GREP ?= $(if $(shell command -v uvx 2>/dev/null),uvx --from ast-grep-cli@$(AST_GREP_VERSION) ast-grep,pipx run --spec ast-grep-cli==$(AST_GREP_VERSION) ast-grep)
-# Tracked and untracked shell scripts that exist in the worktree.
 SHELL_FILES = $(wildcard $(shell git ls-files --cached --others --exclude-standard -- '*.sh'))
 # Tracked and untracked Markdown files; `git ls-files` keeps target/ out.
 MARKDOWN_FILES = $(wildcard $(shell git ls-files --cached --others --exclude-standard -- '*.md'))
 
-# Trivy keeps its vulnerability database in a named volume between runs.
 TRIVY_CACHE_VOLUME ?= trivy-cache
 
 # The only portable registry of standard target names. Local service recipes
@@ -148,7 +137,6 @@ monitoring-rules: ## Check Prometheus rules and their deterministic fixtures wit
 	bash scripts/ci/monitoring-rules.sh
 endif
 
-# Source-only checks are contributed by make/source.mk in the template source.
 SOURCE_CHECK_TARGETS ?=
 
 # `template_state.py` is the sole profile authority. Its source default is
@@ -346,10 +334,11 @@ fmt-check: ## Fail when formatting differs from rustfmt output
 # Retained profiles extend this without changing portable lint semantics.
 INTEGRATION_LINT_FEATURES ?=
 
-# Clippy's `-D warnings` does not reach rustdoc, whose lints (a link to a
-# private item, a redundant link target, a malformed table) would otherwise
-# only print. Cargo's `build.warnings = "deny"` would cover both, but it also
-# fails on the vendored crates, which stay byte-identical to upstream.
+# Clippy's `-D warnings` does not reach rustdoc; `RUSTDOCFLAGS="-D warnings"`
+# enforces `broken_intra_doc_links`, `private_intra_doc_links`,
+# `redundant_explicit_links`, and HTML/table checks across public and private
+# items. Cargo's `build.warnings = "deny"` would cover both, but it also fails
+# on the vendored crates, which stay byte-identical to upstream.
 lint lint-changed: export RUSTDOCFLAGS := $(RUSTDOCFLAGS) -D warnings
 
 lint: ## Clippy over all targets and rustdoc, warnings as errors
@@ -367,9 +356,6 @@ lint-changed: ## Clippy and rustdoc, warnings as errors, over the crates in PKGS
 check-skills: ## Validate the shape of .agents/skills (frontmatter, budget, links)
 	python3 scripts/check-skills.py
 
-# Harness carriers are generated from .agents/roles, .agents/codex-project.toml,
-# and .agents/skills; the *-check targets prove the committed carriers are
-# byte-stable against their sources.
 agent-roles-sync: ## Regenerate the Codex, Claude, Qwen, Grok, Cursor, and OpenCode role carriers
 	bash scripts/agent-roles-sync.sh --apply --repo .
 
@@ -405,7 +391,6 @@ check-instructions: check-skills agent-roles-check ## Every selected instruction
 		*) printf 'unsupported agent harness: %s\\n' "$$harness" >&2; exit 2 ;; \
 	esac
 
-# $(TOOLS_ROOT)/<crate>-<version>/bin/<crate>: build the pinned crate once.
 $(TOOLS_ROOT)/%:
 	$(CARGO) install --locked --root "$(TOOLS_ROOT)/$(firstword $(subst /, ,$*))" --version "$(patsubst $(notdir $@)-%,%,$(firstword $(subst /, ,$*)))" $(notdir $@)
 
@@ -453,8 +438,6 @@ shellcheck: ## ShellCheck every shell script through the pinned container
 	@test -n "$(SHELL_FILES)" || { echo "no shell scripts found; skipping ShellCheck"; exit 0; }; \
 	$(VALIDATION_LOCK) bash scripts/ci/validation-lock.sh --container-run -- docker run --rm --read-only --network none -v "$(CURDIR):/src:ro" -w /src "$(SHELLCHECK_IMAGE)" -x -- $(SHELL_FILES)
 
-# ruff.toml selects defect rules only (no formatter, no style rules) and
-# excludes vendor/.
 python-lint: ## Lint the Python scripts for defects with the pinned ruff
 	@command -v uvx >/dev/null 2>&1 || command -v pipx >/dev/null 2>&1 || { echo "$@ requires uv or pipx for ruff@$(RUFF_VERSION)" >&2; exit 2; }
 	$(RUFF) check --no-cache .
@@ -492,7 +475,6 @@ container-security: ## Admit binary inventories, then fail on fixable HIGH/CRITI
 	$(HEAVY_GUARD)
 	$(VALIDATION_LOCK) env TRIVY_CACHE_VOLUME="$(TRIVY_CACHE_VOLUME)" bash scripts/ci/runtime-image-scan.sh security "$(CONTAINER_IMAGE)"
 
-# Pinned Trivy converts the same admitted native graph into CycloneDX.
 SBOM_OUTPUT ?= sbom.cdx.json
 container-sbom: ## Write admitted per-binary CycloneDX to SBOM_OUTPUT; ALLOW_HEAVY=1
 	$(HEAVY_GUARD)
@@ -505,7 +487,6 @@ publish-image-metadata-check: ## Self-test of the publication naming and tag pro
 .PHONY: grpc-generate grpc-check
 GRPC ?= none
 export GRPC
-# Buf runs through `go run` like the other Go tools; the gRPC scripts read BUF.
 BUF ?= go run github.com/bufbuild/buf/cmd/buf@v$(BUF_VERSION)
 export BUF
 

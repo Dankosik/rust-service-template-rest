@@ -689,8 +689,6 @@ async fn probes_are_answered_while_every_in_flight_permit_is_held() {
         .route("/hold", get(handler_1));
     let mut options = options();
     options.max_in_flight = NonZeroU32::new(1);
-    // The holder keeps its permit, and the next request its wait, while the
-    // probes run.
     options.request_timeout = Duration::from_secs(30);
     let app = harden(routes, &options);
 
@@ -700,8 +698,6 @@ async fn probes_are_answered_while_every_in_flight_permit_is_held() {
     });
     started.notified().await;
 
-    // The next request waits for the permit, so the instance is saturated
-    // with a request queued behind it.
     let waiting = tokio::spawn({
         let app = app.clone();
         async move { app.oneshot(request(Method::GET, "/hold")).await.unwrap() }

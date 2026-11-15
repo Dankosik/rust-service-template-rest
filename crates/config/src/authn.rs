@@ -81,11 +81,9 @@ impl Audiences {
 }
 
 // template:begin oidc-jwt:authn-token-profile
-/// Additional JWT access-token requirements selected by an OIDC JWT profile.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum TokenProfile {
-    /// Accept the service's resource-server access-token contract.
     #[default]
     ResourceServer,
     /// Require RFC 9068 access-token typing and claims.
@@ -94,37 +92,28 @@ pub enum TokenProfile {
 // template:end oidc-jwt:authn-token-profile
 
 // template:begin oidc-jwt:authn-algorithm
-/// Signature algorithms this service admits for JWT access tokens.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 pub enum JwtAlgorithm {
-    /// RSA PKCS#1 v1.5 with SHA-256.
     #[default]
     #[serde(rename = "RS256")]
     Rs256,
-    /// ECDSA P-256 with SHA-256.
     #[serde(rename = "ES256")]
     Es256,
-    /// RSA PSS with SHA-256.
     #[serde(rename = "PS256")]
     Ps256,
-    /// Edwards-curve Ed25519 signatures.
     #[serde(rename = "EdDSA")]
     EdDsa,
 }
 // template:end oidc-jwt:authn-algorithm
 
-/// Static configuration for the optional inbound authentication profiles.
 #[derive(Clone, Deserialize)]
 #[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum AuthnConfig {
     /// No provider is configured. This is the omitted-section default.
     None {},
     // template:begin oidc-jwt:authn-config-jwt-variant
-    /// Verify signed OIDC access tokens against discovered keys.
     OidcJwt {
-        /// Exact OIDC issuer used for discovery and verified-claim comparison.
         issuer: String,
-        /// Exact accepted audiences, from one string or a nonempty list.
         audience: Audiences,
         /// JWT access-token contract. Missing uses `resource-server`.
         #[serde(default)]
@@ -143,15 +132,10 @@ pub enum AuthnConfig {
     },
     // template:end oidc-jwt:authn-config-jwt-variant
     // template:begin oidc-introspection:authn-config-introspection-variant
-    /// Verify opaque access tokens with the configured RFC 7662 endpoint.
     OidcIntrospection {
-        /// Exact OIDC issuer used for verified-claim comparison.
         issuer: String,
-        /// Exact accepted audiences, from one string or a nonempty list.
         audience: Audiences,
-        /// Fixed RFC 7662 endpoint, validated by the adapter before I/O.
         introspection_endpoint: String,
-        /// Client identifier for the fixed introspection credential.
         introspection_client_id: String,
         /// Environment-only client secret. Missing or blank is rejected.
         /// Whitespace determines absence only; a present credential retains
@@ -180,7 +164,6 @@ pub enum AuthnConfig {
     // template:end oidc-introspection:authn-config-introspection-variant
 }
 
-/// Leaves trust and credential inputs out of `Debug` so they never reach logs.
 impl std::fmt::Debug for AuthnConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AuthnConfig")
@@ -278,7 +261,6 @@ where
 // template:end oidc-introspection:authn-default-provider-concurrency
 
 impl AuthnConfig {
-    /// The `authn.mode` value that selected this variant.
     #[must_use]
     pub const fn mode(&self) -> &'static str {
         match self {
@@ -293,11 +275,6 @@ impl AuthnConfig {
     }
 
     // template:begin oidc-introspection:authn-required-introspection-secret
-    /// The client secret that `oidc-introspection` requires.
-    ///
-    /// # Errors
-    ///
-    /// Names the variable to set when the secret is absent.
     pub fn require_introspection_client_secret(
         secret: Option<&SecretString>,
     ) -> Result<&SecretString, ValidationError> {

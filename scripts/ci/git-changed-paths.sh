@@ -1,11 +1,4 @@
 #!/usr/bin/env bash
-# Emit unique changed paths. Renames include both names. A copy from an
-# unchanged path contributes only the added name.
-#
-#   git-changed-paths.sh --worktree BASE_REF   commits since the merge base, the
-#                                              index, the worktree, untracked files
-#   git-changed-paths.sh --diff BASE HEAD      two commits
-#   git-changed-paths.sh --self-test
 set -euo pipefail
 
 usage() {

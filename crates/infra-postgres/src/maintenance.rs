@@ -1,10 +1,3 @@
-//! Maintenance observation for the tables a profile cleans up.
-//!
-//! Two signals per retained table owner: how old its oldest eligible row is
-//! ([`MaintenanceObserver`]), and what each cleanup pass confirmed it removed
-//! ([`CleanupPass`]). `env/monitoring/postgres-maintenance.rules.yml` holds
-//! the alert examples built on them.
-
 use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
@@ -22,10 +15,8 @@ pub use population::{
 // Keep the target used by maintenance log filters when a call site moves.
 const LOG_TARGET: &str = module_path!();
 
-/// Delay between scheduled cleanup passes.
 const CLEANUP_INTERVAL: Duration = Duration::from_mins(1);
 
-/// Cadence for the existing scheduled owner; direct cleanup calls do not use it.
 #[derive(Debug)]
 pub struct CleanupSchedule {
     interval: tokio::time::Interval,
@@ -40,18 +31,11 @@ impl CleanupSchedule {
         Self { interval }
     }
 
-    /// Wait before a pass; the first wait ends at once. The owner cancels
-    /// this future with its existing token.
     pub async fn next(&mut self) {
         self.interval.tick().await;
     }
 }
 
-/// Run `pass` on the [`CleanupSchedule`] and sample `cleanup`'s population
-/// with `sample`, both until `cancel` fires, which drops whichever is in
-/// flight. Each pass that ends without cancellation increments `runs_metric`
-/// by `outcome` (`completed` or `failed`); a failed pass waits for the next
-/// tick.
 pub async fn run_scheduled_cleanup<E, P, S>(
     cleanup: Cleanup,
     runs_metric: &'static str,

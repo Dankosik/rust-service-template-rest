@@ -1,16 +1,4 @@
 #!/usr/bin/env bash
-# Lifecycle check of a built runtime image, observed from outside the
-# container because the distroless base has no shell or curl: the service
-# starts under the hardened run flags, /health/ready answers, the startup
-# record carries the expected commit, and SIGTERM ends the process with exit
-# code 0 inside the 45 s grace budget.
-# The filesystem preflight checks pruned paths on the same fixed image. A
-# retained /jobs-worker must also refuse startup before dependency I/O.
-#
-#   runtime-image-check.sh IMAGE [EXPECTED_COMMIT]
-#   RUNTIME_IMAGE_NETWORK      Docker network to join (a compose project's)
-#   RUNTIME_IMAGE_POSTGRES_DSN Enable the PostgreSQL profile with this DSN, so
-#                              readiness is observed with the pool open
 set -euo pipefail
 
 image=${1:?runtime image is required}

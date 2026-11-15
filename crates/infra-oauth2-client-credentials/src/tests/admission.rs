@@ -74,7 +74,6 @@ fn direct_construction_repeats_sensitive_option_admission() {
             },
             "audience",
         ),
-        // Whitespace alone is empty, as the typed configuration section rules.
         (
             Options {
                 client_id: " ".to_owned(),

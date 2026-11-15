@@ -1,10 +1,4 @@
 #!/usr/bin/env python3
-"""Small real-Git lifecycle fixtures; full Rust render proof belongs to A/B use.
-
-The fixture's public initializer deliberately has revision-specific generated
-output. No private renderer or updater seam is substituted. These tests protect
-Git custody/conflicts and input refusal; they do not claim Rust generation proof.
-"""
 
 from __future__ import annotations
 

@@ -1,10 +1,3 @@
-//! The registered routes as an `AsyncAPI` 3.0 document.
-//!
-//! A route declared with [`Route::documented`](crate::Route::documented)
-//! carries its payload type's `utoipa` schema, so the document comes from the
-//! same declaration that routes the event and cannot name another subject,
-//! type or version.
-
 use std::collections::BTreeMap;
 
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
@@ -19,8 +12,6 @@ use crate::wire::{
     NATS_MSG_ID, schema_label,
 };
 
-/// Appends a payload type's schema, and every schema it references, to the
-/// list and returns the payload schema's name.
 pub(crate) type PayloadSchema = fn(&mut Vec<(String, RefOr<Schema>)>) -> String;
 
 pub(crate) fn payload_schema<T: ToSchema>(schemas: &mut Vec<(String, RefOr<Schema>)>) -> String {
@@ -30,7 +21,6 @@ pub(crate) fn payload_schema<T: ToSchema>(schemas: &mut Vec<(String, RefOr<Schem
     name
 }
 
-/// Why the registered routes have no contract document.
 #[derive(Debug, thiserror::Error)]
 pub enum ContractError {
     #[error("route for {event_type} v{schema_version} has no payload schema")]
@@ -56,10 +46,6 @@ impl Registry {
     /// The document has no operations, because a route does not say whether
     /// this process publishes or consumes it. Keys are sorted, so the same
     /// routes always render the same document.
-    ///
-    /// # Errors
-    /// Rejects a route without a payload schema, two different schemas under
-    /// one name, and a schema that cannot be rendered.
     pub fn asyncapi(&self, title: &str, version: &str) -> Result<Value, ContractError> {
         let mut channels = BTreeMap::<&str, BTreeMap<String, Value>>::new();
         let mut schemas = BTreeMap::<String, Value>::new();
@@ -234,15 +220,15 @@ mod tests {
 
     #[derive(utoipa::ToSchema)]
     struct Line {
-        #[allow(dead_code, reason = "only the schema is read")]
+        #[expect(dead_code, reason = "only the schema is read")]
         sku: String,
     }
 
     #[derive(utoipa::ToSchema)]
     struct OrderCreated {
-        #[allow(dead_code, reason = "only the schema is read")]
+        #[expect(dead_code, reason = "only the schema is read")]
         lines: Vec<Line>,
-        #[allow(dead_code, reason = "only the schema is read")]
+        #[expect(dead_code, reason = "only the schema is read")]
         note: Option<String>,
     }
 
@@ -253,7 +239,7 @@ mod tests {
 
     #[derive(utoipa::ToSchema)]
     struct OrderCancelled {
-        #[allow(dead_code, reason = "only the schema is read")]
+        #[expect(dead_code, reason = "only the schema is read")]
         reason: String,
     }
 
@@ -391,7 +377,7 @@ mod tests {
     }
 
     #[derive(utoipa::ToSchema)]
-    #[allow(dead_code, reason = "only the schema is read")]
+    #[expect(dead_code, reason = "only the schema is read")]
     struct TuplePayload {
         pair: (String, bool),
     }
@@ -421,7 +407,7 @@ mod tests {
     }
 
     #[derive(utoipa::ToSchema)]
-    #[allow(dead_code, reason = "only the schema is read")]
+    #[expect(dead_code, reason = "only the schema is read")]
     struct Node {
         lines: Vec<Line>,
         #[schema(no_recursion)]
@@ -456,7 +442,7 @@ mod tests {
     }
 
     #[derive(utoipa::ToSchema)]
-    #[allow(dead_code, reason = "only the schema is read")]
+    #[expect(dead_code, reason = "only the schema is read")]
     struct LiteralPayload {
         #[schema(schema_with = literal_metadata_schema)]
         metadata: serde_json::Value,
@@ -554,13 +540,13 @@ mod tests {
     mod other {
         #[derive(utoipa::ToSchema)]
         pub(super) struct Line {
-            #[allow(dead_code, reason = "only the schema is read")]
+            #[expect(dead_code, reason = "only the schema is read")]
             quantity: u32,
         }
 
         #[derive(utoipa::ToSchema)]
         pub(super) struct OrderShipped {
-            #[allow(dead_code, reason = "only the schema is read")]
+            #[expect(dead_code, reason = "only the schema is read")]
             lines: Vec<Line>,
         }
 

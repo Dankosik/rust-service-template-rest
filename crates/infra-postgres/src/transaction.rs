@@ -1,9 +1,3 @@
-//! The transaction seam and the commit-outcome policy.
-//!
-//! A feature chooses the atomic boundary by calling [`in_tx`] with an async
-//! closure. The boundary owns commit and rollback. A closure borrowing the
-//! underlying connection must follow the restriction on [`Tx::connection`].
-//!
 //! The one thing a driver cannot hide is that `COMMIT` may have succeeded
 //! on the server after the client stopped hearing from it. [`TxError`]
 //! keeps the two cases apart: a commit the server definitely rejected may be
@@ -27,13 +21,10 @@ use crate::error::sqlstate;
 use crate::observe::{self, TransactionObservation, TransactionOutcome, observed};
 use crate::pool::{acquire, acquire_until, format_pg_duration};
 
-/// The stage that failed and what is known about the commit outcome.
 #[derive(Debug, thiserror::Error)]
 pub enum TxError {
-    /// Nothing ran.
     #[error("postgres transaction: acquire connection: {0}")]
     Acquire(#[source] sqlx::Error),
-    /// Nothing ran.
     #[error("postgres transaction: begin: {0}")]
     Begin(#[source] sqlx::Error),
     /// The server rejected the commit, or the check ahead of `COMMIT` failed
@@ -60,13 +51,9 @@ impl TxError {
     }
 }
 
-/// An opaque capability for work inside a provider-owned transaction.
-///
-/// `&mut Tx` is a `sqlx` executor, used like `&mut PgConnection`:
-/// `sqlx::query(..).execute(&mut *tx)`. The transaction boundary retains
-/// commit and rollback ownership. It reads a statement's success as proof
-/// that the transaction is alive, which holds for SQL the server executes;
-/// an empty statement proves nothing and has no place here.
+/// Reads a statement's success as proof that the transaction is alive, which
+/// holds for SQL the server executes; an empty statement proves nothing and has
+/// no place here.
 #[derive(Debug)]
 pub struct Tx<'c> {
     conn: &'c mut PgConnection,
@@ -90,15 +77,9 @@ impl Tx<'_> {
     }
 }
 
-/// Set the timeout for later statements in `tx`. [`Duration::ZERO`] disables it.
-///
 /// `set_config(..., is_local = true)` lasts until the transaction ends, so
 /// PostgreSQL restores the session timeout itself on commit, rollback, or a
 /// dropped connection.
-///
-/// # Errors
-///
-/// The statement's error, unchanged.
 pub async fn set_statement_timeout(tx: &mut Tx<'_>, timeout: Duration) -> Result<(), sqlx::Error> {
     observed(
         "set statement timeout",
@@ -217,7 +198,6 @@ impl Drop for DiscardOnDrop {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Isolation {
-    /// Omit the isolation clause; the server uses `default_transaction_isolation`.
     #[default]
     ServerDefault,
     ReadCommitted,
@@ -264,9 +244,6 @@ impl TxOptions {
     }
 }
 
-/// # Errors
-///
-/// The closure's error, or a [`TxError`] converted into it.
 pub async fn in_tx<T, E, F>(pool: &PgPool, f: F) -> Result<T, E>
 where
     F: AsyncFnOnce(&mut Tx<'_>) -> Result<T, E>,
@@ -275,9 +252,6 @@ where
     in_tx_with(pool, TxOptions::default(), f).await
 }
 
-/// # Errors
-///
-/// The closure's error, or a [`TxError`] converted into it.
 pub async fn in_tx_with<T, E, F>(pool: &PgPool, options: TxOptions, f: F) -> Result<T, E>
 where
     F: AsyncFnOnce(&mut Tx<'_>) -> Result<T, E>,
@@ -290,10 +264,6 @@ where
 /// a connection is bounded by `deadline`, as [`acquire_until`] describes. The
 /// deadline bounds only that wait. The closure and the commit
 /// keep their own budgets.
-///
-/// # Errors
-///
-/// The closure's error, or a [`TxError`] converted into it.
 pub async fn in_tx_with_acquire_deadline<T, E, F>(
     pool: &PgPool,
     deadline: tokio::time::Instant,
@@ -421,11 +391,8 @@ mod tests {
     #[tokio::test]
     async fn only_a_statement_that_ended_without_an_error_proves_the_transaction() {
         assert!(proof_after(vec![Ok(1), Ok(2)], 3).await);
-        // A statement with no rows still has to reach its end.
         assert!(proof_after(vec![], 1).await);
-        // Dropped before the end: the server's answer was not read.
         assert!(!proof_after(vec![Ok(1), Ok(2)], 2).await);
-        // The end that follows an error is not a completed statement.
         let failed = || vec![Ok(1), Err(sqlx::Error::Protocol("failed".into()))];
         assert!(!proof_after(failed(), 2).await);
         assert!(!proof_after(failed(), 3).await);

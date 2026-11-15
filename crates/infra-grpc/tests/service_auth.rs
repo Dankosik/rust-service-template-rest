@@ -1,11 +1,12 @@
-#![allow(
+#![expect(
     clippy::expect_used,
-    clippy::panic,
     clippy::unwrap_used,
     reason = "integration fixtures fail closed with their local setup context"
 )]
-
-//! Loopback proof of service-token admission on the tonic router.
+#![allow(
+    clippy::panic,
+    reason = "no panic! call in every projection of this integration fixture"
+)]
 
 use std::{
     fmt::Write as _,

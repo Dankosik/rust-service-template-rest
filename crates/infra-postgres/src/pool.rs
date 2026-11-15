@@ -1,5 +1,3 @@
-//! The pool and the template's session defaults.
-//!
 //! Budgets are constants rather than configuration keys: a service that
 //! needs different ones changes them here, in one reviewed place, instead
 //! of every deployment discovering its own. The pool size is the exception
@@ -90,7 +88,6 @@ pub(crate) const IDLE_CONNECTION_TIMEOUT: Duration = Duration::from_mins(10);
 /// dead connection still leaves time to open a replacement.
 const IDLE_PING_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Why the pool could not be opened.
 #[derive(Debug, thiserror::Error)]
 pub enum ConnectError {
     /// No connection could be established inside [`ACQUIRE_TIMEOUT`]; the
@@ -98,10 +95,8 @@ pub enum ConnectError {
     /// so this is what an unreachable database looks like at startup.
     #[error("postgres connect: no connection established inside the {budget:?} acquire budget")]
     Timeout { budget: Duration },
-    /// The mandatory session readback did not complete before its client deadline.
     #[error("postgres session verification: did not complete inside the {budget:?} budget")]
     SessionVerificationTimeout { budget: Duration },
-    /// A driver error while acquiring a connection or reading the session settings.
     #[error("postgres session admission: {0}")]
     Connect(#[source] sqlx::Error),
     /// The session does not carry a timeout inside the template's budget.
@@ -117,7 +112,6 @@ pub enum ConnectError {
         budget: Duration,
         session_settings_source: SessionSettingsSource,
     },
-    /// The session's default isolation is not the one this process requires.
     #[error(
         "postgres session: default_transaction_isolation is {found}, expected {expected}; {}",
         .session_settings_source.remedy()
@@ -137,8 +131,6 @@ fn found(milliseconds: i64) -> String {
     }
 }
 
-/// Where a pooled session's budgets and default isolation come from
-/// (`postgres.session_budgets`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SessionSettingsSource {
     /// Published by this process in every connection's startup packet. Works
@@ -164,18 +156,9 @@ impl SessionSettingsSource {
 
 #[derive(Clone, Debug)]
 pub struct PoolOptions<'a> {
-    /// `postgres.max_connections`. Zero is unrepresentable; disable the
-    /// profile instead of opening a pool.
     pub max_connections: NonZeroU32,
-    /// Reported as `application_name`, so `pg_stat_activity` attributes a
-    /// session to the service instead of to an anonymous driver.
     pub application_name: &'a str,
-    /// The default isolation for every transaction on each physical
-    /// connection. [`Isolation::ServerDefault`] leaves the server setting
-    /// unchanged.
     pub default_isolation: Isolation,
-    /// Whether this process publishes the session budgets and any explicit
-    /// isolation level or expects the server to supply them.
     pub session_settings_source: SessionSettingsSource,
 }
 
@@ -188,7 +171,6 @@ pub struct SessionOptions<'a> {
     pub application_name: &'a str,
     pub statement_timeout: Duration,
     pub idle_in_transaction_timeout: Duration,
-    /// Includes the wait for the advisory lock.
     pub lock_timeout: Duration,
     pub extra: &'a [(&'a str, &'a str)],
 }
@@ -232,15 +214,9 @@ pub fn prepare_pool(dsn: &Dsn, options: &PoolOptions<'_>) -> PgPool {
     pool_options.connect_lazy_with(connect_options)
 }
 
-/// Acquire a native pooled connection with bounded operation diagnostics.
-///
 /// `operation` is a callsite-owned static label, never a request or SQL value.
 /// Slow successes and native acquire timeouts are logged; cancellation leaves
 /// the native future and its ownership to `SQLx` without inventing an outcome.
-///
-/// # Errors
-///
-/// The native acquisition error, unchanged.
 #[expect(
     clippy::disallowed_methods,
     reason = "the pool adapter owns the native checkout"
@@ -257,20 +233,11 @@ pub async fn acquire(
     .await
 }
 
-/// [`acquire`] for a caller whose own deadline bounds the work. Pass the
-/// request or job's `deadline` so a connection that frees in time can still
-/// serve it. For a single wait bounded by the pool's configured timeout, use
-/// [`acquire`].
-///
 /// The pool bounds each native wait by its fixed acquire timeout, so this waits
 /// again while `deadline` allows. Each wait queues behind those that arrived
 /// meanwhile; a connection still frees in the order the pool serves it. A wait
 /// that ends at `deadline` is the native `PoolTimedOut`, so callers keep one
 /// failure to map.
-///
-/// # Errors
-///
-/// The native acquisition error, unchanged, or `PoolTimedOut` at `deadline`.
 #[expect(
     clippy::disallowed_methods,
     reason = "the pool adapter owns the native checkout"
@@ -298,8 +265,6 @@ pub async fn acquire_until(
     .await
 }
 
-/// Ping a connection idle past [`PING_IDLE_AFTER`] before it is handed out,
-/// within [`IDLE_PING_TIMEOUT`]; an error discards it.
 #[expect(
     clippy::needless_pass_by_value,
     reason = "the signature `PoolOptions::before_acquire` requires"
@@ -334,20 +299,13 @@ fn ping_if_idle(
     })
 }
 
-/// Verifies the session policy on one connection from the retained pool.
 /// One client deadline covers acquisition and the complete readback;
 /// [`ConnectError::SessionVerificationTimeout`] reports it. Cancellation
-/// leaves cleanup to the caller.
+/// leaves cleanup to the caller; this function never closes the caller's pool.
 ///
 /// Use the same [`PoolOptions::default_isolation`] and
 /// [`PoolOptions::session_settings_source`] as in [`prepare_pool`]. They
 /// determine the expected isolation level and the advice on a mismatch.
-///
-/// # Errors
-///
-/// Returns a driver error from checkout or readback, an acquire timeout, a
-/// session-verification timeout, or a session policy refusal. This function
-/// never closes the caller's pool.
 pub async fn admit_pool(pool: &PgPool, options: &PoolOptions<'_>) -> Result<(), ConnectError> {
     let budget = SESSION_VERIFICATION_TIMEOUT;
     tokio::time::timeout(budget, verify_session(pool, options))
@@ -355,15 +313,11 @@ pub async fn admit_pool(pool: &PgPool, options: &PoolOptions<'_>) -> Result<(), 
         .map_err(|_| ConnectError::SessionVerificationTimeout { budget })?
 }
 
-/// Opens the pool and verifies that its first session carries the required policy.
 /// Process roots use [`prepare_pool`] and [`admit_pool`] to retain cleanup ownership.
-/// Verification and rejection cleanup each have their own client bound.
-/// These sequential waits are not a whole-bootstrap or remote socket-close bound.
-///
-/// # Errors
-///
-/// Returns the admission refusal unchanged. Failed admission closes the pool
-/// within its bound and records an incomplete close separately.
+/// Verification and rejection cleanup each have their own client bound; failed
+/// admission closes the pool within its bound and records an incomplete close
+/// separately. These sequential waits are not a whole-bootstrap or remote
+/// socket-close bound.
 pub async fn connect(dsn: &Dsn, options: &PoolOptions<'_>) -> Result<PgPool, ConnectError> {
     let pool = prepare_pool(dsn, options);
     if let Err(refused) = admit_pool(&pool, options).await {
@@ -378,17 +332,12 @@ pub async fn connect(dsn: &Dsn, options: &PoolOptions<'_>) -> Result<PgPool, Con
     Ok(pool)
 }
 
-/// Read the effective session settings back and refuse a session that lacks
-/// a budget or the required default isolation.
-///
 /// Publishing a setting does not prove the session has it: PgBouncer before
 /// 1.26 accepts a startup parameter it is told to track or ignore and drops
 /// it, and with [`SessionSettingsSource::Server`] nothing is published at all. A
 /// stricter limit than the template's is admitted; no limit, or a looser
 /// one, is not.
 async fn verify_session(pool: &PgPool, options: &PoolOptions<'_>) -> Result<(), ConnectError> {
-    // The effective session budgets and default isolation, in milliseconds as
-    // `pg_settings` stores both timeouts.
     let session = observed("check session budgets", async {
         let mut connection = acquire(pool, "check session budgets").await?;
         sqlx::query!(
@@ -454,10 +403,6 @@ fn check_budget(
 
 /// Used by the migration runner, whose budgets and extra GUCs differ from
 /// the pool's. [`PgConnectOptions`] stay in this crate.
-///
-/// # Errors
-///
-/// The driver's connect error; the caller bounds the wait.
 pub async fn connect_session(
     dsn: &Dsn,
     options: &SessionOptions<'_>,

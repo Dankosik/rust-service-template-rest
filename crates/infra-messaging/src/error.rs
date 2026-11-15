@@ -1,6 +1,5 @@
 use std::time::Duration;
 
-/// A bounded adapter failure safe to report at composition boundaries.
 #[derive(Debug, thiserror::Error)]
 pub enum MessagingError {
     #[error("messaging configuration is invalid: {0}")]
@@ -15,8 +14,6 @@ pub enum MessagingError {
     TimedOut { budget: Duration },
     #[error("messaging operation was cancelled")]
     Cancelled,
-    /// The resource is shutting down or its consumer has failed, so it takes
-    /// no new work.
     #[error("messaging resource is draining or its consumer failed")]
     Unavailable,
     /// The configured payload limit is zero or cannot fit one publication, or
@@ -26,7 +23,6 @@ pub enum MessagingError {
     Bounds,
 }
 
-/// Why an event cannot become, or be read from, a wire envelope.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum EnvelopeError {
     #[error("subject is invalid")]
@@ -64,7 +60,6 @@ pub enum EnvelopeError {
     },
 }
 
-/// A conclusive or uncertain publication outcome.
 #[derive(Debug, thiserror::Error)]
 pub enum PublishError {
     #[error("messaging publication was rejected")]
@@ -81,7 +76,6 @@ pub enum PublishError {
 /// its trace with the adapter's `messaging_delivery_failed` event.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum HandlerError {
-    /// Delivery failed transiently and should be redelivered.
     #[error("event handler requested retry")]
     Retryable,
     /// Delivery can never succeed and should go to the dead-letter subject.

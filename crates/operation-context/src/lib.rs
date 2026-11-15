@@ -1,5 +1,3 @@
-//! Fixed monotonic deadlines and cancellation lineage shared by operation owners.
-
 use std::future::pending;
 use std::time::Duration;
 
@@ -19,7 +17,6 @@ impl Deadline {
         Self { origin, budget }
     }
 
-    /// A deadline that expires at `cutoff`, measured from now; a cutoff already past is expired.
     #[must_use]
     pub fn at(cutoff: Instant) -> Self {
         let now = Instant::now();
@@ -49,7 +46,6 @@ impl Deadline {
         self.origin.checked_add(self.budget)
     }
 
-    /// Whichever of the two deadlines has less time remaining now.
     #[must_use]
     pub fn earlier(self, other: Self) -> Self {
         let now = Instant::now();
@@ -70,7 +66,6 @@ impl Deadline {
     }
 }
 
-/// Why an unfinished logical operation must stop; adapters own its error mapping.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Stopped {
     Deadline,
@@ -85,7 +80,6 @@ pub struct OperationContext {
 }
 
 impl OperationContext {
-    /// A context with the given optional deadline and cancellation token; `None` means no deadline.
     #[must_use]
     pub const fn new(deadline: Option<Deadline>, cancellation: CancellationToken) -> Self {
         Self {
@@ -147,13 +141,11 @@ impl OperationContext {
         )
     }
 
-    /// A separate cancellation scope under the same existing lifetime.
     #[must_use]
     pub fn child_context(&self) -> Self {
         Self::new(self.deadline, self.cancellation.child_token())
     }
 
-    /// Why this scope must stop, if it must. An expired deadline is reported before cancellation.
     #[must_use]
     pub fn stopped(&self) -> Option<Stopped> {
         if self.deadline.is_some_and(Deadline::expired) {
@@ -165,13 +157,10 @@ impl OperationContext {
         }
     }
 
-    /// # Errors
-    /// Returns the existing deadline/cancellation reason when this scope stopped.
     pub fn check(&self) -> Result<(), Stopped> {
         self.stopped().map_or(Ok(()), Err)
     }
 
-    /// Wait without spawning work. Deadline takes precedence when both are ready.
     pub async fn wait_stopped(&self) -> Stopped {
         let deadline = async {
             match self.deadline {

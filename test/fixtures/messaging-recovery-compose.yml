@@ -1,5 +1,3 @@
-# The controller resolves both images from env/docker-compose.yml. No host
-# broker, route, monitoring or database port is published by this fixture.
 x-nats: &nats
   image: ${RECOVERY_NATS_IMAGE:?controller resolves the canonical pin}
   init: true

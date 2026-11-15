@@ -46,14 +46,6 @@ pub struct Limits {
 /// the opening budget, admission of its opening, the authentication and
 /// caller admission this build compiles in, and the business concurrency
 /// limit.
-///
-/// # Errors
-///
-/// Returns [`Error::InvalidFileDescriptorSet`] when reflection was added and
-/// cannot serve the described sets and [`Error::DuplicateService`] when
-/// reflection collides with a registered service. Returns
-/// [`Error::ConflictingServiceDescription`] when the descriptions of a
-/// built-in service disagree on its methods.
 // template:begin service-auth:grpc-router-caller-rule-errors-doc
 /// Returns [`Error::MissingCallerRule`] when a caller table is incomplete.
 // template:end service-auth:grpc-router-caller-rule-errors-doc

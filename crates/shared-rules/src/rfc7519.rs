@@ -1,5 +1,3 @@
-//! JSON Web Token, RFC 7519.
-
 /// RFC 7519 §4.1.4 makes expiration exclusive. All arguments are in whole seconds.
 #[must_use]
 pub const fn is_expired(expiry: u64, now: u64, leeway: u64) -> bool {

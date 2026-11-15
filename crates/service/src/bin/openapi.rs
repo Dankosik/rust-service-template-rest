@@ -1,6 +1,3 @@
-//! Print the service's OpenAPI document. `make openapi-generate` redirects
-//! it into `api/openapi/service.yaml`.
-
 use std::io::Write;
 use std::process::ExitCode;
 

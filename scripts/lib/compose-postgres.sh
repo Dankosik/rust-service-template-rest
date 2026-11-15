@@ -1,17 +1,4 @@
 #!/usr/bin/env bash
-# Shared by the database-backed proof scripts: one throwaway compose project
-# per run from env/docker-compose.yml, an ephemeral host port, and a clean
-# environment for the DSN policy.
-#
-#   source scripts/lib/compose-postgres.sh
-#   require_docker            # exit 1 under REQUIRE_DOCKER=1, else refuse with 2
-#   compose_postgres_up [prefix] [--override-file absolute-path]
-#                            # sets COMPOSE_PROJECT, COMPOSE_NETWORK, POSTGRES_HOST_PORT
-#   compose_pgbouncer_up      # optional; sets PGBOUNCER_HOST_PORT
-#   trap compose_postgres_cleanup EXIT
-#   trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
-#
-# Callers own `set -euo pipefail` and the repository root as working directory.
 
 # The DSN policy refuses ambient libpq variables; a developer shell may carry
 # them from other tooling, and a proof must not depend on that.
@@ -102,13 +89,11 @@ compose_postgres_cleanup() {
 	exit "${status}"
 }
 
-# DSN as seen from the host (ephemeral published port).
 compose_postgres_host_dsn() {
 	printf 'postgres://%s:%s@127.0.0.1:%s/%s?sslmode=disable' \
 		"${COMPOSE_POSTGRES_USER}" "${COMPOSE_POSTGRES_PASSWORD}" "${POSTGRES_HOST_PORT}" "${COMPOSE_POSTGRES_DB}"
 }
 
-# PgBouncer in front of the running PostgreSQL; sets PGBOUNCER_HOST_PORT.
 compose_pgbouncer_up() {
 	compose_postgres up -d --wait pgbouncer
 	local address
@@ -121,13 +106,11 @@ compose_pgbouncer_up() {
 	export PGBOUNCER_HOST_PORT
 }
 
-# DSN of the same database through PgBouncer, as seen from the host.
 compose_pgbouncer_host_dsn() {
 	printf 'postgres://%s:%s@127.0.0.1:%s/%s?sslmode=disable' \
 		"${COMPOSE_POSTGRES_USER}" "${COMPOSE_POSTGRES_PASSWORD}" "${PGBOUNCER_HOST_PORT}" "${COMPOSE_POSTGRES_DB}"
 }
 
-# DSN as seen from a container on the compose network.
 compose_postgres_network_dsn() {
 	printf 'postgres://%s:%s@postgres:5432/%s?sslmode=disable' \
 		"${COMPOSE_POSTGRES_USER}" "${COMPOSE_POSTGRES_PASSWORD}" "${COMPOSE_POSTGRES_DB}"

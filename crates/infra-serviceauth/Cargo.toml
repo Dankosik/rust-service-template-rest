@@ -13,7 +13,6 @@ workspace = true
 
 [features]
 default = []
-# Generated keys and hand-built tokens for tests that run a real verifier.
 test-support = []
 
 [dependencies]

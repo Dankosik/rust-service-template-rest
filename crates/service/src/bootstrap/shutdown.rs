@@ -1,5 +1,3 @@
-//! Ordered teardown under one retained process deadline.
-
 use std::{future::Future, panic::AssertUnwindSafe, time::Duration};
 
 use futures_util::FutureExt;

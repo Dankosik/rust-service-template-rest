@@ -27,27 +27,21 @@ impl From<Algorithm> for jsonwebtoken::Algorithm {
     }
 }
 
-/// Immutable composition input. Secrets come from the configuration snapshot.
 #[derive(Clone, derive_more::Debug)]
 #[debug("Options([REDACTED])")]
 pub struct Options {
     /// The token endpoint URL; must be HTTPS without userinfo or fragment and
     /// must not contain whitespace or control characters.
     pub token_url: String,
-    /// The client identifier sent in token requests and as the assertion `iss` and `sub`.
     pub client_id: String,
-    /// The PEM private key that signs client assertions; must match `algorithm`.
     pub private_key: SecretString,
-    /// The key identifier carried in the client-assertion header as `kid`.
     pub key_id: String,
-    /// The client-assertion signing algorithm; it must match the key.
     pub algorithm: Algorithm,
     /// The audience asserted in the signed client assertion, normally the
     /// authorization server's issuer identifier.
     pub assertion_audience: String,
     /// Scopes requested from the provider; each is an RFC 6749 scope token, and an empty list requests none.
     pub scopes: Vec<String>,
-    /// The `audience` parameter of token requests; `None` omits it.
     pub audience: Option<String>,
     /// Best-effort retained subject count, from 1 to 65,536, alongside a 16 MiB
     /// Bearer payload target. Zero does not disable the cache; it is refused.
@@ -57,8 +51,6 @@ pub struct Options {
     pub provider_concurrency: u32,
 }
 
-/// Options [`admit_options`] accepted, in the form
-/// [`Credentials::build`](crate::Credentials::build) uses.
 pub(crate) struct Admitted {
     options: Options,
     endpoint: Url,
@@ -79,7 +71,6 @@ impl Admitted {
         options: Options,
         endpoint: Url,
     ) -> Result<Self, ConfigurationError> {
-        // Loopback fixtures inject their own HTTP transport and endpoint.
         let permits = admitted_provider_concurrency(options.provider_concurrency)?;
         Ok(Self {
             options,

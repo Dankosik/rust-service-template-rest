@@ -104,7 +104,6 @@ impl Target {
                 None,
                 "conformance",
             ))
-            // Compute a checksum whenever a request names one.
             .request_checksum_calculation(
                 aws_sdk_s3::config::RequestChecksumCalculation::WhenSupported,
             )
@@ -174,7 +173,6 @@ async fn live_provider_conformance() {
     contract(&storage, &object).await;
     written.extend(record_facts(&target, &object, key).await);
 
-    // Contract: delete, then not found; delete of a missing key succeeds.
     for written in &written {
         storage.delete(written).await.unwrap();
     }
@@ -185,7 +183,6 @@ async fn live_provider_conformance() {
     storage.delete(&object).await.unwrap();
 }
 
-/// What every provider must do for the client's contract to hold.
 async fn contract(storage: &ObjectStorage, object: &ObjectKey) {
     let body = Bytes::from_static(br#"{"conformance":true}"#);
     let options = PutOptions::default()
@@ -232,8 +229,6 @@ async fn contract(storage: &ObjectStorage, object: &ObjectKey) {
     );
 }
 
-/// Provider behavior the client does not rely on everywhere, printed so a
-/// later change can enable it from evidence. Returns the keys it wrote.
 async fn record_facts(
     target: &Target,
     object: &ObjectKey,

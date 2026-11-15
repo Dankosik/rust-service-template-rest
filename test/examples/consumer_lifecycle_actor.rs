@@ -1,6 +1,3 @@
-//! Source-only actor, applied byte-for-byte to both historical consumer trees.
-//! No production source, migration or dependency is part of this overlay.
-
 #![expect(
     clippy::expect_used,
     clippy::panic,

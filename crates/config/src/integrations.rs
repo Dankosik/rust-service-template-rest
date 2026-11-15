@@ -25,32 +25,25 @@ use crate::validate::missing;
 #[serde(deny_unknown_fields, default)]
 pub struct IntegrationConfig {
     // template:begin outbound-auth:config-integration-oauth-field
-    /// OAuth client-credentials input. Absent entries do not create clients.
     pub oauth: Option<OAuthConfig>,
     // template:end outbound-auth:config-integration-oauth-field
     // template:begin grpc:config-integration-grpc-field
-    /// Native gRPC client input. Absent entries do not create a channel.
     pub grpc: Option<GrpcClientConfig>,
     // template:end grpc:config-integration-grpc-field
 }
 
 // template:begin grpc:config-integration-grpc-type
-/// Immutable native gRPC client input for one named integration.
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GrpcClientConfig {
     /// `http` or `https` URI, admitted by the transport before a channel exists.
     #[serde(default)]
     pub destination: String,
-    /// Explicit client security mode; required.
     pub security: GrpcSecurity,
-    /// Optional PEM trust anchor for TLS. Blank is absent.
     #[serde(default, deserialize_with = "crate::de::blank_as_none")]
     pub ca_certificate: Option<String>,
-    /// Optional PEM client certificate for mTLS. Blank is absent.
     #[serde(default, deserialize_with = "crate::de::blank_as_none")]
     pub certificate: Option<String>,
-    /// PEM client key for mTLS, never in a config file. Blank is absent.
     #[serde(default, deserialize_with = "crate::de::blank_secret_as_none")]
     pub private_key: Option<SecretString>,
 }
@@ -74,38 +67,29 @@ impl std::fmt::Debug for GrpcClientConfig {
 #[serde(deny_unknown_fields)]
 #[debug("OAuthConfig {{ .. }}")]
 pub struct OAuthConfig {
-    /// Fixed token endpoint, admitted before any adapter construction.
     #[serde(default)]
     pub token_url: String,
     /// Client identifier posted as a form field and asserted as the client
     /// assertion's `iss` and `sub`.
     #[serde(default)]
     pub client_id: String,
-    /// PEM private key used to sign the client assertion, never in a config
-    /// file.
     #[serde(default, deserialize_with = "crate::de::blank_secret_as_none")]
     pub private_key: Option<SecretString>,
-    /// Key identifier carried in the client-assertion header as `kid`.
     #[serde(default)]
     pub key_id: String,
     /// Client-assertion signing algorithm; required, because it must match
     /// the key.
     pub algorithm: OAuthAlgorithm,
-    /// Audience claim asserted in the signed client assertion.
     #[serde(default)]
     pub assertion_audience: String,
-    /// Optional RFC 6749 scopes, retained in their configured order.
     #[serde(default)]
     pub scopes: Scopes,
-    /// Optional OAuth audience parameter.
     pub audience: Option<String>,
-    /// How many subjects keep a token exchanged on their behalf.
     #[serde(
         default = "default_exchange_cache_capacity",
         deserialize_with = "crate::de::unsigned_count"
     )]
     pub exchange_cache_capacity: u32,
-    /// Maximum simultaneous token acquisitions across both grant types.
     #[serde(
         default = "default_provider_concurrency",
         deserialize_with = "deserialize_provider_concurrency"
@@ -142,14 +126,10 @@ where
     crate::de::deserialize_scalar(deserializer, "must be an integer from 1 to 4294967295")
 }
 
-/// Client-assertion signing algorithm, decoded from its RFC 7518 identifier.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OAuthAlgorithm {
-    /// RSASSA-PKCS1-v1_5 using SHA-256.
     Rs256,
-    /// RSASSA-PSS using SHA-256.
     Ps256,
-    /// ECDSA using the P-256 curve and SHA-256.
     Es256,
 }
 
@@ -170,7 +150,6 @@ impl<'de> Deserialize<'de> for OAuthAlgorithm {
     }
 }
 
-/// RFC 6749 scope tokens supplied as a list or an environment string.
 #[derive(Clone, Default, PartialEq, Eq, derive_more::Debug)]
 #[debug("Scopes([REDACTED])")]
 pub struct Scopes(Vec<String>);

@@ -1,5 +1,3 @@
-//! Typed claim decoding and application identity normalization.
-
 use crate::{
     Actor, JsonObject, PreparationError, Principal, VerificationError, VerificationReason,
     principal::Identity,
@@ -169,7 +167,6 @@ struct Envelope {
     active: bool,
 }
 
-/// The claims an active RFC 7662 response must or may supply.
 #[derive(Deserialize)]
 struct ActiveClaims<'a> {
     #[serde(borrow)]
@@ -309,7 +306,6 @@ fn present_numeric_date<'de, D: serde::Deserializer<'de>>(
 // template:end oidc-jwt:authn-claims-jwt-validation
 
 // template:begin oidc-introspection:authn-claims-introspection-validation
-/// Private time evidence retained alongside an introspection principal.
 #[derive(Clone, Debug)]
 pub(crate) struct VerifiedIntrospection {
     pub(crate) principal: Principal,
@@ -603,7 +599,6 @@ mod tests {
                 serde_json::json!({"aud": []}),
                 Err(VerificationReason::Audience),
             ),
-            // Lifetime is checked before issuer and audience.
             (
                 serde_json::json!({"exp": 1, "iss": "other"}),
                 Err(VerificationReason::Expired),

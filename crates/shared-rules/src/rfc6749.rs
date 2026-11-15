@@ -1,5 +1,3 @@
-//! OAuth 2.0, RFC 6749.
-
 /// RFC 6749 §3.3 `scope-token = 1*NQCHAR`, where `NQCHAR` is
 /// `%x21 / %x23-5B / %x5D-7E`.
 #[must_use]

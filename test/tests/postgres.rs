@@ -1,9 +1,3 @@
-//! Database-backed proof for `infra-postgres` and `migrate`.
-//!
-//! The template pool runs on a `#[sqlx::test]` database through the admitted
-//! DSN, so session defaults, the probe, the transaction seam, and the migration
-//! runner are observed as the service and the `migrate` binary use them.
-
 #![cfg(feature = "integration")]
 #![allow(
     clippy::expect_used,
@@ -44,7 +38,6 @@ const APP: &str = "integration-tests";
 
 type EventFields = std::collections::BTreeMap<String, String>;
 
-/// Captures only the two owners whose public diagnostic contract is under test.
 #[derive(Clone, Default)]
 struct PoolEvents(std::sync::Arc<std::sync::Mutex<Vec<EventFields>>>);
 
@@ -135,8 +128,6 @@ async fn pool_with_default_isolation(
     .expect("pool connects")
 }
 
-/// A pool that publishes nothing and expects the server to carry the
-/// budgets and, when one is named, the default isolation.
 async fn pool_with_server_budgets(
     dsn: &Dsn,
     default_isolation: Isolation,
@@ -153,7 +144,6 @@ async fn pool_with_server_budgets(
     .await
 }
 
-/// Set a default on the per-test database; sessions opened later carry it.
 async fn alter_database(pool: &PgPool, setting: &str) {
     let database: String = sqlx::query_scalar("SELECT current_database()")
         .fetch_one(pool)
@@ -176,7 +166,6 @@ async fn server_address(dsn: &Dsn) -> SocketAddr {
         .expect("the server has an address")
 }
 
-/// The per-test database of `pool`, reached at `address` instead.
 async fn dsn_at(pool: &PgPool, address: SocketAddr) -> Dsn {
     let mut url = url_for(pool, DATABASE_URL).await;
     url.set_ip_host(address.ip())

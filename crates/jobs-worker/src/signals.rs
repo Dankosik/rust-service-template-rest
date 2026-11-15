@@ -1,5 +1,3 @@
-//! The process stop signals and the time the first one arrived.
-
 use futures_util::FutureExt;
 use tokio::time::Instant;
 
@@ -42,7 +40,6 @@ impl Signals {
         }
     }
 
-    /// Consume one native notification and retain its first observation time.
     pub(crate) async fn wait(&mut self) -> Result<(), SignalError> {
         #[cfg(unix)]
         let (notification, name) = tokio::select! {
@@ -57,7 +54,6 @@ impl Signals {
         Ok(())
     }
 
-    /// Poll and consume only an already pending notification.
     pub(crate) fn take_pending(&mut self) -> Result<bool, SignalError> {
         match self.wait().now_or_never() {
             Some(result) => result.map(|()| true),

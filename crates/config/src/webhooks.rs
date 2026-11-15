@@ -12,11 +12,9 @@ use serde::Deserialize;
 use crate::ValidationError;
 use crate::validate::{non_blank, validate_endpoint_id};
 
-/// Static outgoing webhook endpoints and their environment-only signing keys.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct WebhooksConfig {
-    /// Stable endpoint IDs bound to destination and current signing keys.
     pub endpoints: BTreeMap<String, WebhookEndpointConfig>,
     /// The most deliveries one worker process runs at once
     /// (`APP__WEBHOOKS__MAX_CONCURRENT_DELIVERIES`). Unset by default:
@@ -28,13 +26,10 @@ pub struct WebhooksConfig {
     pub max_concurrent_deliveries: Option<NonZeroU32>,
 }
 
-/// One configured outbound destination and its current signing keys.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebhookEndpointConfig {
-    /// The static HTTPS destination. Provider construction admits its URL form.
     pub url: String,
-    /// Environment-only key used for every new delivery.
     pub secret: SecretString,
     /// Optional environment-only predecessor retained during a key rotation.
     /// Blank is absent.

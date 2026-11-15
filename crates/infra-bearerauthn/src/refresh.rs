@@ -64,7 +64,6 @@ struct State {
 }
 
 impl State {
-    /// The ticket of the fetch asked for but not yet finished.
     fn pending(&self) -> Option<u64> {
         (self.requested_ticket > self.finished_ticket).then_some(self.requested_ticket)
     }
@@ -80,7 +79,6 @@ impl State {
     }
 }
 
-/// How a signature miss is admitted under the watch write lock.
 enum Admission {
     Answer(SignatureRefresh),
     Join(u64),
@@ -93,7 +91,6 @@ pub(crate) struct KeyStore {
 }
 
 impl KeyStore {
-    /// Installs the startup key set and starts the first cooldown.
     pub(crate) fn new(keys: Arc<KeySet>) -> Arc<Self> {
         metrics::describe_counter!(REFRESH_METRIC, "JWKS refresh outcomes by closed reason");
         let state = watch::Sender::new(State {
@@ -121,13 +118,10 @@ impl KeyStore {
         self.state.borrow().keys.clone()
     }
 
-    /// The generation of the installed set, read without cloning it.
     pub(crate) fn generation(&self) -> u64 {
         self.state.borrow().keys.generation()
     }
 
-    /// Returns a set installed since `checked`, otherwise joins the fetch in
-    /// flight or requests one outside the cooldown.
     pub(crate) async fn refresh_for_signature_miss(
         &self,
         checked: &Arc<KeySet>,

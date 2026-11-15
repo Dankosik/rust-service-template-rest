@@ -15,9 +15,7 @@ async fn a_refused_auth_is_retried_after_the_client_gives_up() {
     .expect("start connect");
     let namespace = cache.namespace("auth");
 
-    // Keep AUTH unavailable for a complete setup chain, then make the
-    // endpoint usable. Recovery must outlive the initial retry allowance.
-    let chain = 7; // The accepted setup chain is one attempt plus six retries.
+    let chain = 7; // 1 initial attempt + 6 retries.
     gate.wait_for(
         Duration::from_secs(20),
         "setup retry chain did not progress without traffic",
@@ -270,10 +268,6 @@ async fn caller_cancellation_records_cancelled_and_an_expired_deadline_timeout()
     }
 }
 
-/// Replies are FIFO, so the maintenance `PING` sent 2 s after setup waits
-/// behind this command. A `PING` budget capped below `command_timeout` would
-/// expire first, retire the generation, and fail the command before its own
-/// budget ends.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_slow_reply_within_command_timeout_survives_the_maintenance_ping() {
     let server = FakeServer::start().await;
@@ -817,9 +811,6 @@ async fn reliability_a_probe_reply_timeout_retires_the_connection() {
     probe.check().await.expect("healthy probe after timeout");
 }
 
-/// A caller that gives up before the command ceiling, by its own shorter
-/// deadline or by dropping the call, says nothing about the server, so peers
-/// on the same connection keep it.
 #[tokio::test]
 async fn a_caller_stop_before_the_ceiling_keeps_the_connection_for_peers() {
     use operation_context::OperationContext;
@@ -1186,8 +1177,6 @@ async fn an_overdue_ping_runs_before_another_slow_password_refresh() {
     .expect("start cache");
     assert_eq!(cache.namespace("refresh").get("ready").await, Ok(None));
 
-    // The server rejects the new password but delays its reply past a full
-    // refresh interval. The connection remains usable and PING is already due.
     *server.observed.auth_reply_delay.lock().expect("delay lock") = Duration::from_millis(5_500);
     std::fs::write(file.path(), ephemeral_password()).expect("changed password");
     server
@@ -1246,7 +1235,6 @@ async fn reliability_namespace_and_probe_retain_owner_until_live_maintenance_is_
             || server.command_count("PING", None) > pings,
         )
         .await;
-    // Maintenance is outside application/probe admission accounting.
     assert_work_metrics(&recorder, 0, 0, 0);
     drop(probe);
     assert_work_metrics(&recorder, 0, 0, 1);

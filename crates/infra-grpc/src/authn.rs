@@ -1,5 +1,3 @@
-//! Bearer authentication of business calls and their declared scopes.
-
 use std::sync::Arc;
 
 use axum::extract::{Request, State};

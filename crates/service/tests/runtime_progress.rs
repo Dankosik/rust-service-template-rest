@@ -9,6 +9,16 @@
 //! source identity. Every process uses the resolved image ID, never a moving tag.
 //! Numeric failures retain every run and reopen the frozen design; they never
 //! cause a retry with a different rate, quota, deadline, or acceptance threshold.
+//!
+//! Cgroup 1-CPU quota starvation-proof rationale: pinning the service container
+//! to a 100 ms / 100 ms cgroup v2 CPU quota (1 CPU) with `runtime.worker_threads=1`,
+//! one blocking CPU permit (no queue), and external load/stub peers outside that
+//! quota forces cheap unary traffic, bounded uploads/preparation, stdout
+//! backpressure, and CPU saturation to contend for the sole Tokio worker and
+//! cgroup slice. Requiring `cpu.stat` throttling (`nr_throttled` and
+//! `throttled_usec` rising) plus 90%+ interval occupancy proves CPU enforcement
+//! was exercised, while the separate uncooperative negative control confirms
+//! the sampler and cheap-traffic gap oracle catch sole-worker starvation.
 
 #![cfg(unix)]
 #![expect(

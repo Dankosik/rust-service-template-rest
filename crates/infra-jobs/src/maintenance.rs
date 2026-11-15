@@ -1,5 +1,3 @@
-//! Completed retention and registered-job gauges.
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -17,42 +15,28 @@ use crate::engine::{
 };
 use infra_postgres::set_statement_timeout;
 
-/// Gauge of live jobs. Labels `kind`, `state` (`available`, `scheduled`, `running`).
 const LIVE_JOBS_METRIC: &str = "jobs_live_jobs";
-/// Gauge of retained failed jobs. Label `kind`.
 pub(crate) const FAILED_JOBS_METRIC: &str = "jobs_failed_jobs";
-/// Age of the oldest available job. Label `kind`. Zero when none.
 const OLDEST_AVAILABLE_AGE_METRIC: &str = "jobs_oldest_available_age_seconds";
-/// Database timestamp of the last successful observation.
 pub(crate) const OBSERVATION_TIMESTAMP_METRIC: &str = "jobs_observation_timestamp_seconds";
 const RETAIN_COMPLETED_FOR: Duration = Duration::from_hours(24);
 const RETENTION_BATCH_ROWS: u32 = 500;
 /// The hang guard on one retention batch: a slow batch is waited for.
 const RETENTION_STATEMENT_TIMEOUT: Duration = Duration::from_secs(5);
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(10);
-/// How long a population read waits for the engine's statement turn.
 const POPULATION_TURN_WAIT: Duration = Duration::from_secs(1);
 const PER_KIND_STATE_SAMPLE_CAP: i64 = 1_000;
-/// The statement bound of one registered-kind sample.
 const SAMPLE_STATEMENT_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Delete expired completed jobs in batches of [`RETENTION_BATCH_ROWS`] and
-/// return how many were deleted.
-///
 /// Batches run until one is short. The first batch error is returned; earlier
 /// batches stay committed. Failed jobs remain until recovery. A short batch
 /// does not prove empty inventory: locked eligible rows can remain.
-///
-/// # Errors
-///
-/// [`OperationError`] from the batch that failed.
 pub(crate) async fn remove_expired(shared: &Shared) -> Result<u64, OperationError> {
     remove_expired_with_cancel(shared, None)
         .await
         .map(|(removed, _)| removed)
 }
 
-/// How a retention pass ended; [`CleanupPass`] records why a pass finished.
 enum PassEnd {
     Finished,
     Cancelled,
@@ -80,7 +64,6 @@ async fn remove_expired_with_cancel(
     }
 }
 
-/// Run retention under the selected schedule until `cancel` fires.
 pub(crate) async fn run_retention(shared: Arc<Shared>, cancel: CancellationToken) {
     let _ = Box::pin(cancel.run_until_cancelled(async {
         let mut schedule = CleanupSchedule::new(Cleanup::Jobs);
@@ -127,8 +110,6 @@ async fn delete_batch(shared: &Shared) -> Result<u64, OperationError> {
     .await
 }
 
-/// Independently poll registered-kind and global maintenance samples under
-/// the existing once-per-process owner, until `cancel` fires.
 pub(crate) async fn run_sampling(shared: Arc<Shared>, cancel: CancellationToken) {
     let _ = Box::pin(cancel.run_until_cancelled(async {
         tokio::join!(
@@ -237,9 +218,6 @@ async fn read_population(
     .await
 }
 
-/// Describe the queue-observation gauges and publish neutral pre-sample values.
-/// [`Engine::start`](crate::Engine::start) calls this for the engine that owns
-/// the process duties.
 pub(crate) fn init_metrics(kinds: &[&'static str]) {
     metrics::describe_gauge!(
         LIVE_JOBS_METRIC,
@@ -418,7 +396,6 @@ fn publish_sample(sample: &Sample) {
     metrics::gauge!(OBSERVATION_TIMESTAMP_METRIC).set(sample.observed_at);
 }
 
-/// Every per-kind series a sample sets, the one list registration zeroes too.
 fn publish_kind(kind: &str, queue_metrics: KindQueueMetrics) {
     for (state, count) in [
         ("available", queue_metrics.available),

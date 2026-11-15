@@ -1,5 +1,3 @@
-//! Admitted password-file input. The connection supervisor owns refresh and AUTH.
-
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -15,13 +13,10 @@ const DEFAULT_USER: &str = "default";
 pub(crate) struct PasswordFile {
     path: PathBuf,
     username: String,
-    /// One permit, held by a blocking read until it ends, including one whose
-    /// caller stopped waiting.
     reading: Arc<Semaphore>,
 }
 
 impl PasswordFile {
-    /// Admission checks availability; every subsequent setup reads again.
     pub(crate) fn admit(path: PathBuf, username: Option<&str>) -> Result<Self, CacheError> {
         let content = read_password_file(&path)?;
         password_from(content)?;

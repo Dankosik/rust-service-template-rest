@@ -9,8 +9,6 @@ repository.workspace = true
 publish.workspace = true
 build = "build.rs"
 
-# The library embeds `migrations/` and runs a migrator over one connection;
-# the binary loads the service configuration and applies the embedded set.
 [[bin]]
 name = "migrate"
 path = "src/main.rs"

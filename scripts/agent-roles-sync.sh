@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Generate harness-specific role carriers from canonical role sources.
 set -euo pipefail
 
 usage() {

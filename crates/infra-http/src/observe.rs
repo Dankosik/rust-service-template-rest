@@ -1,31 +1,9 @@
-//! Observation of every request in one middleware, as the gRPC transport's
-//! `observe` does it: the OpenTelemetry server span, the HTTP server metrics,
-//! and one structured access-log line.
-//!
-//! The span admits finite HTTP diagnostics and validated correlation using
-//! `tracing-opentelemetry-instrumentation-sdk` pieces. Raw URI, caller authority
-//! and User-Agent are never recorded. Only the operation name, the kind, and
-//! the request id are `tracing` fields, because the JSON log layer serializes
-//! every span field and repeats
-//! it on each record inside the request; the HTTP attributes go to the
-//! OpenTelemetry span alone. This runs after routing and after the request id
-//! is set, so all of them are known at creation, and nothing is `Span::record`ed
-//! afterwards, since every record re-serializes the span's fields.
-//!
-//! The metrics follow the OpenTelemetry HTTP semantic conventions as
-//! Prometheus renders them: the response-head duration by method, route
-//! template, and status, whose `_count` series is the request count, and the
-//! active requests by method, held until the response body ends, fails, or
-//! is dropped. A drop before the response
-//! head is recorded as 499 for client abandonment or 503 for a forced server
-//! shutdown. Neither status was sent to the client.
-//!
-//! The access-log line is written inside the span, so it carries the trace
-//! and span ids through the subscriber, and outside admission and the opening
-//! deadline, so a shed or timed-out request is still recorded with its real
-//! status.
-//! Matched health probe routes are skipped by route template, not raw path,
-//! so an unmatched request that merely looks like a probe is still logged.
+//! Only the operation name, the kind, and the request id are `tracing` fields,
+//! because the JSON log layer serializes every span field and repeats it on
+//! each record inside the request; HTTP attributes go to the OpenTelemetry
+//! span alone. This runs after routing and after the request id is set, so
+//! nothing is `Span::record`ed afterwards, since every record re-serializes
+//! the span's fields.
 
 use std::sync::{Arc, PoisonError, RwLock};
 use std::time::{Duration, Instant};
@@ -51,26 +29,16 @@ use crate::problem::{Problem, complete_problem};
 use crate::request_id::REQUEST_ID_HEADER;
 use crate::server::{ConnectionInfo, ListenerScheme};
 
-/// The response-head duration, labelled by `http_request_method`,
-/// `http_route` (the matched route template or `<unmatched>`), and
-/// `http_response_status_code`; its `_count` series is the request count.
 pub(crate) const REQUEST_DURATION_METRIC: &str = "http_server_request_duration_seconds";
 
-/// Requests whose response body has not ended, labelled by
-/// `http_request_method`.
 pub(crate) const ACTIVE_REQUESTS_METRIC: &str = "http_server_active_requests";
 
-/// Histogram buckets for request latencies, in seconds.
 pub(crate) const LATENCY_BUCKETS: &[f64] = &[
     0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
 ];
 
-/// Time a request waited for an in-flight permit, a histogram without labels.
-/// It is recorded only for a request that had to wait, whether the wait ended
-/// in a permit or in a shed.
 pub(crate) const ADMISSION_WAIT_METRIC: &str = "http_server_admission_wait_seconds";
 
-/// Requests shed because no in-flight permit freed within the request timeout.
 pub(crate) const SHED_REQUESTS_METRIC: &str = "http_server_shed_requests_total";
 
 /// Every histogram this crate records. A composition root hands it to the

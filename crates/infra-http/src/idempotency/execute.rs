@@ -1,5 +1,3 @@
-//! The handler seam, one store attempt, and its HTTP outcome mapping.
-
 use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
@@ -28,7 +26,6 @@ const UNAVAILABLE_DETAIL: &str = "idempotent request processing is unavailable";
 const KEY_MISMATCH_DETAIL: &str = "Idempotency-Key is bound to a different request";
 const IN_PROGRESS_DETAIL: &str = "a request with this Idempotency-Key is in progress";
 
-/// The closed metric labels of HTTP idempotency.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Outcome {
     InvalidKey,
@@ -93,7 +90,6 @@ pub(super) enum Provenance {
     Replayed,
 }
 
-/// The extractor on an idempotent composed handler.
 pub struct Idempotency {
     attempt: Attempt,
 }

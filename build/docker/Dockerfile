@@ -29,7 +29,6 @@
 #   Locked resolution is not a future binary/image equality guarantee: APT
 #   inputs, this frontend tag and tool/package availability can change.
 
-# Declared once for the stages that cook and build the service package.
 ARG SERVICE_PACKAGE=service
 
 FROM rust:1.100.0-slim-trixie@sha256:e9d95b74296f7126a83ae3d041aeaba1ff4c478f13abc5cc034fcf7c131c3d4a AS chef
@@ -177,13 +176,10 @@ LABEL org.opencontainers.image.version="${APP_VERSION}" \
       org.opencontainers.image.source="${SOURCE_URL}"
 ARG SERVICE_BIN=service
 COPY --from=service-build "/out/${SERVICE_BIN}" /service
-# The migration job runs the same image with `--entrypoint /migrate`; it
-# needs no migration directory.
 # template:begin postgres:docker-migrator-runtime
 COPY --from=migrate-build /out/migrate /migrate
 # template:end postgres:docker-migrator-runtime
 # template:begin worker:docker-jobs-worker-runtime
-# The jobs worker runs the same image with --entrypoint /jobs-worker.
 COPY --from=jobs-worker-build /out/jobs-worker /jobs-worker
 # template:end worker:docker-jobs-worker-runtime
 EXPOSE 8080

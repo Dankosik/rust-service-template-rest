@@ -1,10 +1,3 @@
-//! One opt-in native recovery proof. Ordinary integration discovery compiles
-//! this carrier but cannot silently satisfy it without its historical actors.
-//!
-//! Primary oracle: exact durable identities from actual old/new processes and
-//! native archives. Existing jobs/outbox tests own individual adapter branches;
-//! they cannot detect a missing archive, wrong executable or restore fence.
-
 #![cfg(feature = "integration")]
 #![expect(
     clippy::expect_used,

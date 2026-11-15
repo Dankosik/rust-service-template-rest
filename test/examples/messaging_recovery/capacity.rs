@@ -1,5 +1,3 @@
-//! Bounded open-loop fixture ingress. This never publishes or consumes directly.
-
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::io::Write as _;

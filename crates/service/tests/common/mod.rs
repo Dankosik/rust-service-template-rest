@@ -1,5 +1,3 @@
-//! Probe polling shared by the process-level tests of the built binaries.
-
 use std::time::{Duration, Instant};
 
 /// The status and body of one GET; an error status is a response, not an error.

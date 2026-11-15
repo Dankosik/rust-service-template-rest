@@ -1,26 +1,4 @@
 #!/usr/bin/env bash
-# Surface-aware verification: classify the changed paths, plan the smallest
-# set of make targets that proves them, run the plan under the validation
-# lock, and record the outcome.
-#
-#   verify.sh                 plan and run for the worktree changes since BASE_REF
-#   verify.sh --plan          print the plan only
-#   verify.sh --files P...    plan for an explicit path list
-#   verify.sh --self-test
-#
-# A passing run writes a receipt under <git-common-dir>/codex/verify named by
-# the candidate fingerprint (changed files' content and modes plus HEAD), the
-# plan, and the environment; an identical rerun reuses it unless
-# VERIFY_FORCE=1. Every run writes an attempt record with per-step state, so a
-# failed or interrupted run leaves evidence without granting acceptance. A
-# step that changes the candidate invalidates the attempt.
-#
-# Heavy steps and the source initializer matrix are CI-owned: a local run
-# names them and records a partial result instead of running them.
-# ALLOW_HEAVY=1 and ALLOW_FULL=1 keep them local. A repository without CI
-# (REPOSITORY_CI = none in make/service.mk) owns every step: the run admits the
-# heavy ones, adds the checks only CI ran, and names those without a local
-# command.
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)

@@ -19,33 +19,27 @@ use crate::listener_limits::{
 };
 use crate::validate::{ValidationError, duration_range, required};
 
-/// Explicit security mode for a native gRPC server or client.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum GrpcSecurity {
     /// The operator supplies the enclosing network trust boundary.
     Plaintext,
-    /// TLS 1.3 is constructed from the supplied material by the transport.
     Tls,
 }
 
-/// Immutable input for the optional native gRPC listener.
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct GrpcConfig {
-    /// Whether bootstrap starts a native gRPC listener.
     pub enabled: bool,
     /// Listener address, required only when the listener is enabled.
     /// An IP `host:port`, or `:port` for IPv4 all-interfaces (`0.0.0.0`).
     /// Hostnames are refused; load does not look them up. Blank is absent.
     #[serde(default, deserialize_with = "crate::de::optional_listen_addr")]
     pub addr: Option<SocketAddr>,
-    /// Explicit listener security mode, required only when enabled.
     pub security: Option<GrpcSecurity>,
     /// PEM certificate chain for TLS, never read while the listener is off.
     #[serde(default, deserialize_with = "blank_as_none")]
     pub certificate: Option<String>,
-    /// Environment-only PEM private key for TLS.
     #[serde(default, deserialize_with = "blank_secret_as_none")]
     pub private_key: Option<SecretString>,
     /// Optional PEM client trust anchor; present means mTLS is required.
@@ -101,7 +95,6 @@ impl Default for GrpcConfig {
     }
 }
 
-/// Leaves trust and credential inputs out of `Debug` so they never reach logs.
 impl fmt::Debug for GrpcConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("GrpcConfig")
@@ -117,28 +110,20 @@ impl fmt::Debug for GrpcConfig {
 }
 
 impl GrpcConfig {
-    /// The listener address when one was configured.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when `grpc.addr` is absent.
     pub fn required_addr(&self) -> Result<SocketAddr, ValidationError> {
         required("grpc.addr", self.addr, "grpc.enabled is true")
     }
 
-    /// Adapter form of `grpc.max_in_flight`: `None` means shedding is off.
     #[must_use]
     pub fn in_flight_cap(&self) -> Option<NonZeroU32> {
         NonZeroU32::new(self.max_in_flight)
     }
 
-    /// Adapter form of `grpc.max_connections`: `None` means unbounded.
     #[must_use]
     pub fn connection_cap(&self) -> Option<NonZeroU32> {
         NonZeroU32::new(self.max_connections)
     }
 
-    /// Adapter form of `grpc.max_connection_age`: zero becomes `None`.
     #[must_use]
     pub fn connection_age_cap(&self) -> Option<Duration> {
         (!self.max_connection_age.is_zero()).then_some(self.max_connection_age)
@@ -146,11 +131,6 @@ impl GrpcConfig {
 
     /// The listener's security mode with the material it needs: one owner
     /// for the rule the validator and the transport conversion both apply.
-    ///
-    /// # Errors
-    ///
-    /// Returns the key that is missing for the selected mode, or the TLS
-    /// key that plaintext must not carry.
     pub fn listener_security(&self) -> Result<GrpcListenerSecurity<'_>, ValidationError> {
         let security = required("grpc.security", self.security, "grpc.enabled is true")?;
         match security {
@@ -221,15 +201,10 @@ impl GrpcConfig {
     reason = "the view borrows TLS material that must not be formatted"
 )]
 pub enum GrpcListenerSecurity<'a> {
-    /// No TLS material; the operator supplies the network trust boundary.
     Plaintext,
-    /// TLS 1.3 material for the transport to parse.
     Tls {
-        /// PEM certificate chain.
         certificate: &'a str,
-        /// PEM private key.
         private_key: &'a SecretString,
-        /// PEM client trust anchor; present means mTLS is required.
         client_ca: Option<&'a str>,
     },
 }

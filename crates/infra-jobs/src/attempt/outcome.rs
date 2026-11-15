@@ -1,5 +1,3 @@
-//! What an attempt's end becomes in the queue, and the statements that store it.
-
 use infra_postgres::observed;
 use sqlx::postgres::PgConnection;
 use tokio::time::Instant;
@@ -77,11 +75,9 @@ impl Write<'_> {
     }
 }
 
-/// An acknowledged outcome write: whether it changed the job row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Written {
     Applied,
-    /// The fenced claim was no longer running, so the write matched no row.
     Unchanged,
 }
 
@@ -162,8 +158,6 @@ pub(super) async fn send_outcome(
     })
 }
 
-/// The supervisor batches completions separately via
-/// [`complete_batched`](super::completion::complete_batched).
 async fn execute(
     connection: &mut PgConnection,
     fence: ClaimFence,
@@ -296,19 +290,15 @@ pub(super) fn map_outcome(attempt: &AttemptId, policy: Policy, ended: Ended) -> 
     }
 }
 
-/// Why an attempt spent its unit without completing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum RetryCause {
-    /// The handler failed; the next attempt waits at least `floor_micros`.
     Failure { floor_micros: i64 },
-    /// The handler ran past its timeout.
     Timeout,
 }
 
 impl RetryCause {
     const FAILURE: Self = Self::Failure { floor_micros: 0 };
 
-    /// The least delay before the next attempt; a timeout sets none.
     const fn floor_micros(self) -> i64 {
         match self {
             Self::Failure { floor_micros } => floor_micros,
@@ -356,7 +346,6 @@ fn payload_summary(kind: &str, error: &serde_json::Error) -> String {
     )
 }
 
-/// The final formatting step before an attempt summary is stored.
 fn sanitize_summary(text: &str) -> String {
     let mut sanitized = String::with_capacity(text.len().min(MAX_ERROR_SUMMARY_BYTES));
     for ch in text.chars() {

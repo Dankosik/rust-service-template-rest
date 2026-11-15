@@ -1,5 +1,3 @@
-//! Bounds on broker round trips.
-
 use std::future::Future;
 use std::time::Duration;
 
@@ -11,7 +9,6 @@ use crate::error::MessagingError;
 /// Bounds every broker round trip, inside any longer caller deadline.
 pub const BROKER_OPERATION_BUDGET: Duration = Duration::from_secs(5);
 
-/// The earlier of `deadline` and one [`BROKER_OPERATION_BUDGET`] from now.
 pub(crate) fn within_operation_budget(deadline: Instant) -> Instant {
     deadline.min(Instant::now() + BROKER_OPERATION_BUDGET)
 }

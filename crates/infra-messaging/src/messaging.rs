@@ -42,7 +42,6 @@ pub struct MessagingOptions {
     pub consumer: Option<ConsumerOptions>,
 }
 
-/// Where the broker credentials come from.
 #[derive(Clone, Debug)]
 pub enum Credentials {
     /// The content of a credentials file. `Debug` redacts it.
@@ -70,7 +69,6 @@ impl std::fmt::Debug for MessagingOptions {
     }
 }
 
-/// Consumer fields coupled to adapter settlement and resource admission.
 #[derive(Clone, Debug)]
 pub struct ConsumerOptions {
     pub durable_name: String,
@@ -82,8 +80,6 @@ pub struct ConsumerOptions {
     pub concurrency: NonZeroUsize,
 }
 
-/// One connected messaging dependency and its lifecycle state.
-///
 /// Cloning yields another handle to the same connection and shared state;
 /// [`Messaging::close`] drains and closes that connection for every handle.
 #[derive(Clone, Debug)]
@@ -92,8 +88,6 @@ pub struct Messaging {
     consumer: Option<ConsumerAdmission>,
 }
 
-/// Retains a partially admitted native connection until it can be transferred
-/// to [`Messaging`] or explicitly closed by the process owner.
 #[derive(Debug)]
 pub struct MessagingStartup {
     options: MessagingOptions,
@@ -104,15 +98,10 @@ pub struct MessagingStartup {
     phase: StartupPhase,
 }
 
-/// How far a [`MessagingStartup`] got.
 #[derive(Debug)]
 enum StartupPhase {
-    /// No connection was opened yet.
     Prepared,
-    /// The connection is open and owned here until admission succeeds or
-    /// [`MessagingStartup::close`] closes it.
     Connected(NativeConnection),
-    /// Ownership moved to the admitted [`Messaging`].
     Admitted,
 }
 
@@ -122,7 +111,6 @@ pub(crate) struct Shared {
     pub(crate) jetstream: async_nats::jetstream::Context,
     pub(crate) source_stream: String,
     pub(crate) max_payload_bytes: usize,
-    /// The largest encoded envelope the configured payload limit admits.
     pub(crate) envelope_limit: usize,
     draining: AtomicBool,
     failed: AtomicBool,
@@ -131,7 +119,6 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
-    /// Whether this resource is draining or its consumer failed.
     pub(crate) fn refuses_work(&self) -> bool {
         self.is_draining() || self.has_failed()
     }
@@ -155,12 +142,10 @@ impl Shared {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CloseOutcome {
-    /// Native termination and final connection event submission were observed.
     Complete,
     /// Cancellation or the effective deadline ended the caller's wait.
     /// Native force-close was requested; completion has not been confirmed.
     WaitInterrupted,
-    /// The client closing could not be confirmed.
     UnobservedClose,
 }
 
@@ -171,11 +156,6 @@ impl Messaging {
     /// call, and handler metrics to the one installed at [`Self::consumer`],
     /// so install the recorder first. Each broker round trip is bounded by
     /// [`BROKER_OPERATION_BUDGET`] inside `deadline`.
-    ///
-    /// # Errors
-    ///
-    /// Returns a sanitized connection, topology, bounds, cancellation, or timeout
-    /// failure when the configured dependency cannot be admitted.
     pub async fn connect(
         options: MessagingOptions,
         deadline: Instant,
@@ -196,11 +176,6 @@ impl Messaging {
     }
 
     /// Prepares a retained startup owner without network I/O.
-    ///
-    /// # Errors
-    ///
-    /// Returns a bounds refusal for a payload limit that is zero or cannot fit
-    /// one publication within the native work window.
     pub fn prepare(
         options: MessagingOptions,
         deadline: Instant,
@@ -242,11 +217,6 @@ impl Messaging {
     }
 
     /// Admits a typed registry against the configured durable consumer.
-    ///
-    /// # Errors
-    ///
-    /// Returns a sanitized error when routes, the durable configuration, or
-    /// the remaining startup budget cannot admit consumption.
     pub async fn consumer(&self, registry: Registry) -> Result<Consumer, MessagingError> {
         if self.shared.refuses_work() {
             return Err(MessagingError::Unavailable);
@@ -278,11 +248,6 @@ impl Messaging {
 impl MessagingStartup {
     /// Connects and verifies topology while retaining native cleanup ownership.
     /// On success ownership transfers to the returned admitted dependency.
-    ///
-    /// # Errors
-    ///
-    /// Returns a sanitized connection, topology, cancellation or timeout failure,
-    /// or a configuration refusal if this owner has already been admitted.
     pub async fn admit(&mut self) -> Result<Messaging, MessagingError> {
         let options = &self.options;
         let deadline = self.deadline;

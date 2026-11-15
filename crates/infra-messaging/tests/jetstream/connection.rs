@@ -1,5 +1,3 @@
-//! Connection admission, TLS trust, reconnect, and close.
-
 use super::*;
 
 /// Disconnects one real broker connection and holds replacement connections

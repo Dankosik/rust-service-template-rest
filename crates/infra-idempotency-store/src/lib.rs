@@ -1,14 +1,3 @@
-//! PostgreSQL record store for HTTP idempotency.
-//!
-//! Owns the one profile table, `http_idempotency_records`: arbitration of a
-//! scoped key at the writer, the one execution transaction that commits the
-//! work together with its success record, the startup check, and the bounded
-//! cleanup of expired records. Its records have the shape of an HTTP success
-//! (a 2xx status, header pairs, a body), so it serves no other transport, but
-//! it applies no HTTP policy: the inbound seam in `infra_http::idempotency`
-//! derives scopes and fingerprints, captures and decodes stored successes,
-//! and maps [`Attempted`] to responses.
-//!
 //! No other production crate names the table; the integration tests seed and
 //! corrupt it directly. A feature's persistence adapter reaches
 //! the transaction's connection through the PostgreSQL provider, which the
@@ -54,14 +43,6 @@ pub struct Store {
 pub struct InvalidRetention;
 
 impl Store {
-    /// A store over `pool` whose records stay live for `retention` after
-    /// their write, measured on the database clock.
-    ///
-    /// Does no I/O. Keeps whole microseconds of `retention`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`InvalidRetention`] when the duration exceeds 36,500 days.
     pub fn new(pool: PgPool, retention: Duration) -> Result<Self, InvalidRetention> {
         if retention > MAX_RETENTION {
             return Err(InvalidRetention);

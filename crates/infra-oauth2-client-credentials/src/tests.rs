@@ -156,8 +156,6 @@ impl Fixture {
         self.prepare(self.options(scopes, audience))
     }
 
-    /// Admits the fixture's loopback HTTP token endpoint and drives its refresh
-    /// lifetime until this fixture finishes.
     fn prepare(&self, options: Options) -> Credentials {
         let (credentials, driver) = self.build(options);
         self.drive(driver);
@@ -392,8 +390,6 @@ fn json_response(status: &str, body: &serde_json::Value) -> Vec<u8> {
     response(status, &serde_json::to_vec(body).unwrap())
 }
 
-/// A token-exchange response admitted by `token_from_response`'s
-/// `issued_token_type` check.
 fn exchange_response(access_token: &str) -> serde_json::Value {
     serde_json::json!({
         "access_token": access_token,

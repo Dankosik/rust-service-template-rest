@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Remote-only provenance check of the deliberately patched published source."""
 import hashlib
 import io
 import pathlib

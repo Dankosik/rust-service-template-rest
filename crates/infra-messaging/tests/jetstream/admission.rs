@@ -1,8 +1,5 @@
-//! Broker and stream limits refused at admission.
-
 use super::*;
 
-/// The `messaging_admission_failed` events as (`error.type`, `required_bytes`, `limit_bytes`).
 fn admission_refusals(logged: &Logged) -> Vec<(String, String, Option<String>)> {
     let field = |event: &[(&'static str, String)], name: &str| {
         event

@@ -1,12 +1,4 @@
 #!/usr/bin/env bash
-# Proves tools/versions.env: every line is NAME=value, no name repeats, every
-# *_IMAGE value is pinned by digest, and every Cargo tool binary make resolved
-# reports its pinned version. Then the Dockerfile: its tool ARG defaults equal
-# the manifest (Railway passes no build arguments), every FROM image carries a
-# digest, and the builder tag's Rust version equals the rust-toolchain.toml
-# channel. Go, Node and Python tools prove their pins when their targets run:
-# `go run <module>@v<version>`, `npx <package>@<version>` and `uvx
-# ruff@<version>` resolve nothing else.
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)

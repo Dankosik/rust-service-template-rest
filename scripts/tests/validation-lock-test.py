@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Blackbox queue/lifetime contracts; no Cargo, Docker, or shared lock access."""
 
 import errno
 import fcntl

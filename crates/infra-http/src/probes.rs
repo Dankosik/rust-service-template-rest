@@ -1,11 +1,3 @@
-//! The operations this crate owns: the liveness and readiness probes, seeded
-//! with the problem components every operation references.
-//!
-//! [`router`] returns an [`OpenApiRouter`], so the axum routes and their
-//! OpenAPI description stay together until the service crate finalizes policy
-//! and supplies state. New operations join a feature carrier, never this file
-//! or the hardened chain.
-//!
 //! Liveness is process-only: if the handler runs, the process is alive.
 //! Readiness is the cached verdict owned by the `health` crate; the handler
 //! never touches a dependency and exposes no dependency detail.
@@ -13,16 +5,6 @@
 //! Probe bodies stay `text/plain` (`ok` / `not ready`) on purpose: kube and
 //! other platform probes match that contract. They do not use the Problem
 //! envelope the rest of the hardened router answers with.
-//!
-//! The `utoipa::path` attributes are the contract of these operations; the
-//! generated document is committed as `api/openapi/service.yaml` and the
-//! service crate's tests refuse a stale copy. Every operation declares its
-//! `x-security-decision` and its OpenAPI `security`; an empty `security()`
-//! renders `security: []`, the explicit public override the linter and the
-//! contract tests require. Beside its own answers, every operation declares
-//! [`TransportProblemResponses`]: the OpenAPI group for shared transport
-//! Problems (`400`, `413`, `500`), which come from the chain, not from these
-//! handlers; that type records what stays out of the group.
 
 use axum::extract::{FromRef, State};
 use axum::http::StatusCode;
@@ -33,15 +15,11 @@ use utoipa_axum::routes;
 
 use crate::problem::responses::{ProblemComponents, TransportProblemResponses};
 
-/// Route templates of the probes, served and documented from these constants;
-/// see [`HEALTH_PROBES`] for their other effects.
 const LIVE_PATH: &str = "/health/live";
 const READY_PATH: &str = "/health/ready";
 const LIVE_OPERATION_ID: &str = "healthLive";
 const READY_OPERATION_ID: &str = "healthReady";
 
-/// Probe bodies: what the handler sends and what the contract shows as the
-/// example, from one constant each.
 const LIVE_BODY: &str = "ok";
 const READY_BODY: &str = "ok";
 const NOT_READY_BODY: &str = "not ready";
@@ -73,13 +51,6 @@ pub(crate) fn is_health_probe_operation(path: &str, operation_id: Option<&str>) 
         .any(|(probe, id)| path.ends_with(probe) && operation_id == Some(*id))
 }
 
-/// The probe routes with their contract and the problem components, as one
-/// [`OpenApiRouter`] whose state is still unapplied: the service crate's
-/// `api::contract` merges this value, finalizes policy, then calls
-/// `with_state` before [`crate::harden()`]. The state is any type that hands
-/// out a [`ReadinessReader`], so a composition root with more state than
-/// readiness serves the same probes. One `routes!` call per path: the macro
-/// groups the methods of a single path.
 pub fn router<S>() -> OpenApiRouter<S>
 where
     ReadinessReader: FromRef<S>,
@@ -214,8 +185,6 @@ mod tests {
         value.split(';').next().unwrap().trim().to_owned()
     }
 
-    /// The media types the document declares for one response, following a
-    /// `$ref` into `components/responses`.
     fn declared_media_types(
         document: &serde_json::Value,
         path: &str,

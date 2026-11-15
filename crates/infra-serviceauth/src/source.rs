@@ -1,6 +1,3 @@
-//! The outbound token source: this service's signed tokens, one handle per
-//! receiver.
-
 use std::{
     fmt,
     sync::{Arc, Mutex, PoisonError},
@@ -16,7 +13,6 @@ use crate::{JwtType, KeyId, MAX_TOKEN_LIFETIME_SECONDS, ServiceName, unix_second
 /// sends has more than half its lifetime left by this service's clock.
 const REUSE_SECONDS: u64 = MAX_TOKEN_LIFETIME_SECONDS / 2;
 
-/// This service's signing identity, from its configuration snapshot.
 #[derive(Clone)]
 pub struct SigningOptions {
     pub name: ServiceName,
@@ -52,15 +48,12 @@ pub enum SigningError {
     Signing,
 }
 
-/// This process's outbound token source. Cloning shares it.
 #[derive(Clone)]
 pub struct TokenSource(Signing);
 
 #[derive(Clone)]
 enum Signing {
-    /// Service authentication is off: calls carry no token.
     Disabled,
-    /// Callers are verified, but this service signs nothing.
     WithoutKey,
     Key(Arc<Signer>),
 }
@@ -91,10 +84,6 @@ impl TokenSource {
     }
 
     /// Prepares signing without I/O; signing one token proves the key.
-    ///
-    /// # Errors
-    /// Returns [`SigningError::InvalidKey`] for a key that does not sign
-    /// ES256.
     pub fn try_new(options: SigningOptions) -> Result<Self, SigningError> {
         let key = EncodingKey::from_ec_pem(options.private_key.expose_secret().as_bytes())
             .map_err(|_| SigningError::InvalidKey)?;
@@ -114,11 +103,6 @@ impl TokenSource {
 
     /// A handle that signs tokens addressed to `receiver`. Composition asks
     /// once per outbound client; each handle reuses its own token.
-    ///
-    /// # Errors
-    /// Returns [`SigningError::InvalidReceiver`] for a name outside the
-    /// [`ServiceName`] grammar and [`SigningError::NoSigningKey`] when this
-    /// service verifies callers but was given no signing key.
     pub fn receiver(&self, receiver: &str) -> Result<ReceiverTokens, SigningError> {
         let audience = ServiceName::parse(receiver).map_err(|_| SigningError::InvalidReceiver)?;
         let state = match &self.0 {
@@ -134,7 +118,6 @@ impl TokenSource {
     }
 }
 
-/// Tokens for one receiver. Cloning shares the cached token.
 #[derive(Clone)]
 pub struct ReceiverTokens(ReceiverState);
 
@@ -172,11 +155,6 @@ impl fmt::Debug for ReceiverTokens {
 impl ReceiverTokens {
     /// The `Authorization` value for the next call, marked sensitive, or
     /// `None` while service authentication is off.
-    ///
-    /// # Errors
-    /// Returns [`SigningError::Clock`] when the system clock precedes the
-    /// Unix epoch, or [`SigningError::Signing`] if signing a new token or
-    /// converting it to an authorization header fails.
     pub fn authorization(&self) -> Result<Option<HeaderValue>, SigningError> {
         let ReceiverState::Active(active) = &self.0 else {
             return Ok(None);
@@ -308,7 +286,6 @@ mod tests {
                 .as_str(),
             "orders"
         );
-        // A receiver verifies only tokens addressed to it.
         let other = Verifier::new(
             ServiceName::parse("billing").unwrap(),
             JwtType::parse("example-svc+jwt").unwrap(),

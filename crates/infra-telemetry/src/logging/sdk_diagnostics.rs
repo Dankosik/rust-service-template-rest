@@ -1,11 +1,8 @@
-//! SDK diagnostics admitted as finite numeric observations before every output.
-
 use enum_map::{Enum, EnumMap, enum_len};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tracing::field::{Field, Visit};
 use tracing::{Event, Metadata};
 
-/// SDK diagnostic events counted under [`DIAGNOSTICS_METRIC`].
 #[derive(Clone, Copy, Enum)]
 enum SdkEvent {
     SpanDroppingStarted,
@@ -56,7 +53,6 @@ static COUNTS: EnumMap<SdkEvent, AtomicU64> =
 static DROPPED: Observed = Observed::new();
 static REJECTED: Observed = Observed::new();
 
-/// A number the SDK reported, absent until its first report.
 struct Observed {
     value: AtomicU64,
     seen: AtomicBool,
@@ -114,7 +110,6 @@ pub(super) fn is_denied_target(target: &str) -> bool {
     .any(|family| super::within(target, family))
 }
 
-/// Whether a denied target's callsite is an SDK diagnostic this module counts.
 pub(super) fn is_known_diagnostic(metadata: &Metadata<'_>) -> bool {
     metadata.is_event() && SdkEvent::from_name(metadata.name()).is_some()
 }

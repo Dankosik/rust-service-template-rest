@@ -1,5 +1,3 @@
-//! Thin process entrypoint. All composition lives in the service library.
-
 // jemalloc: about 12% less CPU per request than glibc malloc under mixed load
 // for about 5 MB more resident memory; see docs/backend-library-selection.md.
 // Under `hotpath-alloc`, `#[hotpath::main]` installs its own counting

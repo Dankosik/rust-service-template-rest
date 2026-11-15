@@ -8,9 +8,6 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
-# The library holds the API contract assembly (`api`) and the runtime
-# composition (`run`); the `service` binary calls `run`, and `openapi` renders
-# the committed document from the same assembly.
 [lib]
 name = "service"
 
@@ -40,7 +37,6 @@ hotpath-cpu = ["hotpath", "hotpath/hotpath-cpu"]
 [dependencies]
 futures-util = { workspace = true, features = ["std"] }
 hotpath = { workspace = true, optional = true }
-# `FromRef` for the application state; the transport stays in infra-http.
 axum = { workspace = true }
 derive_more = { workspace = true, features = ["debug"] }
 health = { workspace = true }

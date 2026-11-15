@@ -1,10 +1,4 @@
 #!/usr/bin/env python3
-"""Exercise policy admission with changed context and documented policy inputs.
-
-The scenarios edit a fixed fixture shaped like the template's own policy, so
-they hold in every initialized service, whatever its profiles and IaC form;
-`make docs-check` admits each repository's real context.
-"""
 
 from __future__ import annotations
 
@@ -105,8 +99,6 @@ class Coverage(unittest.TestCase):
         path.write_text(updated)
 
     def snippet_policy(self) -> None:
-        """A repository initialized before the IaC file keeps its form in the document."""
-
         program = (self.root / IAC).read_text()
         (self.root / IAC).unlink()
         with (self.root / POLICY).open("a") as stream:

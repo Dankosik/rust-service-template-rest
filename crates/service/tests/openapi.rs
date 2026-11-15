@@ -1,17 +1,11 @@
-//! Contract proof over the assembled API document.
-//!
-//! The committed `api/openapi/service.yaml` must equal what the `openapi`
-//! binary renders. Each path operation in the service's OpenAPI 3.1.0 document
-//! must have supported effective security and declare the problem responses that
-//! policy requires. The problem schemas must stay closed.
-
-// Integration tests are test code; the workspace's production lint levels
-// for unwrap/expect/panic do not apply to them.
-#![allow(
+#![expect(
     clippy::expect_used,
+    reason = "a broken fixture or setup fails the test"
+)]
+#![allow(
     clippy::unwrap_used,
     clippy::panic,
-    reason = "a broken fixture or setup fails the test"
+    reason = "allow-*-in-tests suppresses these inside #[test] functions"
 )]
 
 use std::process::Command;

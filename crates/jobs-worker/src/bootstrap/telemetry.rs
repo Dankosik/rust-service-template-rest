@@ -1,5 +1,3 @@
-//! Traces, logs, metrics, and the startup record.
-
 use infra_telemetry::{
     ExporterState, LoggingFormat, LoggingOptions, Metrics, TracingOptions, install_subscriber,
     install_tracer_provider, runtime_metrics,

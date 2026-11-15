@@ -1,8 +1,3 @@
-//! PostgreSQL durable background jobs.
-//!
-//! Owns the runtime statements on `background_jobs`. Enqueue runs on the
-//! caller's open transaction.
-
 mod attempt;
 mod claim;
 mod engine;
@@ -32,8 +27,6 @@ pub use kind::{
 };
 pub use session::StartupError;
 
-/// Every histogram this crate records. A composition root hands it to the
-/// Prometheus recorder; a metric left out renders the default buckets.
 pub const HISTOGRAMS: &[(&str, &[f64])] = &[
     (ATTEMPT_DURATION_METRIC, attempt::ATTEMPT_DURATION_BUCKETS),
     (CLAIM_DURATION_METRIC, claim::CLAIM_DURATION_BUCKETS),

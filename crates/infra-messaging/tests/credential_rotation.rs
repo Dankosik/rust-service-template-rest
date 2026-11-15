@@ -1,5 +1,3 @@
-//! Integration tests for credential-file rotation across broker reconnects.
-
 #![expect(
     clippy::expect_used,
     clippy::unwrap_used,

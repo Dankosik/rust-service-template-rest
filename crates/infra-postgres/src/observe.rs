@@ -1,12 +1,3 @@
-//! What an operator sees of the pool and of each transaction.
-//!
-//! Four questions, one signal each: how full the pool is (the occupancy
-//! gauges and their limit), whether callers wait for a connection (the
-//! transaction-only wait histogram and named acquisition events), how long
-//! a transaction holds one and how it ends (the duration histogram and the
-//! span), and how long an observed operation takes and how it fails ([`observed`]).
-//! The driver's slow-statement warning adds the SQL text of the ones that matter.
-
 use std::time::{Duration, Instant};
 
 use metrics::{SharedString, Unit};
@@ -18,25 +9,14 @@ use crate::error::{failure_cause, sqlstate};
 use crate::maintenance::{CLEANUP_DURATION_BUCKETS, CLEANUP_DURATION_METRIC};
 use crate::transaction::TxError;
 
-/// Successful acquisitions slower than this receive operation diagnostics.
 const SLOW_ACQUIRE_THRESHOLD: Duration = Duration::from_secs(1);
 
-/// Pool occupancy, named after the OpenTelemetry database client semantic
-/// convention `db.client.connection.count` with its required attributes
-/// `db.client.connection.pool.name` and `db.client.connection.state`
-/// (`idle`, `used`). The Prometheus exporter spells dots as underscores.
 const CONNECTION_COUNT_METRIC: &str = "db_client_connection_count";
 
-/// The pool's connection limit (`db.client.connection.max`); occupancy over
-/// it is saturation.
 const CONNECTION_MAX_METRIC: &str = "db_client_connection_max";
 
-/// How long a transaction waited for its pooled connection
-/// (`db.client.connection.wait_time`), including opening a new one.
 pub(crate) const CONNECTION_WAIT_METRIC: &str = "db_client_connection_wait_time_seconds";
 
-/// Buckets in seconds for [`CONNECTION_WAIT_METRIC`], up to the acquire
-/// budget.
 pub(crate) const CONNECTION_WAIT_BUCKETS: &[f64] = &[
     0.0005,
     0.001,
@@ -49,13 +29,8 @@ pub(crate) const CONNECTION_WAIT_BUCKETS: &[f64] = &[
     crate::ACQUIRE_TIMEOUT.as_secs_f64(),
 ];
 
-/// How long a transaction took from asking for a connection to its commit
-/// answer, or to the closure's error (the rollback is not awaited), by
-/// `outcome`.
 pub(crate) const TRANSACTION_DURATION_METRIC: &str = "postgres_transaction_duration_seconds";
 
-/// Buckets in seconds for [`TRANSACTION_DURATION_METRIC`], up to the
-/// statement budget.
 pub(crate) const TRANSACTION_DURATION_BUCKETS: &[f64] = &[
     0.001,
     0.0025,
@@ -87,18 +62,14 @@ const fn strictly_increasing(buckets: &[f64]) -> bool {
     true
 }
 
-/// Observed PostgreSQL operation duration (`db.client.operation.duration`),
-/// by `db.query.summary` and, when the operation fails, `error.type`.
 pub(crate) const OPERATION_DURATION_METRIC: &str = "db_client_operation_duration_seconds";
 
-/// Buckets in seconds for [`OPERATION_DURATION_METRIC`]: the boundaries the
-/// OpenTelemetry convention advises for this histogram. The composition
-/// root passes both to the Prometheus recorder.
+/// OpenTelemetry semantic convention boundaries; the composition root hands
+/// [`HISTOGRAMS`] to the Prometheus recorder, or omitted metrics fall back to
+/// default buckets.
 pub(crate) const OPERATION_DURATION_BUCKETS: &[f64] =
     &[0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0];
 
-/// Every histogram this crate records. A composition root hands it to the
-/// Prometheus recorder; a metric left out renders the default buckets.
 pub const HISTOGRAMS: &[(&str, &[f64])] = &[
     (CONNECTION_WAIT_METRIC, CONNECTION_WAIT_BUCKETS),
     (TRANSACTION_DURATION_METRIC, TRANSACTION_DURATION_BUCKETS),
@@ -106,7 +77,6 @@ pub const HISTOGRAMS: &[(&str, &[f64])] = &[
     (CLEANUP_DURATION_METRIC, CLEANUP_DURATION_BUCKETS),
 ];
 
-/// Repeating it is harmless.
 pub(crate) fn describe() {
     metrics::describe_gauge!(
         CONNECTION_COUNT_METRIC,
@@ -207,7 +177,6 @@ pub(crate) async fn acquisition<T>(
     result
 }
 
-/// `error.type` when the caller stops waiting for the operation.
 const CANCELLED: &str = "cancelled";
 
 /// Poll a PostgreSQL operation and record how long it takes to finish or be
@@ -220,10 +189,6 @@ const CANCELLED: &str = "cancelled";
 /// The operation gets a client span only inside another span. A background
 /// loop that polls outside any span would otherwise start a one-span trace
 /// per tick. Its operations are still measured.
-///
-/// # Errors
-///
-/// The operation's own error.
 pub async fn observed<T>(
     summary: &'static str,
     statement: impl Future<Output = Result<T, sqlx::Error>>,
@@ -298,7 +263,6 @@ impl Drop for StatementEnd {
     }
 }
 
-/// Every `outcome` label of [`TRANSACTION_DURATION_METRIC`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TransactionOutcome {
     Committed,
@@ -309,7 +273,6 @@ pub(crate) enum TransactionOutcome {
     BeginFailed,
     CommitFailed,
     CommitUnknown,
-    /// The caller dropped the transaction before it ended.
     Cancelled,
 }
 

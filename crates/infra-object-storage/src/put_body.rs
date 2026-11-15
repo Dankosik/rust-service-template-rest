@@ -1,12 +1,3 @@
-//! Upload bodies: in-memory bytes, or a stream held to its declared length.
-//!
-//! The request carries `Content-Length`, and hyper stops polling a body once
-//! that many bytes are through, without an error. A longer body would be
-//! stored truncated on a provider that receives no checksum. A streamed body
-//! holds back the frame that completes the declared length until the inner
-//! body confirms its end, fails the request otherwise, and records why, so
-//! the put reports a refused input rather than an unknown outcome.
-
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,7 +20,6 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 /// not touch a Tokio resource.
 const SOURCE_POLLS_PER_YIELD: usize = 64;
 
-/// An upload body with its exact length.
 #[derive(Debug)]
 pub struct PutBody {
     pub(crate) len: u64,
@@ -126,8 +116,6 @@ struct ExactLength {
     /// `&mut`.
     inner: SyncWrapper<UnsyncBoxBody<Bytes, BoxError>>,
     remaining: u64,
-    /// The data frame that completed the declared length, held until the
-    /// inner body shows it has nothing more.
     held: Option<Frame<Bytes>>,
     /// Trailers seen while confirming the end, returned after `held`.
     trailers: Option<Frame<Bytes>>,
@@ -178,8 +166,6 @@ impl Body for ExactLength {
                 return Poll::Ready(self.trailers.take().map(Ok));
             }
             if polls_remaining == 0 {
-                // Ready empty frames must not monopolize the caller, even
-                // while the last data frame waits for end confirmation.
                 context.waker().wake_by_ref();
                 return Poll::Pending;
             }
@@ -243,7 +229,6 @@ mod tests {
 
     use super::*;
 
-    /// Poll the way hyper does: stop as soon as `len` bytes are through.
     fn send<const N: usize>(len: u64, chunks: [&'static [u8]; N]) -> (Result<u64, ()>, bool) {
         let frames =
             chunks.map(|chunk| Ok::<_, Infallible>(Frame::data(Bytes::from_static(chunk))));
@@ -273,7 +258,6 @@ mod tests {
 
     #[test]
     fn a_frame_past_the_declared_length_fails_the_body() {
-        // The first frame completes the length; hyper would stop there.
         assert_eq!(send(4, [b"abcd", b"efgh"]), (Err(()), true));
         assert_eq!(send(4, [b"abcdefgh"]), (Err(()), true));
     }
@@ -312,8 +296,6 @@ mod tests {
             mut self: Pin<&mut Self>,
             _: &mut Context<'_>,
         ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
-            // Fail a broken wrapper deterministically instead of hanging on
-            // the infinite empty source. The caller resets this each poll.
             assert!(self.polls.fetch_add(1, Ordering::Relaxed) < SOURCE_POLLS_PER_YIELD);
             self.steps.pop_front().unwrap_or_else(|| {
                 Poll::Ready(self.empty_tail.then(|| Ok(Frame::data(Bytes::new()))))

@@ -413,8 +413,6 @@ async fn a_resource_that_refuses_every_token_costs_one_token_request_per_evictio
         .credentials(&[], None)
         .http(fixture.resource_client());
     for token_requests in [1, 2] {
-        // Every call is refused, yet a token younger than the eviction age
-        // is kept instead of being requested again.
         for _ in 0..3 {
             let response = client
                 .execute(fixture.request(), deadline(Duration::from_secs(10)))
@@ -424,7 +422,6 @@ async fn a_resource_that_refuses_every_token_costs_one_token_request_per_evictio
             assert_eq!(fixture.token_requests().len(), token_requests);
         }
         advance(EVICTION_MIN_AGE).await;
-        // Old enough now: this 401 evicts it for the next round.
         client
             .execute(fixture.request(), deadline(Duration::from_secs(10)))
             .await
@@ -442,7 +439,6 @@ async fn a_late_401_does_not_evict_a_newer_token() {
     );
     let credentials = fixture.credentials(&[], None);
     let client = credentials.http(fixture.resource_client());
-    // Old enough that only its replacement keeps the late 401 from evicting.
     credentials
         .service_token(acquisition_deadline(&token_context(), None))
         .await

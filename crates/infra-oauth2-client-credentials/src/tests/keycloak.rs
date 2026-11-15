@@ -1,5 +1,5 @@
 //! The adapter against a real authorization server: a throwaway Keycloak
-//! container. Run through `make test-integration-oauth`, which starts it
+//! container. Run through `ALLOW_HEAVY=1 make test-integration-oauth`, which starts it
 //! (`scripts/ci/test-integration-oauth.sh`) and sets `OAUTH_TEST_KEYCLOAK_URL`.
 //!
 //! This proves what the local fixture cannot: that a real server accepts the
@@ -26,9 +26,7 @@ use super::{
 use crate::options::Admitted;
 
 const KEY_ID: &str = "key-1";
-/// The audience client an exchanged token is addressed to.
 const TARGET: &str = "target";
-/// The client whose service token stands in for a verified inbound token.
 const UPSTREAM: &str = "upstream";
 const UPSTREAM_SECRET: &str = "upstream-fixture-secret";
 
@@ -171,8 +169,6 @@ impl Realm {
         .await;
     }
 
-    /// Registers the calling service for `algorithm` with the public half of
-    /// `key`, as an operator would, and returns its credentials.
     async fn caller(
         &self,
         algorithm: Algorithm,
@@ -234,7 +230,6 @@ impl Realm {
         credentials
     }
 
-    /// A real access token whose audience includes every `caller-*` client.
     async fn subject_token(&self) -> SecretString {
         SecretString::from(
             self.token(
@@ -339,7 +334,6 @@ async fn every_algorithm_authenticates_the_client_and_exchanges_a_subject_token(
         let service = claims(&service);
         assert_eq!(service.iss, realm.issuer());
         assert_eq!(service.azp, caller(algorithm));
-        // A second request signs a new assertion; a reused `jti` is refused.
         *credentials.cached() = super::Cached::default();
         credentials
             .service_token(acquisition_deadline(&token_context(), None))
@@ -357,8 +351,6 @@ async fn every_algorithm_authenticates_the_client_and_exchanges_a_subject_token(
             .await
             .unwrap();
         let exchanged = claims(&exchanged);
-        // The subject stays the upstream caller; this service is the party
-        // the token was issued to, and the integration its audience.
         assert_eq!(exchanged.sub, subject_claims.sub);
         assert_eq!(exchanged.azp, caller(algorithm));
         assert_eq!(audiences(&exchanged), [TARGET]);
@@ -373,7 +365,6 @@ async fn refusals_carry_the_error_code_keycloak_reports() {
     let key = key_pair(algorithm);
     let registered = realm.caller(algorithm, &key, &[], Some(TARGET)).await;
 
-    // An assertion signed by a key the server does not hold for this client.
     let stranger = realm.credentials(algorithm, &key_pair(algorithm), &[], None);
     assert_eq!(
         stranger

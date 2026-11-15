@@ -1,6 +1,3 @@
-//! The native client connection: connect, reconnect pacing, connection
-//! events, and close.
-
 use std::time::Duration;
 
 use async_nats::rustls::crypto::{GetRandomFailed, SecureRandom};
@@ -21,7 +18,6 @@ use crate::messaging::{CloseOutcome, Credentials, MessagingOptions};
 const RECONNECT_BACKOFF_CAP: Duration = Duration::from_secs(4);
 const RECONNECT_CAP_ATTEMPT: usize = 13;
 
-/// The native client and the receiver that reports its final `Closed` event.
 #[derive(Clone, Debug)]
 pub(crate) struct NativeConnection {
     pub(crate) client: async_nats::Client,
@@ -30,7 +26,6 @@ pub(crate) struct NativeConnection {
 }
 
 impl NativeConnection {
-    /// Opens the first connection.
     pub(crate) async fn open(
         options: &MessagingOptions,
         deadline: Instant,
@@ -301,8 +296,6 @@ fn report_connection_event(event: &async_nats::Event) {
     }
 }
 
-/// Describes the connection metrics to the installed recorder. Repeating it
-/// is harmless.
 pub(crate) fn describe_metrics() {
     metrics::describe_counter!(
         "messaging_connection_events_total",
@@ -350,7 +343,6 @@ mod tests {
         }
     }
 
-    /// One logged event's fields, the message under `message`.
     type Logged = Vec<(&'static str, String)>;
 
     #[derive(Clone, Default)]

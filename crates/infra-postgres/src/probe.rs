@@ -1,5 +1,3 @@
-//! Readiness participation.
-//!
 //! The probe shares the pool so readiness can reflect saturation in the
 //! pool that serves requests. The background refresher applies its failure
 //! threshold and bounds the whole check. The acquire budget bounds the wait

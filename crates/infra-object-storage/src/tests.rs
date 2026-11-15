@@ -125,7 +125,6 @@ fn a_concurrency_limit_outside_the_semaphore_range_is_refused() {
     }
 }
 
-/// One request the stub saw: method, path, and headers. Bodies are drained.
 #[derive(Clone, Debug)]
 struct Seen {
     method: Method,
@@ -135,8 +134,6 @@ struct Seen {
 
 type Respond = Arc<dyn Fn(&Seen, usize) -> Response + Send + Sync>;
 
-/// A plaintext S3 stand-in on 127.0.0.1. `respond` gets each request and its
-/// zero-based index.
 struct Stub {
     endpoint: String,
     seen: Arc<Mutex<Vec<Seen>>>,
@@ -156,7 +153,6 @@ impl Stub {
         Self::start_delaying(move |_| response_delay, respond).await
     }
 
-    /// `delay_of` gets a request's zero-based index and holds its response.
     async fn start_delaying(
         delay_of: impl Fn(usize) -> Duration + Send + Sync + 'static,
         respond: impl Fn(&Seen, usize) -> Response + Send + Sync + 'static,
@@ -413,8 +409,6 @@ async fn failed_create_only_put_is_not_retried_and_is_unknown() {
 
 #[tokio::test]
 async fn mutations_make_one_attempt() {
-    // A retry would leave only the last reply, which could hide an earlier
-    // attempt that applied the mutation.
     let stub = Stub::start(|_, _| xml_error(StatusCode::SERVICE_UNAVAILABLE, "SlowDown")).await;
     let storage = stub.storage(|_| {});
     let result = storage
@@ -557,7 +551,6 @@ async fn get_reads_the_body_and_validates_a_returned_checksum() {
         assert_eq!(download.into_bytes().await.unwrap(), expected);
         assert_eq!(stub.seen()[0].headers["x-amz-checksum-mode"], "ENABLED");
 
-        // The download is itself a body of exactly the object's size.
         let download = storage.get(&key()).await.unwrap();
         assert_eq!(
             http_body::Body::size_hint(&download).exact(),
@@ -588,7 +581,6 @@ async fn get_with_a_wrong_checksum_fails_integrity_at_the_end() {
         outcome = download.next_chunk().await;
     }
     assert_eq!(outcome, Err(ObjectStorageError::Integrity));
-    // A later call must not read as a clean end.
     assert_eq!(
         download.next_chunk().await,
         Err(ObjectStorageError::Integrity)
@@ -798,7 +790,6 @@ async fn a_failed_credential_load_sends_nothing_and_is_retryable() {
         crate::https_client(),
         aws_sdk_s3::config::SharedCredentialsProvider::new(NoIdentity),
     );
-    // Nothing was sent, so even a mutation's outcome is known.
     let put = storage
         .put(
             &key(),
@@ -949,7 +940,6 @@ async fn the_span_names_the_region_only_on_amazon() {
     let _subscriber = tracing::subscriber::set_default(records.clone());
     let _every_dispatcher = tracing::Dispatch::new(Records::default());
 
-    // Presigning creates the span and sends nothing.
     let amazon = ObjectStorage::try_new(options(Provider::AmazonS3 {
         region: "eu-central-1".to_owned(),
         expected_bucket_owner: "123456789012".to_owned(),
@@ -1035,7 +1025,6 @@ pub(super) fn in_tracing_child(test_name: &str) -> bool {
     false
 }
 
-/// Every span and event a test emits, one line each with its recorded fields.
 #[derive(Clone, Default)]
 pub(super) struct Records(Arc<Mutex<Vec<String>>>);
 

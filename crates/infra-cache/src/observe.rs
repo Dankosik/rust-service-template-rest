@@ -37,7 +37,6 @@ fn operation_label(operation: Operation) -> &'static str {
     }
 }
 
-/// How a command ended. Failures record a separate series for each error type.
 #[derive(Clone, Copy, enum_map::Enum)]
 pub(crate) enum Outcome {
     Hit,
@@ -105,10 +104,6 @@ impl NamespaceHistograms {
     }
 }
 
-/// One polled cache command. The guard keeps the admitted server identity and
-/// the bounded labels (namespace, operation, outcome, error type), never the
-/// key, the value, or server text. Dropping it before an outcome records
-/// `cancelled`.
 pub(crate) struct OperationGuard<'a> {
     started: Instant,
     namespace: &'static str,
@@ -195,7 +190,6 @@ impl Drop for OperationGuard<'_> {
     }
 }
 
-/// Describes every cache metric to the installed recorder. Repeating it is harmless.
 pub(crate) fn describe() {
     metrics::describe_histogram!(
         OPERATION_DURATION_METRIC,

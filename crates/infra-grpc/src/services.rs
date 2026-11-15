@@ -43,18 +43,13 @@ impl Services {
         Self::default()
     }
 
-    /// Reads the services and methods of an encoded `FileDescriptorSet`,
-    /// such as `grpc_contracts::FILE_DESCRIPTOR_SET`. A generated server does
-    /// not list its methods; the set is what lets a scope requirement name a
-    /// real method and a metric carry a method label no caller can invent.
-    /// The set itself is kept for [`Services::add_reflection`] to serve, hence
-    /// `'static`. Describe a contract before adding its servers.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidFileDescriptorSet`] when the bytes do not
-    /// decode and [`Error::ConflictingServiceDescription`] when descriptions
-    /// disagree on a service's methods.
+    /// Reads the services and methods of an encoded
+    /// [`prost_types::FileDescriptorSet`], such as
+    /// `grpc_contracts::FILE_DESCRIPTOR_SET`. A generated server does not list
+    /// its methods; the set is what lets a scope requirement name a real method
+    /// and a metric carry a method label no caller can invent. The set itself
+    /// is kept for [`Services::add_reflection`] to serve, hence `'static`.
+    /// Describe a contract before adding its servers.
     pub fn describe(&mut self, encoded_file_descriptor_set: &'static [u8]) -> Result<(), Error> {
         self.learn(encoded_file_descriptor_set)?;
         self.descriptor_sets.push(encoded_file_descriptor_set);
@@ -95,13 +90,6 @@ impl Services {
         Ok(())
     }
 
-    /// Records `S::NAME` and adds the generated server.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::UndescribedService`] when no described set holds
-    /// that name, and [`Error::DuplicateService`] when the name is already
-    /// registered or reserved for the built-in health service.
     pub fn add<S>(&mut self, service: S) -> Result<(), Error>
     where
         S: tower::Service<http::Request<tonic::body::Body>, Error = Infallible>
@@ -134,10 +122,6 @@ impl Services {
     /// registered services, health and both reflection endpoints.
     /// Reflection is a business route: admitted, limited and deadline-bound
     /// like every other registered service.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::DuplicateService`] when reflection is already added.
     pub fn add_reflection(&mut self) -> Result<(), Error> {
         if std::mem::replace(&mut self.reflection, true) {
             return Err(Error::DuplicateService(REFLECTION_SERVICE));
@@ -219,13 +203,6 @@ impl Services {
     /// lacks one gets `PERMISSION_DENIED` before the handler. A method with
     /// no declared requirement admits any authenticated caller, as an OpenAPI
     /// operation without scopes does.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::UnregisteredMethodPath`] unless `path` is
-    /// `/{service}/{method}` of a described method of a service already
-    /// added, and [`Error::DuplicateScopeRequirement`] when `path` already
-    /// has one.
     pub fn require_scopes(&mut self, path: &str, scopes: &[&str]) -> Result<(), Error> {
         if !self.is_registered_method(path) {
             return Err(Error::UnregisteredMethodPath(path.to_owned()));
@@ -248,14 +225,6 @@ impl Services {
     /// [`Services::authenticate_callers`]; without it, [`router`](crate::router()) checks only
     /// that a declared table is complete and refuses to build otherwise. A
     /// caller outside the rule gets `PERMISSION_DENIED` before the handler.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::UnregisteredCallerRule`] unless `path` names a
-    /// described method of an added service or an added reflection path,
-    /// [`Error::DuplicateCallerRule`] when `path` already has a rule, and
-    /// [`Error::InvalidCallerRule`] for a caller outside the name grammar.
-    /// Returns [`Error::DuplicateCallerName`] when a caller is named twice.
     pub fn allow_callers(&mut self, path: &str, callers: &[&str]) -> Result<(), Error> {
         let reflection = self.reflection && crate::REFLECTION_PATHS.contains(&path);
         if !(self.is_registered_method(path) || reflection) {

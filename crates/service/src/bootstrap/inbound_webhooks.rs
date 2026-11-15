@@ -1,5 +1,3 @@
-//! Inbound webhook receiver composition.
-
 use std::sync::Arc;
 
 use super::background::Background;

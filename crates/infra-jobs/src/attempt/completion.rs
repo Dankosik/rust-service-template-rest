@@ -1,5 +1,3 @@
-//! Completion writes for one fenced claim or a batch sharing a supervisor deadline.
-
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
@@ -244,9 +242,6 @@ async fn write_batch(shared: &Shared, mut batch: CompletionBatch, deadline: Inst
                 if deadline_reached_or_cleanup_ended(&shared.cleanup, deadline) {
                     return Err(OperationError::TimedOut);
                 }
-                // COMPLETE for every attempt queued while the previous batch was in
-                // flight, under the fence `complete_query` explains. Returns the 1-based
-                // position of each applied completion.
                 observed(
                     "complete jobs",
                     sqlx::query_scalar!(
@@ -285,8 +280,6 @@ async fn write_batch(shared: &Shared, mut batch: CompletionBatch, deadline: Inst
     }
 }
 
-/// Each of `len` batched completions' writes, from the 1-based positions the
-/// statement applied.
 fn written_by_position(positions: &[i64], len: usize) -> Vec<Written> {
     let mut written = vec![Written::Unchanged; len];
     for &position in positions {

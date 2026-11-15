@@ -1,20 +1,6 @@
-//! RFC 9457 problem details: the closed catalog of client-visible failures.
-//!
-//! One catalog on purpose: a second copy drifts, and a status advertising the
-//! wrong code is what a client keys its retry policy off. `Code` is the
-//! stable machine-readable identity; this module projects it into the HTTP
-//! status. `type` is always `about:blank` and `title` the status phrase, so
-//! the standard members say only what the status says and `code` is the one
-//! identifier. A code no operation declares is not by itself wrong; the
-//! hardened chain can still answer 405, 504, or a shed 503 without an
-//! operation-specific response. Connection-layer outcomes (hyper 431, the
-//! accept-cap close, a protocol-sniff deadline close) are not `Problem` values
-//! even when a matching `Code` exists in the catalog.
-//!
-//! The same types describe themselves in the OpenAPI document: `ToSchema`
-//! renders the `Problem` and `InvalidParam` schemas from the serializer, and
-//! [`responses`] holds the reusable `application/problem+json` responses
-//! operations reference. Doc comments on those items are contract text.
+//! Connection-layer outcomes (hyper 431, the accept-cap close, a
+//! protocol-sniff deadline close) are not `Problem` values even when a
+//! matching `Code` exists in the catalog.
 
 use std::time::Duration;
 
@@ -249,25 +235,18 @@ fn retry_after_value(after: Duration) -> HeaderValue {
     }
 }
 
-/// The 413 for a request body cut off by the configured limit, whichever
-/// reader hit it.
 pub(crate) fn body_too_large() -> Problem {
     Problem::new(Code::RequestEntityTooLarge).detail("request body exceeds the configured limit")
 }
 
-/// The 400 for a request body stream that failed before it was fully read.
 pub(crate) fn body_unreadable() -> Problem {
     Problem::new(Code::BadRequest).detail("request body could not be read")
 }
 
-/// The sanitized 500 Problem for wiring, middleware, persistence, and record
-/// faults.
 pub(crate) fn sanitized_problem() -> Problem {
     Problem::new(Code::InternalServerError).detail(SANITIZED_DETAIL)
 }
 
-/// The sanitized 500 response for wiring, middleware, persistence, and record
-/// faults.
 pub(crate) fn sanitized_internal_error() -> Response {
     sanitized_problem().into_response()
 }
@@ -322,13 +301,10 @@ pub mod responses {
     /// of in every operation.
     #[derive(Debug, IntoResponses)]
     pub enum TransportProblemResponses {
-        /// 400: the request is malformed.
         #[response(status = 400)]
         BadRequest(#[ref_response] BadRequest),
-        /// 413: the body exceeds the size limit.
         #[response(status = 413)]
         RequestEntityTooLarge(#[ref_response] RequestEntityTooLarge),
-        /// 500: unexpected internal failure.
         #[response(status = 500)]
         InternalServerError(#[ref_response] InternalServerError),
     }

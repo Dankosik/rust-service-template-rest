@@ -1,5 +1,3 @@
-//! Stored-success admission and replay.
-
 use axum::body::{Body, Bytes};
 use axum::http::header::{
     CONTENT_DISPOSITION, CONTENT_ENCODING, CONTENT_LANGUAGE, CONTENT_TYPE, ETAG, LAST_MODIFIED,
@@ -28,7 +26,6 @@ const REPLAYABLE: [HeaderName; 7] = [
     LAST_MODIFIED,
 ];
 
-/// A captured success: what the first response and every replay carry.
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 pub(super) struct ReplayableResponse {
     status: StatusCode,
@@ -36,7 +33,6 @@ pub(super) struct ReplayableResponse {
     body: Bytes,
 }
 
-/// Why a successful response cannot be stored.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Unstorable {
     Status,
@@ -56,7 +52,6 @@ impl Unstorable {
     }
 }
 
-/// Why a stored record cannot be replayed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Undecodable {
     BodyLimit,
@@ -146,7 +141,6 @@ impl ReplayableResponse {
     }
 }
 
-/// Validate a database record before replaying it.
 pub(super) fn decode(record: Record) -> Result<ReplayableResponse, Undecodable> {
     if record.body.len() > MAX_STORED_BODY_BYTES {
         return Err(Undecodable::BodyLimit);
@@ -179,7 +173,6 @@ pub(super) fn decode(record: Record) -> Result<ReplayableResponse, Undecodable> 
     })
 }
 
-/// Whether a documented success header can be retained and replayed.
 pub(super) fn is_replayable_header_name(name: &str) -> bool {
     REPLAYABLE
         .iter()

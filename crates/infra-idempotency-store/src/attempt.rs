@@ -1,5 +1,3 @@
-//! Arbitration and the record-writing transaction.
-//!
 //! An attempt holds one explicit `READ COMMITTED` transaction:
 //!
 //! 1. One statement checks the writer and reads a live record. Equal
@@ -31,7 +29,6 @@ use crate::{READ_COMMITTED, Store};
 
 pub type Digest = [u8; 32];
 
-/// The durable primary key for a caller and decoded idempotency key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ScopeKey(Digest);
 
@@ -41,8 +38,6 @@ impl ScopeKey {
         Self(digest)
     }
 
-    /// The digest as a non-secret scope identifier for diagnostics; it never
-    /// reveals the raw key or caller.
     #[must_use]
     pub const fn digest(&self) -> &Digest {
         &self.0
@@ -101,8 +96,6 @@ pub struct HeaderPair {
     pub value: Vec<u8>,
 }
 
-/// One stored success. The store finds the row by [`ScopeKey`] and compares
-/// its fingerprint with the request's to decide replay or mismatch.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Record {
     pub status: i16,
@@ -110,18 +103,12 @@ pub struct Record {
     pub body: Bytes,
 }
 
-/// How [`Store::attempt`] decided.
 #[derive(Debug)]
 pub enum Attempted<C, R> {
-    /// The work ran and committed together with its success record.
     Committed(C),
-    /// The work ran and asked for rollback.
     RolledBack(R),
-    /// A live record for the same request decided. The work did not run.
     Replay(Record),
-    /// A live record for a different request decided. The work did not run.
     Mismatch,
-    /// No live record was found and another transaction holds the lock key.
     InProgress,
 }
 
@@ -145,20 +132,6 @@ pub enum AttemptError {
 }
 
 impl Store {
-    /// Arbitrate `scope`, then run `work` in the transaction that also writes
-    /// its success record. `Ok((record, value))` commits both and yields
-    /// [`Attempted::Committed`] with `value`; `Err(value)` rolls back and
-    /// yields [`Attempted::RolledBack`]. Work is never retried.
-    ///
-    /// Connection acquisition uses the pool's configured timeout.
-    ///
-    /// The store writes the success record under `scope`. It saves
-    /// `fingerprint` for later arbitration and `caller` for diagnostics.
-    ///
-    /// # Errors
-    ///
-    /// [`AttemptError`] when the store could not decide; each is logged with
-    /// its phase and a bounded cause.
     pub async fn attempt<W, C, R>(
         &self,
         scope: &ScopeKey,
@@ -173,13 +146,6 @@ impl Store {
             .await
     }
 
-    /// [`Self::attempt`] for a request with its own deadline: the wait for a
-    /// pooled connection is bounded by `deadline`. That deadline applies
-    /// only to connection acquisition.
-    ///
-    /// # Errors
-    ///
-    /// As [`Self::attempt`].
     pub async fn attempt_with_acquire_deadline<W, C, R>(
         &self,
         scope: &ScopeKey,
@@ -243,14 +209,12 @@ impl Store {
     }
 }
 
-/// What arbitration decided without running the work.
 enum Decision {
     Replay(Record),
     Mismatch,
     InProgress,
 }
 
-/// Steps 1 and 2: [`None`] when the work may run.
 async fn arbitrate(
     tx: &mut Tx<'_>,
     scope: &ScopeKey,
@@ -279,8 +243,6 @@ async fn arbitrate(
     )
     .await
     .map_err(|err| read_failed(&err, "arbitrate"))?;
-    // The join returns the fingerprint, status, and headers together.
-    // The body is selected separately, only for a matching fingerprint.
     let live = match (row.fingerprint, row.status, row.headers) {
         (Some(stored_fingerprint), Some(status), Some(headers)) => Some(decide_live(
             stored_fingerprint,
@@ -362,7 +324,6 @@ fn read_failed(err: &sqlx::Error, phase: &'static str) -> AttemptError {
     }
 }
 
-/// Step 3.
 async fn write(
     tx: &mut Tx<'_>,
     scope: &ScopeKey,
@@ -415,15 +376,9 @@ async fn write(
     }
 }
 
-/// The [`Err`] side of the transaction boundary. An [`Err`] from the closure
-/// asks the provider to roll back. The provider can also return its own error.
 enum Stop<R> {
-    /// Arbitration decided without running the work.
     Decided(Decision),
-    /// The work ran and asked for rollback.
     RolledBack(R),
-    /// An attempt failure inside the closure or a provider failure converted
-    /// from [`TxError`]. With [`TxError::CommitUnknown`], the work may have committed.
     Failed(AttemptError),
 }
 

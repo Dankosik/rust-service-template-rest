@@ -1,9 +1,3 @@
-//! Asynchronous startup after the runtime exists: stop signals, observability,
-//! registration, dependency admission, listeners, and readiness.
-//!
-//! A failed signal install returns before anything is open. Every later refusal
-//! goes through the same retained-resource shutdown plan.
-
 // template:begin jobs:worker-bootstrap-jobs-module
 mod jobs;
 // template:end jobs:worker-bootstrap-jobs-module
@@ -36,11 +30,8 @@ use crate::signals::{SignalError, Signals};
 use crate::{BuildError, Register, Registration};
 
 const METRICS_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(10);
-/// The background task that watches readiness progress, as named in failures.
 const READINESS_PROGRESS: &str = "readiness_progress";
 
-/// Every startup refusal, plus an engine, a consumer, or a background task
-/// stopping without a stop signal.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum WorkerError {
     #[error(
@@ -113,14 +104,12 @@ pub(crate) enum WorkerError {
     Admission(health::NotReady),
 }
 
-/// How the running worker ended. A stop during startup counts as [`Self::Signal`].
 #[derive(Debug)]
 enum Ended {
     Signal,
     Failure(WorkerError),
 }
 
-/// Native work that has been admitted but has not started claiming or pulling.
 struct Prepared {
     // template:begin jobs:worker-bootstrap-prepared-jobs
     engines: Vec<infra_jobs::Engine>,
@@ -244,7 +233,6 @@ fn signal_ended(result: Result<(), SignalError>, background: &Background) -> End
     }
 }
 
-/// Check retained faults before a stop and before every claiming/ready transition.
 fn pending_end(
     resources: &Resources,
     background: &Background,
@@ -315,11 +303,7 @@ async fn prepare(
 ) -> Result<Prepared, WorkerError> {
     let identity = worker_identity(&config.observability.otel.service_name);
     let (metrics, exporter_state) = telemetry::install_observability(config, &identity, resources)?;
-    // Docker, containerd and systemd start processes with a soft limit of
-    // 1024 open files under a much higher hard limit, keeping the low value
-    // for `select(2)` callers. Nothing here calls `select`, so raise the
-    // soft limit to the hard one, as the Go runtime does since 1.19;
-    // otherwise every connection past about a thousand fails to accept.
+    // Raise RLIMIT_NOFILE to the hard limit; see docs/backend-library-selection.md.
     // After the subscriber, so a failure's warning is not lost.
     if let Err(error) = rlimit::increase_nofile_limit(u64::MAX) {
         tracing::warn!(error = %error, "open_file_limit_unchanged");
@@ -451,9 +435,6 @@ fn register_capabilities(
     })
 }
 
-/// [`Ended::Signal`] when a stop signal ended the wait. A terminal jobs,
-/// messaging, or background-task failure names its owner and takes the error
-/// exit after ordered cleanup.
 async fn wait_for_stop(
     resources: &Resources,
     background: &Background,

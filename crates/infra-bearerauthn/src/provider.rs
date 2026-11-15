@@ -1,5 +1,3 @@
-//! Trusted provider URL admission and pooled HTTPS transport.
-
 use std::time::{Duration, Instant};
 
 use operation_context::{OperationContext, Stopped};
@@ -51,7 +49,6 @@ pub enum ProviderFailure {
     Timeout,
     Connect,
     Status(u16),
-    /// The response is not `application/json` where that is required.
     MediaType,
     TooLarge,
     Transfer,
@@ -89,11 +86,6 @@ impl ProviderFailure {
 pub struct IssuerUrl(EndpointUrl);
 
 impl IssuerUrl {
-    /// Parses an issuer URL.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`PreparationError`] when the URL violates the provider grammar.
     pub fn parse(raw: &str) -> Result<Self, PreparationError> {
         let url = admit(raw)?;
         if url.url.query().is_some() {
@@ -125,12 +117,8 @@ pub struct EndpointUrl {
 }
 
 impl EndpointUrl {
-    /// Parses a provider endpoint.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`PreparationError`] for a non-HTTPS URL, missing host, userinfo,
-    /// fragment, whitespace or control characters.
+    /// Parses an HTTPS provider endpoint with a host and no userinfo, fragment,
+    /// whitespace, or control characters.
     pub fn parse(raw: &str) -> Result<Self, PreparationError> {
         admit(raw)
     }
@@ -171,7 +159,6 @@ const fn invalid_url() -> PreparationError {
     PreparationError::new(PreparationPhase::Options, PreparationReason::InvalidUrl)
 }
 
-/// The only outbound client authentication engines may use.
 #[derive(Clone)]
 pub(crate) struct ProviderClient {
     client: reqwest::Client,

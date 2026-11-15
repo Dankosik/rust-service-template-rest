@@ -1,5 +1,3 @@
-//! PostgreSQL error classification shared by provider consumers.
-
 use std::borrow::Cow;
 
 /// The SQLSTATE of a database error, when the driver supplied a valid one.

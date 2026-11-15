@@ -11,7 +11,6 @@ use crate::app::is_local_development;
 use crate::de::{blank_as_none, blank_secret_as_none};
 use crate::validate::{ValidationError, missing, required_when};
 
-/// How gRPC calls between services are authenticated.
 #[derive(Clone, Deserialize)]
 #[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum ServiceAuthConfig {
@@ -19,16 +18,13 @@ pub enum ServiceAuthConfig {
     /// accepted only in a local or development environment. This is the
     /// omitted-section default.
     None {},
-    /// Every gRPC business call carries a caller-signed ES256 token.
     Jwt {
         /// This service's name: the audience it accepts and its tokens'
         /// `iss` and `sub`.
         #[serde(default)]
         name: String,
-        /// The `typ` of this trust domain's service tokens.
         #[serde(default)]
         jwt_type: String,
-        /// The trust registry: a JSON object of each caller's JWK Set.
         #[serde(default)]
         trust: String,
         /// The `kid` receivers hold this service's public key under.
@@ -42,7 +38,6 @@ pub enum ServiceAuthConfig {
     },
 }
 
-/// Leaves trust and credential inputs out of `Debug` so they never reach logs.
 impl std::fmt::Debug for ServiceAuthConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ServiceAuthConfig")
@@ -104,18 +99,12 @@ impl ServiceAuthConfig {
 
 #[derive(Clone, Copy, Debug)]
 pub struct ServiceSigningKey<'a> {
-    /// The `kid` receivers hold the public key under.
     pub key_id: &'a str,
-    /// PKCS#8 PEM of the EC P-256 signing key.
     pub private_key: &'a SecretString,
 }
 
 impl<'a> ServiceSigningKey<'a> {
     /// Returns `None` when both parts are absent and the service only verifies callers.
-    ///
-    /// # Errors
-    ///
-    /// Names the missing configuration key when only one part is set.
     pub fn from_optional_parts(
         key_id: Option<&'a str>,
         private_key: Option<&'a SecretString>,

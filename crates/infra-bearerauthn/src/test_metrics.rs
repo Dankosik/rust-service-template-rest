@@ -1,5 +1,3 @@
-//! Metric and trace capture for authentication tests.
-
 use std::sync::Arc;
 
 #[derive(Clone, Default)]
@@ -8,10 +6,8 @@ pub(crate) struct Diagnostics {
     pub(crate) histograms: Arc<std::sync::Mutex<Vec<metrics::Key>>>,
     pub(crate) acquisitions: Arc<std::sync::Mutex<Vec<f64>>>,
     pub(crate) events: Arc<std::sync::Mutex<Vec<String>>>,
-    /// Each span's fields, the ones recorded later appended to its entry.
     pub(crate) spans: Arc<std::sync::Mutex<Vec<String>>>,
 }
-/// Renders fields as `name=value;` with values in their debug form.
 #[derive(Default)]
 struct Fields(String);
 impl tracing::field::Visit for Fields {

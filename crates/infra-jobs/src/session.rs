@@ -1,11 +1,8 @@
-//! The PostgreSQL session preconditions the engine and the operator share.
-
 use std::time::Duration;
 
 use infra_postgres::observed;
 use sqlx::PgPool;
 
-/// Why the jobs store cannot start.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum StartupError {
     #[error("the jobs store requires UTF8 server encoding")]
@@ -14,23 +11,12 @@ pub enum StartupError {
     NotWritable,
     #[error("the jobs store requires READ COMMITTED session isolation")]
     UnsupportedIsolation,
-    /// Anything else, including the check's bound.
     #[error("the jobs store is unavailable")]
     Unavailable,
 }
 
 pub(crate) const STARTUP_CHECK_BUDGET: Duration = Duration::from_secs(5);
 
-/// Check UTF8, READ COMMITTED and writability, bounded by
-/// [`STARTUP_CHECK_BUDGET`].
-///
-/// # Errors
-///
-/// [`StartupError::UnsupportedEncoding`] when PostgreSQL is not UTF8,
-/// [`StartupError::NotWritable`] when `writable` is false, and
-/// [`StartupError::UnsupportedIsolation`] when the pool default is not read
-/// committed, and [`StartupError::Unavailable`] for anything else, including
-/// the bound; that one is logged with a bounded cause.
 pub(crate) async fn check_startup(pool: &PgPool) -> Result<(), StartupError> {
     let read = async {
         let mut connection = infra_postgres::acquire(pool, "check jobs startup").await?;

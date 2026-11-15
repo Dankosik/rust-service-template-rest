@@ -1,19 +1,4 @@
 #!/usr/bin/env python3
-"""Report hand-written code that a newer toolchain's std or lints now cover.
-
-Run once after a toolchain bump (`make modernize-scan SINCE=<old toolchain>`).
-It prints candidates and never fails on them: about half of the mechanical
-suggestions in the round-3 pass were rejected on judgment, so a gate would
-cost more than it catches. Pedantic and default lints already fail `make lint`
-once `rust-version` moves; this covers what they do not:
-
-1. clippy lints new since SINCE, with their default level;
-2. one clippy pass with the nursery and restriction groups, filtered to the
-   lints that replace a hand-written form with a std one (plus every lint new
-   since SINCE);
-3. the ast-grep rules in tools/modernize/rules, for repository patterns no
-   clippy lint covers. ast-grep does not look inside macro arguments.
-"""
 
 from __future__ import annotations
 
@@ -42,7 +27,6 @@ DECLINED_LINTS = {"clippy::option_if_let_else", "clippy::return_and_then"}
 
 
 def lint_levels(toolchain: str | None) -> dict[str, str]:
-    """Map each clippy lint name to its default level for a toolchain."""
     command = ["clippy-driver", "-W", "help", "-"]
     if toolchain:
         command = ["rustup", "run", toolchain, *command]

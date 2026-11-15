@@ -1,5 +1,3 @@
-//! Recovery observes the committed queue, including arbitration and lost commit replies.
-
 use infra_jobs::operator::{
     self, Inspection, InspectionResult, JobState, OperatorError, RecoveryTarget,
 };

@@ -1,5 +1,3 @@
-//! Password rotation.
-//!
 //! A platform that rotates the database password (a secrets manager's agent,
 //! a mounted Kubernetes secret, a sidecar that writes short-lived tokens)
 //! rewrites the file `postgres.password_file` names. `sqlx` takes its connect

@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# Run upgrade custody from the explicitly selected trusted template checkout.
 set -euo pipefail
 
 script_dir=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)

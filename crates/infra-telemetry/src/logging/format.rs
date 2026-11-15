@@ -35,15 +35,12 @@ use tracing_subscriber::registry::LookupSpan;
 use super::LoggingFormat;
 use super::output::{DropReason, MAX_RECORD_BYTES, Output, Record};
 
-/// First allocation of a value buffer and an output line; both grow to their limit.
 const SCRATCH_CAPACITY: usize = 256;
 const LINE_CAPACITY: usize = 512;
 const MAX_EVENT_FIELDS: usize = 128;
 const MAX_SPAN_BYTES: usize = 4096;
 const MAX_SPAN_FIELDS: usize = 64;
-/// Callbacks formatting at once across threads; one more is dropped as `busy`.
 const MAX_ACTIVE_CALLBACKS: usize = 32;
-/// Spans holding a field cache at once; one more is left without one.
 const MAX_CACHED_SPANS: usize = 1024;
 const TRACE_ID_FIELD: &str = "trace_id";
 const SPAN_ID_FIELD: &str = "span_id";
@@ -145,7 +142,6 @@ impl Bytes {
         self.limit.saturating_sub(self.buf.len())
     }
 
-    /// Back to `mark`, clearing a failure written after it.
     fn rewind(&mut self, mark: usize) {
         self.buf.truncate(mark);
         self.failed = false;
@@ -411,7 +407,6 @@ struct SpanFields {
     _slot: Permit,
 }
 
-/// What a [`Capture`] records the fields of.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Source {
     Span,
@@ -731,7 +726,6 @@ fn write_body(
     if !write_all_fields(line, values, event, spans, truncated, format) && !truncated {
         truncated = true;
         line.rewind(header);
-        // What fits is written; the marker says the rest is missing.
         write_all_fields(line, values, event, spans, truncated, format);
     }
     line.limit = MAX_RECORD_BYTES;
@@ -747,7 +741,6 @@ fn record_tail(format: LoggingFormat, truncated: bool) -> &'static [u8] {
     }
 }
 
-/// Both slices are sorted by key, then capture order. Spans were captured leaf first.
 fn write_all_fields(
     line: &mut Bytes,
     values: &[u8],
@@ -837,7 +830,6 @@ fn write_timestamp(line: &mut Bytes) {
     let _ = SystemTime.format_time(&mut Writer::new(line));
 }
 
-/// `key` with `bytes` as a quoted lowercase hex string.
 fn write_hex_field<const N: usize>(
     line: &mut Bytes,
     key: &str,

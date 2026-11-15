@@ -1,17 +1,5 @@
-//! Committed native gRPC contracts generated from `api/proto` by
-//! `make grpc-generate`. Modules mirror protobuf packages, so `example.v1` is
-//! `example::v1`.
-//!
-//! Change schemas in `api/proto`, regenerate with `make grpc-generate`, and
-//! keep schema and generated Rust together. `make grpc-check` verifies drift
-//! and compatibility. Normal service builds use the committed Rust.
-//! Handlers own input validation; `infra-grpc` owns listener and middleware policy.
-
 pub mod codec;
 
-/// The encoded `FileDescriptorSet` the Rust was generated from, with its
-/// imports, for `infra_grpc::Services::describe`: it names the methods and
-/// is what reflection serves.
 pub const FILE_DESCRIPTOR_SET: &[u8] = include_bytes!("generated/file_descriptor_set.binpb");
 
 // Keep generated-code lint exceptions off the handwritten codec. Re-export

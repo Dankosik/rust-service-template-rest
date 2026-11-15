@@ -26,7 +26,6 @@ const MAX_RESIDENT_DELIVERY_BYTES: u64 = MAX_RESIDENT_DELIVERY_MIB * MIB;
 const PRODUCER_ACTIVE: &str = "a producer is active";
 const CONSUMER_ACTIVE: &str = "a consumer is active";
 
-/// Optional `JetStream` connection and worker limits.
 #[expect(
     clippy::struct_excessive_bools,
     reason = "NATS trust, authentication and TLS-first are independent operator capabilities"
@@ -34,10 +33,8 @@ const CONSUMER_ACTIVE: &str = "a consumer is active";
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct MessagingConfig {
-    /// NATS server URLs. An empty list keeps messaging inactive.
     #[serde(deserialize_with = "url_list")]
     pub urls: Vec<String>,
-    /// Inline NATS credentials. This environment-only value is redacted.
     #[serde(default, deserialize_with = "blank_secret_as_none")]
     pub credentials: Option<SecretString>,
     /// Path to a NATS credentials file, the alternative to `credentials` for
@@ -61,21 +58,15 @@ pub struct MessagingConfig {
     /// Permit a connection without credentials only for a local or
     /// development process.
     pub allow_unauthenticated: bool,
-    /// Operator-owned source stream for publication and consumption.
     #[serde(default, deserialize_with = "blank_as_none")]
     pub source_stream: Option<String>,
-    /// Largest payload admitted before handler allocation.
     pub max_payload_bytes: ByteSize,
-    /// Durable consumer name, required only by a consuming worker.
     #[serde(default, deserialize_with = "blank_as_none")]
     pub consumer_durable: Option<String>,
-    /// Filter subject, required only by a consuming worker.
     #[serde(default, deserialize_with = "blank_as_none")]
     pub consumer_filter_subject: Option<String>,
-    /// DLQ subject, required only by a consuming worker.
     #[serde(default, deserialize_with = "blank_as_none")]
     pub dlq_subject: Option<String>,
-    /// Maximum deliveries held through handling and settlement.
     #[serde(deserialize_with = "crate::de::unsigned_count")]
     pub consumer_concurrency: NonZeroU32,
 }
@@ -114,11 +105,6 @@ impl MessagingConfig {
         self.allow_plaintext || self.trusted_network
     }
 
-    /// Validate the inputs required by a producer or outbox publisher.
-    ///
-    /// # Errors
-    ///
-    /// Returns the first missing producer input or a security-policy error.
     pub fn validate_producer(&self, app_env: &str) -> Result<(), ValidationError> {
         let credentials = self.validate(app_env)?;
         if !self.is_active() {
@@ -134,11 +120,6 @@ impl MessagingConfig {
         Ok(())
     }
 
-    /// The credential source the client uses, if one is set.
-    ///
-    /// # Errors
-    ///
-    /// Returns `messaging.credentials_file` when both sources are set.
     pub fn credential_source(&self) -> Result<Option<MessagingCredentials<'_>>, ValidationError> {
         match (&self.credentials, &self.credentials_file) {
             (Some(_), Some(_)) => Err(ValidationError::new(
@@ -151,11 +132,6 @@ impl MessagingConfig {
         }
     }
 
-    /// The stream an active producer publishes to.
-    ///
-    /// # Errors
-    ///
-    /// Returns `messaging.source_stream` when the value is absent.
     pub fn required_source_stream(&self) -> Result<&str, ValidationError> {
         required(
             "messaging.source_stream",
@@ -164,22 +140,12 @@ impl MessagingConfig {
         )
     }
 
-    /// Validate the inputs required by a consuming worker.
-    ///
-    /// # Errors
-    ///
-    /// Returns the first missing consumer input or a producer-policy error.
     pub fn validate_consumer(&self, app_env: &str) -> Result<(), ValidationError> {
         self.validate_producer(app_env)?;
         self.required_consumer_keys()?;
         Ok(())
     }
 
-    /// The subscription keys an active consumer needs.
-    ///
-    /// # Errors
-    ///
-    /// Returns the first missing consumer key.
     pub fn required_consumer_keys(&self) -> Result<ConsumerKeys<'_>, ValidationError> {
         Ok(ConsumerKeys {
             durable: required(
@@ -283,16 +249,12 @@ impl MessagingConfig {
     }
 }
 
-/// One admitted NATS credential source.
 #[derive(Clone, Copy, Debug)]
 pub enum MessagingCredentials<'a> {
-    /// The environment-only `messaging.credentials` value.
     Inline(&'a SecretString),
-    /// The file `messaging.credentials_file` names.
     File(&'a Path),
 }
 
-/// The consumer keys [`MessagingConfig::required_consumer_keys`] admitted.
 #[derive(Clone, Copy, Debug)]
 pub struct ConsumerKeys<'a> {
     pub durable: &'a str,

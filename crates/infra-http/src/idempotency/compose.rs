@@ -1,9 +1,3 @@
-//! Composition and authenticated request capture for idempotent route carriers.
-//!
-//! Key handling and request capture are the only policy this module owns. The
-//! final contract layer authenticates first and inserts a sealed principal
-//! before this carrier runs.
-
 use std::convert::Infallible;
 use std::num::NonZeroUsize;
 use std::ops::ControlFlow;
@@ -33,11 +27,8 @@ use utoipa_axum::router::UtoipaMethodRouter;
 
 const INVALID_KEY_DETAIL: &str = "Idempotency-Key is missing or invalid";
 
-/// The generated contract and runtime composition owner for idempotent route
-/// carriers.
 #[derive(Debug)]
 pub struct Composer {
-    /// `None` for a composer that only renders the contract.
     store: Option<Store>,
     operations: usize,
 }
@@ -49,17 +40,12 @@ pub enum Activation {
     Inactive,
     /// The store must be checked and maintained before readiness admission.
     Active {
-        /// The store the composed routes arbitrate through.
         store: Store,
-        /// How many idempotent operations the composition serves.
         operations: NonZeroUsize,
     },
     /// Idempotent operations are served by a composer without a store, which
     /// startup must refuse.
-    Unconfigured {
-        /// How many idempotent operations the composition serves.
-        operations: NonZeroUsize,
-    },
+    Unconfigured { operations: NonZeroUsize },
 }
 
 impl Composer {
@@ -91,11 +77,6 @@ impl Composer {
     /// effective security so capture can receive a verified caller.
     /// Declare every header that can change the intended effect as an inline
     /// request parameter so its values participate in retry matching.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CompositionError`] when this route's local contract cannot
-    /// support idempotent execution and replay.
     pub fn route<S>(
         &mut self,
         routes: UtoipaMethodRouter<S>,
@@ -128,8 +109,8 @@ impl Composer {
     ///
     /// The target document must already include the `ProblemComponents`
     /// registration from [`crate::router()`]: the generated family references
-    /// the shared `Problem` and `InvalidParam` schemas and the shared 413/500
-    /// responses.
+    /// the shared [`Problem`] and [`crate::problem::InvalidParam`] schemas and
+    /// the shared 413/500 responses.
     #[must_use]
     pub fn components(&self) -> utoipa::openapi::OpenApi {
         IdempotencyComponents::openapi()

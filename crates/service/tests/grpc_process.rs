@@ -1,5 +1,3 @@
-//! Black-box proof that the gRPC example shares the shipped process lifecycle.
-
 #![cfg(target_os = "linux")]
 #![expect(
     clippy::expect_used,
@@ -1042,7 +1040,6 @@ fn tls_health_and_http_share_the_example_sigterm_lifecycle() {
         ),
         "{metrics}"
     );
-    // The shed counter is published at zero before any shed.
     assert!(
         metrics.contains("grpc_server_shed_requests_total 0"),
         "{metrics}"

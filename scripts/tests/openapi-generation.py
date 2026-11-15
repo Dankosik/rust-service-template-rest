@@ -1,5 +1,3 @@
-"""Exercise the OpenAPI Make recipe against per-invocation Cargo messages."""
-
 import json
 import os
 from pathlib import Path

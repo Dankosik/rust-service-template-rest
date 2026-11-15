@@ -1,6 +1,3 @@
-//! Dead-letter transfer and redrive: the headers a transfer adds, the bound
-//! it must fit, its deterministic identity, and restoring the original event.
-
 use async_nats::{HeaderMap, HeaderName};
 use bytes::Bytes;
 use sha2::{Digest, Sha256};
@@ -120,7 +117,6 @@ pub(crate) fn dead_letter_headers(
     headers
 }
 
-/// One stored dead-letter record used for deterministic redrive reconstruction.
 #[derive(Clone, Debug)]
 pub struct DeadLetterRecord {
     pub headers: HeaderMap,
@@ -131,10 +127,8 @@ pub struct DeadLetterRecord {
 }
 
 /// Reconstructs an original event with Go's deterministic `redrive-` ID.
-///
-/// # Errors
-/// Rejects a record without restorable subject, identity or creation time.
-/// An unmarked legacy transfer ID shared by both identity headers is ambiguous.
+/// An unmarked legacy transfer ID shared by both identity headers is rejected
+/// as ambiguous.
 pub fn restore_dead_letter(record: DeadLetterRecord) -> Result<PreparedEvent, EnvelopeError> {
     let subject = header_value(&record.headers, header_name::ORIGINAL_SUBJECT).to_owned();
     if !valid_subject(&subject) {
@@ -200,9 +194,6 @@ fn has_ambiguous_original_id(
 }
 
 /// Go-compatible deterministic transfer identity for dead-letter publication.
-///
-/// # Errors
-/// Rejects a stored timestamp that cannot be normalized to UTC.
 pub fn dead_letter_id(
     stream: &str,
     stream_sequence: u64,

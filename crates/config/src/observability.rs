@@ -1,5 +1,3 @@
-//! Diagnostics listener and OpenTelemetry trace export.
-
 use std::net::SocketAddr;
 
 use secrecy::SecretString;
@@ -14,7 +12,6 @@ pub struct ObservabilityConfig {
     pub otel: OtelConfig,
 }
 
-/// The `observability.metrics` subsection: the private Prometheus diagnostics listener.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, default)]
 pub struct MetricsConfig {
@@ -35,28 +32,21 @@ impl Default for MetricsConfig {
     }
 }
 
-/// Trace samplers this service accepts, by their OpenTelemetry names.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TracesSampler {
-    /// Samples every trace.
     AlwaysOn,
-    /// Samples no trace.
     AlwaysOff,
-    /// Samples a fixed fraction of traces, `traces_sampler_arg`, decided by trace id.
     #[serde(rename = "traceidratio")]
     TraceIdRatio,
-    /// Follows the parent span's sampling decision and applies the `traces_sampler_arg` ratio to traces with no parent. This is the default.
     #[default]
     #[serde(rename = "parentbased_traceidratio")]
     ParentBasedTraceIdRatio,
 }
 
-/// The `observability.otel` subsection: resource identity, sampling, and the OTLP exporter.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct OtelConfig {
-    /// `service.name` resource attribute.
     // template:begin postgres:otel-postgres-application-name-doc
     /// It also supplies PostgreSQL `application_name` for pooled and migrator
     /// sessions; a distinct database session label is not a configuration axis.
@@ -66,13 +56,11 @@ pub struct OtelConfig {
     // template:end jobs:otel-jobs-worker-identity-doc
     /// The initializer rewrites this default for a derived service.
     pub service_name: String,
-    /// Sampler that decides which traces are recorded.
     pub traces_sampler: TracesSampler,
     /// Ratio for the ratio-based samplers, in `[0, 1]`. Always validated
     /// (finite and in range) even when the selected sampler ignores it.
     #[serde(deserialize_with = "crate::de::ratio")]
     pub traces_sampler_arg: f64,
-    /// OTLP exporter endpoint and credential.
     pub exporter: OtelExporterConfig,
 }
 
@@ -87,7 +75,6 @@ impl Default for OtelConfig {
     }
 }
 
-/// The `observability.otel.exporter` subsection: where OTLP traces are sent and with what credential.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct OtelExporterConfig {

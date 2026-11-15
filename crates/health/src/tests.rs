@@ -796,8 +796,6 @@ async fn absorbed_failures_flips_and_a_late_refresh_are_logged() {
     let (readiness, flag, _) = flaky(true);
     readiness.refresh().await;
     flag.store(false, Ordering::Relaxed);
-    // Two absorbed failures, the flip, then a failure that is
-    // already published.
     for _ in 0..4 {
         readiness.refresh().await;
     }

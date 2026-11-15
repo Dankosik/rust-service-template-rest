@@ -1,23 +1,5 @@
 # shellcheck shell=bash
-# The `--<mode> [--repo <dir>] [--harness <selection>]` command line the sync
-# helpers share.
-#
-# It is one file because the helpers accept the same line, and the line is
-# security-relevant in the same way for each: --repo is resolved to a real
-# directory before anything writes into it, and an unrecognized flag is refused
-# rather than ignored. Multiple copies would let one helper keep a rule another
-# lost.
-#
-# What stays with each script is what differs: which modes it accepts, its usage
-# text, and the prefix its failures carry. This calls back into the caller's
-# `usage` and `fail` for exactly that reason — a shared parser that invented its
-# own wording would report one harness failure as another.
 
-# sync_cli_parse accepts the caller's modes and argv, and publishes the result as
-# SYNC_MODE, SYNC_REPO, and the optional SYNC_HARNESS override. A caller defines
-# `usage` and `fail` before calling it.
-#
-#   sync_cli_parse "preflight apply check" "$@"
 sync_cli_parse() {
 	local accepted=" $1 "
 	shift
@@ -67,16 +49,10 @@ sync_cli_parse() {
 		exit 2
 	}
 
-	# Resolved here rather than at each use: every later path is built from it,
-	# and a directory that does not exist must fail before the first write.
 	SYNC_REPO=$(CDPATH='' cd -- "${SYNC_REPO}" 2>/dev/null && pwd) ||
 		fail "repository directory not found"
 }
 
-# sync_cli_selected_harness prints the selected adapter. An explicit command-line
-# choice is useful while rendering a staged service; otherwise template_state
-# reads the complete local initialization lock. A source checkout has no lock and
-# its state helper deliberately selects all adapters.
 sync_cli_selected_harness() {
 	if [[ -n "${SYNC_HARNESS}" ]]; then
 		printf '%s\n' "${SYNC_HARNESS}"
@@ -86,8 +62,6 @@ sync_cli_selected_harness() {
 		--repo "${SYNC_REPO}" --field agent_harness
 }
 
-# sync_cli_require_harness refuses a dedicated adapter action unless its target
-# is selected. `all` is the source-template selection and includes each adapter.
 sync_cli_require_harness() {
 	local required="$1" selected
 	selected=$(sync_cli_selected_harness) ||

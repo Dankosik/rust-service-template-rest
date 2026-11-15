@@ -330,8 +330,6 @@ jobs:
         if: needs.changes.outputs.rust_source == 'true' || needs.changes.outputs.cargo_dependencies == 'true'
         run: bash ./scripts/ci/measure.sh quality-unused-deps -- make unused-deps
       - name: OpenAPI
-        # Redocly over the committed document plus the drift and contract
-        # tests. Node.js is preinstalled on the runner.
         if: needs.changes.outputs.openapi == 'true'
         run: bash ./scripts/ci/measure.sh quality-openapi -- make openapi-check
       - name: Generate handler OpenAPI diagnostic
@@ -352,7 +350,6 @@ jobs:
           path: .ci/generated-openapi/service.yaml
           if-no-files-found: error
       - name: OpenAPI compatibility
-        # oasdiff against the pull-request base. Go is preinstalled on the runner.
         if: github.event_name == 'pull_request' && needs.changes.outputs.openapi == 'true'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -387,7 +384,6 @@ jobs:
           bash ./scripts/ci/measure.sh quality-migration-history -- make migration-history-self-test
       # template:end postgres:ci-quality-migrations
       - name: Instructions
-        # Skill shape plus the generated harness carriers against their sources.
         if: needs.changes.outputs.agent_instructions == 'true'
         run: bash ./scripts/ci/measure.sh quality-instructions -- make check-instructions
       - name: Readability checker prerequisites
@@ -524,8 +520,6 @@ jobs:
       - name: Load tool manifest
         run: grep -v '^#' tools/versions.env | grep . >>"${GITHUB_ENV}"
       - name: Dependency review
-        # New vulnerable dependencies on a pull request, from the lockfile
-        # and the workflow action pins.
         if: >-
           github.event_name == 'pull_request' && (
             needs.changes.outputs.cargo_dependencies == 'true' ||
@@ -538,7 +532,6 @@ jobs:
           fail-on-severity: high
           comment-summary-in-pr: never
       - name: Install pinned toolchain
-        # cargo-deny resolves the locked graph through cargo.
         if: needs.changes.outputs.cargo_dependencies == 'true' || needs.changes.outputs.dependency_policy == 'true'
         run: |
           rustup toolchain install
@@ -563,7 +556,6 @@ jobs:
       - name: Workflow security
         if: needs.changes.outputs.github_workflows == 'true'
         env:
-          # Enables the online audits (known-vulnerable-actions, impostor-commit).
           GH_TOKEN: ${{ github.token }}
         run: bash ./scripts/ci/measure.sh security-zizmor -- make zizmor
 
@@ -643,7 +635,6 @@ jobs:
         if: needs.changes.outputs.github_workflows == 'true'
         run: bash ./scripts/ci/measure.sh delivery-actionlint -- make actionlint
       - name: Shell
-        # Changed scripts on a diff event, every script otherwise.
         if: needs.changes.outputs.shell == 'true'
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -671,7 +662,7 @@ jobs:
       - name: Set up Buildx
         id: buildx
         if: needs.changes.outputs.runtime_image == 'true'
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
           use: false
           cleanup: false
@@ -1038,7 +1029,6 @@ jobs:
       - name: Database-backed proof
         if: matrix.suite == 'db'
         run: bash ./scripts/ci/measure.sh integration-db -- make test-integration-db
-        # Each proof owns a registered Compose project through its canonical script.
       - name: Load tool manifest
         if: matrix.suite == 'db'
         run: grep -v '^#' tools/versions.env | grep . >>"${GITHUB_ENV}"
@@ -1052,8 +1042,6 @@ jobs:
           path: .git/tools/sqlx-cli-${{ env.SQLX_CLI_VERSION }}
           key: sqlx-cli-${{ runner.os }}-${{ runner.arch }}-${{ env.SQLX_CLI_VERSION }}
       - name: Query metadata
-        # .sqlx/ against the statements and a database that holds exactly
-        # the embedded migrations; offline builds trust it.
         if: matrix.suite == 'db'
         run: bash ./scripts/ci/measure.sh integration-query-metadata -- make sqlx-check
       - name: Save sqlx-cli
@@ -1237,8 +1225,6 @@ jobs:
       - name: Load tool manifest
         run: grep -v '^#' tools/versions.env | grep . >>"${GITHUB_ENV}"
       - name: Install pinned Cargo tools
-        # Every runtime graph runs the initialized service's `make unused-deps`;
-        # a full graph also runs its `make test`.
         if: matrix.part != 'source'
         uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
         with:
@@ -1290,7 +1276,6 @@ jobs:
         with:
           persist-credentials: false
       - name: Links
-        # Relative links and #fragments only (offline); no toolchain.
         run: bash ./scripts/ci/measure.sh docs-links -- make docs-check
 
   required:

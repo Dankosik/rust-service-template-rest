@@ -15,7 +15,6 @@ use crate::{Error, StopScopes, policy::Origin};
 /// Prometheus naming.
 pub const REQUEST_DURATION_METRIC: &str = "http_client_request_duration_seconds";
 
-/// Buckets in seconds for [`REQUEST_DURATION_METRIC`].
 pub const REQUEST_DURATION_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0,
 ];
@@ -30,19 +29,9 @@ pub const HISTOGRAMS: &[(&str, &[f64])] = &[(REQUEST_DURATION_METRIC, REQUEST_DU
 /// `{method} {template}` and both the span and the duration metric carry the
 /// template. Supply a static template with placeholders for variable path
 /// segments so requests for the same operation share a metric label.
-///
-/// ```
-/// use infra_outbound_http::{Bytes, Request, UrlTemplate};
-///
-/// let mut request = Request::get("https://provider.example/v1/items/42")
-///     .body(Bytes::new())
-///     .expect("request");
-/// request.extensions_mut().insert(UrlTemplate("/v1/items/{id}"));
-/// ```
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UrlTemplate(pub &'static str);
 
-/// Configured server identity, formatted once per client. Clones share it.
 #[derive(Clone, Debug)]
 pub(crate) struct Server {
     address: SharedString,
@@ -65,10 +54,7 @@ impl Server {
 enum Outcome {
     /// A response was buffered to its end, whatever its status.
     Response,
-    /// The exchange failed with this `error.type`.
     Failed(&'static str),
-    /// Caller cancellation or abandonment without an expired deadline taking
-    /// precedence.
     Cancelled,
 }
 

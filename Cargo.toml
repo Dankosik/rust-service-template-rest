@@ -27,12 +27,9 @@ license = "MIT"
 repository = "https://github.com/Dankosik/rust-service-template-rest"
 publish = false
 
-# One version per dependency for the whole workspace. Crates reference these
-# with `workspace = true` and enable only the features they need.
 [workspace.dependencies]
 # Profiling is optional in each consuming crate; pin the measurement tool.
 hotpath = { version = "=0.28.4", default-features = false }
-# Workspace crates
 service-config = { path = "crates/config" }
 health = { path = "crates/health" }
 json-payload = { path = "crates/json-payload" }
@@ -84,16 +81,12 @@ infra-webhooks = { path = "crates/infra-webhooks" }
 # template:end webhooks-common:workspace-webhooks-crate
 
 # template:begin postgres:workspace-postgres-dependencies
-# Persistence. `macros` where a checked
-# statement (`sqlx::query!`), `sqlx::migrate!` or `#[sqlx::test]` is used.
 sqlx = { version = "0.9.0", default-features = false }
 # template:end postgres:workspace-postgres-dependencies
 # template:begin http-idempotency:workspace-http-idempotency-digest
-# Idempotency structured strings.
 sfv = { version = "0.16.0", default-features = false }
 # template:end http-idempotency:workspace-http-idempotency-digest
 
-# Runtime and transport
 # template:begin messaging:workspace-messaging-client
 async-nats = { version = "=0.50.0", default-features = false }
 # The key type async-nats signs connection challenges with; the adapter signs
@@ -136,9 +129,7 @@ http-body-util = "0.1.5"
 http = { version = "1.5.0", default-features = false }
 mime = { version = "0.3.17", default-features = false }
 tokio = { version = "1.53.1", default-features = false }
-# The service binary's global allocator; see docs/backend-library-selection.md.
 tikv-jemallocator = { version = "0.7.0", default-features = false }
-# Raises the long-running binaries' open-file soft limit; see docs/backend-library-selection.md.
 rlimit = { version = "0.11.0", default-features = false }
 tokio-util = { version = "0.7.19", default-features = false }
 tower = { version = "0.5.3", default-features = false }
@@ -159,12 +150,9 @@ tokio-stream = { version = "0.1.19", default-features = false }
 rustls = { version = "0.23.46", default-features = false }
 # template:end rustls:workspace-rustls
 
-# API contract. The document is derived from the
-# handlers and committed as api/openapi/service.yaml.
 utoipa = { version = "6.0.0", default-features = false }
 utoipa-axum = { version = "0.3.0", default-features = false }
 
-# Configuration
 config = { version = "0.15.25", default-features = false }
 clap = { version = "4.6.7", default-features = false }
 serde = { version = "1", default-features = false }
@@ -202,12 +190,8 @@ metrics-process = { version = "2.4.3", default-features = false }
 metrics-util = { version = "0.20.4", default-features = false }
 tokio-metrics = { version = "0.5.2", default-features = false }
 thiserror = { version = "2.0.20", default-features = false }
-# Shutdown reason sets in infra-telemetry.
 bitflags = { version = "2.13.2", default-features = false }
 
-
-# Utility toolkit.
-# Declarations are not runtime dependencies; each owner opts in below.
 url = { version = "2.5", default-features = false }
 sha2 = { version = "0.11.0", default-features = false }
 async-trait = { version = "0.1.92", default-features = false }
@@ -261,10 +245,8 @@ aws-lc-rs = { version = "=1.19.0", default-features = false }
 httpdate = { version = "1.0.3", default-features = false }
 # template:end webhooks:workspace-webhooks-httpdate
 
-# Build metadata
 vergen-gitcl = { version = "10.0.3", default-features = false }
 
-# Test support
 axum-test = { version = "21.1.0", default-features = false }
 rstest = { version = "0.28.0", default-features = false }
 tempfile = "3"
@@ -275,9 +257,9 @@ tokio-rustls = { version = "0.26.6", default-features = false }
 rcgen = { version = "0.14.10", default-features = false }
 # template:end tls-fixtures:workspace-tls-fixtures
 
-# Lints apply to every crate that opts in with `[lints] workspace = true`.
-# `make lint` promotes warnings to errors; keep the levels here at `warn` so
-# local builds stay usable while a fix is in progress.
+# `make lint` promotes warnings to errors; levels here default to `warn` so
+# local builds stay usable while a fix is in progress, except unconditional
+# defects (`unsafe_code`, `broken_intra_doc_links`, `print_stdout`, `print_stderr`).
 [workspace.lints.rust]
 unsafe_code = "forbid"
 missing_debug_implementations = "warn"
@@ -285,8 +267,6 @@ unreachable_pub = "warn"
 rust_2018_idioms = { level = "warn", priority = -1 }
 
 [workspace.lints.rustdoc]
-# A doc comment names an item through an intra-doc link, so a rename or
-# removal that leaves the comment behind fails `make lint`.
 broken_intra_doc_links = "deny"
 
 [workspace.lints.clippy]
@@ -296,9 +276,9 @@ unwrap_used = "warn"
 expect_used = "warn"
 panic = "warn"
 todo = "warn"
-# `#[expect]` reports a suppression that no longer fires; `#[allow]` stays only
-# where another template profile or test binary can change whether the lint
-# fires (`dead_code` on shared items, code between template markers).
+# `#[expect]` is preferred so stale suppressions fail; `#[allow]` stays where
+# profile or target variation changes whether the lint fires, always with
+# `reason = "..."`.
 allow_attributes_without_reason = "warn"
 dbg_macro = "warn"
 disallowed_methods = "warn"
@@ -307,6 +287,9 @@ print_stdout = "deny"
 print_stderr = "deny"
 # Module names repeat in paths by design (`health::health_ready` reads worse).
 module_name_repetitions = "allow"
+# `AGENTS.md` keeps `missing_docs` off and avoids restating typed `Result` or panic contracts.
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
 
 # Debug and test builds: line tables keep file:line in backtraces for
 # workspace frames; dependencies carry no debuginfo. Against Cargo's default

@@ -83,7 +83,6 @@ impl Progress {
         metrics::gauge!(SCHEDULER_FRESHNESS_METRIC).set(1.0);
     }
 
-    /// Stores a completed observation; returns the largest lag so far.
     fn record(&self, completed: Instant, lag: Duration) -> Duration {
         let mut sample = self
             .sample
@@ -123,11 +122,6 @@ impl Metrics {
     /// take precedence over any valid entry for `runtime_scheduler_lag_seconds`.
     /// Other histograms use the supplied buckets or the Prometheus client
     /// defaults.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`MetricsError::Install`] when a recorder cannot be installed,
-    /// or [`MetricsError::HistogramBuckets`] for an invalid histogram override.
     pub fn install(histograms: &[(&str, &[f64])]) -> Result<Self, MetricsError> {
         let mut builder = PrometheusBuilder::new().set_buckets(DEFAULT_BUCKETS)?;
         for &(name, buckets) in histograms {
@@ -157,15 +151,11 @@ impl Metrics {
         })
     }
 
-    /// Sets `service_startup_trace_exporter_active` from the exporter's startup
-    /// state. A missing tracer provider (`None`) counts as inactive.
     pub fn record_trace_exporter(&self, state: Option<&ExporterState>) {
         let initialized = matches!(state, Some(ExporterState::Initialized { .. }));
         metrics::gauge!(TRACE_EXPORTER_ACTIVE_METRIC).set(f64::from(initialized));
     }
 
-    /// Render the Prometheus text exposition, refreshing process metrics
-    /// first so a scrape sees current values.
     #[must_use]
     pub fn render(&self) -> String {
         self.process.collect();
@@ -199,8 +189,6 @@ impl Metrics {
         }
     }
 
-    /// Drain histogram samples once a second so the recorder does not grow
-    /// between scrapes. Run under the background task tracker.
     pub async fn upkeep(self, cancel: CancellationToken) {
         let _ = cancel
             .run_until_cancelled(async {

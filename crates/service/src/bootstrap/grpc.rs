@@ -1,9 +1,3 @@
-//! The native gRPC listener's startup step.
-//!
-//! The transport owns listener policy. This step gives a derived service one
-//! registration hook, selects how the listener authenticates its callers, and
-//! converts admitted limits and TLS material.
-
 use std::sync::Arc;
 
 use health::Readiness;
@@ -30,7 +24,6 @@ pub type GrpcRegistration = fn(
     &mut BackgroundRegistration<'_>,
 ) -> Result<(), infra_grpc::Error>;
 
-/// The gRPC listener, ready to bind.
 pub(super) struct Prepared {
     pub(super) router: axum::Router,
     pub(super) tls: Option<Arc<ServerConfig>>,
@@ -122,11 +115,6 @@ fn limits(grpc: &GrpcConfig) -> infra_grpc::Limits {
 ///
 /// The conversion does not read paths or perform network I/O, and borrows the
 /// private key without copying it. Plaintext has no server config.
-///
-/// # Errors
-///
-/// Returns the configuration key whose value is missing, or whose material
-/// cannot form a server config.
 fn tls(grpc: &GrpcConfig) -> Result<Option<Arc<ServerConfig>>, ValidationError> {
     let GrpcListenerSecurity::Tls {
         certificate,

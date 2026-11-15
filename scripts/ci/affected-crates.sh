@@ -1,21 +1,4 @@
 #!/usr/bin/env bash
-# Plan the smallest crate set to lint and test for a changed-path list.
-#
-# Reads paths on stdin. Prints:
-#   changed_packages=<names>   crates whose source or tests changed
-#   lint_packages=<names>      the changed crates (clippy --all-targets)
-#   test_packages=<names>      changed crates plus every workspace crate that
-#                              depends on a changed crate's production code
-#                              (cargo tree -i over normal, build, and dev edges)
-#   fallback=true|false        true: run the whole workspace instead
-#   fallback_reason=...
-#
-# `cargo nextest run -p a -p b` is the consumer (`make test-changed PKGS=…`,
-# `make lint-changed PKGS=…`). A manifest, lockfile, or toolchain change falls
-# back to the workspace because feature unification can change what an
-# untouched crate compiles; so does a Rust file outside crates/, which has no
-# crate owner. Only a crate's tests/ directory is test-only: a change there
-# reselects that crate alone.
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -93,39 +76,32 @@ self_test() (
 		grep -qx 'test_packages=' <<<"${output}"
 	done
 
-	# Production change: the crate plus its dependents, including a dev edge.
 	output=$(printf '%s\n' crates/mid/src/lib.rs | bash "${script}")
 	grep -qx 'changed_packages=mid' <<<"${output}"
 	grep -qx 'lint_packages=mid' <<<"${output}"
 	grep -qx 'test_packages=mid top' <<<"${output}"
 	grep -qx 'fallback=false' <<<"${output}"
 
-	# build.rs is production code of its crate.
 	output=$(printf '%s\n' crates/mid/build.rs | bash "${script}")
 	grep -qx 'test_packages=mid top' <<<"${output}"
 
-	# Independent roots and overlapping reverse closures form one sorted set.
 	output=$(printf '%s\n' crates/alone/src/lib.rs crates/mid/build.rs crates/mid/src/lib.rs crates/top/src/lib.rs | bash "${script}")
 	grep -qx 'test_packages=alone mid top' <<<"${output}"
 
-	# The package name comes from the manifest, not the directory.
 	output=$(printf '%s\n' crates/cfg/src/lib.rs | bash "${script}")
 	grep -qx 'changed_packages=fixture-config' <<<"${output}"
 	grep -qx 'test_packages=fixture-config' <<<"${output}"
 
-	# Test-only change: no reverse closure.
 	output=$(printf '%s\n' crates/mid/tests/it.rs | bash "${script}")
 	grep -qx 'changed_packages=mid' <<<"${output}"
 	grep -qx 'lint_packages=mid' <<<"${output}"
 	grep -qx 'test_packages=mid' <<<"${output}"
 
-	# Mixed: alone's production closure plus mid's tests, sorted and unique.
 	output=$(printf '%s\n' crates/alone/src/lib.rs crates/mid/tests/it.rs crates/mid/tests/fixtures/a.toml | bash "${script}")
 	grep -qx 'changed_packages=alone mid' <<<"${output}"
 	grep -qx 'lint_packages=alone mid' <<<"${output}"
 	grep -qx 'test_packages=alone mid' <<<"${output}"
 
-	# A closure covering 80% of the workspace runs the workspace instead.
 	output=$(printf '%s\n' crates/leaf/src/lib.rs | bash "${script}")
 	grep -qx 'changed_packages=leaf' <<<"${output}"
 	grep -qx 'fallback=true' <<<"${output}"

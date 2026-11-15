@@ -1,5 +1,3 @@
-//! URL text as written, before a parser normalizes it.
-
 /// Whether the written authority of `url` contains an `@`.
 ///
 /// A WHATWG parser consumes leading slashes and backslashes for special

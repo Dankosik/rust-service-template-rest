@@ -1,5 +1,3 @@
-//! HTTP listener, request budgets, capacity bounds, and the drain budget.
-
 use std::net::SocketAddr;
 use std::num::NonZeroU32;
 use std::time::Duration;
@@ -14,7 +12,6 @@ use crate::listener_limits::{
 };
 use crate::validate::{ValidationError, duration_range, int_range};
 
-/// The `http` section: application listener address, request budgets, capacity bounds, and shutdown timing.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, default)]
 pub struct HttpConfig {
@@ -81,7 +78,6 @@ pub struct HttpConfig {
     /// as its peer does.
     #[serde(with = "humantime_serde")]
     pub max_connection_age: Duration,
-    /// Re-enable access logging for `/health/live` and `/health/ready`.
     pub access_log_health_probes: bool,
 }
 
@@ -112,25 +108,21 @@ impl Default for HttpConfig {
 }
 
 impl HttpConfig {
-    /// Adapter form of `http.max_connections`: `None` means unbounded.
     #[must_use]
     pub fn connection_cap(&self) -> Option<NonZeroU32> {
         NonZeroU32::new(self.max_connections)
     }
 
-    /// Adapter form of `http.max_in_flight`: `None` means shedding is off.
     #[must_use]
     pub fn in_flight_cap(&self) -> Option<NonZeroU32> {
         NonZeroU32::new(self.max_in_flight)
     }
 
-    /// Adapter form of `http.max_connection_age`: zero becomes `None`.
     #[must_use]
     pub fn connection_age_cap(&self) -> Option<Duration> {
         (!self.max_connection_age.is_zero()).then_some(self.max_connection_age)
     }
 
-    /// Drain budget left after the readiness propagation delay.
     #[must_use]
     pub fn effective_drain_budget(&self) -> Duration {
         self.drain_timeout

@@ -1,6 +1,3 @@
-//! Final contract-driven inbound bearer authentication and the Problem
-//! responses every protected operation declares.
-
 use axum::Router;
 use axum::extract::{FromRequestParts, Request, State};
 use axum::http::Extensions;
@@ -36,28 +33,22 @@ impl VerifiedPrincipal {
         self.0.issuer()
     }
 
-    /// See [`Principal::subject`].
     #[must_use]
     pub fn subject(&self) -> Option<&str> {
         self.0.subject()
     }
 
-    /// See [`Principal::client_id`].
     #[must_use]
     pub fn client_id(&self) -> Option<&str> {
         self.0.client_id()
     }
 
-    /// See [`Principal::scopes`].
     #[must_use]
     pub fn scopes(&self) -> &[String] {
         self.0.scopes()
     }
 
     /// Deserialize application claims from the same accepted verification evidence.
-    ///
-    /// # Errors
-    /// Returns a sanitized typed error if the requested claim shape does not match.
     pub fn claims<T: serde::de::DeserializeOwned>(
         &self,
     ) -> Result<T, infra_bearerauthn::ClaimAccessError> {
@@ -77,7 +68,6 @@ impl VerifiedPrincipal {
         self.0.access_token()
     }
 
-    /// See [`Principal::actor`].
     #[must_use]
     pub fn actor(&self) -> Option<&infra_bearerauthn::Actor> {
         self.0.actor()
@@ -104,11 +94,8 @@ where
 /// Consume an assembled contract, validate its effective security policy, and
 /// apply the single outer authentication layer to every real endpoint.
 ///
-/// # Errors
-///
-/// Returns a closed finalization error for unsupported or contradictory
-/// OpenAPI effective security. A real endpoint absent from the
-/// document remains a served, sanitized 500 rather than a silent bypass.
+/// A real endpoint absent from the document remains a served, sanitized 500
+/// rather than a silent bypass.
 pub fn finalize<S>(
     contract: OpenApiRouter<S>,
     verifier: Verifier,
@@ -284,19 +271,14 @@ pub struct AuthenticationUnavailable(pub Problem);
 /// own authorization.
 #[derive(Debug, IntoResponses)]
 pub enum ProtectedOperationProblemResponses {
-    /// 400: bearer authentication is malformed.
     #[response(status = 400)]
     Malformed(#[ref_response] AuthenticationMalformed),
-    /// 401: bearer authentication is required or invalid.
     #[response(status = 401)]
     Unauthorized(#[ref_response] AuthenticationUnauthorized),
-    /// 403: authorization denied the verified principal.
     #[response(status = 403)]
     Forbidden(#[ref_response] AuthenticationForbidden),
-    /// 503: authentication trust or provider is unavailable.
     #[response(status = 503)]
     Unavailable(#[ref_response] AuthenticationUnavailable),
-    /// 504: the request budget expired before a response committed.
     #[response(status = 504)]
     Timeout(#[ref_response] GatewayTimeout),
 }

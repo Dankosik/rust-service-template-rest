@@ -1,20 +1,8 @@
-//! Credential rotation.
-//!
-//! A platform that rotates the broker credentials (a secrets manager's agent
-//! or a mounted Kubernetes secret) rewrites the file
-//! `messaging.credentials_file` names. The client asks for credentials on
-//! every connection, the first one and each reconnect, so each answer here
-//! reads the file again, as the Go client's `UserCredentials` does. A
-//! connection the broker closes for an expired user reconnects with the
-//! file's current content.
-
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use secrecy::{ExposeSecret as _, SecretString};
 
-/// Why a credentials file gave no credentials. Neither reason carries the
-/// path or any of the file's content.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum CredentialsFileError {
     #[error("credentials file is unreadable: {0}")]
@@ -23,8 +11,6 @@ pub(crate) enum CredentialsFileError {
     Malformed,
 }
 
-/// Describes the credentials-file metric to the installed recorder.
-/// Repeating it is harmless.
 pub(crate) fn describe_metrics() {
     use metrics::describe_counter;
 
@@ -83,7 +69,6 @@ impl CredentialsFile {
         })
     }
 
-    /// Answers one connection's challenge with the file's current user.
     pub(crate) async fn answer(
         &self,
         nonce: &[u8],
@@ -142,7 +127,6 @@ fn parse(content: &str) -> Result<(String, nkeys::KeyPair), CredentialsFileError
     Ok((jwt.to_owned(), key))
 }
 
-/// A line such as `-----BEGIN NATS USER JWT-----`.
 fn is_marker(line: &str) -> bool {
     line.len() >= 6 && line.starts_with("---") && line.ends_with("---")
 }

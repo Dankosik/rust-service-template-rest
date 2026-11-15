@@ -1,5 +1,3 @@
-//! The readiness probe and the publication occupancy it samples.
-
 use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -168,8 +166,6 @@ impl MessagingProbe {
     }
 }
 
-/// Describes the publication occupancy gauges to the installed recorder.
-/// Repeating it is harmless.
 pub(crate) fn describe_metrics() {
     use metrics::{Unit, describe_gauge};
 

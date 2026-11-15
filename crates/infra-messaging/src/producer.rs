@@ -17,7 +17,6 @@ use crate::prepared::PreparedEvent;
 use crate::wire::{encode_prepared, validate_header_bytes};
 
 outcome_label! {
-    /// How one publication ended.
     pub(crate) enum PublishOutcome {
         Acknowledged => "acknowledged",
         Rejected => "rejected",
@@ -29,7 +28,6 @@ const PUBLISH_TOTAL: &str = "messaging_publish_total";
 const PUBLISH_DURATION_SECONDS: &str = "messaging_publish_duration_seconds";
 const PUBLISH_ADMISSION_REFUSED_TOTAL: &str = "messaging_publish_admission_refused_total";
 
-/// Publication outcome metrics, registered once per messaging resource.
 #[derive(Debug)]
 pub(crate) struct PublishMetrics {
     outcomes: Outcomes<PublishOutcome>,
@@ -46,13 +44,11 @@ impl PublishMetrics {
     }
 }
 
-/// A clonable producer admitted by one live messaging resource.
 #[derive(Clone, Debug)]
 pub struct Producer {
     pub(crate) shared: Arc<Shared>,
 }
 
-/// Confirmed broker publication acknowledgment.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PublishAck {
     pub stream: String,
@@ -64,11 +60,6 @@ pub struct PublishAck {
 impl Producer {
     /// Dispatches and awaits one confirmed `JetStream` acknowledgment within
     /// `context`, at most one [`BROKER_OPERATION_BUDGET`] away.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Rejected` for conclusive refusal and `Ambiguous` when dispatch
-    /// may have happened without a conclusive acknowledgment.
     pub async fn publish(
         &self,
         event: &PreparedEvent,
@@ -274,8 +265,6 @@ fn classify_publish(
     }
 }
 
-/// Describes the publication metrics to the installed recorder. Repeating it
-/// is harmless.
 pub(crate) fn describe_metrics() {
     use metrics::{Unit, describe_counter, describe_histogram};
 

@@ -1,5 +1,3 @@
-//! Job kinds and the engines that claim them.
-
 use futures_util::FutureExt;
 use infra_jobs::{Engine, KindError, Kinds, KindsBuilder};
 use service_config::Config;

@@ -1,5 +1,3 @@
-//! CLAIM and the claim loop.
-
 use std::num::NonZeroU32;
 use std::ops::ControlFlow;
 use std::sync::Arc;
@@ -20,12 +18,10 @@ use crate::engine::{
 use crate::kind::{JobId, Registered};
 use crate::trace_context::Carrier;
 
-/// Claim request duration through its database acknowledgement. No labels.
 pub const CLAIM_DURATION_METRIC: &str = "jobs_claim_duration_seconds";
 pub(crate) const CLAIM_DURATION_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 8.0, 12.0,
 ];
-/// Queue time from `not_before` to the start of the successful claim statement. Label `kind`.
 pub const QUEUE_WAIT_METRIC: &str = "jobs_queue_wait_seconds";
 pub(crate) const QUEUE_WAIT_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0,
@@ -95,7 +91,6 @@ pub(crate) fn describe_metrics() {
     );
 }
 
-/// Claim until `stop` fires.
 pub(crate) async fn run_claim_loop(
     shared: Arc<Shared>,
     stop: CancellationToken,
@@ -144,7 +139,6 @@ pub(crate) async fn run_claim_loop(
     }
 }
 
-/// When the claim loop sends its next claim.
 #[derive(Clone, Copy)]
 enum Next {
     /// The last round filled every free slot: more work is likely due.
@@ -562,7 +556,6 @@ enum Drawn {
         generation: i64,
         payload: String,
         trace: Carrier,
-        /// The same offset bound by the claim statement.
         lease_offset: Duration,
         queue_wait_seconds: f64,
     },

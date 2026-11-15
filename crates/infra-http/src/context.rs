@@ -1,5 +1,3 @@
-//! Request opening and explicitly continuing response work have distinct lifetimes.
-
 use std::future::Future;
 use std::mem::DropGuard;
 use std::sync::Arc;

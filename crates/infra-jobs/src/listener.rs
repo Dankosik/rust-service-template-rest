@@ -1,5 +1,3 @@
-//! The `LISTEN` connection that wakes claim loops when enqueue commits a due job.
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -93,7 +91,6 @@ async fn subscribe(pool: &PgPool) -> Result<PgListener, sqlx::Error> {
     Ok(listener)
 }
 
-/// The channel enqueue notifies with the kind name of a job due at once.
 pub(crate) const WAKE_CHANNEL: &str = "background_jobs";
 
 #[cfg(test)]

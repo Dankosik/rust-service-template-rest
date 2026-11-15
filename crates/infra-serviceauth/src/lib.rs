@@ -21,10 +21,8 @@ pub use source::{ReceiverTokens, SigningError, SigningOptions, TokenSource};
 pub use trust::{TrustError, TrustRegistry};
 pub use verify::{Caller, Failure, Verifier};
 
-/// The longest lifetime a service token may claim, `exp - iat`, in seconds.
 const MAX_TOKEN_LIFETIME_SECONDS: u64 = 60;
 
-/// Whole seconds since the Unix epoch; `None` for a clock before it.
 fn unix_seconds() -> Option<u64> {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -51,10 +49,6 @@ impl InvalidServiceName {
 }
 
 impl ServiceName {
-    /// Admits a service name.
-    ///
-    /// # Errors
-    /// Returns [`InvalidServiceName`] outside the grammar.
     pub fn parse(value: &str) -> Result<Self, InvalidServiceName> {
         let bytes = value.as_bytes();
         let label = |byte: &u8| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-';
@@ -95,7 +89,6 @@ impl From<ServiceName> for Arc<str> {
 #[debug("{_0:?}")]
 pub struct JwtType(Arc<str>);
 
-/// A token type outside the media-type subtype grammar.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 #[error(
     "the service token type is an RFC 6838 media subtype such as example-svc+jwt, optionally prefixed by application/"
@@ -104,9 +97,6 @@ pub struct InvalidJwtType;
 
 impl JwtType {
     /// Admits a token type and keeps its short lowercase form.
-    ///
-    /// # Errors
-    /// Returns [`InvalidJwtType`] outside RFC 6838 `restricted-name` syntax.
     pub fn parse(value: &str) -> Result<Self, InvalidJwtType> {
         let short = rfc7515::typ_subtype(value).ok_or(InvalidJwtType)?;
         let name = short.as_bytes();
@@ -148,10 +138,6 @@ impl InvalidKeyId {
 }
 
 impl KeyId {
-    /// Admits a key id.
-    ///
-    /// # Errors
-    /// Returns [`InvalidKeyId`] outside the grammar.
     pub fn parse(value: &str) -> Result<Self, InvalidKeyId> {
         if (1..=256).contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_graphic()) {
             Ok(Self(Arc::from(value)))

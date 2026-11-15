@@ -657,7 +657,6 @@ async fn unknown_processor_commit_does_not_add_a_competing_retry(pool: PgPool) {
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn missing_consumer_spends_attempts_and_exhausts_the_normal_budget(pool: PgPool) {
     accept_for_processing(&pool, "message-missing-consumer").await;
-    // Resume historical work with two of the normal 25 attempts remaining.
     sqlx::query("UPDATE background_jobs SET attempts = 23 WHERE kind = 'webhooks.process'")
         .execute(&pool)
         .await
@@ -879,8 +878,6 @@ async fn receipt_identity_preserves_binary_ids_and_endpoint_scope(pool: PgPool) 
     super::close_pools(&[&pool]).await;
 }
 
-/// A provider scheme other than Standard Webhooks: a shared token header and
-/// the provider's own delivery ID header.
 struct TokenVerifier;
 
 impl Verifier for TokenVerifier {
@@ -946,7 +943,6 @@ async fn a_provider_verifier_shares_the_receipt_path_beside_standard_webhooks(po
         receive("provider", provider_headers("shared", "delivery-1")).await,
         Ok(ReceiptOutcome::Duplicate)
     );
-    // Each endpoint admits only its own scheme, and the verifier's reason survives.
     assert_eq!(
         receive("provider", signed_headers(&keys, "msg_2", b"{}")).await,
         Err(ReceiveError::Rejected(Rejection::new("invalid_token")))
@@ -962,7 +958,6 @@ async fn a_provider_verifier_shares_the_receipt_path_beside_standard_webhooks(po
             Err(ReceiveError::Rejected(Rejection::new("invalid_message_id")))
         );
     }
-    // A provider verifier does not lift the body bound.
     let oversized = vec![b'x'; infra_webhooks::protocol::MAX_BODY_BYTES + 1];
     assert_eq!(
         receiver
@@ -1442,7 +1437,6 @@ async fn receipt_migration_preserves_historical_pairs_jobs_and_admission_approxi
             .fetch_all(&pool)
             .await
             .expect("jobs after");
-    // Forward migrations add empty histories and leave legacy payloads in JSONB.
     for job in &mut jobs_after {
         let row = job.as_object_mut().expect("job row is a JSON object");
         assert_eq!(row.remove("payload_text"), Some(serde_json::Value::Null));

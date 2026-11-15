@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Generate and verify Go wire records with the pinned Go source.
-#
 # The bridge is deliberately a package test added only to a temporary checkout:
 # package natsjs owns buildNATSMessage/decodeMessage, while domainevent owns the
 # typed event construction it feeds.  It adapts JSON records to those APIs; it

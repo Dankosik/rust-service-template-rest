@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Policy boundary fixtures plus tiny pinned detector and Clippy smoke cases."""
 import importlib.util
 import json
 import os
@@ -296,15 +295,11 @@ class Native(unittest.TestCase):
 
     @staticmethod
     def strict_policy(prefix):
-        """The workspace policy with optional-path tolerance off for one prefix,
-        so a claimed identity that does not resolve fails the proof loudly."""
         return "\n".join(line.replace(", allow-invalid = true", "")
                          if f'path = "{prefix}' in line else line
                          for line in (ROOT / "clippy.toml").read_text().splitlines())
 
     def lint_artifacts(self, package, features=(), *, profile_owned=False):
-        """Reuse the locked, feature-unified metadata `make lint` reported.
-        No new project, dependency resolution or build happens here."""
         metadata = json.loads(subprocess.check_output([
             "cargo", "metadata", "--locked", "--offline", "--format-version=1",
         ], cwd=ROOT, text=True))
@@ -345,7 +340,6 @@ class Native(unittest.TestCase):
                      for option in ("-L", f"dependency={directory}"))
 
     def blocking_probe(self, root, code, expected=None, extern=(), *, allow_type_diagnostic=False):
-        """Exercise the real pinned lint, never a source-text substitute."""
         driver = subprocess.check_output(["rustup", "which", "clippy-driver"], cwd=ROOT, text=True).strip()
         source = root / "blocking.rs"
         source.write_text("#![allow(dead_code, deprecated)]\n" + code)

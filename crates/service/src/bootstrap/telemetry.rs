@@ -1,5 +1,3 @@
-//! Metrics registration, trace options, and the startup record.
-
 use infra_telemetry::{ExporterState, Metrics, ResolvedSampler, TracingOptions};
 use service_config::{Config, TracesSampler};
 

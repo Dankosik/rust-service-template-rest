@@ -104,14 +104,6 @@ impl Client {
     /// [`Self::with_timeout_policy`] with [`ClientTimeout::OpeningOnly`] for
     /// intentionally long-lived streams. Cancellation does not imply rollback
     /// or that a request already handed to tonic was never dispatched.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidDestination`] for a destination that is not a URI,
-    /// including tonic's `unix:` socket form,
-    /// [`Error::DestinationSecurityMismatch`] when its scheme disagrees with
-    /// `security`, a certificate or key variant for unusable PEM material, and
-    /// [`Error::InvalidClientTls`] when tonic cannot build the TLS connector.
     pub fn try_new(
         destination: &str,
         security: ClientSecurity,
@@ -125,10 +117,6 @@ impl Client {
     /// Both policies have a finite opening budget. Supplied caller metadata
     /// always bounds the whole RPC and is reduced by adapter readiness waiting
     /// before handoff to tonic; its internal queue/transit remain unobservable.
-    ///
-    /// # Errors
-    ///
-    /// Returns the same destination and TLS errors as [`Self::try_new`].
     pub fn with_timeout_policy(
         destination: &str,
         security: ClientSecurity,
@@ -292,9 +280,6 @@ impl PreparedCall {
     }
 
     /// Dispatches this prepared request within its original budget.
-    ///
-    /// # Errors
-    /// Returns the existing deadline, cancellation, or transport status.
     pub async fn send(self) -> Result<Response<Body>, tonic::Status> {
         self.send_inner(|_| Ok(()), None).await
     }
@@ -305,10 +290,6 @@ impl PreparedCall {
     /// receives the code mapped from a non-200 HTTP status.
     /// Local failures and bodies abandoned before a status is available skip
     /// the callback. Generated-client metrics use the decoded RPC outcome.
-    ///
-    /// # Errors
-    ///
-    /// Returns the same errors as [`Self::send`].
     pub async fn send_with_response_status(
         self,
         on_status: impl FnOnce(tonic::Code) + Send + 'static,
@@ -318,10 +299,6 @@ impl PreparedCall {
 
     /// Like [`Self::send_with_response_status`], with a final check after the
     /// channel is ready and before it receives the request.
-    ///
-    /// # Errors
-    ///
-    /// Also returns a status from the dispatch check, without sending the request.
     pub async fn send_with_dispatch_check(
         self,
         check: impl FnOnce() -> Result<(), tonic::Status> + Send,

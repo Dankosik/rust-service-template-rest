@@ -1,6 +1,4 @@
-//! The hardened middleware chain and fallback policy.
-//!
-//! Order is the contract, outermost first:
+//! Middleware order is the contract, outermost first:
 //!
 //! request-id sanitize → set → nosniff → observation (OpenTelemetry server span,
 //! HTTP metrics, request-id echo, problem completion, access log) → traceparent

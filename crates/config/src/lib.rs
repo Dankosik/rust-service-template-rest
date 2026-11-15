@@ -135,7 +135,6 @@ pub use webhooks::{WebhookEndpointConfig, WebhooksConfig};
 // template:end webhooks:config-webhooks-export
 pub use validate::ValidationError;
 
-/// The immutable runtime snapshot built once during startup.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Config {
@@ -186,10 +185,6 @@ pub struct Config {
 impl Config {
     /// Validate every section. Cross-key rules that live on a section type
     /// run there; process-structure ceilings are not encoded here.
-    ///
-    /// # Errors
-    ///
-    /// Returns the first violated rule, naming the configuration key.
     pub fn validate(&self) -> Result<(), ValidationError> {
         self.app.validate()?;
         self.http.validate()?;

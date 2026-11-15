@@ -62,7 +62,6 @@ fn environment_endpoint_enables_export_and_nothing_disables_it() {
         resolve_endpoint(None, env(&[root])).unwrap(),
         Some(Endpoint::Environment)
     );
-    // A blank typed endpoint is vacant, so the environment's is used.
     assert_eq!(
         resolve_endpoint(Some("  "), env(&[root])).unwrap(),
         Some(Endpoint::Environment)
@@ -115,7 +114,6 @@ fn trust_files_come_from_the_standard_variables_traces_variant_first() {
                 variable: "OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE",
                 path: "/traces/ca.pem".into(),
             }),
-            // A blank traces variant is vacant, so the general one holds.
             client_certificate: Some(TrustFile {
                 variable: "OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE",
                 path: "/general/client.pem".into(),

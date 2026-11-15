@@ -1,5 +1,3 @@
-//! OAuth 2.0 Bearer token usage, RFC 6750.
-
 /// Why a request's `Authorization` values carry no usable Bearer token.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NoBearer {
@@ -16,11 +14,6 @@ pub enum NoBearer {
 /// The scheme matches ASCII case-insensitively. Tabs, leading or trailing
 /// whitespace, control bytes, and non-ASCII bytes are malformed. The caller
 /// bounds how many bytes it passes.
-///
-/// # Errors
-///
-/// Returns [`NoBearer::Missing`] without a value or for another scheme, and
-/// [`NoBearer::Malformed`] for several values or a value outside the grammar.
 pub fn token<'a>(values: impl IntoIterator<Item = &'a [u8]>) -> Result<&'a str, NoBearer> {
     let mut values = values.into_iter();
     let value = values.next().ok_or(NoBearer::Missing)?;

@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Remote CI compatibility receipt against the actual feature-enabled service."""
 import json
 import os
 import pathlib
@@ -16,7 +15,6 @@ TOOLS = ('profiler_status', 'server', 'functions_timing', 'mutexes')
 
 
 def mcp_receipt():
-    """Initialize one Streamable HTTP session and call every tool in TOOLS."""
     session = None
     sequence = 0
     protocol = '2025-03-26'

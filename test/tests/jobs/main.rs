@@ -1,18 +1,4 @@
-//! Real-PostgreSQL proof for durable background jobs.
-//!
-//! Every test gets its own database from `#[sqlx::test]`, migrated with the
-//! embedded set except the missing-schema case. Waits are bounded and every
-//! spawned task is joined.
-//!
-//! `enqueue` proves enqueue through `in_tx`: the committed row, rollback and a
-//! rejected commit leaving nothing, validation and database failures, and every
-//! uniqueness outcome. `http_idempotency` proves the joint boundary: a
-//! committed attempt enqueues once, and a replayed, rolled-back, or in-progress
-//! attempt enqueues nothing.
-
 #![cfg(feature = "integration")]
-// Integration tests are test code; the workspace's production lint levels
-// for unwrap/expect/panic do not apply to them.
 #![allow(
     clippy::expect_used,
     clippy::unwrap_used,
@@ -48,7 +34,6 @@ pub(crate) use infra_postgres::sqlstate;
 
 const APP: &str = "integration-tests-jobs";
 const WAIT: Duration = Duration::from_secs(10);
-/// Pause between polls for a lock waiter.
 const POLL: Duration = Duration::from_millis(20);
 
 #[derive(Debug, derive_more::From, derive_more::Display)]
@@ -77,7 +62,6 @@ pub(crate) async fn job_count(pool: &PgPool) -> i64 {
         .expect("a job count")
 }
 
-/// `future`, which must finish within [`WAIT`].
 pub(crate) async fn bounded<F: Future>(what: &str, future: F) -> F::Output {
     tokio::time::timeout(WAIT, future).await.expect(what)
 }

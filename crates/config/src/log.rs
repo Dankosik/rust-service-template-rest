@@ -1,10 +1,7 @@
-//! Process logger level and output format.
-
 use serde::Deserialize;
 
 use crate::validate::{ValidationError, non_blank};
 
-/// Output format of the process logger, selected by `log.format`.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum LogFormat {
@@ -12,7 +9,6 @@ pub enum LogFormat {
     /// span ids on every record inside a request.
     #[default]
     Json,
-    /// Human-readable single-line output for local development.
     Text,
 }
 
@@ -23,7 +19,6 @@ pub struct LogConfig {
     /// `info,sqlx=warn`. `RUST_LOG` is not read; `APP__LOG__LEVEL` is the
     /// override channel like every other key.
     pub level: String,
-    /// Output format of log records; `json` by default.
     pub format: LogFormat,
 }
 
@@ -38,7 +33,6 @@ impl Default for LogConfig {
 
 impl LogConfig {
     pub(crate) fn validate(&self) -> Result<(), ValidationError> {
-        // The subscriber's parser owns the directive grammar.
         non_blank("log.level", &self.level)
     }
 }

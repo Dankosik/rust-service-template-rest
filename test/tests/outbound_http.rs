@@ -1,5 +1,3 @@
-//! Downstream adoption of the outbound client's narrow loopback mock API.
-
 use std::time::Duration;
 
 use infra_outbound_http::{BuildError, Bytes, Client, Limits, Request, Url};

@@ -172,7 +172,6 @@ impl TokenEndpoint {
     }
 }
 
-/// One token grant: what its request sends and how its answer is admitted.
 #[derive(Clone, Copy)]
 enum Grant<'subject> {
     ClientCredentials,
@@ -191,8 +190,6 @@ impl Grant<'_> {
         };
     }
 
-    /// The `grant` metric label; shorter than the URN token exchange sends as
-    /// `grant_type`.
     fn metric_label(self) -> &'static str {
         match self {
             Self::ClientCredentials => "client_credentials",

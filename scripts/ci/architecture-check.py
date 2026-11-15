@@ -9,7 +9,6 @@ import sys
 
 
 def load_metadata(root):
-    """Let Cargo interpret manifests, aliases, targets and workspace inheritance."""
     command = [
         "cargo", "metadata", "--locked", "--offline", "--no-deps",
         "--format-version", "1",
@@ -138,7 +137,6 @@ def _edge_label(package, path, dependency):
 
 
 def check(metadata, policy, root):
-    """Return deterministic diagnostics; an empty list means declarations comply."""
     root = Path(root).resolve()
     try:
         roles, members = _validate_policy(policy)

@@ -4,7 +4,6 @@ use crate::load::{Error, load_from};
 use crate::test_support::{BUILD, env, write};
 use std::assert_matches;
 
-/// A jwt-mode section with the required keys, then `extra` lines.
 fn jwt(extra: &str) -> ServiceAuthConfig {
     toml::from_str(&format!(
         "mode = \"jwt\"\nname = \"catalog\"\njwt_type = \"example-svc+jwt\"\ntrust = \"{{}}\"\n{extra}"
@@ -22,7 +21,6 @@ fn none_admits_unauthenticated_grpc_only_in_development() {
         let error = none.validate(env, true).unwrap_err();
         assert_eq!(error.key, "service_auth.mode", "{env}");
     }
-    // Without a gRPC listener there is nothing to authenticate.
     assert_eq!(none.validate("production", false), Ok(()));
 }
 

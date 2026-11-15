@@ -1,8 +1,4 @@
 #!/usr/bin/env bash
-# Run one validation step and append its wall time, CPU time, and peak RSS to
-# the GitHub step summary (or stdout), so a route's cost is visible per run.
-#
-#   measure.sh <route> -- command [args...]
 set -euo pipefail
 
 if [[ ${1:-} == --self-test ]]; then

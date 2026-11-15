@@ -17,7 +17,6 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        # No argument: rustup reads rust-toolchain.toml, including components.
         rustup toolchain install
         pinned=$(rustup show active-toolchain | awk '{print $1}')
         rustup default "${pinned}"

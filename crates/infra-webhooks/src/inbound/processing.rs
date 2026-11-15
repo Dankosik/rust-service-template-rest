@@ -1,6 +1,3 @@
-//! The worker side: endpoint-to-consumer bindings and the jobs handler that
-//! applies one retained delivery.
-
 use std::collections::hash_map::Entry;
 use std::fmt;
 use std::sync::Arc;
@@ -22,18 +19,12 @@ use super::{Incoming, async_trait};
 /// for object-safe async traits.
 #[async_trait]
 pub trait Consumer: Send + Sync + 'static {
-    /// Apply `incoming` through the adopter's business boundary.
-    ///
-    /// # Errors
-    ///
-    /// - An `Err` rolls back every effect made on `tx`.
-    /// - The [`JobError`] class decides whether the job is retried.
-    /// - Do not complete the job: [`Processor`] completes it in the same
-    ///   transaction after `Ok`.
+    /// An `Err` rolls back every effect made on `tx`, and its [`JobError`] class
+    /// decides whether the job is retried. Do not complete the job: [`Processor`]
+    /// completes it in the same transaction after `Ok`.
     async fn process(&self, tx: &mut Tx<'_>, incoming: &Incoming) -> Result<(), JobError>;
 }
 
-/// Explicit endpoint-to-consumer bindings for a processing worker.
 #[derive(Default)]
 pub struct Consumers {
     bindings: HashMap<String, Arc<dyn Consumer>>,
@@ -45,12 +36,6 @@ impl Consumers {
         Self::default()
     }
 
-    /// Bind one configured endpoint to its consumer.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`EndpointAlreadyBound`] when the endpoint already has a binding;
-    /// the first binding stays.
     pub fn bind(
         &mut self,
         endpoint_id: impl Into<String>,
@@ -67,11 +52,6 @@ impl Consumers {
         }
     }
 
-    /// Fail when a configured endpoint has no consumer binding.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`MissingConsumer`] for the first unbound endpoint.
     pub fn require<'a>(
         &self,
         endpoint_ids: impl IntoIterator<Item = &'a str>,
@@ -112,7 +92,6 @@ impl fmt::Debug for Consumers {
     }
 }
 
-/// The jobs handler that invokes one bound inbound consumer.
 pub struct Processor {
     consumers: Consumers,
 }

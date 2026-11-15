@@ -230,7 +230,6 @@ fn cache_password_file_is_a_path_a_file_or_the_environment_may_set() {
         Some(std::path::Path::new("/run/secrets/cache-password"))
     );
 
-    // A blank variable unsets the key, as it does for every optional path.
     let cfg = load_from(&options, BUILD, env(&[("APP__CACHE__PASSWORD_FILE", " ")])).unwrap();
     assert_eq!(cfg.cache.password_file, None);
 }

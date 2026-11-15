@@ -1,6 +1,3 @@
-//! The exporter against a collector that listens: what arrives there, and
-//! what unusable trust material does to the exporter.
-
 use std::io::{Read, Write};
 use std::net::SocketAddr;
 #[expect(
@@ -64,15 +61,12 @@ impl Request {
 )]
 type CollectorStream = std::net::TcpStream;
 
-/// An OTLP/HTTP receiver that answers every export with an empty success.
-/// Its accept thread ends with the test process.
 struct Collector {
     addr: SocketAddr,
     requests: mpsc::Receiver<Request>,
 }
 
 impl Collector {
-    /// `accept` turns a connection into the request it carried, if any.
     #[expect(
         clippy::disallowed_methods,
         reason = "collector fixture owns accept on its dedicated thread through test-process exit"
@@ -165,7 +159,6 @@ fn read_request(stream: &mut impl Read) -> Option<Request> {
 #[test]
 fn a_finished_span_reaches_the_collector_with_the_typed_headers() {
     let collector = Collector::start(exchange);
-    // A collector root: the exporter must post to `/v1/traces` under it.
     let mut options = options(&format!("http://{}", collector.addr));
     options.otlp_headers = Some(SecretString::from(
         "x-tenant=t%201+2,x-once=%250A,x-bad-escape=%0A%ZZ,x-bad-utf8=%0A%FF",
@@ -463,7 +456,6 @@ fn an_exhausted_allowance_returns_before_the_receiver_is_released() {
             panic!("exhausted allowance cannot complete: {outcome:?}");
         };
         assert!(reasons.contains(ProviderShutdownReasons::DEADLINE));
-        // The receiver is still stopped when the caller's bounded return is asserted.
         release.send(()).unwrap();
         thread.join().expect("collector stops after release");
         rt.shutdown_timeout(WAIT);

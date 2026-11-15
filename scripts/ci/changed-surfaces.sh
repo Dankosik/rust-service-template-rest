@@ -1,21 +1,4 @@
 #!/usr/bin/env bash
-# Classify changed paths into validation surfaces. CI and `make verify` read
-# the same output, so one owner decides which gates a change selects.
-#
-#   changed-surfaces.sh < paths        NAME=true|false per surface, then
-#                                      classified=, surface_count=,
-#                                      unclassified_files=; exit 1 when any
-#                                      path has no surface (fail closed)
-#   changed-surfaces.sh --union BASE   OR of this classifier and the one at
-#                                      BASE, so a pull request that changes
-#                                      the classifier is judged by both
-#   changed-surfaces.sh --all          every applicable surface true (tags,
-#                                      schedule, manual runs); profile and
-#                                      source-only surfaces remain bounded
-#   changed-surfaces.sh --self-test
-#
-# Surface table: docs/ci-cd-production-ready.md. A surface joins this list
-# with its first artifact and its consumer, never ahead.
 set -euo pipefail
 
 names=(
@@ -313,8 +296,6 @@ classify() {
 			mark migrations runtime_image
 			;;
 		esac; fi
-	# JetStream proof is independent from PostgreSQL and follows the concrete
-	# adapter, its broker runner, Compose input, and actual-Go bridge.
 	if [[ ${messaging} == nats-jetstream ]]; then case "${file}" in
 	Cargo.toml | Cargo.lock | crates/domain-events/* | crates/infra-messaging/* | crates/config/Cargo.toml | crates/config/src/messaging.rs | \
 	crates/jobs-worker/* | crates/service/Cargo.toml | crates/service/src/bootstrap/* | env/docker-compose.yml | env/nats/* | \
@@ -322,7 +303,6 @@ classify() {
 		mark messaging_integration
 		;;
 	esac; fi
-	# Valkey proof follows the cache adapter, its Compose service, and the integration runner.
 	if [[ ${cache} == redis ]]; then case "${file}" in
 	Cargo.toml | Cargo.lock | crates/infra-cache/* | test/fixtures/tls.rs | crates/config/Cargo.toml | crates/config/src/cache.rs | \
 	crates/service/Cargo.toml | crates/service/src/bootstrap/* | env/docker-compose.yml | \
@@ -330,15 +310,12 @@ classify() {
 		mark cache_integration
 		;;
 	esac; fi
-	# The versitygw proof runs only the object storage crate's emulator suite.
 	if [[ ${object_storage} == s3 ]]; then case "${file}" in
 	Cargo.toml | Cargo.lock | crates/infra-object-storage/* | env/docker-compose.yml | \
 	scripts/ci/test-integration-object-storage.sh | make/template.mk | .github/workflows/ci.yml)
 		mark object_storage_integration
 		;;
 	esac; fi
-	# The Keycloak proof runs only the OAuth crate's suite, over the bounded
-	# HTTP client it sends token requests through.
 	if [[ ${outbound_auth} == oauth2-client-credentials ]]; then case "${file}" in
 	Cargo.toml | Cargo.lock | crates/infra-oauth2-client-credentials/* | crates/infra-outbound-http/* | \
 	scripts/ci/test-integration-oauth.sh | make/template.mk | .github/workflows/ci.yml)
@@ -404,8 +381,6 @@ classify() {
 		case "${file}" in
 		.gitleaks.toml | .gitleaksignore) mark secret_scanning ;;
 		esac
-		# Instructions, roles, skills, their generated harness carriers, the
-		# workflow and harness documents, and the scripts that check them.
 		case "${file}" in
 		template.lock | template-owned.paths | scripts/lib/template_*.py | scripts/lib/template_profiles.json | AGENTS.md | CLAUDE.md | QWEN.md | Grok.md | opencode.json | .agents/* | .claude/* | .codex/* | .cursor/* | .qwen/* | .grok/* | .opencode/* | docs/skill-authoring.md | docs/agent-harness.md | docs/agent-harness/* | docs/spec-first-workflow.md | docs/spec-first-workflow/* | docs/prompt-composition.md | docs/prompt-maintenance.md | docs/subagent-brief-template.md | scripts/check-skills.py | scripts/agent-roles-sync.sh | scripts/codex-agents-sync.sh | scripts/harness-skills-sync.sh | scripts/lib/sync-cli.sh)
 			mark agent_instructions

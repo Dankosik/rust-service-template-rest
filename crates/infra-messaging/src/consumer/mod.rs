@@ -1,6 +1,3 @@
-//! The pull loop of one admitted durable consumer and the handle the
-//! composition root owns to drain, abort and join it.
-
 mod delivery;
 
 use std::num::NonZeroUsize;
@@ -72,7 +69,6 @@ fn pull_delivery_bytes(
     .try_fold(payload_bytes, usize::checked_add)
 }
 
-/// A bounded pull consumer admitted against an existing source stream.
 #[derive(Debug)]
 pub struct Consumer {
     shared: Arc<Shared>,
@@ -101,7 +97,6 @@ pub enum ConsumerError {
     TaskEnded,
 }
 
-/// A running consumer owned and joined by the composition root.
 #[derive(Debug)]
 pub struct ConsumerHandle {
     stop: CancellationToken,
@@ -110,7 +105,6 @@ pub struct ConsumerHandle {
     supervisor: Supervisor,
 }
 
-/// The consumer task, or its result once it was joined.
 #[derive(Debug)]
 enum Supervisor {
     Running(AbortOnDropHandle<Result<(), ConsumerError>>),
@@ -516,23 +510,18 @@ impl Consumer {
     }
 }
 
-/// How admitting one pull batch's deliveries ended.
 #[derive(Clone, Copy, Debug)]
 enum BatchEnd {
-    /// Every reserved slot received a delivery.
     Filled,
     Stopped,
-    /// The batch ended before filling its slots.
     Closed,
     MaxBytesExceededBeforeFirstDelivery,
-    /// The batch could not receive or verify a delivery.
     Failed {
         phase: &'static str,
         error_kind: &'static str,
     },
 }
 
-/// A delivery task that panicked or was cancelled ends the consumer.
 fn check_delivery_task_result(
     joined: Option<Result<Result<(), ConsumerError>, JoinError>>,
 ) -> Result<(), ConsumerError> {
@@ -542,7 +531,6 @@ fn check_delivery_task_result(
     }
 }
 
-/// An unanswered lookup does not confirm loss of the admitted durable.
 async fn durable_confirmed_lost(pull: &PullConsumer) -> bool {
     matches!(check_durable_loss(pull).await, Ok(true))
 }
@@ -677,8 +665,6 @@ async fn release_message(message: &async_nats::jetstream::Message, stop: &Cancel
     }
 }
 
-/// Describes the delivery metrics to the installed recorder. Repeating it is
-/// harmless.
 pub(crate) fn describe_metrics() {
     use metrics::describe_counter;
 
@@ -716,9 +702,6 @@ impl ConsumerHandle {
     /// Success confirms all admitted work joined after admission stopped.
     /// The handle remains owned here when this future is dropped or times out,
     /// allowing the root to abort and retry within its shared cleanup deadline.
-    ///
-    /// # Errors
-    /// Returns the terminal consumer fault or a forced-drain outcome.
     pub async fn finish(&mut self, deadline: Instant) -> Result<(), ConsumerError> {
         self.drain();
         let task = match &mut self.supervisor {

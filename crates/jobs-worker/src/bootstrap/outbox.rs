@@ -1,5 +1,3 @@
-//! The outbox publication engine and database-backed message handlers.
-
 use std::num::NonZeroU32;
 
 use infra_jobs::Engine;
@@ -143,7 +141,6 @@ mod tests {
             received.is_closed(),
             "factory uses the retained native pool"
         );
-        // The consumed FnOnce is not run again.
         messages.activate_postgres_messages(&resources).unwrap();
     }
 }

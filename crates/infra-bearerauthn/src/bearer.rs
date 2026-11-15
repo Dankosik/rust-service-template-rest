@@ -1,11 +1,7 @@
-//! Strict RFC 6750 bearer-envelope parsing.
-
 use shared_rules::rfc6750::{self, NoBearer};
 
 use crate::Failure;
 
-/// The accepted bearer token text. Its contents are intentionally opaque and
-/// its debug form is redacted.
 #[derive(Eq, PartialEq, derive_more::Debug)]
 #[debug("BearerToken([REDACTED])")]
 pub(crate) struct BearerToken<'a> {
@@ -17,7 +13,6 @@ impl<'a> BearerToken<'a> {
         self.text.as_bytes()
     }
 
-    /// The presented token text, for a verified engine to retain on its principal.
     pub(crate) fn to_secret(&self) -> secrecy::SecretString {
         self.text.to_owned().into()
     }
@@ -26,12 +21,7 @@ impl<'a> BearerToken<'a> {
 /// Parses exactly one Authorization header value as a bearer envelope, by
 /// [`shared_rules::rfc6750::token`]: foreign schemes are missing Bearer
 /// evidence without credential parsing, and anything outside RFC 6750 is
-/// malformed.
-///
-/// # Errors
-///
-/// Returns the fixed failure class for a missing or malformed bearer envelope.
-/// The caller owns the ingress byte bound.
+/// malformed. The caller owns the ingress byte bound.
 pub(crate) fn parse_bearer<'a>(
     headers: impl IntoIterator<Item = &'a [u8]>,
 ) -> Result<BearerToken<'a>, Failure> {

@@ -14,7 +14,6 @@ pub struct Principal {
     expiry_epoch_seconds: u64,
 }
 
-/// The verified evidence every engine supplies for one principal.
 pub(crate) struct Identity {
     pub(crate) issuer: String,
     pub(crate) subject: Option<String>,
@@ -61,9 +60,6 @@ impl Principal {
 
     /// Deserializes immutable claims from the accepted provider evidence.
     /// Duplicate custom members use the last value, before decoding the requested type.
-    ///
-    /// # Errors
-    /// Returns a sanitized error when the application type cannot read the claims.
     pub fn claims<T: serde::de::DeserializeOwned>(&self) -> Result<T, ClaimAccessError> {
         let invalid_shape = |_| ClaimAccessError::InvalidShape;
         let mut input = ClaimJson(&self.identity.payload);
@@ -155,7 +151,6 @@ impl Actor {
     }
 }
 
-/// Typed claim access failed without exposing the application type or payload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ClaimAccessError {
     #[error("verified claims do not match the requested type")]

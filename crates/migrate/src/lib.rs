@@ -1,22 +1,3 @@
-//! Migration execution for the PostgreSQL profile.
-//!
-//! [`MIGRATOR`] embeds `migrations/`. [`run()`] applies pending migrations over
-//! one dedicated connection with the migration session budgets, under the
-//! `sqlx` advisory session lock and a deadline, following the same
-//! [`Migrate`](sqlx::migrate::Migrate) sequence as `sqlx migrate run` (sqlx-cli): lock, ensure table,
-//! refuse dirty history, compare, apply each pending migration in its own
-//! transaction, unlock. [`verify_history`] is the read-only startup check.
-//! Both apply one history rule.
-//!
-//! A `-- no-transaction` migration carries what PostgreSQL refuses inside a
-//! transaction (`CREATE INDEX CONCURRENTLY`). It runs under the remaining run
-//! deadline instead of the session timeouts and is refused while the database
-//! holds an invalid index.
-//!
-//! Forward-only by policy. The source rules the resolver does not enforce
-//! are a unit test over the embedded set, including unique versions, which
-//! every run and startup check also refuses.
-
 mod history;
 mod run;
 

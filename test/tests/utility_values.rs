@@ -1,5 +1,3 @@
-//! Value and encoding recipes: explicit formats instead of repeated string parsing.
-
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use proptest::prelude::*;

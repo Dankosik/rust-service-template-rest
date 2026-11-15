@@ -1,6 +1,3 @@
-//! An error's chain of causes: as one line of text, and as the errors a
-//! caller can test by type.
-
 use std::error::Error;
 use std::fmt;
 

@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Admit one fixed image's binary inventory before native Trivy reporting.
-# runtime-image-scan.sh security|sbom|filesystem IMAGE [SBOM_OUTPUT]
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)

@@ -27,7 +27,6 @@ fn deadline() -> Instant {
     Instant::now() + Duration::from_secs(5)
 }
 
-/// The operator-owned source stream, DLQ stream and durable of the fixture.
 async fn provision(
     url: &str,
     stream_name: &str,

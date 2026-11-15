@@ -1,5 +1,3 @@
-//! Independent, bounded NATS and HTTP receivers for the reading-counter recipe.
-
 use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
 use futures_util::StreamExt;
@@ -12,7 +10,6 @@ use tokio_util::sync::CancellationToken;
 
 use crate::reading_counter::{self, Channel, Operation};
 
-/// Receiver failures propagate to the fixture process owner.
 pub type ReceiverError = Box<dyn std::error::Error + Send + Sync>;
 
 #[expect(
@@ -23,33 +20,24 @@ fn emit(value: &serde_json::Value) {
     println!("{value}");
 }
 
-/// A fixture-only barrier after durable readback and before transport completion.
+/// Barrier after durable readback and before transport completion.
 #[derive(Clone, Debug)]
 pub struct CompletionHold {
     pub channel: Channel,
     pub operation_id: String,
-    /// Created after the marker has been read back.
     pub ready: PathBuf,
-    /// Creating this file releases the hold before its five-second ceiling.
     pub release: PathBuf,
 }
 
-/// Explicit process inputs; the driver owns their disposable resources.
 #[derive(Debug)]
 pub struct ReceiverOptions {
-    /// Existing integration broker.
     pub nats_url: String,
-    /// Existing run-scoped stream.
     pub stream: String,
-    /// Run-scoped event subject.
     pub subject: String,
-    /// Stable durable identity across receiver restarts.
     pub consumer: String,
-    /// Loopback listener only.
     pub http_bind: SocketAddr,
     /// Finite admission window, at most 250 seconds, leaving shutdown headroom.
     pub run_for: Duration,
-    /// Optional lost-completion barrier.
     pub hold: Option<CompletionHold>,
 }
 
@@ -217,11 +205,7 @@ async fn receive_http(
     }
 }
 
-/// Receive against an independent pool until signal, failure, or finite expiry.
 /// Both serial receive loops are joined before returning; no task is detached.
-///
-/// # Errors
-/// Returns invalid bounds, unavailable broker/listener, or receiver-loop failure.
 pub async fn run(pool: &PgPool, options: ReceiverOptions) -> Result<(), ReceiverError> {
     if !options.http_bind.ip().is_loopback()
         || options.run_for.is_zero()

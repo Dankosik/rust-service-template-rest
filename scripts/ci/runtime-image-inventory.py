@@ -26,7 +26,6 @@ def required_string(value: object, label: str) -> str:
 
 
 def expected_binaries(root: Path) -> dict[str, tuple[str, str, str]]:
-    """Current manifests and selection own identities, independently of the scan."""
     workspace = tomllib.loads((root / "Cargo.toml").read_text())
     selected = {"/service"}
     if selected_profiles(root)[0] == "postgres":
@@ -72,7 +71,6 @@ def expected_binaries(root: Path) -> dict[str, tuple[str, str, str]]:
 
 
 def check_outputs(root: Path, expected: dict[str, tuple[str, str, str]]) -> None:
-    """Cross-check the current Docker stages, without inventing a Docker parser."""
     path = root / "build/docker/Dockerfile"
     arguments: dict[str, str] = {}
     builds: dict[str, tuple[str, str]] = {}

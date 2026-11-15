@@ -1,6 +1,3 @@
-//! Two separately owned adapter compositions sharing one real PostgreSQL.
-//! This observes consumer recovery, not separate OS schedulers or process exit.
-
 use std::{net::SocketAddr, num::NonZeroU32, time::Duration};
 
 use axum::{extract::State, http::StatusCode, response::IntoResponse as _, routing::get};

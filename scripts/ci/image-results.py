@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Admit selected native image jobs; never consume image receipts as authority."""
 from __future__ import annotations
 
 import copy

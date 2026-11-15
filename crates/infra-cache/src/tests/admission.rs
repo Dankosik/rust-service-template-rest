@@ -377,7 +377,6 @@ fn a_namespace_name_at_the_length_bound_is_accepted() {
 fn a_password_file_admits_a_dsn_without_a_password() {
     let file = tempfile::NamedTempFile::new().expect("temp password");
     std::fs::write(file.path(), "hunter2\n").expect("write password");
-    // No password in the DSN and no `allow_unauthenticated`.
     on_runtime(|| {
         Cache::start(with_password_file(
             "redis://127.0.0.1:6379",

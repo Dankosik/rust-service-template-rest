@@ -86,7 +86,6 @@ pub enum Failure {
     Unavailable,
 }
 
-/// A safe preparation phase for operator diagnostics.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PreparationPhase {
     Options,
@@ -102,20 +101,16 @@ pub enum PreparationPhase {
 pub enum PreparationReason {
     InvalidUrl,
     ClientBuild,
-    /// An option is empty or outside its accepted range.
     InvalidOption,
     // template:begin oidc-jwt:authn-jwt-preparation-reasons
     Fetch(ProviderFailure),
     Timeout,
-    /// A provider document could not be read.
     Parse,
     IssuerMismatch,
     NoUsableKeys,
     // template:end oidc-jwt:authn-jwt-preparation-reasons
 }
 
-/// An issuer mismatch includes the configured issuer and, when safe to echo,
-/// the discovered issuer.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum PreparationError {
     #[error("authentication preparation failed during {phase:?}: {reason:?}")]
@@ -277,7 +272,6 @@ fn record_verification(
 /// path, and a registry lookup per request costs more than the increment.
 /// Bootstrap installs the recorder before it prepares a verifier.
 struct SuccessCounters {
-    /// The engine label every verification decision of this verifier carries.
     mode: &'static str,
     verified: metrics::Counter,
     transport: authenticate::TransportSuccessCounters,
@@ -298,7 +292,6 @@ impl SuccessCounters {
 }
 
 // template:begin oidc-introspection:authn-introspection-test-support
-/// Fixture-only transport custody for tests that exercise a real verifier.
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
     use tokio_util::sync::CancellationToken;
@@ -317,11 +310,6 @@ pub mod test_support {
 
     impl FixtureTransport {
         /// Creates the sole fixture mapping: one named TLS endpoint to loopback.
-        ///
-        /// # Errors
-        ///
-        /// Returns [`Failure::Unavailable`] for an invalid mapping or certificate,
-        /// or when client preparation fails.
         pub fn try_new(
             fixture_host: &str,
             fixture_addr: std::net::SocketAddr,
@@ -339,7 +327,6 @@ pub mod test_support {
 }
 // template:end oidc-introspection:authn-introspection-test-support
 
-/// A prepared real authentication engine.
 #[derive(Clone, derive_more::Debug)]
 #[debug("Verifier([REDACTED])")]
 pub struct Verifier {
@@ -387,10 +374,6 @@ impl Verifier {
 
     /// Verifies one fixture's Authorization value under a fresh 3-second budget,
     /// without recording a transport outcome.
-    ///
-    /// # Errors
-    /// Returns [`Failure`] for missing or malformed bearer evidence, an invalid
-    /// token, or an unavailable provider.
     #[cfg(feature = "test-support")]
     pub async fn verify_fixture_authorization(
         &self,
@@ -411,11 +394,6 @@ impl Verifier {
 
     /// Verifies a token while spending the caller's original operation budget.
     /// A stopped caller leaves shared key refresh and other cache-fill waiters running.
-    ///
-    /// # Errors
-    /// Returns [`Failure::Unavailable`] when the caller stops, including when
-    /// synchronous verification finishes after its cutoff. Other failures retain
-    /// the existing invalid-evidence and provider classifications.
     pub(crate) async fn verify_with_context(
         &self,
         token: &BearerToken<'_>,

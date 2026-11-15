@@ -1,8 +1,3 @@
-//! Staged teardown under the original process deadline, including partial startup.
-//!
-//! Each stage spends the remaining process budget up to its own ceiling.
-//! The final runtime wait is reserved inside `http.grace_period`.
-
 use std::panic::AssertUnwindSafe;
 use std::time::Duration;
 
@@ -29,17 +24,13 @@ use crate::resources::BrokerResource;
 use crate::resources::{Listeners, Resources};
 use crate::signals::Signals;
 
-/// Ceiling for finishing attempts after a forced drain.
 const ATTEMPT_CLEANUP: Duration = Duration::from_secs(2);
 const LISTENERS: Duration = Duration::from_secs(2);
 const BACKGROUND_JOIN: Duration = Duration::from_secs(3);
 pub(crate) const DEPENDENCY_CLOSE: Duration = Duration::from_secs(5);
 const TELEMETRY_FLUSH: Duration = Duration::from_secs(5);
-/// The telemetry stage: the flush plus the SDK's join slack.
 const TELEMETRY_STAGE: Duration = TELEMETRY_FLUSH.saturating_add(SHUTDOWN_JOIN_SLACK);
-/// Part of [`TELEMETRY_FLUSH`] kept for log closure after the trace flush.
 const LOG_CLOSE_RESERVE: Duration = Duration::from_secs(1);
-/// Whole process tail, including the runtime shutdown reserve.
 const SHUTDOWN_TAIL: Duration = ATTEMPT_CLEANUP
     .saturating_add(LISTENERS)
     .saturating_add(BACKGROUND_JOIN)
@@ -74,7 +65,6 @@ pub(crate) fn validate_grace_budget(http: &HttpConfig) -> Result<(), GraceBudget
     Ok(())
 }
 
-/// How the teardown ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Outcome {
     Graceful,
@@ -97,13 +87,10 @@ enum DrainOutcome {
     NeedsAttemptCleanup,
 }
 
-/// The process deadline: `grace` after the first stop, or after now when
-/// no stop arrived.
 pub(crate) fn stop_deadline(first_stop: Option<Instant>, grace: Duration) -> Instant {
     first_stop.unwrap_or_else(Instant::now) + grace
 }
 
-/// Async stages reserve the final runtime allowance inside the process deadline.
 struct Budget {
     deadline: Instant,
 }
@@ -124,7 +111,6 @@ impl Budget {
     }
 }
 
-/// Concrete partial resources and the first stop/failure deadline.
 pub(crate) struct Plan<'a> {
     pub(crate) http: &'a HttpConfig,
     pub(crate) resources: Resources,
@@ -133,7 +119,6 @@ pub(crate) struct Plan<'a> {
     pub(crate) deadline: Instant,
 }
 
-/// Each independent stage survives an unwind; every wait spends the same deadline.
 pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
     let Plan {
         http,

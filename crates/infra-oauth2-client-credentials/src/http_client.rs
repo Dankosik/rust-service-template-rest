@@ -1,6 +1,3 @@
-//! Concrete HTTP binding. The credential and cache remain in their private
-//! owner; [`AuthenticatedClient::execute`] documents the call contract.
-
 use bytes::Bytes;
 use http::{Request, Response, StatusCode};
 use infra_outbound_http::Client;
@@ -49,16 +46,10 @@ impl AuthenticatedClient {
     /// A request carrying [`crate::OnBehalfOf`] in its extensions is sent with a
     /// token exchanged for that subject instead of the service token; the
     /// extension is always removed before dispatch. Responses are never
-    /// replayed. On receiving a 401 status, the client stops reusing the token
-    /// it used if the token is at least 30 seconds old, even if reading the
-    /// response body fails.
-    ///
-    /// # Errors
-    /// Rejects caller Authorization, or a missing subject this client
-    /// [requires](Self::require_on_behalf_of), before I/O, acquisition failure
-    /// before resource dispatch (including a token that expired during request
-    /// preparation), and otherwise preserves bounded resource
-    /// errors.
+    /// replayed. A token that expired during request preparation is refused
+    /// before dispatch, and on receiving a 401 status, the client stops reusing
+    /// the token it used if the token is at least 30 seconds old, even if
+    /// reading the response body fails.
     pub async fn execute(
         &self,
         request: Request<Bytes>,
@@ -75,9 +66,6 @@ impl AuthenticatedClient {
     /// context, clamped to the resource client's local ceiling before token work.
     /// Request context extensions additionally bound credentials and dispatch.
     /// Cancellation stops this caller's wait without closing the credential owner.
-    ///
-    /// # Errors
-    /// Returns composition, acquisition, or bounded resource errors, as [`Self::execute`].
     pub async fn execute_with_context(
         &self,
         mut request: Request<Bytes>,

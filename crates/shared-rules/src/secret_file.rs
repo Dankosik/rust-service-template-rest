@@ -1,5 +1,3 @@
-//! Secrets mounted as files.
-
 /// The value a secret file holds: its text without the trailing line breaks
 /// (`\n`, and `\r` from a Windows line end) that editors, `echo`, and
 /// heredocs add. Shell command substitution, `$(< file)`, likewise drops

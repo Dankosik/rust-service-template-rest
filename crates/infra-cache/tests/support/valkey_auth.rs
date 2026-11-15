@@ -1,5 +1,3 @@
-//! Actual server authentication, isolated to one named user on the existing server.
-
 use std::io::Write;
 use std::path::Path;
 use std::pin::Pin;
@@ -330,8 +328,6 @@ fn assert_exchange(
     reason = "one sequential authentication scenario keeps socket identity, pending-password transitions, and panic-safe fixture cleanup together"
 )]
 async fn replacement_password_is_authenticated_on_retained_and_new_connections() {
-    // This real server boundary catches AUTH being skipped or a rejected AUTH
-    // being reported as success; old sessions alone cannot distinguish either.
     let recorder = observation_recorder();
     let _recorder = metrics::set_default_local_recorder(&recorder);
     let logs = CapturedLogs::default();

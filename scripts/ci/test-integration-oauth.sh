@@ -1,7 +1,4 @@
 #!/usr/bin/env bash
-# OAuth adapter proof against a throwaway Keycloak container. A caller can
-# supply an already-running one through OAUTH_TEST_KEYCLOAK_URL; its bootstrap
-# administrator must be admin/admin, as started here.
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)

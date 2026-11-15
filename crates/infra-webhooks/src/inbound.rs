@@ -45,7 +45,6 @@ const READ_COMMITTED: TxOptions = TxOptions {
     read_only: false,
 };
 
-/// The durable admission result for one verified delivery.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReceiptOutcome {
     /// The receipt and processing job committed together.
@@ -54,7 +53,6 @@ pub enum ReceiptOutcome {
     Duplicate,
 }
 
-/// A closed inbound admission failure for the HTTP adapter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ReceiveError {
     #[error("inbound webhook endpoint is not configured")]
@@ -75,7 +73,6 @@ pub enum ReceiveError {
 pub struct Rejection(&'static str);
 
 impl Rejection {
-    /// A rejection with a static `snake_case` reason label.
     #[must_use]
     pub const fn new(reason: &'static str) -> Self {
         Self(reason)
@@ -105,11 +102,6 @@ pub trait Verifier: Send + Sync + 'static {
     /// provider's stable ID for this message, 1 to [`MAX_MESSAGE_ID_BYTES`](crate::protocol::MAX_MESSAGE_ID_BYTES)
     /// bytes, equal on every redelivery. `body` is the raw request body and
     /// `now` the admission time for replay windows.
-    ///
-    /// # Errors
-    ///
-    /// A [`Rejection`] when the evidence is missing, malformed, stale, or does
-    /// not match the endpoint's key.
     fn authenticate(
         &self,
         headers: &HeaderMap,
@@ -130,7 +122,6 @@ impl Verifier for KeyRing {
     }
 }
 
-/// Configured receiving endpoints and their durable receipt store.
 #[derive(Clone)]
 pub struct Receiver {
     pool: PgPool,
@@ -163,13 +154,6 @@ impl Receiver {
     /// `deadline` bounds only the wait for a pooled connection. Each attempt
     /// keeps the pool's fixed timeout and is retried on timeout while time
     /// remains. The caller owns any deadline for the full receipt operation.
-    ///
-    /// # Errors
-    ///
-    /// Returns a closed rejection for an unknown endpoint, refused evidence, a
-    /// body over [`MAX_BODY_BYTES`](crate::protocol::MAX_BODY_BYTES), a message identity outside 1 to
-    /// [`MAX_MESSAGE_ID_BYTES`](crate::protocol::MAX_MESSAGE_ID_BYTES) bytes, or a delivery too large to retain, or
-    /// unavailable when receipt ownership could not be acknowledged.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub async fn receive(
         &self,
@@ -193,10 +177,6 @@ impl Receiver {
     ///
     /// See [`Self::receive`] for admission and deadline semantics. The body
     /// moves into the winning receipt's payload without a copy.
-    ///
-    /// # Errors
-    ///
-    /// Returns the same endpoint, verification and persistence errors as [`Self::receive`].
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub async fn receive_bytes(
         &self,
@@ -307,7 +287,6 @@ impl ReceiptFailure {
         }
     }
 
-    /// The static `webhook.reason` log label.
     const fn reason(&self) -> &'static str {
         match self {
             Self::UnexpectedDuplicate => "integrity",
@@ -335,7 +314,6 @@ fn rejected(endpoint_id: &str, rejection: Rejection) -> ReceiveError {
     ReceiveError::Rejected(rejection)
 }
 
-/// Log a receipt the store could not acknowledge, with bounded fields only.
 fn receipt_unavailable(endpoint_id: &str, error: &ReceiptFailure) -> ReceiveError {
     let driver = error.driver();
     tracing::warn!(
@@ -487,7 +465,6 @@ mod tests {
                 panic!("an oversized body never reaches the verifier")
             }
         }
-        // Nothing listens on port 1, so any write would fail as Unavailable.
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgres://127.0.0.1:1/unreachable")
             .expect("a lazy pool opens no connection");

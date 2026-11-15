@@ -51,7 +51,6 @@ impl OnBehalfOf {
     }
 }
 
-/// An idle, cloneable owner of one private credential tuple and its tokens.
 #[derive(Clone, derive_more::Debug)]
 #[debug("Credentials([REDACTED])")]
 pub struct Credentials(pub(crate) Arc<Owner>);
@@ -143,7 +142,6 @@ pub(crate) struct Cached {
 
 pub(crate) struct ServiceToken {
     token: Arc<Token>,
-    /// When the next background refresh of this still reusable token may start.
     pub(crate) refresh_after: Instant,
 }
 
@@ -174,9 +172,6 @@ impl Credentials {
     /// Prepares credentials without performing DNS, token, or resource I/O.
     /// The integration must drive and await the returned [`RefreshDriver`].
     /// Dropping or completing that driver closes any surviving clients.
-    ///
-    /// # Errors
-    /// Returns a sanitized option, clock, or transport-construction failure.
     pub fn prepare(options: Options) -> Result<(Self, RefreshDriver), ConfigurationError> {
         let admitted = admit_options(options)?;
         let token_http =

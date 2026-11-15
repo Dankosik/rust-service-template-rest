@@ -1,5 +1,3 @@
-//! Serde adapters for field forms serde does not express directly.
-
 use std::net::SocketAddr;
 use std::str::FromStr;
 
@@ -47,7 +45,6 @@ where
     }
 }
 
-// Buffer the scalar kind before config-rs can coerce floats or booleans.
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum CountInput<T> {
@@ -117,7 +114,6 @@ where
     }
 }
 
-/// What a listen address must be, for the decode message.
 const LISTEN_ADDR_FORM: &str = "an IP address and port, or :port; hostnames are not resolved";
 
 /// Missing, empty, or whitespace-only text is vacant (`None`); a present
@@ -149,7 +145,6 @@ where
     Ok(raw.and_then(|value| (!value.trim().is_empty()).then(|| SecretString::from(value))))
 }
 
-/// Listen address: `ip:port`, or `:port` for IPv4 all-interfaces.
 pub(crate) fn listen_addr<'de, D>(deserializer: D) -> Result<SocketAddr, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -158,7 +153,6 @@ where
     parse_listen_addr(&raw).ok_or_else(|| invalid_listen_addr(&raw))
 }
 
-/// Listen address, or `None` when the value is missing, empty, or whitespace.
 pub(crate) fn optional_listen_addr<'de, D>(deserializer: D) -> Result<Option<SocketAddr>, D::Error>
 where
     D: serde::Deserializer<'de>,

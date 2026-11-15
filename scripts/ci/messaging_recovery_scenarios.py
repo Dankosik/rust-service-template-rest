@@ -1,9 +1,3 @@
-"""Six native recovery situations, driven only through the owned Session.
-
-The oracle is an independent expected-result inventory. Replay reads actual
-restored outbox or stream bytes; an oracle copy is never a publication source.
-"""
-
 import base64
 from datetime import datetime, timezone
 import hashlib
@@ -15,7 +9,6 @@ import time
 
 
 def header(raw, name):
-    """Read first identity value while retaining raw bytes for equality."""
     for line in base64.b64decode(raw.get("hdrs", "")).decode().split("\r\n")[1:]:
         key, separator, value = line.partition(":")
         if separator and key == name:
@@ -473,7 +466,6 @@ class Rehearsal:
                         "pre_existing_effect": ["coherent-existing"], "producer_pending_not_yet_published": ["newer-pending"]})
 
     def retained_publication(self, logical_id):
-        """A native publication probe reads only real outbox bytes, never oracle bytes."""
         rows = [row for row in self.jobs() if row["payload"]["message_id"] == logical_id]
         self.c.require(len(rows) == 1 and rows[0]["state"] in {"pending", "running", "failed"}, "no_publishable_retained_intent")
         intent = rows[0]["payload"]

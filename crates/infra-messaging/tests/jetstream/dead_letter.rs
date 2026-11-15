@@ -1,5 +1,3 @@
-//! Dead-letter transfer and redrive.
-
 use super::*;
 
 #[tokio::test]

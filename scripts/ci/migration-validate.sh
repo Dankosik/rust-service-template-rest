@@ -1,12 +1,4 @@
 #!/usr/bin/env bash
-# Rehearse the runtime image against a live database: `/migrate` from the
-# image applies the embedded set to a fresh PostgreSQL, a second run reports
-# no_change, and the service image then passes the lifecycle check with the
-# profile enabled, so readiness is proven with the pool open.
-#
-#   migration-validate.sh [IMAGE [EXPECTED_COMMIT]]
-#   Without IMAGE the runtime image is built as service:migration first.
-#   REQUIRE_DOCKER=1 makes a missing Docker a failure instead of a refusal.
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)

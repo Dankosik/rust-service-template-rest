@@ -13,15 +13,11 @@ const MAX_KEY_BYTES: usize = 1024;
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct ObjectKey(String);
 
-/// The key does not match the portable grammar. The key itself is not kept.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("object key does not match the portable key grammar")]
 pub struct InvalidObjectKey;
 
 impl ObjectKey {
-    /// # Errors
-    ///
-    /// Returns [`InvalidObjectKey`] when the key does not match the grammar.
     pub fn try_new(key: impl Into<String>) -> Result<Self, InvalidObjectKey> {
         let key = key.into();
         if key.len() > MAX_KEY_BYTES {

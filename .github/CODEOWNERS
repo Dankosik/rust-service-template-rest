@@ -2,7 +2,6 @@
 # Example: * @acme/backend-platform
 * @Dankosik
 
-# Critical areas requiring explicit ownership.
 /crates/ @Dankosik
 /.github/workflows/ @Dankosik
 /Cargo.toml @Dankosik

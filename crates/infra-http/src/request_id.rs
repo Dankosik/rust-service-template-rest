@@ -1,5 +1,3 @@
-//! Request correlation.
-//!
 //! [`SetRequestIdLayer`](tower_http::request_id::SetRequestIdLayer) trusts the
 //! inbound header and any existing [`RequestId`] extension. Sanitize both
 //! before it establishes the ID that observation echoes in the response header

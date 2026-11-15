@@ -1,58 +1,35 @@
-//! Provider admission: endpoint, region, addressing, and which optional S3
-//! features each provider receives.
-
 use url::Url;
 
 use crate::error::ConfigError;
 use crate::put_body::UploadSource;
 
-/// Where the bucket lives. Each provider carries only the fields it accepts.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Provider {
-    /// Amazon S3. The SDK resolves the regional endpoint.
     AmazonS3 {
-        /// Region, for example `eu-central-1`.
         region: String,
-        /// The 12-digit account that must own the bucket.
         expected_bucket_owner: String,
     },
-    /// Cloudflare R2. Region is always `auto`.
     CloudflareR2 {
         /// `https://<account id>[.eu|.fedramp].r2.cloudflarestorage.com`.
         endpoint: String,
     },
     /// Railway Buckets (Tigris). Endpoint and region come from the bucket's
     /// `ENDPOINT` and `REGION` variables.
-    Railway {
-        /// HTTPS origin, `https://t3.storageapi.dev` today.
-        endpoint: String,
-        /// Signing region; `auto` when empty.
-        region: String,
-    },
+    Railway { endpoint: String, region: String },
     /// Any other S3-compatible store at an HTTPS origin, such as Backblaze
     /// B2, Ceph, or Hetzner Object Storage. It receives only the common S3
     /// subset: no upload checksum and no expected bucket owner.
     S3Compatible {
-        /// `https://` origin; a port is allowed.
         endpoint: String,
-        /// Signing region; `us-east-1` when empty.
         region: String,
-        /// Path-style addressing (`<endpoint>/<bucket>/<key>`) for a store
-        /// that serves no `<bucket>.<endpoint>` host.
         path_style: bool,
     },
     /// An S3 emulator for local development and tests. Plaintext is allowed;
     /// the caller must already have applied the local-only policy.
-    Local {
-        /// `http://` or `https://` origin.
-        endpoint: String,
-        /// Signing region; `us-east-1` when empty.
-        region: String,
-    },
+    Local { endpoint: String, region: String },
 }
 
 impl Provider {
-    /// The configuration spelling, safe to log.
     #[must_use]
     pub fn name(&self) -> &'static str {
         match self {
@@ -65,7 +42,6 @@ impl Provider {
     }
 }
 
-/// Which uploads name a CRC64NVME checksum for the SDK to compute.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum UploadChecksum {
     /// Every upload: a header for bytes, an `aws-chunked` trailer for a stream.
@@ -85,7 +61,6 @@ impl UploadChecksum {
     }
 }
 
-/// The admitted provider tuple the SDK config is built from.
 #[derive(Debug)]
 pub(crate) struct Admitted {
     pub(crate) endpoint: Option<String>,
@@ -219,7 +194,6 @@ fn serialize(origin: &Url) -> String {
     origin[..url::Position::BeforePath].to_owned()
 }
 
-/// A shape-validated signing region, or the provider's default when empty.
 fn signing_region(region: &str, default: Option<&str>) -> Result<String, ConfigError> {
     if region.is_empty() {
         return default.map(str::to_owned).ok_or(ConfigError::Region);
@@ -235,7 +209,6 @@ fn signing_region(region: &str, default: Option<&str>) -> Result<String, ConfigE
     }
 }
 
-/// `<32 hex>[.eu|.fedramp].r2.cloudflarestorage.com`.
 fn r2_host(host: &str) -> bool {
     let Some(rest) = host.strip_suffix(".r2.cloudflarestorage.com") else {
         return false;

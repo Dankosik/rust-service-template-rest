@@ -1,5 +1,3 @@
-//! Service identity: environment, version, commit, instance.
-
 use serde::Deserialize;
 
 use crate::validate::{ValidationError, non_blank};
@@ -8,7 +6,6 @@ use crate::validate::{ValidationError, non_blank};
 /// for `app.version` and `app.commit` when the snapshot leaves them empty.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BuildInfo {
-    /// Usually `env!("CARGO_PKG_VERSION")` of the calling package.
     pub version: &'static str,
     /// The source revision stamped by this crate's build script; `unknown`
     /// when absent.
@@ -35,7 +32,6 @@ pub(crate) fn is_local_development(env: &str) -> bool {
     matches!(env, "local" | "development")
 }
 
-/// Refuses an enabled escape hatch `key` outside a developer environment.
 #[allow(
     dead_code,
     reason = "removing every profile with an escape hatch leaves the rule without a caller"
@@ -54,12 +50,9 @@ pub(crate) fn local_development_only(
     Ok(())
 }
 
-/// The `app` section: service identity published as telemetry resource attributes.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, default)]
 pub struct AppConfig {
-    /// Deployment environment name published as
-    /// `deployment.environment.name`.
     pub env: String,
     /// Service version published as `service.version`. Empty means "use the
     /// build's own version".

@@ -136,8 +136,6 @@ CONFIG_IO_CODES = {"no such file or directory": "io_missing", "permission denied
 
 
 class Refused(RuntimeError):
-    """Only closed, credential-free reasons cross the command boundary."""
-
     def __init__(self, reason, *, command_class="controller", exit_code=None):
         super().__init__(reason)
         self.command_class = command_class
@@ -163,7 +161,6 @@ def load(path):
 
 
 def atomic(path, value, exclusive=False):
-    """Commit private state before an effect; no-clobber immutable selections."""
     raw = (json.dumps(value, sort_keys=True, indent=2) + "\n").encode()
     fd, temporary = tempfile.mkstemp(prefix=".pending-", dir=path.parent)
     try:
@@ -301,7 +298,6 @@ def save_command_output(path, remaining, stdout, stderr):
 
 def run(command, *, timeout=30, env=None, input=None, check=True, tick=None, command_class=None,
         private_output=None, private_output_limit=None, validation_control=False):
-    """Finite native command; suppress provider stderr and secret-bearing argv."""
     if command_class is None:
         command_class = {"openssl": "openssl", "yq": "config_query"}.get(command[0], "native_command")
         if command[0] == "docker" and len(command) > 1:
@@ -511,7 +507,6 @@ def image_pin(service):
 
 
 def artifact_identity(path, architecture):
-    """Refuse host Mach-O and wrong-architecture artifacts before any startup."""
     with path.open("rb") as binary:
         header = binary.read(20)
     machines = {"amd64": 62, "arm64": 183}
@@ -563,7 +558,6 @@ class Session:
                     "-p", self.data["project"], "-f", str(COMPOSE), *args], env=environment, **kwargs)
 
     def register_validation(self):
-        """Automatic sessions bind native effects to the existing guardian."""
         owner = os.environ.get("VALIDATION_LOCK_TOKEN", "")
         require(re.fullmatch(r"[a-f0-9]{32}", owner) is not None
                 and self.data["generation"].startswith(owner[:12]), "validation_owner_missing")
@@ -714,7 +708,6 @@ class Session:
             raise Refused("native_config_test_failed", command_class="nats_config_test", exit_code=code)
 
     def capture_resources(self):
-        """Record the exact identities also when native startup partly failed."""
         generation = self.data["generation"]
         ids = self.compose("ps", "-a", "-q", timeout=10)[1].decode().split()
         if ids:
@@ -795,7 +788,6 @@ class Session:
         require(used <= GIB, "retained_data_limit_stop_required")
 
     def capture_effect_failure(self, known_ids):
-        """One bounded, read-only observation; incomplete evidence never changes the failure."""
         until = time.monotonic() + min(15, max(0, self.data["expires_at"] - time.time()))
         sections = {name: {"status": "incomplete"} for name in
                     ("resources", "client", "workers", "producer", "effect", "source", "dlq", "consumers")}
@@ -1104,7 +1096,6 @@ class Session:
         raise Refused("worker_start_deadline")
 
     def workload_start(self):
-        """One finite ingress process, tracked by the same session worker custody."""
         self.verify()
         require("load" not in self.data.get("workers", {}), "workload_already_running")
         client = self.data["containers"]["client"]["id"]
@@ -1373,7 +1364,6 @@ class Session:
 
 
 def demonstrate(session):
-    """One native B4 observation, with a neighbor as the wrong-delete oracle."""
     with session.lock():
         selected = session.seed()
         neighbor = session.seed("neighbor")
@@ -1403,7 +1393,6 @@ def timestamp(value):
 
 
 def prepare_auth(session):
-    """Use the pinned native CLI's offline store; no host credential store."""
     with session.capture_startup_resources():
         session.compose("up", "-d", "--pull", "never", "client", timeout=30)
     session.startup_phase("auth_generation")

@@ -1,5 +1,3 @@
-//! Job kinds, their policies, and the erased handler a worker runs.
-
 use std::fmt;
 use std::future::Future;
 use std::marker::PhantomData;
@@ -19,7 +17,6 @@ use tokio_util::sync::CancellationToken;
 
 pub(crate) const MAX_KIND_LEN: usize = 64;
 pub(crate) const DEFAULT_MAX_ATTEMPTS: u16 = 25;
-/// The largest attempt budget a [`Policy`] may declare.
 pub const MAX_ATTEMPTS: u16 = 25;
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_mins(1);
 /// Delay of [`JobError::unavailable`], in microseconds. A refunded attempt does
@@ -29,21 +26,15 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_mins(1);
 /// to drain and short enough to notice its recovery.
 pub(crate) const UNAVAILABLE_DELAY_MICROS: i64 = 10_000_000;
 pub const MIN_TIMEOUT: Duration = Duration::from_secs(1);
-/// The longest attempt timeout a [`Policy`] may declare.
 pub const MAX_TIMEOUT: Duration = Duration::from_hours(1);
 
 const MAX_DELAY_DAYS: u64 = 36_500;
-/// The longest delay [`crate::EnqueueOptions::delay`] and
-/// [`JobError::retry_after_at_least`] accept.
 pub const MAX_DELAY: Duration = Duration::from_hours(MAX_DELAY_DAYS * 24);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, thiserror::Error)]
 #[error("delay exceeds the maximum of {MAX_DELAY_DAYS} days")]
 pub struct InvalidDelay;
 
-/// Returns the exact PostgreSQL microsecond delay, dropping sub-microseconds.
-///
-/// The queue accepts zero through [`MAX_DELAY`] inclusive.
 pub(crate) fn checked_delay_micros(duration: Duration) -> Result<i64, InvalidDelay> {
     if duration > MAX_DELAY {
         return Err(InvalidDelay);
@@ -51,7 +42,6 @@ pub(crate) fn checked_delay_micros(duration: Duration) -> Result<i64, InvalidDel
     i64::try_from(duration.as_micros()).map_err(|_| InvalidDelay)
 }
 
-/// Bound, in UTF-8 bytes, on a stored error summary.
 pub(crate) const MAX_ERROR_SUMMARY_BYTES: usize = 1024;
 
 /// A payload type a worker can run.
@@ -63,7 +53,6 @@ pub trait JobKind: Serialize + DeserializeOwned + Send + Sync + 'static {
     const NAME: &'static str;
 }
 
-/// A job's stable identifier, as enqueue generates it.
 #[derive(
     Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, derive_more::Debug, derive_more::Display,
 )]
@@ -78,13 +67,10 @@ impl JobId {
     }
 }
 
-/// Custody of one claimed attempt, assembled before the handler runs.
 pub(crate) struct Attempt {
     pub(crate) job_id: JobId,
-    /// Attempts used, including this one.
     pub(crate) number: u16,
     pub(crate) generation: i64,
-    /// This attempt's own deadline, never later than the supervisor's.
     #[expect(
         clippy::struct_field_names,
         reason = "the name contrasts with the supervisor deadline every caller compares it to"
@@ -94,7 +80,6 @@ pub(crate) struct Attempt {
     pub(crate) pool: PgPool,
 }
 
-/// One claimed attempt, as the handler receives it.
 pub struct Job<K> {
     attempt: Attempt,
     payload: K,
@@ -106,7 +91,6 @@ impl<K: JobKind> Job<K> {
         self.attempt.job_id
     }
 
-    /// Attempts used, including this one.
     #[must_use]
     pub const fn attempt(&self) -> u16 {
         self.attempt.number
@@ -117,7 +101,6 @@ impl<K: JobKind> Job<K> {
         &self.payload
     }
 
-    /// Fires at timeout or at the end of the drain.
     #[must_use]
     pub fn cancellation(&self) -> CancellationToken {
         self.attempt.cancellation.clone()
@@ -154,11 +137,6 @@ impl<K: JobKind> Job<K> {
     /// whose outcome is unknown converts into a retryable [`JobError`]; the
     /// engine's fenced retry write changes nothing if the commit landed, and
     /// schedules another attempt if it did not.
-    ///
-    /// # Errors
-    ///
-    /// [`CompleteError::StaleClaim`] when this running claim no longer exists,
-    /// or [`CompleteError::Database`] when the statement fails.
     pub async fn complete_in_tx(&self, tx: &mut Tx<'_>) -> Result<(), CompleteError> {
         let complete = crate::attempt::complete_query(crate::attempt::ClaimFence {
             job_id: self.attempt.job_id,
@@ -242,10 +220,6 @@ impl JobError {
     ///
     /// The queue keeps its jittered backoff and rounds this floor up to a
     /// whole microsecond for PostgreSQL. The floor never bypasses exhaustion.
-    ///
-    /// # Errors
-    ///
-    /// [`InvalidDelay`] if the floor exceeds [`crate::MAX_DELAY`].
     pub fn retry_after_at_least(
         error: impl fmt::Display,
         delay: Duration,
@@ -260,9 +234,6 @@ impl JobError {
     }
 
     /// Schedule again without a failure, refunding this attempt exactly once.
-    ///
-    /// # Errors
-    /// [`InvalidDelay`] if the delay exceeds [`crate::MAX_DELAY`].
     pub fn snooze(delay: Duration) -> Result<Self, InvalidDelay> {
         Ok(Self {
             disposition: Disposition::Snooze {
@@ -293,7 +264,6 @@ impl JobError {
         }
     }
 
-    /// Whether the worker must not retry this failure.
     #[must_use]
     pub const fn is_permanent(&self) -> bool {
         matches!(self.disposition, Disposition::Permanent)
@@ -401,8 +371,6 @@ impl Default for Policy {
     }
 }
 
-/// Registered kinds, not yet checked. [`Self::validate`] checks them into
-/// [`Kinds`].
 pub struct KindsBuilder {
     entries: Vec<Registered>,
 }
@@ -415,7 +383,6 @@ impl KindsBuilder {
         }
     }
 
-    /// Record `handler` under `K::NAME` with `policy`. Checked by [`Self::validate`].
     pub fn register<K: JobKind>(&mut self, policy: Policy, handler: impl Handler<K>) -> &mut Self {
         self.entries.push(Registered {
             name: K::NAME,
@@ -434,11 +401,6 @@ impl KindsBuilder {
 
     /// Check every registered kind. The first failure wins, in registration
     /// order: an invalid name, a duplicate name, then a policy outside its range.
-    ///
-    /// # Errors
-    ///
-    /// [`KindError`] when nothing is registered, a name is invalid or repeated,
-    /// or a policy is outside its range.
     pub fn validate(self) -> Result<Kinds, KindError> {
         if self.entries.is_empty() {
             return Err(KindError::NoKinds);
@@ -485,7 +447,6 @@ impl fmt::Debug for KindsBuilder {
     }
 }
 
-/// Checked kinds, as an [`Engine`](crate::Engine) claims them.
 pub struct Kinds {
     entries: Vec<Arc<Registered>>,
 }
@@ -536,8 +497,6 @@ pub enum KindError {
     InvalidTimeout { kind: &'static str },
 }
 
-/// The kind-name grammar, the one check both [`KindsBuilder::validate`] and
-/// enqueue call.
 pub(crate) const fn is_valid_kind_name(name: &str) -> bool {
     let bytes = name.as_bytes();
     if bytes.is_empty() || bytes.len() > MAX_KIND_LEN || !bytes[0].is_ascii_lowercase() {
@@ -563,9 +522,6 @@ pub(crate) const fn is_valid_kind_name(name: &str) -> bool {
 /// ```compile_fail
 /// const _: () = infra_jobs::assert_valid_kind_name("Not.Valid");
 /// ```
-///
-/// # Panics
-/// Panics when `name` is outside the kind-name grammar.
 pub const fn assert_valid_kind_name(name: &str) {
     assert!(is_valid_kind_name(name), "invalid job kind name");
 }
@@ -592,7 +548,6 @@ pub(crate) type HandlerFuture =
     Pin<Box<dyn Future<Output = Result<(), JobError>> + Send + 'static>>;
 
 pub(crate) trait Dispatch: Send + Sync {
-    /// Decode `payload` and build the handler's future.
     fn prepare(&self, attempt: Attempt, payload: &[u8])
     -> Result<HandlerFuture, serde_json::Error>;
 }

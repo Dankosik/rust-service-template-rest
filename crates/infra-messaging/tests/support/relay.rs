@@ -1,5 +1,3 @@
-//! Wire faults over the real broker; no publication or settlement is simulated.
-
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 

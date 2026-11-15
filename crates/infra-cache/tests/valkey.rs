@@ -269,7 +269,6 @@ fn pem_block(label: &str, der: &[u8]) -> String {
     )
 }
 
-/// A client CA and a client-auth leaf it signed, the leaf and its key as PEM files.
 struct ClientIdentity {
     ca: Vec<u8>,
     cert: tempfile::NamedTempFile,

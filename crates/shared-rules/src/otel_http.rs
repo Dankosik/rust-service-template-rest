@@ -1,5 +1,3 @@
-//! OpenTelemetry HTTP semantic conventions.
-
 /// The `http.request.method` value for a method no convention names.
 pub const OTHER_METHOD: &str = "_OTHER";
 

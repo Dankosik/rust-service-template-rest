@@ -1,5 +1,3 @@
-//! Standard Webhooks signing and durable work on the existing jobs queue.
-
 use base64::{display::Base64Display, engine::general_purpose::STANDARD};
 use serde::Serializer;
 use serde_with::SerializeAs;

@@ -1,6 +1,3 @@
-//! The closed failure sets, for construction and for operations, and the
-//! mapping from SDK results.
-
 use std::borrow::Cow;
 use std::error::Error;
 
@@ -66,47 +63,34 @@ impl ObjectStorageError {
     }
 }
 
-/// Why the options were refused. Display names the key, never its value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ConfigError {
     #[error("object_storage.bucket is not a valid dotless bucket name")]
     Bucket,
-    /// Not a region this provider accepts.
     #[error("object_storage.region is not valid for the provider")]
     Region,
-    /// Missing, malformed, or not the origin shape this provider requires.
     #[error("object_storage.endpoint is not valid for the provider")]
     Endpoint,
     #[error("object_storage.expected_bucket_owner must be a 12-digit account id")]
     ExpectedBucketOwner,
-    /// The provider does not take this credential source, or its credential
-    /// chain could not be built.
     #[error("object_storage.credentials is not usable for the selected provider")]
     Credentials,
     #[error("object_storage.access_key_id is required")]
     AccessKeyId,
     #[error("object_storage.secret_access_key is required")]
     SecretAccessKey,
-    /// No operation could be admitted, or more than a semaphore can count.
     #[error("object_storage.max_concurrency is out of range")]
     MaxConcurrency,
 }
 
-/// Whether a call reads or mutates, which decides its timeout and retry policy
-/// and how an ambiguous failure reads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Call {
-    /// Get, head, presign, or the bucket probe.
     Read,
-    /// A replacing put or a delete.
     UnconditionalMutation,
-    /// A put with `If-None-Match: *`, sent once.
     CreateOnly,
 }
 
 impl Call {
-    /// A failure that may have reached the provider: a read retries safely,
-    /// a mutation may have applied.
     fn ambiguous(self) -> ObjectStorageError {
         match self {
             Self::Read => ObjectStorageError::Unavailable,
@@ -115,26 +99,17 @@ impl Call {
     }
 }
 
-/// The transport-level class of an SDK failure, before the call decides.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FailureKind<'a> {
-    /// The request was never sent: it could not be built or signed.
     NotSent,
-    /// The request was never sent: the credential source yielded none.
     NoCredentials,
-    /// No usable response: a timeout, a dispatch failure, or an unreadable response.
     Lost,
-    /// A provider error response.
     Status { status: u16, code: Option<&'a str> },
 }
 
-/// A classified failure with its span `error.type`.
 #[derive(Debug)]
 pub(crate) struct Failure {
     pub(crate) error: ObjectStorageError,
-    /// The provider's error code when it is a short identifier, otherwise the
-    /// HTTP status, the transport class, or a fixed local label. Never
-    /// provider message text.
     pub(crate) error_type: Cow<'static, str>,
 }
 
@@ -146,8 +121,6 @@ impl Failure {
         }
     }
 
-    /// The stopped context maps to unavailable, including when a read has
-    /// already received headers or started streaming.
     pub(crate) fn stopped(stopped: Stopped) -> Self {
         Self::with_label(ObjectStorageError::Unavailable, stop_label(stopped))
     }
@@ -252,12 +225,10 @@ where
     }
 }
 
-/// S3 error codes are short `PascalCase` identifiers such as `SlowDown`.
 fn is_identifier(code: &str) -> bool {
     !code.is_empty() && code.len() <= 64 && code.bytes().all(|byte| byte.is_ascii_alphanumeric())
 }
 
-/// The one mapping from a provider reply to the failure a caller sees.
 fn classify(call: Call, kind: FailureKind<'_>) -> ObjectStorageError {
     use ObjectStorageError as E;
     match kind {

@@ -50,7 +50,6 @@ const LIMITS: Limits = Limits {
     response_body_bytes: RESPONSE_BODY_BYTES,
 };
 
-/// Worker side: one endpoint's destination, transport client and signing keys.
 #[derive(Clone, derive_more::Debug)]
 #[debug("Endpoint([REDACTED])")]
 pub struct Endpoint {
@@ -63,11 +62,6 @@ impl Endpoint {
     /// The destination must be an HTTPS URL with a host and without credentials
     /// or a fragment. A URL that passes validation and transport setup but cannot be
     /// represented as an HTTP request URI fails each delivery permanently.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`EndpointError::InvalidDestination`] for an invalid URL or a
-    /// destination outside this policy and [`EndpointError::Client`] for transport setup failure.
     pub fn try_new(destination: &str, keys: KeyRing) -> Result<Self, EndpointError> {
         if shared_rules::uri::has_whitespace_or_control(destination)
             || shared_rules::uri::authority_has_userinfo(destination)
@@ -82,15 +76,11 @@ impl Endpoint {
         Ok(Self::from_destination(destination, client, keys))
     }
 
-    /// Use a caller-built local test client. Production code must use
-    /// [`Endpoint::try_new`].
+    /// Use a caller-built local test client for an `http` or `https`
+    /// destination with a host and no credentials or fragment. Production code
+    /// must use [`Endpoint::try_new`].
     ///
     /// The caller supplies the absolute destination admitted by its client.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`EndpointError::InvalidDestination`] when the destination is not
-    /// `http` or `https`, has no host, or carries credentials or a fragment.
     #[cfg(feature = "test-support")]
     pub fn with_client(
         destination: Url,
@@ -121,7 +111,6 @@ fn is_admissible(destination: &Url) -> bool {
         && destination.fragment().is_none()
 }
 
-/// Delivery handler over the worker's startup snapshot of endpoints.
 #[derive(derive_more::Debug)]
 #[debug("Dispatcher([REDACTED])")]
 pub struct Dispatcher {
@@ -228,7 +217,6 @@ impl JobKind for Delivery {
 
 const _: () = infra_jobs::assert_valid_kind_name(DELIVERY_KIND);
 
-/// Why a worker could not build one configured endpoint.
 #[derive(Debug, thiserror::Error)]
 pub enum EndpointError {
     /// The destination has no host, carries credentials or a fragment, or
@@ -240,8 +228,6 @@ pub enum EndpointError {
     Client(#[source] BuildError),
 }
 
-/// Why one delivery attempt did not deliver. It owns the attempt's retry
-/// class, log level, metric labels, and jobs failure summary.
 #[derive(Clone, Copy)]
 enum DeliveryFailure {
     InvalidPayload,
@@ -253,7 +239,6 @@ enum DeliveryFailure {
 }
 
 impl DeliveryFailure {
-    /// The static `reason` label for logs and metrics.
     const fn reason(self) -> &'static str {
         match self {
             Self::InvalidPayload => "invalid_payload",
@@ -297,7 +282,6 @@ impl DeliveryFailure {
     }
 }
 
-/// The summary jobs keeps in a delivery's failure history.
 impl fmt::Display for DeliveryFailure {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

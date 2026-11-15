@@ -1,33 +1,3 @@
-//! One-shot `PostgreSQL` wire-protocol faults for transaction-boundary proof.
-//!
-//! It sits between one pool and the server and relays both directions. It
-//! frames the frontend's messages, the untyped startup message first and then
-//! a type byte and a big-endian `i32` length that counts itself, and it frames
-//! the backend's only once it has fired. Armed, it acts once on the first
-//! simple-query commit of any connection, optionally restricted to a
-//! transaction containing matching SQL. `sqlx-postgres` 0.9.0 commits with a
-//! bare `COMMIT`, which is what `infra_postgres::in_tx` sends:
-//!
-//! - [`Fault::ForwardThenDrop`] forwards it, waits for the server's
-//!   `ReadyForQuery`, and closes both sockets without relaying the answer: a
-//!   real commit whose acknowledgement is lost.
-//! - [`Fault::ForwardThenSilence`] holds both sockets open after the server
-//!   answers, withholding all remaining traffic until explicit shutdown.
-//! - [`Fault::DropBeforeForward`] closes both sockets before forwarding it:
-//!   nothing commits.
-//! - [`Fault::ForwardThenCorruptReady`] forwards it and relays the completed
-//!   commit with an invalid `ReadyForQuery` status: the driver sees a protocol
-//!   error after the real commit.
-//!
-//! It can also hold the backend's `ReadyForQuery` after forwarding one
-//! `BEGIN`, `COMMIT` or protocol Sync. Dropping the client future before release makes the transport
-//! boundary distinguish a provider that discards a pending physical connection
-//! from one that returns a potentially in-transaction connection to its pool.
-//!
-//! It fires only once, so a later connection, such as a readback's, passes
-//! through. It frames the plaintext protocol only, so the pool's DSN uses
-//! `sslmode=disable`.
-
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -44,10 +14,8 @@ const COMMIT: &[u8] = b"COMMIT";
 
 const JOIN_BUDGET: Duration = Duration::from_secs(5);
 
-/// Bound on observing a held acknowledgement or silent relay.
 const READY_HOLD_BUDGET: Duration = Duration::from_secs(5);
 
-/// What an armed proxy does with the first `COMMIT`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Fault {
     /// Forward it, wait for `ReadyForQuery`, then close both sockets: the
@@ -112,7 +80,6 @@ enum ReadyHoldState {
     Released,
 }
 
-/// Which request will have its `ReadyForQuery` reply withheld once.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ReadyBoundary {
     Begin,
@@ -250,7 +217,6 @@ impl CommitProxy {
         }
     }
 
-    /// Hold one backend reply after the selected request reaches PostgreSQL.
     pub(crate) fn arm_ready_hold(&self, boundary: ReadyBoundary) {
         self.ready_hold.arm(boundary);
     }
@@ -327,8 +293,7 @@ async fn accept(
     }
 }
 
-/// Relay one connection until either side closes, the fault fires, or the
-/// proxy stops. Returning drops, and so closes, both sockets.
+/// Returning drops, and so closes, both sockets.
 async fn relay(
     mut client: TcpStream,
     server: SocketAddr,
@@ -545,7 +510,6 @@ impl Frontend {
     }
 }
 
-/// A length field that cannot frame a message; the relay closes.
 #[derive(Debug)]
 struct Malformed;
 

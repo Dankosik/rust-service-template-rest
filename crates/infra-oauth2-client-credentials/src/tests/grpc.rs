@@ -679,7 +679,6 @@ async fn trailers_only_unauthenticated_evicts_without_replay_and_permission_deni
         let credentials = tokens.credentials(&[], None);
         let mut client = resource.client(&credentials);
         let before_tokens = tokens.token_requests().len();
-        // Old enough for an unauthenticated answer to evict it.
         warm_and_age(&credentials).await;
         let before_calls = resource.calls();
         let error = client
@@ -779,7 +778,6 @@ async fn a_late_rejection_does_not_evict_a_newer_cached_token() {
     let resource = Resource::new().await;
     let credentials = tokens.credentials(&[], None);
     let mut client = resource.client(&credentials);
-    // Old enough that only its replacement keeps the late answer from evicting.
     warm_and_age(&credentials).await;
     let mut delayed = Box::pin(client.unary(rpc(
         UnaryRequest {
@@ -844,7 +842,6 @@ async fn http_401_without_grpc_status_evicts_and_another_status_does_not() {
         let credentials = tokens.credentials(&[], None);
         let before_tokens = tokens.token_requests().len();
         let before_calls = resource.calls();
-        // Old enough for an unauthenticated answer to evict it.
         warm_and_age(&credentials).await;
         let mut request = rpc(UnaryRequest::default(), Duration::from_secs(10));
         request

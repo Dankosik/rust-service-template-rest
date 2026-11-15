@@ -1,5 +1,3 @@
-//! JSON Web Algorithms, RFC 7518.
-
 /// RFC 7518 §6.2.1.2 and §6.2.1.3: each P-256 coordinate is exactly 32
 /// octets, leading zeros kept.
 const P256_COORDINATE_BYTES: usize = 32;

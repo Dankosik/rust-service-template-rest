@@ -1,13 +1,3 @@
-//! Bounded `JetStream` publication and typed event delivery.
-//!
-//! Composition supplies validated configuration and routes. This crate owns
-//! Go-compatible bytes, broker finality and consumer settlement; a feature
-//! handler receives only the typed event and an
-//! [`OperationContext`](operation_context::OperationContext) with its delivery
-//! deadline and cancellation.
-//!
-//! Preparation obligations on the caller are listed on [`PreparedEvent::prepare`].
-
 mod budget;
 mod connection;
 mod consumer;

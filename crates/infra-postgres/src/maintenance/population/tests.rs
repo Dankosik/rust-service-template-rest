@@ -180,7 +180,6 @@ fn clock_inconsistency_never_replaces_a_valid_population_with_empty() {
                 population_gauge(&recorder, "last_success_timestamp_seconds"),
                 1000.0
             );
-            // A stable new bracket restores observation after the rejected jump.
             let mut resumed = observer.attempt();
             resumed.requested = MaintenanceClock {
                 wall: Some(receipt_wall + 1.0),

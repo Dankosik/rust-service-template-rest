@@ -24,11 +24,9 @@ use crate::validate::{ValidationError, duration_range, int_range, non_blank, req
 /// 5 MiB), the smallest documented across the supported providers.
 const MAX_OBJECT_BYTES_CEILING: u64 = 5 * GIB - 5 * MIB;
 
-/// Where the bucket lives.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ObjectStorageProvider {
-    /// The profile is inert.
     #[default]
     None,
     /// Amazon S3: `region` and `expected_bucket_owner`, no endpoint.
@@ -44,11 +42,9 @@ pub enum ObjectStorageProvider {
     Local,
 }
 
-/// How the client authenticates.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ObjectStorageCredentials {
-    /// `access_key_id` and `secret_access_key`.
     #[default]
     AccessKey,
     /// The AWS identity the platform gives the workload. `amazon_s3` only;
@@ -56,35 +52,25 @@ pub enum ObjectStorageCredentials {
     WorkloadIdentity,
 }
 
-/// Optional object storage for one bucket at one fixed endpoint.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct ObjectStorageConfig {
-    /// `none` (default), `amazon_s3`, `cloudflare_r2`, `railway`,
-    /// `s3_compatible`, or `local`.
     pub provider: ObjectStorageProvider,
     /// S3 bucket name. On Railway, the bucket's `BUCKET` variable.
     pub bucket: String,
     /// Signing region. Required for `amazon_s3`; `auto` or empty for
     /// `cloudflare_r2`; optional for `railway`, `s3_compatible`, and `local`.
     pub region: String,
-    /// Endpoint origin. Empty for `amazon_s3`; required otherwise.
     pub endpoint: String,
-    /// Amazon account id that must own the bucket. `amazon_s3` only.
     pub expected_bucket_owner: String,
-    /// Path-style addressing. `s3_compatible` only.
     pub path_style: bool,
-    /// `access_key` (default) or, for `amazon_s3`, `workload_identity`.
     pub credentials: ObjectStorageCredentials,
-    /// Access key id. Empty under `workload_identity`.
     pub access_key_id: String,
     /// Set `APP__OBJECT_STORAGE__SECRET_ACCESS_KEY` in the environment or via
     /// `--secrets-dir`. Blank is absent. Absent under `workload_identity`.
     #[serde(default, deserialize_with = "blank_secret_as_none")]
     pub secret_access_key: Option<SecretString>,
-    /// Largest object a put may send or a get may return.
     pub max_object_bytes: ByteSize,
-    /// Operations admitted at once; the excess is refused, not queued.
     #[serde(deserialize_with = "crate::de::unsigned_count")]
     pub max_concurrency: u64,
     /// Bound for one call, retries included; GET covers the entire body
@@ -116,11 +102,6 @@ impl Default for ObjectStorageConfig {
 }
 
 impl ObjectStorageConfig {
-    /// The secret that `access_key` credentials require.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when `object_storage.secret_access_key` is absent.
     pub fn required_secret_access_key(&self) -> Result<&SecretString, ValidationError> {
         required(
             "object_storage.secret_access_key",

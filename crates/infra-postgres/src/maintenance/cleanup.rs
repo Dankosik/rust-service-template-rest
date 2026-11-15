@@ -8,11 +8,9 @@ use super::LOG_TARGET;
 use crate::error::{failure_cause, sqlstate};
 use crate::transaction::{Tx, TxError, TxOptions, in_tx_with, set_statement_timeout};
 
-/// The terminal duration of a cleanup pass, including every admitted wait.
 pub(crate) const CLEANUP_DURATION_METRIC: &str = "postgres_cleanup_pass_duration_seconds";
 
-/// Buckets in seconds for [`CLEANUP_DURATION_METRIC`]. They reach 3600 s so
-/// long passes, which have no deadline, stay visible.
+/// Reaches 3600 s so long passes, which have no deadline, stay visible.
 pub(crate) const CLEANUP_DURATION_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0,
     600.0, 1200.0, 1800.0, 3600.0,
@@ -23,8 +21,6 @@ pub(crate) const CLEANUP_DURATION_BUCKETS: &[f64] = &[
 const CLEANUP_BATCH_BUDGET: Duration = Duration::from_secs(12);
 const CLEANUP_STATEMENT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Every `cleanup` label of the cleanup metrics: the populations a cleanup
-/// pass deletes from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Cleanup {
     Jobs,
@@ -42,11 +38,9 @@ impl Cleanup {
     }
 }
 
-/// How a cleanup pass that did not fail ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PassEnd {
     Completed,
-    /// The pass saw the owner's cancellation between batches.
     Cancelled,
 }
 
@@ -62,7 +56,6 @@ const CLEANUP_BATCHES_METRIC: &str = "postgres_cleanup_committed_batches_total";
 pub(super) const CLEANUP_REMOVED_ROWS_METRIC: &str = "postgres_cleanup_removed_rows_total";
 const CLEANUP_PASSES_METRIC: &str = "postgres_cleanup_passes_total";
 
-/// Every `outcome` label of a cleanup pass.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CleanupOutcome {
     Completed,
@@ -126,7 +119,6 @@ pub struct CleanupPass {
     removed_rows: u64,
 }
 
-/// The failure class of a cleanup batch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum CleanupError {
     #[error("acquire")]
@@ -135,7 +127,6 @@ pub enum CleanupError {
     Begin,
     #[error("statement")]
     Statement,
-    /// The commit failed or its outcome is unknown.
     #[error("commit")]
     Commit,
     /// The batch missed its client-side deadline and may have committed.
@@ -191,12 +182,9 @@ impl CleanupPass {
     }
 
     /// Pass `batch_limit` to each delete and stop when it removes fewer rows
-    /// or the owner cancels between batches. Count only acknowledged commits.
-    /// A short batch does not establish that the eligible population is empty.
-    ///
-    /// # Errors
-    ///
-    /// The failed batch's error. Earlier confirmed batches stay committed.
+    /// or the owner cancels between batches. Count only acknowledged commits;
+    /// earlier confirmed batches stay committed on failure. A short batch does
+    /// not establish that the eligible population is empty.
     pub async fn run_until_short_batch<F>(
         mut self,
         pool: &PgPool,
@@ -230,12 +218,6 @@ impl CleanupPass {
         }
     }
 
-    /// Execute one cleanup transaction with a server statement timeout and
-    /// a client deadline from acquisition through commit acknowledgement.
-    ///
-    /// # Errors
-    ///
-    /// Returns and logs the batch's failure class.
     async fn run_batch<F>(
         &mut self,
         pool: &PgPool,
@@ -304,12 +286,10 @@ impl CleanupPass {
         self.removed_rows = self.removed_rows.saturating_add(rows);
     }
 
-    /// The pass is returning successfully after a short batch.
     pub fn completed(&mut self) {
         self.outcome = CleanupOutcome::Completed;
     }
 
-    /// The pass is returning its original error, including unknown commit.
     pub fn failed(&mut self) {
         self.outcome = CleanupOutcome::Failed;
     }

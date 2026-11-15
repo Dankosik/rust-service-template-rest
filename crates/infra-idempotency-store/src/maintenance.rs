@@ -1,5 +1,3 @@
-//! The startup check and the bounded cleanup of expired records.
-
 use std::time::Duration;
 
 use infra_postgres::{
@@ -14,30 +12,19 @@ const STARTUP_CHECK_BUDGET: Duration = Duration::from_secs(5);
 
 const CLEANUP_BATCH_ROWS: u32 = 500;
 
-/// Runs of periodic cleanup, by `outcome` (`completed`, `failed`).
 pub const CLEANUP_RUNS_METRIC: &str = "http_idempotency_cleanup_runs_total";
 
-/// Expired records the cleanup deleted, counted per committed batch.
 pub const CLEANUP_REMOVED_METRIC: &str = "http_idempotency_cleanup_removed_records_total";
 
-/// Why an active idempotency boundary cannot start.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum StartupError {
     #[error("the PostgreSQL session is not writable")]
     NotWritable,
-    /// Anything else, including the check's bound.
     #[error("the idempotency store is unavailable")]
     Unavailable,
 }
 
 impl Store {
-    /// Check that the current session is writable, bounded to 5 s.
-    ///
-    /// # Errors
-    ///
-    /// [`StartupError::NotWritable`] for a read-only or recovering session,
-    /// and [`StartupError::Unavailable`] for anything else, including the
-    /// bound; that one is logged with a bounded cause.
     pub async fn check_startup(&self) -> Result<(), StartupError> {
         // Migration-history admission owns schema compatibility; this check
         // keeps only the live writer property.
@@ -72,13 +59,9 @@ impl Store {
     /// Delete expired records in batches of at most 500 until a batch
     /// deletes fewer. Return confirmed deletions, which do not certify that
     /// the population is empty. Each batch runs in its own `READ COMMITTED`
-    /// transaction and skips locked records.
-    ///
-    /// # Errors
-    ///
-    /// The failure class of the batch that failed, logged with a bounded
-    /// cause. Earlier batches stay committed. A timeout leaves the batch's
-    /// commit outcome unconfirmed.
+    /// transaction and skips locked records; on failure, earlier batches stay
+    /// committed, and a timeout leaves the current batch's commit outcome
+    /// unconfirmed.
     pub async fn remove_expired(&self) -> Result<u64, CleanupError> {
         self.cleanup_pass(None).await.map(|pass| pass.removed_rows)
     }
@@ -118,11 +101,6 @@ impl Store {
         Ok(deleted.rows_affected())
     }
 
-    /// Periodic cleanup and independent population observation under one owner.
-    /// Cleanup follows the shared schedule. Every run that ends without
-    /// cancellation counts its outcome; a failed run waits for the next tick
-    /// and changes neither readiness nor serving.
-    /// Returns when `cancel` fires, dropping a run in flight.
     pub async fn run_cleanup(self, cancel: CancellationToken) {
         metrics::describe_counter!(
             CLEANUP_RUNS_METRIC,

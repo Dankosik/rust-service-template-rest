@@ -1,5 +1,3 @@
-//! Generated TLS material for real-TLS test fixtures.
-
 use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa, KeyPair,
     KeyUsagePurpose,
@@ -15,12 +13,6 @@ pub(crate) struct TlsMaterial {
 }
 
 impl TlsMaterial {
-    /// Generates fresh material whose leaf names `host`.
-    ///
-    /// # Panics
-    ///
-    /// Panics when `host` is empty or key generation or signing fails; a TLS
-    /// test cannot run without its material.
     #[must_use]
     #[allow(
         clippy::expect_used,

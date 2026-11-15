@@ -1,5 +1,3 @@
-//! Text and file recipes. File work is synchronous and belongs off async worker threads.
-
 use std::io::{Read, Seek, Write};
 
 use bstr::ByteSlice;

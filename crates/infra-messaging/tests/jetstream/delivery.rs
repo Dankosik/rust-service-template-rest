@@ -1,5 +1,3 @@
-//! Typed handler runs, their settlement, tracing, drain and pull capacity.
-
 use super::*;
 
 #[tokio::test]
@@ -236,7 +234,6 @@ async fn retryable_handler_is_redelivered_after_broker_nak_then_confirmed_acked(
         .finish(deadline())
         .await
         .expect("bounded consumer drain must join its pull task");
-    // The failed attempt's span is an error named by its closed outcome.
     let deliveries = exported_spans(exporter, &format!("process {}", fixture.subject));
     let outcomes: Vec<_> = deliveries
         .iter()

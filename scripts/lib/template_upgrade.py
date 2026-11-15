@@ -605,7 +605,6 @@ def accept(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def finish_sealing(repo: Path, path: Path, attempt: dict[str, Any]) -> None:
-    """Reconcile either side of the one compare-and-swap acceptance update."""
     resolved, seal = attempt["resolved_commit"], attempt["seal_commit"]
     head = rev(repo)
     if head not in {resolved, seal} or git(repo, ["symbolic-ref", "HEAD"]).decode().strip() != REF:

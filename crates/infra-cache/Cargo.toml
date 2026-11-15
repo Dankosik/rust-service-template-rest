@@ -9,7 +9,6 @@ repository.workspace = true
 publish.workspace = true
 
 [features]
-# Real Valkey tests run only through the explicit cache integration owner.
 integration = []
 
 [[test]]

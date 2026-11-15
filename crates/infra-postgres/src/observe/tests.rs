@@ -8,7 +8,6 @@ use crate::{Dsn, acquire_until, in_tx};
 
 pub(crate) type EventFields = std::collections::BTreeMap<String, String>;
 
-/// Records the fields of every event, each of which must be at `level`.
 #[derive(Clone)]
 pub(crate) struct Events {
     pub(crate) records: std::sync::Arc<std::sync::Mutex<Vec<EventFields>>>,
@@ -168,7 +167,6 @@ async fn a_transaction_that_gets_no_connection_records_its_wait_and_its_outcome(
         .connect_lazy_with(dsn.connect_options());
     let result: Result<(), TxError> = in_tx(&pool, async |_tx| Ok(())).await;
     std::assert_matches!(result, Err(TxError::Acquire(_)), "{result:?}");
-    // A transaction dropped before it ended.
     drop(TransactionObservation::start(Span::none()));
     let scrape = recorder.handle().render();
     for line in [
@@ -178,7 +176,6 @@ async fn a_transaction_that_gets_no_connection_records_its_wait_and_its_outcome(
     ] {
         assert!(scrape.contains(line), "{line} is missing from:\n{scrape}");
     }
-    // Two outcomes and one pool: nothing else became a series.
     assert_eq!(scrape.matches("_count{").count(), 3, "{scrape}");
     assert!(!scrape.contains("pw"), "{scrape}");
 }
@@ -206,7 +203,6 @@ async fn acquire_until_waits_for_the_deadline_not_for_the_pool_timeout() {
         started.elapsed()
     );
 
-    // A deadline inside the pool's timeout wins over it.
     let patient = PgPoolOptions::new()
         .acquire_timeout(Duration::from_secs(30))
         .connect_lazy_with(dsn.connect_options());
@@ -256,7 +252,6 @@ async fn a_statement_records_its_duration_by_summary_and_by_how_it_failed() {
     })
     .await;
     assert!(lost.is_err());
-    // The caller stops waiting before the server answers.
     let abandoned = tokio::time::timeout(
         Duration::from_millis(1),
         observed(

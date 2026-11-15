@@ -1,13 +1,4 @@
-//! Real-PostgreSQL proof for the HTTP idempotency record store (P1-P8).
-//!
-//! Two independent template pools on each per-test database stand for two
-//! replicas. The work's effect is a row in a test-owned table, so the tests
-//! count effects and work runs themselves. The mounted proof exercises request
-//! identity and HTTP responses.
-
 #![cfg(feature = "integration")]
-// Integration tests are test code; the workspace's production lint levels
-// for unwrap/expect/panic do not apply to them.
 #![allow(
     clippy::expect_used,
     clippy::unwrap_used,
@@ -46,12 +37,10 @@ use tokio_util::sync::CancellationToken;
 
 use commit_proxy::{CommitProxy, ReadyBoundary};
 
-/// What a test's work returns: `Ok` commits the record and hands it back.
 type Committing<R> = Result<(Record, Record), R>;
 
 type Outcome<R> = Result<Attempted<Record, R>, AttemptError>;
 
-/// A record to commit that the attempt also hands back as its value.
 fn returned(record: Record) -> (Record, Record) {
     (record.clone(), record)
 }
@@ -59,7 +48,6 @@ fn returned(record: Record) -> (Record, Record) {
 const APP: &str = "integration-tests-idempotency";
 const RETENTION: Duration = Duration::from_hours(1);
 const WAIT: Duration = Duration::from_secs(10);
-/// Pause between retries while a dropped attempt's transaction ends.
 const RETRY_PAUSE: Duration = Duration::from_millis(20);
 const CANCEL_BUDGET: Duration = Duration::from_secs(1);
 
@@ -71,7 +59,6 @@ const OTHER_SCOPE: Digest = [0x13; 32];
 const INPUT: Digest = [0xa1; 32];
 const OTHER_INPUT: Digest = [0xa2; 32];
 
-/// Expired records to clean: more than two batches of 500.
 const BACKLOG: i64 = 1_201;
 const LIVE: i64 = 10;
 
@@ -98,21 +85,16 @@ const INSERT_LIVE: &str = "INSERT INTO http_idempotency_records \
     VALUES ($1, $2, 201, ARRAY[]::http_idempotency_header_pair[], '{}', \
     'https://issuer.example', 'subject', 'fixture-subject', now() + interval '1 hour')";
 
-/// The template pool on `dsn`: the service's session defaults and budgets.
 async fn template_pool(dsn: &Dsn, max_connections: u32) -> PgPool {
     integration_tests::template_pool(dsn, APP, max_connections, Isolation::ServerDefault).await
 }
 
-/// One replica: an independent template pool on the per-test database, and
-/// the store over it.
 async fn replica(dsn: &Dsn) -> (PgPool, Store) {
     let pool = template_pool(dsn, 3).await;
     let store = Store::new(pool.clone(), RETENTION).expect("retention fits PostgreSQL");
     (pool, store)
 }
 
-/// Make every later session on the per-test database read-only by default;
-/// sessions already open keep their mode.
 async fn make_read_only(pool: &PgPool) {
     pool.execute(
         "DO $$ BEGIN EXECUTE format(\
@@ -164,8 +146,6 @@ async fn seed(pool: &PgPool, sql: &'static str, records: i64) {
     assert_eq!(i64::try_from(seeded.rows_affected()), Ok(records));
 }
 
-/// A stored success as the seam encodes it: status 201, all replayable
-/// headers, and `body`.
 fn success(body: &str) -> Record {
     Record {
         status: 201,
@@ -215,8 +195,6 @@ fn caller(value: &str) -> CallerIdentity {
     }
 }
 
-/// Holds the next armed work inside its transaction, after its effect, until
-/// the test releases it.
 #[derive(Debug, Default)]
 struct Hold {
     armed: AtomicBool,
@@ -229,8 +207,6 @@ impl Hold {
         self.armed.store(true, Ordering::SeqCst);
     }
 
-    /// Called by the work: an armed hold signals its entry and waits for the
-    /// release; otherwise it returns at once.
     async fn pass(&self) {
         if self.armed.swap(false, Ordering::SeqCst) {
             self.entered.notify_one();
@@ -238,7 +214,6 @@ impl Hold {
         }
     }
 
-    /// Wait until the held work has entered.
     async fn entered(&self) {
         bounded("the held work to enter", self.entered.notified()).await;
     }
@@ -248,8 +223,6 @@ impl Hold {
     }
 }
 
-/// The operation's work: it counts its runs and writes one effect row per run
-/// inside the attempt's transaction.
 #[derive(Debug, Default)]
 struct Work {
     runs: AtomicUsize,
@@ -271,16 +244,12 @@ impl Work {
     }
 }
 
-/// Why a work asks for rollback. The seam rolls back a non-2xx response and
-/// an unstorable success alike; the store sees only the request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Refusal {
     NotSuccess,
     Unstorable,
 }
 
-/// One attempt at `scope` and `fingerprint`, whose work, if it runs,
-/// writes an effect and commits `record`.
 async fn execute(
     store: &Store,
     scope: Digest,
@@ -302,8 +271,6 @@ async fn execute(
         .await
 }
 
-/// [`execute`] with [`INPUT`] until the key is free: a dropped attempt holds it until
-/// `PostgreSQL` ends that attempt's transaction.
 async fn once_free(store: &Store, scope: Digest, record: &Record, work: &Work) -> Outcome<Refusal> {
     let deadline = Instant::now() + WAIT;
     loop {
@@ -319,7 +286,6 @@ async fn once_free(store: &Store, scope: Digest, record: &Record, work: &Work) -
     }
 }
 
-/// `future`, which must finish within [`WAIT`].
 async fn bounded<F: Future>(what: &str, future: F) -> F::Output {
     tokio::time::timeout(WAIT, future).await.expect(what)
 }
@@ -331,8 +297,6 @@ fn committed(outcome: Outcome<Refusal>) -> Record {
     }
 }
 
-/// The record a live record replayed, or `None` when it refused a
-/// different request.
 fn live(outcome: Outcome<Refusal>) -> Option<Record> {
     match outcome {
         Ok(Attempted::Replay(record)) => Some(record),
@@ -350,9 +314,6 @@ async fn p1_a_held_key_refuses_duplicates_and_commits_one_effect(pool: PgPool) {
     let record = success(r#"{"id":1}"#);
     let work = Work::default();
 
-    // One attempt holds the key inside its work. Duplicates on either
-    // replica, with the same or another input, are in progress at once and
-    // never run the work.
     work.hold.arm();
     let (held, ()) = tokio::join!(execute(&replica_1, SCOPE, INPUT, &record, &work), async {
         work.hold.entered().await;
@@ -367,8 +328,6 @@ async fn p1_a_held_key_refuses_duplicates_and_commits_one_effect(pool: PgPool) {
     },);
     assert_eq!(committed(held), record);
 
-    // After the commit, retries replay on both replicas, one after another
-    // and all at once, and none runs the work.
     for replica in [&replica_1, &replica_2] {
         let retry = execute(replica, SCOPE, INPUT, &record, &work).await;
         assert_eq!(live(retry), Some(record.clone()));
@@ -417,7 +376,6 @@ async fn p1_a_record_committed_under_the_work_is_kept_and_the_work_rolls_back(po
     std::assert_matches!(refused, Err(AttemptError::Internal), "{refused:?}");
     assert_eq!(count(&pool, EFFECTS).await, 0);
 
-    // The other writer's record still decides the key.
     let decided = execute(&store, SCOPE, INPUT, &record, &work).await;
     assert_eq!(live(decided), None);
     assert_eq!(records(&pool, SCOPE).await, 1);
@@ -435,8 +393,6 @@ async fn p2_rolled_back_work_leaves_no_effect_or_record_and_the_retry_executes(p
     let work = Work::default();
 
     let caller = caller("fixture-subject");
-    // A non-2xx response and an unstorable success both ask for rollback
-    // after the work wrote its effect.
     for (scope, refusal) in [
         (SCOPE, Refusal::NotSuccess),
         (OTHER_CALLER, Refusal::Unstorable),
@@ -456,8 +412,6 @@ async fn p2_rolled_back_work_leaves_no_effect_or_record_and_the_retry_executes(p
             "{outcome:?}"
         );
     }
-    // A panic in the work unwinds out of the attempt and drops its
-    // transaction.
     let panicked = AssertUnwindSafe(replica_1.attempt(
         &ScopeKey::from_digest(OTHER_SCOPE),
         &caller,
@@ -473,7 +427,6 @@ async fn p2_rolled_back_work_leaves_no_effect_or_record_and_the_retry_executes(p
     assert_eq!(work.runs(), 3);
     assert_eq!(count(&pool, EFFECTS).await, 0);
 
-    // Nothing was stored, so each retry executes, here on the other replica.
     for scope in [SCOPE, OTHER_CALLER, OTHER_SCOPE] {
         assert_eq!(records(&pool, scope).await, 0);
         let retry = once_free(&replica_2, scope, &record, &work).await;
@@ -496,16 +449,12 @@ async fn p3_a_replay_returns_the_stored_bytes_and_other_scopes_are_independent(p
     let first = execute(&replica_1, SCOPE, INPUT, &record, &work).await;
     assert_eq!(committed(first), record);
 
-    // The same fingerprint gets the stored status, headers, and body bytes on
-    // the other replica, not what its own work would have produced.
     let replayed = execute(&replica_2, SCOPE, INPUT, &other, &work).await;
     assert_eq!(live(replayed), Some(record.clone()));
-    // Another fingerprint is refused by the live record, which stays.
     let mismatched = execute(&replica_2, SCOPE, OTHER_INPUT, &other, &work).await;
     assert_eq!(live(mismatched), None);
     assert_eq!(work.runs(), 1);
 
-    // Other scopes hold keys of their own.
     for scope in [OTHER_CALLER, OTHER_SCOPE] {
         let independent = execute(&replica_2, scope, INPUT, &other, &work).await;
         assert_eq!(committed(independent), other);
@@ -670,8 +619,6 @@ async fn p4_an_expired_record_is_not_replayed_and_is_replaced(pool: PgPool) {
     assert_eq!(committed(first), record);
     expire(&pool, SCOPE).await;
 
-    // The key executes afresh, whatever the input, and the new record
-    // replaces the expired one.
     let afresh = execute(&replica_2, SCOPE, OTHER_INPUT, &replacement, &work).await;
     assert_eq!(committed(afresh), replacement);
     let decided = execute(&replica_1, SCOPE, INPUT, &record, &work).await;
@@ -883,7 +830,6 @@ async fn p4_cleanup_drains_the_backlog_and_keeps_live_and_held_records(pool: PgP
         tokio::join!(execute(&replica_1, SCOPE, INPUT, &record, &work), async {
             work.hold.entered().await;
             let removed = bounded("a cleanup run", Box::pin(replica_2.remove_expired())).await;
-            // The executing attempt still holds its key.
             let duplicate = execute(&replica_2, SCOPE, INPUT, &record, &work).await;
             std::assert_matches!(duplicate, Ok(Attempted::InProgress), "{duplicate:?}");
             work.hold.release();
@@ -1010,7 +956,6 @@ async fn p4_the_cleanup_task_runs_at_once_and_returns_promptly_on_cancel(pool: P
     let cancel = CancellationToken::new();
     let task = tokio::spawn(store.run_cleanup(cancel.clone()));
 
-    // The first run starts at once, drains the backlog, and counts itself.
     let completed = format!("{CLEANUP_RUNS_METRIC}{{outcome=\"completed\"}} 1");
     bounded("the first cleanup run", async {
         while !recorder.handle().render().contains(&completed) {
@@ -1156,7 +1101,6 @@ async fn p5_a_read_only_session_is_unavailable_even_with_a_live_record(pool: PgP
     let first = execute(&writer, SCOPE, INPUT, &record, &work).await;
     assert_eq!(committed(first), record);
 
-    // Sessions opened from now on are read-only.
     make_read_only(&pool).await;
     let (reader_pool, reader) = replica(&dsn).await;
     for scope in [SCOPE, OTHER_CALLER] {
@@ -1165,7 +1109,6 @@ async fn p5_a_read_only_session_is_unavailable_even_with_a_live_record(pool: PgP
     }
     assert_eq!(work.runs(), 1);
     assert_eq!(count(&pool, EFFECTS).await, 1);
-    // Cleanup on that session fails in its statement and deletes nothing.
     assert_eq!(reader.remove_expired().await, Err(CleanupError::Statement));
     close_pools(&[&writer_pool, &reader_pool]).await;
 }
@@ -1217,8 +1160,6 @@ async fn p7_a_dropped_attempt_leaves_no_effect_and_frees_its_key(pool: PgPool) {
     let record = success(r#"{"id":1}"#);
     let work = Work::default();
 
-    // Drive one attempt until its work has written its effect and waits, then
-    // drop it, as an expired request budget or a disconnect does.
     work.hold.arm();
     let mut attempt = Box::pin(execute(&replica_1, SCOPE, INPUT, &record, &work));
     tokio::select! {
@@ -1228,8 +1169,6 @@ async fn p7_a_dropped_attempt_leaves_no_effect_and_frees_its_key(pool: PgPool) {
     drop(attempt);
     assert_eq!(count(&pool, EFFECTS).await, 0);
 
-    // Once `PostgreSQL` ends the dropped transaction, the key is free on
-    // every replica.
     let retry = once_free(&replica_2, SCOPE, &record, &work).await;
     assert_eq!(committed(retry), record);
     assert_eq!(work.runs(), 2);
@@ -1244,7 +1183,6 @@ async fn p8_startup_admits_a_migrated_writer_and_refuses_a_read_only_session(poo
     let (writer_pool, writer) = replica(&dsn).await;
     assert_eq!(writer.check_startup().await, Ok(()));
 
-    // Set before the pool opens, so every session of the pool is read-only.
     make_read_only(&pool).await;
     let (reader_pool, reader) = replica(&dsn).await;
     assert_eq!(reader.check_startup().await, Err(StartupError::NotWritable));

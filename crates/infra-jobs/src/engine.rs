@@ -1,5 +1,3 @@
-//! The job engine: shared state and bounded supervisor cleanup.
-
 use std::fmt;
 use std::future::Future;
 use std::num::NonZeroU32;
@@ -31,9 +29,7 @@ pub const LEASE_RESERVE: Duration = Duration::from_mins(1);
 /// supervisor stops writing before another worker can rescue the lease.
 pub(crate) const CANCEL_MARGIN: Duration = Duration::from_secs(2);
 pub(crate) const RECORD_RETRY_INTERVAL: Duration = Duration::from_secs(1);
-/// Client bound around one engine statement: acquire and statement acknowledgement.
 pub(crate) const OPERATION_BACKSTOP: Duration = Duration::from_secs(12);
-/// Counter of failed engine statements. Label `operation`.
 const OPERATION_FAILURES_METRIC: &str = "jobs_worker_operation_failures_total";
 
 /// A worker's job engine: one kind set, its attempt slots, and its claim loop.
@@ -56,15 +52,12 @@ pub struct Started {
 /// These counters do not attribute zero-row queue writes to this worker.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DrainEnd {
-    /// Handlers whose result (including panic/timeout) became known.
     pub known_results: usize,
     /// Attempts classified as cancelled, including handlers dropped after grace.
     pub cancelled: usize,
     /// Acknowledged one-row release writes.
     pub released: usize,
-    /// Attempts whose cleanup or transaction outcome stayed uncertain.
     pub uncertain: usize,
-    /// The deadline passed before every supervisor finished and the claim loop exited.
     pub timed_out: bool,
 }
 
@@ -79,7 +72,6 @@ pub struct DrainEnd {
 pub enum OperationError {
     #[error("acquire")]
     Acquire(#[source] sqlx::Error),
-    /// The statement failed, or a returned row did not decode.
     #[error("statement")]
     Statement(#[from] sqlx::Error),
     #[error("timed out")]
@@ -188,25 +180,13 @@ impl Engine {
     }
 
     /// Check UTF8, READ COMMITTED defaults and a writable session, bounded to 5 s.
-    ///
-    /// # Errors
-    ///
-    /// [`StartupError::NotWritable`] when the session is read-only or recovering,
-    /// [`StartupError::UnsupportedEncoding`] or [`StartupError::UnsupportedIsolation`]
-    /// for incompatible session defaults, and [`StartupError::Unavailable`] for
-    /// anything else, including the bound.
     pub async fn check_startup(&self) -> Result<(), StartupError> {
         crate::session::check_startup(&self.shared.pool).await
     }
 
-    /// Delete expired completed jobs once and return how many were deleted.
-    ///
-    /// A short batch ends the pass without proving empty inventory: locked
-    /// eligible rows can remain.
-    ///
-    /// # Errors
-    ///
-    /// [`OperationError`] from the batch that failed. Earlier batches stay committed.
+    /// Delete expired completed jobs once and return how many were deleted;
+    /// earlier batches stay committed on failure. A short batch ends the pass
+    /// without proving empty inventory: locked eligible rows can remain.
     pub async fn remove_expired(&self) -> Result<u64, OperationError> {
         maintenance::remove_expired(&self.shared).await
     }
@@ -285,13 +265,11 @@ impl Started {
         self.stop.cancel();
     }
 
-    /// Attempts admitted and not yet recorded.
     #[must_use]
     pub fn in_flight(&self) -> usize {
         self.shared.drain.in_flight()
     }
 
-    /// Resolves once the claim loop has exited and every supervisor has ended.
     pub async fn drained(&self) {
         self.shared.drain.wait().await;
     }
@@ -349,15 +327,12 @@ impl fmt::Debug for Started {
     }
 }
 
-/// Whether an engine owns the process-wide duties or serves beside the engine
-/// that does, sharing its worker id and peers.
 #[derive(Clone, Copy)]
 enum Role<'a> {
     Owner,
     Beside(&'a Shared),
 }
 
-/// The engine's own tasks. Each runs until its token is cancelled.
 enum Run {
     Claim {
         // Deregister the peer before releasing drain waiters, even before the first poll.
@@ -370,8 +345,6 @@ enum Run {
 }
 
 impl Run {
-    /// The task label of the `jobs_engine_task_stopped` record this task ends
-    /// with, so a caller cannot pair a run with the wrong label.
     const fn label(&self) -> &'static str {
         match self {
             Self::Claim { .. } => "claim",
@@ -577,12 +550,9 @@ pub(crate) struct Shared {
     pub(crate) cleanup: ForcedCleanup,
     pub(crate) counters: Counters,
     pub(crate) drain: Arc<AttemptDrain>,
-    /// Per operation: set after the first failure, clear after recovery.
     failing: EnumMap<Operation, AtomicBool>,
     pub(crate) completions: crate::attempt::Completions,
     pub(crate) owned_attempts: crate::attempt::MembershipGauge,
-    /// A database notification, listener subscription, or slot release can
-    /// wake the claim loop to recheck for work.
     pub(crate) claim_wake: Arc<Notify>,
     pub(crate) peers: Arc<PeerRegistry>,
     owns_process_duties: bool,
@@ -633,7 +603,6 @@ impl ForcedCleanup {
         window.deadline
     }
 
-    /// Resolves once a cleanup is forced.
     pub(crate) async fn forced(&self) {
         self.force.cancelled().await;
     }
@@ -669,7 +638,6 @@ pub(crate) struct Counters {
     pub(crate) uncertain: AtomicUsize,
 }
 
-/// One engine statement. The label is [`Operation::as_str`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, enum_map::Enum)]
 pub(crate) enum Operation {
     Claim,
@@ -701,7 +669,6 @@ pub(crate) fn observe_failure(shared: &Shared, operation: Operation, error: &Ope
     }
 }
 
-/// Logs the SQLSTATE when the database sent one, and a bounded cause otherwise.
 fn log_operation_failure(operation: Operation, error: &OperationError) {
     let (sqlstate, cause) = match error {
         OperationError::TimedOut => (None, Some("timeout")),
@@ -732,7 +699,6 @@ pub(crate) fn observe_recovery(shared: &Shared, operation: Operation) {
     }
 }
 
-/// Bound acquire and full statement acknowledgement by [`OPERATION_BACKSTOP`].
 pub(crate) async fn backstop<T>(
     operation: impl Future<Output = Result<T, OperationError>>,
 ) -> Result<T, OperationError> {

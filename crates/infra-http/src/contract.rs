@@ -1,5 +1,3 @@
-//! Final security policy compiled from the assembled upstream OpenAPI document.
-
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -48,9 +46,6 @@ pub enum FinalizeError {
 ///
 /// A served route the document does not describe is not opened: it answers a
 /// sanitized 500 at request time.
-///
-/// # Errors
-/// Returns an error for protected operations or unsupported effective security.
 pub fn finalize_public<S>(contract: OpenApiRouter<S>) -> Result<Router<S>, FinalizeError>
 where
     S: Clone + Send + Sync + 'static,
@@ -67,7 +62,6 @@ where
     }))
 }
 
-/// Split off the served routes and wrap them in the finalization layer.
 pub(crate) fn layer_routes<S>(
     contract: OpenApiRouter<S>,
     layer: impl FnOnce(Router<S>) -> Router<S>,

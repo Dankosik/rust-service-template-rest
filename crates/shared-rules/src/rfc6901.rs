@@ -1,5 +1,3 @@
-//! JSON Pointer, RFC 6901.
-
 use std::borrow::Cow;
 
 /// `token` written as one reference token (RFC 6901 §3): `~` becomes `~0`,

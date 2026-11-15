@@ -1,6 +1,3 @@
-//! Readiness: a verdict checked in the background and served from cache, plus
-//! the drain flag.
-//!
 //! The readiness endpoints are unauthenticated, so they never reach a
 //! dependency themselves; otherwise any caller could turn a probe request
 //! into a database round-trip. A background task checks the probes on an
@@ -10,26 +7,6 @@
 //! last "ready" would stand forever. [`RefreshPolicy::stale_after`] bounds
 //! its age. Process roots additionally arm completion progress: once an armed
 //! completion gap expires, a late check cannot restore readiness.
-//!
-//! The state travels through [`tokio::sync::watch`], so a streaming reader
-//! can wait for the next publication.
-//!
-//! Bootstrap owns admission through [`Readiness::refresh`], then runs
-//! [`Readiness::refresh_until`] in a tracked background task. Handlers read
-//! the cached result with [`ReadinessReader::verdict`]. Teardown
-//! calls [`Readiness::start_drain`] before cancelling the refresher.
-//!
-//! Operators see the refresher through five metrics and bounded log events.
-//! `readiness_checks_total` counts completed checks by outcome,
-//! `readiness_probe_checks_total` counts each probe's own outcome in every
-//! check, and the `readiness_ready` gauge is the published answer.
-//! `readiness_last_completed_timestamp_seconds` and `readiness_stale_after_seconds`
-//! expose completion freshness even when the refresher stops. The
-//! events are `readiness_lost` and `readiness_recovered` for a published
-//! flip, `readiness_check_failed` for a failure the threshold absorbed, and
-//! `readiness_refresh_late` when a check completes after its predecessor
-//! already went stale. `readiness_progress_lost` records the first terminal
-//! completion gap of an armed process.
 
 use std::fmt;
 use std::sync::Arc;
@@ -79,7 +56,6 @@ impl ProbeError {
 pub struct OwnerDropped;
 // template:end grpc:health-owner-dropped
 
-/// Why the service is not ready.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum NotReady {
     #[error("service is draining")]
@@ -103,31 +79,14 @@ pub enum NotReady {
     },
 }
 
-/// Completed checks by outcome. A rate that falls to zero while the process
-/// runs is a stopped or hung refresher; the `failed` and `timed_out` rates
-/// show a dependency flapping below the failure threshold.
 const CHECKS_METRIC: &str = "readiness_checks_total";
 
-/// Each probe's own outcome in every check. The verdict and the log events
-/// name only the first failed probe; this counter shows the others, and a
-/// probe that fails while the threshold still holds readiness.
 const PROBE_CHECKS_METRIC: &str = "readiness_probe_checks_total";
 
-/// `1` while the published verdict is ready, `0` before the first check,
-/// while a probe verdict is withdrawn, and from the start of the drain. The
-/// refresher and the drain write it; armed process expiry also withdraws it.
-/// For generic unarmed users the completion timestamp and stale bound expose
-/// expiry without another refresh, while readers refuse the stale verdict.
 const READY_METRIC: &str = "readiness_ready";
 
-/// Unix seconds of the last completed check, including failures; zero before
-/// completion, NaN if the wall clock cannot supply a positive Unix timestamp.
-/// Clock skew/jumps, future timestamps, missing/stale samples or failed scrapes
-/// make freshness uncertain. These gauges are not an atomic snapshot and never
-/// decide readiness: the reader uses monotonic time.
 const LAST_COMPLETED_METRIC: &str = "readiness_last_completed_timestamp_seconds";
 
-/// Maximum fresh age in seconds, interpreted with the completion timestamp.
 const STALE_AFTER_METRIC: &str = "readiness_stale_after_seconds";
 
 /// Tokio's timer resolution: a shorter [`RefreshPolicy::interval`] cannot
@@ -369,9 +328,6 @@ impl Readiness {
 
     /// Require completion progress after successful startup admission.
     /// The admitted check retains its timestamp; arming never renews its age.
-    ///
-    /// # Errors
-    /// Returns the current admission refusal, including a terminal stale gap.
     pub fn arm_progress(&self) -> Result<(), NotReady> {
         let mut result = Ok(());
         let mut newly_expired = None;
@@ -678,10 +634,6 @@ impl ReadinessReader {
     /// A verdict older than [`RefreshPolicy::stale_after`] is refused: a
     /// stopped or hung refresher would otherwise leave its last "ready"
     /// standing.
-    ///
-    /// # Errors
-    ///
-    /// Returns why the service is not ready.
     pub fn verdict(&self) -> Result<(), NotReady> {
         let state = self.rx.borrow();
         if state.draining {
@@ -713,10 +665,6 @@ impl ReadinessReader {
     /// This observes the cached state only; it never checks a probe. A caller
     /// must re-read [`Self::verdict`] after this future resolves, which makes
     /// a publication race use the current monotone drain state.
-    ///
-    /// # Errors
-    ///
-    /// [`OwnerDropped`] when the last [`Readiness`] sender is gone.
     pub async fn wait_for_verdict_event(&mut self) -> Result<(), OwnerDropped> {
         if self.rx.has_changed().map_err(|_| OwnerDropped)? {
             return self.rx.changed().await.map_err(|_| OwnerDropped);

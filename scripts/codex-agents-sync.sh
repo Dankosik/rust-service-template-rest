@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Generate Codex's portable project runtime and custom-agent registry from
-# template-owned sources. Machine-specific settings stay in user config.
 set -euo pipefail
 
 runtime_start_marker="# template-owned-codex-runtime:start"

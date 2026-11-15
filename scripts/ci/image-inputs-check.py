@@ -48,7 +48,6 @@ def watch_set(values: list[str], owner: str) -> set[str]:
 
 
 def top_level_parts(code: str, separator: str) -> list[str]:
-    """Split masked IaC only between complete expressions at this depth."""
     closing = {"(": ")", "[": "]", "{": "}"}
     stack: list[str] = []
     parts = []
@@ -70,7 +69,6 @@ def top_level_parts(code: str, separator: str) -> list[str]:
 
 
 def selected_image_service(code: str) -> bool:
-    """Recognize the direct export or the sole service returned in project resources."""
     identifier = r"[A-Za-z_$][\w$]*"
     primitives = {"service", "image", "defineRailway", "project"}
     imported = set()
@@ -137,8 +135,6 @@ def selected_image_service(code: str) -> bool:
 
 
 def policy_watches(root: Path) -> tuple[set[str] | None, str]:
-    """The agreed watch set and the IaC source it was read from."""
-
     text = (root / POLICY).read_text()
 
     def table(key: str) -> str:
@@ -226,8 +222,6 @@ def input_families(root: Path) -> set[str]:
 
 
 def remote(arguments: list[str]) -> bool:
-    """ADD whose every source is a URL reads nothing from the build context."""
-
     operands = [argument for argument in arguments if not argument.startswith("--")]
     return len(operands) > 1 and all(re.match(r"https?://", source) for source in operands[:-1])
 

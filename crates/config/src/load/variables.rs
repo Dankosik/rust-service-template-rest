@@ -1,6 +1,3 @@
-//! The `APP__` variables of one load: the secrets directory's files, then
-//! the process environment over them.
-
 use std::ffi::OsString;
 use std::path::Path;
 
@@ -10,7 +7,6 @@ fn variable_prefix() -> String {
     format!("{ENV_PREFIX}{ENV_SEPARATOR}")
 }
 
-/// The variable that sets the dotted `key`, such as `APP__HTTP__ADDR`.
 pub(crate) fn variable_name(key: &str) -> String {
     format!(
         "{}{}",
@@ -38,7 +34,6 @@ fn is_key_path(suffix: &str) -> bool {
     })
 }
 
-/// The form [`is_env_addressable`] admits, for the errors that refuse a key.
 pub(crate) const ADDRESSABLE_KEY_FORM: &str =
     "lowercase letters, digits, `_`, or `-`, without `__` or a trailing `_`";
 
@@ -53,10 +48,8 @@ pub(crate) fn is_env_addressable(name: &str) -> bool {
         && !name.ends_with('_')
 }
 
-/// One variable of a carrier, kept under the lowercased name config-rs reads.
 pub(super) struct Variable {
     pub(super) original_name: String,
-    /// The dotted key the variable sets, such as `http.addr`.
     pub(super) key: String,
     pub(super) value: String,
 }
@@ -139,8 +132,8 @@ where
     };
     variables.extend(read_environment(environment)?);
     for (name, child) in &variables {
-        // Skip the separator after APP. The remaining matches are the same
-        // segment boundaries the environment source uses to build dotted keys.
+        // Skip the separator after APP; each remaining `__` is a dot boundary
+        // in `child.key`.
         for (end, _) in name.match_indices(ENV_SEPARATOR).skip(1) {
             if let Some(parent) = variables.get(&name[..end]) {
                 return Err(Error::OverlappingVariables {

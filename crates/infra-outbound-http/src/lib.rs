@@ -35,7 +35,6 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 /// 32,768-slot index table.
 pub const MAX_RESPONSE_HEADER_COUNT: usize = 24_576;
 
-/// Fixed client ceilings. Every field is required and positive.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Limits {
     /// The longest an exchange may take, from entry to the end of the response body.
@@ -60,10 +59,8 @@ impl Limits {
 
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
-    /// The origin URL is not admitted: see [`Client::try_new`].
     #[error("outbound HTTP origin is invalid")]
     InvalidOrigin,
-    /// A limit is zero or above its ceiling: see [`Limits`].
     #[error("outbound HTTP limits are invalid")]
     InvalidLimits,
     #[error("outbound HTTP TLS configuration failed")]
@@ -79,10 +76,8 @@ pub enum Error {
     /// the caller supplied a `Host` header.
     #[error("outbound HTTP target is invalid")]
     InvalidTarget,
-    /// A deadline or [`Limits::operation_timeout`] ended the operation.
     #[error("outbound HTTP operation timed out")]
     Timeout,
-    /// A supplied [`OperationContext`] was cancelled before the exchange ended.
     #[error("outbound HTTP operation was cancelled")]
     Cancelled,
     #[error("outbound HTTP dispatch was refused")]
@@ -106,31 +101,6 @@ pub enum Error {
 /// `Transfer-Encoding`, and sets `Content-Length` to the buffered body length
 /// for nonempty bodies and for `POST`, `PUT`, and `PATCH`. For other empty
 /// requests it removes `Content-Length`. If `Accept` is absent, it adds `*/*`.
-///
-/// ```no_run
-/// use std::time::Duration;
-///
-/// use infra_outbound_http::{Bytes, Client, Limits, Request, Url};
-/// use tokio::time::Instant;
-///
-/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// let client = Client::try_new(
-///     &Url::parse("https://provider.example")?,
-///     Limits {
-///         operation_timeout: Duration::from_secs(2),
-///         response_header_count: 100,
-///         response_body_bytes: 1024 * 1024,
-///     },
-/// )?;
-/// let request = Request::get("https://provider.example/v1/items?q=a%2Fb")
-///     .body(Bytes::new())?;
-/// let response = client
-///     .execute(request, Instant::now() + Duration::from_secs(3))
-///     .await?;
-/// assert!(response.status().is_success());
-/// # Ok(())
-/// # }
-/// ```
 #[derive(Clone)]
 pub struct Client {
     origin: policy::Origin,
@@ -155,13 +125,6 @@ impl Client {
     /// Creates a client bound to the origin (scheme, host, and port) of
     /// `origin`. Its path, query, and fragment are ignored. Construction
     /// performs no DNS or network I/O.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`BuildError::InvalidLimits`] for invalid limits,
-    /// [`BuildError::InvalidOrigin`] for a non-HTTPS URL, a URL without a
-    /// host, or a URL with userinfo, and
-    /// [`BuildError::Tls`] when the platform verifier cannot be built.
     pub fn try_new(origin: &Url, limits: Limits) -> Result<Self, BuildError> {
         limits.validate()?;
         let origin = policy::admit_origin(origin)?;
@@ -200,14 +163,8 @@ impl Client {
     }
 
     /// Creates the narrow local-HTTP constructor used by downstream mock
-    /// tests. Production code must use [`Client::try_new`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`BuildError::InvalidLimits`] for invalid limits,
-    /// [`BuildError::InvalidOrigin`] unless `origin` is an `http` URL with a
-    /// literal loopback IP address and no userinfo, and [`BuildError::Tls`]
-    /// when the platform verifier cannot be built.
+    /// tests, admitting only `http` origins with a literal loopback IP address
+    /// and no userinfo. Production code must use [`Client::try_new`].
     #[cfg(feature = "test-support")]
     pub fn try_new_for_test_http(origin: &Url, limits: Limits) -> Result<Self, BuildError> {
         limits.validate()?;
@@ -238,10 +195,6 @@ impl Client {
     /// Dropping this future ends the exchange; it does not undo a provider-side
     /// effect. A [`UrlTemplate`] request extension names the
     /// operation in the attempt's span and metric.
-    ///
-    /// # Errors
-    ///
-    /// Returns target, timeout, cancellation, response-size, or transport errors.
     pub async fn execute(
         &self,
         request: Request<Bytes>,
@@ -274,10 +227,6 @@ impl Client {
     /// dispatch and confirmed body EOF all spend the same original allowance.
     /// A cutoff maps to [`Error::Timeout`] and cancellation to
     /// [`Error::Cancelled`]; neither undoes a remote effect.
-    ///
-    /// # Errors
-    ///
-    /// Returns target, timeout, cancellation, response-size, or transport errors.
     pub async fn execute_with_context(
         &self,
         request: Request<Bytes>,
@@ -290,10 +239,6 @@ impl Client {
     /// Like [`Self::execute_with_context`], with a synchronous callback when
     /// response headers arrive. It runs once before body admission or reading,
     /// so it may observe a status even if the exchange later fails.
-    ///
-    /// # Errors
-    ///
-    /// Returns the same errors as [`Self::execute_with_context`].
     pub async fn execute_with_response_status(
         &self,
         request: Request<Bytes>,
@@ -306,13 +251,9 @@ impl Client {
 
     /// Like [`Self::execute_with_response_status`], with a synchronous admission
     /// check after request preparation and immediately before transport handoff.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::DispatchRefused`] when the check returns `false` and
-    /// the operation is still active. A timeout or cancellation observed
-    /// after the check takes precedence. Also returns the errors documented
-    /// by [`Self::execute_with_response_status`].
+    /// Returns [`Error::DispatchRefused`] when the check returns `false` and the
+    /// operation is still active; a timeout or cancellation observed after the
+    /// check takes precedence.
     pub async fn execute_with_dispatch_check(
         &self,
         request: Request<Bytes>,
@@ -472,7 +413,6 @@ fn append_within(collected: &mut Vec<u8>, data: &[u8], limit: usize) {
     collected.extend_from_slice(data);
 }
 
-// `Limited` yields either the hyper body error or its own length error.
 fn map_body_error(error: BoxError) -> Error {
     if error.is::<http_body_util::LengthLimitError>() {
         Error::ResponseBodyTooLarge

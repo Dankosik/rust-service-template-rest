@@ -1,6 +1,3 @@
-//! Broker and stream admission: what an answering broker must offer before
-//! this adapter publishes or consumes, and how a refusal is classified.
-
 use std::num::NonZeroUsize;
 
 use async_nats::jetstream::consumer::PullConsumer;
@@ -20,8 +17,6 @@ use crate::messaging::{ConsumerOptions, MessagingOptions};
 use crate::registry::Registry;
 use crate::wire;
 
-/// Oldest broker version this adapter admits; see the durable-messaging
-/// guide for the server requirements.
 const MIN_SERVER_VERSION: (i64, i64, i64) = (2, 12, 3);
 
 // NATS does not advertise max_control_line in INFO. Wildcard consumers use

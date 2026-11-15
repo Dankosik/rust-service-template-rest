@@ -1,5 +1,3 @@
-//! Go-compatible NATS envelope headers and bounded decoding.
-
 use async_nats::{HeaderMap, HeaderName};
 use bytes::Bytes;
 use time::format_description::well_known::Rfc3339;
@@ -62,10 +60,6 @@ pub struct InboundEnvelope {
 ///
 /// The bounds enforced by [`PreparedEvent`] keep these headers within
 /// [`HEADER_LIMIT_BYTES`].
-///
-/// # Errors
-/// Returns [`EnvelopeError::CreatedAtOutOfRange`] if the creation time cannot
-/// be formatted.
 pub fn encode_prepared(event: &PreparedEvent) -> Result<HeaderMap, EnvelopeError> {
     let mut headers = HeaderMap::new();
     headers.insert(header_name::MESSAGE_ID, event.message_id());
@@ -84,10 +78,6 @@ pub fn encode_prepared(event: &PreparedEvent) -> Result<HeaderMap, EnvelopeError
 /// Requires `Message-Id`, `Event-Type`, `Event-Schema`, `Created-At` and
 /// `Nats-Msg-Id`. `Nats-Msg-Id` is validated and not returned; the logical
 /// identity is `Message-Id`.
-///
-/// # Errors
-/// Rejects a malformed subject, a missing or invalid required header, an
-/// invalid schema, or a creation time that is zero or cannot be parsed.
 pub fn decode_envelope(
     subject: &str,
     headers: &HeaderMap,
@@ -280,7 +270,6 @@ fn header_line_bytes(name: &str, value: &str) -> usize {
     name.len() + value.len() + HEADER_LINE_FRAMING_BYTES
 }
 
-/// [`header_line_bytes`] for a value of `value_bytes`, `None` on overflow.
 fn checked_header_line_bytes(name: &str, value_bytes: usize) -> Option<usize> {
     name.len()
         .checked_add(HEADER_LINE_FRAMING_BYTES)?
@@ -331,7 +320,6 @@ fn parse_timestamp(value: &str) -> Result<OffsetDateTime, EnvelopeError> {
         .ok_or(EnvelopeError::CreatedAtInvalid)
 }
 
-/// `prefix` followed by the lowercase hex of a SHA-256 digest.
 #[must_use]
 pub fn prefixed_digest_hex(prefix: &str, digest: &[u8; 32]) -> String {
     let mut id = String::with_capacity(prefix.len() + SHA256_HEX_LEN);
