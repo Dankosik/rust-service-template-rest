@@ -8,7 +8,7 @@ A retained profile uses the real-server proof below when its claim requires it.
 Use for an explicitly required database observation or a bounded diagnostic.
 Changing a PostgreSQL file does not add a local integration gate; ordinary
 completion for `crates/infra-postgres`, `crates/migrate`, and `test/` still
-follows [Rust Validation](rust.md), whose unit tests need no Docker.
+follows [AGENTS.md](../../AGENTS.md#validation-budget), whose unit tests need no Docker.
 
 A claim of observed transaction, locking, commit-outcome, readiness,
 migration, or adapter-integration behavior needs a real PostgreSQL:
@@ -244,7 +244,8 @@ and an attempt that outlives a short drain exiting `3` with its job claimable
 again, plus zero/last-good sampling freshness), and, where the HTTP idempotency pack is also retained,
 `http_idempotency.rs` (the joint proof through the idempotency store).
 `bash scripts/ci/test-integration-db.sh --test jobs` runs that target alone.
-In the source template's initializer matrix, runtime graphs 17-26 run this
-suite once each (23-26 with the joint module) and need a usable Docker
-daemon.
+In the source template's initializer matrix (`scripts/ci/template-init-check.sh`),
+every full-validation runtime graph that retains `jobs=postgres` (with the joint
+module when `http_idempotency=postgres` is also retained) runs this suite once
+and requires a usable Docker daemon.
 <!-- template:end jobs:docs-postgres-validation-jobs -->

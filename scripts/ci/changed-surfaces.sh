@@ -625,7 +625,6 @@ HOOK
 		assert_case "${file}" "runtime_progress" ""
 	done
 	assert_case crates/health/tests/probes.rs "rust_source" "runtime_progress"
-	assert_case docs/runtime-progress-proof.md "documentation" "runtime_progress"
 	# template:end runtime-progress:classifier-runtime-progress-tests
 
 	assert_case template.lock \

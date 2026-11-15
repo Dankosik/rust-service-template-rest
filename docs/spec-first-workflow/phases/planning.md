@@ -28,10 +28,29 @@ results in `tasks.md`, and put each task packet in `tasks/<ID>-<slug>.md` using
 Test execution and reviews belong
 to Completion, not schedulable ledger tasks. The packet defines what must become
 true; Implementation chooses how. Apply the [Planning Ledger
-Contract](planning/ledger-contract.md). Load [Conditional Planning Branches](planning/conditional-branches.md)
-only for integration-first uncertainty or broad contract fan-out, and [Planning
-Proof And Readiness](planning/proof-and-readiness.md) before declaring
-readiness.
+Contract](planning/ledger-contract.md). Load [Conditional Planning
+Branches](planning/conditional-branches.md) only for integration-first
+uncertainty or broad contract fan-out, and complete the [Readiness dry
+run](#readiness-dry-run) below before declaring readiness.
+
+## Readiness Dry Run
+
+Walk the next task through its implementation using accepted behavior, design,
+current sources, and dependency timing under the [Ready
+Frontier](planning/ledger-contract.md#ready-frontier). This is a written
+walkthrough; do not launch tests, services, or probes.
+
+Confirm each existing item the task consumes — such as a function, type, trait
+implementation, configuration key, or library API and its semantics — against
+its source: current repository code, and for a crate, the source of the version
+locked in `Cargo.lock`. A plan's or design's description of that item is not
+evidence. A consumed item that is missing, or whose source contradicts the
+planned use, leaves the task unready.
+
+Preserve real external dependencies at their consuming action; an unavailable
+future test environment does not block coding from closed inputs. Do not persist
+waves; the Orchestrator refills the ready frontier after implementation results,
+and Leads choose useful parallel subtask lanes.
 
 Apply [Task Review / Readiness](task-review-readiness.md) through shared
 [Review](../shared/review.md). Ready when the next unit can implement from

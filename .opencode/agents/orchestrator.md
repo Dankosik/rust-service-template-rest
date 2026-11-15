@@ -7,8 +7,12 @@ permission:
   task:
     "*": deny
     acceptance-unit-lead: allow
+    worker-agent: allow
+    specialist-agent: allow
+    evidence-agent: allow
     reviewer-agent: allow
+    adjudicator-agent: allow
 ---
 
-Apply `.agents/skills/orchestrator/SKILL.md` and the current
-[Agent Harness](../../docs/agent-harness.md) adapter.
+Load [Ledger Orchestrator](../../.agents/skills/orchestrator/SKILL.md)
+and [OpenCode adapter](../../docs/agent-harness/opencode.md).

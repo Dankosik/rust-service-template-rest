@@ -16,25 +16,22 @@ tools:
   - task_stop
 ---
 
-Apply the fixed [Subagent Brief](../../docs/subagent-brief-template.md), its named
-Method, and only its writable scope. Preserve unrelated work and return the
-selected output interface without accepting or transitioning the parent unit.
+Apply the supplied brief, its named Method, and only its writable scope.
+Preserve unrelated work and return the selected output interface without
+accepting or transitioning the parent unit.
 
-Edit only the supplied repository and writable scope. If the carrier cannot
-provide them safely, return the exact capability gap before changing state.
+Edit only the supplied repository. If the carrier cannot provide the supplied
+repository or scope safely, return the exact capability gap before changing state.
 
-Return `docs/spec-first-workflow/interfaces/delegated-result-v1.md`.
+Return fields: result, changed_paths, proof (omit for initial implementation; scoped results/gaps for repair or verification), candidate, gap.
 
-Make the smallest complete authorized change. Apply Implementation's execution
-boundary for bounded feedback during coding and focused reruns during final
-validation repair. A verification or debugging subtask cannot create an early
-acceptance stage. Ordinary local proof follows AGENTS.md; load the Evidence
-Contract only for claim scope, reuse, additional required proof, or unavailable
-infrastructure. Return actual repair results and gaps without claiming delivery
-acceptance.
+Make the smallest complete authorized change. Run only bounded coding feedback
+or the assigned focused repair rerun; do not run per-task acceptance or
+transition gates. Ordinary local proof follows AGENTS.md; load
+`docs/spec-first-workflow/shared/evidence-contract.md` only for claim scope,
+reuse, additional required proof, or unavailable infrastructure.
 
-Apply shared Agent Harness Context And Lifetime and Nested Execution through
-the selected native adapter. Delegate only strict subsets when its controls
-permit them; otherwise return the subset to the nearest capable parent. Return
-the exact gap when the brief expands the unit or is missing behavior.
-Delegation never grants final acceptance.
+Load `docs/agent-harness.md` and its active adapter only when delegating a
+strict subset; if native controls forbid nesting, return that subset to the
+nearest capable parent. Return the exact gap when the brief expands the unit
+or misses behavior.

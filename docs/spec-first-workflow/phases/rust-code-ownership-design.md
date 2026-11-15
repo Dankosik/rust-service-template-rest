@@ -8,8 +8,9 @@ implementation.
 
 Apply `rust-coder`'s earliest-owner rule and `rust-structural-quality`'s
 deletion test to the ready behavior/design and current code, callers, the
-composition root, the generated contract, tests, and replacement paths. Return [Ownership Map V1](../interfaces/ownership-map-v1.md) without
-function-body or statement-level design.
+composition root, the generated contract, tests, and replacement paths. Return
+[Ownership Map V1](#ownership-map-v1) without function-body or statement-level
+design.
 
 Change cost: For a new abstraction or responsibility split, apply
 `rust-structural-quality` to the proposed ownership map.
@@ -21,9 +22,9 @@ and proof; preserve unaffected boundaries.
 ## Review
 
 Use root self-review for unambiguous placement. Load [Rust Ownership
-Review](../rubrics/rust-ownership-review.md) only when its conditional trigger is
-present. A broader shared [Review](../shared/review.md) routes through Technical
-Design Review and consumes any current panel receipts.
+Review](#rust-ownership-review) only when its conditional trigger is present. A
+broader shared [Review](../shared/review.md) routes through Technical Design
+Review and consumes any current panel receipts.
 
 Done when every responsibility has one owner, every changed file one present
 reason, the crate graph keeps feature crates free of transport and provider
@@ -32,3 +33,54 @@ choosing ownership, dependency/composition, generated authority, lifecycle,
 cleanup, proof location, or exported surface. Reopen System Design when
 placement cannot preserve mechanism/truth; reopen Specification when it cannot
 preserve observable behavior.
+
+## Ownership Map V1
+
+Return two reconciled sections. Describe each responsibility, its constraints,
+and evidence once in Responsibilities; Files references those entries by
+unambiguous name or anchor and supplies file-specific facts (retaining every
+required field and verifying bidirectional coverage).
+
+Responsibilities (one row per changed responsibility):
+
+```text
+responsibility | affected path | current evidence | semantic owner | exact package/file action | dependency/composition/generated boundary | cleanup | proof owner | reopen condition
+```
+
+For a non-mechanical implementation source, also record its selected reuse rung,
+authority or version, strongest viable rejected source, parity proof, and
+upgrade condition.
+
+Files (one row per added or materially changed Rust file):
+
+```text
+path | responsibilities | one present reason to exist | declarations/visibility | call-path role | lifecycle/error ownership | allowed dependencies | forbidden responsibilities
+```
+
+Every responsibility appears exactly once and every file maps back to a present
+responsibility. Use an evidence-bounded deterministic placement rule only when
+implementation-local facts prevent an exact path now.
+
+## Rust Ownership Review
+
+Load this complementary panel only when a real responsibility/placement fork
+survives, several crates or ownership boundaries change, generated/manual
+containment is non-obvious, the restructure is broad or hard to reverse, or
+current evidence/reviewers materially disagree. Ordinary unambiguous placement
+uses root self-review.
+
+Partition one fixed [Ownership Map V1](#ownership-map-v1) into:
+
+1. responsibility and execution-path ownership;
+2. crate and module placement, dependency direction, composition, visibility
+   (`pub`, `pub(crate)`), and generated/manual containment;
+3. file cohesion, naming, declaration grouping, and test placement
+   (`#[cfg(test)]` beside the owner, `tests/` for black-box proof).
+
+Each read-only lane returns only its lens result through shared
+[Read-Only Delegation](../shared/read-only-delegation.md) and
+[Review](../shared/review.md). The root synthesizes compatibility. The panel
+passes only when every triggered lens is `PASS` on the same candidate; repair or
+reopen findings, then re-run only each materially affected lens in fresh
+context. A broader triggered Technical Design Review consumes these receipts
+without repeating them.

@@ -20,7 +20,7 @@
     "scripts/ci/jobs-reliability-reference.py",
     "specs/",
     "docs/assets/banner.png",
-    "evals/"
+    "docs/template-upgrade.md"
   ],
   "source-template": {
     "remove_when_unselected": [],
@@ -688,8 +688,7 @@
       "crates/service/examples/runtime_progress.rs",
       "crates/service/tests/runtime_progress.rs",
       "scripts/ci/runtime-progress-proof.sh",
-      "build/docker/runtime-progress.Dockerfile",
-      "docs/runtime-progress-proof.md"
+      "build/docker/runtime-progress.Dockerfile"
     ],
     "markers": [
       {"path": "crates/service/Cargo.toml", "ids": ["service-runtime-progress-dependencies", "service-runtime-progress-tokio-features"]},

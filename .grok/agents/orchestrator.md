@@ -6,5 +6,5 @@ permission_mode: bypassPermissions
 prompt_mode: full
 ---
 
-Apply `.agents/skills/orchestrator/SKILL.md` and the current
-[Agent Harness](../../docs/agent-harness.md) adapter.
+Load [Ledger Orchestrator](../../.agents/skills/orchestrator/SKILL.md)
+and [Grok Build adapter](../../docs/agent-harness/grok-build.md).

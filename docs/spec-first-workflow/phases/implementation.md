@@ -40,54 +40,14 @@ required sources, and reading callers remain implementation work.
 
 ### Feedback During Coding
 
-#### Static Diagnostics
-
-After a coherent edit changes shared types, signatures, imports, generated
-contracts, or their callers, use bounded compile-only or type diagnostics to
-catch mechanical incompatibilities. Include affected production and test code
-and required build variants; gather independent diagnostics even if one fails.
-Choose commands that execute neither application/test code nor startup hooks,
-services, containers, or live probes. Run within existing resource and execution
-authority, with no watch loop or heavy checks; repeat only after a relevant
-change or new diagnostic hypothesis. Lint, scans, runtime builds, and aggregate
-validation still wait for the assembled ledger. Behavioral feedback has the
-narrower trigger below.
-
-This feedback repairs code; it is not a task-transition gate or acceptance
-receipt. An unavailable diagnostic tool does not hold a handoff or independent
-coding. Fix observed in-scope mechanical defects before calling that code
-Implemented; record an unavailable implementation input and continue unrelated
-work. Missing final-validation infrastructure does not block coding.
-
-#### Behavioral Feedback
-
-Use one bounded behavioral scenario during coding when a named unverified
-assumption at an implemented boundary would otherwise propagate into substantial
-dependent work, and the scenario costs less than that likely rework. State the
-assumption, dependent work, and discriminating result in existing task state.
-Task completion, a generic risk label, or a desire for a green check is not
-this trigger.
-
-Choose the smallest scenario that exercises the actual boundary with an
-independent expected result. Use an available local fixture and existing
-resource authority, validation locks, and a bounded runtime and cleanup.
-Keep its consumed code and inputs stable while it runs; unrelated writers may
-continue. This allowance does not include aggregate suites, full matrices,
-watch loops, review, live targets, or provisioning paid resources.
-
-Stop after resolving that assumption; repeat only after a relevant repair or
-new discriminating hypothesis. On failure, use [Validation Repair](implementation/validation-repair.md).
-If the scenario cannot run cheaply within existing authority, retain the
-material uncertainty and continue code supported by accepted contracts. It does not become mandatory
-final proof merely because it was considered during coding. A demonstrated
-defect is repaired before returning the affected code as Implemented; a missing
-probe alone creates no handoff gate. Reopen invalid accepted behavior or
-architecture through its owner.
-
-Retain the actual command, result, and exercised scope in existing execution
-state for possible final reuse under the Evidence Contract. This feedback
-grants no task acceptance, aggregate receipt, or release authority. Required
-final validation and review still cover the whole assembled result.
+Use bounded compile-only or type diagnostics (`make lint-changed` or
+`cargo check -p <crate> --all-targets --locked` per [Validation
+budget](../../../AGENTS.md#validation-budget)), or one cheap local boundary
+scenario when an unverified boundary assumption would otherwise propagate into
+substantial rework. Coding feedback is not a task-transition gate or acceptance
+receipt, though observed in-scope defects must be repaired before returning
+`Implemented` (retain commands and results for possible reuse under the Evidence
+Contract).
 
 Establish shared contracts and generated sources before dependent lanes consume
 them. When implementation reveals invalid accepted behavior or architecture,
@@ -97,8 +57,9 @@ cleanup, command locators, fixture relationships, and runner repairs for the
 same accepted result stay with the executor. A new write surface updates locks
 and scheduling; it does not itself reopen Planning.
 
-Join or stop lanes using the candidate, return `Implemented` through
-[Acceptance Result V1](../interfaces/acceptance-result-v1.md), and release the
+Join or stop lanes using the candidate, return [Delegated Result
+V1](#delegated-result-v1) to the Acceptance-Unit Lead (or `Implemented` through
+[Acceptance Result V1](../interfaces/acceptance-result-v1.md)), and release the
 implementation scope. Do not wait for proof, a reviewer, or other independent
 units before returning it. `Implemented` supplies unverified implementation for
 local dependent work; it is neither accepted behavior nor release authority.
@@ -113,10 +74,11 @@ ledger task as a standalone delivery to start verification early.
 
 The delivery owner selects one non-overlapping plan for the ordinary local
 criterion in [AGENTS.md](../../../AGENTS.md#validation-budget) and any explicit
-additions. Ordinary Rust delivery uses [Rust Validation](../../validation/rust.md):
-matching build and relevant unit tests, not an automatic `make verify`. Use
-[Validation Routing](../../validation-routing.md) only for mixed surfaces or a
-specialized command branch. Load the [Evidence Contract](../shared/evidence-contract.md)
+additions. Ordinary Rust delivery uses [Validation
+budget](../../../AGENTS.md#validation-budget): matching build and relevant unit
+tests, not an automatic `make verify`. Use [Validation
+Routing](../../validation-routing.md) only for mixed surfaces or a specialized
+command branch. Load the [Evidence Contract](../shared/evidence-contract.md)
 when judging explicit additions, reuse, claim scope, or unavailable
 infrastructure. Reconcile packet requirements with their actual source;
 agent-added runtime scenarios do not become mandatory by accumulation. Combine
@@ -130,12 +92,25 @@ expensive execution. Cover affected production/test projects, required build
 variants, generated clients, and accepted intermediate release versions;
 one failing project must not hide independent diagnostics.
 
-For a required runtime/integration scenario or runner fixture, load
-[Validation Scenarios](implementation/validation-scenarios.md) before execution.
-On a check failure, load [Validation Repair](implementation/validation-repair.md).
-Before isolated or remote execution, load [Execution Inputs](implementation/execution-inputs.md).
-Before a potentially long check or resource wait, load [Progress](implementation/progress.md).
-These branches do not add checks or change the assembled validation boundary.
+When runtime/integration proof or an accepted fixture scenario is explicitly
+required, run the smallest representative scenario covering setup, behavior,
+observation, and cleanup before expanding, reusing valid prepared environments
+and keeping cleanup bounded on failure or cancellation. For isolated or remote
+execution, resolve candidate/image identities, checksums, and host-specific
+paths from task state or its manifest before consuming results, updating the
+replacement record and invalidating only affected evidence after repair. Before
+a potentially long check or resource wait, set an observation checkpoint in
+existing execution state and inspect logs, process/resource state, or lock
+owners via background/yielding execution rather than blindly waiting, recording
+concrete delay causes without creating extra status artifacts. Classify any
+failure as product, test/oracle, or environment: for an optional check's broken
+environment, record the material gap and stop that path rather than provisioning
+infrastructure; repair in-scope defects and required-check failures at their
+shared source (checking broken setup preconditions first and gathering related
+failures in scope) within the same executor loop without a coordinator handoff,
+releasing validation locks while editing and applying [Parent-Owned
+Recovery](../shared/transition.md#parent-owned-recovery) if another attempt
+yields no new discriminating evidence.
 
 Final local acceptance requires the AGENTS.md local criterion, explicit task
 additions, resolved blocking findings, and any final review selected by shared
@@ -145,3 +120,18 @@ Missing required proof remains `implementation complete; verification incomplete
 for that scope. Continue available authorized repairs without indefinite
 environment recovery. A requested CI, release, deployment, or runtime result
 remains outstanding until actually obtained; never claim it from local tests.
+
+## Delegated Result V1
+
+Every mutable delegated worker returns:
+
+```text
+result: <completed bounded outcome or no result>
+changed_paths: <repository-relative paths or none>
+proof: <omit for initial implementation; actual scoped results and gaps for final-validation repair or standalone verification>
+candidate: <identity when isolated or none>
+gap: <remaining blocker or none>
+```
+
+The result is input to the Acceptance-Unit Lead, not acceptance, review, or
+ledger state.

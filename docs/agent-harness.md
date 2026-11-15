@@ -1,120 +1,85 @@
 # Agent Harness
 
-Harness-neutral index for native delegation and durable execution controls.
-`AGENTS.md` owns authority and workflow phases own why a control is used; the
-selected adapter owns how the current harness provides it.
+Harness-neutral native delegation and durable controls. `AGENTS.md` owns
+authority; workflow phases own why a control applies; the selected adapter owns
+how the harness provides it.
 
 ## Delegation Interface
 
-Across checkout or actor changes, retain the selected workflow revision and
-instruction locators in the existing handoff, and verify the effective model
-and effort through native state. Compare only the relevant local owners before
-using a stale checkout's policy. Resolve material drift with the continuation
-owner before dependent work; do not silently mix policies, bulk-sync an active
-checkout, or treat a pinned revision as overriding current user/native authority.
-Unchanged owners need no repeated inventory or bootstrap turn.
+Across checkout or actor changes, keep workflow revision and instruction
+locators, verify effective model/effort natively, and resolve material drift
+with the continuation owner before dependent work (never mix policies,
+bulk-sync active checkouts, or override user/native authority). Unchanged
+owners need no bootstrap turn.
 
-Give a delegated agent only the semantic fields in the [Subagent Brief
-Template](subagent-brief-template.md). Isolate concurrent mutation only when it
-is cheaper than waiting for the current checkout. Concurrent mutation may share
-a checkout only when mutable owners and exclusive-lock resources do not overlap.
-Overlapping work stays serial. Read-only lanes may share the current checkout.
-Workers inside one Lead may share the Lead's checkout only when writable
-responsibility and exclusive locks are disjoint. Do not create worktrees for
-sequential work, cheap disjoint units, or bounded read-only review.
+Send only [Subagent Brief Template](subagent-brief-template.md) fields.
+Read-only lanes share the checkout. Concurrent mutable units/lanes share a
+checkout only when mutable owners and locks are disjoint; otherwise serialize,
+or isolate only when cheaper than waiting—never for sequential work, cheap
+disjoint units, or read-only review.
 
-Count live Leads, mutable descendants, and in-flight review or validation lanes
-against capacity. Leave spare slots for unlock and landing.
+Count the active tree (Leads, mutable descendants, review/validation lanes)
+against capacity, reserving slots for review, unlock, and landing.
 
-Silence alone does not establish a stall. Use native failure state, a missed
-agreed checkpoint, or repeated attempts without new evidence to trigger
-[Parent-Owned Recovery](spec-first-workflow/shared/transition.md#parent-owned-recovery).
-Preserve useful work and reconcile the affected subtree before replacement or
-scope reassignment.
+Silence is not a stall; trigger [Parent-Owned
+Recovery](spec-first-workflow/shared/transition.md#parent-owned-recovery) on
+native failure, missed checkpoint, or repeated uninformative attempts. Before
+replacing a parent, reassigning scope, or resetting a stalled subtree, preserve
+edits/findings, reconcile state, and confirm descendant termination natively.
 
-Carry model, reasoning effort, isolation, native identity, and task lifecycle in
-tool fields rather than prompt prose. Exclusive locks determine scheduling and
-isolation, not reasoning capability. Select capability from the remaining
-semantic judgment, implementation uncertainty, protected risks, and interacting
-invariants under the selected adapter. Use its balanced configuration for
-bounded implementation with closed behavior and no protected-risk reason.
-A test plan or named check is not a prerequisite for delegation or model choice.
-Raise capability for unresolved judgment or interacting invariants, or after a causal
-attempt or review exposes a missed invariant. If capability signals disagree,
-raise under the adapter.
-Expected failing tests and mechanically diagnosed setup or syntax errors do
-not by themselves trigger escalation; unexplained or repeated causal failures do.
-Retain the raised capability for the remaining repair of that unit. Child work
-uses the cheapest configuration permitted by the adapter for its authority and
-fixed brief. Preserve an exact user-selected model.
+Carry model, effort, isolation, identity, and lifecycle in tool fields. Select
+capability from remaining judgment, uncertainty, protected risks, and
+interacting invariants—not locks or unwritten tests. Use balanced settings for
+closed work; raise capability when signals disagree or a causal attempt/review
+exposes a missed invariant (not for expected test failures or syntax/setup
+errors), and keep it through repair. Children use the cheapest permitted
+settings; preserve user-selected models.
 
-Choose roles by capability: `evidence-agent`, `specialist-agent`,
-`worker-agent`, `reviewer-agent`, or `adjudicator-agent`. Put domain expertise or
-a phase review lens in the brief's `Method`; use model/effort fields for a
-critical quality tier instead of creating another semantic role.
+Use `evidence-agent`, `specialist-agent`, `worker-agent`, `reviewer-agent`, or
+`adjudicator-agent`; put expertise or review lenses in `Method` and quality tiers
+in model/effort fields.
 
 ## Context And Lifetime
 
-Lifetime follows responsibility, not model size:
-
 | Owner | Lifetime |
 | --- | --- |
-| Orchestrator | The ledger; recover from canonical state when context is no longer reliable. |
-| Architect or phase owner | Its macro phase; a different phase or independent design uses a fresh actor. |
-| Lead | Its unit, with related-unit reuse only under the Planning Ledger Contract. |
-| Execution lane | One bounded brief and corrections of that same result, including on smaller models. |
-| Evidence lane | One bounded evidence brief and related follow-ups under the conditions below. |
+| Orchestrator | The ledger; recover from canonical state if unreliable. |
+| Architect / phase owner | Macro phase; independent design or new phase uses a fresh actor. |
+| Lead | Its unit; related-unit reuse only under Planning Ledger Contract. |
+| Execution lane | One bounded brief and its corrections, including smaller models. |
+| Evidence lane | One bounded evidence brief and related follow-ups below. |
 
-Start every execution or evidence lane, including nested descendants, with a
-fresh history using the selected adapter's native controls. Supply accepted
-behavior, necessary decisions, source locators, writable scope, and the expected
-outcome through the existing Subagent Brief. Executors choose their tests while
-coding; final-validation repair briefs carry the focused rerun and established
-execution authority with the repair. Clean history excludes the parent's conversation; it does not
-remove applicable instructions, tools, permissions, or current repository files.
-Reviewer freshness remains governed by shared Review.
+Start execution/evidence lanes (including descendants) with fresh history
+excluding parent conversation while keeping instructions, tools, permissions,
+and repo files; supply accepted behavior, decisions, locators, writable scope,
+and expected outcome. Reviewer freshness follows
+[Review](spec-first-workflow/shared/review.md).
 
-Keep implementation corrections with the same worker while its outcome,
-writable responsibility, and proof boundary remain unchanged and its context
-remains useful. Once the parent consumes its completed result, end that worker's
-assignment; resume it only for a correction within the same brief.
+Reuse a worker only for corrections inside its unchanged outcome, writable
+scope, and proof boundary; end it once consumed. Evidence lanes may answer
+related follow-ups for the same parent decision when independence is unneeded,
+rechecking affected assumptions.
 
-An evidence agent may answer a related follow-up for the same parent decision
-within the same evidence boundary when its context remains useful and
-independence is unnecessary. Supply the changed question and inputs; recheck
-earlier assumptions affected by that delta.
-
-Use a fresh agent for a different implementation outcome or writable
-responsibility, an unrelated investigation, or a question requiring independent
-judgment. Lead reuse does not extend to its execution lanes. Reviewer reuse
-remains governed by [Review](spec-first-workflow/shared/review.md).
-
-For stalled diagnosis or unreliable context, preserve the current edits and
-material findings, reconcile and stop the old subtree, and give a fresh agent
-the remaining brief and useful evidence. Change the failed approach through
-the responsible parent; do not copy the unsuccessful conversation wholesale.
-Follow-ups continue existing history and do not reset context. Do not rotate
-agents by elapsed time or message count, or add a separate lifecycle manager.
+Use a fresh agent for a new outcome, writable scope, unrelated investigation, or
+independent judgment (Lead reuse excludes execution lanes). On stalled
+diagnosis or unreliable context, change strategy via the parent rather than
+copying failed transcripts or rotating by time/turn count. Follow-ups continue
+history without resetting context.
 
 ## Nested Execution
 
-The Orchestrator owns the ledger; Leads return Implemented, and one assigned
-delivery owner owns final validation and acceptance. A worker
-may delegate a strict subset of its accepted brief only when the selected
-adapter permits descendants and Implementation's benefit, ownership, and lock
-conditions hold. Missing product or architecture decisions return to their
-owner; unwritten test cases and commands do not block delegation.
-At a native depth or tool limit, the nearest capable parent dispatches the
-subset or completes it within its own authority; do not invent a new acceptance
-unit or an unsupported carrier. Use only as much nesting as the work needs.
+Orchestrator owns the ledger; Leads return `Implemented`; one assigned delivery
+owner owns final validation and acceptance. Workers delegate strict subsets
+only if the adapter permits descendants and Implementation's benefit,
+ownership, and lock rules hold. Missing product/architecture decisions return to
+their owner; unwritten tests do not block delegation. At a depth/tool limit, the
+nearest capable parent dispatches or completes the subset without inventing an
+acceptance unit or unsupported carrier.
 
-Each delegating parent owns its subtree: retain child identities, give them
-disjoint writable scopes, consume and integrate their results, and join or stop
-all descendants before returning, freezing, or releasing that scope. A parent
-cannot edit a delegated writable scope concurrently. Count the whole active
-tree against capacity and leave room for review and completion. Reconcile and
-stop the entire affected subtree before replacing a parent or reassigning its
-scope; parent interruption alone does not prove descendant termination.
+Each delegating parent owns its subtree: retain child identities, assign
+disjoint writable scopes (never edited concurrently by the parent), integrate
+results serially, and join/stop descendants before returning, freezing, or
+releasing scope.
 
 ## Select One Adapter
 
@@ -127,13 +92,12 @@ scope; parent interruption alone does not prove descendant termination.
 | Cursor IDE, CLI, or Cloud Agents | [Cursor](agent-harness/cursor.md) |
 | OpenCode CLI, TUI, desktop, or IDE | [OpenCode](agent-harness/opencode.md) |
 
-Do not mix control planes inside one outcome. A task, subagent, worktree,
-model, or Goal is a carrier; it never expands authorization or transfers unit
-ownership. Use a durable Goal only when the work is genuinely long-running or
-resumable and the selected adapter's native authorization and capability
-requirements are met.
+Never mix control planes in one outcome. A task, subagent, worktree, model, or
+Goal is a carrier—never authorization or unit ownership. Use a durable Goal
+only for genuinely long-running/resumable work meeting native auth and
+capability rules.
 
 All adapters preserve the same ledger, unit ownership, review, and transition
-semantics. Select topology from callable native controls, not the product name.
-When a full-ledger carrier is unavailable, report that capability gap instead
-of replacing the accepted workflow with a smaller one.
+semantics. Select topology from callable controls, not product name, and
+report an unavailable full-ledger carrier as a capability gap instead of
+shrinking the workflow.

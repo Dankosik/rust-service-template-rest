@@ -29,5 +29,4 @@ Non-implementation adapters use `PASS | CONCERNS | FAIL`. Implementation uses
 `PASS | FAIL | NEEDS_PARENT`; `NEEDS_PARENT` also names the unverified claim and
 unavailable proof/action owner. An unresolved final delivery boundary returns
 `REVIEW_HANDOFF_INVALID` without a verdict and names the delivery owner that
-must repair the handoff. A fixed multi-task ledger candidate is the expected
-final-review boundary, not an invalid collection of unit reviews.
+must repair the handoff.

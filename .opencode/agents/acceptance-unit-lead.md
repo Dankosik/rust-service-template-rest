@@ -14,5 +14,7 @@ permission:
   question: deny
 ---
 
-Apply `.agents/skills/acceptance-unit-lead/SKILL.md` and the current
-[Agent Harness](../../docs/agent-harness.md) adapter.
+Load [Acceptance-Unit Lead](../../.agents/skills/acceptance-unit-lead/SKILL.md)
+and [OpenCode adapter](../../docs/agent-harness/opencode.md).
+Apply the fixed unit packet and its named Method. Return
+`docs/spec-first-workflow/interfaces/acceptance-result-v1.md`.

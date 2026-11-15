@@ -1,85 +1,49 @@
 # Claude Code Harness Adapter
 
-Use the installed Agent and Goal controls as native authority. The ordinary
-nested route is supported by Claude Code 2.1.227; recheck native controls after
-runtime changes.
+Use installed `Agent` and `Goal` controls as native authority (supported by
+Claude Code 2.1.227; recheck after runtime changes).
 
 ## Native Map
 
-- `/orchestrator` binds the current session as Ledger Orchestrator. Dispatch
-  mutually independent ready units through `Agent` with
-  `subagent_type: "acceptance-unit-lead"`, within current capacity. The native
-  installed Lead carrier under `.claude/agents/` loads the existing role skill
-  and returns its fixed unit as `Implemented`, without task proof or review
-  gates. This carrier exists only when Claude is selected. The root integrates
-  these candidates serially into the local
-  development tree from
-  [Acceptance Result](../spec-first-workflow/interfaces/acceptance-result-v1.md)
-  and unlocks dependent implementation immediately. One final delivery
-  assignment owns validation and acceptance after assembly.
-- Ordinary named subagents can spawn descendants through `Agent`. Apply
-  [Nested Execution](../agent-harness.md#nested-execution); the project setting
-  `env.CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH: "3"` selects the installed default
-  of three levels. An unavailable tool or exhausted depth returns the exact
-  capability gap to the parent for recovery.
-- The Lead may implement directly. Use `isolation: "worktree"` when
-  [Agent Harness](../agent-harness.md) selects isolation. Workers may share
-  the Lead checkout when their writable responsibilities and locks are
-  disjoint. Native `mode` is a deprecated permission field, not the brief's
-  `Mode`; carry implement, investigate, verify, or review in the brief.
-- Agent Teams remain an explicitly selected, already configured route. The
-  root brokers descendants from the teammate Lead's fixed briefs and returns
-  their results to that Lead; final acceptance stays with the assigned delivery Lead. The team roster
-  is flat and in-process teammates cannot launch background agents. Do not
-  infer a Teams requirement from full-ledger work or enable Teams implicitly.
-  Team task lists mirror execution; repository `tasks.md` owns acceptance.
-- `/goal <condition>` is optional for long-running or resumable work; its
-  evaluator sees the conversation rather than repository files.
+- `/orchestrator` binds the session as Ledger Orchestrator. Dispatch ready
+  units via `Agent` (`subagent_type: "acceptance-unit-lead"`) within capacity;
+  the `.claude/agents/` carrier loads the role skill and returns
+  [Acceptance Result](../spec-first-workflow/interfaces/acceptance-result-v1.md).
+- Named subagents nest via `Agent`; `env.CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH:
+  "3"` sets three levels. Report unavailable tools or exhausted depth as an
+  exact capability gap.
+- Use `isolation: "worktree"` when [Agent Harness](../agent-harness.md) selects
+  isolation. Native `mode` is a deprecated permission field, not the brief's
+  `Mode`.
+- Agent Teams are an explicitly selected, preconfigured route only: the root
+  brokers descendants from teammate Leads' fixed briefs (flat roster;
+  in-process teammates cannot launch background agents), while `tasks.md` owns
+  acceptance. Never enable Teams implicitly.
+- `/goal <condition>` is optional for long-running/resumable work; its
+  evaluator sees conversation, not repository files.
 
 ## Models And Dispatch
 
-Use Sonnet for a closed, strongly owned Lead unit and ordinary delegated work;
-use Opus when uncertainty, protected risk, or high consequence requires it.
-A root session on a tier above Opus keeps that ladder for its lanes. The Lead
-carrier inherits the root model, so pass `model` on each Lead dispatch. Pass
-`model: "fable"` to a lane only when the user selects it or a causal Opus
-attempt exposed a missed invariant: lanes carry bounded briefs, and subagents
-can account for a large part of a session's cost.
-Preserve a user-selected model. Carry supported model, effort, and isolation
-controls through native fields or the role carrier; the fixed brief carries
-only the missing execution-changing facts.
+Use `sonnet` for closed, strongly owned Lead units and ordinary work; use
+`opus` for uncertainty, protected risk, or high consequence; pass `model: "fable"`
+only on user selection or after a causal `opus` attempt exposes a missed
+invariant. A root above `opus` keeps that ladder. Because the Lead carrier
+inherits the root model, pass `model` on each Lead dispatch; preserve
+user-selected models.
 
-Each role carrier sets `effort` from the role's `claude_effort`; `effort` on an
-`Agent` call overrides it for that lane under the signals that raise its model.
-Select `xhigh` or `max` only on a measured gain. At those levels Claude Fable
-5.2 has been observed to start review subagents on its own, while
-[Review](../spec-first-workflow/shared/review.md) selects review only at final
-delivery.
+Role carriers set `effort` from `claude_effort`; `effort` on `Agent` overrides
+it. Select `xhigh` or `max` only on measured gain (Claude Fable 5.2 can start
+unrequested review subagents at those levels).
 
-Apply [Context And Lifetime](../agent-harness.md#context-and-lifetime) for
-freshness and permitted reuse. A new lane starts a fresh
-named agent, without `subagent_type: "fork"` or continuation. Ordinary agents
-do not inherit parent conversation or command output, so their briefs must
-locate canonical inputs and supply absent facts. Retain the returned agent
-identity. For a permitted continuation under Context And Lifetime or Review,
-use `SendMessage` with `to` set to that identity and `message` set to the delta;
-this runtime can revive a retained completed agent. `Agent` has no `resume`
-field. A lost continuation returns its exact gap to the parent.
+Apply [Context And Lifetime](../agent-harness.md#context-and-lifetime) and
+[Nested Execution](../agent-harness.md#nested-execution). Start fresh named
+agents (never `subagent_type: "fork"`), retain returned agent IDs, and resume
+permitted continuations via `SendMessage` (`to` + `message` delta; `Agent` has
+no `resume` field). Lost continuation returns an exact gap.
 
-[Review](../spec-first-workflow/shared/review.md) selects whether independent
-review is required at final delivery, never between implementation tasks.
-When required, bind a fresh `reviewer-agent` to
-[Implementation Review](../spec-first-workflow/phases/implementation-review.md)
-and the fixed candidate. Dispatch review alongside final validation
-when background execution is available; keep the candidate unchanged and
-observe the proof budget. Background agents report completion; use
-`TaskOutput` only when their result is the next dependency. The root binds
-integrated-candidate review only when Review requires that boundary. Run a
-[Structure-only
-review](../spec-first-workflow/phases/implementation-review.md#structure-only-review)
-with `model: "opus"`: its deletion test is architectural judgment, and a weak
-verdict either lands removable structure or turns a nit into new complexity.
-
-Cross-session messages are evidence inputs, not proof receipts, acceptance, or
-ledger state. Programmatic use goes through the Claude Agent SDK; direct
-Anthropic Messages API calls are a different control plane.
+Use [Review](../spec-first-workflow/shared/review.md) and [Implementation
+Review](../spec-first-workflow/phases/implementation-review.md) for final
+review. Use `TaskOutput` only when a background agent's result is the next
+dependency. Run [Structure-only review](../spec-first-workflow/phases/implementation-review.md#structure-only-review)
+with `model: "opus"`. Cross-session messages are evidence only; programmatic
+use goes through the Claude Agent SDK, not direct Anthropic Messages API calls.

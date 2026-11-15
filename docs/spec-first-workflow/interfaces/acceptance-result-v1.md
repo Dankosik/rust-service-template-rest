@@ -15,8 +15,7 @@ next_owner: <next implementation owner, or exact missing input and its owner>
 
 Return Implemented when in-scope code, tests, and cleanup are written and writers
 have joined. [Implementation](../phases/implementation.md#feedback-during-coding)
-owns permitted coding feedback; do not attach a per-task proof receipt or
-wait for final-validation resources. The result unlocks local dependent coding;
+owns permitted coding feedback. The result unlocks local dependent coding;
 it makes no behavior, acceptance, or release claim. Blocked retains partial
 work and names the missing implementation input. Neither verdict starts final
 validation while another code task remains unfinished.
@@ -55,5 +54,4 @@ Completion to run checks early.
 
 During orchestrated execution these results are input to the Orchestrator,
 which records canonical state without repeating implementation or validation.
-A root-local Lead may record its own result. Result IDs and this interface's
-filename do not create a per-unit acceptance stage.
+A root-local Lead may record its own result.

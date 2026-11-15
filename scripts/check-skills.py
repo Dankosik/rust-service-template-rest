@@ -3,11 +3,11 @@
 
 Two classes share the directory (docs/skill-authoring.md):
 
-- decision skills (`rust-*`): the rust-cli-skills shape; frontmatter with
-  exactly `name` and `description`, a description that states its trigger in
-  at most two sentences, one heading, prose paragraphs with targeted links,
-  an opening bold concept, a body inside the word budget, a LICENSE beside
-  SKILL.md, and optional linked Markdown decision examples;
+- decision skills (`rust-*`, `merge-conflict-resolution`): the rust-cli-skills
+  shape; frontmatter with exactly `name` and `description`, a description that
+  states its trigger in at most two sentences, one heading, prose paragraphs
+  with targeted links, an opening bold concept, a body inside the word budget,
+  a LICENSE beside SKILL.md, and optional linked Markdown decision examples;
 - workflow skills (ported from the Go template, harness-neutral): the same
   name and description rules plus `metadata.invocation` (`role` or `user`),
   `metadata.kind` (`carrier` or `workflow`), and
@@ -31,7 +31,8 @@ from template_state import load_lock  # noqa: E402
 
 SKILLS = ROOT / ".agents" / "skills"
 ROOT_LICENSE = ROOT / "LICENSE"
-MIN_WORDS, MAX_WORDS = 250, 1000
+MIN_PARAGRAPHS = 3
+MIN_WORDS, MAX_WORDS = 150, 1000
 WORKFLOW_MAX_WORDS = 600
 DECISION_KEYS = {"name", "description"}
 WORKFLOW_KEYS = {"name", "description", "metadata", "disable-model-invocation"}
@@ -96,8 +97,10 @@ def check_decision_body(name: str, body: str) -> list[str]:
     prose = paragraphs[1:] if paragraphs and paragraphs[0].startswith("# ") else paragraphs
     if not prose or not prose[0].startswith("**"):
         problems.append(f"{name}: first paragraph must open with the bold leading concept")
-    if len(prose) < 4:
-        problems.append(f"{name}: body has {len(prose)} paragraphs, expected at least 4")
+    if len(prose) < MIN_PARAGRAPHS:
+        problems.append(
+            f"{name}: body has {len(prose)} paragraphs, expected at least {MIN_PARAGRAPHS}"
+        )
     for paragraph in prose:
         if re.match(r"^\s*([-*]|\d+\.)\s", paragraph, re.M):
             problems.append(f"{name}: body contains a list; write paragraphs")

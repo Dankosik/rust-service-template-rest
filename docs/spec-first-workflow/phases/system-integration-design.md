@@ -9,7 +9,7 @@ authority, relevant repository architecture, accepted risks and proof
 obligations, and decision-changing Research. Derive material drivers and hard
 constraints, compare viable same-level substitutes only while a real fork
 survives, and trace each affected actor or trigger to caller-visible completion
-or durable finality through [Material Flow](../rubrics/material-flow.md).
+or durable finality under [Material Flow](#material-flow).
 
 When choosing a custom infrastructure mechanism, state the current requirement
 or lifecycle cost that rules out suitable repository, standard-library, or
@@ -20,8 +20,9 @@ only while an unresolved alternative could change the decision.
 Load only methods exposed by the decision:
 
 - runtime boundary, consistency, or truth owner -> [Repository
-  Architecture](../../repo-architecture.md) and its leaves;
+  Architecture](../../repo-architecture.md);
 - client-visible REST wiring -> `rust-api-contract` and `rust-axum`;
+- PostgreSQL pool, transactions, or migrations -> `rust-sqlx`;
 - trust, secrets, authorization, signing, or exact bytes -> `rust-security`;
 - numeric scale or budget, or a flow run per request, message, or job ->
   `rust-performance`;
@@ -35,8 +36,9 @@ Load only methods exposed by the decision:
 - non-mechanical Rust placement -> [Rust Code / Ownership
   Design](rust-code-ownership-design.md).
 
-Durable delivery, replay, and reconciliation have no skill until the
-messaging and jobs profiles arrive; decide them here and record the decision.
+Durable delivery, replay, and reconciliation have no dedicated skill; decide
+them here from [Repository Architecture](../../repo-architecture.md) and record
+the decision.
 
 Use [Read-Only Delegation](../shared/read-only-delegation.md) only for
 independent material domain questions. The root validates and synthesizes their
@@ -61,6 +63,26 @@ caller-controlled input, state its cost per unit in round trips, queries, held
 locks, and buffered bytes, and what bounds that cost. Derive it from the
 selected mechanism; measure only when an accepted budget or Research requires
 it.
+
+## Material Flow
+
+Trace each actor or trigger to caller-visible completion or durable finality.
+At every material crossing record only what Implementation must not invent:
+
+- initiating and receiving owners, transferred responsibility, contract, and
+  produced state/effect;
+- canonical representation, transformation, source of truth, identifiers,
+  units, absence, consistency, visibility, freshness, ordering, and finality;
+- failure point, cancellation/timeout, possibly committed effect, retry and
+  exhaustion owner, idempotency/replay/reconciliation, degradation, and
+  restoration boundary;
+- when scale-sensitive, workload envelope, critical path, amplification,
+  serialization/parallelism/queueing, structural ceiling, and proving boundary.
+
+Show current and target flows only when their difference changes a decision.
+Use a diagram only when compact text cannot make ordering, fan-out,
+transformation, or recovery reviewable; normative text and canonical contracts
+remain authoritative.
 
 Return the selected mechanism, driver and alternative dispositions, material
 flows, operator signals, unit costs, affected authorities and contracts,

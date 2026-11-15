@@ -33,8 +33,7 @@ Reopen if:
 <smallest upstream invalidation condition>
 ```
 
-The implementing agent fills in test cases and commands while writing code;
-Planning needs the outcome, not a test-case inventory or approved oracle plan.
+The implementing agent fills in test cases and commands while writing code.
 [Evidence Contract](../shared/evidence-contract.md#required-and-optional-proof)
 owns required proof. A product claim does not automatically require a live
 scenario, and an agent-authored packet cannot expand local acceptance. Empty
@@ -50,8 +49,7 @@ code or agreed contracts without passing checks. Keep annotations consistent
 with the ledger. A later acceptance or effect dependency does not block local
 implementation from closed inputs. Boundary names that work and the actual stop
 before the pending gate. Final validation describes proof for the entire
-assembled ledger, not an intermediate
-task-transition gate; implementation alone does not satisfy it. [Ready
+assembled ledger; implementation alone does not satisfy it. [Ready
 Frontier](../phases/planning/ledger-contract.md#ready-frontier) owns dispatch and
 resumption.
 

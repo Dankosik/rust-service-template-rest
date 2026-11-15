@@ -20,13 +20,11 @@ implementation completion and its eventual final validation under [Ready
 Frontier](planning/ledger-contract.md#ready-frontier), using only the fixed plan,
 cited sources, and current evidence. Resolve prerequisites and handoffs, trace
 canonical/generated order, locate non-obvious writable surfaces/resources, and
-trace the expected user-visible outcome to the real path. Check consumed code
-and dependency behavior against source as the [Readiness dry
-run](planning/proof-and-readiness.md#readiness-dry-run) requires; a missing
-item or a use its source contradicts is a hidden decision. Test cases, fixtures,
-assertions, and exact commands are executor-owned choices; their absence does
-not fail Planning review. Missing final integration evidence prevents
-Completion only when the accepted claim requires it, without blocking
+trace the expected user-visible outcome to the real path. Check consumed code and dependency behavior against source as the [Readiness
+dry run](planning.md#readiness-dry-run) requires; a missing item or a use its
+source contradicts is a hidden decision. Absence of concrete test cases or
+commands does not fail Planning review. Missing final integration evidence
+prevents Completion only when the accepted claim requires it, without blocking
 independent implementation. Optional integration evidence does not block local
 completion.
 
@@ -41,8 +39,7 @@ or unavailable input, but continue independent paths. Inspect later units only
 for a decision/dependency that can invalidate the next accepted result.
 
 Do not reslice tasks, author replacement packets, or choose missing behavior,
-mechanism, ownership, rollout, authority, or concurrency. Do not turn this
-review into a preliminary test-design exercise.
+mechanism, ownership, rollout, authority, or concurrency.
 
 Review is a written walkthrough over read sources, without live checks.
 `PASS` requires the next authorized implementation to be executable from

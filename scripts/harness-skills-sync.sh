@@ -43,9 +43,9 @@ skills_root="${repo}/.agents/skills"
 harness_root="${repo}/.${harness}"
 links_root="${harness_root}/skills"
 
-# Decision skills (rust-*) carry no metadata block by design (docs/
-# skill-authoring.md): they are model-invoked methods. Workflow skills declare
-# invocation and kind explicitly.
+# Decision skills (rust-*, merge-conflict-resolution) carry no metadata block by
+# design (docs/skill-authoring.md): they are model-invoked methods. Workflow
+# skills declare invocation and kind explicitly.
 read_metadata() {
 	local file=$1 line invocation_count=0 kind_count=0
 	metadata_invocation=''

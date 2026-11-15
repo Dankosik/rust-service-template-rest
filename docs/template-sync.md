@@ -1,26 +1,26 @@
 # Initialization and portable updates
 
 Initialization gives a clean template checkout its service identity and selects
-the existing database, authentication, outbound HTTP, outbound machine authentication,
-HTTP idempotency,
-background jobs, and agent-harness packs. Later synchronization adopts
-portable tooling and instructions from a committed source checkout. The
+the existing database, authentication, outbound HTTP, outbound machine
+authentication, gRPC, HTTP idempotency, background jobs, messaging, outbox,
+outbound webhooks, inbound webhooks, cache, object storage, service
+authentication, and agent-harness packs. Later synchronization adopts portable
+tooling and instructions from a committed source checkout. The
 [ownership manifest](../template-owned.paths) is the full-sync copy authority;
 the service keeps its application, configuration and local policies.
-For complete runtime updates and rendered-baseline custody, use the separate
-[runtime upgrade guide](template-upgrade.md) from an admitted external template
-checkout. The portable manifest does not gain runtime ownership.
+For complete runtime updates and rendered-baseline custody, run
+`scripts/template-upgrade.sh` (`docs/template-upgrade.md` in an admitted
+external template checkout). The portable manifest does not gain runtime
+ownership.
 
 ## Initialize a service
 
-Start with a clean Git checkout, Python 3.11+, Git and the pinned Rust toolchain.
-Fetch the dependencies in the committed lockfile while connected. The initializer
-runs `cargo metadata --offline` in a staged copy so Cargo can prune the projected
-lockfile. It checks each remaining package's name, version, source and checksum
-against the template lock, allowing the renamed local service package. It then
-formats the staged Rust code and runs the OpenAPI generator with
-`--locked --offline` before changing the checkout. Missing tools or dependencies and
-unsupported source shapes stop initialization before target writes.
+Start with a clean Git checkout, Python 3.11+, Git, the pinned Rust toolchain,
+and fetched lockfile dependencies (`cargo fetch --locked`). The initializer
+prunes `Cargo.lock` offline via `cargo metadata --offline`, verifies every
+remaining package's name, version, source, and checksum against the template
+lock, formats the staged Rust code, and regenerates OpenAPI with
+`--locked --offline` before mutating the checkout.
 
 ```sh
 cargo fetch --locked
@@ -34,10 +34,19 @@ make template-init \
   OUTBOUND_HTTP=none \
   OUTBOUND_AUTH=none \
   GRPC=none \
+  HTTP_IDEMPOTENCY=none \
+  JOBS=none \
+  MESSAGING=none \
+  OUTBOX=none \
+  WEBHOOKS=none \
+  INBOUND_WEBHOOKS=none \
+  CACHE=none \
+  OBJECT_STORAGE=none \
+  SERVICE_AUTH=none \
   AGENT_HARNESS=claude
 ```
 
-The direct entry accepts the same values:
+The direct entry accepts the same values in kebab-case:
 
 ```sh
 scripts/init-module.sh --repo . \
@@ -45,405 +54,212 @@ scripts/init-module.sh --repo . \
   --repository https://github.com/example/catalog-api \
   --description 'Catalog API' \
   --codeowner @example/platform \
-  --database none --authn none --outbound-http none --outbound-auth none --agent-harness claude
+  --database none --authn none --outbound-http none --outbound-auth none \
+  --grpc none --http-idempotency none --jobs none --messaging none \
+  --outbox none --webhooks none --inbound-webhooks none --cache none \
+  --object-storage none --service-auth none --agent-harness claude
 ```
 
-The four identity values are required. `DATABASE` defaults to `none` and accepts
-`none` or `postgres`. `AGENT_HARNESS` defaults to `all` and accepts `core`,
-`codex`, `claude`, `qwen`, `cursor`, `grok`, `opencode`, or `all`. Every combination is
-supported. `core` keeps canonical instructions without a product adapter;
-`all` keeps the six existing adapters. PostgreSQL remains disabled at runtime
-until configured when its pack is retained.
+The four identity values are required (`SERVICE_NAME` Cargo-safe and not a Rust
+keyword, `REPOSITORY` plain HTTPS GitHub owner/repo URL, `CODEOWNER` `@user` or
+`@org/team`, single-line `DESCRIPTION` up to 256 characters; invalid, duplicate,
+or conflicting inputs refuse before writing). `DATABASE` defaults to `none`
+(`none` | `postgres`). `AGENT_HARNESS` defaults to `all` (`core` for canonical
+instructions only, `codex`, `claude`, `qwen`, `cursor`, `grok`, `opencode`, or
+`all`).
 
 <!-- template:begin authn:docs-template-init-authn -->
-`AUTHN` defaults to `none` and accepts `none`, `oidc-jwt`, or `oidc-introspection`; exactly one whole-file engine may be retained. The direct entry takes the same choice as `--authn`. `none` removes all authentication configuration, code, tests, dependencies, and adopter guidance. An initialized authentication profile still defaults to runtime `authn.mode = "none"`; a protected route contract requires a complete valid trust tuple before startup.
-The introspection profile retains its complete optional positive-cache configuration and implementation, disabled by default. JWT-only and no-auth outputs remove that cache path along with introspection; selecting the profile does not enable caching at runtime.
+`AUTHN` (`--authn`) defaults to `none` (`none` | `oidc-jwt` | `oidc-introspection`); at most one engine is retained, defaulting at runtime to `authn.mode = "none"`. `oidc-introspection` retains its optional disabled-by-default positive cache; `oidc-jwt` and `none` prune it.
 <!-- template:end authn:docs-template-init-authn -->
 <!-- template:begin outbound-http:docs-template-init-outbound -->
-`OUTBOUND_HTTP` defaults to `none` and accepts `none` or `bounded`; the direct
-entry takes `--outbound-http`. `bounded` retains the
-[decision record](decisions/outbound-http-decisions.md), crate, tests, and shared TLS
-fixtures independently of authentication. `none` removes that pack. The readonly
-request budget stays when auth or outbound needs it. The retained client uses a
-trusted operator-selected HTTPS origin and normal system resolution; selection
-supplies no provider configuration or automatic request.
+`OUTBOUND_HTTP` (`--outbound-http`) defaults to `none` (`none` | `bounded`); `bounded` retains the [decision record](decisions/outbound-http-decisions.md), crate, tests, and shared TLS fixtures.
 <!-- template:end outbound-http:docs-template-init-outbound -->
 <!-- template:begin outbound-auth:docs-template-init-outbound-auth -->
-`OUTBOUND_AUTH` defaults to `none` and accepts `none` or
-`oauth2-client-credentials`; the direct entry takes `--outbound-auth`.
-Selecting OAuth2 retains its [decision record](decisions/outbound-machine-authentication-decisions.md), provider
-crate, configuration, tests, and bounded outbound HTTP prerequisite. It
-persists the effective `OUTBOUND_HTTP=bounded` choice even when its input was
-`none`. `none` removes the complete profile. Selection creates no provider,
-token call, task, listener, or readiness dependency.
+`OUTBOUND_AUTH` (`--outbound-auth`) defaults to `none` (`none` | `oauth2-client-credentials`); selecting it retains its [decision record](decisions/outbound-machine-authentication-decisions.md), crate, tests, and persists `OUTBOUND_HTTP=bounded` even when passed as `none`.
 <!-- template:end outbound-auth:docs-template-init-outbound-auth -->
 <!-- template:begin grpc:docs-template-init-grpc -->
-`GRPC` defaults to `none` and accepts `none` or `enabled`; the direct entry takes
-`--grpc`. It retains the native transport, committed schemas and generated
-contracts, the generation tool, configuration and the example. Selection starts no listener or client. Old locks lacking
-`grpc` normalize to `none`; exact replay records and preserves the selection.
-`none` removes exclusive surfaces while shared HTTP failure and retained
-prost/TLS ownership survive. The concrete OAuth bridge remains only when both
-profiles are selected.
+`GRPC` (`--grpc`) defaults to `none` (`none` | `enabled`) and retains the native transport, schemas/contracts, codegen tool, and example (without starting a listener/client). `none` prunes exclusive surfaces while retaining shared HTTP/TLS ownership; the OAuth bridge stays only when both profiles are selected.
 <!-- template:end grpc:docs-template-init-grpc -->
 <!-- template:begin http-idempotency:docs-template-init-http-idempotency -->
-`HTTP_IDEMPOTENCY` defaults to `none` and accepts `none` or `postgres`; the
-direct entry takes `--http-idempotency`. `postgres` retains the
-record-store crate, the
-profile migration, and tests, and requires `DATABASE=postgres` and an
-authentication engine (`AUTHN=oidc-jwt` or `oidc-introspection`); an
-unsupported combination or an unknown value is refused before any target
-write, naming the unmet requirement. `none` removes the pack. Selection
-supplies no retention value or automatic request; the boundary stays inert
-until an operation opts in and the runtime retention is configured.
+`HTTP_IDEMPOTENCY` (`--http-idempotency`) defaults to `none` (`none` | `postgres`); `postgres` requires `DATABASE=postgres` and an `AUTHN` engine, retaining the store crate, migration, and tests (inert until an operation opts in and retention is configured).
 <!-- template:end http-idempotency:docs-template-init-http-idempotency -->
 <!-- template:begin jobs:docs-template-init-jobs -->
-`JOBS` defaults to `none` and accepts `none` or `postgres`; the direct entry
-takes `--jobs`. `postgres` retains the
-`infra-jobs` and `jobs-worker` crates, the `jobs` configuration section, the
-migration, the jobs tests and the test-only fixture binary, the `/jobs-worker`
-image entrypoint. It requires `DATABASE=postgres`
-and combines with every `AUTHN`, `OUTBOUND_HTTP`, and `HTTP_IDEMPOTENCY`
-choice; `JOBS=postgres` without that database is refused before any target
-write with `JOBS=postgres requires DATABASE=postgres`, and an unknown value
-with `JOBS is unsupported`. `none` removes the pack. `JOBS` is a common
-environment variable name (for example a parallelism setting): an ambient
-value such as `JOBS=8` makes `make template-init` refuse with
-`JOBS is unsupported`, so it must be unset or a valid choice. Selection
-starts no worker; `/jobs-worker` runs only where it is deployed.
+`JOBS` (`--jobs`) defaults to `none` (`none` | `postgres`); `postgres` requires `DATABASE=postgres` and retains `infra-jobs`, `jobs-worker`, config, migration, tests, and `/jobs-worker`. Because `JOBS` is a common shell variable (e.g. `JOBS=8`), unset non-profile ambient `JOBS` values before running `make template-init`.
 <!-- template:end jobs:docs-template-init-jobs -->
 <!-- template:begin messaging:docs-template-init-messaging -->
-`MESSAGING` defaults to `none` and accepts `none` or `nats-jetstream`; the
-direct entry takes `--messaging`. `nats-jetstream` retains the typed event and
-adapter crates, the existing worker where needed, configuration, NATS proof,
-digest-pinned Compose input, and CI ownership. It is independently valid with `DATABASE=none`
-and `JOBS=none`. Selection starts no client or worker; a configured deployment
-supplies the operator-created topology. `none` removes the complete messaging
-closure. The separate `OUTBOX` selection defaults to `none` and accepts `none`
-or `postgres`; the direct entry takes `--outbox`. `OUTBOX=postgres` requires
-`DATABASE=postgres`, `JOBS=postgres`, and `MESSAGING=nats-jetstream`. An incomplete
-selection refuses before any target write.
+`MESSAGING` (`--messaging`) defaults to `none` (`none` | `nats-jetstream`, valid with `DATABASE=none` and `JOBS=none`), retaining typed events, adapter, Compose NATS, and CI gates. `OUTBOX` (`--outbox`) defaults to `none` (`none` | `postgres`) and requires `DATABASE=postgres`, `JOBS=postgres`, and `MESSAGING=nats-jetstream`.
 <!-- template:end messaging:docs-template-init-messaging -->
 <!-- template:begin cache:docs-template-init-cache -->
-`CACHE` defaults to `none` and accepts `none` or `redis`; the direct entry
-takes `--cache`. `redis` retains the `infra-cache` crate, the `[cache]`
-section, the digest-pinned Compose Valkey service, and the integration proof. It does not require PostgreSQL or jobs. Selection
-starts no client; a configured DSN does. `none` removes that closure.
+`CACHE` (`--cache`) defaults to `none` (`none` | `redis`, independent of PostgreSQL/jobs), retaining `infra-cache`, `[cache]`, and Compose Valkey proof.
 <!-- template:end cache:docs-template-init-cache -->
 <!-- template:begin object-storage:docs-template-init-object-storage -->
-`OBJECT_STORAGE` defaults to `none` and accepts `none` or `s3`; the direct
-entry takes `--object-storage`. `s3` retains the `infra-object-storage` crate,
-the `[object_storage]` section, the digest-pinned Compose versitygw service,
-and the emulator and live-provider proofs. It does not require PostgreSQL or jobs. Selection
-creates no client; a configured provider does, without a request. `none`
-removes that closure.
+`OBJECT_STORAGE` (`--object-storage`) defaults to `none` (`none` | `s3`, independent of PostgreSQL/jobs), retaining `infra-object-storage`, `[object_storage]`, and Compose versitygw / conformance proofs.
 <!-- template:end object-storage:docs-template-init-object-storage -->
 <!-- template:begin service-auth:docs-template-init-service-auth -->
-`SERVICE_AUTH` defaults to `none` and accepts `none` or `jwt`; the direct entry
-takes `--service-auth`. `jwt` requires `GRPC=enabled` and retains the
-`infra-serviceauth` crate, the `[service_auth]` section, gRPC caller admission
-and the outbound token binding, and their tests. Selection verifies and signs nothing until
-`service_auth.mode = "jwt"`. `none` removes that closure.
+`SERVICE_AUTH` (`--service-auth`) defaults to `none` (`none` | `jwt`); `jwt` requires `GRPC=enabled` and retains `infra-serviceauth`, `[service_auth]`, gRPC admission, and client binding (inert until `service_auth.mode = "jwt"`).
 <!-- template:end service-auth:docs-template-init-service-auth -->
 
-
-Service names are lowercase ASCII, start with a letter, use single hyphens
-between letters or digits, end in a letter or digit, and have at most 64
-characters. Existing package/binary names and Rust reserved identifiers cannot
-be used. Repository URLs are HTTPS GitHub owner/repository URLs with no extra
-components, credentials, query, fragment or trailing slash. A code owner is
-one `@user` or `@org/team` token. Descriptions are nonempty single-line text of
-at most 256 Unicode characters without controls. Quotes and punctuation are
-data. Duplicate or conflicting inputs and unknown choices refuse.
-
-Initialization renames the service package and main executable while retaining
-the `crates/service` directory, library name and `openapi` auxiliary executable.
-It updates the repository identity, local commands/image, runtime identity,
-OpenAPI annotations and generated document. It physically removes unselected
-packs and source-only validation fixtures. The initializer itself remains
-local for one-shot replay.
-
-Review the resulting diff and commit it using the normal contribution process.
-No initializer command stages, commits, resets, stashes or cleans files.
-
-Initialization lets Cargo prune `Cargo.lock`. Once the manifests are projected,
-`cargo metadata --offline` drops the packages no retained member reaches and
-keeps every other locked version, source and checksum. The initializer then
-refuses a lock that gained any package the template lock does not pin, other
-than the renamed service package, so a manifest the lock does not satisfy stops
-initialization before the target changes. The initializer as a whole also
-preserves local patches and publish settings.
-
-This replaced a hand-written lock projector, last retained in
-[PR #250](https://github.com/Dankosik/rust-service-template-rest/pull/250), which
-needed a hard-coded dependency edge for each feature a profile enables. On
-2026-11-10 Cargo's result was byte-identical to the projector's on all 68
-runtime graphs of the initializer matrix, with a registry cache holding only
-what `cargo fetch --locked` downloads. Return to a hand-maintained projection
-only if Cargo's pruning changes a retained package identity on a supported
-graph.
-
-The initializer then drops every `[workspace.dependencies]` declaration that no
-retained member inherits, so a selection that removes the last consumer of a
-shared dependency still passes the service's `make unused-deps`. A declaration
-with a comment of its own belongs in a profile marker that removes both; the
-initializer refuses rather than leave that comment behind.
+Initialization renames the service package and main binary (keeping `crates/service/`, library name, and `openapi`), drops unselected packs, `source_only` files, and unused `[workspace.dependencies]` (refusing standalone comments outside profile markers), and leaves `init-module.sh` for one-shot replay. Review and commit the diff yourself; the initializer never stages or commits. Cargo lock pruning via `cargo metadata --offline` replaced the hand-maintained feature projector (byte-identical on all 68 runtime graphs on 2026-11-10); reopen a manual projector only if Cargo pruning changes a retained package on a supported graph.
 
 ## Initialization record and replay
 
-`template.lock` is the local, versioned JSON initialization record. It contains
-identity, selected packs, the admitted local source HEAD, explicit local-checkout
-provenance, and initialization state. It is service-owned and sync never edits
-it. A complete record means that initialization postconditions passed; it is
-not a build, test, CI or deployment receipt, current dependency inventory or
-runtime configuration. Cargo manifests/lockfile, retained source and typed
-configuration remain their current authorities.
+`template.lock` is the service-owned JSON initialization record (identity,
+profiles, admitted source HEAD/provenance, and state). It records initialization
+postconditions only — `Cargo.toml`, `Cargo.lock`, source, and typed config
+remain runtime/dependency truth. Sync never edits `template.lock`.
 
-Repeating the exact initialization values checks identity and profile structure
-and succeeds without rewriting ordinary service edits. A different selection,
-incomplete record, malformed record, or inconsistent structure refuses. Profile
-migration of an established service is outside this command's scope.
-New schema-1 records contain every current profile field, including unselected
-capabilities. `InitInputs.profiles()` in the [initializer](../scripts/lib/template_init.py)
-owns that emitted shape; `validate_profiles()` in the [lock reader](../scripts/lib/template_state.py)
-owns admitted current and historical shapes and their combination rules. Missing
-capability fields mean `none` only in an admitted historical shape. Matching
-historical replay preserves the original lock bytes; other partial or unknown
-shapes refuse.
+Repeating exact initialization values verifies identity and structure without
+touching ordinary service edits; changing profiles, partial/unknown shapes, or
+malformed records refuses (profile migration is out of scope).
+[The initializer](../scripts/lib/template_init.py) (`InitInputs.profiles()`)
+emits all current fields, while [the lock reader](../scripts/lib/template_state.py)
+(`validate_profiles()`) normalizes admitted historical locks to `none` while
+preserving original historical bytes on replay.
 
 <!-- template:begin messaging:docs-template-init-messaging-lock -->
-The lock records the selected `messaging` value. Historical records without it
-mean `none`; changing it after initialization is a refused profile migration.
+`template.lock` records `messaging` (historical locks default to `none`; changing it after initialization is refused).
 <!-- template:end messaging:docs-template-init-messaging-lock -->
 
 <!-- template:begin cache:docs-template-init-cache-lock -->
-The lock records the selected `cache` value. Historical records without it
-mean `none`; changing it after initialization is a refused profile migration.
+`template.lock` records `cache` (historical locks default to `none`; changing it after initialization is refused).
 <!-- template:end cache:docs-template-init-cache-lock -->
 
 <!-- template:begin object-storage:docs-template-init-object-storage-lock -->
-The lock records the selected `object_storage` value. Historical records
-without it mean `none`; changing it after initialization is a refused profile
-migration.
+`template.lock` records `object_storage` (historical locks default to `none`; changing it after initialization is refused).
 <!-- template:end object-storage:docs-template-init-object-storage-lock -->
 
 <!-- template:begin service-auth:docs-template-init-service-auth-lock -->
-The lock records the selected `service_auth` value. Historical records without
-it mean `none`; changing it after initialization is a refused profile
-migration.
+`template.lock` records `service_auth` (historical locks default to `none`; changing it after initialization is refused).
 <!-- template:end service-auth:docs-template-init-service-auth-lock -->
 
 <!-- template:begin authn:docs-template-init-authn-lock -->
-The lock records the selected `authn` value. Historical records without it
-mean `none`; they do not imply JWT support. Changing the choice after
-initialization is a refused profile migration.
+`template.lock` records `authn` (historical locks default to `none`, not JWT; changing it after initialization is refused).
 <!-- template:end authn:docs-template-init-authn-lock -->
 
 ## Adopt a committed source
 
-SOURCE and TARGET must be separate, nonoverlapping Git roots, addressed without
-symlink root spellings. The command reads SOURCE HEAD once, reports that object
-ID and uses its Git blobs throughout. It does not fetch or use uncommitted
-source bytes. Applicable source dirt refuses; unrelated source work is ignored.
-Check out the template's `green` branch as SOURCE: `main` can hold merges whose
-[post-merge proof](ci-cd-production-ready.md#red-main) is still running or red.
+SOURCE and TARGET must be separate, nonoverlapping Git roots (no symlink root
+spellings). Sync reads SOURCE `HEAD` Git blobs once (refusing applicable source
+dirt; ignoring unrelated work). Check out the template's `green` branch as
+SOURCE: `main` can hold merges whose [post-merge proof](ci-cd-production-ready.md#red-main)
+is still running or red.
 
 ```sh
 scripts/template-sync.sh --check --from /path/to/template --repo /path/to/service
 scripts/template-sync.sh --apply --from /path/to/template --repo /path/to/service
 ```
 
-`--check` never writes the target. Exit `0` means selected parity, `1` means
-drift, and `2` means refusal or an operational failure. `--apply` admits the
-same complete plan, applies it, verifies it, and leaves changes uncommitted.
-Commit the adopted diff before checking parity again: dirty owned paths refuse
-even if their bytes already match the source. An already-current clean target
-is a no-op.
-
-Use `--instructions-only` with either mode to adopt the portable bootstrap,
-workflow/harness documents, canonical skills/roles and selected adapter views.
-It leaves Makefiles, scripts, tool pins, the manifest, receipts and unselected
-adapter data untouched. Dirty unselected tooling and a legacy Makefile do not
-block this mode. Success means instruction parity only.
+`--check` is read-only (`0` parity, `1` drift, `2` refusal/failure). `--apply`
+applies, verifies, and leaves changes uncommitted; commit before re-checking
+(`dirty` owned paths refuse even if bytes match). `--instructions-only` syncs
+only bootstrap, workflow/harness docs, canonical skills/roles, and selected
+adapters without touching Makefiles, scripts, tool pins, or the manifest.
 
 ## Ownership and preservation
 
-Manifest files are replaced as whole files; directory entries end in `/` and
-own their descendants, including deletion of target-only owned content. Removing
-an entry from the source manifest relinquishes ownership of that target path.
-Standalone scripts are individual entries, so service siblings remain local.
-Profile-marked sections in portable owners are materialized by the committed
-source initializer's marker renderer using the target lock before purity checks,
-copying, and parity comparison. The manifest still owns each complete output
-file, so a dirty portable Makefile or CI helper refuses full sync. When projection is needed, its source
-helper and profile-inventory dirt also refuses; the reported source revision remains
-the captured Git revision, not a hash of the selected output. Legacy locks use
-the same normalized selections as initialization. An already initialized source
-has no removable markers and must match the target's capability selections.
-Marker-free older or initialized sources need no one-shot initializer helper;
-they follow the same strict purity and copy path.
-Generated adapters are rendered by the committed source helpers. Full sync
-prunes only the declared paths of unselected adapters and cannot restore an
-absent database pack.
+Manifest files replace whole files; directory entries ending in `/` own all
+descendants (deleting target-only files). Removing a manifest entry relinquishes
+ownership. Standalone scripts are listed individually so service siblings stay
+local. Profile-marked sections in portable owners are rendered against
+`template.lock` before purity checks and parity comparison; an already
+initialized source must match the target's capability selections. Full sync
+regenerates selected adapters and prunes unselected adapter paths.
 
 <!-- template:begin authn:docs-template-init-authn-sync -->
-Portable sync never restores a pruned authentication engine, runtime configuration, or profile-marked adopter documentation; the target lock and profile policy remain authoritative.
+Sync never restores a pruned authentication profile; `template.lock` remains authoritative.
 <!-- template:end authn:docs-template-init-authn-sync -->
 <!-- template:begin outbound-http:docs-template-init-outbound-sync -->
-Portable sync cannot restore a pruned outbound pack, its shared test fixtures,
-or profile-marked guide and decision record. The target lock remains authoritative.
+Sync never restores a pruned outbound HTTP profile; `template.lock` remains authoritative.
 <!-- template:end outbound-http:docs-template-init-outbound-sync -->
 <!-- template:begin outbound-auth:docs-template-init-outbound-auth-sync -->
-Portable sync cannot restore a pruned OAuth2 machine-authentication profile,
-its configuration, provider crate, or profile-marked guide, service-to-service
-mandate, and decision record. The target lock remains authoritative.
+Sync never restores a pruned OAuth2 outbound-auth profile; `template.lock` remains authoritative.
 <!-- template:end outbound-auth:docs-template-init-outbound-auth-sync -->
 <!-- template:begin http-idempotency:docs-template-init-http-idempotency-sync -->
-Portable sync cannot restore a pruned idempotency pack, its schema
-migration, configuration section, or profile-marked guide. The target lock
-remains authoritative.
+Sync never restores a pruned HTTP idempotency profile; `template.lock` remains authoritative.
 <!-- template:end http-idempotency:docs-template-init-http-idempotency-sync -->
 <!-- template:begin jobs:docs-template-init-jobs-sync -->
-Portable sync cannot restore a pruned jobs pack, its migration, its
-configuration section, or its guide. The target lock remains authoritative.
+Sync never restores a pruned background jobs profile; `template.lock` remains authoritative.
 <!-- template:end jobs:docs-template-init-jobs-sync -->
 
+Application/Cargo sources, config, secrets, OpenAPI, migrations, README,
+CODEOWNERS, `template.lock`, CI activation, `.railway/`, and local policy docs
+remain service-owned; runtime changes (`Cargo.toml`, `vendor/`, `Dockerfile`)
+require service-owned adoption. Keep local Make rules in `make/service.mk` and
+standard targets in `make/template.mk`; full sync refuses unsplit root Make
+recipes, unsafe extension syntax, or standard-target overrides (parsed as data,
+never executed).
 
-Application/Cargo sources, configuration, secrets, OpenAPI, migrations, README,
-CODEOWNERS, initialization provenance, CI activation and local architecture,
-validation and deployment policy, `.railway/` included, stay service-owned.
-Cargo/toolchain, vendor patches and Docker inputs outside `template-owned.paths`
-need service-owned adoption and review; successful portable sync does not
-upgrade the runtime.
-Put local Make data and nonstandard recipes in `make/service.mk`; standard targets belong to
-`make/template.mk`. Full sync refuses unsplit root Make recipes, unsafe service
-extension syntax and standard-target overrides. It parses this structure as
-data and never executes target Makefiles or hooks.
-
-Portable validation scripts source optional service-owned hooks, so a service
-adds processes, schemas and paths without editing template-owned files. Each
-hook only adds to the caller's variables; the portable owner keeps fixtures,
-custody and cleanup. An absent file keeps the template behavior.
+Portable validation scripts source optional service-owned hooks (append-only to
+caller variables; portable owners keep custody and cleanup):
 
 | Hook | Sourced by | Defines |
 | --- | --- | --- |
 | `scripts/ci/service-changed-surfaces.sh` | `changed-surfaces.sh` | `service_changed_surfaces FILE`, which calls `mark` for service paths |
-| `scripts/ci/service-database.sh` | `migration-history-check.sh`, `sqlx-prepare.sh`, `test-integration-db.sh`, `migration-validate.sh` | `service_migration_directories` (more append-only histories); `service_sqlx_init`/`service_sqlx_group` (independent SQLx groups); `service_db_before_tests`/`service_db_after_tests`; `service_migration_validate` (further rehearsals through `run_migrate NAME ENTRYPOINT`) |
-| `scripts/ci/service-runtime-image.sh` | `runtime-image-build.sh`, `runtime-image-check.sh` | `service_runtime_image_build_arguments` (for example a BuildKit `--secret`, resolved before any builder is reserved); `service_runtime_image_configure`/`service_runtime_image_observe` for `RUNTIME_IMAGE_ROLE` lifecycle checks |
-| `scripts/ci/service-runtime-binaries.json` | `runtime-image-inventory.py` | Additional image paths mapped to `{"crate", "source"}`; each needs its own auditable inventory |
+| `scripts/ci/service-database.sh` | `migration-history-check.sh`, `sqlx-prepare.sh`, `test-integration-db.sh`, `migration-validate.sh` | `service_migration_directories`; `service_sqlx_init`/`service_sqlx_group`; `service_db_before_tests`/`service_db_after_tests`; `service_migration_validate` (`run_migrate NAME ENTRYPOINT`) |
+| `scripts/ci/service-runtime-image.sh` | `runtime-image-build.sh`, `runtime-image-check.sh` | `service_runtime_image_build_arguments`; `service_runtime_image_configure`/`service_runtime_image_observe` for `RUNTIME_IMAGE_ROLE` |
+| `scripts/ci/service-runtime-binaries.json` | `runtime-image-inventory.py` | Additional image paths mapped to `{"crate", "source"}` |
 
 `INTEGRATION_LINT_FEATURES += --features <crate>/integration` in
 `make/service.mk` adds lint coverage; `make lint-changed` applies each feature
 only when its crate is selected.
 
-To preserve an additional canonical skill, put an empty regular
-`.service-owned` file directly inside its real `.agents/skills/<name>/`
-directory beside a valid `SKILL.md`. Its name must not collide with a source
-skill. That entire skill tree, including local dirt, is preserved; selected
-Claude/Qwen discovery links are rendered from it. Malformed markers, unsafe
-links or colliding names refuse. Unmarked target-only skills remain owned
-drift and may be removed after normal dirty-path admission.
-
-Claude settings own only `env.CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH`; Qwen settings
-own only `model.maxSubagentDepth`. Sync replaces or inserts that JSON value
-while preserving all existing other bytes. Duplicate keys, non-finite values,
-invalid JSON, or nonobject roots/managed parents refuse. Settings values are
-never included in diagnostics. Codex project config remains an exact generated
-view; machine-specific settings live outside it.
+To preserve a local canonical skill under `.agents/skills/<name>/` (not colliding
+with source skills), place an empty regular `.service-owned` file beside a valid
+`SKILL.md`; sync preserves that tree and renders selected Claude/Qwen discovery
+links. Claude/Qwen settings sync only `env.CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH`
+and `model.maxSubagentDepth` lexically, preserving all other bytes and refusing
+duplicate keys or non-JSON/non-finite inputs. Codex project config remains an
+exact generated view.
 
 ## Refusal and recovery
 
-Both commands preflight all selected writes/removals, generated outputs, path
-types, parents and ownership before target mutation. Tracked/staged dirt or
-untracked/ignored overlap refuses, except valid service-owned skills and their
-canonical discovery links. Unrelated files are preserved. Unsafe manifest paths,
-symlink parents, ordinary symlinks, submodules, type collisions, missing local
-authorities, invalid projections and helper failures also refuse.
-
-Commands require exclusive access to their selected source/target paths while
-running. Admission is not filesystem transaction isolation from other writers.
-Deterministic refusal leaves target bytes and Git state unchanged.
-
-Unexpected I/O after writes start can leave command-produced changes. An
-interrupted initializer keeps an incomplete lock and never reports success;
-sync reports partial application. Inspect the diff and diagnostic. Recover
-initialization in a fresh clean template checkout, preserving the interrupted
-checkout for comparison; reconcile sync-produced changes explicitly. There is
-no automatic rollback, reset, retry or destructive resume.
+Commands preflight all target paths, types, links, locks, and helpers before
+any write. Any tracked/staged dirt or untracked overlap (except valid
+`.service-owned` skills), symlinks, submodules, or invalid projections refuse
+without modifying target bytes or Git state. Exclusive access during execution
+is required. If I/O fails mid-write, inspect the diff: recover failed
+initialization in a fresh clean checkout (keeping the interrupted one for
+comparison) or reconcile sync diffs manually; there is no automatic rollback.
 
 ## Design choices
 
-The initializer and sync are Bash entrypoints forwarding to Python 3.11+ standard
-library policy code over Git object plumbing; no Rust crate, renderer, templating
-language, Git library or network lookup is involved. Git supplies bytes and
-identity, Python the repository-specific safety policy. Copier and cargo-generate
-were rejected: neither removes the exact-manifest ownership, selective dirty
-refusal or one-shot physical-pruning gap, and a renderer would add state and
-hooks. `git archive` is rejected because export attributes can omit or
-substitute committed content. Whole-file JSON serialization is rejected for
-consumer settings because it changes unrelated bytes, which the small managed-leaf
-lexical edit avoids. `scripts/lib/template_profiles.json` is the closed source
-inventory, not executable configuration, and sync never adopts it. Reopen these
-choices if a maintained mechanism meets the same admission and preservation
-contract at lower lifecycle cost.
+Initializer and sync are Bash entrypoints over stdlib-only Python 3.11+ and Git
+plumbing (no third-party templating engine, Git library, or network lookup).
+Copier and `cargo-generate` were rejected for lacking exact-manifest ownership,
+selective dirty refusal, and one-shot physical pruning; `git archive` was
+rejected because export attributes can alter committed bytes; whole-file JSON
+serialization was rejected for consumer settings to preserve unrelated bytes.
+`scripts/lib/template_profiles.json` is source-only closed inventory, never
+adopted by sync. Reopen if a maintained tool meets this contract at lower cost.
 
 ## Validation boundary
 
 <!-- template:begin webhooks-common:docs-template-sync-webhooks -->
 ## Webhook profile projection
 
-`WEBHOOKS` accepts `none` or `durable`; `INBOUND_WEBHOOKS` accepts `none` or
-`standard-webhooks`, and both default to `none`. Each selected direction requires
-`DATABASE=postgres` and `JOBS=postgres`; outbound additionally requires
-`OUTBOUND_HTTP=bounded`. Invalid values or combinations refuse before target
-mutation. A retained capability remains runtime-inert until endpoints/bindings
-are configured.
-
-The lock records both choices. Historical locks infer them as `none` only through
-the existing compatible historical shapes; changing an established choice remains
-a refused profile migration. The initializer removes absent shared protocol,
-directional crate/dependency, docs, migration, route, test, and marker edges.
-Outbound-only removes ingress/receipt material; inbound-only does not retain
-outbound HTTP or DNS solely for webhooks. The worker's consumer registration
-remains only with inbound webhooks.
+`WEBHOOKS` (`--webhooks`, `none` | `durable`) and `INBOUND_WEBHOOKS`
+(`--inbound-webhooks`, `none` | `standard-webhooks`) default to `none`; both
+require `DATABASE=postgres` and `JOBS=postgres`, and outbound additionally
+requires `OUTBOUND_HTTP=bounded`. Retained capabilities are runtime-inert until
+configured. The lock records both choices (historical locks default to `none`,
+no post-init migration), and the initializer prunes unselected directional
+crates, migrations, routes, docs, and worker registrations.
 <!-- template:end webhooks-common:docs-template-sync-webhooks -->
 
-Use `make help` and the
-[validation router](validation-routing.md) for ordinary development.
-The source template additionally owns `make template-owned-purity-check` and
-`ALLOW_FULL=1 make template-init-check`. The canonical runtime inventory
-`scripts/ci/template-init-check.sh`,
-CI planner `scripts/ci/initializer-matrix.py`, and
-projection inventory `scripts/tests/template-profile-projections.py` own
-profile tuples, command scopes, partitions and coverage; this guide keeps no
-parallel coverage total.
+Use `make help` and the [validation router](validation-routing.md) for ordinary
+development. The source template additionally owns
+`make template-owned-purity-check` and `ALLOW_FULL=1 make template-init-check`
+(with `scripts/ci/template-init-check.sh`, `scripts/ci/initializer-matrix.py`,
+and `scripts/tests/template-profile-projections.py` as canonical runtime/matrix
+authorities).
 <!-- template:begin outbound-auth:docs-template-init-outbound-auth-proof -->
-OAuth representatives cover standalone, authenticated, messaging and full
-PostgreSQL neighboring packs. They compile retained production and test targets;
-only PostgreSQL selections request the integration-test feature. The workspace
-quality gate runs the OAuth behavior suite. These choices do not multiply the
-harness or database matrix.
+OAuth representatives cover standalone, authenticated, messaging, and full
+PostgreSQL neighboring packs without multiplying the harness/database matrix;
+only PostgreSQL selections enable the integration-test feature.
 <!-- template:end outbound-auth:docs-template-init-outbound-auth-proof -->
-Runtime representatives retain their public initializer, build/test or focused
-all-target checks and selected database proof. The canonical artifact tuples
-add the actual locked release/package/binary selection and an image with exactly
-the retained entrypoints. Workspace/debug or all-target compilation alone does
-not prove that release graph. Shared tuples reuse one build/image; their artifact
-steps add no database suite. Exact non-harness tree equality covers harness
-choices without repeating runtime proof.
-
-Quality, dependency, image and database gates retain their own scopes. Each CI
-part reuses its own absolute Cargo target; the planner owns grouping and selected
-commands. `make verify` leaves the initializer to CI unless `ALLOW_FULL=1`.
-A change to projected text alone runs `make template-init-projections`.
-
-`bash scripts/ci/template-init-check.sh --projections-only` runs the canonical
-projection checks without Cargo or full/heavy admission; these are not public-CLI
-initializations or builds. `--source-checks` keeps the source safety/purity/sync
-route. The public initializer always prunes and checks the staged lockfile,
-formats the code and generates OpenAPI before changing a target. These source runners
-are removed from generated services, so standard checks cannot recurse into them.
-
-Local results describe their fixed candidate and commands. They do not claim a
-remote CI run, publication or deployment. The service's
-[CI/CD policy](ci-cd-production-ready.md) remains the authority for release gates.
+`make template-init-projections` /
+`bash scripts/ci/template-init-check.sh --projections-only` run projection checks
+without Cargo builds; `--source-checks` keeps source safety/purity/sync checks.
+These source runners are stripped from generated services. Local results do not
+claim CI, publication, or deployment; [CI/CD policy](ci-cd-production-ready.md)
+remains release authority.

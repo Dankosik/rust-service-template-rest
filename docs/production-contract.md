@@ -39,8 +39,7 @@ readiness probe; every operation's deadline fits inside
   the health-only scaffold; reopen when the service retains those
   capabilities.
 - Surviving capacity after one failure-domain loss: Unresolved.
-- Comparable workload evidence: Unresolved (stage 11 adds the benchmark
-  harness).
+- Comparable workload evidence: Unresolved.
 - Source capacity with cold, expired or unavailable caches, including
   concurrent loaders, waiters, payload storage and application replicas:
   N/A for the health-only scaffold; reopen when cached state is adopted.
@@ -126,18 +125,23 @@ applicable runtime rules.
 - Metrics listener reachability: Unresolved. The shipped
   `observability.metrics.addr` binds IPv4 all-interfaces (`0.0.0.0`); deployment keeps it
   private.
-- Egress, identity, and authorization authorities: Unresolved. The template
-  ships no authentication and no outbound client; a retained authentication
-  profile supplies a global bearer default and explicit `security: []` marks a
-  public operation.
+- Egress, identity, and authorization authorities: Unresolved for the service's
+  domain. The template ships optional `infra-bearerauthn` (global bearer default
+  with explicit `security: []` for public operations), `infra-serviceauth`,
+  `infra-oauth2-client-credentials`, and `infra-outbound-http` profiles; each
+  derived service supplies its trusted issuers, audiences, callers, and egress
+  policies.
 
 ## Operation and recovery
 
-- SLI, SLO, and alert queries: Unresolved. Available signals: the HTTP
-  duration histogram by route template and status, `http_server_shed_requests_total`,
-  connection refusals, `readiness_checks_total` by outcome, process and Tokio
-  runtime metrics, and the JSON log records with trace and span ids.
-- Runbook and manual intervention paths: Unresolved.
+- SLI, SLO, and alert queries: Unresolved for service-specific thresholds.
+  [`env/monitoring/service.rules.yml`](../env/monitoring/service.rules.yml)
+  provides default multi-window burn-rate Prometheus rules and ticket alerts over
+  the emitted HTTP, gRPC, runtime, and worker metrics; each derived service tunes
+  job selectors, objectives, and route exclusions.
+- Runbook and manual intervention paths: Unresolved for service-owned data and
+  dependencies; [Alerting](alerting.md#runbooks) covers the shipped alert
+  runbooks.
 - Rollback authority and mixed-version window: Unresolved. A published
   image is rolled back by digest ([Railway Deployment Profile](railway-deployment-profile.md#rollback)).
 - Shutdown: the template exits `0` after a clean staged teardown, `3` when a

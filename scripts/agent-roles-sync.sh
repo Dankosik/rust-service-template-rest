@@ -144,27 +144,6 @@ validate_description() {
 	esac
 }
 
-is_grok_session_agent() {
-	case "$1" in
-	orchestrator.md | acceptance-unit-lead.md) return 0 ;;
-	*) return 1 ;;
-	esac
-}
-
-is_cursor_session_agent() {
-	case "$1" in
-	acceptance-unit-lead.md) return 0 ;;
-	*) return 1 ;;
-	esac
-}
-
-is_opencode_session_agent() {
-	case "$1" in
-	orchestrator.md | acceptance-unit-lead.md) return 0 ;;
-	*) return 1 ;;
-	esac
-}
-
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/agent-roles.XXXXXX")
 trap 'rm -rf -- "${tmp}"' EXIT
 mkdir -p "${tmp}/codex" "${tmp}/claude" "${tmp}/qwen" "${tmp}/grok" "${tmp}/grok-roles" "${tmp}/cursor" "${tmp}/opencode"
@@ -231,15 +210,17 @@ for source_file in "${sources}"/*.toml; do
 	*) fail "${source_file#"${repo}/"} has unsupported grok_effort ${grok_effort:-<empty>}" ;;
 	esac
 	case "${output_schema}" in
-	lane-result-v1) schema_line="" ;;
+	lane-result-v1)
+		schema_line="Return fields: conclusion, evidence (primary locator and result), uncertainty_or_conflict, disposition (accept | reject | repair | carry_as_proof_or_risk | reopen), destination."
+		;;
 	decision-result-v1)
-		schema_line=$'Return \x60docs/spec-first-workflow/interfaces/decision-result-v1.md\x60.'
+		schema_line="Return fields: disposition (decision | constraint_only | proof_only | no_new_decision_required | blocked), decision_or_constraint, forced_consequences, proof_or_gap, blocker, strongest_rejected_alternative, rejection_reason, reopen_owner_or_condition."
 		;;
 	review-result-v1)
 		schema_line=$'Return \x60docs/spec-first-workflow/interfaces/review-result-v1.md\x60.'
 		;;
 	delegated-result-v1)
-		schema_line=$'Return \x60docs/spec-first-workflow/interfaces/delegated-result-v1.md\x60.'
+		schema_line="Return fields: result, changed_paths, proof (omit for initial implementation; scoped results/gaps for repair or verification), candidate, gap."
 		;;
 	*) fail "${source_file#"${repo}/"} has unsupported output schema ${output_schema}" ;;
 	esac
@@ -343,6 +324,132 @@ done
 shopt -u nullglob
 ((${#role_names[@]} > 0)) || fail ".agents/roles contains no canonical role files"
 
+generate_session_agents() {
+	local lead_desc orch_desc claude_tools qwen_tools
+	lead_desc="Unit: Use when bound ACCEPTANCE_UNIT_LEAD for an implementation unit or final delivery validation. Own the assigned boundary; Skip sibling scheduling."
+	orch_desc="Ledger: Use when this session must route a ready persisted Implementation ledger as LEDGER_ORCHESTRATOR. Own routing; Skip unit work."
+	claude_tools="Read, Grep, Glob, Bash, Edit, Write, Agent, SendMessage, TaskOutput, TaskStop"
+	qwen_tools=$'  - read_file\n  - grep_search\n  - glob\n  - list_directory\n  - run_shell_command\n  - write_file\n  - edit\n  - agent\n  - list_agents\n  - send_message\n  - task_stop'
+
+	cat >"${tmp}/claude/acceptance-unit-lead.md" <<EOF
+---
+name: acceptance-unit-lead
+description: "${lead_desc}"
+tools: ${claude_tools}
+model: inherit
+effort: high
+---
+
+Load [Acceptance-Unit Lead](../../.agents/skills/acceptance-unit-lead/SKILL.md)
+and [Claude Code adapter](../../docs/agent-harness/claude-code.md).
+Apply the fixed unit packet and its named Method. Return
+\`docs/spec-first-workflow/interfaces/acceptance-result-v1.md\`.
+EOF
+
+	cat >"${tmp}/qwen/acceptance-unit-lead.md" <<EOF
+---
+name: acceptance-unit-lead
+description: "${lead_desc}"
+model: inherit
+tools:
+${qwen_tools}
+---
+
+Load [Acceptance-Unit Lead](../../.agents/skills/acceptance-unit-lead/SKILL.md)
+and [Qwen Code adapter](../../docs/agent-harness/qwen-code.md).
+Apply the fixed unit packet and its named Method. Return
+\`docs/spec-first-workflow/interfaces/acceptance-result-v1.md\`.
+EOF
+
+	cat >"${tmp}/cursor/acceptance-unit-lead.md" <<EOF
+---
+name: acceptance-unit-lead
+description: "${lead_desc}"
+model: grok-4.6[effort=xhigh]
+readonly: false
+---
+
+Load [Acceptance-Unit Lead](../../.agents/skills/acceptance-unit-lead/SKILL.md)
+and [Cursor adapter](../../docs/agent-harness/cursor.md).
+Apply the fixed unit packet and its named Method. Return
+\`docs/spec-first-workflow/interfaces/acceptance-result-v1.md\`.
+EOF
+
+	cat >"${tmp}/grok/acceptance-unit-lead.md" <<EOF
+---
+name: acceptance-unit-lead
+description: "${lead_desc}"
+agents_md: true
+permission_mode: bypassPermissions
+prompt_mode: full
+---
+
+Load [Acceptance-Unit Lead](../../.agents/skills/acceptance-unit-lead/SKILL.md)
+and [Grok Build adapter](../../docs/agent-harness/grok-build.md).
+Apply the fixed unit packet and its named Method. Return
+\`docs/spec-first-workflow/interfaces/acceptance-result-v1.md\`.
+EOF
+
+	cat >"${tmp}/grok/orchestrator.md" <<EOF
+---
+name: orchestrator
+description: "${orch_desc}"
+agents_md: true
+permission_mode: bypassPermissions
+prompt_mode: full
+---
+
+Load [Ledger Orchestrator](../../.agents/skills/orchestrator/SKILL.md)
+and [Grok Build adapter](../../docs/agent-harness/grok-build.md).
+EOF
+
+	cat >"${tmp}/opencode/acceptance-unit-lead.md" <<EOF
+---
+description: "${lead_desc}"
+mode: all
+model: xai/grok-4.6
+variant: xhigh
+permission:
+  task:
+    "*": deny
+    worker-agent: allow
+    specialist-agent: allow
+    evidence-agent: allow
+    reviewer-agent: allow
+    adjudicator-agent: allow
+  question: deny
+---
+
+Load [Acceptance-Unit Lead](../../.agents/skills/acceptance-unit-lead/SKILL.md)
+and [OpenCode adapter](../../docs/agent-harness/opencode.md).
+Apply the fixed unit packet and its named Method. Return
+\`docs/spec-first-workflow/interfaces/acceptance-result-v1.md\`.
+EOF
+
+	cat >"${tmp}/opencode/orchestrator.md" <<EOF
+---
+description: "${orch_desc}"
+mode: primary
+model: xai/grok-4.6
+variant: high
+permission:
+  task:
+    "*": deny
+    acceptance-unit-lead: allow
+    worker-agent: allow
+    specialist-agent: allow
+    evidence-agent: allow
+    reviewer-agent: allow
+    adjudicator-agent: allow
+---
+
+Load [Ledger Orchestrator](../../.agents/skills/orchestrator/SKILL.md)
+and [OpenCode adapter](../../docs/agent-harness/opencode.md).
+EOF
+}
+
+generate_session_agents
+
 set_generated_path() {
 	case "$1" in
 	codex) generated_target="${repo}/.codex/agents" ;;
@@ -364,18 +471,6 @@ check_extra() {
 	for file in "${target}"/*."${extension}"; do
 		role=${file##*/}
 		role=${role%."${extension}"}
-		if [[ "${harness}" == claude || "${harness}" == qwen ]] && [[ "${role}" == acceptance-unit-lead ]]; then
-			continue
-		fi
-		if [[ "${harness}" == grok ]] && is_grok_session_agent "${role}.${extension}"; then
-			continue
-		fi
-		if [[ "${harness}" == cursor ]] && is_cursor_session_agent "${role}.${extension}"; then
-			continue
-		fi
-		if [[ "${harness}" == opencode ]] && is_opencode_session_agent "${role}.${extension}"; then
-			continue
-		fi
 		[[ -f "${tmp}/${harness}/${role}.${extension}" ]] ||
 			fail "${file#"${repo}/"} has no canonical role source"
 	done
@@ -391,18 +486,6 @@ sync_generated() {
 	for file in "${target}"/*."${extension}"; do
 		role=${file##*/}
 		role=${role%."${extension}"}
-		if [[ "${harness}" == claude || "${harness}" == qwen ]] && [[ "${role}" == acceptance-unit-lead ]]; then
-			continue
-		fi
-		if [[ "${harness}" == grok ]] && is_grok_session_agent "${role}.${extension}"; then
-			continue
-		fi
-		if [[ "${harness}" == cursor ]] && is_cursor_session_agent "${role}.${extension}"; then
-			continue
-		fi
-		if [[ "${harness}" == opencode ]] && is_opencode_session_agent "${role}.${extension}"; then
-			continue
-		fi
 		[[ -f "${tmp}/${harness}/${role}.${extension}" ]] || rm -f -- "${file}"
 	done
 	for file in "${tmp}/${harness}"/*."${extension}"; do
@@ -412,19 +495,20 @@ sync_generated() {
 }
 
 check_generated() {
-	local harness="$1" extension="$2" target role actual expected
+	local harness="$1" extension="$2" target expected actual
 	check_extra "${harness}" "${extension}"
 	set_generated_path "${harness}"
 	target=${generated_target}
-	for role in "${role_names[@]}"; do
-		actual="${target}/${role}.${extension}"
-		expected="${tmp}/${harness}/${role}.${extension}"
+	shopt -s nullglob
+	for expected in "${tmp}/${harness}"/*."${extension}"; do
+		actual="${target}/${expected##*/}"
 		[[ -f "${actual}" ]] || fail "${actual#"${repo}/"} is missing"
 		if ! cmp -s "${expected}" "${actual}"; then
 			diff -u "${actual}" "${expected}" >&2 || true
 			fail "${actual#"${repo}/"} is stale; run scripts/agent-roles-sync.sh --apply"
 		fi
 	done
+	shopt -u nullglob
 }
 
 case "${mode}" in

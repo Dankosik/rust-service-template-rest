@@ -1,7 +1,7 @@
 # Cache decisions
 
 <!-- template:begin cache:docs-cache-decisions -->
-Stage 10.11 library decisions, recorded 2026-09-27 and extended through
+Library decisions, recorded 2026-09-27 and extended through
 2026-10-02. The owned supervisor and retryable password refresh replace the
 manager-replacement, detached warm-up, and streaming-credential decisions.
 `crates/infra-cache` owns adoption and observable behavior. This record retains
@@ -29,78 +29,6 @@ the accepted choices and their reopen conditions.
 | Histogram only, with `error_type` on failed series | Hit, miss, and error counts are the `_count` series of `cache_operation_duration_seconds`. Labels are the closed sets `cache`, `operation` (`get`, `set`, `delete`), and `outcome` (`hit`, `miss`, `ok`, `error`, `timeout`, `cancelled`); `error` and `timeout` series add `error_type` (`timeout`, `io`, `auth`, `response`, `parse`, `other`). Without it the cause existed only on the span and a debug event, so at the production log level a refused password and a network outage were the same `error`; OpenTelemetry's `db.client.operation.duration` carries `error.type` for the same reason. | At most six more series per namespace and operation, registered on first use. No parallel counters. Reopen a counter only if an operator question cannot be answered from the histogram. |
 
 Registry and maintenance evidence, fetched 2026-09-27: `redis` (redis-rs) 1.7.1, released 2026-09-25, BSD-3-Clause, MSRV 1.88, repository pushed 2026-09-25, ~26.6M recent downloads. `fred` 10.1.0, last release and last push 2025-02-27, 43 open issues. `deadpool-redis` 0.23.1, 2026-08-26, depending on `redis` ^1.6. `bb8-redis` 0.26.0, 2025-12-09, depending on `redis` ^1. `rustis` 0.26, 30k recent downloads. `valkey-glide` has no crates.io Rust API. `moka` 0.12.16 is already in the workspace. Valkey is BSD-3-Clause. Redis 8 is AGPLv3 / RSALv2 / SSPLv1. redis-rs MSRV 1.88 fits workspace Rust 1.100. These figures do not describe the resolved lock, which carries 1.8.1; the version-specific claims above were rechecked against the 1.8.1 source on 2026-11-10.
-
-## Resolved dependency graph
-
-Caller admission and driver capacity have separate lifetimes. An early
-cancellation releases the caller's admission slot while the existing
-supervisor keeps the driver reservation until the reply arrives or the
-generation retires. Otherwise a backpressured socket can leave the driver
-queue full of abandoned commands after their callers release admission.
-The supervisor keeps the reply receiver alive, so an already queued command
-can still reach the socket after its caller stops.
-The generation reserves one queue entry for maintenance and requires each
-application command and external probe to reserve one of the other entries
-before its first Redis poll. Waiting for that reservation is cancellable.
-Only a query that has entered the driver's queue can be polled again on drop
-to collect an already delivered reply or cause retirement. Recheck this
-guarantee if redis-rs adds a pre-enqueue wait or the number of producers
-changes.
-
-An external probe can wait up to its connected timeout for a reservation.
-After handoff it gets its full reply budget, as do maintenance PING and AUTH,
-so a late reservation cannot shorten the time owed to commands ahead of it.
-The caller's outer startup or readiness deadline still bounds the whole check.
-
-`infra-cache` retains redis 1.8.1 with `tokio-comp` and `tokio-rustls-comp`.
-The supervisor reuses the already declared and locked `backon` 1.6.0 (`std`),
-`tokio-util` (`rt`), and Tokio synchronization/macros. It uses the workspace's
-resolved `futures-util` (`alloc`) to poll abandoned replies without imposing
-one task per cancelled request or writing a readiness queue. Redis's own
-concurrency limiter releases its permit when the caller drops its future, so
-it cannot account for a queued request after cancellation.
-
-`socket2` 0.6.5 remains a direct edge because redis does not re-export
-`TcpKeepalive`, which sets keepalive retries. `xxhash-rust` uses BSL-1.0
-(Boost Software License, OSI approved), allowed by `deny.toml` within the
-cache marker. `CACHE=none` projects away the cache's packages and edges.
-
-## Supported extension points
-
-A later accepted rate-limit or lock capability can add its provider operation
-beside `get`, `set`, and `delete`, sharing bounded connections and observation.
-Feature behavior remains provider-free; composition or a service adapter calls
-`infra-cache` and translates feature-defined requests and results. No raw
-connection or generic cache interface is exposed to a feature. These additional
-capabilities are not in this profile.
-[Cache bootstrap](../../crates/service/src/bootstrap/cache.rs) uses
-`cache.probe()` for the bounded startup check. A service that requires the
-cache can register the probe for readiness. Sentinel, Cluster, and pools stay
-closed without an accepted topology or command requirement.
-
-## Ownership and proving surfaces
-
-`infra-cache` owns admission, namespace operations, the probe and sanitized
-observation. Its private `connection.rs` owns the supervisor, generation
-fencing, independent recovery and final-owner cancellation; `credentials.rs`
-owns password-file admission and bounded reads. `service-config` owns the
-`[cache]` section. Bootstrap owns construction, the bounded startup check,
-optional readiness registration and shutdown drop. Features own keys,
-serialization, TTL, invalidation and fallback; composition/adapters invoke the
-provider and translate their results. HTTP handlers own status projection.
-
-The proving surfaces remain crate unit/protocol tests, Compose Valkey tests,
-crate doctests, and service process tests. Admission/TLS, namespace, metrics,
-round-trip and expiry coverage remains applicable. Reliability coverage must
-discriminate a silent established peer, no replay of timed-out writes,
-retirement of unanswered probes and commands abandoned after their ceiling,
-late errors from old generations,
-final-owner cancellation and legitimate retained handles, rejected unchanged
-password retry, and sanitized rendered dependency logs. Public long command
-timeouts are part of resource accounting; service validation alone is not an
-assumption for direct callers. Service tests retain the degrading startup and
-existing teardown boundary. Final validation reports what actually ran; this
-decision record does not certify those results.
 
 The Go sibling template rejected a generic cache
 (`specs/redis-valkey-cache-capability`). This template adopts that ceiling

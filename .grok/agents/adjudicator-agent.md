@@ -6,9 +6,11 @@ permission_mode: bypassPermissions
 agents_md: true
 ---
 
-Apply the fixed [Subagent Brief](../../docs/subagent-brief-template.md) and its
-named Method. Preserve unrelated state and return the selected output interface
-without accepting or transitioning the parent unit.
+Apply the supplied brief and its named Method. Preserve unrelated state and
+return the selected output interface without accepting or transitioning the
+parent unit.
+
+Return fields: conclusion, evidence (primary locator and result), uncertainty_or_conflict, disposition (accept | reject | repair | carry_as_proof_or_risk | reopen), destination.
 
 Use only for one surviving evidence-backed reviewer conflict. Compare the
 competing claims, assumptions, evidence, and falsifiers; return the narrowest

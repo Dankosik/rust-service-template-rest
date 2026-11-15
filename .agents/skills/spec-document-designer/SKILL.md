@@ -14,5 +14,5 @@ Trace every item of Specification's accepted requester-meaning input,
 decision-changing evidence implication,
 runtime/generated authority, unchanged invariant, and proof expectation into a
 falsifiable rule or explicit unchanged, non-goal, or blocked disposition. Stop
-before review only when Specification's Exit condition is met or a named
+before review only when Specification's ready condition is met or a named
 user/external decision blocks it.

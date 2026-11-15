@@ -5,11 +5,10 @@ boundary.
 
 Move only when the current owner is `ready`, every triggered decision has a
 disposition, required review permits movement, and the next owner can act
-without inventing product meaning, mechanism, ownership, or authority. Choosing
-tests during Implementation is normal executor work, not an upstream gap.
+without inventing product meaning, mechanism, ownership, or authority.
 An untriggered phase may be `skipped` without loading or reviewing it. Ordinary
 inline movement needs no receipt; a durable macro-phase boundary returns
-[Transition Result V1](../interfaces/transition-result-v1.md).
+[Transition Result V1](#transition-result-v1).
 
 Carry only the current result, authoritative locators, movement evidence,
 candidate identity when relevant, proof boundary, exact blocker/next action,
@@ -110,3 +109,19 @@ through [Decision Ownership](../../../AGENTS.md#decision-ownership). If required
 evidence or native capability remains unavailable after authorized recovery,
 report the exact limitation and incomplete claim; do not invent success or ask
 the user to choose a technical mechanism.
+
+## Transition Result V1
+
+Return one durable macro-phase receipt:
+
+```text
+status: ready | blocked | skipped
+owner: <phase>
+result: <artifact path or inline result>
+review: <Review Result V1 locator or inline result; none for blocked/skipped>
+movement_evidence: <why the next owner may act, or none>
+reopen_owner: <owner or none>
+next_owner: <owner or none>
+```
+
+Use no receipt for ordinary inline movement.

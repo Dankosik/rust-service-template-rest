@@ -1,683 +1,273 @@
 # CI/CD Production Readiness
 
-What the pipeline proves about a candidate, in the order a change meets it,
-and the decisions behind each gate with the alternatives they beat
-([recorded at the end](#decisions-recorded-here)).
+What the pipeline proves about a candidate, the decisions behind each gate
+([recorded below](#decisions-recorded-here)), and the runbooks for red `main`
+and failed runs.
 
 ## Local leaves
 
-Ordinary local completion is a matching build and relevant tests under
-[AGENTS.md](../AGENTS.md#validation-budget); [Validation Routing](validation-routing.md)
-selects anything beyond that. `make verify` runs the surface-aware route's
-local steps and records a receipt, leaving the heavy steps and the initializer
-matrix to CI; `ALLOW_FULL=1 make check` is the explicit full gate. Local
-completion does not assert platform admission, runtime behavior, or a
-release; an explicit request for green CI or a release retains that outcome
-until the real result exists.
+[AGENTS.md](../AGENTS.md#validation-budget) owns ordinary local completion;
+[Validation Routing](validation-routing.md) owns `make plan` / `make verify`
+and explicit verification leaves. Local completion never proves platform
+admission, runtime behavior, or a release.
 
-## Pull-request and push CI
+## Pipeline contract
 
-[ci.yml](../.github/workflows/ci.yml) classifies the exact diff once
-(`scripts/ci/changed-surfaces.sh`, the classifier `make verify` uses; a pull
-request that changes the classifier is judged by both the base and the head
-version) and starts only the jobs its surfaces select. A pull request runs the
-gate, every job below except `image`, `runtime-progress`, `jobs-reliability`
-and the `initializer` parts; those run after merge, on `main`, with CodeQL's
-Rust analysis ([Red main](#red-main)):
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml),
+[`.github/workflows/cd.yml`](../.github/workflows/cd.yml),
+[`.github/workflows/codeql.yml`](../.github/workflows/codeql.yml),
+[`scripts/ci/changed-surfaces.sh`](../scripts/ci/changed-surfaces.sh),
+[`deny.toml`](../deny.toml), and [`make/template.mk`](../make/template.mk) own
+job names, triggers, tool pins, and gate definitions. Cross-file policies:
 
-| Job | Selected by | Proves |
-| --- | --- | --- |
-| `quality` | Rust source, manifests, lint config, OpenAPI, instructions, duplication, architecture | format; on pull requests clippy and tests of affected crates and dependents, on `main` and manifest changes the workspace; cargo-shear; Redocly and contract drift; oasdiff against the base; skills; clone admission and declared crate directions; checker self-test (over `make lint`'s artifacts) and source-only checker projections |
-| `quality-profiles` | Rust source, manifests | the native transport regressions (manifests) and the optional profiling configurations, over `quality`'s restored cache |
-| `quality-validation` | validation system | the classifier, affected-crate planner, validation-lock and `make verify` self-tests |
-| `security` | manifests, `deny.toml`, workflows; tool manifest and image on pull requests | cargo-deny (advisories, licenses, bans, sources); Dependency Review, fail on high, pull requests only; zizmor with the online audits |
-| `secrets` | every event except a schedule without a policy change | Gitleaks over the commits since the base; complete `HEAD` ancestry on tags, manual runs, selected schedules, and a push without a readable base |
-| `delivery` | shell, Python, workflows, tool manifest, image, publication metadata | actionlint; ShellCheck over the changed scripts; ruff over the Python scripts; `tools-check`; BuildKit Dockerfile checks; the publication metadata self-test |
-| `image` | Docker/image sources, the root `Cargo.toml` (release profile and workspace dependencies), and any selected profile image path | one local-default image: build, hardened lifecycle asserting `app.commit`, and Trivy for image changes; retained profile details below |
-| `docs` | Markdown, documentation, image-input policy/checker and Docker context controls | Railway watch forms agree and cover admitted image inputs; every relative link and `#fragment` resolves (lychee, offline, pinned container); no Rust toolchain |
-| `monitoring-rules` | rule files, their fixtures, the runner, tool pins and the shared routing owners | `promtool check rules` over every `env/monitoring/*.rules.yml` and `promtool test rules` over its `scripts/tests/<name>-rules.yml`; a rule file without fixtures fails |
+- **Merge admission:** Configure GitHub Rulesets to require `required`
+  (`ci.yml`) and `codeql-required` (`codeql.yml`) without the strict up-to-date
+  rule. Both accept intentionally skipped surface gates (docs-only PRs run no
+  Rust jobs); conflicting merges fail post-merge via [Red main](#red-main).
+- **PR vs post-merge:** PRs run surface-selected gates (`post_merge=false`);
+  `initializer`, `image`, `runtime-progress`, `jobs-reliability`, and CodeQL
+  Rust run post-merge on `main`. Schedules, tags, and `workflow_dispatch` select
+  every surface.
+- **Prerequisites:** Enable Dependabot alerts in derived repos so Dependency
+  Review has a graph. GHCR publication (`cd.yml`) requires
+  `ENABLE_GHCR_PUBLISH == 'true'`; release tags must equal `v<crate version>`.
+- **Source initializer:** `initializer_runtime` runs `make template-init-check`
+  planned by
+  [`scripts/ci/initializer-matrix.py`](../scripts/ci/initializer-matrix.py)
+  from [`scripts/ci/template-init-check.sh`](../scripts/ci/template-init-check.sh),
+  and `image-derived` checks release artifact graphs; projected docs alone run
+  only `initializer (projections)`. Derived services strip `make/source.mk` and
+  source-only runners.
+
+### Profile-conditioned gates
+
 <!-- template:begin grpc:docs-ci-grpc-gates -->
-| `grpc` | schema, generated contracts, generator, Buf configuration | Buf format/lint, one generation compared with committed output, and FILE compatibility against the exact base when applicable |
+- **gRPC:** `grpc` checks Buf lint/format, codegen drift, and PR-base `FILE`
+  compatibility; `security` checks `tools/grpc-codegen/Cargo.toml` against
+  `deny.toml` on `cargo_dependencies` or `dependency_policy`.
 <!-- template:end grpc:docs-ci-grpc-gates -->
-| `required` | always | fails when any job failed or was cancelled; requires terminal success for a selected initializer matrix |
-
-The `monitoring_rules` surface selects the `monitoring-rules` job and the same
-`make monitoring-rules` command in `make verify`. The runner extracts only
-`promtool` from [Prometheus 3.5.5's official release](https://github.com/prometheus/prometheus/releases/tag/v3.5.5),
-checks the archive against the release SHA256 pinned in `tools/versions.env`
-on every use, and keeps its cache in this checkout's `target/monitoring-tools`.
-No Prometheus server or global install is needed.
-
-The `quality-profiles` job runs the selected native SQLx, NATS, Smithy and Hyper
-regressions serially. The native helper records each package's source,
-manifest, lock, normal/build graph, selected test names and nonzero count
-before execution, then uses its locked standalone manifest and the production
-feature selection. This is separate from the workspace lock used by adapter
-and integration proof; a removed profile removes its optional native source and selected entry.
-Hyper remains unconditional because telemetry retains the client.
-
 <!-- template:begin postgres:docs-ci-postgres-gates -->
-With PostgreSQL retained, `quality` also checks migration history, lints the
-added migrations with Squawk (`SQUAWK_CLI_VERSION`, through `npx` as Redocly
-is), and checks the embedded source rules. The `integration (db)` leg runs the real database proof on provider, migrator,
-migration, DB-test, Compose or DB-script changes, and then `make sqlx-check`:
-`.sqlx/` must equal what the checked statements produce against a database
-holding exactly the embedded migrations. `sqlx-cli` has no release binaries, so
-the job builds the pinned version once and caches it by version. A migration change selects the image
-rehearsal in place of plain lifecycle: `/migrate` against a fresh database,
-`no_change` replay, then lifecycle with the pool open.
+- **PostgreSQL:** `quality` checks forward-only migrations, Squawk lint on
+  added files, and embedded rules; `integration` runs `test-integration-db` and
+  `make sqlx-check`; `image` runs the `/migrate` rehearsal on migration edits.
 <!-- template:end postgres:docs-ci-postgres-gates -->
-
 <!-- template:begin messaging:docs-ci-messaging-gates -->
-With JetStream retained, `messaging_integration` selects one real-NATS suite
-and the actual Go compatibility bridge when adapter, profile, Compose, or
-bridge inputs change. It has a messaging-only representative with no PostgreSQL
-or jobs and a combined representative only when another retained profile needs
-it. CI also checks locked offline Cargo metadata after initialization, the
-resolved NATS image digest, and dependency policy. These are selected surfaces,
-not a Cartesian multiplication of every profile, database, and harness.
+- **Messaging:** `messaging_integration` runs the Compose NATS suite and
+  `make messaging-go-compat`; `messaging-recovery` is `workflow_dispatch`-only.
 <!-- template:end messaging:docs-ci-messaging-gates -->
 <!-- template:begin cache:docs-ci-cache-gates -->
-With the cache profile retained, the `cache_integration` surface runs
-`make test-integration-cache` against Compose Valkey in the integration job.
+- **Cache:** `cache_integration` runs `make test-integration-cache` against
+  Compose Valkey.
 <!-- template:end cache:docs-ci-cache-gates -->
 <!-- template:begin object-storage:docs-ci-object-storage-gates -->
-With the object storage profile retained, the `object_storage_integration`
-surface runs `make test-integration-object-storage` against Compose versitygw
-in the integration job. No CI job writes to a live provider bucket.
+- **Object storage:** `object_storage_integration` runs
+  `make test-integration-object-storage` against Compose `versitygw` (never live
+  buckets).
 <!-- template:end object-storage:docs-ci-object-storage-gates -->
 <!-- template:begin outbox:docs-ci-outbox-gates -->
-With the outbox profile retained, the database-and-NATS integration selection
-covers transactional commit/rollback, live-key same/conflict/lost outcomes,
-outage snooze/recovery, uncertain completion, durable consumer effect dedupe,
-and publication despite occupied webhook slots. The initializer retains
-meaningful outbox-only and combined representatives and verifies the initialized
-locked graph with `cargo metadata --locked --offline`. These checks join the
-assembled candidate's final CI route; a documentation change does not create a
-separate acceptance gate.
+- **Outbox:** Database-and-NATS integration covers commit/rollback, live-key
+  conflicts, outage snooze/recovery, uncertain completion, durable consumer
+  dedupe, and occupied-webhook isolation.
 <!-- template:end outbox:docs-ci-outbox-gates -->
-
-The source template additionally selects the initializer matrix on
-`initializer_runtime`, the paths that can change an initialized service's
-build and tests or the initializer itself. Parallel parts together run
-`make template-init-check`, and `scripts/ci/initializer-matrix.py` plans them
-from the same diff: a changed crate, migration, test, or proto path selects
-only the runtime graphs whose profile tuple keeps it (the initializer's own
-removal inventory decides), and any other initializer path selects all. The
-Cargo-free `initializer (projections)` job checks the canonical profile/harness
-projections on every `module_initializer` change. The runtime inventory
-`scripts/ci/template-init-check.sh`,
-planner `scripts/ci/initializer-matrix.py` and
-projection inventory `scripts/tests/template-profile-projections.py` own the
-exact tuples, part assignments and commands, rather than hand-maintained totals
-in this guide. Baseline full checks and focused all-target/profile checks retain
-their scopes; representative capability additions do not repeat full database
-suites across every neighboring profile or harness. Every runtime graph also
-runs the initialized service's `make unused-deps`.
-
-The selected artifact tuples also build each retained executable with the
-Dockerfile's locked release/package/binary/default-feature selection and check
-its image entrypoints and Rust inventories, one `image-derived` job per leg of
-tuples that `scripts/ci/initializer-matrix.py` groups within a cache family.
-They reuse a tuple's artifact and add no database scenario. Debug/workspace or
-all-target checks alone cannot establish those selected release graphs. Each
-part reuses one absolute Cargo target and records its selected tuple, command,
-result and duration.
-
-In the source template the database surface also selects the
-`jobs-reliability` job, `make jobs-reliability-reference`: the exact-commit
-jobs recovery and initialized-service upgrade reference on its own Compose
-PostgreSQL and NATS ([test/README.md](../test/README.md)), beside
-`integration` rather than after its suites.
-
 <!-- template:begin outbound-auth:docs-ci-outbound-auth-gates -->
-OAuth representatives cover standalone, authenticated, messaging and maximal
-PostgreSQL neighbors. Retained test targets compile once per graph; database-free
-graphs do not request the removed integration-test feature. The workspace quality
-gate runs the OAuth behavior suite. The `oauth_integration` surface runs
-`make test-integration-oauth` in its own `oauth-integration` job against the
-script's digest-pinned throwaway Keycloak, independently of Compose integration.
+- **Outbound auth:** `oauth_integration` runs `make test-integration-oauth`
+  against a digest-pinned throwaway Keycloak container.
 <!-- template:end outbound-auth:docs-ci-outbound-auth-gates -->
-
-A change to projected text alone selects `module_initializer` without the
-runtime surface and runs only the `initializer (projections)` job.
-Other quality, security, image and database jobs keep their own gates. The
-source-only runner and Make include are removed from derived services, so
-initializer proof cannot recur there. [Initialization validation](template-sync.md#validation-boundary)
-defines the proof scopes and focused mode.
-
-A weekly schedule and manual dispatch select every surface, because advisory
-databases move without a commit. Tags select every surface too. A docs-only
-pull request runs `changes`, `docs`, `secrets`, and `required` and no Rust job,
-plus `initializer (projections)` when it touches projected documentation
-(historical upstream evidence: [#11](https://github.com/Dankosik/rust-service-template-rest/pull/11)
-before the `docs` job existed; it adds a link check, not a toolchain).
-Every action is pinned by commit SHA with its version beside it; tool
-versions come from `tools/versions.env` through `GITHUB_ENV` and
-`taiki-e/install-action`.
-
-A pull request or merge-group run sets `post_merge=false`, and `required`
-accepts the post-merge jobs as skipped; a push, tag, schedule or manual run
-selects them by surface as before. A push to `main` replaces the run still
-pending in its concurrency group, so one run can prove several merges; its
-`changes` job therefore classifies the diff from the `green` branch, the last
-commit `ci` and CodeQL both proved, and falls back to the previous push when
-`green` is missing or not an ancestor. The `initializer` and `image-derived`
-matrices run four and two at a time, so a `main` run leaves about six of the
-account's twenty runners to pull-request gates.
-
-Cargo caches go through `Swatinem/rust-cache`: keyed by the toolchain, every
-manifest and lockfile, and the `CARGO_*`/`RUST*` environment, and saved only by
-a push to `main` after a successful job. Every job that uses them installs the
-pinned toolchain through [`.github/actions/rust-toolchain`](../.github/actions/rust-toolchain/action.yml),
-which removes every other one: the action hashes all installed toolchains, so
-the runner image's moving `stable` would otherwise change every key. The
-initializer parts share one cache per family, which only the family's saving
-part writes. The saved target keeps dependency
-artifacts alone; workspace crates and test binaries rebuild on every checkout
-anyway, and keeping them pushed the repository past its 10 GB cache budget, so
-caches evicted one another and most pull requests started cold. For the same
-budget the dependencies build without debuginfo (workspace crates keep line
-tables) and the archives are written at zstd level 12. The first save owns a
-key until the lockfile changes, so a save must hold everything its job can
-build: `quality` saves only after a workspace build, and each `integration`
-leg compiles every retained suite it owns before it saves. The `db` leg and the
-`services` leg (JetStream with its Go wire records, Valkey, versitygw) run side
-by side under their own cache keys: one after another they took 420 s and set
-the pull-request wall time (CI audit 2026-11-02).
-
-[codeql.yml](../.github/workflows/codeql.yml) runs CodeQL for Rust
-(`build-mode: none`) after merge when Rust source or manifests change, or the
-analysis itself, and for Actions on pull requests too when workflows change,
-with `security-events: write` scoped to the analyze jobs. On `main` it
-classifies the diff from `green`, as `ci` does. The Rust analysis covers shipped code: its
-[configuration](../.github/codeql/rust.yml) ignores the test crate, tools, test
-directories and vendored examples and benches, the `test` cfg is turned off,
-and the extractor's consistency and telemetry diagnostics are excluded; the
-vendored sources stay, because CodeQL's SQLx models reach the workspace's
-queries through them. It points the extractor's `cargo_target_dir` at a
-persistent target restored with the crate registry; like the CI caches, only a
-push to `main` writes it, after a successful analysis. `codeql-required`
-accepts skipped analyses and rejects failed ones.
-
-GitHub Rulesets or organization policy own merge admission: require
-`required` and `codeql-required`. The repository does not rewrite its own
-protection settings. Dependency Review needs the repository dependency graph
-(Dependabot alerts enabled), an operator step for a derived repository.
-
-## Readability gates
-
-The existing `quality` job and `make verify` invoke the same
-`duplication-check`, `architecture-check` and `quality-check-self-test` targets.
-The `duplication` classifier surface follows handwritten main-workspace Rust,
-`.jscpd.json`, its reviewed baseline and checker. `architecture` follows Cargo
-declarations, its policy/checker and component-boundary documentation. Manifests,
-lockfiles, toolchain, tool pins and shared integration select both. Their
-self-test requires the pinned toolchain and `npx`; a missing prerequisite fails.
-The existing `required` job consumes `quality` with unchanged failure semantics.
-
-jscpd 5.4.2, pinned in `tools/versions.env`, discovers exact substantial Rust
-clones. The Python wrapper validates its JSON coordinates and admits only the
-bounded service-owned cases in `quality/duplication-baseline.json`; dedicated
-test files are outside the scan. The checker never refreshes policy. The
-architecture checker applies `quality/architecture.json` to Cargo metadata declarations, including build,
-optional, alias and inactive-target edges. Clippy owns the nesting limit of six.
-
-In the source template `template-quality-projections` exercises both checker
-CLIs against four renamed profile graphs: minimal, all retained capabilities,
-and inbound-only/outbound-only webhook profiles. The two directional profiles
-also compile the retained webhook tests against the shared test recorder. It runs once per graph, separately from harness equality and runtime
-builds. Ordinary projected-documentation changes retain the Cargo-free
-projection job. Generic checkers and their self-test are portable sync owners;
-config, architecture classifications and clone admissions remain required local
-authorities and are never overwritten by sync.
-
-## Generated contracts
-
-The OpenAPI document is generated from the handlers and committed; the drift
-test in `make test` refuses a stale copy, Redocly lints it, and pull requests
-compare it with the base through oasdiff. Generated output is never edited by
-hand ([Generated Contracts](validation/generated.md)).
-
-## Secrets and dependencies
-
-`.gitleaks.toml` carries the default rules and documented fixture/build-output
-allowlists. `.gitleaksignore` excludes four exact commit-qualified findings
-for public historical NATS and Smithy fixtures, with provenance and SHA256
-hashes beside each group. Initialized services retain it because they inherit
-those commits; the exclusions do not cover new commits or worktree copies.
-There is no baseline report. `deny.toml` restricts the
-graph to the two Linux gnu targets and lists the one advisory ignore with its
-reopen condition. Duplicate crate versions are warnings, not failures.
-Dependabot updates Cargo dependencies, GitHub Actions in workflows and in the
-composite publication action, the Dockerfile `FROM` and Compose image digests,
-and the Railway SDK under `.railway`; the tool manifest and the vendored forks
-are bumped by hand, prompted by the weekly `dependency-drift` issue
-([Vendored forks](#vendored-forks)). Cargo applies the same 7-day cooldown to
-hand-run resolution through `registry.global-min-publish-age` in
-`.cargo/config.toml`.
-
-Candidate history admission scans `HEAD` and every reachable ancestor,
-including merged-parent ancestry, with native `--log-opts=HEAD`. The target
-refuses shallow or unavailable repository/`HEAD` state with exit 2 before
-scanning; CI keeps `fetch-depth: 0`. Unrelated fetched refs do not become inputs
-to immutable candidate admission. The separate explicit native `--all`
-repository audit uses the same rules, ignores and redaction
-([Security Validation](validation/security.md)).
 
 ## Vendored forks
 
-`vendor/<crate>` is a published crates.io archive with a narrow patch, applied
-through `[patch.crates-io]`; its `PATCHES.md` owns the provenance, the patch,
-its proof and the retirement condition. Dependabot does not update a path
-dependency and cargo-deny matches advisories only against registry sources, so
-neither sees a fork. `make dependency-drift`, run by the `security` job when
-the graph changes, fails when:
+`vendor/<crate>` holds a crates.io archive with a `[patch.crates-io]` patch;
+`PATCHES.md` owns provenance, proof, and retirement. Because Dependabot and
+`cargo-deny` skip path dependencies, `make dependency-drift` fails on registry
+bypasses, base-version OSV advisories, or a missing `Upstream reviewed:` line.
+Weekly `dependency-drift` (`--upstream`) opens one issue for post-cooldown
+upstream releases and outdated `tools/versions.env` pins (promtool tracks
+Prometheus 3.5 LTS).
 
-- `Cargo.lock` resolves a registry copy of a vendored crate, or lists an unused
-  patch: a dependent that requires a newer version silently bypasses the fork;
-- OSV lists an advisory for the fork's base version;
-- `PATCHES.md` has no `Upstream reviewed: <version>` line.
+When `dependency-drift` names a fork:
 
-The weekly `dependency-drift` workflow adds `--upstream` and files the report
-as the one open `dependency-drift` issue, closed when the report is clean. It
-names a fork whose upstream published a version, older than the Dependabot
-cooldown of 7 days, that is neither the base nor the reviewed version, and
-each `tools/versions.env` pin behind its upstream release (promtool follows
-the Prometheus 3.5 LTS line).
-
-For a fork the issue names:
-
-1. Read upstream's changelog and commits from the base to the new release:
-   whether it meets the retirement condition in `PATCHES.md`, and which
-   security and bug fixes it adds.
-2. Retirement met: remove the vendor directory, the `[patch.crates-io]` entry,
-   the workspace exclusion and every carrier the retirement section names
-   (Docker context, profile removal entries, classifier cases, native
-   regression targets) in one change, keeping the behavior proof at its
-   surviving owner.
-3. Still needed and the release carries fixes worth taking: rebase. Extract
-   the new archive after checking its registry checksum, reapply the patch,
-   update the base version and hashes in `PATCHES.md`, regenerate the
-   standalone lock, and rerun `make native-transport-regressions` and the
-   profile's integration proof.
-4. Still needed and nothing applies: set `Upstream reviewed:` to the release,
-   with one sentence on why.
-
-A security fix needed before upstream publishes it is backported as an exact
-upstream commit and recorded in `PATCHES.md`, which a rebase onto the release
-that carries it drops. For a tool pin, bump the line and its digests in a
-reviewed commit; `make tools-check` proves the shape.
-
-## Publication
-
-[cd.yml](../.github/workflows/cd.yml) has one job, gated by the repository
-variable `ENABLE_GHCR_PUBLISH == 'true'`. Main publication consumes a
-successful same-repository push run of `ci`, waits for the exact-SHA CodeQL
-run, and checks out that SHA; a `v*` tag waits for its own `ci` and CodeQL
-runs. The shared [publish-image action](../.github/actions/publish-image/action.yml):
-
-1. names the candidate (`scripts/ci/publish-image-metadata.sh`); a release
-   tag must equal `v<crate version>`;
-2. builds one run-scoped candidate for the exact commit and binds the local
-   image ID to the final BuildKit export;
-3. runs the hardened lifecycle check and Trivy scan against that ID;
-4. writes a CycloneDX SBOM for the same ID;
-5. pushes the run tag and checks that the registry manifest matches both the
-   digest reported by that push and the tested image;
-6. signs the digest keyless with cosign and attests provenance and SBOM;
-7. verifies the signature and both attestations back out of GHCR;
-8. records the digest, uploads the SBOM artifact;
-9. promotes `sha-<12>` + `main` or `v*` + `latest` sequentially from the
-   tested image ID and records each tag after its digest is confirmed.
-
-Public tags never move before verification. Consumers verify with
-`cosign verify --certificate-identity
-https://github.com/<owner>/<repo>/.github/workflows/cd.yml@refs/heads/main`
-(or `@refs/tags/v…`) and `gh attestation verify oci://<image>@<digest> --repo
-<owner>/<repo>`. Nothing is published by this template repository; stage 12
-exercises the path once.
+1. Check upstream changes from base against `PATCHES.md` retirement criteria
+   and fixes.
+2. **Retirement met:** Remove `vendor/<crate>`, `[patch.crates-io]`, workspace
+   exclusions, and profile/classifier/Docker references together, keeping the
+   behavior proof at its surviving owner.
+3. **Fixes worth taking:** Verify checksum, reapply patch, update `PATCHES.md`
+   and standalone lockfile, and rerun `make native-transport-regressions` and
+   the profile proof.
+4. **Nothing applies:** Update `Upstream reviewed: <version>` with a one-line
+   reason. Backport urgent security fixes as exact upstream commits in
+   `PATCHES.md`.
 
 ## Red main
 
-[main-health.yml](../.github/workflows/main-health.yml) runs when `ci` or
-CodeQL completes a push run on `main`. It reads the latest decided push run of
-each, re-runs a first failed attempt once to separate a flake, and on a second
-failure opens, or comments on, the one open issue labeled `main-red` with the
-failed jobs and the commits since `green`. When both workflows succeeded at the
-same commit, `green` fast-forwards there and the issue closes. CD publishes only
-after a successful `ci` push run, so a red `main` ships no image; template sync
-reads `green` ([Adopt a committed source](template-sync.md#adopt-a-committed-source)).
+[`.github/workflows/main-health.yml`](../.github/workflows/main-health.yml)
+runs when `ci` or `codeql` finishes on `main`. It checks the latest decided
+push runs of both workflows, reruns a first failure once, opens or updates the
+`main-red` issue on a second failure, and fast-forwards `green` (closing the
+issue) when both pass on the same commit. CD publishes only after a passing `ci`
+push run, and template sync reads `green`
+([Adopt a committed source](template-sync.md#adopt-a-committed-source)).
 
-Repair while the issue is open:
+While `main-red` is open:
 
-1. Name the failing commit. With several commits since `green`, push a branch
-   at a suspect commit and dispatch `ci` on it (`gh workflow run ci.yml --ref
-   <branch>`), which selects every surface; delete the branch afterwards.
-2. Fix forward: a pull request that makes the failed jobs pass, through the
-   same gate as any change. Reproduce a post-merge job with its `make` target
-   from the job's steps.
-3. When `main` is still red two hours after the issue opened, or two fix pull
-   requests failed, revert the failing commit through a pull request instead.
-   A revert of a migration that shipped in a `green` image is not a revert;
-   fix forward with a new migration.
+1. **Isolate:** With multiple commits since `green`, push a branch at a suspect
+   commit and run `gh workflow run ci.yml --ref <branch>` (selects every
+   surface); delete the branch afterwards.
+2. **Fix forward:** Merge a PR making the failed jobs pass, reproducing
+   post-merge jobs locally via their `make` targets.
+3. **Revert fallback:** If `main` stays red two hours after the issue opens, or
+   two fix PRs fail, revert via PR. Never revert a migration that shipped in a
+   `green` image; fix forward with a new migration.
 
-Other pull requests keep merging while `main` is red; the failed jobs of the
-next `main` run name any new breakage beside the open one.
+PRs keep merging while `main` is red; later runs report new failures on the open issue.
 
 ## Recovery
 
-- Failed CI changes no external state; each job's containers are removed by
-  the scripts' traps.
-- Before promotion, a failed publication leaves deployable tags untouched.
-  The build cache, run tag, signature and attestations may persist. During
-  promotion, earlier confirmed tags remain published. If a write or its
-  readback fails, the summary identifies the unconfirmed tag. Check its
-  registry digest before retrying.
-- Retain and verify the accepted immutable image digest for rollback, together
-  with compatible configuration. A mutable tag or rebuilt old commit is not that
-  retained artifact. Source deployment has its own [deployment custody](railway-deployment-profile.md#rollback).
-- Startup identity and readiness do not prove old SQL, data or payload compatibility;
-  the service owns its mixed-version window and [recovery admission](production-contract.md#operation-and-recovery).
+- **Failed CI:** Script traps remove ephemeral Compose/Docker containers; no
+  external state changes.
+- **Failed publication:** Before promotion, deployable tags (`sha-<12>`,
+  `main`, `v*`, `latest`) stay untouched, though caches, run tags, or
+  signatures may remain. During sequential promotion, check the job summary for
+  any unconfirmed tag and verify its registry digest before retrying.
+- **Rollback custody:** Retain and verify the accepted immutable digest (or
+  Railway deployment identity for [source deployments](railway-deployment-profile.md#rollback))
+  with compatible config; startup identity and readiness never prove
+  mixed-version SQL or payload compatibility
+  ([recovery admission](production-contract.md#operation-and-recovery)).
 
 ## Decisions Recorded Here
 
-Made in stages 4 and 5 with the research behind them (versions as read on
-2026-09-18; claims marked *verified* were executed on this workspace). A
-later change reopens one only with new evidence.
+Recorded with workspace measurements; reopen only with new evidence matching
+each reopen condition.
 
 ### Tool manifest
 
-| Decision | Alternative rejected | Why |
+| Decision | Rejected | Why |
 | --- | --- | --- |
-| `tools/versions.env`, `NAME=value` lines read by `make` (`include`), shell (`.`), and CI (`>> $GITHUB_ENV` after stripping comments) | `mise` with `mise.lock`; `cargo-run-bin`; a `tools/Cargo.toml` of tools as dependencies; `cargo-binstall` as a prerequisite | Cargo has no project-local tool table or checksum-verified binary distribution; a versions file needs no parser and no new prerequisite. `mise` reopens if the tool set outgrows Cargo + Go + Node + Docker |
-| Cargo tools built once per version with `cargo install --locked --root <git-common-dir>/tools/<crate>-<version>` as Make prerequisites; `taiki-e/install-action` (v2.88.0) in CI with `CI=true` resolving them from `PATH` | compiling in CI | the four tools cost about six minutes to compile (*verified*: cargo-shear 58 s, cargo-deny 121 s, zizmor 161 s), acceptable once per workstation, not per run |
-| `cargo-chef` and `cargo-auditable` as the upstream static (musl) release binaries, each archive checked against its release `.sha256` pinned per architecture; versions and digests are Dockerfile `ARG` defaults asserted equal to the manifest by `make tools-check` | `cargo install` in the builder; `cargo-binstall`; passing them as build arguments only | compiling both took 67 s of a 728 s cold build on a 4-vCPU host, and CI image builds start without a layer cache; binstall is one more tool whose fallbacks reach third-party builds and source compilation; Railway passes no build arguments |
-| Redocly through `npx`, oasdiff, Gitleaks, and actionlint through `go run <module>@v<version>` | binaries with checksum scripts | `npx` and the Go module checksum database already verify what they run; Go is a prerequisite for oasdiff anyway (`go run` of Gitleaks: 16 s cold, 1 s warm, *verified*) |
-| ruff through `uvx ruff@<version>` (`pipx run ruff==<version>` on CI runners) | a pip requirements file; a native binary download | one PyPI package at a pinned version, run per invocation like `npx`; `ruff.toml` selects defect rules only (syntax, undefined names, unused imports and variables, bugbear without `raise from` and `zip(strict=)`) and no formatter gate, because `make actionlint` turns pyflakes off and nothing else lints the scripts that decide what `make verify` and CI run |
-| ShellCheck, Trivy, and lychee as digest-pinned containers | native binaries | Haskell and Go binaries with no Cargo or Go module path; Docker is a prerequisite for image work |
-| Base images pinned once in the Dockerfile `FROM` lines, moved by Dependabot's `docker` ecosystem; the manifest does not repeat them | a manifest copy | one owner per pin; `make tools-check` asserts every `FROM` carries a digest and the rust tag equals the toolchain channel (*verified* that a drifted `ARG` default fails) |
-| The manifest is not Dependabot-managed; the weekly `dependency-drift` issue lists pins behind upstream | Renovate regex manager | deliberate bumps; a derived repository may add Renovate |
+| `tools/versions.env` (`NAME=value`) sourced by Make, shell, and CI | `mise`, `cargo-run-bin`, `tools/Cargo.toml`, `cargo-binstall` | Needs no parser; `mise` reopens if tools outgrow Cargo + Go + Node + Docker |
+| Cargo tools built once into `<git-common-dir>/tools` locally; `taiki-e/install-action` in CI | Compiling per CI run | Compiling all four took ~6 min (`cargo-shear` 58 s, `cargo-deny` 121 s, `zizmor` 161 s) |
+| SHA256-verified static `cargo-chef` and `cargo-auditable` in Dockerfile | `cargo install` in builder; `cargo-binstall` | Compiling cost 67 s of a 728 s cold 4-vCPU build; `make tools-check` enforces `ARG` parity |
+| Redocly via `npx`; `oasdiff`, Gitleaks, `actionlint` via `go run` | Per-binary checksum scripts | `npx`/Go checksum DB verify downloads; `make actionlint` disables host tools for parity |
+| `ruff` via `uvx` (`pipx run` in CI), defect rules only (`ruff.toml`) | `requirements.txt`; native binary; formatter | One pinned PyPI linter (`make actionlint` disables pyflakes) |
+| ShellCheck, Trivy, lychee as digest-pinned containers | Native binaries | No Cargo/Go module path; Docker is already required for image work |
+| Base digests in Dockerfile `FROM` (Dependabot); `tools/versions.env` bumped via `dependency-drift` | Duplicating digests in manifest; Renovate regex | One owner per pin; `make tools-check` verifies `FROM` digests and `rust:<channel>` parity |
 
 ### Gates
 
 | Gate | Decision | Rejected | Why |
 | --- | --- | --- | --- |
-| Advisories, licenses, bans, sources | `cargo-deny` 0.20.2; `[graph] targets` = the two Linux gnu triples; `allow-wildcard-paths = true`; `multiple-versions = "warn"`; no advisory ignores | `cargo-audit` (same database, no reachability analysis exists for Rust); `cargo-vet` (a template cannot ship audits) | without `targets`, macOS-only crates enter license decisions about the Linux binary (*verified*); path dependencies count as wildcards otherwise (*verified*); `base64`, `getrandom`, `hashbrown`, `syn`, `tower-http` resolve twice through upstream crates and are warnings |
-| Unused dependencies | `cargo-shear` 1.14.0, on the workspace and on every initializer runtime graph | `cargo-machete` (two false positives here: `humantime-serde` used through `#[serde(with)]`, `vergen-gitcl` in `build.rs`); `cargo-udeps` (nightly) | *verified*: cargo-shear found the unused `http` and `hyper` in `infra-http` with no false positive. The full workspace uses every declaration, so only an initialized graph shows one that a profile left without users: 55 of the 68 graphs failed `make unused-deps` before the initializer dropped those declarations (*verified*, 2026-10-20) |
-| Test adequacy | `cargo-mutants` 27.1.0 through `make mutants PKG=<crate>`, local only | a pull-request mutation gate; `mutagen` (nightly, unmaintained) | each mutant rebuilds and reruns the crate's tests: `infra-grpc`'s `router.rs` took 17 min for 71 mutants, and its 7 survivors named three untested rules: the cancelled-call status, the rejected-call drain limit, and the 16 KiB header limit (*verified*, 2026-10-27). A survivor is evidence for one missing assertion, which a reviewer judges, not a score a gate can hold; the run exits 2 when any survives |
-| Dependency metadata in the binary | `cargo auditable build` | plain `cargo build` | Trivy reports 178 Rust packages from the image's `/service` (`rustbinary`); without it the scan sees only Debian packages (*verified*) |
-| Vendored forks | `make dependency-drift` in the `security` job; `--upstream` weekly into one `dependency-drift` issue; OSV for advisories on the fork base | `cargo-deny` alone; failing pull requests on upstream releases | path dependencies have no registry source, so cargo-deny and Dependabot skip them (2026-10-26: async-nats 0.50.0 traced CONNECT credentials, fixed only on upstream `main`); an upstream release is a review prompt, not a defect in an unrelated pull request |
-| New vulnerable dependencies | `actions/dependency-review-action` v5, `fail-on-severity: high`, pull requests only | — | needs the repository dependency graph (Dependabot alerts enabled), which was off here and had to be enabled (*verified* by the first failing run) |
-| Secrets | Gitleaks 8.30.1 with range or complete candidate-ancestry admission; default rules and documented allowlists; four commit-qualified public-fixture fingerprints in `.gitleaksignore` | unrelated refs as candidate admission inputs; a baseline report or unqualified historical-fixture exclusions | native `HEAD` retains reachable ancestry; exact fingerprints cover only the reviewed historical findings; `gitleaks dir` ignores `.gitignore` and read 153 MB of `target/` without the allowlist (*verified*) |
-| Workflow syntax and security | actionlint 1.7.12 with host integrations off; zizmor 1.31.1 regular persona with `GH_TOKEN` for the online audits | — | zizmor found `cache-poisoning` on the original single-job workflow, fixed by restore-always/save-on-main (*verified*); its `dangerous-triggers` and `self-repository` findings on `cd.yml` are ignored inline with reasons (the job's `if` guards, and actionlint does not yet parse GitHub's `$/` form) |
-| Dockerfile lint | `docker buildx build --check`, and `# check=error=true` in the Dockerfile so a check violation fails every build, Railway's included | hadolint | BuildKit's linter is built in |
-| Static analysis | CodeQL for Rust (GA since CodeQL 2.23.3) and Actions, `build-mode: none`, advanced setup with `codeql-required`; Rust after merge (2026-10-22) | — | default setup was not configured, so the workflow does not conflict |
-| Image vulnerabilities and SBOM | Trivy 0.76.1 container: `--severity HIGH,CRITICAL --ignore-unfixed --exit-code 1`; CycloneDX SBOM from the same container over the pushed image | grype/syft (a second scanner); `cargo-cyclonedx` (describes the source graph, not the image); `aquasecurity/trivy-action` (a second Trivy pin) | 194 SBOM components on the scaffold image: 178 `pkg:cargo`, 14 `pkg:deb` (*verified*) |
-| Links | lychee 0.24.2 container, `--offline --include-fragments`, over `git ls-files '*.md'` | lychee via `cargo install` (no install-action manifest, compiles reqwest and tokio in CI); `lychee-action` (CI-only, second pin); `mlc` and `markdown-link-check` (fragment checking not documented); a template-owned script (a solved problem) | *verified*: reports `Cannot find fragment` and `File not found`; external URLs excluded on purpose so the gate cannot flake |
-| Test runner | `cargo-nextest` 0.9.148 for `make test`, `test-changed` and `test-package`, then `cargo test --doc` for the doctests nextest does not run; the database proof keeps `cargo test` | `cargo test` for every suite | *measured* (CI audit 2026-11-02): `cargo test` ran the workspace's 54 test binaries one after another for 127 s, the longest 41 s; nextest runs them at once |
+| Policy (`deny.toml`) | `cargo-deny` over Linux gnu targets, `allow-wildcard-paths = true`, `multiple-versions = "warn"`, zero advisory ignores | `cargo-audit`; `cargo-vet` | Excludes macOS-only crates; path deps need `allow-wildcard-paths` |
+| Unused deps | `cargo-shear` on workspace and initializer graphs | `cargo-machete`; `cargo-udeps` | Catches orphaned deps in profile graphs (55/68 failed before pruning) |
+| Test adequacy | `cargo-mutants` local-only (`make mutants PKG=<crate>`) | PR mutation gate; `mutagen` | 71 mutants in `infra-grpc/router.rs` took 17 min; survivors guide assertions |
+| Binary inventory | `cargo auditable build` | Plain `cargo build` | Embeds 178 `pkg:cargo` crates for Trivy inside `/service` |
+| Vendored forks | `make dependency-drift` in `security`; weekly `--upstream` issue | `cargo-deny` alone; failing PRs | Path deps bypass `cargo-deny`/Dependabot; upstream releases prompt review |
+| Vulnerabilities | `actions/dependency-review-action` (`high`, PRs only) | — | Requires repository dependency graph (Dependabot alerts enabled) |
+| Secrets | Gitleaks over range (PR/push) or `HEAD` ancestry (tags, dispatch, schedule, shallow-refused); `.gitleaks.toml` + `.gitleaksignore` | `--all` as gate; baseline file | Keeps full ancestry without masking new commits or worktrees |
+| Workflows | `actionlint` (host tools off); `zizmor` (`GH_TOKEN`) | — | Catches cache poisoning and unsafe triggers; `cd.yml` keeps scoped inline ignores |
+| Dockerfile | `docker buildx build --check` + `# check=error=true` | `hadolint` | Built into BuildKit; `# check=error=true` fails Railway builds too |
+| Static analysis | CodeQL Rust (`build-mode: none`, shipped code via `.github/codeql/rust.yml`) post-merge; Actions on PRs | Default setup; analyzing tests | Excluding tests and `vendor/` examples cut analysis from ~15.5 to ~7 min while keeping SQLx models |
+| Image & SBOM | Trivy container (`HIGH,CRITICAL`, `--ignore-unfixed`) + CycloneDX SBOM | `grype`/`syft`; `cargo-cyclonedx`; `trivy-action` | One container checks CVEs and emits the 194-component SBOM |
+| Links | Offline `lychee` container (`--include-fragments`) | `cargo install` lychee; `lychee-action`; `mlc` | Offline fragment checks prevent network flakiness |
+| Test runner | `cargo-nextest` + `cargo test --doc`; `cargo test` for DB | Serial `cargo test` | Workspace `cargo test` ran 54 binaries serially in 127 s vs parallel `nextest` |
+| Runtime progress | `make runtime-progress-proof` post-merge (100 ms / 100 ms 1-CPU cgroup v2 quota, `worker_threads=1`, 90%+ occupancy + `cpu.stat` throttling + uncooperative negative control) | Unthrottled host test | Forces cheap unary traffic, uploads, stdout backpressure, and CPU load onto one worker so starvation cannot hide behind spare host cores |
 
-### Routing
+### Routing and pipeline invariants
 
-| Decision | Alternative rejected | Why |
+| Decision | Rejected | Why |
 | --- | --- | --- |
-| Ported `changed-surfaces.sh` and `git-changed-paths.sh`, fail-closed, `--union BASE`, self-tests | `dorny/paths-filter`, `tj-actions/changed-files` | no action classifies fail-closed, reports unclassified paths, unions the base classifier, and runs unchanged under `make verify` |
-| `affected-crates.sh` over `cargo tree --locked --workspace -i <pkg> -e normal,build,dev` | a hand-maintained dependency map | the dev edge reselects a dependent's tests (*verified*: `health` → `infra-http`, `service`); a manifest, lockfile, or toolchain change and a closure at 80% of the workspace fall back to the workspace because feature unification can change an untouched crate |
-| One `changes` job feeding conditional jobs and an always-reported `required`; `quality` installs the toolchain only when a Rust surface is selected | one job with conditional steps | a docs-only pull request runs no Rust job |
-| `ALLOW_FULL` guards `make check` only; `ALLOW_HEAVY` guards the image targets, the database proof, the migration rehearsal, and the history scan; `CI=true` satisfies both | guarding `lint` and `test` too | `make build`, `make test`, and `make lint` are the ordinary commands AGENTS.md names |
+| Fail-closed `changed-surfaces.sh` (`--union BASE`) + `affected-crates.sh` (`cargo tree -i`, 80% workspace fallback) | `dorny/paths-filter`; manual crate map | Shared classifier drives CI and `make verify`; manifest/toolchain edits fall back to workspace |
+| `ALLOW_FULL=1` guards `make check` and `make template-init-check`; `ALLOW_HEAVY=1` guards heavy targets (`make/template.mk`, `make/source.mk`) | Guarding `lint` and `test` | Keeps ordinary `make build`/`test`/`lint` unguarded while blocking accidental heavy runs |
+| Short gates (`quality-profiles`, `quality-validation`, `security`, `delivery`, `docs`, `grpc`, `monitoring-rules`, `oauth-integration`, `initializer (projections)`) need `[changes, secrets]` with `!cancelled()` | Depending on `changes` alone; merging short gates | With 20 runners (CodeQL holds 2), queuing long gates first avoids random-order stalls (~15 vs ~20 min simulated) |
+| `main` pushes diff from `green`; concurrency replaces pending `main` runs | Diffing from `before` only | Prevents replaced pending runs from dropping commits |
+| `Swatinem/rust-cache`: single toolchain via `.github/actions/rust-toolchain`, `save-if` on `main` after full build, `ZSTD_CLEVEL=12`, `[profile.dev]` line-tables-only + dep `debug = false` in `Cargo.toml` | Keeping runner `stable`; partial saves; runner Cargo config | `rust-cache` hashes all toolchains and path lists; first save owns a key until `Cargo.lock` changes, fitting the 10 GB budget |
+| `initializer` runs balanced `core`/`full` cache families (max 4 parts; `image-derived` max 2), unified `vendor/` mtimes, one `CARGO_TARGET_DIR` | Per-graph targets; unbounded matrix | Avoids rebuilding `[patch]` crates per clone and leaves ~6 runners for PRs |
+| `quality-profiles`, `quality-validation`, and `jobs-reliability` (no fat LTO) split into own jobs | Monolithic `quality` / `integration` | Removes non-artifact checks from critical path; readability self-test stays in `quality` for `make lint` artifacts |
+| `REPOSITORY_CI ?= none` mode in `make/service.mk` | Implicit CI mode | Gives CI-less Railway repos a complete `make verify` (`ci_mode: none`) receipt |
 
 <!-- template:begin postgres:docs-ci-postgres-routing -->
-`db_integration` selects database proof; `migrations` selects static history
-with the lint and the image rehearsal in place of the plain lifecycle check. Separate
-surfaces let a schema change require image rehearsal without rebuilding for
-every adapter-only change.
+`db_integration` selects real-DB and `sqlx-check` gates; `migrations` selects
+static history, Squawk lint, and `/migrate` rehearsal independently of
+adapter-only edits.
 <!-- template:end postgres:docs-ci-postgres-routing -->
 
-### Pipeline time
-
-Reopened on 2026-09-23 with CI evidence: after stage 9, pull-request runs took
-22–36 minutes and pushes to `main` up to 43, almost all of it the initializer
-job, while every other job finished within 8 minutes.
-
-| Decision | Alternative rejected | Why |
-| --- | --- | --- |
-| The initializer's staged OpenAPI build reuses an explicit absolute `CARGO_TARGET_DIR`, and `template-init-check.sh` exports its one cache to every initialization | a private target per initialization | about 22 initializations per run each compiled the locked graph cold, about 50 s apiece on the 4-vCPU runner, while each representative's build took 3–5 s and its tests 7–14 s on the warm cache; staged files are written fresh, so Cargo still rebuilds every workspace crate |
-| The initializer runs parts balanced on measured warm seconds per graph, in two cache families (`core` graphs retain no idempotency, jobs, messaging, outbox or webhooks; `full` graphs do); each family's cache is written only by its saving part, and only after that part ran all of its graphs (2026-10-20); six `full` and two `core` parts since 2026-10-21 (below) | eight parts with a cache each (to 2026-10-20); twelve parts with a cache each; one sequential job or full database proof for every cross-profile combination | the eight parts took 984–1,472 s on main run 39419885702 (23 graphs in `baseline`, near the 30-minute timeout) and their caches held 6.1 GB plus stale copies against the 10 GB budget; the 68 warm graphs total about 6,400 s, so twelve parts landed near ten minutes each; two family caches hold about 2.9 GB, and a restoring part pays about 30 s per heavy variant its family cache lacks. `required` reads one aggregate result; command-duration receipts expose changes to the critical path |
-| Each graph clone dates the vendored `[patch]` crates to the attempt's start (2026-10-20) | the clone's own timestamps | the vendored crates are path dependencies, fresh by timestamp: every clone made them and each dependent (axum, reqwest, tonic, sqlx, aws-sdk-s3, …) stale, so the lint, test and database steps of every graph rebuilt them. Their bytes are identical in every clone of an attempt and no profile renders them; rust-cache never stores their artifacts, and an artifact older than the attempt still rebuilds |
-| `initializer_runtime` selects the matrix; projected text alone runs the Cargo-free projections | the whole matrix for every projected path | 250 of the 355 tracked files `module_initializer` selects are documentation, instructions, harness carriers or metadata, which cannot change a build; the projections prove their markers and harness independence in about a minute instead of the matrix's three |
-| Workspace crates build with line tables (`[profile.dev] debug = "line-tables-only"` in `Cargo.toml`, which every target cache key hashes) | full debuginfo | the `quality` and initializer caches were 4.2 and 4.1 GB, 8.7 of the repository's 10 GB, so the integration, Go-tool and buildx caches were evicted and one restore took 50–126 s; line tables keep file:line in test backtraces |
-| `make verify` leaves heavy steps and the initializer matrix to CI and records a partial receipt | refusing to run without `ALLOW_HEAVY=1` or `ALLOW_FULL=1` | the refusal led agents to run the full matrix on a workstation, 40 minutes and more with several GB of temporary targets, while CI runs the same gates in parallel |
-| `REPOSITORY_CI ?= none` in `make/service.mk` makes `make verify` own every step: it admits the heavy guards for its commands, checks Rust as a push does, adds the range secret scan, profiling configurations, OpenAPI compatibility against the merge base, the generator's dependency policy, Go wire compatibility, the jobs reliability reference and the integration compile, names CodeQL, Dependency Review, publication, the scheduled history scan and messaging recovery with their residual, and records `ci_mode: none` with a complete status (2026-10-17) | leaving `REPOSITORY_CI` implicit, so a repository without CI keeps receiving `partially_verified` receipts that name an owner that never runs; running CodeQL locally (its CLI is not licensed for private repositories without GitHub Advanced Security) | a service that deploys from Railway without GitHub Actions needs one local route whose receipt means the same as a green CI run; the steps CI keeps inline stay duplicated in `ci.yml` until CI calls the new targets |
-| No registry-only cache restore in `security` and CodeQL | the restores that were there | a cache version includes its path list, so restoring fewer paths than `quality` saves never hit (the CodeQL run of 2026-09-23 reported "Cache not found"); the crate downloads cost seconds |
-| Dependencies build without debuginfo (`[profile.dev.package."*"] debug = false` in `Cargo.toml`), and caches are archived at `ZSTD_CLEVEL=12` | line tables for every crate at the default zstd level; zstd level 16 | after the cache pruning the caches still held 11.2 GB against the 10 GB budget (initializer 9.5 GB), so the BuildKit, CodeQL and `quality` caches kept being evicted; without dependency debuginfo and at level 16 the initializer caches measured 5.5 GB (*verified*, 2026-10-01), and a cold part builds faster, while a failing test still reports file:line for workspace frames. Level 16 cost each saving job 2–6 minutes; level 12 costs 35–85 s for archives about 6% larger, paid only by the push to `main` that first saves a key |
-| A cache is saved only by a run that built everything its job can build: `quality` after a workspace build, `integration` after compiling every retained suite | saving after any successful job | the first save owns the key. The push that merged the cache change ran only the validation steps and left a 104 MB `quality` cache, so every Rust pull request compiled the workspace cold (360 s against 100 s warm); a push that selected three of the four integration suites left the database proof compiling for 158–194 s against 72 s |
-| The canonical projections run in their own Cargo-free job on every `module_initializer` change | a second stage of the `source` part | the projections took 110–150 s after the 150–330 s source suites in one job; side by side the `source` part takes 190 s warm instead of 310 s |
-| The four validation self-tests run under `make -j4` | one after another | independent fixtures; 88 s became 48 s |
-| CodeQL Rust points the extractor's `cargo_target_dir` at a persistent target, cached with the registry under its own key | the default scratch directory per run | loading the workspace (crate downloads, build scripts, proc-macros, all features on) took about 60 s of a 7-minute analysis; codeql-action 4.38.1 offers neither dependency caching nor overlay analysis for Rust, and the queries (about 3 minutes) and database finalization (about 40 s) are fixed cost on a 4-vCPU runner |
-
-Reopened on 2026-10-20 with CI evidence: pull-request and `main` runs took
-32–35 minutes and about 250–270 runner-minutes against the account's twenty
-concurrent jobs. `image-derived` (1,873–2,020 s) and `integration`
-(1,786–1,935 s) set the critical path, every initializer part took 16–25
-minutes, and the caches held 10.6–11.9 GB against the 10 GB budget, so most
-Rust jobs started cold.
-
-| Decision | Alternative rejected | Why |
-| --- | --- | --- |
-| Every Rust job installs the pinned toolchain alone through one composite action | leaving the runner's `stable` installed; `add-rust-environment-hash-key: false` with hand-built keys | `Swatinem/rust-cache` 2.9.2 hashes every installed toolchain: the runner image that added `stable` 1.99.1 beside the pinned 1.99.0 moved every key (`9df4000f` to `75a985ba`), jobs on the old and new images missed each other's caches, and both generations crowded the budget. Hand-built keys would have to repeat the lockfile, manifest and environment hashing the action already owns |
-| One `image-derived` job per leg of release representatives, each restoring its initializer family's cache for the staged OpenAPI build; the two `core` representatives share a leg since 2026-10-21 (below) | the serial job | since every build gets its own validation-lock builder, the four representatives shared no BuildKit layer, so the serial job took the sum of their times (1,873–2,020 s) while the longest, graph 65, takes about 780 s alone. Each leg keeps its own receipt and upload; the aggregate is success only when every leg passed |
-| CI neither imports nor exports a BuildKit Actions cache for runtime images | exporting the cooked stage on pushes to `main` | the export cost 173 s per push and its blobs never survived the budget (only a 0-byte index remained); the image lane runs for image, manifest and lockfile changes, which change the cooked recipe anyway. Publication keeps its own export |
-| The jobs reliability reference runs as its own job (`make jobs-reliability-reference`), and its fixture builds keep the release optimization level without fat LTO | inside the database proof step, with the shipped profile | it added 925–1,100 s after the suite, 735–897 s of it three serial fat-LTO builds; no scenario bound depends on the profile, the receipt records fixture digests without comparing them, and the image jobs build the production profile |
-| `quality-profiles` runs the native transport and profiling checks over `quality`'s restored cache without saving it, and `quality-validation` the validation self-tests; the readability checks stay in `quality` | one job | the moved steps ran after lint, build and test: 908 s on a pull request and 1,227 s on `main`. The readability checker self-test reads the compiler artifacts `make lint` reported in the same job, so it cannot move. `required` demands each job its surfaces select |
-| The runtime-progress runner builds its specimen and driver in one release invocation | two serial invocations | the two single-threaded fat-LTO links ran one after the other before the measured window; an example and a test resolve the same dev-dependency features, so the specimen is unchanged |
-| CodeQL Rust analyzes shipped code only: `.github/codeql/rust.yml` ignores test-only paths and vendored examples and benches, the `test` cfg is off, and the consistency and telemetry diagnostic queries are excluded; the extractor cache key carries the CodeQL version and the vendored manifests | analyzing every tracked Rust file with the default diagnostics; ignoring `vendor/` | the analysis grew from about 7 to 15.5 minutes (928 s on main run 39419885745) after the vendored crates arrived: 706 files, 399 MiB of relations, and test-only code was about half of the lines. Ignoring the vendored sources would drop the SQLx sinks the workspace's queries resolve through; test code ships nowhere, and `#[cfg(not(test))]` items are analyzed now instead. A CLI pins its own extractor toolchain, so a cache built by another CLI version must not restore |
-
-Reopened on 2026-10-21 with CI evidence: the warm all-surface dispatch
-39464197796 took 20.8 minutes, while its longest job took 833 s. Its 32
-parallel jobs met 18 free runners (CodeQL held two of the account's twenty),
-and GitHub gave each freed runner to a queued job in no fixed order, neither
-the file's nor the job ids': `quality` started after 467 s and `image-derived
-(65)` after 455 s, so the run ended at 1,245 s.
-
-| Decision | Alternative rejected | Why |
-| --- | --- | --- |
-| The gates that take a few minutes (`quality-profiles`, `quality-validation`, `security`, `delivery`, `docs`, `grpc`, `monitoring-rules`, `oauth-integration` and `initializer (projections)`) also need `secrets`, the seconds-long gate every event runs, and run under `!cancelled()` | every gate needing only `changes`; one merged job for the short gates | with only the long gates and `secrets` queued at the start, every long gate gets a runner at once, and the short gates fit into the runners that `secrets` and CodeQL's Actions analysis free; a simulation of the run's measured durations under random runner order put the full run at 15.0 minutes against 19.8 for the old layout. A merged short-gate job would still leave 23 jobs for 18 runners. `required` demands each selected gate as before, and a short gate still runs when `secrets` fails |
-| Six `full` and two `core` runtime parts of about 14 minutes warm (at most about 19 cold), and one `image-derived` leg for graphs 1 and 7 | twelve parts of about ten minutes and one leg per representative | twelve parts, the source suites and four image legs were 17 long jobs beside `quality`, `image-source`, `runtime-progress`, `integration` and `jobs-reliability`, so no order could start them all; eight parts, the source suites and three legs fill the 18 free runners exactly with those five and `secrets`. In the same simulation one more long job would compete with the short gates for the first freed runners (p90 21 minutes). A part's fixed cost (about 70 s warm and 150 s cold for setup, cache restore and the first initialization) is paid eight times instead of twelve; graphs 1 and 7 take 380 and 489 s on the same cache family, so their leg stays near a part's length |
-
-Reopened on 2026-10-22: agents merge many small pull requests, and the full
-proof on each one held every merge for 18–20 minutes and about 220
-runner-minutes, then CodeQL's Rust analysis for about 12 more. A merge made
-every other open pull request `BEHIND` under the strict up-to-date rule, and
-each update reran the whole proof, so parallel work landed about three pull
-requests an hour. Of the 70 failed runs among the 200 from 2026-10-05 to
-2026-10-22, `quality` failed in 35 (17 alone) and `integration` in 11 (5
-alone); of the jobs that now run after merge only `initializer` ever failed
-alone, in 3.
-
-| Decision | Alternative rejected | Why |
-| --- | --- | --- |
-| The gate runs `changes`, `secrets`, `quality`, `quality-profiles`, `quality-validation`, `security`, `delivery`, `docs`, `grpc`, `monitoring-rules`, `integration`, `oauth-integration` and `initializer (projections)`; `initializer`, `image-source`, `image-derived`, `runtime-progress`, `jobs-reliability` and CodeQL Rust run after merge on `main` | the full proof on every pull request; a draft that defers the heavy jobs until ready for review | the gate is about as long as `quality` (6–8 minutes) and keeps the jobs that caught most defects or guard something a revert cannot undo (a leaked secret, a published contract, a database proof); the moved jobs found a defect alone 3 times in 200 runs. Drafts deferred the same jobs to the end of review, so the wait moved instead of shrinking |
-| A red `main` is repaired forward through `main-red`, with a revert after two hours or two failed fixes; merges continue | blocking merges while `main` is red; an automatic revert at the first failure; a merge queue | a merge freeze turns one red job into a stop for every agent; an automatic revert without a culprit search would also revert innocent commits in a batched run (Google's TAP reverts only after a culprit finder and a flake check). GitHub merge queues need an organization-owned repository, which the account declined |
-| `main-health` recomputes state from the latest decided runs on each completion and re-runs a first failure once | reacting to the single completed event | a push replaces the pending run, and the health job's own concurrency group replaces its pending event, so event order is not reliable; a state read makes any surviving event sufficient |
-| The ruleset requires `required` and `codeql-required` without the up-to-date rule (since 2026-10-22) | strict up-to-date branches | each merge made every other open pull request `BEHIND`, and its update reran the gate; two pull requests that pass apart and fail together now fail the post-merge run on `main` and open `main-red` |
-| `changes` classifies a `main` push from `green` | from `github.event.before` | a replaced pending run would leave its commits unclassified: the next run's previous push already contains them |
-| `initializer` at most four parts and `image-derived` two legs at a time | unbounded matrices | a `main` run would take all twenty runners and hold every pull-request gate in the queue; the bound keeps about six runners for the gate and makes a full `main` run about 35–40 minutes, which only the red-main signal waits for |
+**Cross-file CI notes:** BuildKit `type=gha` silently skips inside `run:` steps
+(no `ACTIONS_RUNTIME_TOKEN`), so CI skips BuildKit export while CD exports
+`cooked` to `type=registry` in GHCR. Scripts run under `/bin/sh` rather than
+zsh, where `status` is read-only.
 
 ### Runtime image
 
-Measured on 2026-10-26 on a dedicated 4-vCPU DigitalOcean host (`c-4`,
-`linux/amd64`, Docker 29.1, empty BuildKit cache; *verified*). Each image
-ran the service, `/migrate` and `/jobs-worker` from the production
-Dockerfile; the request matrix ran the image's own `/service` with an
-experiment-only fixture route set, the service on two pinned CPUs,
-PostgreSQL 18 on a third and wrk on the fourth, medians of five interleaved
-rounds:
+Measured on a 4-vCPU `linux/amd64` DigitalOcean host (`Docker 29.1`, empty
+cache) across `/service`, `/migrate`, and `/jobs-worker`:
 
-| Variant | Runtime base | Cold build | Source-only rebuild | Compressed image | Trivy (OS) |
+| Variant | Runtime base | Cold build | Source rebuild | Compressed | Trivy (OS) |
 | --- | --- | --- | --- | --- | --- |
-| glibc (**selected**) | `gcr.io/distroless/cc-debian13:nonroot` | 655 s (731 s with the tools compiled in the builder) | 263 s | 30.1 MB | 14 packages; 31 unfixed MEDIUM/LOW, 0 HIGH/CRITICAL |
-| static musl | `gcr.io/distroless/static-debian13:nonroot` | 666 s on the Debian builder; 1,173 s on `rust:<v>-alpine` | 266 s | 20.7 MB | 6 packages, 0 CVEs |
+| glibc (**selected**) | `gcr.io/distroless/cc-debian13:nonroot` | 655 s | 263 s | 30.1 MB | 14 pkgs; 0 HIGH/CRIT (31 unfixed MED/LOW) |
+| static musl | `gcr.io/distroless/static-debian13:nonroot` | 666 s (Debian) / 1,173 s (`rust:alpine`) | 266 s | 20.7 MB | 6 pkgs; 0 CVEs |
 
-| CPU per request, musl against glibc | plain | JSON 1 KiB | JSON 64 KiB | PostgreSQL read | PostgreSQL write |
+| CPU/request, musl vs glibc | plain | JSON 1 KiB | JSON 64 KiB | PG read | PG write |
 | --- | --- | --- | --- | --- | --- |
 | Change | +11% | +33% | +99% | +1% | +2% |
 
-Both variants retired equal instruction counts per request (within 3%);
-the difference is time: `perf` put 49% of the musl process's JSON 64 KiB
-samples in musl's `memcpy` (`rep movsq` and a bytewise tail), against
-glibc's vectorised copy. musl's resident memory was 8–15% lower. Compiler
-speed is a separate effect: `rust:<v>-alpine` runs a musl-hosted `rustc`,
-and every compile step took about 1.8 times as long. A smaller image and
-six fewer OS packages do not pay for up to twice the CPU on payload-heavy
-requests, so the service stays glibc; the reopen condition is in Deferred.
+musl's lower RSS (8–15%) and 6 fewer packages do not pay for up to 2x CPU on
+JSON (`perf` put 49% of 64 KiB JSON samples in bytewise `memcpy`) plus ~1.8x
+slower musl-hosted `rustc` compiles.
 
-Builder and runtime share one Debian release because a trixie-built binary
-does not start on `cc-debian12`. `cargo-chef` cooks the dependency layer as
-a plain layer because BuildKit does not export `RUN --mount=type=cache` to
-`type=gha`; a source-only change rebuilds only the workspace crates, which with
-the fat-LTO release profile took 489 s for the service, `/migrate`, and
-`/jobs-worker` on a 4-vCPU host (286 s without LTO); see the profile comment in
-`Cargo.toml`. Each binary builds in its own stage over the cooked layer, so
-BuildKit runs the three single-threaded fat-LTO links in parallel; separate
-cargo invocations keep each binary's feature resolution. Publication exports
-only the cooked stage, to a registry cache beside the image in GHCR, since
-every later layer follows the source copy and no later commit reuses it; CI
-exports none (Pipeline time).
-`rust-toolchain.toml` stays out of the context because rustup would download
-`clippy` and `rustfmt` in every stage (*verified*). In an earlier experiment,
-two `--no-cache` builds produced byte-identical binaries (`CARGO_INCREMENTAL=0`,
-fixed `/src`, `strip = true`, `SOURCE_DATE_EPOCH` for the mtime); their image IDs
-differed by layer timestamps; on 2026-10-26 the build with downloaded
-`cargo-chef` and `cargo-auditable` produced the same three binaries, byte for
-byte, as the build that compiled them. Locked dependency resolution does not guarantee
-future binary or image equality. APT indexes and unpinned build packages, the
-`docker/dockerfile:1` frontend tag and tool/package download availability
-remain mutable inputs. An old checkout is not guaranteed to
-remain buildable; rollback custody retains the accepted artifact.
-The lifecycle check runs from outside because the base has
-no shell or curl. `app.version` stays the Cargo version and the check asserts
-`app.commit`; the Go `sha-<12>` version was a workaround for having no module
-version. `distroless` tags are mutable, so the digest is pinned and moved by
-Dependabot.
+Builder and runtime share `debian13` (`trixie` binaries fail on `debian12`).
+`cargo-chef` cooks dependencies in a plain layer for registry cache export, and
+each binary builds in parallel with `cargo auditable build`. `rust-toolchain.toml`
+stays out of `.dockerignore` to prevent per-stage `rustup` downloads. Locked
+builds produced byte-identical binaries (`CARGO_INCREMENTAL=0`, `strip = true`,
+`SOURCE_DATE_EPOCH`), while APT indexes, `docker/dockerfile:1`, and upstream
+downloads remain mutable; rollback custody retains the accepted image digest.
+`app.version` comes from Cargo, `app.commit` from `VCS_REF`, and `distroless`
+tags are digest-pinned.
 
 <!-- template:begin postgres:docs-ci-migrator-image -->
-When PostgreSQL is retained the image also carries `/migrate`, built and cooked in the
-same stages as the main binary so the migration job runs the same
-image with `--entrypoint /migrate` and needs no migration directory: the
-set is embedded at compile time, which is why `migrations/` and the
-`test/` manifest enter the build context. `runtime-image-check.sh` accepts
-`RUNTIME_IMAGE_NETWORK` and `RUNTIME_IMAGE_POSTGRES_DSN`, so the rehearsal
-observes readiness with the pool open (`postgres_pool_opened`) under the
-same hardened flags.
+With PostgreSQL retained, the image builds `/migrate` with embedded migrations;
+`runtime-image-check.sh` accepts `RUNTIME_IMAGE_NETWORK` and
+`RUNTIME_IMAGE_POSTGRES_DSN` to verify `postgres_pool_opened`.
 <!-- template:end postgres:docs-ci-migrator-image -->
 <!-- template:begin worker:docs-ci-jobs-worker-image -->
-Jobs or messaging retention also keeps `/jobs-worker`, cooked and built in its
-own auditable stage. The image's default entrypoint stays `/service`; the worker
-uses `--entrypoint /jobs-worker`. [Container Validation](validation/containers.md)
-owns the retained/absent entrypoint and startup-refusal checks.
+With jobs or messaging retained, the image builds `/jobs-worker`
+(`--entrypoint /jobs-worker`); [Container Validation](validation/containers.md)
+checks retained/absent entrypoints and startup refusals.
 <!-- template:end worker:docs-ci-jobs-worker-image -->
 
 ### Publication and deployment
 
-The composite action rather than a reusable workflow keeps the Fulcio
-identity `…/.github/workflows/cd.yml@<ref>`; a release tag must equal
-`v<crate version>` because Cargo owns the version. Config as Code
-(`railway.toml`) is deprecated with a hard cutoff and closed to new services.
+`cd.yml` uses a composite action to keep the Fulcio identity
+`…/.github/workflows/cd.yml@<ref>`. `railway.toml` is deprecated in favor of IaC.
 
-| Decision (2026-10-17) | Alternative rejected | Why |
+| Decision | Rejected | Why |
 | --- | --- | --- |
-| The template ships `.railway/railway.ts` with `.railway/package.json` and a lockfile pinning `railway` 3.16.0; it names a partial, takes the project and environment from the linked context, and declares the template's variables, preserving the operator-set ones; the initializer writes the service name and repository into it | the document-only snippet (the deferral "`.railway/railway.ts` generation") | the adopting system's task list asks for the file; a pinned SDK and partials make it usable without an owner-supplied project, and the file applies nothing until an operator runs `railway config apply` against a linked project |
-| The image-input check reads `.railway/railway.ts` and falls back to the `ts` snippet in a repository's own [profile](railway-deployment-profile.md), naming which it read | requiring the file | repositories initialized before the file existed keep their service-owned document; remove the fallback once the template stops supporting them |
-| `IMAGE_TESTS=unit` runs `cargo test --workspace --lib --bins` in a debug stage the runtime stage depends on; the default `none` skips it | `cargo test --release`, which reuses no cooked layer and links every test binary with fat LTO; running the integration suites, which need Docker and a database | a failing unit test stops a platform build before it replaces the running deployment; the debug cook costs a second dependency build once per lockfile |
-| The Railway IaC no longer sets `IMAGE_TESTS`, so a Railway source build skips the unit-test stage; a repository with `REPOSITORY_CI = none` sets the service variable `IMAGE_TESTS=unit` itself (2026-10-27) | keeping `unit` in every Railway build; Railway "Wait for CI" (`checkSuites`) as the template default | on a 4-vCPU builder (DigitalOcean c-4, the template at 2efa4ead) the gate added 65–70 s to every source-change build (280–283 s → 345–351 s) and 379 s once per lockfile change, and one of its four gated runs failed on a timing-sensitive `infra-cache` test after an unrelated change, which would have blocked a correct deployment; PR CI already tests the affected crates and the push to `main` runs `make test`; none of nine derived services on Railway set the variable. "Wait for CI" holds a deployment until every workflow on the commit ends, which on this repository includes the post-merge heavy proofs, and skips it after two hours where Actions never run, as in several derived repositories. Reopen when a Railway-deployed repository has no CI |
-| The build rules of the open template pull request #274 are ported, not merged: no credential in any build argument, the private-dependency route through a vendored release, and the corrected build-argument sentence | building on #274 | merging it needs the template owner's approval, and its other changes (the Build Speed guide, an `image-results.py` fix) are outside this change; merging #274 later conflicts only in the profile document's build-argument sentence |
-
-The initializer does not create linked Railway inputs or deployment resources.
+| Ship `.railway/railway.ts` + `.railway/package.json` (`railway` 3.16.0) using partials and linked context | Document-only snippet | Ready for `railway config apply` without template project IDs while preserving operator variables |
+| `image-inputs-check.py` reads `.railway/railway.ts`, falling back to the profile `ts` snippet | Requiring `.railway/railway.ts` everywhere | Keeps pre-IaC derived repos valid until support ends |
+| `ARG IMAGE_TESTS=none` skips unit tests unless set (`IMAGE_TESTS=unit` for `REPOSITORY_CI = none`) | Always running `unit`; Railway "Wait for CI" | Avoids +65–70 s/build (+379 s/lockfile) and timing flakes when CI already tests; "Wait for CI" blocks on post-merge jobs |
+| Private deps via `vendor-private/` + `.cargo/config.toml` | `ARG` tokens or secret mounts | Railway lacks secret mounts and BuildKit logs `ARG` values |
 
 ### Deviations from the Go template
 
 | Go template | Rust template | Why |
 | --- | --- | --- |
-| `tools/go.mod` + `go tool` | `tools/versions.env`; `cargo install --locked` locally, `install-action` in CI, `go run` for Go tools, containers for the rest | no project-local tool table in Cargo |
-| `govulncheck` + `gosec` | `cargo-deny` + CodeQL Rust | no reachability analysis for Rust; `gosec`'s role is CodeQL's |
-| `go mod tidy -diff`, `go mod verify` | `cargo-shear`; `--locked` everywhere | no tidy in Cargo; the lockfile is verified by `--locked` |
-| static Go binary, `GOTOOLCHAIN=local` | glibc binary on `distroless/cc-debian13`, toolchain file excluded from the context | allocator neutrality until stage 11; target parity with the tests |
-| module metadata in Go binaries | `cargo auditable build` | Rust binaries carry nothing by default |
-| `APP_VERSION=sha-<12>` | version from Cargo, commit from `VCS_REF` | Cargo owns the version |
-| Go build cache as a cache mount | cargo-chef layers | mounts are not exported to the Actions cache |
-| `railway.toml` | `.railway/railway.ts` with a pinned SDK | Config as Code deprecated |
-| Gitleaks baseline file | documented allowlists and four commit-qualified public-fixture fingerprints | retain complete candidate-ancestry scanning while excluding only the reviewed historical findings |
-| `gotestsum` | `cargo-nextest` | runs every test binary at once |
-| no link checker | lychee, offline, with fragments | the stage 5 exit criterion names one |
-| `test/README.md` in the documentation graph | deferred to the first `test/` crate | no directory before its first artifact |
+| `tools/go.mod` + `go tool` | `tools/versions.env` (`cargo install`, `install-action`, `go run`, containers) | No project-local Cargo tool table |
+| `govulncheck` + `gosec` | `cargo-deny` + CodeQL Rust | No reachability in `cargo-deny`; CodeQL covers static checks |
+| `go mod tidy -diff` / `verify` | `cargo-shear`; `--locked` | Cargo enforces lockfile parity via `--locked` |
+| Static Go binary | glibc binary on `distroless/cc-debian13` | Neutral allocator and test parity |
+| Go module metadata | `cargo auditable build` | Rust omits dependency metadata by default |
+| Go build cache mount | `cargo-chef` layers | Mounts cannot export to registry caches |
+| `railway.toml` | `.railway/railway.ts` | Railway deprecated Config as Code |
+| Gitleaks baseline | `.gitleaks.toml` + commit-qualified `.gitleaksignore` | Keeps full history scanning intact |
+| `gotestsum` | `cargo-nextest` + `cargo test --doc` | Parallel test execution |
+| No link checker | Offline `lychee` container (`--include-fragments`) | Prevents broken relative links and `#fragments` |
 
 ### Deferred, with the change that reopens each
 
-- Static musl image: a musl `memcpy` within reach of glibc's, or a
-  maintained override, measured on the request matrix in Runtime image.
-- `mise`: the tool set outgrows Cargo + Go + Node + Docker.
-- `cargo-vet` and a Renovate regex manager: a derived repository's policy.
-- Multi-platform image: a consumer that deploys on another architecture;
-  the Dockerfile is arch-neutral.
-- Second `tower-http` in the tree (`axum-tracing-opentelemetry` through
-  `reqwest`): a warning until upstream converges.
-- BuildKit `rewrite-timestamp` for reproducible image ids: a consumer that
-  needs identical image digests, not only identical binaries.
-
-### Gotchas
-
-1. `cargo deny check bans` treats path dependencies as wildcards; set
-   `allow-wildcard-paths = true`.
-2. `cargo deny check licenses` warns on an allowance no crate uses
-   (`license-not-encountered`); add a license with the crate that brings it.
-3. `gitleaks dir` ignores `.gitignore`; keep the `target/` allowlist.
-4. zizmor is offline without a token; CI passes `GH_TOKEN`.
-5. `actions/cache` with a save in a workflow that also runs on tags is a
-   `cache-poisoning` finding; restore everywhere, save only on pushes to
-   `main`. zizmor reads only `lookup-only` on `Swatinem/rust-cache`, not
-   `save-if`, so its uses carry `zizmor: ignore[cache-poisoning]` beside a
-   `save-if` that admits pushes to `main` alone.
-6. `rust-toolchain.toml` in the image context makes rustup download
-   components in every stage; exclude it and pin the `FROM` tag.
-7. `cargo chef cook` must not run inside a cache mount when the layer is
-   exported to a cache backend; `cargo auditable build` after it reuses the
-   cooked layer (`RUSTC_WORKSPACE_WRAPPER`).
-8. Trivy's `rustbinary` analyzer needs the auditable section; zero Rust
-   packages in a scan means the wrapper was dropped.
-9. `go run github.com/zricethezav/gitleaks/v8@v8.30.1 version` prints
-   "version is set by build process"; assert the tool by behaviour.
-10. `GITHUB_ENV` accepts `NAME=value` lines only; strip the manifest's
-    comments before appending it.
-11. actionlint's shellcheck and pyflakes integrations use the host's
-    binaries; `make actionlint` disables both so local and CI agree;
-    `make shellcheck` and `make python-lint` run the pinned tools.
-12. A `while read … do [[ … ]] && …; done` loop returns the last test's
-    status; under `set -e` a final non-matching path aborts the step. Use
-    `if`.
-13. In zsh, `status` is a read-only variable; scripts run under `/bin/sh`.
-14. The contract test that listed the exact operation ids broke on the first
-    feature; it asserts probe presence now.
-15. buildx's `type=gha` cache reads `ACTIONS_RUNTIME_TOKEN` and
-    `ACTIONS_RESULTS_URL`, which GitHub hands to actions but not to `run:`
-    steps, and it skips the import and export silently when they are absent
-    (*verified*: the first `main` run of the `image` job showed neither
-    "importing cache manifest from gha" nor "exporting cache"; the Go
-    template's logs show the same). Publication now exports the cooked layer
-    to a `type=registry` cache in GHCR, which needs only the `docker login`
-    the push already performs.
-16. An `actions/cache` entry is versioned by its path list as well as its
-    key: a restore must name exactly the paths that were saved, or it misses
-    every time without an error.
-17. A tool that sets its own `CARGO_TARGET_DIR` compiles cold on every call;
-    the initializer reuses an explicit absolute caller cache instead.
-18. The first save claims a cache key, and later runs never replace it. Save
-    a target cache only after the step that fills it; otherwise a push to
-    `main` that ran only the OpenAPI, migration, or validation steps lets a
-    partial target own the key until `Cargo.lock` changes.
-    `Swatinem/rust-cache` evaluates `save-if` when the job starts, so the
-    condition names the surfaces that select the filling step.
-19. Cargo reads no environment variable for `[profile.dev.package."*"]`, and
-    `Swatinem/rust-cache` does not hash the runner's Cargo configuration.
-    Build settings belong in `Cargo.toml`, which the keys hash; a setting
-    written to the runner's configuration needs a `CARGO_*` variable beside
-    it, or the caches keep artifacts built at the old setting.
+- **Static musl image:** Musl `memcpy` matching glibc's, re-measured on the
+  [Runtime image](#runtime-image) matrix.
+- **`mise`:** Tools outgrowing Cargo + Go + Node + Docker.
+- **`cargo-vet` / Renovate regex:** Per-service policy in a derived repo.
+- **Multi-platform image:** Consumer deploying on another architecture.
+- **Second `tower-http` (`axum-tracing-opentelemetry` via `reqwest`):** Warning
+  until upstream converges.
+- **BuildKit `rewrite-timestamp`:** Consumer requiring identical image digests.

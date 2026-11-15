@@ -82,34 +82,12 @@ Recovery](spec-first-workflow/shared/transition.md#parent-owned-recovery) govern
 whether the enclosing task continues. Preserve specialist rigor without
 turning missing technical policy into a user decision.
 
-| Meaning | Canonical owner |
-| --- | --- |
-| Authority, safety, secrets, irreversible boundaries, global invariants, Direct Work eligibility | `AGENTS.md` |
-| Structured/orchestrated path, macro phases, phase selection | [Workflow Router](spec-first-workflow.md) |
-| Movement, narrow reopen, and boundary handoff | [Transition](spec-first-workflow/shared/transition.md) |
-| Durable movement receipt fields | [Transition Result V1](spec-first-workflow/interfaces/transition-result-v1.md) |
-| One phase's unique decision | Its phase owner |
-| Artifact persistence | [Artifacts](spec-first-workflow/shared/artifacts.md) |
-| Status values and transitions | [Artifact Lifecycle V1](spec-first-workflow/interfaces/artifact-lifecycle-v1.md) |
-| Ordinary local completion | `AGENTS.md` |
-| Evidence scope, reuse, and sufficiency exceptions | [Evidence Contract](spec-first-workflow/shared/evidence-contract.md) |
-| Proof result fields | [Evidence Result V1](spec-first-workflow/interfaces/evidence-result-v1.md) |
-| Task/acceptance split and ready frontier | [Planning Ledger Contract](spec-first-workflow/phases/planning/ledger-contract.md) |
-| Implementation carrier and execution topology | [Implementation](spec-first-workflow/phases/implementation.md) |
-| Implementation result and final acceptance fields | [Acceptance Result V1](spec-first-workflow/interfaces/acceptance-result-v1.md) |
-| Independent-review trigger and lifecycle | [Review](spec-first-workflow/shared/review.md) |
-| Review result fields and verdict values | [Review Result V1](spec-first-workflow/interfaces/review-result-v1.md) |
-| Read-only lane eligibility | [Read-Only Delegation](spec-first-workflow/shared/read-only-delegation.md) |
-| Read-only lane result fields | [Lane Result V1](spec-first-workflow/interfaces/lane-result-v1.md) |
-| Task messages, useful context, and executor discretion | [Prompt Composition](prompt-composition.md) |
-| Resume after interruption and terminal cleanup | Their separate shared owners |
-| Domain judgment | `.agents/skills/<domain>` |
-| Domain decision result fields | [Decision Result V1](spec-first-workflow/interfaces/decision-result-v1.md) |
-| Harness-neutral role scope | `.agents/roles` |
-| Output fields and allowed values | `docs/spec-first-workflow/interfaces/` |
-| Accepted task decisions and execution state | `specs/<task>/` |
-| Repository/runtime facts | Code, OpenAPI, tests, generated sources, and repository architecture |
-| Generated carriers | `scripts/agent-roles-sync.sh` from canonical roles |
+`AGENTS.md` owns global authority, safety, Direct Work eligibility, and the local
+validation budget; [Workflow Router](spec-first-workflow.md) owns structured
+phases and shared workflow contracts; [Prompt Composition](prompt-composition.md)
+owns task messages; `.agents/roles/` and `.agents/skills/` own role scopes and
+domain judgment; and code, OpenAPI, tests, and generated sources own
+repository/runtime facts.
 
 [Skill Authoring](skill-authoring.md) owns skill invocation, metadata,
 body/reference boundaries, and catalog constraints. Propagation to derived
@@ -134,40 +112,16 @@ retention case in existing change evidence. Static consistency review and the
 matching existing structural check can complete an accepted policy change;
 label them as static evidence, not measured model behavior.
 
-A claim of measured improvement requires a comparison with the same model and
-harness before and after, or the explicitly requested evaluation. Do not make
-that experiment a prerequisite for every policy edit or build a new evaluation
-harness just to close the task. Do not promote an isolated trajectory into a
-general measured claim.
+A claim of measured improvement requires a controlled comparison (same model,
+effort, tools, and frozen loaded instruction set on fresh tasks with blinded
+assessment, a no-skill control when claiming skill value, and unavailable
+infrastructure or empty test commands separated from code failures). Do not make
+that experiment a prerequisite for policy edits, promote an isolated trajectory
+into a general claim, or build a new evaluation harness just to close the task.
 
-When comparing skills, freeze the actual loaded instruction set, model, effort,
-tools, and resource policy. Separate unavailable infrastructure from code
-failures, and an empty successful test command from exercised behavior. Keep
-requirement failures visible even when the style review accepts the code.
-Use disclosed tasks for development; a superiority claim needs a frozen
-candidate on fresh tasks with blinded assessment and a predeclared decision
-rule. Repeated outputs from one task do not create independent tasks. A
-comparison without a no-skill control establishes relative results, not the
-added value of either skill set.
-
-Treat a reader's explanation as a claim to verify against the task, code, and
-resolved API before turning it into an instruction. In particular, check the
-failure path before accepting a recommendation to remove defensive code.
-Separate contract violations and concrete maintenance costs from aesthetic
-preferences; a ranking or a count of style findings is not evidence of an
-instruction's causal effect. Preserve useful counterexamples from either arm,
-and record non-blind follow-up reading as such.
-
-When a behavioral evaluation is actually required, evaluate delegated
-specialist results and the parent's continuation together. A correct local blocker is not a workflow failure when the parent
-resolves it and resumes. Compare technical-choice ownership, disagreement
-resolution, repeated-gap recovery, and completion without technical questions
-to the user. Retain cases for user-owned business ambiguity, unavailable
-external authority, explicit phase stops, and missing required proof. Hold
-model, effort, tools, and task inputs fixed; report a static review or simulated
-trajectory as such rather than claiming live workflow improvement.
-
-In such an evaluation, also retain mid-task correction and side-question
-continuation, small-change verification restraint, and phase handoffs before an
-Implementation ledger exists. Compare prompt changes separately from model or
-effort changes. These evaluation lenses do not expand a policy edit's acceptance.
+Treat a reader's explanation as a claim to verify against the task, code,
+failure paths, and resolved API before turning it into an instruction. Separate
+contract violations and maintenance costs from aesthetic preferences; keep
+evaluations focused on technical-choice ownership, disagreement resolution, and
+recovery without user-facing technical questions, while retaining explicit
+phase stops and unavailable-authority cases.

@@ -27,19 +27,12 @@ its helpers, values, and rules with the area's. A recorded decision or typed
 dependency clears only the link it names, not other copies between the same
 crates.
 
-Load only the matching method:
-
-- added abstractions, layers, files, shims, or parallel paths, or one rule or change spanning several places: [`rust-structural-quality`](../rust-structural-quality/SKILL.md)
-- opaque ownership, borrowing, trait, or error-identity choices: [`rust-idiomatic`](../rust-idiomatic/SKILL.md)
-- crate, module, dependency, or proof-placement ambiguity: [`rust-coder`](../rust-coder/SKILL.md) and [Repository Architecture](../../../docs/repo-architecture.md)
-- an independent Rust contract, lifecycle, security, or performance pressure: the corresponding `rust-*` skill
-
 For every affected responsibility and added structure, record its anchor,
 current owner, deletion or collapse attempt, observables that must survive,
 next realistic change cost, available proof, and disposition. A code-judo
 finding survives only with a concrete smaller replacement and an accounted
-behavior boundary. Preserve error identity, status, nil/empty meaning, mutation
-authority, cleanup and side-effect order, `Send`/`Sync` boundaries, and
+behavior boundary. Preserve error identity, status, `Option`/empty meaning,
+mutation authority, cleanup and side-effect order, `Send`/`Sync` boundaries, and
 dependency direction when they apply.
 
 Treat file length, branch count, duplication, co-change, one-situation special
@@ -47,11 +40,9 @@ cases, and sequential execution as search signals, not findings. Do not prescrib
 parallelism, or atomicity without evidence that it reduces present ownership
 or reader cost while preserving behavior.
 
-Return findings first, ordered by outcome impact, with one finding for one
-shared cause and every anchor its repair closes. Each finding names its
-anchor, impact, [classification and verdict](../../../docs/spec-first-workflow/interfaces/review-result-v1.md),
-smallest repair owner, evidence boundary, and compact replacement. Omit
-cosmetic nits. If no material finding survives, say so explicitly.
-
-Complete when every affected responsibility and added structure has a
-disposition, then return one Review Result V1 for the fixed candidate.
+Return findings first, ordered by outcome impact, grouping one shared cause with
+every anchor its repair closes and a compact replacement. Omit cosmetic nits;
+if no material finding survives, say so explicitly. Complete when every affected
+responsibility and added structure has a disposition, then return [Review
+Result V1](../../../docs/spec-first-workflow/interfaces/review-result-v1.md) for
+the fixed candidate.
