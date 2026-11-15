@@ -41,11 +41,16 @@ an optional check remains blocking. Do not use a generic risk label to add a
 new acceptance condition.
 
 For a structure `TASK_DEFECT`, name the current constraint violated and the
-concrete unnecessary responsibility, dependency, duplication, or retained path.
-Apply the accepted simplicity and dependency constraints, including
-[Engineering](../../../AGENTS.md#engineering). A shorter equivalent design alone
-does not establish a violation. An alternative organization that preserves
-current responsibilities and constraints is `FOLLOW_UP`.
+concrete unnecessary responsibility, dependency, duplication, hand-rolled
+mechanism, unlinked duplicate representation, or retained path. Apply the
+accepted simplicity and dependency constraints, including
+[Engineering](../../../AGENTS.md#engineering): reimplementing a mechanism
+already provided with matching boundary semantics by `std`, a declared crate, or
+an authoritative tool, or splitting one fact across carriers callers must keep
+aligned by hand, is a `TASK_DEFECT` unless a concrete boundary divergence
+justifies keeping it. A shorter equivalent spelling alone does not establish a
+violation; an alternative organization that preserves current responsibilities
+and single ownership is `FOLLOW_UP`.
 
 `PASS` returns the candidate for acceptance. `FAIL` returns anchored
 candidate-caused findings. `NEEDS_PARENT` names proof or action outside reviewer
@@ -62,11 +67,12 @@ unaffected reasoning.
 
 Use when shared Review selects review only for added structure. For each
 addition its trigger names, apply the `rust-structural-quality` deletion test
-and search the workspace for code that already owns the same responsibility.
-A `TASK_DEFECT` names the [Engineering](../../../AGENTS.md#engineering)
-constraint violated and the addition to delete, collapse, or replace with that
-owner or a maintained crate; other observations are `FOLLOW_UP`. Behavior and
-proof stay outside this review's boundary.
+and check whether existing workspace code, `std`, a declared dependency, or an
+authoritative tool already owns the responsibility with matching boundary
+semantics. A `TASK_DEFECT` names the [Engineering](../../../AGENTS.md#engineering)
+constraint violated and the addition to delete, collapse, bind to its source
+owner, or replace with that owner or a maintained crate; other observations are
+`FOLLOW_UP`. Behavior and proof stay outside this review's boundary.
 
 ## Integrated candidate
 

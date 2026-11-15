@@ -20,10 +20,15 @@ current refresh attempt and the last successful publication can coexist, one
 phase flag must not erase either fact.
 
 Before storing a second representation of a fact, identify what it preserves.
-A derived value may justify storage for a current cost or snapshot requirement.
-A historical count may remain necessary after the underlying records expire.
-Without that reason, deriving the value removes a synchronization obligation.
-This is a semantic decision, not a rule to remove every counter or cache.
+A derived value may justify storage for a current cost or snapshot requirement,
+and a historical count may remain necessary after the underlying records expire.
+When a live projection or prebuilt bind table must stay aligned with its source
+owner, retain a borrow or handle to that owner inside the projection rather than
+making callers pass both and preserve their order or correspondence by hand;
+keep them separate only when comparing a deliberate point-in-time snapshot
+against later state. Without a cost, snapshot, or retention reason, deriving the
+value removes a synchronization obligation. This is a semantic decision, not a
+rule to remove every counter or cache.
 
 Likewise, distinguish not supplied from supplied but empty only when the caller
 does: a plain collection is enough otherwise. The selecting condition, rather

@@ -86,9 +86,13 @@ sentences and names things by what they are, not task-coined labels.
 
 ## Engineering
 
-Reuse the current owner, repository pattern, standard library, and declared
-dependencies before adding custom machinery; load `rust-dependencies` when
-choosing between a library and custom code or changing dependencies. Make the
+Reuse the current owner, repository pattern, standard library, declared
+dependencies, and authoritative tool machine outputs (`cargo metadata`,
+`--message-format=json`, `git`, image/attestation descriptors) before adding
+custom machinery, lockfile/manifest surgery, path heuristics, or CLI-text
+scraping; delegate generic mechanics while keeping service-specific policy in
+application code, and load `rust-dependencies` when choosing between a library
+and custom code or changing dependencies or crate features. Make the
 smallest coherent change for the accepted outcome, including prerequisite
 refactoring to preserve responsibility boundaries and single ownership;
 `crates/shared-rules` owns rules crates without a common owner must apply
@@ -171,7 +175,8 @@ outcome, checks run, and material limitations. Select final independent
 behavior materially affects authorization, money, data integrity, concurrency
 safety, or hard-to-reverse migration, or when a material correctness question
 remains uncertain. Otherwise, Review selects a structure-only review when adding
-a crate, dependency, trait or layer, config key, or parallel path.
+a crate, dependency or crate feature, trait or layer, custom general mechanism,
+config key, or parallel path.
 
 Tasks and lanes within an active Implementation ledger stay under its owner
 through final validation. For a non-direct outcome, or when Direct Work
@@ -206,9 +211,10 @@ pressure.
 ## Rust Change Surface
 
 For Rust changes, load `rust-coder` for edits and any [`.agents/skills`](.agents/skills)
-entry whose trigger matches the changed pressure. Bump
-[`rust-toolchain.toml`](rust-toolchain.toml) and workspace `edition`/`rust-version`
-in [`Cargo.toml`](Cargo.toml) only together in one reviewed change.
+entry whose trigger matches the changed pressure. Target the pinned toolchain
+in [`rust-toolchain.toml`](rust-toolchain.toml) and workspace `edition`/`rust-version`
+in [`Cargo.toml`](Cargo.toml) when selecting language and standard-library
+constructs; bump them only together in one reviewed change.
 
 Do not restyle untouched code. Outside tests, return failures through `Result`
 rather than `unwrap`, `expect`, or `panic!`. `catch_unwind` stays allowed as
@@ -219,7 +225,9 @@ intra-doc links on touched doc comments are checked by `make lint`.
 Agents are the only readers of this code. Express facts via names, types,
 tests, and assertions before comments. Documents never restate code, the
 committed contract, or `make help`; they record only decision reasons, runbooks,
-or policies code cannot state. Comments record only non-code reasons, external
-constraints, or cross-item invariants, except product-output doc comments
-(`utoipa` operation/schema descriptions, `clap` help, config section notes).
-Changes own and update or delete comments on touched items.
+or policies code cannot state. Comments record only non-code reasons (including
+the concrete boundary divergence that rules out an apparent standard or
+dependency replacement), external constraints, or cross-item invariants, except
+product-output doc comments (`utoipa` operation/schema descriptions, `clap`
+help, config section notes). Changes own and update or delete comments on
+touched items.
