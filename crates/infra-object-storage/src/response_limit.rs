@@ -1,5 +1,3 @@
-//! Bound bodies the SDK collects before it interprets their status or XML.
-
 use aws_sdk_s3::config::interceptors::BeforeDeserializationInterceptorContextMut;
 use aws_sdk_s3::config::{ConfigBag, Intercept, RuntimeComponents};
 use aws_sdk_s3::primitives::SdkBody;

@@ -121,23 +121,6 @@
             "text": " outcomes_label_a_configured_endpoint_an",
             "boundary": false
           }
-        },
-        {
-          "path": "crates/infra-webhooks/src/test_metrics.rs",
-          "original_lines": [
-            5,
-            46
-          ],
-          "max_tokens": 277,
-          "before": {
-            "text": "\nimpl metrics::Recorder for CounterKeys ",
-            "boundary": false
-          },
-          "source": "{\n    fn describe_counter(\n        &self,\n        _: metrics::KeyName,\n        _: Option<metrics::Unit>,\n        _: metrics::SharedString,\n    ) {\n    }\n\n    fn describe_gauge(\n        &self,\n        _: metrics::KeyName,\n        _: Option<metrics::Unit>,\n        _: metrics::SharedString,\n    ) {\n    }\n\n    fn describe_histogram(\n        &self,\n        _: metrics::KeyName,\n        _: Option<metrics::Unit>,\n        _: metrics::SharedString,\n    ) {\n    }\n\n    fn register_counter(&self, key: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Counter {\n        self.0.lock().expect(\"keys\").push(key.clone());\n        metrics::Counter::noop()\n    }\n\n    fn register_gauge(&self, _: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {\n        metrics::Gauge::noop()\n    }\n\n    fn register_histogram(\n        &self,\n        _: &metrics::Key,\n        _: &metrics::Metadata<'_>,\n    ) -> metrics::Histogram {\n        metrics::Histogram::noop()\n    }\n}",
-          "after": {
-            "text": "\n",
-            "boundary": true
-          }
         }
       ]
     },

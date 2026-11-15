@@ -1,19 +1,4 @@
 #!/usr/bin/env bash
-# Static append-only check over migrations/: a change may add migration
-# files, never modify, delete, or rename one, every added version must be
-# newer than the newest version the base already had, and the added versions
-# must be unique. The runtime check in crates/migrate compares checksums
-# against the database; this one fails the pull request before a rewritten
-# file reaches any database.
-#
-# The files the change adds are then linted with Squawk for DDL that blocks
-# or breaks a running service. Only additions are linted: a file the base
-# already had may be applied somewhere and can no longer be corrected.
-#
-#   migration-history-check.sh              worktree vs HEAD, untracked included
-#   BASE_REF=<ref> migration-history-check.sh   merge-base of BASE_REF and HEAD
-#   migration-history-check.sh --self-test
-#   MIGRATION_LINTER=<command> replaces the pinned `npx squawk-cli`.
 set -euo pipefail
 
 ROOT_DIR="${MIGRATION_REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"

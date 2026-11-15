@@ -1,5 +1,3 @@
-//! JSON Web Signature, RFC 7515.
-
 /// The parts of a JWS in compact serialization (RFC 7515 §7.1),
 /// `header.payload.signature`, each still base64url-encoded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

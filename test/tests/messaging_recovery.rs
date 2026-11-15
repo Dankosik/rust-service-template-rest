@@ -1,4 +1,3 @@
-//! Real-store proof reuses the executable example's effect, never a mock inbox.
 #![cfg(feature = "integration")]
 #![expect(
     clippy::expect_used,

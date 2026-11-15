@@ -27,22 +27,16 @@ use tracing_subscriber::filter::Targets;
 use tracing_subscriber::layer::{Context, SubscriberExt};
 use tracing_subscriber::{EnvFilter, Layer, Registry};
 
-/// Output format for the process logger, distinct from the configuration
-/// snapshot's `json` / `text` wire enum.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LoggingFormat {
     Json,
     Text,
 }
 
-/// Options for installing the global subscriber.
 #[derive(Debug)]
 pub struct LoggingOptions<'a> {
-    /// An `EnvFilter` directive such as `info` or `info,sqlx=warn`.
     pub level: &'a str,
     pub format: LoggingFormat,
-    /// Installed tracer provider; `None` leaves spans without an
-    /// OpenTelemetry context.
     pub tracer_provider: Option<&'a TracerProviderHandle>,
 }
 
@@ -62,16 +56,6 @@ pub enum LoggingError {
     WorkerStart(#[source] std::io::Error),
 }
 
-/// Installs the process's global subscriber and starts its writer thread.
-///
-/// # Errors
-///
-/// Returns [`LoggingError::Directive`] for an unparsable directive,
-/// [`LoggingError::WorkerStart`] when the writer thread cannot start,
-/// [`LoggingError::AlreadyInstalled`] when a global subscriber exists (seen
-/// as the current default, so call it outside a scoped default), and
-/// [`LoggingError::LogLoggerInstalled`] when a `log` logger exists.
-///
 /// The global `log` bridge is installed first. If another subscriber takes the
 /// global slot before this function installs its own, the function returns
 /// [`LoggingError::AlreadyInstalled`] and leaves the bridge installed.
@@ -157,8 +141,6 @@ pub(crate) fn publish_observations() {
     sdk_diagnostics::publish();
 }
 
-/// The directive's filter with the spans every directive keeps: `Targets`
-/// when that is exact, `EnvFilter` otherwise.
 type DirectiveFilters = (
     Option<WithInfoSpans<Targets>>,
     Option<WithInfoSpans<EnvFilter>>,
@@ -192,13 +174,10 @@ fn is_span_at_info_or_above(metadata: &Metadata<'_>) -> bool {
     metadata.is_span() && *metadata.level() <= Level::INFO
 }
 
-/// How [`WithInfoSpans`] treats a callsite, in rule order.
 enum Admission {
     Always,
     Never,
-    /// Decided per event in [`Layer::event_enabled`].
     Deferred,
-    /// The directive decides.
     Directive,
 }
 
@@ -294,7 +273,6 @@ fn static_targets(directive: &str) -> Option<Targets> {
     directive.parse().ok()
 }
 
-/// Whether `target` is `root` or a module under it.
 fn within(target: &str, root: &str) -> bool {
     target
         .strip_prefix(root)
@@ -302,7 +280,6 @@ fn within(target: &str, root: &str) -> bool {
 }
 
 // template:begin object-storage:telemetry-sdk-log-cap
-/// A global filter that caps the AWS SDK's targets.
 type SdkCap =
     tracing_subscriber::filter::FilterFn<Box<dyn Fn(&tracing::Metadata<'_>) -> bool + Send + Sync>>;
 

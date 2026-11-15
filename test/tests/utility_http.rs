@@ -1,5 +1,3 @@
-//! HTTP utility recipes use test-local routers and a loopback mock, not service endpoints.
-
 use std::time::Duration;
 
 use axum::http::{HeaderMap, HeaderValue, Uri};

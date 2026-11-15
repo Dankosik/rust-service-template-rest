@@ -1,10 +1,6 @@
-//! Process-level proof of the built binary: startup, probes, metrics,
-//! SIGTERM drain, and exit codes. Cargo builds the binary and sets
-//! `CARGO_BIN_EXE_service` for integration tests.
+//! Cargo builds the binary and sets `CARGO_BIN_EXE_service` for integration tests.
 
-// Integration tests are test code; the workspace's production lint levels
-// for unwrap/expect/panic do not apply to them.
-#![allow(
+#![expect(
     clippy::expect_used,
     clippy::unwrap_used,
     clippy::panic,

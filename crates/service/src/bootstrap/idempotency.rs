@@ -1,5 +1,3 @@
-//! HTTP idempotency boundary composition and activation.
-
 use super::background::Background;
 use infra_http::idempotency::{Activation, Composer};
 use infra_idempotency_store::Store;

@@ -16,7 +16,6 @@ pub(crate) const WEBHOOK_ID: &str = "webhook-id";
 pub(crate) const WEBHOOK_TIMESTAMP: &str = "webhook-timestamp";
 pub(crate) const WEBHOOK_SIGNATURE: &str = "webhook-signature";
 
-/// The fixed maximum raw webhook body accepted by either direction.
 pub const MAX_BODY_BYTES: usize = 128 * 1024;
 const TIMESTAMP_TOLERANCE_SECONDS: u64 = 300;
 const SIGNATURE_PREFIX: &str = "v1,";
@@ -25,7 +24,6 @@ const MAX_KEY_BYTES: usize = 64;
 const TAG_BYTES: usize = 32;
 const ENCODED_TAG_BYTES: usize = base64::encoded_len(TAG_BYTES, true).expect("HMAC tag fits");
 
-/// The longest `webhook-id` accepted by verification.
 pub const MAX_MESSAGE_ID_BYTES: usize = 255;
 
 /// A decoded HMAC-SHA256 signing key.
@@ -37,11 +35,6 @@ pub const MAX_MESSAGE_ID_BYTES: usize = 255;
 pub struct SigningKey(hmac::Key);
 
 impl SigningKey {
-    /// Decode one configured Standard Webhooks secret.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`InvalidKey`] for a malformed secret.
     pub fn from_encoded(encoded: &str) -> Result<Self, InvalidKey> {
         let encoded = encoded.trim_prefix("whsec_");
         let decoded = STANDARD.decode(encoded).map_err(|_| InvalidKey)?;
@@ -52,7 +45,6 @@ impl SigningKey {
     }
 }
 
-/// The active signing key and an optional predecessor used during rotation.
 #[derive(Clone, derive_more::Debug)]
 #[debug("KeyRing([REDACTED])")]
 pub struct KeyRing {
@@ -61,7 +53,6 @@ pub struct KeyRing {
 }
 
 impl KeyRing {
-    /// Build a key ring from already decoded, redacted keys.
     #[must_use]
     pub const fn new(active: SigningKey, previous: Option<SigningKey>) -> Self {
         Self { active, previous }
@@ -71,10 +62,6 @@ impl KeyRing {
     ///
     /// A composition root that resolves each key by reference decodes
     /// individual [`SigningKey`] values and uses [`Self::new`] instead.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`InvalidKey`] when either supplied secret is malformed.
     pub fn from_encoded(active: &str, previous: Option<&str>) -> Result<Self, InvalidKey> {
         let active = SigningKey::from_encoded(active)?;
         let previous = previous.map(SigningKey::from_encoded).transpose()?;
@@ -86,11 +73,6 @@ impl KeyRing {
     /// `timestamp` is the `webhook-timestamp` value in Unix seconds. The
     /// active signature comes first. A predecessor produces one additional
     /// space-separated v1 candidate.
-    ///
-    /// # Errors
-    ///
-    /// Returns a closed framing error for an over-limit body or an invalid
-    /// message identifier.
     pub fn signatures(
         &self,
         message_id: &[u8],
@@ -116,11 +98,6 @@ impl KeyRing {
 
     /// The expected tag is computed once per key, so the work is at most two
     /// HMACs over the body however many candidates the caller supplies.
-    ///
-    /// # Errors
-    ///
-    /// Returns a closed error suitable for a sanitized protocol rejection. No
-    /// body, identifier, signature, or key bytes appear in the error.
     pub fn verify(
         &self,
         headers: &HeaderMap,
@@ -163,7 +140,6 @@ impl VerifiedMessage {
         &self.message_id
     }
 
-    /// The verified `webhook-timestamp` in Unix seconds.
     #[must_use]
     pub const fn timestamp(&self) -> i64 {
         self.timestamp
@@ -175,7 +151,6 @@ impl VerifiedMessage {
 #[error("webhook signing key is invalid")]
 pub struct InvalidKey;
 
-/// Closed reasons for webhook framing or verification failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ProtocolError {
     #[error("webhook body exceeds the maximum size")]
@@ -197,7 +172,6 @@ pub enum ProtocolError {
 }
 
 impl ProtocolError {
-    /// The stable, bounded label for this failure in logs and metrics.
     #[must_use]
     pub const fn reason(self) -> &'static str {
         match self {
@@ -228,7 +202,6 @@ fn unambiguous_header<'a>(
     Ok(first)
 }
 
-/// The length bound every message identity meets, signed or not.
 pub(crate) fn ensure_message_id_len(message_id: &[u8]) -> Result<(), ProtocolError> {
     (!message_id.is_empty() && message_id.len() <= MAX_MESSAGE_ID_BYTES)
         .ok_or(ProtocolError::InvalidMessageId)
@@ -301,7 +274,6 @@ mod tests {
     const UPSTREAM_KEY: &str = "whsec_C2FVsBQIhrscChlQIMV+b5sSYspob7oD";
     const UPSTREAM_SIGNATURE: &str = "v1,tZ1I4/hDygAJgO5TYxiSd6Sd0kDW6hPenDe+bTa3Kkw=";
     const UPSTREAM_BODY: &[u8] = br#"{"email":"test@example.com","username":"test_user"}"#;
-    // Fixed arbitrary-byte vector from the accepted design table.
     const ARBITRARY_BYTES_KEY: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
     const ARBITRARY_BYTES_SIGNATURE: &str = "v1,zS3Ns419EcpSLc66f4eI2flsBpaIFaRVByOzialbunY=";
     const ARBITRARY_BYTES_BODY: &[u8] = &[0, b'{', b'\"', b'x', b'\"', b':', b'1', b'}', 255];

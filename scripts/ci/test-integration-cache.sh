@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Cache adapter proof against a throwaway Compose Valkey. The CI integration
-# job can supply a shared, already-running server through CACHE_URL.
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)

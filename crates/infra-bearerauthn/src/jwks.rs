@@ -1,5 +1,3 @@
-//! JWKS acquisition and key admission: the provider keys a JWT verifier trusts.
-
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
@@ -31,12 +29,10 @@ pub enum JwtAlgorithm {
 const MIN_RSA_MODULUS_BITS: usize = 2048;
 const MAX_RSA_MODULUS_BITS: usize = 8192;
 
-/// The largest signature an admitted key produces: RSA-8192.
 pub(crate) const MAX_SIGNATURE_BYTES: usize = MAX_RSA_MODULUS_BITS / 8;
 
 pub(crate) const KEY_REJECTIONS_METRIC: &str = "authn_jwks_key_rejections_total";
 
-/// Why no installed key verified the signature.
 pub(crate) enum SignatureVerificationError {
     NoCandidate,
     BadSignature,
@@ -359,7 +355,6 @@ pub(crate) async fn fetch_key_set(
     Ok(Arc::new(parse_key_set(&bytes, algorithms)?))
 }
 
-/// Why no key set was acquired, at startup or on refresh.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum KeySetFailure {
     Fetch(ProviderFailure),

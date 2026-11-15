@@ -1,8 +1,3 @@
-//! The stored `state` and `failure_reason` values of a job row.
-//!
-//! The migration's CHECK constraints and the SQL literals in the statements
-//! name the same strings.
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JobState {
     Pending,
@@ -28,7 +23,6 @@ impl JobState {
         Self::ALL.into_iter().find(|state| state.as_str() == value)
     }
 
-    /// Whether the row is live, as the migration defines it: pending or running.
     #[must_use]
     pub(crate) const fn is_live(self) -> bool {
         match self {

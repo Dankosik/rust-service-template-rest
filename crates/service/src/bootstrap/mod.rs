@@ -1,16 +1,3 @@
-//! Composition root: configuration, telemetry, readiness, transports, and
-//! process lifecycle.
-//!
-//! Startup order: flags → config → signal handlers → tracer provider →
-//! subscriber → metrics recorder → background tasks → dependencies → API
-//! contract → bind sockets → readiness admission → serve. A stop signal ends an
-//! unfinished startup, and a background task that ends on its own ends the
-//! service. Every exit after the signal handlers runs the one teardown in
-//! [`shutdown`]. Handlers and feature code never own this sequence.
-//!
-//! Each optional profile keeps its own startup step in a module beside this
-//! one; this file is the order they run in.
-
 mod background;
 // template:begin grpc:bootstrap-grpc-module
 mod grpc;

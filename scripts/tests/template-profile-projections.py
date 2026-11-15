@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Compare all profile projections using the initializer's canonical projector."""
 
 from __future__ import annotations
 
@@ -425,8 +424,6 @@ def _assert_refused(
     initializer, database: str, authn: str, outbound_http: str, http_idempotency: str, jobs: str,
     webhooks: str, inbound_webhooks: str,
 ) -> None:
-    """Prove `parse_inputs` refuses this non-harness selection before any write."""
-
     try:
         initializer.parse_inputs(
             _refused_namespace(database, authn, outbound_http, http_idempotency, jobs, webhooks, inbound_webhooks)
@@ -609,8 +606,6 @@ def _project(source: Path, candidate: str, initializer, inputs, destination: Pat
 
 
 def _check_oauth_projections(source: Path, candidate: str, initializer, work: Path) -> None:
-    """Project the four accepted OAuth combinations without multiplying harnesses."""
-
     outbound_paths = frozenset(
         relative.rstrip("/") for relative in initializer._profile_data(source).removals["outbound-auth"]
     )
@@ -647,8 +642,6 @@ def _check_oauth_projections(source: Path, candidate: str, initializer, work: Pa
 
 
 def _check_messaging_without_jobs(source: Path, candidate: str, initializer, work: Path) -> None:
-    """Removing jobs must remove its operator while preserving the messaging worker graph."""
-
     inputs = _inputs(
         initializer, "postgres", "none", "none", "none", "none", "none", "none",
         "core", messaging="nats-jetstream",
@@ -670,7 +663,6 @@ def _check_messaging_without_jobs(source: Path, candidate: str, initializer, wor
 
 
 def _assert_recovery_example_output(initializer, nodes: dict[str, Node], *, retained: bool) -> None:
-    """The public factory and executable must travel with the outbox profile."""
     worker = nodes.get("crates/jobs-worker/src/lib.rs")
     payload = worker.payload if worker is not None and isinstance(worker.payload, bytes) else b""
     if bool(re.search(rb"\bpub\s+fn\s+with_postgres_messages\b", payload)) != retained:
@@ -704,8 +696,6 @@ def _assert_recovery_example_output(initializer, nodes: dict[str, Node], *, reta
 
 
 def _check_grpc_projections(source: Path, candidate: str, initializer, work: Path) -> None:
-    """Exercise the five gRPC graphs that add independent profile reachability."""
-
     profile_data = initializer._profile_data(source)
     grpc_paths = frozenset(relative.rstrip("/") for relative in profile_data.removals["grpc"])
     combined_paths = frozenset(
@@ -754,8 +744,6 @@ def _check_grpc_projections(source: Path, candidate: str, initializer, work: Pat
 
 
 def _check_cache_projections(source: Path, candidate: str, initializer, work: Path) -> None:
-    """Project cache alone, with PostgreSQL, and with the maximal profile set."""
-
     profile_data = initializer._profile_data(source)
     cache_paths = frozenset(relative.rstrip("/") for relative in profile_data.removals["cache"])
     integration_paths = frozenset(relative.rstrip("/") for relative in profile_data.removals["integration"])
@@ -820,8 +808,6 @@ _WORKER_INITIALIZERS: dict[Path, Any] = {}
 
 
 def _check_selection(context: dict[str, Any], selection: tuple[str, ...]) -> tuple[str, str | None]:
-    """Project one admitted selection in every harness; return its records and any refusal."""
-
     source = context["source"]
     initializer = _WORKER_INITIALIZERS.get(source)
     if initializer is None:
@@ -978,8 +964,6 @@ def _project_selection(
             lock_result="agent_harness_only",
         )
 def _check_object_storage_projections(source: Path, candidate: str, initializer, work: Path) -> None:
-    """Project object storage alone, with PostgreSQL, and with the maximal profile set."""
-
     profile_data = initializer._profile_data(source)
     object_storage_paths = frozenset(relative.rstrip("/") for relative in profile_data.removals["object-storage"])
     integration_paths = frozenset(relative.rstrip("/") for relative in profile_data.removals["integration"])
@@ -1045,8 +1029,6 @@ def _check_object_storage_projections(source: Path, candidate: str, initializer,
 
 
 def _check_service_auth_projections(source: Path, candidate: str, initializer, work: Path) -> None:
-    """Project service tokens beside no bearer engine, beside JWT bearer, and in the maximal set."""
-
     profile_data = initializer._profile_data(source)
     service_auth_paths = frozenset(relative.rstrip("/") for relative in profile_data.removals["service-auth"])
     scenarios = (
@@ -1122,8 +1104,6 @@ def _check_service_auth_projections(source: Path, candidate: str, initializer, w
 
 
 def _check_runtime_progress_projections(source: Path, candidate: str, initializer, work: Path) -> None:
-    """The executable proof and its dev edges require all four source profiles."""
-
     paths = frozenset(
         relative.rstrip("/")
         for relative in initializer._profile_data(source).removals["runtime-progress"]
@@ -1251,7 +1231,6 @@ def check(source: Path) -> None:
 
 
 def check_image_context(source: Path) -> None:
-    """Exercise graph 1 at Cargo's real target-discovery boundary after Docker filtering."""
     initializer = _load_initializer(source)
     source = initializer.git_root(source)
     initializer._tracked_checkout_is_clean(source)
@@ -1304,7 +1283,6 @@ def check_image_context(source: Path) -> None:
 
 
 def check_quality(source: Path) -> None:
-    """Prove checker usability once per distinct retained/removed graph, not harness."""
     initializer = _load_initializer(source)
     source = initializer.git_root(source)
     initializer._tracked_checkout_is_clean(source)

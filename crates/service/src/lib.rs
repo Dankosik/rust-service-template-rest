@@ -1,8 +1,3 @@
-//! The service's API contract, assembled from the routers the transport and
-//! feature crates own, and the composition root that serves it. The
-//! `service` binary calls [`run`], the `openapi` binary renders the contract,
-//! and the integration tests hold the committed document to it.
-
 pub mod api;
 
 mod bootstrap;

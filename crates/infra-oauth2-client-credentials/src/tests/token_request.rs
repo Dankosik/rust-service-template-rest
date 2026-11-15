@@ -12,8 +12,6 @@ struct DecodedAssertion {
     jti: String,
 }
 
-/// Decodes and verifies a captured request's `client_assertion` field with
-/// the fixture's matching public key.
 fn decode_assertion(
     fixture: &Fixture,
     request: &CapturedRequest,
@@ -476,8 +474,6 @@ async fn cancellation_at_provider_completion_leaves_a_live_caller_its_own_attemp
     }
 }
 
-/// The `oauth2_token_acquisitions_total` series a scrape holds, as
-/// `(grant, outcome, count)`.
 fn acquisition_counts(scrape: &str) -> Vec<(String, String, u64)> {
     let label = |line: &str, name: &str| {
         let (_, rest) = line.split_once(&format!("{name}=\"")).unwrap();
@@ -509,7 +505,6 @@ async fn every_token_request_is_counted_once_under_its_grant_and_closed_outcome(
             .http(fixture.resource_client())
     };
     let far = || deadline(Duration::from_secs(10));
-    // One request, then a reuse that makes none.
     let reused = client();
     for _ in 0..2 {
         reused.execute(fixture.request(), far()).await.unwrap();

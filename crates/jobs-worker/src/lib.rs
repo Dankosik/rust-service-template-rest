@@ -1,11 +1,3 @@
-//! The jobs worker's entry point and registration contract.
-//!
-//! A composition root registers its retained job kinds in `src/main.rs` by
-//! passing a registration function or closure to [`run`], which fills a
-//! [`Registration`]. The shipped binary supplies its retained profile
-//! registrations; a composition with no retained capability refuses after
-//! configuration is loaded.
-
 mod background;
 mod bootstrap;
 mod cli;
@@ -25,10 +17,6 @@ use tokio_util::sync::CancellationToken;
 
 pub type BuildError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
-/// What a derived service's registration fills and may use to build
-/// handlers: each retained job kind and typed messaging handler. The worker
-/// decides which registered capabilities become active from the immutable
-/// configuration before it opens either dependency.
 #[derive(derive_more::Debug)]
 #[debug("Registration {{ .. }}")]
 pub struct Registration<'a> {
@@ -60,9 +48,7 @@ impl<'a> Registration<'a> {
     /// after pool admission and migration-history verification, before broker admission.
     /// It must perform only bounded synchronous composition: no I/O, pool creation,
     /// task spawning or retries. The worker retains pool and shutdown ownership.
-    ///
-    /// # Errors
-    /// Refuses a second factory. A factory error, panic, duplicate handler or empty
+    /// Refuses a second factory; a factory error, panic, duplicate handler, or empty
     /// consumer registry later refuses startup through the existing cleanup path.
     pub fn with_postgres_messages(
         &mut self,
@@ -167,12 +153,10 @@ where
 
 enum ProcessResult {
     Worker(Result<shutdown::Outcome, bootstrap::WorkerError>),
-    /// One-shot output, help or an operator receipt, and whether it succeeded.
     Reported(bool),
     Usage,
 }
 
-/// The one owner of the exit-code table, including one-shot commands.
 fn exit_code(result: &ProcessResult) -> u8 {
     match result {
         ProcessResult::Worker(Ok(shutdown::Outcome::Graceful)) | ProcessResult::Reported(true) => 0,
@@ -182,8 +166,6 @@ fn exit_code(result: &ProcessResult) -> u8 {
     }
 }
 
-/// Run the long-lived worker. The final runtime wait spends at most
-/// [`shutdown::RUNTIME_SHUTDOWN_TIMEOUT`] within the process deadline.
 fn start(
     options: &LoadOptions,
     register: Register<'_>,

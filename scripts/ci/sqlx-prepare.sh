@@ -1,19 +1,4 @@
 #!/usr/bin/env bash
-# Query metadata for `sqlx::query!`: describes every checked statement in the
-# selected compilation groups against their independent migration sets.
-# Groups write workspace or native package-local caches.
-#
-#   sqlx-prepare.sh           regenerate .sqlx/
-#   sqlx-prepare.sh --check   fail when .sqlx/ differs from what the
-#                             statements and the migrations produce now
-#
-# PostgreSQL comes from env/docker-compose.yml on an ephemeral port, or from
-# DATABASE_URL when the caller owns the compose lifecycle
-# (INTEGRATION_COMPOSE_MANAGED=1). Either way the work happens in a database
-# of its own, created here and dropped on exit. `cargo sqlx` (sqlx-cli at the
-# version tools/versions.env pins) must be on PATH; `make sqlx-prepare` and
-# `make sqlx-check` put it there.
-#   REQUIRE_DOCKER=1 makes a missing Docker a failure instead of a refusal.
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)

@@ -40,7 +40,6 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sy
 # template:end jobs:test-jobs-dependencies
 
 # template:begin jobs-reference:test-reading-counter-dependencies
-# The executable recipe uses the same already-resolved providers as the tests.
 [dependencies.async-nats]
 workspace = true
 features = ["jetstream"]
@@ -139,7 +138,6 @@ indexmap = { workspace = true, features = ["std"] }
 itertools = { workspace = true, features = ["use_std"] }
 # template:begin postgres:test-postgres-health-dependency
 health = { workspace = true }
-# Capture acquisition and readiness events in the real-database proof.
 tracing = { workspace = true }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs", "tls12"] }
 rcgen = { workspace = true, features = ["aws_lc_rs"] }

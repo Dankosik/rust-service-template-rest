@@ -1,5 +1,3 @@
-//! Expired receipt cleanup and the observation of its backlog.
-
 use std::time::Duration;
 
 use infra_postgres::{
@@ -21,10 +19,8 @@ const RECEIPT_RETENTION: Duration = Duration::from_hours(14 * 24);
 
 const CLEANUP_BATCH_ROWS: u32 = 500;
 
-/// Periodic receipt cleanup runs, by `completed` or `failed`.
 pub const CLEANUP_RUNS_METRIC: &str = "webhook_receipt_cleanup_runs_total";
 
-/// Expired receipts the cleanup deleted, counted per committed batch.
 pub const CLEANUP_REMOVED_METRIC: &str = "webhook_receipt_cleanup_removed_receipts_total";
 
 impl Receiver {
@@ -33,11 +29,7 @@ impl Receiver {
     /// skips receipts another cleanup holds. An admission's
     /// `ON CONFLICT DO NOTHING` locks no existing receipt.
     /// Confirmed counts do not certify an empty expired population.
-    ///
-    /// # Errors
-    ///
-    /// The failure class of the batch that failed, logged with a bounded
-    /// cause. Earlier batches stay committed. A timeout leaves the batch's
+    /// Earlier batches stay committed. A timeout leaves the batch's
     /// commit outcome unconfirmed.
     pub async fn remove_expired(&self) -> Result<u64, CleanupError> {
         self.remove_expired_pass(None)
@@ -135,7 +127,6 @@ mod tests {
         let recorder = DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
         let _local = metrics::set_default_local_recorder(&recorder);
-        // Nothing listens on port 1, so every acquire ends at the pool's bound.
         let pool = sqlx::postgres::PgPoolOptions::new()
             .acquire_timeout(Duration::from_millis(50))
             .connect_lazy("postgres://127.0.0.1:1/unreachable")

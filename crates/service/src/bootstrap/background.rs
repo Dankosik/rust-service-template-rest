@@ -1,6 +1,3 @@
-//! Background tasks the service owns from startup until the background-join
-//! stage of teardown, and the capability that lends them to registrations.
-
 use std::future::Future;
 
 use infra_http::Server;

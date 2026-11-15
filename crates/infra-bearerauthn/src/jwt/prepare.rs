@@ -1,5 +1,3 @@
-//! Initial trust for the JWT verifier.
-
 use std::{future::Future, pin::Pin, time::Duration};
 
 use serde::Deserialize;
@@ -17,10 +15,8 @@ use crate::{
 };
 
 const STARTUP_BUDGET: Duration = Duration::from_secs(6);
-/// Bounds provider-supplied text that reaches an operator error.
 const MAX_ECHOED_ISSUER_BYTES: usize = 256;
 
-/// Bootstrap input for OIDC discovery and JWT verification.
 #[derive(Clone, Eq, PartialEq, derive_more::Debug)]
 #[debug("JwtOptions([REDACTED])")]
 pub struct JwtOptions {
@@ -47,11 +43,6 @@ pub type RefreshTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 /// `cancel` stops only the refresh task. The six-second startup budget starts
 /// before client construction. Synchronous work is checked after it returns
 /// because it cannot be preempted by the async deadline.
-///
-/// # Errors
-///
-/// Returns [`PreparationError`] when options, client preparation, discovery,
-/// issuer agreement, or initial key admission fail.
 pub async fn prepare_jwt(
     options: JwtOptions,
     cancel: CancellationToken,

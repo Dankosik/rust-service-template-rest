@@ -1,5 +1,3 @@
-//! Private request identity framing for HTTP idempotency.
-//!
 //! Domain strings, caller tags, query-presence bytes, and length prefixes are
 //! a persistent format: changing them changes identity against live records.
 //! Preserve the exact framing pinned by the scope/request test vectors.
@@ -21,7 +19,6 @@ const SCOPE_DOMAIN: &[u8] = b"http-idempotency/scope/v2";
 const REQUEST_DOMAIN: &[u8] = b"http-idempotency/request/v1";
 const REQUEST_WITH_HEADERS_DOMAIN: &[u8] = b"http-idempotency/request/v2";
 
-/// Select the sealed verified caller that owns a key.
 pub(super) fn caller_identity(
     issuer: &str,
     subject: Option<&str>,
@@ -70,7 +67,6 @@ pub(super) fn decode_key<'a>(values: impl IntoIterator<Item = &'a [u8]>) -> Opti
         .then_some(decoded)
 }
 
-/// Scope one decoded key to the verified caller.
 pub(super) fn scope_key(caller: &CallerIdentity, key: &[u8]) -> ScopeKey {
     let mut hasher = Sha256::new();
     hasher.update(SCOPE_DOMAIN);
@@ -82,7 +78,6 @@ pub(super) fn scope_key(caller: &CallerIdentity, key: &[u8]) -> ScopeKey {
     ScopeKey::from_digest(hasher.finalize().into())
 }
 
-/// Fingerprint exactly the client-visible request tuple that the seam owns.
 pub(super) fn request_fingerprint(
     method: &Method,
     uri: &Uri,

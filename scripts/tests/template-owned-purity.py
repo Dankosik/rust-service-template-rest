@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Source-only structural checks for portable ownership and fixture containment."""
 
 from __future__ import annotations
 

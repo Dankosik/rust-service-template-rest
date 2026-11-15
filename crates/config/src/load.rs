@@ -18,85 +18,55 @@ use rejection::describe_rejection;
 use variables::collect_variables;
 pub(crate) use variables::{ADDRESSABLE_KEY_FORM, is_env_addressable, variable_name};
 
-/// Variable namespace. `APP__HTTP__ADDR` sets `http.addr`.
 const ENV_PREFIX: &str = "APP";
 const ENV_SEPARATOR: &str = "__";
 
-/// What a variable name must be, for the two errors that refuse one.
 const NAME_FORM: &str = "each segment between `__` separators must be letters, digits, `_`, or `-`";
 
-/// Why a snapshot could not be built. `Display` carries the whole cause, so
-/// no variant also exposes it through `source()`.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// An `APP__` variable name that does not meet the name form.
     #[error("environment variable {name} is malformed: {NAME_FORM}")]
     MalformedEnvName { name: String },
-    /// An `APP__` variable whose value is not valid Unicode.
     #[error("environment variable {name} holds a value that is not valid Unicode")]
-    NonUnicodeEnvValue {
-        /// The variable name; the value is never reported.
-        name: String,
-    },
-    /// The secrets directory could not be read.
+    NonUnicodeEnvValue { name: String },
     #[error("secrets directory {}: {error}", path.display())]
     ReadSecretsDir {
         path: PathBuf,
         error: std::io::Error,
     },
-    /// A file in the secrets directory could not be read.
     #[error("secret file {}: {error}", path.display())]
     ReadSecret {
         path: PathBuf,
         error: std::io::Error,
     },
-    /// A secrets-directory file whose name is not a valid variable name.
     #[error("secret file {} is malformed: its name is a variable name, and {NAME_FORM}", path.display())]
     MalformedSecretName { path: PathBuf },
-    /// Two variable names that address the same key within one carrier.
     #[error("{name} and {other} set the same key")]
     AmbiguousName { name: String, other: String },
-    /// One variable sets a scalar at a path another variable uses as a table.
     #[error("{parent} and {child} set overlapping keys: one key is inside the other")]
     OverlappingVariables { parent: String, child: String },
-    /// A later source would erase the keys in an earlier table.
     #[error(
         "{input} cannot replace configuration table `{key}` with a value. Override its keys individually"
     )]
     TableOverride { key: String, input: String },
-    /// A config file could not be read.
     #[error("config file {}: {error}", path.display())]
     ReadFile {
         path: PathBuf,
         error: std::io::Error,
     },
-    /// A config file is not valid TOML. The diagnostic carries no input text.
     #[error("config file {}: {error}", path.display())]
     ParseFile {
         path: PathBuf,
         error: toml::de::Error,
     },
-    /// A config file gives a secret-like key a non-empty value.
     #[error("secret-like key `{key}` carries a value in config file {}; secrets come only from an `{ENV_PREFIX}{ENV_SEPARATOR}` variable", path.display())]
-    SecretInFile {
-        key: String,
-        /// The config file that carries the value.
-        path: PathBuf,
-    },
-    /// A config file key that no `APP__` variable can address.
+    SecretInFile { key: String, path: PathBuf },
     #[error("key `{key}` in config file {} cannot be set by an `{ENV_PREFIX}{ENV_SEPARATOR}` variable; use {ADDRESSABLE_KEY_FORM} for table keys and keep them outside arrays", path.display())]
-    UnaddressableKey {
-        key: String,
-        /// The config file that holds the key.
-        path: PathBuf,
-    },
-    /// Merging the configuration sources failed.
+    UnaddressableKey { key: String, path: PathBuf },
     #[error("load configuration: {0}")]
     Merge(config::ConfigError),
-    /// The message never carries a value a variable supplied.
     #[error("configuration is invalid: {0}")]
     Deserialize(String),
-    /// A validation rule failed.
     #[error("configuration is invalid: {0}")]
     Validate(ValidationError),
 }
@@ -107,20 +77,10 @@ impl From<ValidationError> for Error {
     }
 }
 
-/// Load, merge, and validate the snapshot.
-///
-/// # Errors
-///
-/// Fails on malformed, ambiguous, or overlapping `APP__` names, a variable value
-/// that is not Unicode, an unreadable secrets directory, an unreadable or
-/// unparsable file, a source replacing a table with a value, a file key no
-/// variable can address, a non-empty secret-like value in a config file, an
-/// unknown key anywhere, or a violated validation rule.
 pub fn load(options: &LoadOptions, build: BuildInfo) -> Result<Config, Error> {
     load_from(options, build, std::env::vars_os())
 }
 
-/// [`load`] over an explicit environment, for tests.
 pub(crate) fn load_from<I, K, V>(
     options: &LoadOptions,
     build: BuildInfo,
@@ -138,12 +98,6 @@ where
 }
 
 // template:begin postgres:load-migration
-/// Load the sections the migration binary reads.
-///
-/// # Errors
-///
-/// Enforces the same variable, file, and secret rules as [`load`]. Only
-/// the sections in [`crate::MigrationConfig`] are decoded and validated.
 pub fn load_migration(
     options: &LoadOptions,
     build: BuildInfo,
@@ -151,7 +105,6 @@ pub fn load_migration(
     load_migration_from(options, build, std::env::vars_os())
 }
 
-/// [`load_migration`] over an explicit environment, for tests.
 pub(crate) fn load_migration_from<I, K, V>(
     options: &LoadOptions,
     build: BuildInfo,
@@ -171,17 +124,10 @@ where
 // template:end postgres:load-migration
 
 // template:begin jobs:load-jobs-operator
-/// Load only PostgreSQL configuration for a jobs operator command.
-///
-/// # Errors
-///
-/// Enforces the same namespace, file and secret rules as [`load`], but only
-/// decodes and validates the PostgreSQL section. Other sections are ignored.
 pub fn load_jobs_operator(options: &LoadOptions) -> Result<crate::JobsOperatorConfig, Error> {
     load_jobs_operator_from(options, std::env::vars_os())
 }
 
-/// [`load_jobs_operator`] over an explicit environment, for tests.
 pub(crate) fn load_jobs_operator_from<I, K, V>(
     options: &LoadOptions,
     environment: I,

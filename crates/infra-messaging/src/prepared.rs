@@ -35,9 +35,6 @@ pub(crate) struct PreparedEventParts {
 
 impl Registry {
     /// Uses the registered subject with the bounds of [`PreparedEvent::prepare`].
-    ///
-    /// # Errors
-    /// Rejects a missing route before invoking the payload serializer.
     pub fn prepare<T: EventPayload + Serialize>(
         &self,
         event: &Event<T>,
@@ -59,12 +56,6 @@ impl PreparedEvent {
     /// and concurrent preparation within their operation deadline. That deadline
     /// and the output bound cannot preempt a callback or bound its private
     /// allocations. Bound the source before invoking this synchronous API.
-    ///
-    /// # Errors
-    /// Rejects an invalid subject, unserializable payload or non-finite float,
-    /// payload beyond the configured byte bound or 127 nested JSON containers,
-    /// an invalid identity or one with surrounding whitespace, or an invalid
-    /// creation time.
     pub fn prepare<T: EventPayload + Serialize>(
         subject: impl Into<String>,
         event: &Event<T>,

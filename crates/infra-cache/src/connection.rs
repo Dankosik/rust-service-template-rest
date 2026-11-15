@@ -36,7 +36,6 @@ const MIN_GENERATION_SPACING: Duration = Duration::from_secs(2);
 const SETUP_BACKOFF_FACTOR: f32 = 2.0;
 /// Bound one reconnect chain; the supervisor starts the next after a pause.
 const SETUP_BACKOFF_MAX_RETRIES: usize = 6;
-/// Spacing of the maintenance `PING` that finds a silently dead connection.
 const PING_INTERVAL: Duration = Duration::from_secs(2);
 const PASSWORD_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 /// Shared by every namespace, including commands waiting for a connection.
@@ -50,23 +49,13 @@ const PIPELINE_BUFFER_SIZE: usize = CALLER_PIPELINE_CAPACITY + 1;
 #[path = "tests/full_pipeline.rs"]
 mod full_pipeline_tests;
 
-/// Bounded cause of an unsuccessful cache exchange. Server text is never copied.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, enum_map::Enum)]
 pub(crate) enum ErrorType {
-    /// A deadline or setup or probe bound elapsed, or the client reported a timeout.
     Timeout,
-    /// A transport failure, a closed link, or a connection generation that
-    /// retired under the command.
     Io,
-    /// The server refused the credentials, including `WRONGPASS` and
-    /// `NOAUTH` replies to `HELLO`.
     Auth,
     ServerErrorReply,
     Parse,
-    /// A local command slot refusal, which
-    /// `cache_command_admission_refused_total` counts apart, an unreadable
-    /// password file, a client that could not be rebuilt, or any other
-    /// redis-rs error kind.
     Other,
 }
 
@@ -94,7 +83,6 @@ impl ErrorType {
     }
 }
 
-/// Bounded cause of a Redis client failure.
 pub(crate) fn error_type(error: &redis::RedisError) -> ErrorType {
     if error.is_timeout() {
         return ErrorType::Timeout;
@@ -110,7 +98,6 @@ pub(crate) fn error_type(error: &redis::RedisError) -> ErrorType {
         // other unnamed codes are `Extension`, still a server error reply.
         redis::ErrorKind::Server(_) | redis::ErrorKind::Extension => ErrorType::ServerErrorReply,
         redis::ErrorKind::Parse => ErrorType::Parse,
-        // InvalidClientConfig and every other kind stay `other`.
         _ => ErrorType::Other,
     }
 }
@@ -118,7 +105,6 @@ pub(crate) fn error_type(error: &redis::RedisError) -> ErrorType {
 pub(crate) struct Link {
     pub(crate) server: ServerEndpoint,
     shared: Arc<Shared>,
-    /// A full slot set refuses at once rather than queueing.
     application_slots: Semaphore,
     /// Separate from the application slots so application load cannot
     /// hide readiness.
@@ -192,8 +178,6 @@ impl AbandonedReply {
     }
 }
 
-/// Held from the slot claim until the command ends, including the wait for a
-/// connection generation.
 struct CommandSlot<'a> {
     _permit: SemaphorePermit<'a>,
     in_flight: &'a Gauge,
@@ -205,14 +189,12 @@ impl Drop for CommandSlot<'_> {
     }
 }
 
-/// A command's stop scope and the cache's own ceiling within it.
 pub(crate) struct CommandScope {
     pub(crate) context: OperationContext,
     ceiling: Deadline,
 }
 
 impl CommandScope {
-    /// `parent` under a `command_timeout` ceiling starting now.
     pub(crate) fn under(parent: &OperationContext, command_timeout: Duration) -> Self {
         let ceiling = Deadline::new(Instant::now(), command_timeout);
         Self {
@@ -221,7 +203,6 @@ impl CommandScope {
         }
     }
 
-    /// Without a parent there is no child token for anything to cancel.
     pub(crate) fn standalone(command_timeout: Duration) -> Self {
         let ceiling = Deadline::new(Instant::now(), command_timeout);
         Self {
@@ -391,19 +372,16 @@ impl Shared {
         self.changed.notify_waiters();
     }
 
-    /// Clears the previous setup failure. Returns whether the link is still open.
     #[must_use]
     fn begin_attempt(&self) -> bool {
         self.transition(State::Connecting)
     }
 
-    /// Returns whether the link is still open.
     #[must_use]
     fn publish(&self, generation: Arc<Generation>) -> bool {
         self.transition(State::Connected(generation))
     }
 
-    /// Returns whether the link is still open.
     #[must_use]
     fn record_failure(&self, error: ErrorType) -> bool {
         self.transition(State::SetupFailed(error))
@@ -421,7 +399,6 @@ impl Shared {
     }
 
     async fn acquire(&self) -> Result<Arc<Generation>, ErrorType> {
-        // A connected link answers without touching the shared waiter list.
         if let Some(settled) = self.settled() {
             return settled;
         }
@@ -435,7 +412,6 @@ impl Shared {
         }
     }
 
-    /// Returns `None` while a command must wait for the next transition.
     fn settled(&self) -> Option<Result<Arc<Generation>, ErrorType>> {
         match &*self.state() {
             State::Closed => Some(Err(ErrorType::Io)),
@@ -628,7 +604,6 @@ impl Drop for SupervisorExit {
     }
 }
 
-// Check retirement first and poll the work before sampling the deadline.
 async fn reply_until<T>(
     retired: &CancellationToken,
     work: impl Future<Output = T>,
@@ -750,7 +725,6 @@ async fn run_supervisor(
                 let delay = if let Some(delay) = backoff.next() {
                     delay
                 } else {
-                    // The chain is exhausted: pause, then start the next one.
                     backoff = backoff_policy.build();
                     SETUP_BACKOFF_MAX_DELAY
                 };
@@ -775,8 +749,6 @@ async fn drain_abandoned_replies(mut replies: mpsc::UnboundedReceiver<AbandonedR
     }
 }
 
-/// One bounded setup attempt. A connection the peer closes before publication
-/// is [`ErrorType::Io`]; the returned generation owns its retirement token.
 async fn setup_attempt<'a>(
     server: &ServerEndpoint,
     client: &redis::Client,
@@ -808,8 +780,6 @@ async fn setup_attempt<'a>(
     })
 }
 
-/// The admitted client, or one rebuilt with the password file's current
-/// content. The rotation is present exactly when a password file is.
 async fn credentialed_client<'a>(
     server: &ServerEndpoint,
     admitted: &redis::Client,
@@ -866,8 +836,6 @@ async fn connect(
         .map_err(|error| error_type(&error))
 }
 
-/// Keeps `generation` checked until it must retire. The caller retires it
-/// when this returns.
 async fn maintain(
     server: &ServerEndpoint,
     generation: &Generation,
@@ -914,12 +882,9 @@ async fn maintain(
     }
 }
 
-/// Password-file rotation for one generation.
 struct Rotation<'a> {
     file: &'a PasswordFile,
-    /// The password the server last accepted on this generation.
     authenticated_password: String,
-    /// The current run of read failures has already been logged.
     unreadable_logged: bool,
 }
 
@@ -933,7 +898,6 @@ enum RefreshOutcome {
 }
 
 impl RefreshOutcome {
-    /// The `outcome` and `reason` labels.
     fn labels(&self) -> (&'static str, &'static str) {
         match self {
             Self::ReadFailed(_) => ("read_failed", "none"),
@@ -954,7 +918,6 @@ impl RefreshOutcome {
     }
 }
 
-/// Whether a maintenance exchange leaves the generation usable.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Disposition {
     Keep,
@@ -978,7 +941,6 @@ impl<'a> Rotation<'a> {
     ) -> Disposition {
         let outcome = tokio::select! {
             biased;
-            // A generation retired mid-refresh records nothing.
             () = generation.retired.cancelled() => return Disposition::Retire,
             outcome = self.refresh(generation, command_timeout) => outcome,
         };

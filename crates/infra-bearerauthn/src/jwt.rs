@@ -1,5 +1,3 @@
-//! JWS verification against admitted keys.
-
 use std::{
     sync::Arc,
     time::{Duration, Instant as MonotonicInstant},
@@ -21,7 +19,6 @@ mod prepare;
 
 pub use prepare::{JwtOptions, RefreshTask, prepare_jwt};
 
-/// Target entry count after cache maintenance.
 const MAX_REMEMBERED: u64 = 1024;
 const MAX_REMEMBERED_FOR: Duration = REFRESH_INTERVAL;
 
@@ -33,13 +30,9 @@ pub enum TokenProfile {
     Rfc9068,
 }
 
-/// A token whose signature a key set verified, and everything else its full
-/// verification decided from the token bytes alone.
 #[derive(Clone)]
 struct Remembered {
     verified: VerifiedJwt,
-    /// [`KeySet::generation`](crate::jwks::KeySet::generation) of the set that
-    /// verified the signature.
     key_generation: u64,
     sampled_at: MonotonicInstant,
     held_for: Duration,
@@ -372,7 +365,6 @@ mod tests {
             Some("bound"),
             &serde_json::json!({}),
         );
-        // The only key refuses PS256; the refresh answer is "still unknown".
         assert_eq!(
             check(&verifier, &token).await.unwrap_err(),
             VerificationReason::UnknownKey
@@ -420,7 +412,6 @@ mod tests {
         );
         verifier.key_store.finish(1, Ok(rotated_set));
         assert_eq!(call.await.unwrap(), Ok(()));
-        // Within the cooldown a second miss keeps the precise reason.
         let stale = signed(&installed, Algorithm::ES256, None, &serde_json::json!({}));
         assert_eq!(
             check(&verifier, &stale).await.unwrap_err(),
@@ -1506,7 +1497,6 @@ mod tests {
             assert_eq!(hit, expected, "{now}");
             assert_eq!(hit, full, "{now}");
         }
-        // Expiry drops the entry; a clock that steps back decides it afresh.
         assert_eq!(remembered_count(&memo), 0);
         assert!(verify_at(&memo, &token, 1_000).await.is_ok());
     }
@@ -1611,7 +1601,6 @@ mod tests {
         assert_eq!(call.await.unwrap(), Ok(()));
         let remembered = memo.remembered.get(token.as_bytes()).unwrap();
         assert_eq!(remembered.key_generation, memo.key_store.generation());
-        // The unchanged set now verifies it without another refresh.
         assert!(verify_at(&memo, &token, 1_000).await.is_ok());
     }
 

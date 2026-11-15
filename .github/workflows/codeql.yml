@@ -127,7 +127,6 @@ jobs:
         with:
           persist-credentials: false
       - name: Install pinned toolchain
-        # The Rust extractor reads the workspace through cargo; rust-toolchain.toml selects the compiler.
         run: |
           rustup toolchain install
           rustup show active-toolchain
@@ -161,11 +160,8 @@ jobs:
         uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
         env:
           CODEQL_EXTRACTOR_RUST_OPTION_CARGO_TARGET_DIR: ${{ runner.temp }}/codeql-cargo-target
-          # Test-only code ships nowhere (.github/codeql/rust.yml).
           CODEQL_EXTRACTOR_RUST_OPTION_CARGO_CFG_OVERRIDES: "-test"
       - name: Save extractor caches
-        # Only a push to main writes the cache, and only after the analysis
-        # that filled it succeeded.
         if: >-
           github.event_name == 'push' &&
           github.ref == 'refs/heads/main' &&

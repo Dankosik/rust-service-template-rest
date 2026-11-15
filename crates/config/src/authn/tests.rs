@@ -171,7 +171,6 @@ fn jwt_normalizes_scalar_or_list_audiences_without_changing_values() {
     )
     .unwrap();
 
-    // URL grammar is adapter-owned; only required config shape is checked here.
     scalar.validate().unwrap();
 
     let AuthnConfig::OidcJwt {

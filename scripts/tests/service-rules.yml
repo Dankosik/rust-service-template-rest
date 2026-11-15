@@ -1,9 +1,3 @@
-# Prometheus 3.5.5. Run with the pinned task-local promtool, without a server.
-# Tests load the shipped expressions unchanged and assert on ALERTS, so every
-# case also proves which alerts stay silent. Counters advance per one-minute
-# sample: "0+90x300" is 90 requests a minute for five hours. Every case scrapes
-# the service, since ServiceDown fires when discovery loses it.
-# See https://prometheus.io/docs/prometheus/latest/configuration/unit_testing_rules/
 rule_files:
   - ../../env/monitoring/service.rules.yml
 evaluation_interval: 1m

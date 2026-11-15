@@ -1,17 +1,3 @@
-//! `migrate`: apply the embedded migrations to the configured database.
-//!
-//! Reads the service's configuration sources (`--config`, overlays,
-//! `APP__*`) and decodes only the sections it uses, so a migration run is
-//! attributable to the same service, version, and environment as the
-//! process it prepares the schema for and needs no secret but the DSN.
-//! Requires the PostgreSQL profile to be enabled. Once the logger is installed,
-//! the CLI submits one terminal `migration_run` record. Configuration or
-//! logger setup failures use a default JSON logger. If that logger cannot be
-//! installed, the original error goes to stderr. The CLI exits 0 on success
-//! or no change and 1 otherwise (clap flag errors keep clap's 0/2 convention).
-//! A stop signal drops the run, and the server ends the session, lock, and
-//! transaction.
-
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
@@ -45,7 +31,6 @@ enum Failure {
     Runtime(std::io::Error),
     #[error("install stop signal handlers: {0}")]
     Signals(std::io::Error),
-    /// Configuration or logging setup failed before a migration session.
     #[error("{0}")]
     Setup(String),
     #[error(transparent)]
@@ -215,7 +200,6 @@ async fn apply(config: &MigrationConfig, target: Option<i64>) -> Result<Report, 
             u64::try_from(config.postgres.migration_deadline.as_millis()).unwrap_or(u64::MAX),
         "migration_starting"
     );
-    // Same service identity as traces; not a separate Postgres label.
     let options = RunOptions::defaults(
         &dsn,
         &config.observability.otel.service_name,

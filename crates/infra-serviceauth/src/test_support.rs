@@ -4,7 +4,6 @@
 
 #![expect(
     clippy::expect_used,
-    clippy::missing_panics_doc,
     reason = "test fixtures fail with their setup context"
 )]
 
@@ -21,7 +20,6 @@ use jsonwebtoken::{
     jwk::{Jwk, PublicKeyUse},
 };
 
-/// A generated EC P-256 key and its `kid`.
 pub struct TestKey {
     kid: String,
     pair: EcdsaKeyPair,
@@ -69,7 +67,6 @@ impl TestKey {
         serde_json::to_value(jwk).expect("public JWK serialization")
     }
 
-    /// The PKCS#8 private key as the environment carries it.
     #[must_use]
     pub fn pem(&self) -> String {
         let body = STANDARD.encode(&self.pkcs8);
@@ -84,13 +81,11 @@ impl TestKey {
         )
     }
 
-    /// A compact JWS over the given header and claims, signed as given.
     #[must_use]
     pub fn sign(&self, header: &serde_json::Value, claims: &serde_json::Value) -> String {
         self.sign_raw(header.to_string().as_bytes(), claims.to_string().as_bytes())
     }
 
-    /// A compact JWS over raw header and claims bytes.
     #[must_use]
     pub fn sign_raw(&self, header: &[u8], claims: &[u8]) -> String {
         let message = format!(
@@ -106,7 +101,6 @@ impl TestKey {
     }
 }
 
-/// A registry document trusting each key under its caller name.
 #[must_use]
 pub fn registry(callers: &[(&str, &[&TestKey])]) -> String {
     let mut document = serde_json::Map::new();

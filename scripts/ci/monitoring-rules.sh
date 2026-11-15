@@ -1,8 +1,4 @@
 #!/usr/bin/env bash
-# Validate every shipped rule file and its deterministic fixtures with the
-# checksum-pinned official promtool, without installing a global binary or
-# starting a Prometheus server. Each env/monitoring/<name>.rules.yml needs
-# scripts/tests/<name>-rules.yml, so a rule cannot ship unproven.
 set -euo pipefail
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "${root}"

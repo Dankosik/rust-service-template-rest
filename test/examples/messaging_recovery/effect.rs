@@ -1,5 +1,3 @@
-//! Example-owned receipt policy. No external effect can join this atomicity claim.
-
 use domain_events::{Event, EventPayload};
 use infra_messaging::{HandlerError, Registry, RegistryError};
 use infra_postgres::{Isolation, PgPool, Tx, TxError, TxOptions, in_tx_with};

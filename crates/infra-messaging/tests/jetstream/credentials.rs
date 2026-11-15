@@ -1,5 +1,3 @@
-//! Credential sources accepted and refused by the broker.
-
 use super::*;
 
 const AUTH_USER_A: &str = "UDBCQIADO7SFCGGE5FNGOTL66SCF6F3FL6WWOT75R36TCLHAVKM6TACY";

@@ -1,5 +1,3 @@
-//! Local contract generation and validation for one idempotent route.
-
 use axum::http::HeaderName;
 use axum::http::header::CONTENT_TYPE;
 use utoipa::openapi::RefOr;

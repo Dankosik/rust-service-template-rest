@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Controller state tests; native broker evidence belongs to the owned demo."""
 
 import contextlib
 import importlib.util

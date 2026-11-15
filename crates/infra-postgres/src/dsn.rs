@@ -1,5 +1,3 @@
-//! Connection-string admission.
-//!
 //! `sqlx` is permissive: every `PgConnectOptions` constructor starts from the
 //! libpq environment (`PGHOST`, `PGSSLROOTCERT`, ...), falls back to
 //! `.pgpass` when the URL has no password, accepts Unix sockets and
@@ -88,10 +86,6 @@ impl std::fmt::Debug for Dsn {
 impl Dsn {
     /// A non-empty `PGSSLROOTCERT`, `PGSSLCERT`, `PGSSLKEY`, or `PGOPTIONS`
     /// in the environment is refused too, not only URL text.
-    ///
-    /// # Errors
-    ///
-    /// The first violated rule, without the offending value.
     pub fn admit(raw: &str) -> Result<Self, DsnError> {
         Self::admit_with(raw, None)
     }
@@ -100,10 +94,6 @@ impl Dsn {
     /// is given (`postgres.password_file`). The URL must then carry no
     /// password; the file holds the password alone, and its trailing line
     /// breaks are not part of it.
-    ///
-    /// # Errors
-    ///
-    /// The first violated rule, without the offending value.
     pub fn admit_with(raw: &str, password_file: Option<&Path>) -> Result<Self, DsnError> {
         Self::admit_from(raw, password_file, |name| {
             std::env::var_os(name).is_some_and(|value| !value.is_empty())

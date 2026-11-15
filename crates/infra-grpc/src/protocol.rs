@@ -1,5 +1,3 @@
-//! Wire rules for gRPC method paths, timeouts and response status codes.
-
 use std::time::Duration;
 
 use http::{HeaderMap, HeaderName, StatusCode};

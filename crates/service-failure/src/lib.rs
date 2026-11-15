@@ -17,17 +17,14 @@ use serde::ser::Serializer;
 /// wire spellings cannot drift apart and a profile removes one line per code.
 macro_rules! codes {
     ($($variant:ident => $wire:literal,)+) => {
-        /// Stable machine-readable failure code a client matches on.
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
         pub enum Code {
             $(
-                #[doc = concat!("Wire code `", $wire, "`.")]
                 $variant,
             )+
         }
 
         impl Code {
-            /// Every published code, for transport coverage tests.
             pub const ALL: &'static [Code] = &[$(Self::$variant,)+];
 
             /// The wire spelling: lowercase `snake_case` of at most 63 bytes,
@@ -74,10 +71,8 @@ codes! {
     GatewayTimeout => "gateway_timeout",
 }
 
-/// Caller-visible text for failures a transport refuses to describe.
 pub const SANITIZED_DETAIL: &str = "request failed";
 
-/// Caller-visible text when admission control sheds a request.
 pub const AT_CAPACITY_DETAIL: &str = "server is at capacity";
 
 /// Retry hint on a shed request. Short on purpose: shedding means the server
@@ -85,7 +80,6 @@ pub const AT_CAPACITY_DETAIL: &str = "server is at capacity";
 pub const AT_CAPACITY_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(1);
 
 // template:begin authn:insufficient-scope-detail
-/// Caller-visible text when a verified principal lacks a required scope.
 pub const INSUFFICIENT_SCOPE_DETAIL: &str = "the verified principal lacks the required scope";
 // template:end authn:insufficient-scope-detail
 

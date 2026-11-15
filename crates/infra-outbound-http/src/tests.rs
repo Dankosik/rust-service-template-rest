@@ -691,8 +691,6 @@ async fn completed_exchange_reuses_an_idle_https_connection() {
 
 #[tokio::test]
 async fn target_and_caller_headers_reach_the_wire_unchanged() {
-    // Framing headers are the exception: see
-    // `buffered_body_length_replaces_caller_framing_on_the_wire`.
     let material = TlsMaterial::new(FIXTURE_HOST);
     let (address, captured, server) =
         tls_server_capture(&material, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
@@ -821,7 +819,6 @@ async fn opted_in_client_sends_the_context_of_its_named_client_span() {
     let subscriber = tracing_subscriber::registry()
         .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")));
     let _guard = tracing::subscriber::set_default(subscriber);
-    // See `observation_records_polled_attempts_once_without_request_data`.
     let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
 
     let material = TlsMaterial::new(FIXTURE_HOST);

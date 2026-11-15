@@ -17,7 +17,6 @@ const WORKER_MANAGEMENT_CONNECTIONS: u64 = 2;
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct JobsOperatorConfig {
-    /// The `postgres` section, the only section the jobs operator commands decode.
     pub postgres: PostgresConfig,
 }
 
@@ -49,11 +48,6 @@ impl JobsConfig {
     /// One connection per concurrent attempt plus at most two for the
     /// worker's claiming, outcome recording, maintenance, and
     /// readiness probe. Called only by the worker.
-    ///
-    /// # Errors
-    ///
-    /// Returns `postgres.max_connections` when the pool is below
-    /// `jobs.max_workers` plus 2.
     pub fn validate_pool_capacity(&self, postgres: &PostgresConfig) -> Result<(), ValidationError> {
         let required = self.ordinary_pool_requirement();
         if u64::from(postgres.max_connections.get()) < required {
@@ -76,17 +70,11 @@ impl JobsConfig {
     /// Admit the shared pool for one reserved publisher plus any ordinary engine.
     /// The publisher has one slot and two management connections; ordinary work
     /// retains its existing `max_workers + 2` allowance.
-    ///
-    /// # Errors
-    ///
-    /// Returns `postgres.max_connections` below three for publication alone,
-    /// or below `jobs.max_workers + 5` when ordinary work is also registered.
     pub fn validate_pool_capacity_with_outbox(
         &self,
         postgres: &PostgresConfig,
         ordinary_jobs: bool,
     ) -> Result<(), ValidationError> {
-        /// One publication slot plus two management connections.
         const PUBLISHER_CONNECTIONS: u64 = 3;
         let (required, formula) = if ordinary_jobs {
             let reserve = WORKER_MANAGEMENT_CONNECTIONS + PUBLISHER_CONNECTIONS;

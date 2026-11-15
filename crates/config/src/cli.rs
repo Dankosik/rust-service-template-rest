@@ -29,8 +29,6 @@ pub struct LoadOptions {
 }
 
 impl LoadOptions {
-    /// Parse argv, including the program name, so binaries need not depend
-    /// on clap.
     #[must_use]
     pub fn parse_from<I, T>(args: I) -> Self
     where
@@ -40,7 +38,6 @@ impl LoadOptions {
         <Self as Parser>::parse_from(args)
     }
 
-    /// Base file first, then overlays in order.
     pub(crate) fn files(&self) -> impl Iterator<Item = &Path> {
         self.config
             .iter()

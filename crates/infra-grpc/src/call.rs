@@ -1,5 +1,3 @@
-//! One terminal owner for native response work, capacity and upload cancellation.
-
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};

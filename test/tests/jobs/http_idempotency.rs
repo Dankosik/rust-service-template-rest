@@ -23,7 +23,6 @@ impl JobKind for WidgetWelcome {
 
 type Committing<C = Record> = Result<(Record, C), ()>;
 
-/// A record to commit that the attempt also hands back as its value.
 fn returned(record: Record) -> (Record, Record) {
     (record.clone(), record)
 }

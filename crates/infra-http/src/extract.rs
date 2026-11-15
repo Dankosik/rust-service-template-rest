@@ -1,18 +1,3 @@
-//! Request extractors whose rejections are [`Problem`] values.
-//!
-//! axum's own `Json`, `Query`, and `Path` reject with a `text/plain` body.
-//! These wrappers run the same extractors and map each rejection into the
-//! closed catalog, so a handler that takes them answers a malformed request
-//! with `application/problem+json` like every other failure. A rejection never
-//! carries a submitted value: `invalid_params` gives the failing member's
-//! location with a fixed reason when the deserializer reached it; a missing
-//! root member, an unnamed position, or a name over 256 bytes carries no
-//! location. axum's own message, which quotes the value, is dropped.
-//!
-//! `clippy.toml` disallows axum's three types in application code, so a
-//! handler cannot take the `text/plain` rejections by accident. [`Json`] is
-//! therefore also the JSON response body, as `axum::Json` is.
-
 use std::error::Error as StdError;
 
 use axum::body::Bytes;
@@ -42,15 +27,6 @@ const SCHEMA_REASON: &str = "is missing or does not match the declared schema";
 /// unbounded one.
 const MAX_PARAM_NAME_BYTES: usize = 256;
 
-/// A JSON body: `axum::Json` with [`Problem`] rejections.
-///
-/// As an extractor, a missing or wrong `Content-Type` answers `415`,
-/// malformed JSON `400`, a body that parses but does not fit `T` `422`, and an
-/// oversize body `413`. The `422` names the failing member's RFC 6901 pointer
-/// in `invalid_params` when the deserializer reached that member; a missing
-/// root member or an unnamed position carries no location. As a response it
-/// renders `application/json` as `axum::Json` does; a value serde cannot
-/// serialize answers the sanitized `500` Problem instead of axum's plain text.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Json<T>(pub T);
 
@@ -115,11 +91,6 @@ where
     }
 }
 
-/// Query parameters: `axum::extract::Query` with [`Problem`] rejections.
-///
-/// A query string that does not fit `T` answers `400`; `invalid_params` names
-/// the parameter as `query.<name>` when the failing value was reached, while a
-/// missing required parameter carries no location.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Query<T>(pub T);
 
@@ -142,11 +113,6 @@ where
     }
 }
 
-/// Path parameters: `axum::extract::Path` with [`Problem`] rejections.
-///
-/// A segment that does not fit `T` answers `400`, naming the parameter as
-/// `path.<name>` in `invalid_params`. A handler whose `T` cannot match its
-/// route template is a wiring fault and answers the sanitized `500`.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Path<T>(pub T);
 

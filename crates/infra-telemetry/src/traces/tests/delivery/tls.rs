@@ -1,6 +1,3 @@
-//! Whom the exporter trusts: a collector behind a private certificate
-//! authority, and one that requires a client certificate.
-
 use std::sync::Arc;
 
 use rcgen::{
@@ -13,8 +10,6 @@ use rustls::{RootCertStore, ServerConfig, ServerConnection, StreamOwned};
 
 use super::*;
 
-/// A collector that speaks TLS. A refused handshake is a connection without
-/// a request.
 fn tls_collector(config: Arc<ServerConfig>) -> Collector {
     Collector::start(move |stream| {
         let tls = ServerConnection::new(Arc::clone(&config)).ok()?;
@@ -22,9 +17,6 @@ fn tls_collector(config: Arc<ServerConfig>) -> Collector {
     })
 }
 
-/// A private certificate authority, the collector certificate it signed for
-/// `127.0.0.1`, and a client certificate, with the PEM files the standard
-/// variables would name.
 struct Pki {
     issuer: CertifiedIssuer<'static, KeyPair>,
     files: tempfile::TempDir,

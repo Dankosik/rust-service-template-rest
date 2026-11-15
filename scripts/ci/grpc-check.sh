@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Verify the owned wire contract and the committed generation. Run through
-# `make grpc-check`, which supplies BUF.
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)

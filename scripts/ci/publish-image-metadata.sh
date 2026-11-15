@@ -1,18 +1,4 @@
 #!/usr/bin/env bash
-# Names for one publication and the tag promotion that ends it. The only
-# place the two publication modes differ: "main" promotes sha-<12> and
-# `main`, "release" promotes the v* tag and `latest`, each only after the
-# pushed digest was signed, attested, and verified back out of the registry.
-#
-#   publish-image-metadata.sh metadata <mode> <candidate-sha> <repository> <default-branch> <ref-name> <ref> <run-id> <run-attempt> <crate-version>
-#   publish-image-metadata.sh identify <candidate-image> <export-metadata>
-#   publish-image-metadata.sh push <candidate-image> <image-id> <id-kind>
-#   publish-image-metadata.sh promote <image-repo> <image-id> <digest> <tags> <summary>
-#   publish-image-metadata.sh self-test
-#
-# The version is the Cargo package version (the binary logs it as
-# app.version); a release tag must equal `v<crate-version>`, so a tag on the
-# wrong commit is refused before anything is built.
 set -euo pipefail
 
 usage() {

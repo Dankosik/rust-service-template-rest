@@ -21,7 +21,6 @@ impl Peers {
         maintenance::invalidate_sample();
     }
 
-    /// Sorted and deduplicated for registration's binary searches.
     fn registered_kinds(&self) -> Vec<&'static str> {
         let mut kinds: Vec<_> = self
             .entries
@@ -92,7 +91,6 @@ impl PeerRegistry {
         }
     }
 
-    /// Snapshot the kinds and the identity that authorizes publishing their sample.
     pub(crate) fn sampling_kinds(&self) -> (Vec<&'static str>, Arc<()>) {
         let peers = self.lock();
         (peers.registered_kinds(), Arc::clone(&peers.sample_revision))
@@ -125,7 +123,6 @@ impl PeerRegistry {
     }
 }
 
-/// Owned by the unstarted engine, then by its claim task.
 pub(crate) struct PeerRegistration {
     registry: Arc<PeerRegistry>,
     claim_wake: Arc<Notify>,

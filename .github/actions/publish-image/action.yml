@@ -199,7 +199,6 @@ runs:
         {
           echo "### Verified image"
           echo
-          # Markdown backticks are literal here.
           # shellcheck disable=SC2016
           printf '`%s@%s`\n' "${IMAGE_REPO}" "${DIGEST}"
           echo

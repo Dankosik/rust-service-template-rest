@@ -1,18 +1,12 @@
-//! Validation error and the rules every section shares: ranges, blank
-//! values, required values, and webhook endpoint IDs.
-
 use std::time::Duration;
 
 use crate::load::variable_name;
 use crate::secret_policy::is_secret_like_key;
 
-/// One violated configuration rule, named by the key an operator would set.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("{key}: {message}")]
 pub struct ValidationError {
-    /// Dotted key, for example `http.request_timeout`.
     pub key: String,
-    /// What the value had to satisfy.
     pub message: String,
 }
 
@@ -65,7 +59,6 @@ pub(crate) fn non_blank(key: &str, value: &str) -> Result<(), ValidationError> {
     Ok(())
 }
 
-/// Refuses a blank `value` for `key`, which `condition` requires.
 #[allow(
     dead_code,
     reason = "removing every authentication profile leaves the rule without a caller"
@@ -81,7 +74,6 @@ pub(crate) fn required_when(
     Ok(())
 }
 
-/// The `value` that `condition` requires for `key`.
 #[allow(
     dead_code,
     reason = "removing every profile with a conditional key leaves the rule without a caller"
@@ -106,7 +98,6 @@ pub(crate) fn missing(key: &str, condition: &str) -> ValidationError {
     ValidationError::new(key, message)
 }
 
-/// One endpoint ID rule for outbound and inbound webhooks.
 #[allow(
     dead_code,
     reason = "removing both webhook profiles leaves the shared rule without a caller"

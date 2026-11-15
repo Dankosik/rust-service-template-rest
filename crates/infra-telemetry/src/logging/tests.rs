@@ -226,7 +226,6 @@ fn json_line_sorts_event_fields_then_merged_span_fields() {
         ),
         "event fields, then span fields with the nearest value of a repeated key: {record}"
     );
-    // RFC 3339 in UTC with microseconds, as tracing-subscriber's timer.
     let shape: String = timestamp
         .chars()
         .map(|c| if c.is_ascii_digit() { '0' } else { c })
@@ -304,7 +303,6 @@ fn json_line_names_the_real_target_of_a_log_crate_record() {
 
 #[test]
 fn info_spans_survive_a_quieter_directive() {
-    // `Targets` for the first two, `EnvFilter` for the span directive.
     for directive in ["warn", "off", "warn,[never]=trace"] {
         let buffer = Buffer::default();
         let (layer, guard) = buffer.layer(LoggingFormat::Json);

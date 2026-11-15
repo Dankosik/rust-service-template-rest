@@ -22,7 +22,6 @@ async fn zero_or_expired_during_acquisition_never_authorizes_dispatch() {
         "200 OK",
         &serde_json::json!({"access_token":"late", "token_type":"Bearer", "expires_in":1}),
     );
-    // A new owner isolates expiry admission from the prior completed failure.
     let client = fixture
         .credentials(&[], None)
         .http(fixture.resource_client());
@@ -119,7 +118,6 @@ async fn a_waiter_reuses_a_shared_failure_but_not_a_request_only_token() {
         let mut waiter =
             Box::pin(client.execute(fixture.request(), deadline(Duration::from_secs(10))));
         poll_pending(waiter.as_mut()).await;
-        // The waiter queues behind the leader instead of sending its own request.
         assert_eq!(fixture.token_requests().len(), before_tokens + 1);
         gate.add_permits(2);
         let (leader, waiter) = tokio::time::timeout(Duration::from_secs(2), async {

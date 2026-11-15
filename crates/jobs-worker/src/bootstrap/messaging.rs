@@ -1,5 +1,3 @@
-//! Broker admission and the typed-message consumer.
-
 use std::time::Duration;
 
 use futures_util::FutureExt;

@@ -18,8 +18,6 @@ fn defaults_are_inactive_and_within_the_delivery_budget() {
 
 #[test]
 fn default_delivery_fits_a_broker_with_the_default_payload_limit() {
-    // nats-server's default `max_payload`, which bounds payload and
-    // headers together.
     const BROKER_DEFAULT_MAX_PAYLOAD: u64 = 1024 * 1024;
     let config = MessagingConfig::default();
     assert!(

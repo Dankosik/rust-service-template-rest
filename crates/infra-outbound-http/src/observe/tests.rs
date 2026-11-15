@@ -86,7 +86,6 @@ async fn exercise_completed_attempts() {
     assert_eq!(custom_error.status().as_u16(), 999);
     server.await.expect("999-status fixture joins");
 
-    // Refused before I/O, so it is not an attempt.
     std::assert_matches!(
         client
             .execute(request_to("https://other.fixture.test/items"), deadline())
@@ -130,8 +129,6 @@ async fn observation_records_polled_attempts_once_without_request_data() {
     let diagnostics = SpanDiagnostics::default();
     let _recorder = metrics::set_default_local_recorder(&recorder);
     let _subscriber = tracing::subscriber::set_default(diagnostics.clone());
-    // Keep callsite interest independent of a sibling test's thread-local
-    // subscriber; tracing-core 0.1.36 otherwise has a single-dispatcher fast path.
     let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
     exercise_completed_attempts().await;
 
@@ -236,7 +233,6 @@ async fn url_template_names_the_operation_in_the_span_and_the_metric() {
         .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")));
     let _recorder = metrics::set_default_local_recorder(&recorder);
     let _subscriber = tracing::subscriber::set_default(subscriber);
-    // See `observation_records_polled_attempts_once_without_request_data`.
     let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
     let material = TlsMaterial::new(FIXTURE_HOST);
     let (address, captured, server) = tls_server_capture(
@@ -292,8 +288,6 @@ async fn observation_records_timeout_cancellation_and_polled_drop_once() {
     let diagnostics = SpanDiagnostics::default();
     let _recorder = metrics::set_default_local_recorder(&recorder);
     let _subscriber = tracing::subscriber::set_default(diagnostics.clone());
-    // Keep callsite interest independent of a sibling test's thread-local
-    // subscriber; tracing-core 0.1.36 otherwise has a single-dispatcher fast path.
     let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
     let material = TlsMaterial::new(FIXTURE_HOST);
     // The recorded 200 status proves the timeout struck after the
@@ -385,10 +379,8 @@ async fn observation_records_timeout_cancellation_and_polled_drop_once() {
     );
 }
 
-/// The name of the span an event was logged in, and the event's fields.
 type EventFields = (Option<&'static str>, SpanFields);
 
-/// Events of this crate.
 #[derive(Clone, Default)]
 struct EventDiagnostics(Arc<Mutex<Vec<EventFields>>>);
 
@@ -414,8 +406,6 @@ where
     }
 }
 
-/// One failure of each transport class, in the order `tls`, `connect`,
-/// `protocol`, `transport`. Returns the deepest source of each error.
 async fn exercise_transport_failures() -> Vec<String> {
     let sensitive_request = || {
         Request::get("https://provider.fixture.test/sentinel-path?token=sentinel-query")
@@ -485,7 +475,6 @@ async fn transport_failures_are_classed_and_their_cause_is_logged_in_the_client_
     let _recorder = metrics::set_default_local_recorder(&recorder);
     let _subscriber =
         tracing::subscriber::set_default(tracing_subscriber::registry().with(diagnostics.clone()));
-    // See `observation_records_polled_attempts_once_without_request_data`.
     let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
     let roots = exercise_transport_failures().await;
 
@@ -494,7 +483,6 @@ async fn transport_failures_are_classed_and_their_cause_is_logged_in_the_client_
         ("tls", false),
         ("connect", false),
         ("protocol", false),
-        // The body broke after a complete response head.
         ("transport", true),
     ] {
         let class_label = format!("error_type=\"{class}\"");

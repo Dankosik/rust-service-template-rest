@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Exercise the managed fixture's readiness decision with local stand-ins."""
 
 import os
 from pathlib import Path

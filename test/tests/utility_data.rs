@@ -1,5 +1,3 @@
-//! External data recipes. Schema and business policy still belong to the consuming feature.
-
 use std::collections::BTreeMap;
 use std::time::Duration;
 

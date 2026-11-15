@@ -1,20 +1,4 @@
 #!/usr/bin/env bash
-# Dependency drift that Dependabot and cargo-deny cannot see. Each vendor/<crate>
-# is a [patch.crates-io] path dependency: Dependabot does not update it and
-# cargo-deny matches advisories only against registry sources, so a stale or
-# vulnerable fork base is invisible to both. tools/versions.env has no
-# Dependabot ecosystem either.
-#
-# Every run, per fork: the lock resolves the vendored copy and no registry copy
-# (a dependent that outgrows the fork's version silently drops the patch), OSV
-# lists no advisory for the fork's base version, and PATCHES.md records the
-# last upstream release reviewed against it ("Upstream reviewed: <version>").
-#
-# --upstream adds the moving targets: a fork whose upstream released a version
-# that is neither its base nor its reviewed version, and a tools/versions.env
-# pin behind its upstream release. A release younger than the Dependabot
-# cooldown waits for the next run. Prints a Markdown report; exits 1 on any
-# finding. The weekly dependency-drift workflow files the report as an issue.
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)

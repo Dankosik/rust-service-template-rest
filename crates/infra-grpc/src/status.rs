@@ -1,5 +1,3 @@
-//! The gRPC projection of the shared failure catalog.
-
 use std::collections::HashMap;
 use std::time::Duration;
 

@@ -95,7 +95,6 @@ fn a_value_cut_between_characters_stays_valid_text_and_names_the_cut() {
         if matches!(format, LoggingFormat::Json) {
             let json: serde_json::Value = serde_json::from_str(lines[0]).expect("valid JSON");
             let kept = json["payload"].as_str().expect("a string");
-            // Three bytes of text take four escaped: most of the line is the value.
             assert!(kept.len() > 10_000 && wide.starts_with(kept));
         }
     }
@@ -154,7 +153,6 @@ fn debug_and_display_stop_serializing_at_the_owned_byte_limit() {
 #[test]
 fn repeated_span_updates_compact_and_overflow_permanently_withholds_context() {
     for format in [LoggingFormat::Json, LoggingFormat::Text] {
-        // JSON string quotes plus the span name consume six of 4096 bytes.
         let exact = "a".repeat(4090);
         let (records, snapshot) = capture(format, || {
             let span = tracing::info_span!("ok", value = "initial");

@@ -1,6 +1,3 @@
-//! The one insert path. It runs on the caller's open transaction and never
-//! opens, commits, or rolls one back.
-
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 use std::io::{self, Write};
@@ -24,7 +21,6 @@ pub struct EnqueueOptions<'a> {
     /// How long the job waits before it may be claimed. The sub-microsecond
     /// part is dropped. At most [`crate::MAX_DELAY`].
     pub delay: Duration,
-    /// 1 to 255 bytes of UTF-8 without control characters, when set.
     pub unique_key: Option<&'a str>,
 }
 
@@ -40,7 +36,6 @@ pub enum Enqueued {
 pub enum LivePayloadComparison {
     Same,
     Different,
-    /// No matching live holder remained when the comparison locked the row.
     NoLongerLive,
 }
 
@@ -62,19 +57,12 @@ pub enum EnqueueError {
     PayloadDoesNotDecode(#[source] serde_json::Error),
     #[error("payload is {bytes} bytes; the maximum is {MAX_PAYLOAD_BYTES}")]
     PayloadTooLarge { bytes: usize },
-    /// The statement failed; the caller's transaction is aborted.
-    ///
-    /// Its SQLSTATE is [`infra_postgres::sqlstate`].
     #[error("the jobs statement failed")]
     Database(#[from] sqlx::Error),
 }
 
 /// Count the bytes `serde_json` emits without retaining the JSON. Preflights
 /// own their work budget and apply the size limit to the complete payload.
-///
-/// # Errors
-///
-/// Returns an error if serialization or byte counting fails.
 pub fn json_payload_len<T: serde::Serialize + ?Sized>(
     value: &T,
 ) -> Result<usize, serde_json::Error> {
@@ -110,12 +98,6 @@ pub fn json_payload_len<T: serde::Serialize + ?Sized>(
 /// Custom serializers must be finite, trusted, nonblocking code. Callers own
 /// source size, collection cardinality and concurrent calls within their
 /// transaction deadline; that deadline cannot preempt a serializer callback.
-///
-/// # Errors
-///
-/// [`EnqueueError`] when the kind name, unique key, delay, or payload is
-/// refused, including a payload whose JSON does not decode back as `K`, or
-/// when the statement fails.
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub async fn enqueue<K: JobKind>(
     tx: &mut Tx<'_>,
@@ -171,15 +153,10 @@ pub async fn enqueue<K: JobKind>(
 /// commits or rolls back `tx`; [`LivePayloadComparison::NoLongerLive`] means
 /// the caller must not treat the duplicate as accepted.
 /// Equality compares serialized job payloads byte for byte. A row from an
-/// older writer is compared by re-serializing what its handler would decode.
+/// older writer is compared by re-serializing what its handler would decode;
+/// a legacy payload error leaves the transaction usable.
 /// Preparation has the same once-only serialization, late-error precedence
 /// and finite source, callback, concurrency and deadline duties as [`enqueue`].
-///
-/// # Errors
-///
-/// [`EnqueueError`] when the kind, key, or proposed payload is refused, when
-/// the locking statement fails, or when a legacy payload cannot be decoded
-/// or re-serialized. A legacy payload error leaves the transaction usable.
 pub async fn compare_live_payload<K: JobKind>(
     tx: &mut Tx<'_>,
     unique_key: &str,
@@ -192,8 +169,6 @@ pub async fn compare_live_payload<K: JobKind>(
             unique_key: Some(unique_key),
         },
     )?;
-    // Matches `background_jobs_live_unique_key` as the insert in [`enqueue`]
-    // does, so it reads the same live holder.
     let stored = observed(
         "compare job payload",
         sqlx::query!(
@@ -215,8 +190,6 @@ pub async fn compare_live_payload<K: JobKind>(
     let same = if let Some(payload_text) = stored.payload_text {
         payload_text == prepared.payload
     } else {
-        // The query projects the non-null JSONB payload here. Treat an absent
-        // projection as invalid JSON too.
         let legacy = stored.legacy_payload.as_deref().unwrap_or_default();
         let decoded =
             serde_json::from_str::<K>(legacy).map_err(EnqueueError::PayloadDoesNotDecode)?;

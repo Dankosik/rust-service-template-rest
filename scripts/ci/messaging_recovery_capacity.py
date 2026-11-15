@@ -1,10 +1,3 @@
-"""Capacity observation in the existing owned Session; no alternate delivery path.
-
-Counters use actual adjacent database-observation timestamps. PubAck-confirmed
-IDs are completed native outbox jobs, a conservative durable lower bound (a
-PubAck whose completion is unresolved stays in the retained/ambiguous set).
-"""
-
 from collections import Counter
 import csv
 from itertools import pairwise
@@ -32,7 +25,6 @@ METRIC = re.compile(r'^([a-zA-Z_:][a-zA-Z_0-9:]*(?:\{[^\n]*\})?)\s+([-+0-9.eE]+|
 
 
 def rates(previous, current):
-    """Only same clock, monotonic cumulative counters form an interval rate."""
     if previous is None:
         return {key + "_per_second": None for key in COUNTS}
     seconds = current["observed_unix"] - previous["observed_unix"]
@@ -42,7 +34,6 @@ def rates(previous, current):
 
 
 def metrics(raw):
-    """Export only the existing bounded metric families; never retain raw logs."""
     result = {}
     for line in raw.decode().splitlines():
         match = METRIC.fullmatch(line)

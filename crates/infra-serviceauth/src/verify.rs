@@ -18,16 +18,12 @@ use shared_rules::{
 
 use crate::{JwtType, MAX_TOKEN_LIFETIME_SECONDS, ServiceName, TrustRegistry, unix_seconds};
 
-/// Allowance for the clock difference between caller and receiver.
 const LEEWAY_SECONDS: u64 = 30;
 
-/// Target entry count after cache maintenance.
 const MAX_REMEMBERED: u64 = 1024;
 
-/// Service token verification outcomes by closed reason.
 const VERIFICATIONS_METRIC: &str = "service_auth_verifications_total";
 
-/// The fixed outcomes a transport maps to its response.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum Failure {
     #[error("service token is required")]
@@ -101,7 +97,6 @@ pub struct Caller {
 }
 
 impl Caller {
-    /// The caller's name as its trust registry entry spells it.
     #[must_use]
     pub const fn name(&self) -> &ServiceName {
         &self.name
@@ -114,7 +109,6 @@ impl fmt::Debug for Caller {
     }
 }
 
-/// Verifies service tokens addressed to one receiver. Cloning shares it.
 #[derive(Clone)]
 pub struct Verifier(Arc<Inner>);
 
@@ -131,7 +125,7 @@ struct Inner {
     /// Every check but the validity window depends only on the token's bytes
     /// and on the audience, type and registry fixed for the process, so a
     /// remembered token is decided by its window alone, as a full check would
-    /// decide it (S14). It is not a replay cache (S5): nothing is refused for
+    /// decide it. It is not a replay cache: nothing is refused for
     /// having been remembered. The cache bounds memory only; the window is
     /// checked here on every hit. Only a token whose signature verified is
     /// inserted, so a caller cannot choose colliding keys; `SipHash` over the
@@ -185,12 +179,6 @@ impl Verifier {
 
     /// Verifies the `Authorization` values of one call and names its caller.
     /// Records one outcome; a failure logs only its closed reason.
-    ///
-    /// # Errors
-    /// Returns [`Failure::Missing`] without a `Bearer` value,
-    /// [`Failure::Malformed`] for several values or bearer syntax outside
-    /// RFC 6750, [`Failure::Invalid`] for any token outside the contract, and
-    /// [`Failure::Unavailable`] when the system clock precedes the Unix epoch.
     pub fn authenticate<'a>(
         &self,
         authorization: impl IntoIterator<Item = &'a [u8]>,
@@ -218,8 +206,6 @@ impl Verifier {
         }
     }
 
-    /// Every check at `now`, without repeating the signature check for a
-    /// token that already passed.
     fn verify_at(&self, token: &[u8], now: u64) -> Result<Caller, Reason> {
         if let Some((caller, window)) = self.0.remembered.get(token) {
             return match window.admits(now) {
@@ -249,8 +235,6 @@ impl Verifier {
             .map(|(caller, _)| caller)
     }
 
-    /// Every check of the contract at `now`; the caller and the token's
-    /// validity window.
     fn verify_uncached(&self, token: &[u8], now: u64) -> Result<(Caller, Window), Reason> {
         let rfc7515::Compact {
             signing_input: message,
@@ -410,7 +394,6 @@ enum Audience<'a> {
 }
 
 impl Audience<'_> {
-    /// Exactly one audience, and it is `name`.
     fn is_only(&self, name: &str) -> bool {
         match self {
             Self::One(audience) => audience == name,
@@ -617,12 +600,10 @@ mod tests {
         let header = Case::header(&case.billing);
         let forged = case.billing.sign(&header, &Case::claims());
         assert_eq!(case.check(&forged), Err(Reason::UnknownKey));
-        // billing's key under orders's kid: the signature fails.
         let forged = case
             .billing
             .sign(&Case::header(&case.orders), &Case::claims());
         assert_eq!(case.check(&forged), Err(Reason::Signature));
-        // An issuer the registry does not name.
         let unknown = case.signed(|_, claims| {
             claims["iss"] = "catalog".into();
             claims["sub"] = "catalog".into();
@@ -720,7 +701,6 @@ mod tests {
             let token = case.signed(|_, claims| change(claims));
             assert_eq!(case.check(&token), Err(expected), "{token}");
         }
-        // Inside the 30-second allowance on both sides.
         let token = case.signed(|_, claims| {
             claims["iat"] = (NOW - 89).into();
             claims["exp"] = (NOW - 29).into();
@@ -812,7 +792,6 @@ mod tests {
         header["jwk"] = case.billing.jwk();
         let forged = case.billing.sign(&header, &Case::claims());
         assert_eq!(case.check(&forged), Err(Reason::Signature));
-        // A repeated header member.
         let duplicate = case.orders.sign_raw(
             format!(
                 r#"{{"alg":"ES256","typ":"{TYPE}","kid":"{}","kid":"other"}}"#,
@@ -822,7 +801,6 @@ mod tests {
             Case::claims().to_string().as_bytes(),
         );
         assert_eq!(case.check(&duplicate), Err(Reason::Header));
-        // A repeated claim the verifier reads.
         let duplicate = case.orders.sign_raw(
             Case::header(&case.orders).to_string().as_bytes(),
             format!(r#"{{"iss":"orders","sub":"orders","aud":"catalog","aud":"billing","iat":{NOW},"exp":{}}}"#, NOW + 60).as_bytes(),
@@ -848,7 +826,6 @@ mod tests {
                 "{signature}"
             );
         }
-        // A changed payload under the original signature.
         let (header, rest) = token.split_once('.').unwrap();
         let (_, signature) = rest.split_once('.').unwrap();
         let mut claims = Case::claims();
@@ -888,7 +865,6 @@ mod tests {
         let handle = recorder.handle();
         let _guard = metrics::set_default_local_recorder(&recorder);
         let case = Case::new();
-        // `authenticate` reads the system clock.
         let now = unix_now().unwrap();
         let token = case.signed(|_, claims| {
             claims["iat"] = now.into();

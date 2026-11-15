@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""One-shot derived-service initialization from a committed template snapshot."""
 
 from __future__ import annotations
 
@@ -541,8 +540,6 @@ def _apply_identity(snapshot: Path, profiles: ProfileData, inputs: InitInputs) -
 
 
 def _replace_service_manifest_names(path: Path, contents: str, service_name: str) -> None:
-    """Rename package/bin while proving the library target stays `service`."""
-
     section = ""
     replacements = 0
     output: list[str] = []
@@ -738,8 +735,6 @@ def _apply_markers(
 
 
 def project_portable(snapshot: Path, target_lock: dict[str, Any]) -> None:
-    """Materialize manifest bytes with the initializer's marker policy only."""
-
     files = tuple(
         (path.relative_to(snapshot).as_posix(), path)
         for entry in manifest_entries(snapshot)
@@ -878,8 +873,6 @@ def _postconditions(
 
 
 def _retired_pack_profiles(inputs: InitInputs, profiles: ProfileData) -> set[str]:
-    """Complete older trees retain their retired packs, but new projections never do."""
-
     retired: set[str] = set()
     if "egress-dns" in profiles.removals and inputs.outbound_http == "bounded":
         retired.add("egress-dns")
@@ -894,8 +887,6 @@ def _retired_pack_profiles(inputs: InitInputs, profiles: ProfileData) -> set[str
 
 
 def _validate_profile_packs(root: Path, profiles: ProfileData, selected: set[str]) -> None:
-    """Replay proves retained physical profile packs without reading their bytes."""
-
     for profile, paths in profiles.removals.items():
         for relative in paths:
             candidate = root / relative.rstrip("/")
@@ -915,8 +906,6 @@ def _validate_profile_packs(root: Path, profiles: ProfileData, selected: set[str
 
 
 def _validate_generated_ownership(root: Path, harness: str) -> None:
-    """Read generated carrier shape only; target helpers never execute here."""
-
     selected = set(selected_adapters(harness))
     for adapter in ("claude", "qwen"):
         if adapter not in selected:
@@ -990,8 +979,6 @@ def _preflight_staged(snapshot: Path, inputs: InitInputs, profiles: ProfileData)
 
 
 def _project_staged(snapshot: Path, inputs: InitInputs, profiles: ProfileData) -> None:
-    """Apply the canonical profile projection without invoking Cargo or rustfmt."""
-
     _check_harness_projection(snapshot, "all")
     _apply_markers(snapshot, profiles, inputs)
     _apply_identity(snapshot, profiles, inputs)
@@ -1045,8 +1032,6 @@ def _prune_cargo_lock(snapshot: Path, inputs: InitInputs) -> bytes:
 
 
 def _validate_staged_runtime(snapshot: Path, inputs: InitInputs) -> None:
-    """Prune the lock, then validate the projected runtime tree with locked commands."""
-
     metadata_bytes = _prune_cargo_lock(snapshot, inputs)
     _format_staged_rust(snapshot, metadata_bytes)
     try:
@@ -1067,8 +1052,6 @@ def _validate_staged_runtime(snapshot: Path, inputs: InitInputs) -> None:
 
 
 def _format_staged_rust(snapshot: Path, metadata_bytes: bytes) -> None:
-    """Use pinned rustfmt on Cargo's workspace targets, without another resolver."""
-
     try:
         metadata = json.loads(metadata_bytes)
         members = set(metadata["workspace_members"])
@@ -1137,8 +1120,6 @@ def _generate_harness_projection(snapshot: Path, harness: str) -> None:
 
 
 def _dependency_sections(manifest: dict[str, Any]) -> list[dict[str, Any]]:
-    """Every normal, dev, and build dependency table, target-specific ones included."""
-
     sections: list[Any] = []
     for section_name in ("dependencies", "dev-dependencies", "build-dependencies"):
         if section_name in manifest:
@@ -1177,8 +1158,6 @@ def _declared_dependencies(manifest: dict[str, Any]) -> set[str]:
 
 
 def _member_manifests(snapshot: Path) -> list[Path]:
-    """The retained manifests of the workspace members `crates/*` and `test`."""
-
     manifests = [*sorted(snapshot.glob("crates/*/Cargo.toml")), snapshot / "test/Cargo.toml"]
     return [path for path in manifests if path.is_file() and not path.is_symlink()]
 

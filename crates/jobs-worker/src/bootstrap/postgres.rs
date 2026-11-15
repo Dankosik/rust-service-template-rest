@@ -1,5 +1,3 @@
-//! The shared PostgreSQL pool: admission, opening, and its readiness probe.
-
 use std::num::NonZeroU32;
 
 use health::Probe;
@@ -13,8 +11,6 @@ use crate::resources::{PoolResource, Resources};
 
 const POSTGRES_IDENTIFIER_LIMIT: usize = 63;
 
-/// Check the pool capacity, open the pool, and verify the migration history
-/// when a retained capability needs the database.
 pub(super) async fn admit_pool(
     config: &Config,
     capabilities: &RetainedCapabilities,
@@ -98,7 +94,6 @@ async fn open_pool(
     Ok(pool)
 }
 
-/// The worker and the operator differ only in pool size and session name.
 pub(crate) fn pool_options<'a>(
     config: &PostgresConfig,
     max_connections: NonZeroU32,

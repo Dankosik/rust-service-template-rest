@@ -1,7 +1,4 @@
 #!/usr/bin/env bash
-# Validate all canonical projections and sixty-eight distinct runtime graphs
-# from one private, fixed source candidate. The shared checkout is never
-# staged or committed.
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)

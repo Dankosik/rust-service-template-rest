@@ -1135,7 +1135,6 @@ async fn insert_notified(pool: &PgPool, kind: &str, payload: String) -> String {
     .expect("a due job and its wake commit")
 }
 
-/// How many sessions of this suite hold the wake `LISTEN`.
 async fn listening_sessions(pool: &PgPool) -> i64 {
     sqlx::query_scalar(
         "SELECT count(*) FROM pg_stat_activity \
@@ -1148,7 +1147,6 @@ async fn listening_sessions(pool: &PgPool) -> i64 {
     .expect("the listener observation")
 }
 
-/// The backend that holds the wake `LISTEN`, once there is one.
 async fn listening_pid(pool: &PgPool) -> Option<i32> {
     sqlx::query_scalar(
         "SELECT pid FROM pg_stat_activity \
@@ -1660,7 +1658,6 @@ fn gate_registry(gate: Arc<GateState>) -> infra_jobs::Kinds {
     kinds.validate().expect("the gate registry")
 }
 
-/// How a cooperative handler answers its cancellation token.
 #[derive(Clone, Copy)]
 enum Reaction {
     Complete,
@@ -2676,8 +2673,6 @@ async fn w4_x7_cancel_and_finish_returns_the_budget_unit(pool: PgPool) {
     join(run, &[&jobs]).await;
 }
 
-/// Force-cancel one cooperative handler and return the drain counters, the
-/// claimed row, and the row after cleanup.
 async fn force_cancel_cooperative(
     pool: &PgPool,
     reaction: Reaction,

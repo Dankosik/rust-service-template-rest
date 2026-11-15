@@ -3,7 +3,7 @@
     clippy::unwrap_used,
     clippy::panic,
     reason = "a broken fixture or setup fails the test"
-)] // Test failures explain broken fixtures.
+)]
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::OwnedFd;

@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# One Linux release specimen, one immutable image, and the complete frozen
-# quota driver. Keep inputs and all adverse observations beside its results.
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)

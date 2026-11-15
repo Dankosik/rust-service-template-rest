@@ -1,5 +1,3 @@
-//! Bounded HTTP server over hyper.
-//!
 //! `axum::serve` is intentionally unconfigurable: it sets no timer, so
 //! hyper's header-read timeout is silently disabled, and it exposes no
 //! header-size or connection bounds. This accept loop owns those limits and
@@ -174,10 +172,6 @@ pub struct BoundListener {
 
 impl BoundListener {
     /// Reserve the address before starting an accept task.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ServerError::Bind`] when the address cannot be bound.
     pub async fn bind(addr: SocketAddr) -> Result<Self, ServerError> {
         let listener = TcpListener::bind(addr)
             .await
@@ -246,10 +240,6 @@ impl Server {
     ///
     /// Returns once the listener is bound. Initialize request-visible state
     /// before calling: the accept task can serve requests before this returns.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ServerError::Bind`] when the address cannot be bound.
     pub async fn bind(
         addr: SocketAddr,
         app: Router,
@@ -286,8 +276,6 @@ impl Server {
 
     /// Stop accepting, tell every connection to finish its current request
     /// and close, and wait up to `budget` for them to do so.
-    ///
-    /// # Errors
     ///
     /// Returns [`ServerError::AcceptTask`] when the accept loop failed. The
     /// connection drain still runs within the same deadline, but its

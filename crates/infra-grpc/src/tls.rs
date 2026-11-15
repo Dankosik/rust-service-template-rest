@@ -20,16 +20,6 @@ pub struct ServerTlsMaterial<'a> {
 
 /// TLS 1.3 server config with HTTP/2 ALPN. A client CA makes client
 /// certificates mandatory.
-///
-/// # Errors
-///
-/// Returns the [`TlsMaterialError`] naming the certificate, private key, or
-/// client CA that cannot be used.
-///
-/// # Panics
-///
-/// Only if the bundled aws-lc-rs provider stopped supporting TLS 1.3, which
-/// is a build defect rather than operator input.
 pub fn server_tls_config(
     material: ServerTlsMaterial<'_>,
 ) -> Result<Arc<ServerConfig>, TlsMaterialError> {

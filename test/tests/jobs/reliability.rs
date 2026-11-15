@@ -1,8 +1,3 @@
-//! Durable recipe proof. The source-only Python carrier owns process crashes,
-//! backup/restore, resource observations and the initialized-service upgrade.
-//! These cases cover the separate marker/aggregate and acceptance transactions
-//! that the older queue-effect fixtures do not exercise.
-
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 

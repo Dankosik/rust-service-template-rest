@@ -1,5 +1,3 @@
-//! Test-only reading reference CLI; worker mode enters the actual worker runner.
-
 use std::{
     collections::BTreeMap, ffi::OsString, num::NonZeroU32, process::ExitCode, time::Duration,
 };

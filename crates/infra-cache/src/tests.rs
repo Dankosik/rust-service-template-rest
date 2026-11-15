@@ -64,12 +64,6 @@ fn observation_recorder() -> metrics_exporter_prometheus::PrometheusRecorder {
     builder.build_recorder()
 }
 
-/// A server that refuses authentication until told otherwise and answers
-/// every `GET` with a miss. The client authenticates inside `HELLO 3`; the
-/// server counts those attempts so tests can observe the complete setup retry
-/// allowance. Each accepted connection records the primary
-/// generation; a `SET` on an older generation is `READONLY`. With a
-/// `password` set, authentication succeeds only with that password.
 struct FakeServer {
     address: std::net::SocketAddr,
     accept_auth: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -135,12 +129,10 @@ impl FakeServer {
         }
     }
 
-    /// Close every open connection; the listener keeps accepting.
     fn hang_up(&self) {
         self.sessions.lock().expect("sessions lock").clear();
     }
 
-    /// Accept only this password from now on.
     fn require_password(&self, password: &str) {
         *self.password.lock().expect("password lock") = Some(password.to_owned());
     }
@@ -297,7 +289,6 @@ struct SocketObservations {
     auth_reply_delay: std::sync::Mutex<Duration>,
     ping_reply_delays: std::sync::Mutex<std::collections::VecDeque<Duration>>,
     next_set_reply: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
-    /// Reply delay of a `GET` whose key ends in `:slow`.
     slow_get_delay: std::sync::Mutex<Duration>,
     changed: tokio::sync::Notify,
 }
@@ -314,7 +305,6 @@ impl SocketObservations {
         }
     }
 
-    /// How long the fake server holds the reply to `arguments`.
     fn reply_delay(&self, arguments: &[String]) -> Duration {
         match arguments.first().map(String::as_str) {
             Some("AUTH") => *self.auth_reply_delay.lock().expect("delay lock"),

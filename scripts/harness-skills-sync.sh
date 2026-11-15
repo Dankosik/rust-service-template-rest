@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Expose the canonical `.agents/skills/` set to one supported harness through
-# one generated relative symlink per skill.
 set -euo pipefail
 
 usage() {

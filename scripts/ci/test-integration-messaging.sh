@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Ordinary JetStream proof may use a shared NATS_URL. Each authenticated phase
-# owns a private instance of the same Compose service and pinned image.
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)

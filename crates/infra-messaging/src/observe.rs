@@ -1,17 +1,12 @@
-//! Closed outcome vocabularies and their pre-registered metric handles.
-
 use std::marker::PhantomData;
 use std::time::Duration;
 
 use enum_map::{Enum, EnumMap};
 
-/// A closed outcome vocabulary whose metric label each variant owns.
 pub(crate) trait OutcomeLabel: Copy + Enum + 'static {
     fn label(self) -> &'static str;
 }
 
-/// Declares a closed outcome vocabulary together with its labels and its
-/// [`enum_map::Enum`] position.
 macro_rules! outcome_label {
     ($(#[$meta:meta])* $vis:vis enum $name:ident {
         $($variant:ident => $label:literal),+ $(,)?
@@ -78,8 +73,6 @@ impl<O: OutcomeLabel> Outcomes<O> {
     }
 }
 
-/// Records an operation's outcome `label` on its span, and marks the span
-/// failed with that label as its `error.type` when `failed`.
 pub(crate) fn record_span_outcome(span: &tracing::Span, label: &'static str, failed: bool) {
     span.record("outcome", label);
     if failed {

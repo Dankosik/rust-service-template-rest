@@ -1,9 +1,3 @@
-//! Transactional `JetStream` publication through the canonical jobs queue.
-//!
-//! This module stores the already serialized event bytes with its immutable
-//! route and identity. Jobs owns every queue statement and the caller owns the
-//! transaction outcome; this adapter only maps immutable intent to a jobs kind.
-
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -39,14 +33,12 @@ const POLICY: Policy = Policy {
     max_running: None,
 };
 
-/// The durable enqueue outcome for an immutable event intent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OutboxEnqueued {
     Created,
     Duplicate,
 }
 
-/// Why a prepared event could not establish its durable publication intent.
 #[derive(Debug, thiserror::Error)]
 pub enum OutboxEnqueueError {
     #[error("outbox payload is {bytes} bytes; the immutable intent allows {max_bytes}")]
@@ -54,16 +46,12 @@ pub enum OutboxEnqueueError {
     #[error("outbox event identity conflicts with a live immutable intent")]
     EventIdConflict,
     /// The duplicate row disappeared before it could be compared.
-    ///
-    /// The caller's transaction/retry owner must retry the same prepared event.
     #[error("outbox live identity changed; retry the caller transaction")]
     LiveIdentityChanged,
     #[error(transparent)]
     Jobs(#[from] infra_jobs::EnqueueError),
 }
 
-/// Why a stored outbox intent cannot be published. None of the reasons
-/// carries stored content.
 #[derive(Debug, thiserror::Error)]
 enum IntentError {
     #[error("format version is not supported")]
@@ -82,10 +70,6 @@ enum IntentError {
 ///
 /// The caller owns engine construction, pool admission, and lifecycle. This
 /// helper only creates the checked registry consumed by that engine.
-///
-/// # Errors
-///
-/// Returns a jobs registry error when the fixed kind or policy is invalid.
 pub fn kinds(producer: Producer) -> Result<Kinds, infra_jobs::KindError> {
     let mut kinds = KindsBuilder::new();
     kinds.register(POLICY, Publisher { producer });
@@ -115,18 +99,12 @@ impl<'a> OutboxText<'a> {
 impl PreparedEvent {
     /// Enqueues this immutable event inside the caller's already-open transaction.
     ///
-    /// The method never creates a connection or commits. A duplicate live key
-    /// is accepted only when the jobs owner confirms byte-for-byte equal intent;
-    /// a vanished live key returns the caller to its existing transaction retry
-    /// policy. Borrowed metadata is checked cooperatively before cloning or
-    /// base64 construction; dropping this future during that check sends no SQL.
+    /// Never creates a connection or commits. A duplicate live key is accepted
+    /// only when the jobs owner confirms byte-for-byte equal intent; a vanished
+    /// live key returns the caller to its existing transaction retry policy.
+    /// Borrowed metadata is checked cooperatively before cloning or base64
+    /// construction; dropping this future during that check sends no SQL.
     /// Direct callers own finite input, concurrent-call and deadline bounds.
-    ///
-    /// # Errors
-    ///
-    /// Returns a conflict for different live immutable content, a retryable
-    /// contention result when no live row remains to compare, or the canonical
-    /// jobs enqueue error.
     pub async fn enqueue(&self, tx: &mut Tx<'_>) -> Result<OutboxEnqueued, OutboxEnqueueError> {
         let intent = self.prepare_outbox_intent().await?;
         let key = event_key(&intent.message_id);

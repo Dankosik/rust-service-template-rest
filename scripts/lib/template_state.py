@@ -1,10 +1,4 @@
 #!/usr/bin/env python3
-"""Shared state, snapshot, and admission primitives for template lifecycle tools.
-
-The initializer and synchronizer deliberately share this small stdlib-only
-surface.  It owns format and filesystem admission, while each command owns its
-own transformations and user-facing operation semantics.
-"""
 
 from __future__ import annotations
 
@@ -47,8 +41,6 @@ HARNESS_CHOICES = ("core", "codex", "claude", "qwen", "cursor", "grok", "opencod
 
 @dataclass(frozen=True)
 class AdapterPack:
-    """The selected-adapter paths which are not ordinary manifest ownership."""
-
     canonical: tuple[str, ...]
     generated: tuple[str, ...]
     settings: tuple[str, ...] = ()
@@ -141,11 +133,11 @@ _RESERVED_CRATE_NAMES = {
 
 
 class Refusal(ValueError):
-    """An expected admission failure that must occur before real writes."""
+    pass
 
 
 class ToolFailure(RuntimeError):
-    """A required local command could not establish an input."""
+    pass
 
 
 def _reject_duplicate_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -162,8 +154,6 @@ def _reject_constant(value: str) -> Any:
 
 
 def parse_json_bytes(raw: bytes, label: str) -> Any:
-    """Parse a UTF-8 JSON value while rejecting duplicate and non-finite input."""
-
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as error:
@@ -248,13 +238,6 @@ def validate_identity(value: object) -> dict[str, str]:
 
 
 def http_idempotency_requirement(database: str, authn: str) -> str | None:
-    """Name the unmet HTTP_IDEMPOTENCY=postgres requirement, or none when met.
-
-    This is the one owner of the combination rule. Both `validate_profiles`
-    below and `template_init.py`'s `parse_inputs` call it and word their own
-    refusals from the field it names.
-    """
-
     if database != "postgres":
         return "database"
     if authn not in ("oidc-jwt", "oidc-introspection"):
@@ -263,33 +246,18 @@ def http_idempotency_requirement(database: str, authn: str) -> str | None:
 
 
 def jobs_requirement(database: str) -> str | None:
-    """Return the unmet JOBS=postgres refusal, or none when met.
-
-    This is the one owner of the combination rule. `template_init.py`'s
-    `parse_inputs` raises its text, and `validate_profiles` words its own
-    lock refusal.
-    """
-
     if database != "postgres":
         return "JOBS=postgres requires DATABASE=postgres"
     return None
 
 
 def service_auth_requirement(grpc: str) -> str | None:
-    """Return the unmet SERVICE_AUTH=jwt prerequisite, if any.
-
-    Service tokens authenticate native gRPC calls, so the profile has nothing
-    to protect without that listener.
-    """
-
     if grpc != "enabled":
         return "SERVICE_AUTH=jwt requires GRPC=enabled"
     return None
 
 
 def outbox_requirement(database: str, jobs: str, messaging: str) -> str | None:
-    """Return the unmet transactional-outbox prerequisite, if any."""
-
     if database != "postgres":
         return "OUTBOX=postgres requires DATABASE=postgres"
     if jobs != "postgres":
@@ -300,8 +268,6 @@ def outbox_requirement(database: str, jobs: str, messaging: str) -> str | None:
 
 
 def webhooks_requirement(database: str, jobs: str, outbound_http: str) -> str | None:
-    """Return the unmet durable-outbound webhook prerequisite, if any."""
-
     if database != "postgres":
         return "WEBHOOKS=durable requires DATABASE=postgres"
     if jobs != "postgres":
@@ -312,8 +278,6 @@ def webhooks_requirement(database: str, jobs: str, outbound_http: str) -> str | 
 
 
 def inbound_webhooks_requirement(database: str, jobs: str) -> str | None:
-    """Return the unmet durable-inbound webhook prerequisite, if any."""
-
     if database != "postgres":
         return "INBOUND_WEBHOOKS=standard-webhooks requires DATABASE=postgres"
     if jobs != "postgres":
@@ -473,8 +437,6 @@ def validate_profiles(value: object) -> dict[str, str]:
 
 
 def validate_lock(value: object) -> dict[str, Any]:
-    """Return a schema-1 lock or refuse every unsupported representation."""
-
     expected = {"schema_version", "state", "identity", "profiles", "source"}
     if not isinstance(value, dict) or set(value) != expected:
         raise Refusal("template.lock has an unsupported schema")
@@ -534,8 +496,6 @@ def load_lock_snapshot(root: Path, required: bool = False) -> LockSnapshot | Non
 
 
 def load_lock(root: Path, required: bool = False) -> dict[str, Any] | None:
-    """Load and validate the local one-shot lock without following a symlink."""
-
     snapshot = load_lock_snapshot(root, required)
     return None if snapshot is None else snapshot.normalized
 
@@ -574,8 +534,6 @@ def lock_has_explicit_inbound_webhooks(root: Path, required: bool = False) -> bo
 
 
 def selected_profiles(root: Path) -> tuple[str, str]:
-    """Return database and harness; the uninitialized source is postgres/all."""
-
     lock = load_lock(root)
     if lock is None:
         return ("postgres", "all")
@@ -586,8 +544,6 @@ def selected_profiles(root: Path) -> tuple[str, str]:
 
 
 def selected_authn(root: Path) -> str:
-    """Return the normalized authentication profile without changing the lock."""
-
     lock = load_lock(root)
     if lock is None:
         # The source contains all optional implementations, but has not made a
@@ -599,8 +555,6 @@ def selected_authn(root: Path) -> str:
 
 
 def selected_outbound_http(root: Path) -> str:
-    """Return the normalized outbound choice, or the source capability."""
-
     root = Path(root)
     lock = load_lock(root)
     if lock is None:
@@ -611,8 +565,6 @@ def selected_outbound_http(root: Path) -> str:
 
 
 def selected_outbound_auth(root: Path) -> str:
-    """Return the normalized OAuth profile, or the source capability."""
-
     root = Path(root)
     lock = load_lock(root)
     if lock is None:
@@ -623,8 +575,6 @@ def selected_outbound_auth(root: Path) -> str:
 
 
 def selected_grpc(root: Path) -> str:
-    """Return the native gRPC selection, or the source capability."""
-
     root = Path(root)
     lock = load_lock(root)
     if lock is None:
@@ -635,8 +585,6 @@ def selected_grpc(root: Path) -> str:
 
 
 def selected_http_idempotency(root: Path) -> str:
-    """Return the normalized idempotency choice, or the source capability."""
-
     root = Path(root)
     lock = load_lock(root)
     if lock is None:
@@ -647,8 +595,6 @@ def selected_http_idempotency(root: Path) -> str:
 
 
 def selected_jobs(root: Path) -> str:
-    """Return the normalized jobs choice, or the source capability."""
-
     root = Path(root)
     lock = load_lock(root)
     if lock is None:
@@ -659,8 +605,6 @@ def selected_jobs(root: Path) -> str:
 
 
 def selected_messaging(root: Path) -> str:
-    """Return the normalized messaging choice, or the source capability."""
-
     root = Path(root)
     lock = load_lock(root)
     if lock is None:
@@ -671,8 +615,6 @@ def selected_messaging(root: Path) -> str:
 
 
 def selected_cache(root: Path) -> str:
-    """Return the normalized cache choice, or the source capability."""
-
     root = Path(root)
     lock = load_lock(root)
     if lock is None:
@@ -683,8 +625,6 @@ def selected_cache(root: Path) -> str:
 
 
 def selected_object_storage(root: Path) -> str:
-    """Return the normalized object storage choice, or the source capability."""
-
     root = Path(root)
     lock = load_lock(root)
     if lock is None:
@@ -695,8 +635,6 @@ def selected_object_storage(root: Path) -> str:
 
 
 def selected_service_auth(root: Path) -> str:
-    """Return the normalized service authentication choice, or the source capability."""
-
     root = Path(root)
     lock = load_lock(root)
     if lock is None:
@@ -707,8 +645,6 @@ def selected_service_auth(root: Path) -> str:
 
 
 def selected_outbox(root: Path) -> str:
-    """Return the normalized outbox choice, or the source capability."""
-
     root = Path(root)
     lock = load_lock(root)
     if lock is None:
@@ -719,8 +655,6 @@ def selected_outbox(root: Path) -> str:
 
 
 def selected_webhooks(root: Path) -> str:
-    """Return the normalized outbound webhook selection, or source capability."""
-
     root = Path(root)
     lock = load_lock(root)
     if lock is None:
@@ -731,8 +665,6 @@ def selected_webhooks(root: Path) -> str:
 
 
 def selected_inbound_webhooks(root: Path) -> str:
-    """Return the normalized inbound webhook selection, or source capability."""
-
     root = Path(root)
     lock = load_lock(root)
     if lock is None:
@@ -753,8 +685,6 @@ def selected_adapters(harness: str) -> tuple[str, ...]:
 
 
 def safe_relative(path: str, *, allow_directory: bool = False) -> str:
-    """Validate an inventory path and retain its explicit directory suffix."""
-
     if not isinstance(path, str) or not path:
         raise Refusal("owner path is empty")
     directory = path.endswith("/")
@@ -838,8 +768,6 @@ def _protected_manifest_owner(entry: str) -> bool:
 def _derived_service_skill_roots(
     root: Path, *, initializing: bool = False, replay_lock: LockSnapshot | None = None,
 ) -> frozenset[Path]:
-    """Admit the narrow local-skill reservation only in a complete derived tree."""
-
     lock = replay_lock.normalized if replay_lock is not None else load_lock(root)
     if lock is not None and lock["state"] != "complete" and not initializing:
         raise Refusal("template.lock is incomplete; inspect the init-produced diff and use a fresh template checkout")
@@ -890,8 +818,6 @@ def _manifest_files(root: Path, entry: str) -> tuple[Path, ...]:
 
 
 def _contains_profile_marker(contents: bytes) -> bool:
-    """Only whole-line host-comment markers are executable profile syntax."""
-
     return (
         _PROFILE_MARKER_LINE_RE.search(contents) is not None
         or _PROFILE_MARKER_PREFIX_RE.search(contents) is not None
@@ -899,8 +825,6 @@ def _contains_profile_marker(contents: bytes) -> bool:
 
 
 def manifest_entries(snapshot_root: Path) -> tuple[str, ...]:
-    """Read safe ownership paths before validating their materialized bytes."""
-
     manifest = Path(snapshot_root) / "template-owned.paths"
     _regular_file(manifest, "template-owned.paths")
     entries: list[str] = []
@@ -927,13 +851,6 @@ def parse_manifest(
     snapshot_root: Path, *, harness: str = "all", target_repository: str | None = None,
     initializing: bool = False, _replay_lock: LockSnapshot | None = None,
 ) -> tuple[str, ...]:
-    """Validate ownership; selected outputs may omit unselected adapter inputs.
-
-    Committed template sources use the default all-adapter closure. A derived
-    repository keeps that same portable manifest, with its lock selecting which
-    adapter inputs must physically exist.
-    """
-
     entries = manifest_entries(snapshot_root)
     if target_repository is not None and not isinstance(target_repository, str):
         raise Refusal("target repository identity is invalid")
@@ -981,8 +898,6 @@ def parse_manifest(
 
 
 def git(root: Path, args: Sequence[str], *, input_bytes: bytes | None = None) -> bytes:
-    """Run read-only Git plumbing without shell interpolation or index writes."""
-
     command = [
         "git",
         "-c",
@@ -1043,8 +958,6 @@ def _parse_tree_record(record: bytes) -> tuple[str, str, str, str]:
 
 
 def _batch_blobs(root: Path, object_ids: Sequence[str]) -> dict[str, bytes]:
-    """Read the already-admitted blobs in one declared-length Git batch."""
-
     if not object_ids:
         return {}
     command = [
@@ -1097,8 +1010,6 @@ def _batch_blobs(root: Path, object_ids: Sequence[str]) -> dict[str, bytes]:
 
 
 def _generated_skill_link(path: str, contents: bytes) -> str | None:
-    """Return the canonical skill name for the sole permitted source symlink."""
-
     for prefix in (".claude/skills/", ".qwen/skills/"):
         if path.startswith(prefix):
             name = path.removeprefix(prefix)
@@ -1109,8 +1020,6 @@ def _generated_skill_link(path: str, contents: bytes) -> str | None:
 
 
 def snapshot_tree(root: Path, destination: Path, revision: str | None = None) -> str:
-    """Materialize tracked files and admitted generated skill links from one immutable commit."""
-
     root = git_root(root)
     revision = revision or git_head(root)
     if not _OBJECT_ID_RE.fullmatch(revision):
@@ -1176,8 +1085,6 @@ class PlannedLink:
 
 
 def atomic_write(path: Path, data: bytes, mode: int) -> None:
-    """Replace one regular target using a same-parent temporary file."""
-
     parent = path.parent
     if parent.is_symlink() or not parent.is_dir():
         raise Refusal("write parent is unsafe")
@@ -1197,7 +1104,6 @@ def atomic_write(path: Path, data: bytes, mode: int) -> None:
 def admit_plan(
     root: Path, writes: Iterable[PlannedWrite | PlannedLink], removals: Iterable[str] = ()
 ) -> tuple[list[PlannedWrite], list[PlannedLink], list[str]]:
-    """Prove every operation's type and parent shape before its first write."""
     regular_writes: list[PlannedWrite] = []
     link_writes: list[PlannedLink] = []
     for write in writes:
@@ -1238,8 +1144,6 @@ def admit_plan(
 
 
 def verify_plan(root: Path, writes: Iterable[PlannedWrite | PlannedLink], removals: Iterable[str] = ()) -> None:
-    """Read back exactly the operation effects; no broad tree comparison is implied."""
-
     for write in writes:
         target = root / write.relative
         if isinstance(write, PlannedWrite):
@@ -1259,8 +1163,6 @@ def verify_plan(root: Path, writes: Iterable[PlannedWrite | PlannedLink], remova
 
 
 def write_plan(root: Path, writes: Iterable[PlannedWrite | PlannedLink], removals: Iterable[str] = ()) -> None:
-    """Apply an admitted plan in finality order and read every effect back."""
-
     regular_writes, link_writes, removal_paths = admit_plan(root, writes, removals)
     for write in regular_writes:
         target = ensure_safe_destination(root, write.relative)

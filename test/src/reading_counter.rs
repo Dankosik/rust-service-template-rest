@@ -1,9 +1,3 @@
-//! Service-owned reading counter recipe, also copied into the initialized fixture.
-//!
-//! The queue is transport state. Request and effect identities survive its retention.
-//! Dynamic SQL is intentional: this schema belongs only to this executable fixture,
-//! and must never enter the template's canonical migrations or offline SQL metadata.
-
 use std::{
     fmt,
     path::PathBuf,
@@ -23,34 +17,27 @@ use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row};
 use time::{UtcDateTime, format_description::well_known::Rfc3339};
 
-/// Schema installed explicitly by the fixture CLI, never by the worker.
+// Dynamic SQL is intentional: this schema belongs only to this executable fixture
+// and must never enter the template's canonical migrations or offline SQL metadata.
 pub const SCHEMA: &str =
     include_str!("../fixtures/migrations/reading_counter/0001_reading_counter.sql");
-/// Bound on the encoded immutable operation in every transport.
 pub const MAX_OPERATION_BYTES: usize = 1024;
 pub const POOL_PRESSURE_DIR: &str = "READING_POOL_PRESSURE_DIR";
 pub const LOCAL_CHECKPOINT_DIR: &str = "READING_LOCAL_CHECKPOINT_DIR";
-/// Fixture-only permanent failure for the selected logical operation.
 pub const FAIL_OPERATION: &str = "READING_FAIL_OPERATION";
 
-/// One immutable read. Canonical UUID spelling avoids alternate identity encodings.
+/// Canonical UUID spelling avoids alternate identity encodings.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Operation {
     pub scope: String,
     pub operation_id: String,
     pub article_id: String,
-    /// Version of the article content; nonzero.
     pub content_version: u32,
-    /// Content text, at most `MAX_OPERATION_BYTES` and without NUL.
     pub content: String,
 }
 
 impl Operation {
-    /// Validate source bounds before serializing a transport payload.
-    ///
-    /// # Errors
-    /// Rejects noncanonical UUIDs, zero versions, NUL, or an encoded payload over 1 KiB.
     pub fn validate(&self) -> Result<(), Error> {
         for id in [&self.scope, &self.operation_id, &self.article_id] {
             if id.len() != 36
@@ -82,7 +69,6 @@ impl EventPayload for Operation {
     const SCHEMA_VERSION: u16 = 1;
 }
 
-/// Independent business projection. Receivers use a different database.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Channel {
@@ -101,12 +87,11 @@ impl Channel {
     }
 }
 
-/// The first committed mutation result, not the aggregate's later count.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Effect {
     pub operation: Operation,
     pub channel: Channel,
-    /// The read count when the effect was first committed.
+    /// The read count when the effect was first committed, not the aggregate's later count.
     pub read_count: i64,
 }
 
@@ -129,10 +114,6 @@ pub struct PreparedRequest {
     event_time: String,
 }
 impl PreparedRequest {
-    /// Builds the event for `operation` on `subject` with a fresh occurrence time.
-    ///
-    /// # Errors
-    /// Rejects an invalid operation, route, or occurrence timestamp.
     pub fn try_new(operation: Operation, subject: &str) -> Result<Self, Error> {
         operation.validate()?;
         let event = Event {
@@ -158,17 +139,13 @@ impl PreparedRequest {
     }
 }
 
-/// Closed business errors retain transaction uncertainty for caller reconciliation.
 #[derive(Debug)]
 pub enum Error {
     InvalidOperation,
-    /// The identity conflicts with an existing different operation.
     Conflict,
-    /// Acceptance has no established intent.
     MissingIntent,
     Control,
     Database(sqlx::Error),
-    /// The transaction failed; may leave the commit outcome unknown.
     Transaction(TxError),
     Json(serde_json::Error),
     Enqueue(infra_jobs::EnqueueError),
@@ -177,7 +154,6 @@ pub enum Error {
     Complete(infra_jobs::CompleteError),
 }
 impl Error {
-    /// Whether the transaction commit outcome is unknown and needs reconciliation.
     #[must_use]
     pub const fn commit_unknown(&self) -> bool {
         matches!(self, Self::Transaction(TxError::CommitUnknown(_)))
@@ -217,10 +193,6 @@ impl From<serde_json::Error> for Error {
     }
 }
 
-/// Install only the fixture-owned schema, preserving canonical migration history.
-///
-/// # Errors
-/// Returns SQL or transaction errors without retrying.
 pub async fn migrate(pool: &PgPool) -> Result<(), Error> {
     in_tx(pool, async |tx| {
         sqlx::raw_sql(SCHEMA).execute(&mut *tx).await?;
@@ -229,11 +201,7 @@ pub async fn migrate(pool: &PgPool) -> Result<(), Error> {
     .await
 }
 
-/// Atomically record acceptance and the fixed three intents. Unknown COMMIT is
-/// returned unchanged: callers read this same identity before deciding to retry.
-///
-/// # Errors
-/// Conflicting immutable fields, provider failure, or transaction uncertainty.
+/// Unknown COMMIT is returned unchanged: callers read this same identity before deciding to retry.
 pub async fn accept(
     pool: &PgPool,
     prepared: &PreparedRequest,
@@ -247,9 +215,6 @@ pub async fn accept(
 }
 
 /// The caller owns commit and must propagate this result, including failure.
-///
-/// # Errors
-/// Same as [`accept`].
 pub async fn accept_in_tx(
     tx: &mut Tx<'_>,
     prepared: &PreparedRequest,
@@ -315,9 +280,6 @@ async fn enqueue_intents(
 /// The driver first stops old writers and reconciles all three effect authorities.
 /// Prepared event identity, time and payload survive this transport-only replay;
 /// the original accepted transport IDs remain unchanged in `reading_requests`.
-///
-/// # Errors
-/// Missing/conflicting acceptance, any remaining original transport, or enqueue failure.
 pub async fn replay(
     pool: &PgPool,
     operation: &Operation,
@@ -358,10 +320,6 @@ fn accepted_row(row: &sqlx::postgres::PgRow, operation: &Operation) -> Result<Ac
     })
 }
 
-/// Read durable acceptance, including after an uncertain transaction.
-///
-/// # Errors
-/// Unavailable database truth or conflicting immutable fields is not absence.
 pub async fn read_request(pool: &PgPool, operation: &Operation) -> Result<Option<Accepted>, Error> {
     operation.validate()?;
     let row = sqlx::query("SELECT operation,event_id,event_time,local_job_id::text,outbox_job_id::text,webhook_job_id::text FROM reading_requests WHERE scope=$1::uuid AND operation_id=$2::uuid")
@@ -380,8 +338,6 @@ fn same_operation(encoded: &str, operation: &Operation) -> Result<(), Error> {
 }
 
 /// Apply one durable effect, reconciling an unknown commit against its marker once.
-///
-/// # Errors
 /// Unknown or unavailable readback never establishes success or triggers replay.
 pub async fn apply_effect(
     pool: &PgPool,
@@ -405,9 +361,6 @@ pub async fn apply_effect(
 
 /// Marker uniqueness arbitrates concurrent duplicates before the aggregate changes.
 /// Both writes and caller-owned fenced completion share this transaction.
-///
-/// # Errors
-/// Conflicting immutable fields or SQL failure must roll back the caller transaction.
 pub async fn apply_effect_in_tx(
     tx: &mut Tx<'_>,
     channel: Channel,
@@ -438,10 +391,6 @@ pub async fn apply_effect_in_tx(
     })
 }
 
-/// Read a channel's durable marker without consulting transport state.
-///
-/// # Errors
-/// Unavailable readback or conflict is never equivalent to marker absence.
 pub async fn read_effect(
     pool: &PgPool,
     channel: Channel,
@@ -538,10 +487,6 @@ async fn wait_release(
     Ok(())
 }
 
-/// Register the fixture kind with the actual worker, using its existing pool.
-///
-/// # Errors
-/// The worker's registration contract is fallible; this fixed registration succeeds.
 pub fn register(
     registration: &mut jobs_worker::Registration<'_>,
 ) -> Result<(), jobs_worker::BuildError> {

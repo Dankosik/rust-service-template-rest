@@ -1,5 +1,3 @@
-//! The named durable: reconciliation, filter admission, and loss.
-
 use super::*;
 
 #[tokio::test]

@@ -5,10 +5,6 @@ use serde::{Serialize, Serializer, ser};
 const NON_FINITE: &str = "non-finite float in JSON payload";
 
 /// Keep output private until success: a refusal does not roll back earlier writes.
-///
-/// # Errors
-/// Returns a serialization or writer error, including a non-finite float refusal
-/// even when a custom [`Serialize`] implementation catches the nested error.
 pub fn to_writer<W: Write, T: Serialize + ?Sized>(
     writer: W,
     value: &T,

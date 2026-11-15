@@ -1,5 +1,3 @@
-//! The bounded trace carrier stored on a job and linked from its attempt span.
-
 use std::str::FromStr;
 
 use opentelemetry::{
@@ -26,7 +24,6 @@ pub(crate) fn capture() -> Carrier {
     carrier.validated()
 }
 
-/// Link `span` to a valid, remote stored context without changing its parent.
 pub(crate) fn link(span: &tracing::Span, carrier: &Carrier) {
     let context = global::get_text_map_propagator(|propagator| {
         propagator.extract_with_context(&opentelemetry::Context::new(), carrier)
@@ -56,8 +53,6 @@ pub(crate) struct Carrier {
 }
 
 impl Carrier {
-    /// The stored pair without a refused `tracestate`, or two absent fields
-    /// when `traceparent` is refused.
     pub(crate) fn from_stored(trace_parent: Option<String>, trace_state: Option<String>) -> Self {
         if trace_parent
             .as_deref()

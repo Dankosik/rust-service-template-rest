@@ -1,5 +1,3 @@
-//! Decode failures rendered without a value a variable supplied.
-
 use crate::de::VALUE_FREE;
 
 /// Sections whose values stay out of a decode failure whichever source set
@@ -58,17 +56,12 @@ pub(super) fn describe_rejection(
     }
 }
 
-/// What a decode failure may say about the value it refused.
 enum Rejection<'a> {
-    /// The message holds no value.
     AsWritten,
-    /// The message may quote the value; this is the form it expected.
     Expected(&'a str),
-    /// The message may quote the value and names no expected form.
     Unexplained,
 }
 
-/// The key a decode failure names, and what its message may be trusted for.
 fn classify(error: &config::ConfigError) -> (Option<&str>, Rejection<'_>) {
     const KEYS_ONLY: [&str; 3] = ["unknown field ", "missing field ", "duplicate field "];
     const QUOTES_VALUE: [&str; 3] = ["invalid type: ", "invalid value: ", "unknown variant "];
@@ -104,7 +97,6 @@ fn classify(error: &config::ConfigError) -> (Option<&str>, Rejection<'_>) {
     }
 }
 
-/// Whether the dotted `path` is `key` or lies beneath it.
 fn is_at_or_under(path: &str, key: &str) -> bool {
     path.strip_prefix(key)
         .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))

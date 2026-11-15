@@ -1,5 +1,3 @@
-//! The health and diagnostics listeners and the readiness they serve.
-
 use health::{Probe, Readiness, RefreshPolicy};
 use infra_http::{HardenOptions, Server, ServerOptions};
 use infra_telemetry::{Metrics, diagnostics_router};
@@ -9,7 +7,6 @@ use super::{READINESS_PROGRESS, WorkerError};
 use crate::background::Background;
 use crate::resources::{Listeners, Resources};
 
-/// One probe per dependency that admission opened.
 pub(super) fn readiness_probes(resources: &Resources) -> Vec<Box<dyn Probe>> {
     #[allow(unused_mut, reason = "retained profiles add their probes")]
     let mut probes: Vec<Box<dyn Probe>> = Vec::new();

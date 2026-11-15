@@ -1,5 +1,3 @@
-//! Collection and constructor recipes; these are test-local examples, not domain APIs.
-
 use indexmap::{IndexMap, IndexSet};
 use itertools::Itertools;
 

@@ -15,7 +15,6 @@ const REUSE_MARGIN: Duration = Duration::from_secs(10);
 /// that refuses every token costs one token request per this period.
 pub(crate) const EVICTION_MIN_AGE: Duration = Duration::from_secs(30);
 
-/// A sensitive `Bearer` header value and its known expiration.
 #[derive(derive_more::Debug)]
 #[debug("Token([REDACTED])")]
 pub(crate) struct Token {

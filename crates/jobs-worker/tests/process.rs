@@ -1,10 +1,3 @@
-//! Process-level proof of the shipped binary with no configuration and no
-//! database. It refuses before broker I/O when no retained registration is
-//! available, and a retained jobs registry still requires PostgreSQL.
-//! `--help` exits 0 and prints usage.
-
-// Integration tests are test code; the workspace's production lint levels
-// for unwrap/expect/panic do not apply to them.
 #![allow(
     clippy::expect_used,
     clippy::unwrap_used,

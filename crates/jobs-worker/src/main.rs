@@ -1,6 +1,3 @@
-//! The jobs worker composition registers each retained capability.
-//! A derived service supplies its own adapters and business handlers.
-
 use std::process::ExitCode;
 
 // jemalloc: 3-11% less worker CPU per job than glibc malloc, with no more

@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Committed-source sync composition canary with local-byte preservation oracles."""
 
 from __future__ import annotations
 

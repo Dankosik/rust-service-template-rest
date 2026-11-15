@@ -1,10 +1,3 @@
-//! The public Standard Webhooks ingress route.
-//!
-//! This module owns only transport admission: it bounds raw bytes, carries the
-//! generated operation contract, and translates the provider's closed receive
-//! outcomes into the service Problem catalog.  Signature verification and the
-//! receipt transaction remain in `infra-webhooks`.
-
 use std::fmt;
 use std::time::SystemTime;
 
@@ -102,22 +95,16 @@ struct ServiceUnavailable(Problem);
 #[derive(Debug, IntoResponses)]
 #[expect(dead_code, reason = "The variants exist only for the OpenAPI derive")]
 enum WebhookProblemResponses {
-    /// 400: the webhook was rejected.
     #[response(status = 400)]
     Rejected(#[ref_response] WebhookRejected),
-    /// 404: no such webhook endpoint.
     #[response(status = 404)]
     NotFound(#[ref_response] NotFound),
-    /// 413: the body exceeds the size limit.
     #[response(status = 413)]
     RequestEntityTooLarge(#[ref_response] RequestEntityTooLarge),
-    /// 500: unexpected internal failure.
     #[response(status = 500)]
     InternalServerError(#[ref_response] InternalServerError),
-    /// 503: durable receipt storage is unavailable.
     #[response(status = 503)]
     Unavailable(#[ref_response] ServiceUnavailable),
-    /// 504: the request budget for a receipt attempt was exhausted.
     #[response(status = 504)]
     Timeout(#[ref_response] GatewayTimeout),
 }
@@ -147,11 +134,6 @@ where
     OpenApiRouter::with_openapi(document).routes(routes!(receive))
 }
 
-/// Verify and atomically retain one inbound Standard Webhooks delivery.
-///
-/// Bearer authentication is explicitly disabled for this operation.  It is
-/// still authenticated: every configured endpoint must pass Standard Webhooks
-/// signature and timestamp verification before a durable receipt is written.
 #[utoipa::path(
     post,
     path = "/webhooks/{endpoint_id}",

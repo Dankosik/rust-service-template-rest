@@ -1,6 +1,3 @@
-//! Service tokens on native gRPC: caller admission for business calls and
-//! the client binding that sends this service's token.
-
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;

@@ -43,8 +43,6 @@ pub enum PostgresSessionBudgets {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct PostgresConfig {
-    /// Whether the service opens a pool at startup and reports it in
-    /// readiness.
     pub enabled: bool,
     /// `postgres://user:password@host:port/database?sslmode=<mode>`.
     /// Set `APP__POSTGRES__DSN` in the environment or via `--secrets-dir`.
@@ -58,7 +56,6 @@ pub struct PostgresConfig {
     /// the default.
     #[serde(default, deserialize_with = "blank_as_none")]
     pub password_file: Option<PathBuf>,
-    /// Where each pooled session's `statement_timeout` and `idle_in_transaction_session_timeout` come from; `startup` by default.
     pub session_budgets: PostgresSessionBudgets,
     /// Upper bound on pooled connections. Size it from the database's
     /// `max_connections` divided across every instance and job that shares
@@ -88,11 +85,6 @@ impl Default for PostgresConfig {
 }
 
 impl PostgresConfig {
-    /// The occupied DSN, or the same validation error `enabled` uses.
-    ///
-    /// # Errors
-    ///
-    /// Returns `postgres.dsn` when the value is absent.
     pub fn required_dsn(&self) -> Result<&SecretString, ValidationError> {
         required("postgres.dsn", self.dsn.as_ref(), "postgres.enabled = true")
     }

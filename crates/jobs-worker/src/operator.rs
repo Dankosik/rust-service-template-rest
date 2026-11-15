@@ -1,5 +1,3 @@
-//! One PostgreSQL-only operation, followed by bounded dependency and runtime close.
-
 use std::cell::Cell;
 use std::io::Write;
 use std::num::NonZeroU32;
@@ -178,7 +176,6 @@ fn recovery_target(args: &RecoveryArgs) -> Result<RecoveryTarget, InputError> {
     RecoveryTarget::try_new(&args.id, &args.kind, &args.version)
 }
 
-/// The receipt's closed `outcome` vocabulary.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Outcome {
     Ok,
@@ -210,8 +207,6 @@ impl Outcome {
     }
 }
 
-/// The receipt's closed `cause` vocabulary for failures the operator detects
-/// itself; database failures carry [`OperatorError::cause`] instead.
 #[derive(Clone, Copy)]
 enum Cause {
     Configuration,
@@ -243,7 +238,6 @@ impl Cause {
     }
 }
 
-/// What an acknowledged operation established.
 enum Executed {
     Inspected(InspectionResult),
     Redriven { new_version: String },
@@ -252,7 +246,6 @@ enum Executed {
 
 struct FailureReceipt {
     outcome: Outcome,
-    /// The bounded code from [`Cause`] or [`OperatorError::cause`].
     cause: &'static str,
     detail: FailureDetail,
 }
@@ -336,7 +329,6 @@ impl Report {
     }
 }
 
-/// Returns process success, never maps an exit code or retries an operation.
 #[expect(
     clippy::disallowed_methods,
     reason = "finite operator output is emitted after its runtime stops; this function owns the stdout lock"

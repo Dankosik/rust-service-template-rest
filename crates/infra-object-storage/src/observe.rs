@@ -16,8 +16,6 @@ use crate::error::Failure;
 
 const OPERATION_DURATION_METRIC: &str = "object_storage_operation_duration_seconds";
 
-/// Buckets in seconds for [`OPERATION_DURATION_METRIC`], from a fast head to
-/// a large transfer.
 const OPERATION_DURATION_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0,
 ];
@@ -64,7 +62,6 @@ impl Operation {
     }
 }
 
-/// `ok`, `cancelled`, and every [`ObjectStorageError`] label.
 #[derive(Clone, Copy, enum_map::Enum)]
 enum Outcome {
     Ok,
@@ -101,8 +98,6 @@ impl Histograms {
     }
 }
 
-/// Starts before admission so refusals are observed too. Dropping the guard
-/// before recording an outcome records `cancelled`.
 pub(crate) struct OperationGuard {
     started: Instant,
     operation: Operation,
@@ -214,7 +209,6 @@ impl OperationGuard {
         failure.error
     }
 
-    /// Record cancellation without relying on the drop fallback.
     pub(crate) fn cancel(&mut self) {
         self.finish(Outcome::Cancelled);
     }
@@ -249,7 +243,6 @@ fn identifier(value: &str) -> Option<Box<str>> {
     bounded.then(|| value.into())
 }
 
-/// Describes the histogram to the installed recorder. Repeating it is harmless.
 pub(crate) fn describe() {
     metrics::describe_histogram!(
         OPERATION_DURATION_METRIC,

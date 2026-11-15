@@ -1,5 +1,3 @@
-//! PostgreSQL pool admission.
-
 use super::background::Background;
 use infra_postgres::{Dsn, PgPool, PoolOptions, SessionSettingsSource};
 use secrecy::ExposeSecret;

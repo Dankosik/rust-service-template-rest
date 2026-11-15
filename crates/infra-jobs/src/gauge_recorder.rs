@@ -1,5 +1,3 @@
-//! A metrics recorder that keeps gauge values, for tests that read them back.
-
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};

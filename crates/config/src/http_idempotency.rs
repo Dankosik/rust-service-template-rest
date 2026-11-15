@@ -31,13 +31,6 @@ pub struct HttpIdempotencyConfig {
 impl HttpIdempotencyConfig {
     pub const RETENTION_KEY: &str = "http_idempotency.retention";
 
-    /// The retention an idempotent operation needs before it may be served.
-    ///
-    /// # Errors
-    ///
-    /// Returns `postgres.enabled` (checked first) when PostgreSQL is
-    /// disabled, or `http_idempotency.retention` when PostgreSQL is enabled
-    /// but no retention is set.
     pub fn required_retention(&self, postgres_enabled: bool) -> Result<Duration, ValidationError> {
         if !postgres_enabled {
             return Err(ValidationError::new(

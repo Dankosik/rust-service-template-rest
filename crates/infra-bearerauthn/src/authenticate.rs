@@ -1,12 +1,9 @@
-//! The inbound bearer boundary shared by every transport.
-
 use std::mem::DropGuard;
 
 use operation_context::{OperationContext, Stopped};
 
 use crate::{Failure, Principal, Verifier, parse_bearer};
 
-/// Bearer-authentication outcomes at an inbound transport boundary.
 pub(crate) const AUTHN_VERIFICATIONS_METRIC: &str = "authn_verifications_total";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -51,7 +48,6 @@ impl TransportSuccessCounters {
     }
 }
 
-/// One recorded transport outcome; it owns the `result` and `failure` label pair.
 #[derive(Clone, Copy)]
 enum Outcome {
     Success,
@@ -95,10 +91,6 @@ impl Verifier {
     /// Fixture-only: [`Verifier::authenticate_with_context`] under a fresh
     /// 3-second budget that is not linked to any caller's deadline or
     /// cancellation.
-    ///
-    /// # Errors
-    ///
-    /// Returns the closed [`Failure`] the transport maps to its response.
     #[cfg(any(test, feature = "test-support"))]
     pub async fn authenticate<'a>(
         &self,
@@ -123,10 +115,6 @@ impl Verifier {
     /// `transport`: `timeout` when the context's deadline has expired, including
     /// when the transport drops this future to enforce it. Cancellation and
     /// abandonment before the deadline are recorded as `cancelled`.
-    ///
-    /// # Errors
-    /// Returns [`Failure::Unavailable`] when the context stops; otherwise returns
-    /// the closed [`Failure`] the transport maps to its response.
     pub async fn authenticate_with_context<'a>(
         &self,
         authorization: impl IntoIterator<Item = &'a [u8]>,

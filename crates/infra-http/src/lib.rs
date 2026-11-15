@@ -1,16 +1,3 @@
-//! HTTP transport adapter.
-//!
-//! Owns the hardened middleware chain, the problem envelope, the health
-//! probe handlers with their OpenAPI contract, and a bounded server over
-//! hyper. It does not own business rules, configuration loading, or process
-//! lifecycle; the composition root in the `service` crate wires those
-//! together and assembles the full API document.
-//!
-//! The chain mixes `tower-http` layers (request id, response headers, panic
-//! recovery) with this crate's own middleware for observation, admission, the
-//! request deadline, the transport body limit and request-id sanitizing.
-//! Axum's extractor limit uses the same body-size ceiling.
-
 mod body;
 mod contract;
 pub mod extract;

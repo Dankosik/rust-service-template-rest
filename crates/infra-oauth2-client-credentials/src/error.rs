@@ -2,7 +2,6 @@ use std::fmt;
 
 use serde::Deserialize;
 
-/// Safe admission failure identifying only the failed input and its static cause.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("OAuth2 {key}: {reason}")]
 pub struct ConfigurationError {
@@ -10,7 +9,6 @@ pub struct ConfigurationError {
     pub reason: &'static str,
 }
 
-/// Closed acquisition outcomes. Raw protocol and transport errors are discarded.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum AcquisitionError {
     #[error("OAuth2 acquisition deadline elapsed")]
@@ -79,7 +77,6 @@ impl Rejection {
         serde_json::from_slice::<ErrorResponse>(body).map_or(Self::Other, |response| response.error)
     }
 
-    /// The registered wire code, or `None` for [`Self::Other`].
     fn code(self) -> Option<&'static str> {
         match self {
             Self::InvalidRequest => Some("invalid_request"),
@@ -107,12 +104,10 @@ impl fmt::Display for Rejection {
     }
 }
 
-/// Authentication failures are distinct from the existing resource transport.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("caller Authorization header conflicts with OAuth2 authentication")]
     AuthorizationConflict,
-    /// A token exchange was needed but the request carries no subject token.
     #[error("request carries no subject to act on behalf of")]
     SubjectRequired,
     #[error(transparent)]

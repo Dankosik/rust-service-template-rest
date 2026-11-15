@@ -62,7 +62,6 @@ pub(crate) const fn route_key<T: EventPayload>() -> RouteKey<'static> {
     }
 }
 
-/// Composition-owned subject routing for one typed event.
 #[derive(Clone)]
 pub struct Route {
     pub(crate) key: RouteKey<'static>,
@@ -133,13 +132,11 @@ pub enum RegistryError {
     Empty,
 }
 
-/// Typed routes and handlers registered before consumer admission.
 #[derive(Clone)]
 pub struct Registry {
     routes: HashMap<RouteKey<'static>, RouteEntry>,
 }
 
-/// What one route key carries: the route itself and its handler once registered.
 #[derive(Clone)]
 struct RouteEntry {
     route: Route,
@@ -181,10 +178,7 @@ impl std::fmt::Debug for Registry {
 }
 
 impl Registry {
-    /// Creates a registry with all composition-owned routes.
-    ///
-    /// # Errors
-    /// Rejects duplicate routes, invalid subjects and types NATS would trim.
+    /// Rejects duplicate routes, invalid subjects, and event types NATS would trim.
     pub fn try_new(routes: impl IntoIterator<Item = Route>) -> Result<Self, RegistryError> {
         let mut mapped = HashMap::default();
         for route in routes {
@@ -223,9 +217,6 @@ impl Registry {
     /// Registers a typed handler. It receives the event and an
     /// [`OperationContext`] carrying the fixed delivery deadline and
     /// cancellation; broker metadata stays outside feature code.
-    ///
-    /// # Errors
-    /// Rejects missing routes and a second handler for the same event version.
     pub fn register<T, F, Fut>(&mut self, handler: F) -> Result<(), RegistryError>
     where
         T: EventPayload + DeserializeOwned + 'static,
@@ -266,9 +257,6 @@ impl Registry {
     }
 
     /// Refuses a consuming worker with no registered typed behavior.
-    ///
-    /// # Errors
-    /// Returns `Empty` when no handler has been registered.
     pub fn require_handlers(&self) -> Result<(), RegistryError> {
         if self.has_handlers() {
             Ok(())

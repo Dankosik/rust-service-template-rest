@@ -1,6 +1,3 @@
-//! One delivery: its typed handler run under the handler time limit, the
-//! settlement that outcome selects, and the dead-letter transfer.
-
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
@@ -39,7 +36,6 @@ const HANDLER_DURATION_SECONDS: &str = "messaging_handler_duration_seconds";
 const DEAD_LETTER_TOTAL: &str = "messaging_dead_letter_total";
 const SETTLEMENT_FAILURES_TOTAL: &str = "messaging_settlement_failures_total";
 
-/// Runs and settles the deliveries of one admitted consumer.
 #[derive(Debug)]
 pub(super) struct DeliveryHandler {
     shared: Arc<Shared>,
@@ -58,7 +54,6 @@ pub(super) struct DeliveryHandler {
 /// and never becomes a label.
 const UNREGISTERED: &str = "unregistered";
 
-/// Handler outcome metrics of one event type.
 #[derive(Debug)]
 struct EventMetrics {
     event_type: &'static str,
@@ -103,7 +98,6 @@ impl HandlerMetrics {
 }
 
 outcome_label! {
-    /// How one admitted delivery ended.
     enum Outcome {
         Success => "success",
         Permanent => "permanent",
@@ -115,7 +109,6 @@ outcome_label! {
     }
 }
 
-/// How a delivery is settled after its handler ran.
 #[derive(Debug, PartialEq, Eq)]
 enum Settlement {
     Acknowledge,
@@ -123,7 +116,6 @@ enum Settlement {
     Redeliver(Duration),
 }
 
-/// The settlement of attempt `delivery_attempt` (from 1) that ended with `outcome`.
 fn settlement(outcome: Outcome, delivery_attempt: usize) -> Settlement {
     match outcome {
         Outcome::Success => Settlement::Acknowledge,
@@ -476,8 +468,6 @@ pub(super) async fn redeliver_after(source: &Message, delay: Duration) {
     metrics::counter!(SETTLEMENT_FAILURES_TOTAL, "operation" => "nak").increment(1);
 }
 
-/// Describes the delivery metrics to the installed recorder. Repeating it is
-/// harmless.
 pub(super) fn describe_metrics() {
     use metrics::{Unit, describe_counter, describe_histogram};
 

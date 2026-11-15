@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Finite source-only rehearsal. The ignored Rust case owns actor fencing and
-# reconciliation; this carrier owns historical rendering and native archives.
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)

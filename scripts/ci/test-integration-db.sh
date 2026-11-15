@@ -1,16 +1,4 @@
 #!/usr/bin/env bash
-# Database-backed proof: PostgreSQL from env/docker-compose.yml on an
-# ephemeral port with PgBouncer in front of it, plus NATS when the selected
-# profile needs outbox publication. The integration CI job can instead own a
-# shared Compose lifecycle and provide DATABASE_URL, PGBOUNCER_DATABASE_URL
-# and NATS_URL itself. Extra arguments go to `cargo test`.
-#
-#   test-integration-db.sh [cargo test args]
-#   test-integration-db.sh --jobs-reliability-reference
-#   REQUIRE_DOCKER=1 makes a missing Docker a failure instead of a refusal.
-#   --jobs-reliability-reference runs, in place of the suite, the source-only
-#   exact-commit recovery and initialized-service rehearsal against the same
-#   Compose services (make jobs-reliability-reference). No test filter.
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)

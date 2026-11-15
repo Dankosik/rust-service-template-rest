@@ -214,7 +214,6 @@ fn finished_exports_are_counted_by_outcome() {
             budget,
             1,
         );
-        // The OTLP exporter reports its own timeout as an internal failure.
         export(
             Fixed(|| Err(OTelSdkError::InternalFailure("network error".into()))),
             Duration::ZERO,

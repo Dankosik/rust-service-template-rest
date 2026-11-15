@@ -1,6 +1,3 @@
-//! Fixtures shared by the loader tests and the section tests that load
-//! through it.
-
 use std::path::PathBuf;
 
 use crate::BuildInfo;

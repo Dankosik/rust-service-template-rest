@@ -1,6 +1,3 @@
-//! One call's budget: the SDK timeout and retry policy for a read or a
-//! mutation, and the poll that stops when the operation context does.
-
 use std::time::Duration;
 
 use aws_sdk_s3::config::retry::RetryConfig;
@@ -27,7 +24,6 @@ const CONNECT_TIMEOUT: Duration = Duration::from_millis(3100);
 /// retry and its backoff. The SDK sets no attempt bound itself.
 const READ_ATTEMPT_SHARE: u32 = 2;
 
-/// The one timeout and retry policy for a read or mutation call.
 pub(crate) fn call_policy(
     call: Call,
     remaining: Duration,
@@ -84,7 +80,6 @@ pub(crate) async fn within<T>(
     .await
 }
 
-/// The context stopped [`within`] before the future finished.
 pub(crate) struct Interrupted {
     pub(crate) stopped: Stopped,
     /// The future was polled at least once, so a request may have been sent.
@@ -92,7 +87,6 @@ pub(crate) struct Interrupted {
 }
 
 impl Interrupted {
-    /// Once the SDK future has been polled, a mutation may have reached the provider.
     pub(crate) fn fail(self, guard: &mut OperationGuard, call: Call) -> ObjectStorageError {
         let failure = if self.polled {
             Failure::stopped_after_poll(call, self.stopped)

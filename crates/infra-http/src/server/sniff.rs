@@ -1,5 +1,3 @@
-//! The protocol-sniff read deadline in front of hyper-util's `auto` builder.
-
 use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};

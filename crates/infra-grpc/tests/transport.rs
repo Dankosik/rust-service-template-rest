@@ -1,11 +1,9 @@
-#![allow(
+#![expect(
     clippy::expect_used,
     clippy::panic,
     clippy::unwrap_used,
     reason = "integration fixtures fail closed with their local setup context"
 )]
-
-//! Loopback proof of the tonic router on the shared HTTP listener.
 
 use std::{
     net::SocketAddr,

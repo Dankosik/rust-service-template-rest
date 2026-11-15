@@ -13,10 +13,8 @@ use crate::protocol::MAX_BODY_BYTES;
 // O(n) check before any insert.
 const PREFLIGHT_BYTES_PER_POLL: usize = 4096;
 
-/// The content type for a JSON webhook body.
 pub const JSON_CONTENT_TYPE: &str = "application/json";
 
-/// Producer side: the configured endpoint IDs a delivery may target.
 #[derive(Clone, Debug)]
 pub struct Producer {
     endpoint_ids: BTreeSet<String>,
@@ -36,13 +34,6 @@ impl Producer {
     /// Returns the job ID, which is the Standard Webhooks message ID.
     /// Validation failures happen before any insert. A JSON body uses
     /// [`JSON_CONTENT_TYPE`].
-    ///
-    /// # Errors
-    ///
-    /// Returns a closed error for an unknown endpoint, a body over
-    /// [`MAX_BODY_BYTES`], a content type that is not a valid HTTP header
-    /// value, or an enqueue failure. This delivery has no unique key, so an
-    /// unexpected duplicate is closed as an adapter error.
     pub async fn enqueue(
         &self,
         tx: &mut Tx<'_>,
@@ -115,7 +106,6 @@ async fn escaped_len(
     while !rest.is_empty() {
         let end = rest.floor_char_boundary(*budget);
         if end == 0 {
-            // The budget left is smaller than the next character.
             yield_once().await;
             *budget = PREFLIGHT_BYTES_PER_POLL;
             continue;
@@ -149,7 +139,6 @@ const fn serialize_failed(error: serde_json::Error) -> OutboundError {
     OutboundError::Enqueue(EnqueueError::Serialize(error))
 }
 
-/// Why producer enqueueing did not establish durable work.
 #[derive(Debug, thiserror::Error)]
 pub enum OutboundError {
     #[error("outbound webhook endpoint is not configured")]

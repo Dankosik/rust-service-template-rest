@@ -9,15 +9,6 @@ use crate::observe::{OperationGuard, Outcome};
 use crate::{Cache, CacheNamespace, SetError, Unavailable};
 
 impl Cache {
-    /// A named view of this connection.
-    ///
-    /// Keys are stored as `{name}:{key}`. `name` is the `cache` metric label.
-    /// Reuse or clone this view to retain its lazily registered histogram handles.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `name` does not match `^[a-z][a-z0-9_]{0,63}$`. A namespace
-    /// name is chosen by the feature author, not by a caller.
     #[must_use]
     pub fn namespace(&self, name: &'static str) -> CacheNamespace {
         assert!(
@@ -32,7 +23,6 @@ impl Cache {
     }
 }
 
-/// The closed set of namespace operations.
 #[derive(Clone, Copy, enum_map::Enum)]
 pub(super) enum Operation {
     Get,
@@ -60,23 +50,11 @@ impl Operation {
 }
 
 impl CacheNamespace {
-    /// `GET`. `Ok(None)` is a miss. [`Unavailable`] means the caller should degrade.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Unavailable`] for a timeout, a stop, an unusable server, or a
-    /// server error reply.
     pub async fn get(&self, key: &str) -> Result<Option<Vec<u8>>, Unavailable> {
         self.get_bounded(key, &self.standalone_command_scope())
             .await
     }
 
-    /// `GET` within the caller's remaining budget and command ceiling.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Unavailable`] for a timeout, a stop, an unusable server, or a
-    /// server error reply.
     pub async fn get_with_context(
         &self,
         key: &str,
@@ -102,33 +80,15 @@ impl CacheNamespace {
         .await
     }
 
-    /// `SET key value PX milliseconds`.
-    ///
     /// The TTL is floored to whole milliseconds, which must be in `1..=i64::MAX`.
     /// Redis owns absolute-expiry arithmetic and can still refuse an admitted TTL.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SetError::InvalidTtl`] before dispatch or observation for an
-    /// out-of-range TTL, or [`SetError::Unavailable`] for a stopped command, an
-    /// unusable server, or a server refusal such as an admitted TTL whose
-    /// absolute expiry overflows. A timed-out write may have landed and is
-    /// never replayed.
+    /// A timed-out or stopped write is never replayed and may still apply on the
+    /// server.
     pub async fn set(&self, key: &str, value: &[u8], ttl: Duration) -> Result<(), SetError> {
         self.set_bounded(key, value, ttl, &self.standalone_command_scope())
             .await
     }
 
-    /// `SET` within the caller's remaining budget and command ceiling.
-    ///
-    /// The TTL contract is the same as [`Self::set`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SetError::InvalidTtl`] before considering caller cancellation,
-    /// admission or observation, or [`SetError::Unavailable`] for a stopped
-    /// command, an unusable server, or a server refusal. A stopped write may
-    /// have landed; it is not replayed.
     pub async fn set_with_context(
         &self,
         key: &str,
@@ -169,25 +129,11 @@ impl CacheNamespace {
             .map_err(SetError::Unavailable)
     }
 
-    /// `DEL`. The deleted-count is ignored; a missing key is still success.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Unavailable`] for a timeout, a stop, an unusable server, or a
-    /// server error reply. A timed-out deletion may have landed and is
-    /// never replayed.
     pub async fn delete(&self, key: &str) -> Result<(), Unavailable> {
         self.delete_bounded(key, &self.standalone_command_scope())
             .await
     }
 
-    /// `DEL` within the caller's remaining budget and command ceiling.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Unavailable`] for a timeout, a stop, an unusable server, or a
-    /// server error reply. A stopped pending deletion may have landed and is
-    /// never replayed.
     pub async fn delete_with_context(
         &self,
         key: &str,
@@ -203,19 +149,14 @@ impl CacheNamespace {
             .await
     }
 
-    /// The caller's context under this cache's command ceiling. Applied at the
-    /// public operation so preparation and dispatch share one cutoff.
     fn command_scope(&self, context: &OperationContext) -> CommandScope {
         CommandScope::under(context, self.cache.command_timeout)
     }
 
-    /// [`Self::command_scope`] of an unbounded parent.
     fn standalone_command_scope(&self) -> CommandScope {
         CommandScope::standalone(self.cache.command_timeout)
     }
 
-    /// One observed command under the caller's already-bounded context.
-    /// `outcome` names a successful reply.
     async fn run<T: redis::FromRedisValue + Send + 'static>(
         &self,
         scope: &CommandScope,
@@ -229,7 +170,6 @@ impl CacheNamespace {
             operation,
             &self.cache.link.server,
         );
-        // One context cutoff includes preparation, connection wait, and exactly one dispatch.
         match self.cache.link.command(command, scope).await {
             Ok(value) => {
                 if operation.is_read()
@@ -291,7 +231,6 @@ struct NamespacedKey<'a> {
 }
 
 impl NamespacedKey<'_> {
-    /// Payload bytes of the `{namespace}:{key}` argument.
     fn len(&self) -> usize {
         self.namespace.len() + 1 + self.key.len()
     }

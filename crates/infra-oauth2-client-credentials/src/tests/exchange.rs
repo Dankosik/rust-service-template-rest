@@ -64,7 +64,6 @@ async fn the_configured_capacity_bounds_how_many_subjects_keep_their_exchanged_t
             .unwrap();
     }
     assert_eq!(fixture.token_requests().len(), 2);
-    // Moka applies its bound when it runs its pending maintenance.
     cache.run_pending_tasks().await;
     assert!(cache.entry_count() <= 1);
     for subject in ["alice", "bob"] {
@@ -77,7 +76,6 @@ async fn the_configured_capacity_bounds_how_many_subjects_keep_their_exchanged_t
             .unwrap();
         cache.run_pending_tasks().await;
     }
-    // One subject at most kept its token, so the other exchanged again.
     assert!(fixture.token_requests().len() > 2);
     assert!(cache.entry_count() <= 1);
     fixture.finish().await;
@@ -103,7 +101,6 @@ async fn a_capacity_that_does_not_divide_the_payload_target_keeps_every_configur
                 )
                 .await
                 .unwrap();
-            // Moka applies its bound when it runs its pending maintenance.
             cache.run_pending_tasks().await;
         }
     }
@@ -164,7 +161,6 @@ async fn a_short_lived_exchanged_token_serves_its_own_request_after_one_exchange
             )
             .await
             .unwrap();
-        // Inside its reuse margin, it is never reused, nor fetched twice.
         assert_eq!(fixture.token_requests().len(), expected_exchanges);
     }
     fixture.finish().await;

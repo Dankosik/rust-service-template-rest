@@ -1,5 +1,3 @@
-//! Stop signals, owned through the runtime's final shutdown.
-
 use futures_util::FutureExt;
 use tokio::time::Instant;
 

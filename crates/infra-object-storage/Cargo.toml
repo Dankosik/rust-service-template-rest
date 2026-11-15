@@ -9,8 +9,6 @@ repository.workspace = true
 publish.workspace = true
 
 [features]
-# The emulator suite runs only through the explicit object storage
-# integration owner (scripts/ci/test-integration-object-storage.sh).
 integration = []
 
 [[test]]

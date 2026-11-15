@@ -1,5 +1,3 @@
-//! Worker loader flags and the optional PostgreSQL-only operator commands.
-
 use clap::Parser;
 use service_config::LoadOptions;
 

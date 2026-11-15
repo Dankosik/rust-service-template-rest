@@ -1,11 +1,4 @@
 #!/usr/bin/env python3
-"""Committed-snapshot synchronization for initialized derived services.
-
-The synchronizer deliberately treats a source revision as data: it materializes
-one Git-object snapshot, renders the selected portable result in a private
-directory, and admits every target write before it touches the target.  It
-never evaluates the target Makefile or a target helper.
-"""
 
 from __future__ import annotations
 
@@ -89,8 +82,6 @@ class JsonNode:
 
 
 class _JsonScanner:
-    """Small JSON token/span reader after strict parsing has accepted bytes."""
-
     def __init__(self, text: str) -> None:
         self.text = text
         self.index = 0
@@ -225,8 +216,6 @@ def _node(root: Path, relative: str, *, links: bool) -> Node | None:
 
 
 def _tree(root: Path, scope: Scope, *, links: bool) -> dict[str, Node]:
-    """Walk the selected tree, including its root. Existence probes follow links before lstat classifies each node."""
-
     safe_relative(scope.relative, allow_directory=scope.directory)
     stem = scope.relative.rstrip("/")
     first = _node(root, stem, links=links)

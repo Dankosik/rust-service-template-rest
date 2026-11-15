@@ -1,12 +1,6 @@
 # template:begin integration:compose-file
-# Local retained-profile services. PostgreSQL is selected by `DATABASE=postgres`;
-# JetStream is selected by `MESSAGING=nats-jetstream`; cache is selected by `CACHE=redis`;
-# the S3 emulator is selected by `OBJECT_STORAGE=s3`.
 # template:end integration:compose-file
 # template:begin postgres:compose-postgres-header
-# Local PostgreSQL for the profile: `make compose-up`, then
-#   APP__POSTGRES__ENABLED=true \
-#   APP__POSTGRES__DSN='postgres://app:app@127.0.0.1:5432/app?sslmode=disable' make run
 # The same file serves `make test-integration-db` and the image rehearsal,
 # which set POSTGRES_PORT=0 for an ephemeral host port and read it back.
 # `make test-integration-db` also starts `pgbouncer` in front of it.
@@ -33,8 +27,6 @@ services:
       start_period: 30s
       timeout: 3s
       retries: 20
-  # PgBouncer in transaction pooling mode in front of the same server, for
-  # the pooled-deployment proof in `make test-integration-db`.
   pgbouncer:
     image: ghcr.io/cloudnative-pg/pgbouncer:1.26.1@sha256:6c91fd7383b8b098bc0c3b71dba4e98bd568c0d301b9fc66027fbc23259c6a7d
     depends_on:

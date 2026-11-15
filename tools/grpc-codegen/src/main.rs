@@ -1,5 +1,3 @@
-//! Generates committed Rust bindings from Buf's descriptor set.
-//!
 //! Buf owns schema compilation and builds the set with its imports: prost
 //! resolves an imported message type from the set. This tool runs stock tonic
 //! codegen over it and does not invoke protoc. Well-known types map to
@@ -37,10 +35,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         .build_server(true)
         .build_client(true)
         .build_transport(false)
-        // Stock prost codec with smaller per-call buffers; see `grpc_contracts::codec`.
         .codec_path("crate::codec::ContractCodec")
         .emit_rerun_if_changed(false)
-        // Nests each package's file in its module path: `example.v1` becomes `example::v1`.
         .include_file("_includes.rs")
         .out_dir(&output_dir)
         .compile_fds(descriptor_set)?;

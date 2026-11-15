@@ -33,19 +33,14 @@ pub(crate) const TRACE_SPANS_EXPORTED_METRIC: &str = "otel_sdk_exporter_span_exp
 /// startup, 0 otherwise. A startup-configuration signal, not delivery health.
 pub(crate) const TRACE_EXPORTER_ACTIVE_METRIC: &str = "service_startup_trace_exporter_active";
 
-/// Trace sampler selected by typed configuration, with the ratio already
-/// attached to the variants that use it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ResolvedSampler {
     AlwaysOn,
     AlwaysOff,
-    /// Sample the given fraction of traces by trace id, ignoring the parent.
     TraceIdRatio(f64),
-    /// Follow the parent's sampling decision; sample root spans by the given ratio.
     ParentBasedTraceIdRatio(f64),
 }
 
-/// Resource identity, sampler, and exporter settings for the tracer provider.
 #[derive(Debug)]
 pub struct TracingOptions {
     pub service_name: String,
@@ -57,20 +52,13 @@ pub struct TracingOptions {
     pub instance_id: Option<String>,
     pub deployment_environment: String,
     pub sampler: ResolvedSampler,
-    /// Typed OTLP/HTTP endpoint; a URL without a path gets `/v1/traces`.
-    /// `None` falls back to the environment.
     pub otlp_endpoint: Option<String>,
-    /// Typed collector headers as `key=value,key=value`. `None` means no
-    /// extra headers.
     pub otlp_headers: Option<SecretString>,
 }
 
-/// Which configuration selected the OTLP endpoint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EndpointSource {
-    /// `observability.otel.exporter.otlp_endpoint` was occupied.
     Typed,
-    /// An `OTEL_EXPORTER_OTLP_*ENDPOINT` variable was occupied.
     Environment,
 }
 
@@ -89,14 +77,10 @@ impl EndpointSource {
 pub enum ExporterState {
     Initialized {
         endpoint_source: EndpointSource,
-        /// The collector is verified against the certificate file of a
-        /// standard variable, not the platform trust store.
         has_certificate_file: bool,
-        /// A client certificate from the standard variables is presented.
         has_client_certificate: bool,
     },
     Disabled,
-    /// An endpoint resolved but the exporter could not be built.
     Degraded,
 }
 
@@ -174,12 +158,8 @@ pub const SHUTDOWN_JOIN_SLACK: Duration = Duration::from_millis(500);
 /// the OpenTelemetry layer. The global tracer provider keeps a clone of the
 /// SDK provider.
 ///
-/// # Errors
-///
-/// Returns [`TracingError::AmbientCredential`] when the typed endpoint is set
-/// and an ambient header variable is occupied, and
-/// [`TracingError::InvalidHeader`] for a malformed typed header. Exporter
-/// build failures do not error; they degrade and are reported in the handle.
+/// Exporter build failures do not error; they degrade and are reported in the
+/// handle.
 pub fn install_tracer_provider(
     options: &TracingOptions,
 ) -> Result<TracerProviderHandle, TracingError> {
@@ -275,7 +255,6 @@ impl TracerProviderHandle {
         self.shutdown_with_budget(Duration::MAX, deadline).await
     }
 
-    /// [`Self::shutdown`] with the SDK's time also capped at `sdk_budget`.
     async fn shutdown_with_budget(
         self,
         sdk_budget: Duration,
@@ -334,31 +313,18 @@ impl TracerProviderHandle {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProviderShutdown {
     Completed,
-    /// The drain failed or could not be confirmed within its deadline.
     Incomplete(ProviderShutdownReasons),
 }
 
 bitflags::bitflags! {
-    /// Finite failure observations; no exporter error text is retained.
-    /// The `telemetry` shutdown stage logs the named flags alongside [`Self::bits`].
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
     pub struct ProviderShutdownReasons: u32 {
-        /// An SDK operation during the drain (an export, or the exporter's or
-        /// provider's shutdown) reported a timeout or failed after its whole
-        /// budget.
         const SDK_TIMEOUT = 1;
-        /// An SDK operation during the drain found its target already shut down.
         const SDK_ALREADY_SHUTDOWN = 1 << 1;
-        /// An SDK operation during the drain reported an internal failure.
         const SDK_INTERNAL_FAILURE = 1 << 2;
-        /// The exporter's shutdown failed; an `SDK_*` bit says how.
         const EXPORTER_SHUTDOWN = 1 << 3;
-        /// The provider's shutdown failed; an `SDK_*` bit says how.
         const PROVIDER_SHUTDOWN = 1 << 4;
-        /// The blocking shutdown task panicked or was cancelled.
         const JOIN = 1 << 5;
-        /// The caller's deadline left no time for the SDK or passed before its
-        /// shutdown was confirmed.
         const DEADLINE = 1 << 6;
     }
 }
@@ -370,7 +336,6 @@ struct DrainObservation {
 }
 
 impl DrainObservation {
-    /// Records a failure once draining, with `operation` naming the operation.
     fn latch(drain: &Mutex<Self>, failure: SdkFailure, operation: ProviderShutdownReasons) {
         let mut drain = drain
             .lock()
@@ -381,7 +346,6 @@ impl DrainObservation {
     }
 }
 
-/// The category of a failed SDK operation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SdkFailure {
     Timeout,
@@ -391,8 +355,9 @@ enum SdkFailure {
 
 impl SdkFailure {
     /// The SDK's category, except that a failure after the whole `budget`
-    /// is a timeout: `opentelemetry-otlp` 0.33.1 returns a timed-out export
-    /// as [`OTelSdkError::InternalFailure`], and
+    /// is a timeout: `opentelemetry-otlp` 0.33 (manifest `0.33.0`, lockfile
+    /// `0.33.1`) returns a timed-out export as
+    /// [`OTelSdkError::InternalFailure`], and
     /// [`SdkTracerProvider::shutdown_with_timeout`]
     /// wraps its processor's `Timeout` in one.
     fn classify(error: &OTelSdkError, elapsed: Duration, budget: Duration) -> Self {
@@ -412,7 +377,6 @@ impl SdkFailure {
         }
     }
 
-    /// The `error_type` label of [`TRACE_SPANS_EXPORTED_METRIC`].
     const fn label(self) -> &'static str {
         match self {
             Self::Timeout => "timeout",

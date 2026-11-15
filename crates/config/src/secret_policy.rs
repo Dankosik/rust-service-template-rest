@@ -48,7 +48,6 @@ pub(crate) fn is_secret_like_key(key: &str) -> bool {
     })
 }
 
-/// Return the dotted path of the first secret-like key with a non-empty leaf value.
 pub(crate) fn first_secret_like_key(table: &toml::Table) -> Option<String> {
     let mut path = Vec::new();
     find_secret(table, &mut path)

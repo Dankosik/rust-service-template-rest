@@ -1,5 +1,3 @@
-//! Bounded local output. Only the owned worker touches the sink.
-
 use enum_map::{Enum, EnumMap, enum_len};
 use std::cell::Cell;
 use std::io::{self, Write};
@@ -36,7 +34,6 @@ pub(super) struct Record {
     pub(super) bytes: Box<[u8]>,
 }
 
-/// Why the logger rejected a record; a label of `telemetry_log_records_dropped_total`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Enum)]
 pub enum DropReason {
     QueueFull,
@@ -60,7 +57,6 @@ impl DropReason {
     }
 }
 
-/// The writer operation that failed; a label of `telemetry_log_sink_errors_total`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Enum)]
 pub enum SinkOperation {
     Write,
@@ -98,20 +94,12 @@ impl LogSnapshot {
 }
 
 bitflags::bitflags! {
-    /// Reasons recorded in [`LoggerShutdown::Incomplete`] when local writer
-    /// completion could not be established.
     #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
     pub struct LoggerShutdownReasons: u32 {
-        /// The deadline passed before the writer exited and was joined.
         const DEADLINE = 1;
-        /// The writer panicked or its completion channel disconnected; recorded
-        /// whenever it happens, since a dead writer never drains.
         const WORKER = 1 << 1;
-        /// A sink write failed after [`LoggerGuard::begin_shutdown`].
         const WRITE = 1 << 2;
-        /// A sink flush failed after [`LoggerGuard::begin_shutdown`].
         const FLUSH = 1 << 3;
-        /// A record was dropped after [`LoggerGuard::begin_shutdown`].
         const DROPPED = 1 << 4;
     }
 }
@@ -198,7 +186,6 @@ impl Shared {
             SinkOperation::Write => self.latch_drain_failure(LoggerShutdownReasons::WRITE),
             SinkOperation::Flush => self.latch_drain_failure(LoggerShutdownReasons::FLUSH),
             SinkOperation::Worker => {
-                // A dead worker can never make a later clean drain.
                 self.drain
                     .fetch_or(LoggerShutdownReasons::WORKER.bits(), Ordering::Relaxed);
             }
@@ -281,8 +268,6 @@ impl LoggerGuard {
         }
     }
 
-    /// Waits within `deadline` for the writer's acknowledgement, then for it
-    /// to exit, and joins it.
     fn wait_for_worker(&mut self, deadline: Instant) -> LoggerShutdownReasons {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
@@ -292,7 +277,6 @@ impl LoggerGuard {
         match self.completion.recv_timeout(remaining) {
             Ok(()) => {}
             Err(RecvTimeoutError::Timeout) => return LoggerShutdownReasons::DEADLINE,
-            // The writer may still be exiting; it is joined below.
             Err(RecvTimeoutError::Disconnected) => reasons = LoggerShutdownReasons::WORKER,
         }
         while self
@@ -418,8 +402,6 @@ enum Written {
     Nothing,
 }
 
-/// [`Write::write_all`], reporting whether the sink accepted part of `line`
-/// before it failed.
 fn write_line(writer: &mut impl Write, line: &[u8]) -> Written {
     let mut rest = line;
     while !rest.is_empty() {
@@ -563,7 +545,6 @@ mod tests {
             .recv_timeout(TEST_TIMEOUT)
             .expect("writer entered sink");
 
-        // One in progress plus the accepted 512 queue slots.
         for index in 0..512 {
             output.submit(record(format!("{index}\n").as_bytes()));
         }
@@ -639,7 +620,6 @@ mod tests {
         }
     }
 
-    /// Accepts three bytes of the first line, then fails once.
     struct TornWriter {
         bytes: Arc<Mutex<Vec<u8>>>,
         writes: usize,
@@ -676,7 +656,6 @@ mod tests {
         output.submit(record(b"first\n"));
         output.submit(record(b"second\n"));
         guard.begin_shutdown();
-        // The failure may land after the shutdown marker, which makes it final.
         let (LoggerShutdown::Completed(snapshot) | LoggerShutdown::Incomplete { snapshot, .. }) =
             guard.shutdown(Instant::now() + TEST_TIMEOUT);
 

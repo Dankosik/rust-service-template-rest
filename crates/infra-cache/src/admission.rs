@@ -1,5 +1,3 @@
-//! Startup admission for Redis client options and Tokio runtime requirements.
-
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -10,26 +8,19 @@ use socket2::{Domain, Protocol, Socket, Type};
 use crate::credentials::PasswordFile;
 use crate::{CacheError, CacheOptions, ClientCertificate, ServerEndpoint};
 
-/// Detect a dead peer before the platform's connection idle timeout.
 const KEEPALIVE_TIME: Duration = Duration::from_secs(30);
-/// Space between keepalive probes once the idle time has elapsed.
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
-/// Give up on a silent peer after a few probes, where the platform allows it.
 const KEEPALIVE_RETRIES: u32 = 3;
 /// Linux `TCP_USER_TIMEOUT`: a half-open connection is failed and reconnected.
 #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
 const USER_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// What admission accepted: the server identity, the client to dial it, and
-/// the password file each connection reads, if any.
 pub(crate) struct Admitted {
     pub(crate) server: ServerEndpoint,
     pub(crate) client: redis::Client,
     pub(crate) password_file: Option<PasswordFile>,
 }
 
-/// Checks `options` without touching the network.
-/// [`CacheOptions::command_timeout`] is not admission input.
 pub(crate) fn admit(options: CacheOptions) -> Result<Admitted, CacheError> {
     let CacheOptions {
         dsn,
@@ -130,7 +121,6 @@ fn admit_address(
             port: *port,
             tls: true,
         }),
-        // Unix sockets and any future address class are outside standalone TCP.
         _ => Err(CacheError::UnsupportedAddress),
     }
 }
@@ -151,7 +141,6 @@ fn admit_password(
     }
 }
 
-/// Returning `None` lets the client use the process trust store.
 fn read_tls_certificates(
     root_ca_path: Option<&Path>,
     client_certificate: Option<&ClientCertificate>,
@@ -169,7 +158,6 @@ fn read_tls_certificates(
     }))
 }
 
-/// Reads a PEM root CA. [`admit_address`] has already refused it on plaintext.
 #[expect(
     clippy::disallowed_methods,
     reason = "startup cache admission owns finite TLS material reads before serving"
@@ -185,9 +173,6 @@ fn read_root_ca(path: &Path) -> Result<Vec<u8>, CacheError> {
     Ok(bytes)
 }
 
-/// Reads the PEM certificate chain and key. [`admit_address`] has already
-/// refused them on plaintext.
-///
 /// redis-rs hands the pair to rustls only when it dials, where a key that
 /// does not belong to the certificate is a configuration error on every
 /// connection attempt. Building the signing key here makes it a startup error.
@@ -225,7 +210,6 @@ fn read_client_certificate(
     })
 }
 
-/// At least one certificate, all of them valid PEM.
 fn pem_certificates(bytes: &[u8]) -> Option<Vec<rustls::pki_types::CertificateDer<'static>>> {
     use rustls::pki_types::CertificateDer;
     use rustls::pki_types::pem::PemObject;
@@ -254,6 +238,5 @@ fn tcp_settings() -> redis::io::tcp::TcpSettings {
 /// depending on a composition root remembering it; an already-installed
 /// provider is kept.
 fn install_tls_provider() {
-    // `Err` means a provider is already installed; that one is kept.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 }

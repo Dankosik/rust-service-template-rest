@@ -154,10 +154,9 @@ curl http://127.0.0.1:8080/health/ready
 
 ## Documentation
 
-The code is the source of truth: crate documentation (`cargo doc --open`), the
-committed OpenAPI document in `api/openapi/`, typed configuration in
-`crates/config`, and `make help`. The few documents kept are the ones code
-cannot show:
+The code is the source of truth: the committed OpenAPI document in
+`api/openapi/`, typed configuration in `crates/config`, and `make help`. The
+few documents kept are the ones code cannot show:
 
 [Architecture](docs/repo-architecture.md) ·
 [Production contract](docs/production-contract.md) ·

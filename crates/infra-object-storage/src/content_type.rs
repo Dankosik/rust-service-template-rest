@@ -12,10 +12,6 @@ pub struct ContentType(String);
 pub struct InvalidContentType;
 
 impl ContentType {
-    /// # Errors
-    ///
-    /// Returns [`InvalidContentType`] for a blank value, one over 1024 bytes,
-    /// or one containing a byte other than visible ASCII, space, or tab.
     pub fn try_new(value: impl Into<String>) -> Result<Self, InvalidContentType> {
         let value = value.into();
         let valid = !value.trim().is_empty()

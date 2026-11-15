@@ -1,5 +1,3 @@
-//! Applying pending migrations over one dedicated session.
-
 use std::time::Duration;
 
 use infra_postgres::{
@@ -22,27 +20,20 @@ const STATEMENT_TIMEOUT: Duration = Duration::from_mins(2);
 /// lifts it.
 const LOCK_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Budgets for one run. [`RunOptions::defaults`] is what the binary uses,
-/// with `postgres.migration_deadline`; tests shorten them to observe a
-/// failure.
 #[derive(Clone, Debug)]
 pub struct RunOptions<'a> {
     pub dsn: &'a Dsn,
-    /// Reported as `application_name` for the migration session.
     pub application_name: &'a str,
     /// Bound on lock, history, and every pending migration after a live
     /// session exists. Connect is not inside this value; a
     /// `-- no-transaction` migration receives the remaining deadline.
     /// Must fit the monotonic clock's range.
     pub deadline: Duration,
-    /// Session `statement_timeout`, and `idle_in_transaction_session_timeout`, of the migration connection.
     pub statement_timeout: Duration,
-    /// Session `lock_timeout` of the migration connection; it also bounds the wait for the advisory session lock.
     pub lock_timeout: Duration,
 }
 
 impl<'a> RunOptions<'a> {
-    /// Options with the default session statement and lock timeouts, and the given application name and run deadline.
     #[must_use]
     pub const fn defaults(dsn: &'a Dsn, application_name: &'a str, deadline: Duration) -> Self {
         Self {
@@ -55,12 +46,8 @@ impl<'a> RunOptions<'a> {
     }
 }
 
-/// What one run observed and applied.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Report {
-    /// Newest version the history held before this run.
-    ///
-    /// `None` for an empty history. May be a later release's version.
     pub before: Option<i64>,
     pub applied: Vec<i64>,
 }
@@ -72,7 +59,6 @@ impl Report {
     }
 }
 
-/// Why [`run`] stopped.
 #[derive(Debug, thiserror::Error)]
 pub enum RunError {
     #[error("migration connect: {0}")]
@@ -88,12 +74,7 @@ pub enum RunError {
     #[error(
         "migration {version} runs outside a transaction and the database holds invalid indexes ({indexes}); drop each with DROP INDEX CONCURRENTLY, then run again"
     )]
-    InvalidIndexes {
-        /// Version of the `-- no-transaction` migration that was refused.
-        version: i64,
-        /// Names of the invalid indexes found, joined with `, `.
-        indexes: String,
-    },
+    InvalidIndexes { version: i64, indexes: String },
     /// Two embedded migrations carry one version, so the history can name at
     /// most one of them.
     #[error("migration version {0} is embedded more than once")]
@@ -138,33 +119,23 @@ impl From<PendingError> for RunError {
     }
 }
 
-/// A failed run and the progress it observed before stopping.
 #[derive(Debug, thiserror::Error)]
 #[error("{error}")]
 pub struct RunFailure {
     #[source]
     pub error: RunError,
-    /// What the run observed before it stopped. `before` and `applied` stay
-    /// empty when the history was not read.
     pub report: Report,
 }
 
 impl RunFailure {
-    /// The `stage` word on the terminal `migration_run` record.
     #[must_use]
     pub fn stage(&self) -> &'static str {
         self.error.stage()
     }
 }
 
-/// Apply every pending migration in `migrator`.
-///
-/// # Errors
-///
-/// [`RunFailure`] carries the [`RunError`] and the progress observed before
-/// the failure. [`RunFailure::stage`] names where it stopped. Each migration
-/// and its history row share one transaction, except a `-- no-transaction`
-/// migration, whose row is written after its statement.
+/// Each migration and its history row share one transaction, except a
+/// `-- no-transaction` migration, whose row is written after its statement.
 pub async fn run(migrator: &Migrator, options: &RunOptions<'_>) -> Result<Report, RunFailure> {
     run_cutoff(options.deadline)?;
     let session = SessionOptions {
@@ -183,7 +154,6 @@ pub async fn run(migrator: &Migrator, options: &RunOptions<'_>) -> Result<Report
             ("client_connection_check_interval", "1s"),
         ],
     };
-    // The connect bound is applied before the run deadline starts.
     let mut conn = tokio::time::timeout(ACQUIRE_TIMEOUT, connect_session(options.dsn, &session))
         .await
         .map_err(|_| RunFailure {
@@ -228,8 +198,6 @@ fn run_cutoff(budget: Duration) -> Result<tokio::time::Instant, RunFailure> {
         })
 }
 
-/// The `sqlx migrate run` sequence over the [`Migrate`] trait.
-///
 /// The lock is held before the history is read, so `before` and `applied`
 /// describe this run.
 async fn apply_pending(
@@ -270,9 +238,7 @@ async fn apply_pending(
     Ok(())
 }
 
-/// Apply one `-- no-transaction` migration.
-///
-/// Nothing rolls such a statement back, so two things differ from a
+/// Nothing rolls a `-- no-transaction` migration back, so two things differ from a
 /// transactional migration. An invalid index refuses the run before the
 /// statement starts: a failed `CREATE INDEX CONCURRENTLY` leaves one, and the
 /// `IF NOT EXISTS` that makes the file safe to rerun would otherwise accept

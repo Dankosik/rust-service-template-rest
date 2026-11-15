@@ -1,6 +1,3 @@
-//! Spans and metrics. Metric names and labels follow the grpc-ecosystem
-//! Prometheus convention (`go-grpc-middleware`), so standard dashboards apply.
-//!
 //! The span is built as the HTTP adapter's observe builds its own: only the
 //! operation name and kind are `tracing` fields, because the JSON log layer
 //! serializes every span field and repeats it on each record inside the call;
@@ -27,20 +24,14 @@ use crate::call::{Observation, ResponseCustody, Side};
 
 const SERVER_STARTED: &str = "grpc_server_started_total";
 const SERVER_HANDLED: &str = "grpc_server_handled_total";
-/// Server time to the call's status, a histogram by service and method.
 pub(crate) const SERVER_HANDLING_SECONDS: &str = "grpc_server_handling_seconds";
 const SERVER_SHED: &str = "grpc_server_shed_requests_total";
-/// Time a call waited for an admission permit, a histogram without labels. It
-/// is recorded only for a call that had to wait, whether the wait ended in a
-/// permit, a refusal or the caller leaving.
 pub(crate) const SERVER_ADMISSION_WAIT_SECONDS: &str = "grpc_server_admission_wait_seconds";
-/// Calls waiting for an admission permit right now, a gauge without labels.
 const SERVER_ADMISSION_WAITING: &str = "grpc_server_admission_waiting";
 const SERVER_FAILURES: &str = "grpc_server_failures_total";
 const CLIENT_STARTED: &str = "grpc_client_started_total";
 const CLIENT_DIAGNOSTIC_BYTES: usize = 1024;
 const CLIENT_HANDLED: &str = "grpc_client_handled_total";
-/// Client time to the call's status, a histogram by service and method.
 pub(crate) const CLIENT_HANDLING_SECONDS: &str = "grpc_client_handling_seconds";
 /// Prometheus client default buckets shared by call duration and admission wait.
 /// Explicit boundaries keep `go-grpc-middleware` dashboard queries against

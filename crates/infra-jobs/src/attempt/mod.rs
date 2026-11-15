@@ -1,5 +1,3 @@
-//! One supervisor owns its handler and fixed queue outcome through cleanup.
-
 mod completion;
 mod outcome;
 
@@ -27,17 +25,11 @@ use outcome::{Ended, Transition, Unacknowledged, Written, map_outcome, send_outc
 /// wait sooner.
 const COOPERATIVE_GRACE: Duration = Duration::from_millis(100);
 
-/// Attempt admission retained by supervisors or completion bookkeeping. No labels.
 const OWNED_ATTEMPTS_METRIC: &str = "jobs_owned_attempts";
-/// Queued plus in-flight completion entries. No labels.
 const COMPLETION_MEMBERSHIPS_METRIC: &str = "jobs_completion_memberships";
 
-/// Observed handler results and claim-time exhaustions, a terminal failure
-/// once. Labels `kind`, `outcome`.
 const ATTEMPTS_METRIC: &str = "jobs_attempts_total";
-/// Queue-write acknowledgement, not attribution. Labels `kind`, `disposition`.
 const PERSISTENCE_METRIC: &str = "jobs_persistence_total";
-/// Handler run time. Label `kind`.
 pub const ATTEMPT_DURATION_METRIC: &str = "jobs_attempt_duration_seconds";
 pub(crate) const ATTEMPT_DURATION_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0,
@@ -75,7 +67,6 @@ pub(crate) fn describe_metrics() {
     );
 }
 
-/// An outcome write's `jobs_persistence_total` disposition.
 #[derive(Clone, Copy)]
 enum Persistence {
     Applied,
@@ -175,18 +166,13 @@ impl Drop for MetricMembership {
     }
 }
 
-/// Which job and attempt an outcome belongs to. The claim generation that
-/// fences outcome writes travels beside it, only to the writes.
 #[derive(Debug)]
 pub(crate) struct AttemptId {
     pub(crate) job_id: JobId,
     pub(crate) kind: &'static str,
-    /// Attempts used, including this one.
     pub(crate) number: u16,
 }
 
-/// The claim an outcome write matches: the job row, and the generation its
-/// claim took. A row a later claim took no longer matches.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ClaimFence {
     pub(crate) job_id: JobId,
@@ -236,10 +222,6 @@ fn error_field(summary: &str) -> Option<&str> {
     (!summary.is_empty()).then_some(summary)
 }
 
-/// The supervisor of one claimed attempt.
-///
-/// It retires `guard` once the attempt's outcome is written or known to be
-/// uncertain.
 pub(crate) fn supervise(
     shared: Arc<Shared>,
     claimed: crate::claim::Claimed,
@@ -294,7 +276,6 @@ fn attempt_span(attempt: &AttemptId) -> tracing::Span {
     )
 }
 
-/// The attempt span and `jobs_attempts_total` share the outcome label.
 fn record_on_span(span: &tracing::Span, transition: &Transition) {
     span.record("outcome", transition.label());
     match transition {
@@ -405,7 +386,6 @@ fn prepare_handler(
     .map_err(Ended::Payload)
 }
 
-/// `future`'s output, or `None` once `until` passes or cleanup ends.
 async fn within<T>(
     cleanup: &ForcedCleanup,
     until: Instant,
@@ -620,8 +600,6 @@ fn observe_acknowledged(
     }
 }
 
-/// The attempt's queue transition is not known to have landed; lease expiry
-/// recovers the row.
 fn observe_uncertain(shared: &Shared, attempt: &AttemptId) {
     shared.counters.uncertain.fetch_add(1, Ordering::Relaxed);
     persistence_counter(attempt.kind, Persistence::Unknown).increment(1);

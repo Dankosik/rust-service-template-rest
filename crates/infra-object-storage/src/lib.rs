@@ -1,25 +1,3 @@
-//! Optional S3-compatible object storage client for one bucket at one fixed
-//! endpoint.
-//!
-//! The feature owns keys, authorization, content policy, retention,
-//! and whether an operation is create-only. Its provider adapter uses this
-//! client and maps storage results into the feature's business interface;
-//! the feature does not depend on this crate. The AWS SDK owns signing, the
-//! wire protocol, retries, checksums, and presigning; this crate admits the
-//! provider tuple, bounds size and concurrency, maps every SDK operation
-//! result onto [`ObjectStorageError`], and observes each call without
-//! recording keys.
-//!
-//! Construction performs no I/O and the client is not a readiness
-//! dependency. [`ObjectStorage::probe`] is the opt-in bucket check.
-//!
-//! [`PutBody::stream`] takes any `http_body::Body<Data = Bytes>` whose error
-//! converts into a boxed error, and [`Download`] is one, so a request body can
-//! be stored and an object returned as a response body without a body
-//! conversion. Direct response streaming holds an admission
-//! slot at the reader's pace within the fixed operation deadline; use
-//! collected bytes or a presigned URL for a reader that may be slow.
-
 mod call;
 mod content_type;
 mod credentials;
@@ -70,7 +48,7 @@ const PRESIGN_MIN: Duration = Duration::from_secs(1);
 /// The `SigV4` limit, and R2's; Railway would allow 90 days.
 const PRESIGN_MAX: Duration = Duration::from_hours(7 * 24);
 
-/// Construction input. [`Debug`] prints the provider name and limits only.
+/// [`Debug`] prints the provider name and limits only.
 pub struct ObjectStorageOptions {
     pub provider: Provider,
     /// The S3 bucket name (on Railway the hashed `BUCKET`, not the display name).
@@ -97,7 +75,7 @@ impl std::fmt::Debug for ObjectStorageOptions {
     }
 }
 
-/// A client for one bucket. Cheap to clone; clones share admission.
+/// Cheap to clone; clones share admission.
 #[derive(Clone)]
 pub struct ObjectStorage {
     inner: Arc<Inner>,
@@ -116,7 +94,6 @@ struct Inner {
     histograms: Arc<Histograms>,
 }
 
-/// The provider and limits only; the bucket and credentials stay out of logs.
 impl std::fmt::Debug for ObjectStorage {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -153,7 +130,6 @@ impl PutOptions {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ObjectMetadata {
-    /// Byte length from the response `Content-Length`.
     pub size: u64,
     /// The stored `Content-Type` value as the provider returned it; not
     /// validated as a [`ContentType`].
@@ -199,18 +175,12 @@ impl PresignedUrl {
 }
 
 impl ObjectStorage {
-    /// Admit the provider tuple and build the client. This performs no I/O.
-    ///
-    /// The SDK config is built directly, so no ambient `AWS_*` variable,
-    /// profile file, or proxy variable can change the endpoint, region,
-    /// retries, or checksum behavior. Credentials come from
+    /// Performs no I/O. The SDK config is built directly, so no ambient
+    /// `AWS_*` variable, profile file, or proxy variable can change the
+    /// endpoint, region, retries, or checksum behavior. Credentials come from
     /// [`CredentialSource`] alone: an access key pair, or for
     /// [`CredentialSource::WorkloadIdentity`] the variables and endpoints the
     /// platform provides for that identity.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ConfigError`] naming the refused key.
     pub fn try_new(options: ObjectStorageOptions) -> Result<Self, ConfigError> {
         let admitted = provider::admit(&options.provider, &options.bucket)?;
         // None would refuse every call as `Busy`; more would panic the semaphore.
@@ -279,7 +249,6 @@ impl ObjectStorage {
         }
     }
 
-    /// The configured provider name, safe to log.
     #[must_use]
     pub fn provider_name(&self) -> &'static str {
         self.inner.provider_name
@@ -287,12 +256,6 @@ impl ObjectStorage {
 
     /// Store an object, replacing any existing one unless
     /// [`PutOptions::create_only`] is set.
-    ///
-    /// # Errors
-    ///
-    /// [`ObjectStorageError::TooLarge`] and [`ObjectStorageError::Busy`] send
-    /// nothing. `AlreadyExists` answers a create-only put. A failure after
-    /// sending is `Unavailable`, `Rejected`, or `OutcomeUnknown`.
     pub async fn put(
         &self,
         key: &ObjectKey,
@@ -304,13 +267,12 @@ impl ObjectStorage {
     }
 
     /// Store within the caller's original remaining budget and this client's
-    /// existing ceiling. A stopped caller sends nothing before dispatch.
-    ///
-    /// # Errors
-    ///
-    /// As [`Self::put`]. A known provider answer from a live SDK poll remains
-    /// internally final when that poll crosses the cooperative cutoff; the
-    /// outer caller remains responsible for its own terminal deadline.
+    /// existing ceiling. A stop before the first request poll maps to
+    /// `Unavailable`, whereas a stop interrupting an already-polled request maps
+    /// to `OutcomeUnknown` without granting replay authority. A known provider
+    /// answer from a live SDK poll remains internally final when that poll
+    /// crosses the cooperative cutoff; the outer caller remains responsible for
+    /// its own terminal deadline.
     pub async fn put_with_context(
         &self,
         key: &ObjectKey,
@@ -385,23 +347,14 @@ impl ObjectStorage {
     /// through confirmed EOF/integrity, failure, drop, cancellation, or its
     /// original operation cutoff; an unpolled retained download releases its
     /// adapter-owned body, permit, and observation at that cutoff.
-    ///
-    /// # Errors
-    ///
-    /// `NotFound` when the key is absent; `TooLarge` when the stored object
-    /// exceeds `max_object_bytes`; `Integrity` for a range response or a
-    /// missing or negative size; otherwise `Busy`, `Unavailable`, or
-    /// `Rejected`. This call reads a zero-length object's body through EOF,
-    /// so a body length or checksum mismatch can also return `Integrity`.
     pub async fn get(&self, key: &ObjectKey) -> Result<Download, ObjectStorageError> {
         self.get_with_context(key, &OperationContext::unbounded())
             .await
     }
 
-    /// # Errors
-    ///
-    /// As [`Self::get`]. A stopped context maps to `Unavailable` and cannot
-    /// yield a newly obtained body chunk or successful EOF.
+    /// Start a download within the caller's original remaining budget. A
+    /// stopped context maps to `Unavailable` and cannot yield a newly obtained
+    /// body chunk or successful EOF.
     pub async fn get_with_context(
         &self,
         key: &ObjectKey,
@@ -454,14 +407,9 @@ impl ObjectStorage {
     }
 
     /// Read an object's metadata. The size is reported even above
-    /// `max_object_bytes`; only reading the body is bounded.
-    ///
-    /// # Errors
-    ///
-    /// `NotFound` when the key is absent; on a provider whose HEAD reply
-    /// carries no error body (Amazon S3 among them), a missing bucket also
-    /// reads as `NotFound`. `Integrity` when the response size is missing or
-    /// negative; otherwise `Busy`, `Unavailable`, or `Rejected`.
+    /// `max_object_bytes`; only reading the body is bounded. On a provider
+    /// whose `HEAD` reply carries no error body (Amazon S3 among them), a
+    /// missing bucket also maps to [`ObjectStorageError::NotFound`].
     pub async fn head(&self, key: &ObjectKey) -> Result<ObjectMetadata, ObjectStorageError> {
         self.head_with_context(key, &OperationContext::unbounded())
             .await
@@ -469,10 +417,6 @@ impl ObjectStorage {
 
     /// Read metadata within the caller's original remaining budget and local
     /// ceiling. A stopped context maps to `Unavailable` before dispatch.
-    ///
-    /// # Errors
-    ///
-    /// As [`Self::head`].
     pub async fn head_with_context(
         &self,
         key: &ObjectKey,
@@ -511,21 +455,16 @@ impl ObjectStorage {
     }
 
     /// Delete an object. A missing key is success, as in S3.
-    ///
-    /// # Errors
-    ///
-    /// `Busy`, `Unavailable`, `Rejected`, or `OutcomeUnknown`.
     pub async fn delete(&self, key: &ObjectKey) -> Result<(), ObjectStorageError> {
         self.delete_with_context(key, &OperationContext::unbounded())
             .await
     }
 
-    /// # Errors
-    ///
-    /// As [`Self::delete`]. A stop before the first request poll is `Unavailable`.
-    /// A stop that interrupts an already-polled request is `OutcomeUnknown`;
-    /// recovery does not grant replay authority. A definitive provider answer
-    /// from a poll that began live still applies if that poll crosses the cutoff.
+    /// Delete within the caller's original remaining budget and local ceiling.
+    /// A stop before the first request poll maps to `Unavailable`, whereas a
+    /// stop interrupting an already-polled request maps to `OutcomeUnknown`
+    /// without granting replay authority. A definitive provider answer from a
+    /// poll that began live still applies if that poll crosses the cutoff.
     pub async fn delete_with_context(
         &self,
         key: &ObjectKey,
@@ -557,18 +496,10 @@ impl ObjectStorage {
     /// Presign a GET for `expires_in`, between 1 second and 7 days. This is a
     /// local signature: nothing is sent to the store, and no admission slot
     /// is used. Under [`CredentialSource::WorkloadIdentity`] it may first
-    /// load the credentials. The
-    /// URL works without extra headers, so it carries no expected bucket
-    /// owner even on Amazon S3.
-    ///
-    /// # Errors
-    ///
-    /// `Rejected` when `expires_in` is out of range or the request cannot be
-    /// constructed. `Unavailable` when
-    /// [`CredentialSource::WorkloadIdentity`] yields no credentials or its
-    /// endpoint fails; nothing reaches the store. The URL also stops working
-    /// when those temporary credentials expire, which may be before
-    /// `expires_in`.
+    /// load the credentials, and the URL stops working when those temporary
+    /// credentials expire, which may be before `expires_in`. The URL works
+    /// without extra headers, so it carries no expected bucket owner even on
+    /// Amazon S3.
     pub async fn presign_get(
         &self,
         key: &ObjectKey,
@@ -580,10 +511,6 @@ impl ObjectStorage {
 
     /// Sign within the caller's budget. URL expiry remains an independent
     /// bearer-credential lifetime.
-    ///
-    /// # Errors
-    ///
-    /// As [`Self::presign_get`]. A stopped context maps to `Unavailable`.
     pub async fn presign_get_with_context(
         &self,
         key: &ObjectKey,
@@ -629,8 +556,6 @@ impl ObjectStorage {
         }
     }
 
-    /// Readiness probe (`HeadBucket`). Not registered by default: a service
-    /// registers it only when it cannot serve without storage.
     #[must_use]
     pub fn probe(&self) -> BucketProbe {
         BucketProbe {

@@ -1,16 +1,3 @@
-//! PostgreSQL adapter over `sqlx`.
-//!
-//! Owns what the driver leaves to the application: admission of the one
-//! connection string ([`Dsn`]) and of a rotated password
-//! ([`refresh_password_periodically`]), the pool with the template's session
-//! budgets ([`connect`]), readiness participation ([`PostgresProbe`]), the
-//! transaction seam with its commit-outcome policy ([`in_tx`]), the pool,
-//! transaction and statement signals ([`observed`]), and maintenance
-//! observation for the tables a profile cleans up ([`MaintenanceObserver`],
-//! [`CleanupPass`]). Owns no business rule and no process lifecycle: the
-//! composition root decides when the pool opens and closes, features decide
-//! what runs inside a transaction.
-
 mod credentials;
 mod dsn;
 mod error;

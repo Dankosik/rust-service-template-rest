@@ -1,5 +1,3 @@
-//! Background tasks the worker owns until the background-join stage.
-
 use std::sync::{Arc, Mutex, PoisonError};
 
 use tokio::sync::watch;
@@ -32,7 +30,6 @@ impl Background {
         }
     }
 
-    /// Spawn the task `start` builds from a child of the root token.
     pub(crate) fn spawn<F>(&self, name: &'static str, start: impl FnOnce(CancellationToken) -> F)
     where
         F: Future<Output = ()> + Send + 'static,
@@ -58,7 +55,6 @@ impl Background {
         *self.first_failure.borrow()
     }
 
-    /// Report a live task's failure while retaining its completion custody.
     pub(crate) fn record_failure(&self, name: &'static str) {
         record_first(&self.first_failure, name);
     }
@@ -74,8 +70,6 @@ impl Background {
         }
     }
 
-    /// Wait for the first recorded failure, including one reported by a task
-    /// that is still running.
     pub(crate) async fn wait_for_failure(&self) -> &'static str {
         let mut failures = self.first_failure.subscribe();
         if let Ok(seen) = failures.wait_for(Option::is_some).await

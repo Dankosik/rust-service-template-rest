@@ -1,6 +1,3 @@
-//! The history rule a run and the startup check share, and the read-only
-//! startup check itself.
-
 use std::time::Duration;
 
 use infra_postgres::{observed, sqlstate};
@@ -9,17 +6,12 @@ use sqlx::postgres::{PgConnection, PgPool};
 
 use crate::MIGRATOR;
 
-/// Bound on startup history admission, including pool acquire and its
-/// read-only history statements.
 pub const HISTORY_VERIFY_BUDGET: Duration = Duration::from_secs(5);
 
-/// PostgreSQL `undefined_table`.
 const UNDEFINED_TABLE: &str = "42P01";
 
-/// A sanitized reason startup cannot admit the embedded migration history.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum HistoryError {
-    /// The migrator still needs to apply at least one embedded migration.
     #[error("embedded migrations are pending")]
     Pending,
     /// An applied migration failed or changed, or the history holds an
@@ -31,7 +23,6 @@ pub enum HistoryError {
     /// session's `search_path`, so its absence is a visibility failure.
     #[error("the migration history table is not visible to this session")]
     NotVisible,
-    /// Pool, statement, decoding, or deadline failures stay private.
     #[error("the migration history is unavailable")]
     Unavailable,
 }
@@ -42,11 +33,6 @@ pub enum HistoryError {
 /// the newest embedded migration belongs to a later release and is admitted.
 /// An absent table is treated as an empty history, so an empty embedded set
 /// can start.
-///
-/// # Errors
-///
-/// A table outside the session's `search_path` is [`HistoryError::NotVisible`].
-/// Connection and query failures are sanitized before they leave this check.
 pub async fn verify_history(pool: &PgPool) -> Result<(), HistoryError> {
     let check = async {
         let mut conn = infra_postgres::acquire(pool, "check migration history").await?;
@@ -69,9 +55,7 @@ pub async fn verify_history(pool: &PgPool) -> Result<(), HistoryError> {
 
 enum HistoryRead {
     History(Vec<AppliedMigration>),
-    /// No table with the history name exists in any schema.
     Missing,
-    /// The table exists, but this session cannot see it.
     NotVisible,
 }
 
@@ -92,8 +76,6 @@ async fn read_history(conn: &mut PgConnection, table: &str) -> Result<HistoryRea
     }
 }
 
-/// Whether a relation with the history table's name exists in any schema.
-///
 /// The runtime history table is unqualified, so the relation name is the last
 /// dotted component with surrounding quotes removed.
 async fn history_table_exists_elsewhere(
@@ -116,7 +98,6 @@ async fn history_table_exists_elsewhere(
     .map_err(MigrateError::Execute)
 }
 
-/// Applied rows. A failed row is dirty history, as in `Migrator::run`.
 pub(crate) async fn applied_history(
     conn: &mut PgConnection,
     table: &str,

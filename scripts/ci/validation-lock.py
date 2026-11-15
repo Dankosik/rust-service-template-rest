@@ -1,9 +1,4 @@
 #!/usr/bin/env python3
-"""Local validation queue. The gate is an immutable hard link, never a PID lock.
-
-Only this file owns admission, process scopes and typed daemon custody. Queue
-metadata is private and diagnostic command identities never contain raw argv.
-"""
 
 import contextlib
 import ctypes
@@ -158,7 +153,6 @@ def command_output(args, timeout=5, admission=None, binary=False, stderr_output=
 
 
 def protobuf_fields(data):
-    """Only the varint/bytes fields used by Status and Any, not a protobuf codec."""
     offset = 0
 
     def varint():
@@ -310,7 +304,6 @@ def boot_id():
 
 
 def process_identity(pid):
-    """Kernel start identity, including sub-second reuse protection on Darwin."""
     if sys.platform == "linux":
         try:
             fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
@@ -334,7 +327,6 @@ def process_identity(pid):
 
 
 def session_members(sid, timeout=5):
-    """A successful complete native snapshot is required to assert absence."""
     output = command_output(["ps", "-axo", "pid=,stat="], timeout=timeout)
     members = []
     for line in output.splitlines():
@@ -369,7 +361,6 @@ def scope_absent(scope, current_boot, timeout=5):
 
 
 def signal_scope(scope, writer, signum, current_boot, sequence, deadline_ns):
-    """Grant a bounded request through the already-owned channel, never a PID."""
     if scope["boot"] != current_boot or process_identity(scope["pid"]) != scope["identity"]:
         raise Refusal("scope anchor unavailable; termination is unknown")
     if time.monotonic_ns() >= deadline_ns:
@@ -385,7 +376,6 @@ def signal_scope(scope, writer, signum, current_boot, sequence, deadline_ns):
 
 
 def ordinary_scope_loop(command, control, completion, initial_result=None):
-    """Deliver already-granted cancellation from inside the owned session."""
     os.set_blocking(control, False)
     sid = os.getsid(0)
     pending = []
@@ -553,7 +543,6 @@ def close_except(retained):
 
 
 def prepare_scope(command, environment, completion, lease_path, current_boot, native_operation=False):
-    """Prepare a native session with no command effect until the launch byte."""
     with contextlib.ExitStack() as setup:
         barrier_read, barrier_write = os.pipe()
         setup.callback(os.close, barrier_read)

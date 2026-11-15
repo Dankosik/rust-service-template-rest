@@ -1,15 +1,8 @@
-//! The one test-only job kind.
-//!
-//! Shared by the jobs database suite and the fixture worker. The fixture
-//! binary registers it through [`register`]. The shipped binary never contains
-//! this kind.
-
 use std::time::Duration;
 
 use infra_jobs::{Job, JobError, JobKind, Policy};
 use serde::{Deserialize, Serialize};
 
-/// A probe payload. The action tells the handler what to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Probe {
     pub action: ProbeAction,
@@ -21,34 +14,18 @@ impl JobKind for Probe {
 
 const _: () = infra_jobs::assert_valid_kind_name(Probe::NAME);
 
-/// What one probe attempt does after it records itself.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProbeAction {
     Succeed,
     FailRetryable,
     FailPermanent,
-    /// Retry no sooner than a caller-selected delay.
-    RetryAfterAtLeast {
-        millis: u64,
-    },
-    /// Defer once, then complete on the next delivery.
-    SnoozeOnce {
-        millis: u64,
-    },
-    /// Sleep, ignoring cancellation, so a timeout must abort the attempt.
-    Sleep {
-        millis: u64,
-    },
-    /// Wait until the attempt is cancelled, then fail retryably.
+    RetryAfterAtLeast { millis: u64 },
+    SnoozeOnce { millis: u64 },
+    Sleep { millis: u64 },
     WaitForCancellation,
     Panic,
-    /// Remain pending and panic when cancellation destroys the handler.
-    DropPanic {
-        /// Also unwind while disposing the first panic's payload.
-        secondary: bool,
-    },
-    /// Panic with a payload whose disposal fails the supervisor.
+    DropPanic { secondary: bool },
     PanicPayloadDrop,
 }
 
@@ -83,18 +60,6 @@ impl Drop for PanicPayloadDrop {
 /// a released attempt reuses its number.
 pub const CREATE_PROBE_ATTEMPTS: &str = "CREATE TABLE probe_attempts (seq bigserial PRIMARY KEY, job_id uuid NOT NULL, attempt integer NOT NULL, started_at timestamptz NOT NULL DEFAULT clock_timestamp())";
 
-/// Record the attempt, then follow [`Probe::action`].
-///
-/// # Errors
-///
-/// A retryable [`JobError`] when the attempt row cannot be written, or when
-/// the action fails retryably or is cancelled. A permanent [`JobError`] when
-/// the action fails permanently.
-///
-/// # Panics
-///
-/// When the action is [`ProbeAction::Panic`] or [`ProbeAction::PanicPayloadDrop`].
-/// [`ProbeAction::DropPanic`] panics when its pending future is destroyed.
 pub async fn handle(job: Job<Probe>) -> Result<(), JobError> {
     let id = job.id().to_string();
     sqlx::query("INSERT INTO probe_attempts (job_id, attempt) VALUES ($1::uuid, $2)")
@@ -144,19 +109,8 @@ pub async fn handle(job: Job<Probe>) -> Result<(), JobError> {
     }
 }
 
-/// Set in the fixture worker's environment, makes its registration spawn a
-/// background task named `fixture` that returns at once.
 pub const BACKGROUND_TASK_RETURNS: &str = "JOBS_WORKER_FIXTURE_BACKGROUND_TASK_RETURNS";
 
-/// The fixture worker's registration, the one test-only kind with the default policy.
-///
-/// # Errors
-/// Never; the worker's registration contract is fallible.
-///
-/// # Panics
-///
-/// The deferred message factory asserts that it receives an admitted pool and
-/// intentionally panics when `JOBS_WORKER_FIXTURE_MESSAGE_FACTORY` is `panic`.
 pub fn register(
     registration: &mut jobs_worker::Registration<'_>,
 ) -> Result<(), jobs_worker::BuildError> {

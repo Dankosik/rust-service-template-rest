@@ -1,12 +1,4 @@
 #!/usr/bin/env python3
-"""Exercise inventory refusal and report publication at their command boundaries.
-
-The compact native report follows Trivy v0.76.1's Rust parser and language
-application conversion (pkg/dependency/parser/rust/binary/parse.go and
-pkg/fanal/analyzer/language/analyze.go). It represents normal runtime packages,
-not proc-macro/build dependencies. --native-conversion additionally exercises
-pinned Trivy itself, offline, without an image build or vulnerability DB.
-"""
 from __future__ import annotations
 
 import copy

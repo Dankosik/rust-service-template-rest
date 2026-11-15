@@ -1,5 +1,3 @@
-//! Optional object storage client construction.
-
 use infra_object_storage::{CredentialSource, ObjectStorage, ObjectStorageOptions, Provider};
 use service_config::{Config, ObjectStorageCredentials, ObjectStorageProvider};
 

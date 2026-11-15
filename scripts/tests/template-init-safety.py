@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-"""Refusal and one-shot preservation checks against an isolated candidate."""
 
 from __future__ import annotations
 
@@ -246,7 +245,6 @@ def assert_marker_syntax(source: Path, work: Path) -> None:
 
 
 def assert_snapshot_backpressure(source: Path, work: Path) -> None:
-    """A committed multi-blob snapshot must finish without a duplex-pipe deadlock."""
     repository, destination = work / "batch-source", work / "batch-snapshot"
     repository.mkdir()
     # The first response exceeds an ordinary pipe buffer; the following real
@@ -346,8 +344,6 @@ def assert_preflight_extraction(source: Path, work: Path) -> None:
 
 
 def assert_lock_pruning(source: Path, work: Path) -> None:
-    """Cargo may drop pinned packages and rename the service; any other identity is refused."""
-
     initializer, _state_module = load_marker_modules(source)
     inputs = initializer.parse_inputs(initializer.build_parser().parse_args([
         "--service-name", "pruning-api", "--repository", "https://github.com/example/pruning-api",
@@ -458,8 +454,6 @@ def assert_profile_pack(source: Path, target: Path, profile_name: str, selected:
 
 
 def assert_vendor_patch(target: Path, package: str, relative: str, selected: bool) -> None:
-    """An optional provider keeps its patched source and selected lock identity together."""
-
     manifest = tomllib.loads((target / "Cargo.toml").read_text(encoding="utf-8"))
     patch = manifest.get("patch", {}).get("crates-io", {}).get(package)
     excluded = relative in manifest["workspace"].get("exclude", [])

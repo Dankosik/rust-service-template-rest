@@ -6,7 +6,6 @@ use hyper_util::client::legacy::connect::HttpConnector;
 
 use crate::{BuildError, Limits, policy::Origin};
 
-/// The longest TCP connect budget, whatever the operation timeout.
 const CONNECT_TIMEOUT_CAP: Duration = Duration::from_secs(10);
 
 pub(crate) type Transport = hyper_util::client::legacy::Client<
@@ -14,7 +13,6 @@ pub(crate) type Transport = hyper_util::client::legacy::Client<
     Full<Bytes>,
 >;
 
-// System DNS; tests route fixture names to loopback listeners instead.
 #[cfg(not(test))]
 pub(crate) type Resolver = hyper_util::client::legacy::connect::dns::GaiResolver;
 #[cfg(test)]

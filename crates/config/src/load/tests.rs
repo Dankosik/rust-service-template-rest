@@ -692,7 +692,6 @@ fn secrets_directory_supplies_variables_and_the_environment_overrides_it() {
     );
     write(&dir, "APP__HTTP__ADDR", "127.0.0.1:7\n");
     write(&dir, "APP__LOG__LEVEL", "debug");
-    // Entries outside the namespace are not variables.
     write(&dir, "README", "not a variable");
     write(&dir, ".APP__LOG__FORMAT", "yaml");
     std::fs::create_dir(dir.path().join("..data")).unwrap();
@@ -878,7 +877,6 @@ fn variables_that_are_not_unicode_are_refused() {
     .unwrap_err();
     assert_matches!(err, Error::MalformedEnvName { .. }, "{err}");
 
-    // A name outside the namespace is not read at all.
     load_from(
         &LoadOptions::default(),
         BUILD,

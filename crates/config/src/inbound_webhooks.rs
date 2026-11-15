@@ -13,23 +13,17 @@ use crate::ValidationError;
 use crate::load::{ADDRESSABLE_KEY_FORM, is_env_addressable};
 use crate::validate::validate_endpoint_id;
 
-/// Static inbound endpoints and their environment-only verification secrets.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct InboundWebhooksConfig {
-    /// Stable endpoint IDs bound to immutable verification-key references.
     pub endpoints: BTreeMap<String, InboundWebhookEndpointConfig>,
-    /// Environment-only Standard Webhooks secrets, keyed by immutable reference.
     pub secrets: BTreeMap<String, SecretString>,
 }
 
-/// Verification-key references for one configured inbound endpoint.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InboundWebhookEndpointConfig {
-    /// Immutable reference to the current verification key.
     pub active_key: String,
-    /// Optional immutable predecessor reference retained during rotation.
     #[serde(default, deserialize_with = "crate::de::blank_as_none")]
     pub previous_key: Option<String>,
 }

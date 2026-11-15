@@ -8,14 +8,11 @@ use url::Url;
 
 use crate::{BuildError, Error};
 
-/// The configured origin in the form an absolute request URI is compared
-/// against: scheme, serialized host, and effective port.
 #[derive(Clone)]
 pub(crate) struct Origin {
     scheme: Scheme,
     host: Box<str>,
     port: u16,
-    /// The `Host` value hyper would derive from every admitted URI.
     host_header: HeaderValue,
 }
 

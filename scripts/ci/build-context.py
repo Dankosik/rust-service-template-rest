@@ -1,10 +1,4 @@
 #!/usr/bin/env python3
-"""Project supported Cargo context; own an explicitly selected local sccache.
-
-Cargo remains the configuration/compiler authority. Unknown inherited inputs
-still execute, but cannot identify a reusable verification result. This helper
-does not provision tools, rewrite Cargo configuration, or clean build caches.
-"""
 
 import errno
 import hashlib

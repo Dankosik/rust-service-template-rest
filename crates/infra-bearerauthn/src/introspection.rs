@@ -1,5 +1,3 @@
-//! RFC 7662 opaque-token introspection.
-
 use std::{
     collections::HashMap,
     future::Future,
@@ -26,11 +24,9 @@ use crate::{
 
 const MAX_RETAINED_PAYLOAD_BYTES: usize = 64 * 1024;
 
-/// Bootstrap input for RFC 7662 token introspection.
 #[derive(Clone, derive_more::Debug)]
 #[debug("IntrospectionOptions([REDACTED])")]
 pub struct IntrospectionOptions {
-    /// The issuer URL that a verified principal is attributed to.
     pub issuer: crate::IssuerUrl,
     /// Audiences of which a token must name at least one; non-empty, with no
     /// empty entry.
@@ -45,7 +41,6 @@ pub struct IntrospectionOptions {
     pub cache: Option<IntrospectionCacheOptions>,
 }
 
-/// Validated positive-result retention for one prepared introspection verifier.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct IntrospectionCacheOptions {
     capacity: usize,
@@ -54,10 +49,6 @@ pub struct IntrospectionCacheOptions {
 
 impl IntrospectionCacheOptions {
     /// Selects a best-effort capacity of 1–1024 entries and a fixed TTL of 1–300 seconds.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`PreparationError`] when either retention bound is invalid.
     pub fn try_new(capacity: usize, ttl: Duration) -> Result<Self, PreparationError> {
         if !CACHE_CAPACITY.contains(&capacity) || !CACHE_TTL.contains(&ttl) {
             return Err(PreparationError::invalid_options());
@@ -68,17 +59,10 @@ impl IntrospectionCacheOptions {
 
 /// Prepares an introspection verifier. Install the metrics recorder first:
 /// the verifier registers its counters here.
-///
-/// # Errors
-///
-/// Returns [`PreparationError`] for invalid options or client preparation failure.
 pub fn prepare_introspection(options: IntrospectionOptions) -> Result<Verifier, PreparationError> {
     IntrospectionVerifier::try_new(options, ProviderClient::try_new()?).map(Verifier::introspection)
 }
 
-/// # Errors
-///
-/// Returns [`PreparationError`] when the options are invalid.
 #[cfg(any(test, feature = "test-support"))]
 pub fn prepare_introspection_with_fixture(
     options: IntrospectionOptions,
@@ -87,8 +71,6 @@ pub fn prepare_introspection_with_fixture(
     IntrospectionVerifier::try_new(options, fixture.into_provider()).map(Verifier::introspection)
 }
 
-/// A bounded provider client with optional positive retention for one
-/// immutable trust context.
 #[derive(derive_more::Debug)]
 #[debug("IntrospectionVerifier([REDACTED])")]
 pub(crate) struct IntrospectionVerifier {

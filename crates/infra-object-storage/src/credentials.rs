@@ -1,6 +1,3 @@
-//! Where the client's credentials come from: a configured access key pair,
-//! or the AWS identity the platform gives the workload.
-
 use aws_config::ecs::EcsCredentialsProvider;
 use aws_config::imds::credentials::ImdsCredentialsProvider;
 use aws_config::meta::credentials::CredentialsProviderChain;
@@ -14,7 +11,6 @@ use crate::provider::Admitted;
 
 /// How the client authenticates. [`Debug`] prints the variant only.
 pub enum CredentialSource {
-    /// A long-lived access key pair.
     AccessKey {
         access_key_id: String,
         secret_access_key: SecretString,
@@ -37,8 +33,6 @@ impl std::fmt::Debug for CredentialSource {
 }
 
 impl CredentialSource {
-    /// The SDK credentials provider for this source. Nothing is sent: a
-    /// workload identity loads on the first call.
     pub(crate) fn credentials_provider(
         &self,
         admitted: &Admitted,

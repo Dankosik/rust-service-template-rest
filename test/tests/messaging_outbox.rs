@@ -1,10 +1,3 @@
-//! Real PostgreSQL and `JetStream` proof for transactional outbox publication.
-//!
-//! Each case provisions its own `JetStream` source stream and `SQLx` database. The
-//! carrier drives the public outbox enqueue and registry APIs through the
-//! production jobs engine; it does not replace broker acknowledgement, queue
-//! transitions, or the publisher with a test double.
-
 #![cfg(feature = "integration")]
 #![allow(
     clippy::expect_used,

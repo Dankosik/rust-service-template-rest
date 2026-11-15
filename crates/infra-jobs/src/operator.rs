@@ -1,5 +1,3 @@
-//! Safe inspection and version-fenced recovery of one failed job.
-//!
 //! All mutations borrow the caller's transaction. Their results are provisional
 //! until that caller receives an acknowledged commit. No operation runs a
 //! handler, republishes an event, or retries an uncertain transaction.
@@ -18,11 +16,9 @@ pub use crate::state::{FailureReason, JobState};
 /// acknowledgement included; one operator call, transaction admission and
 /// commit included, fits the same bound.
 pub const OPERATION_TIMEOUT: Duration = crate::engine::OPERATION_BACKSTOP;
-/// The bound on [`check_startup`], acquire and the session query included.
 pub const STARTUP_TIMEOUT: Duration = crate::session::STARTUP_CHECK_BUDGET;
 const MAX_PAGE_LIMIT: u16 = 500;
 const MAX_HANDLED_KINDS: usize = 1024;
-/// Every handled kind at its longest, separated by commas.
 const MAX_HANDLED_BYTES: usize = MAX_HANDLED_KINDS * (MAX_KIND_LEN + 1) - 1;
 const CURSOR_PREFIX: &str = "v1:";
 /// The statement bound of one operator transaction. The retention and
@@ -30,7 +26,6 @@ const CURSOR_PREFIX: &str = "v1:";
 /// policy covers only the operator's statements.
 const STATEMENT_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// An invalid request field. Diagnostics never contain the rejected value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum InputError {
     #[error("id must be a non-nil UUID")]
@@ -54,7 +49,6 @@ pub enum InputError {
     HandledKinds,
 }
 
-/// Exactly one inspected identity and failed cycle; fields cannot bypass admission.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecoveryTarget {
     id: JobId,
@@ -63,10 +57,6 @@ pub struct RecoveryTarget {
 }
 
 impl RecoveryTarget {
-    /// Admit an operator-supplied identity before database access.
-    ///
-    /// # Errors
-    /// Returns the invalid field, without its value.
     pub fn try_new(id: &str, kind: &str, version: &str) -> Result<Self, InputError> {
         let id = parse_id(id)?;
         if !is_valid_kind_name(kind) {
@@ -91,7 +81,6 @@ impl RecoveryTarget {
     pub fn kind(&self) -> &str {
         &self.kind
     }
-    /// The expected failed cycle; render as a decimal string in JSON.
     #[must_use]
     pub const fn version(&self) -> i64 {
         self.version
@@ -106,8 +95,6 @@ fn parse_id(value: &str) -> Result<JobId, InputError> {
     Ok(JobId(id))
 }
 
-/// A page cursor: [`CURSOR_PREFIX`] and the canonical lowercase UUID of the
-/// last scanned row.
 fn parse_cursor(cursor: &str) -> Result<JobId, InputError> {
     if cursor.len() != CURSOR_PREFIX.len() + uuid::fmt::Hyphenated::LENGTH {
         return Err(InputError::Cursor);
@@ -126,7 +113,6 @@ fn encode_cursor(id: JobId) -> String {
     format!("{CURSOR_PREFIX}{id}")
 }
 
-/// A comma-separated list of kind names; the empty string is the empty set.
 fn parse_handled_kinds(handled_kinds: &str) -> Result<BTreeSet<String>, InputError> {
     if handled_kinds.is_empty() {
         return Ok(BTreeSet::new());
@@ -146,7 +132,6 @@ fn parse_handled_kinds(handled_kinds: &str) -> Result<BTreeSet<String>, InputErr
     Ok(kinds)
 }
 
-/// A bounded, admitted inspection request.
 #[derive(Debug)]
 pub struct Inspection(Selection);
 
@@ -183,23 +168,16 @@ impl Filter {
 }
 
 impl Inspection {
-    /// # Errors
-    /// Refuses an invalid or nil UUID.
     pub fn one(id: &str) -> Result<Self, InputError> {
         Ok(Self(Selection::One(parse_id(id)?)))
     }
 
-    /// # Errors
-    /// Refuses malformed cursors and limits outside 1..=500.
     pub fn failed(after: Option<&str>, limit: u16) -> Result<Self, InputError> {
         Self::page(after, limit, Filter::Failed)
     }
 
     /// Scan a window for live rows outside the explicitly supplied fleet kinds.
     /// An empty string explicitly declares that no kinds are handled.
-    ///
-    /// # Errors
-    /// Refuses malformed cursor, limit, or bounded comma-separated kind list.
     pub fn unhandled(
         handled_kinds: &str,
         after: Option<&str>,
@@ -269,16 +247,11 @@ pub struct JobSnapshot {
     pub state: JobState,
     /// The current cycle's claim generation, as a decimal string.
     pub version: String,
-    /// Attempts used in the current cycle, including the current one.
     pub attempts: i32,
-    /// Why automatic execution stopped; set only for a failed job.
     pub failure_reason: Option<FailureReason>,
     pub created_at: String,
-    /// The earliest time the job may run.
     pub not_before: String,
-    /// When the current claim expires, while one is held.
     pub claim_expires_at: Option<String>,
-    /// When the job reached a terminal state.
     pub finished_at: Option<String>,
     /// How many earlier failed cycles were archived by redrives.
     pub recovery_count: i32,
@@ -294,15 +267,12 @@ pub enum InspectionResult {
         observed_at: String,
         scanned: u16,
         items: Vec<JobSnapshot>,
-        /// The last scanned row's cursor when the scan fills the admitted limit.
         next_cursor: Option<String>,
     },
 }
 
-/// A provisional redrive. Only an acknowledged caller commit establishes it.
 #[derive(Debug)]
 pub struct Redriven {
-    /// The claim generation of the new cycle, as a decimal string.
     pub new_version: String,
 }
 
@@ -323,12 +293,10 @@ pub enum OperatorError {
 }
 
 impl OperatorError {
-    /// Whether a caller must reconcile an unknown commit against the same identity.
     #[must_use]
     pub const fn is_commit_unknown(&self) -> bool {
         matches!(self, Self::Transaction(TxError::CommitUnknown(_)))
     }
-    /// A bounded database code; no DETAIL, query, value, or connection string.
     #[must_use]
     pub fn sqlstate(&self) -> Option<Cow<'_, str>> {
         let error = match self {
@@ -338,7 +306,6 @@ impl OperatorError {
         };
         infra_postgres::sqlstate(error)
     }
-    /// Closed safe diagnostic class.
     #[must_use]
     pub const fn cause(&self) -> &'static str {
         match self {
@@ -369,10 +336,6 @@ impl fmt::Debug for OperatorError {
     }
 }
 
-/// Share the worker's UTF8/writable/isolation checks without creating an engine.
-///
-/// # Errors
-/// Refuses an unavailable, read-only, or incompatible session.
 pub async fn check_startup(pool: &PgPool) -> Result<(), StartupError> {
     crate::session::check_startup(pool).await
 }
@@ -416,13 +379,10 @@ impl TryFrom<SnapshotRow> for JobSnapshot {
     }
 }
 
-/// Bound the caller's transaction with [`STATEMENT_TIMEOUT`].
 async fn apply_statement_timeout(tx: &mut Tx<'_>) -> Result<(), OperatorError> {
     Ok(infra_postgres::set_statement_timeout(tx, STATEMENT_TIMEOUT).await?)
 }
 
-/// The inspection projection, one row per job, followed by `$tail`: the
-/// `FROM background_jobs` filter of one selection and its binds.
 macro_rules! snapshot_query {
     ($tail:tt $(, $arg:expr)*) => {
         sqlx::query_as!(
@@ -440,10 +400,9 @@ macro_rules! snapshot_query {
 }
 
 /// Observe safe columns with a two-second statement backstop inside the caller's
-/// read-only transaction. A page bounds scanned rows before filtering.
-///
-/// # Errors
-/// Propagates unavailable observations; never turns a timeout into an empty page.
+/// read-only transaction. A page bounds scanned rows before filtering;
+/// unavailable observations propagate rather than turning a timeout into an
+/// empty page.
 pub async fn inspect(
     tx: &mut Tx<'_>,
     inspection: &Inspection,
@@ -546,11 +505,8 @@ fn conflict_or_database(error: sqlx::Error) -> OperatorError {
 }
 
 /// Redrive the same failed identity, archiving its previous cycle atomically.
-/// The result remains provisional until the caller's commit is acknowledged.
-///
-/// # Errors
-/// Refuses missing/stale targets or a conflicting live key; all failures must
-/// propagate out of the caller's transaction so that recovery is rolled back.
+/// The result remains provisional until the caller's commit is acknowledged, and
+/// failures must propagate out of the caller's transaction so recovery rolls back.
 pub async fn redrive(tx: &mut Tx<'_>, target: &RecoveryTarget) -> Result<Redriven, OperatorError> {
     lock_job_row(tx, target.id).await?;
     observed(
@@ -588,9 +544,6 @@ pub async fn redrive(tx: &mut Tx<'_>, target: &RecoveryTarget) -> Result<Redrive
 /// A job that relays an event, such as an outbox relay job, takes that event
 /// with it: the operator must reconcile the event the discarded job would have
 /// published.
-///
-/// # Errors
-/// Refuses missing/stale targets and propagates database failures.
 pub async fn discard(tx: &mut Tx<'_>, target: &RecoveryTarget) -> Result<(), OperatorError> {
     lock_job_row(tx, target.id).await?;
     let result = observed("discard failed job", sqlx::query!(

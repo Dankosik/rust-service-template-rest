@@ -1,5 +1,3 @@
--- Apply explicitly to an owned example database after the template migrations.
--- No receipt TTL: retain identity for the complete permitted replay horizon.
 CREATE TABLE recovery_producer_counters (
     counter_id text PRIMARY KEY,
     value bigint NOT NULL
@@ -30,7 +28,6 @@ CREATE TABLE recovery_effect_receipts (
     PRIMARY KEY (consumer_scope, logical_id)
 );
 
--- The existing integration_tests::jobs::Probe ordinary job records attempts here.
 CREATE TABLE probe_attempts (
     seq bigserial PRIMARY KEY,
     job_id uuid NOT NULL,

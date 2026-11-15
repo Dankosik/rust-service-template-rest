@@ -1,5 +1,3 @@
-//! W3C trace context in NATS headers, as the Go template writes and reads it.
-
 use async_nats::{HeaderMap, HeaderName};
 use opentelemetry::global;
 use opentelemetry::propagation::{Extractor, Injector};

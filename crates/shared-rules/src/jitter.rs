@@ -1,5 +1,3 @@
-//! Spreading timers that replicas would otherwise fire together.
-
 use std::time::Duration;
 
 /// The share `sample / u16::MAX` of `window`, rounded down to a nanosecond:

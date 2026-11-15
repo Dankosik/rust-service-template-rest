@@ -1,9 +1,3 @@
-# Prometheus 3.5.5. Run with the pinned task-local promtool, without a server.
-# Tests load the shipped expressions unchanged. The independent fixture inventory
-# models reviewed deployment configuration; the shipped example keeps timestamp 0.
-# ALERTS selectors isolate this inventory from the intentionally unconfigured example.
-# Shared raw series are YAML anchors; overrides model faults at the scrape boundary.
-# See https://prometheus.io/docs/prometheus/latest/configuration/unit_testing_rules/
 rule_files:
   - ../../env/monitoring/postgres-maintenance.rules.yml
 evaluation_interval: 15s

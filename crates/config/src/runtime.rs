@@ -1,5 +1,3 @@
-//! Tokio runtime worker count.
-
 use std::num::NonZeroUsize;
 
 use serde::Deserialize;
@@ -32,7 +30,6 @@ impl RuntimeConfig {
         Ok(())
     }
 
-    /// The configured worker count, or the process's available parallelism.
     #[must_use]
     pub fn effective_worker_threads(&self) -> usize {
         self.worker_threads

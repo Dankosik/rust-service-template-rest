@@ -1,5 +1,3 @@
-"""Shared profile fixtures for initializer replay and synchronization checks."""
-
 from __future__ import annotations
 
 import hashlib

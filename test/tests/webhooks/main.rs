@@ -1,5 +1,3 @@
-//! Real-PostgreSQL proof for retained durable webhook capabilities.
-
 #![cfg(feature = "integration")]
 #![allow(
     clippy::expect_used,

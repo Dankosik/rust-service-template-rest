@@ -1,5 +1,3 @@
-//! An open download: the object's body, read to its confirmed end.
-
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll, Waker};
@@ -121,9 +119,6 @@ enum ReadStep {
 
 type ReadPoll = Poll<Result<ReadStep, ObjectStorageError>>;
 
-/// The `close*` methods only move a still-open state to its terminal one
-/// under the lock; the returned [`Completion`] records the outcome and
-/// releases the resources after the lock is gone.
 impl State {
     fn close(&mut self, outcome: Outcome) -> Option<Completion> {
         if !matches!(self.status, Status::Open(_)) {
@@ -319,16 +314,6 @@ impl Download {
         &self.metadata
     }
 
-    /// The next chunk, or `None` at confirmed EOF. The SDK validates a
-    /// supported full-object checksum there when available. A cancelled read
-    /// preserves a withheld final chunk for the next reader while the context
-    /// remains live.
-    ///
-    /// # Errors
-    ///
-    /// `Integrity` for a checksum mismatch or length disagreement;
-    /// `Unavailable` for transport, cancellation, or original-cutoff expiry.
-    /// Every later call preserves the same terminal result.
     pub async fn next_chunk(&mut self) -> Result<Option<Bytes>, ObjectStorageError> {
         std::future::poll_fn(|context| self.poll_chunk(context)).await
     }
@@ -366,10 +351,6 @@ impl Download {
 
     /// Consume and collect unread bytes under the original context. Returned
     /// bytes outlive admission and need a budget at their consumer.
-    ///
-    /// # Errors
-    ///
-    /// As [`Self::next_chunk`].
     pub async fn into_bytes(mut self) -> Result<Bytes, ObjectStorageError> {
         let unread_bytes = lock(&self.shared).unread_bytes().unwrap_or(0);
         let mut buffer = Vec::with_capacity(usize::try_from(unread_bytes).unwrap_or(0));

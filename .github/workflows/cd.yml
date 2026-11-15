@@ -88,7 +88,6 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
       - name: Install pinned toolchain
-        # The metadata step reads the crate version through cargo.
         run: |
           rustup toolchain install
           rustup show active-toolchain

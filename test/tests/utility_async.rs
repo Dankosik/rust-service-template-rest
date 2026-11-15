@@ -1,4 +1,3 @@
-//! Async recipes: bounded work, explicit order, cancellation and operation-owned retry policy.
 #![expect(
     clippy::unwrap_used,
     clippy::panic,
@@ -88,7 +87,6 @@ async fn cancelling_a_child_stops_tracked_work_without_cancelling_its_parent() {
     assert!(!parent.is_cancelled());
 }
 
-// A feature-local specimen, not a generic executor or a production API.
 const CPU_MAX_BYTES: usize = 64 * 1024;
 const CPU_RECORD_BYTES: usize = size_of::<u128>();
 const CPU_MAX_ITEMS: usize = 4096;
@@ -268,7 +266,6 @@ async fn cpu_recipe_enforces_finite_input_and_returns_a_separately_owned_result(
         .unwrap()
         .unwrap()
         .unwrap();
-    // Independent two-round arithmetic: 1 -> 384 -> 147457; 0 -> 0 -> 1.
     assert_eq!(
         result,
         [147_457_u128.to_le_bytes(), 1_u128.to_le_bytes()].concat()
@@ -445,5 +442,4 @@ async fn a_local_cache_has_explicit_capacity_expiration_and_invalidation() {
     assert_eq!(loads.load(Ordering::SeqCst), 1);
     cache.invalidate("item").await;
     assert_eq!(cache.get("item").await, None);
-    // This example does not claim distributed consistency or exact LRU eviction.
 }

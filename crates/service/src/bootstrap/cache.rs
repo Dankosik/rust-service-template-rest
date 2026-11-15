@@ -1,5 +1,3 @@
-//! Optional cache connection.
-
 use health::Probe;
 use infra_cache::{Cache, CacheOptions, ClientCertificate};
 use service_config::Config;

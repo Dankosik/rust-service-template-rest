@@ -1,18 +1,3 @@
-//! P9: the idempotency boundary mounted under the hardened chain.
-//!
-//! A test-only operation is composed exactly as the adopter guide's feature
-//! path. Its handler takes the `Idempotency` extractor, the verified
-//! principal, its `async-trait` port through `State`, and the JSON input;
-//! it authorizes every attempt before the seam and runs its work through
-//! `Idempotency::execute`, where the port's adapter writes through
-//! `Tx::connection`. `Composer::route` composes it with
-//! the real introspection verifier, which asks a TLS fixture provider on
-//! loopback; activation is asserted active, and `axum-test` drives the
-//! hardened router. Each response is checked for status, content type,
-//! Problem code, and headers, and the outcome counter is read from a
-//! thread-local Prometheus recorder: `#[sqlx::test]` runs a current-thread
-//! runtime, so every emission lands on the test thread.
-
 use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::num::{NonZeroU32, NonZeroUsize};
@@ -84,9 +69,7 @@ const WIDGET_ROWS: &str = "SELECT count(*) FROM widgets";
 /// TLS handshake is never mistaken for a boundary outcome.
 const BUDGET: Duration = Duration::from_secs(5);
 const SHORT_BUDGET: Duration = Duration::from_secs(2);
-/// Request bodies up to 2 MiB, so a success can outgrow the stored-body bound.
 const MAX_BODY_BYTES: usize = 2 * 1_048_576;
-/// The specified stored-body bound: 1 MiB.
 const STORED_BODY_BOUND: usize = 1_048_576;
 const RESERVED_NAME: &str = "reserved";
 const HANDLER_TIMEOUT_COLOR: &str = "handler-timeout";
@@ -101,23 +84,17 @@ const FIXTURE_HOST: &str = "authn.fixture.test";
 const ISSUER: &str = "https://issuer.example";
 const AUDIENCE: &str = "service";
 const ALICE: &str = "alice-token";
-/// Alice through a client that lost its permission: the same scope, refused
-/// by the operation's authorization.
 const ALICE_REVOKED: &str = "alice-revoked-client-token";
 const BOB: &str = "bob-token";
 const NO_SCOPE: &str = "no-scope-token";
-/// Both scopes of the first `scoped_alternatives` alternative.
 const SCOPE_A_AND_B: &str = "scope-a-and-b-token";
-/// Only the second alternative's scope.
 const SCOPE_C: &str = "scope-c-only-token";
-/// One of the two AND-ed scopes, satisfying neither alternative.
 const SCOPE_A_ONLY: &str = "scope-a-only-token";
 const INACTIVE: &str = "inactive-token";
 const HELD_PROVIDER: &str = "held-provider-token";
 const REVOKED_CLIENT: &str = "revoked-client";
 const MAX_INTROSPECTION_REQUEST: usize = 16 * 1024;
 
-/// The operation's semantic input: the whole decoded body.
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
 struct NewWidget {
     name: String,
@@ -159,8 +136,6 @@ trait CreateWidgets: Send + Sync {
     async fn create(&self, tx: &mut Tx<'_>, input: &NewWidget) -> Result<Widget, CreateError>;
 }
 
-/// The port's provider adapter, the only code that reaches the transaction's
-/// connection.
 #[derive(Debug)]
 struct SqlWidgets {
     hold: Arc<Hold>,
@@ -176,8 +151,6 @@ impl CreateWidgets for SqlWidgets {
                 .fetch_one(tx.connection())
                 .await
                 .map_err(|_| CreateError::Store)?;
-        // Test control: an armed hold keeps this attempt inside its
-        // transaction after the effect.
         self.hold.pass().await;
         if input.name == RESERVED_NAME {
             return Err(CreateError::Reserved);
@@ -233,7 +206,6 @@ async fn create_widget(
         idempotency.execute(
             async |tx: &mut Tx<'_>| match widgets.create(tx, &input).await {
                 Ok(widget) => created_response(widget),
-                // Non-2xx: rolled back and returned unchanged.
                 Err(err) => err.into_problem().into_response(),
             },
         );
@@ -488,8 +460,6 @@ async fn read_token<S: AsyncRead + Unpin>(stream: &mut S) -> Option<String> {
     }
 }
 
-/// The body of a complete request, once its head and `content-length` bytes
-/// have arrived.
 fn request_body(request: &[u8]) -> Option<&[u8]> {
     let head_end = request
         .array_windows()
@@ -507,8 +477,6 @@ fn request_body(request: &[u8]) -> Option<&[u8]> {
     request.get(head_end..head_end + length)
 }
 
-/// The provider's answer for `token`: two subjects, the first also through a
-/// revoked client, and inactive for anything else.
 fn introspection(token: &str) -> String {
     let (subject, client, scope) = match token {
         ALICE => ("alice", "widgets-app", "widgets:write"),
@@ -694,8 +662,6 @@ fn problem_body(response: &TestResponse, status: StatusCode, code: &str) -> Valu
     body
 }
 
-/// Assert a Problem of the chain, authentication, or the boundary: it also
-/// carries the exchange's own request id, in the header and the body.
 fn problem(response: &TestResponse, status: StatusCode, code: &str, request_id: &str) -> Value {
     let body = problem_body(response, status, code);
     assert_eq!(
@@ -706,10 +672,6 @@ fn problem(response: &TestResponse, status: StatusCode, code: &str, request_id: 
     body
 }
 
-/// Assert the stored form of a created widget answered to `request_id`: 201,
-/// all seven replayable headers the work set, including repeated
-/// Content-Language values, and the exchange's own request id. Returns the
-/// body.
 fn created(response: &TestResponse, request_id: &str) -> Value {
     assert_eq!(
         response.status_code(),
@@ -776,8 +738,6 @@ fn retry_after(response: &TestResponse) -> Option<String> {
     })
 }
 
-/// Every `http_idempotency_outcomes_total` series the recorder renders, by
-/// `outcome`.
 fn outcomes(recorder: &PrometheusRecorder) -> BTreeMap<String, u64> {
     recorder
         .handle()
@@ -796,7 +756,6 @@ fn outcomes(recorder: &PrometheusRecorder) -> BTreeMap<String, u64> {
         .collect()
 }
 
-/// The expected outcome counts; a zero count is a series never recorded.
 fn counts(expected: &[(&str, u64)]) -> BTreeMap<String, u64> {
     expected
         .iter()
@@ -805,8 +764,6 @@ fn counts(expected: &[(&str, u64)]) -> BTreeMap<String, u64> {
         .collect()
 }
 
-/// Send `request()` until it is no longer 409, and count the 409s: a dropped
-/// attempt holds its key until `PostgreSQL` ends that attempt's transaction.
 async fn until_free(request: impl Fn() -> TestRequest) -> (TestResponse, u64) {
     let deadline = Instant::now() + WAIT;
     let mut conflicts = 0;
@@ -844,8 +801,6 @@ async fn authorized_without_idempotency(
         tenant: Value,
         scope: String,
     }
-    // The route's declared `widgets:write` scope is checked by the final
-    // authentication layer before this handler runs.
     assert!(!headers.contains_key(axum::http::header::AUTHORIZATION));
     let claims = principal
         .claims::<ApplicationClaims>()
@@ -868,8 +823,6 @@ async fn authorized_without_idempotency(
         .into_response()
 }
 
-/// Two alternatives: `scope-a` AND `scope-b`, OR `scope-c` alone. Counts its
-/// own calls so a denied request can prove the handler never ran.
 #[utoipa::path(
     get,
     path = "/_test/scoped-alternatives",
@@ -1155,8 +1108,6 @@ async fn authentication_and_scope_authorization_work_without_a_composer() {
     );
 }
 
-/// Alternatives are joined by OR and the scopes within one by AND; a
-/// caller granted by neither is refused before the handler runs.
 #[tokio::test(flavor = "current_thread")]
 async fn scope_alternatives_are_ored_and_scopes_within_one_are_anded() {
     let provider = Provider::start().await;
@@ -1215,8 +1166,6 @@ async fn p9_authentication_failures_answer_before_the_key_is_read(pool: PgPool) 
     let mounted = Mounted::on(&pool, BUDGET).await;
     let input = json!({"name": "gizmo", "color": "red"});
 
-    // Authentication answers first: a malformed quoted key behind a failed
-    // authentication is never looked at.
     let malformed_key = "\"k-1";
     let inactive = format!("Bearer {INACTIVE}");
     for (authorization, status, code, challenge) in [
@@ -1275,7 +1224,6 @@ async fn p9_authentication_failures_answer_before_the_key_is_read(pool: PgPool) 
     );
     assert_eq!(outcomes(&recorder), counts(&[]));
 
-    // Once authentication passes, the same key is refused.
     let refused = mounted
         .create(ALICE, malformed_key, &input, "req-key")
         .await;
@@ -1292,9 +1240,6 @@ async fn p9_the_key_grammar_is_exact(pool: PgPool) {
     let mounted = Mounted::on(&pool, BUDGET).await;
     let input = json!({"name": "gizmo", "color": "red"});
 
-    // Every malformed key is one fixed 400 that names the rule and never the
-    // value: missing, empty, 256 bytes, an unquoted space, an unterminated
-    // quoted string, non-ASCII, and repeated fields with distinct/equal values.
     let long = "k".repeat(256);
     let invalid: [&[&[u8]]; 8] = [
         &[],
@@ -1330,8 +1275,6 @@ async fn p9_the_key_grammar_is_exact(pool: PgPool) {
     }
     assert_eq!(outcomes(&recorder), counts(&[("invalid_key", 8)]));
 
-    // The longest key, the shortest, every visible ASCII byte, and a decoded
-    // structured-field string are accepted.
     for key in [
         "k".repeat(255),
         "k".to_owned(),
@@ -1366,8 +1309,6 @@ async fn p9_a_success_replays_byte_for_byte_behind_current_authorization(pool: P
     );
     assert_eq!(outcomes(&recorder), counts(&[("executed", 1)]));
 
-    // Member order and whitespace are raw request identity: they do not
-    // canonicalize into a replay.
     let reordered = mounted
         .server
         .post(PRIMARY_WIDGETS)
@@ -1390,7 +1331,6 @@ async fn p9_a_success_replays_byte_for_byte_behind_current_authorization(pool: P
         counts(&[("executed", 1), ("key_mismatch", 1)])
     );
 
-    // Exact method/path/query/content type/body bytes replay the response.
     let exact = mounted.create(ALICE, "k-1", &input, "req-exact").await;
     created(&exact, "req-exact");
     assert_eq!(
@@ -1438,7 +1378,6 @@ async fn p9_a_success_replays_byte_for_byte_behind_current_authorization(pool: P
         "req-changed",
     );
     assert!(retry_after(&mismatch).is_none());
-    // Another caller's same key is independent.
     let other = mounted.create(BOB, "k-1", &input, "req-bob").await;
     assert_ne!(created(&other, "req-bob")["id"], widget["id"]);
     let again = mounted.create(ALICE, "k-1", &input, "req-again").await;
@@ -1468,7 +1407,6 @@ async fn p9_request_identity_keeps_original_uri_resource_and_operation(pool: PgP
     let mounted = Mounted::on(&pool, BUDGET).await;
     let input = json!({"name": "gizmo", "color": "red"});
 
-    // Distinct resources on one operation cannot replay each other.
     let first_resource = mounted
         .replace(1, ALICE, "k-resource", &input, "req-resource-one")
         .await;
@@ -1552,8 +1490,6 @@ async fn p9_rolled_back_work_and_undecodable_records_are_never_replayed(pool: Pg
     let _local = metrics::set_default_local_recorder(&recorder);
     let mounted = Mounted::on(&pool, BUDGET).await;
 
-    // The operation's own non-2xx comes back unchanged, rolls back, and is
-    // not stored, so a retry runs the work again.
     let reserved = json!({"name": RESERVED_NAME, "color": "red"});
     for request_id in ["req-reserved", "req-reserved-again"] {
         let response = mounted.create(ALICE, "k-2", &reserved, request_id).await;
@@ -1582,13 +1518,10 @@ async fn p9_rolled_back_work_and_undecodable_records_are_never_replayed(pool: Pg
     );
     assert_eq!(count(&pool, WIDGET_ROWS).await, 0);
 
-    // No record stayed behind, so the same key executes another input.
     let input = json!({"name": "gizmo", "color": "red"});
     let stored = mounted.create(ALICE, "k-3", &input, "req-stored").await;
     created(&stored, "req-stored");
 
-    // An undecodable live record is an integrity failure on every retry, and
-    // the work never runs.
     let corrupted = sqlx::query(
         "UPDATE http_idempotency_records SET headers = \
          ARRAY[ROW('x-ignored', convert_to('bad', 'UTF8'))::http_idempotency_header_pair] \
@@ -1630,8 +1563,6 @@ async fn p9_a_held_key_answers_in_progress_with_a_retry_hint(pool: PgPool) {
     let input = json!({"name": "gizmo", "color": "red"});
     let changed = json!({"name": "gizmo", "color": "blue"});
 
-    // While the first attempt works, the same key answers 409 at once, with
-    // the same input and with another.
     let duplicates = async {
         mounted.hold.entered().await;
         for (duplicate, request_id) in [(&input, "req-duplicate"), (&changed, "req-changed")] {
@@ -1686,11 +1617,9 @@ async fn p9_the_database_cutoff_answers_unavailable_and_the_same_key_recovers(po
     tokio::time::resume();
     assert_eq!(count(&pool, WIDGET_ROWS).await, 0);
 
-    // The key is free once `PostgreSQL` ends the dropped transaction.
     let (retry, conflicts) = until_free(|| mounted.create(ALICE, "k-5", &input, "req-retry")).await;
     created(&retry, "req-retry");
 
-    // A handler can stop waiting before the store cutoff and answer with its own Problem.
     let input = json!({"name": "gizmo", "color": HANDLER_TIMEOUT_COLOR});
     mounted.hold.arm();
     let pause_on_entry = async {
@@ -1727,8 +1656,6 @@ async fn p9_a_read_only_writer_answers_unavailable(pool: PgPool) {
     let recorder = PrometheusBuilder::new().build_recorder();
     let _local = metrics::set_default_local_recorder(&recorder);
     create_widgets(&pool).await;
-    // The writer turns read-only after startup: every session of the store's
-    // pool is read-only.
     make_read_only(&pool).await;
     let store_pool = template_pool(&dsn_for(&pool).await, 4).await;
     let mounted = Mounted::new(store_pool, BUDGET).await;
@@ -1810,8 +1737,6 @@ async fn p9_postgres_timeouts_allow_a_same_key_retry(pool: PgPool) {
     }
 }
 
-/// An ambiguous COMMIT must answer a retryable Problem whatever the driver
-/// error, and the same-key retry must reconcile the actual database outcome.
 async fn uncertain_commit(pool: PgPool, fault: Fault) {
     let recorder = PrometheusBuilder::new().build_recorder();
     let _local = metrics::set_default_local_recorder(&recorder);

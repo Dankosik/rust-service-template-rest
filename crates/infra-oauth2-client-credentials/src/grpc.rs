@@ -1,6 +1,3 @@
-//! Concrete gRPC binding. The credential and cache remain in their private
-//! owner; [`Credentials::grpc`] documents the call contract.
-
 use std::{
     future::Future,
     pin::Pin,
@@ -20,7 +17,6 @@ use crate::{
     request_admission::{AdmissionRefusal, admit_request_subject},
 };
 
-/// A cloneable governed gRPC client with private machine credentials.
 #[derive(Clone, derive_more::Debug)]
 #[debug("grpc::AuthenticatedClient([REDACTED])")]
 pub struct AuthenticatedClient {

@@ -1,5 +1,3 @@
-//! HTTP semantics, RFC 9110.
-
 /// Whether the `Content-Type` value names `application/json`. The comparison
 /// ignores ASCII case, parameters, and optional whitespace around the media
 /// type (RFC 9110 §8.3.1).

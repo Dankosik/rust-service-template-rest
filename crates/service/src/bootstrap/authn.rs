@@ -1,5 +1,3 @@
-//! Bearer verifier preparation for the selected authentication engine.
-
 use service_config::{AuthnConfig, Config};
 // template:begin oidc-jwt:bootstrap-auth-jwt-algorithm-import
 use service_config::{JwtAlgorithm, TokenProfile};

@@ -1,5 +1,3 @@
-//! The readiness probe.
-
 use super::*;
 
 #[tokio::test]

@@ -16,7 +16,6 @@ use crate::app::local_development_only;
 use crate::de::{blank_as_none, blank_secret_as_none};
 use crate::validate::{ValidationError, duration_range, missing};
 
-/// Optional Redis-compatible cache. Absent `dsn` keeps the profile inert.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct CacheConfig {
@@ -78,10 +77,6 @@ impl CacheConfig {
         self.dsn.is_some()
     }
 
-    /// The client certificate presented for mutual TLS, if one is set.
-    ///
-    /// # Errors
-    ///
     /// Returns the path of the pair that is missing when only one is set: a
     /// certificate without its key, or a key without its certificate, would
     /// silently present nothing.
@@ -140,12 +135,9 @@ impl CacheConfig {
     }
 }
 
-/// The client certificate [`CacheConfig::client_certificate`] admitted.
 #[derive(Clone, Copy, Debug)]
 pub struct CacheClientCertificate<'a> {
-    /// PEM certificate chain.
     pub cert_path: &'a Path,
-    /// PEM private key of that certificate.
     pub key_path: &'a Path,
 }
 

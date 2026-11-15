@@ -37,8 +37,6 @@ use opentelemetry_otlp::{
 
 use super::{EndpointSource, TracingError};
 
-/// Standard trust variables, each a path to a PEM file; the traces variant
-/// wins.
 pub(super) const CERTIFICATE_VARS: [&str; 2] = [
     "OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE",
     "OTEL_EXPORTER_OTLP_CERTIFICATE",
@@ -60,12 +58,9 @@ fn non_blank(value: OsString) -> Option<OsString> {
     (!is_blank(&value)).then_some(value)
 }
 
-/// Where spans are exported.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Endpoint<'a> {
-    /// The typed URL.
     Typed(&'a str),
-    /// The SDK reads the standard endpoint variables itself.
     Environment,
     /// The `OTEL_EXPORTER_OTLP_ENDPOINT` root, given to the SDK as its own
     /// traces URL, because the SDK would read the blank traces variable
@@ -144,8 +139,6 @@ impl TrustFile {
     }
 }
 
-/// The collector's trust material from the standard variables. All vacant
-/// is the platform trust store and no client certificate.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct CollectorTrust {
     pub(super) certificate: Option<TrustFile>,
@@ -262,8 +255,6 @@ fn compression(
     }
 }
 
-/// The exporter's HTTP client when a trust variable is set; `None` leaves
-/// the SDK's own client, which verifies with the platform trust store.
 #[expect(
     clippy::disallowed_types,
     reason = "startup hands the blocking HTTP client to the SDK-owned exporter thread"
@@ -361,8 +352,6 @@ fn traces_url(endpoint: &str) -> String {
     }
 }
 
-/// The SDK's rule for `OTEL_EXPORTER_OTLP_ENDPOINT`: `/v1/traces` appended
-/// to the root as written.
 fn root_traces_url(root: &str) -> String {
     format!("{}/v1/traces", root.trim_suffix('/'))
 }
@@ -394,9 +383,10 @@ pub(super) fn parse_headers(raw: &str) -> Result<HashMap<String, String>, Tracin
     Ok(headers)
 }
 
-// opentelemetry-otlp 0.33.1 decodes each pair after '%' with from_str_radix
-// (including a leading '+'). A malformed pair or invalid UTF-8 anywhere makes
-// with_headers send the entire original value, which was already checked.
+// opentelemetry-otlp 0.33 (manifest 0.33.0, lockfile 0.33.1) decodes each pair
+// after '%' with from_str_radix (including a leading '+'). A malformed pair or
+// invalid UTF-8 anywhere makes with_headers send the entire original value,
+// which was already checked.
 fn decoded_otlp_header_value(value: &str) -> Option<String> {
     let (prefix, escapes) = value.split_once('%')?;
     let mut decoded = Vec::with_capacity(value.len());

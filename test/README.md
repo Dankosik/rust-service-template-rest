@@ -4,24 +4,16 @@ This service retains this crate for utility-recipe tests. PostgreSQL-specific
 proof is available only when the local PostgreSQL profile is retained.
 
 <!-- template:begin postgres:test-readme-postgres -->
-Workspace crate `integration-tests`: database-backed proof for the PostgreSQL
-profile. `make test` compiles it with the `integration` feature off, so
-nothing here runs without Docker; `ALLOW_HEAVY=1 make test-integration-db`
-brings a PostgreSQL and a PgBouncer in front of it up from
-`env/docker-compose.yml`, exports `DATABASE_URL` and
-`PGBOUNCER_DATABASE_URL`, and runs `tests/postgres.rs` with the feature on.
+`make test` compiles `integration-tests` with the `integration` feature off and
+runs non-Docker targets; `--features integration` targets require live
+`DATABASE_URL` and `PGBOUNCER_DATABASE_URL`.
 
-- `src/lib.rs`: helpers that turn the `#[sqlx::test]` per-test database into
-  an admitted `Dsn`.
-- `tests/postgres.rs`: pool session defaults, probe verdicts, the transaction
-  seam and its commit-outcome policy, and the migration runner's stages.
-- `fixtures/migrations/<scenario>/`: migration sets the runner tests apply;
-  not part of the service schema, which lives in `migrations/`.
+- `fixtures/migrations/<scenario>/` holds migration-runner test fixtures and is
+  not part of the service schema in `migrations/`.
 
-Selection and the claims each command supports:
-[PostgreSQL Validation](../docs/validation/postgres.md). Process and
-container proof for the built image stays in `crates/service/tests/` and
-`scripts/ci/runtime-image-check.sh`.
+Selection and claims: [PostgreSQL Validation](../docs/validation/postgres.md).
+Process and container proof for the built image stays in
+`crates/service/tests/` and `scripts/ci/runtime-image-check.sh`.
 <!-- template:end postgres:test-readme-postgres -->
 
 <!-- template:begin http-idempotency:test-readme-http-idempotency -->
@@ -35,13 +27,9 @@ proof runs where the introspection engine is retained.
 <!-- template:end http-idempotency:test-readme-http-idempotency -->
 <!-- template:begin jobs:test-readme-jobs -->
 
-With the jobs pack retained, the same command also runs `tests/jobs/`: the
-engine suite (enqueue, uniqueness, claiming, retries, recovery, fencing,
-retention; `main.rs` with `enqueue.rs` and `execution.rs`), the process suite
-on the test-only `jobs-worker-fixture` binary (`process.rs`, with the `Probe`
-kind in `src/jobs.rs` and the binary in `src/bin/`), and the joint HTTP
-idempotency proof (`http_idempotency.rs`) where both packs are retained. The
-shipped binary's refusal test is in `crates/jobs-worker/tests/`.
+With the jobs pack retained, `tests/jobs/` runs the process suite against the
+test-only `jobs-worker-fixture` binary while the shipped binary's refusal test
+stays in `crates/jobs-worker/tests/`.
 <!-- template:end jobs:test-readme-jobs -->
 
 <!-- template:begin jobs-reference:test-readme-reading-reference -->

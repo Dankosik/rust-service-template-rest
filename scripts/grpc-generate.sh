@@ -1,10 +1,4 @@
 #!/usr/bin/env bash
-# Generate committed Rust from the owned protobuf module. Buf builds the
-# descriptor set with its imports, which prost needs to resolve an imported
-# message type; stock tonic-prost-build emits the code. The same set is
-# committed beside the Rust for server reflection.
-# Run through `make grpc-generate`, which supplies BUF. The optional argument
-# is the output directory.
 set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"

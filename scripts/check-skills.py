@@ -1,22 +1,4 @@
 #!/usr/bin/env python3
-"""Structural check for the skills under .agents/skills.
-
-Two classes share the directory (docs/skill-authoring.md):
-
-- decision skills (`rust-*`, `merge-conflict-resolution`): the rust-cli-skills
-  shape; frontmatter with exactly `name` and `description`, a description that
-  states its trigger in at most two sentences, one heading, prose paragraphs
-  with targeted links, an opening bold concept, a body inside the word budget,
-  a LICENSE beside SKILL.md, and optional linked Markdown decision examples;
-- workflow skills (ported from the Go template, harness-neutral): the same
-  name and description rules plus `metadata.invocation` (`role` or `user`),
-  `metadata.kind` (`carrier` or `workflow`), and
-  `disable-model-invocation: true`; the body is a short carrier that may link
-  to the workflow documents and hold lists; `references/*.md` and the Codex
-  carrier `agents/openai.yaml` are the only other entries.
-
-Proves shape, not model behavior. Standard library only.
-"""
 
 from __future__ import annotations
 
@@ -41,7 +23,6 @@ NAME = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 
 
 def parse_frontmatter(text: str) -> tuple[dict[str, object], str]:
-    """Flat `key: value` lines, plus one level of indented keys under `metadata`."""
     if not text.startswith("---\n"):
         raise ValueError("missing frontmatter")
     end = text.find("\n---\n", 4)
@@ -157,7 +138,6 @@ def check_entries(name: str, skill_dir: Path, workflow: bool) -> list[str]:
 
 
 def check_service_owned(name: str, skill_dir: Path) -> list[str]:
-    """Validate the narrow reservation grammar without imposing template policy."""
     marker = skill_dir / ".service-owned"
     problems: list[str] = []
     if marker.is_symlink() or not marker.is_file() or marker.read_bytes():

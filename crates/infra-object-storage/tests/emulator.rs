@@ -1,10 +1,6 @@
 //! The client against a real S3 implementation: versitygw from
 //! `env/docker-compose.yml`. Run through `make test-integration-object-storage`,
 //! which starts the emulator and sets `OBJECT_STORAGE_TEST_ENDPOINT`.
-//!
-//! This proves signing, the wire protocol, create-only, CRC64NVME in a
-//! header and in an `aws-chunked` trailer, response validation, and presigned
-//! expiry. Provider-specific behavior needs the live conformance test.
 
 #![expect(
     clippy::unwrap_used,

@@ -1,5 +1,3 @@
-//! Integration tests against a live `JetStream` broker.
-
 #![expect(
     clippy::expect_used,
     clippy::panic,
@@ -459,7 +457,6 @@ fn install_tracing() -> &'static opentelemetry_sdk::trace::InMemorySpanExporter 
     &EXPORTER
 }
 
-/// The exported spans named `name`; a fixture's subject makes the name unique.
 fn exported_spans(
     exporter: &opentelemetry_sdk::trace::InMemorySpanExporter,
     name: &str,
@@ -486,7 +483,6 @@ fn trace_id(span: &tracing::Span) -> opentelemetry::trace::TraceId {
     span.context().span().span_context().trace_id()
 }
 
-/// The fields of every event logged on this thread while the guard lives.
 type Logged = Arc<Mutex<Vec<Vec<(&'static str, String)>>>>;
 
 struct LoggedFields(Vec<(&'static str, String)>);

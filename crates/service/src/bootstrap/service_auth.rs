@@ -1,5 +1,3 @@
-//! Service token verification and signing from the `service_auth` section.
-
 use infra_serviceauth::{
     JwtType, KeyId, ServiceName, SigningOptions, TokenSource, TrustRegistry, Verifier,
 };

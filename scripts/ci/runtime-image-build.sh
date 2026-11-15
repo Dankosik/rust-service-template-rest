@@ -1,23 +1,4 @@
 #!/usr/bin/env bash
-# Build the runtime image from the repository context with BuildKit. One
-# command for make, CI, and publication.
-#
-#   runtime-image-build.sh [IMAGE]          default service:ci
-#   runtime-image-build.sh --check          Dockerfile checks only
-#
-# Environment:
-#   VCS_REF                  commit baked into the binary (default: HEAD)
-#   APP_VERSION              OCI version label (default: the service crate version)
-#   SOURCE_URL               OCI source label
-#   SOURCE_DATE_EPOCH        binary mtime (default: HEAD commit time, else 0)
-#   RUNTIME_IMAGE_CACHE_FROM / RUNTIME_IMAGE_CACHE_TO
-#                            buildx cache specs, e.g. type=registry,ref=<repo>:buildcache
-#   RUNTIME_IMAGE_METADATA_FILE  receipt from the final loaded image exporter
-#   IMAGE_TESTS              unit runs the unit-test gate inside the build (default none)
-#
-# Tool versions inside the image come from tools/versions.env as build
-# arguments; the Dockerfile carries the same values as defaults for builds
-# that pass none (Railway), and `make tools-check` asserts they agree.
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)

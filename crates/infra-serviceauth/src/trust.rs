@@ -1,5 +1,3 @@
-//! The trust registry: each trusted caller and its public signing keys.
-
 use std::{collections::BTreeMap, fmt};
 
 use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED, ParsedPublicKey};
@@ -33,7 +31,6 @@ pub struct TrustError {
     reason: &'static str,
 }
 
-/// Where in the registry document a refusal applies.
 #[derive(Clone, Debug, Eq, PartialEq, derive_more::Display)]
 enum Place {
     #[display("")]
@@ -58,14 +55,6 @@ impl TrustError {
 }
 
 impl TrustRegistry {
-    /// Admits a registry document.
-    ///
-    /// # Errors
-    /// Returns [`TrustError`] for a document that is not one JSON object, a
-    /// repeated or ill-formed caller name, no caller, a caller without keys,
-    /// a repeated `kid` within a caller, a repeated member name anywhere in a
-    /// caller's JWK Set, or any key that is not an EC P-256
-    /// public key for ES256 signatures with a `kid`.
     pub fn parse(document: &str) -> Result<Self, TrustError> {
         let entries: Entries = serde_json::from_str(document).map_err(|error| {
             let line = error.line();
@@ -107,7 +96,6 @@ impl TrustRegistry {
         self.callers.keys()
     }
 
-    /// The registered name and keys of a caller, by its spelling in `iss`.
     pub(crate) fn caller(&self, name: &str) -> Option<(&ServiceName, &[TrustedKey])> {
         self.callers
             .get_key_value(name)

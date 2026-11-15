@@ -32,11 +32,9 @@ impl MaintenancePopulation {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PopulationSample {
     pub observed_at_unix_seconds: f64,
-    /// `None` when the population is empty.
     pub oldest_at_unix_seconds: Option<f64>,
 }
 
-/// Bounded failure classes; no driver text or arbitrary stored kind is emitted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MaintenanceFailure {
     Permit,
@@ -118,7 +116,6 @@ const LAST_ATTEMPT_SUCCESS_METRIC: &str = "postgres_maintenance_last_attempt_suc
 const CLOCK_VALID_METRIC: &str = "postgres_maintenance_clock_valid";
 const OBSERVATIONS_METRIC: &str = "postgres_maintenance_observations_total";
 
-/// One profile-owned sampler's last-good evidence; this object spawns no work.
 #[derive(Debug)]
 pub struct MaintenanceObserver {
     population: MaintenancePopulation,
@@ -238,7 +235,6 @@ impl MaintenanceObserver {
         }
     }
 
-    /// Dropping the attempt records cancellation.
     fn attempt(&mut self) -> MaintenanceAttempt<'_> {
         MaintenanceAttempt {
             observer: self,
@@ -278,8 +274,6 @@ impl Drop for MaintenanceObserver {
     }
 }
 
-/// How one observation attempt ended; the `outcome` label of
-/// `postgres_maintenance_observations_total`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AttemptOutcome {
     Succeeded,
@@ -297,7 +291,6 @@ impl AttemptOutcome {
     }
 }
 
-/// One observation attempt, including all waits through transaction acknowledgement.
 #[derive(Debug)]
 struct MaintenanceAttempt<'a> {
     observer: &'a mut MaintenanceObserver,
@@ -306,7 +299,6 @@ struct MaintenanceAttempt<'a> {
 }
 
 impl MaintenanceAttempt<'_> {
-    /// Publish only after the read transaction has acknowledged success.
     fn record_sample(self, sample: PopulationSample) {
         self.record_sample_at(sample, MaintenanceClock::now());
     }
@@ -335,7 +327,6 @@ impl MaintenanceAttempt<'_> {
         valid.then_some(received_at)
     }
 
-    /// An invalid sample is a failed attempt that keeps the last-good one.
     fn record_sample_at(mut self, sample: PopulationSample, received: MaintenanceClock) {
         let Some(received_at) = self.validated_receipt_time(sample, received) else {
             self.failed_at(MaintenanceFailure::ClockInvalid, received);
@@ -367,7 +358,6 @@ impl MaintenanceAttempt<'_> {
         self.observer.failing = false;
     }
 
-    /// A failed read never overwrites its last-good population or sample times.
     fn failed(self, failure: MaintenanceFailure) {
         self.failed_at(failure, MaintenanceClock::now());
     }
@@ -403,10 +393,6 @@ impl Drop for MaintenanceAttempt<'_> {
 /// Run one population read in a read-only transaction whose limits end a stuck
 /// statement with its own failure before the observation budget cancels the
 /// attempt.
-///
-/// # Errors
-///
-/// The transaction's or the statement's failure class.
 pub async fn in_observation_tx<F>(
     pool: &PgPool,
     read: F,

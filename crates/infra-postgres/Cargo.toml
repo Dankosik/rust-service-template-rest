@@ -16,7 +16,6 @@ hotpath = []
 
 [dependencies]
 async-trait = { workspace = true }
-# `Stream`, to wrap a statement's result stream.
 futures-util = { workspace = true }
 health = { workspace = true }
 # `sqlx::ConnectOptions` takes statement-log levels as `log::LevelFilter`.
@@ -30,7 +29,6 @@ shared-rules = { workspace = true }
 # resolved sqlx graph is the same whichever optional packs are retained.
 sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls-aws-lc-rs", "macros", "uuid"] }
 thiserror = { workspace = true }
-# `fs`: the password file is read again while the service runs.
 tokio = { workspace = true, features = ["time", "macros", "fs"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }

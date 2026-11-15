@@ -25,7 +25,6 @@ fn refresh_spread_spans_its_window_and_vanishes_on_source_failure() {
     }
 }
 
-/// Asserts that no token request arrives within a short real-time window.
 async fn assert_no_token_request(fixture: &Fixture) {
     assert!(
         tokio::time::timeout(Duration::from_millis(100), fixture.token_received())
@@ -492,8 +491,6 @@ impl tracing::Subscriber for Events {
 async fn a_failed_background_refresh_is_logged_with_its_error_type() {
     let events = Events::default();
     let _subscriber = tracing::subscriber::set_default(events.clone());
-    // Keep callsite interest independent of a sibling test's thread-local
-    // subscriber; tracing-core otherwise has a single-dispatcher fast path.
     let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
     let fixture = Fixture::new().await;
     fixture.token_json(
@@ -512,7 +509,6 @@ async fn a_failed_background_refresh_is_logged_with_its_error_type() {
         br#"{"error":"invalid_client","error_description":"provider-secret-body"}"#,
     ));
     advance(Duration::from_secs(3321)).await;
-    // The caller keeps its token; the refresh it starts fails alone.
     client
         .execute(fixture.request(), deadline(Duration::from_secs(10)))
         .await
