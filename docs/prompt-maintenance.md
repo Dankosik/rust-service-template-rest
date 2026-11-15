@@ -47,40 +47,45 @@ Give each instruction one disposition before editing it.
 | Conditional method | Put behind its observable trigger. |
 | Structure or process justified only by hypothetical future reuse | Remove; retain only when a current accepted constraint and owner require it. |
 | Behavior guaranteed by a tool, schema, sandbox, or generator | Remove from prose or emit once only where the guarantee is absent. |
+| Mechanical prohibition checkable by a lint, architecture rule, or structural script | Graduate into `Cargo.toml`, `clippy.toml`, `quality/architecture.json`, `scripts/check-skills.py`, or `scripts/tests/` and remove the prose ban. |
 | Fact apparent from canonical code, contract, test, or file layout | Remove. |
 | Restatement of another owner | Replace with a trigger and link. |
 | Example that defines required behavior | Replace with a schema or fixture when possible; otherwise retain it with its contract. |
 | Example of only the ordinary path | Remove unless it makes a non-obvious engineering choice visible; retain its selecting condition and the condition that changes the choice under [Skill Authoring](skill-authoring.md#decision-examples). |
 
-Keep a hard boundary explicit; express judgment as the broadest principle that
-preserves the measured behavior. If ordinary repository context already makes a
-rule derivable, do not teach it again.
+Keep hard boundaries explicit; express judgment as the broadest principle that
+preserves the intended behavior, and delete rules already derivable from
+ordinary repository context. Reduce context cost by deleting whole no-op
+sentences and consolidating duplicate owners rather than compressing clauses
+into telegraphic prose.
 
 ## Ownership And Interfaces
 
 One file owns one meaning. Bootstrap files contain only rules needed before
-routing. Routers choose the next owner; they do not explain that owner's method.
+routing. Routers choose the next owner; the selected owner explains its method.
 Move repeatable fields, allowed values, tool capabilities, sandbox guarantees,
-and generated carriers into interfaces rather than narrative checklists.
+and generated carriers into interfaces, tables, or branch lists rather than
+narrative walls of text.
 
 The instruction graph flows `bootstrap -> router -> phase -> method ->
-reference`. Lower layers do not reselect higher layers. A selector selects; it
-does not restate the selected owner's method. Reference indexes contain only
-selection pressures, links, and the decision effect of loading them.
+reference`, strictly downward. A selector selects its target owner and stops
+there. Reference indexes contain only selection pressures, links, and the
+decision effect of loading them.
 
 Roles encode capability, permission, isolation, and context freshness. Skills
-encode expertise and method. A model-invoked skill needs an independent
-observable trigger that changes the method; aliases and explicit workflows do
-not compete in autonomous discovery.
+encode expertise and method. Model-invoked skills carry an independent
+observable trigger that changes the method; user-invoked workflows carry
+human-facing picker descriptions and stay out of implicit discovery.
 
-Write durable instructions as observable triggers, actions, completion criteria,
-or stop conditions. State allowed behavior and reserve prohibitions for safety,
-authority, or decisive exclusions. Expose only material the current task can
-act on. A local stop identifies the dependent action and receiving owner;
-[Decision Ownership](../AGENTS.md#decision-ownership) and [Parent-Owned
+Write durable instructions as observable triggers, target actions, completion
+criteria, or stop conditions. State the desired action directly and reserve
+negative prohibitions for safety, authority, or decisive exclusions. Expose only
+material the current task can act on. A local stop identifies the dependent
+action and receiving owner; [Decision Ownership](../AGENTS.md#decision-ownership)
+and [Parent-Owned
 Recovery](spec-first-workflow/shared/transition.md#parent-owned-recovery) govern
-whether the enclosing task continues. Preserve specialist rigor without
-turning missing technical policy into a user decision.
+whether the enclosing task continues. Preserve specialist rigor while keeping
+technical-policy resolution with the responsible agent.
 
 `AGENTS.md` owns global authority, safety, Direct Work eligibility, and the local
 validation budget; [Workflow Router](spec-first-workflow.md) owns structured

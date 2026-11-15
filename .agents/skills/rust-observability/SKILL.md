@@ -5,16 +5,14 @@ description: "Operator evidence. Use when logs, spans, metrics, or probes change
 
 # Rust Observability
 
-**Operator evidence.** Start with the question an operator must answer and choose the smallest signal that distinguishes the relevant states. Identify who consumes it, what its absence means, and the cost and disclosure of producing it.
+**Operator evidence.** Start from the operational question an operator must answer and emit the smallest signal that separates the relevant states, accounting for its consumer, absence meaning, hot-path cost, and privacy boundary.
 
-`crates/infra-telemetry` and `crates/infra-http` govern admitted fields, event names, subscriber installation, and request correlation. Library code emits through the selected facade rather than installing a global subscriber; preserve the distinction between diagnostics and intentional CLI output.
+**Telemetry owners.** Emit library diagnostics through `tracing` and `metrics` facades while keeping subscriber installation, field admission, and HTTP correlation in `crates/infra-telemetry` and `crates/infra-http`, and keeping intentional CLI output separate from diagnostic events.
 
-Give events stable identities and useful structured fields. An error's source chain or a span's existence does not guarantee that the renderer or exporter exposes it, so inspect the final signal the operator receives and avoid duplicate reporting that makes one failure look like several. Carry correlation through the existing context, and check background and handoff paths where it may be absent rather than claiming all records inherit request identity.
+**Events and correlation.** Give events stable names and structured fields, verify that the configured formatter or exporter surfaces error causes and span context, report each failure once at its owning boundary, and propagate correlation explicitly across background tasks and handoffs where ambient request spans end.
 
-Metrics describe populations, so choose a unit, aggregation, and bounded set of labels that answer the question. Route templates, finite outcomes, and stable problem codes can be useful; raw paths, arbitrary errors, and user identifiers create cardinality and disclosure risks. Account for retention, exporter cost, and work on hot paths, and reuse an existing instrument when it already distinguishes the state rather than adding labels for merely available data.
+**Metrics cardinality.** Choose metric units, aggregations, and bounded label sets—route templates, finite outcomes, and stable Problem codes—reusing existing instruments where they already separate the state and keeping high-cardinality paths, raw errors, and user IDs out of labels.
 
-Logs, spans, metric labels, errors, and `Debug` formatting are all disclosure surfaces. Apply redaction and field admission before publication, including failure paths and third-party diagnostics, and avoid capturing complete request or response payloads by default. Locally emitted events prove local emission, not collector delivery, alerting, or retention; keep those claims separate.
+**Redaction and claim scope.** Enforce field admission and secret redaction across logs, spans, metric labels, errors, and `Debug` output before emission, omitting raw request/response bodies by default and distinguishing local emission proof from collector delivery or alerting.
 
-Probes are control inputs: determine liveness, readiness, startup admission, and dependency criticality with their lifecycle and integration owners in `crates/service/src/bootstrap`. A dependency that supports degradation need not gate readiness (cache and object-storage profiles opt in only when composition requires it). Where a probe participates, preserve its budget, cached verdict, and staleness policy rather than performing a new remote check on each request.
-
-Do not add dashboards, alerts, probes, a collector, or a lifecycle audit solely because this method names them.
+**Health probes.** Align liveness, readiness, startup admission, and dependency criticality with `crates/service/src/bootstrap`: gate readiness only on non-degradable dependencies, preserve cached probe budgets and staleness windows, and scope telemetry additions strictly to the requested signal.

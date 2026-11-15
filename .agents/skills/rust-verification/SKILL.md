@@ -5,10 +5,10 @@ description: "Evidence boundary. Use for verification-only work or deciding whet
 
 # Rust Verification
 
-**Evidence boundary.** A proof covers exactly the behavior it would fail on, and a claim cannot be wider than that boundary. Name the observable whose absence would make the selected proof fail before running it.
+**Evidence boundary.** Bound every verification claim to the exact behavior whose failure the executed check would catch, naming that observable before running the command.
 
-Workspace checks prove bounded surfaces: `make lint` checks clippy shape at pedantic, not runtime behavior; `make check-skills` checks instruction shape, not model effect; workspace process tests cover startup, probes, metrics, `SIGTERM` drain, and exit codes; a manual baseline run observes the startup summary and shutdown sequence in logs.
+**Surface mapping.** Map each workspace check to what it actually proves: `make lint` proves static lint conformance, `make check-skills` proves skill shape, process tests prove binary startup, probes, metrics, `SIGTERM` drain, and exit codes, and a baseline run proves emitted startup/shutdown logs.
 
-A passing command proves only the surfaces it observed. File presence, a compile, a test filter that matched nothing, a skipped process test, or an unrelated aggregate cannot carry a claim. A test that passes with a sleep as synchronization has not proven ordering, and the dependency tree proves resolution rather than runtime behavior. Nothing local proves CI, a container, a collector receiving spans, or production behavior; say so rather than implying it.
+**Executed scope.** Count only executed, non-skipped checks that observe the claimed boundary—separating compilation, lockfile resolution, and sleep-timed runs from behavioral proof, and separating local test passes from CI, container, collector-delivery, or production outcomes.
 
-Record the exact command, its preconditions, whether the result was fresh or reused, and the scope actually exercised. Reuse a passing result while its inputs, configuration, toolchain, and environment are unchanged. For verification-only work, do not edit files; return unsupported claims with their exact missing proof and owner, never weaken a requested CI, runtime, or deployment result into local success, and never present a serial self-review as independent review.
+**Receipts and read-only boundary.** Record the exact command, preconditions, fresh-versus-reused status (reusing passes only while inputs, config, toolchain, and environment match), and exercised scope. During verification-only work, keep the tree untouched, report unverified claims with their missing proof and owner, preserve requested CI/runtime/deployment boundaries, and keep author checks distinct from independent review.

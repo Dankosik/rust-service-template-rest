@@ -52,23 +52,23 @@ layers).
 ## Body
 
 One H1 heading, then at least three prose paragraphs of 150–1000 words in
-total. The ceiling guards context cost, not completeness: a rule no compiler or
-lint enforces earns its words. Keep the method in prose; use links to select a supporting reference or
-locate a canonical project example. Substantial code, lists, and tables belong
-in the selected reference rather than the entrypoint. The first paragraph opens with the
-leading concept in bold and states the method in one or two sentences. Each
-following paragraph is one decision cluster: the judgment, the non-obvious
-criteria that change it, and the plausible wrong default, written as observable
-triggers and actions rather than prohibitions.
+total (at most 125 words per paragraph). Keep the method in prose; use links to
+select a supporting reference or locate a canonical project example, and place
+substantial code, lists, and tables in the selected reference.
+
+The first paragraph opens with the leading concept in bold and states the
+method in one or two sentences. Each following paragraph opens with a bold
+cluster anchor (`**Cluster.**`) and covers one decision cluster: the judgment,
+the non-obvious criteria that change it, and the plausible wrong default,
+written as observable triggers and target actions rather than prohibitions.
 
 Ground service-specific decisions in conditional links to their current owners
-so an agent extends the existing path. Do not copy a changing inventory of
-layers, defaults, providers, commands, or lifecycle stages into the method.
-Keep a local fact in the body only when its non-obvious consequence changes
-the decision, and name its authority. Behaviour a lint or type already guarantees
-does not need another prose rule; choosing the right invariant or type still
-may. Rules that must always apply belong in `AGENTS.md`, not in a skill that
-may not be selected.
+so an agent extends the existing path. Leave changing inventories of layers,
+defaults, providers, commands, and lifecycle stages in their owning files. Keep
+a local fact in the body only when its non-obvious consequence changes the
+decision, and name its authority. Graduate mechanical prohibitions into lints, architecture policies, or
+structural checks; spend skill prose on choosing the right invariant or type.
+Rules that apply unconditionally belong in `AGENTS.md`.
 
 Keep the core decision usable without sibling skills or repository-specific
 files, and apply named repository paths only when working in this repository.
@@ -167,17 +167,18 @@ code that does not exist.
 
 ## Workflow skills
 
-A workflow skill's frontmatter holds exactly `name`, `description`,
-`metadata` with `invocation` (`role` for a ledger carrier bound by a harness
-role, `user` for an entry the user invokes) and `kind` (`carrier` or
-`workflow`), and `disable-model-invocation: true`, so no harness selects it
-implicitly. The description states its trigger the same way and stays within
-two sentences. The body is one H1 and at most 600 words; it may hold lists
-and links to `docs/spec-first-workflow/**` and `docs/agent-harness*`,
-because the skill is the entry point and those documents own the method. Besides `SKILL.md` and `LICENSE`, a workflow skill
-may hold `references/*.md` (examples the body names) and `agents/openai.yaml`,
-the Codex carrier with `allow_implicit_invocation: false`.
+A workflow skill's frontmatter holds `name`, `description`, `metadata` with
+`invocation` (`role` for a ledger carrier bound by a harness role, `user` for an
+entry a person invokes directly) and `kind` (`carrier` or `workflow`), and
+`disable-model-invocation: true`, keeping implicit model discovery off. Role
+carriers state their binding trigger with `Use when` or `Use only`; user-invoked
+workflow skills write human-facing picker descriptions in at most two sentences
+naming the job, deliverable, and boundary. The body is one H1 and at most 600
+words; it may hold lists and links to `docs/spec-first-workflow/**` and
+`docs/agent-harness*`, which own the method. Besides `SKILL.md` and `LICENSE`, a
+workflow skill may hold `references/*.md` (examples the body names) and
+`agents/openai.yaml`, the Codex carrier with `allow_implicit_invocation: false`.
 
-A decision skill carries no `metadata` block; the harness sync treats its
-absence as `invocation: model`, `kind: method`. Changing a workflow skill's
-method means changing the workflow document it links, not the skill.
+A decision skill carries only `name` and `description`; harness sync treats the
+omitted `metadata` as `invocation: model`, `kind: method`. Update a workflow
+skill's method in the workflow document it links rather than in the skill.

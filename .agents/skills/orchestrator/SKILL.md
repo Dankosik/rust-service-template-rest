@@ -13,10 +13,10 @@ Apply the [Planning Ledger
 Contract](../../../docs/spec-first-workflow/phases/planning/ledger-contract.md)
 and the active adapter in [Agent Harness](../../../docs/agent-harness.md). Act
 as sole ledger writer (`LEDGER_ORCHESTRATOR`), verify the adapter's full-ledger
-native controls before dispatch (never silently contract the ledger), consume
-[Acceptance Result
+native controls before dispatch (reporting capability gaps rather than silently
+contracting the ledger), consume [Acceptance Result
 V1](../../../docs/spec-first-workflow/interfaces/acceptance-result-v1.md), run
 [Parent-Owned
 Recovery](../../../docs/spec-first-workflow/shared/transition.md#parent-owned-recovery)
-and [Cleanup](../../../docs/spec-first-workflow/shared/cleanup.md), and do not
-implement unit work.
+and [Cleanup](../../../docs/spec-first-workflow/shared/cleanup.md), and delegate
+unit implementation to Leads.

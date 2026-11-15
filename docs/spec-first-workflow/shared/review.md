@@ -4,45 +4,30 @@ Use fresh independent review at the boundaries selected by this contract.
 
 ## Trigger
 
-One fresh reviewer is required for a standalone Research macro result and each
-fixed Specification, completed Technical Design, and Planning result before
-movement. Test authoring is Implementation work and has no separate phase review.
+Run one fresh independent review for a standalone Research synthesis and for
+each completed Specification, Technical Design, and Planning result before phase
+movement. Keep implementation tasks, subtask lanes, and test authoring moving
+directly along the ready frontier, reserving implementation review strictly for
+the final assembled delivery boundary (or an explicit standalone review
+request).
 
-Implementation tasks and subtask lanes have no review or self-review gate.
-Return implemented code and continue the ready frontier immediately. Task
-packets and protected-domain skills cannot reintroduce per-task review through
-a generic risk trigger. Standalone review requests are separate work; a reviewer subtask inside an
-implementation ledger cannot bypass this boundary.
+At the final assembled delivery boundary (in both structured workflows and
+standalone Direct Work), select one fresh reviewer according to the changed
+surface:
 
-Select independent review once for the final assembled delivery candidate when
-the user requires it, materially changed behavior affects authorization, money,
-data integrity, concurrency safety, or hard-to-reverse migration, or a material
-correctness question remains uncertain or contested. Scope that review to the
-changed outcome, including unit-local protected invariants and cross-unit
-interactions; do not defer a unit risk and then omit it from final review.
-Passing tests do not replace this final review. Its evidence scope stays within
-the [Evidence Contract](evidence-contract.md#local-completion): a review trigger
-does not authorize extra infrastructure or new mandatory runtime checks.
-
-When no such review is selected and the final candidate adds a workspace crate,
-a dependency or crate feature, a trait or layer, a custom general mechanism, a
-configuration key, or a fallback, compatibility shim, or parallel path, select
-one fresh reviewer for
-[Structure-only review](../phases/implementation-review.md#structure-only-review)
-of those additions. The author's own deletion test does not replace it: the
-author keeps the reasoning that produced the structure. A full final review
-already covers them.
-
-Otherwise the delivery owner completes final validation without a separate
-review report. Record the final disposition in the existing Completion result.
-Resolve outstanding blocking findings before acceptance. Reuse current evidence
-and recheck only repairs and invalidated reasoning; task count does not add
-review cycles.
-
-For a standalone Direct Work delivery, select review at its final boundary
-using the same trigger. Pre-Implementation supporting work keeps its existing
-phase method. Do not route ledger tasks through Direct Work to obtain an
-intermediate self-review or reviewer.
+- **Full final review**: Required when requested by the user, when changed
+  behavior affects authorization, money, data integrity, concurrency safety, or
+  hard-to-reverse migration, or when a material correctness question remains
+  uncertain. Cover unit-local invariants and cross-unit interactions within the
+  [Evidence Contract](evidence-contract.md#local-completion) proof boundary.
+- **Structure-only review**: Selected when full review is untriggered and the
+  candidate adds a workspace crate, dependency or crate feature, trait or layer,
+  custom general mechanism, config key, or fallback/shim/parallel path; route to
+  [Structure-only review](../phases/implementation-review.md#structure-only-review).
+- **Direct completion**: When neither trigger fires, complete final validation
+  directly and record the disposition in the Completion result, closing all
+  blocking findings and rechecking only repaired deltas and invalidated
+  reasoning.
 
 ## Lifecycle
 

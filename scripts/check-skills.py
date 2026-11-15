@@ -15,6 +15,7 @@ SKILLS = ROOT / ".agents" / "skills"
 ROOT_LICENSE = ROOT / "LICENSE"
 MIN_PARAGRAPHS = 3
 MIN_WORDS, MAX_WORDS = 150, 1000
+MAX_PARAGRAPH_WORDS = 125
 WORKFLOW_MAX_WORDS = 600
 DECISION_KEYS = {"name", "description"}
 WORKFLOW_KEYS = {"name", "description", "metadata", "disable-model-invocation"}
@@ -52,7 +53,21 @@ def parse_frontmatter(text: str) -> tuple[dict[str, object], str]:
     return fields, text[end + 5 :]
 
 
-def check_description(name: str, fields: dict[str, object]) -> list[str]:
+def _is_user_workflow(fields: dict[str, object]) -> bool:
+    metadata = fields.get("metadata")
+    return (
+        isinstance(metadata, dict)
+        and metadata.get("invocation") == "user"
+        and metadata.get("kind") == "workflow"
+    )
+
+
+def check_description(
+    name: str,
+    fields: dict[str, object],
+    *,
+    require_use_trigger: bool = True,
+) -> list[str]:
     problems: list[str] = []
     if fields.get("name") != name or not NAME.match(name):
         problems.append(f"{name}: frontmatter name must equal the lowercase-hyphen directory name")
@@ -60,7 +75,7 @@ def check_description(name: str, fields: dict[str, object]) -> list[str]:
     if not description:
         problems.append(f"{name}: empty description")
         return problems
-    if "Use " not in description:
+    if require_use_trigger and "Use " not in description:
         problems.append(f"{name}: description must state its trigger with `Use when`, `Use for`, `Use to`, or `Use only`")
     if len(re.findall(r"[.!?](\s|$)", description)) > 2:
         problems.append(f"{name}: description longer than two sentences")
@@ -78,17 +93,24 @@ def check_decision_body(name: str, body: str) -> list[str]:
     prose = paragraphs[1:] if paragraphs and paragraphs[0].startswith("# ") else paragraphs
     if not prose or not prose[0].startswith("**"):
         problems.append(f"{name}: first paragraph must open with the bold leading concept")
+    elif not all(p.startswith("**") for p in prose[1:]):
+        problems.append(f"{name}: each paragraph must open with a bold concept or cluster anchor")
     if len(prose) < MIN_PARAGRAPHS:
         problems.append(
             f"{name}: body has {len(prose)} paragraphs, expected at least {MIN_PARAGRAPHS}"
         )
-    for paragraph in prose:
+    for index, paragraph in enumerate(prose, start=1):
         if re.match(r"^\s*([-*]|\d+\.)\s", paragraph, re.M):
             problems.append(f"{name}: body contains a list; write paragraphs")
             break
         if paragraph.startswith("```"):
             problems.append(f"{name}: body contains a code block; name APIs in prose")
             break
+        paragraph_words = len(paragraph.split())
+        if paragraph_words > MAX_PARAGRAPH_WORDS:
+            problems.append(
+                f"{name}: paragraph {index} has {paragraph_words} words, limit is {MAX_PARAGRAPH_WORDS}"
+            )
     words = len(" ".join(prose).split())
     if not MIN_WORDS <= words <= MAX_WORDS:
         problems.append(f"{name}: body has {words} words, budget is {MIN_WORDS}-{MAX_WORDS}")
@@ -151,7 +173,9 @@ def check_service_owned(name: str, skill_dir: Path) -> list[str]:
     except ValueError as err:
         return [f"{name}: .service-owned SKILL.md {err}"]
 
-    problems.extend(check_description(name, fields))
+    problems.extend(
+        check_description(name, fields, require_use_trigger=not _is_user_workflow(fields))
+    )
     metadata = fields.get("metadata")
     if metadata is not None:
         if not isinstance(metadata, dict) or set(metadata) != set(WORKFLOW_METADATA):
@@ -181,7 +205,11 @@ def check(skill_dir: Path, lock: dict[str, object] | None) -> list[str]:
         return [f"{name}: {err}"]
 
     workflow = "metadata" in fields
-    problems = check_description(name, fields)
+    problems = check_description(
+        name,
+        fields,
+        require_use_trigger=not _is_user_workflow(fields),
+    )
     if workflow:
         if set(fields) != WORKFLOW_KEYS:
             problems.append(f"{name}: workflow frontmatter keys must be exactly {sorted(WORKFLOW_KEYS)}, got {sorted(fields)}")
