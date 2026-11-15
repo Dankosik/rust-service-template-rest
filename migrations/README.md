@@ -9,69 +9,36 @@ migrations arrive with its first durable feature. With an empty set, the
 runner checks the empty-history path.
 
 <!-- template:begin http-idempotency:migrations-readme-http-idempotency -->
-The HTTP idempotency pack creates `http_idempotency_records` in
-`20260923000001_create_http_idempotency_records.sql`. The canonical schema
-stores digest-backed identity, the request fingerprint, accepted 2xx response
-bytes and headers, expiry, and trusted caller metadata. It intentionally omits
-a caller-identity index: unrestricted verified caller values cannot be safely
-represented by a literal btree key, and no runtime query needs that access
-path. Trusted operators can still use the heap metadata with bound queries.
-`20260928190000_compress_http_idempotency_bodies_with_lz4.sql` switches new
-bodies to lz4 TOAST compression, which PostgreSQL 14+ builds with lz4 support
-provide. `20261002150000_tune_http_idempotency_records_autovacuum.sql` sets a
-table-local autovacuum threshold of 5,000 rows and scale factor of 1%, which
-the TOAST table follows; it does not change any server setting or role. Only `infra-idempotency-store` names the table; the service never
-creates or alters it at runtime.
+`http_idempotency_records` intentionally omits a caller-identity index:
+unrestricted verified caller values cannot be safely represented by a literal
+btree key, and no runtime query needs that access path (operators use bound
+queries over heap metadata). Table-local `lz4` TOAST compression and autovacuum
+tuning (`5,000` rows, `1%` scale factor) alter no server setting or role, and
+only `infra-idempotency-store` names the table.
 <!-- template:end http-idempotency:migrations-readme-http-idempotency -->
 <!-- template:begin jobs:migrations-readme-jobs -->
-The background jobs pack creates `background_jobs` and its claim-generation
-sequence in `20260924000001_create_background_jobs.sql`. That canonical schema
-uses JSONB payloads, C-collated text unique keys, trace state, enqueue-time
-`created_at`, nullable UUID `attempted_by`, and the current partial indexes.
-It sets a table-local autovacuum scale factor of zero and threshold of 5,000;
-it does not change any server setting or role. The existing `migrate` binary
-applies it with the rest of the set.
-`20261001120000_add_background_job_errors.sql` adds the `errors` JSONB
-failure history and drops the unused random `id` default, since enqueue
-supplies a time-ordered id. Neither the service nor worker creates or
-alters schema at runtime, and only `crates/infra-jobs` names the table.
-`20261002150001_add_background_job_recovery_history.sql` adds
-`recovery_history jsonb NOT NULL DEFAULT '[]'` for prior recovery cycles.
-`20261002150002_index_failed_background_jobs.sql` then adds
-`background_jobs_failed_kind (kind,id) WHERE state='failed'` concurrently,
-using the canonical single-statement `-- no-transaction` path and runner
-budgets. These identifiers follow the immutable `20261002150000` high-water
-mark, which was ahead of current UTC when allocated; no applied file changed.
+`background_jobs` uses table-local autovacuum tuning (`5,000` rows, `0` scale
+factor) without changing server settings or roles, and only `crates/infra-jobs`
+names the table. Migration identifiers `20261002150001` and `20261002150002`
+follow the `20261002150000` high-water mark allocated ahead of UTC.
 
-Old workers remain schema-compatible but still delete seven-day failures.
-Apply both migrations and stop/replace every old retention owner before
-activating recovery or relying on retained-failure custody. New workers require
-their complete admitted history. Keep the additive schema on rollback and roll
-forward: an old binary restores failed deletion. Never clear recovery history
-or reset claim-generation sequences as a rollback step.
+Old workers remain schema-compatible with `errors` and `recovery_history` but
+still delete seven-day failures: apply the migrations and stop/replace every old
+retention owner before activating recovery or relying on retained-failure
+custody. New workers require complete admitted history; on rollback, keep the
+additive schema, roll forward with migrations, and never clear `recovery_history`
+or reset claim-generation sequences.
 
-Apply `20261112120000_preserve_background_job_payload_text.sql` before
-replacing producers and workers. The nullable column needs no backfill.
-New producers also populate the existing JSONB column so old workers can
-still read new jobs during rollout or rollback. Exact payload delivery and
-comparison require updated producers and workers. Existing JSONB-only rows
-retain their stored representation, including any normalization that already
-occurred.
+Apply `20261112120000_preserve_background_job_payload_text.sql` before replacing
+producers and workers. New producers populate both nullable text and JSONB
+columns so old workers remain compatible during rollout or rollback; existing
+JSONB-only rows retain their normalized representation.
 <!-- template:end jobs:migrations-readme-jobs -->
 <!-- template:begin inbound-webhooks:migrations-readme-inbound-webhooks -->
-The inbound webhooks pack creates `webhook_receipts` in
-`20260926022945_create_webhook_receipts.sql` with digest-backed identity and
-payload columns, and cuts over to exact native receipt custody in
-`20260926130000_native_webhook_receipts.sql`. The cutover migration takes
-`LOCK TABLE webhook_receipts IN ACCESS EXCLUSIVE MODE`, refuses duplicate
-`(endpoint_id COLLATE "C", message_id)` rows, switches `endpoint_id` to `C`
-collation, adds `received_at timestamptz NOT NULL DEFAULT now()`, promotes
-`(endpoint_id, message_id)` (`webhook_receipts_exact_identity`) to the primary
-key while dropping `identity_hash` and `body_sha256`, and indexes `received_at`
-for retention pruning. Stop pre-cutover receivers before running
-`20260926130000_native_webhook_receipts.sql` and keep old receivers stopped
-during and after cutover; neither the service nor worker alters schema at
-runtime.
+Stop pre-cutover receivers before running
+`20260926130000_native_webhook_receipts.sql` (which locks `webhook_receipts` in
+`ACCESS EXCLUSIVE MODE` and refuses duplicate `(endpoint_id COLLATE "C",
+message_id)` rows) and keep old receivers stopped during and after cutover.
 <!-- template:end inbound-webhooks:migrations-readme-inbound-webhooks -->
 
 Rules enforced by `cargo test -p migrate` over the embedded set and by

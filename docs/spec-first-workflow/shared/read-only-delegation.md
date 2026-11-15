@@ -13,9 +13,9 @@ authorization, ordered reasoning, synthesis, repair, integration, acceptance,
 and completion in the root. One lane owns one eligible question at a time; repeating the
 same question over the same evidence is not coverage.
 
-Before dispatch, load [Agent Harness](../../agent-harness.md) and use the
-[Subagent Brief Template](../../subagent-brief-template.md) with one outcome,
-authoritative inputs, mode, read-only boundary, and stop condition. When an
+Before dispatch in a role-carrier harness, load [Agent Harness](../../agent-harness.md);
+brief the lane with one outcome, authoritative inputs, mode, read-only boundary,
+and stop condition. When an
 expensive-to-reverse decision has a real open fork, use [Generative Candidate
 Lanes](#generative-candidate-lanes).
 

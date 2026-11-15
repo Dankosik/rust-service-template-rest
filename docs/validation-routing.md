@@ -1,22 +1,12 @@
 # Validation Routing
 
-Use this router for mixed surfaces or verification beyond the ordinary local
+Use this router for explicit verification leaves beyond the ordinary local
 budget. [AGENTS.md](../AGENTS.md#validation-budget) owns ordinary local
-completion; [`make/template.mk`](../make/template.mk) owns command composition
-(`make help`), and
-[`scripts/ci/changed-surfaces.sh`](../scripts/ci/changed-surfaces.sh) is the
+completion (including [Instruction Validation](validation/instructions.md) on
+`make check-instructions` and offline link checks on `make docs-check`);
+[`make/template.mk`](../make/template.mk) owns command composition (`make help`),
+and [`scripts/ci/changed-surfaces.sh`](../scripts/ci/changed-surfaces.sh) is the
 classifier shared by CI and `make verify`.
-
-## Ordinary local completion
-
-| Changed surface | Load | Local validation |
-| --- | --- | --- |
-| Rust behavior, tests, or crate manifests | [AGENTS.md](../AGENTS.md#validation-budget) | matching build and relevant tests |
-| Agent instructions, roles, skills, or carriers | [Instructions](validation/instructions.md) | static review and `make check-instructions` |
-| Documentation | — | `make docs-check` (offline `lychee` link/fragment check) |
-
-Stop when that boundary passes. Unrun optional checks do not block local
-completion; a missing required build or test execution is not a pass.
 
 ## Explicit verification and external gates
 

@@ -31,10 +31,21 @@ Keep production reads within the requested target and data scope. Require
 explicit authorization covering recipients and purpose for external messages,
 and covering target, intended effect, cost, and recovery bounds for deployment,
 remote writes, purchases, destructive deletion, sensitive-data handling,
-material scope expansion, or irreversible effects. Treat tool availability,
-credentials, trusted-project settings, and passing checks strictly as
-capabilities rather than authority. Never expose raw secrets. Respect explicit
+material scope expansion, or irreversible effects. Keep authorized external
+actions within those accepted scope, cost, security, and proof bounds, choosing
+live technical parameters inside that envelope and returning proof of the exact
+effect. Treat tool availability, credentials, trusted-project settings, and
+passing checks strictly as capabilities rather than authority. Carry only secret
+locators or environment-variable names in prompts, logs, and artifacts; if a
+credential appears outside its secret channel, stop using it, suspend its
+external-effect authority, and require rotation before reuse. Respect explicit
 read-only, docs-only, research-only, and named-phase boundaries.
+
+An accepted outcome may cross into an available neighboring repository (unlike a
+Git worktree of this repository, which shares this contract): load that
+repository's instructions before editing, preserve unrelated changes, and
+validate every changed repository, narrowing completion claims if a neighbor is
+blocked.
 
 Skills and durable controls supply methods while preserving request scope and
 authority. Current user instructions override skill defaults within system,
@@ -145,8 +156,10 @@ Cargo validation runs with `--locked`; update `Cargo.lock` deliberately only
 during initial resolution or an accepted dependency change, inspect its diff,
 and validate with `--locked`. Reuse adequate coverage, count only executed
 required tests as passes within existing harnesses, serialize CPU-heavy
-validation, and preserve shared caches (`make check` and `make verify` acquire
-the shared validation lock).
+validation, keep each Git worktree's `target/` separate, and preserve shared
+caches (`make check` and `make verify` acquire `scripts/ci/validation-lock.sh`).
+Remove temporary files and clean task worktrees created for the session only
+after accepted results are preserved and no live process or lock uses them.
 
 Keep local completion distinct from CI, release, deployment, and runtime
 outcomes while keeping existing CI gates intact. Steps `make verify` marks
@@ -181,18 +194,14 @@ explicit verification and phase-only boundaries.
 
 | Trigger | Owner |
 | --- | --- |
-| Authorized external, costly, sensitive, destructive, or irreversible action | [External Effects](docs/spec-first-workflow/shared/external-effects.md) |
-| Accepted work first enters another checkout | [Repository Boundaries](docs/spec-first-workflow/shared/repository-boundaries.md) |
-| Proven task closeout leaves execution-only state/resources, or scoped cleanup is requested | [Cleanup](docs/spec-first-workflow/shared/cleanup.md) |
-| Crate ownership, dependency direction, request path, lifecycle, persistence, or an integration boundary can change | [Repository Architecture](docs/repo-architecture.md) |
-| A crate, binary, dependency, or CI gate is added or removed, or contribution, pull-request, or evidence expectations apply | [Repository Architecture](docs/repo-architecture.md) (structural changes), then [CONTRIBUTING.md](CONTRIBUTING.md) |
+| Crate ownership, binary set, dependency direction, request path, lifecycle, persistence, or an integration boundary can change | [Repository Architecture](docs/repo-architecture.md) |
 | A non-obvious technical decision must survive the current session | `docs/decisions/` or [Backend Library Selection](docs/backend-library-selection.md) |
 | A change reverses or adopts a rejected choice from a decision artifact | Proceed only if its reopen condition is met or the user explicitly requests it, updating the record in the same change |
 | Instructions, tools, roles, or skills change | [Prompt Maintenance](docs/prompt-maintenance.md); [Skill Authoring](docs/skill-authoring.md) for skills; then `make check-instructions` |
-| A prompt for another agent, session, phase, or native entry skill must be written | [Prompt Composition](docs/prompt-composition.md) |
-| A durable control, carrier, model, or effort must be chosen or operated | [Agent Harness](docs/agent-harness.md) |
-| Build/test wait slows iteration, a new worktree/parallel session starts, or a workstation is set up | [Build Speed](docs/build-speed.md) |
-| Verification claim beyond the budget table, or a mixed surface | [Validation Routing](docs/validation-routing.md) and the matching leaf under `docs/validation/` |
+| Drafting a handoff prompt for another session, phase, or repository entry skill | [Prompt Composition](docs/prompt-composition.md) |
+| Operating a repository role carrier, multi-phase delegation tree, or durable Goal, or selecting harness model/effort tiers | [Agent Harness](docs/agent-harness.md) |
+| Build or container compile time slows iteration, or workstation build caching is configured | [Build Speed](docs/build-speed.md) |
+| Specialized security, container, delivery, OpenAPI, or quality verification beyond `make plan` / `make verify` | [Validation Routing](docs/validation-routing.md) and the matching leaf under `docs/validation/` |
 | A CI job, tool pin, Dockerfile, image check, or publication step changes what may ship | [CI/CD Production Readiness](docs/ci-cd-production-ready.md); `rust-delivery-platform` owns the method |
 | An open `main-red` issue is the task, or names a change you own | [Red main](docs/ci-cd-production-ready.md#red-main) |
 | Deployment policy for a derived service | [Railway Deployment Profile](docs/railway-deployment-profile.md) |
@@ -202,11 +211,10 @@ pressure.
 
 ## Rust Change Surface
 
-For Rust changes, load `rust-coder` and any [`.agents/skills`](.agents/skills)
-entry whose trigger matches the changed pressure. Target the pinned toolchain in
-[`rust-toolchain.toml`](rust-toolchain.toml) and workspace `edition`/`rust-version`
-in [`Cargo.toml`](Cargo.toml) when selecting language and standard-library
-constructs, moving them only together in one reviewed change.
+For Rust changes, load `rust-coder` and only the [`.agents/skills`](.agents/skills)
+entries whose trigger matches an open decision in the changed surface. Move
+`rust-toolchain.toml` and workspace `edition` / `rust-version` in `Cargo.toml`
+only together in one reviewed change.
 
 Keep formatting and style changes scoped to touched items. Outside tests, return
 failures through `Result` rather than `unwrap`, `expect`, or `panic!`, while

@@ -1,16 +1,12 @@
 # Build Speed
 
-Read this when builds or tests slow iteration (including deployment images), a
-worktree starts building, or a workstation is set up.
+Read this when builds or tests slow iteration (including deployment images) or
+workstation build caching is configured.
 [AGENTS.md](../AGENTS.md#validation-budget) owns completion rules; this guide
 reduces wait times without weakening them.
 
 ## Iteration loop
 
-- Type-check while editing with `make lint-changed PKGS="<crates>"` or
-  `cargo check -p <crate> --all-targets --locked` (skips codegen/linking).
-- Run completion commands once after type-checking, scoped by
-  `scripts/ci/affected-crates.sh` unless the planner falls back to `make test`.
 - Debug one failing test directly: `cargo test -p <crate> --locked <test name>`.
 - Build `--release` only when needed; `[profile.release]` uses single-CGU fat
   LTO and takes minutes. Run long Cargo builds in the background to avoid
