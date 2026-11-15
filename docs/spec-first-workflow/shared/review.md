@@ -25,8 +25,9 @@ the [Evidence Contract](evidence-contract.md#local-completion): a review trigger
 does not authorize extra infrastructure or new mandatory runtime checks.
 
 When no such review is selected and the final candidate adds a workspace crate,
-a dependency or crate feature, a trait or layer, a configuration key, or a
-fallback, compatibility shim, or parallel path, select one fresh reviewer for
+a dependency or crate feature, a trait or layer, a custom general mechanism, a
+configuration key, or a fallback, compatibility shim, or parallel path, select
+one fresh reviewer for
 [Structure-only review](../phases/implementation-review.md#structure-only-review)
 of those additions. The author's own deletion test does not replace it: the
 author keeps the reasoning that produced the structure. A full final review

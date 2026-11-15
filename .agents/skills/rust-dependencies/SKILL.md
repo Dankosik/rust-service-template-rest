@@ -1,13 +1,13 @@
 ---
 name: rust-dependencies
-description: "Resolution. Use before adding or upgrading a crate or feature, changing toolchain or edition, or choosing library vs custom code."
+description: "Resolution. Use before adding or upgrading a crate or feature, changing toolchain or edition, or writing a non-domain parser, encoder, wrapper, or coordination helper instead of a library."
 ---
 
 # Rust Dependencies
 
 **Resolution.** Compare the behavior and maintenance the application would own with the dependency's compatibility, operating, and supply-chain costs. Prefer a maintained crate for a non-trivial general mechanism when it meets the requirement; a smaller dependency count alone does not establish simplicity.
 
-Check the existing owner, standard library, and installed dependencies first. If they leave a gap, evaluate a suitable maintained crate using official documentation for the exact selected version, including defaults, features, and failure semantics. A tiny fixed grammar, an explicit std-only constraint, or a concrete compatibility or operating limit can justify custom code; state that reason rather than treating dependency absence as a benefit by itself.
+Check the existing owner, standard library, and installed dependencies (including sibling modules and optional features of crates already in `Cargo.lock`) before adding a new external package or writing custom code; delegate generic mechanics to the library while keeping domain or protocol policy in the caller. If they leave a gap, evaluate a suitable maintained crate using official documentation and resolved source for the exact selected version, including defaults, features, accepted inputs, cancellation, and failure precedence. A tiny fixed grammar, an explicit std-only constraint, or a concrete boundary or operating divergence can justify custom code; state that concrete reason at the site rather than treating dependency absence as a benefit by itself.
 
 Scale research to the open choice. A routine library addition needs evidence of behavior, toolchain, license, and trust fit, recorded briefly in the existing change record; compare alternatives in depth when they materially differ in guarantees, maintenance, compatibility, or operating cost, or when an upgrade or new trust boundary makes those consequential. In this service, a new capability records that decision in its accepted artifact under `specs/`, without creating a new specs tree or full architecture study for a routine library. Apply the same scrutiny to custom general mechanisms.
 
