@@ -294,8 +294,6 @@ record_source_suites() {
 		"${scrubbed_identity[@]}" python3 "${source}/scripts/tests/template-init-safety.py" --source "${source}"
 	record_command "${receipt}" "${log_dir}/source-sync-canary.log" "source-sync-canary" \
 		"${scrubbed_identity[@]}" python3 "${source}/scripts/tests/template-sync-canary.py" --source "${source}"
-	record_command "${receipt}" "${log_dir}/source-upgrade.log" "source-upgrade" \
-		"${scrubbed_identity[@]}" python3 "${source}/scripts/tests/template-upgrade.py" --source "${source}"
 }
 
 run_artifact() {

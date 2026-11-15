@@ -309,7 +309,7 @@ classify() {
 		.gitleaks.toml | .gitleaksignore) mark secret_scanning ;;
 		esac
 		case "${file}" in
-		template.lock | template-owned.paths | scripts/lib/template_*.py | scripts/lib/template_profiles.json | AGENTS.md | CLAUDE.md | QWEN.md | Grok.md | opencode.json | .agents/* | .claude/* | .codex/* | .cursor/* | .qwen/* | .grok/* | .opencode/* | docs/skill-authoring.md | docs/agent-harness.md | docs/agent-harness/* | docs/spec-first-workflow.md | docs/spec-first-workflow/* | docs/prompt-composition.md | docs/prompt-maintenance.md | scripts/check-skills.py | scripts/agent-roles-sync.sh | scripts/codex-agents-sync.sh | scripts/harness-skills-sync.sh | scripts/lib/sync-cli.sh)
+		template.lock | template-owned.paths | scripts/lib/template_*.py | scripts/lib/template_profiles.json | AGENTS.md | CLAUDE.md | QWEN.md | Grok.md | opencode.json | .agents/* | .claude/* | .codex/* | .cursor/* | .qwen/* | .grok/* | .opencode/* | docs/skill-authoring.md | docs/agent-harness.md | docs/agent-harness/* | docs/spec-first-workflow.md | docs/spec-first-workflow/* | docs/prompt-composition.md | docs/prompt-maintenance.md | scripts/check-skills.py | scripts/agent-harness-sync.py)
 			mark agent_instructions
 			;;
 		esac
@@ -332,7 +332,7 @@ classify() {
 		if [[ ${source_only} == true ]]; then case "${file}" in
 		Cargo.toml | Cargo.lock | rust-toolchain.toml | template.lock | Makefile | make/*.mk | \
 		api/openapi/* | env/config/* | .github/workflows/ci.yml | \
-		scripts/init-module.sh | scripts/template-sync.sh | scripts/template-upgrade.sh | scripts/lib/template_*.py | scripts/lib/template_profiles.json | \
+		scripts/init-module.sh | scripts/template-sync.sh | scripts/lib/template_*.py | scripts/lib/template_profiles.json | \
 		template-owned.paths | \
 		scripts/ci/template-init-check.sh | scripts/ci/initializer-matrix.py | scripts/tests/template-* | \
 		crates/config/src/* | crates/config/Cargo.toml | crates/service/src/* | crates/service/tests/* | crates/service/Cargo.toml | \
@@ -359,11 +359,11 @@ classify() {
 		.github/workflows/cd.yml | .github/actions/publish-image/action.yml | .github/actions/rust-toolchain/action.yml | \
 		scripts/ci/changed-surfaces.sh | scripts/ci/verify.sh | scripts/ci/runtime-image-build.sh | scripts/ci/runtime-image-inventory.py | scripts/ci/runtime-image-scan.sh | scripts/tests/runtime-image-inventory.py | \
 		scripts/ci/validation-lock.sh | scripts/ci/validation-lock.py | scripts/tests/validation-lock-test.py | \
-		.agents/* | AGENTS.md | CLAUDE.md | QWEN.md | Grok.md | opencode.json | \
+		scripts/agent-harness-sync.py | .agents/* | AGENTS.md | CLAUDE.md | QWEN.md | Grok.md | opencode.json | \
 		.claude/* | .codex/* | .cursor/* | .qwen/* | .grok/* | .opencode/* | \
 		docs/repo-architecture.md | docs/production-contract.md | docs/backend-library-selection.md | \
 		docs/ci-cd-production-ready.md | docs/railway-deployment-profile.md | .railway/* | \
-		docs/validation/* | docs/template-sync.md | docs/template-upgrade.md | docs/decisions/* | docs/alerting.md)
+		docs/validation/* | docs/template-sync.md | docs/decisions/* | docs/alerting.md)
 			mark module_initializer
 			;;
 		esac; fi
@@ -785,11 +785,12 @@ HOOK
 	assert_case opencode.json \
 		"agent_instructions" \
 		"documentation no_validation_required"
-	for file in scripts/agent-roles-sync.sh scripts/codex-agents-sync.sh scripts/harness-skills-sync.sh scripts/lib/sync-cli.sh; do
-		assert_case "${file}" \
-			"agent_instructions shell" \
-			"validation_system tool_manifest"
-	done
+	assert_case .agents/adapters/claude/CLAUDE.md \
+		"agent_instructions documentation module_initializer" \
+		"rust_source"
+	assert_case scripts/agent-harness-sync.py \
+		"agent_instructions python module_initializer" \
+		"shell validation_system tool_manifest initializer_runtime"
 	assert_case crates/infra-postgres/src/dsn.rs \
 		"rust_source db_integration" \
 		"migrations cargo_dependencies"
@@ -838,9 +839,6 @@ HOOK
 	assert_case test/Cargo.toml \
 		"cargo_dependencies db_integration" \
 		"rust_source"
-	assert_case test/README.md \
-		"documentation db_integration" \
-		"rust_source"
 	assert_case env/docker-compose.yml \
 		"db_integration migrations runtime_image" \
 		"rust_source"
@@ -881,9 +879,6 @@ HOOK
 	assert_case scripts/tests/template-profile-projections.py \
 		"module_initializer initializer_runtime" \
 		"rust_source cargo_dependencies shell github_workflows db_integration"
-	assert_case scripts/template-upgrade.sh \
-		"module_initializer initializer_runtime shell" \
-		"rust_source cargo_dependencies github_workflows db_integration"
 	for file in changed-surfaces git-changed-paths affected-crates verify validation-lock; do
 		assert_case "scripts/ci/${file}.sh" \
 			"validation_system shell" \

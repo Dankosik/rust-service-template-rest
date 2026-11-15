@@ -52,7 +52,7 @@ def check_role_carrier_bytes(target: Path) -> None:
     relative = ".claude/agents/worker-agent.md"
     carrier = target / relative
     original = carrier.read_bytes()
-    command = ["bash", "scripts/agent-roles-sync.sh", "--check"]
+    command = [sys.executable, "-B", "scripts/agent-harness-sync.py", "--check"]
 
     def must_be_stale() -> None:
         checked = run(command, cwd=target)
@@ -73,6 +73,24 @@ def check_role_carrier_bytes(target: Path) -> None:
     checked = run(command, cwd=target)
     if checked.returncode:
         raise AssertionError(f"role check refused restored carrier: {checked.stderr}")
+    stray = target / ".claude/agents/stray.txt"
+    stray.write_text("stray\n", encoding="utf-8")
+    try:
+        if run(command, cwd=target).returncode == 0:
+            raise AssertionError("role check accepted a stray non-role file inside .claude/agents")
+    finally:
+        stray.unlink(missing_ok=True)
+    sentinel = target / "README.md"
+    sentinel_bytes = sentinel.read_bytes()
+    carrier.unlink()
+    carrier.symlink_to("../../README.md")
+    try:
+        apply_cmd = [sys.executable, "-B", "scripts/agent-harness-sync.py", "--apply"]
+        if run(apply_cmd, cwd=target).returncode == 0 or sentinel.read_bytes() != sentinel_bytes:
+            raise AssertionError("role sync followed or accepted a symlink inside .claude/agents")
+    finally:
+        carrier.unlink(missing_ok=True)
+        carrier.write_bytes(original)
 
 
 def init(
@@ -130,7 +148,6 @@ def assert_marker_syntax(source: Path, work: Path) -> None:
     profile = initializer.ProfileData(
         source_only=(),
         removals={},
-        markers=(("authn", "marker.txt", "one"), ("authn", "marker.txt", "two")),
         identity=(),
     )
     inputs = initializer.InitInputs(
@@ -157,7 +174,8 @@ def assert_marker_syntax(source: Path, work: Path) -> None:
     for label, contents in (
         ("duplicate", "# template:begin authn:one\n# template:end authn:one\n# template:begin authn:one\n# template:end authn:one\n"),
         ("nested", "# template:begin authn:one\n# template:begin authn:two\n# template:end authn:two\n# template:end authn:one\n"),
-        ("missing", "# ordinary content\n"),
+        ("unclosed", "# template:begin authn:one\n"),
+        ("mismatched", "# template:begin authn:one\n# template:end authn:two\n"),
     ):
         marker_root = work / f"marker-{label}"
         marker_root.mkdir()
@@ -826,6 +844,7 @@ def check(source: Path) -> None:
         target = work / "success"
         clone(source, target)
         local_adapter_note = target / ".codex/service-note.txt"
+        local_adapter_note.parent.mkdir(parents=True, exist_ok=True)
         local_adapter_note.write_text("service-owned sibling\n", encoding="utf-8")
         result = init(source, target, "--database", "none", "--agent-harness", "claude")
         if result.returncode:
@@ -845,8 +864,9 @@ def check(source: Path) -> None:
             "make/source.mk", "scripts/ci/template-init-check.sh", "scripts/tests/template-init-safety.py",
             "crates/infra-postgres", "crates/migrate", "migrations", "env/docker-compose.yml",
             "Grok.md", "QWEN.md", ".agents/codex-project.toml",
+            ".agents/adapters/qwen", ".agents/adapters/cursor", ".agents/adapters/grok", ".agents/adapters/opencode",
             ".codex/config.toml", ".codex/agents", ".cursor/rules/agent-harness.mdc", ".cursor/agents",
-            ".grok/rules/harness.md", ".grok/agents", ".grok/roles", "opencode.json",
+            ".grok/rules/harness.md", ".grok/agents", ".grok/roles", "opencode.json", ".opencode/.gitignore",
             ".opencode/rules/harness.md", ".opencode/agents", ".opencode/commands/orchestrator.md",
             ".opencode/plugins/task-subagents.js", ".qwen/agents", ".qwen/skills", ".qwen/settings.json",
         ]:
@@ -905,7 +925,7 @@ def check(source: Path) -> None:
             or state(target) != invalid_before
         ):
             raise AssertionError("replay lost the canonical first refusal for reordered profiles")
-        parsed_inventory["unknown-pack"] = {"remove_when_unselected": [], "markers": []}
+        parsed_inventory["unknown-pack"] = {"remove_when_unselected": []}
         inventory_path.write_text(json.dumps(parsed_inventory, indent=2) + "\n", encoding="utf-8")
         unknown_before = state(target)
         unknown_repeat = init(source, target, "--database", "none", "--agent-harness", "claude")

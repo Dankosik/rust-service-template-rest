@@ -8,11 +8,11 @@ SOURCE_CHECK_TARGETS := template-owned-purity-check template-init-check template
 template-owned-purity-check: ## Check source-only manifest and portability boundaries
 	python3 scripts/tests/template-owned-purity.py --repo .
 
-template-init-check: ## Check 368 canonical projections and sixty-eight runtime graphs (13-26, 27, 29, 30, 48, 49, 53, 55 also run retained database suites; Docker)
+template-init-check: ## Check 54 canonical projections and sixty-eight runtime graphs (13-26, 27, 29, 30, 48, 49, 53, 55 also run retained database suites; Docker)
 	@{ test "$(ALLOW_FULL)" = 1 || test "$(CI)" = true; } || { echo "template-init-check requires ALLOW_FULL=1 (CI sets CI=true)" >&2; exit 2; }
 	bash scripts/ci/template-init-check.sh --repo .
 
-template-init-projections: ## Check the 368 canonical projections alone, without Cargo
+template-init-projections: ## Check the 54 canonical projections alone, without Cargo
 	bash scripts/ci/template-init-check.sh --repo . --projections-only
 
 template-quality-projections: ## Exercise readability checkers on four retained/removed, renamed profile graphs

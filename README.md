@@ -149,8 +149,7 @@ curl http://127.0.0.1:8080/health/ready
 ```
 
 `make help` lists every command. Later template changes arrive through
-[template sync](docs/template-sync.md) and the
-[runtime upgrade guide](docs/template-upgrade.md).
+[template sync](docs/template-sync.md).
 
 ## Documentation
 

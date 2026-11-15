@@ -44,41 +44,85 @@ class AdapterPack:
     canonical: tuple[str, ...]
     generated: tuple[str, ...]
     settings: tuple[str, ...] = ()
+    static_copies: tuple[tuple[str, str], ...] = ()
+    setting_spec: tuple[str, str, str, str] | None = None
+    role_dirs: tuple[tuple[str, str], ...] = ()
 
 
 # The manifest remains the sole whole-file full-sync authority.  These are
-# generator inputs/projections and lexical settings exceptions only.
+# canonical .agents inputs, materialized harness projections, and managed
+# settings exceptions only.
 ADAPTERS: dict[str, AdapterPack] = {
     "codex": AdapterPack(
         canonical=(".agents/codex-project.toml",),
         generated=(".codex/config.toml", ".codex/agents/"),
+        role_dirs=((".codex/agents", "toml"),),
     ),
     "claude": AdapterPack(
-        canonical=("CLAUDE.md",),
-        generated=(".claude/agents/", ".claude/skills/"),
+        canonical=(".agents/adapters/claude/CLAUDE.md", ".agents/adapters/claude/settings.json"),
+        generated=("CLAUDE.md", ".claude/agents/", ".claude/skills/"),
         settings=(".claude/settings.json",),
+        static_copies=((".agents/adapters/claude/CLAUDE.md", "CLAUDE.md"),),
+        setting_spec=(
+            ".agents/adapters/claude/settings.json",
+            ".claude/settings.json",
+            "env",
+            "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH",
+        ),
+        role_dirs=((".claude/agents", "md"),),
     ),
     "qwen": AdapterPack(
-        canonical=("QWEN.md",),
-        generated=(".qwen/agents/", ".qwen/skills/"),
+        canonical=(".agents/adapters/qwen/QWEN.md", ".agents/adapters/qwen/settings.json"),
+        generated=("QWEN.md", ".qwen/agents/", ".qwen/skills/"),
         settings=(".qwen/settings.json",),
+        static_copies=((".agents/adapters/qwen/QWEN.md", "QWEN.md"),),
+        setting_spec=(
+            ".agents/adapters/qwen/settings.json",
+            ".qwen/settings.json",
+            "model",
+            "maxSubagentDepth",
+        ),
+        role_dirs=((".qwen/agents", "md"),),
     ),
     "cursor": AdapterPack(
-        canonical=(".cursor/rules/agent-harness.mdc",),
-        generated=(".cursor/agents/",),
+        canonical=(".agents/adapters/cursor/rules/agent-harness.mdc",),
+        generated=(".cursor/rules/agent-harness.mdc", ".cursor/agents/"),
+        static_copies=((".agents/adapters/cursor/rules/agent-harness.mdc", ".cursor/rules/agent-harness.mdc"),),
+        role_dirs=((".cursor/agents", "md"),),
     ),
     "grok": AdapterPack(
-        canonical=("Grok.md", ".grok/rules/harness.md"),
-        generated=(".grok/agents/", ".grok/roles/"),
+        canonical=(".agents/adapters/grok/Grok.md", ".agents/adapters/grok/rules/harness.md"),
+        generated=("Grok.md", ".grok/rules/harness.md", ".grok/agents/", ".grok/roles/"),
+        static_copies=(
+            (".agents/adapters/grok/Grok.md", "Grok.md"),
+            (".agents/adapters/grok/rules/harness.md", ".grok/rules/harness.md"),
+        ),
+        role_dirs=((".grok/agents", "md"), (".grok/roles", "toml")),
     ),
     "opencode": AdapterPack(
         canonical=(
+            ".agents/adapters/opencode/opencode.json",
+            ".agents/adapters/opencode/.gitignore",
+            ".agents/adapters/opencode/rules/harness.md",
+            ".agents/adapters/opencode/commands/orchestrator.md",
+            ".agents/adapters/opencode/plugins/task-subagents.js",
+        ),
+        generated=(
             "opencode.json",
+            ".opencode/.gitignore",
             ".opencode/rules/harness.md",
             ".opencode/commands/orchestrator.md",
             ".opencode/plugins/task-subagents.js",
+            ".opencode/agents/",
         ),
-        generated=(".opencode/agents/",),
+        static_copies=(
+            (".agents/adapters/opencode/opencode.json", "opencode.json"),
+            (".agents/adapters/opencode/.gitignore", ".opencode/.gitignore"),
+            (".agents/adapters/opencode/rules/harness.md", ".opencode/rules/harness.md"),
+            (".agents/adapters/opencode/commands/orchestrator.md", ".opencode/commands/orchestrator.md"),
+            (".agents/adapters/opencode/plugins/task-subagents.js", ".opencode/plugins/task-subagents.js"),
+        ),
+        role_dirs=((".opencode/agents", "md"),),
     ),
 }
 

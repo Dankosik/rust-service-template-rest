@@ -338,10 +338,13 @@ def check(source: Path) -> None:
         setting_apply = sync(source, target, "--apply", instructions_only=True)
         if setting_apply.returncode:
             raise AssertionError(f"managed setting type repair failed: {setting_apply.stderr}")
-        rendered_settings = settings.read_bytes()
-        if rendered_settings != crlf_settings.replace(b'": 3\r\n', b'": "3"\r\n'):
-            raise AssertionError("settings repair changed unrelated CRLF bytes or did not replace the managed token")
-        commit_paths(target, "adopt lexical managed setting", ".claude/settings.json")
+        rendered_text = settings.read_text(encoding="utf-8")
+        if not rendered_text.endswith("\n") or json.loads(rendered_text) != {
+            "unrelated": {"keep": True},
+            "env": {"CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "3"},
+        }:
+            raise AssertionError("settings repair lost unrelated consumer keys or did not normalize the managed setting")
+        commit_paths(target, "adopt managed setting", ".claude/settings.json")
 
         make_cases = (
             ("space-target", b"\n build: ; @:\n", "overrides"),

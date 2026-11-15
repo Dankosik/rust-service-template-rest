@@ -1,5 +1,5 @@
 # Whole-file portable ownership for committed-source sync. Directory entries
-# own their descendants; generated adapters and lexical settings are derived by
+# own their descendants; generated adapters and managed settings are derived by
 # scripts/lib/template_state.py rather than copied from this manifest.
 template-owned.paths
 AGENTS.md
@@ -7,15 +7,18 @@ AGENTS.md
 .agents/roles/
 .agents/role-classes/
 .agents/codex-project.toml
-CLAUDE.md
-QWEN.md
-Grok.md
-opencode.json
-.cursor/rules/agent-harness.mdc
-.grok/rules/harness.md
-.opencode/rules/harness.md
-.opencode/commands/orchestrator.md
-.opencode/plugins/task-subagents.js
+.agents/adapters/claude/CLAUDE.md
+.agents/adapters/claude/settings.json
+.agents/adapters/qwen/QWEN.md
+.agents/adapters/qwen/settings.json
+.agents/adapters/cursor/rules/agent-harness.mdc
+.agents/adapters/grok/Grok.md
+.agents/adapters/grok/rules/harness.md
+.agents/adapters/opencode/opencode.json
+.agents/adapters/opencode/.gitignore
+.agents/adapters/opencode/rules/harness.md
+.agents/adapters/opencode/commands/orchestrator.md
+.agents/adapters/opencode/plugins/task-subagents.js
 docs/spec-first-workflow.md
 docs/spec-first-workflow/
 docs/agent-harness.md
@@ -31,10 +34,7 @@ tools/versions.env
 scripts/template-sync.sh
 scripts/lib/template_sync.py
 scripts/lib/template_state.py
-scripts/lib/sync-cli.sh
-scripts/agent-roles-sync.sh
-scripts/codex-agents-sync.sh
-scripts/harness-skills-sync.sh
+scripts/agent-harness-sync.py
 scripts/check-skills.py
 scripts/ci/affected-crates.sh
 scripts/ci/changed-surfaces.sh

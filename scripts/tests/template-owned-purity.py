@@ -28,6 +28,7 @@ REQUIRED_SYNC_HELPERS = {
     "scripts/template-sync.sh",
     "scripts/lib/template_sync.py",
     "scripts/lib/template_state.py",
+    "scripts/agent-harness-sync.py",
 }
 
 
@@ -58,11 +59,10 @@ def check(root: Path) -> None:
     for name in section_names:
         removal_key = "remove_when_none" if name == "postgres" else "remove_when_unselected"
         section = profile.get(name)
-        if not isinstance(section, dict) or set(section) != {removal_key, "markers"}:
+        if not isinstance(section, dict) or set(section) != {removal_key}:
             raise AssertionError(f"profile inventory has no exact {name} section")
         removals = section[removal_key]
-        markers = section["markers"]
-        if not isinstance(removals, list) or not isinstance(markers, list):
+        if not isinstance(removals, list):
             raise AssertionError(f"profile inventory has an incomplete {name} projection")
         for relative in removals:
             if not isinstance(relative, str) or not relative:
@@ -70,22 +70,6 @@ def check(root: Path) -> None:
             plain = relative.rstrip("/")
             if any(plain == entry.rstrip("/") or plain.startswith(f"{entry.rstrip('/')}/") for entry in entries):
                 raise AssertionError(f"manifest leaks profile-specific {name} output: {relative}")
-        for marker in markers:
-            if (
-                not isinstance(marker, dict)
-                or set(marker) not in ({"path", "id"}, {"path", "ids"})
-                or not isinstance(marker.get("path"), str)
-                or not marker["path"]
-            ):
-                raise AssertionError(f"profile inventory has malformed {name} marker")
-            marker_ids = [marker["id"]] if "id" in marker else marker["ids"]
-            if (
-                not isinstance(marker_ids, list)
-                or not marker_ids
-                or any(not isinstance(item, str) or not item for item in marker_ids)
-                or len(marker_ids) != len(set(marker_ids))
-            ):
-                raise AssertionError(f"profile inventory has duplicate {name} marker ids")
     for broad_owner in ("make/", "docs/", "scripts/", "crates/", "scripts/tests/template-sync-canary.py"):
         if not state._protected_manifest_owner(broad_owner):
             raise AssertionError(f"broad protected owner was admitted: {broad_owner}")

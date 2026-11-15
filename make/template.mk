@@ -80,8 +80,9 @@ ACTIONLINT ?= go run github.com/rhysd/actionlint/cmd/actionlint@v$(ACTIONLINT_VE
 # runners, which have it preinstalled.
 RUFF ?= $(if $(shell command -v uvx 2>/dev/null),uvx ruff@$(RUFF_VERSION),pipx run ruff==$(RUFF_VERSION))
 SHELL_FILES = $(wildcard $(shell git ls-files --cached --others --exclude-standard -- '*.sh'))
-# Tracked and untracked Markdown files; `git ls-files` keeps target/ out.
-MARKDOWN_FILES = $(wildcard $(shell git ls-files --cached --others --exclude-standard -- '*.md'))
+# Tracked and untracked Markdown files; `git ls-files` keeps target/ out, and
+# `.agents/adapters/` holds repo-root bootstrap templates projected into `/`.
+MARKDOWN_FILES = $(wildcard $(shell git ls-files --cached --others --exclude-standard -- '*.md' ':(exclude).agents/adapters/**'))
 
 TRIVY_CACHE_VOLUME ?= trivy-cache
 
@@ -90,8 +91,7 @@ TRIVY_CACHE_VOLUME ?= trivy-cache
 # registered PostgreSQL subset during normal Make execution.
 TEMPLATE_STANDARD_TARGETS := help template-init build run test test-package test-changed mutants fmt fmt-check lint lint-changed \
 	check check-unlocked check-skills check-instructions clean \
-	agent-roles-sync agent-roles-check codex-agents-sync codex-agents-check \
-	claude-skills-sync claude-skills-check qwen-skills-sync qwen-skills-check \
+	agent-harness-sync agent-harness-check \
 	openapi-generate openapi-check openapi-lint openapi-breaking openapi-breaking-since \
 	tools-check deny dependency-drift unused-deps secret-scan secret-scan-history actionlint zizmor shellcheck python-lint docs-check profiling-check \
 	dockerfile-check runtime-image-build runtime-image-check container-security container-sbom \
@@ -297,40 +297,13 @@ lint-changed: ## Clippy and rustdoc, warnings as errors, over the crates in PKGS
 check-skills: ## Validate the shape of .agents/skills (frontmatter, budget, links)
 	python3 scripts/check-skills.py
 
-agent-roles-sync: ## Regenerate the Codex, Claude, Qwen, Grok, Cursor, and OpenCode role carriers
-	bash scripts/agent-roles-sync.sh --apply --repo .
+agent-harness-sync: ## Materialize selected agent harness carriers from canonical .agents sources
+	python3 scripts/agent-harness-sync.py --apply --repo .
 
-agent-roles-check: ## Fail when a role carrier differs from its canonical source
-	bash scripts/agent-roles-sync.sh --check --repo .
+agent-harness-check: ## Verify canonical .agents sources and materialized harness carriers
+	python3 scripts/agent-harness-sync.py --check --repo . $(if $(wildcard make/source.mk),,--require-materialized)
 
-codex-agents-sync: ## Regenerate the Codex project runtime and role registry in .codex/config.toml
-	bash scripts/codex-agents-sync.sh --apply --repo .
-
-codex-agents-check: ## Fail when .codex/config.toml drifts from .agents/codex-project.toml and the roles
-	bash scripts/codex-agents-sync.sh --check --repo .
-
-claude-skills-sync: ## Regenerate the Claude Code skill view (.claude/skills)
-	bash scripts/harness-skills-sync.sh claude --apply --repo .
-
-claude-skills-check: ## Fail when .claude/skills does not mirror .agents/skills
-	bash scripts/harness-skills-sync.sh claude --check --repo .
-
-qwen-skills-sync: ## Regenerate the Qwen Code skill view (.qwen/skills)
-	bash scripts/harness-skills-sync.sh qwen --apply --repo .
-
-qwen-skills-check: ## Fail when .qwen/skills does not mirror .agents/skills
-	bash scripts/harness-skills-sync.sh qwen --check --repo .
-
-check-instructions: check-skills agent-roles-check ## Every selected instruction carrier: skill shape, role carriers, and selected generated views
-	@harness="$$(python3 scripts/lib/template_state.py profile --repo . --field agent_harness)" || exit $$?; \
-	case "$$harness" in \
-		all) $(MAKE) codex-agents-check claude-skills-check qwen-skills-check ;; \
-		codex) $(MAKE) codex-agents-check ;; \
-		claude) $(MAKE) claude-skills-check ;; \
-		qwen) $(MAKE) qwen-skills-check ;; \
-		core|cursor|grok|opencode) ;; \
-		*) printf 'unsupported agent harness: %s\\n' "$$harness" >&2; exit 2 ;; \
-	esac
+check-instructions: check-skills agent-harness-check ## Every selected instruction carrier: skill shape, canonical roles, and generated views
 
 $(TOOLS_ROOT)/%:
 	$(CARGO) install --locked --root "$(TOOLS_ROOT)/$(firstword $(subst /, ,$*))" --version "$(patsubst $(notdir $@)-%,%,$(firstword $(subst /, ,$*)))" $(notdir $@)
@@ -392,14 +365,25 @@ python-lint: ## Lint the Python scripts for defects with the pinned ruff
 # contract; external URLs are not, and checking them would make the gate flaky.
 docs-check: ## Image-input watch coverage and relative Markdown links/fragments
 	python3 scripts/ci/image-inputs-check.py
-	@test -n "$(MARKDOWN_FILES)" || { echo "no Markdown files found; skipping link check"; exit 0; }; \
-	if [ "$(CI)" = "true" ] || (command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1); then \
-		docker run --rm --read-only --network none -v "$(CURDIR):/src:ro" -w /src --entrypoint lychee "$(LYCHEE_IMAGE)" \
-			--offline --include-fragments --no-progress --root-dir /src -- $(MARKDOWN_FILES); \
-	elif command -v lychee >/dev/null 2>&1; then \
-		lychee --offline --include-fragments --no-progress --root-dir "$(CURDIR)" -- $(MARKDOWN_FILES); \
-	else \
-		echo "$@ requires Docker ($(LYCHEE_IMAGE)) or local lychee" >&2; exit 2; \
+	@run_lychee() { \
+		root="$$1"; shift; \
+		if [ "$(CI)" = "true" ] || (command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1); then \
+			docker run --rm --read-only --network none -v "$$root:/src:ro" -w /src --entrypoint lychee "$(LYCHEE_IMAGE)" \
+				--offline --include-fragments --no-progress --root-dir /src -- "$$@"; \
+		elif command -v lychee >/dev/null 2>&1; then \
+			(cd "$$root" && lychee --offline --include-fragments --no-progress --root-dir "$$root" -- "$$@"); \
+		else \
+			echo "$@ requires Docker ($(LYCHEE_IMAGE)) or local lychee" >&2; exit 2; \
+		fi; \
+	}; \
+	if [ -n "$(MARKDOWN_FILES)" ]; then run_lychee "$(CURDIR)" $(MARKDOWN_FILES); fi; \
+	if [ -f make/source.mk ]; then \
+		stage="$$(python3 -c 'import pathlib, tempfile; print(pathlib.Path(tempfile.mkdtemp(prefix="docs-check-")).resolve())')" && \
+		trap 'rm -rf "$$stage"' EXIT && \
+		python3 -c 'import os, shutil, subprocess, sys; dst = sys.argv[1]; files = subprocess.check_output(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"]).split(b"\0"); [os.makedirs(os.path.dirname(os.path.join(dst, p)), exist_ok=True) or shutil.copy2(p, os.path.join(dst, p)) for r in files if r and os.path.isfile(p := r.decode()) and not os.path.islink(p)]' "$$stage" && \
+		python3 scripts/agent-harness-sync.py --apply --repo "$$stage" >/dev/null && \
+		harness_md="$$(cd "$$stage" && find CLAUDE.md QWEN.md Grok.md .claude .qwen .cursor .grok .opencode -type f -name '*.md' 2>/dev/null)" && \
+		run_lychee "$$stage" $$harness_md; \
 	fi
 
 dockerfile-check: ## Native BuildKit Dockerfile checks
