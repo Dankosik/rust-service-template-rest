@@ -124,10 +124,10 @@ def normalized_target(value: object) -> str:
 
 class RootfsMember(tarfile.TarInfo):
     @classmethod
-    def frombuf(cls, buf, encoding, errors):
-        # TarFile otherwise treats even a corrupt later header as end-of-archive.
+    def fromtarfile(cls, archive):
+        # TarFile.next() treats some malformed later members as end-of-archive.
         try:
-            return super().frombuf(buf, encoding, errors)
+            return super().fromtarfile(archive)
         except tarfile.EOFHeaderError:
             raise
         except tarfile.HeaderError as error:
