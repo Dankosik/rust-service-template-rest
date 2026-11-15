@@ -9,7 +9,7 @@ if ! bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --assert-held; then
 fi
 
 compose_project="service-cache-${VALIDATION_LOCK_TOKEN:0:12}-$(date +%s)-$$"
-resource=
+started_compose=false
 
 require_docker() {
 	if docker info >/dev/null 2>&1; then
@@ -26,11 +26,8 @@ require_docker() {
 cleanup() {
 	local status=$?
 	trap - EXIT INT TERM HUP
-	if [[ -n ${resource} ]]; then
-		if ! bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-cleanup "${resource}"; then
-			echo "validation resource cleanup incomplete: ${resource}" >&2
-			if [[ ${status} == 0 ]]; then status=1; fi
-		fi
+	if [[ ${started_compose} == true ]]; then
+		VALKEY_PORT=0 docker compose -p "${compose_project}" -f env/docker-compose.yml down -v --remove-orphans >/dev/null 2>&1 || true
 	fi
 	exit "${status}"
 }
@@ -41,10 +38,8 @@ if [[ -z ${CACHE_URL:-} ]]; then
 	trap 'exit 130' INT
 	trap 'exit 143' TERM
 	trap 'exit 129' HUP
-	resource=$(bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-register compose "${compose_project}" \
-		--file "${ROOT_DIR}/env/docker-compose.yml")
-	if ! VALKEY_PORT=0 bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-run "${resource}" -- \
-		docker compose -p "${compose_project}" -f env/docker-compose.yml up -d --wait valkey; then
+	started_compose=true
+	if ! VALKEY_PORT=0 docker compose -p "${compose_project}" -f env/docker-compose.yml up -d --wait valkey; then
 		VALKEY_PORT=0 docker compose -p "${compose_project}" -f env/docker-compose.yml ps --all || true
 		VALKEY_PORT=0 docker compose -p "${compose_project}" -f env/docker-compose.yml logs --no-color --tail 100 valkey || true
 		container_id=$(VALKEY_PORT=0 docker compose -p "${compose_project}" -f env/docker-compose.yml ps --all --quiet valkey) || true

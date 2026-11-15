@@ -5,19 +5,17 @@ image=${1:?runtime image is required}
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 expected_commit=${2:-}
 role=${RUNTIME_IMAGE_ROLE:-service}
-ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
-cd "${ROOT_DIR}"
-if ! bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --assert-held; then
-	exec bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" -- bash "${ROOT_DIR}/scripts/ci/runtime-image-check.sh" "$@"
+cd "${root}"
+if ! bash "${root}/scripts/ci/validation-lock.sh" --assert-held; then
+	exec bash "${root}/scripts/ci/validation-lock.sh" -- bash "${root}/scripts/ci/runtime-image-check.sh" "$@"
 fi
 image=$(docker image inspect --format '{{.Id}}' "${image}")
 bash "${root}/scripts/ci/runtime-image-scan.sh" filesystem "${image}"
 container="${role}-runtime-check-${VALIDATION_LOCK_TOKEN:0:12}-$$"
-resource=
-worker_resource=
+worker=
 
 # Never empty, so the expansion below is safe under `set -u` on bash 3.2.
-docker_args=(--label "runtime-check=${container}" --label "dev.rust-service.validation-owner=${VALIDATION_LOCK_TOKEN}")
+docker_args=(--label "runtime-check=${container}")
 if [[ -n ${RUNTIME_IMAGE_NETWORK:-} ]]; then
 	docker_args+=(--network "${RUNTIME_IMAGE_NETWORK}")
 fi
@@ -45,16 +43,12 @@ fi
 service_runtime_image_configure
 
 cleanup() {
-	local status=$? token
+	local status=$?
 	trap - EXIT INT TERM HUP
-	for token in "${worker_resource}" "${resource}"; do
-		if [[ -n ${token} ]]; then
-			if ! bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-cleanup "${token}"; then
-				echo "validation runtime container cleanup incomplete: ${token}" >&2
-				if [[ ${status} == 0 ]]; then status=1; fi
-			fi
-		fi
-	done
+	if [[ -n ${worker} ]]; then
+		docker rm -f -v "${worker}" >/dev/null 2>&1 || true
+	fi
+	docker rm -f -v "${container}" >/dev/null 2>&1 || true
 	exit "${status}"
 }
 trap cleanup EXIT
@@ -69,16 +63,13 @@ command -v curl >/dev/null 2>&1 || {
 
 # The same flags a hardened deployment uses; a binary that needs a writable
 # root, a capability, or privilege escalation fails here first.
-resource=$(bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-register container "${container}")
-container_id=$(bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-run "${resource}" -- \
-	docker run -d --name "${container}" \
+docker run -d --name "${container}" \
 	-p 127.0.0.1::8080 \
 	--read-only \
 	--cap-drop=ALL \
 	--security-opt=no-new-privileges \
 	"${docker_args[@]}" \
-	"${image}" ${run_args[@]+"${run_args[@]}"})
-bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-bind "${resource}" "${container_id}"
+	"${image}" ${run_args[@]+"${run_args[@]}"} >/dev/null
 
 address=$(docker port "${container}" 8080/tcp 2>/dev/null | head -n 1 || true)
 port=${address##*:}
@@ -173,17 +164,13 @@ messaging=$(python3 "${root}/scripts/lib/template_state.py" profile --repo "${ro
 }
 if [[ ${jobs} == postgres || ${messaging} == nats-jetstream ]]; then
 	worker="${container}-jobs-worker"
-	worker_resource=$(bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-register container "${worker}")
-	worker_id=$(bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-run "${worker_resource}" -- \
-		docker create --name "${worker}" --label "runtime-check=${container}" \
-		--label "dev.rust-service.validation-owner=${VALIDATION_LOCK_TOKEN}" \
+	docker create --name "${worker}" --label "runtime-check=${container}" \
 		--read-only \
 		--cap-drop=ALL \
 		--security-opt=no-new-privileges \
 		--network none \
 		--entrypoint /jobs-worker \
-		"${image}")
-	bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-bind "${worker_resource}" "${worker_id}"
+		"${image}" >/dev/null
 	expected="no job kind or typed message handler is registered: register this service's retained capabilities in crates/jobs-worker/src/main.rs"
 	webhooks=$(python3 "${root}/scripts/lib/template_state.py" profile --repo "${root}" --field webhooks)
 	inbound_webhooks=$(python3 "${root}/scripts/lib/template_state.py" profile --repo "${root}" --field inbound_webhooks)
@@ -192,8 +179,7 @@ if [[ ${jobs} == postgres || ${messaging} == nats-jetstream ]]; then
 		expected='postgres.enabled must be true to run the jobs worker'
 	fi
 	[[ -z ${worker_refusal} ]] || expected=${worker_refusal}
-	worker_output=$(bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-run "${worker_resource}" -- \
-		docker start --attach "${worker}" 2>&1 || true)
+	worker_output=$(docker start --attach "${worker}" 2>&1 || true)
 	worker_exit=$(docker inspect -f '{{.State.ExitCode}}' "${worker}")
 	refusal=$(grep -Fo "${expected}" <<<"${worker_output}" | head -n 1 || true)
 	if [[ ${worker_exit} != 1 || -z ${refusal} ]]; then

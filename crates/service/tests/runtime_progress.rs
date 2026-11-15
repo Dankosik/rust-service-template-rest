@@ -2,7 +2,7 @@
 //!
 //! Run through `make runtime-progress-proof`; its wrapper supplies the immutable
 //! `RUNTIME_PROGRESS_IMAGE`, `RUNTIME_PROGRESS_SOURCE`, results directory and
-//! registered container identities under the authenticated validation owner.
+//! container name prefix for teardown.
 //! Docker must support cgroup v2 and host.docker.internal:host-gateway. The
 //! driver and its finite OIDC/S3 peers stay outside the service's CPU quota.
 //! The image's org.opencontainers.image.revision label must equal the supplied
@@ -124,13 +124,6 @@ impl Evidence {
 /// Every CLI child is killed and waited on its bound; output readers are joined.
 async fn docker(arguments: &[String], within: Duration) -> Result<String> {
     command_output("docker", arguments, within).await
-}
-
-async fn validation(arguments: &[String]) -> Result<String> {
-    let helper = std::env::var("RUNTIME_PROGRESS_VALIDATION_HELPER").map_err(failure)?;
-    let mut command = vec![helper];
-    command.extend_from_slice(arguments);
-    command_output("bash", &command, Duration::from_secs(30)).await
 }
 
 async fn command_output(program: &str, arguments: &[String], within: Duration) -> Result<String> {
@@ -554,26 +547,13 @@ async fn launch(
     evidence: &Evidence,
     primary_failure: bool,
 ) -> Result<Option<Container>> {
-    validation(&args(&["--assert-held"])).await?;
     let prefix = std::env::var("RUNTIME_PROGRESS_CONTAINER_PREFIX").map_err(failure)?;
-    let suffix = name
-        .strip_prefix(&format!("{prefix}-"))
-        .ok_or("container name is outside the registered quota fixture")?;
-    let resource = std::env::var(format!("RUNTIME_PROGRESS_RESOURCE_{suffix}")).map_err(failure)?;
-    let owner = std::env::var("VALIDATION_LOCK_TOKEN").map_err(failure)?;
-    let mut command = container_command(image, name, peers, primary_failure);
-    command.splice(
-        1..1,
-        args(&[
-            "--label",
-            &format!("dev.rust-service.validation-owner={owner}"),
-        ]),
-    );
+    if name.strip_prefix(&format!("{prefix}-")).is_none() {
+        return Err("container name is outside the registered quota fixture".to_owned());
+    }
+    let command = container_command(image, name, peers, primary_failure);
     evidence.record(json!({"event": "container_command", "arguments": command}));
-    let mut protected_command = args(&["--resource-run", &resource, "--", "docker"]);
-    protected_command.extend(command);
-    let id = validation(&protected_command).await?;
-    validation(&args(&["--resource-bind", &resource, id.trim()])).await?;
+    let id = docker(&command, Duration::from_secs(30)).await?;
     evidence.record(json!({"event": "container_started", "name": name, "id": id.trim()}));
     if primary_failure {
         return Ok(None);
@@ -2317,9 +2297,6 @@ async fn bounded_sources_preserve_process_progress_under_one_cpu_quota() {
         events: Arc::default(),
         task_errors: Arc::default(),
     };
-    validation(&args(&["--assert-held"]))
-        .await
-        .expect("quota proof requires an authenticated validation owner");
     let prefix = std::env::var("RUNTIME_PROGRESS_CONTAINER_PREFIX")
         .expect("run the quota proof through runtime-progress-proof.sh");
     let identity = docker(

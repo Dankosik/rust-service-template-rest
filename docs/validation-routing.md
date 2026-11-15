@@ -41,9 +41,7 @@ print changed files, surfaces, planned commands, CI-owned steps, and no-op
 surfaces. `make verify` runs local steps under the Git-common validation lock
 ([`scripts/ci/validation-lock.py`](../scripts/ci/validation-lock.py)) and
 records attempts and reusable receipts under `<git-common-dir>/codex/verify`
-(`VERIFY_FORCE=1` bypasses reuse; receipts require lock admission and
-projectable [`scripts/ci/build-context.py`](../scripts/ci/build-context.py)
-state; failures never auto-clean artifacts or caches).
+(`VERIFY_FORCE=1` bypasses reuse; failures never auto-clean artifacts or caches).
 
 - **CI mode:** By default (`github-actions`), heavy steps and the source
   initializer matrix stay CI-owned (`status: partially_verified`). Setting
@@ -56,8 +54,7 @@ state; failures never auto-clean artifacts or caches).
   workspace for manifests, lockfiles, toolchains, non-`crates/` Rust, or >=80%
   closures.
 - **Readability surfaces:** `duplication` and `architecture` require Python,
-  Cargo, rustup, and `npx`, running `make lint` once before
-  `make quality-check-self-test`.
+  Cargo, and `npx`.
 
 `ALLOW_FULL=1` guards `make check` and `make template-init-check`;
 `ALLOW_HEAVY=1` guards the container-backed, history-wide, and heavy integration

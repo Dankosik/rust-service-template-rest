@@ -24,7 +24,6 @@ export default defineRailway((ctx) => {
         "crates/**", "migrations/**", ".sqlx/**", "vendor/**",
         "test/Cargo.toml", "test/src/**", "test/tests/**", "test/fixtures/**",
         "env/config/**", "build/docker/**", ".dockerignore",
-        "docs/railway-deployment-profile.md",
       ],
     },
     deploy: {

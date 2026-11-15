@@ -30,7 +30,6 @@ fi
 
 compose_project_base="service-messaging-${VALIDATION_LOCK_TOKEN:0:12}-$(date +%s)-$$"
 compose_project=${compose_project_base}
-resource=
 compose_config="${ROOT_DIR}/env/nats/nats-server.conf"
 cleanup_pending=false
 receipt_dir=${MESSAGING_RECEIPT_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/service-messaging-receipt.XXXXXX")}
@@ -57,12 +56,7 @@ cleanup_owned() {
 	[[ ${cleanup_pending} == true ]] || return 0
 	cleanup_pending=false
 	local down_status=0 observed=true containers networks volumes
-	if NATS_PORT=127.0.0.1:0 NATS_CONFIG_FILE="${compose_config}" \
-		bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-cleanup "${resource}" >>"${receipt_dir}/compose.log" 2>&1; then
-		:
-	else
-		down_status=$?
-	fi
+	compose down -v --remove-orphans >>"${receipt_dir}/compose.log" 2>&1 || down_status=$?
 	if ! containers=$(docker ps -aq --filter "label=com.docker.compose.project=${compose_project}"); then observed=false; fi
 	if ! networks=$(docker network ls -q --filter "label=com.docker.compose.project=${compose_project}"); then observed=false; fi
 	if ! volumes=$(docker volume ls -q --filter "label=com.docker.compose.project=${compose_project}"); then observed=false; fi
@@ -77,7 +71,6 @@ cleanup_owned() {
 	return 1
 }
 
-# The EXIT trap invokes this callback; keep its exit-status and cleanup custody.
 # shellcheck disable=SC2329
 finish() {
 	local status=$? cleanup_status=0
@@ -95,16 +88,10 @@ trap 'exit 129' HUP
 
 start_owned() {
 	compose_config=$1
-	# A completed resource identity cannot be reused by a later phase.
 	compose_project="${compose_project_base}-$2"
-	resource=$(bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-register compose "${compose_project}" \
-		--file "${ROOT_DIR}/env/docker-compose.yml")
 	cleanup_pending=true
 	printf 'start project=%s config=%s\n' "${compose_project}" "${compose_config}" >>"${receipt}"
-	if ! NATS_PORT=127.0.0.1:0 NATS_CONFIG_FILE="${compose_config}" \
-		bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-run "${resource}" -- \
-		docker compose -p "${compose_project}" -f "${ROOT_DIR}/env/docker-compose.yml" \
-		up -d --wait --wait-timeout 30 nats >>"${receipt_dir}/compose.log" 2>&1; then
+	if ! compose up -d --wait --wait-timeout 30 nats >>"${receipt_dir}/compose.log" 2>&1; then
 		compose ps --all >&2 || true
 		compose logs --no-color --tail 100 nats >&2 || true
 		echo "owned messaging startup failed; see compose.log" >&2

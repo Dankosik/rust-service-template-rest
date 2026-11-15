@@ -7,7 +7,7 @@ cd "${ROOT_DIR}"
 image=${1:-service:ci}
 arguments=()
 # Resolve service inputs (for example BuildKit secrets) before acquiring
-# custody or reserving a builder, so a missing input refuses without either.
+# the validation lock, so a missing input refuses immediately.
 # Dockerfile checks consume no service inputs.
 service_runtime_image_build_arguments() { :; }
 if [[ ${image} != --check && -f scripts/ci/service-runtime-image.sh ]]; then
@@ -16,32 +16,15 @@ if [[ ${image} != --check && -f scripts/ci/service-runtime-image.sh ]]; then
 	service_runtime_image_build_arguments
 fi
 
-# A direct script call has the same custody as its Make/CI entry point.
 if [[ ${VALIDATION_LOCK_HELD:-} != 1 ]]; then
 	exec bash scripts/ci/validation-lock.sh -- bash "$0" "$@"
 fi
 bash scripts/ci/validation-lock.sh --assert-held
 
-builder_resource=
-cleanup() {
-	local status=$?
-	trap - EXIT INT TERM HUP
-	if [[ -n ${builder_resource} ]] && ! bash scripts/ci/validation-lock.sh --resource-cleanup "${builder_resource}"; then
-		[[ ${status} != 0 ]] || status=1
-	fi
-	exit "${status}"
-}
-trap cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
-trap 'exit 129' HUP
-builder_arguments=()
-[[ -z ${VALIDATION_BUILDER_NAME:-} ]] || builder_arguments+=("${VALIDATION_BUILDER_NAME}")
-builder_resource=$(bash scripts/ci/validation-lock.sh --builder-prepare ${builder_arguments[@]+"${builder_arguments[@]}"})
-builder_name=$(bash scripts/ci/validation-lock.sh --builder-name "${builder_resource}")
+builder_args=()
+[[ -z ${VALIDATION_BUILDER_NAME:-} ]] || builder_args=(--builder "${VALIDATION_BUILDER_NAME}")
 if [[ ${image} == --check ]]; then
-	bash scripts/ci/validation-lock.sh --resource-run "${builder_resource}" -- \
-		docker buildx build --builder "${builder_name}" --check -f build/docker/Dockerfile .
+	docker buildx build ${builder_args[@]+"${builder_args[@]}"} --check -f build/docker/Dockerfile .
 	exit
 fi
 
@@ -81,9 +64,7 @@ arguments+=(
 # copy, so a new commit never reuses it, and exporting the binary
 # stages would spend the repository's cache budget on dead layers.
 if [[ -n ${RUNTIME_IMAGE_CACHE_TO:-} ]]; then
-	bash scripts/ci/validation-lock.sh --resource-run "${builder_resource}" -- \
-		docker buildx build --builder "${builder_name}" "${arguments[@]}" --target cooked --cache-to "${RUNTIME_IMAGE_CACHE_TO}" .
+	docker buildx build ${builder_args[@]+"${builder_args[@]}"} "${arguments[@]}" --target cooked --cache-to "${RUNTIME_IMAGE_CACHE_TO}" .
 fi
 [[ -z ${RUNTIME_IMAGE_METADATA_FILE:-} ]] || arguments+=(--metadata-file "${RUNTIME_IMAGE_METADATA_FILE}")
-bash scripts/ci/validation-lock.sh --resource-run "${builder_resource}" -- \
-	docker buildx build --builder "${builder_name}" --load "${arguments[@]}" -t "${image}" .
+docker buildx build ${builder_args[@]+"${builder_args[@]}"} --load "${arguments[@]}" -t "${image}" .

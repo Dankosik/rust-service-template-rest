@@ -28,10 +28,9 @@ reduces wait times without weakening them.
 - Keep one heavy Cargo/container command per checkout (start from at most two
   concurrent builds on 16 GB RAM). Wrap independent heavy commands with
   `bash scripts/ci/validation-lock.sh -- <command>`.
-- Check waits with `bash scripts/ci/validation-lock.sh --status` (override 900 s
-  timeout via `VALIDATION_LOCK_TIMEOUT_SECONDS`). On quarantine, restore
-  observation and run `--reconcile` (or `--reconcile-buildkit RESOURCE`); never
-  delete the gate or force an unlock ([`scripts/ci/validation-lock.py`](../scripts/ci/validation-lock.py)).
+- Check lock ownership with `bash scripts/ci/validation-lock.sh --status`
+  (override 900 s timeout via `VALIDATION_LOCK_TIMEOUT_SECONDS`;
+  [`scripts/ci/validation-lock.py`](../scripts/ci/validation-lock.py)).
 
 ## Workstation setup
 
@@ -41,25 +40,6 @@ reduces wait times without weakening them.
 2. **Shared compiler cache (optional):** Install [sccache][sccache] and set
    `rustc-wrapper = "sccache"` under `[build]` in `~/.cargo/config.toml` to
    cache dependency crates (`sccache --show-stats`).
-
-## Command-scoped compiler cache
-
-`BUILD_CACHE=inherit` (default) preserves your Cargo/wrapper context;
-unprojectable wrappers/paths skip receipt reuse
-([`scripts/ci/build-context.py`](../scripts/ci/build-context.py)). For a
-task-local cache, provision the `SCCACHE_VERSION` pinned in `tools/versions.env`
-into an ignored path and run:
-
-```sh
-BUILD_CACHE=sccache \
-BUILD_CACHE_BIN="$PWD/.artifacts/tools/sccache" \
-BUILD_CACHE_DIR="$PWD/.artifacts/compiler-cache" \
-make build
-```
-
-`BUILD_CACHE_SIZE` defaults to `1G`; `BUILD_MIN_FREE_BYTES` sets an optional
-free-space floor. Keep `BUILD_CACHE_DIR` empty or checkout-owned and separate
-from `CARGO_TARGET_DIR` and `CARGO_HOME`.
 
 ## Deployment builds
 
@@ -84,8 +64,7 @@ from `CARGO_TARGET_DIR` and `CARGO_HOME`.
   (16.5 vs 31 emulated CPU-minutes) via
   `bash scripts/ci/validation-lock.sh -- docker buildx build --platform linux/amd64 -f <variant> .`.
 - **Keep the cooked layer locally:** Pass `RUNTIME_IMAGE_CACHE_FROM` and
-  `RUNTIME_IMAGE_CACHE_TO` (e.g., `type=local` under `.artifacts/`) or a
-  task-owned `VALIDATION_BUILDER_NAME` with `VALIDATION_BUILDER_EXCLUSIVE=1`
+  `RUNTIME_IMAGE_CACHE_TO` (e.g., `type=local` under `.artifacts/`)
   (31 vs 175 emulated CPU-minutes on one-line rebuilds).
 - **Fat-LTO floor and lock:** Each binary ends with single-threaded fat LTO;
   image builds share the validation lock. Compare in-container CPU time rather

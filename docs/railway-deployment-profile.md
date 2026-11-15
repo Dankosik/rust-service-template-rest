@@ -83,13 +83,11 @@ Readiness](ci-cd-production-ready.md)). Deploy that digest after verifying it.
 
 ## Repository-owned policy
 
-The values a derived service applies, and the IaC form that carries them:
+The runtime deployment values a derived service applies (`.railway/railway.ts`
+is the canonical authority for `build.*` and `watchPatterns`):
 
 | Setting | Value | Why |
 | --- | --- | --- |
-| `build.builder` | `DOCKERFILE` | the template's image is the deployment unit |
-| `build.dockerfilePath` | `build/docker/Dockerfile` | |
-| `build.watchPatterns` | `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `crates/**`, `migrations/**`, `.sqlx/**`, `vendor/**`, `test/Cargo.toml`, `test/src/**`, `test/tests/**`, `test/fixtures/**`, `env/config/**`, `build/docker/**`, `.dockerignore`, `docs/railway-deployment-profile.md` | covers admitted image inputs and build controls; other documentation, CI, and agent-only changes do not start a deployment |
 | `deploy.healthcheckPath` | `/health/ready` | the cached readiness verdict, not liveness |
 | `deploy.healthcheckTimeout` | `180` | Railway's default is 300; a derived service with a 5 s warm-up passed 13 s after its container started |
 | `deploy.restartPolicyType` / `restartPolicyMaxRetries` | `ON_FAILURE` / `5` | a clean `SIGTERM` exit (`0`) is not restarted; exit `3` (degraded shutdown) and `1` are |
@@ -97,30 +95,14 @@ The values a derived service applies, and the IaC form that carries them:
 | `deploy.drainingSeconds` | `45` | see the budget below |
 
 The source build uses the repository root as its context. `make docs-check`
-checks the table and `.railway/railway.ts` against the Dockerfile and root
-`.dockerignore` allowlist; a repository initialized before the file existed
-keeps a `ts` snippet in this document, which the check reads instead and
-names. Every admitted file or directory family requires coverage, including
-new families before files exist; exclusions may reduce build inputs but do not
-reduce this conservative watch set. `rust-toolchain.toml` is an additional
-trigger coupled to the builder pin, although it stays outside the context.
-The workspace test manifest, `test/src/` and `test/tests/` enter the context.
-Cargo and cargo-chef must discover real targets after initialization can remove
-the optional helper library and worker fixture binary. The retained utility
-tests keep that workspace member valid; package/bin release builds do not compile
-those test targets. Their source changes, like `env/config/`, change no byte of
-the runtime image and feed only the optional unit-test stage; they stay watched
-because the check admits no exception, and of the 150 commits since
-2026-09-01 that touched a watched path none touched only those.
-
-Update the table and the IaC file when admitting an input. The check refuses unsupported
-inclusion/watch syntax, alternate build contexts and Dockerfile-specific ignore
-overrides with the responsible path; an `ADD` whose every source is a URL reads
-no context and passes. Extend the coverage model before adopting those forms. A
-service whose IaC file deploys a published image (`source: image(...)` with no
-build settings and no `build.*` rows here) has no source build to watch, and the
-check reports that instead. This checks policy data only; it does not apply IaC
-or verify live Railway settings.
+checks `.railway/railway.ts` against `build/docker/Dockerfile` and the root
+`.dockerignore` allowlist so every admitted file or directory family is covered
+by `build.watchPatterns` while documentation, CI, and agent-only changes do not
+trigger a deployment. `rust-toolchain.toml` is watched alongside the image
+inputs because it pins the Rust builder version. A service whose `.railway/railway.ts`
+deploys a published image (`source: image(...)` with no `build` block) has no
+source build context to watch, and the check reports that instead. This checks
+policy data only; it does not apply IaC or verify live Railway settings.
 
 ## The build
 

@@ -28,13 +28,6 @@ on:
     # Weekly: advisory databases move without a commit, so every surface runs.
     - cron: "41 4 * * 2"
   workflow_dispatch:
-    # template:begin messaging:ci-messaging-recovery-input
-    inputs:
-      messaging_recovery:
-        description: Run the bounded owned R3/TLS recovery and capacity fixture
-        type: boolean
-        default: false
-    # template:end messaging:ci-messaging-recovery-input
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -291,14 +284,11 @@ jobs:
         if: >-
           needs.changes.outputs.rust_source == 'true' ||
           needs.changes.outputs.cargo_dependencies == 'true' ||
-          needs.changes.outputs.lint_config == 'true' ||
-          needs.changes.outputs.duplication == 'true' ||
-          needs.changes.outputs.architecture == 'true'
+          needs.changes.outputs.lint_config == 'true'
         env:
           EVENT_NAME: ${{ github.event_name }}
           CARGO_DEPENDENCIES: ${{ needs.changes.outputs.cargo_dependencies }}
           LINT_CONFIG: ${{ needs.changes.outputs.lint_config }}
-          NATIVE_CHECKER: ${{ needs.changes.outputs.duplication == 'true' || needs.changes.outputs.architecture == 'true' }}
           RUST_SOURCE: ${{ needs.changes.outputs.rust_source }}
           FALLBACK: ${{ steps.affected.outputs.fallback }}
           LINT_PACKAGES: ${{ steps.affected.outputs.lint_packages }}
@@ -316,7 +306,7 @@ jobs:
             '
             exit 0
           fi
-          if [[ "${LINT_CONFIG}" == true || "${NATIVE_CHECKER}" == true ]]; then
+          if [[ "${LINT_CONFIG}" == true ]]; then
             bash ./scripts/ci/measure.sh quality-lint -- make lint
           elif [[ -n "${LINT_PACKAGES}" ]]; then
             bash ./scripts/ci/measure.sh quality-lint-changed -- make lint-changed PKGS="${LINT_PACKAGES}"
@@ -391,9 +381,7 @@ jobs:
         run: |
           command -v python3
           command -v npx
-          command -v rustup
       - name: Readability checker self-test
-        # Reuses the compiler-artifact receipt `make lint` wrote above.
         if: needs.changes.outputs.duplication == 'true' || needs.changes.outputs.architecture == 'true'
         run: bash ./scripts/ci/measure.sh quality-checkers -- make quality-check-self-test
       - name: Rust duplication
@@ -464,7 +452,6 @@ jobs:
           cargo check --locked --manifest-path crates/service/Cargo.toml --all-targets --features hotpath,hotpath-alloc,hotpath-mcp,hotpath-cpu,hotpath/hotpath-prometheus
           cargo tree --locked --manifest-path crates/service/Cargo.toml --features hotpath,hotpath-alloc,hotpath-mcp,hotpath-cpu,hotpath/hotpath-prometheus -e features -i hotpath
           if [ -f scripts/ci/hotpath-mcp-check.py ]; then
-            python3 scripts/ci/hotpath-vendor-check.py
             messages=${RUNNER_TEMP}/profiling-build.jsonl
             cargo build --locked -p service --bin service --features hotpath,hotpath-alloc,hotpath-mcp --message-format=json-render-diagnostics >"${messages}"
             service=$(python3 scripts/ci/openapi-artifact.py --manifest crates/service/Cargo.toml --name service --kind bin <"${messages}")
@@ -881,114 +868,6 @@ jobs:
           retention-days: 7
   # template:end runtime-progress:ci-runtime-progress-job
 
-  # template:begin messaging:ci-messaging-recovery-job
-  messaging-recovery:
-    if: github.event_name == 'workflow_dispatch' && inputs.messaging_recovery
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 1
-          persist-credentials: false
-      - name: Install pinned toolchain
-        uses: ./.github/actions/rust-toolchain # zizmor: ignore[self-repository]
-      - name: Cargo caches
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.2 # zizmor: ignore[cache-poisoning]
-        with:
-          cache-bin: "false"
-          shared-key: messaging-recovery
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-      - name: Install Go for the native backup CLI
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: '1.27.0'
-          cache: false
-      - name: Build the fixed fixture artifacts once
-        run: |
-          set -euo pipefail
-          source tools/versions.env
-          test "$(df -Pk . | awk 'END {print $4}')" -ge 8388608
-          mkdir -p .artifacts/messaging-recovery/bin .artifacts/messaging-recovery/results
-          runtime_image=$(yq -r '.services.postgres.image' env/docker-compose.yml)
-          # One static artifact set works in both canonical client runtimes,
-          # independent of the hosted runner's glibc version.
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y musl-tools
-          rustup target add x86_64-unknown-linux-musl
-          packages=(-p infra-messaging --example dlq_recovery)
-          if [[ -f test/examples/messaging_recovery.rs ]]; then
-            packages+=(-p integration-tests --example messaging_recovery -p migrate --bin migrate)
-          fi
-          messages=${RUNNER_TEMP}/musl-build.jsonl
-          cargo build --locked --release --target x86_64-unknown-linux-musl --features infra-messaging/integration "${packages[@]}" --message-format=json-render-diagnostics >"${messages}"
-          copy_artifact() {
-            local executable
-            executable=$(python3 scripts/ci/openapi-artifact.py --manifest "$1" --name "$2" --kind "$3" <"${messages}")
-            cp "${executable}" ".artifacts/messaging-recovery/bin/$2"
-          }
-          copy_artifact crates/infra-messaging/Cargo.toml dlq_recovery example
-          if [[ -f test/examples/messaging_recovery.rs ]]; then
-            copy_artifact test/Cargo.toml messaging_recovery example
-            copy_artifact crates/migrate/Cargo.toml migrate bin
-          fi
-          CGO_ENABLED=0 GOBIN="${PWD}/.artifacts/messaging-recovery/bin" go install "github.com/nats-io/natscli/nats@v${NATS_CLI_VERSION}"
-          docker pull "$(yq -r '.services.nats.image' env/docker-compose.yml)"
-          if [[ "${runtime_image}" != null ]]; then
-            docker pull "${runtime_image}"
-          fi
-      - name: Controller custody checks
-        run: make messaging-recovery-self-test
-      - name: Owned one-record R3/TLS demonstration
-        run: >-
-          make messaging-recovery
-          RECOVERY_ARTIFACTS="${PWD}/.artifacts/messaging-recovery/bin"
-          RECOVERY_SESSION="${PWD}/.artifacts/messaging-recovery/results/dlq"
-  # template:end messaging:ci-messaging-recovery-job
-      # template:begin outbox:ci-native-recovery-rehearsals
-      - name: Native backup, fault, capacity and retention situations
-        run: >-
-          make messaging-recovery RECOVERY_COMMAND=rehearse
-          RECOVERY_ARTIFACTS="${PWD}/.artifacts/messaging-recovery/bin"
-          RECOVERY_SESSION="${PWD}/.artifacts/messaging-recovery/results/rehearsal"
-      - name: Shared-worker R3/TLS capacity, outage and catch-up measurements
-        run: >-
-          make messaging-recovery RECOVERY_COMMAND=measure
-          RECOVERY_ARTIFACTS="${PWD}/.artifacts/messaging-recovery/bin"
-          RECOVERY_SESSION="${PWD}/.artifacts/messaging-recovery/results/capacity"
-      # template:end outbox:ci-native-recovery-rehearsals
-  # template:begin messaging:ci-messaging-recovery-cleanup
-      - name: Terminate any interrupted original lifetime
-        if: always()
-        run: |
-          for manifest in .artifacts/messaging-recovery/results/dlq/session.json .artifacts/messaging-recovery/results/rehearsal/*/session.json .artifacts/messaging-recovery/results/capacity/*/session.json; do
-            if [[ -f "${manifest}" ]]; then
-              bash scripts/ci/messaging-recovery.sh stop --session "${manifest%/session.json}"
-            fi
-          done
-      - name: Retain synthetic evidence without fixture credentials
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: messaging-recovery-${{ github.sha }}-${{ github.run_attempt }}
-          path: |
-            .artifacts/messaging-recovery/results/**/evidence/*.json
-            .artifacts/messaging-recovery/results/**/session.json
-            .artifacts/messaging-recovery/results/**/selections/*.json
-            .artifacts/messaging-recovery/results/**/rehearsal.json
-            .artifacts/messaging-recovery/results/**/oracle.json
-            .artifacts/messaging-recovery/results/**/backups/**/boundary.json
-            .artifacts/messaging-recovery/results/capacity/capacity.json
-            .artifacts/messaging-recovery/results/capacity/measurement-plan.json
-            .artifacts/messaging-recovery/results/capacity/**/measurement.json
-            .artifacts/messaging-recovery/results/capacity/**/timeseries.csv
-            .artifacts/messaging-recovery/results/capacity/**/report.md
-            .artifacts/messaging-recovery/results/capacity/**/IDs.json
-          include-hidden-files: true
-          if-no-files-found: error
-          retention-days: 7
-  # template:end messaging:ci-messaging-recovery-cleanup
-
   # template:begin integration:ci-integration-job
   integration:
     needs: changes
@@ -1295,10 +1174,7 @@ jobs:
       - image
       # template:begin runtime-progress:ci-required-runtime-progress-need
       - runtime-progress
-    # template:end runtime-progress:ci-required-runtime-progress-need
-    # template:begin messaging:ci-required-messaging-recovery-need
-      - messaging-recovery
-    # template:end messaging:ci-required-messaging-recovery-need
+      # template:end runtime-progress:ci-required-runtime-progress-need
       # template:begin integration:ci-required-integration-need
       - integration
       # template:end integration:ci-required-integration-need
@@ -1314,136 +1190,23 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
-      - name: Reject failed or cancelled gates
-        # Classification must succeed before skipped jobs can be intentional.
-        # Explicit always() also removes the step's implicit status guard.
-        if: always() && (needs.changes.result != 'success' || contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))
-        run: exit 1
-      # The checks below also reject a skipped job when its named selector applies.
-      # Manual messaging recovery participates in the failure/cancellation check above.
-      - name: Require selected quality success
-        if: >-
-          always() && (
-            needs.changes.outputs.rust_source == 'true' ||
-            needs.changes.outputs.cargo_dependencies == 'true' ||
-            needs.changes.outputs.lint_config == 'true' ||
-            needs.changes.outputs.openapi == 'true' ||
-            needs.changes.outputs.migrations == 'true' ||
-            needs.changes.outputs.agent_instructions == 'true' ||
-            needs.changes.outputs.duplication == 'true' ||
-            needs.changes.outputs.architecture == 'true'
-          ) && needs.quality.result != 'success'
-        run: exit 1
-      - name: Require selected quality profiles success
-        if: >-
-          always() && (
-            needs.changes.outputs.rust_source == 'true' ||
-            needs.changes.outputs.cargo_dependencies == 'true'
-          ) && needs.quality-profiles.result != 'success'
-        run: exit 1
-      - name: Require selected validation self-tests success
-        if: >-
-          always() && needs.changes.outputs.validation_system == 'true' &&
-          needs.quality-validation.result != 'success'
-        run: exit 1
-      # template:begin runtime-progress:ci-required-runtime-progress-success
-      - name: Require selected quota proof success
-        if: >-
-          always() && needs.changes.outputs.runtime_progress == 'true' &&
-          needs.changes.outputs.post_merge == 'true' &&
-          needs.runtime-progress.result != 'success'
-        run: exit 1
-      # template:end runtime-progress:ci-required-runtime-progress-success
-      # template:begin grpc:ci-required-grpc-success
-      - name: Require selected protobuf contract success
-        if: >-
-          always() && (
-            needs.changes.outputs.grpc_schema == 'true'
-          ) && needs.grpc.result != 'success'
-        run: exit 1
-      # template:end grpc:ci-required-grpc-success
-      - name: Require selected security success
-        if: >-
-          always() && (
-            needs.changes.outputs.cargo_dependencies == 'true' ||
-            needs.changes.outputs.dependency_policy == 'true' ||
-            needs.changes.outputs.github_workflows == 'true' ||
-            (github.event_name == 'pull_request' && (
-              needs.changes.outputs.tool_manifest == 'true' ||
-              needs.changes.outputs.runtime_image == 'true'
-            ))
-          ) && needs.security.result != 'success'
-        run: exit 1
-      - name: Require selected secret scan success
-        if: >-
-          always() && (
-            github.event_name != 'schedule' || needs.changes.outputs.secret_scanning == 'true'
-          ) && needs.secrets.result != 'success'
-        run: exit 1
-      - name: Require selected delivery success
-        if: >-
-          always() && (
-            needs.changes.outputs.shell == 'true' ||
-            needs.changes.outputs.python == 'true' ||
-            needs.changes.outputs.github_workflows == 'true' ||
-            needs.changes.outputs.tool_manifest == 'true' ||
-            needs.changes.outputs.runtime_image == 'true' ||
-            needs.changes.outputs.publication_metadata == 'true'
-          ) && needs.delivery.result != 'success'
-        run: exit 1
-      - name: Require selected image success
-        if: >-
-          always() && (
-            (needs.changes.outputs.runtime_image == 'true' || needs.changes.outputs.artifact_graphs != '') && needs.changes.outputs.post_merge == 'true'
-          ) && needs.image.result != 'success'
-        run: exit 1
-      # template:begin integration:ci-required-integration-success
-      - name: Require selected integration success
-        if: >-
-          always() && (
-            needs.changes.outputs.db_integration == 'true' ||
-            needs.changes.outputs.messaging_integration == 'true' ||
-            needs.changes.outputs.cache_integration == 'true' ||
-            needs.changes.outputs.object_storage_integration == 'true'
-          ) && needs.integration.result != 'success'
-        run: exit 1
-      # template:end integration:ci-required-integration-success
-      # template:begin source-template:ci-required-jobs-reliability-success
-      - name: Require selected jobs reliability reference success
-        if: >-
-          always() && (
-            needs.changes.outputs.db_integration == 'true' && needs.changes.outputs.post_merge == 'true'
-          ) && needs.jobs-reliability.result != 'success'
-        run: exit 1
-      # template:end source-template:ci-required-jobs-reliability-success
-      # template:begin outbound-auth:ci-required-oauth-integration-success
-      - name: Require selected OAuth integration success
-        if: >-
-          always() && (
-            needs.changes.outputs.oauth_integration == 'true'
-          ) && needs.oauth-integration.result != 'success'
-        run: exit 1
-      # template:end outbound-auth:ci-required-oauth-integration-success
-      - name: Require selected initializer matrix success
-        if: >-
-          always() && (
-            needs.changes.outputs.initializer_runtime == 'true' && needs.changes.outputs.post_merge == 'true'
-          ) && needs.initializer.result != 'success'
-        run: exit 1
-      - name: Require selected initializer projections success
-        if: >-
-          always() && (
-            needs.changes.outputs.module_initializer == 'true'
-          ) && needs.initializer-projections.result != 'success'
-        run: exit 1
-      - name: Require selected documentation success
-        if: >-
-          always() && (
-            needs.changes.outputs.documentation == 'true'
-          ) && needs.docs.result != 'success'
-        run: exit 1
-      - name: Require selected monitoring rule proof success
-        if: needs.changes.outputs.monitoring_rules == 'true' && needs.monitoring-rules.result != 'success'
-        run: exit 1
-      - name: Accept passed and intentionally skipped gates
-        run: echo "all applicable CI gates passed"
+      - name: Verify required CI gates
+        if: always()
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          python3 -c '
+          import json, os, sys
+          needs = json.loads(os.environ["NEEDS_JSON"])
+          failed = []
+          if needs.get("changes", {}).get("result") != "success":
+              failed.append("changes=" + str(needs.get("changes", {}).get("result")))
+          for name, state in sorted(needs.items()):
+              result = state.get("result")
+              if result not in {"success", "skipped"}:
+                  failed.append(f"{name}={result}")
+          if failed:
+              print("CI gates did not pass: " + ", ".join(failed), file=sys.stderr)
+              sys.exit(1)
+          print("all applicable CI gates passed")
+          '

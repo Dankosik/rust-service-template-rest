@@ -21,15 +21,10 @@ binaries and resolves them from `PATH` because `CI=true`. A version bump is a
 deliberate commit to the manifest (and to the Dockerfile `ARG` default for
 the tools built inside the image); `make tools-check` refuses drift.
 
-`SCCACHE_VERSION` pins the optional task-local compiler cache (`BUILD_CACHE=sccache`
-with `BUILD_CACHE_BIN` and `BUILD_CACHE_DIR`); `BUILD_CACHE=inherit` is the
-default ([Build Speed](../build-speed.md#command-scoped-compiler-cache)).
-
 A merge-readiness or release claim also needs the CI evidence named in
 [CI/CD Production Readiness](../ci-cd-production-ready.md); local analyzers
 do not prove platform state.
 
-The shared validation queue ([`scripts/ci/validation-lock.py`](../../scripts/ci/validation-lock.py))
-owns lock admission, container custody, and quarantine. When a run enters
-quarantine, use `--status` and `--reconcile`; never delete the gate, force an
-unlock, or stop unrelated processes, containers, or caches to clear custody.
+The shared validation lock ([`scripts/ci/validation-lock.py`](../../scripts/ci/validation-lock.py))
+serializes heavy local validation commands across a Git checkout; inspect
+ownership with `bash scripts/ci/validation-lock.sh --status`.

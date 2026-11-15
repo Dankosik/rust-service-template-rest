@@ -112,7 +112,6 @@ CARGO_NEXTEST_VERSION|crates|cargo-nextest|
 CARGO_SHEAR_VERSION|crates|cargo-shear|
 ZIZMOR_VERSION|crates|zizmor|
 CARGO_MUTANTS_VERSION|crates|cargo-mutants|
-SCCACHE_VERSION|crates|sccache|
 SQLX_CLI_VERSION|crates|sqlx-cli|
 CARGO_CHEF_VERSION|crates|cargo-chef|
 CARGO_AUDITABLE_VERSION|crates|cargo-auditable|
@@ -123,7 +122,6 @@ RUFF_VERSION|pypi|ruff|
 OASDIFF_VERSION|go|github.com/oasdiff/oasdiff|
 GITLEAKS_VERSION|go|github.com/zricethezav/gitleaks/v8|
 ACTIONLINT_VERSION|go|github.com/rhysd/actionlint|
-NATS_CLI_VERSION|go|github.com/nats-io/natscli|
 BUF_VERSION|go|github.com/bufbuild/buf|
 SHELLCHECK_IMAGE|github|koalaman/shellcheck|
 TRIVY_IMAGE|github|aquasecurity/trivy|
