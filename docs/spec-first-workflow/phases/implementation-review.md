@@ -81,9 +81,10 @@ the complete changed outcome: deferred unit-local protected invariants,
 whole-spec coverage, cross-unit compatibility, assembly, and global Completion.
 Implemented units have no prior review verdict to reuse. Reuse only actual
 still-current evidence and review; do not restart unaffected closed findings.
-Each surviving finding names the smallest affected task owner for repair. Use
-`INTEGRATION_DEFECT` for a seam or assembly failure. Reopen Planning only when
-no existing owner can repair it without changing accepted behavior or scope.
+Each surviving finding names the smallest affected task owner (or affected seam
+owners for `INTEGRATION_DEFECT`) for repair. Reopen Planning only when repairing
+the defect changes accepted behavior or ledger-wide scope rather than a local
+seam between implemented units.
 Keep repair and invalidated checks inside final validation; do not recreate
 individual task acceptance or review cycles. Preserve unaffected implementation
 and current proof.

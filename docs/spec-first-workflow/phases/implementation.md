@@ -48,10 +48,16 @@ observed in-scope defects before returning `Implemented`, and retain command
 results for reuse under the Evidence Contract.
 
 Establish shared contracts and generated sources before dependent lanes consume
-them. Reopen the smallest decision owner only when implementation exposes
+them: when parallel tasks or lanes share a new or changed Rust seam, land the
+boundary types, traits, and signatures first (verifying them with `cargo check`
+and replacing any temporary placeholder bodies before returning `Implemented`)
+so producers and consumers code against checked types rather than coordinating
+in prose. Reopen the smallest decision owner only when implementation exposes
 invalid accepted behavior or architecture; keep test-case, oracle, caller, error,
-cleanup, locator, fixture, and runner repairs with the executor, and update lock
-scheduling directly when a write surface grows.
+cleanup, locator, fixture, and runner repairs with the executor. When a write
+surface grows, route the scope delta to the scheduling owner (Orchestrator, or a
+root-local Lead directly) before editing outside the assigned scope, updating
+locks and continuing the lane when disjoint without reopening Planning.
 
 Join or stop child lanes, return [Delegated Result V1](#delegated-result-v1) to
 the Acceptance-Unit Lead (or `Implemented` via [Acceptance Result

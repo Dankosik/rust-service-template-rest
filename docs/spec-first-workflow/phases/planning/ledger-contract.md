@@ -43,9 +43,11 @@ soon as each `Implemented` result integrates:
 - **Scoped stops and steering**: On a write overlap, invalidated contract, or
   reconciled decision/guidance delta, update the owning artifacts and ledger in
   place, pause only conflicting writers or invalidated consumers, and notify
-  affected live Leads one-to-one (or replace them when outcome, scope, or
-  capability changes) under [Agent Harness](../../../agent-harness.md#context-and-lifetime)
-  while unrelated tasks continue.
+  affected live Leads one-to-one—continuing a Lead on a parent-granted disjoint
+  scope expansion for the same outcome, or replacing it when outcome, reassigned
+  scope, or capability changes—under [Agent
+  Harness](../../../agent-harness.md#context-and-lifetime) while unrelated tasks
+  continue.
 
 ## Acceptance Transition
 
@@ -80,9 +82,11 @@ Run one consolidated final validation stage across the ledger:
   selected by [Review](../../shared/review.md); pass local `Accepted` once local
   mandatory criteria and blocking findings close while reporting requested
   external outcomes separately.
-- **Repairs and verdict**: Route defects back to their implementation Leads,
-  rerun only invalidated checks, and have the Orchestrator record the resulting
-  verdict directly.
+- **Repairs and verdict**: Route defects back to their implementation Leads
+  (granting one Lead a combined writable scope across both sides of an
+  `INTEGRATION_DEFECT` seam while no conflicting writer is active), rerun only
+  invalidated checks, and have the Orchestrator record the resulting verdict
+  directly.
 
 Mark `done` once final `Accepted` closes Completion, then apply
 [Cleanup](../../shared/cleanup.md).

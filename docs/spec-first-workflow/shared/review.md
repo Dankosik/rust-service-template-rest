@@ -97,4 +97,9 @@ The phase adapter owns lenses and threshold, while the artifact, ledger, or
 
 A phase-owned complementary panel replaces the default reviewer only when its
 trigger partitions one fixed candidate into named non-overlapping lenses and
-defines one synthesis threshold. Stop after one result for one fixed boundary.
+defines one synthesis threshold. For one surviving material evidence-backed
+reviewer conflict (across panel lenses, replacement review, or [Parent-Owned
+Recovery](transition.md#parent-owned-recovery)), the synthesis owner may
+dispatch `adjudicator-agent` for [Lane Result
+V1](read-only-delegation.md#lane-result-v1) while keeping final synthesis
+authority. Stop after one result for one fixed boundary.

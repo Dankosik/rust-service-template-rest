@@ -37,9 +37,10 @@ when signals conflict or an attempt/review exposes a missed invariant (retaining
 it through repair), and run children on the lightest sufficient settings while
 honoring user-selected models.
 
-Use `evidence-agent`, `specialist-agent`, `worker-agent`, `reviewer-agent`, or
-`adjudicator-agent`; put expertise or review lenses in `Method` and quality tiers
-in model/effort fields.
+Dispatch unit Leads via the selected adapter's Acceptance-Unit Lead carrier, and
+leaf lanes via `evidence-agent`, `specialist-agent`, `worker-agent`,
+`reviewer-agent`, or `adjudicator-agent`; put expertise or review lenses in
+`Method` and quality tiers in model/effort fields.
 
 ## Context And Lifetime
 
@@ -57,23 +58,25 @@ and repo files; supply accepted behavior, decisions, locators, writable scope,
 and expected outcome. Reviewer freshness follows
 [Review](spec-first-workflow/shared/review.md).
 
-Reuse a worker only for corrections inside its unchanged outcome, writable
-scope, and proof boundary; end it once consumed. Evidence lanes may answer
-related follow-ups for the same parent decision when independence is unneeded,
-rechecking affected assumptions.
+Reuse a worker only for corrections—or a parent-granted disjoint writable-scope
+expansion—inside its unchanged outcome, capability tier, and proof boundary; end
+it once consumed. Evidence lanes may answer related follow-ups for the same
+parent decision when independence is unneeded, rechecking affected assumptions.
 
 When reconciled guidance or a decision changes an active child's inputs or
-constraints inside its unchanged outcome, writable scope, and capability tier,
-notify only each affected child directly, one-to-one, with the decision delta,
-its consequence for that child's assignment, and any updated artifact locator
-rather than relying on silent file edits or broadcasting to unaffected lanes.
+constraints inside its unchanged outcome, capability tier, and current or
+parent-expanded disjoint writable scope, notify only each affected child
+directly, one-to-one, with the decision delta, its consequence for that child's
+assignment, and any updated artifact locator rather than relying on silent file
+edits or broadcasting to unaffected lanes.
 
 Use a fresh agent (stopping the old child and reconciling its partial edits
-first) when a change alters outcome, writable scope, or required capability, or
-for an unrelated investigation or independent judgment (Lead reuse excludes
-execution lanes). On stalled diagnosis or unreliable context, change strategy
-via the parent rather than copying failed transcripts or rotating by time/turn
-count. Follow-ups continue history without resetting context.
+first) when a change alters outcome, reassigns or narrows writable scope, or
+changes required capability, or for an unrelated investigation or independent
+judgment (Lead reuse excludes execution lanes). On stalled diagnosis or
+unreliable context, change strategy via the parent rather than copying failed
+transcripts or rotating by time/turn count. Follow-ups continue history without
+resetting context.
 
 ## Nested Execution
 
