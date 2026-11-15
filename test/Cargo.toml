@@ -114,7 +114,7 @@ ipnet = { workspace = true, features = ["std"] }
 base64 = { workspace = true, features = ["std"] }
 csv = { workspace = true }
 camino = { workspace = true }
-tempfile = { workspace = true }
+tempfile = { workspace = true, features = ["getrandom"] }
 walkdir = { workspace = true }
 fs-err = { workspace = true }
 strsim = { workspace = true }

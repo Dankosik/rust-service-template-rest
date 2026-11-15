@@ -8,6 +8,10 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+# Shared via #[path] across tests/jetstream/main.rs and test/tests/messaging_outbox.rs.
+[package.metadata.cargo-shear]
+ignored-paths = ["tests/support/relay.rs"]
+
 [features]
 integration = []
 
@@ -80,7 +84,7 @@ metrics-exporter-prometheus = { workspace = true }
 opentelemetry_sdk = { workspace = true, features = ["testing", "trace"] }
 proptest = { workspace = true, features = ["std"] }
 rcgen = { workspace = true, features = ["crypto", "pem", "aws_lc_rs"] }
-tempfile = { workspace = true }
+tempfile = { workspace = true, features = ["getrandom"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util", "net", "io-util"] }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }
 tracing-subscriber = { workspace = true, features = ["std", "registry"] }

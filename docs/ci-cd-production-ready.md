@@ -44,9 +44,10 @@ job names, triggers, tool pins, and gate definitions. Cross-file policies:
 ### Profile-conditioned gates
 
 <!-- template:begin grpc:docs-ci-grpc-gates -->
-- **gRPC:** `grpc` checks Buf lint/format, codegen drift, and PR-base `FILE`
-  compatibility; `security` checks `tools/grpc-codegen/Cargo.toml` against
-  `deny.toml` on `cargo_dependencies` or `dependency_policy`.
+- **gRPC:** `grpc` checks Buf lint/format, generator Clippy/rustdoc, codegen
+  drift, and PR-base `FILE` compatibility; `security` checks
+  `tools/grpc-codegen/Cargo.toml` against `tools/grpc-codegen/deny.toml` on
+  `cargo_dependencies` or `dependency_policy`.
 <!-- template:end grpc:docs-ci-grpc-gates -->
 <!-- template:begin postgres:docs-ci-postgres-gates -->
 - **PostgreSQL:** `quality` checks forward-only migrations, Squawk lint on
@@ -149,7 +150,7 @@ each reopen condition.
 | `tools/versions.env` (`NAME=value`) sourced by Make, shell, and CI | `mise`, `cargo-run-bin`, `tools/Cargo.toml`, `cargo-binstall` | Needs no parser; `mise` reopens if tools outgrow Cargo + Go + Node + Docker |
 | Cargo tools built once into `<git-common-dir>/tools` locally; `taiki-e/install-action` in CI | Compiling per CI run | Compiling all four took ~6 min (`cargo-shear` 58 s, `cargo-deny` 121 s, `zizmor` 161 s) |
 | SHA256-verified static `cargo-chef` and `cargo-auditable` in Dockerfile | `cargo install` in builder; `cargo-binstall` | Compiling cost 67 s of a 728 s cold 4-vCPU build; `make tools-check` enforces `ARG` parity |
-| Redocly via `npx`; `oasdiff`, Gitleaks, `actionlint` via `go run` | Per-binary checksum scripts | `npx`/Go checksum DB verify downloads; `make actionlint` disables host tools for parity |
+| Redocly, `jscpd`, Squawk via `npx` (`--ignore-scripts`, `npm_config_before` publish-age cooldown); `oasdiff`, `buf`, Gitleaks, `actionlint` via `go run` | Per-binary checksum scripts | `npx` cooldown/script guard and Go checksum DB harden downloads; `make actionlint` disables host tools for parity |
 | `ruff` via `uvx` (`pipx run` in CI), defect rules only (`ruff.toml`) | `requirements.txt`; native binary; formatter | One pinned PyPI linter (`make actionlint` disables pyflakes) |
 | ShellCheck, Trivy, lychee as digest-pinned containers | Native binaries | No Cargo/Go module path; Docker is already required for image work |
 | Base digests in Dockerfile `FROM` (Dependabot); `tools/versions.env` bumped via `dependency-drift` | Duplicating digests in manifest; Renovate regex | One owner per pin; `make tools-check` verifies `FROM` digests and `rust:<channel>` parity |
@@ -158,7 +159,7 @@ each reopen condition.
 
 | Gate | Decision | Rejected | Why |
 | --- | --- | --- | --- |
-| Policy (`deny.toml`) | `cargo-deny` over Linux gnu targets, `allow-wildcard-paths = true`, `multiple-versions = "warn"`, zero advisory ignores | `cargo-audit`; `cargo-vet` | Excludes macOS-only crates; path deps need `allow-wildcard-paths` |
+| Policy (`deny.toml`) | `cargo-deny` over Linux gnu targets, `allow-wildcard-paths = true`, `unmaintained = "all"`, `unsound = "all"`, `multiple-versions = "deny"` with explicit `skip`, zero advisory ignores | `cargo-audit`; `cargo-vet` | Excludes macOS-only crates; path deps need `allow-wildcard-paths`; warns as skipped duplicates retire |
 | Unused deps | `cargo-shear` on workspace and initializer graphs | `cargo-machete`; `cargo-udeps` | Catches orphaned deps in profile graphs (55/68 failed before pruning) |
 | Test adequacy | `cargo-mutants` local-only (`make mutants PKG=<crate>`) | PR mutation gate; `mutagen` | 71 mutants in `infra-grpc/router.rs` took 17 min; survivors guide assertions |
 | Binary inventory | `cargo auditable build` | Plain `cargo build` | Embeds `pkg:cargo` dependency metadata for Trivy inside shipped binaries |
@@ -217,10 +218,10 @@ slower musl-hosted `rustc` compiles.
 
 Builder and runtime share `debian13` (`trixie` binaries fail on `debian12`).
 `cargo-chef` cooks dependencies in a plain layer for registry cache export, and
-each binary builds in parallel with `cargo auditable build`. `rust-toolchain.toml`
-stays out of `.dockerignore` to prevent per-stage `rustup` downloads. Locked
-builds produced byte-identical binaries (`CARGO_INCREMENTAL=0`, `strip = true`,
-`SOURCE_DATE_EPOCH`), while APT indexes, `docker/dockerfile:1`, and upstream
+each binary builds in parallel with `cargo auditable build`. `.dockerignore`
+excludes `rust-toolchain.toml` from the build context to prevent per-stage
+`rustup` downloads. Locked builds produced byte-identical binaries
+(`CARGO_INCREMENTAL=0`, `strip = true`, `SOURCE_DATE_EPOCH`), while APT indexes, `docker/dockerfile:1`, and upstream
 downloads remain mutable; rollback custody retains the accepted image digest.
 `app.version` comes from Cargo, `app.commit` from `VCS_REF`, and `distroless`
 tags are digest-pinned.
@@ -273,6 +274,8 @@ favor of IaC.
 - **`mise`:** Tools outgrowing Cargo + Go + Node + Docker.
 - **`cargo-vet` / Renovate regex:** Per-service policy in a derived repo.
 - **Multi-platform image:** Consumer deploying on another architecture.
-- **Second `tower-http` (`axum-tracing-opentelemetry` via `reqwest`):** Warning
-  until upstream converges.
+- **Skipped duplicate crates in `deny.toml` (`tower-http`, RustCrypto digest/MAC
+  pairs, `rand`/`getrandom`, `base64`, `hashbrown`, `syn`, `untrusted`):**
+  Explicit `skip` entries until upstream converges (`cargo-deny` warns as each
+  retires).
 - **BuildKit `rewrite-timestamp`:** Consumer requiring identical image digests.

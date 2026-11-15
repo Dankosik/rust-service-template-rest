@@ -14,6 +14,10 @@ use std::{
 use prost::Message;
 use prost_types::FileDescriptorSet;
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "offline build-time codegen CLI without an async runtime"
+)]
 fn main() -> Result<(), Box<dyn Error>> {
     let mut arguments = env::args_os();
     let program = arguments.next().unwrap_or_default();
