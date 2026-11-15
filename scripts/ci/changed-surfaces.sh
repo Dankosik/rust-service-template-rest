@@ -299,7 +299,7 @@ classify() {
 	if [[ ${messaging} == nats-jetstream ]]; then case "${file}" in
 	Cargo.toml | Cargo.lock | crates/domain-events/* | crates/infra-messaging/* | crates/config/Cargo.toml | crates/config/src/messaging.rs | \
 	crates/jobs-worker/* | crates/service/Cargo.toml | crates/service/src/bootstrap/* | env/docker-compose.yml | env/nats/* | \
-	test/tests/messaging_outbox.rs | test/tests/messaging_recovery.rs | test/examples/messaging_recovery* | test/fixtures/messaging_recovery.sql | test/fixtures/messaging-recovery-compose.yml | scripts/ci/messaging-recovery.* | scripts/ci/messaging_recovery_scenarios.py | scripts/ci/messaging_recovery_capacity.py | scripts/tests/messaging-recovery-test.py | scripts/ci/test-integration-db.sh | scripts/ci/test-integration-messaging.sh | scripts/messaging-go-compat.sh | make/template.mk | .github/workflows/ci.yml)
+	test/tests/messaging_outbox.rs | test/tests/messaging_recovery.rs | test/fixtures/messaging_recovery.sql | scripts/ci/test-integration-db.sh | scripts/ci/test-integration-messaging.sh | scripts/messaging-go-compat.sh | make/template.mk | .github/workflows/ci.yml)
 		mark messaging_integration
 		;;
 	esac; fi
@@ -335,7 +335,7 @@ classify() {
 		esac
 		case "${file}" in
 		.redocly.yaml | api/openapi/* | crates/infra-http/src/webhooks.rs | crates/service/src/api.rs | \
-		scripts/ci/openapi-artifact.py | scripts/tests/openapi-generation.py) mark openapi ;;
+		scripts/ci/openapi-artifact.py) mark openapi ;;
 		esac
 		# template:begin grpc:classifier-grpc-schema
 		case "${file}" in
@@ -391,11 +391,9 @@ classify() {
 		esac
 		case "${file}" in
 		.editorconfig | .gitattributes | .gitignore | LICENSE | .github/CODEOWNERS | .github/ISSUE_TEMPLATE/*) mark no_validation_required ;;
-		# Report-only rules read by `make modernize-scan`; nothing gates on them.
-		tools/modernize/*) mark no_validation_required ;;
 		esac
 		case "${file}" in
-		template.lock | template-owned.paths | scripts/lib/template_*.py | scripts/lib/template_profiles.json | Makefile | make/*.mk | scripts/ci/build-context.py | scripts/ci/runtime-image-inventory.py | scripts/ci/runtime-image-scan.sh | scripts/tests/runtime-image-inventory.py | scripts/ci/image-inputs-check.py | scripts/tests/image-inputs-check.py | scripts/ci/changed-surfaces.sh | scripts/ci/git-changed-paths.sh | scripts/ci/affected-crates.sh | scripts/ci/verify.sh | scripts/ci/validation-lock.sh | scripts/ci/validation-lock.py | scripts/tests/validation-lock-test.py | scripts/ci/measure.sh)
+		template.lock | template-owned.paths | scripts/lib/template_*.py | scripts/lib/template_profiles.json | Makefile | make/*.mk | scripts/ci/runtime-image-inventory.py | scripts/ci/runtime-image-scan.sh | scripts/tests/runtime-image-inventory.py | scripts/ci/image-inputs-check.py | scripts/tests/image-inputs-check.py | scripts/ci/changed-surfaces.sh | scripts/ci/git-changed-paths.sh | scripts/ci/affected-crates.sh | scripts/ci/verify.sh | scripts/ci/validation-lock.sh | scripts/ci/validation-lock.py | scripts/tests/validation-lock-test.py | scripts/ci/measure.sh)
 			mark validation_system
 			;;
 		esac
@@ -405,14 +403,8 @@ classify() {
 		# and tests or the initializer itself; the canonical projections alone
 		# prove projected text.
 		if [[ ${source_only} == true ]]; then case "${file}" in
-		# Removed from every generated consumer; their Rust owner still gets
-		# ordinary compile/test routing, but native restore stays explicit.
-		test/tests/consumer_lifecycle.rs | test/examples/consumer_lifecycle_actor.rs | scripts/ci/consumer-lifecycle-check.sh)
-			mark module_initializer
-			;;
 		Cargo.toml | Cargo.lock | rust-toolchain.toml | template.lock | Makefile | make/*.mk | \
 		api/openapi/* | env/config/* | .github/workflows/ci.yml | \
-		scripts/ci/build-context.py | \
 		scripts/init-module.sh | scripts/template-sync.sh | scripts/template-upgrade.sh | scripts/lib/template_*.py | scripts/lib/template_profiles.json | \
 		template-owned.paths | \
 		scripts/ci/template-init-check.sh | scripts/ci/initializer-matrix.py | scripts/tests/template-* | scripts/tests/fixtures/template-profiles-b206.json | scripts/tests/fixtures/historical_profiles.py | \
@@ -673,13 +665,8 @@ HOOK
 	assert_case crates/infra-jobs/src/enqueue.rs \
 		"rust_source db_integration messaging_integration module_initializer initializer_runtime" \
 		"cargo_dependencies migrations"
-	for file in test/examples/messaging_recovery.rs test/examples/messaging_recovery/effect.rs test/examples/messaging_recovery/capacity.rs test/tests/messaging_recovery.rs; do
-		assert_case "${file}" "rust_source db_integration messaging_integration" "cargo_dependencies migrations"
-	done
+	assert_case test/tests/messaging_recovery.rs "rust_source db_integration messaging_integration" "cargo_dependencies migrations"
 	assert_case test/fixtures/messaging_recovery.sql "db_integration messaging_integration" "migrations"
-	for file in scripts/ci/messaging-recovery.sh scripts/ci/messaging-recovery.py scripts/ci/messaging_recovery_scenarios.py scripts/ci/messaging_recovery_capacity.py scripts/tests/messaging-recovery-test.py test/fixtures/messaging-recovery-compose.yml; do
-		assert_case "${file}" "messaging_integration" "migrations"
-	done
 	rm -rf "${classifier_root}/crates/infra-messaging"
 	mkdir -p "${classifier_root}/crates/infra-cache/src"
 	: >"${classifier_root}/crates/infra-cache/src/lib.rs"
@@ -791,7 +778,6 @@ HOOK
 		"openapi" \
 		"rust_source documentation"
 	assert_case scripts/ci/openapi-artifact.py "openapi python cargo_dependencies module_initializer" "rust_source documentation"
-	assert_case scripts/tests/openapi-generation.py "openapi python" "rust_source documentation"
 	# template:begin grpc:classifier-grpc-tests
 	for file in api/proto/example/v1/echo.proto crates/grpc-contracts/src/generated/example.v1.rs tools/grpc-codegen/Cargo.toml buf.yaml; do
 		assert_case "${file}" "grpc_schema" "openapi runtime_image"
@@ -820,11 +806,6 @@ HOOK
 	done
 	assert_case scripts/ci/image-results.py \
 		"github_workflows validation_system module_initializer" "runtime_image initializer_runtime cargo_dependencies"
-	assert_case scripts/ci/consumer-lifecycle-check.sh \
-		"shell module_initializer" "runtime_image initializer_runtime initializer_artifacts"
-	for file in test/tests/consumer_lifecycle.rs test/examples/consumer_lifecycle_actor.rs; do
-		assert_case "${file}" "rust_source db_integration module_initializer" "runtime_image initializer_runtime initializer_artifacts"
-	done
 	assert_case scripts/ci/runtime-image-inventory.py \
 		"runtime_image validation_system module_initializer initializer_artifacts" "initializer_runtime cargo_dependencies"
 	assert_case scripts/ci/runtime-image-scan.sh \
@@ -883,9 +864,6 @@ HOOK
 	assert_case opencode.json \
 		"agent_instructions" \
 		"documentation no_validation_required"
-	assert_case tools/modernize/rules/fixed-windows.yml \
-		"no_validation_required" \
-		"rust_source python validation_system"
 	for file in scripts/agent-roles-sync.sh scripts/codex-agents-sync.sh scripts/harness-skills-sync.sh scripts/lib/sync-cli.sh; do
 		assert_case "${file}" \
 			"agent_instructions shell" \
@@ -920,9 +898,7 @@ HOOK
 			"rust_source cargo_dependencies runtime_image module_initializer initializer_runtime" \
 			"migrations dependency_policy"
 	done
-	for file in scripts/ci/hotpath-vendor-check.py scripts/ci/hotpath-mcp-check.py; do
-		assert_case "${file}" "cargo_dependencies" "rust_source runtime_image validation_system"
-	done
+	assert_case scripts/ci/hotpath-mcp-check.py "cargo_dependencies" "rust_source runtime_image validation_system"
 	for file in vendor/sqlx-core/src/pool/connection.rs vendor/sqlx-core/Cargo.toml vendor/sqlx-core/PATCHES.md; do
 		assert_case "${file}" \
 			"rust_source cargo_dependencies db_integration runtime_image module_initializer initializer_runtime" \
@@ -1002,10 +978,6 @@ HOOK
 			"validation_system module_initializer" \
 			"shell rust_source cargo_dependencies initializer_runtime"
 	done
-
-	assert_case scripts/ci/build-context.py \
-		"validation_system module_initializer initializer_runtime" \
-		"shell rust_source cargo_dependencies"
 
 	output="$(printf '%s\n' Cargo.toml | (cd "${classifier_root}" && bash scripts/ci/changed-surfaces.sh))"
 	local cargo_surface_count=8
@@ -1159,7 +1131,11 @@ PY_LOCK
 	if [[ -f ${root}/scripts/ci/service-changed-surfaces.sh ]]; then
 		cp "${root}/scripts/ci/service-changed-surfaces.sh" "${classifier_root}/scripts/ci/service-changed-surfaces.sh"
 	fi
-	output="$(git -C "${root}" ls-files | (cd "${classifier_root}" && bash scripts/ci/changed-surfaces.sh))"
+	output="$(git -C "${root}" ls-files | while IFS= read -r file; do
+		if [[ -e ${root}/${file} || -L ${root}/${file} ]]; then
+			printf '%s\n' "${file}"
+		fi
+	done | (cd "${classifier_root}" && bash scripts/ci/changed-surfaces.sh))"
 	has_line "${output}" 'classified=true'
 
 	# The union keeps a surface either classifier selects. When HEAD predates

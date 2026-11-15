@@ -667,32 +667,17 @@ def _assert_recovery_example_output(initializer, nodes: dict[str, Node], *, reta
     payload = worker.payload if worker is not None and isinstance(worker.payload, bytes) else b""
     if bool(re.search(rb"\bpub\s+fn\s+with_postgres_messages\b", payload)) != retained:
         raise initializer.Refusal("deferred message factory did not follow the outbox profile")
-    manifest = nodes.get("test/Cargo.toml")
-    content = manifest.payload if manifest is not None and isinstance(manifest.payload, bytes) else b""
-    examples = tomllib.loads(content.decode()).get("example", [])
-    if any(example.get("name") == "messaging_recovery" for example in examples) != retained:
-        raise initializer.Refusal("durable-effect executable did not follow the outbox profile")
-    for path in ("test/examples/messaging_recovery.rs", "test/examples/messaging_recovery/effect.rs",
-                 "test/fixtures/messaging_recovery.sql", "test/tests/messaging_recovery.rs", "scripts/ci/messaging_recovery_scenarios.py"):
+    for path in ("test/fixtures/messaging_recovery.sql", "test/tests/messaging_recovery.rs"):
         if (path in nodes) != retained:
-            raise initializer.Refusal(f"durable-effect example projection mismatch: {path}")
+            raise initializer.Refusal(f"outbox recovery fixture projection mismatch: {path}")
     messaging = "crates/infra-messaging/Cargo.toml" in nodes
-    for path in ("crates/infra-messaging/examples/dlq_recovery.rs", "scripts/ci/messaging-recovery.sh",
-                 "scripts/ci/messaging-recovery.py", "scripts/tests/messaging-recovery-test.py",
-                 "test/fixtures/messaging-recovery-compose.yml"):
-        if (path in nodes) != messaging:
-            raise initializer.Refusal(f"owned DLQ workflow projection mismatch: {path}")
+    if ("crates/infra-messaging/examples/dlq_recovery.rs" in nodes) != messaging:
+        raise initializer.Refusal("owned DLQ example projection mismatch")
     if messaging:
         manifest = nodes["crates/infra-messaging/Cargo.toml"]
         examples = tomllib.loads(manifest.payload.decode()).get("example", [])
         if not any(example.get("name") == "dlq_recovery" for example in examples):
             raise initializer.Refusal("messaging-only output lost the DLQ executable")
-        controller = nodes["scripts/ci/messaging-recovery.py"].payload
-        if (b"from messaging_recovery_scenarios import rehearse" in controller) != retained:
-            raise initializer.Refusal("native rehearsal command did not follow the outbox profile")
-        workflow = nodes[".github/workflows/ci.yml"].payload
-        if (b"RECOVERY_COMMAND=rehearse" in workflow) != retained:
-            raise initializer.Refusal("native rehearsal invocation did not follow the outbox profile")
 
 
 def _check_grpc_projections(source: Path, candidate: str, initializer, work: Path) -> None:

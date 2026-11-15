@@ -20,15 +20,11 @@ if [[ -z ${requested_image} ]]; then
 fi
 
 history_container=''
-history_resource=''
 cleanup() {
 	local status=$?
 	trap - EXIT INT TERM HUP
-	if [[ -n ${history_resource} ]]; then
-		if ! bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-cleanup "${history_resource}"; then
-			echo "validation history container cleanup incomplete" >&2
-			if [[ ${status} == 0 ]]; then status=1; fi
-		fi
+	if [[ -n ${history_container} ]]; then
+		docker rm -f -v "${history_container}" >/dev/null 2>&1 || true
 	fi
 	if ! compose_postgres_down; then
 		echo "validation PostgreSQL cleanup incomplete" >&2
@@ -48,20 +44,12 @@ dsn=$(compose_postgres_network_dsn)
 # entrypoint in the same image.
 run_migrate() {
 	local name="service-migrate-${VALIDATION_LOCK_TOKEN:0:12}-$$-$1"
-	local resource status=0
-	resource=$(bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-register container "${name}") || return
-	bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-run "${resource}" -- \
-		docker run --rm --name "${name}" --label "dev.rust-service.validation-owner=${VALIDATION_LOCK_TOKEN}" \
+	docker run --rm --name "${name}" \
 		--network "${COMPOSE_NETWORK}" \
 		--read-only --cap-drop=ALL --security-opt=no-new-privileges \
 		-e APP__POSTGRES__ENABLED=true \
 		-e "APP__POSTGRES__DSN=${dsn}" \
-		--entrypoint "${2:-/migrate}" "${image}" || status=$?
-	if ! bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-cleanup "${resource}"; then
-		echo "validation migrator cleanup incomplete: ${resource}" >&2
-		if [[ ${status} == 0 ]]; then status=1; fi
-	fi
-	return "${status}"
+		--entrypoint "${2:-/migrate}" "${image}"
 }
 
 # A nonempty embedded set cannot admit an absent history: startup checks it
@@ -70,15 +58,12 @@ run_migrate() {
 # contract by skipping this nonempty-source scenario.
 if compgen -G 'migrations/*.sql' >/dev/null; then
 	history_name="service-migration-history-${VALIDATION_LOCK_TOKEN:0:12}-$$"
-	history_resource=$(bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-register container "${history_name}")
-	history_container=$(bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-run "${history_resource}" -- \
-		docker run -d --name "${history_name}" \
-		--label "dev.rust-service.validation-owner=${VALIDATION_LOCK_TOKEN}" --network "${COMPOSE_NETWORK}" \
+	history_container=$(docker run -d --name "${history_name}" \
+		--network "${COMPOSE_NETWORK}" \
 		--read-only --cap-drop=ALL --security-opt=no-new-privileges \
 		-e APP__POSTGRES__ENABLED=true \
 		-e "APP__POSTGRES__DSN=${dsn}" \
 		"${image}")
-	bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-bind "${history_resource}" "${history_container}"
 	history_deadline=$((SECONDS + 30))
 	while [[ $(docker inspect --format '{{.State.Running}}' "${history_container}") == true ]]; do
 		if ((SECONDS >= history_deadline)); then
@@ -90,9 +75,8 @@ if compgen -G 'migrations/*.sql' >/dev/null; then
 	done
 	history_exit=$(docker inspect --format '{{.State.ExitCode}}' "${history_container}")
 	history_refusal=$(docker logs "${history_container}" 2>&1)
-	bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-cleanup "${history_resource}"
+	docker rm -f -v "${history_container}" >/dev/null 2>&1 || true
 	history_container=''
-	history_resource=''
 	if [[ ${history_exit} == 0 ]]; then
 		echo "service admitted missing migration history" >&2
 		printf '%s\n' "${history_refusal}" >&2

@@ -1,26 +1,26 @@
 #!/usr/bin/env python3
-"""Admit the root-context image watch policy, without executing IaC.
-
-The policy table in the deployment profile and the IaC form must agree. The IaC
-form is `.railway/railway.ts` when the repository has it; a repository
-initialized before the template shipped that file keeps the form as a `ts`
-snippet in the profile document. An IaC file that deploys a published image
-and declares no build settings leaves Railway no repository context to watch.
-"""
+"""Verify that .railway/railway.ts watchPatterns cover all Docker build context inputs."""
 
 from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 import re
 import shlex
 import sys
+from pathlib import Path
 
-POLICY = "docs/railway-deployment-profile.md"
 IAC = ".railway/railway.ts"
 DOCKERFILE = "build/docker/Dockerfile"
 _LITERAL = re.compile(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*")
+_FORBIDDEN_CONTEXT_KEYS = (
+    "rootDirectory",
+    "context",
+    "buildContext",
+    "additionalContexts",
+    "dockerContext",
+    "buildCommand",
+)
 
 
 class Refusal(ValueError):
@@ -31,184 +31,79 @@ def literal(path: str) -> bool:
     return bool(_LITERAL.fullmatch(path)) and all(part not in {".", ".."} for part in path.split("/"))
 
 
-def one(values: list[str], owner: str) -> str:
-    if len(values) != 1:
-        raise Refusal(f"{owner}: expected exactly one literal policy form, found {len(values)}")
-    return values[0]
-
-
-def watch_set(values: list[str], owner: str) -> set[str]:
-    for value in values:
-        base = value[:-3] if value.endswith("/**") else value
-        if not literal(base):
-            raise Refusal(f"{owner}: unsupported watch syntax {value!r}; use a literal file or directory/**")
-    if not values or len(set(values)) != len(values):
-        raise Refusal(f"{owner}: empty or duplicate watch patterns")
-    return set(values)
-
-
-def top_level_parts(code: str, separator: str) -> list[str]:
-    closing = {"(": ")", "[": "]", "{": "}"}
-    stack: list[str] = []
-    parts = []
-    declaration = re.compile(r"[ \t]*(?:import|const|export)\b")
-    start = 0
-    for i, char in enumerate(code):
-        if char in closing:
-            stack.append(closing[char])
-        elif char in ")]}":
-            if not stack or char != stack.pop():
-                return []
-        elif not stack and (char == separator or (
-                separator == ";" and char == "\n" and declaration.match(code, i + 1))):
-            parts.append(code[start:i].strip())
-            start = i + 1
-    if code[start:].strip():
-        parts.append(code[start:].strip())
-    return [] if stack else parts
-
-
-def selected_image_service(code: str) -> bool:
-    identifier = r"[A-Za-z_$][\w$]*"
-    primitives = {"service", "image", "defineRailway", "project"}
-    imported = set()
-    other_bindings = set()
-    statements = [part for part in top_level_parts(code, ";") if part]
-    for statement in statements[:-1]:
-        if re.fullmatch(r'import\s*"(?:railway/iac)?"', statement):
-            continue
-        module = re.fullmatch(
-            rf'import\b\s*(?P<type>type\s+)?(?:(?P<default>{identifier})\s*,?\s*)?'
-            rf'(?:\{{(?P<named>[^{{}}]*)\}}|\*\s+as\s+(?P<namespace>{identifier}))?\s*'
-            r'\bfrom\s*"(?P<sdk>railway/iac)?"', statement, re.S)
-        if module:
-            if module["type"]:
-                continue
-            other_bindings.update(name for name in (module["default"], module["namespace"]) if name)
-            for item in (module["named"] or "").split(","):
-                if not item.strip():
-                    continue
-                binding = re.fullmatch(rf"(?:(type)\s+)?({identifier})(?:\s+as\s+({identifier}))?", item.strip())
-                if not binding:
-                    return False
-                if binding[1]:
-                    continue
-                local = binding[3] or binding[2]
-                if module["sdk"] and local == binding[2]:
-                    imported.add(local)
-                else:
-                    other_bindings.add(local)
-            continue
-        declaration = re.fullmatch(rf"(?:export\s+)?const\s+({identifier})\s*=\s*([^=;]+)", statement, re.S)
-        if not declaration or declaration[1] in primitives:
-            return False
-    if not statements or not (export := re.fullmatch(r"export\s+default\s+(.+)", statements[-1], re.S)):
-        return False
-    selected = export[1]
-    required = {"service", "image"}
-    if selected.startswith("defineRailway"):
-        project = re.fullmatch(
-            rf"defineRailway\s*\(\s*\(\s*(?P<context>{identifier})?\s*\)\s*=>\s*\{{\s*"
-            rf"const\s+(?P<resource>{identifier})\s*=\s*(?P<service>.+?)\s*(?:;|\n)\s*"
-            r"return\s+project\s*\(\s*[\w.$?\"\s]+,\s*\{\s*resources\s*:\s*\[\s*(?P=resource)\s*,?\s*\]"
-            r"\s*,?\s*\}\s*,?\s*\)\s*;?\s*\}\s*\)", selected, re.S)
-        if not project or project["context"] in primitives or project["resource"] in primitives:
-            return False
-        selected = project["service"]
-        required.update(("defineRailway", "project"))
-    # A module with bindings must establish the origin of the SDK primitives.
-    if len(statements) > 1 and not required <= imported - other_bindings:
-        return False
-    options = re.fullmatch(rf'service\s*\(\s*(?:{identifier}|"")\s*,\s*\{{(.*)\}}\s*,?\s*\)', selected, re.S)
-    if not options:
-        return False
-    sources = []
-    for field in top_level_parts(options[1], ","):
-        prop = re.fullmatch(rf"({identifier})(?:\s*:\s*(.+))?", field, re.S)
-        if not prop:
-            return False
-        if prop[1] == "source":
-            sources.append(prop[2] or "")
-    if len(sources) != 1 or not (image := re.fullmatch(r"image\s*\((.*)\)", sources[0], re.S)):
-        return False
-    return bool(top_level_parts(image[1], ","))
-
-
-def policy_watches(root: Path) -> tuple[set[str] | None, str]:
-    text = (root / POLICY).read_text()
-
-    def table(key: str) -> str:
-        return one(re.findall(r"^\| `" + re.escape(key) + r"` \| ([^|]+) \|", text, re.M), f"{POLICY} table {key}")
-
-    iac = root / IAC
-    if iac.exists() or iac.is_symlink():
-        source = IAC
-        program = iac.read_text()
-    else:
-        # Remove this fallback once no supported repository predates IAC.
-        source = f"{POLICY} IaC snippet"
-        program = one([block for block in re.findall(r"```ts\n(.*?)\n```", text, re.S) if "watchPatterns" in block], source)
-    # Comments are explanatory prose, never configuration. Strings are admitted below.
+def strip_comments_and_strings(program: str) -> tuple[str, str]:
     tokens = r""""(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`|//[^\n]*|/\*[\s\S]*?\*/"""
-    program = re.sub(tokens, lambda m: " " if m[0].startswith("/") else m[0], program)
-    # A string such as "[::]:8080" is a value, not a computed key.
+    uncommented = re.sub(tokens, lambda m: " " if m[0].startswith("/") else m[0], program)
+
     def mask_value(match: re.Match[str]) -> str:
         key = match[0][1:-1]
-        if key == "railway/iac":
-            return '"railway/iac"'
-        if key.isidentifier() and re.match(r"\s*:", program[match.end():]):
+        if key.isidentifier() and re.match(r"\s*:", uncommented[match.end() :]):
             return key
         return '""'
 
-    code = re.sub(tokens, mask_value, program)
-    if "..." in code or re.search(r"\[[^\]]+\]\s*:", code):
-        raise Refusal(f"{source}: unsupported computed/spread IaC policy; use explicit build settings")
+    return uncommented, re.sub(tokens, mask_value, uncommented)
 
-    def has_setting(key: str) -> bool:
-        return bool(re.search(r"[{,]\s*" + key + r"\s*[:,}]", code))
 
-    for key in ("rootDirectory", "context", "buildContext", "additionalContexts", "dockerContext", "buildCommand"):
-        if has_setting(key) or re.search(r"^\|[^|]*\b" + key + r"\b", text, re.M):
-            raise Refusal(f"{source}: unsupported {key}; coverage requires the repository root build context")
-    if (source == IAC and not re.search(r"^\|\s*`?build\.", text, re.M)
-            and not any(has_setting(key) for key in ("build", "builder", "dockerfilePath", "watchPatterns"))
-            and selected_image_service(code)):
-        return None, source
-    table_patterns = table("build.watchPatterns")
-    if not re.fullmatch(r"\s*`[^`]+`(?:\s*,\s*`[^`]+`)*\s*", table_patterns):
-        raise Refusal(f"{POLICY}: watch table must contain only comma-separated literal patterns")
-    table_set = watch_set(re.findall(r"`([^`]+)`", table_patterns), f"{POLICY} table")
-    for key in ("builder", "dockerfilePath", "watchPatterns"):
-        if len(re.findall(r"\b" + key + r"\s*:", program)) != 1:
-            raise Refusal(f"{source}: expected exactly one IaC {key} setting")
+def policy_watches(root: Path) -> set[str] | None:
+    iac_path = root / IAC
+    if not iac_path.is_file():
+        raise Refusal(f"{IAC}: missing Railway IaC configuration")
+    uncommented, masked = strip_comments_and_strings(iac_path.read_text(encoding="utf-8"))
+
+    if "..." in masked or re.search(r"\[[^\]]+\]\s*:", masked):
+        raise Refusal(f"{IAC}: unsupported computed/spread IaC policy; use explicit build settings")
+
+    for key in _FORBIDDEN_CONTEXT_KEYS:
+        if re.search(r"[{,]\s*" + key + r"\s*[:,}]", masked):
+            raise Refusal(f"{IAC}: unsupported {key}; coverage requires the repository root build context")
+
+    has_build = any(
+        re.search(r"[{,]\s*" + key + r"\s*[:,}]", masked)
+        for key in ("build", "builder", "dockerfilePath", "watchPatterns")
+    )
+    if not has_build:
+        if re.search(r"\bsource\s*:\s*image\s*\([^)]+\)", masked) and not re.search(r"\bgithub\s*\(", masked):
+            return None
+        raise Refusal(f"{IAC}: expected explicit build.watchPatterns or a published-image service")
+
     for key, expected in (("builder", "DOCKERFILE"), ("dockerfilePath", DOCKERFILE)):
-        row = table("build." + key).strip()
-        actual = one(re.findall(r"\b" + key + r'\s*:\s*"([^"\n]+)"\s*,', program), f"{source} {key}")
-        if row != f"`{expected}`" or actual != expected:
-            raise Refusal(f"{source}: build.{key} must select {expected!r} in the table and the IaC form")
-    patterns = one(re.findall(r"\bwatchPatterns\s*:\s*\[([^\]]*)\]", program, re.S), f"{source} watchPatterns")
-    # JSON strings plus an optional trailing comma are the supported data subset.
+        matches = re.findall(r"\b" + key + r'\s*:\s*"([^"\n]+)"', uncommented)
+        if len(matches) != 1 or matches[0] != expected:
+            raise Refusal(f"{IAC}: build.{key} must appear once and equal {expected!r}")
+
+    patterns = re.findall(r"\bwatchPatterns\s*:\s*\[([^\]]*)\]", uncommented, re.S)
+    if len(patterns) != 1:
+        raise Refusal(f"{IAC}: expected exactly one literal watchPatterns array")
+
     try:
-        values = json.loads("[" + re.sub(r",\s*$", "", patterns) + "]")
+        values = json.loads("[" + re.sub(r",\s*$", "", patterns[0]) + "]")
     except json.JSONDecodeError as error:
-        raise Refusal(f"{source}: watchPatterns must be a literal string array; {error.msg}") from error
-    if not all(isinstance(value, str) for value in values):
-        raise Refusal(f"{source}: watchPatterns must contain literal strings only")
-    iac_set = watch_set(values, source)
-    if table_set != iac_set:
-        raise Refusal(f"{source}: watch forms disagree; table-only={sorted(table_set - iac_set)}, IaC-only={sorted(iac_set - table_set)}")
-    return table_set, source
+        raise Refusal(f"{IAC}: watchPatterns must be a literal string array; {error.msg}") from error
+
+    if not values or not all(isinstance(value, str) for value in values) or len(set(values)) != len(values):
+        raise Refusal(f"{IAC}: watchPatterns must be non-empty, unique literal strings")
+
+    for value in values:
+        base = value[:-3] if value.endswith("/**") else value
+        if not literal(base):
+            raise Refusal(f"{IAC}: unsupported watch syntax {value!r}; use a literal file or directory/**")
+
+    return set(values)
 
 
 def input_families(root: Path) -> set[str]:
-    rules = [(number, line.strip()) for number, line in enumerate((root / ".dockerignore").read_text().splitlines(), 1)
-             if line.strip() and not line.startswith("#")]
+    rules = [
+        (number, line.strip())
+        for number, line in enumerate((root / ".dockerignore").read_text(encoding="utf-8").splitlines(), 1)
+        if line.strip() and not line.startswith("#")
+    ]
     if not rules or rules[0][1] != "*":
         raise Refusal(".dockerignore: supported coverage starts with '*' and explicit literal !file or !directory/ inclusions")
     inputs = {DOCKERFILE, ".dockerignore"}
+    if (root / "rust-toolchain.toml").is_file():
+        inputs.add("rust-toolchain.toml")
     for number, rule in rules[1:]:
         if not rule.startswith("!"):
-            # Exclusions only narrow the conservative obligations from inclusions.
             continue
         path = rule[1:]
         directory = path.endswith("/")
@@ -230,15 +125,14 @@ def check_dockerfile(root: Path) -> None:
     override = root / (DOCKERFILE + ".dockerignore")
     if override.exists() or override.is_symlink():
         raise Refusal(f"{DOCKERFILE}.dockerignore: Dockerfile-specific ignore overrides are unsupported; use the root .dockerignore")
-    text = (root / DOCKERFILE).read_text()
-    if re.search(r"^#\s*escape\s*=", text, re.M | re.I):
-        raise Refusal(f"{DOCKERFILE}: unsupported escape directive; coverage uses the current backslash continuation grammar")
-    # Only current local context COPY and previously declared stages are supported.
-    # External build contexts must not be mistaken for an already covered stage.
+    text = (root / DOCKERFILE).read_text(encoding="utf-8")
+    if re.search(r"^[ \t]*#\s*escape\s*=", text, re.M | re.I):
+        raise Refusal(f"{DOCKERFILE}: unsupported escape directive")
+    stripped = re.sub(r"(?m)^[ \t]*#.*(?:\r?\n|$)", "", text)
     stages: set[str] = set()
     stage_count = 0
-    for line in re.sub(r"\\\n", " ", text).splitlines():
-        if not line.strip() or line.lstrip().startswith("#"):
+    for line in re.sub(r"\\[ \t]*\r?\n", " ", stripped).splitlines():
+        if not line.strip():
             continue
         try:
             parts = shlex.split(line)
@@ -256,26 +150,32 @@ def check_dockerfile(root: Path) -> None:
                     raise Refusal(f"{DOCKERFILE}: unsupported external/named COPY context {source!r}")
             elif operation == "ADD" and remote(parts[1:]):
                 continue
-            elif operation != "COPY" or len(parts) < 3 or any(source != "." and not literal(source.rstrip("/")) for source in parts[1:-1]):
-                raise Refusal(f"{DOCKERFILE}: unsupported context instruction {line.strip()!r}; admit its inputs before changing {POLICY}")
+            elif operation != "COPY" or len(parts) < 3 or any(
+                source != "." and not literal(source.rstrip("/")) for source in parts[1:-1]
+            ):
+                raise Refusal(f"{DOCKERFILE}: unsupported context instruction {line.strip()!r}")
         elif operation == "RUN" and "--mount=" in line:
-            # Secret files arrive through BuildKit, not the repository context.
             mounts = [part.removeprefix("--mount=") for part in parts[1:] if part.startswith("--mount=")]
-            if not mounts or any([field for field in mount.split(",") if field.startswith("type=")] != ["type=secret"] for mount in mounts):
-                raise Refusal(f"{DOCKERFILE}: unsupported RUN mount context; admit its inputs before changing {POLICY}")
+            if not mounts or any(
+                [field for field in mount.split(",") if field.startswith("type=")] != ["type=secret"]
+                for mount in mounts
+            ):
+                raise Refusal(f"{DOCKERFILE}: unsupported RUN mount context")
 
 
 def check(root: Path) -> str:
-    watches, source = policy_watches(root)
+    watches = policy_watches(root)
     if watches is None:
-        return f"{source} deploys a published image; Railway builds no repository context"
+        return f"{IAC} deploys a published image; Railway builds no repository context"
     check_dockerfile(root)
     for family in sorted(input_families(root)):
         path = family[:-3] if family.endswith("/**") else family
-        covered = family in watches or any(watch.endswith("/**") and path.startswith(watch[:-3] + "/") for watch in watches)
+        covered = family in watches or any(
+            watch.endswith("/**") and path.startswith(watch[:-3] + "/") for watch in watches
+        )
         if not covered:
-            raise Refusal(f"{family}: image input is uncovered; add it to build.watchPatterns in {POLICY} and {source}")
-    return f"the policy table and {source} cover admitted image input families"
+            raise Refusal(f"{family}: image input is uncovered; add it to build.watchPatterns in {IAC}")
+    return f"{IAC} covers admitted image input families"
 
 
 def main() -> int:

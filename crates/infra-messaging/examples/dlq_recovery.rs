@@ -1,8 +1,7 @@
-//! Exact-record inspection and immutable publication; the owned controller retires.
+//! Exact-record inspection and immutable dead-letter redrive example.
 //!
 //! `inspect CONNECTION STREAM SEQUENCE SELECTION [--payload]` is read-only.
-//! `redrive SELECTION` is an internal command of messaging-recovery.sh: its
-//! connection and one-use grant come from the owned client container's mount.
+//! `redrive SELECTION` reads its connection and one-use grant from the configured mount.
 
 #[expect(
     clippy::disallowed_types,

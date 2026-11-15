@@ -10,27 +10,7 @@ include tools/versions.env
 
 CARGO ?= cargo
 CARGO_FLAGS ?= --locked
-BUILD_CACHE ?= inherit
-# The helper reads these command-scoped inputs; it never installs the optional
-# cache or changes global Cargo settings. Command-line Make overrides must be
-# visible to both the verifier and the actual Cargo leaf.
-export CARGO CARGO_FLAGS BUILD_CACHE
-# GNU Make exports an explicitly named undefined variable as an empty value.
-# Preserve absent optional inputs; an explicitly supplied empty value still
-# reaches the helper's ordinary validation.
-ifneq ($(origin BUILD_CACHE_BIN),undefined)
-export BUILD_CACHE_BIN
-endif
-ifneq ($(origin BUILD_CACHE_DIR),undefined)
-export BUILD_CACHE_DIR
-endif
-ifneq ($(origin BUILD_CACHE_SIZE),undefined)
-export BUILD_CACHE_SIZE
-endif
-ifneq ($(origin BUILD_MIN_FREE_BYTES),undefined)
-export BUILD_MIN_FREE_BYTES
-endif
-BUILD_CARGO = python3 scripts/ci/build-context.py --run -- $(CARGO)
+export CARGO CARGO_FLAGS
 # Default comparison base for range-scoped gates (secret scan, verify); CI
 # passes the event's base commit.
 BASE_REF ?= origin/main
@@ -85,7 +65,7 @@ NEXTEST_PATH = $(if $(filter $(TOOLS_ROOT)/%,$(CARGO_NEXTEST)),env PATH="$(dir $
 # cores busy: on four slots the suite took 57 s, on eight 34-37 s (10-core
 # workstation, 2026-11-02).
 NEXTEST_TEST_THREADS ?= $(shell echo $$((2 * $$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2))))
-NEXTEST_RUN = $(NEXTEST_PATH) $(BUILD_CARGO) nextest run --no-tests=pass --test-threads=$(NEXTEST_TEST_THREADS) $(CARGO_FLAGS)
+NEXTEST_RUN = $(NEXTEST_PATH) $(CARGO) nextest run --no-tests=pass --test-threads=$(NEXTEST_TEST_THREADS) $(CARGO_FLAGS)
 
 # Go tools resolve through the module checksum database; the first run
 # compiles and caches them.
@@ -96,7 +76,6 @@ ACTIONLINT ?= go run github.com/rhysd/actionlint/cmd/actionlint@v$(ACTIONLINT_VE
 # Python tools run from PyPI at the pinned version: uv locally, pipx on CI
 # runners, which have it preinstalled.
 RUFF ?= $(if $(shell command -v uvx 2>/dev/null),uvx ruff@$(RUFF_VERSION),pipx run ruff==$(RUFF_VERSION))
-AST_GREP ?= $(if $(shell command -v uvx 2>/dev/null),uvx --from ast-grep-cli@$(AST_GREP_VERSION) ast-grep,pipx run --spec ast-grep-cli==$(AST_GREP_VERSION) ast-grep)
 SHELL_FILES = $(wildcard $(shell git ls-files --cached --others --exclude-standard -- '*.sh'))
 # Tracked and untracked Markdown files; `git ls-files` keeps target/ out.
 MARKDOWN_FILES = $(wildcard $(shell git ls-files --cached --others --exclude-standard -- '*.md'))
@@ -117,16 +96,16 @@ TEMPLATE_STANDARD_TARGETS := help template-init build run test test-package test
 	test-integration-object-storage test-object-storage-conformance test-integration-oauth integration-compile migration-check migration-history-self-test migration-validate \
 	native-transport-regressions \
 	plan verify install-hooks verify-check changed-surfaces-check affected-crates-check validation-lock-self-test \
-	duplication-check architecture-check quality-check-self-test modernize-scan
+	duplication-check architecture-check quality-check-self-test
 # template:begin grpc:make-grpc-standard-targets
 TEMPLATE_STANDARD_TARGETS += grpc-generate grpc-check grpc-generator-deny
 # template:end grpc:make-grpc-standard-targets
 # template:begin runtime-progress:make-runtime-progress-standard-targets
 TEMPLATE_STANDARD_TARGETS += runtime-progress-proof
 # template:end runtime-progress:make-runtime-progress-standard-targets
-# template:begin messaging:make-messaging-recovery-targets
-TEMPLATE_STANDARD_TARGETS += messaging-recovery messaging-recovery-self-test messaging-go-compat
-# template:end messaging:make-messaging-recovery-targets
+# template:begin messaging:make-messaging-targets
+TEMPLATE_STANDARD_TARGETS += messaging-go-compat
+# template:end messaging:make-messaging-targets
 
 # A service initialized before the runner existed has no service-owned
 # runner, and portable sync does not add one, so the gate follows the runner.
@@ -143,7 +122,7 @@ SOURCE_CHECK_TARGETS ?=
 # postgres/all; a derived service must have a complete lock. Synchronization
 # never invokes Make, so this lookup is limited to normal local commands.
 POSTGRES_PROFILE_TARGETS := compose-up compose-down test-integration-db sqlx-prepare sqlx-check migration-check migration-history-self-test migration-validate
-MESSAGING_PROFILE_TARGETS := test-integration-messaging messaging-recovery messaging-recovery-self-test messaging-go-compat
+MESSAGING_PROFILE_TARGETS := test-integration-messaging messaging-go-compat
 CACHE_PROFILE_TARGETS := test-integration-cache
 OBJECT_STORAGE_PROFILE_TARGETS := test-integration-object-storage test-object-storage-conformance
 OUTBOUND_AUTH_PROFILE_TARGETS := test-integration-oauth
@@ -232,30 +211,30 @@ template-init: ## Initialize the service identity and selected profiles once
 	@bash scripts/init-module.sh --repo .
 
 build: ## Build every workspace crate in debug mode
-	$(BUILD_CARGO) build --workspace $(CARGO_FLAGS)
+	$(CARGO) build --workspace $(CARGO_FLAGS)
 
 run: ## Start the HTTP service locally with env/config/local.toml
-	$(BUILD_CARGO) run -p $(SERVICE_BIN) $(CARGO_FLAGS) -- --config $(LOCAL_CONFIG)
+	$(CARGO) run -p $(SERVICE_BIN) $(CARGO_FLAGS) -- --config $(LOCAL_CONFIG)
 
 test: $(filter $(TOOLS_ROOT)/%,$(CARGO_NEXTEST)) ## Run the ordinary workspace unit-test suite
 	TEST_PACKAGE_SELECTION=--workspace $(NEXTEST_RUN) --workspace
-	$(BUILD_CARGO) test --doc --workspace --no-fail-fast $(CARGO_FLAGS)
+	$(CARGO) test --doc --workspace --no-fail-fast $(CARGO_FLAGS)
 
 HOTPATH_PROFILE_FEATURES := hotpath,hotpath-alloc,hotpath-mcp,hotpath-cpu,hotpath/hotpath-prometheus
 profiling-check: ## Compile the optional hotpath profiling configurations of the service package
-	$(BUILD_CARGO) check $(CARGO_FLAGS) --manifest-path crates/service/Cargo.toml --all-targets --features hotpath
-	$(BUILD_CARGO) check $(CARGO_FLAGS) --manifest-path crates/service/Cargo.toml --all-targets --features $(HOTPATH_PROFILE_FEATURES)
+	$(CARGO) check $(CARGO_FLAGS) --manifest-path crates/service/Cargo.toml --all-targets --features hotpath
+	$(CARGO) check $(CARGO_FLAGS) --manifest-path crates/service/Cargo.toml --all-targets --features $(HOTPATH_PROFILE_FEATURES)
 	$(CARGO) tree $(CARGO_FLAGS) --manifest-path crates/service/Cargo.toml --features $(HOTPATH_PROFILE_FEATURES) -e features -i hotpath
 
 test-package: $(filter $(TOOLS_ROOT)/%,$(CARGO_NEXTEST)) ## Run one crate's tests; requires PKG=<crate name>
 	@test -n "$(PKG)" || { echo "test-package requires PKG=<crate name>" >&2; exit 2; }
 	TEST_PACKAGE_SELECTION='-p $(PKG)' $(NEXTEST_RUN) -p $(PKG)
-	$(BUILD_CARGO) test --doc -p $(PKG) --no-fail-fast $(CARGO_FLAGS)
+	$(CARGO) test --doc -p $(PKG) --no-fail-fast $(CARGO_FLAGS)
 
 test-changed: $(filter $(TOOLS_ROOT)/%,$(CARGO_NEXTEST)) ## Run the tests of the crates in PKGS="<crate> <crate>"
 	$(REQUIRE_PKGS)
 	TEST_PACKAGE_SELECTION='$(addprefix -p ,$(PKGS))' $(NEXTEST_RUN) $(addprefix -p ,$(PKGS))
-	$(BUILD_CARGO) test --doc $(addprefix -p ,$(PKGS)) --no-fail-fast $(CARGO_FLAGS)
+	$(CARGO) test --doc $(addprefix -p ,$(PKGS)) --no-fail-fast $(CARGO_FLAGS)
 
 # cargo-mutants builds a copy of the workspace, so the run takes the shared
 # validation lock; `--in-place` would leave a mutated tree behind an interrupt.
@@ -274,14 +253,14 @@ test-integration-messaging: ## JetStream adapter proof against a throwaway Compo
 
 # Each runner compiles its suite without Compose when INTEGRATION_COMPOSE_MANAGED=1.
 integration-compile: ## Compile every retained integration suite without running it
-	@for suite in db messaging cache object-storage; do \
+	@for suite in db messaging cache object-storage oauth; do \
 		if [ -f "scripts/ci/test-integration-$$suite.sh" ]; then \
 			INTEGRATION_COMPOSE_MANAGED=1 DATABASE_URL=compile-only PGBOUNCER_DATABASE_URL=compile-only NATS_URL=compile-only \
-				CACHE_URL=compile-only OBJECT_STORAGE_TEST_ENDPOINT=compile-only \
+				CACHE_URL=compile-only OBJECT_STORAGE_TEST_ENDPOINT=compile-only OAUTH_TEST_KEYCLOAK_URL=compile-only \
 				bash "scripts/ci/test-integration-$$suite.sh" --no-run || exit; \
 		fi; \
 	done
-	@if [ -f scripts/messaging-go-compat.sh ]; then $(BUILD_CARGO) test $(CARGO_FLAGS) -p infra-messaging --test wire_compat --no-run; fi
+	@if [ -f scripts/messaging-go-compat.sh ]; then $(CARGO) test $(CARGO_FLAGS) -p infra-messaging --test wire_compat --no-run; fi
 
 # template:begin messaging:make-messaging-go-compat-target
 messaging-go-compat: ## Compare the JetStream wire with the pinned Go service's actual encoder and decoder; requires Go and network
@@ -289,21 +268,10 @@ messaging-go-compat: ## Compare the JetStream wire with the pinned Go service's 
 	@work=$$(mktemp -d) && trap 'rm -rf "$$work"' EXIT && \
 		bash scripts/messaging-go-compat.sh generate "$$work/records.json" && \
 		GO_WIRE_FIXTURES="$$work/records.json" GO_WIRE_RUST_EXPORT="$$work/rust-export.json" \
-			$(BUILD_CARGO) test $(CARGO_FLAGS) -p infra-messaging --test wire_compat -- --ignored --exact rust_production_wire_exports_for_go && \
+			$(CARGO) test $(CARGO_FLAGS) -p infra-messaging --test wire_compat -- --ignored --exact rust_production_wire_exports_for_go && \
 		bash scripts/messaging-go-compat.sh verify-rust "$$work/records.json" "$$work/rust-export.json" && \
 		bash scripts/messaging-go-compat.sh check "$$work/records.json"
 # template:end messaging:make-messaging-go-compat-target
-
-# template:begin messaging:make-messaging-recovery-recipes
-RECOVERY_COMMAND ?= demo
-messaging-recovery: ## Owned R3/TLS demo, rehearse or measure; requires RECOVERY_SESSION=new-dir and RECOVERY_ARTIFACTS=prebuilt-linux-dir
-	$(HEAVY_GUARD)
-	@test -n "$(RECOVERY_SESSION)" -a -n "$(RECOVERY_ARTIFACTS)" || { echo "set RECOVERY_SESSION and RECOVERY_ARTIFACTS" >&2; exit 2; }
-	$(VALIDATION_LOCK) bash scripts/ci/messaging-recovery.sh "$(RECOVERY_COMMAND)" --session "$(RECOVERY_SESSION)" --artifacts "$(RECOVERY_ARTIFACTS)"
-
-messaging-recovery-self-test: ## Controller crash custody and one-record refusal checks without a broker
-	python3 scripts/tests/messaging-recovery-test.py
-# template:end messaging:make-messaging-recovery-recipes
 
 test-integration-cache: ## Valkey adapter proof against a throwaway Compose Valkey; ALLOW_HEAVY=1, REQUIRE_DOCKER=1 to fail without Docker
 	$(HEAVY_GUARD)
@@ -323,7 +291,7 @@ test-object-storage-conformance: ## Live-provider conformance; PROVIDER=amazon_s
 	@case "$(PROVIDER)" in amazon_s3|cloudflare_r2|railway|s3_compatible) ;; *) printf '%s requires PROVIDER=amazon_s3|cloudflare_r2|railway|s3_compatible\n' "$@" >&2; exit 2 ;; esac
 	@test "$(OBJECT_STORAGE_CONFORMANCE_WRITES)" = allow || { printf 'refusing %s: it writes to a real bucket; set OBJECT_STORAGE_CONFORMANCE_WRITES=allow\n' "$@" >&2; exit 2; }
 	$(VALIDATION_LOCK) env OBJECT_STORAGE_CONFORMANCE_WRITES=allow OBJECT_STORAGE_CONFORMANCE_PROVIDER=$(PROVIDER) \
-		$(BUILD_CARGO) test -p infra-object-storage --features integration --test conformance $(CARGO_FLAGS) -- --ignored --no-capture
+		$(CARGO) test -p infra-object-storage --features integration --test conformance $(CARGO_FLAGS) -- --ignored --no-capture
 
 fmt: ## Format every crate
 	$(CARGO) $(CARGO_FLAGS) fmt --all
@@ -342,16 +310,13 @@ INTEGRATION_LINT_FEATURES ?=
 lint lint-changed: export RUSTDOCFLAGS := $(RUSTDOCFLAGS) -D warnings
 
 lint: ## Clippy over all targets and rustdoc, warnings as errors
-	@mkdir -p .ci
-	@rm -f .ci/clippy-artifacts.jsonl
-	$(BUILD_CARGO) clippy --workspace --all-targets --keep-going $(INTEGRATION_LINT_FEATURES) $(MESSAGING_LINT_FEATURES) $(CACHE_LINT_FEATURES) $(OBJECT_STORAGE_LINT_FEATURES) $(OUTBOUND_AUTH_LINT_FEATURES) $(CARGO_FLAGS) --message-format=json-render-diagnostics -- -D warnings > .ci/clippy-artifacts.jsonl.tmp
-	@mv .ci/clippy-artifacts.jsonl.tmp .ci/clippy-artifacts.jsonl
-	$(BUILD_CARGO) doc --keep-going --workspace --no-deps --document-private-items $(INTEGRATION_LINT_FEATURES) $(MESSAGING_LINT_FEATURES) $(CACHE_LINT_FEATURES) $(OBJECT_STORAGE_LINT_FEATURES) $(OUTBOUND_AUTH_LINT_FEATURES) $(CARGO_FLAGS)
+	$(CARGO) clippy --workspace --all-targets --keep-going $(INTEGRATION_LINT_FEATURES) $(MESSAGING_LINT_FEATURES) $(CACHE_LINT_FEATURES) $(OBJECT_STORAGE_LINT_FEATURES) $(OUTBOUND_AUTH_LINT_FEATURES) $(CARGO_FLAGS) -- -D warnings
+	$(CARGO) doc --keep-going --workspace --no-deps --document-private-items $(INTEGRATION_LINT_FEATURES) $(MESSAGING_LINT_FEATURES) $(CACHE_LINT_FEATURES) $(OBJECT_STORAGE_LINT_FEATURES) $(OUTBOUND_AUTH_LINT_FEATURES) $(CARGO_FLAGS)
 
 lint-changed: ## Clippy and rustdoc, warnings as errors, over the crates in PKGS="<crate> <crate>"
 	$(REQUIRE_PKGS)
-	$(BUILD_CARGO) clippy $(addprefix -p ,$(PKGS)) --all-targets --keep-going $(foreach feature,$(filter-out --features,$(INTEGRATION_LINT_FEATURES)),$(if $(filter $(firstword $(subst /, ,$(feature))),$(PKGS)),--features $(feature))) $(if $(filter infra-messaging,$(PKGS)),$(MESSAGING_LINT_FEATURES)) $(if $(filter infra-cache,$(PKGS)),$(CACHE_LINT_FEATURES)) $(if $(filter infra-object-storage,$(PKGS)),$(OBJECT_STORAGE_LINT_FEATURES)) $(if $(filter infra-oauth2-client-credentials,$(PKGS)),$(OUTBOUND_AUTH_LINT_FEATURES)) $(CARGO_FLAGS) -- -D warnings
-	$(BUILD_CARGO) doc --keep-going --no-deps --document-private-items $(addprefix -p ,$(PKGS)) $(foreach feature,$(filter-out --features,$(INTEGRATION_LINT_FEATURES)),$(if $(filter $(firstword $(subst /, ,$(feature))),$(PKGS)),--features $(feature))) $(if $(filter infra-messaging,$(PKGS)),$(MESSAGING_LINT_FEATURES)) $(if $(filter infra-cache,$(PKGS)),$(CACHE_LINT_FEATURES)) $(if $(filter infra-object-storage,$(PKGS)),$(OBJECT_STORAGE_LINT_FEATURES)) $(if $(filter infra-oauth2-client-credentials,$(PKGS)),$(OUTBOUND_AUTH_LINT_FEATURES)) $(CARGO_FLAGS)
+	$(CARGO) clippy $(addprefix -p ,$(PKGS)) --all-targets --keep-going $(foreach feature,$(filter-out --features,$(INTEGRATION_LINT_FEATURES)),$(if $(filter $(firstword $(subst /, ,$(feature))),$(PKGS)),--features $(feature))) $(if $(filter infra-messaging,$(PKGS)),$(MESSAGING_LINT_FEATURES)) $(if $(filter infra-cache,$(PKGS)),$(CACHE_LINT_FEATURES)) $(if $(filter infra-object-storage,$(PKGS)),$(OBJECT_STORAGE_LINT_FEATURES)) $(if $(filter infra-oauth2-client-credentials,$(PKGS)),$(OUTBOUND_AUTH_LINT_FEATURES)) $(CARGO_FLAGS) -- -D warnings
+	$(CARGO) doc --keep-going --no-deps --document-private-items $(addprefix -p ,$(PKGS)) $(foreach feature,$(filter-out --features,$(INTEGRATION_LINT_FEATURES)),$(if $(filter $(firstword $(subst /, ,$(feature))),$(PKGS)),--features $(feature))) $(if $(filter infra-messaging,$(PKGS)),$(MESSAGING_LINT_FEATURES)) $(if $(filter infra-cache,$(PKGS)),$(CACHE_LINT_FEATURES)) $(if $(filter infra-object-storage,$(PKGS)),$(OBJECT_STORAGE_LINT_FEATURES)) $(if $(filter infra-oauth2-client-credentials,$(PKGS)),$(OUTBOUND_AUTH_LINT_FEATURES)) $(CARGO_FLAGS)
 
 check-skills: ## Validate the shape of .agents/skills (frontmatter, budget, links)
 	python3 scripts/check-skills.py
@@ -432,26 +397,20 @@ actionlint: ## Lint GitHub Actions workflows
 zizmor: $(filter $(TOOLS_ROOT)/%,$(ZIZMOR)) ## Audit GitHub Actions workflows for security weaknesses; GH_TOKEN enables the online audits
 	$(ZIZMOR) --persona regular .github
 
-# A failed Docker request is terminal only with native created identity and
-# scoped absence. CID files survive unknown admission for the cleanup owner.
 shellcheck: ## ShellCheck every shell script through the pinned container
 	@test -n "$(SHELL_FILES)" || { echo "no shell scripts found; skipping ShellCheck"; exit 0; }; \
-	$(VALIDATION_LOCK) bash scripts/ci/validation-lock.sh --container-run -- docker run --rm --read-only --network none -v "$(CURDIR):/src:ro" -w /src "$(SHELLCHECK_IMAGE)" -x -- $(SHELL_FILES)
+	docker run --rm --read-only --network none -v "$(CURDIR):/src:ro" -w /src "$(SHELLCHECK_IMAGE)" -x -- $(SHELL_FILES)
 
 python-lint: ## Lint the Python scripts for defects with the pinned ruff
 	@command -v uvx >/dev/null 2>&1 || command -v pipx >/dev/null 2>&1 || { echo "$@ requires uv or pipx for ruff@$(RUFF_VERSION)" >&2; exit 2; }
 	$(RUFF) check --no-cache .
-
-modernize-scan: ## After a toolchain bump: report code newer std forms or lints now cover (SINCE=<old toolchain>)
-	@command -v uvx >/dev/null 2>&1 || command -v pipx >/dev/null 2>&1 || { echo "$@ requires uv or pipx for ast-grep@$(AST_GREP_VERSION)" >&2; exit 2; }
-	CARGO='$(BUILD_CARGO)' AST_GREP='$(AST_GREP)' SINCE='$(SINCE)' python3 scripts/modernize-scan.py
 
 # Offline on purpose: relative paths and #fragments are this repository's
 # contract; external URLs are not, and checking them would make the gate flaky.
 docs-check: ## Image-input watch coverage and relative Markdown links/fragments
 	python3 scripts/ci/image-inputs-check.py
 	@test -n "$(MARKDOWN_FILES)" || { echo "no Markdown files found; skipping link check"; exit 0; }
-	$(VALIDATION_LOCK) bash scripts/ci/validation-lock.sh --container-run -- docker run --rm --read-only --network none -v "$(CURDIR):/src:ro" -w /src --entrypoint lychee "$(LYCHEE_IMAGE)" \
+	docker run --rm --read-only --network none -v "$(CURDIR):/src:ro" -w /src --entrypoint lychee "$(LYCHEE_IMAGE)" \
 		--offline --include-fragments --no-progress --root-dir /src -- $(MARKDOWN_FILES)
 
 dockerfile-check: ## Native BuildKit Dockerfile checks
@@ -510,13 +469,13 @@ openapi-generate: ## Regenerate api/openapi/service.yaml from the Rust contract
 	@set -eu; \
 		work=$$(mktemp -d "$$(dirname "$(OPENAPI_FILE)")/.openapi.XXXXXXXX"); \
 		trap 'rm -rf "$$work"' 0; trap 'exit 1' HUP INT TERM; \
-		$(BUILD_CARGO) build -q --workspace --bin openapi $(CARGO_FLAGS) --message-format=json-render-diagnostics >"$$work/messages"; \
+		$(CARGO) build -q --workspace --bin openapi $(CARGO_FLAGS) --message-format=json-render-diagnostics >"$$work/messages"; \
 		generator=$$(python3 scripts/ci/openapi-artifact.py <"$$work/messages"); \
 		"$$generator" >"$$work/service.yaml"; \
 		mv "$$work/service.yaml" "$(OPENAPI_FILE)"
 
 openapi-check: openapi-lint ## Fail when the committed document is stale or fails lint
-	$(BUILD_CARGO) test -p $(SERVICE_BIN) $(CARGO_FLAGS) --test openapi
+	$(CARGO) test -p $(SERVICE_BIN) $(CARGO_FLAGS) --test openapi
 
 openapi-lint: ## Lint and validate the committed document with Redocly CLI
 	@command -v npx >/dev/null 2>&1 || { echo "openapi-lint requires Node.js (npx) for @redocly/cli@$(REDOCLY_CLI_VERSION)" >&2; exit 2; }
@@ -525,11 +484,7 @@ openapi-lint: ## Lint and validate the committed document with Redocly CLI
 openapi-breaking: ## Compare the document with BASE_OPENAPI=<file> for breaking changes
 	@test -n "$(BASE_OPENAPI)" || { echo "openapi-breaking requires BASE_OPENAPI=<path to the base document>" >&2; exit 2; }
 	$(call REQUIRE_GO,oasdiff@v$(OASDIFF_VERSION))
-	@if [ -s "$(OPENAPI_BREAKING_APPROVALS)" ]; then \
-		$(OASDIFF) breaking --fail-on ERR --err-ignore "$(OPENAPI_BREAKING_APPROVALS)" "$(BASE_OPENAPI)" $(OPENAPI_FILE); \
-	else \
-		$(OASDIFF) breaking --fail-on ERR "$(BASE_OPENAPI)" $(OPENAPI_FILE); \
-	fi
+	$(OASDIFF) breaking --fail-on ERR "$(BASE_OPENAPI)" $(OPENAPI_FILE)
 
 openapi-breaking-since: ## Compare the document with its committed version at BASE_REF for breaking changes
 	@git cat-file -e "$(BASE_REF):$(OPENAPI_FILE)" 2>/dev/null || { echo "$@: $(OPENAPI_FILE) is unavailable at $(BASE_REF)" >&2; exit 2; }

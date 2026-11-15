@@ -3,33 +3,35 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-POLICY = "docs/railway-deployment-profile.md"
 IAC = ".railway/railway.ts"
 WATCHES = (
-    "Cargo.toml", "Cargo.lock", "crates/**", "migrations/**", ".sqlx/**", "vendor/**", "test/Cargo.toml",
-    "test/src/**", "test/tests/**", "test/fixtures/**", "env/config/**", "build/docker/**", ".dockerignore",
-    POLICY,
+    "Cargo.toml",
+    "Cargo.lock",
+    "rust-toolchain.toml",
+    "crates/**",
+    "migrations/**",
+    ".sqlx/**",
+    "vendor/**",
+    "test/Cargo.toml",
+    "test/src/**",
+    "test/tests/**",
+    "test/fixtures/**",
+    "env/config/**",
+    "build/docker/**",
+    ".dockerignore",
 )
-TABLE_WATCHES = ", ".join(f"`{watch}`" for watch in WATCHES)
 IAC_WATCHES = ", ".join(f'"{watch}"' for watch in WATCHES)
 FIXTURE = {
-    POLICY: f"""# Railway deployment profile
-
-| Setting | Value | Reason |
-| --- | --- | --- |
-| `build.builder` | `DOCKERFILE` | |
-| `build.dockerfilePath` | `build/docker/Dockerfile` | |
-| `build.watchPatterns` | {TABLE_WATCHES} | |
-""",
+    "rust-toolchain.toml": '[toolchain]\nchannel = "1.95.0"\n',
     IAC: f"""export default {{
   build: {{
     builder: "DOCKERFILE",
@@ -82,7 +84,11 @@ class Coverage(unittest.TestCase):
         path.write_text(original.replace(before, after))
 
     def run_check(self, expected: str | None = None) -> str:
-        result = subprocess.run([sys.executable, str(self.root / "scripts/ci/image-inputs-check.py"), "--repo", str(self.root)], capture_output=True, text=True)
+        result = subprocess.run(
+            [sys.executable, str(self.root / "scripts/ci/image-inputs-check.py"), "--repo", str(self.root)],
+            capture_output=True,
+            text=True,
+        )
         if expected is None:
             self.assertEqual(result.returncode, 0, result.stderr)
         else:
@@ -91,179 +97,72 @@ class Coverage(unittest.TestCase):
         return result.stdout
 
     def remove_watch(self, pattern: str) -> None:
-        self.replace(POLICY, f'`{pattern}`, ', '')
         path = self.root / IAC
         original = path.read_text()
         updated = re.sub(r'"' + re.escape(pattern) + r'",\s*', "", original, count=1)
         self.assertNotEqual(updated, original, "scenario does not reach its intended input")
         path.write_text(updated)
 
-    def snippet_policy(self) -> None:
-        program = (self.root / IAC).read_text()
-        (self.root / IAC).unlink()
-        with (self.root / POLICY).open("a") as stream:
-            stream.write(f"\n```ts\n{program}```\n")
-
-    def test_reads_the_iac_file_and_names_it(self) -> None:
-        self.assertIn(f"and {IAC} cover", self.run_check())
-
-    def test_document_snippet_stands_in_without_the_iac_file(self) -> None:
-        self.snippet_policy()
-        self.assertIn("IaC snippet cover", self.run_check())
-        self.replace(POLICY, '"migrations/**", ', '')
-        self.run_check("IaC snippet: watch forms disagree")
-
-    def test_the_iac_file_wins_over_a_stale_snippet(self) -> None:
-        with (self.root / POLICY).open("a") as stream:
-            stream.write('\n```ts\nconst stale = { builder: "NIXPACKS", watchPatterns: ["docs/**"] };\n```\n')
-        self.assertIn(f"and {IAC} cover", self.run_check())
-
-    def test_current_context_and_additional_exclusions(self) -> None:
+    def test_accepts_covered_inputs_and_ignores_exclusions(self) -> None:
+        self.assertIn(f"{IAC} covers", self.run_check())
         with (self.root / ".dockerignore").open("a") as stream:
             stream.write("\ncrates/*/benches/\n")
         self.run_check()
 
-    def test_previously_omitted_inputs_cannot_pass(self) -> None:
-        for pattern in (
-            "migrations/**", ".sqlx/**", "vendor/**", "test/Cargo.toml", "test/src/**", "test/tests/**",
-            "test/fixtures/**", "env/config/**",
-        ):
+    def test_uncovered_or_future_family_refuses(self) -> None:
+        for pattern in ("migrations/**", ".sqlx/**", "vendor/**", "rust-toolchain.toml"):
             with self.subTest(pattern=pattern):
-                originals = {relative: (self.root / relative).read_text() for relative in (POLICY, IAC)}
+                original = (self.root / IAC).read_text()
                 self.remove_watch(pattern)
-                self.run_check(pattern + ": image input is uncovered")
-                for relative, text in originals.items():
-                    (self.root / relative).write_text(text)
+                self.run_check(f"{pattern}: image input is uncovered")
+                (self.root / IAC).write_text(original)
 
-    def test_future_family_requires_watch_before_any_file_exists(self) -> None:
         with (self.root / ".dockerignore").open("a") as stream:
             stream.write("\n!assets/\n")
         self.run_check("assets/**: image input is uncovered")
-        self.replace(POLICY, '`Cargo.toml`,', '`assets/**`, `Cargo.toml`,')
         self.replace(IAC, '"Cargo.toml",', '"assets/**", "Cargo.toml",')
         self.run_check()
 
-    def test_forms_cannot_drift(self) -> None:
-        self.replace(IAC, '"migrations/**", ', '')
-        self.run_check("watch forms disagree")
-
-    def test_unknown_inclusion_and_watch_grammar_refuse(self) -> None:
+    def test_invalid_ignore_or_watch_syntax_refuses(self) -> None:
         original_ignore = (self.root / ".dockerignore").read_text()
         with (self.root / ".dockerignore").open("a") as stream:
             stream.write("\n!assets/*.json\n")
         self.run_check("unsupported inclusion '!assets/*.json'")
         (self.root / ".dockerignore").write_text(original_ignore)
-        self.replace(POLICY, 'crates/**', 'crates/*')
+
+        self.replace(IAC, "crates/**", "crates/*")
         self.run_check("unsupported watch syntax 'crates/*'")
 
-    def test_context_must_start_with_exclusion(self) -> None:
-        self.replace(".dockerignore", "\n*\n", "\n")
-        self.run_check("supported coverage starts with '*'")
-
-    def test_specific_ignore_override_refuses(self) -> None:
+    def test_dockerfile_context_escapes_and_mounts_refuse(self) -> None:
         (self.root / "build/docker/Dockerfile.dockerignore").write_text("!secrets/\n")
         self.run_check("Dockerfile-specific ignore overrides are unsupported")
+        (self.root / "build/docker/Dockerfile.dockerignore").unlink()
 
-    def test_changed_context_selection_refuses(self) -> None:
-        self.replace(IAC, 'builder: "DOCKERFILE",', 'builder: "DOCKERFILE",\n      rootDirectory: "subdir",')
-        self.run_check("unsupported rootDirectory")
-
-    def test_dynamic_or_duplicate_policy_cannot_hide_an_override(self) -> None:
-        original = (self.root / IAC).read_text()
-        self.replace(IAC, 'watchPatterns: [', '...overrides, watchPatterns: [')
-        self.run_check("unsupported computed/spread IaC policy")
-        (self.root / IAC).write_text(original)
-        self.replace(IAC, 'watchPatterns: [', 'watchPatterns: dynamicPatterns(), watchPatterns: [')
-        self.run_check("expected exactly one IaC watchPatterns setting")
-        (self.root / IAC).write_text(original)
-        self.replace(IAC, 'watchPatterns: [', '[key]: "x", watchPatterns: [')
-        self.run_check("unsupported computed/spread IaC policy")
-
-    def test_bracketed_string_value_is_not_a_computed_key(self) -> None:
-        self.replace(IAC, 'builder: "DOCKERFILE",', 'builder: "DOCKERFILE",\n      addr: "[::]:8080",')
-        self.run_check()
-
-    def test_named_context_refuses(self) -> None:
-        with (self.root / "build/docker/Dockerfile").open("a") as stream:
-            stream.write("\nCOPY --from=assets /file /file\n")
-        self.run_check("unsupported external/named COPY context 'assets'")
-
-    def test_secret_mount_reads_no_context_but_bind_and_cache_still_refuse(self) -> None:
         path = self.root / "build/docker/Dockerfile"
         original = path.read_text()
+        path.write_text(original + "\n# trailing backslash in comment \\\nCOPY --from=assets /file /file\n")
+        self.run_check("unsupported external/named COPY context 'assets'")
+
         path.write_text(original + "RUN --mount=type=secret,id=credential,required=true test -s /run/secrets/credential\n")
         self.run_check()
-        for mount in ("type=bind,source=unwatched,target=/input", "type=cache,target=/cache",
-                      "type=secret,type=bind,source=unwatched,target=/input"):
-            with self.subTest(mount=mount):
-                path.write_text(original + f"RUN --mount=type=secret,id=credential --mount={mount} true\n")
-                self.run_check("unsupported RUN mount context")
+        path.write_text(original + "RUN --mount=type=cache,target=/cache true\n")
+        self.run_check("unsupported RUN mount context")
 
-    def test_remote_add_reads_no_context(self) -> None:
-        with (self.root / "build/docker/Dockerfile").open("a") as stream:
-            stream.write("ADD --checksum=sha256:00 \\\n    https://example.com/tool.tgz /tmp/tool.tgz\n")
+        path.write_text(original + "ADD --checksum=sha256:00 https://example.com/tool.tgz /tmp/tool.tgz\n")
         self.run_check()
-        with (self.root / "build/docker/Dockerfile").open("a") as stream:
-            stream.write("ADD tools/tool.tgz /tmp/\n")
-        self.run_check("unsupported context instruction 'ADD tools/tool.tgz /tmp/'")
+        path.write_text(original + "ADD tools/tool.tgz /tmp/\n")
+        self.run_check("unsupported context instruction")
 
-    def test_published_image_leaves_no_context_to_watch(self) -> None:
+    def test_published_image_and_forbidden_iac_overrides(self) -> None:
         image = 'export default service("api", { source: image(process.env.IMAGE) });\n'
         (self.root / IAC).write_text(image)
-        policy = (self.root / POLICY).read_text()
-        (self.root / POLICY).write_text("\n".join(line for line in policy.splitlines() if not line.startswith("| `build.")) + "\n")
         self.assertIn(f"{IAC} deploys a published image", self.run_check())
-        for setting, refusal in (('buildCommand: "make"', "unsupported buildCommand"),
-                                 ('...overrides', "unsupported computed/spread"),
-                                 ('[key]: value', "unsupported computed/spread"),
-                                 ('build: {}', "expected exactly one literal policy form")):
-            with self.subTest(setting=setting):
-                (self.root / IAC).write_text(image.replace("source:", f"{setting}, source:"))
-                self.run_check(refusal)
-        (self.root / IAC).write_text(image.replace("image(process.env.IMAGE)", "image(process.env.IMAGE) || github(repo)"))
-        self.run_check("expected exactly one literal policy form")
-        (self.root / IAC).with_name("release.ts").write_text(
-            'export const releaseImage = "acme/api";\n'
-            'export { github as repositorySource } from "railway/iac";\n')
-        release_import = (
-            'import { releaseImage } from "./release.ts";\n'
-            'import { image, service } from "railway/iac";\n'
-            'export default service("api", { source: image(releaseImage) });\n')
-        (self.root / IAC).write_text(release_import)
-        self.assertIn(f"{IAC} deploys a published image", self.run_check())
-        foreign_provider = release_import.replace("{ releaseImage }", "{ releaseImage, repositorySource as image }")
-        (self.root / IAC).write_text(foreign_provider.replace("{ image, service }", "{ service }"))
-        self.run_check("table build.watchPatterns: expected exactly one literal policy form")
-        with_release = (
-            'import { github, image, service } from "railway/iac";\n'
-            'const release = { source: image(process.env.IMAGE) };\n'
-            'const source = github("acme/api");\n'
-            'export default service("api", { source });\n')
-        (self.root / IAC).write_text(with_release)
-        self.run_check("table build.watchPatterns: expected exactly one literal policy form")
-        (self.root / IAC).write_text(with_release.replace("{ source }", "{ source: image(process.env.IMAGE) }"))
-        self.assertIn(f"{IAC} deploys a published image", self.run_check())
-        project = """import { defineRailway, github, image, project, service } from "railway/iac";
-const name = "api";
-export const partial = name;
-const other = service("source-build", { source: github("acme/api") });
-export default defineRailway((ctx) => {
-  const web = service(name, { deploy: { healthcheckPath: "/ready" }, source: image(process.env.IMAGE) });
-  return project(ctx.projectName ?? name, { resources: [web] });
-});
-"""
-        (self.root / IAC).write_text(project)
-        self.assertIn(f"{IAC} deploys a published image", self.run_check())
-        (self.root / IAC).write_text(project.replace("resources: [web]", "resources: [other]"))
-        self.run_check("table build.watchPatterns: expected exactly one literal policy form")
-        (self.root / IAC).write_text(image)
-        (self.root / POLICY).write_text(policy)
-        self.run_check("expected exactly one IaC builder setting")
+        (self.root / IAC).write_text(image.replace("source:", 'rootDirectory: "sub", source:'))
+        self.run_check("unsupported rootDirectory")
+        (self.root / IAC).write_text(image.replace("source:", "...overrides, source:"))
+        self.run_check("unsupported computed/spread")
 
     def test_docs_gate_refuses_before_link_checker(self) -> None:
-        # Make resolves the repository's profiles before executing any recipe;
-        # a source checkout has no lock and an initialized service may have no
-        # profile makefile.
         optional = ["template.lock", *(str(path.relative_to(ROOT)) for path in ROOT.glob("make/profile-*.mk"))]
         for relative in ["scripts/lib/template_state.py", *(path for path in optional if (ROOT / path).exists())]:
             target = self.root / relative
@@ -276,7 +175,13 @@ export default defineRailway((ctx) => {
         docker = bin_dir / "docker"
         docker.write_text(f'#!/bin/sh\ntouch "{marker}"\nexit 0\n')
         docker.chmod(0o755)
-        result = subprocess.run(["make", "docs-check"], cwd=self.root, env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}, capture_output=True, text=True)
+        result = subprocess.run(
+            ["make", "docs-check"],
+            cwd=self.root,
+            env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"},
+            capture_output=True,
+            text=True,
+        )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("migrations/**: image input is uncovered", result.stderr)
         self.assertFalse(marker.exists(), "link checker ran after policy refusal")

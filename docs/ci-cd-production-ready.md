@@ -53,7 +53,7 @@ job names, triggers, tool pins, and gate definitions. Cross-file policies:
 <!-- template:end postgres:docs-ci-postgres-gates -->
 <!-- template:begin messaging:docs-ci-messaging-gates -->
 - **Messaging:** `messaging_integration` runs the Compose NATS suite and
-  `make messaging-go-compat`; `messaging-recovery` is `workflow_dispatch`-only.
+  `make messaging-go-compat`.
 <!-- template:end messaging:docs-ci-messaging-gates -->
 <!-- template:begin cache:docs-ci-cache-gates -->
 - **Cache:** `cache_integration` runs `make test-integration-cache` against
@@ -181,7 +181,7 @@ each reopen condition.
 | `main` pushes diff from `green`; concurrency replaces pending `main` runs | Diffing from `before` only | Prevents replaced pending runs from dropping commits |
 | `Swatinem/rust-cache`: single toolchain via `.github/actions/rust-toolchain`, `save-if` on `main` after full build, `ZSTD_CLEVEL=12`, `[profile.dev]` line-tables-only + dep `debug = false` in `Cargo.toml` | Keeping runner `stable`; partial saves; runner Cargo config | `rust-cache` hashes all toolchains and path lists; first save owns a key until `Cargo.lock` changes, fitting the 10 GB budget |
 | `initializer` runs balanced `core`/`full` cache families (max 4 parts; `image-derived` max 2), unified `vendor/` mtimes, one `CARGO_TARGET_DIR` | Per-graph targets; unbounded matrix | Avoids rebuilding `[patch]` crates per clone and leaves ~6 runners for PRs |
-| `quality-profiles`, `quality-validation`, and `jobs-reliability` (no fat LTO) split into own jobs | Monolithic `quality` / `integration` | Removes non-artifact checks from critical path; readability self-test stays in `quality` for `make lint` artifacts |
+| `quality-profiles`, `quality-validation`, and `jobs-reliability` (no fat LTO) split into own jobs | Monolithic `quality` / `integration` | Removes non-artifact checks from critical path |
 | `REPOSITORY_CI ?= none` mode in `make/service.mk` | Implicit CI mode | Gives CI-less Railway repos a complete `make verify` (`ci_mode: none`) receipt |
 
 <!-- template:begin postgres:docs-ci-postgres-routing -->
@@ -242,7 +242,6 @@ checks retained/absent entrypoints and startup refusals.
 | Decision | Rejected | Why |
 | --- | --- | --- |
 | Ship `.railway/railway.ts` + `.railway/package.json` (`railway` 3.16.0) using partials and linked context | Document-only snippet | Ready for `railway config apply` without template project IDs while preserving operator variables |
-| `image-inputs-check.py` reads `.railway/railway.ts`, falling back to the profile `ts` snippet | Requiring `.railway/railway.ts` everywhere | Keeps pre-IaC derived repos valid until support ends |
 | `ARG IMAGE_TESTS=none` skips unit tests unless set (`IMAGE_TESTS=unit` for `REPOSITORY_CI = none`) | Always running `unit`; Railway "Wait for CI" | Avoids +65–70 s/build (+379 s/lockfile) and timing flakes when CI already tests; "Wait for CI" blocks on post-merge jobs |
 | Private deps via `vendor-private/` + `.cargo/config.toml` | `ARG` tokens or secret mounts | Railway lacks secret mounts and BuildKit logs `ARG` values |
 

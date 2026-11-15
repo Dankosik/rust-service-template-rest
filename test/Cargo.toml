@@ -180,13 +180,6 @@ required-features = ["integration"]
 test = false
 # template:end jobs:test-jobs-worker-fixture
 
-# template:begin outbox:test-messaging-recovery-example
-[[example]]
-name = "messaging_recovery"
-path = "examples/messaging_recovery.rs"
-test = true
-# template:end outbox:test-messaging-recovery-example
-
 # template:begin jobs-reference:test-reading-counter-fixture
 [[bin]]
 name = "reading-counter-fixture"

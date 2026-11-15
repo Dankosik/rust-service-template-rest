@@ -193,12 +193,10 @@ containers = root / "containers"
 containers.mkdir(exist_ok=True)
 def create_container():
     identity = uuid.uuid4().hex + uuid.uuid4().hex
-    label = args[args.index("--label") + 1].split("=", 1)
-    state = {"Id": identity, "Name": "/" + args[args.index("--name") + 1],
-             "Config": {"Labels": {label[0]: label[1]}},
+    name = args[args.index("--name") + 1] if "--name" in args else identity[:12]
+    state = {"Id": identity, "Name": "/" + name,
              "State": {"Running": args[0] == "run", "Restarting": False}}
     (containers / identity).write_text(json.dumps(state))
-    pathlib.Path(args[args.index("--cidfile") + 1]).write_text(identity)
     return identity
 if args[:2] == ["context", "show"]: print("inventory-fixture")
 elif args[0] == "info": print("inventory-fixture-daemon")
@@ -225,7 +223,7 @@ elif args[0] == "cp":
     path = args[1].split(":", 1)[1]
     if path not in json.loads(os.environ["FIXTURE_BINARIES"]): sys.exit(1)
     dest = pathlib.Path(args[2]); dest.write_bytes(b"executable"); dest.chmod(0o755)
-elif args[0] == "rm": (containers / args[-1]).unlink()
+elif args[0] == "rm": (containers / args[-1]).unlink(missing_ok=True)
 elif args[0] == "run":
     identity = create_container()
     mount = next(arg[:-6] for arg in args if arg.endswith(":/work"))
@@ -367,9 +365,7 @@ else: sys.exit(2)
 
     @staticmethod
     def run_native_container(command: list[str]) -> subprocess.CompletedProcess:
-        owner = str(ROOT / "scripts/ci/validation-lock.sh")
-        return subprocess.run(["bash", owner, "--", "bash", owner, "--container-run", "--", "docker", *command],
-                              cwd=ROOT, capture_output=True, text=True)
+        return subprocess.run(["docker", *command], cwd=ROOT, capture_output=True, text=True)
 
     @unittest.skipUnless(NATIVE, "pinned native conversion is selected explicitly at final validation")
     def test_pinned_security_command_accepts_native_policy_report(self) -> None:

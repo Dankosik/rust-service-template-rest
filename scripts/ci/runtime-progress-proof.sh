@@ -28,29 +28,20 @@ inputs=${results}.inputs
 mkdir -p "${inputs}/image"
 image="runtime-progress-proof:${run_id}"
 image_id=
-builder_resource=
-container_resources=()
 container_names=()
 
 cleanup() {
-	local status=$? resource container cleanup_failed=false
+	local status=$? container cleanup_failed=false
 	trap - EXIT INT TERM HUP
 	set +e
-	# Registered names and IDs are the cancellation boundary, including a run
-	# whose Docker CLI returned no ID. The driver normally retains logs first.
 	for container in "${container_names[@]}"; do
 		if timeout 10s docker inspect "${container}" >"${inputs}/${container}.cleanup-inspect.json" 2>&1; then
 			timeout 15s docker logs "${container}" >"${inputs}/${container}.stdout" 2>"${inputs}/${container}.stderr" || cleanup_failed=true
 		fi
-	done
-	for resource in "${container_resources[@]}"; do
-		bash scripts/ci/validation-lock.sh --resource-cleanup "${resource}" || cleanup_failed=true
+		docker rm -f -v "${container}" >/dev/null 2>&1 || true
 	done
 	if [[ -n ${image_id} && ${cleanup_failed} == false ]]; then
 		timeout 10s docker image rm "${image}" >"${inputs}/image-cleanup.log" 2>&1 || cleanup_failed=true
-	fi
-	if [[ -n ${builder_resource} ]]; then
-		bash scripts/ci/validation-lock.sh --resource-cleanup "${builder_resource}" || cleanup_failed=true
 	fi
 	if [[ ${cleanup_failed} == true && ${status} == 0 ]]; then status=1; fi
 	printf '%s\n' "${status}" >"${inputs}/runner-exit-code"
@@ -109,18 +100,13 @@ print(drivers[0])
 PY
 )
 sha256sum "${inputs}/image/runtime_progress" >"${inputs}/binary.sha256"
-builder_arguments=()
-[[ -z ${VALIDATION_BUILDER_NAME:-} ]] || builder_arguments+=("${VALIDATION_BUILDER_NAME}")
-builder_resource=$(bash scripts/ci/validation-lock.sh --builder-prepare "${builder_arguments[@]}")
-builder_name=$(bash scripts/ci/validation-lock.sh --builder-name "${builder_resource}")
-bash scripts/ci/validation-lock.sh --resource-run "${builder_resource}" -- \
-	docker buildx build --builder "${builder_name}" --load --file build/docker/runtime-progress.Dockerfile \
+builder_args=()
+[[ -z ${VALIDATION_BUILDER_NAME:-} ]] || builder_args=(--builder "${VALIDATION_BUILDER_NAME}")
+docker buildx build ${builder_args[@]+"${builder_args[@]}"} --load --file build/docker/runtime-progress.Dockerfile \
 	--build-arg "RUNTIME_PROGRESS_BASE_IMAGE=${base_image}" \
 	--build-arg "RUNTIME_PROGRESS_SOURCE=${source_revision}" \
 	--build-arg "RUNTIME_PROGRESS_RUN=${run_id}" \
 	--tag "${image}" "${inputs}/image" 2>&1 | tee "${inputs}/image-build.log"
-bash scripts/ci/validation-lock.sh --resource-cleanup "${builder_resource}"
-builder_resource=
 image_id=$(docker image inspect --format '{{.Id}}' "${image}")
 docker image inspect "${image_id}" >"${inputs}/image-inspect.json"
 
@@ -130,13 +116,8 @@ test_name=bounded_sources_preserve_process_progress_under_one_cpu_quota
 "${driver}" --list --ignored >"${inputs}/driver-tests"
 grep -qx "${test_name}: test" "${inputs}/driver-tests"
 export RUNTIME_PROGRESS_CONTAINER_PREFIX="runtime-progress-${VALIDATION_LOCK_TOKEN:0:12}-${run_id}"
-export RUNTIME_PROGRESS_VALIDATION_HELPER="${ROOT_DIR}/scripts/ci/validation-lock.sh"
 for suffix in ordinary blocked primary negative; do
-	container_name="${RUNTIME_PROGRESS_CONTAINER_PREFIX}-${suffix}"
-	resource=$(bash scripts/ci/validation-lock.sh --resource-register container "${container_name}")
-	container_resources+=("${resource}")
-	container_names+=("${container_name}")
-	export "RUNTIME_PROGRESS_RESOURCE_${suffix}=${resource}"
+	container_names+=("${RUNTIME_PROGRESS_CONTAINER_PREFIX}-${suffix}")
 done
 export RUNTIME_PROGRESS_IMAGE="${image_id}" RUNTIME_PROGRESS_SOURCE="${source_revision}" RUNTIME_PROGRESS_RESULTS="${results}"
 timeout --signal=TERM --kill-after=15s 12m "${driver}" --ignored --exact "${test_name}" --no-capture \

@@ -9,9 +9,8 @@ unset PGHOSTADDR PGHOST PGPORT PGUSER PGPASSWORD PGDATABASE PGSSLMODE \
 COMPOSE_POSTGRES_USER=app
 COMPOSE_POSTGRES_PASSWORD=app
 COMPOSE_POSTGRES_DB=app
-COMPOSE_POSTGRES_RESOURCE=
 COMPOSE_POSTGRES_OVERRIDE=
-COMPOSE_POSTGRES_LOCK=$(cd "$(dirname "${BASH_SOURCE[0]}")/../ci" && pwd)/validation-lock.sh
+COMPOSE_PROJECT=
 
 require_docker() {
 	if docker info >/dev/null 2>&1; then
@@ -30,13 +29,7 @@ compose_postgres() {
 	if [[ -n ${COMPOSE_POSTGRES_OVERRIDE} ]]; then
 		files+=(-f "${COMPOSE_POSTGRES_OVERRIDE}")
 	fi
-	if [[ ${1:-} == up ]]; then
-		POSTGRES_PORT=0 PGBOUNCER_PORT=0 bash "${COMPOSE_POSTGRES_LOCK}" \
-			--resource-run "${COMPOSE_POSTGRES_RESOURCE}" -- \
-			docker compose -p "${COMPOSE_PROJECT}" "${files[@]}" "$@"
-	else
-		POSTGRES_PORT=0 PGBOUNCER_PORT=0 docker compose -p "${COMPOSE_PROJECT}" "${files[@]}" "$@"
-	fi
+	POSTGRES_PORT=0 PGBOUNCER_PORT=0 docker compose -p "${COMPOSE_PROJECT}" "${files[@]}" "$@"
 }
 
 compose_postgres_up() {
@@ -50,16 +43,7 @@ compose_postgres_up() {
 		fi
 		COMPOSE_POSTGRES_OVERRIDE=$2
 	fi
-	local resource_files=(--file "$(pwd)/env/docker-compose.yml")
-	if [[ -n ${COMPOSE_POSTGRES_OVERRIDE} ]]; then
-		# The caller retains this file until positive resource cleanup; the
-		# inherited guardian uses exactly the same files during recovery.
-		resource_files+=(--file "${COMPOSE_POSTGRES_OVERRIDE}")
-	fi
-	bash "${COMPOSE_POSTGRES_LOCK}" --assert-held || return
 	COMPOSE_PROJECT="${prefix}-${VALIDATION_LOCK_TOKEN:0:12}-$(date +%s)-$$"
-	COMPOSE_POSTGRES_RESOURCE=$(bash "${COMPOSE_POSTGRES_LOCK}" --resource-register compose "${COMPOSE_PROJECT}" \
-		"${resource_files[@]}") || return
 	COMPOSE_NETWORK="${COMPOSE_PROJECT}_default"
 	compose_postgres up -d --wait postgres
 	local address
@@ -73,9 +57,9 @@ compose_postgres_up() {
 }
 
 compose_postgres_down() {
-	if [[ -n ${COMPOSE_POSTGRES_RESOURCE:-} ]]; then
-		bash "${COMPOSE_POSTGRES_LOCK}" --resource-cleanup "${COMPOSE_POSTGRES_RESOURCE}" || return
-		COMPOSE_POSTGRES_RESOURCE=
+	if [[ -n ${COMPOSE_PROJECT:-} ]]; then
+		compose_postgres down -v --remove-orphans >/dev/null 2>&1 || return
+		COMPOSE_PROJECT=
 	fi
 }
 

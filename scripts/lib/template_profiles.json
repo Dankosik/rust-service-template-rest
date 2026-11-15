@@ -4,7 +4,6 @@
     "make/source.mk",
     "scripts/ci/template-init-check.sh",
     "scripts/ci/initializer-matrix.py",
-    "scripts/ci/hotpath-vendor-check.py",
     "scripts/ci/hotpath-mcp-check.py",
     "scripts/tests/fixtures/",
     "scripts/tests/template-owned-purity.py",
@@ -14,9 +13,6 @@
     "scripts/tests/template-upgrade.py",
     "scripts/template-upgrade.sh",
     "scripts/lib/template_upgrade.py",
-    "scripts/ci/consumer-lifecycle-check.sh",
-    "test/tests/consumer_lifecycle.rs",
-    "test/examples/consumer_lifecycle_actor.rs",
     "scripts/ci/jobs-reliability-reference.py",
     "specs/",
     "docs/assets/banner.png",
@@ -25,7 +21,7 @@
   "source-template": {
     "remove_when_unselected": [],
     "markers": [
-      {"path": ".github/workflows/ci.yml", "ids": ["ci-jobs-reliability-job", "ci-required-jobs-reliability-need", "ci-required-jobs-reliability-success"]},
+      {"path": ".github/workflows/ci.yml", "ids": ["ci-jobs-reliability-job", "ci-required-jobs-reliability-need"]},
       {"path": "README.md", "ids": ["readme-banner", "readme-template-overview"]}
     ]
   },
@@ -641,8 +637,7 @@
           "ci-grpc-output",
           "ci-grpc-job",
           "ci-required-grpc-need",
-          "ci-grpc-generator-dependencies",
-          "ci-required-grpc-success"
+          "ci-grpc-generator-dependencies"
         ]
       },
       {
@@ -693,7 +688,7 @@
     "markers": [
       {"path": "crates/service/Cargo.toml", "ids": ["service-runtime-progress-dependencies", "service-runtime-progress-tokio-features"]},
       {"path": "make/template.mk", "ids": ["make-runtime-progress-standard-targets", "make-runtime-progress-target"]},
-      {"path": ".github/workflows/ci.yml", "ids": ["ci-runtime-progress-output", "ci-runtime-progress-job", "ci-required-runtime-progress-need", "ci-required-runtime-progress-success"]},
+      {"path": ".github/workflows/ci.yml", "ids": ["ci-runtime-progress-output", "ci-runtime-progress-job", "ci-required-runtime-progress-need"]},
       {"path": "scripts/ci/changed-surfaces.sh", "ids": ["classifier-runtime-progress-surface", "classifier-runtime-progress-inputs", "classifier-runtime-progress-tests", "classifier-runtime-progress-count"]},
       {"path": "scripts/ci/verify.sh", "id": "verify-runtime-progress"}
     ]
@@ -804,7 +799,6 @@
       "crates/config/src/integrations/tests.rs",
       "crates/infra-oauth2-client-credentials/",
       "scripts/ci/test-integration-oauth.sh",
-      "scripts/tests/oauth-readiness-test.py",
       "docs/decisions/outbound-machine-authentication-decisions.md"
     ],
     "markers": [
@@ -832,8 +826,7 @@
         "path": ".github/workflows/ci.yml",
         "ids": [
           "ci-oauth-integration-job",
-          "ci-required-oauth-integration-need",
-          "ci-required-oauth-integration-success"
+          "ci-required-oauth-integration-need"
         ]
       },
       {
@@ -1063,10 +1056,6 @@
       "env/nats/auth-rotation/",
       "env/nats/credential-rotation.conf",
       "scripts/ci/test-integration-messaging.sh",
-      "scripts/ci/messaging-recovery.sh",
-      "scripts/ci/messaging-recovery.py",
-      "scripts/tests/messaging-recovery-test.py",
-      "test/fixtures/messaging-recovery-compose.yml",
       "scripts/messaging-go-compat.sh"
     ],
     "markers": [
@@ -1077,9 +1066,7 @@
       {"path": ".dockerignore", "id": "dockerignore-messaging-vendor"},
       {"path": ".gitleaks.toml", "id": "gitleaks-messaging-fixtures"},
       {"path": "build/docker/Dockerfile", "id": "docker-messaging-vendor"},
-      {"path": ".github/workflows/ci.yml", "ids": ["ci-messaging-recovery-input", "ci-messaging-recovery-job", "ci-messaging-recovery-cleanup", "ci-required-messaging-recovery-need"]},
-      {"path": "make/template.mk", "ids": ["make-messaging-recovery-targets", "make-messaging-go-compat-target", "make-messaging-recovery-recipes"]},
-      {"path": "tools/versions.env", "id": "tools-nats-cli-version"},
+      {"path": "make/template.mk", "ids": ["make-messaging-targets", "make-messaging-go-compat-target"]},
       {"path": "crates/config/src/lib.rs", "ids": ["config-module", "config-export", "config-field", "config-validate"]},
       {"path": "crates/config/src/load/tests.rs", "ids": ["load-zero-messaging-count"]},
       {"path": "crates/jobs-worker/Cargo.toml", "ids": ["worker-messaging-dependency"]},
@@ -1121,7 +1108,7 @@
     "markers": [
       {"path": "env/docker-compose.yml", "ids": ["compose-file"]},
       {"path": ".github/dependabot.yml", "ids": ["dependabot-compose"]},
-      {"path": ".github/workflows/ci.yml", "ids": ["ci-integration-job", "ci-required-integration-need", "ci-required-integration-success"]}
+      {"path": ".github/workflows/ci.yml", "ids": ["ci-integration-job", "ci-required-integration-need"]}
     ]
   },
   "jobs-messaging": {
@@ -1130,21 +1117,13 @@
   },
   "outbox": {
     "remove_when_unselected": [
-      "scripts/ci/messaging_recovery_scenarios.py",
-      "scripts/ci/messaging_recovery_capacity.py",
       "crates/infra-messaging/src/outbox.rs",
       "crates/jobs-worker/src/bootstrap/outbox.rs",
       "test/tests/messaging_outbox.rs",
       "test/tests/messaging_recovery.rs",
-      "test/examples/messaging_recovery.rs",
-      "test/examples/messaging_recovery/",
       "test/fixtures/messaging_recovery.sql"
     ],
     "markers": [
-      {"path": "scripts/ci/messaging-recovery.py", "ids": ["recovery-rehearsal-command", "recovery-rehearsal-dispatch"]},
-      {"path": "scripts/tests/messaging-recovery-test.py", "ids": ["capacity-measurement-tests"]},
-      {"path": ".github/workflows/ci.yml", "id": "ci-native-recovery-rehearsals"},
-      {"path": "test/fixtures/messaging-recovery-compose.yml", "ids": ["recovery-compose-postgres", "recovery-compose-postgres-volume"]},
       {"path": "crates/infra-messaging/Cargo.toml", "ids": ["messaging-outbox-dependencies"]},
       {"path": "crates/infra-messaging/src/lib.rs", "ids": ["messaging-outbox-module"]},
       {"path": "crates/config/src/jobs.rs", "ids": ["jobs-outbox-capacity"]},
@@ -1158,7 +1137,7 @@
       {"path": "test/tests/jobs/process.rs", "ids": ["test-jobs-process-nats-imports", "test-jobs-process-nats-imports-2", "test-jobs-process-nats-fixture", "test-jobs-process-nats-fixture-argument", "test-jobs-process-nats-fixture-argument-2", "test-jobs-process-nats-fixture-argument-3", "test-jobs-process-nats-fixture-argument-4", "test-jobs-process-nats-fixture-argument-5", "test-jobs-process-nats-fixture-argument-6", "test-jobs-process-nats-fixture-argument-7", "test-jobs-process-nats-fixture-argument-8", "test-jobs-process-nats-fixture-cleanup", "test-jobs-process-nats-fixture-cleanup-2", "test-jobs-process-nats-fixture-cleanup-3", "test-jobs-process-nats-fixture-cleanup-4", "test-jobs-process-nats-fixture-cleanup-5", "test-jobs-process-nats-fixture-cleanup-6", "test-jobs-process-nats-fixture-cleanup-7", "test-jobs-process-nats-fixture-cleanup-8", "test-jobs-process-nats-fixture-parameter", "test-jobs-process-nats-fixture-use", "test-jobs-process-nats-fixture-use-2", "test-jobs-process-nats-fixture-use-3", "test-jobs-process-nats-fixture-use-4", "test-jobs-process-nats-fixture-use-5", "test-jobs-process-nats-fixture-use-6", "test-jobs-process-nats-fixture-use-7", "test-jobs-process-nats-fixture-use-8", "test-jobs-process-nats-environment", "test-jobs-process-outbox-capacity", "test-jobs-process-progress-nats-create", "test-jobs-process-progress-nats-argument", "test-jobs-process-progress-nats-cleanup", "test-jobs-process-shared-engines", "test-jobs-process-deferred-messages", "test-jobs-process-supervisor-nats-fixture", "test-jobs-process-supervisor-nats-argument", "test-jobs-process-supervisor-nats-cleanup"]},
       {"path": "test/tests/jobs/operator.rs", "ids": ["test-jobs-operator-outbox"]},
       {"path": "test/src/jobs.rs", "ids": ["test-jobs-deferred-messages-fixture"]},
-      {"path": "test/Cargo.toml", "ids": ["test-messaging-outbox-dependencies", "test-messaging-recovery-example"]},
+      {"path": "test/Cargo.toml", "ids": ["test-messaging-outbox-dependencies"]},
       {"path": "README.md", "ids": ["docs-readme-outbox-profile"]},
       {"path": "docs/ci-cd-production-ready.md", "ids": ["docs-ci-outbox-gates"]}
     ]

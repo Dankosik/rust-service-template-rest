@@ -14,7 +14,6 @@ KEYCLOAK_IMAGE=quay.io/keycloak/keycloak:26.8.0@sha256:b0f60d489d51c5d113390bdf5
 READY_TIMEOUT_SECONDS=180
 
 container=
-resource=
 container_name="service-oauth-${VALIDATION_LOCK_TOKEN:0:12}-$(date +%s)-$$"
 
 require_docker() {
@@ -32,11 +31,8 @@ require_docker() {
 cleanup() {
 	local status=$?
 	trap - EXIT INT TERM HUP
-	if [[ -n ${resource} ]]; then
-		if ! bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-cleanup "${resource}"; then
-			echo "validation Keycloak cleanup incomplete: ${resource}" >&2
-			if [[ ${status} == 0 ]]; then status=1; fi
-		fi
+	if [[ -n ${container} ]]; then
+		docker rm -f -v "${container}" >/dev/null 2>&1 || true
 	fi
 	exit "${status}"
 }
@@ -101,21 +97,19 @@ while True:
 PY
 }
 
-if [[ -z ${OAUTH_TEST_KEYCLOAK_URL:-} ]]; then
+if [[ " $* " == *" --no-run "* ]]; then
+	OAUTH_TEST_KEYCLOAK_URL=${OAUTH_TEST_KEYCLOAK_URL:-compile-only}
+elif [[ -z ${OAUTH_TEST_KEYCLOAK_URL:-} ]]; then
 	require_docker
 	trap cleanup EXIT
 	trap 'exit 130' INT
 	trap 'exit 143' TERM
 	trap 'exit 129' HUP
-	resource=$(bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-register container "${container_name}")
 	# Development mode: plain HTTP on loopback and an in-memory database, which
 	# is all a throwaway realm needs.
-	container=$(bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-run "${resource}" -- \
-		docker run -d --name "${container_name}" \
-		--label "dev.rust-service.validation-owner=${VALIDATION_LOCK_TOKEN}" -p 127.0.0.1::8080 \
+	container=$(docker run -d --name "${container_name}" -p 127.0.0.1::8080 \
 		-e KC_BOOTSTRAP_ADMIN_USERNAME=admin -e KC_BOOTSTRAP_ADMIN_PASSWORD=admin \
 		"${KEYCLOAK_IMAGE}" start-dev)
-	bash "${ROOT_DIR}/scripts/ci/validation-lock.sh" --resource-bind "${resource}" "${container}"
 	address=$(docker port "${container}" 8080/tcp)
 	port=${address##*:}
 	if [[ -z ${port} ]]; then

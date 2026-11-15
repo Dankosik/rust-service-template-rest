@@ -7,6 +7,7 @@
 
 .artifacts/
 /.ci/native-transport/
+/.ci/profile-mcp/
 /sbom.cdx.json
 *.profraw
 *.profdata
@@ -18,10 +19,6 @@
 .claude/settings.local.json
 .qwen/QWEN.local.md
 .qwen/settings.local.json
-
-# Exact compiler-artifact receipt from the local workspace lint.
-/.ci/clippy-artifacts.jsonl
-/.ci/clippy-artifacts.jsonl.tmp
 
 # The Railway SDK that `npm ci --prefix .railway` installs for railway.ts.
 .railway/node_modules/
