@@ -514,12 +514,6 @@ fn assert_work_metrics(
 
 // These tests exercise real socket readiness and EOF. Bounded event waits keep
 // the clock running with I/O, avoiding paused-time auto-advance past OS events.
-async fn poll_once<F: Future + ?Sized>(
-    mut future: std::pin::Pin<&mut F>,
-) -> std::task::Poll<F::Output> {
-    std::future::poll_fn(|context| std::task::Poll::Ready(future.as_mut().poll(context))).await
-}
-
 #[tokio::test]
 async fn reliability_admission_bounds_connection_waits_without_cancelling_setup() {
     use health::Probe;
@@ -536,7 +530,7 @@ async fn reliability_admission_bounds_connection_waits_without_cancelling_setup(
     // No scheduler yield: the supervisor has not published a connection yet.
     for _ in 0..256 {
         let mut command = Box::pin(namespace.get("pending"));
-        assert!(poll_once(command.as_mut()).await.is_pending());
+        assert!(futures_util::poll!(command.as_mut()).is_pending());
         waiting.push(command);
     }
     assert_work_metrics(&recorder, 256, 0, 0);
@@ -548,21 +542,24 @@ async fn reliability_admission_bounds_connection_waits_without_cancelling_setup(
     drop(other);
     let mut excess = Box::pin(namespace.get("refused"));
     assert_eq!(
-        poll_once(excess.as_mut()).await,
+        futures_util::poll!(excess.as_mut()),
         Poll::Ready(Err(crate::Unavailable))
     );
     assert_work_metrics(&recorder, 256, 1, 0);
     let probe = cache.probe();
     let mut waiting_probe = probe.check();
-    assert!(poll_once(waiting_probe.as_mut()).await.is_pending());
+    assert!(futures_util::poll!(waiting_probe.as_mut()).is_pending());
     let mut excess_probe = probe.check();
-    std::assert_matches!(poll_once(excess_probe.as_mut()).await, Poll::Ready(Err(_)));
+    std::assert_matches!(
+        futures_util::poll!(excess_probe.as_mut()),
+        Poll::Ready(Err(_))
+    );
     assert_work_metrics(&recorder, 257, 2, 0);
     drop(waiting_probe);
     drop(waiting.pop());
     assert_work_metrics(&recorder, 255, 2, 0);
     let mut replacement = Box::pin(namespace.get("replacement"));
-    assert!(poll_once(replacement.as_mut()).await.is_pending());
+    assert!(futures_util::poll!(replacement.as_mut()).is_pending());
     drop(waiting);
     assert_work_metrics(&recorder, 1, 2, 0);
     assert_eq!(replacement.await, Ok(None));
@@ -608,7 +605,7 @@ async fn reliability_full_application_window_leaves_probe_and_maintenance_admiss
     let sibling = cache.namespace("other_capacity");
     let mut excess = Box::pin(sibling.delete("refused"));
     assert_eq!(
-        poll_once(excess.as_mut()).await,
+        futures_util::poll!(excess.as_mut()),
         Poll::Ready(Err(crate::Unavailable))
     );
     let probe = cache.probe();
@@ -624,7 +621,7 @@ async fn reliability_full_application_window_leaves_probe_and_maintenance_admiss
     }
     let mut excess_probe = probe.check();
     std::assert_matches!(
-        poll_once(excess_probe.as_mut()).await,
+        futures_util::poll!(excess_probe.as_mut()),
         Poll::Ready(Err(error)) if error.to_string() == "cache ping failed: other"
     );
     // Leave caller futures unpolled; the supervisor must progress independently
@@ -786,12 +783,12 @@ async fn reliability_a_probe_reply_timeout_retires_the_connection() {
     // No yield after the timeout: peers already observe retirement, and reused
     // capacity cannot dispatch another command on the old generation.
     assert_eq!(
-        poll_once(peer.as_mut()).await,
+        futures_util::poll!(peer.as_mut()),
         Poll::Ready(Err(crate::Unavailable))
     );
     assert_work_metrics(&recorder, 1, 0, 1);
     let mut replacement = Box::pin(namespace.get("replacement"));
-    assert!(poll_once(replacement.as_mut()).await.is_pending());
+    assert!(futures_util::poll!(replacement.as_mut()).is_pending());
     assert_work_metrics(&recorder, 2, 0, 1);
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(4), replacement)
@@ -804,7 +801,7 @@ async fn reliability_a_probe_reply_timeout_retires_the_connection() {
     // This peer kept its old identity unpolled while the successor served
     // a response. Its late failure must not withdraw that successor.
     assert_eq!(
-        poll_once(late.as_mut()).await,
+        futures_util::poll!(late.as_mut()),
         Poll::Ready(Err(crate::Unavailable))
     );
     assert_work_metrics(&recorder, 0, 0, 1);
@@ -955,11 +952,11 @@ async fn dropping_a_command_or_probe_before_dispatch_keeps_the_connection() {
         {
             let stopped = namespace.get("stopped");
             tokio::pin!(stopped);
-            assert!(poll_once(stopped.as_mut()).await.is_pending());
+            assert!(futures_util::poll!(stopped.as_mut()).is_pending());
         }
         {
             let mut stopped = probe.check();
-            assert!(poll_once(stopped.as_mut()).await.is_pending());
+            assert!(futures_util::poll!(stopped.as_mut()).is_pending());
         }
         assert_eq!(namespace.get("live").await, Ok(None));
     })
@@ -1013,7 +1010,7 @@ async fn acknowledged_write_keeps_its_result_after_disconnect() {
     assert_eq!(namespace.get("ready").await, Ok(None));
     let write = namespace.set("key", b"value", Duration::from_secs(10));
     tokio::pin!(write);
-    assert!(poll_once(write.as_mut()).await.is_pending());
+    assert!(futures_util::poll!(write.as_mut()).is_pending());
     server
         .wait_for(Duration::from_secs(1), "SET was not sent", || {
             server.command_count("SET", Some("acknowledged_write:key")) == 1
@@ -1048,7 +1045,7 @@ async fn cancelling_a_read_with_a_ready_reply_keeps_the_connection() {
     let context = OperationContext::unbounded();
     let read = namespace.get_with_context("key", &context);
     tokio::pin!(read);
-    assert!(poll_once(read.as_mut()).await.is_pending());
+    assert!(futures_util::poll!(read.as_mut()).is_pending());
     server
         .wait_for(Duration::from_secs(1), "GET was not sent", || {
             server.command_count("GET", Some("cancel_ready_read:key")) == 1
@@ -1087,7 +1084,7 @@ async fn dropping_an_exchange_with_a_delivered_reply_keeps_the_connection() {
                 }
             };
             tokio::pin!(exchange);
-            assert!(poll_once(exchange.as_mut()).await.is_pending());
+            assert!(futures_util::poll!(exchange.as_mut()).is_pending());
             // The later GET's reply proves the FIFO driver delivered the earlier reply.
             assert_eq!(namespace.get("fence").await, Ok(None));
             if check_probe {
@@ -1337,7 +1334,8 @@ async fn reliability_rejected_unchanged_password_recovers_without_traffic() {
         .wait_for(Duration::from_secs(7), |logs| {
             logs.contains("cache_password_reloaded")
         })
-        .await;
+        .await
+        .expect("expected credential diagnostic was not emitted");
     assert_eq!(
         server.connections(),
         connections,
@@ -1359,7 +1357,8 @@ async fn reliability_rejected_unchanged_password_recovers_without_traffic() {
         .wait_for(Duration::from_secs(7), |logs| {
             logs.contains("cache_password_file_unreadable")
         })
-        .await;
+        .await
+        .expect("expected credential diagnostic was not emitted");
     assert_eq!(namespace.get("usable-during-file-outage").await, Ok(None));
     assert!(
         password_refresh_samples(&recorder).contains(
@@ -1391,7 +1390,8 @@ async fn reliability_rejected_unchanged_password_recovers_without_traffic() {
         .wait_for(Duration::from_secs(2), |logs| {
             logs.matches("cache_password_reloaded").count() == 2
         })
-        .await;
+        .await
+        .expect("expected credential diagnostic was not emitted");
     server
         .wait_for(
             Duration::from_secs(7),
@@ -1606,36 +1606,34 @@ async fn reliability_password_file_preserves_case_crlf_and_username() {
 
 #[derive(Clone, Default)]
 struct CapturedLogs {
-    bytes: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
-    changed: std::sync::Arc<tokio::sync::Notify>,
+    bytes: tokio::sync::watch::Sender<Vec<u8>>,
 }
 
 impl CapturedLogs {
     fn rendered(&self) -> String {
-        String::from_utf8(self.bytes.lock().expect("logs lock").clone()).expect("UTF-8 logs")
+        String::from_utf8(self.bytes.borrow().clone()).expect("UTF-8 logs")
     }
 
-    async fn wait_for(&self, budget: Duration, ready: impl Fn(&str) -> bool) {
-        tokio::time::timeout(budget, async {
-            loop {
-                if ready(&self.rendered()) {
-                    break;
-                }
-                self.changed.notified().await;
-            }
-        })
-        .await
-        .expect("expected credential diagnostic was not emitted");
+    async fn wait_for(
+        &self,
+        budget: Duration,
+        ready: impl Fn(&str) -> bool,
+    ) -> Result<(), tokio::time::error::Elapsed> {
+        tokio::time::timeout(
+            budget,
+            self.bytes
+                .subscribe()
+                .wait_for(|bytes| ready(std::str::from_utf8(bytes).expect("UTF-8 logs"))),
+        )
+        .await?
+        .expect("capture owns the log sender");
+        Ok(())
     }
 }
 
 impl std::io::Write for CapturedLogs {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.bytes
-            .lock()
-            .expect("logs lock")
-            .extend_from_slice(bytes);
-        self.changed.notify_one();
+        self.bytes.send_modify(|logs| logs.extend_from_slice(bytes));
         Ok(bytes.len())
     }
 
@@ -1691,20 +1689,14 @@ fn reliability_auth_errors_are_sanitized_through_the_dependency_log_bridge() {
         let namespace = cache.namespace("logs");
         assert_eq!(namespace.get("sensitive-key").await, Ok(None));
         std::fs::write(file.path(), format!("{rejected}\n")).expect("rejected password");
-        tokio::time::timeout(Duration::from_secs(7), async {
-            loop {
-                let rendered = captured.rendered();
-                if rendered.contains("Failed to re-authenticate")
-                    || rendered.contains("error.type=\"auth\"")
-                    || rendered.contains("error.type=auth")
-                {
-                    break;
-                }
-                captured.changed.notified().await;
-            }
-        })
-        .await
-        .expect("AUTH rejection must emit a bounded failure classification");
+        captured
+            .wait_for(Duration::from_secs(7), |logs| {
+                logs.contains("Failed to re-authenticate")
+                    || logs.contains("error.type=\"auth\"")
+                    || logs.contains("error.type=auth")
+            })
+            .await
+            .expect("AUTH rejection must emit a bounded failure classification");
         let rendered = format!("{} {cache:?} {namespace:?}", captured.rendered());
         for (category, secret) in [
             ("raw server text", marker),

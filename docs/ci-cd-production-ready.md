@@ -37,7 +37,7 @@ Rust analysis ([Red main](#red-main)):
 | `docs` | Markdown, documentation, image-input policy/checker and Docker context controls | Railway watch forms agree and cover admitted image inputs; every relative link and `#fragment` resolves (lychee, offline, pinned container); no Rust toolchain |
 | `monitoring-rules` | rule files, their fixtures, the runner, tool pins and the shared routing owners | `promtool check rules` over every `env/monitoring/*.rules.yml` and `promtool test rules` over its `scripts/tests/<name>-rules.yml`; a rule file without fixtures fails |
 <!-- template:begin grpc:docs-ci-grpc-gates -->
-| `grpc` | schema, generated contracts, generator, Buf configuration | Buf format/lint, repeat deterministic generation, committed drift and FILE compatibility against the actual PR base |
+| `grpc` | schema, generated contracts, generator, Buf configuration | Buf format/lint, one generation compared with committed output, and FILE compatibility against the exact base when applicable |
 <!-- template:end grpc:docs-ci-grpc-gates -->
 | `required` | always | fails when any job failed or was cancelled; requires terminal success for a selected initializer matrix |
 
@@ -319,16 +319,17 @@ runs. The shared [publish-image action](../.github/actions/publish-image/action.
 
 1. names the candidate (`scripts/ci/publish-image-metadata.sh`); a release
    tag must equal `v<crate version>`;
-2. builds one run-scoped candidate for the exact commit with the same make
-   target CI uses;
-3. repeats the hardened lifecycle check and the Trivy scan;
-4. writes a CycloneDX SBOM from the pinned Trivy container;
-5. pushes the candidate and resolves its digest;
+2. builds one run-scoped candidate for the exact commit and binds the local
+   image ID to the final BuildKit export;
+3. runs the hardened lifecycle check and Trivy scan against that ID;
+4. writes a CycloneDX SBOM for the same ID;
+5. pushes the run tag and checks that the registry manifest matches both the
+   digest reported by that push and the tested image;
 6. signs the digest keyless with cosign and attests provenance and SBOM;
 7. verifies the signature and both attestations back out of GHCR;
 8. records the digest, uploads the SBOM artifact;
-9. promotes `sha-<12>` + `main` or `v*` + `latest`, reading each tag's digest
-   back; a partial failure records the promoted and failed tags.
+9. promotes `sha-<12>` + `main` or `v*` + `latest` sequentially from the
+   tested image ID and records each tag after its digest is confirmed.
 
 Public tags never move before verification. Consumers verify with
 `cosign verify --certificate-identity
@@ -368,8 +369,11 @@ next `main` run name any new breakage beside the open one.
 
 - Failed CI changes no external state; each job's containers are removed by
   the scripts' traps.
-- A failed publication never promotes public tags; the run-scoped candidate
-  tag is the only pushed reference.
+- Before promotion, a failed publication leaves deployable tags untouched.
+  The build cache, run tag, signature and attestations may persist. During
+  promotion, earlier confirmed tags remain published. If a write or its
+  readback fails, the summary identifies the unconfirmed tag. Check its
+  registry digest before retrying.
 - Retain and verify the accepted immutable image digest for rollback, together
   with compatible configuration. A mutable tag or rebuilt old commit is not that
   retained artifact. Source deployment has its own [deployment custody](railway-deployment-profile.md#rollback).

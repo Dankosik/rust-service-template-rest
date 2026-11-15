@@ -112,14 +112,9 @@ impl Receiver {
                 "observe expired webhook receipts",
                 sqlx::query_as!(
                     PopulationSample,
-                    r#"SELECT extract(epoch FROM observation.observed_at)::float8 AS "observed_at_unix_seconds!",
-                                  extract(epoch FROM oldest.received_at + $1::interval)::float8 AS "oldest_at_unix_seconds?"
-                           FROM (SELECT statement_timestamp() AS observed_at) observation
-                           LEFT JOIN LATERAL (
-                               SELECT received_at FROM webhook_receipts
-                               WHERE received_at < observation.observed_at - $1::interval
-                               ORDER BY received_at LIMIT 1
-                           ) oldest ON true"#,
+                    r#"SELECT extract(epoch FROM statement_timestamp())::float8 AS "observed_at_unix_seconds!",
+                              extract(epoch FROM min(received_at) + $1::interval)::float8 AS "oldest_at_unix_seconds?"
+                       FROM webhook_receipts WHERE received_at < statement_timestamp() - $1::interval"#,
                     RECEIPT_RETENTION as _,
                 )
                 .fetch_one(&mut *tx),

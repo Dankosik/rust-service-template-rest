@@ -193,8 +193,14 @@ class Rehearsal:
         return actual
 
     def effects(self, ids, *, seconds=30):
+        expected = set(ids)
+
+        def receipts_ready():
+            rows = self.session.rows("effect", "SELECT logical_id FROM recovery_effect_receipts")
+            return {row["logical_id"] for row in rows} == expected
+
         try:
-            self.wait("effects_not_established", lambda: set(self.receipt_map()) == set(ids), seconds)
+            self.wait("effects_not_established", receipts_ready, seconds)
         except self.c.Refused as error:
             if str(error) == "effects_not_established":
                 try:

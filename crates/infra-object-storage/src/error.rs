@@ -2,11 +2,15 @@
 //! mapping from SDK results.
 
 use std::borrow::Cow;
+use std::error::Error;
 
 use aws_sdk_s3::config::http::HttpResponse;
 use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
 use aws_sdk_s3::operation::delete_object::{DeleteObjectError, DeleteObjectOutput};
+use aws_sdk_s3::primitives::ByteStreamError;
+use aws_smithy_runtime::client::http::body::content_length_enforcement::ContentLengthError;
 use operation_context::Stopped;
+use shared_rules::error_chain::causes;
 
 /// Why an operation failed. Each variant tells the caller what it may do next.
 ///
@@ -294,10 +298,14 @@ fn classification_status(status: u16, code: Option<&str>) -> u16 {
     }
 }
 
-/// Whether a download body error is a checksum mismatch rather than transport.
-pub(crate) fn is_checksum_mismatch(error: &(dyn std::error::Error + 'static)) -> bool {
-    shared_rules::error_chain::causes(error)
-        .any(<dyn std::error::Error>::is::<aws_smithy_checksums::body::validate::Error>)
+pub(crate) fn from_download_body(error: &ByteStreamError) -> Failure {
+    if causes(error).any(<dyn Error>::is::<aws_smithy_checksums::body::validate::Error>) {
+        LocalFailure::ChecksumMismatch.into()
+    } else if causes(error).any(<dyn Error>::is::<ContentLengthError>) {
+        LocalFailure::ContentLength.into()
+    } else {
+        LocalFailure::DownloadBody.into()
+    }
 }
 
 #[cfg(test)]

@@ -242,7 +242,7 @@ async fn apply_pending(
     conn.lock().await?;
     conn.ensure_migrations_table(&migrator.table_name).await?;
     let history = applied_history(conn, &migrator.table_name).await?;
-    report.before = history.iter().map(|migration| migration.version).max();
+    report.before = history.last().map(|migration| migration.version);
     for migration in pending(migrator, &history)? {
         tracing::event!(
             target: "migrate_record",

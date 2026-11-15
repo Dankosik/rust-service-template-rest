@@ -38,7 +38,7 @@ self_test() {
 	# and still proves which files reach it and under which transaction mode.
 	linter_log=$(mktemp -t migration-history-linter.XXXXXX)
 	linter="${fixture}/.git/linter"
-	printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >>"%s"\n' "${linter_log}" >"${linter}"
+	printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@" >>"%s"\n' "${linter_log}" >"${linter}"
 	chmod +x "${linter}"
 	trap 'rm -rf -- "${fixture}" "${linter_log}"' EXIT
 
@@ -56,7 +56,33 @@ self_test() {
 		exit 1
 	fi
 	git -C "${fixture}" restore migrations/20260918000001_create.sql
+	local pair old new refusal
+	for pair in '20260918000001_create.sql:former migration.txt' 'README.md:20260918000004_from notes.sql'; do
+		old=migrations/${pair%:*}
+		new=migrations/${pair#*:}
+		git -C "${fixture}" mv "${old}" "${new}"
+		if refusal=$(run 2>&1) || [[ ${refusal} != *'applied migration files are append-only'* ]]; then
+			echo "self-test: rename ${old} to ${new} did not refuse the history change" >&2
+			exit 1
+		fi
+		git -C "${fixture}" mv "${new}" "${old}"
+	done
+	local copy='migrations/20260918000004_copy with space.sql'
+	cp "${fixture}/migrations/README.md" "${fixture}/${copy}"
+	git -C "${fixture}" add "${copy}"
+	run >/dev/null || { echo 'self-test: copy classified as an addition failed' >&2; exit 1; }
+	[[ $(cat "${linter_log}") == *$'--assume-in-transaction\n'"${copy}"* ]] || {
+		echo 'self-test: copy classified as an addition missed lint' >&2
+		exit 1
+	}
 	printf '# more notes\n' >>"${fixture}/migrations/README.md"
+	# With its source modified, Git now reports the same destination as C100.
+	if refusal=$(run 2>&1) || [[ ${refusal} != *'applied migration files are append-only'* || ${refusal} != *C100* ]]; then
+		echo 'self-test: a detected copy into the migration history escaped the copy policy' >&2
+		exit 1
+	fi
+	git -C "${fixture}" restore --staged -- "${copy}"
+	rm "${fixture}/${copy}"
 	run >/dev/null || {
 		echo "self-test: editing a non-migration file failed" >&2
 		exit 1
@@ -66,7 +92,7 @@ self_test() {
 		echo "self-test: untracked newer addition failed" >&2
 		exit 1
 	}
-	[[ $(cat "${linter_log}") == *"--assume-in-transaction migrations/20260918000004_add.sql" ]] || {
+	[[ $(cat "${linter_log}") == *$'--assume-in-transaction\nmigrations/20260918000004_add.sql' ]] || {
 		echo "self-test: the added migration did not reach the linter as transactional" >&2
 		exit 1
 	}
@@ -80,7 +106,7 @@ self_test() {
 		echo "self-test: untracked no-transaction addition failed" >&2
 		exit 1
 	}
-	[[ $(cat "${linter_log}") == *"--assume-in-transaction migrations/20260918000004_add.sql"*"--no-assume-in-transaction migrations/20260918000005_online.sql" ]] || {
+	[[ $(cat "${linter_log}") == *$'--assume-in-transaction\nmigrations/20260918000004_add.sql'*$'--no-assume-in-transaction\nmigrations/20260918000005_online.sql' ]] || {
 		echo "self-test: migrations were not linted under their own transaction mode" >&2
 		exit 1
 	}
@@ -209,54 +235,62 @@ else
 	include_untracked=true
 fi
 
-# An awk pattern, expanded by awk and not by the shell.
-# shellcheck disable=SC2016
-is_migration='$NF ~ /^[0-9]+_.+\.sql$/'
-diff_status=$(git diff --name-status --find-renames --find-copies "${base}" -- "${migration_dir}/")
+is_migration() {
+	[[ ${1##*/} =~ ^[0-9]+_.+\.sql$ ]]
+}
 
-changes=$(printf '%s\n' "${diff_status}" | awk -F'\t' '$1 != "A" && $1 != ""' | awk -F/ "${is_migration}" || true)
-
-if [[ -n ${changes} ]]; then
+temporary=$(mktemp -d)
+trap 'rm -rf -- "${temporary}"' EXIT
+git diff --name-status -z --find-renames --find-copies "${base}" -- "${migration_dir}/" >"${temporary}/status"
+incomplete_record() {
+	echo 'migration history: incomplete Git name-status record' >&2
+	exit 1
+}
+while IFS= read -r -d '' status || [[ -n ${status} ]]; do
+	IFS= read -r -d '' path || incomplete_record
+	case ${status} in
+	R* | C*)
+		IFS= read -r -d '' destination || incomplete_record
+		if { [[ ${status} == R* ]] && is_migration "${path}"; } || is_migration "${destination}"; then
+			printf '%s\t%s\t%s\n' "${status}" "${path}" "${destination}" >>"${temporary}/refused"
+		fi
+		;;
+	A) printf '%s\0' "${path}" ;;
+	*)
+		if is_migration "${path}"; then printf '%s\t%s\n' "${status}" "${path}" >>"${temporary}/refused"; fi
+		;;
+	esac
+done <"${temporary}/status" >"${temporary}/added"
+if [[ -s ${temporary}/refused ]]; then
 	echo "migration history: applied migration files are append-only; only additions are allowed (${scope})" >&2
-	printf '%s\n' "${changes}" >&2
+	cat "${temporary}/refused" >&2
 	exit 1
 fi
 
+migration_versions() {
+	local file name
+	while IFS= read -r -d '' file; do
+		if is_migration "${file}"; then
+			name=${file##*/}
+			printf '%s\t%q\n' "${name%%_*}" "${file}"
+		fi
+	done
+}
 prior_max=$(
-	git ls-tree -r --name-only "${base}" -- "${migration_dir}/" |
-		LC_ALL=C awk -F/ "${is_migration}"' {
-			name = $NF
-			sub(/_.*/, "", name)
-			if (name + 0 > max) max = name + 0
-		}
-		END { print max + 0 }'
+	git ls-tree -r --name-only -z "${base}" -- "${migration_dir}/" | migration_versions |
+		LC_ALL=C awk '$1 + 0 > max { max = $1 + 0 } END { print max + 0 }'
 )
-added=$(printf '%s\n' "${diff_status}" | awk -F'\t' '$1 == "A" { print $2 }')
 if [[ ${include_untracked} == true ]]; then
-	untracked=$(git ls-files --others --exclude-standard -- "${migration_dir}/")
-	added="${added}${added:+$'\n'}${untracked}"
+	git ls-files -z --others --exclude-standard -- "${migration_dir}/" >>"${temporary}/added"
 fi
-out_of_order=$(
-	printf '%s\n' "${added}" |
-		LC_ALL=C awk -F/ -v max="${prior_max}" "${is_migration}"' {
-			name = $NF
-			sub(/_.*/, "", name)
-			if (name + 0 <= max) print
-		}'
-)
+migration_versions <"${temporary}/added" >"${temporary}/versions"
+out_of_order=$(LC_ALL=C awk -F'\t' -v max="${prior_max}" '$1 + 0 <= max { print $2 }' "${temporary}/versions")
 if [[ -n ${out_of_order} ]]; then
 	echo "migration history: new migrations must be newer than prior version ${prior_max} (${scope})" >&2
 	printf '%s\n' "${out_of_order}" >&2
 	exit 1
 fi
-duplicates=$(
-	printf '%s\n' "${added}" |
-		LC_ALL=C awk -F/ "${is_migration}"' {
-			name = $NF
-			sub(/_.*/, "", name)
-			if (seen[name]++) print name
-		}'
-)
+duplicates=$(LC_ALL=C awk -F'\t' 'seen[$1]++ { print $1 }' "${temporary}/versions")
 if [[ -n ${duplicates} ]]; then
 	echo "migration history: new migration versions must be unique (${scope})" >&2
 	printf '%s\n' "${duplicates}" >&2
@@ -268,14 +302,16 @@ echo "migration history is append-only (${scope})"
 # sqlx runs a file outside a transaction when it starts with this marker.
 transactional=()
 outside_transaction=()
-while IFS= read -r file; do
+LC_ALL=C sort -z "${temporary}/added" >"${temporary}/sorted"
+while IFS= read -r -d '' file; do
+	is_migration "${file}" || continue
 	[[ -f ${file} ]] || continue
 	if [[ $(head -c 17 "${file}") == '-- no-transaction' ]]; then
 		outside_transaction+=("${file}")
 	else
 		transactional+=("${file}")
 	fi
-done < <(printf '%s\n' "${added}" | LC_ALL=C awk -F/ "${is_migration}"' { print }' | LC_ALL=C sort)
+done <"${temporary}/sorted"
 if ((${#transactional[@]} + ${#outside_transaction[@]} == 0)); then
 	exit 0
 fi

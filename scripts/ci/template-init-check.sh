@@ -381,9 +381,8 @@ run_graph() {
 	fi
 	# Pinned tools (cargo-shear for every graph, protoc for gRPC) are built
 	# once per attempt rather than once per initialized clone.
-	source_common=$(git -C "${source}" rev-parse --git-common-dir)
-	[[ ${source_common} == /* ]] || source_common=${source}/${source_common}
-	source_tools_root=${TOOLS_ROOT:-$(cd "${source_common}" && pwd)/tools}
+	source_common=$(git -C "${source}" rev-parse --path-format=absolute --git-common-dir)
+	source_tools_root=${TOOLS_ROOT:-${source_common}/tools}
 	runtime_environment+=("TOOLS_ROOT=${source_tools_root}")
 	printf 'runtime_graph=%s database=%s authn=%s outbound_http=%s outbound_auth=%s grpc=%s http_idempotency=%s jobs=%s messaging=%s outbox=%s webhooks=%s inbound_webhooks=%s cache=%s object_storage=%s service_auth=%s harness=core candidate=%s\n' \
 		"${graph}" "${database}" "${authn}" "${outbound_http}" "${outbound_auth}" "${grpc}" "${http_idempotency}" "${jobs}" "${messaging}" "${outbox}" "${webhooks}" "${inbound_webhooks}" "${cache}" "${object_storage}" "${service_auth}" "${candidate}" >>"${receipt}"
@@ -565,8 +564,7 @@ run_validation() {
 	local -a scrubbed_identity=(env -u SERVICE_NAME -u REPOSITORY -u DESCRIPTION -u CODEOWNER -u DATABASE -u AUTHN -u OUTBOUND_HTTP -u OUTBOUND_AUTH -u GRPC -u HTTP_IDEMPOTENCY -u JOBS -u MESSAGING -u OUTBOX -u WEBHOOKS -u INBOUND_WEBHOOKS -u CACHE -u OBJECT_STORAGE -u SERVICE_AUTH -u AGENT_HARNESS)
 	work=$(mktemp -d)
 	trap 'rm -rf -- "${work}"' RETURN
-	common=$(git -C "${repo}" rev-parse --git-common-dir)
-	[[ ${common} == /* ]] || common=${repo}/${common}
+	common=$(git -C "${repo}" rev-parse --path-format=absolute --git-common-dir)
 	receipt_dir=${common}/codex/template-init
 	mkdir -p "${receipt_dir}"
 	receipt=$(mktemp "${receipt_dir}/attempt.XXXXXX")

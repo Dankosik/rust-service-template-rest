@@ -4,7 +4,7 @@ use bytes::Bytes;
 use http::{HeaderValue, Method, Request, Uri, Version, header, uri::Scheme};
 #[cfg(feature = "test-support")]
 use url::Host;
-use url::{Position, Url};
+use url::Url;
 
 use crate::{BuildError, Error};
 
@@ -29,8 +29,8 @@ impl Origin {
         let (Some(host), Some(port)) = (url.host_str(), url.port_or_known_default()) else {
             return Err(BuildError::InvalidOrigin);
         };
-        let host_header = HeaderValue::from_str(&url[Position::BeforeHost..Position::AfterPort])
-            .map_err(|_| BuildError::InvalidOrigin)?;
+        let host_header =
+            HeaderValue::from_str(url.authority()).map_err(|_| BuildError::InvalidOrigin)?;
         Ok(Self {
             scheme,
             host: host.into(),

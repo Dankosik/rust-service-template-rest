@@ -118,6 +118,24 @@ fn retained_outbox_reserves_profile_specific_connection_capacity() {
         "diagnostics: {diagnostics}"
     );
 }
+
+#[test]
+fn outbox_publisher_requires_broker_urls_before_opening_the_pool() {
+    let output = output_with_env(
+        &[],
+        &[
+            ("APP__POSTGRES__ENABLED", "true"),
+            ("APP__POSTGRES__MAX_CONNECTIONS", "6"),
+            ("APP__POSTGRES__DSN", "invalid-dsn"),
+        ],
+    );
+    let diagnostics = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(1), "{diagnostics}");
+    assert!(
+        diagnostics.contains("messaging.urls: is required when a producer is active"),
+        "{diagnostics}"
+    );
+}
 // template:end outbox:worker-process-outbox-capacity
 
 #[test]

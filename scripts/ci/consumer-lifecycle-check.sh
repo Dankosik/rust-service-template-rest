@@ -109,8 +109,8 @@ PY
 }
 
 prepare_actor() {
-	local label=$1 revision=$2 checkout pristine lock_before cargo_target_dir
-	local -a actor_build=(cargo build --locked -p integration-tests --features integration --example consumer_lifecycle_actor)
+	local label=$1 revision=$2 checkout pristine lock_before cargo_target_dir actor messages
+	local -a actor_build=(cargo build --locked -p integration-tests --features integration --example consumer_lifecycle_actor --message-format=json-render-diagnostics)
 	checkout="${LIFECYCLE_EVIDENCE}/consumers/${label}"
 	# Historical source graphs keep separate Cargo artifacts, including initialization.
 	cargo_target_dir="${LIFECYCLE_EVIDENCE}/build/${label}"
@@ -141,14 +141,17 @@ prepare_actor() {
 	lock_before=$(shasum -a 256 "${checkout}/Cargo.lock" | awk '{print $1}')
 	mkdir -p "${checkout}/test/examples"
 	cp "${LIFECYCLE_EVIDENCE}/overlay/consumer_lifecycle_actor.rs" "${checkout}/test/examples/consumer_lifecycle_actor.rs"
+	mkdir -p "${cargo_target_dir}"
+	messages="${cargo_target_dir}/actor-build.jsonl"
 	(
 		cd "${checkout}"
-		CARGO_TARGET_DIR="${cargo_target_dir}" "${actor_build[@]}"
+		CARGO_TARGET_DIR="${cargo_target_dir}" "${actor_build[@]}" >"${messages}"
 		git diff --exit-code
 		[[ $(git ls-files --others --exclude-standard) == test/examples/consumer_lifecycle_actor.rs ]] || refuse "historical build changed more than the actor overlay"
 	)
 	[[ $(shasum -a 256 "${checkout}/Cargo.lock" | awk '{print $1}') == "${lock_before}" ]] || refuse "historical lock changed during build"
-	cp "${cargo_target_dir}/debug/examples/consumer_lifecycle_actor" "${LIFECYCLE_EVIDENCE}/bin/${label}"
+	actor=$(python3 "${ROOT_DIR}/scripts/ci/openapi-artifact.py" --manifest "${checkout}/test/Cargo.toml" --name consumer_lifecycle_actor --kind example <"${messages}")
+	cp "${actor}" "${LIFECYCLE_EVIDENCE}/bin/${label}"
 	python3 - "${LIFECYCLE_EVIDENCE}" "${label}" "${revision}" "${pristine}" "${cargo_target_dir}" "${actor_build[@]}" <<'PY'
 import hashlib, json, pathlib, subprocess, sys
 p, label, revision, pristine, cargo_target_dir = pathlib.Path(sys.argv[1]), *sys.argv[2:6]

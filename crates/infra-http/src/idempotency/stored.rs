@@ -160,16 +160,11 @@ pub(super) fn decode(record: Record) -> Result<ReplayableResponse, Undecodable> 
         .headers
         .into_iter()
         .map(|pair| {
-            let name = HeaderName::from_bytes(pair.name.as_bytes())
-                .map_err(|_| Undecodable::HeaderName)?;
-            // `capture` stores only the canonical allowlist spellings. Another
-            // spelling is a record this boundary did not write and would replay
-            // a duplicate of an allowlisted header.
-            if name.as_str() != pair.name || !is_replayable_header_name(name.as_str()) {
-                return Err(Undecodable::HeaderName);
-            }
-            let value =
-                HeaderValue::from_bytes(&pair.value).map_err(|_| Undecodable::HeaderValue)?;
+            let name = REPLAYABLE
+                .into_iter()
+                .find(|name| name.as_str() == pair.name)
+                .ok_or(Undecodable::HeaderName)?;
+            let value = HeaderValue::try_from(pair.value).map_err(|_| Undecodable::HeaderValue)?;
             Ok((name, value))
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -302,11 +297,12 @@ mod tests {
             200,
             vec![HeaderPair {
                 name: "content-type".to_owned(),
-                value: b"text/plain".to_vec(),
+                value: vec![0xff],
             }],
             b"stored".to_vec(),
         );
-        assert!(decode(valid).is_ok());
+        let response = decode(valid).unwrap().into_response();
+        assert_eq!(response.headers()[CONTENT_TYPE].as_bytes(), &[0xff]);
         for (invalid, reason) in [
             (record(199, Vec::new(), Vec::new()), Undecodable::Status),
             (
@@ -314,7 +310,7 @@ mod tests {
                     200,
                     vec![HeaderPair {
                         name: "Content-Type".to_owned(),
-                        value: b"text/plain".to_vec(),
+                        value: vec![b'\n'],
                     }],
                     Vec::new(),
                 ),

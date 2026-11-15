@@ -147,7 +147,7 @@ jobs:
           else
             bash ./scripts/ci/git-changed-paths.sh --diff "${BASE_SHA}" HEAD >"${paths}"
             bash ./scripts/ci/changed-surfaces.sh --union "${BASE_SHA}" <"${paths}" >"${surfaces}"
-            plan=()
+            plan=(--union "${BASE_SHA}")
           fi
           tee -a "${GITHUB_OUTPUT}" <"${surfaces}" >>"${GITHUB_STEP_SUMMARY}"
           if grep -Eq '^initializer_(runtime|artifacts)=true$' "${surfaces}"; then
@@ -469,8 +469,10 @@ jobs:
           cargo tree --locked --manifest-path crates/service/Cargo.toml --features hotpath,hotpath-alloc,hotpath-mcp,hotpath-cpu,hotpath/hotpath-prometheus -e features -i hotpath
           if [ -f scripts/ci/hotpath-mcp-check.py ]; then
             python3 scripts/ci/hotpath-vendor-check.py
-            cargo build --locked -p service --bin service --features hotpath,hotpath-alloc,hotpath-mcp
-            python3 scripts/ci/hotpath-mcp-check.py
+            messages=${RUNNER_TEMP}/profiling-build.jsonl
+            cargo build --locked -p service --bin service --features hotpath,hotpath-alloc,hotpath-mcp --message-format=json-render-diagnostics >"${messages}"
+            service=$(python3 scripts/ci/openapi-artifact.py --manifest crates/service/Cargo.toml --name service --kind bin <"${messages}")
+            python3 scripts/ci/hotpath-mcp-check.py "${service}"
           fi
       - name: Preserve profiling compatibility receipt
         if: always()
@@ -927,11 +929,17 @@ jobs:
           if [[ -f test/examples/messaging_recovery.rs ]]; then
             packages+=(-p integration-tests --example messaging_recovery -p migrate --bin migrate)
           fi
-          cargo build --locked --release --target x86_64-unknown-linux-musl --features infra-messaging/integration "${packages[@]}"
-          cp target/x86_64-unknown-linux-musl/release/examples/dlq_recovery .artifacts/messaging-recovery/bin/
+          messages=${RUNNER_TEMP}/musl-build.jsonl
+          cargo build --locked --release --target x86_64-unknown-linux-musl --features infra-messaging/integration "${packages[@]}" --message-format=json-render-diagnostics >"${messages}"
+          copy_artifact() {
+            local executable
+            executable=$(python3 scripts/ci/openapi-artifact.py --manifest "$1" --name "$2" --kind "$3" <"${messages}")
+            cp "${executable}" ".artifacts/messaging-recovery/bin/$2"
+          }
+          copy_artifact crates/infra-messaging/Cargo.toml dlq_recovery example
           if [[ -f test/examples/messaging_recovery.rs ]]; then
-            cp target/x86_64-unknown-linux-musl/release/examples/messaging_recovery .artifacts/messaging-recovery/bin/
-            cp target/x86_64-unknown-linux-musl/release/migrate .artifacts/messaging-recovery/bin/
+            copy_artifact test/Cargo.toml messaging_recovery example
+            copy_artifact crates/migrate/Cargo.toml migrate bin
           fi
           CGO_ENABLED=0 GOBIN="${PWD}/.artifacts/messaging-recovery/bin" go install "github.com/nats-io/natscli/nats@v${NATS_CLI_VERSION}"
           docker pull "$(yq -r '.services.nats.image' env/docker-compose.yml)"
@@ -1007,25 +1015,20 @@ jobs:
       # `required` reads the aggregate, which fails when either leg fails.
       fail-fast: false
       matrix:
-        suite: [db, services]
-    env:
-      SUITE_SELECTED: >-
-        ${{ matrix.suite == 'db' && needs.changes.outputs.db_integration == 'true' ||
-            matrix.suite == 'services' && (
-              needs.changes.outputs.messaging_integration == 'true' ||
-              needs.changes.outputs.cache_integration == 'true' ||
-              needs.changes.outputs.object_storage_integration == 'true') }}
+        suite: >-
+          ${{ fromJSON(needs.changes.outputs.db_integration != 'true' && '["services"]' ||
+              (needs.changes.outputs.messaging_integration == 'true' ||
+               needs.changes.outputs.cache_integration == 'true' ||
+               needs.changes.outputs.object_storage_integration == 'true') && '["db","services"]' ||
+              '["db"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        if: env.SUITE_SELECTED == 'true'
         with:
           fetch-depth: 1
           persist-credentials: false
       - name: Install pinned toolchain
-        if: env.SUITE_SELECTED == 'true'
         uses: ./.github/actions/rust-toolchain # zizmor: ignore[self-repository]
       - name: Cargo caches
-        if: env.SUITE_SELECTED == 'true'
         id: cargo-cache
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.2 # zizmor: ignore[cache-poisoning]
         with:
@@ -1033,16 +1036,16 @@ jobs:
           cache-bin: "false"
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Database-backed proof
-        if: matrix.suite == 'db' && needs.changes.outputs.db_integration == 'true'
+        if: matrix.suite == 'db'
         run: bash ./scripts/ci/measure.sh integration-db -- make test-integration-db
         # Each proof owns a registered Compose project through its canonical script.
       - name: Load tool manifest
-        if: matrix.suite == 'db' && needs.changes.outputs.db_integration == 'true'
+        if: matrix.suite == 'db'
         run: grep -v '^#' tools/versions.env | grep . >>"${GITHUB_ENV}"
       - name: Restore sqlx-cli
         # sqlx-cli publishes no release binaries; make builds the pinned
         # version once and this cache keeps it until the pin moves.
-        if: matrix.suite == 'db' && needs.changes.outputs.db_integration == 'true'
+        if: matrix.suite == 'db'
         id: sqlx-cli-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -1051,11 +1054,11 @@ jobs:
       - name: Query metadata
         # .sqlx/ against the statements and a database that holds exactly
         # the embedded migrations; offline builds trust it.
-        if: matrix.suite == 'db' && needs.changes.outputs.db_integration == 'true'
+        if: matrix.suite == 'db'
         run: bash ./scripts/ci/measure.sh integration-query-metadata -- make sqlx-check
       - name: Save sqlx-cli
         if: >-
-          matrix.suite == 'db' && needs.changes.outputs.db_integration == 'true' &&
+          matrix.suite == 'db' &&
           steps.sqlx-cli-cache.outputs.cache-hit != 'true' &&
           github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -1097,7 +1100,6 @@ jobs:
         # its suites would keep the others cold until the lockfile changes, so
         # the run that saves compiles them all; a selected suite is already built.
         if: >-
-          env.SUITE_SELECTED == 'true' &&
           github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
         env:
           INTEGRATION_COMPOSE_MANAGED: "1"
@@ -1332,7 +1334,8 @@ jobs:
         # Explicit always() also removes the step's implicit status guard.
         if: always() && (needs.changes.result != 'success' || contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))
         run: exit 1
-      # Mirror each job selector: only an unselected gate may be skipped.
+      # The checks below also reject a skipped job when its named selector applies.
+      # Manual messaging recovery participates in the failure/cancellation check above.
       - name: Require selected quality success
         if: >-
           always() && (

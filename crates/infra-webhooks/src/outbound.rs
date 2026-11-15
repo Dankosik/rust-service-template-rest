@@ -14,13 +14,14 @@ use std::{
 };
 
 use bytes::Bytes;
-use http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header};
+use http::{HeaderMap, HeaderValue, Method, Request, StatusCode, Uri, header};
 use infra_jobs::{Handler, Job, JobError, JobKind, KindsBuilder, Policy};
 use infra_outbound_http::{BuildError, Client, Error as HttpError, Limits};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use url::Url;
 
+use crate::StreamingBase64;
 use crate::protocol::{KeyRing, WEBHOOK_ID, WEBHOOK_SIGNATURE, WEBHOOK_TIMESTAMP};
 
 pub use producer::{JSON_CONTENT_TYPE, OutboundError, Producer};
@@ -53,18 +54,20 @@ const LIMITS: Limits = Limits {
 #[derive(Clone, derive_more::Debug)]
 #[debug("Endpoint([REDACTED])")]
 pub struct Endpoint {
-    destination: Url,
+    destination: Option<Uri>,
     client: Client,
     keys: KeyRing,
 }
 
 impl Endpoint {
-    /// Parse the HTTPS destination (no credentials, no fragment) and build its client.
+    /// The destination must be an HTTPS URL with a host and without credentials
+    /// or a fragment. A URL that passes validation and transport setup but cannot be
+    /// represented as an HTTP request URI fails each delivery permanently.
     ///
     /// # Errors
     ///
-    /// Returns [`EndpointError::InvalidDestination`] for an unusable destination,
-    /// and [`EndpointError::Client`] when client construction fails.
+    /// Returns [`EndpointError::InvalidDestination`] for an invalid URL or a
+    /// destination outside this policy and [`EndpointError::Client`] for transport setup failure.
     pub fn try_new(destination: &str, keys: KeyRing) -> Result<Self, EndpointError> {
         if shared_rules::uri::has_whitespace_or_control(destination)
             || shared_rules::uri::authority_has_userinfo(destination)
@@ -76,11 +79,7 @@ impl Endpoint {
             .filter(|destination| destination.scheme() == "https" && is_admissible(destination))
             .ok_or(EndpointError::InvalidDestination)?;
         let client = Client::try_new(&destination, LIMITS).map_err(EndpointError::Client)?;
-        Ok(Self {
-            destination,
-            client,
-            keys,
-        })
+        Ok(Self::from_destination(destination, client, keys))
     }
 
     /// Use a caller-built local test client. Production code must use
@@ -101,11 +100,15 @@ impl Endpoint {
         if !matches!(destination.scheme(), "http" | "https") || !is_admissible(&destination) {
             return Err(EndpointError::InvalidDestination);
         }
-        Ok(Self {
-            destination,
+        Ok(Self::from_destination(destination, client, keys))
+    }
+
+    fn from_destination(destination: Url, client: Client, keys: KeyRing) -> Self {
+        Self {
+            destination: Uri::try_from(String::from(destination)).ok(),
             client,
             keys,
-        })
+        }
     }
 }
 
@@ -203,7 +206,10 @@ struct Delivery {
     version: u8,
     endpoint_id: String,
     content_type: String,
-    #[serde_as(as = "serde_with::base64::Base64")]
+    #[serde_as(
+        serialize_as = "StreamingBase64",
+        deserialize_as = "serde_with::base64::Base64"
+    )]
     body: Bytes,
 }
 
@@ -333,7 +339,7 @@ impl Endpoint {
             .ok()?;
         Request::builder()
             .method(Method::POST)
-            .uri(self.destination.as_str())
+            .uri(self.destination.clone()?)
             .header(header::CONTENT_TYPE, &delivery.content_type)
             .header(WEBHOOK_ID, message_id)
             .header(WEBHOOK_TIMESTAMP, HeaderValue::from(timestamp))
@@ -490,23 +496,43 @@ mod tests {
     }
 
     #[test]
-    fn serialized_payload_is_endpoint_content_type_and_base64_body() {
+    fn https_registration_preserves_the_http_uri_length_boundary_at_delivery() {
+        let origin = "https://partner.example/";
+        let destination = format!("{origin}{}", "a".repeat(65_534 - origin.len()));
         let delivery = super::Delivery {
             version: super::delivery_version(),
             endpoint_id: "partner".to_owned(),
             content_type: "application/json".to_owned(),
-            body: bytes::Bytes::from_static(b"raw\0bytes"),
+            body: bytes::Bytes::new(),
         };
 
-        assert_eq!(
-            serde_json::to_value(&delivery).unwrap(),
-            serde_json::json!({
-                "version": 2,
-                "endpoint_id": "partner",
-                "content_type": "application/json",
-                "body": "cmF3AGJ5dGVz"
-            })
-        );
+        let endpoint = Endpoint::try_new(&destination, ring()).unwrap();
+        let request = endpoint.signed_request(&delivery, "id", 0).unwrap();
+        assert_eq!(request.uri().to_string(), destination);
+        let endpoint = Endpoint::try_new(&format!("{destination}a"), ring()).unwrap();
+        assert!(endpoint.signed_request(&delivery, "id", 0).is_none());
+    }
+
+    #[test]
+    fn serialized_payload_is_endpoint_content_type_and_padded_base64_body() {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+        for len in [1, 2, 3, 4, crate::protocol::MAX_BODY_BYTES] {
+            let body = bytes::Bytes::from(vec![0xff; len]);
+            let encoded = STANDARD.encode(&body);
+            let delivery = super::Delivery {
+                version: super::delivery_version(),
+                endpoint_id: "partner".to_owned(),
+                content_type: "application/json".to_owned(),
+                body,
+            };
+            assert_eq!(
+                serde_json::to_string(&delivery).unwrap(),
+                format!(
+                    r#"{{"version":2,"endpoint_id":"partner","content_type":"application/json","body":"{encoded}"}}"#
+                )
+            );
+        }
     }
 
     #[test]
@@ -527,13 +553,13 @@ mod tests {
     #[test]
     fn a_versioned_row_still_deserializes() {
         let delivery: super::Delivery = serde_json::from_str(
-            r#"{"version":99,"endpoint_id":"partner","content_type":"application/json","body":"cmF3AGJ5dGVz"}"#,
+            r#"{"version":99,"endpoint_id":"partner","content_type":"application/json","body":"cmF3AGJ5dGVz/w"}"#,
         )
         .unwrap();
 
         assert_eq!(delivery.endpoint_id, "partner");
         assert_eq!(delivery.content_type, "application/json");
-        assert_eq!(delivery.body.as_ref(), b"raw\0bytes");
+        assert_eq!(delivery.body.as_ref(), b"raw\0bytes\xff");
     }
 
     #[test]

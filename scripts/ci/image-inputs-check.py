@@ -47,7 +47,27 @@ def watch_set(values: list[str], owner: str) -> set[str]:
     return set(values)
 
 
-def policy_watches(root: Path) -> tuple[set[str], str]:
+def single_image_source(code: str) -> bool:
+    """The sole source property must have an image call as its entire value."""
+    sources = list(re.finditer(r"\bsource\s*:\s*", code))
+    if len(sources) != 1:
+        return False
+    value = code[sources[0].end():]
+    call = re.match(r"image\s*\(", value)
+    if call is None:
+        return False
+    depth = 1
+    for i in range(call.end(), len(value)):
+        if value[i] == "(":
+            depth += 1
+        elif value[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return value[i + 1:].lstrip().startswith((",", "}"))
+    return False
+
+
+def policy_watches(root: Path) -> tuple[set[str] | None, str]:
     """The agreed watch set and the IaC source it was read from."""
 
     text = (root / POLICY).read_text()
@@ -55,10 +75,6 @@ def policy_watches(root: Path) -> tuple[set[str], str]:
     def table(key: str) -> str:
         return one(re.findall(r"^\| `" + re.escape(key) + r"` \| ([^|]+) \|", text, re.M), f"{POLICY} table {key}")
 
-    table_patterns = table("build.watchPatterns")
-    if not re.fullmatch(r"\s*`[^`]+`(?:\s*,\s*`[^`]+`)*\s*", table_patterns):
-        raise Refusal(f"{POLICY}: watch table must contain only comma-separated literal patterns")
-    table_set = watch_set(re.findall(r"`([^`]+)`", table_patterns), f"{POLICY} table")
     iac = root / IAC
     if iac.exists() or iac.is_symlink():
         source = IAC
@@ -68,17 +84,36 @@ def policy_watches(root: Path) -> tuple[set[str], str]:
         source = f"{POLICY} IaC snippet"
         program = one([block for block in re.findall(r"```ts\n(.*?)\n```", text, re.S) if "watchPatterns" in block], source)
     # Comments are explanatory prose, never configuration. Strings are admitted below.
-    program = re.sub(r"//[^\n]*", "", program)
+    tokens = r""""(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`|//[^\n]*|/\*[\s\S]*?\*/"""
+    program = re.sub(tokens, lambda m: " " if m[0].startswith("/") else m[0], program)
     # A string such as "[::]:8080" is a value, not a computed key.
-    code = re.sub(r'"(?:[^"\\\n]|\\.)*"', '""', program)
+    def mask_value(match: re.Match[str]) -> str:
+        key = match[0][1:-1]
+        if key.isidentifier() and re.match(r"\s*:", program[match.end():]):
+            return key
+        return '""'
+
+    code = re.sub(tokens, mask_value, program)
     if "..." in code or re.search(r"\[[^\]]+\]\s*:", code):
         raise Refusal(f"{source}: unsupported computed/spread IaC policy; use explicit build settings")
+
+    def has_setting(key: str) -> bool:
+        return bool(re.search(r"[{,]\s*" + key + r"\s*[:,}]", code))
+
+    for key in ("rootDirectory", "context", "buildContext", "additionalContexts", "dockerContext", "buildCommand"):
+        if has_setting(key) or re.search(r"^\|[^|]*\b" + key + r"\b", text, re.M):
+            raise Refusal(f"{source}: unsupported {key}; coverage requires the repository root build context")
+    if (source == IAC and single_image_source(code)
+            and not any(has_setting(key) for key in ("build", "builder", "dockerfilePath", "watchPatterns"))
+            and not re.search(r"^\|\s*`?build\.", text, re.M)):
+        return None, source
+    table_patterns = table("build.watchPatterns")
+    if not re.fullmatch(r"\s*`[^`]+`(?:\s*,\s*`[^`]+`)*\s*", table_patterns):
+        raise Refusal(f"{POLICY}: watch table must contain only comma-separated literal patterns")
+    table_set = watch_set(re.findall(r"`([^`]+)`", table_patterns), f"{POLICY} table")
     for key in ("builder", "dockerfilePath", "watchPatterns"):
         if len(re.findall(r"\b" + key + r"\s*:", program)) != 1:
             raise Refusal(f"{source}: expected exactly one IaC {key} setting")
-    for key in ("rootDirectory", "context", "buildContext", "additionalContexts", "dockerContext", "buildCommand"):
-        if re.search(r"\b" + key + r"\s*:", program) or re.search(r"^\|[^|]*\b" + key + r"\b", text, re.M):
-            raise Refusal(f"{source}: unsupported {key}; coverage requires the repository root build context")
     for key, expected in (("builder", "DOCKERFILE"), ("dockerfilePath", DOCKERFILE)):
         row = table("build." + key).strip()
         actual = one(re.findall(r"\b" + key + r'\s*:\s*"([^"\n]+)"\s*,', program), f"{source} {key}")
@@ -165,26 +200,10 @@ def check_dockerfile(root: Path) -> None:
                 raise Refusal(f"{DOCKERFILE}: unsupported RUN mount context; admit its inputs before changing {POLICY}")
 
 
-def published_image(root: Path) -> bool:
-    """Railway deploys a published image and builds nothing from this repository.
-
-    Only an IaC file with an image source, no build settings and no build rows
-    in the profile qualifies; anything else keeps the watch policy.
-    """
-
-    iac = root / IAC
-    if not (iac.exists() or iac.is_symlink()):
-        return False
-    program = re.sub(r"//[^\n]*", "", iac.read_text())
-    return (bool(re.search(r"\bsource\s*:\s*image\(", program))
-            and not re.search(r"\b(?:builder|dockerfilePath|watchPatterns)\s*:", program)
-            and not re.search(r"^\| `build\.", (root / POLICY).read_text(), re.M))
-
-
 def check(root: Path) -> str:
-    if published_image(root):
-        return f"{IAC} deploys a published image; Railway builds no repository context"
     watches, source = policy_watches(root)
+    if watches is None:
+        return f"{source} deploys a published image; Railway builds no repository context"
     check_dockerfile(root)
     for family in sorted(input_families(root)):
         path = family[:-3] if family.endswith("/**") else family

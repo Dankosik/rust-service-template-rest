@@ -150,14 +150,9 @@ impl Store {
                 "observe expired idempotency records",
                 sqlx::query_as!(
                     PopulationSample,
-                    "SELECT extract(epoch FROM clock.observed_at)::float8 AS \"observed_at_unix_seconds!\", \
-                     extract(epoch FROM oldest.expires_at)::float8 AS \"oldest_at_unix_seconds?\" \
-                     FROM (SELECT statement_timestamp() AS observed_at) AS clock \
-                     LEFT JOIN LATERAL ( \
-                         SELECT expires_at FROM http_idempotency_records \
-                         WHERE expires_at <= clock.observed_at \
-                         ORDER BY expires_at LIMIT 1 \
-                     ) AS oldest ON true"
+                    "SELECT extract(epoch FROM statement_timestamp())::float8 AS \"observed_at_unix_seconds!\", \
+                            extract(epoch FROM min(expires_at))::float8 AS \"oldest_at_unix_seconds?\" \
+                     FROM http_idempotency_records WHERE expires_at <= statement_timestamp()"
                 )
                 .fetch_one(&mut *tx),
             )

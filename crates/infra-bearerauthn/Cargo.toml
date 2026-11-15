@@ -32,7 +32,12 @@ jsonwebtoken = { workspace = true, features = ["aws_lc_rs"] }
 # template:end oidc-jwt:authn-jwt-dependency
 aws-lc-rs = { workspace = true, features = ["alloc", "aws-lc-sys", "prebuilt-nasm"] }
 metrics = { workspace = true }
-reqwest = { workspace = true, features = ["rustls"] }
+reqwest = { workspace = true, features = [
+    "rustls",
+# template:begin oidc-introspection:authn-introspection-reqwest-form
+    "form",
+# template:end oidc-introspection:authn-introspection-reqwest-form
+] }
 # `Principal::access_token()` retains the presented bearer token as a secret
 # regardless of the selected engine, so this dependency is unconditional.
 secrecy = { workspace = true }
@@ -53,6 +58,9 @@ tokio-util = { workspace = true, features = ["rt"] }
 url = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
+# template:begin oidc-introspection:authn-introspection-dev-dependency
+futures-util = { workspace = true, features = ["async-await"] }
+# template:end oidc-introspection:authn-introspection-dev-dependency
 # template:begin oidc-jwt:authn-jwt-dev-dependency
 proptest = { workspace = true, features = ["std"] }
 # template:end oidc-jwt:authn-jwt-dev-dependency

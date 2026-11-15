@@ -212,14 +212,9 @@ async fn read_population(
                 "observe failed jobs population",
                 sqlx::query_as!(
                     PopulationSample,
-                    "WITH sampled AS (SELECT statement_timestamp() AS observed_at) \
-                     SELECT EXTRACT(EPOCH FROM sampled.observed_at)::double precision AS \"observed_at_unix_seconds!\", \
-                            EXTRACT(EPOCH FROM oldest.finished_at)::double precision AS \"oldest_at_unix_seconds?\" \
-                     FROM sampled LEFT JOIN LATERAL ( \
-                         SELECT finished_at FROM background_jobs \
-                         WHERE state = 'failed' \
-                         ORDER BY finished_at LIMIT 1 \
-                     ) AS oldest ON true"
+                    "SELECT EXTRACT(EPOCH FROM statement_timestamp())::double precision AS \"observed_at_unix_seconds!\", \
+                            EXTRACT(EPOCH FROM min(finished_at))::double precision AS \"oldest_at_unix_seconds?\" \
+                     FROM background_jobs WHERE state = 'failed'"
                 )
                 .fetch_one(&mut *tx),
             )
@@ -228,14 +223,10 @@ async fn read_population(
                 "observe completed jobs population",
                 sqlx::query_as!(
                     PopulationSample,
-                    "WITH sampled AS (SELECT statement_timestamp() AS observed_at) \
-                     SELECT EXTRACT(EPOCH FROM sampled.observed_at)::double precision AS \"observed_at_unix_seconds!\", \
-                            EXTRACT(EPOCH FROM oldest.finished_at + $1::interval)::double precision AS \"oldest_at_unix_seconds?\" \
-                     FROM sampled LEFT JOIN LATERAL ( \
-                         SELECT finished_at FROM background_jobs \
-                         WHERE state = 'completed' AND finished_at <= sampled.observed_at - $1::interval \
-                         ORDER BY finished_at LIMIT 1 \
-                     ) AS oldest ON true",
+                    "SELECT EXTRACT(EPOCH FROM statement_timestamp())::double precision AS \"observed_at_unix_seconds!\", \
+                            EXTRACT(EPOCH FROM min(finished_at) + $1::interval)::double precision AS \"oldest_at_unix_seconds?\" \
+                     FROM background_jobs \
+                     WHERE state = 'completed' AND finished_at <= statement_timestamp() - $1::interval",
                     RETAIN_COMPLETED_FOR as _,
                 )
                 .fetch_one(&mut *tx),
@@ -308,20 +299,21 @@ async fn sample_once(shared: &Shared) -> Result<Option<Sample>, OperationError> 
                             scheduled.count AS \"scheduled!\", \
                             running.count AS \"running!\", \
                             failed.count AS \"failed!\", \
-                            COALESCE(EXTRACT(EPOCH FROM sampled.observed_at - oldest.not_before), 0)::double precision \
+                            COALESCE(EXTRACT(EPOCH FROM sampled.observed_at - available.oldest), 0)::double precision \
                                 AS \"oldest_available_seconds!\", \
                             EXTRACT(EPOCH FROM sampled.observed_at)::double precision AS \"observed_at!\" \
                      FROM sampled \
                      CROSS JOIN registered \
                      CROSS JOIN LATERAL ( \
-                         SELECT count(*) AS count \
+                         SELECT count(*) AS count, min(capped.not_before) AS oldest \
                          FROM ( \
-                             SELECT 1 \
+                             SELECT job.not_before \
                              FROM background_jobs AS job \
                              WHERE job.kind = registered.kind \
                                AND job.state = 'pending' \
                                AND job.not_before <= sampled.observed_at \
-                            LIMIT $2 \
+                             ORDER BY job.not_before, job.id \
+                             LIMIT $2 \
                          ) AS capped \
                      ) AS available \
                      CROSS JOIN LATERAL ( \
@@ -354,16 +346,7 @@ async fn sample_once(shared: &Shared) -> Result<Option<Sample>, OperationError> 
                                AND job.state = 'failed' \
                             LIMIT $2 \
                          ) AS capped \
-                     ) AS failed \
-                     LEFT JOIN LATERAL ( \
-                         SELECT job.not_before \
-                         FROM background_jobs AS job \
-                         WHERE job.kind = registered.kind \
-                           AND job.state = 'pending' \
-                           AND job.not_before <= sampled.observed_at \
-                         ORDER BY job.not_before, job.id \
-                         LIMIT 1 \
-                     ) AS oldest ON true",
+                     ) AS failed",
                     &kinds as _,
                     PER_KIND_STATE_SAMPLE_CAP,
                 )

@@ -17,7 +17,10 @@ pub(super) fn admit_pool_inputs(
     config
         .jobs
         .validate_pool_capacity_with_outbox(&config.postgres, capabilities.jobs.is_some())?;
-    config.messaging.validate_producer(&config.app.env)?;
+    // Retaining a message consumer already validated the producer policy on this config.
+    if capabilities.messages.is_none() {
+        config.messaging.validate_producer(&config.app.env)?;
+    }
     Ok(())
 }
 

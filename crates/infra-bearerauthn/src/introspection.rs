@@ -307,7 +307,10 @@ impl IntrospectionVerifier {
                 self.endpoint.url(),
                 &self.client_id,
                 self.client_secret.expose_secret(),
-                form_body(token.expose_secret()),
+                &[
+                    ("token", token.expose_secret()),
+                    ("token_type_hint", "access_token"),
+                ],
                 context,
             )
             .await
@@ -361,24 +364,14 @@ fn retention(principal: &Principal, ttl: Duration, now: SystemTime) -> Duration 
         .map_or(Duration::ZERO, |remaining| remaining.min(ttl))
 }
 
-fn form_body(token: &str) -> String {
-    url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("token", token)
-        .append_pair("token_type_hint", "access_token")
-        .finish()
-}
-
 #[cfg(test)]
 mod tests {
     use std::{
-        future::{Future, poll_fn},
         num::NonZeroUsize,
-        pin::Pin,
         sync::{
             Arc, Mutex,
             atomic::{AtomicUsize, Ordering},
         },
-        task::Poll,
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
     use tokio::{
@@ -610,13 +603,6 @@ mod tests {
             .await
             .map_err(|error| error.failure)
     }
-    async fn poll_pending<T>(mut future: Pin<&mut impl Future<Output = T>>) {
-        assert!(
-            poll_fn(|cx| Poll::Ready(future.as_mut().poll(cx)))
-                .await
-                .is_pending()
-        );
-    }
 
     #[tokio::test]
     async fn the_request_form_encodes_client_credentials_and_sends_the_token_only_in_the_body() {
@@ -630,6 +616,10 @@ mod tests {
         let request = String::from_utf8(requests[0].clone()).unwrap();
         let (head, body) = request.split_once("\r\n\r\n").unwrap();
         assert!(head.starts_with("POST /introspect HTTP/1.1\r\n"), "{head}");
+        assert!(
+            head.lines()
+                .any(|line| line == "content-type: application/x-www-form-urlencoded")
+        );
         assert!(
             head.contains("\r\nauthorization: Basic YSUzQWI6Yytk\r\n"),
             "{head}"
@@ -891,7 +881,7 @@ mod tests {
             let mut first = Box::pin(verify(&verifier, b"Bearer shared"));
             tokio::select! { () = fixture.received() => {}, result = &mut first => panic!("response must be gated: {result:?}"), }
             let mut second = Box::pin(verify(&verifier, b"Bearer shared"));
-            poll_pending(second.as_mut()).await;
+            assert!(futures_util::poll!(second.as_mut()).is_pending());
             assert_eq!(
                 verify(&verifier, b"Bearer distinct").await,
                 Err(Failure::Unavailable)
@@ -935,7 +925,7 @@ mod tests {
         let mut leader = Box::pin(verifier.verify_with_context(&token, &context));
         tokio::select! { () = fixture.received() => {}, result = &mut leader => panic!("response must be gated: {result:?}"), }
         let mut survivor = Box::pin(verifier.verify(&token));
-        poll_pending(survivor.as_mut()).await;
+        assert!(futures_util::poll!(survivor.as_mut()).is_pending());
         context.cancel();
         assert_eq!(leader.as_mut().await, Err(Failure::Unavailable));
         drop(leader);
@@ -1078,7 +1068,7 @@ mod tests {
         let mut leader = Box::pin(verify(&verifier, b"Bearer shared"));
         tokio::select! { () = fixture.received() => {}, result = &mut leader => panic!("response must be gated: {result:?}"), }
         let mut waiter = Box::pin(verify(&verifier, b"Bearer shared"));
-        poll_pending(waiter.as_mut()).await;
+        assert!(futures_util::poll!(waiter.as_mut()).is_pending());
         drop(waiter);
         gate.add_permits(1);
         tokio::time::timeout(Duration::from_secs(5), leader)
@@ -1103,7 +1093,7 @@ mod tests {
         tokio::time::pause();
         let context = OperationContext::with_timeout(Duration::from_millis(10));
         let mut waiter = Box::pin(verifier.verify_with_context(&token, &context));
-        poll_pending(waiter.as_mut()).await;
+        assert!(futures_util::poll!(waiter.as_mut()).is_pending());
         tokio::time::advance(Duration::from_millis(11)).await;
         assert_eq!(waiter.as_mut().await, Err(Failure::Unavailable));
         tokio::time::resume();
@@ -1221,7 +1211,7 @@ mod tests {
                 })
                 .unwrap();
             let mut publication = Box::pin(publication.wait());
-            poll_pending(publication.as_mut()).await;
+            assert!(futures_util::poll!(publication.as_mut()).is_pending());
             if elapsed_seconds == 0 {
                 // Simulate removal of the cache entry while the token is still valid.
                 cache.retained.invalidate(&key).await;
@@ -1229,7 +1219,7 @@ mod tests {
             let mut waiter = Box::pin(
                 verifier.verify_with_now(&token, &context, move || Ok(base + elapsed_seconds)),
             );
-            poll_pending(waiter.as_mut()).await;
+            assert!(futures_util::poll!(waiter.as_mut()).is_pending());
             if replacement {
                 let newer = validate_introspection_claims(
                     &active_response("new", base + 600),
@@ -1348,7 +1338,7 @@ mod tests {
                         .map(|now| now.as_secs()),
                 }
             }));
-            poll_pending(waiter.as_mut()).await;
+            assert!(futures_util::poll!(waiter.as_mut()).is_pending());
             gate.add_permits(1);
             tokio::time::timeout(Duration::from_secs(5), leader)
                 .await

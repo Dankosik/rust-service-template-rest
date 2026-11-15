@@ -436,8 +436,7 @@ async fn exercise_transport_failures() -> Vec<String> {
 
     let (address, server) =
         tls_server(&material, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
-    let mut untrusted = TlsMaterial::new(FIXTURE_HOST);
-    untrusted.root = material.untrusted_root.clone();
+    let untrusted = TlsMaterial::new(FIXTURE_HOST);
     let untrusted = fixture_client(address, &untrusted)
         .execute(sensitive_request(), deadline())
         .await;

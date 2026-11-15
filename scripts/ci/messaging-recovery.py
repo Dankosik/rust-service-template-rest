@@ -8,6 +8,7 @@ the original broker lifetime, retained across ambiguity, fences native deletion.
 
 import argparse
 import base64
+from collections import Counter, defaultdict
 import contextlib
 import fcntl
 import hashlib
@@ -16,6 +17,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import select
 import shutil
 import signal
 import stat
@@ -174,20 +176,56 @@ def atomic(path, value, exclusive=False):
             os.unlink(temporary)
         else:
             os.replace(temporary, path)
-        directory = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+    except BaseException:
+        Path(temporary).unlink(missing_ok=True)
+        raise
+    directory = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)
     finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
+        os.close(directory)
 
 
 def private_text(path, text):
     with path.open("x") as output:
         os.chmod(path, 0o600)
         output.write(text)
+
+
+def wait_command(process, input, stdout, stderr, until, tick):
+    pending = memoryview(input) if input is not None else b""
+    if pending:
+        fd = process.stdin.fileno()
+        os.set_blocking(fd, False)
+        writable = select.poll()
+        writable.register(fd, select.POLLOUT)
+    elif input is not None:
+        process.stdin.close()
+
+    next_check = 0
+    while pending or process.poll() is None:
+        now = time.monotonic()
+        require(now < until, "native_command_deadline")
+        if now >= next_check:
+            require(os.fstat(stdout.fileno()).st_size <= 4 * 1024 * 1024
+                    and os.fstat(stderr.fileno()).st_size <= 4 * 1024 * 1024, "native_output_limit")
+            if tick:
+                tick()
+            next_check = time.monotonic() + 0.2
+        delay = min(until, next_check) - time.monotonic()
+        if delay <= 0:
+            continue
+        if pending:
+            try:
+                written = os.write(fd, pending[:65536])
+            except BlockingIOError:
+                writable.poll(delay * 1000)
+            else:
+                pending = pending[written:]
+                if not pending:
+                    process.stdin.close()
+        else:
+            time.sleep(delay)
 
 
 def run(command, *, timeout=30, env=None, input=None, check=True, tick=None, command_class=None,
@@ -199,38 +237,29 @@ def run(command, *, timeout=30, env=None, input=None, check=True, tick=None, com
             command_class = {name: "docker_" + name for name in
                              ("compose", "exec", "inspect", "image", "network", "volume", "ps")}.get(command[1], "docker")
     with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+        until = time.monotonic() + timeout
         with subprocess.Popen(command, stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
                               stdout=stdout, stderr=stderr, env=env, start_new_session=not validation_control) as process:
-            if input is not None:
-                process.stdin.write(input)
-                process.stdin.close()
-            until = time.monotonic() + timeout
             try:
-                while process.poll() is None:
-                    if time.monotonic() >= until:
-                        raise Refused("native_command_deadline")
-                    require(os.fstat(stdout.fileno()).st_size <= 4 * 1024 * 1024
-                            and os.fstat(stderr.fileno()).st_size <= 4 * 1024 * 1024, "native_output_limit")
-                    if tick:
-                        tick()
-                    time.sleep(0.2)
+                wait_command(process, input, stdout, stderr, until, tick)
             except BaseException as error:
-                if process.poll() is None:
-                    # Queue controls must remain in the authenticated caller
-                    # session. Only their helper is interrupted; the queue owns
-                    # the native Docker observer and its terminal readback.
-                    if validation_control:
+                if validation_control:
+                    # The queue owns the native observer and terminal readback.
+                    if process.poll() is None:
                         process.terminate()
-                    else:
-                        os.killpg(process.pid, signal.SIGTERM)
-                    try:
-                        process.wait(timeout=2)
-                    except subprocess.TimeoutExpired:
-                        if validation_control:
+                        try:
+                            process.wait(timeout=2)
+                        except subprocess.TimeoutExpired:
                             process.kill()
-                        else:
-                            os.killpg(process.pid, signal.SIGKILL)
-                        process.wait(timeout=2)
+                            process.wait(timeout=2)
+                elif process.returncode is None:
+                    # Keep the leader unreaped until both signals have been
+                    # sent. Its descendants may outlive it and ignore TERM.
+                    with contextlib.suppress(ProcessLookupError):
+                        os.killpg(process.pid, signal.SIGTERM)
+                        time.sleep(2)
+                        os.killpg(process.pid, signal.SIGKILL)
+                    process.wait(timeout=2)
                 if isinstance(error, Refused):
                     error.command_class = command_class
                     error.exit_code = process.returncode
@@ -254,7 +283,7 @@ def run(command, *, timeout=30, env=None, input=None, check=True, tick=None, com
                                     remaining -= len(raw) + 1
             stdout.seek(0)
             data = stdout.read(4 * 1024 * 1024 + 1)
-            if len(data) > 4 * 1024 * 1024:
+            if len(data) > 4 * 1024 * 1024 or os.fstat(stderr.fileno()).st_size > 4 * 1024 * 1024:
                 raise Refused("native_output_limit", command_class=command_class, exit_code=process.returncode)
             if check and process.returncode != 0:
                 raise Refused("native_command_failed", command_class=command_class, exit_code=process.returncode)
@@ -506,6 +535,21 @@ class Session:
                 "exit_code": error.exit_code if isinstance(error, Refused) else None,
             }
             self.save()
+
+    @contextlib.contextmanager
+    def capture_startup_resources(self):
+        try:
+            yield
+        except BaseException as error:
+            self.remember_startup_failure(error)
+            raise
+        finally:
+            try:
+                self.startup_phase("resource_capture")
+                self.capture_resources()
+            except Exception:
+                if "startup_failure" not in self.data:
+                    raise
 
     @contextlib.contextmanager
     def startup_diagnostics(self):
@@ -852,8 +896,11 @@ class Session:
             self.evidence("effect-failure", report)
 
     def worker_log_categories(self, role):
-        result = {"status": "incomplete", "truncated": None, "events": {}, "effect_errors": {},
-                  "delivery_outcomes": {}, "pull_errors": {}}
+        result = {"status": "incomplete", "truncated": None}
+        event_counts = Counter()
+        effect_errors = Counter()
+        delivery_outcomes = Counter()
+        pull_errors = defaultdict(Counter)
         events = {"jobs_claiming_started": "claiming_started", "messaging_consuming_started": "consuming_started",
                   "jobs_worker_ready": "ready", "jobs worker failed": "worker_failed",
                   "messaging consumer stopped": "consumer_stopped",
@@ -889,32 +936,33 @@ class Session:
                     if event is None:
                         result["unclassified_lines"] += 1
                         continue
-                    result["events"][event] = result["events"].get(event, 0) + 1
+                    event_counts[event] += 1
                     if event == "worker_failed" and fields.get("failure.kind") == "consumer_stopped":
-                        result["events"]["consumer_stopped"] = result["events"].get("consumer_stopped", 0) + 1
+                        event_counts["consumer_stopped"] += 1
                     elif event == "effect_failed":
                         code = errors.get(fields.get("error"), "unclassified")
-                        result["effect_errors"][code] = result["effect_errors"].get(code, 0) + 1
+                        effect_errors[code] += 1
                     elif event == "delivery_failed":
                         code = fields.get("outcome")
                         if code not in {"permanent", "retryable", "timeout", "panic", "unhandled", "undecodable"}:
                             code = "unclassified"
-                        result["delivery_outcomes"][code] = result["delivery_outcomes"].get(code, 0) + 1
+                        delivery_outcomes[code] += 1
                     elif event == "pull_failed":
                         phase, kind = fields.get("phase"), fields.get("error.type")
                         if not isinstance(phase, str) or phase not in pull_kinds:
                             phase = "unclassified"
                         if not isinstance(kind, str) or kind not in pull_kinds.get(phase, ()):
                             kind = "unclassified"
-                        counts = result["pull_errors"].setdefault(phase, {})
-                        counts[kind] = counts.get(kind, 0) + 1
+                        pull_errors[phase][kind] += 1
                 except (ValueError, KeyError, TypeError, AttributeError):
                     result["unclassified_lines"] += 1
-            if not result["events"]:
+            if not event_counts:
                 result["status"] = "unclassified"
         except (OSError, Refused):
             pass
-        return result
+        return {**result, "events": dict(event_counts), "effect_errors": dict(effect_errors),
+                "delivery_outcomes": dict(delivery_outcomes),
+                "pull_errors": {phase: dict(counts) for phase, counts in pull_errors.items()}}
 
     def client_exec(self, *args, timeout=35, check=True, input=None, environment=None,
                     private_output=None, private_output_limit=None):
@@ -1299,18 +1347,8 @@ def timestamp(value):
 
 def prepare_auth(session):
     """Use the pinned native CLI's offline store; no host credential store."""
-    try:
+    with session.capture_startup_resources():
         session.compose("up", "-d", "--pull", "never", "client", timeout=30)
-    except BaseException as error:
-        session.remember_startup_failure(error)
-        raise
-    finally:
-        try:
-            session.startup_phase("resource_capture")
-            session.capture_resources()
-        except Exception:
-            if "startup_failure" not in session.data:
-                raise
     session.startup_phase("auth_generation")
     def auth(*args):
         return session.client_exec("env", "-u", "NATS_CREDS", "/artifacts/nats", "--no-context", "auth", *args)
@@ -1440,21 +1478,11 @@ cluster {{
         session.startup_phase("native_config_parse")
         session.test_native_config()
         services = [*SERVICES, *(["postgres"] if postgres else [])]
-        try:
+        with session.capture_startup_resources():
             # Capture exact resources even on partial Compose startup. No later
             # generation is allowed to reuse this directory or these volumes.
             session.startup_phase("broker_up")
             session.compose("up", "-d", "--wait", "--wait-timeout", "60", "--pull", "never", *services, timeout=75)
-        except BaseException as error:
-            session.remember_startup_failure(error)
-            raise
-        finally:
-            try:
-                session.startup_phase("resource_capture")
-                session.capture_resources()
-            except Exception:
-                if "startup_failure" not in session.data:
-                    raise
         require(set(data["containers"]) == set(services), "startup_incomplete_stop_required")
         data["status"] = "active"
         session.save()

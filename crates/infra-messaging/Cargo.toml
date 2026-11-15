@@ -58,6 +58,7 @@ health = { workspace = true }
 json-payload = { workspace = true }
 metrics = { workspace = true }
 nkeys = { workspace = true }
+percent-encoding = { workspace = true }
 secrecy = { workspace = true }
 opentelemetry = { workspace = true, features = ["trace"] }
 serde = { workspace = true, features = ["std", "derive"] }

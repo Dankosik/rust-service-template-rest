@@ -37,7 +37,7 @@ from template_state import (
     _contains_profile_marker,
     _manifest_files,
     _regular_file,
-    parse_json_bytes,
+    parse_json_text,
     parse_manifest,
     safe_relative,
     selected_adapters,
@@ -225,7 +225,7 @@ def _node(root: Path, relative: str, *, links: bool) -> Node | None:
 
 
 def _tree(root: Path, scope: Scope, *, links: bool) -> dict[str, Node]:
-    """Return an lstat-only selected tree, including the directory root."""
+    """Walk the selected tree, including its root. Existence probes follow links before lstat classifies each node."""
 
     safe_relative(scope.relative, allow_directory=scope.directory)
     stem = scope.relative.rstrip("/")
@@ -264,8 +264,7 @@ def _read_git(root: Path, args: Sequence[str]) -> bytes:
     try:
         result = subprocess.run(
             ["git", "-C", os.fspath(root), *args],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
             env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
         )
@@ -278,22 +277,19 @@ def _read_git(root: Path, args: Sequence[str]) -> bytes:
 
 def _status_paths(root: Path) -> tuple[str, ...]:
     raw = _read_git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching"])
-    records = [record for record in raw.split(b"\0") if record]
+    records = (record for record in raw.split(b"\0") if record)
     paths: list[str] = []
-    index = 0
-    while index < len(records):
-        record = records[index]
+    for record in records:
         if len(record) < 4 or record[2:3] != b" ":
             raise Refusal("git status returned an invalid record")
         status = record[:2]
         path = record[3:].decode("utf-8", "surrogateescape")
         paths.append(path)
         if status[:1] in {b"R", b"C"} or status[1:] in {b"R", b"C"}:
-            index += 1
-            if index >= len(records):
+            original = next(records, None)
+            if original is None:
                 raise Refusal("git status returned an incomplete rename")
-            paths.append(records[index].decode("utf-8", "surrogateescape"))
-        index += 1
+            paths.append(original.decode("utf-8", "surrogateescape"))
     return tuple(paths)
 
 
@@ -303,8 +299,7 @@ def _check_ignored_destinations(root: Path, paths: Iterable[str]) -> None:
         try:
             result = subprocess.run(
                 ["git", "-C", os.fspath(root), "check-ignore", "-q", "--no-index", "--", relative],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                capture_output=True,
                 check=False,
                 env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
             )
@@ -372,7 +367,7 @@ def _validate_source_inputs(snapshot: Path, selected: set[str], manifest: Sequen
 def _run_helper(snapshot: Path, arguments: Sequence[str]) -> None:
     command = ["bash", os.fspath(snapshot / arguments[0]), *arguments[1:]]
     try:
-        result = subprocess.run(command, cwd=snapshot, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        result = subprocess.run(command, cwd=snapshot, capture_output=True, check=False)
     except OSError as error:
         raise ToolFailure("required snapshot helper is unavailable") from error
     if result.returncode:
@@ -414,7 +409,7 @@ def _project_portable(snapshot: Path, target_lock: dict) -> bool:
             [sys.executable, "-B", "-c", script, os.fspath(snapshot)],
             cwd=snapshot / "scripts/lib",
             input=json.dumps(target_lock).encode("utf-8"),
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+            capture_output=True, check=False,
         )
     except OSError as error:
         raise ToolFailure("committed profile projection helper is unavailable") from error
@@ -540,7 +535,7 @@ def _remove_unselected_from_stage(stage: Path, selected: set[str]) -> None:
 
 
 def _strict_json(text: str, label: str) -> JsonNode:
-    parse_json_bytes(text.encode("utf-8"), label)
+    parse_json_text(text, label)
     return _JsonScanner(text).parse()
 
 
@@ -828,19 +823,7 @@ def _run(arguments: argparse.Namespace) -> int:
     target = git_root(Path(arguments.repo))
     if source == target:
         raise Refusal("source and target must be distinct Git roots")
-    source_inside_target = False
-    target_inside_source = False
-    try:
-        source.relative_to(target)
-        source_inside_target = True
-    except ValueError:
-        pass
-    try:
-        target.relative_to(source)
-        target_inside_source = True
-    except ValueError:
-        pass
-    if source_inside_target or target_inside_source:
+    if source.is_relative_to(target) or target.is_relative_to(source):
         raise Refusal("source and target Git roots may not overlap")
 
     revision = git_head(source)

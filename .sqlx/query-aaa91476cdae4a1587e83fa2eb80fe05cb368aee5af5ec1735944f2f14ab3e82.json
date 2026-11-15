@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXTRACT(EPOCH FROM statement_timestamp())::double precision AS \"observed_at_unix_seconds!\", EXTRACT(EPOCH FROM min(finished_at) + $1::interval)::double precision AS \"oldest_at_unix_seconds?\" FROM background_jobs WHERE state = 'completed' AND finished_at <= statement_timestamp() - $1::interval",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "observed_at_unix_seconds!",
+        "type_info": "Float8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "oldest_at_unix_seconds?",
+        "type_info": "Float8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Interval"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "aaa91476cdae4a1587e83fa2eb80fe05cb368aee5af5ec1735944f2f14ab3e82"
+}

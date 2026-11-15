@@ -491,7 +491,8 @@ async fn reclaim_repeats_the_external_delivery_and_fences_the_late_completion(po
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn legacy_job_uses_current_path_and_rotated_keys_despite_invalid_saved_routing(pool: PgPool) {
     let body = b"\0{\"event\":\"legacy\"}\xff";
-    let configured = outbound(&["partner"]);
+    let configured = outbound(&["partner", "oversized"]);
+    let refused = enqueue(&pool, &configured, "oversized", body).await;
     let id = enqueue(&pool, &configured, "partner", body).await;
     sqlx::query(
         "UPDATE background_jobs SET payload_text = NULL, payload = jsonb_build_object(\
@@ -505,18 +506,35 @@ async fn legacy_job_uses_current_path_and_rotated_keys_despite_invalid_saved_rou
     .expect("obsolete routing values do not constrain the legacy common payload");
 
     let (address, captured, peer) = reply_peer(200, 0).await;
+    let oversized = format!("/{}", "a".repeat(65_534));
     let running = RunningDispatcher::start(
         &pool,
-        dispatcher(&[("partner", "/current?binding=live")], address),
+        dispatcher(
+            &[
+                ("oversized", &oversized),
+                ("partner", "/current%2Fpath?binding=live%26well"),
+            ],
+            address,
+        ),
         1,
     );
+    job_is(&pool, &refused, "failed", 1).await;
+    let (reason, summary): (String, String) = sqlx::query_as(
+        "SELECT failure_reason, error_summary FROM background_jobs WHERE id::text = $1",
+    )
+    .bind(&refused)
+    .fetch_one(&pool)
+    .await
+    .expect("permanent refusal is recorded on the oversized endpoint's delivery");
+    assert_eq!(reason, "permanent");
+    assert_eq!(summary, "invalid_payload");
     job_is(&pool, &id, "completed", 1).await;
     let request = super::bounded("fixture request capture", captured)
         .await
         .expect("fixture captures request");
     assert!(
-        request.starts_with(b"POST /current?binding=live HTTP/1.1\r\n"),
-        "current endpoint path replaces obsolete persisted routing"
+        request.starts_with(b"POST /current%2Fpath?binding=live%26well HTTP/1.1\r\n"),
+        "escaped path and query from the current endpoint replace obsolete routing"
     );
     let timestamp = header(&request, "webhook-timestamp")
         .parse::<i64>()

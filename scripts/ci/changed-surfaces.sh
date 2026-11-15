@@ -240,6 +240,10 @@ classify() {
 			[[ ${source_only} != true ]] || mark module_initializer initializer_runtime
 			;;
 		scripts/ci/hotpath-*.py) mark cargo_dependencies ;;
+		scripts/ci/openapi-artifact.py)
+			# The profiler and historical actor are source-only; recovery stays manual.
+			[[ ${source_only} != true ]] || mark cargo_dependencies module_initializer
+			;;
 		vendor/sqlx-core/*)
 			mark rust_source cargo_dependencies runtime_image
 			[[ ${database} != postgres ]] || mark db_integration
@@ -436,7 +440,7 @@ classify() {
 		scripts/ci/build-context.py | \
 		scripts/init-module.sh | scripts/template-sync.sh | scripts/template-upgrade.sh | scripts/lib/template_*.py | scripts/lib/template_profiles.json | \
 		template-owned.paths | \
-		scripts/ci/template-init-check.sh | scripts/ci/initializer-matrix.py | scripts/tests/template-* | scripts/tests/fixtures/template-profiles-b206.json | \
+		scripts/ci/template-init-check.sh | scripts/ci/initializer-matrix.py | scripts/tests/template-* | scripts/tests/fixtures/template-profiles-b206.json | scripts/tests/fixtures/historical_profiles.py | \
 		crates/config/src/* | crates/config/Cargo.toml | crates/service/src/* | crates/service/tests/* | crates/service/Cargo.toml | \
 		crates/infra-bearerauthn/* | crates/infra-outbound-http/* | crates/infra-idempotency-store/* | crates/infra-webhooks/* | crates/infra-http/Cargo.toml | crates/infra-http/src/authn.rs | crates/infra-http/src/context.rs | crates/infra-http/src/idempotency/* | crates/infra-http/src/harden.rs | crates/infra-http/src/harden/* | crates/infra-http/src/lib.rs | crates/infra-http/src/problem.rs | crates/infra-http/src/webhooks.rs | \
 		crates/infra-postgres/* | crates/migrate/* | crates/infra-jobs/* | crates/jobs-worker/* | crates/domain-events/* | crates/infra-messaging/* | crates/infra-cache/* | \
@@ -490,11 +494,17 @@ classify() {
 	((${#unclassified_paths[@]} == 0))
 }
 
-union_classify() {
-	local base_ref=$1 tmp files old_files current_files base_script current old current_status old_status name value count=0
-	local current_classified current_unclassified line
+union_classify() (
+	local base_ref=$1 base root tmp files old_files current_files base_script current old current_status old_status name value count=0
+	local current_classified current_unclassified line file
+	root=$(git rev-parse --show-toplevel)
+	cd "${root}"
+	base=$(git rev-parse --verify --end-of-options "${base_ref}^{commit}") || {
+		echo "classifier base is unavailable: ${base_ref}" >&2
+		return 2
+	}
 	tmp=$(mktemp -d)
-	trap 'rm -rf -- "${tmp}"' RETURN
+	trap 'rm -rf -- "${tmp}"' EXIT
 	files=${tmp}/files
 	old_files=${tmp}/old-files
 	base_script=${tmp}/changed-surfaces.sh
@@ -503,24 +513,31 @@ union_classify() {
 	: >"${old_files}"
 	: >"${current_files}"
 	while IFS= read -r file; do
+		[[ -n ${file} ]] || continue
+		GIT_LITERAL_PATHSPECS=1 git ls-tree --full-tree -z "${base}" -- "${file}" >"${tmp}/entry" || return
 		# A path deleted by this change is classified only by the base
 		# classifier, which still knows it; the head classifier may not.
-		if [[ -e ${file} || -L ${file} ]] || ! git cat-file -e "${base_ref}:${file}" 2>/dev/null; then
+		if [[ -e ${file} || -L ${file} || ! -s ${tmp}/entry ]]; then
 			printf '%s\n' "${file}" >>"${current_files}"
 		fi
-		[[ ${file} != scripts/ci/changed-surfaces.sh ]] || continue
-		git cat-file -e "${base_ref}:${file}" 2>/dev/null && printf '%s\n' "${file}" >>"${old_files}"
+		if [[ ${file} != scripts/ci/changed-surfaces.sh && -s ${tmp}/entry ]]; then
+			printf '%s\n' "${file}" >>"${old_files}"
+		fi
 	done <"${files}"
-	git show "${base_ref}:scripts/ci/changed-surfaces.sh" >"${base_script}" 2>/dev/null || {
+	git show "${base}:scripts/ci/changed-surfaces.sh" >"${base_script}" 2>/dev/null || {
 		echo "classifier base is unavailable: ${base_ref}" >&2
 		return 2
 	}
 	set +e
-	current=$(classify <"${current_files}")
+	current=$(set -e; classify <"${current_files}")
 	current_status=$?
 	old=$(bash "${base_script}" <"${old_files}")
 	old_status=$?
 	set -e
+	if ((current_status != 0)) && ! has_line "${current}" 'classified=false'; then
+		echo "current classifier failed" >&2
+		return "${current_status}"
+	fi
 	if ((old_status != 0)); then
 		echo "base classifier failed: ${base_ref}" >&2
 		return "${old_status}"
@@ -542,7 +559,7 @@ union_classify() {
 		"${count}" \
 		"${current_unclassified}"
 	return "${current_status}"
-}
+)
 
 assert_case() {
 	local file=$1 true_names=$2 false_names=$3 output name
@@ -799,9 +816,8 @@ HOOK
 	assert_case api/openapi/service.yaml \
 		"openapi" \
 		"rust_source documentation"
-	for file in scripts/ci/openapi-artifact.py scripts/tests/openapi-generation.py; do
-		assert_case "${file}" "openapi python" "rust_source documentation"
-	done
+	assert_case scripts/ci/openapi-artifact.py "openapi python cargo_dependencies module_initializer" "rust_source documentation"
+	assert_case scripts/tests/openapi-generation.py "openapi python" "rust_source documentation"
 	# template:begin grpc:classifier-grpc-tests
 	for file in api/proto/example/v1/echo.proto crates/grpc-contracts/src/generated/example.v1.rs tools/grpc-codegen/Cargo.toml buf.yaml; do
 		assert_case "${file}" "grpc_schema" "openapi runtime_image"
@@ -998,9 +1014,9 @@ HOOK
 	assert_case scripts/template-upgrade.sh \
 		"module_initializer initializer_runtime shell" \
 		"rust_source cargo_dependencies github_workflows db_integration"
-	assert_case scripts/tests/fixtures/template-profiles-b206.json \
-		"module_initializer initializer_runtime" \
-		"rust_source cargo_dependencies shell github_workflows db_integration"
+	for file in scripts/tests/fixtures/template-profiles-b206.json scripts/tests/fixtures/historical_profiles.py; do
+		assert_case "${file}" "module_initializer initializer_runtime" "rust_source cargo_dependencies shell github_workflows db_integration"
+	done
 	for file in changed-surfaces git-changed-paths affected-crates verify validation-lock measure; do
 		assert_case "scripts/ci/${file}.sh" \
 			"validation_system shell" \

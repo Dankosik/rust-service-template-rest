@@ -70,9 +70,7 @@ COPY --from=build /app /app
 
 class Coverage(unittest.TestCase):
     def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory(prefix="image-inputs-check-")
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory(prefix="image-inputs-check-")))
         for relative, text in FIXTURE.items():
             target = self.root / relative
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -218,10 +216,21 @@ class Coverage(unittest.TestCase):
         self.run_check("unsupported context instruction 'ADD tools/tool.tgz /tmp/'")
 
     def test_published_image_leaves_no_context_to_watch(self) -> None:
-        (self.root / IAC).write_text('export default service("api", { source: image(process.env.IMAGE) });\n')
+        image = 'export default service("api", { source: image(process.env.IMAGE) });\n'
+        (self.root / IAC).write_text(image)
         policy = (self.root / POLICY).read_text()
         (self.root / POLICY).write_text("\n".join(line for line in policy.splitlines() if not line.startswith("| `build.")) + "\n")
         self.assertIn(f"{IAC} deploys a published image", self.run_check())
+        for setting, refusal in (('buildCommand: "make"', "unsupported buildCommand"),
+                                 ('...overrides', "unsupported computed/spread"),
+                                 ('[key]: value', "unsupported computed/spread"),
+                                 ('build: {}', "expected exactly one literal policy form")):
+            with self.subTest(setting=setting):
+                (self.root / IAC).write_text(image.replace("source:", f"{setting}, source:"))
+                self.run_check(refusal)
+        (self.root / IAC).write_text(image.replace("image(process.env.IMAGE)", "image(process.env.IMAGE) || github(repo)"))
+        self.run_check("expected exactly one literal policy form")
+        (self.root / IAC).write_text(image)
         (self.root / POLICY).write_text(policy)
         self.run_check("expected exactly one IaC builder setting")
 

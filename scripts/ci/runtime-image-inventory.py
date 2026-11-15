@@ -9,7 +9,9 @@ import posixpath
 import re
 import shlex
 import sys
+import tarfile
 import tomllib
+from typing import BinaryIO
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 from template_state import Refusal, parse_json_bytes, selected_jobs, selected_messaging, selected_profiles
@@ -120,6 +122,48 @@ def normalized_target(value: object) -> str:
     return posixpath.normpath("/" + value.lstrip("/"))
 
 
+class RootfsMember(tarfile.TarInfo):
+    @classmethod
+    def frombuf(cls, buf, encoding, errors):
+        # TarFile otherwise treats even a corrupt later header as end-of-archive.
+        try:
+            return super().frombuf(buf, encoding, errors)
+        except tarfile.EOFHeaderError:
+            raise
+        except tarfile.HeaderError as error:
+            raise Refusal(f"invalid rootfs tar header: {error}") from error
+
+
+def check_pruned_rootfs(source: BinaryIO, mounts: object, pruned: set[str]) -> None:
+    def root_entry(name: str) -> str:
+        canonical = posixpath.normpath("/" + name.lstrip("/"))
+        return "/" + canonical.split("/", 2)[1]
+
+    if not isinstance(mounts, list):
+        raise Refusal("missing container mount inventory")
+    for mount in mounts:
+        destination = mount.get("Destination") if isinstance(mount, dict) else None
+        if not isinstance(destination, str) or not destination.startswith("/"):
+            raise Refusal("invalid container mount destination")
+        entry = root_entry(destination)
+        if entry == "/" or entry in pruned:
+            raise Refusal(f"{destination}: mount prevents pruned entrypoint inspection")
+
+    with tarfile.open(fileobj=source, mode="r|", tarinfo=RootfsMember) as archive:
+        while (member := archive.next()) is not None:
+            archive.members.clear()  # Python 3.11 caches headers even in stream mode.
+            entry = root_entry(member.name)
+            if entry in pruned:
+                raise Refusal(f"{entry}: pruned binary is present in the exported rootfs")
+        # TarFile stops at the first zero block. Docker's complete tar ends with two,
+        # followed only by optional block padding. Read through EOF before returning.
+        if archive.offset == 0 or archive.fileobj.read(tarfile.BLOCKSIZE) != bytes(tarfile.BLOCKSIZE):
+            raise Refusal("incomplete rootfs tar")
+        while padding := archive.fileobj.read(64 * 1024):
+            if len(padding) % tarfile.BLOCKSIZE or padding.strip(b"\0"):
+                raise Refusal("invalid data after rootfs tar end")
+
+
 def admit(report: object, expected: dict[str, tuple[str, str, str]], image_id: str) -> None:
     if not isinstance(report, dict) or report.get("ArtifactType") != "container_image":
         raise Refusal("expected a native Trivy container image report")
@@ -187,10 +231,18 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument("--expectations", action="store_true", help="print selected and pruned paths for filesystem checks")
+    parser.add_argument("--rootfs-mounts", type=Path, help="inspect the exported rootfs on stdin against these container mounts")
+    parser.add_argument("--pruned", nargs="+")
     parser.add_argument("--report", type=Path)
     parser.add_argument("--image-id")
     args = parser.parse_args()
     try:
+        if args.rootfs_mounts is not None:
+            if not args.pruned:
+                parser.error("--pruned is required for rootfs inspection")
+            mounts = parse_json_bytes(args.rootfs_mounts.read_bytes(), "container mounts")
+            check_pruned_rootfs(sys.stdin.buffer, mounts, set(args.pruned))
+            return 0
         expected = expected_binaries(args.repo)
         if args.expectations:
             for path in dict.fromkeys([*ENTRYPOINTS, *expected]):
@@ -200,7 +252,7 @@ def main() -> int:
                 parser.error("--report and --image-id are required for admission")
             admit(parse_json_bytes(args.report.read_bytes(), "Trivy report"), expected, args.image_id)
             print("runtime-image-inventory: admitted runtime graphs for " + ", ".join(expected))
-    except (OSError, ValueError, KeyError, TypeError, AttributeError) as error:
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, tarfile.TarError) as error:
         print(f"runtime-image-inventory: {error}", file=sys.stderr)
         return 1
     return 0

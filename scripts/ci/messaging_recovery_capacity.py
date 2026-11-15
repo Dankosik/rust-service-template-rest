@@ -7,6 +7,7 @@ PubAck whose completion is unresolved stays in the retained/ambiguous set).
 
 from collections import Counter
 import csv
+from itertools import pairwise
 import json
 import math
 import os
@@ -356,7 +357,7 @@ class Measurement(Rehearsal):
                      and row["backlog"] <= 2 and row["oldest_queue_seconds"] <= 2 for row in self.samples)
         growing = any(b["phase"] == a["phase"] and b["phase"].startswith(("ramp_", "burst_"))
                       and b["backlog"] > a["backlog"] + 2 and b["oldest_queue_seconds"] > a["oldest_queue_seconds"]
-                      for a, b in zip(self.samples, self.samples[1:]))
+                      for a, b in pairwise(self.samples))
         required_metrics = ("db_client_connection_count", "db_client_connection_wait_time_seconds_count",
                             "db_client_operation_duration_seconds_count", "postgres_transaction_duration_seconds_count")
         observed_metrics = {name for row in self.samples for name in row["metrics"]}
@@ -415,17 +416,23 @@ class Measurement(Rehearsal):
         (self.session.path / "report.md").write_text("\n".join(report))
         return result
 
+    def prepare_plan(self, session):
+        self.plan = {
+            "start_unix_ms": time.time_ns() // 1_000_000 + 15_000,
+            "stages": [{"name": name, "seconds": seconds, "rate": rate, "payload_bytes": size}
+                       for name, seconds, rate, size in STAGES],
+        }
+        self.expected = inventory(self.plan)
+        self.c.atomic(self.path / "measurement-plan.json", self.plan)
+        self.c.atomic(session.path / "measurement-plan.json", self.plan)
+
     def execute(self):
         try:
             s = self.fresh("baseline")
             with s.lock():
                 self.database("producer")
                 s.worker_start("worker", "producer")
-                self.plan = {"start_unix_ms": int((time.time() + 15) * 1000), "stages": [
-                    {"name": name, "seconds": seconds, "rate": rate, "payload_bytes": size} for name, seconds, rate, size in STAGES]}
-                self.expected = inventory(self.plan)
-                self.c.atomic(self.path / "measurement-plan.json", self.plan)
-                self.c.atomic(s.path / "measurement-plan.json", self.plan)
+                self.prepare_plan(s)
                 total = sum(stage[1] for stage in STAGES)
                 outage_start = self.plan["start_unix_ms"] / 1000 + sum(stage[1] for stage in STAGES[:9])
                 s.workload_start()

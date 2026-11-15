@@ -43,10 +43,14 @@ pub(super) fn caller_identity(
 /// values keep the compatible visible-ASCII grammar.
 pub(super) fn decode_key<'a>(values: impl IntoIterator<Item = &'a [u8]>) -> Option<Cow<'a, [u8]>> {
     let mut values = values.into_iter();
-    let value = trim_ows(values.next()?);
+    let value = values.next()?;
     if values.next().is_some() {
         return None;
     }
+    let value = str::from_utf8(value)
+        .ok()?
+        .trim_matches([' ', '\t'])
+        .as_bytes();
     let decoded = if value.first() == Some(&b'"') {
         let item = sfv::Parser::new(value).parse::<sfv::Item>().ok()?;
         let sfv::BareItem::String(value) = item.bare_item else {
@@ -137,18 +141,6 @@ fn frame_header_values(hasher: &mut Sha256, headers: &HeaderMap, name: &HeaderNa
     }
 }
 
-fn trim_ows(value: &[u8]) -> &[u8] {
-    let start = value
-        .iter()
-        .position(|byte| !matches!(byte, b' ' | b'\t'))
-        .unwrap_or(value.len());
-    let end = value
-        .iter()
-        .rposition(|byte| !matches!(byte, b' ' | b'\t'))
-        .map_or(start, |index| index + 1);
-    &value[start..end]
-}
-
 const fn caller_tag(kind: CallerKind) -> u8 {
     match kind {
         CallerKind::Subject => 1,
@@ -189,13 +181,13 @@ mod tests {
 
     #[test]
     fn key_decoding_accepts_raw_and_structured_string_forms() {
-        assert_eq!(
-            decode_key([b" \ta/b=\t".as_slice()]).as_deref(),
-            Some(b"a/b=".as_slice())
+        std::assert_matches!(
+            decode_key([b" \ta/b=\t".as_slice()]),
+            Some(Cow::Borrowed(b"a/b="))
         );
-        assert_eq!(
-            decode_key([b" \t\"a b\\\\c\"\t ".as_slice()]).as_deref(),
-            Some(b"a b\\c".as_slice())
+        std::assert_matches!(
+            decode_key([b" \t\"a b\\\\c\"\t ".as_slice()]),
+            Some(Cow::Owned(value)) if value.as_slice() == b"a b\\c"
         );
         assert_eq!(
             decode_key([b"\"same\"".as_slice()]),
@@ -211,6 +203,10 @@ mod tests {
             b"\"key\";a=1".as_slice(),
             b"\"key\" trailing".as_slice(),
             b"\x7f".as_slice(),
+            b"\rkey".as_slice(),
+            b"key\n".as_slice(),
+            b"\x0ckey".as_slice(),
+            b"key\xff".as_slice(),
             b"\xc3\xa9".as_slice(),
         ] {
             assert_eq!(decode_key([value]), None, "{value:?}");

@@ -103,16 +103,8 @@ impl FullPipeline {
             .expect("bound reply writes")
             .expect("answer queued requests");
         self.poll_driver(Waker::noop());
-        poll_pending(self.replies.as_mut()).await;
+        assert!(futures_util::poll!(self.replies.as_mut()).is_pending());
     }
-}
-
-async fn poll_pending<F: Future + ?Sized>(mut future: Pin<&mut F>) {
-    poll_fn(|cx| {
-        assert!(future.as_mut().poll(cx).is_pending());
-        Poll::Ready(())
-    })
-    .await;
 }
 
 async fn fill_with_cancelled_commands(namespace: &CacheNamespace) {
@@ -120,7 +112,7 @@ async fn fill_with_cancelled_commands(namespace: &CacheNamespace) {
     // abandoned sends, and the maintenance PING fills the last place.
     for _ in 0..APPLICATION_SLOTS {
         let mut abandoned = pin!(namespace.get("abandoned"));
-        poll_pending(abandoned.as_mut()).await;
+        assert!(futures_util::poll!(abandoned.as_mut()).is_pending());
     }
 }
 
@@ -141,10 +133,10 @@ async fn dropping_a_mutation_waiting_for_capacity_does_not_enqueue_it() {
             let namespace = pipeline.cache.namespace("test");
             let generation = pipeline.generation.clone();
             let mut peer = pin!(namespace.get("peer"));
-            poll_pending(peer.as_mut()).await;
+            assert!(futures_util::poll!(peer.as_mut()).is_pending());
             fill_with_cancelled_commands(&namespace).await;
             let mut maintenance = pin!(ping_until(&generation, BUDGET));
-            poll_pending(maintenance.as_mut()).await;
+            assert!(futures_util::poll!(maintenance.as_mut()).is_pending());
 
             let mut mutation = Box::pin(async {
                 if delete {
@@ -156,7 +148,7 @@ async fn dropping_a_mutation_waiting_for_capacity_does_not_enqueue_it() {
                         .expect("SET");
                 }
             });
-            poll_pending(mutation.as_mut()).await;
+            assert!(futures_util::poll!(mutation.as_mut()).is_pending());
 
             let wake = Arc::new(DriverWake::default());
             let waker = Waker::from(wake.clone());
@@ -183,16 +175,16 @@ async fn dropping_a_probe_waiting_for_capacity_keeps_the_peer_command() {
         let namespace = pipeline.cache.namespace("test");
         let generation = pipeline.generation.clone();
         let mut peer = pin!(namespace.get("peer"));
-        poll_pending(peer.as_mut()).await;
+        assert!(futures_util::poll!(peer.as_mut()).is_pending());
         fill_with_cancelled_commands(&namespace).await;
         let mut maintenance = pin!(ping_until(&generation, BUDGET));
-        poll_pending(maintenance.as_mut()).await;
+        assert!(futures_util::poll!(maintenance.as_mut()).is_pending());
 
         let probe = pipeline.cache.probe();
         let mut check = probe.check();
-        poll_pending(check.as_mut()).await;
+        assert!(futures_util::poll!(check.as_mut()).is_pending());
         drop(check);
-        poll_pending(peer.as_mut()).await;
+        assert!(futures_util::poll!(peer.as_mut()).is_pending());
 
         pipeline.poll_driver(Waker::noop());
         pipeline.answer_gets_and_ping().await;
@@ -210,9 +202,9 @@ async fn dropping_a_dispatched_probe_keeps_the_peer_command() {
     let namespace = pipeline.cache.namespace("test");
     let probe = pipeline.cache.probe();
     let mut check = probe.check();
-    poll_pending(check.as_mut()).await;
+    assert!(futures_util::poll!(check.as_mut()).is_pending());
     let mut peer = pin!(namespace.get("peer"));
-    poll_pending(peer.as_mut()).await;
+    assert!(futures_util::poll!(peer.as_mut()).is_pending());
 
     pipeline.poll_driver(Waker::noop());
     let mut actual = [0; EXPECTED_REQUESTS.len()];
@@ -223,7 +215,7 @@ async fn dropping_a_dispatched_probe_keeps_the_peer_command() {
     assert_eq!(actual.as_slice(), EXPECTED_REQUESTS);
 
     drop(check);
-    poll_pending(peer.as_mut()).await;
+    assert!(futures_util::poll!(peer.as_mut()).is_pending());
     timeout(
         BUDGET,
         pipeline.server.write_all(b"+PONG\r\n$4\r\nlive\r\n"),

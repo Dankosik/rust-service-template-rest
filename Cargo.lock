@@ -2761,6 +2761,7 @@ dependencies = [
  "opentelemetry",
  "opentelemetry_sdk",
  "operation-context",
+ "percent-encoding",
  "proptest",
  "rcgen",
  "secrecy",
@@ -2824,6 +2825,7 @@ dependencies = [
  "aws-sdk-s3",
  "aws-smithy-checksums",
  "aws-smithy-http-client",
+ "aws-smithy-runtime",
  "aws-smithy-runtime-api",
  "aws-smithy-types",
  "axum",
@@ -2968,7 +2970,6 @@ dependencies = [
 name = "infra-webhooks"
 version = "0.1.0"
 dependencies = [
- "arrayvec",
  "async-trait",
  "aws-lc-rs",
  "base64 0.23.1",
@@ -4506,6 +4507,7 @@ dependencies = [
  "rustls-platform-verifier",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",

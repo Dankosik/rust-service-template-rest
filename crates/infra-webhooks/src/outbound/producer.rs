@@ -79,12 +79,14 @@ impl Producer {
         if body_len > MAX_BODY_BYTES {
             return Err(OutboundError::BodyTooLarge);
         }
+        let encoded_body_len =
+            base64::encoded_len(body_len, true).ok_or(OutboundError::BodyTooLarge)?;
         if !self.endpoint_ids.contains(endpoint_id) {
             return Err(OutboundError::UnknownEndpoint);
         }
 
         let mut budget = PREFLIGHT_BYTES_PER_POLL;
-        let mut serialized_len = EMPTY_DELIVERY_JSON.len() + body_len.div_ceil(3) * 4;
+        let mut serialized_len = EMPTY_DELIVERY_JSON.len() + encoded_body_len;
         serialized_len += escaped_len(content_type, &mut budget, |fragment| {
             HeaderValue::from_bytes(fragment.as_bytes())
                 .map(drop)
@@ -173,7 +175,7 @@ mod tests {
     async fn preflight_matches_delivery_json_at_the_jobs_limit() {
         let endpoint_id = "partner\\\"é";
         let outbound = super::Producer::new([endpoint_id.to_owned()]);
-        for body_bytes in [0, 1, 2, 3, super::MAX_BODY_BYTES] {
+        for body_bytes in [0, 1, 2, 3, 4, super::MAX_BODY_BYTES] {
             for extra in [0, 1] {
                 let mut delivery = super::Delivery {
                     version: super::delivery_version(),

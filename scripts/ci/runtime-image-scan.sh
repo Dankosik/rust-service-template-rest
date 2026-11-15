@@ -18,7 +18,7 @@ trivy_cache=${TRIVY_CACHE_VOLUME:-trivy-cache}
 
 # Tags may move between invocations, never between this invocation's checks.
 image_id=$(docker image inspect --format '{{.Id}}' "${image}")
-[[ ${image_id} == sha256:* ]] || { echo "could not resolve a fixed image ID" >&2; exit 1; }
+[[ ${image_id} =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "could not resolve a fixed image ID" >&2; exit 1; }
 umask 077
 temporary=$(mktemp -d "${TMPDIR:-/tmp}/runtime-image-scan.XXXXXXXX")
 container=
@@ -47,22 +47,27 @@ container=$(bash "${root}/scripts/ci/validation-lock.sh" --resource-run "${resou
 	docker create --name "${container_name}" \
 	--label "dev.rust-service.validation-owner=${VALIDATION_LOCK_TOKEN}" --entrypoint /service "${image_id}")
 bash "${root}/scripts/ci/validation-lock.sh" --resource-bind "${resource}" "${container}"
+pruned=()
 while IFS=$'\t' read -r selection path; do
-	copied=false
-	if docker cp "${container}:${path}" "${temporary}/binary" >/dev/null 2>&1; then copied=true; fi
-	case "${selection}:${copied}" in
-	retained:true)
+	case "${selection}" in
+	retained)
+		if ! docker cp "${container}:${path}" "${temporary}/binary" >/dev/null; then
+			echo "${path}: could not copy retained binary from ${image_id}" >&2; exit 1
+		fi
 		[[ -f ${temporary}/binary && -s ${temporary}/binary && -x ${temporary}/binary ]] || {
 			echo "${path}: retained entrypoint is not a nonempty executable file" >&2; exit 1;
 		}
+		rm -rf "${temporary}/binary"
 		;;
-	retained:false) echo "${path}: retained binary is absent from ${image_id}" >&2; exit 1 ;;
-	pruned:true) echo "${path}: pruned binary is present in ${image_id}" >&2; exit 1 ;;
-	pruned:false) ;;
+	pruned) pruned+=("${path}") ;;
 	*) echo "invalid binary expectation: ${selection} ${path}" >&2; exit 1 ;;
 	esac
-	rm -rf "${temporary}/binary"
 done < "${temporary}/expected"
+if [[ -n ${pruned[0]:-} ]]; then
+	docker container inspect --format '{{json .Mounts}}' "${container}" > "${temporary}/mounts.json"
+	docker export "${container}" | python3 scripts/ci/runtime-image-inventory.py \
+		--rootfs-mounts "${temporary}/mounts.json" --pruned "${pruned[@]}"
+fi
 bash "${root}/scripts/ci/validation-lock.sh" --resource-cleanup "${resource}"
 resource=
 container=

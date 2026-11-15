@@ -168,6 +168,10 @@ def parse_json_bytes(raw: bytes, label: str) -> Any:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as error:
         raise Refusal(f"{label} is not UTF-8") from error
+    return parse_json_text(text, label)
+
+
+def parse_json_text(text: str, label: str) -> Any:
     try:
         return json.loads(
             text,
@@ -995,8 +999,7 @@ def git(root: Path, args: Sequence[str], *, input_bytes: bytes | None = None) ->
         result = subprocess.run(
             command,
             input=input_bytes,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
             env=environment,
         )
@@ -1106,7 +1109,7 @@ def _generated_skill_link(path: str, contents: bytes) -> str | None:
 
 
 def snapshot_tree(root: Path, destination: Path, revision: str | None = None) -> str:
-    """Materialize regular tracked blobs from one immutable commit into destination."""
+    """Materialize tracked files and admitted generated skill links from one immutable commit."""
 
     root = git_root(root)
     revision = revision or git_head(root)
@@ -1139,15 +1142,6 @@ def snapshot_tree(root: Path, destination: Path, revision: str | None = None) ->
         shutil.rmtree(destination, ignore_errors=True)
         raise
     return revision
-
-
-def _has_symlink_parent(root: Path, relative: str) -> bool:
-    current = root
-    for part in Path(relative).parts[:-1]:
-        current = current / part
-        if current.is_symlink():
-            return True
-    return False
 
 
 def ensure_safe_destination(root: Path, relative: str, *, missing_ok: bool = True) -> Path:
@@ -1196,10 +1190,7 @@ def atomic_write(path: Path, data: bytes, mode: int) -> None:
         os.chmod(temporary, mode)
         os.replace(temporary, path)
     except Exception:
-        try:
-            os.unlink(temporary)
-        except FileNotFoundError:
-            pass
+        Path(temporary).unlink(missing_ok=True)
         raise
 
 

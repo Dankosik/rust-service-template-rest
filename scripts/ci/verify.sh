@@ -544,6 +544,36 @@ PY
 		grep -q '^  make template-init-artifacts ARTIFACT_GRAPHS=47,65$' <<<"$(plan_section commands)"
 		output=$(bash "${script}" --plan --files crates/infra-bearerauthn/src/jwt.rs)
 		if grep -q 'make template-init-artifacts' <<<"${output}"; then return 1; fi
+		# Only the historical classifier knows the removed input. The planner
+		# must use that same base before narrowing the release proof.
+		(
+			local checkout retired='crates/infra-http/src/[retired].cfg'
+			checkout=$(mktemp -d)
+			trap 'rm -rf -- "${checkout}"' EXIT
+			git clone -q --local . "${checkout}"
+			cd "${checkout}"
+			: >make/source.mk
+			mkdir -p "${retired%/*}"
+			: >"${retired}"
+			cat >scripts/ci/changed-surfaces.sh <<'BASE_CLASSIFIER'
+#!/usr/bin/env bash
+if grep -Fxq 'crates/infra-http/src/[retired].cfg'; then
+	echo initializer_artifacts=true
+fi
+BASE_CLASSIFIER
+			git add make/source.mk scripts/ci/changed-surfaces.sh "${retired%/*}"
+			git -c user.name=verify-test -c user.email=verify-test@example.invalid -c commit.gpgsign=false commit -qm "old classifier"
+			cp "${fixture}/scripts/ci/changed-surfaces.sh" scripts/ci/
+			rm -- "${retired}"
+			output=$(BASE_REF=HEAD bash scripts/ci/verify.sh --plan --files "${retired}")
+			grep -q '^  make template-init-artifacts ARTIFACT_GRAPHS=1,7,47,65$' <<<"$(plan_section ci-owned)"
+			if printf '%s\n' Cargo.lock unknown/unowned | python3 scripts/ci/initializer-matrix.py --artifacts-only >plan 2>diagnostics; then
+				echo "initializer planner accepted a failed classifier" >&2
+				return 1
+			fi
+			[[ ! -s plan ]]
+			grep -Fq 'unclassified_files=unknown/unowned' diagnostics
+		)
 		# Readability proof stays separate from the Cargo-free text projections.
 		output=$(bash "${script}" --plan --files quality/architecture.json)
 		[[ $(grep -c '^  make lint$' <<<"${output}") == 1 ]] || assert_failed
@@ -1269,7 +1299,7 @@ if is_true architecture; then
 	add_command make architecture-check "declared graph, boundary policy, or checker inputs changed" "make architecture-check" cheap false false
 fi
 if is_true initializer_runtime; then
-	add_command make template-init-check "canonical projections and twenty-six runtime representatives" "make template-init-check" cpu false true
+	add_command make template-init-check "canonical projections and the initializer runtime graph inventory" "make template-init-check" cpu false true
 elif is_true module_initializer; then
 	add_command make template-init-projections "projected text changed and no runtime input did" "make template-init-projections" cpu false false
 fi
@@ -1432,7 +1462,7 @@ if is_true runtime_image || is_true migrations; then
 fi
 if is_true initializer_artifacts; then
 	# Reuse CI's exact graph selection, including retained-path narrowing.
-	artifact_plan=$(python3 scripts/ci/initializer-matrix.py --artifacts-only <"${files_path}")
+	artifact_plan=$(python3 scripts/ci/initializer-matrix.py --artifacts-only --union "${merge_base_sha}" <"${files_path}")
 	artifact_graphs=${artifact_plan#artifact_graphs=}
 	if [[ -n ${artifact_graphs} ]]; then
 		add_command artifacts "${artifact_graphs}" "selected initialized release binary sets" "make template-init-artifacts ARTIFACT_GRAPHS=${artifact_graphs}" docker true true
@@ -1550,8 +1580,7 @@ if [[ ${ci_mode} == none ]]; then environment_detail+="; REPOSITORY_CI=none"; fi
 environment=$(printf '%s\n' "${environment_detail}" | shasum -a 256 | awk '{print $1}')
 environment_context_schema=${build_context_schema}
 environment_context_identity=${build_context_identity}
-common_dir=$(git rev-parse --git-common-dir)
-[[ ${common_dir} == /* ]] || common_dir=${ROOT_DIR}/${common_dir}
+common_dir=$(git rev-parse --path-format=absolute --git-common-dir)
 receipt_dir=${common_dir}/codex/verify
 receipt=${receipt_dir}/${candidate}-${plan}-${environment}.receipt
 

@@ -44,8 +44,7 @@ lock = {"schema_version": 1, "state": "complete", "identity": identity,
 
 
 def command(repo: Path, *args: str, env: dict[str, str] | None = None) -> str:
-    result = subprocess.run(args, cwd=repo, env=env or ENV, stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, text=True, check=False)
+    result = subprocess.run(args, cwd=repo, env=env or ENV, capture_output=True, text=True, check=False)
     if result.returncode:
         raise AssertionError(f"{args}: {result.stderr}")
     return result.stdout.strip()
@@ -63,9 +62,7 @@ def commit(repo: Path, message: str) -> str:
 
 class UpgradeTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory(prefix="upgrade-fixture-")
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory(prefix="upgrade-fixture-")))
         self.source = self.root / "source"
         self.source.mkdir()
         git(self.source, "init", "-q", "--template=", "-b", "main")
@@ -74,7 +71,7 @@ class UpgradeTests(unittest.TestCase):
                  "scripts/lib/template_state.py": "# historical state owner\n",
                  "scripts/lib/template_profiles.json": '{"fixture":1}\n',
                  "rust-toolchain.toml": '[toolchain]\nchannel = "fixture"\n',
-                 "Cargo.lock": '# fixture locked graph\n', "runtime.txt": "upstream A\n",
+                 "Cargo.lock": '# fixture locked graph\n', "runtime file.txt": "upstream A\n",
                  "generation.txt": "A\n", "retired.txt": "consumer may delete me\n", ".gitignore": "ignored.txt\n"}
         for path, data in files.items():
             file = self.source / path
@@ -92,7 +89,7 @@ class UpgradeTests(unittest.TestCase):
 
     def upgrade(self, *args: str, success: bool = True) -> dict:
         result = subprocess.run(["bash", str(TOOL), *map(str, args)], cwd=self.root,
-                                env=ENV, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+                                env=ENV, text=True, capture_output=True, check=False)
         if not success:
             self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
             return {"error": result.stderr}
@@ -129,7 +126,7 @@ class UpgradeTests(unittest.TestCase):
         return candidate
 
     def next_source(self, letter: str) -> str:
-        (self.source / "runtime.txt").write_text(f"upstream {letter}\n")
+        (self.source / "runtime file.txt").write_text(f"upstream {letter}\n")
         (self.source / "generation.txt").write_text(letter + "\n")
         (self.source / "scripts/lib/template_init.py").write_text(
             INITIALIZER.replace("public initializer ", "new public initializer ")
@@ -157,24 +154,26 @@ class UpgradeTests(unittest.TestCase):
         command(self.root, "git", "clone", "--no-local", "-q", str(candidate), str(clone))
         baseline = json.loads((clone / "template.upgrade.json").read_text())["baseline"]["commit"]
         git(clone, "merge-base", "--is-ancestor", baseline, "HEAD")
-        (clone / "runtime.txt").write_text("consumer customization\n")
+        (clone / "runtime file.txt").write_text("consumer customization\n")
         (clone / "retired.txt").unlink()
         commit(clone, "consumer customizations")
         upgrade = self.root / "upgrade-B"
         prepared = self.upgrade("prepare", "--consumer", clone, "--source", self.source,
                                 "--revision", b, "--destination", upgrade)
         self.assertEqual(prepared["state"], "conflicted")
-        self.assertIn("runtime.txt", prepared["conflicts"])
+        self.assertIn("runtime file.txt", prepared["conflicts"])
+        for stage, expected in enumerate(("upstream A", "consumer customization", "upstream B"), start=1):
+            self.assertEqual(git(upgrade, "show", f":{stage}:runtime file.txt"), expected)
         self.assertEqual((upgrade / "generated.txt").read_text(), "new public initializer B\n")
         self.assertFalse((upgrade / "retired.txt").exists())
         self.assertEqual((upgrade / "template.lock").read_bytes(), original_lock)
         self.assertEqual(json.loads((upgrade / "template.upgrade.json").read_text())["source"]["revision"], self.a)
-        (upgrade / "runtime.txt").write_text("resolved consumer and B\n")
+        (upgrade / "runtime file.txt").write_text("resolved consumer and B\n")
         commit(upgrade, "resolve B explicitly")
         repeated = self.upgrade("prepare", "--consumer", clone, "--source", self.source,
                                 "--revision", b, "--destination", upgrade)
         self.assertEqual(repeated["state"], "resolved-awaiting-proof")
-        self.assertEqual((upgrade / "runtime.txt").read_text(), "resolved consumer and B\n")
+        self.assertEqual((upgrade / "runtime file.txt").read_text(), "resolved consumer and B\n")
         review, validation = self.proof(upgrade, content_tree="0" * 40)
         refusal = self.upgrade("accept", "--candidate", upgrade, "--review", review, "--validation", validation, success=False)
         self.assertIn("evidence does not admit", refusal["error"])
@@ -196,7 +195,7 @@ class UpgradeTests(unittest.TestCase):
         commit(third, "adopt C content")
         self.seal(third)
         self.assertEqual((third / "later-business.txt").read_text(), "after B\n")
-        self.assertEqual((third / "runtime.txt").read_text(), "resolved consumer and B\n")
+        self.assertEqual((third / "runtime file.txt").read_text(), "resolved consumer and B\n")
         self.assertEqual((third / "extra.txt").read_text(), "source C addition\n")
 
     def test_refusals_do_not_create_custody_and_abort_retains_work(self) -> None:
@@ -312,7 +311,7 @@ for key in ("UPGRADE_FIXTURE_TOKEN", "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS",
                 result = subprocess.run(["bash", str(TOOL), "adopt", "--consumer", str(clean), "--source", str(self.source),
                                          "--revision", source, "--initial-commit", initial, "--destination", str(candidate),
                                          "--cargo-target", str(target)], env=env,
-                                        text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+                                        text=True, capture_output=True, check=False)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertFalse((candidate / ".git/hooks/post-checkout").exists())
                 if supplied == "line-tables-only":

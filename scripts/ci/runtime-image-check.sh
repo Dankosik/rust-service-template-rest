@@ -4,10 +4,8 @@
 # starts under the hardened run flags, /health/ready answers, the startup
 # record carries the expected commit, and SIGTERM ends the process with exit
 # code 0 inside the 45 s grace budget.
-# A final step takes its /jobs-worker expectation from the repository's jobs
-# selection: where the pack is retained, the image must carry the entrypoint
-# and it must refuse to start before any database I/O; otherwise the image
-# must not carry it.
+# The filesystem preflight checks pruned paths on the same fixed image. A
+# retained /jobs-worker must also refuse startup before dependency I/O.
 #
 #   runtime-image-check.sh IMAGE [EXPECTED_COMMIT]
 #   RUNTIME_IMAGE_NETWORK      Docker network to join (a compose project's)
@@ -217,9 +215,5 @@ if [[ ${jobs} == postgres || ${messaging} == nats-jetstream ]]; then
 	fi
 	echo "jobs-worker refused before dependency I/O: ${refusal}"
 else
-	if docker cp "${container}:/jobs-worker" - >/dev/null 2>&1; then
-		echo "runtime image has /jobs-worker without a retained worker profile" >&2
-		exit 1
-	fi
 	echo "no worker profile is retained; the image has no /jobs-worker entrypoint"
 fi

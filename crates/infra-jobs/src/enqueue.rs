@@ -125,10 +125,8 @@ pub async fn enqueue<K: JobKind>(
     let prepared = prepare(payload, options)?;
     let trace = trace_context::capture();
     let id = JobId::new_v7();
-    // The conflict target, its WHERE, `COLLATE "C"`, and the state literals
-    // repeat the partial unique index `background_jobs_live_unique_key` word
-    // for word: PostgreSQL infers the arbiter index only from a match, and
-    // `compare_live_payload` must find the row that index holds.
+    // PostgreSQL infers background_jobs_live_unique_key from the columns and
+    // live-row predicate. The index inherits unique_key's C collation.
     let inserted = observed(
         "enqueue job",
         sqlx::query!(

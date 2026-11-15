@@ -223,7 +223,7 @@ impl ProviderClient {
         url: &Url,
         client_id: &str,
         client_secret: &str,
-        form_body: String,
+        form: &[(&str, &str)],
         context: &OperationContext,
     ) -> Result<Vec<u8>, ProviderFailure> {
         context.check().map_err(|_| ProviderFailure::Timeout)?;
@@ -233,11 +233,7 @@ impl ProviderClient {
             .client
             .post(url.clone())
             .basic_auth(&client_id, Some(&client_secret))
-            .header(
-                header::CONTENT_TYPE,
-                header::HeaderValue::from_static("application/x-www-form-urlencoded"),
-            )
-            .body(form_body);
+            .form(form);
         context.check().map_err(|_| ProviderFailure::Timeout)?;
         let result = Exchange::start("introspection", "POST", url)
             .run(request, ExchangeMode::Introspection(context))
@@ -920,7 +916,7 @@ mod tests {
                 &fixture_url(address),
                 "a:b",
                 "c d",
-                "token=opaque".to_owned(),
+                &[("token", "opaque")],
                 &operation_context::OperationContext::with_timeout(super::PROVIDER_TIMEOUT),
             )
             .await
@@ -947,7 +943,7 @@ mod tests {
                         &fixture_url(address),
                         "fixture",
                         "secret",
-                        "token=opaque".to_owned(),
+                        &[("token", "opaque")],
                         &operation_context::OperationContext::with_timeout(super::PROVIDER_TIMEOUT),
                     )
                     .with_subscriber(dispatch.clone())

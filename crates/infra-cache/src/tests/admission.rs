@@ -164,16 +164,12 @@ fn pem_fixtures_preserve_labels_and_wrap_at_64_columns_with_lf() {
     );
 }
 
-/// A self-signed certificate and its PKCS #8 key, each in its own PEM file.
 fn client_identity() -> (tempfile::NamedTempFile, tempfile::NamedTempFile) {
-    let key = rcgen::KeyPair::generate().expect("client key");
-    let certificate = rcgen::CertificateParams::new(vec!["cache-client".to_owned()])
-        .expect("client certificate params")
-        .self_signed(&key)
+    let identity = rcgen::generate_simple_self_signed(["cache-client".to_owned()])
         .expect("client certificate");
     (
-        write_pem("CERTIFICATE", certificate.der()),
-        write_pem("PRIVATE KEY", &key.serialize_der()),
+        write_pem("CERTIFICATE", identity.cert.der()),
+        write_pem("PRIVATE KEY", &identity.signing_key.serialize_der()),
     )
 }
 

@@ -215,9 +215,8 @@ fn origin(endpoint: &str, scheme: OriginScheme) -> Result<Url, ConfigError> {
     }
 }
 
-/// `scheme://host[:port]` without the trailing slash `Url` adds.
 fn serialize(origin: &Url) -> String {
-    origin.as_str().trim_end_matches('/').to_owned()
+    origin[..url::Position::BeforePath].to_owned()
 }
 
 /// A shape-validated signing region, or the provider's default when empty.

@@ -564,7 +564,7 @@ async fn a_rebuilt_cache_reads_the_replaced_ca_after_recovery() {
 #[tokio::test]
 async fn an_untrusted_ca_is_unavailable() {
     let material = tls::TlsMaterial::new("localhost");
-    let ca = write_pem(&material.untrusted_root);
+    let ca = write_pem(tls::new_issuer().der());
     let upstream = upstream_addr(&cache_url());
     let proxy = Proxy::tls(upstream, tls_acceptor(&material)).await;
     let cache = Cache::start(options(

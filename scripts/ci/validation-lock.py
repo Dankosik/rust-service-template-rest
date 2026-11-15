@@ -11,6 +11,7 @@ import datetime
 import errno
 import fcntl
 import hashlib
+from itertools import pairwise
 import json
 import math
 import os
@@ -199,6 +200,29 @@ def native_object(pairs):
     return value
 
 
+def buildkit_history_ns(value):
+    seconds, nanos = value["seconds"], value.get("nanos", 0)
+    # Protobuf Timestamp spans years 0001 through 9999. Go omits zero nanos.
+    if (type(seconds) is not int or not -62_135_596_800 <= seconds <= 253_402_300_799
+            or type(nanos) is not int or not 0 <= nanos < 1_000_000_000):
+        raise Refusal("native history completion time is invalid")
+    return seconds * 1_000_000_000 + nanos
+
+
+def buildkit_progress_ns(value):
+    # Go emits RFC3339Nano. datetime accepts the calendar and offset, but
+    # truncates sub-microsecond fractions if given the whole timestamp.
+    match = re.fullmatch(r"([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})"
+                         r"(?:\.([0-9]{1,9}))?(Z|[+-][0-9]{2}:[0-5][0-9])", value)
+    if match is None:
+        raise Refusal("malformed native failure evidence")
+    second, fraction, zone = match.groups()
+    instant = datetime.datetime.fromisoformat(second + zone)
+    epoch = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
+    seconds = (instant - epoch) // datetime.timedelta(seconds=1)
+    return seconds * 1_000_000_000 + int((fraction or "").ljust(9, "0"))
+
+
 def buildkit_preexport_failure(record, blob, progress, candidate):
     """v0.33.1 ExecOp failures precede runExporters; upgrades require review.
 
@@ -207,8 +231,7 @@ def buildkit_preexport_failure(record, blob, progress, candidate):
     WrapVertex call sites in solver/jobs.go at the recorded revision.
     """
     try:
-        created, completed = [record[key]["seconds"] + record[key]["nanos"] / 1e9
-                              for key in ("CreatedAt", "CompletedAt")]
+        created, completed = [buildkit_history_ns(record[key]) for key in ("CreatedAt", "CompletedAt")]
         if not 0 < created <= completed:
             raise Refusal("native history completion time is invalid")
         error = record["error"]
@@ -240,12 +263,12 @@ def buildkit_preexport_failure(record, blob, progress, candidate):
                 vertices.append(body["digest"])
             elif kind == prefix + "stack.Stack+json":
                 frames = [f["Name"] for f in body["frames"]]
-                path = [prefix + "solver/llbsolver/ops.(*ExecOp).Exec",
-                        prefix + "solver.(*sharedOp).Exec.func2"]
+                path = (prefix + "solver/llbsolver/ops.(*ExecOp).Exec",
+                        prefix + "solver.(*sharedOp).Exec.func2")
                 if (body.get("version") == "v0.33.1"
                         and body.get("revision") == "8c91502cf280bd70a0c50912ce251c46a8881d9f"
                         and body.get("cmdline", [None])[0] == "/usr/bin/buildkitd"
-                        and any(frames[i:i + 2] == path for i in range(len(frames) - 1))):
+                        and path in pairwise(frames)):
                     execution_stacks.append(body)
             elif kind == prefix + "gatewayapi.ExitMessage+json":
                 # The failed process's exit status (executor/runcexecutor
@@ -264,8 +287,7 @@ def buildkit_preexport_failure(record, blob, progress, candidate):
                 digest = vertex["digest"]
                 status[digest] = {**status.get(digest, {}), **vertex}
         failed = status[vertices[0]]
-        started_at, completed_at = [datetime.datetime.fromisoformat(failed[key]).timestamp()
-                                    for key in ("started", "completed")]
+        started_at, completed_at = [buildkit_progress_ns(failed[key]) for key in ("started", "completed")]
         if (not created <= started_at <= completed_at <= completed or failed.get("error") != error["message"]
                 or len(status) != record["numTotalSteps"]
                 or sum(bool(v.get("completed")) for v in status.values()) != record["numCompletedSteps"]
@@ -458,14 +480,14 @@ def ordinary_scope_loop(command, control, completion, initial_result=None):
                             hints.add(os.getpgid(pid))
                     hints.discard(sid)
                     active = {"sequence": sequence, "signal": signum, "deadline": deadline,
-                              "hints": sorted(hints), "own_group": True}
+                              "hints": sorted(hints, reverse=True), "own_group": True}
                 except (Refusal, OSError, subprocess.TimeoutExpired) as failure:
                     fail("ordinary cancellation observation failed: " + str(failure))
         if active is not None and relay is None and error is None:
             if time.monotonic_ns() >= active["deadline"]:
                 fail("ordinary cancellation grant expired before admission")
             elif active["hints"]:
-                hint = active["hints"].pop(0)
+                hint = active["hints"].pop()
                 # This fork is irreversible admission. A paused relay may finish
                 # late; its session remains owned and prevents final retirement.
                 try:
@@ -532,11 +554,18 @@ def close_except(retained):
 
 def prepare_scope(command, environment, completion, lease_path, current_boot, native_operation=False):
     """Prepare a native session with no command effect until the launch byte."""
-    barrier_read, barrier_write = os.pipe()
-    ready_read, ready_write = os.pipe()
-    lease = safe_open(lease_path, os.O_RDWR | os.O_CREAT | os.O_EXCL)
-    fcntl.flock(lease, fcntl.LOCK_EX)
-    pid = os.fork()
+    with contextlib.ExitStack() as setup:
+        barrier_read, barrier_write = os.pipe()
+        setup.callback(os.close, barrier_read)
+        setup.callback(os.close, barrier_write)
+        ready_read, ready_write = os.pipe()
+        setup.callback(os.close, ready_read)
+        setup.callback(os.close, ready_write)
+        lease = safe_open(lease_path, os.O_RDWR | os.O_CREAT | os.O_EXCL)
+        setup.callback(os.close, lease)
+        fcntl.flock(lease, fcntl.LOCK_EX)
+        pid = os.fork()
+        setup.pop_all()
     if pid == 0:
         try:
             close_except({0, 1, 2, barrier_read, ready_write, lease})
@@ -733,29 +762,32 @@ class Queue:
             raise Refusal("ownership-unavailable: owner no longer accepts effects")
 
     def register_ticket(self, command):
-        with self.locked(interruptible=True):
-            self.check_deadline()
-            sequence_path = self.directory / "sequence.json"
-            try:
-                sequence = read_json(sequence_path)["next"]
-            except FileNotFoundError:
-                sequence = 1
-            atomic_json(sequence_path, {"next": sequence + 1})
-            token = secrets.token_hex(16)
-            fd = safe_open(self.tickets / (token + ".lease"), os.O_RDWR | os.O_CREAT | os.O_EXCL)
-            fcntl.flock(fd, fcntl.LOCK_EX)
-            try:
-                candidate = command_output(["git", "rev-parse", "HEAD"])
-            except (Refusal, FileNotFoundError):
-                candidate = "unavailable"
-            try:
-                checkout = command_output(["git", "rev-parse", "--show-toplevel"])
-            except (Refusal, FileNotFoundError):
-                checkout = "unavailable"
-            ticket = {"sequence": sequence, "token": token, "command": safe_command(command),
-                      "candidate": candidate, "checkout": checkout}
-            atomic_json(self.tickets / (token + ".json"), ticket)
-            return ticket, fd
+        with contextlib.ExitStack() as setup:
+            with self.locked(interruptible=True):
+                self.check_deadline()
+                sequence_path = self.directory / "sequence.json"
+                try:
+                    sequence = read_json(sequence_path)["next"]
+                except FileNotFoundError:
+                    sequence = 1
+                atomic_json(sequence_path, {"next": sequence + 1})
+                token = secrets.token_hex(16)
+                fd = safe_open(self.tickets / (token + ".lease"), os.O_RDWR | os.O_CREAT | os.O_EXCL)
+                setup.callback(os.close, fd)
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                try:
+                    candidate = command_output(["git", "rev-parse", "HEAD"])
+                except (Refusal, FileNotFoundError):
+                    candidate = "unavailable"
+                try:
+                    checkout = command_output(["git", "rev-parse", "--show-toplevel"])
+                except (Refusal, FileNotFoundError):
+                    checkout = "unavailable"
+                ticket = {"sequence": sequence, "token": token, "command": safe_command(command),
+                          "candidate": candidate, "checkout": checkout}
+                atomic_json(self.tickets / (token + ".json"), ticket)
+            setup.pop_all()
+        return ticket, fd
 
     def remove_ticket(self, token):
         # Lease inodes are retained, never replaced while another actor can hold one.
@@ -1621,13 +1653,15 @@ class Queue:
             # The deadline was admission-only. Native cleanup uses its own bounded
             # operation timeout, never the elapsed waiting budget after launch.
             self.deadline = None
-            interrupted_at = None
+            escalate_at_ns = quarantine_at_ns = None
             escalated = False
             command_result = None
             reaped = False
             while True:
-                if INTERRUPTED and interrupted_at is None:
-                    interrupted_at = time.monotonic()
+                if INTERRUPTED and quarantine_at_ns is None:
+                    interrupted_at_ns = time.monotonic_ns()
+                    escalate_at_ns = interrupted_at_ns + 10_000_000_000
+                    quarantine_at_ns = interrupted_at_ns + 15_000_000_000
                     print(f"validation cancelled token={token[:12]} signal={INTERRUPTED} "
                           "phase=running custody=retained", file=sys.stderr)
                     with self.locked():
@@ -1635,8 +1669,7 @@ class Queue:
                         state["stage"] = "cancelling"
                         self.save_state(token, state)
                     if barrier is not None:
-                        signal_scope(scope, barrier, INTERRUPTED, self.boot, 1,
-                                     int(interrupted_at * 1e9) + 15_000_000_000)
+                        signal_scope(scope, barrier, INTERRUPTED, self.boot, 1, quarantine_at_ns)
                 if not reaped:
                     pid, _ = os.waitpid(scope["pid"], os.WNOHANG)
                     reaped = bool(pid)
@@ -1654,9 +1687,9 @@ class Queue:
                 # killpg(..., 0) returns EPERM for a group containing only its
                 # unreaped zombie, which is not an observation failure.
                 absent = reaped and scope_absent(scope, self.boot)
-                if interrupted_at is not None and barrier is not None and not absent and time.monotonic() - interrupted_at >= 10 and not escalated:
-                    signal_scope(scope, barrier, signal.SIGKILL, self.boot, 2,
-                                 int(interrupted_at * 1e9) + 15_000_000_000)
+                if (escalate_at_ns is not None and barrier is not None and not absent
+                        and time.monotonic_ns() >= escalate_at_ns and not escalated):
+                    signal_scope(scope, barrier, signal.SIGKILL, self.boot, 2, quarantine_at_ns)
                     escalated = True
                     os.close(barrier)
                     barrier = None
@@ -1674,7 +1707,7 @@ class Queue:
                         return 128 + INTERRUPTED if INTERRUPTED else (command_result if command_result is not None else 1)
                     self.quarantine(token, "protected observer session or terminal receipt remains unresolved")
                     return 128 + INTERRUPTED if INTERRUPTED else 1
-                if interrupted_at is not None and time.monotonic() - interrupted_at >= 15:
+                if quarantine_at_ns is not None and time.monotonic_ns() >= quarantine_at_ns:
                     self.quarantine(token, "ordinary session termination is unconfirmed")
                     return 128 + INTERRUPTED
                 time.sleep(POLL)

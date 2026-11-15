@@ -31,7 +31,6 @@ const ACQUISITIONS_TOTAL: &str = "oauth2_token_acquisitions_total";
 /// The authorization server's token endpoint as both grants reach it: one
 /// signed, bounded, counted request per attempt, with no reuse of its own.
 pub(crate) struct TokenEndpoint {
-    url: Url,
     uri: Uri,
     http: Client,
     scope: Option<String>,
@@ -49,19 +48,15 @@ impl TokenEndpoint {
         signer: Signer,
         permits: usize,
     ) -> Result<Self, ConfigurationError> {
-        let uri = url
-            .as_str()
-            .parse::<Uri>()
-            .map_err(|_| ConfigurationError {
-                key: "token_url",
-                reason: "must be a valid HTTPS URL",
-            })?;
+        let uri = Uri::try_from(String::from(url)).map_err(|_| ConfigurationError {
+            key: "token_url",
+            reason: "must be a valid HTTPS URL",
+        })?;
         metrics::describe_counter!(
             ACQUISITIONS_TOTAL,
             "OAuth2 token attempts by grant and closed terminal outcome"
         );
         Ok(Self {
-            url,
             uri,
             http,
             scope: joined_scopes(scopes),
@@ -72,7 +67,7 @@ impl TokenEndpoint {
     }
 
     pub(crate) fn host(&self) -> Option<&str> {
-        self.url.host_str()
+        self.uri.host()
     }
 
     /// Performs one client-credentials token request and records its outcome.

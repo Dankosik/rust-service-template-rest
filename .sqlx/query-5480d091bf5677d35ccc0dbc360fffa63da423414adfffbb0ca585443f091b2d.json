@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXTRACT(EPOCH FROM statement_timestamp())::double precision AS \"observed_at_unix_seconds!\", EXTRACT(EPOCH FROM min(finished_at))::double precision AS \"oldest_at_unix_seconds?\" FROM background_jobs WHERE state = 'failed'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "observed_at_unix_seconds!",
+        "type_info": "Float8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "oldest_at_unix_seconds?",
+        "type_info": "Float8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "5480d091bf5677d35ccc0dbc360fffa63da423414adfffbb0ca585443f091b2d"
+}

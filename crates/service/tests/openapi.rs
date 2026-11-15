@@ -1,10 +1,9 @@
 //! Contract proof over the assembled API document.
 //!
 //! The committed `api/openapi/service.yaml` must equal what the `openapi`
-//! binary renders, every operation must have supported effective security and
-//! the problem responses that policy requires, and the problem schemas
-//! must stay closed. The tests walk the document as JSON, so they hold for
-//! feature operations merged later without knowing their types.
+//! binary renders. Each path operation in the service's OpenAPI 3.1.0 document
+//! must have supported effective security and declare the problem responses that
+//! policy requires. The problem schemas must stay closed.
 
 // Integration tests are test code; the workspace's production lint levels
 // for unwrap/expect/panic do not apply to them.
@@ -204,8 +203,8 @@ fn every_operation_has_supported_security_and_matching_optional_context() {
         if !public {
             assert!(
                 uses_bearer_only(&document, operation),
-                "{method} {path} is protected but not every alternative is the bearer \
-                 scheme without scopes"
+                "{method} {path} requires each security alternative to name one HTTP \
+                 bearer scheme with an array of string scopes"
             );
             for status in PROTECTED_PROBLEM_STATUSES {
                 assert!(

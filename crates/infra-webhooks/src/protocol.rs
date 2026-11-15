@@ -4,10 +4,9 @@
 //! framing, timestamp admission, and HMAC verification. It deliberately has
 //! no knowledge of endpoints, JSON, persistence, or HTTP routing.
 
-use std::fmt::Write as _;
+use std::fmt::NumBuffer;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use arrayvec::ArrayString;
 use aws_lc_rs::{constant_time, hmac};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bytes::Bytes;
@@ -24,10 +23,7 @@ const SIGNATURE_PREFIX: &str = "v1,";
 const MIN_KEY_BYTES: usize = 24;
 const MAX_KEY_BYTES: usize = 64;
 const TAG_BYTES: usize = 32;
-/// A tag in padded Standard base64: four characters per started three bytes.
-const ENCODED_TAG_BYTES: usize = TAG_BYTES.div_ceil(3) * 4;
-/// `i64::MIN` in decimal, the longest canonical timestamp.
-const MAX_TIMESTAMP_TEXT_BYTES: usize = 20;
+const ENCODED_TAG_BYTES: usize = base64::encoded_len(TAG_BYTES, true).expect("HMAC tag fits");
 
 /// The longest `webhook-id` accepted by verification.
 pub const MAX_MESSAGE_ID_BYTES: usize = 255;
@@ -268,10 +264,7 @@ fn tag(key: &SigningKey, message_id: &[u8], timestamp: i64, body: &[u8]) -> hmac
     let mut context = hmac::Context::with_key(&key.0);
     context.update(message_id);
     context.update(b".");
-    let mut text = ArrayString::<MAX_TIMESTAMP_TEXT_BYTES>::new();
-    // The capacity holds every i64, so formatting cannot fail.
-    let _ = write!(text, "{timestamp}");
-    context.update(text.as_bytes());
+    context.update(timestamp.format_into(&mut NumBuffer::new()).as_bytes());
     context.update(b".");
     context.update(body);
     context.sign()
@@ -413,6 +406,29 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn signs_canonical_decimal_seconds_across_the_signed_range() {
+        use aws_lc_rs::hmac;
+
+        let key = hmac::Key::new(
+            hmac::HMAC_SHA256,
+            &STANDARD.decode(ARBITRARY_BYTES_KEY).unwrap(),
+        );
+        let keys = KeyRing::from_encoded(ARBITRARY_BYTES_KEY, None).unwrap();
+        for (timestamp, frame) in [
+            (i64::MIN, b"id.-9223372036854775808.raw".as_slice()),
+            (-1, b"id.-1.raw"),
+            (0, b"id.0.raw"),
+            (i64::MAX, b"id.9223372036854775807.raw"),
+        ] {
+            let tag = hmac::sign(&key, frame);
+            assert_eq!(
+                keys.signatures(b"id", timestamp, b"raw").unwrap(),
+                format!("v1,{}", STANDARD.encode(tag))
+            );
+        }
     }
 
     #[test]

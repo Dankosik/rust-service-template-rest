@@ -14,7 +14,7 @@ import subprocess
 import sys
 import tempfile
 import tomllib
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -785,14 +785,8 @@ def _remove_unselected_adapters(snapshot: Path, harness: str) -> None:
 
 
 def _tracked_checkout_is_clean(root: Path) -> None:
-    raw = git(root, ["status", "--porcelain=v1", "-z"])
-    records = [record for record in raw.split(b"\0") if record]
-    for record in records:
-        if len(record) < 3:
-            raise Refusal("git status contains an invalid record")
-        status = record[:2]
-        if status not in {b"??", b"!!"}:
-            raise Refusal("initializer requires a clean tracked checkout")
+    if git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=no"]):
+        raise Refusal("initializer requires a clean tracked checkout")
 
 
 def _target_overlap_is_clean(root: Path, planned: Sequence[str]) -> None:
@@ -977,8 +971,7 @@ def _run_staged_command(snapshot: Path, command: Sequence[str], operation: str) 
         result = subprocess.run(
             command,
             cwd=snapshot,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
             env=_staged_environment(snapshot),
         )
@@ -1060,8 +1053,7 @@ def _validate_staged_runtime(snapshot: Path, inputs: InitInputs) -> None:
         generated = subprocess.run(
             ["cargo", "run", "-q", "-p", inputs.service_name, "--bin", "openapi", "--locked", "--offline"],
             cwd=snapshot,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
             env=_staged_environment(snapshot),
         )
@@ -1292,12 +1284,10 @@ def _collect_plan(
     owned_directories = tuple(item.rstrip("/") for item in owned_removals if item.endswith("/"))
     candidate_directories: set[str] = set()
     for relative in removals:
-        parent = Path(relative).parent
-        while parent != Path("."):
+        for parent in Path(relative).parents[:-1]:
             candidate = parent.as_posix()
             if not any(path.startswith(f"{candidate}/") for path in staged_paths):
                 candidate_directories.add(candidate)
-            parent = parent.parent
     removal_set = set(removals)
     for relative in sorted(candidate_directories, key=lambda item: (len(Path(item).parts), item), reverse=True):
         directory = root / relative
@@ -1358,25 +1348,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser = argparse.ArgumentParser(description="initialize one derived service from this template")
     parser.add_argument("--repo", type=Path, default=Path.cwd())
-    parser.add_argument("--service-name", action=SingleValue)
-    parser.add_argument("--repository", action=SingleValue)
-    parser.add_argument("--description", action=SingleValue)
-    parser.add_argument("--codeowner", action=SingleValue)
-    parser.add_argument("--database", action=SingleValue)
-    parser.add_argument("--authn", action=SingleValue)
-    parser.add_argument("--outbound-http", action=SingleValue)
-    parser.add_argument("--outbound-auth", action=SingleValue)
-    parser.add_argument("--grpc", action=SingleValue)
-    parser.add_argument("--http-idempotency", action=SingleValue)
-    parser.add_argument("--jobs", action=SingleValue)
-    parser.add_argument("--messaging", action=SingleValue)
-    parser.add_argument("--outbox", action=SingleValue)
-    parser.add_argument("--webhooks", action=SingleValue)
-    parser.add_argument("--inbound-webhooks", action=SingleValue)
-    parser.add_argument("--cache", action=SingleValue)
-    parser.add_argument("--object-storage", action=SingleValue)
-    parser.add_argument("--service-auth", action=SingleValue)
-    parser.add_argument("--agent-harness", action=SingleValue)
+    for field in fields(InitInputs):
+        parser.add_argument("--" + field.name.replace("_", "-"), action=SingleValue)
     return parser
 
 

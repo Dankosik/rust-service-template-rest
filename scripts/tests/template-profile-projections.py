@@ -20,6 +20,7 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
+from unittest.mock import patch
 
 
 sys.dont_write_bytecode = True
@@ -1523,15 +1524,13 @@ def self_test(source: Path) -> None:
     _expect_refusal(initializer, lambda: _validated_exclusions(initializer, ("Cargo.toml",)), "runtime exclusion")
     _expect_refusal(initializer, lambda: _validated_exclusions(initializer, (".agents/",)), "broad dot-directory exclusion")
     pack_type = next(iter(initializer.ADAPTERS.values())).__class__
-    initializer.ADAPTERS["malicious-runtime-owner"] = pack_type(
+    runtime_owner = pack_type(
         canonical=(".cargo/config.toml",),
         generated=(),
         settings=(),
     )
-    try:
+    with patch.dict(initializer.ADAPTERS, {"malicious-runtime-owner": runtime_owner}):
         _expect_refusal(initializer, lambda: _validated_exclusions(initializer), "malicious adapter runtime exclusion")
-    finally:
-        initializer.ADAPTERS.pop("malicious-runtime-owner", None)
     candidate = "0" * 40
     core_inputs = _inputs(initializer, "none", "none", "none", "none", "none", "none", "none", "core")
     codex_inputs = _inputs(initializer, "none", "none", "none", "none", "none", "none", "none", "codex")
