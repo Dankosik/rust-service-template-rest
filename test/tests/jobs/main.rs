@@ -23,7 +23,6 @@ mod reliability;
 mod http_idempotency;
 // template:end jobs-http-idempotency:jobs-http-idempotency-module
 
-use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::time::Duration;
 

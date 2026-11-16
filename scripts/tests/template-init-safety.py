@@ -230,10 +230,19 @@ def assert_snapshot_backpressure(source: Path, work: Path) -> None:
     revision = subprocess.check_output(["git", "-C", os.fspath(repository), "rev-parse", "HEAD"], text=True).strip()
     # Copying the live working tree instead of the admitted revision is wrong.
     (repository / "0000-large").write_bytes(b"uncommitted replacement\n")
-    command = [sys.executable, "-B", "-c",
-               "import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); "
-               "from state import snapshot_tree; snapshot_tree(Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4])",
-               os.fspath(source / "scripts/template"), os.fspath(repository), os.fspath(destination), revision]
+    command = [
+        sys.executable,
+        "-B",
+        "-c",
+        (
+            "import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); "
+            "from state import snapshot_tree; snapshot_tree(Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4])"
+        ),
+        os.fspath(source / "scripts/template"),
+        os.fspath(repository),
+        os.fspath(destination),
+        revision,
+    ]
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=30)
     except subprocess.TimeoutExpired as error:

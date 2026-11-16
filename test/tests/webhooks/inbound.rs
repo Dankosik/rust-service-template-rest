@@ -69,7 +69,7 @@ fn mounted_receiver_with_limit(
 
 fn signed_headers(keys: &KeyRing, message_id: impl AsRef<[u8]>, body: &[u8]) -> HeaderMap {
     let message_id = message_id.as_ref();
-    let timestamp: i64 = time::OffsetDateTime::now_utc().unix_timestamp();
+    let timestamp = time::OffsetDateTime::now_utc().unix_timestamp();
     let mut headers = HeaderMap::new();
     headers.insert(
         "webhook-id",
@@ -97,7 +97,7 @@ fn signed_headers(keys: &KeyRing, message_id: impl AsRef<[u8]>, body: &[u8]) -> 
 
 fn unsigned_headers(message_id: impl AsRef<[u8]>) -> HeaderMap {
     let message_id = message_id.as_ref();
-    let timestamp: i64 = time::OffsetDateTime::now_utc().unix_timestamp();
+    let timestamp = time::OffsetDateTime::now_utc().unix_timestamp();
     let mut headers = HeaderMap::new();
     headers.insert(
         "webhook-id",

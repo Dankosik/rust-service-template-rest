@@ -1,11 +1,7 @@
-use axum::http::StatusCode;
+use std::sync::Mutex;
+use std::sync::atomic::AtomicUsize;
 
-use std::num::NonZeroU32;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
-
-use axum::body::Body;
-use axum::http::header::{ALLOW, CONTENT_LENGTH, CONTENT_TYPE, RETRY_AFTER};
+use axum::http::header::{ALLOW, CONTENT_TYPE, RETRY_AFTER};
 use axum::http::{Method, Request as HttpRequest};
 use axum::routing::{get, post};
 use axum_test::TestServer;

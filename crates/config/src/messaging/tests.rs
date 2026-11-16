@@ -1,5 +1,4 @@
 use std::assert_matches;
-use std::num::NonZeroU32;
 use std::path::Path;
 
 use secrecy::ExposeSecret as _;

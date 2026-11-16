@@ -143,12 +143,8 @@ fn fixtures() -> FixtureSet {
 fn verify_go_record_in_rust(fixture: &FixtureCase) {
     let inbound_headers = headers(&fixture.inbound.headers);
     let inbound_body = Bytes::from(fixture.inbound.body.clone());
-    let decoded = decode_envelope(
-        &fixture.inbound.subject,
-        &inbound_headers,
-        inbound_body.clone(),
-    )
-    .unwrap_or_else(|error| panic!("{}: Go record rejected by Rust: {error}", fixture.name));
+    let decoded = decode_envelope(&fixture.inbound.subject, &inbound_headers, inbound_body)
+        .unwrap_or_else(|error| panic!("{}: Go record rejected by Rust: {error}", fixture.name));
 
     assert_eq!(
         decoded.message_id(),

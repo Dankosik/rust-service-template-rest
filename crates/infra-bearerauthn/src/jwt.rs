@@ -825,7 +825,10 @@ mod tests {
     fn payload_and_compact_cases(body: &str) -> Vec<(String, String)> {
         const HEADER: &str = CORPUS_HEADER;
         let mut exact = Vec::new();
-        let members = &body[1..body.len() - 1];
+        let members = body
+            .strip_prefix('{')
+            .and_then(|inner| inner.strip_suffix('}'))
+            .unwrap();
         for (name, payload) in [
             ("duplicate iss", format!(r#"{{{members},"iss":"x"}}"#)),
             ("duplicate aud", format!(r#"{{{members},"aud":"api"}}"#)),
@@ -863,7 +866,10 @@ mod tests {
             ("padded signature", format!("{message}.{signature}=")),
             (
                 "truncated signature",
-                format!("{message}.{}", &signature[..signature.len() - 4]),
+                format!(
+                    "{message}.{}",
+                    signature.get(..signature.len() - 4).unwrap()
+                ),
             ),
             (
                 "long signature",
@@ -871,7 +877,10 @@ mod tests {
             ),
             (
                 "signature outside the alphabet",
-                format!("{message}.{}~", &signature[..signature.len() - 1]),
+                format!(
+                    "{message}.{}~",
+                    signature.get(..signature.len() - 1).unwrap()
+                ),
             ),
             (
                 "another token's signature",
@@ -1576,7 +1585,10 @@ mod tests {
         let memo = ec_verifier(&signing, "k");
         let good = ec_token(&signing, "k", &serde_json::json!({}));
         let (message, signature) = good.rsplit_once('.').unwrap();
-        let tampered = format!("{message}.{}", signature.replacen(&signature[..2], "AA", 1));
+        let tampered = format!(
+            "{message}.{}",
+            signature.replacen(signature.get(..2).unwrap(), "AA", 1)
+        );
         let claim_refusals = [
             ec_token(&signing, "k", &serde_json::json!({"aud": "other"})),
             ec_token(

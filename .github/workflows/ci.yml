@@ -222,6 +222,26 @@ jobs:
         uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-nextest@${{ env.CARGO_NEXTEST_VERSION }},cargo-shear@${{ env.CARGO_SHEAR_VERSION }}
+      - name: Install pinned typos
+        if: >-
+          needs.changes.outputs.rust_source == 'true' ||
+          needs.changes.outputs.cargo_dependencies == 'true' ||
+          needs.changes.outputs.lint_config == 'true' ||
+          needs.changes.outputs.openapi == 'true' ||
+          needs.changes.outputs.migrations == 'true' ||
+          needs.changes.outputs.agent_instructions == 'true'
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: typos@${{ env.TYPOS_VERSION }}
+      - name: Typos
+        if: >-
+          needs.changes.outputs.rust_source == 'true' ||
+          needs.changes.outputs.cargo_dependencies == 'true' ||
+          needs.changes.outputs.lint_config == 'true' ||
+          needs.changes.outputs.openapi == 'true' ||
+          needs.changes.outputs.migrations == 'true' ||
+          needs.changes.outputs.agent_instructions == 'true'
+        run: make typos
       - name: Format
         if: >-
           needs.changes.outputs.rust_source == 'true' ||
@@ -583,7 +603,7 @@ jobs:
         if: needs.changes.outputs.tool_manifest == 'true'
         uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
-          tool: cargo-deny@${{ env.CARGO_DENY_VERSION }},cargo-nextest@${{ env.CARGO_NEXTEST_VERSION }},cargo-shear@${{ env.CARGO_SHEAR_VERSION }},zizmor@${{ env.ZIZMOR_VERSION }}
+          tool: cargo-deny@${{ env.CARGO_DENY_VERSION }},cargo-nextest@${{ env.CARGO_NEXTEST_VERSION }},cargo-shear@${{ env.CARGO_SHEAR_VERSION }},typos@${{ env.TYPOS_VERSION }},zizmor@${{ env.ZIZMOR_VERSION }}
       - name: Tool manifest
         if: needs.changes.outputs.tool_manifest == 'true'
         run: make tools-check
@@ -963,6 +983,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Load tool manifest
+        uses: ./.github/actions/load-versions # zizmor: ignore[self-repository]
+      - name: Install pinned typos
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: typos@${{ env.TYPOS_VERSION }}
+      - name: Typos
+        run: make typos
       - name: Links
         run: make docs-check
 

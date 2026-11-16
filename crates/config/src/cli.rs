@@ -40,8 +40,6 @@ impl LoadOptions {
 
 #[cfg(test)]
 mod tests {
-    use clap::Parser;
-
     use super::*;
 
     #[test]
@@ -64,8 +62,7 @@ mod tests {
             vec![PathBuf::from("a.toml"), PathBuf::from("b.toml")]
         );
         assert_eq!(opts.secrets_dir, Some(PathBuf::from("/run/secrets/app")));
-        let files: Vec<_> = opts.files().collect();
-        assert_eq!(files.len(), 3);
+        assert_eq!(opts.files().count(), 3);
     }
 
     #[test]

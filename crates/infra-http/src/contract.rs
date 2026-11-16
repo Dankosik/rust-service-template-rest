@@ -302,7 +302,7 @@ mod tests {
 
     use axum::body::Body;
     use axum::http::header::{ALLOW, CONTENT_TYPE};
-    use axum::http::{Method, Request, StatusCode};
+    use axum::http::{Request, StatusCode};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
     use utoipa::OpenApi;

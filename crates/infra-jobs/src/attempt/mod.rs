@@ -1,7 +1,6 @@
 mod completion;
 mod outcome;
 
-use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;

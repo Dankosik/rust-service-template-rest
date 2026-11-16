@@ -271,9 +271,7 @@ fn wiring_failure(operation_id: &str, failure: &'static str) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use axum::http::StatusCode;
-    use axum::http::{HeaderMap, HeaderValue};
-    use http_body_util::BodyExt;
+    use axum::http::{HeaderMap, StatusCode};
 
     use super::*;
 

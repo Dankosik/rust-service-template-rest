@@ -340,7 +340,7 @@ impl<const INLINE: usize> fmt::Write for Quoted<'_, INLINE> {
                 return self.stop();
             }
             self.values.append(escaped);
-            rest = &tail[1..];
+            rest = tail.get(1..).unwrap_or("");
         }
     }
 }

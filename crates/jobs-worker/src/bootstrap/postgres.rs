@@ -109,7 +109,8 @@ pub(crate) fn pool_options<'a>(
 
 fn application_name(service_name: &str) -> String {
     let end = service_name.floor_char_boundary(POSTGRES_IDENTIFIER_LIMIT - IDENTITY_SUFFIX.len());
-    format!("{}{IDENTITY_SUFFIX}", &service_name[..end])
+    let prefix = service_name.get(..end).unwrap_or(service_name);
+    format!("{prefix}{IDENTITY_SUFFIX}")
 }
 
 pub(super) fn admitted_pool(resources: &Resources) -> Result<PgPool, WorkerError> {

@@ -417,7 +417,8 @@ mod tests {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgres://127.0.0.1:1/unreachable")
             .expect("a lazy pool opens no connection");
-        let receiver = Receiver::new(pool, [("provider".to_owned(), Arc::new(AcceptAll) as _)]);
+        let verifier: Arc<dyn Verifier> = Arc::new(AcceptAll);
+        let receiver = Receiver::new(pool, [("provider".to_owned(), verifier)]);
         let outcome = receiver
             .receive(
                 "provider",

@@ -488,6 +488,11 @@ mod tests {
                 "{}::client_observation_is_global_bounded_and_terminal_exactly_once",
                 module_path!().split_once("::").unwrap().1
             );
+            #[expect(
+                clippy::disallowed_methods,
+                clippy::disallowed_types,
+                reason = "cargo test fallback isolates the global metric registry in a fresh child process"
+            )]
             let child = std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", &name, "--test-threads=1"])
                 .env(OWN_PROCESS, "1")

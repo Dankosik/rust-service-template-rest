@@ -65,7 +65,9 @@ mod tests {
 
     impl Error for Layer {
         fn source(&self) -> Option<&(dyn Error + 'static)> {
-            self.source.as_deref().map(|source| source as _)
+            self.source
+                .as_deref()
+                .map(|source| source as &dyn std::error::Error)
         }
     }
 

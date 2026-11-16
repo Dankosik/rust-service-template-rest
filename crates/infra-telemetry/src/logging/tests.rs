@@ -386,6 +386,11 @@ fn only_directives_without_span_filters_or_empty_parts_become_targets() {
     }
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "cumulative SDK diagnostic test runs in an isolated owned child process"
+)]
 fn in_diagnostic_child() -> bool {
     const CHILD: &str = "TELEMETRY_DIAGNOSTIC_TEST_CHILD";
     if std::env::var_os(CHILD).is_none() {

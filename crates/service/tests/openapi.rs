@@ -8,6 +8,10 @@
     reason = "allow-*-in-tests suppresses these inside #[test] functions"
 )]
 
+#[expect(
+    clippy::disallowed_types,
+    reason = "OpenAPI drift test runs the compiled openapi generator binary directly"
+)]
 use std::process::Command;
 
 use serde_json::{Value, json};
@@ -95,6 +99,11 @@ fn has_problem_response(document: &Value, operation: &Value, status: &str) -> bo
 }
 
 #[test]
+#[expect(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "OpenAPI drift test executes the compiled openapi generator binary synchronously"
+)]
 fn committed_document_matches_the_generator() {
     let output = Command::new(env!("CARGO_BIN_EXE_openapi"))
         .output()

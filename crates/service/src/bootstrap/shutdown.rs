@@ -1,4 +1,4 @@
-use std::{future::Future, panic::AssertUnwindSafe, time::Duration};
+use std::{panic::AssertUnwindSafe, time::Duration};
 
 use futures_util::FutureExt;
 use health::Readiness;

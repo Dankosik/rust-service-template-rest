@@ -1,4 +1,4 @@
-use std::{future::Future, pin::Pin, time::Duration};
+use std::{pin::Pin, time::Duration};
 
 use serde::Deserialize;
 use tokio::time::Instant;

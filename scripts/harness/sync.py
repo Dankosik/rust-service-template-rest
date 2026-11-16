@@ -769,8 +769,10 @@ def _check_workflow_metadata(name: str, metadata: object, prefix: str = "") -> l
     pair = (metadata.get("invocation"), metadata.get("kind"))
     if pair not in WORKFLOW_METADATA_PAIRS:
         return [
-            f"{label}metadata (invocation, kind) must be ('user', 'workflow') or ('role', 'carrier'), "
-            f"got ({pair[0]!r}, {pair[1]!r})"
+            (
+                f"{label}metadata (invocation, kind) must be ('user', 'workflow') or ('role', 'carrier'), "
+                f"got ({pair[0]!r}, {pair[1]!r})"
+            )
         ]
     return []
 

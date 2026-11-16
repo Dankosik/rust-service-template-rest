@@ -117,7 +117,7 @@ where
     variables.extend(read_environment(environment)?);
     for (name, child) in &variables {
         for (end, _) in name.match_indices(ENV_SEPARATOR).skip(1) {
-            if let Some(parent) = variables.get(&name[..end]) {
+            if let Some(parent) = name.get(..end).and_then(|prefix| variables.get(prefix)) {
                 return Err(Error::OverlappingVariables {
                     parent: parent.original_name.clone(),
                     child: child.original_name.clone(),

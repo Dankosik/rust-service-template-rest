@@ -26,12 +26,12 @@ async fn typed_handler_success_is_followed_by_confirmed_source_ack() {
     let mut registry = registry(&fixture);
     registry
         .register::<ExampleEvent, _, _>(move |event, _| {
-            if let Some(sender) = observed_tx
+            let sender = observed_tx
                 .lock()
                 .expect("test completion sender lock must not be poisoned")
-                .take()
-            {
-                let _ = sender.send(event.id.clone());
+                .take();
+            if let Some(sender) = sender {
+                let _ = sender.send(event.id);
             }
             async { Ok(()) }
         })
@@ -93,11 +93,11 @@ async fn handler_runs_in_the_trace_of_the_publication() {
     let mut registry = registry(&fixture);
     registry
         .register::<ExampleEvent, _, _>(move |_, _| {
-            if let Some(sender) = observed_tx
+            let sender = observed_tx
                 .lock()
                 .expect("test completion sender lock must not be poisoned")
-                .take()
-            {
+                .take();
+            if let Some(sender) = sender {
                 let _ = sender.send(trace_id(&tracing::Span::current()));
             }
             async { Ok(()) }
@@ -192,11 +192,11 @@ async fn retryable_handler_is_redelivered_after_broker_nak_then_confirmed_acked(
                 if attempt == 0 {
                     Err(HandlerError::Retryable)
                 } else {
-                    if let Some(sender) = completed_tx
+                    let sender = completed_tx
                         .lock()
                         .expect("test completion sender lock must not be poisoned")
-                        .take()
-                    {
+                        .take();
+                    if let Some(sender) = sender {
                         let _ = sender.send(());
                     }
                     Ok(())

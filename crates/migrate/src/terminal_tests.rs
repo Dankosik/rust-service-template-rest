@@ -29,6 +29,7 @@ enum Sink {
 
 #[expect(
     clippy::disallowed_methods,
+    clippy::disallowed_types,
     reason = "synchronous fixture polling waits for owned child or thread completion within its existing timeout"
 )]
 fn run_fixture(scenario: &str, sink: Sink) -> (i32, String, String, Duration) {

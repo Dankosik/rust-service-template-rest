@@ -1,5 +1,4 @@
 use std::fmt;
-use std::future::Future;
 use std::marker::PhantomData;
 use std::num::NonZeroU32;
 use std::pin::Pin;
@@ -488,7 +487,6 @@ mod tests {
 
     use serde::{Deserialize, Serialize};
     use sqlx::postgres::PgPoolOptions;
-    use tokio_util::sync::CancellationToken;
 
     use super::*;
 
@@ -546,7 +544,7 @@ mod tests {
         fn kind_name_check_matches_the_documented_pattern(
             name in "[a-zA-Z0-9._ /é-]{0,70}|[a-z][a-z0-9._-]{0,63}",
         ) {
-            let documented = regex::regex!(r"^[a-z][a-z0-9._-]{0,63}$");
+            let documented = regex::regex!("^[a-z][a-z0-9._-]{0,63}$");
             proptest::prop_assert_eq!(is_valid_kind_name(&name), documented.is_match(&name));
         }
     }

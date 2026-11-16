@@ -136,7 +136,7 @@ fn frame(hasher: &mut Sha256, bytes: &[u8]) {
 
 #[cfg(test)]
 mod tests {
-    use axum::http::{HeaderValue, Method, Uri};
+    use axum::http::HeaderValue;
 
     use super::*;
 

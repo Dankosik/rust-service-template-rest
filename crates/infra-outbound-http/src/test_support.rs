@@ -1,6 +1,5 @@
 use std::{
     collections::BTreeMap,
-    future::Future,
     net::SocketAddr,
     sync::{Arc, Mutex},
     task::{Context, Poll},

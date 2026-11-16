@@ -628,7 +628,7 @@ mod tests {
         let alphabet = base64::alphabet::STANDARD.as_str();
         let at = alphabet.find(last).unwrap();
         let sibling = alphabet.chars().nth(at ^ 1).unwrap();
-        let prefix = &encoded[..encoded.len() - 1];
+        let prefix = encoded.strip_suffix(last).unwrap();
         assert!(!accepted(&format!("{prefix}{sibling}=")), "trailing bits");
     }
 

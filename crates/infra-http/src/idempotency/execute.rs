@@ -1,5 +1,4 @@
 use std::fmt;
-use std::future::Future;
 use std::mem::DropGuard;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

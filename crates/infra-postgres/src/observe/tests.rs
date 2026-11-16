@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use metrics::Key;
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
 use metrics_util::debugging::DebuggingRecorder;

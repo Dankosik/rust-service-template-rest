@@ -1,4 +1,3 @@
-use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -283,8 +282,6 @@ impl Registry {
 
 #[cfg(test)]
 mod tests {
-    use bytes::Bytes;
-
     use super::*;
     use crate::error::EnvelopeError;
     use crate::prepared::PreparedEvent;

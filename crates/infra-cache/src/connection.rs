@@ -1,4 +1,4 @@
-use std::future::{Future, poll_fn};
+use std::future::poll_fn;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};

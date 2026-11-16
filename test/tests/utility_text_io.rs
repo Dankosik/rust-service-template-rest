@@ -11,7 +11,7 @@ use unicode_segmentation::UnicodeSegmentation;
 fn names_and_text_patterns_use_existing_utilities() {
     assert_eq!("XMLHttpRequest".to_snake_case(), "xml_http_request");
     assert_eq!("UserProfile".to_kebab_case(), "user-profile");
-    let job_id = regex::regex!(r"^job-([0-9]+)$");
+    let job_id = regex::regex!("^job-([0-9]+)$");
     let captures = job_id.captures("job-123").unwrap();
     assert_eq!(&captures[1], "123");
     assert!(job_id.captures("job-123-extra").is_none());
@@ -39,6 +39,12 @@ fn normalization_and_graphemes_have_explicit_meanings() {
 }
 
 #[test]
+#[expect(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    clippy::filetype_is_file,
+    reason = "utility contract test exercises synchronous fs_err and walkdir helpers on regular files in a tempdir"
+)]
 fn recursive_file_operations_keep_errors_and_relative_paths() {
     let dir = tempfile::tempdir().unwrap();
     fs_err::create_dir(dir.path().join("nested")).unwrap();

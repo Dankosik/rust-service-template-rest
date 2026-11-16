@@ -258,7 +258,6 @@ mod tests {
     use jsonwebtoken::Algorithm;
     use std::assert_matches;
     use std::{
-        future::Future,
         pin::Pin,
         sync::Arc,
         task::{Context, Poll, Waker},

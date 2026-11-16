@@ -199,7 +199,7 @@ compose_pgbouncer_host_dsn() { echo pgbouncer; }
         self.executable(self.root / "bin/cargo", 'printf "%s\\n" "$*" >>"$PWD/oauth-cargo"')
 
         class Handler(http.server.BaseHTTPRequestHandler):
-            def do_GET(self) -> None:  # noqa: N802
+            def do_GET(self) -> None:
                 self.send_response(200)
                 self.end_headers()
 

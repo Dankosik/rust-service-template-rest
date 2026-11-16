@@ -318,7 +318,7 @@ fn save(path: &Path, value: &impl Serialize, persist: Persist) -> Result<()> {
     let parent = path
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
+        .unwrap_or_else(|| Path::new("."));
     let mut file = tempfile::NamedTempFile::new_in(parent).map_err(|_| "file_create")?;
     serde_json::to_writer_pretty(&mut file, value).map_err(|_| "file_write")?;
     file.write_all(b"\n").map_err(|_| "file_write")?;
@@ -628,6 +628,7 @@ mod tests {
     #[test]
     #[expect(
         clippy::disallowed_methods,
+        clippy::disallowed_types,
         clippy::exit,
         reason = "the subprocess fixture polls for exit, reaps the child on timeout, and exits directly from the child branch"
     )]

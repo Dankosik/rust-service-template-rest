@@ -237,7 +237,7 @@ fn check_parameters(url: &Url) -> Result<(), DsnError> {
 fn bounded(key: &str) -> String {
     const MAX: usize = 32;
     match key.char_indices().nth(MAX) {
-        Some((end, _)) => format!("{}…", &key[..end]),
+        Some((end, _)) => format!("{}…", key.get(..end).unwrap_or(key)),
         None => key.to_owned(),
     }
 }

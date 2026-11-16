@@ -363,6 +363,11 @@ fn escaped_field_keys_count_toward_the_complete_record_limit() {
     }
 }
 #[test]
+#[expect(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "processwide capacity test isolates its global subscriber in an owned child process"
+)]
 fn processwide_capacity_is_bounded_and_recovers() {
     const CHILD: &str = "RUST_TELEMETRY_FORMAT_CAPACITY_CHILD";
     if std::env::var_os(CHILD).as_deref() != Some(std::ffi::OsStr::new("1")) {

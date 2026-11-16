@@ -1,4 +1,3 @@
-use std::future::Future;
 use std::mem::DropGuard;
 
 use infra_http::Server;

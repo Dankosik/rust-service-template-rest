@@ -15,12 +15,21 @@ use common::{agent, baseline_env, get, poll_until, spawn_stdout_lines, terminate
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 
+#[expect(
+    clippy::disallowed_types,
+    reason = "process lifecycle fixture owns the spawned service Child handle"
+)]
 struct Service {
     child: Child,
     lines: mpsc::Receiver<String>,
     reader: Option<std::thread::JoinHandle<()>>,
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "process lifecycle fixture spawns and polls the compiled service binary synchronously"
+)]
 impl Service {
     fn command(env: &[(&str, &str)]) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_service"));
@@ -99,6 +108,10 @@ fn records(stdout: &str) -> Vec<serde_json::Value> {
         .collect()
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "Drop reaps the owned service child process on teardown"
+)]
 impl Drop for Service {
     fn drop(&mut self) {
         if self.child.try_wait().ok().flatten().is_none() {
@@ -113,6 +126,7 @@ impl Drop for Service {
 
 #[expect(
     clippy::disallowed_methods,
+    clippy::disallowed_types,
     reason = "synchronous fixture polling waits for owned child or thread completion within its existing timeout"
 )]
 fn wait_child(child: &mut Child, budget: Duration) -> std::process::ExitStatus {
@@ -337,6 +351,10 @@ fn invalid_configuration_exits_one_with_the_key_named() {
 }
 
 #[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "broken-stderr fixture spawns the service binary directly with a closed pipe"
+)]
 fn invalid_configuration_exits_one_with_a_broken_stderr_pipe() {
     let (reader, writer) = std::io::pipe().expect("stderr pipe");
     drop(reader);

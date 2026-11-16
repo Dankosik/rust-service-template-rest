@@ -381,8 +381,8 @@ fn caused_by_length_limit(error: &(dyn std::error::Error + 'static)) -> bool {
 #[cfg(test)]
 mod tests {
     use axum::body::Body;
+    use axum::http::Request;
     use axum::http::header::CONTENT_TYPE;
-    use axum::http::{Request, StatusCode};
     use metrics::Label;
     use tower::ServiceExt;
 

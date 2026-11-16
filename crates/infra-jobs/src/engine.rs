@@ -1,5 +1,4 @@
 use std::fmt;
-use std::future::Future;
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};

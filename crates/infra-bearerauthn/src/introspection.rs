@@ -1,5 +1,4 @@
 use std::{
-    future::Future,
     num::NonZeroUsize,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -1303,7 +1302,8 @@ mod tests {
             tokio::select! { () = fixture.received() => {}, result = &mut leader => panic!("response must be gated: {result:?}"), }
             let waiter_clock = clock.clone();
             let mut waiter = Box::pin(verifier.verify_with_now(&token, &context, move || {
-                match *waiter_clock.lock().unwrap() {
+                let now = *waiter_clock.lock().unwrap();
+                match now {
                     Some(now) => Ok(now),
                     None => crate::unix_time(UNIX_EPOCH - Duration::from_secs(1))
                         .map(|now| now.as_secs()),

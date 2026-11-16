@@ -702,7 +702,9 @@ mod tests {
             .body(())
             .unwrap();
         Call::start(
-            &crate::observe::Series::server(["/test.Service/Stream".into()].into_iter().collect()),
+            &crate::observe::Series::server(
+                std::iter::once("/test.Service/Stream".into()).collect(),
+            ),
             &request,
             None,
         )
