@@ -2,33 +2,71 @@ use super::*;
 use crate::LoadOptions;
 use crate::load::{Error, load_from};
 use crate::test_support::{BUILD, assert_secret_in_file, env};
+use crate::validate::{ValidationErrors, admit_with};
 use std::assert_matches;
 
-fn jwt(extra: &str) -> ServiceAuthConfig {
+fn jwt(extra: &str) -> ServiceAuthInput {
     toml::from_str(&format!(
         "mode = \"jwt\"\nname = \"catalog\"\njwt_type = \"example-svc+jwt\"\ntrust = \"{{}}\"\n{extra}"
     ))
     .unwrap()
 }
 
+fn admit(
+    input: ServiceAuthInput,
+    app_env: &str,
+    grpc_enabled: bool,
+) -> Result<ServiceAuthConfig, ValidationErrors> {
+    admit_with(|v| input.admit(app_env, grpc_enabled, v))
+}
+
+fn rejected_keys(input: ServiceAuthInput, app_env: &str) -> Vec<String> {
+    admit(input, app_env, true)
+        .unwrap_err()
+        .iter()
+        .map(|error| error.key.clone())
+        .collect()
+}
+
 #[test]
 fn none_admits_unauthenticated_grpc_only_in_development() {
-    let none = ServiceAuthConfig::default();
     for env in ["local", "development"] {
-        assert_eq!(none.validate(env, true), Ok(()));
+        assert_matches!(
+            admit(ServiceAuthInput::default(), env, true),
+            Ok(ServiceAuthConfig::None)
+        );
     }
     for env in ["production", "staging", "Production", "dev"] {
-        let error = none.validate(env, true).unwrap_err();
-        assert_eq!(error.key, "service_auth.mode", "{env}");
+        let errors = admit(ServiceAuthInput::default(), env, true).unwrap_err();
+        assert!(errors.names("service_auth.mode"), "{env}");
     }
-    assert_eq!(none.validate("production", false), Ok(()));
+    assert_matches!(
+        admit(ServiceAuthInput::default(), "production", false),
+        Ok(ServiceAuthConfig::None)
+    );
 }
 
 #[test]
 fn jwt_needs_name_type_and_trust_and_a_key_with_its_id() {
-    assert_eq!(jwt("").validate("production", true), Ok(()));
-    let signing = jwt("key_id = \"catalog/1\"\nprivate_key = \"pem\"");
-    assert_eq!(signing.validate("production", true), Ok(()));
+    assert_matches!(
+        admit(jwt(""), "production", true),
+        Ok(ServiceAuthConfig::Jwt {
+            signing_key: None,
+            ..
+        })
+    );
+    let Ok(ServiceAuthConfig::Jwt {
+        signing_key: Some(signing_key),
+        ..
+    }) = admit(
+        jwt("key_id = \"catalog/1\"\nprivate_key = \"pem\""),
+        "production",
+        true,
+    )
+    else {
+        panic!("expected a signing key");
+    };
+    assert_eq!(signing_key.key_id, "catalog/1");
     for (body, key) in [
         (
             "name = \" \"\njwt_type = \"t\"\ntrust = \"{}\"",
@@ -43,25 +81,42 @@ fn jwt_needs_name_type_and_trust_and_a_key_with_its_id() {
             "service_auth.trust",
         ),
     ] {
-        let config: ServiceAuthConfig = toml::from_str(&format!("mode = \"jwt\"\n{body}")).unwrap();
-        assert_eq!(config.validate("production", true).unwrap_err().key, key);
+        let input: ServiceAuthInput = toml::from_str(&format!("mode = \"jwt\"\n{body}")).unwrap();
+        assert_eq!(rejected_keys(input, "production"), [key]);
     }
-    let config = jwt("key_id = \"catalog/1\"");
     assert_eq!(
-        config.validate("local", true).unwrap_err().key,
-        "service_auth.private_key"
+        rejected_keys(jwt("key_id = \"catalog/1\""), "local"),
+        ["service_auth.private_key"]
     );
-    let config = jwt("private_key = \"pem\"\nkey_id = \" \"");
     assert_eq!(
-        config.validate("local", true).unwrap_err().key,
-        "service_auth.key_id"
+        rejected_keys(jwt("private_key = \"pem\"\nkey_id = \" \""), "local"),
+        ["service_auth.key_id"]
+    );
+}
+
+#[test]
+fn every_violated_jwt_rule_is_reported_together() {
+    let input: ServiceAuthInput = toml::from_str("mode = \"jwt\"\nkey_id = \"catalog/1\"").unwrap();
+    assert_eq!(
+        rejected_keys(input, "production"),
+        [
+            "service_auth.name",
+            "service_auth.jwt_type",
+            "service_auth.trust",
+            "service_auth.private_key"
+        ]
     );
 }
 
 #[test]
 fn none_accepts_no_dormant_input_and_debug_names_only_the_mode() {
-    assert!(toml::from_str::<ServiceAuthConfig>("mode = \"none\"\nname = \"x\"\n").is_err());
-    let config = jwt("key_id = \"catalog/1\"\nprivate_key = \"-----BEGIN PRIVATE KEY-----\"");
+    assert!(toml::from_str::<ServiceAuthInput>("mode = \"none\"\nname = \"x\"\n").is_err());
+    let config = admit(
+        jwt("key_id = \"catalog/1\"\nprivate_key = \"-----BEGIN PRIVATE KEY-----\""),
+        "production",
+        true,
+    )
+    .unwrap();
     assert_eq!(
         format!("{config:?}"),
         r#"ServiceAuthConfig { mode: "jwt", .. }"#
@@ -95,8 +150,7 @@ fn service_auth_environment_decodes_and_the_signing_key_stays_secret() {
         name,
         jwt_type,
         trust: loaded,
-        key_id,
-        private_key,
+        signing_key,
     } = &cfg.service_auth
     else {
         panic!("expected jwt service authentication");
@@ -104,11 +158,9 @@ fn service_auth_environment_decodes_and_the_signing_key_stays_secret() {
     assert_eq!(name, "catalog");
     assert_eq!(jwt_type, "example-svc+jwt");
     assert_eq!(loaded, trust);
-    assert_eq!(key_id.as_deref(), Some("catalog/production/2026-10"));
-    assert_eq!(
-        private_key.as_ref().unwrap().expose_secret(),
-        "env-signing-key"
-    );
+    let signing_key = signing_key.as_ref().unwrap();
+    assert_eq!(signing_key.key_id, "catalog/production/2026-10");
+    assert_eq!(signing_key.private_key.expose_secret(), "env-signing-key");
     assert!(!format!("{cfg:?}").contains("env-signing-key"));
 }
 
@@ -141,5 +193,5 @@ fn unauthenticated_grpc_outside_development_refuses_startup() {
         env(&[listener.as_slice(), production.as_slice()].concat()),
     )
     .unwrap_err();
-    assert_matches!(&err, Error::Validate(error) if error.key == "service_auth.mode", "{err}");
+    assert_matches!(&err, Error::Validate(errors) if errors.names("service_auth.mode"), "{err}");
 }

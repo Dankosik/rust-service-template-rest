@@ -96,7 +96,7 @@ pub(super) fn log_startup_record(
         http.grace_period = ?config.http.grace_period,
         observability.metrics.addr = ?config.observability.metrics.addr,
         // template:begin jobs:worker-bootstrap-log-jobs-fields
-        postgres.max_connections = config.postgres.max_connections.get(),
+        postgres.max_connections = config.postgres.as_ref().map(|postgres| postgres.max_connections.get()),
         jobs.max_workers = config.jobs.max_workers.get(),
         jobs.kinds = %super::jobs::kind_names(registry),
         // template:end jobs:worker-bootstrap-log-jobs-fields

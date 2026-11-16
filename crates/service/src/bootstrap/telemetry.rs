@@ -65,7 +65,7 @@ pub(super) fn log_startup_summary(config: &Config, exporter: &ExporterState) {
         http.grace_period = ?config.http.grace_period,
         observability.metrics.addr = ?config.observability.metrics.addr,
         // template:begin postgres:bootstrap-startup-log-postgres
-        postgres.enabled = config.postgres.enabled,
+        postgres.enabled = config.postgres.is_some(),
         // template:end postgres:bootstrap-startup-log-postgres
         // template:begin service-auth:bootstrap-startup-log-service-auth
         service_auth.mode = config.service_auth.mode(),

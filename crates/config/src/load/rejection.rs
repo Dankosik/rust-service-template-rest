@@ -101,3 +101,57 @@ fn is_at_or_under(path: &str, key: &str) -> bool {
     path.strip_prefix(key)
         .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
 }
+
+#[cfg(test)]
+mod tests {
+    use serde::de::{Error, Unexpected};
+
+    use super::*;
+
+    const VALUE: &str = "hunter2";
+
+    fn describe(error: &config::ConfigError) -> String {
+        describe_rejection(error, &["http.addr".to_owned()], "the environment")
+    }
+
+    /// The classification matches serde's own wording. A serde release that
+    /// rewords a form fails here instead of silently changing what an
+    /// operator sees: a value form that stops matching loses its expected
+    /// form, and a key-only form that stops matching loses its key names.
+    #[test]
+    fn serde_value_forms_keep_the_expected_form_and_drop_the_value() {
+        for error in [
+            <config::ConfigError as Error>::invalid_type(Unexpected::Str(VALUE), &"a boolean"),
+            <config::ConfigError as Error>::invalid_value(Unexpected::Str(VALUE), &"a boolean"),
+        ] {
+            let message = error.to_string();
+            assert!(message.contains(VALUE), "serde quotes the value: {message}");
+            assert_eq!(
+                describe(&error),
+                "invalid value, expected a boolean in the environment"
+            );
+        }
+        let variant = <config::ConfigError as Error>::unknown_variant(VALUE, &["json", "text"]);
+        assert_eq!(
+            describe(&variant),
+            "invalid value, expected `json` or `text` in the environment"
+        );
+    }
+
+    #[test]
+    fn serde_key_forms_are_shown_as_written() {
+        for error in [
+            <config::ConfigError as Error>::unknown_field("levl", &["level"]),
+            <config::ConfigError as Error>::missing_field("level"),
+            <config::ConfigError as Error>::duplicate_field("level"),
+        ] {
+            assert_eq!(describe(&error), error.to_string());
+        }
+    }
+
+    #[test]
+    fn an_unrecognised_form_hides_its_text() {
+        let error = <config::ConfigError as Error>::invalid_length(3, &VALUE);
+        assert_eq!(describe(&error), "invalid value in the environment");
+    }
+}

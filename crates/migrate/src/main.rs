@@ -7,7 +7,7 @@ use infra_telemetry::{
 };
 use migrate::{MIGRATOR, Report, RunFailure, RunOptions};
 use secrecy::ExposeSecret;
-use service_config::{BuildInfo, LoadOptions, MigrationConfig, ValidationError, process_failure};
+use service_config::{BuildInfo, LoadOptions, MigrationConfig, process_failure};
 
 const BUILD_INFO: BuildInfo = BuildInfo::from_package_version(env!("CARGO_PKG_VERSION"));
 
@@ -23,8 +23,6 @@ const FALLBACK_LOGGING: LoggingOptions<'static> = LoggingOptions {
 enum Failure {
     #[error("postgres.enabled must be true to run migrations")]
     PostgresDisabled,
-    #[error(transparent)]
-    Config(#[from] ValidationError),
     #[error(transparent)]
     Dsn(#[from] DsnError),
     #[error("build tokio runtime: {0}")]
@@ -42,7 +40,7 @@ enum Failure {
 impl Failure {
     fn stage(&self) -> &'static str {
         match self {
-            Self::PostgresDisabled | Self::Config(_) | Self::Dsn(_) | Self::Setup(_) => "config",
+            Self::PostgresDisabled | Self::Dsn(_) | Self::Setup(_) => "config",
             Self::Runtime(_) => "runtime",
             Self::Signals(_) => "signals",
             Self::Run(error) => error.stage(),
@@ -178,12 +176,12 @@ fn finish(outcome: Result<Report, Failure>, target: Option<i64>, started: Instan
 }
 
 async fn apply(config: &MigrationConfig, target: Option<i64>) -> Result<Report, Failure> {
-    if !config.postgres.enabled {
+    let Some(postgres) = &config.postgres else {
         return Err(Failure::PostgresDisabled);
-    }
+    };
     let dsn = Dsn::admit_with(
-        config.postgres.required_dsn()?.expose_secret(),
-        config.postgres.password_file.as_deref(),
+        postgres.dsn.expose_secret(),
+        postgres.password_file.as_deref(),
     )?;
     tracing::event!(
         target: "migrate_record",
@@ -197,13 +195,13 @@ async fn apply(config: &MigrationConfig, target: Option<i64>) -> Result<Report, 
         postgres.sslmode = dsn.ssl_mode_name(),
         migration.target = target,
         migration.deadline_ms =
-            u64::try_from(config.postgres.migration_deadline.as_millis()).unwrap_or(u64::MAX),
+            u64::try_from(postgres.migration_deadline.as_millis()).unwrap_or(u64::MAX),
         "migration_starting"
     );
     let options = RunOptions::defaults(
         &dsn,
         &config.observability.otel.service_name,
-        config.postgres.migration_deadline,
+        postgres.migration_deadline,
     );
     run_until_stop(&options).await
 }

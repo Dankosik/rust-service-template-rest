@@ -6,42 +6,49 @@ use super::BootstrapError;
 /// Nothing is sent: the bucket is not a readiness dependency; a service that
 /// cannot serve without it pushes `storage.probe()` into the readiness probes.
 pub(super) fn open(config: &Config) -> Result<Option<ObjectStorage>, BootstrapError> {
-    let settings = &config.object_storage;
-    let provider = match settings.provider {
-        ObjectStorageProvider::None => return Ok(None),
-        ObjectStorageProvider::AmazonS3 => Provider::AmazonS3 {
-            region: settings.region.clone(),
-            expected_bucket_owner: settings.expected_bucket_owner.clone(),
+    let Some(settings) = &config.object_storage else {
+        return Ok(None);
+    };
+    let provider = match &settings.provider {
+        ObjectStorageProvider::AmazonS3 {
+            region,
+            expected_bucket_owner,
+        } => Provider::AmazonS3 {
+            region: region.clone(),
+            expected_bucket_owner: expected_bucket_owner.clone(),
         },
-        ObjectStorageProvider::CloudflareR2 => Provider::CloudflareR2 {
-            endpoint: settings.endpoint.clone(),
+        ObjectStorageProvider::CloudflareR2 { endpoint } => Provider::CloudflareR2 {
+            endpoint: endpoint.clone(),
         },
-        ObjectStorageProvider::Railway => Provider::Railway {
-            endpoint: settings.endpoint.clone(),
-            region: settings.region.clone(),
+        ObjectStorageProvider::Railway { endpoint, region } => Provider::Railway {
+            endpoint: endpoint.clone(),
+            region: region.clone().unwrap_or_default(),
         },
-        ObjectStorageProvider::S3Compatible => Provider::S3Compatible {
-            endpoint: settings.endpoint.clone(),
-            region: settings.region.clone(),
-            path_style: settings.path_style,
+        ObjectStorageProvider::S3Compatible {
+            endpoint,
+            region,
+            path_style,
+        } => Provider::S3Compatible {
+            endpoint: endpoint.clone(),
+            region: region.clone().unwrap_or_default(),
+            path_style: *path_style,
         },
-        ObjectStorageProvider::Local => Provider::Local {
-            endpoint: settings.endpoint.clone(),
-            region: settings.region.clone(),
+        ObjectStorageProvider::Local { endpoint, region } => Provider::Local {
+            endpoint: endpoint.clone(),
+            region: region.clone().unwrap_or_default(),
         },
     };
-    let (credentials, credentials_label) = match settings.credentials {
-        ObjectStorageCredentials::AccessKey => {
-            let credentials = CredentialSource::AccessKey {
-                access_key_id: settings.access_key_id.clone(),
-                secret_access_key: settings.required_secret_access_key()?.clone(),
-            };
-            (credentials, "access_key")
-        }
-        ObjectStorageCredentials::WorkloadIdentity => {
-            (CredentialSource::WorkloadIdentity, "workload_identity")
-        }
+    let credentials = match &settings.credentials {
+        ObjectStorageCredentials::AccessKey {
+            access_key_id,
+            secret_access_key,
+        } => CredentialSource::AccessKey {
+            access_key_id: access_key_id.clone(),
+            secret_access_key: secret_access_key.clone(),
+        },
+        ObjectStorageCredentials::WorkloadIdentity => CredentialSource::WorkloadIdentity,
     };
+    let credentials_label = settings.credentials.label();
     let storage = ObjectStorage::try_new(ObjectStorageOptions {
         provider,
         bucket: settings.bucket.clone(),

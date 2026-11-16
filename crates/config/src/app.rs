@@ -1,6 +1,6 @@
 use serde::Deserialize;
 
-use crate::validate::{ValidationError, non_blank};
+use crate::validate::{ValidationError, Violations, non_blank};
 
 /// Values the binary knows at build time and the loader uses as defaults
 /// for `app.version` and `app.commit` when the snapshot leaves them empty.
@@ -93,10 +93,9 @@ impl AppConfig {
         }
     }
 
-    pub(crate) fn validate(&self) -> Result<(), ValidationError> {
-        non_blank("app.env", &self.env)?;
-        non_blank("app.version", &self.version)?;
-        non_blank("app.commit", &self.commit)?;
-        Ok(())
+    pub(crate) fn validate(&self, v: &mut Violations) {
+        v.check(non_blank("app.env", &self.env));
+        v.check(non_blank("app.version", &self.version));
+        v.check(non_blank("app.commit", &self.commit));
     }
 }

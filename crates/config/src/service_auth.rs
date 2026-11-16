@@ -1,6 +1,6 @@
 //! Service-to-service authentication with caller-signed tokens.
 //!
-//! This section validates configuration shape only. Caller-name, token-type,
+//! This section admits configuration shape only. Caller-name, token-type,
 //! trust-registry and key admission belong to the service authentication
 //! adapter, which bootstrap runs before any listener binds.
 
@@ -9,11 +9,11 @@ use serde::Deserialize;
 
 use crate::app::is_local_development;
 use crate::de::{blank_as_none, blank_secret_as_none};
-use crate::validate::{ValidationError, missing, required_when};
+use crate::validate::{Rejected, ValidationError, Violations, missing, required_when};
 
 #[derive(Clone, Deserialize)]
 #[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
-pub enum ServiceAuthConfig {
+pub(crate) enum ServiceAuthInput {
     /// Calls carry and need no service token. With gRPC enabled this is
     /// accepted only in a local or development environment. This is the
     /// omitted-section default.
@@ -38,6 +38,32 @@ pub enum ServiceAuthConfig {
     },
 }
 
+impl Default for ServiceAuthInput {
+    fn default() -> Self {
+        Self::None {}
+    }
+}
+
+impl std::fmt::Debug for ServiceAuthInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ServiceAuthInput { .. }")
+    }
+}
+
+/// How this service authenticates service-to-service calls.
+#[derive(Clone, Default)]
+pub enum ServiceAuthConfig {
+    #[default]
+    None,
+    Jwt {
+        name: String,
+        jwt_type: String,
+        trust: String,
+        /// `None`: the service verifies callers but calls no one.
+        signing_key: Option<ServiceSigningKey>,
+    },
+}
+
 impl std::fmt::Debug for ServiceAuthConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ServiceAuthConfig")
@@ -46,36 +72,33 @@ impl std::fmt::Debug for ServiceAuthConfig {
     }
 }
 
-impl Default for ServiceAuthConfig {
-    fn default() -> Self {
-        Self::None {}
-    }
-}
-
 impl ServiceAuthConfig {
     #[must_use]
     pub const fn mode(&self) -> &'static str {
         match self {
-            Self::None {} => "none",
+            Self::None => "none",
             Self::Jwt { .. } => "jwt",
         }
     }
+}
 
-    pub(crate) fn validate(
-        &self,
+impl ServiceAuthInput {
+    pub(crate) fn admit(
+        self,
         app_env: &str,
         grpc_enabled: bool,
-    ) -> Result<(), ValidationError> {
+        v: &mut Violations,
+    ) -> Result<ServiceAuthConfig, Rejected> {
         match self {
             Self::None {} if grpc_enabled && !is_local_development(app_env) => {
-                Err(ValidationError::new(
+                Err(v.reject(ValidationError::new(
                     "service_auth.mode",
                     format!(
                         "must be jwt when grpc.enabled is true outside app.env local or development, but app.env is \"{app_env}\""
                     ),
-                ))
+                )))
             }
-            Self::None {} => Ok(()),
+            Self::None {} => Ok(ServiceAuthConfig::None),
             Self::Jwt {
                 name,
                 jwt_type,
@@ -83,48 +106,53 @@ impl ServiceAuthConfig {
                 key_id,
                 private_key,
             } => {
-                for (key, value) in [
-                    ("service_auth.name", name),
-                    ("service_auth.jwt_type", jwt_type),
-                    ("service_auth.trust", trust),
-                ] {
-                    required_when(key, value, "service_auth.mode = jwt")?;
-                }
-                ServiceSigningKey::from_optional_parts(key_id.as_deref(), private_key.as_ref())?;
-                Ok(())
+                let condition = "service_auth.mode = jwt";
+                let named = v.take(required_when("service_auth.name", &name, condition));
+                let typed = v.take(required_when("service_auth.jwt_type", &jwt_type, condition));
+                let trusted = v.take(required_when("service_auth.trust", &trust, condition));
+                let signing_key = v.take(signing_key(key_id, private_key));
+                named?;
+                typed?;
+                trusted?;
+                Ok(ServiceAuthConfig::Jwt {
+                    name,
+                    jwt_type,
+                    trust,
+                    signing_key: signing_key?,
+                })
             }
         }
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct ServiceSigningKey<'a> {
-    pub key_id: &'a str,
-    pub private_key: &'a SecretString,
+/// `None` when both parts are absent and the service only verifies callers.
+fn signing_key(
+    key_id: Option<String>,
+    private_key: Option<SecretString>,
+) -> Result<Option<ServiceSigningKey>, ValidationError> {
+    match (key_id, private_key) {
+        (Some(key_id), Some(private_key)) => Ok(Some(ServiceSigningKey {
+            key_id,
+            private_key,
+        })),
+        (Some(_), None) => Err(missing(
+            "service_auth.private_key",
+            "service_auth.key_id is set",
+        )),
+        (None, Some(_)) => Err(missing(
+            "service_auth.key_id",
+            "service_auth.private_key is set",
+        )),
+        (None, None) => Ok(None),
+    }
 }
 
-impl<'a> ServiceSigningKey<'a> {
-    /// Returns `None` when both parts are absent and the service only verifies callers.
-    pub fn from_optional_parts(
-        key_id: Option<&'a str>,
-        private_key: Option<&'a SecretString>,
-    ) -> Result<Option<Self>, ValidationError> {
-        match (key_id, private_key) {
-            (Some(key_id), Some(private_key)) => Ok(Some(Self {
-                key_id,
-                private_key,
-            })),
-            (Some(_), None) => Err(missing(
-                "service_auth.private_key",
-                "service_auth.key_id is set",
-            )),
-            (None, Some(_)) => Err(missing(
-                "service_auth.key_id",
-                "service_auth.private_key is set",
-            )),
-            (None, None) => Ok(None),
-        }
-    }
+/// The identity this service signs its own tokens with; `private_key` is
+/// redacted in `Debug`.
+#[derive(Clone, Debug)]
+pub struct ServiceSigningKey {
+    pub key_id: String,
+    pub private_key: SecretString,
 }
 
 #[cfg(test)]

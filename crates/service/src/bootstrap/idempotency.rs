@@ -40,7 +40,7 @@ pub(super) async fn activate(
 fn unconfigured(config: &Config) -> BootstrapError {
     match config
         .http_idempotency
-        .required_retention(config.postgres.enabled)
+        .required_retention(config.postgres.is_some())
     {
         Err(invalid) => invalid.into(),
         Ok(_) => infra_idempotency_store::StartupError::Unavailable.into(),
@@ -57,7 +57,7 @@ async fn start(
 ) -> Result<(), BootstrapError> {
     let retention = config
         .http_idempotency
-        .required_retention(config.postgres.enabled)?;
+        .required_retention(config.postgres.is_some())?;
     store.check_startup().await?;
     background.spawn(
         "idempotency_cleanup",
@@ -77,7 +77,19 @@ mod tests {
 
     use tokio_util::sync::CancellationToken;
 
+    use service_config::{PostgresConfig, PostgresSessionBudgets};
+
     use super::*;
+
+    fn enabled_postgres() -> PostgresConfig {
+        PostgresConfig {
+            dsn: secrecy::SecretString::from("postgres://localhost/app".to_owned()),
+            password_file: None,
+            session_budgets: PostgresSessionBudgets::Startup,
+            max_connections: std::num::NonZeroU32::MIN,
+            migration_deadline: Duration::from_mins(5),
+        }
+    }
 
     #[tokio::test]
     async fn an_inactive_boundary_touches_no_store_and_spawns_no_task() {
@@ -100,8 +112,10 @@ mod tests {
 
     #[test]
     fn an_unconfigured_boundary_refuses_an_unset_retention_naming_the_key() {
-        let mut config = Config::default();
-        config.postgres.enabled = true;
+        let config = Config {
+            postgres: Some(enabled_postgres()),
+            ..Config::default()
+        };
         let refused = unconfigured(&config);
         std::assert_matches!(&refused, BootstrapError::Config(invalid) if invalid.key == "http_idempotency.retention",
             "{refused:?}"
@@ -110,8 +124,10 @@ mod tests {
 
     #[test]
     fn an_unconfigured_boundary_with_every_key_set_reports_the_store_unavailable() {
-        let mut config = Config::default();
-        config.postgres.enabled = true;
+        let mut config = Config {
+            postgres: Some(enabled_postgres()),
+            ..Config::default()
+        };
         config.http_idempotency.retention = Some(Duration::from_hours(1));
         let refused = unconfigured(&config);
         std::assert_matches!(

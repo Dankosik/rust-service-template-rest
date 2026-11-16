@@ -22,6 +22,109 @@ impl ValidationError {
     }
 }
 
+/// Every rule a loaded snapshot violated, in section order. Never empty.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("{}", join(.0))]
+pub struct ValidationErrors(Vec<ValidationError>);
+
+impl ValidationErrors {
+    pub fn iter(&self) -> std::slice::Iter<'_, ValidationError> {
+        self.0.iter()
+    }
+
+    /// Whether any violation names `key`.
+    #[must_use]
+    pub fn names(&self, key: &str) -> bool {
+        self.0.iter().any(|error| error.key == key)
+    }
+}
+
+impl<'a> IntoIterator for &'a ValidationErrors {
+    type Item = &'a ValidationError;
+    type IntoIter = std::slice::Iter<'a, ValidationError>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+fn join(errors: &[ValidationError]) -> String {
+    errors
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// A section admission refused its input; the reason is recorded in the
+/// [`Violations`] that issued this marker, which no other path constructs.
+#[derive(Debug)]
+#[allow(
+    dead_code,
+    reason = "removing every profile with conditional input leaves no admission that rejects"
+)]
+pub(crate) struct Rejected(());
+
+/// Collects every violated rule of one admission, so an operator sees all of
+/// them in one startup failure rather than one per restart.
+#[derive(Debug, Default)]
+pub(crate) struct Violations(Vec<ValidationError>);
+
+impl Violations {
+    pub(crate) fn check(&mut self, result: Result<(), ValidationError>) {
+        if let Err(error) = result {
+            self.0.push(error);
+        }
+    }
+
+    #[allow(
+        dead_code,
+        reason = "removing every profile with conditional input leaves the method without a caller"
+    )]
+    pub(crate) fn take<T>(&mut self, result: Result<T, ValidationError>) -> Result<T, Rejected> {
+        result.map_err(|error| self.reject(error))
+    }
+
+    #[allow(
+        dead_code,
+        reason = "removing every profile with conditional input leaves the method without a caller"
+    )]
+    pub(crate) fn reject(&mut self, error: ValidationError) -> Rejected {
+        self.0.push(error);
+        Rejected(())
+    }
+
+    /// The admitted value when no rule was violated. A [`Rejected`] value
+    /// always arrives with a recorded violation, so it cannot pass.
+    pub(crate) fn finish<T>(self, admitted: Result<T, Rejected>) -> Result<T, ValidationErrors> {
+        match admitted {
+            Ok(value) if self.0.is_empty() => Ok(value),
+            Ok(_) | Err(_) => Err(ValidationErrors(self.0)),
+        }
+    }
+}
+
+/// Run one admission step alone, as [`crate::ConfigInput::admit`] runs it.
+#[cfg(test)]
+pub(crate) fn admit_with<T>(
+    admit: impl FnOnce(&mut Violations) -> Result<T, Rejected>,
+) -> Result<T, ValidationErrors> {
+    let mut violations = Violations::default();
+    let admitted = admit(&mut violations);
+    violations.finish(admitted)
+}
+
+/// Run one section validator alone and return what it reported.
+#[cfg(test)]
+pub(crate) fn validate_with(
+    validate: impl FnOnce(&mut Violations),
+) -> Result<(), ValidationErrors> {
+    admit_with(|violations| {
+        validate(violations);
+        Ok(())
+    })
+}
+
 pub(crate) fn duration_range(
     key: &str,
     value: Duration,

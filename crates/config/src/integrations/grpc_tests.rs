@@ -68,7 +68,7 @@ fn grpc_integration_names_the_missing_mtls_field(
         ]),
     )
     .unwrap_err();
-    assert_matches!(&err, Error::Validate(error) if error.key == missing_key, "{err}");
+    assert_matches!(&err, Error::Validate(error) if error.names(missing_key), "{err}");
     if let Some(env_hint) = env_hint {
         assert!(err.to_string().contains(env_hint), "{err}");
     }

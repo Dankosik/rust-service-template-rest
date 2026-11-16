@@ -61,7 +61,7 @@ fn runtime_workers_load_from_the_environment_and_zero_names_its_key() {
         env(&[("APP__RUNTIME__WORKER_THREADS", "513")]),
     )
     .unwrap_err();
-    assert_matches!(&err, Error::Validate(error) if error.key == "runtime.worker_threads", "{err}");
+    assert_matches!(&err, Error::Validate(errors) if errors.names("runtime.worker_threads"), "{err}");
 }
 
 #[test]
@@ -126,8 +126,7 @@ fn empty_dsn_and_otlp_headers_are_vacant_none() {
     )
     .unwrap();
     // template:begin postgres:load-empty-dsn-assertion
-    assert!(cfg.postgres.dsn.is_none());
-    assert_eq!(cfg.postgres.password_file, None);
+    assert!(cfg.postgres.is_none());
     // template:end postgres:load-empty-dsn-assertion
     assert!(cfg.observability.otel.exporter.otlp_headers.is_none());
     assert_eq!(cfg.observability.otel.exporter.otlp_endpoint, None);

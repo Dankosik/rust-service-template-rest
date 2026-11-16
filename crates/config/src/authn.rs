@@ -17,7 +17,7 @@ use serde::{Deserialize, Deserializer};
 use crate::de::{blank_secret_as_none, deserialize_scalar};
 // template:end oidc-introspection:authn-occupied-secret-import
 use crate::de::value_free;
-use crate::validate::{ValidationError, required_when};
+use crate::validate::{ValidationError, Violations, required_when};
 
 pub(crate) const AUDIENCE_INPUT_FORM: &str =
     "`authn.audience` must be a string or a list of strings";
@@ -284,7 +284,7 @@ impl AuthnConfig {
     }
     // template:end oidc-introspection:authn-required-introspection-secret
 
-    pub(crate) fn validate(&self) -> Result<(), ValidationError> {
+    pub(crate) fn validate(&self, v: &mut Violations) {
         match self {
             // template:begin oidc-jwt:authn-config-jwt-validation
             Self::OidcJwt {
@@ -293,20 +293,23 @@ impl AuthnConfig {
                 jwks_uri,
                 ..
             } => {
-                required_when("authn.issuer", issuer, "authn.mode = oidc-jwt")?;
+                v.check(required_when(
+                    "authn.issuer",
+                    issuer,
+                    "authn.mode = oidc-jwt",
+                ));
                 if jwks_uri.as_deref().is_some_and(|uri| uri.trim().is_empty()) {
-                    return Err(ValidationError::new(
+                    v.check(Err(ValidationError::new(
                         "authn.jwks_uri",
                         "must not be blank when set",
-                    ));
+                    )));
                 }
                 if algorithms.is_empty() {
-                    return Err(ValidationError::new(
+                    v.check(Err(ValidationError::new(
                         "authn.algorithms",
                         "must contain at least one supported algorithm",
-                    ));
+                    )));
                 }
-                Ok(())
             }
             // template:end oidc-jwt:authn-config-jwt-validation
             // template:begin oidc-introspection:authn-config-introspection-validation
@@ -321,33 +324,40 @@ impl AuthnConfig {
             } => {
                 use shared_rules::oidc_introspection::{CACHE_CAPACITY, CACHE_TTL};
 
-                required_when("authn.issuer", issuer, "authn.mode = oidc-introspection")?;
-                required_when(
+                v.check(required_when(
+                    "authn.issuer",
+                    issuer,
+                    "authn.mode = oidc-introspection",
+                ));
+                v.check(required_when(
                     "authn.introspection_endpoint",
                     introspection_endpoint,
                     "authn.mode = oidc-introspection",
-                )?;
-                required_when(
+                ));
+                v.check(required_when(
                     "authn.introspection_client_id",
                     introspection_client_id,
                     "authn.mode = oidc-introspection",
-                )?;
-                Self::require_introspection_client_secret(introspection_client_secret.as_ref())?;
-                crate::validate::int_range(
+                ));
+                v.check(
+                    Self::require_introspection_client_secret(introspection_client_secret.as_ref())
+                        .map(|_| ()),
+                );
+                v.check(crate::validate::int_range(
                     "authn.cache_capacity",
                     *cache_capacity as u64,
                     *CACHE_CAPACITY.start() as u64,
                     *CACHE_CAPACITY.end() as u64,
-                )?;
-                crate::validate::duration_range(
+                ));
+                v.check(crate::validate::duration_range(
                     "authn.cache_ttl",
                     *cache_ttl,
                     *CACHE_TTL.start(),
                     *CACHE_TTL.end(),
-                )
+                ));
             }
             // template:end oidc-introspection:authn-config-introspection-validation
-            Self::None {} => Ok(()),
+            Self::None {} => {}
         }
     }
 }

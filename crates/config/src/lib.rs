@@ -1,4 +1,4 @@
-//! Typed, validated, immutable runtime configuration.
+//! Typed, admitted, immutable runtime configuration.
 //!
 //! Precedence, last wins: code defaults → `--config` file → `--config-overlay`
 //! files in order → `APP__SECTION__KEY` variables, read from the files of
@@ -7,14 +7,17 @@
 //! fails startup, since it could hide unknown keys before decoding. Secret-like
 //! keys may carry a value only through a variable.
 //!
-//! The full [`Config`] snapshot rejects unknown keys during decoding. The
-//! migration and jobs operator loaders apply the shared input rules, then
-//! ignore sections outside their own snapshots when decoding.
+//! Loading has two steps. Decoding fills the operator's input types and
+//! rejects unknown keys; it stops at its first failure, as `serde` does.
+//! Admission then checks every rule, reports all violations together, and
+//! builds [`Config`], whose types hold only admitted states: a disabled
+//! listener is `None`, an enabled one carries its address and security. A
+//! rule spanning two sections lives in the one that depends on the other.
+//! Rules that need process structure, such as the drain-plus-teardown tail
+//! against the grace period, or a binary's role, stay in the composition root.
 //!
-//! [`Config::validate`] delegates to each section's validator. A rule spanning
-//! two sections lives in the one that depends on the other. Rules that need
-//! process structure, such as the drain-plus-teardown tail against the grace
-//! period, stay in the composition root.
+//! The migration and jobs operator loaders apply the shared input rules, then
+//! ignore sections outside their own snapshots when decoding.
 //!
 //! The loader is [`config`](https://docs.rs/config) with `serde`; the
 //! variable-name and file pre-scans and the secrets directory in [`load()`]
@@ -75,12 +78,14 @@ mod validate;
 
 use serde::Deserialize;
 
+use validate::Violations;
+
 pub use app::{AppConfig, BuildInfo};
 pub use cli::LoadOptions;
 pub use health::HealthConfig;
 pub use http::HttpConfig;
 // template:begin grpc:config-export
-pub use grpc::{GrpcConfig, GrpcListenerSecurity, GrpcSecurity};
+pub use grpc::{GrpcConfig, GrpcListenerSecurity, GrpcSecurity, GrpcTlsMaterial};
 // template:end grpc:config-export
 // template:begin outbound-auth:config-export
 pub use integrations::{OAuthAlgorithm, OAuthConfig, Scopes};
@@ -133,15 +138,173 @@ pub use load::load_jobs_operator;
 // template:begin webhooks:config-webhooks-export
 pub use webhooks::{WebhookEndpointConfig, WebhooksConfig};
 // template:end webhooks:config-webhooks-export
-pub use validate::ValidationError;
+pub use validate::{ValidationError, ValidationErrors};
 
-#[derive(Clone, Debug, Default, Deserialize)]
+/// What the operator supplied, decoded but not yet admitted.
+#[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
+pub(crate) struct ConfigInput {
+    pub(crate) app: AppConfig,
+    http: HttpConfig,
+    // template:begin grpc:config-input-field
+    grpc: grpc::GrpcInput,
+    // template:end grpc:config-input-field
+    // template:begin inbound-webhooks:config-inbound-webhooks-input-field
+    inbound_webhooks: InboundWebhooksConfig,
+    // template:end inbound-webhooks:config-inbound-webhooks-input-field
+    health: HealthConfig,
+    log: LogConfig,
+    runtime: RuntimeConfig,
+    observability: ObservabilityConfig,
+    // template:begin messaging:config-input-field
+    messaging: messaging::MessagingInput,
+    // template:end messaging:config-input-field
+    // template:begin cache:config-input-field
+    cache: cache::CacheInput,
+    // template:end cache:config-input-field
+    // template:begin object-storage:config-input-field
+    object_storage: object_storage::ObjectStorageInput,
+    // template:end object-storage:config-input-field
+    // template:begin client-integrations:config-input-field
+    integrations: std::collections::BTreeMap<String, IntegrationConfig>,
+    // template:end client-integrations:config-input-field
+    // template:begin authn:config-input-field
+    authn: AuthnConfig,
+    // template:end authn:config-input-field
+    // template:begin service-auth:config-service-auth-input-field
+    service_auth: service_auth::ServiceAuthInput,
+    // template:end service-auth:config-service-auth-input-field
+    // template:begin postgres:config-input-field
+    postgres: postgres::PostgresInput,
+    // template:end postgres:config-input-field
+    // template:begin http-idempotency:config-http-idempotency-input-field
+    http_idempotency: HttpIdempotencyConfig,
+    // template:end http-idempotency:config-http-idempotency-input-field
+    // template:begin jobs:config-jobs-input-field
+    jobs: JobsConfig,
+    // template:end jobs:config-jobs-input-field
+    // template:begin webhooks:config-webhooks-input-field
+    webhooks: WebhooksConfig,
+    // template:end webhooks:config-webhooks-input-field
+}
+
+impl ConfigInput {
+    /// Check every rule and build the snapshot, or report every violation.
+    pub(crate) fn admit(self) -> Result<Config, ValidationErrors> {
+        let mut violations = Violations::default();
+        let v = &mut violations;
+        self.app.validate(v);
+        #[allow(
+            unused_variables,
+            reason = "only the gRPC and cache profiles compare against HTTP timings"
+        )]
+        let http_timings = self.http.validate(v);
+        // template:begin grpc:config-admit
+        let grpc = self.grpc.admit(http_timings.drain_budget, v);
+        // template:end grpc:config-admit
+        // template:begin inbound-webhooks:config-inbound-webhooks-validate
+        self.inbound_webhooks.validate(self.postgres.enabled, v);
+        // template:end inbound-webhooks:config-inbound-webhooks-validate
+        self.health.validate(v);
+        self.log.validate(v);
+        self.runtime.validate(v);
+        self.observability.validate(v);
+        // template:begin messaging:config-admit
+        let messaging = self.messaging.admit(&self.app.env, v);
+        // template:end messaging:config-admit
+        // template:begin cache:config-admit
+        let cache = self
+            .cache
+            .admit(&self.app.env, http_timings.request_timeout, v);
+        // template:end cache:config-admit
+        // template:begin object-storage:config-admit
+        let object_storage = self.object_storage.admit(&self.app.env, v);
+        // template:end object-storage:config-admit
+        // template:begin client-integrations:config-validate
+        integrations::validate_integrations(&self.integrations, v);
+        // template:end client-integrations:config-validate
+        // template:begin authn:config-validate
+        self.authn.validate(v);
+        // template:end authn:config-validate
+        // template:begin service-auth:config-service-auth-admit
+        // Only an enabled listener is admitted or rejected; a disabled one is `Ok(None)`.
+        let grpc_enabled = !matches!(grpc, Ok(None));
+        let service_auth = self.service_auth.admit(&self.app.env, grpc_enabled, v);
+        // template:end service-auth:config-service-auth-admit
+        // template:begin postgres:config-admit
+        let postgres = self.postgres.admit(v);
+        // template:end postgres:config-admit
+        // template:begin http-idempotency:config-http-idempotency-validate
+        self.http_idempotency.validate(v);
+        // template:end http-idempotency:config-http-idempotency-validate
+        // template:begin jobs:config-jobs-validate
+        self.jobs.validate(v);
+        // template:end jobs:config-jobs-validate
+        // template:begin webhooks:config-webhooks-validate
+        self.webhooks.validate(v);
+        // template:end webhooks:config-webhooks-validate
+        #[allow(
+            clippy::redundant_closure_call,
+            reason = "the closure scopes `?` on admitted sections; without those profiles it has none"
+        )]
+        let admitted: Result<Config, validate::Rejected> = (|| {
+            Ok(Config {
+                app: self.app,
+                http: self.http,
+                // template:begin grpc:config-admitted-field
+                grpc: grpc?,
+                // template:end grpc:config-admitted-field
+                // template:begin inbound-webhooks:config-inbound-webhooks-admitted-field
+                inbound_webhooks: self.inbound_webhooks,
+                // template:end inbound-webhooks:config-inbound-webhooks-admitted-field
+                health: self.health,
+                log: self.log,
+                runtime: self.runtime,
+                observability: self.observability,
+                // template:begin messaging:config-admitted-field
+                messaging: messaging?,
+                // template:end messaging:config-admitted-field
+                // template:begin cache:config-admitted-field
+                cache: cache?,
+                // template:end cache:config-admitted-field
+                // template:begin object-storage:config-admitted-field
+                object_storage: object_storage?,
+                // template:end object-storage:config-admitted-field
+                // template:begin client-integrations:config-admitted-field
+                integrations: self.integrations,
+                // template:end client-integrations:config-admitted-field
+                // template:begin authn:config-admitted-field
+                authn: self.authn,
+                // template:end authn:config-admitted-field
+                // template:begin service-auth:config-service-auth-admitted-field
+                service_auth: service_auth?,
+                // template:end service-auth:config-service-auth-admitted-field
+                // template:begin postgres:config-admitted-field
+                postgres: postgres?,
+                // template:end postgres:config-admitted-field
+                // template:begin http-idempotency:config-http-idempotency-admitted-field
+                http_idempotency: self.http_idempotency,
+                // template:end http-idempotency:config-http-idempotency-admitted-field
+                // template:begin jobs:config-jobs-admitted-field
+                jobs: self.jobs,
+                // template:end jobs:config-jobs-admitted-field
+                // template:begin webhooks:config-webhooks-admitted-field
+                webhooks: self.webhooks,
+                // template:end webhooks:config-webhooks-admitted-field
+            })
+        })();
+        violations.finish(admitted)
+    }
+}
+
+/// The admitted snapshot [`load()`] returns.
+#[derive(Clone, Debug, Default)]
 pub struct Config {
     pub app: AppConfig,
     pub http: HttpConfig,
     // template:begin grpc:config-field
-    pub grpc: GrpcConfig,
+    /// The native gRPC listener; `None` when `grpc.enabled` is false.
+    pub grpc: Option<GrpcConfig>,
     // template:end grpc:config-field
     // template:begin inbound-webhooks:config-inbound-webhooks-field
     pub inbound_webhooks: InboundWebhooksConfig,
@@ -157,7 +320,8 @@ pub struct Config {
     pub cache: CacheConfig,
     // template:end cache:config-field
     // template:begin object-storage:config-field
-    pub object_storage: ObjectStorageConfig,
+    /// Object storage; `None` when `object_storage.provider` is `none`.
+    pub object_storage: Option<ObjectStorageConfig>,
     // template:end object-storage:config-field
     // template:begin client-integrations:config-field
     pub integrations: std::collections::BTreeMap<String, IntegrationConfig>,
@@ -169,7 +333,8 @@ pub struct Config {
     pub service_auth: ServiceAuthConfig,
     // template:end service-auth:config-service-auth-field
     // template:begin postgres:config-field
-    pub postgres: PostgresConfig,
+    /// PostgreSQL; `None` when `postgres.enabled` is false.
+    pub postgres: Option<PostgresConfig>,
     // template:end postgres:config-field
     // template:begin http-idempotency:config-http-idempotency-field
     pub http_idempotency: HttpIdempotencyConfig,
@@ -180,55 +345,4 @@ pub struct Config {
     // template:begin webhooks:config-webhooks-field
     pub webhooks: WebhooksConfig,
     // template:end webhooks:config-webhooks-field
-}
-
-impl Config {
-    /// Process-structure ceilings are not encoded here.
-    pub fn validate(&self) -> Result<(), ValidationError> {
-        self.app.validate()?;
-        self.http.validate()?;
-        // template:begin grpc:config-validate
-        self.grpc.validate(self.http.effective_drain_budget())?;
-        // template:end grpc:config-validate
-        // template:begin inbound-webhooks:config-inbound-webhooks-validate
-        self.inbound_webhooks.validate(self.postgres.enabled)?;
-        // template:end inbound-webhooks:config-inbound-webhooks-validate
-        self.health.validate()?;
-        self.log.validate()?;
-        self.runtime.validate()?;
-        self.observability.validate()?;
-        // template:begin messaging:config-validate
-        let _ = self.messaging.validate(&self.app.env)?;
-        // template:end messaging:config-validate
-        // template:begin cache:config-validate
-        self.cache
-            .validate(&self.app.env, self.http.request_timeout)?;
-        // template:end cache:config-validate
-        // template:begin object-storage:config-validate
-        self.object_storage.validate(&self.app.env)?;
-        // template:end object-storage:config-validate
-        // template:begin client-integrations:config-validate
-        integrations::validate_integrations(&self.integrations)?;
-        // template:end client-integrations:config-validate
-        // template:begin authn:config-validate
-        self.authn.validate()?;
-        // template:end authn:config-validate
-        // template:begin service-auth:config-service-auth-validate
-        self.service_auth
-            .validate(&self.app.env, self.grpc.enabled)?;
-        // template:end service-auth:config-service-auth-validate
-        // template:begin postgres:config-validate
-        self.postgres.validate()?;
-        // template:end postgres:config-validate
-        // template:begin http-idempotency:config-http-idempotency-validate
-        self.http_idempotency.validate()?;
-        // template:end http-idempotency:config-http-idempotency-validate
-        // template:begin jobs:config-jobs-validate
-        self.jobs.validate()?;
-        // template:end jobs:config-jobs-validate
-        // template:begin webhooks:config-webhooks-validate
-        self.webhooks.validate()?;
-        // template:end webhooks:config-webhooks-validate
-        Ok(())
-    }
 }

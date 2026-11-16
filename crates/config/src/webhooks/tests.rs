@@ -7,13 +7,14 @@ use super::{WebhookEndpointConfig, WebhooksConfig};
 use crate::LoadOptions;
 use crate::load::{Error, load_from};
 use crate::test_support::{BUILD, assert_secret_in_file, env, write};
+use crate::validate::validate_with;
 
 #[test]
 fn defaults_are_inert() {
     let config = WebhooksConfig::default();
     assert!(config.endpoints.is_empty());
     assert_eq!(config.max_concurrent_deliveries, None);
-    config.validate().unwrap();
+    validate_with(|v| config.validate(v)).unwrap();
 }
 
 #[test]
@@ -42,12 +43,12 @@ fn rejects_an_empty_endpoint_id() {
         },
     );
 
-    let err = config.validate().unwrap_err();
-    assert_eq!(err.key, "webhooks.endpoints");
+    let errors = validate_with(|v| config.validate(v)).unwrap_err();
+    assert!(errors.names("webhooks.endpoints"));
 
     let endpoint = config.endpoints.remove("").unwrap();
     config.endpoints.insert("partner/a?#".to_owned(), endpoint);
-    config.validate().unwrap();
+    validate_with(|v| config.validate(v)).unwrap();
 }
 
 #[test]
@@ -62,8 +63,8 @@ fn rejects_empty_signing_secrets() {
         },
     );
 
-    let err = config.validate().unwrap_err();
-    assert_eq!(err.key, "webhooks.endpoints.partner.secret");
+    let errors = validate_with(|v| config.validate(v)).unwrap_err();
+    assert!(errors.names("webhooks.endpoints.partner.secret"));
 }
 
 #[test]
@@ -200,7 +201,7 @@ fn webhooks_blank_environment_secret_is_refused() {
         ]),
     )
     .unwrap_err();
-    assert_matches!(&err, Error::Validate(validation) if validation.key == "webhooks.endpoints.partner.secret", "{err}");
+    assert_matches!(&err, Error::Validate(errors) if errors.names("webhooks.endpoints.partner.secret"), "{err}");
     assert_eq!(
         err.to_string(),
         "configuration is invalid: webhooks.endpoints.partner.secret: cannot be empty"

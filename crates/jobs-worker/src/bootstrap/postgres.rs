@@ -28,9 +28,9 @@ pub(super) async fn admit_pool(
     if !needs_pool {
         return Ok(());
     }
-    if !config.postgres.enabled {
+    let Some(postgres) = &config.postgres else {
         return Err(WorkerError::PostgresDisabled);
-    }
+    };
     #[allow(
         unused_variables,
         reason = "retained outbox supplies the combined admission"
@@ -38,14 +38,14 @@ pub(super) async fn admit_pool(
     let admit_inputs = || {
         config
             .jobs
-            .validate_pool_capacity(&config.postgres)
+            .validate_pool_capacity(postgres)
             .map_err(WorkerError::from)
     };
     // template:begin outbox:worker-bootstrap-outbox-pool-inputs
-    let admit_inputs = || super::outbox::admit_pool_inputs(config, capabilities);
+    let admit_inputs = || super::outbox::admit_pool_inputs(config, postgres, capabilities);
     // template:end outbox:worker-bootstrap-outbox-pool-inputs
     admit_inputs()?;
-    let pool = open_pool(config, background, resources).await?;
+    let pool = open_pool(config, postgres, background, resources).await?;
     migrate::verify_history(&pool).await?;
     resources.pool = Some(PoolResource::Admitted(pool));
     Ok(())
@@ -53,19 +53,16 @@ pub(super) async fn admit_pool(
 
 async fn open_pool(
     config: &Config,
+    postgres: &PostgresConfig,
     background: &Background,
     resources: &mut Resources,
 ) -> Result<PgPool, WorkerError> {
     let dsn = Dsn::admit_with(
-        config.postgres.required_dsn()?.expose_secret(),
-        config.postgres.password_file.as_deref(),
+        postgres.dsn.expose_secret(),
+        postgres.password_file.as_deref(),
     )?;
     let application_name = application_name(&config.observability.otel.service_name);
-    let options = pool_options(
-        &config.postgres,
-        config.postgres.max_connections,
-        &application_name,
-    );
+    let options = pool_options(postgres, postgres.max_connections, &application_name);
     let pool = infra_postgres::prepare_pool(&dsn, &options);
     resources.pool = Some(PoolResource::Starting(pool.clone()));
     infra_postgres::admit_pool(&pool, &options).await?;
@@ -74,7 +71,7 @@ async fn open_pool(
         postgres.port = dsn.port(),
         postgres.database = dsn.database(),
         postgres.sslmode = dsn.ssl_mode_name(),
-        postgres.max_connections = config.postgres.max_connections.get(),
+        postgres.max_connections = postgres.max_connections.get(),
         "postgres_pool_opened"
     );
     background.spawn("postgres_pool_metrics", |cancel| {

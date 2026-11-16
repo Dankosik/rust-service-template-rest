@@ -12,6 +12,7 @@ use url::Url;
 // template:end outbound-auth:config-integration-oauth-url-import
 
 use crate::ValidationError;
+use crate::validate::Violations;
 // template:begin grpc:config-integration-grpc-import
 use crate::GrpcSecurity;
 use crate::validate::missing;
@@ -188,31 +189,34 @@ impl<'de> Deserialize<'de> for Scopes {
 
 pub(crate) fn validate_integrations(
     integrations: &BTreeMap<String, IntegrationConfig>,
-) -> Result<(), ValidationError> {
+    v: &mut Violations,
+) {
     for (name, integration) in integrations {
         // template:begin outbound-auth:config-integration-oauth-validate
         if let Some(oauth) = &integration.oauth {
-            oauth.validate(&format!("integrations.{name}.oauth"))?;
+            oauth.validate(&format!("integrations.{name}.oauth"), v);
         }
         // template:end outbound-auth:config-integration-oauth-validate
         // template:begin grpc:config-integration-grpc-validate
         if let Some(grpc) = &integration.grpc {
-            grpc.validate(&format!("integrations.{name}.grpc"))?;
+            grpc.validate(&format!("integrations.{name}.grpc"), v);
         }
         // template:end grpc:config-integration-grpc-validate
     }
-    Ok(())
 }
 
 // template:begin grpc:config-integration-grpc-validation
 impl GrpcClientConfig {
-    fn validate(&self, prefix: &str) -> Result<(), ValidationError> {
-        crate::validate::non_blank(&format!("{prefix}.destination"), &self.destination)?;
-        if shared_rules::uri::has_whitespace_or_control(&self.destination) {
-            return Err(ValidationError::new(
-                format!("{prefix}.destination"),
+    fn validate(&self, prefix: &str, v: &mut Violations) {
+        let destination_key = format!("{prefix}.destination");
+        let blank = crate::validate::non_blank(&destination_key, &self.destination);
+        let destination_present = blank.is_ok();
+        v.check(blank);
+        if destination_present && shared_rules::uri::has_whitespace_or_control(&self.destination) {
+            v.check(Err(ValidationError::new(
+                destination_key,
                 "must not contain whitespace or controls",
-            ));
+            )));
         }
         match self.security {
             GrpcSecurity::Plaintext => {
@@ -222,60 +226,65 @@ impl GrpcClientConfig {
                     ("private_key", self.private_key.is_some()),
                 ] {
                     if present {
-                        return Err(ValidationError::new(
+                        v.check(Err(ValidationError::new(
                             format!("{prefix}.{name}"),
                             "is only valid when security is tls",
-                        ));
+                        )));
                     }
                 }
             }
             GrpcSecurity::Tls => match (&self.certificate, &self.private_key) {
-                (Some(_), None) => {
-                    return Err(missing(
-                        &format!("{prefix}.private_key"),
-                        &format!("{prefix}.certificate is set"),
-                    ));
-                }
-                (None, Some(_)) => {
-                    return Err(missing(
-                        &format!("{prefix}.certificate"),
-                        &format!("{prefix}.private_key is set"),
-                    ));
-                }
+                (Some(_), None) => v.check(Err(missing(
+                    &format!("{prefix}.private_key"),
+                    &format!("{prefix}.certificate is set"),
+                ))),
+                (None, Some(_)) => v.check(Err(missing(
+                    &format!("{prefix}.certificate"),
+                    &format!("{prefix}.private_key is set"),
+                ))),
                 (Some(_), Some(_)) | (None, None) => {}
             },
         }
-        Ok(())
     }
 }
 // template:end grpc:config-integration-grpc-validation
 
 // template:begin outbound-auth:config-integration-oauth-validation
 impl OAuthConfig {
-    fn validate(&self, prefix: &str) -> Result<(), ValidationError> {
-        let token_url_key = format!("{prefix}.token_url");
-        validate_token_url(&token_url_key, &self.token_url)?;
-
-        crate::validate::non_blank(&format!("{prefix}.client_id"), &self.client_id)?;
-        crate::validate::required(
-            &format!("{prefix}.private_key"),
-            self.private_key.as_ref(),
-            &format!("{prefix} is set"),
-        )?;
-        crate::validate::non_blank(&format!("{prefix}.key_id"), &self.key_id)?;
-        crate::validate::non_blank(
+    fn validate(&self, prefix: &str, v: &mut Violations) {
+        v.check(validate_token_url(
+            &format!("{prefix}.token_url"),
+            &self.token_url,
+        ));
+        v.check(crate::validate::non_blank(
+            &format!("{prefix}.client_id"),
+            &self.client_id,
+        ));
+        v.check(
+            crate::validate::required(
+                &format!("{prefix}.private_key"),
+                self.private_key.as_ref(),
+                &format!("{prefix} is set"),
+            )
+            .map(|_| ()),
+        );
+        v.check(crate::validate::non_blank(
+            &format!("{prefix}.key_id"),
+            &self.key_id,
+        ));
+        v.check(crate::validate::non_blank(
             &format!("{prefix}.assertion_audience"),
             &self.assertion_audience,
-        )?;
+        ));
         if self
             .audience
             .as_deref()
             .is_some_and(|audience| audience.trim().is_empty())
         {
-            return Err(ValidationError::new(
+            v.check(Err(ValidationError::new(
                 format!("{prefix}.audience"),
                 "cannot be empty when configured",
-            ));
+            )));
         }
         if self
             .scopes
@@ -283,19 +292,18 @@ impl OAuthConfig {
             .iter()
             .any(|scope| !shared_rules::rfc6749::is_scope_token(scope))
         {
-            return Err(ValidationError::new(
+            v.check(Err(ValidationError::new(
                 format!("{prefix}.scopes"),
                 "must contain RFC 6749 scope tokens",
-            ));
+            )));
         }
         let capacity = Self::EXCHANGE_CACHE_CAPACITY_RANGE;
-        crate::validate::int_range(
+        v.check(crate::validate::int_range(
             &format!("{prefix}.exchange_cache_capacity"),
             u64::from(self.exchange_cache_capacity),
             u64::from(*capacity.start()),
             u64::from(*capacity.end()),
-        )?;
-        Ok(())
+        ));
     }
 }
 

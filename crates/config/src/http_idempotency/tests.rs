@@ -2,6 +2,7 @@ use super::*;
 use crate::LoadOptions;
 use crate::load::load_from;
 use crate::test_support::{BUILD, env};
+use crate::validate::validate_with;
 
 fn parse(toml: &str) -> Result<HttpIdempotencyConfig, toml::de::Error> {
     toml::from_str(toml)
@@ -11,7 +12,7 @@ fn parse(toml: &str) -> Result<HttpIdempotencyConfig, toml::de::Error> {
 fn defaults_are_vacant() {
     let config = HttpIdempotencyConfig::default();
     assert_eq!(config.retention, None);
-    config.validate().unwrap();
+    validate_with(|v| config.validate(v)).unwrap();
 }
 
 #[rstest::rstest]
@@ -37,7 +38,11 @@ fn a_malformed_value_fails_to_deserialize() {
 #[case::just_above_maximum("30days 1s", false)]
 fn retention_bounds_are_inclusive(#[case] text: &str, #[case] valid: bool) {
     let config = parse(&format!("retention = {text:?}")).unwrap();
-    assert_eq!(config.validate().is_ok(), valid, "{text}");
+    assert_eq!(
+        validate_with(|v| config.validate(v)).is_ok(),
+        valid,
+        "{text}"
+    );
 }
 
 #[rstest::rstest]
@@ -47,7 +52,7 @@ fn retention_bounds_are_inclusive(#[case] text: &str, #[case] valid: bool) {
 fn vacancy_forms_are_none(#[case] toml: &str) {
     let config = parse(toml).unwrap();
     assert_eq!(config.retention, None);
-    config.validate().unwrap();
+    validate_with(|v| config.validate(v)).unwrap();
 }
 
 #[test]
