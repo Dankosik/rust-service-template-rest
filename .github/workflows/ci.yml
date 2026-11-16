@@ -247,8 +247,10 @@ jobs:
           import json, sys
           data = json.loads(sys.argv[1])
           pkgs = " ".join(data["packages"])
-          print(f"mode={data[\"mode\"]}")
-          print(f"fallback={\"true\" if data[\"fallback\"] else \"false\"}")
+          mode = data["mode"]
+          fallback = "true" if data["fallback"] else "false"
+          print(f"mode={mode}")
+          print(f"fallback={fallback}")
           print(f"lint_packages={pkgs}")
           print(f"test_packages={pkgs}")
           ' "${json}" | tee -a "${GITHUB_OUTPUT}" >>"${GITHUB_STEP_SUMMARY}"
