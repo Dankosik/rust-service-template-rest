@@ -63,8 +63,8 @@ Builds hold no credentials (`make dockerfile-check` refuses secret-named `ARG` /
 `none` when CI runs tests; CI-less repositories (`REPOSITORY_CI = none`) must
 set `IMAGE_TESTS=unit` in service variables and `.railway/railway.ts`. `ARG PGO`
 defaults to `none`; `PGO=train`, set the same way, builds the service a second
-time against the requests in `build/docker/pgo-train.sh` for 20–27% less CPU per
-small request and about 17 minutes more per build ([measurements](ci-cd-production-ready.md#profile-guided-build-and-compiler-flags)). Keep
+time against the requests in `build/docker/pgo-train.sh`, trading build time for
+CPU per request ([measurements](ci-cd-production-ready.md#profile-guided-build-and-compiler-flags)). Keep
 Railway "Wait for CI" off unless promotion must wait for post-merge workflows.
 
 ## Rollout
