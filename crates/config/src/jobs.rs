@@ -112,9 +112,8 @@ impl JobsConfig {
     pub(crate) fn validate(&self, violations: &mut Violations) {
         violations.check(int_range(
             "jobs.max_workers",
-            u64::from(self.max_workers.get()),
-            1,
-            500,
+            self.max_workers.get(),
+            1..=500,
         ));
     }
 }

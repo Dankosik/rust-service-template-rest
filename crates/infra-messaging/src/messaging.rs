@@ -23,11 +23,12 @@ pub(crate) const PUBLICATION_WINDOW_BYTES: usize = 64 * 1024 * 1024;
 
 /// Configuration already validated by the composition root, which owns the
 /// transport, credential and resident-memory policy.
-#[derive(Clone)]
+#[derive(Clone, derive_more::Debug)]
 pub struct MessagingOptions {
     /// Shown in the broker's connection reports.
     pub connection_name: String,
     /// A URL can carry credentials, so `Debug` shows only the count.
+    #[debug("{} servers", servers.len())]
     pub servers: Vec<String>,
     /// `None` connects without credentials.
     pub credentials: Option<Credentials>,
@@ -48,24 +49,6 @@ pub enum Credentials {
     /// A credentials file read again for every connection, for a platform
     /// that rotates it.
     File(PathBuf),
-}
-
-impl std::fmt::Debug for MessagingOptions {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("MessagingOptions")
-            .field("connection_name", &self.connection_name)
-            // A server URL can carry a user and password.
-            .field("server_count", &self.servers.len())
-            .field("credentials", &self.credentials)
-            .field("root_ca_path", &self.root_ca_path)
-            .field("allow_plaintext", &self.allow_plaintext)
-            .field("tls_first", &self.tls_first)
-            .field("source_stream", &self.source_stream)
-            .field("max_payload_bytes", &self.max_payload_bytes)
-            .field("consumer", &self.consumer)
-            .finish()
-    }
 }
 
 #[derive(Clone, Debug)]

@@ -18,6 +18,8 @@ mod observe;
 mod probes;
 mod request_id;
 mod server;
+#[cfg(test)]
+mod test_support;
 
 pub use context::{RequestContext, ResponseContext};
 pub use contract::{FinalizeError, finalize_public};

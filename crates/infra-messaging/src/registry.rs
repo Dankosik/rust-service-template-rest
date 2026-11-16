@@ -249,11 +249,7 @@ impl Registry {
     }
 
     pub fn require_handlers(&self) -> Result<(), RegistryError> {
-        if self.has_handlers() {
-            Ok(())
-        } else {
-            Err(RegistryError::Empty)
-        }
+        self.has_handlers().ok_or(RegistryError::Empty)
     }
 
     pub(crate) fn subject_for<T: EventPayload>(&self) -> Option<&async_nats::Subject> {

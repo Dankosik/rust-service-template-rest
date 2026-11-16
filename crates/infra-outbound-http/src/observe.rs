@@ -93,7 +93,7 @@ impl Attempt {
         let template = template.map(|UrlTemplate(template)| template);
         let span = tracing::info_span!(
             "outbound_http",
-            otel.name = %SpanName { method, template },
+            otel.name = %span_name(method, template),
             otel.kind = "client",
             http.request.method = method,
             url.template = template,
@@ -223,23 +223,18 @@ fn describe_histogram() {
 }
 
 /// `HTTP` stands for a method that is not a known one.
-struct SpanName {
-    method: &'static str,
-    template: Option<&'static str>,
-}
-
-impl fmt::Display for SpanName {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(if self.method == OTHER_METHOD {
+fn span_name(method: &'static str, template: Option<&'static str>) -> impl fmt::Display {
+    fmt::from_fn(move |formatter| {
+        formatter.write_str(if method == OTHER_METHOD {
             "HTTP"
         } else {
-            self.method
+            method
         })?;
-        match self.template {
+        match template {
             Some(template) => write!(formatter, " {template}"),
             None => Ok(()),
         }
-    }
+    })
 }
 
 fn is_error_status(status: StatusCode) -> bool {

@@ -26,6 +26,8 @@ mod provider;
 mod refresh;
 // template:end oidc-jwt:authn-refresh-module
 #[cfg(test)]
+mod test_helpers;
+#[cfg(test)]
 mod test_metrics;
 
 #[cfg(test)]

@@ -8,14 +8,7 @@
     reason = "no panic! call in every projection of this integration fixture"
 )]
 
-use std::{
-    fmt::Write as _,
-    net::SocketAddr,
-    num::NonZeroU32,
-    pin::Pin,
-    sync::{Arc, Mutex},
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use std::{fmt::Write as _, net::SocketAddr, num::NonZeroU32, pin::Pin, sync::Arc, time::Duration};
 
 use grpc_contracts::example::v1::{
     BidiStreamRequest, BidiStreamResponse, ClientStreamRequest, ClientStreamResponse,
@@ -28,9 +21,10 @@ use infra_grpc::{Caller, ClientSecurity, Error, Limits, Services, server_options
 use infra_http::Server;
 use infra_serviceauth::{
     JwtType, KeyId, ServiceName, SigningOptions, TokenSource, TrustRegistry, Verifier,
-    test_support::{TestKey, registry},
+    test_support::{TestKey, now_secs, registry},
 };
 use opentelemetry::trace::TracerProvider as _;
+use parking_lot::Mutex;
 use prost::Message as _;
 use tonic::{Code, Request, Response, Status};
 use tracing_subscriber::layer::SubscriberExt as _;
@@ -52,11 +46,11 @@ impl Echo {
             .get::<Caller>()
             .map(|caller| caller.name().as_str().to_owned());
         let authorization = request.metadata().get("authorization").is_some();
-        self.seen.lock().unwrap().push((caller, authorization));
+        self.seen.lock().push((caller, authorization));
     }
 
     fn seen(&self) -> Vec<Seen> {
-        self.seen.lock().unwrap().clone()
+        self.seen.lock().clone()
     }
 }
 
@@ -129,11 +123,7 @@ impl Keys {
     }
 
     fn token(key: &TestKey, issuer: &str, audience: &str, age: u64) -> String {
-        let issued_at = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            - age;
+        let issued_at = now_secs() - age;
         key.sign(
             &serde_json::json!({"alg": "ES256", "typ": TYPE, "kid": key.kid()}),
             &serde_json::json!({"iss": issuer, "sub": issuer, "aud": audience, "iat": issued_at, "exp": issued_at + 60}),
@@ -579,11 +569,11 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Capture {
         _: &tracing::span::Id,
         _: tracing_subscriber::layer::Context<'_, S>,
     ) {
-        attributes.record(&mut Fields(&mut self.0.lock().unwrap()));
+        attributes.record(&mut Fields(&mut self.0.lock()));
     }
 
     fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
-        event.record(&mut Fields(&mut self.0.lock().unwrap()));
+        event.record(&mut Fields(&mut self.0.lock()));
     }
 }
 
@@ -617,7 +607,7 @@ async fn token_text_never_reaches_logs_or_spans_and_the_span_names_the_caller() 
         .unwrap_err();
     drop(server.drain(Duration::from_secs(3)).await);
 
-    let logged = capture.0.lock().unwrap().clone();
+    let logged = capture.0.lock().clone();
     assert!(
         logged.contains("service_auth_caller_not_admitted"),
         "{logged}"

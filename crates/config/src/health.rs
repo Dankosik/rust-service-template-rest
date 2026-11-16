@@ -48,20 +48,17 @@ impl HealthConfig {
         v.check(duration_range(
             "health.refresh_interval",
             self.refresh_interval,
-            Duration::from_millis(100),
-            Duration::from_mins(5),
+            Duration::from_millis(100)..=Duration::from_mins(5),
         ));
         v.check(duration_range(
             "health.probe_budget",
             self.probe_budget,
-            Duration::from_millis(100),
-            Duration::from_secs(30),
+            Duration::from_millis(100)..=Duration::from_secs(30),
         ));
         v.check(int_range(
             "health.failure_threshold",
-            u64::from(self.failure_threshold.get()),
-            1,
-            100,
+            self.failure_threshold.get(),
+            1..=100,
         ));
     }
 }

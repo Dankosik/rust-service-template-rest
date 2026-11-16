@@ -170,20 +170,17 @@ impl ObjectStorageInput {
         v.check(int_range(
             "object_storage.max_object_bytes",
             self.max_object_bytes.as_u64(),
-            1,
-            MAX_OBJECT_BYTES_CEILING,
+            1..=MAX_OBJECT_BYTES_CEILING,
         ));
         v.check(int_range(
             "object_storage.max_concurrency",
             self.max_concurrency,
-            1,
-            512,
+            1..=512,
         ));
         v.check(duration_range(
             "object_storage.operation_timeout",
             self.operation_timeout,
-            Duration::from_secs(1),
-            Duration::from_mins(15),
+            Duration::from_secs(1)..=Duration::from_mins(15),
         ));
         v.check(local_development_only(
             "object_storage.provider",

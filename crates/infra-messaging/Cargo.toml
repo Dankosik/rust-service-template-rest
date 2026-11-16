@@ -88,5 +88,7 @@ proptest = { workspace = true, features = ["std"] }
 rcgen = { workspace = true, features = ["crypto", "pem", "aws_lc_rs"] }
 tempfile = { workspace = true, features = ["getrandom"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util", "net", "io-util"] }
+time = { workspace = true, features = ["macros", "serde-well-known"] }
+const-hex = { workspace = true, features = ["alloc"] }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }
 tracing-subscriber = { workspace = true, features = ["std", "registry"] }

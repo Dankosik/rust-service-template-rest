@@ -36,20 +36,7 @@ fn credentials_seed(credentials: &str) -> &str {
 }
 
 fn credentials_public_user(credentials: &str) -> String {
-    use base64::Engine as _;
-
-    let payload = credentials_jwt(credentials)
-        .split('.')
-        .nth(1)
-        .expect("fixture JWT has a payload");
-    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload)
-        .expect("fixture JWT payload is base64url");
-    serde_json::from_slice::<serde_json::Value>(&payload)
-        .expect("fixture JWT payload is JSON")["sub"]
-        .as_str()
-        .expect("fixture JWT names a user subject")
-        .to_owned()
+    relay::jwt_subject(credentials_jwt(credentials)).expect("fixture JWT names a user subject")
 }
 
 fn credentials_document(jwt: &str, seed: &str) -> String {
@@ -177,16 +164,12 @@ async fn credentials_file_rotation_is_authenticated_by_the_broker() {
     println!("auth_rotation phase=read_only_contenders_joined");
 
     replace_credentials(&active_credentials, b_contents.as_bytes());
-    timeout(Duration::from_secs(10), async {
-        loop {
-            if messaging.probe().check().await.is_ok() {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("the same Messaging client authenticates tuple B and reads fresh metadata");
+    eventually(
+        Duration::from_secs(10),
+        "the same Messaging client authenticates tuple B and reads fresh metadata",
+        async || messaging.probe().check().await.ok(),
+    )
+    .await;
     println!("auth_rotation phase=tuple_b_probe_ready");
     let work_b = registry(&fixture)
         .prepare(&event("authenticated-work-b"), 1024)

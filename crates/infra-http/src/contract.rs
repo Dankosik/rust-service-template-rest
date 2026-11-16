@@ -325,6 +325,7 @@ mod tests {
     use utoipa::OpenApi;
 
     use super::*;
+    use crate::test_support::body_json;
     use crate::{HardenOptions, harden};
 
     #[derive(OpenApi)]
@@ -655,8 +656,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(response.headers()[CONTENT_TYPE], "application/problem+json");
         assert_eq!(response.headers()["x-request-id"], "missing-policy");
-        let bytes = response.into_body().collect().await.unwrap().to_bytes();
-        let problem: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let problem = body_json(response).await;
         assert_eq!(problem["code"], "internal_error");
         assert_eq!(problem["detail"], SANITIZED_DETAIL);
     }

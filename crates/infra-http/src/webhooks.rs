@@ -403,11 +403,11 @@ mod tests {
     use axum::body::Body;
     use axum::http::header::CONTENT_TYPE;
     use axum::http::{Request, StatusCode};
-    use http_body_util::BodyExt;
-    use serde_json::Value;
+    use metrics::Label;
     use tower::ServiceExt;
 
     use super::*;
+    use crate::test_support::body_json;
 
     #[tokio::test]
     async fn outcomes_label_a_configured_endpoint_and_never_an_unknown_one() {
@@ -441,7 +441,7 @@ mod tests {
             let _ = cloned.active.unknown_endpoint();
         });
         // The snapshot lists its keys in no fixed order.
-        let mut samples: Vec<(Vec<(String, String)>, u64)> = snapshotter
+        let mut samples: Vec<(Vec<Label>, u64)> = snapshotter
             .snapshot()
             .into_vec()
             .into_iter()
@@ -450,41 +450,37 @@ mod tests {
                 let DebugValue::Counter(count) = value else {
                     panic!("expected counter, got {value:?}");
                 };
-                (
-                    key.key()
-                        .labels()
-                        .map(|label| (label.key().to_owned(), label.value().to_owned()))
-                        .collect(),
-                    count,
-                )
+                (key.key().labels().cloned().collect(), count)
             })
             .collect();
         samples.sort();
-        let pair = |key: &str, value: &str| (key.to_owned(), value.to_owned());
         assert_eq!(
             samples,
             [
                 (
-                    vec![pair("endpoint", "partner"), pair("outcome", "accepted")],
+                    vec![
+                        Label::new("endpoint", "partner"),
+                        Label::new("outcome", "accepted")
+                    ],
                     2
                 ),
                 (
                     vec![
-                        pair("endpoint", "partner"),
-                        pair("outcome", "rejected"),
-                        pair("reason", "invalid_signature"),
+                        Label::new("endpoint", "partner"),
+                        Label::new("outcome", "rejected"),
+                        Label::new("reason", "invalid_signature"),
                     ],
                     1,
                 ),
                 (
                     vec![
-                        pair("endpoint", "partner"),
-                        pair("outcome", "rejected"),
-                        pair("reason", "invalid_token"),
+                        Label::new("endpoint", "partner"),
+                        Label::new("outcome", "rejected"),
+                        Label::new("reason", "invalid_token"),
                     ],
                     1,
                 ),
-                (vec![pair("outcome", "unknown_endpoint")], 2),
+                (vec![Label::new("outcome", "unknown_endpoint")], 2),
             ]
         );
 
@@ -537,13 +533,7 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("application/problem+json")
         );
-        let body = response
-            .into_body()
-            .collect()
-            .await
-            .expect("complete problem body")
-            .to_bytes();
-        let problem: Value = serde_json::from_slice(&body).expect("problem JSON");
+        let problem = body_json(response).await;
         assert_eq!(problem["code"], "not_found");
     }
 
@@ -568,13 +558,7 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("application/problem+json")
         );
-        let body = response
-            .into_body()
-            .collect()
-            .await
-            .expect("complete problem body")
-            .to_bytes();
-        let problem: Value = serde_json::from_slice(&body).expect("problem JSON");
+        let problem = body_json(response).await;
         assert_eq!(problem["code"], "bad_request");
         assert_eq!(problem["invalid_params"][0]["name"], "path.endpoint_id");
     }

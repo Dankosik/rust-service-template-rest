@@ -432,16 +432,12 @@ async fn tls_root_ca_file_is_reread_for_a_same_client_reconnect_to_a_new_localho
 
     replace_ca(&root_path, &ca_b);
     replacement.wait_for_authenticated_connection().await;
-    timeout(Duration::from_secs(10), async {
-        loop {
-            if messaging.probe().check().await.is_ok() {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("the same messaging connection reports fresh source metadata after CA rotation");
+    eventually(
+        Duration::from_secs(10),
+        "the same messaging connection reports fresh source metadata after CA rotation",
+        async || messaging.probe().check().await.ok(),
+    )
+    .await;
     let prepared = registry(&fixture)
         .prepare(&event("after-root-ca-rotation"), 1024)
         .expect("fixture event is prepared");
@@ -635,24 +631,25 @@ async fn cancelled_close_returns_before_native_termination_and_termination_remai
             Poll::Ready(infra_messaging::CloseOutcome::WaitInterrupted)
         );
         drop(closing);
-        timeout(Duration::from_secs(3), async {
-            let mut cadence = tokio::time::interval(Duration::from_millis(10));
-            loop {
-                cadence.tick().await;
-                if logged.lock().unwrap().iter().any(|fields| {
-                    fields
-                        .iter()
-                        .any(|(key, value)| *key == "message" && value == "messaging_connection")
-                        && fields
+        eventually(
+            Duration::from_secs(3),
+            "native termination emits its final event without another close request",
+            async || {
+                logged
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|fields| {
+                        fields.iter().any(|(key, value)| {
+                            *key == "message" && value == "messaging_connection"
+                        }) && fields
                             .iter()
                             .any(|(key, value)| *key == "result" && value == "closed")
-                }) {
-                    break;
-                }
-            }
-        })
-        .await
-        .expect("native termination emits its final event without another close request");
+                    })
+                    .then_some(())
+            },
+        )
+        .await;
         assert_eq!(
             messaging
                 .clone()

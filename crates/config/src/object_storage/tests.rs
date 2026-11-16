@@ -1,7 +1,7 @@
 use super::*;
 use crate::LoadOptions;
 use crate::load::{Error, load_from};
-use crate::test_support::{BUILD, assert_secret_in_file, env, write};
+use crate::test_support::{BUILD, assert_secret_in_file, env, load_env, write};
 use crate::validate::{ValidationErrors, admit_with};
 use std::assert_matches;
 
@@ -312,22 +312,17 @@ fn debug_output_redacts_the_secret() {
 fn object_storage_environment_maps_railway_bucket_variables() {
     use secrecy::ExposeSecret as _;
 
-    let cfg = load_from(
-        &LoadOptions::default(),
-        BUILD,
-        env(&[
-            ("APP__OBJECT_STORAGE__PROVIDER", "railway"),
-            ("APP__OBJECT_STORAGE__BUCKET", "results-jdhhd8oe18xi"),
-            ("APP__OBJECT_STORAGE__ENDPOINT", "https://t3.storageapi.dev"),
-            ("APP__OBJECT_STORAGE__REGION", "auto"),
-            ("APP__OBJECT_STORAGE__ACCESS_KEY_ID", "tid_example"),
-            ("APP__OBJECT_STORAGE__SECRET_ACCESS_KEY", "hunter2"),
-            ("APP__OBJECT_STORAGE__MAX_OBJECT_BYTES", "2 MiB"),
-            ("APP__OBJECT_STORAGE__MAX_CONCURRENCY", "32"),
-            ("APP__OBJECT_STORAGE__OPERATION_TIMEOUT", "10s"),
-        ]),
-    )
-    .unwrap();
+    let cfg = load_env(&[
+        ("APP__OBJECT_STORAGE__PROVIDER", "railway"),
+        ("APP__OBJECT_STORAGE__BUCKET", "results-jdhhd8oe18xi"),
+        ("APP__OBJECT_STORAGE__ENDPOINT", "https://t3.storageapi.dev"),
+        ("APP__OBJECT_STORAGE__REGION", "auto"),
+        ("APP__OBJECT_STORAGE__ACCESS_KEY_ID", "tid_example"),
+        ("APP__OBJECT_STORAGE__SECRET_ACCESS_KEY", "hunter2"),
+        ("APP__OBJECT_STORAGE__MAX_OBJECT_BYTES", "2 MiB"),
+        ("APP__OBJECT_STORAGE__MAX_CONCURRENCY", "32"),
+        ("APP__OBJECT_STORAGE__OPERATION_TIMEOUT", "10s"),
+    ]);
     let storage = cfg.object_storage.as_ref().unwrap();
     assert_eq!(
         storage.provider,
@@ -354,39 +349,29 @@ fn object_storage_environment_maps_railway_bucket_variables() {
 
 #[test]
 fn object_storage_environment_selects_credentials_and_addressing() {
-    let amazon = load_from(
-        &LoadOptions::default(),
-        BUILD,
-        env(&[
-            ("APP__OBJECT_STORAGE__PROVIDER", "amazon_s3"),
-            ("APP__OBJECT_STORAGE__BUCKET", "document-results"),
-            ("APP__OBJECT_STORAGE__REGION", "eu-central-1"),
-            ("APP__OBJECT_STORAGE__EXPECTED_BUCKET_OWNER", "123456789012"),
-            ("APP__OBJECT_STORAGE__CREDENTIALS", "workload_identity"),
-        ]),
-    )
-    .unwrap();
+    let amazon = load_env(&[
+        ("APP__OBJECT_STORAGE__PROVIDER", "amazon_s3"),
+        ("APP__OBJECT_STORAGE__BUCKET", "document-results"),
+        ("APP__OBJECT_STORAGE__REGION", "eu-central-1"),
+        ("APP__OBJECT_STORAGE__EXPECTED_BUCKET_OWNER", "123456789012"),
+        ("APP__OBJECT_STORAGE__CREDENTIALS", "workload_identity"),
+    ]);
     assert_matches!(
         amazon.object_storage.unwrap().credentials,
         crate::ObjectStorageCredentials::WorkloadIdentity
     );
 
-    let generic = load_from(
-        &LoadOptions::default(),
-        BUILD,
-        env(&[
-            ("APP__OBJECT_STORAGE__PROVIDER", "s3_compatible"),
-            ("APP__OBJECT_STORAGE__BUCKET", "document-results"),
-            (
-                "APP__OBJECT_STORAGE__ENDPOINT",
-                "https://ceph.internal.example:8443",
-            ),
-            ("APP__OBJECT_STORAGE__PATH_STYLE", "true"),
-            ("APP__OBJECT_STORAGE__ACCESS_KEY_ID", "example"),
-            ("APP__OBJECT_STORAGE__SECRET_ACCESS_KEY", "hunter2"),
-        ]),
-    )
-    .unwrap();
+    let generic = load_env(&[
+        ("APP__OBJECT_STORAGE__PROVIDER", "s3_compatible"),
+        ("APP__OBJECT_STORAGE__BUCKET", "document-results"),
+        (
+            "APP__OBJECT_STORAGE__ENDPOINT",
+            "https://ceph.internal.example:8443",
+        ),
+        ("APP__OBJECT_STORAGE__PATH_STYLE", "true"),
+        ("APP__OBJECT_STORAGE__ACCESS_KEY_ID", "example"),
+        ("APP__OBJECT_STORAGE__SECRET_ACCESS_KEY", "hunter2"),
+    ]);
     assert_eq!(
         generic.object_storage.unwrap().provider,
         crate::ObjectStorageProvider::S3Compatible {

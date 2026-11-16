@@ -250,7 +250,8 @@ mod tests {
         },
         parse_bearer,
         refresh::SignatureRefresh,
-        test_metrics::Diagnostics,
+        test_helpers::{merged, runtime},
+        test_metrics::{Diagnostics, labeled},
     };
 
     fn rsa_key_set(kid: &str, algorithm: Option<Algorithm>) -> Arc<KeySet> {
@@ -281,14 +282,13 @@ mod tests {
         kid: Option<&str>,
         extra: &serde_json::Value,
     ) -> String {
-        let mut claims = serde_json::json!({
-            "iss": "https://issuer.example", "aud": "api",
-            "exp": jsonwebtoken::get_current_timestamp() + 60, "sub": "subject",
-        });
-        claims
-            .as_object_mut()
-            .unwrap()
-            .extend(extra.as_object().unwrap().clone());
+        let claims = merged(
+            serde_json::json!({
+                "iss": "https://issuer.example", "aud": "api",
+                "exp": jsonwebtoken::get_current_timestamp() + 60, "sub": "subject",
+            }),
+            extra,
+        );
         let mut header = Header::new(algorithm);
         header.kid = kid.map(ToOwned::to_owned);
         encode(&header, &claims, signing).unwrap()
@@ -1108,30 +1108,34 @@ mod tests {
     /// Rewrites every ASCII letter inside a JSON string, member names
     /// included, as a `\u` escape, which a deserializer cannot borrow from
     /// the payload.
-    fn escape_letters(json: &str) -> String {
-        use std::fmt::Write as _;
-        let mut escaped = String::with_capacity(json.len());
-        // Characters of an escape sequence still to copy unchanged.
-        let (mut in_string, mut copy) = (false, 0_usize);
-        let mut characters = json.chars().peekable();
-        while let Some(character) = characters.next() {
-            if copy > 0 {
-                copy -= 1;
-            } else if in_string && character == '\\' {
-                copy = if characters.peek() == Some(&'u') {
-                    5
+    struct LetterEscaper;
+
+    impl serde_json::ser::Formatter for LetterEscaper {
+        fn write_string_fragment<W: ?Sized + std::io::Write>(
+            &mut self,
+            writer: &mut W,
+            fragment: &str,
+        ) -> std::io::Result<()> {
+            for character in fragment.chars() {
+                if character.is_ascii_alphabetic() {
+                    write!(writer, "\\u{:04x}", u32::from(character))?;
                 } else {
-                    1
-                };
-            } else if character == '"' {
-                in_string.toggle();
-            } else if in_string && character.is_ascii_alphabetic() {
-                write!(escaped, "\\u{:04x}", u32::from(character)).unwrap();
-                continue;
+                    write!(writer, "{character}")?;
+                }
             }
-            escaped.push(character);
+            Ok(())
         }
-        escaped
+    }
+
+    fn escape_letters(json: &serde_json::Value) -> String {
+        use serde::Serialize as _;
+        let mut escaped = Vec::new();
+        json.serialize(&mut serde_json::Serializer::with_formatter(
+            &mut escaped,
+            LetterEscaper,
+        ))
+        .unwrap();
+        String::from_utf8(escaped).unwrap()
     }
 
     #[derive(Clone, Debug)]
@@ -1181,15 +1185,12 @@ mod tests {
                 member.put(&mut claims, name, now);
             }
             let payload = if escaped {
-                escape_letters(&claims.to_string())
+                escape_letters(&claims)
             } else {
                 claims.to_string()
             };
             let token = sign_raw(CORPUS_HEADER, payload.as_bytes());
-            let here = tokio::runtime::Builder::new_current_thread()
-                .build()
-                .unwrap()
-                .block_on(deciders.here(&token));
+            let here = runtime(false).block_on(deciders.here(&token));
             proptest::prop_assert_eq!(here, deciders.library(&token), "payload {}", payload);
         }
 
@@ -1225,10 +1226,7 @@ mod tests {
             }
             let payload = [KEPT.as_bytes(), &rest].concat();
             let token = sign_raw(CORPUS_HEADER, &payload);
-            let here = tokio::runtime::Builder::new_current_thread()
-                .build()
-                .unwrap()
-                .block_on(deciders.here(&token));
+            let here = runtime(false).block_on(deciders.here(&token));
             if std::str::from_utf8(&payload).is_ok() {
                 proptest::prop_assert_eq!(
                     here,
@@ -1263,10 +1261,7 @@ mod tests {
         );
         let header = format!("Bearer {token}");
         let token = parse_bearer([header.as_bytes()]).unwrap();
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .build()
-            .unwrap();
+        let runtime = runtime(false);
         metrics::with_local_recorder(diagnostics.recorder(), || {
             tracing::dispatcher::with_default(&dispatch, || {
                 for _ in 0..2 {
@@ -1282,9 +1277,7 @@ mod tests {
         assert!(counters.iter().any(|(key, value)| {
             key.name() == "authn_token_verifications_total"
                 && *value == 2
-                && key
-                    .labels()
-                    .any(|label| label.key() == "reason" && label.value() == "missing_claim")
+                && labeled(key, &[("reason", "missing_claim")])
         }));
         let events = diagnostics.events();
         assert!(
@@ -1321,10 +1314,7 @@ mod tests {
             &serde_json::json!({}),
         );
         let unknown_header = format!("Bearer {unknown}");
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .build()
-            .unwrap();
+        let runtime = runtime(false);
         metrics::with_local_recorder(diagnostics.recorder(), || {
             // Success counters bind to the recorder installed at preparation;
             // refusal series register lazily on first occurrence and reuse handles.
@@ -1378,13 +1368,6 @@ mod tests {
         });
         assert_eq!(diagnostics.registered_counters().len(), 8);
         assert_authentication_counters(&diagnostics.take_counters());
-    }
-
-    fn labeled(key: &metrics::Key, labels: &[(&str, &str)]) -> bool {
-        labels.iter().all(|(name, value)| {
-            key.labels()
-                .any(|label| label.key() == *name && label.value() == *value)
-        })
     }
 
     fn assert_eager_success_registrations(registered: &[metrics::Key]) {
@@ -1480,11 +1463,7 @@ mod tests {
     }
 
     fn ec_token(signing: &EncodingKey, kid: &str, extra: &serde_json::Value) -> String {
-        let mut claims = serde_json::json!({"exp": EXP});
-        claims
-            .as_object_mut()
-            .unwrap()
-            .extend(extra.as_object().unwrap().clone());
+        let claims = merged(serde_json::json!({"exp": EXP}), extra);
         signed(signing, Algorithm::ES256, Some(kid), &claims)
     }
 

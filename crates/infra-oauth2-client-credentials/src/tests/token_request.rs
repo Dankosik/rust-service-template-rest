@@ -45,7 +45,7 @@ fn assert_token_form(body: &[u8], grant_fields: &str) {
 async fn client_credentials_request_has_no_authorization_header_and_expected_fields() {
     let fixture = Fixture::new().await;
     fixture.token_json(
-        "200 OK",
+        StatusCode::OK,
         &serde_json::json!({
             "access_token": "token+/_~.=",
             "token_type": "bEaReR",
@@ -82,8 +82,7 @@ async fn client_credentials_request_has_no_authorization_header_and_expected_fie
 async fn optional_scope_and_audience_are_omitted_from_the_client_credentials_form() {
     let fixture = Fixture::new().await;
     fixture
-        .credentials(&[], None)
-        .http(fixture.resource_client())
+        .client()
         .execute(fixture.request(), deadline(Duration::from_secs(10)))
         .await
         .unwrap();
@@ -99,8 +98,7 @@ async fn assertion_header_and_claims_are_verifiable_and_two_requests_differ_in_j
     let fixture = Fixture::new().await;
     for _ in 0..2 {
         fixture
-            .credentials(&[], None)
-            .http(fixture.resource_client())
+            .client()
             .execute(fixture.request(), deadline(Duration::from_secs(10)))
             .await
             .unwrap();
@@ -121,10 +119,7 @@ async fn assertion_header_and_claims_are_verifiable_and_two_requests_differ_in_j
         assert_eq!(claims.exp - claims.iat, 60);
         assert_eq!(claims.iat, claims.nbf);
         // Dated ten seconds back for a provider whose clock is behind.
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = jsonwebtoken::get_current_timestamp();
         assert!((10..=15).contains(&(now - claims.iat)));
         assert_ne!(claims.jti, "");
     }
@@ -135,7 +130,7 @@ async fn assertion_header_and_claims_are_verifiable_and_two_requests_differ_in_j
 #[tokio::test]
 async fn token_exchange_request_has_expected_form_fields() {
     let fixture = Fixture::new().await;
-    fixture.token_json("200 OK", &exchange_response("exchanged"));
+    fixture.token_json(StatusCode::OK, &exchange_response("exchanged"));
     fixture
         .credentials(&["read"], Some("https://api.example/é"))
         .http(fixture.resource_client())
@@ -174,10 +169,9 @@ async fn exchange_without_the_access_token_issued_type_is_refused() {
         if let Some(value) = issued_token_type {
             body["issued_token_type"] = value.into();
         }
-        fixture.token_json("200 OK", &body);
+        fixture.token_json(StatusCode::OK, &body);
         let result = fixture
-            .credentials(&[], None)
-            .http(fixture.resource_client())
+            .client()
             .execute(
                 fixture.on_behalf_of_request("subject"),
                 deadline(Duration::from_secs(10)),
@@ -197,12 +191,11 @@ async fn malformed_bearer_tokens_are_refused_before_resource_dispatch() {
     let malformed = ["", "control\u{7f}character", "split token", " leading"];
     for token in malformed {
         fixture.token_json(
-            "200 OK",
+            StatusCode::OK,
             &serde_json::json!({"access_token": token, "token_type": "BEARER", "expires_in": 60}),
         );
         let result = fixture
-            .credentials(&[], None)
-            .http(fixture.resource_client())
+            .client()
             .execute(fixture.request(), deadline(Duration::from_secs(10)))
             .await;
         assert_matches!(
@@ -228,16 +221,11 @@ async fn short_lived_and_omitted_lifetime_service_tokens_are_request_only() {
             2,
         ),
     ] {
-        fixture.token_json("200 OK", &body);
-        let client = fixture
-            .credentials(&[], None)
-            .http(fixture.resource_client());
+        fixture.token_json(StatusCode::OK, &body);
+        let client = fixture.client();
         let before = fixture.token_requests().len();
         for _ in 0..2 {
-            client
-                .execute(fixture.request(), deadline(Duration::from_secs(10)))
-                .await
-                .unwrap();
+            fixture.send(&client).await.unwrap();
         }
         assert_eq!(
             fixture.token_requests().len(),
@@ -257,10 +245,9 @@ async fn invalid_service_and_exchanged_lifetimes_refuse_before_resource_dispatch
     ] {
         let mut response = exchange_response("invalid-lifetime");
         response["expires_in"] = lifetime;
-        fixture.token_json("200 OK", &response);
+        fixture.token_json(StatusCode::OK, &response);
         let error = fixture
-            .credentials(&[], None)
-            .http(fixture.resource_client())
+            .client()
             .execute(request, deadline(Duration::from_secs(10)))
             .await
             .unwrap_err();
@@ -274,7 +261,7 @@ async fn invalid_service_and_exchanged_lifetimes_refuse_before_resource_dispatch
 #[tokio::test]
 async fn exchange_rejects_a_token_when_processing_crosses_the_attempt_deadline() {
     let fixture = Fixture::new().await;
-    fixture.token_json("200 OK", &exchange_response("exchange-token"));
+    fixture.token_json(StatusCode::OK, &exchange_response("exchange-token"));
     let resource = Client::try_new_for_test_http(
         &fixture.origin,
         infra_outbound_http::Limits {
@@ -321,10 +308,8 @@ async fn a_token_that_expires_after_acquisition_is_not_sent_to_the_resource() {
     let fixture = Fixture::new().await;
     let mut response = exchange_response("short-lived");
     response["expires_in"] = 1.into();
-    fixture.token_json("200 OK", &response);
-    let client = fixture
-        .credentials(&[], None)
-        .http(fixture.resource_client());
+    fixture.token_json(StatusCode::OK, &response);
+    let client = fixture.client();
     let recorder = ObserveMetricRegistration(|key: &metrics::Key| {
         if key.name() == "oauth2_token_acquisitions_total"
             && key
@@ -336,11 +321,8 @@ async fn a_token_that_expires_after_acquisition_is_not_sent_to_the_resource() {
         }
     });
     let observation = metrics::set_default_local_recorder(&recorder);
-    let result = client
-        .execute(
-            fixture.on_behalf_of_request("subject"),
-            deadline(Duration::from_secs(10)),
-        )
+    let result = fixture
+        .send_request(&client, fixture.on_behalf_of_request("subject"))
         .await;
     drop(observation);
 
@@ -413,9 +395,7 @@ async fn cancellation_at_provider_completion_leaves_a_live_caller_its_own_attemp
     for on_behalf_of in [false, true] {
         for extension in [false, true] {
             let fixture = Fixture::new().await;
-            let client = fixture
-                .credentials(&[], None)
-                .http(fixture.resource_client());
+            let client = fixture.client();
             let request = || {
                 if on_behalf_of {
                     fixture.on_behalf_of_request("subject")
@@ -445,7 +425,7 @@ async fn cancellation_at_provider_completion_leaves_a_live_caller_its_own_attemp
             // counter registers, so cancellation arrives during acquisition polling.
             let _recorder = metrics::set_default_local_recorder(&recorder);
             fixture.token_json(
-                "400 Bad Request",
+                StatusCode::BAD_REQUEST,
                 &serde_json::json!({"error": "invalid_client"}),
             );
             let gate = fixture.block_tokens();
@@ -454,8 +434,7 @@ async fn cancellation_at_provider_completion_leaves_a_live_caller_its_own_attemp
                 () = fixture.token_received() => {}
                 result = &mut first => panic!("provider response must be gated: {result:?}"),
             }
-            let mut survivor =
-                Box::pin(client.execute(request(), deadline(Duration::from_secs(10))));
+            let mut survivor = Box::pin(fixture.send_request(&client, request()));
             poll_pending(survivor.as_mut()).await;
             gate.add_permits(1);
             assert_matches!(
@@ -464,7 +443,7 @@ async fn cancellation_at_provider_completion_leaves_a_live_caller_its_own_attemp
             );
             assert!(fixture.resource_requests().is_empty());
 
-            fixture.token_json("200 OK", &exchange_response("replacement"));
+            fixture.token_json(StatusCode::OK, &exchange_response("replacement"));
             gate.add_permits(1);
             assert_eq!(survivor.await.unwrap().status(), StatusCode::OK);
             assert_eq!(fixture.token_requests().len(), 2);
@@ -534,7 +513,7 @@ async fn every_token_request_is_counted_once_under_its_grant_and_closed_outcome(
         reused.execute(fixture.request(), far()).await.unwrap();
     }
     fixture.token_raw(response(
-        "400 Bad Request",
+        StatusCode::BAD_REQUEST,
         br#"{"error":"invalid_client"}"#,
     ));
     client()
@@ -542,7 +521,7 @@ async fn every_token_request_is_counted_once_under_its_grant_and_closed_outcome(
         .await
         .unwrap_err();
     fixture.token_raw(response(
-        "400 Bad Request",
+        StatusCode::BAD_REQUEST,
         br#"{"error":"invalid_target"}"#,
     ));
     client()

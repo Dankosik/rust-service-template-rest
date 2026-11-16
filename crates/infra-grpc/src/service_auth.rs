@@ -203,13 +203,13 @@ impl tower::Service<http::Request<Body>> for ServiceTokenClient {
 mod tests {
     use std::convert::Infallible;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::time::Duration;
 
     use bytes::Bytes;
     use futures_util::StreamExt as _;
     use infra_serviceauth::{
         JwtType, TrustRegistry,
-        test_support::{TestKey, registry},
+        test_support::{TestKey, now_secs, registry},
     };
     use operation_context::OperationContext;
     use tower::ServiceExt as _;
@@ -261,10 +261,7 @@ mod tests {
                 admit_caller,
             ));
 
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = now_secs();
         let billing_token = billing.sign(
             &serde_json::json!({"alg": "ES256", "typ": TYPE, "kid": billing.kid()}),
             &serde_json::json!({

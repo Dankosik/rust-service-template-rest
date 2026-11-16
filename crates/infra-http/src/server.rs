@@ -561,10 +561,9 @@ where
 
 async fn wind_down(finish: &CancellationToken, age_deadline: Option<Instant>) {
     if let Some(deadline) = age_deadline {
-        tokio::select! {
-            () = finish.cancelled() => {},
-            () = tokio::time::sleep_until(deadline) => {},
-        }
+        finish
+            .run_until_cancelled(tokio::time::sleep_until(deadline))
+            .await;
     } else {
         finish.cancelled().await;
     }

@@ -341,9 +341,9 @@ pub mod responses {
 
 #[cfg(test)]
 mod tests {
-    use http_body_util::BodyExt;
 
     use super::*;
+    use crate::test_support::body_json;
 
     #[test]
     fn every_code_maps_to_an_error_status_and_a_title() {
@@ -380,8 +380,7 @@ mod tests {
             response.extensions().get::<Problem>().map(Problem::code),
             Some(Code::ServiceUnavailable)
         );
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let json = body_json(response).await;
         assert_eq!(json["code"], "service_unavailable");
         assert_eq!(json["status"], 503);
         assert_eq!(json["title"], "Service Unavailable");
@@ -430,8 +429,7 @@ mod tests {
         let response = Problem::new(Code::BadRequest)
             .invalid_param("/slug", "maximum string length is 64")
             .into_response();
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let json = body_json(response).await;
         assert_eq!(json["invalid_params"][0]["name"], "/slug");
         assert_eq!(
             json["invalid_params"][0]["reason"],

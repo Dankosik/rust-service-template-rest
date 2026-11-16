@@ -392,7 +392,7 @@ pub(crate) mod tests {
     use jsonwebtoken::{Algorithm, EncodingKey, jwk::Jwk};
 
     use super::{JwtAlgorithm, KeySet, KeySetFailure, parse_key_set};
-    use crate::test_metrics::Diagnostics;
+    use crate::test_metrics::{Diagnostics, labeled};
 
     pub(crate) const JWT_SIGNING_DER: &[u8] =
         include_bytes!("../tests/fixtures/authn-jwt-signing-key.der");
@@ -566,9 +566,7 @@ pub(crate) mod tests {
             counters.iter().any(|(key, value)| {
                 key.name() == "authn_jwks_key_rejections_total"
                     && *value == 100
-                    && key
-                        .labels()
-                        .any(|label| label.key() == "reason" && label.value() == "malformed_entry")
+                    && labeled(key, &[("reason", "malformed_entry")])
             }),
             "recorded counters: {counters:?}"
         );

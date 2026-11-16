@@ -93,14 +93,16 @@ fn parse_id(value: &str) -> Result<JobId, InputError> {
 }
 
 fn parse_cursor(cursor: &str) -> Result<JobId, InputError> {
-    if cursor.len() != CURSOR_PREFIX.len() + uuid::fmt::Hyphenated::LENGTH {
-        return Err(InputError::Cursor);
-    }
     let text = cursor
         .strip_prefix(CURSOR_PREFIX)
         .ok_or(InputError::Cursor)?;
     let id = parse_id(text).map_err(|_| InputError::Cursor)?;
-    if text.bytes().any(|byte| byte.is_ascii_uppercase()) {
+    if text
+        != id
+            .0
+            .hyphenated()
+            .encode_lower(&mut uuid::Uuid::encode_buffer())
+    {
         return Err(InputError::Cursor);
     }
     Ok(id)

@@ -1,7 +1,7 @@
 use super::{InboundWebhookEndpointConfig, InboundWebhooksConfig};
 use crate::LoadOptions;
 use crate::load::{Error, load_from};
-use crate::test_support::{BUILD, env, write};
+use crate::test_support::{BUILD, env, load_env, write};
 use crate::validate::{ValidationErrors, validate_with};
 use std::assert_matches;
 
@@ -68,23 +68,18 @@ fn rejects_reused_active_and_previous_references() {
 fn inbound_webhooks_environment_builds_nested_endpoint_and_secret_maps() {
     use secrecy::ExposeSecret as _;
 
-    let cfg = load_from(
-        &LoadOptions::default(),
-        BUILD,
-        env(&[
-            (
-                "APP__INBOUND_WEBHOOKS__ENDPOINTS__PARTNER__ACTIVE_KEY",
-                "partner_v2",
-            ),
-            (
-                "APP__INBOUND_WEBHOOKS__SECRETS__PARTNER_V2",
-                "fixture-secret",
-            ),
-            ("APP__POSTGRES__ENABLED", "true"),
-            ("APP__POSTGRES__DSN", "postgres://localhost/app"),
-        ]),
-    )
-    .unwrap();
+    let cfg = load_env(&[
+        (
+            "APP__INBOUND_WEBHOOKS__ENDPOINTS__PARTNER__ACTIVE_KEY",
+            "partner_v2",
+        ),
+        (
+            "APP__INBOUND_WEBHOOKS__SECRETS__PARTNER_V2",
+            "fixture-secret",
+        ),
+        ("APP__POSTGRES__ENABLED", "true"),
+        ("APP__POSTGRES__DSN", "postgres://localhost/app"),
+    ]);
     assert_eq!(
         cfg.inbound_webhooks
             .endpoints

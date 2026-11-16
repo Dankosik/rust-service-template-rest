@@ -651,7 +651,7 @@ mod tests {
         assert!(!accepted(&format!("{encoded}==")), "extra padding");
         // The last data character carries two trailing bits that must be zero.
         let last = encoded.chars().last().unwrap();
-        let alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let alphabet = base64::alphabet::STANDARD.as_str();
         let at = alphabet.find(last).unwrap();
         let sibling = alphabet.chars().nth(at ^ 1).unwrap();
         let prefix = &encoded[..encoded.len() - 1];

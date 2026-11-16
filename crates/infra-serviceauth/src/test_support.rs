@@ -20,6 +20,11 @@ use jsonwebtoken::{
     jwk::{Jwk, PublicKeyUse},
 };
 
+#[must_use]
+pub fn now_secs() -> u64 {
+    crate::unix_seconds().expect("the system clock follows the Unix epoch")
+}
+
 pub struct TestKey {
     kid: String,
     pair: EcdsaKeyPair,

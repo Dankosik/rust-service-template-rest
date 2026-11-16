@@ -5,6 +5,7 @@
 
 use axum::http::header::HeaderName;
 use axum::http::{HeaderValue, Request};
+use itertools::Itertools as _;
 use tower_http::request_id::{MakeRequestId, RequestId};
 use uuid::Uuid;
 
@@ -37,11 +38,10 @@ impl MakeRequestId for MakeRequestUuid {
 
 /// Keep exactly one inbound `X-Request-ID` matching `^[A-Za-z0-9._~-]{1,128}$`.
 pub(crate) fn sanitize<B>(mut request: Request<B>) -> Request<B> {
-    let mut values = request.headers().get_all(&REQUEST_ID_HEADER).iter();
-    let keep = values
-        .next()
-        .is_some_and(|value| is_valid(value.as_bytes()))
-        && values.next().is_none();
+    let keep = matches!(
+        request.headers().get_all(&REQUEST_ID_HEADER).iter().at_most_one(),
+        Ok(Some(value)) if is_valid(value.as_bytes())
+    );
     if !keep {
         request.headers_mut().remove(&REQUEST_ID_HEADER);
     }
