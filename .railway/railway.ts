@@ -32,7 +32,9 @@ export default defineRailway((ctx) => {
       restartPolicyType: "ON_FAILURE",
       restartPolicyMaxRetries: 5,
       overlapSeconds: 45,
-      drainingSeconds: 45,
+      // The process may use all of `http.grace_period` (45 s) after SIGTERM;
+      // the margin keeps its exit, and its exit code, ahead of SIGKILL.
+      drainingSeconds: 50,
       // template:begin postgres:railway-postgres-migrate
       // Runs in a container of the new image before it starts; a failure
       // keeps the previous deployment serving. Railway sets no timeout of its
@@ -49,8 +51,10 @@ export default defineRailway((ctx) => {
       APP__HTTP__ADDR: "[::]:8080",
       // Only `local` and `development` admit the developer escape hatches.
       APP__APP__ENV: ctx.environment ?? "production",
-      // Sized by the operator to each replica's CPU allocation.
-      APP__RUNTIME__WORKER_THREADS: preserve(),
+      // Unset, the runtime starts one worker per vCPU of the plan limit (24)
+      // and holds about twice the memory after a burst. Raise this to the
+      // replica's CPU allocation.
+      APP__RUNTIME__WORKER_THREADS: "2",
       // template:begin postgres:railway-postgres-env
       // The migrator refuses a disabled profile, and the DSN is set out of band.
       APP__POSTGRES__ENABLED: "true",
