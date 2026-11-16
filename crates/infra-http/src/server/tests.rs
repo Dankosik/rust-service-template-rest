@@ -81,7 +81,7 @@ async fn fetch(addr: SocketAddr, path: &str) -> String {
 
 #[tokio::test]
 async fn serves_and_drains_completely() {
-    let server = Server::bind(loopback(), app(), options()).await.unwrap();
+    let server = Server::bind(loopback(), app(), options()).unwrap();
     let failure = server.accept_failure();
     let addr = server.local_addr();
     assert!(fetch(addr, "/ok").await.starts_with("HTTP/1.1 200 "));
@@ -100,7 +100,7 @@ async fn serves_and_drains_completely() {
 
 #[tokio::test]
 async fn an_unbounded_drain_budget_drains_completely() {
-    let server = Server::bind(loopback(), app(), options()).await.unwrap();
+    let server = Server::bind(loopback(), app(), options()).unwrap();
     assert!(
         fetch(server.local_addr(), "/ok")
             .await
@@ -112,7 +112,7 @@ async fn an_unbounded_drain_budget_drains_completely() {
 
 #[tokio::test]
 async fn in_flight_request_finishes_during_drain() {
-    let server = Server::bind(loopback(), app(), options()).await.unwrap();
+    let server = Server::bind(loopback(), app(), options()).unwrap();
     let addr = server.local_addr();
     let slow = tokio::spawn(async move { fetch(addr, "/slow").await });
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -165,9 +165,7 @@ async fn pending_request() -> (Server, TcpStream) {
         reason = "this concrete fixture builder is outside the application contract; handlers retain runtime checks"
     )]
     let app = Router::new().route("/pending", get(handler_1));
-    let server = Server::bind(loopback(), harden(app), options())
-        .await
-        .unwrap();
+    let server = Server::bind(loopback(), harden(app), options()).unwrap();
     let mut peer = TcpStream::connect(server.local_addr()).await.unwrap();
     peer.write_all(b"GET /pending HTTP/1.1\r\nHost: localhost\r\n\r\n")
         .await
@@ -269,7 +267,7 @@ async fn accept_panic_after_stop_is_still_observed() {
     }
     let stop = Arc::new(std::sync::OnceLock::new());
     let marker = PanicOnClone(stop.clone());
-    let listener = BoundListener::bind(loopback()).await.unwrap();
+    let listener = BoundListener::bind(loopback()).unwrap();
     let server = serve_listener(listener, app(), options(), move |stream| {
         let _ = &marker;
         async move { Some((stream, ListenerScheme::Http)) }
@@ -290,7 +288,7 @@ async fn accept_panic_after_stop_is_still_observed() {
 
 #[tokio::test]
 async fn silent_client_is_closed_after_the_header_timeout() {
-    let server = Server::bind(loopback(), app(), options()).await.unwrap();
+    let server = Server::bind(loopback(), app(), options()).unwrap();
     let mut silent = TcpStream::connect(server.local_addr()).await.unwrap();
     let mut buf = [0u8; 1];
     let closed = tokio::time::timeout(Duration::from_secs(2), silent.read(&mut buf)).await;
@@ -304,7 +302,7 @@ async fn silent_client_is_closed_after_the_header_timeout() {
 
 #[tokio::test]
 async fn a_stalled_http2_preface_is_closed_after_the_header_timeout() {
-    let server = Server::bind(loopback(), app(), options()).await.unwrap();
+    let server = Server::bind(loopback(), app(), options()).unwrap();
     let mut stalled = TcpStream::connect(server.local_addr()).await.unwrap();
     stalled.write_all(b"PRI * HTTP/2.0\r\n").await.unwrap();
     let mut buf = [0u8; 1];
@@ -375,7 +373,7 @@ async fn a_decided_protocol_is_never_timed_out() {
 async fn drain_does_not_wait_for_a_connection_that_sent_nothing() {
     let mut opts = options();
     opts.header_read_timeout = Duration::from_secs(30);
-    let server = Server::bind(loopback(), app(), opts).await.unwrap();
+    let server = Server::bind(loopback(), app(), opts).unwrap();
     let addr = server.local_addr();
     let mut silent = TcpStream::connect(addr).await.unwrap();
     assert!(fetch(addr, "/ok").await.starts_with("HTTP/1.1 200 "));
@@ -392,7 +390,7 @@ async fn drain_does_not_wait_for_a_connection_that_sent_nothing() {
 
 #[tokio::test]
 async fn oversized_header_is_431() {
-    let server = Server::bind(loopback(), app(), options()).await.unwrap();
+    let server = Server::bind(loopback(), app(), options()).unwrap();
     let mut stream = TcpStream::connect(server.local_addr()).await.unwrap();
     let huge = "x".repeat(9 * 1024);
     let request = format!("GET /ok HTTP/1.1\r\nHost: localhost\r\nX-Big: {huge}\r\n\r\n");
@@ -414,7 +412,7 @@ async fn oversized_header_is_431() {
 async fn connection_cap_refuses_the_excess() {
     let mut opts = options();
     opts.max_connections = NonZeroU32::new(1);
-    let server = Server::bind(loopback(), app(), opts).await.unwrap();
+    let server = Server::bind(loopback(), app(), opts).unwrap();
     let addr = server.local_addr();
     let first = TcpStream::connect(addr).await.unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -443,7 +441,7 @@ async fn a_connection_past_its_age_closes_once_idle_and_new_ones_are_served() {
     let mut opts = options();
     opts.header_read_timeout = Duration::from_secs(5);
     opts.max_connection_age = Some(Duration::from_millis(200));
-    let server = Server::bind(loopback(), app(), opts).await.unwrap();
+    let server = Server::bind(loopback(), app(), opts).unwrap();
     let addr = server.local_addr();
     let mut kept = TcpStream::connect(addr).await.unwrap();
     kept.write_all(b"GET /ok HTTP/1.1\r\nHost: localhost\r\n\r\n")
@@ -477,10 +475,9 @@ fn a_connection_age_is_spread_within_a_tenth() {
 
 #[tokio::test]
 async fn bind_failure_is_reported() {
-    let occupied = Server::bind(loopback(), app(), options()).await.unwrap();
-    let err = Server::bind(occupied.local_addr(), app(), options())
-        .await
-        .expect_err("second bind must fail");
+    let occupied = Server::bind(loopback(), app(), options()).unwrap();
+    let err =
+        Server::bind(occupied.local_addr(), app(), options()).expect_err("second bind must fail");
     std::assert_matches!(err, ServerError::Bind { .. }, "{err}");
     occupied.drain(Duration::from_secs(1)).await.unwrap();
 }
@@ -530,11 +527,10 @@ async fn drain_does_not_wait_for_an_unfinished_tls_handshake() {
     let (server_config, client_config) = localhost_tls(b"h2");
     let mut opts = options();
     opts.header_read_timeout = Duration::from_secs(30);
-    let server = BoundListener::bind(loopback()).await.unwrap().serve_tls(
-        app(),
-        opts,
-        Arc::new(server_config),
-    );
+    let server =
+        BoundListener::bind(loopback())
+            .unwrap()
+            .serve_tls(app(), opts, Arc::new(server_config));
     let addr = server.local_addr();
     let mut stalled = TcpStream::connect(addr).await.unwrap();
     stalled.write_all(&[0x16]).await.unwrap();
@@ -563,11 +559,10 @@ async fn connection_age_closes_a_socket_still_waiting_for_tls() {
         max_connection_age: Some(Duration::from_millis(200)),
         ..options()
     };
-    let server = BoundListener::bind(loopback()).await.unwrap().serve_tls(
-        app(),
-        options,
-        Arc::new(server_config),
-    );
+    let server =
+        BoundListener::bind(loopback())
+            .unwrap()
+            .serve_tls(app(), options, Arc::new(server_config));
     let mut client = TcpStream::connect(server.local_addr()).await.unwrap();
     let mut byte = [0];
     let closed = tokio::time::timeout(Duration::from_secs(2), client.read(&mut byte)).await;
@@ -585,11 +580,10 @@ async fn tls_listener_serves_http2() {
     let (server_config, client_config) = localhost_tls(b"h2");
     let mut opts = options();
     opts.header_read_timeout = Duration::from_secs(2);
-    let server = BoundListener::bind(loopback()).await.unwrap().serve_tls(
-        app(),
-        opts,
-        Arc::new(server_config),
-    );
+    let server =
+        BoundListener::bind(loopback())
+            .unwrap()
+            .serve_tls(app(), opts, Arc::new(server_config));
     let addr = server.local_addr();
     let stream = TcpStream::connect(addr).await.unwrap();
     let tls = TlsConnector::from(Arc::new(client_config))
@@ -627,7 +621,7 @@ async fn tls_http1_origin_form_reports_https_in_the_server_span() {
         header_read_timeout: Duration::from_secs(2),
         ..options()
     };
-    let server = BoundListener::bind(loopback()).await.unwrap().serve_tls(
+    let server = BoundListener::bind(loopback()).unwrap().serve_tls(
         harden(app()),
         opts,
         Arc::new(server_config),
@@ -659,3 +653,48 @@ async fn tls_http1_origin_form_reports_https_in_the_server_span() {
     );
 }
 // template:end grpc:http-server-tls-test
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_burst_of_connections_waits_in_the_listen_queue_instead_of_being_dropped() {
+    let listener = BoundListener::bind(loopback()).unwrap();
+    let addr = listener.local_addr;
+    let mut pending = tokio::task::JoinSet::new();
+    for _ in 0..300 {
+        pending.spawn(tokio::time::timeout(
+            Duration::from_millis(500),
+            TcpStream::connect(addr),
+        ));
+    }
+    let connected = pending
+        .join_all()
+        .await
+        .into_iter()
+        .filter(|outcome| matches!(outcome, Ok(Ok(_))))
+        .count();
+    assert_eq!(
+        connected, 300,
+        "the kernel drops the handshake of a connection that finds the queue full, and the client retries a second later"
+    );
+    drop(listener);
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn an_accepted_connection_gives_up_on_a_peer_that_stops_acknowledging() {
+    let listener = TcpListener::bind(loopback()).await.unwrap();
+    let client = TcpStream::connect(listener.local_addr().unwrap())
+        .await
+        .unwrap();
+    let (accepted, _) = listener.accept().await.unwrap();
+
+    configure_accepted(&accepted);
+
+    let socket = socket2::SockRef::from(&accepted);
+    assert_eq!(
+        socket.tcp_user_timeout().unwrap(),
+        Some(Duration::from_secs(30))
+    );
+    assert!(accepted.nodelay().unwrap());
+    drop(client);
+}

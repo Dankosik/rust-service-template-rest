@@ -12,7 +12,7 @@ use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto;
 use hyper_util::service::TowerToHyperService;
 use shared_rules::hyper::HTTP1_MIN_READ_BUFFER_BYTES;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::sync::{Semaphore, watch};
 use tokio::time::{Instant, timeout_at};
 use tokio_util::sync::CancellationToken;
@@ -24,6 +24,13 @@ mod sniff;
 use sniff::SniffDeadline;
 
 pub(crate) const CONNECTIONS_REFUSED_METRIC: &str = "http_server_connections_refused_total";
+
+// `TcpListener::bind` listens with mio's fixed backlog of 128; the kernel caps
+// this request at `net.core.somaxconn`.
+const LISTEN_BACKLOG: u32 = 65_535;
+
+#[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+const ACCEPTED_TCP_USER_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy, Debug)]
 pub struct ServerOptions {
@@ -108,10 +115,10 @@ pub struct BoundListener {
 }
 
 impl BoundListener {
-    pub async fn bind(addr: SocketAddr) -> Result<Self, ServerError> {
-        let listener = TcpListener::bind(addr)
-            .await
-            .map_err(|source| ServerError::Bind { addr, source })?;
+    /// Registers the socket with the Tokio reactor, so it panics outside a
+    /// runtime.
+    pub fn bind(addr: SocketAddr) -> Result<Self, ServerError> {
+        let listener = listen(addr).map_err(|source| ServerError::Bind { addr, source })?;
         let local_addr = listener
             .local_addr()
             .map_err(|source| ServerError::Bind { addr, source })?;
@@ -166,13 +173,31 @@ impl BoundListener {
     // template:end grpc:http-bound-listener-tls
 }
 
+fn listen(addr: SocketAddr) -> std::io::Result<TcpListener> {
+    let socket = match addr {
+        SocketAddr::V4(_) => TcpSocket::new_v4(),
+        SocketAddr::V6(_) => TcpSocket::new_v6(),
+    }?;
+    #[cfg(not(windows))]
+    socket.set_reuseaddr(true)?;
+    socket.bind(addr)?;
+    socket.listen(LISTEN_BACKLOG)
+}
+
+fn configure_accepted(stream: &TcpStream) {
+    let _ = stream.set_nodelay(true);
+    #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+    let _ = socket2::SockRef::from(stream).set_tcp_user_timeout(Some(ACCEPTED_TCP_USER_TIMEOUT));
+}
+
 impl Server {
-    pub async fn bind(
+    /// Panics outside a Tokio runtime, like [`BoundListener::bind`].
+    pub fn bind(
         addr: SocketAddr,
         app: Router,
         options: ServerOptions,
     ) -> Result<Self, ServerError> {
-        Ok(BoundListener::bind(addr).await?.serve(app, options))
+        Ok(BoundListener::bind(addr)?.serve(app, options))
     }
 
     #[must_use]
@@ -371,7 +396,7 @@ async fn accept_loop<F, Fut, IO>(
                 continue;
             }
         };
-        let _ = stream.set_nodelay(true);
+        configure_accepted(&stream);
         let connection = serve_connection(
             stream,
             peer,

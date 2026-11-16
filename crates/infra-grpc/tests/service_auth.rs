@@ -169,7 +169,7 @@ fn echo_services(echo: &Echo) -> Services {
     services
 }
 
-async fn serve(services: Services) -> (Server, SocketAddr) {
+fn serve(services: Services) -> (Server, SocketAddr) {
     let app = infra_grpc::router(
         services,
         readiness().reader(),
@@ -184,7 +184,6 @@ async fn serve(services: Services) -> (Server, SocketAddr) {
         app,
         server_options(limits()),
     )
-    .await
     .unwrap();
     let address = server.local_addr();
     (server, address)
@@ -272,7 +271,7 @@ async fn a_valid_token_names_its_caller_and_every_contract_breach_is_refused() {
     let echo = Echo::default();
     let mut services = echo_services(&echo);
     services.authenticate_callers(keys.verifier());
-    let (server, address) = serve(services).await;
+    let (server, address) = serve(services);
 
     let valid = Keys::token(&keys.orders, "orders", "catalog", 0);
     assert_eq!(unary(address, Some(&valid)).await.unwrap(), "hello");
@@ -318,7 +317,7 @@ async fn the_outbound_binding_signs_for_its_receiver_and_refuses_a_caller_author
     let echo = Echo::default();
     let mut services = echo_services(&echo);
     services.authenticate_callers(keys.verifier());
-    let (server, address) = serve(services).await;
+    let (server, address) = serve(services);
     let source = TokenSource::try_new(SigningOptions {
         name: ServiceName::parse("orders").unwrap(),
         jwt_type: JwtType::parse(TYPE).unwrap(),
@@ -398,7 +397,7 @@ async fn without_a_verifier_bearer_or_nothing_admits_calls_and_no_token_reaches_
         return;
     }
     let echo = Echo::default();
-    let (server, address) = serve(echo_services(&echo)).await;
+    let (server, address) = serve(echo_services(&echo));
     let token = Keys::token(&Keys::new().orders, "orders", "catalog", 0);
     assert_eq!(unary(address, Some(&token)).await.unwrap(), "hello");
     assert_eq!(unary(address, None).await.unwrap(), "hello");
@@ -589,7 +588,7 @@ async fn token_text_never_reaches_logs_or_spans_and_the_span_names_the_caller() 
     let echo = Echo::default();
     let mut services = echo_services(&echo);
     services.authenticate_callers(keys.verifier());
-    let (server, address) = serve(services).await;
+    let (server, address) = serve(services);
     let valid = Keys::token(&keys.orders, "orders", "catalog", 0);
     let foreign = Keys::token(&keys.billing, "orders", "catalog", 0);
     unary(address, Some(&valid)).await.unwrap();

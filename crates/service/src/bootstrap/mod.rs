@@ -534,14 +534,14 @@ async fn start(
     // template:begin http-idempotency:bootstrap-http-idempotency-activation
     idempotency::activate(composer, config, background).await?;
     // template:end http-idempotency:bootstrap-http-idempotency-activation
-    let app_listener = BoundListener::bind(config.http.addr).await?;
+    let app_listener = BoundListener::bind(config.http.addr)?;
     let diagnostics_listener = match config.observability.metrics.addr {
-        Some(addr) => Some(BoundListener::bind(addr).await?),
+        Some(addr) => Some(BoundListener::bind(addr)?),
         None => None,
     };
     // template:begin grpc:bootstrap-grpc-bind-before-ready
     let grpc_listener = match grpc_prepared {
-        Some(grpc) => Some((BoundListener::bind(grpc.addr).await?, grpc)),
+        Some(grpc) => Some((BoundListener::bind(grpc.addr)?, grpc)),
         None => None,
     };
     // template:end grpc:bootstrap-grpc-bind-before-ready

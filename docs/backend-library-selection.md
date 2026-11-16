@@ -64,6 +64,21 @@ jemalloc purges freed pages only from the thread that allocates in the same aren
 
 CPU per request stayed within ±1% for both options (plain and 64 KiB JSON, five interleaved 15 s rounds); resident memory under sustained 64 KiB load rose by about 6 MB because application threads no longer purge inline. With `always`, khugepaged collapses the sparse regions jemalloc purged back into huge pages, outside the allocator's own accounting. `_RJEM_MALLOC_CONF` overrides the baked options at process start. The `stats` feature (needed by `tikv-jemalloc-ctl` gauges) cost 6% CPU per request on the 64 KiB path and stays off; reopen it when allocator-level memory attribution is needed.
 
+### Listener sockets
+
+Measured on a 4-vCPU Xeon 8168 DigitalOcean c-4 (Debian 13, kernel 6.12, `net.core.somaxconn` 4096, service on two CPUs with two workers, loopback):
+
+- **Listen backlog requested at 65,535 instead of `TcpListener::bind`'s 128.** mio passes a fixed 128, so a burst of new connections overflows the accept queue and each dropped handshake retries after one second. The kernel caps the request at `net.core.somaxconn`.
+
+| Simultaneous connections | Backlog 128 | Backlog 4096 |
+| --- | --- | --- |
+| 300 | 118 wait ≥ 1 s, p99 1.04 s | p99 44–77 ms |
+| 1,000 | 82% wait ≥ 1 s | p99 69–140 ms |
+| 3,000 | p50 1.2–2.1 s, p99 2.3–3.1 s, 5–6 thousand dropped handshakes | p99 0.16–0.32 s, none dropped |
+
+- **`TCP_USER_TIMEOUT` of 30 s on accepted connections**, the value the outbound client already uses. With the send buffer capped at 64 KiB, 200 clients that sent a request and stopped reading held 200 connections and 248 MB (a 0.9 MiB response each) for the whole 90 s observed; with a 10 s timeout they were gone within 20 s and memory returned to 43 MB. A client reading steadily at 32 KiB/s still received the full response. HTTP/2 connections were already covered by keep-alive PING.
+- **`http.header_read_timeout` defaults to 75 s instead of 5 s.** hyper's HTTP/1 header timer starts when a connection begins waiting for its next request, so it is also the keep-alive idle timeout. A second request 4.8 s after the first succeeded and one after 5.2 s found the connection closed. Behind nginx with a 60 s upstream keep-alive and 1 ms of network delay, requests spaced about 5 s apart hit a closing connection 36 times in 2,560 and 9 of 1,280 `POST`s returned `502`; with 75 s there were none. A new connection per request cost 119.5 µs of CPU against 67.8 µs on a kept one. The cost is that a client sending its headers slowly holds a connection slot for up to 75 s; `http.max_connections` bounds the slots. Reopen if hyper gains a separate idle timeout.
+
 ### Open-file limit
 
 Docker (since Engine 25), containerd (since 1.8), and systemd (since 240) start containers with a soft `RLIMIT_NOFILE` of `1,024` under a higher hard limit for legacy `select(2)` compatibility; raising soft to hard at startup via `rlimit` prevents `EMFILE` accept failures around 1,000 connections while leaving the hard ceiling platform-owned.

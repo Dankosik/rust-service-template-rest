@@ -2749,6 +2749,7 @@ dependencies = [
  "sha2 0.11.1",
  "shared-rules",
  "smallvec",
+ "socket2",
  "thiserror",
  "tokio",
  "tokio-rustls",
