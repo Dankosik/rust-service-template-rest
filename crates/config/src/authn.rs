@@ -17,7 +17,7 @@ use serde::{Deserialize, Deserializer};
 use crate::de::{blank_secret_as_none, deserialize_scalar};
 // template:end oidc-introspection:authn-occupied-secret-import
 use crate::de::value_free;
-use crate::validate::{Rejected, ValidationError, Violations, required_when};
+use crate::validate::{Rejected, Violations, required_when};
 
 pub(crate) const AUDIENCE_INPUT_FORM: &str =
     "`authn.audience` must be a string or a list of strings";
@@ -329,7 +329,7 @@ impl AuthnInput {
                     "authn.mode = oidc-jwt",
                 ));
                 let located = if jwks_uri.as_deref().is_some_and(|uri| uri.trim().is_empty()) {
-                    Err(v.reject(ValidationError::new(
+                    Err(v.reject(crate::validate::ValidationError::new(
                         "authn.jwks_uri",
                         "must not be blank when set",
                     )))
@@ -337,7 +337,7 @@ impl AuthnInput {
                     Ok(())
                 };
                 let signed = if algorithms.is_empty() {
-                    Err(v.reject(ValidationError::new(
+                    Err(v.reject(crate::validate::ValidationError::new(
                         "authn.algorithms",
                         "must contain at least one supported algorithm",
                     )))
