@@ -133,8 +133,8 @@ RUN if [ "${IMAGE_TESTS}" = unit ]; then \
 FROM cooked AS source
 ARG VCS_REF=unknown
 ARG RAILWAY_GIT_COMMIT_SHA
-# vergen emits VERGEN_GIT_SHA verbatim when the build has no .git (see
-# crates/config/build.rs); this is what the binary logs as app.commit.
+# crates/config/build.rs stamps VERGEN_GIT_SHA when the build has no .git;
+# this is what the binary logs as app.commit.
 ENV VERGEN_GIT_SHA=${RAILWAY_GIT_COMMIT_SHA:-${VCS_REF}}
 COPY . .
 

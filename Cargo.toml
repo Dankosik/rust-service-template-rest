@@ -251,8 +251,6 @@ aws-lc-rs = { version = "=1.19.0", default-features = false }
 httpdate = { version = "1.0.3", default-features = false }
 # template:end webhooks:workspace-webhooks-httpdate
 
-vergen-gitcl = { version = "10.0.3", default-features = false }
-
 axum-test = { version = "21.1.0", default-features = false }
 rstest = { version = "0.28.0", default-features = false }
 tempfile = { version = "3", default-features = false }
