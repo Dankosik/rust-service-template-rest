@@ -230,7 +230,7 @@ mod tests {
         let policy = health::RefreshPolicy {
             interval: Duration::from_secs(1),
             probe_budget: Duration::from_secs(1),
-            failure_threshold: 3,
+            failure_threshold: std::num::NonZeroU32::new(3).unwrap(),
         };
         let readiness = health::Readiness::new(Vec::new(), policy);
         readiness.refresh().await;
@@ -251,7 +251,7 @@ mod tests {
             background.tasks.join_next().now_or_never().is_none(),
             "reporting a failure must not end either process-lifetime task"
         );
-        let _ = readiness.stop_progress();
+        readiness.stop_progress();
         cancel.cancel();
         assert_eq!(
             background

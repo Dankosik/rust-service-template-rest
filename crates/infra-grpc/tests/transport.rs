@@ -390,7 +390,7 @@ impl Fixture {
             RefreshPolicy {
                 interval: Duration::from_mins(1),
                 probe_budget: Duration::from_secs(1),
-                failure_threshold: 1,
+                failure_threshold: std::num::NonZeroU32::MIN,
             },
         );
         if seed {
@@ -956,7 +956,7 @@ fn opening_app_waiting(
         RefreshPolicy {
             interval: Duration::from_mins(1),
             probe_budget: Duration::from_secs(1),
-            failure_threshold: 1,
+            failure_threshold: std::num::NonZeroU32::MIN,
         },
     );
     let mut services = described();

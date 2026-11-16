@@ -30,7 +30,7 @@ const HTTP_CONNECTIONS: u32 = 4;
 const POLICY: RefreshPolicy = RefreshPolicy {
     interval: Duration::from_secs(2),
     probe_budget: Duration::from_secs(4),
-    failure_threshold: 3,
+    failure_threshold: std::num::NonZeroU32::new(3).unwrap(),
 };
 
 // An independently written row makes a successful response distinguish fresh
