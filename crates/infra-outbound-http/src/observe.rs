@@ -40,9 +40,10 @@ pub(crate) struct Server {
 
 impl Server {
     pub(crate) fn new(origin: &Origin) -> Self {
+        let mut port = fmt::NumBuffer::new();
         Self {
             address: SharedString::from(origin.host_arc()),
-            port_label: SharedString::from(Arc::<str>::from(origin.port().to_string())),
+            port_label: SharedString::from(Arc::<str>::from(origin.port().format_into(&mut port))),
         }
     }
 }

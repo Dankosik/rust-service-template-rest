@@ -41,6 +41,7 @@ infra-webhooks = { workspace = true }
 infra-outbound-http = { workspace = true }
 # template:end outbound-http:worker-outbound-http-dependency
 infra-telemetry = { workspace = true }
+parking_lot = { workspace = true }
 service-config = { workspace = true }
 thiserror = { workspace = true }
 tikv-jemallocator = { workspace = true }

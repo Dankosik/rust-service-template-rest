@@ -40,7 +40,8 @@ impl FullPipeline {
             retired: CancellationToken::new(),
         });
         let shared = Arc::new(Shared {
-            state: Mutex::new(State::Connected(generation.clone())),
+            state: ArcSwap::from_pointee(State::Connected(generation.clone())),
+            write: Mutex::new(()),
             changed: Notify::new(),
             retirements: Counter::noop(),
         });

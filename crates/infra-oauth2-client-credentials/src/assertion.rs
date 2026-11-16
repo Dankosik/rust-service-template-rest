@@ -2,6 +2,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use secrecy::ExposeSecret as _;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 use crate::{AcquisitionError, Algorithm, ConfigurationError, Options};
 
@@ -65,7 +66,7 @@ impl Signer {
 
     /// Signs one fresh assertion. Never cached: RFC 7523bis requires a
     /// single-use `jti` and every shortlisted server enforces it.
-    pub(crate) fn sign(&self) -> Result<String, AcquisitionError> {
+    pub(crate) fn sign(&self) -> Result<Zeroizing<String>, AcquisitionError> {
         let elapsed = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| AcquisitionError::Assertion)?;
@@ -73,7 +74,7 @@ impl Signer {
             .map_err(|_| AcquisitionError::Assertion)
     }
 
-    fn sign_at(&self, elapsed: Duration) -> jsonwebtoken::errors::Result<String> {
+    fn sign_at(&self, elapsed: Duration) -> jsonwebtoken::errors::Result<Zeroizing<String>> {
         let issued = elapsed.as_secs().saturating_sub(ASSERTION_BACKDATE_SECS);
         let claims = AssertionClaims {
             iss: &self.client_id,
@@ -82,9 +83,9 @@ impl Signer {
             iat: issued,
             nbf: issued,
             exp: issued + ASSERTION_LIFETIME_SECS,
-            jti: Uuid::new_v4().to_string(),
+            jti: Uuid::new_v4(),
         };
-        jsonwebtoken::encode(&self.header, &claims, &self.key)
+        jsonwebtoken::encode(&self.header, &claims, &self.key).map(Zeroizing::new)
     }
 }
 
@@ -96,5 +97,5 @@ struct AssertionClaims<'a> {
     iat: u64,
     nbf: u64,
     exp: u64,
-    jti: String,
+    jti: Uuid,
 }

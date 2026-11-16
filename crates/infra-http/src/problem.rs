@@ -7,6 +7,7 @@ use std::time::Duration;
 use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE, RETRY_AFTER};
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
+use compact_str::CompactString;
 use serde::Serialize;
 pub use service_failure::Code;
 pub use service_failure::SANITIZED_DETAIL;
@@ -75,12 +76,12 @@ fn http_title(code: Code) -> &'static str {
 pub struct InvalidParam {
     /// An RFC 6901 JSON pointer for a request-body member, or a
     /// `location.name` pair such as `query.limit` for a parameter.
-    #[schema(example = "/slug")]
-    pub name: String,
+    #[schema(value_type = String, example = "/slug")]
+    pub name: CompactString,
     /// Why the contract rejected it. Names the constraint that failed and
     /// never echoes the submitted value.
-    #[schema(example = "maximum string length is 64")]
-    pub reason: String,
+    #[schema(value_type = String, example = "maximum string length is 64")]
+    pub reason: CompactString,
 }
 
 /// RFC 9457 problem details with a stable `code` from the closed failure catalog.
@@ -108,14 +109,14 @@ pub struct Problem {
     title: &'static str,
     #[schema(example = json!(http_status(Code::BadRequest).as_u16()))]
     status: u16,
-    #[schema(nullable = false, example = "invalid request framing")]
-    detail: Option<String>,
+    #[schema(value_type = Option<String>, nullable = false, example = "invalid request framing")]
+    detail: Option<CompactString>,
     /// URI reference identifying this occurrence when the service exposes
     /// one.
-    #[schema(nullable = false, format = "uri-reference")]
-    instance: Option<String>,
-    #[schema(nullable = false, example = "9ccecdfd-92c9-4665-a464-06f8ba73cd77")]
-    request_id: Option<String>,
+    #[schema(value_type = Option<String>, nullable = false, format = "uri-reference")]
+    instance: Option<CompactString>,
+    #[schema(value_type = Option<String>, nullable = false, example = "9ccecdfd-92c9-4665-a464-06f8ba73cd77")]
+    request_id: Option<CompactString>,
     /// Which parts of the request failed validation, following the RFC 9457
     /// extension-member example. Present only on a validation rejection,
     /// and never carrying the submitted value.
@@ -147,27 +148,37 @@ impl Problem {
     }
 
     #[must_use]
-    pub fn detail(mut self, detail: impl Into<String>) -> Self {
+    pub fn detail(mut self, detail: impl Into<CompactString>) -> Self {
         self.detail = Some(detail.into());
         self
     }
 
     #[must_use]
-    pub fn instance(mut self, instance: impl Into<String>) -> Self {
+    pub(crate) fn detail_static(mut self, detail: &'static str) -> Self {
+        self.detail = Some(CompactString::const_new(detail));
+        self
+    }
+
+    #[must_use]
+    pub fn instance(mut self, instance: impl Into<CompactString>) -> Self {
         self.instance = Some(instance.into());
         self
     }
 
     /// Filled by problem completion; callers do not thread the id.
     #[must_use]
-    fn with_request_id(mut self, id: String) -> Self {
-        self.request_id = Some(id);
+    fn with_request_id(mut self, id: &str) -> Self {
+        self.request_id = Some(CompactString::from(id));
         self
     }
 
     /// Adds a failed request part by name with the reason; never the submitted value.
     #[must_use]
-    pub fn invalid_param(mut self, name: impl Into<String>, reason: impl Into<String>) -> Self {
+    pub fn invalid_param(
+        mut self,
+        name: impl Into<CompactString>,
+        reason: impl Into<CompactString>,
+    ) -> Self {
         self.invalid_params.push(InvalidParam {
             name: name.into(),
             reason: reason.into(),
@@ -215,7 +226,7 @@ pub(crate) fn complete_problem(mut response: Response, request_id: Option<&str>)
     let Some(problem) = response.extensions_mut().remove::<Problem>() else {
         return response;
     };
-    let problem = problem.with_request_id(id.to_owned());
+    let problem = problem.with_request_id(id);
     // Keep the status and headers already set by the response's owner.
     *response.body_mut() = axum::Json(&problem).into_response().into_body();
     response.headers_mut().remove(CONTENT_LENGTH);
@@ -236,15 +247,16 @@ fn retry_after_value(after: Duration) -> HeaderValue {
 }
 
 pub(crate) fn body_too_large() -> Problem {
-    Problem::new(Code::RequestEntityTooLarge).detail("request body exceeds the configured limit")
+    Problem::new(Code::RequestEntityTooLarge)
+        .detail_static("request body exceeds the configured limit")
 }
 
 pub(crate) fn body_unreadable() -> Problem {
-    Problem::new(Code::BadRequest).detail("request body could not be read")
+    Problem::new(Code::BadRequest).detail_static("request body could not be read")
 }
 
 pub(crate) fn sanitized_problem() -> Problem {
-    Problem::new(Code::InternalServerError).detail(SANITIZED_DETAIL)
+    Problem::new(Code::InternalServerError).detail_static(SANITIZED_DETAIL)
 }
 
 pub(crate) fn sanitized_internal_error() -> Response {
@@ -355,7 +367,7 @@ mod tests {
     async fn renders_problem_json_with_optional_members() {
         let problem = Problem::new(Code::ServiceUnavailable)
             .detail(service_failure::AT_CAPACITY_DETAIL)
-            .with_request_id("req-1".to_owned())
+            .with_request_id("req-1")
             .retry_after(Duration::from_millis(200));
         let response = problem.into_response();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);

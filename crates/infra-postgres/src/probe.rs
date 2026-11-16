@@ -39,17 +39,21 @@ impl Probe for PostgresProbe {
 /// rejection carries its SQLSTATE, a bounded code that tells an
 /// authentication failure (`28P01`) from other rejections.
 fn probe_error(err: &sqlx::Error) -> ProbeError {
-    ProbeError::new(match err {
-        sqlx::Error::PoolTimedOut => "no connection available inside the acquire budget".to_owned(),
-        sqlx::Error::PoolClosed => "pool is closed".to_owned(),
-        sqlx::Error::Io(_) => "connection failed".to_owned(),
-        sqlx::Error::Tls(_) => "tls handshake failed".to_owned(),
+    match err {
+        sqlx::Error::PoolTimedOut => {
+            ProbeError::from_static("no connection available inside the acquire budget")
+        }
+        sqlx::Error::PoolClosed => ProbeError::from_static("pool is closed"),
+        sqlx::Error::Io(_) => ProbeError::from_static("connection failed"),
+        sqlx::Error::Tls(_) => ProbeError::from_static("tls handshake failed"),
         sqlx::Error::Database(_) => match crate::error::sqlstate(err) {
-            Some(code) => format!("server rejected the readiness check (SQLSTATE {code})"),
-            None => "server rejected the readiness check".to_owned(),
+            Some(code) => ProbeError::format(format_args!(
+                "server rejected the readiness check (SQLSTATE {code})"
+            )),
+            None => ProbeError::from_static("server rejected the readiness check"),
         },
-        _ => "readiness check failed".to_owned(),
-    })
+        _ => ProbeError::from_static("readiness check failed"),
+    }
 }
 
 #[cfg(test)]

@@ -1466,7 +1466,7 @@ async fn a_hung_password_read_is_never_joined_by_a_second() {
     loop {
         match file.read().await {
             Ok(password) => {
-                assert_eq!(password, "rotated");
+                assert_eq!(password.as_str(), "rotated");
                 break;
             }
             Err(error) => assert!(
