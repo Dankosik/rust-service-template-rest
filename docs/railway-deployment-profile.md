@@ -73,16 +73,20 @@ after `drainingSeconds`. On Railway, `overlapSeconds` (not
 propagation delay remains for platforms that continuously poll `/health/ready`.
 
 Keep `deploy.drainingSeconds` in `.railway/railway.ts` (and container/orchestrator
-stop grace elsewhere) at or above `http.grace_period` validated by
-`crates/service/src/bootstrap`, rerunning `ALLOW_HEAVY=1 make runtime-image-check`
+stop grace elsewhere) at least 5 s above `http.grace_period` validated by
+`crates/service/src/bootstrap`: a teardown that spends its whole budget exits at
+the end of the grace period, and an equal platform limit can `SIGKILL` it first,
+replacing exit code `3` with `137`. Rerun `ALLOW_HEAVY=1 make runtime-image-check`
 when lifecycle budgets move.
 
 ## Operator-owned configuration
 
-- **Set `APP__RUNTIME__WORKER_THREADS` explicitly** (e.g., `4` sized to actual
-  CPU quota): unthrottled Railway plans expose 24+ host vCPUs (`crates/config`
-  ignores `TOKIO_WORKER_THREADS` and reads cgroup parallelism when unset),
-  wasting idle threads and RSS on low-CPU services.
+- **Size `APP__RUNTIME__WORKER_THREADS` to the replica's CPU allocation:**
+  `.railway/railway.ts` sets `2`. Unset, `crates/config` reads cgroup
+  parallelism (it ignores `TOKIO_WORKER_THREADS`), and an unthrottled Railway
+  plan exposes 24 vCPUs. On two CPUs, 24 workers kept 65.4 MB resident 90 s
+  after a 20 s burst of 64 KiB JSON against 31.1 MB for two workers, with
+  1.2 MB between them before any load (DigitalOcean c-4, host THP `madvise`).
 - **Isolate diagnostics:** Keep the separate metrics listener unreachable from
   public networks (override its bind address to `[::]:<port>` if scraping over
   IPv6 private networking).
