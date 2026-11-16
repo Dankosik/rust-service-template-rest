@@ -654,8 +654,7 @@ jobs:
           cleanup: false
       # No BuildKit cache import or export: the lane runs for image, manifest
       # and lockfile changes, which change the cooked recipe anyway, and the
-      # exported stage never survived the repository's 10 GB cache budget
-      # (docs/ci-cd-production-ready.md, Pipeline time).
+      # exported stage never survived the repository's 10 GB cache budget.
       - name: Build runtime image
         env:
           VCS_REF: ${{ github.sha }}

@@ -17,7 +17,7 @@ Repository: https://github.com/Dankosik/rust-service-template-rest
 
 <!-- template:begin source-template:readme-template-overview -->
 [![CI](https://github.com/Dankosik/rust-service-template-rest/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Dankosik/rust-service-template-rest/actions/workflows/ci.yml)
-[![Rust 1.100](https://img.shields.io/badge/rust-1.100-orange.svg)](rust-toolchain.toml)
+[![Rust toolchain](https://img.shields.io/badge/rust-pinned-orange.svg)](rust-toolchain.toml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Coding agents now write most of a service's code, and they repeat whatever the
@@ -163,14 +163,17 @@ curl http://127.0.0.1:8080/health/ready
 
 ## Documentation
 
-The code is the source of truth: the committed OpenAPI document in
-`api/openapi/`, typed configuration in `crates/config`, and `make help`. The
-few documents kept are the ones code cannot show:
+Code is the source of truth: the committed OpenAPI document in `api/openapi/`,
+typed configuration in `crates/config`, SQL migrations in `migrations/`, CI
+workflows in `.github/workflows/`, and `make help`. Markdown records only
+policies, runbooks, and non-code decision reasons:
 
 [Architecture](docs/repo-architecture.md) ·
 [Production contract](docs/production-contract.md) ·
 [Validation](docs/validation-routing.md) ·
-[CI/CD](docs/ci-cd-production-ready.md)
+[CI/CD](docs/ci-cd-production-ready.md) ·
+[Deployment](docs/railway-deployment-profile.md) ·
+[Alerting](docs/alerting.md)
 
 ## Community
 

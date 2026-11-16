@@ -24,4 +24,4 @@ request future instead would release capacity on request cancellation while
 started blocking work continues. Use a named binding for the retained guard;
 a wildcard pattern is not an ownership-retention mechanism.
 
-Source: [Tokio blocking-task contract](https://github.com/tokio-rs/tokio/blob/tokio-1.54.1/tokio/src/task/blocking.rs).
+Source: [Tokio `spawn_blocking` contract](https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html).

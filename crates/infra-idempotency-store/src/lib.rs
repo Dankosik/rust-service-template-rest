@@ -1,7 +1,9 @@
 //! No other production crate names the table; the integration tests seed and
 //! corrupt it directly. A feature's persistence adapter reaches
 //! the transaction's connection through the PostgreSQL provider, which the
-//! seam never re-exports.
+//! seam never re-exports. `http_idempotency_records` intentionally omits a
+//! caller-identity index because verified caller strings are unbounded for a
+//! btree key and no runtime query filters by caller alone.
 
 mod attempt;
 mod maintenance;

@@ -143,7 +143,6 @@ REQUIRED_AUTHORITIES = frozenset(
         ".jscpd.json",
         "quality/architecture.json",
         "docs/repo-architecture.md",
-        "docs/validation/postgres.md",
         "docs/ci-cd-production-ready.md",
     }
 )
@@ -536,7 +535,6 @@ _PROTECTED_MANIFEST_FILES = frozenset(
         "docs/ci-cd-production-ready.md",
         "docs/railway-deployment-profile.md",
         "docs/production-contract.md",
-        "docs/validation/postgres.md",
         "make/source.mk",
         "scripts/ci/template-init-check.sh",
         "scripts/ci/initializer-matrix.py",

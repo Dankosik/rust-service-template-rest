@@ -1,10 +1,10 @@
 # Object storage decisions
 
 <!-- template:begin object-storage:docs-object-storage-decisions -->
-`crates/infra-object-storage`, `crates/config/src/object_storage.rs`, and
-`Cargo.toml` own the client API, failure mapping, timeouts, and exact SDK pins
-(moved together in one reviewed change with the pinned `BehaviorVersion` in code
-and [the HTTP client patch](../../vendor/aws-smithy-http-client/PATCHES.md)).
+`crates/infra-object-storage`, `crates/config`, and `Cargo.toml` own the client
+API, failure mapping, timeouts, and exact SDK pins (moved together in one
+reviewed change with the pinned `BehaviorVersion` in code and
+[the HTTP client patch](../../vendor/aws-smithy-http-client/PATCHES.md)).
 This record keeps only rejected alternatives, provider divergences, and reopen
 conditions.
 

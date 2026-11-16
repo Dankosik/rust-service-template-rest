@@ -8,7 +8,6 @@
     "scripts/tests/template-profile-projections.py",
     "scripts/tests/template-init-safety.py",
     "scripts/tests/template-sync-canary.py",
-    "specs/",
     "docs/assets/banner.png"
   ],
   "source-template": {

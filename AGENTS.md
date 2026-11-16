@@ -1,11 +1,16 @@
 # AGENTS.md
 
-When repository documentation and existing code disagree, follow the existing
-code's conventions and report every inconsistency in your final reply.
+Code, `Cargo.toml`/`Cargo.lock`, SQL migrations, committed schemas (`api/`),
+`make/template.mk`, and CI workflows are the sole source of truth for
+repository facts. Markdown owns only [Authority](#authority) boundaries,
+accepted task artifacts, [Rust Change Surface](#rust-change-surface) rules,
+operational runbooks, and non-code decision reasons (`Why` / `Reopen if`).
 
-[Authority](#authority) boundaries, an accepted task artifact's requirements,
-and [Rust Change Surface](#rust-change-surface) rules still bind; report those
-disagreements too.
+When Markdown restates a code fact that disagrees with existing code, follow
+the code and—when that file is within writable scope—delete or update the stale
+prose in the same change. Report a disagreement in your final reply only when a
+change conflicts with [Authority](#authority), an accepted task artifact, an
+explicit reopen condition on a rejected choice, or [Rust Change Surface](#rust-change-surface).
 
 Own the accepted outcome through the applicable workflow, review, repair, and
 acceptance criteria until complete or a required input or capability is
@@ -142,7 +147,7 @@ Select commands from [`make/template.mk`](make/template.mk):
 | --- | --- |
 | One crate's behavior or tests | `make build` and `make test-package PKG=<crate>`, or `make test-changed PKGS="<crates>"` using `scripts/ci/affected-crates.sh` |
 | Several crates, `Cargo.toml`, `Cargo.lock`, or `rust-toolchain.toml` | `make build` and `make test` |
-| Observed database behavior (transaction, lock, commit, migration, or readiness) | Load [PostgreSQL validation](docs/validation/postgres.md) (when retained) and run its required real-database proof |
+| Observed database behavior (transaction, lock, commit, migration, or readiness) | `ALLOW_HEAVY=1 make test-integration-db` (plus `make migration-check` / `ALLOW_HEAVY=1 make migration-validate` on migration edits) when PostgreSQL is retained |
 | Formatting or lint configuration | `make fmt-check` and `make lint` |
 | Documentation or agent instructions | Static consistency review; `make docs-check` for relative links/fragments; `make check-instructions` for skills, roles, and generated carriers |
 | Mixed or unclear surfaces | `make plan` shows the selected route; `make verify` runs it and records a receipt |
@@ -202,7 +207,7 @@ explicit verification and phase-only boundaries.
 | Drafting a handoff prompt for another session, phase, or repository entry skill | [Prompt Composition](docs/prompt-composition.md) |
 | Operating a repository role carrier, multi-phase delegation tree, or durable Goal, or selecting harness model/effort tiers | [Agent Harness](docs/agent-harness.md) |
 | Build or container compile time slows iteration, or workstation build caching is configured | [Build Speed](docs/build-speed.md) |
-| Specialized security, container, delivery, OpenAPI, or quality verification beyond `make plan` / `make verify` | [Validation Routing](docs/validation-routing.md) and the matching leaf under `docs/validation/` |
+| Specialized security, container, delivery, OpenAPI, database, or quality verification beyond `make plan` / `make verify` | [Validation Routing](docs/validation-routing.md) |
 | A CI job, tool pin, Dockerfile, image check, or publication step changes what may ship | [CI/CD Production Readiness](docs/ci-cd-production-ready.md); `rust-delivery-platform` owns the method |
 | An open `main-red` issue is the task, or names a change you own | [Red main](docs/ci-cd-production-ready.md#red-main) |
 | Deployment policy for a derived service | [Railway Deployment Profile](docs/railway-deployment-profile.md) |
