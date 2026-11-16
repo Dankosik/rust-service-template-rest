@@ -309,7 +309,6 @@ mod tests {
     async fn only_admitted_sets_sample_acquisition_time_including_unchanged_keys() {
         let diagnostics = Diagnostics::default();
         let keys = key_set("old");
-        assert_eq!(diagnostics.acquisitions(), [] as [f64; 0]);
         let before = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()

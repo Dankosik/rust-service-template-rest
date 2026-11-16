@@ -332,7 +332,7 @@ impl Window {
     const fn admits(self, now: u64) -> Result<(), Reason> {
         if shared_rules::rfc7519::is_expired(self.expires_at, now, LEEWAY_SECONDS) {
             Err(Reason::Expired)
-        } else if self.valid_from > now.saturating_add(LEEWAY_SECONDS) {
+        } else if shared_rules::rfc7519::is_not_yet_valid(self.valid_from, now, LEEWAY_SECONDS) {
             Err(Reason::NotYetValid)
         } else {
             Ok(())

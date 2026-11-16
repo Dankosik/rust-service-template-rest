@@ -387,7 +387,9 @@ fn check_lifetime(expiry: u64, not_before: Option<u64>, now: u64) -> Result<(), 
 }
 
 fn not_yet_valid(not_before: Option<u64>, now: u64) -> bool {
-    not_before.is_some_and(|not_before| not_before > now.saturating_add(LEEWAY_SECONDS))
+    not_before.is_some_and(|not_before| {
+        shared_rules::rfc7519::is_not_yet_valid(not_before, now, LEEWAY_SECONDS)
+    })
 }
 
 fn require_identity(
@@ -404,7 +406,6 @@ fn non_empty(value: Option<Cow<'_, str>>) -> Option<String> {
     value.filter(|value| !value.is_empty()).map(Cow::into_owned)
 }
 
-#[derive(Eq, PartialEq)]
 pub(crate) struct Scopes(Vec<String>);
 
 impl Scopes {
@@ -658,8 +659,8 @@ mod tests {
         assert!(verify(serde_json::json!({})).is_ok());
         for missing in ["sub", "client_id", "jti", "iat"] {
             assert_eq!(
-                verify(serde_json::json!({ missing: null })),
-                Err(VerificationReason::MissingClaim),
+                verify(serde_json::json!({ missing: null })).err(),
+                Some(VerificationReason::MissingClaim),
                 "{missing}"
             );
         }

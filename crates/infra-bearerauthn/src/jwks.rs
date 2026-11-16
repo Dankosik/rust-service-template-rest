@@ -411,6 +411,18 @@ pub(crate) mod tests {
         EncodingKey::from_ec_der(&rcgen::KeyPair::generate().unwrap().serialize_der())
     }
 
+    /// An Ed25519 signing key and its public JWK. jsonwebtoken derives a JWK
+    /// only from a 48-byte PKCS #8 v1 key, so the JWK is written here.
+    pub(crate) fn ed_signing(kid: &str) -> (EncodingKey, serde_json::Value) {
+        use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair as _};
+
+        let pair = Ed25519KeyPair::generate().unwrap();
+        let signing = EncodingKey::from_ed_der(pair.to_pkcs8v1().unwrap().as_ref());
+        let x = URL_SAFE_NO_PAD.encode(pair.public_key().as_ref());
+        let jwk = serde_json::json!({"kty": "OKP", "crv": "Ed25519", "kid": kid, "x": x});
+        (signing, jwk)
+    }
+
     pub(crate) fn jwk(
         signing: &EncodingKey,
         algorithm: Algorithm,
@@ -470,6 +482,51 @@ pub(crate) mod tests {
                 parse_key_set(&bytes, &[JwtAlgorithm::Rs256]).is_ok(),
                 admitted,
                 "{operations}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_a_key_published_for_signatures_is_admitted() {
+        ensure_crypto_provider();
+        for (key_use, admitted) in [(None, true), (Some("sig"), true), (Some("enc"), false)] {
+            let mut key = jwk(&rsa_signing(), Algorithm::RS256, Some("k"), true);
+            let entry = key.as_object_mut().unwrap();
+            entry.remove("use");
+            if let Some(key_use) = key_use {
+                entry.insert("use".to_owned(), key_use.into());
+            }
+            let bytes = serde_json::to_vec(&serde_json::json!({ "keys": [key] })).unwrap();
+            assert_eq!(
+                parse_key_set(&bytes, &[JwtAlgorithm::Rs256]).is_ok(),
+                admitted,
+                "{key_use:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_rsa_modulus_outside_the_verifier_bounds_is_not_admitted() {
+        ensure_crypto_provider();
+        for (bits, admitted) in [
+            (1024_usize, false),
+            (2047, false),
+            (2048, true),
+            (8192, true),
+            (8200, false),
+        ] {
+            // The most significant byte fixes the bit length; the low bit keeps it odd.
+            let mut modulus = vec![0xff_u8; bits.div_ceil(8)];
+            modulus[0] = 0xff >> (modulus.len() * 8 - bits);
+            let key = serde_json::json!({
+                "kty": "RSA", "kid": "k", "alg": "RS256",
+                "n": URL_SAFE_NO_PAD.encode(&modulus), "e": "AQAB",
+            });
+            let bytes = serde_json::to_vec(&serde_json::json!({ "keys": [key] })).unwrap();
+            assert_eq!(
+                parse_key_set(&bytes, &[JwtAlgorithm::Rs256]).is_ok(),
+                admitted,
+                "{bits} bits"
             );
         }
     }

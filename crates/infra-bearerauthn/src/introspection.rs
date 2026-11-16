@@ -325,19 +325,14 @@ impl Expiry<TokenDigest, VerifiedIntrospection> for Retention {
 
 /// A fresh result can be delivered to its waiters even when its retention is zero.
 fn retention(principal: &Principal, ttl: Duration, now: SystemTime) -> Duration {
-    if now.duration_since(UNIX_EPOCH).is_err()
-        || principal.payload_len() > MAX_RETAINED_PAYLOAD_BYTES
-    {
-        return Duration::ZERO;
+    match now.duration_since(UNIX_EPOCH) {
+        Ok(now) if principal.payload_len() <= MAX_RETAINED_PAYLOAD_BYTES => {
+            Duration::from_secs(principal.expires_at())
+                .saturating_sub(now)
+                .min(ttl)
+        }
+        _ => Duration::ZERO,
     }
-    // An expiry beyond what `SystemTime` represents is simply far away.
-    let Some(token_expiry) = UNIX_EPOCH.checked_add(Duration::from_secs(principal.expires_at()))
-    else {
-        return ttl;
-    };
-    token_expiry
-        .duration_since(now)
-        .map_or(Duration::ZERO, |remaining| remaining.min(ttl))
 }
 
 #[cfg(test)]
@@ -638,8 +633,8 @@ mod tests {
             cancelled.cancel();
             for context in [OperationContext::with_timeout(Duration::ZERO), cancelled] {
                 assert_eq!(
-                    verifier.verify_with_context(&token, &context).await,
-                    Err(Failure::Unavailable)
+                    verifier.verify_with_context(&token, &context).await.err(),
+                    Some(Failure::Unavailable)
                 );
             }
         }
@@ -649,8 +644,9 @@ mod tests {
         assert_eq!(
             verifier
                 .verify_with_context(&token, &OperationContext::with_timeout(Duration::ZERO))
-                .await,
-            Err(Failure::Unavailable)
+                .await
+                .err(),
+            Some(Failure::Unavailable)
         );
         assert_eq!(fixture.calls(), 1);
         fixture.finish().await;
@@ -669,8 +665,9 @@ mod tests {
             assert_eq!(
                 verifier
                     .authenticate_with_context(authorization, crate::Transport::Http, &context)
-                    .await,
-                Err(Failure::Unavailable)
+                    .await
+                    .err(),
+                Some(Failure::Unavailable)
             );
         }
         assert_eq!(fixture.calls(), 0);
@@ -715,7 +712,7 @@ mod tests {
         }
         tokio::time::pause();
         tokio::time::advance(context.remaining().unwrap()).await;
-        assert_eq!(call.as_mut().await, Err(Failure::Unavailable));
+        assert_eq!(call.as_mut().await.err(), Some(Failure::Unavailable));
         tokio::time::resume();
         drop(call);
         gate.add_permits(1);
@@ -764,13 +761,16 @@ mod tests {
         assert_eq!(principal.scopes(), ["read", "write"]);
         let permit = cached.permits.acquire().await.unwrap();
         assert_eq!(
-            verify(&Arc::clone(&cached), b"Bearer first").await.unwrap(),
-            principal
+            verify(&Arc::clone(&cached), b"Bearer first")
+                .await
+                .unwrap()
+                .fields(),
+            principal.fields()
         );
         assert_eq!(fixture.calls(), 3);
         assert_eq!(
-            verify(&cached, b"Bearer second").await,
-            Err(Failure::Unavailable)
+            verify(&cached, b"Bearer second").await.err(),
+            Some(Failure::Unavailable)
         );
         drop(permit);
         verify(&cached, b"Bearer second").await.unwrap();
@@ -797,8 +797,8 @@ mod tests {
         let changed_context =
             IntrospectionVerifier::try_new(options, fixture.provider.clone()).unwrap();
         assert_eq!(
-            verify(&changed_context, b"Bearer first").await,
-            Err(Failure::Invalid)
+            verify(&changed_context, b"Bearer first").await.err(),
+            Some(Failure::Invalid)
         );
         assert_eq!(fixture.calls(), 6);
         fixture.finish().await;
@@ -818,8 +818,8 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(1000)).await;
         for _ in 0..2 {
             assert_eq!(
-                verify(&verifier, b"Bearer first").await,
-                Err(Failure::Unavailable)
+                verify(&verifier, b"Bearer first").await.err(),
+                Some(Failure::Unavailable)
             );
         }
         assert_eq!(fixture.calls(), 3);
@@ -886,8 +886,8 @@ mod tests {
             let mut second = Box::pin(verify(&verifier, b"Bearer shared"));
             assert!(futures_util::poll!(second.as_mut()).is_pending());
             assert_eq!(
-                verify(&verifier, b"Bearer distinct").await,
-                Err(Failure::Unavailable)
+                verify(&verifier, b"Bearer distinct").await.err(),
+                Some(Failure::Unavailable)
             );
             gate.add_permits(1);
             let (first, second) = tokio::time::timeout(Duration::from_secs(5), async {
@@ -896,7 +896,10 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(first.as_ref().err().copied(), expected);
-            assert_eq!(first, second);
+            assert_eq!(
+                first.as_ref().map(crate::Principal::fields),
+                second.as_ref().map(crate::Principal::fields)
+            );
             assert_eq!(fixture.calls(), before + 1);
             *fixture.gate.lock().unwrap() = None;
             assert_eq!(verify(&verifier, b"Bearer shared").await.err(), expected);
@@ -933,7 +936,7 @@ mod tests {
         let mut survivor = Box::pin(verifier.verify(&token));
         assert!(futures_util::poll!(survivor.as_mut()).is_pending());
         context.cancel();
-        assert_eq!(leader.as_mut().await, Err(Failure::Unavailable));
+        assert_eq!(leader.as_mut().await.err(), Some(Failure::Unavailable));
         drop(leader);
         gate.add_permits(1);
         tokio::time::timeout(Duration::from_secs(5), survivor)
@@ -984,7 +987,7 @@ mod tests {
                     result = authentication => panic!("transport must stop first: {result:?}"),
                 }
             } else {
-                assert_eq!(authentication.await, Err(Failure::Unavailable));
+                assert_eq!(authentication.await.err(), Some(Failure::Unavailable));
             }
             tokio::time::resume();
 
@@ -1045,8 +1048,9 @@ mod tests {
                 assert_eq!(
                     tokio::time::timeout(Duration::from_millis(100), verification)
                         .await
-                        .unwrap(),
-                    Err(Failure::Unavailable)
+                        .unwrap()
+                        .err(),
+                    Some(Failure::Unavailable)
                 );
                 tokio::time::resume();
                 let samples = diagnostics.take_histograms();
@@ -1102,7 +1106,7 @@ mod tests {
         let mut waiter = Box::pin(verifier.verify_with_context(&token, &context));
         assert!(futures_util::poll!(waiter.as_mut()).is_pending());
         tokio::time::advance(Duration::from_millis(11)).await;
-        assert_eq!(waiter.as_mut().await, Err(Failure::Unavailable));
+        assert_eq!(waiter.as_mut().await.err(), Some(Failure::Unavailable));
         tokio::time::resume();
         drop(waiter);
         gate.add_permits(1);
