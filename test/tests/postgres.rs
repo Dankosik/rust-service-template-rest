@@ -20,6 +20,7 @@ use std::net::SocketAddr;
 use std::num::NonZeroU32;
 use std::time::{Duration, Instant};
 
+use backon::{ConstantBuilder, Retryable};
 use commit_proxy::{CommitProxy, Fault, ReadyBoundary};
 use health::Probe;
 use infra_postgres::{
@@ -27,12 +28,13 @@ use infra_postgres::{
     PostgresProbe, SessionSettingsSource, TxError, TxOptions, in_tx, in_tx_with,
     refresh_password_periodically, sqlstate,
 };
-use integration_tests::{DATABASE_URL, dsn_for, fixture_dir, pooler_dsn_for, url_for};
+use integration_tests::{DATABASE_URL, dsn_for, fixture_dir, poll_until, pooler_dsn_for, url_for};
 use migrate::{HistoryError, MIGRATOR, RunError, RunOptions};
 use sqlx::migrate::{Migrate, MigrateError, Migrator};
 use sqlx::{AssertSqlSafe, Connection, Executor};
 use tokio_util::sync::CancellationToken;
 use tracing::instrument::WithSubscriber;
+use tracing_subscriber::layer::SubscriberExt as _;
 
 const APP: &str = "integration-tests";
 
@@ -42,33 +44,38 @@ type EventFields = std::collections::BTreeMap<String, String>;
 struct PoolEvents(std::sync::Arc<std::sync::Mutex<Vec<EventFields>>>);
 
 impl PoolEvents {
+    fn subscriber(&self) -> tracing::Dispatch {
+        tracing::Dispatch::new(tracing_subscriber::Registry::default().with(self.clone()))
+    }
+
     fn take(&self) -> Vec<EventFields> {
         std::mem::take(&mut *self.0.lock().unwrap())
     }
 }
 
-impl tracing::Subscriber for PoolEvents {
-    fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
-        matches!(metadata.target(), "infra_postgres::observe" | "health")
-    }
-    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-        tracing::span::Id::from_u64(1)
-    }
-    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-    fn event(&self, event: &tracing::Event<'_>) {
-        struct Fields(EventFields);
-        impl tracing::field::Visit for Fields {
-            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-                self.0.insert(field.name().to_owned(), format!("{value:?}"));
-            }
+impl<S> tracing_subscriber::Layer<S> for PoolEvents
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _context: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        if !matches!(
+            event.metadata().target(),
+            "infra_postgres::observe" | "health"
+        ) {
+            return;
         }
-        let mut fields = Fields(EventFields::new());
-        event.record(&mut fields);
-        self.0.lock().unwrap().push(fields.0);
+        let mut fields = EventFields::new();
+        event.record(
+            &mut |field: &tracing::field::Field, value: &dyn std::fmt::Debug| {
+                fields.insert(field.name().to_owned(), format!("{value:?}"));
+            },
+        );
+        self.0.lock().unwrap().push(fields);
     }
-    fn enter(&self, _: &tracing::span::Id) {}
-    fn exit(&self, _: &tracing::span::Id) {}
 }
 
 async fn template_pool(dsn: &Dsn, max_connections: u32) -> PgPool {
@@ -184,25 +191,25 @@ async fn proxied_pool(pool: &PgPool, max_connections: u32) -> (CommitProxy, PgPo
 const RETURN_OBSERVATION_BUDGET: Duration = Duration::from_secs(7);
 
 async fn wait_for_idle(pool: &PgPool) {
-    tokio::time::timeout(RETURN_OBSERVATION_BUDGET, async {
-        while pool.num_idle() == 0 {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("a healthy return reaches the idle queue");
+    poll_until(
+        "a healthy return reaches the idle queue",
+        RETURN_OBSERVATION_BUDGET,
+        Duration::from_millis(10),
+        async || (pool.num_idle() > 0).then_some(()),
+    )
+    .await;
 }
 
 /// Observe local capacity before attempting replacement work. A three-second
 /// acquire may legitimately time out during the five-second native cleanup.
 async fn wait_for_slot_reclamation(pool: &PgPool) {
-    tokio::time::timeout(RETURN_OBSERVATION_BUDGET, async {
-        while pool.size() != 0 {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the silent connection releases its local pool slot without a reply");
+    poll_until(
+        "the silent connection releases its local pool slot without a reply",
+        RETURN_OBSERVATION_BUDGET,
+        Duration::from_millis(10),
+        async || (pool.size() == 0).then_some(()),
+    )
+    .await;
 }
 
 async fn show(pool: &PgPool, setting: &'static str) -> String {
@@ -771,10 +778,6 @@ async fn through_a_pooler_the_database_carries_the_budgets_when_nothing_is_publi
 }
 
 #[sqlx::test(migrations = false)]
-#[expect(
-    clippy::disallowed_methods,
-    reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
-)]
 async fn a_rotated_password_file_reaches_the_connections_opened_after_it(pool: PgPool) {
     let dsn = dsn_for(&pool).await;
     // Roles are cluster-wide; the tail of the per-test database name keeps this
@@ -792,7 +795,7 @@ async fn a_rotated_password_file_reaches_the_connections_opened_after_it(pool: P
     .unwrap();
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("password");
-    std::fs::write(&file, "first\n").unwrap();
+    tokio::fs::write(&file, "first\n").await.unwrap();
     let mut url = url_for(&pool, DATABASE_URL).await;
     url.set_username(&role).unwrap();
     url.set_password(None).unwrap();
@@ -804,7 +807,7 @@ async fn a_rotated_password_file_reaches_the_connections_opened_after_it(pool: P
         file.clone(),
         cancel.clone(),
     ));
-    let current_user = async || {
+    let current_user = || async {
         sqlx::query_scalar::<_, String>("SELECT current_user")
             .fetch_one(&ours)
             .await
@@ -827,18 +830,21 @@ async fn a_rotated_password_file_reaches_the_connections_opened_after_it(pool: P
     let refused = current_user().await.unwrap_err();
     assert_eq!(sqlstate(&refused).as_deref(), Some("28P01"), "{refused}");
 
-    std::fs::write(&file, "second\n").unwrap();
-    let deadline = Instant::now() + PASSWORD_REFRESH_INTERVAL + Duration::from_secs(5);
-    let user = loop {
-        match current_user().await {
-            Ok(user) => break user,
-            Err(err) if Instant::now() < deadline => {
-                assert_eq!(sqlstate(&err).as_deref(), Some("28P01"), "{err}");
-                tokio::time::sleep(Duration::from_millis(200)).await;
-            }
-            Err(err) => panic!("the pool never picked up the rotated password: {err}"),
-        }
-    };
+    tokio::fs::write(&file, "second\n").await.unwrap();
+    let retry_delay = Duration::from_millis(200);
+    let max_times = usize::try_from(
+        (PASSWORD_REFRESH_INTERVAL + Duration::from_secs(5)).as_millis() / retry_delay.as_millis(),
+    )
+    .unwrap();
+    let user = (|| async { current_user().await })
+        .retry(
+            ConstantBuilder::default()
+                .with_delay(retry_delay)
+                .with_max_times(max_times),
+        )
+        .when(|err| sqlstate(err).as_deref() == Some("28P01"))
+        .await
+        .unwrap_or_else(|err| panic!("the pool never picked up the rotated password: {err}"));
     assert_eq!(user, role);
 
     cancel.cancel();
@@ -962,7 +968,7 @@ async fn acquisition_diagnostics_cover_transactions_history_and_readiness(pool: 
             "pool closure is not an acquire timeout"
         );
     }
-    .with_subscriber(events.clone())
+    .with_subscriber(events.subscriber())
     .await;
 }
 
@@ -992,20 +998,19 @@ async fn responsive_saturation_recovers_work_and_readiness_under_current_policy(
     let cancel = CancellationToken::new();
     let observe = async {
         let saturated = Instant::now();
-        tokio::time::timeout(Duration::from_secs(20), async {
-            while reader.verdict().is_ok() {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .expect("current policy withdraws readiness after bounded saturation");
-        let verdict = reader.verdict();
+        let verdict = poll_until(
+            "current policy withdraws readiness after bounded saturation",
+            Duration::from_secs(20),
+            Duration::from_millis(20),
+            async || reader.verdict().err(),
+        )
+        .await;
         std::assert_matches!(
             verdict,
-            Err(health::NotReady::ProbeFailed {
+            health::NotReady::ProbeFailed {
                 probe: "postgres",
                 ..
-            }),
+            },
             "{verdict:?}"
         );
         // The server still answers through the held slot: this is pool
@@ -1035,16 +1040,13 @@ async fn responsive_saturation_recovers_work_and_readiness_under_current_policy(
         .await
         .unwrap();
         assert_eq!(value, 42);
-        tokio::time::timeout(
+        poll_until(
+            "next successful refresh restores readiness",
             policy.interval + policy.probe_budget + Duration::from_secs(1),
-            async {
-                while reader.verdict().is_err() {
-                    tokio::time::sleep(Duration::from_millis(20)).await;
-                }
-            },
+            Duration::from_millis(20),
+            async || reader.verdict().ok(),
         )
-        .await
-        .expect("next successful refresh restores readiness");
+        .await;
         let recovery = events.take();
         assert!(
             recovery
@@ -1061,7 +1063,7 @@ async fn responsive_saturation_recovers_work_and_readiness_under_current_policy(
     async {
         tokio::join!(readiness.refresh_until(cancel.clone()), observe);
     }
-    .with_subscriber(events.clone())
+    .with_subscriber(events.subscriber())
     .await;
     ours.close().await;
 }

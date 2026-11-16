@@ -388,35 +388,21 @@ fn only_directives_without_span_filters_or_empty_parts_become_targets() {
 
 // Process isolation gives the cumulative SDK observations a fresh lifetime;
 // another exporter fixture must not supply the numeric facts asserted here.
-#[expect(
-    clippy::disallowed_methods,
-    reason = "synchronous fixture polling waits for owned child or thread completion within its existing timeout"
-)]
 fn in_diagnostic_child() -> bool {
     const CHILD: &str = "TELEMETRY_DIAGNOSTIC_TEST_CHILD";
     if std::env::var_os(CHILD).is_none() {
-        let mut child =
-            std::process::Command::new(std::env::current_exe().expect("test executable"))
-                .args([
-                    "--exact",
-                    "logging::tests::sdk_diagnostics_keep_numeric_facts_without_raw_output",
-                    "--no-capture",
-                ])
-                .env(CHILD, "1")
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn()
-                .expect("run the isolated diagnostic observation");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-        while child.try_wait().expect("poll diagnostic child").is_none() {
-            if std::time::Instant::now() >= deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                panic!("diagnostic child exceeded its bounded completion wait");
-            }
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-        let result = child.wait_with_output().expect("collect diagnostic child");
+        let child = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "logging::tests::sdk_diagnostics_keep_numeric_facts_without_raw_output",
+                "--no-capture",
+            ])
+            .env(CHILD, "1")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("run the isolated diagnostic observation");
+        let result = super::wait_for_child(child, std::time::Duration::from_secs(20));
         assert!(
             result.status.success(),
             "child output: {} {}",
@@ -463,6 +449,9 @@ fn emit_denied_diagnostics() {
 
 #[test]
 fn sdk_diagnostics_keep_numeric_facts_without_raw_output() {
+    use metrics::Key;
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
     if !in_diagnostic_child() {
         return;
     }
@@ -487,8 +476,8 @@ fn sdk_diagnostics_keep_numeric_facts_without_raw_output() {
         }
     }
 
-    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-    let handle = recorder.handle();
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
     metrics::with_local_recorder(&recorder, || {
         let (dispatch, guard, _) = capture(LoggingFormat::Json, "off", None);
         tracing::dispatcher::with_default(&dispatch, || {
@@ -496,17 +485,15 @@ fn sdk_diagnostics_keep_numeric_facts_without_raw_output() {
             tracing::warn!(name: "BatchSpanProcessor.SpansDropped", target: "opentelemetry_sdk", dropped_span_count = ?NeverFormat);
         });
         publish_observations();
-        let absent = handle.render();
+        let absent = snapshotter.snapshot().into_vec();
         assert!(
-            !absent
-                .lines()
-                .any(|line| line.starts_with("telemetry_sdk_queue_dropped_spans "))
+            absent.iter().all(
+                |(composite, ..)| composite.key().name() != "telemetry_sdk_queue_dropped_spans"
+            )
         );
-        assert!(
-            !absent
-                .lines()
-                .any(|line| line.starts_with("telemetry_sdk_reported_rejected_spans_total "))
-        );
+        assert!(absent.iter().all(|(composite, ..)| {
+            composite.key().name() != "telemetry_sdk_reported_rejected_spans_total"
+        }));
         tracing::dispatcher::with_default(&dispatch, || {
             tracing::debug!(name: "BatchSpanProcessor.SpanDroppingStarted", target: "opentelemetry_sdk", message = "SDK_SECRET_SENTINEL");
             for _ in 0..2 {
@@ -518,25 +505,37 @@ fn sdk_diagnostics_keep_numeric_facts_without_raw_output() {
         });
         publish_observations();
         publish_observations();
-        let observed = handle.render();
-        assert!(
-            observed.contains("telemetry_sdk_queue_dropped_spans 19\n"),
-            "{observed}"
-        );
-        assert!(
-            observed.contains("telemetry_sdk_reported_rejected_spans_total 3\n"),
-            "{observed}"
-        );
-        assert!(
-            observed
-                .contains("telemetry_sdk_diagnostics_total{event=\"response_parse_error\"} 8\n"),
-            "{observed}"
-        );
-        assert!(
-            observed.contains("telemetry_sdk_diagnostics_total{event=\"queue_spans_dropped\"} 3\n"),
-            "{observed}"
-        );
-        assert!(!observed.contains("SDK_SECRET_SENTINEL"));
+        let observed = snapshotter.snapshot().into_vec();
+        for (target, expected) in [
+            (
+                Key::from_name("telemetry_sdk_queue_dropped_spans"),
+                DebugValue::Gauge(19.0.into()),
+            ),
+            (
+                Key::from_name("telemetry_sdk_reported_rejected_spans_total"),
+                DebugValue::Counter(3),
+            ),
+            (
+                Key::from_parts(
+                    "telemetry_sdk_diagnostics_total",
+                    &[("event", "response_parse_error")],
+                ),
+                DebugValue::Counter(8),
+            ),
+            (
+                Key::from_parts(
+                    "telemetry_sdk_diagnostics_total",
+                    &[("event", "queue_spans_dropped")],
+                ),
+                DebugValue::Counter(3),
+            ),
+        ] {
+            let actual = observed
+                .iter()
+                .find_map(|(composite, _, _, value)| (composite.key() == &target).then_some(value));
+            assert_eq!(actual, Some(&expected), "{target}: {observed:?}");
+        }
+        assert!(!format!("{observed:?}").contains("SDK_SECRET_SENTINEL"));
         drain(guard);
     });
 }

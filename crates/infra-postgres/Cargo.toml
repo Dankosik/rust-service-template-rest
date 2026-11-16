@@ -36,5 +36,6 @@ url = { workspace = true }
 
 [dev-dependencies]
 metrics-exporter-prometheus = { workspace = true }
+metrics-util = { workspace = true, features = ["debugging"] }
 tempfile = { workspace = true, features = ["getrandom"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }

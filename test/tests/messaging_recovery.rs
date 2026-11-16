@@ -327,16 +327,22 @@ async fn failed_mutation_and_caller_rollback_leave_no_receipt(pool: PgPool) {
 }
 
 async fn waiting_for_arbitration(pool: &PgPool) {
-    timeout(WAIT, async {
-        loop {
+    integration_tests::poll_until(
+        "the competing INSERT waits for the original transaction",
+        WAIT,
+        Duration::from_millis(10),
+        async || {
             let waiting: bool = sqlx::query_scalar(
                 "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database() \
                  AND application_name = 'messaging-recovery-test' AND wait_event = 'transactionid')",
-            ).fetch_one(pool).await.unwrap();
-            if waiting { return; }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    }).await.expect("the competing INSERT waits for the original transaction");
+            )
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            waiting.then_some(())
+        },
+    )
+    .await;
 }
 
 #[sqlx::test]

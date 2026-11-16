@@ -1,12 +1,12 @@
 use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::num::{NonZeroU32, NonZeroUsize};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use axum::body::Bytes;
+use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::{FromRef, State};
 use axum::http::header::{
     CONTENT_DISPOSITION, CONTENT_ENCODING, CONTENT_LANGUAGE, ETAG, LAST_MODIFIED, LOCATION,
@@ -31,15 +31,13 @@ use infra_http::{Code, HardenOptions, Problem, REQUEST_ID_HEADER, VerifiedPrinci
 use infra_idempotency_store::Store;
 use infra_postgres::PgPool;
 use integration_tests::dsn_for;
-use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusRecorder};
+use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::Executor as _;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::{JoinError, JoinSet};
-use tokio::time::Instant;
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::rustls::crypto::aws_lc_rs;
@@ -441,61 +439,46 @@ async fn serve(
 async fn answer(
     acceptor: &TlsAcceptor,
     socket: TcpStream,
-    requests: &AtomicUsize,
-    held: &tokio::sync::Notify,
+    requests: &Arc<AtomicUsize>,
+    held: &Arc<tokio::sync::Notify>,
 ) {
-    let Ok(mut stream) = acceptor.accept(socket).await else {
+    let Ok(stream) = acceptor.accept(socket).await else {
         return;
     };
-    let Some(token) = read_token(&mut stream).await else {
-        return;
-    };
-    requests.fetch_add(1, Ordering::Relaxed);
-    if token == HELD_PROVIDER {
-        held.notify_one();
-        std::future::pending::<()>().await;
-    }
-    let body = introspection(&token);
-    let response = format!(
-        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\
-         connection: close\r\n\r\n{body}",
-        body.len()
-    );
-    let _ = stream.write_all(response.as_bytes()).await;
-    let _ = stream.shutdown().await;
-}
-
-async fn read_token<S: AsyncRead + Unpin>(stream: &mut S) -> Option<String> {
-    let mut request = Vec::new();
-    loop {
-        if let Some(body) = request_body(&request) {
-            return url::form_urlencoded::parse(body)
+    let service = hyper::service::service_fn(|request: hyper::Request<hyper::body::Incoming>| {
+        let requests = Arc::clone(requests);
+        let held = Arc::clone(held);
+        async move {
+            let Ok(body) =
+                to_bytes(Body::new(request.into_body()), MAX_INTROSPECTION_REQUEST).await
+            else {
+                return Ok::<_, std::convert::Infallible>(StatusCode::BAD_REQUEST.into_response());
+            };
+            let Some(token) = url::form_urlencoded::parse(&body)
                 .find(|(name, _)| name == "token")
-                .map(|(_, token)| token.into_owned());
+                .map(|(_, value)| value.into_owned())
+            else {
+                return Ok(StatusCode::BAD_REQUEST.into_response());
+            };
+            requests.fetch_add(1, Ordering::Relaxed);
+            if token == HELD_PROVIDER {
+                held.notify_one();
+                std::future::pending::<()>().await;
+            }
+            Ok((
+                [(
+                    axum::http::header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/json"),
+                )],
+                introspection(&token),
+            )
+                .into_response())
         }
-        if request.len() > MAX_INTROSPECTION_REQUEST
-            || stream.read_buf(&mut request).await.ok()? == 0
-        {
-            return None;
-        }
-    }
-}
-
-fn request_body(request: &[u8]) -> Option<&[u8]> {
-    let head_end = request
-        .array_windows()
-        .position(|window| window == b"\r\n\r\n")?
-        + 4;
-    let head = std::str::from_utf8(&request[..head_end]).ok()?;
-    let length = head.lines().find_map(|line| {
-        let (name, value) = line.split_once(':')?;
-        if name.eq_ignore_ascii_case("content-length") {
-            value.trim().parse::<usize>().ok()
-        } else {
-            None
-        }
-    })?;
-    request.get(head_end..head_end + length)
+    });
+    let _ = hyper::server::conn::http1::Builder::new()
+        .keep_alive(false)
+        .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
+        .await;
 }
 
 fn introspection(token: &str) -> String {
@@ -759,22 +742,98 @@ fn retry_after(response: &TestResponse) -> Option<String> {
     })
 }
 
-fn outcomes(recorder: &PrometheusRecorder) -> BTreeMap<String, u64> {
-    recorder
-        .handle()
-        .render()
-        .lines()
-        .filter_map(|line| {
-            let series = line
-                .strip_prefix(HTTP_IDEMPOTENCY_OUTCOMES_METRIC)?
-                .strip_prefix("{outcome=\"")?;
-            let (outcome, value) = series.split_once("\"} ")?;
-            Some((
-                outcome.to_owned(),
-                value.parse().expect("a whole counter value"),
-            ))
-        })
-        .collect()
+type MetricSeries = (String, Vec<(String, String)>);
+
+struct CapturedMetrics {
+    snapshotter: Snapshotter,
+    counters: Mutex<BTreeMap<MetricSeries, u64>>,
+    histograms: Mutex<BTreeMap<MetricSeries, usize>>,
+}
+
+impl CapturedMetrics {
+    fn new(recorder: &DebuggingRecorder) -> Self {
+        Self {
+            snapshotter: recorder.snapshotter(),
+            counters: Mutex::new(BTreeMap::new()),
+            histograms: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    fn drain(&self) {
+        let entries = self.snapshotter.snapshot().into_vec();
+        let mut counters = self.counters.lock().expect("metrics counter lock");
+        let mut histograms = self.histograms.lock().expect("metrics histogram lock");
+        for (key, _, _, value) in entries {
+            let mut labels: Vec<(String, String)> = key
+                .key()
+                .labels()
+                .map(|label| (label.key().to_owned(), label.value().to_owned()))
+                .collect();
+            labels.sort();
+            let series = (key.key().name().to_owned(), labels);
+            match value {
+                DebugValue::Counter(delta) => {
+                    *counters.entry(series).or_insert(0) += delta;
+                }
+                DebugValue::Histogram(samples) => {
+                    *histograms.entry(series).or_insert(0) += samples.len();
+                }
+                DebugValue::Gauge(_) => {}
+            }
+        }
+    }
+
+    fn outcomes(&self) -> BTreeMap<String, u64> {
+        self.drain();
+        self.counters
+            .lock()
+            .expect("metrics counter lock")
+            .iter()
+            .filter(|((name, _), count)| name == HTTP_IDEMPOTENCY_OUTCOMES_METRIC && **count > 0)
+            .filter_map(|((_, labels), count)| {
+                let outcome = labels
+                    .iter()
+                    .find_map(|(key, value)| (key == "outcome").then_some(value.clone()))?;
+                Some((outcome, *count))
+            })
+            .collect()
+    }
+
+    fn counter(&self, target: &str, required: &[(&str, &str)]) -> u64 {
+        self.drain();
+        self.counters
+            .lock()
+            .expect("metrics counter lock")
+            .iter()
+            .filter(|((name, labels), _)| {
+                name == target
+                    && required
+                        .iter()
+                        .all(|(k, v)| labels.iter().any(|(lk, lv)| lk == k && lv == v))
+            })
+            .map(|(_, count)| *count)
+            .sum()
+    }
+
+    fn histogram_samples(&self, target: &str, required: &[(&str, &str)]) -> usize {
+        self.drain();
+        self.histograms
+            .lock()
+            .expect("metrics histogram lock")
+            .iter()
+            .filter(|((name, labels), _)| {
+                name == target
+                    && required
+                        .iter()
+                        .all(|(k, v)| labels.iter().any(|(lk, lv)| lk == k && lv == v))
+            })
+            .map(|(_, count)| *count)
+            .sum()
+    }
+}
+
+fn outcomes(captured: &CapturedMetrics) -> BTreeMap<String, u64> {
+    captured.outcomes()
 }
 
 fn counts(expected: &[(&str, u64)]) -> BTreeMap<String, u64> {
@@ -786,20 +845,19 @@ fn counts(expected: &[(&str, u64)]) -> BTreeMap<String, u64> {
 }
 
 async fn until_free(request: impl Fn() -> TestRequest) -> (TestResponse, u64) {
-    let deadline = Instant::now() + WAIT;
     let mut conflicts = 0;
-    loop {
-        let response = request().await;
-        if response.status_code() != StatusCode::CONFLICT {
-            return (response, conflicts);
-        }
-        conflicts += 1;
-        assert!(
-            Instant::now() < deadline,
-            "the key stayed held for {WAIT:?}"
-        );
-        tokio::time::sleep(RETRY_PAUSE).await;
-    }
+    let response =
+        integration_tests::poll_until("the key is released", WAIT, RETRY_PAUSE, async || {
+            let response = request().await;
+            if response.status_code() == StatusCode::CONFLICT {
+                conflicts += 1;
+                None
+            } else {
+                Some(response)
+            }
+        })
+        .await;
+    (response, conflicts)
 }
 
 #[utoipa::path(
@@ -999,7 +1057,8 @@ async fn cached_verification_succeeds_in_the_final_hundred_milliseconds() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn outer_http_timeout_cancels_inflight_verification_and_owns_504() {
-    let recorder = PrometheusBuilder::new().build_recorder();
+    let recorder = DebuggingRecorder::new();
+    let captured = CapturedMetrics::new(&recorder);
     let _local = metrics::set_default_local_recorder(&recorder);
     let provider = Provider::start().await;
     let router = timeout_router(provider.verifier(), Duration::from_secs(1), Duration::ZERO);
@@ -1020,15 +1079,12 @@ async fn outer_http_timeout_cancels_inflight_verification_and_owns_504() {
         "outer-timeout",
     );
     assert!(response.maybe_header(WWW_AUTHENTICATE).is_none());
-    let scrape = recorder.handle().render();
-    assert!(
-        scrape
-            .lines()
-            .any(|line| line.starts_with("authn_verifications_total{")
-                && line.contains("result=\"timeout\"")
-                && line.contains("failure=\"timeout\"")
-                && line.ends_with(" 1")),
-        "{scrape}"
+    assert_eq!(
+        captured.counter(
+            "authn_verifications_total",
+            &[("result", "timeout"), ("failure", "timeout")],
+        ),
+        1
     );
     tokio::time::resume();
     provider.stop().await;
@@ -1038,7 +1094,8 @@ async fn outer_http_timeout_cancels_inflight_verification_and_owns_504() {
 async fn authentication_and_scope_authorization_work_without_a_composer() {
     // Keep the router and provider tasks on the test thread so this recorder
     // cannot observe counters from concurrently running tests.
-    let recorder = PrometheusBuilder::new().build_recorder();
+    let recorder = DebuggingRecorder::new();
+    let captured = CapturedMetrics::new(&recorder);
     let _local = metrics::set_default_local_recorder(&recorder);
     let provider = Provider::start().await;
     let root_policy = bearer_document();
@@ -1073,23 +1130,9 @@ async fn authentication_and_scope_authorization_work_without_a_composer() {
             });
         }
         responses.push(request.await);
-        let scrape = recorder.handle().render();
-        let count = |name: &str| -> u64 {
-            scrape
-                .lines()
-                .filter_map(|line| {
-                    let series = line.strip_prefix(name)?;
-                    if !series.starts_with(['{', ' ']) {
-                        return None;
-                    }
-                    let (_, value) = series.rsplit_once(' ')?;
-                    Some(value.parse::<u64>().expect("a whole verification counter"))
-                })
-                .sum()
-        };
         verification_counts.push((
-            count("authn_verifications_total"),
-            count("authn_token_verifications_total"),
+            captured.counter("authn_verifications_total", &[]),
+            captured.counter("authn_token_verifications_total", &[]),
         ));
     }
     provider.stop().await;
@@ -1182,7 +1225,8 @@ async fn scope_alternatives_are_ored_and_scopes_within_one_are_anded() {
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn p9_authentication_failures_answer_before_the_key_is_read(pool: PgPool) {
-    let recorder = PrometheusBuilder::new().build_recorder();
+    let recorder = DebuggingRecorder::new();
+    let captured = CapturedMetrics::new(&recorder);
     let _local = metrics::set_default_local_recorder(&recorder);
     let mounted = Mounted::on(&pool, BUDGET).await;
     let input = json!({"name": "gizmo", "color": "red"});
@@ -1231,7 +1275,7 @@ async fn p9_authentication_failures_answer_before_the_key_is_read(pool: PgPool) 
             challenge.map(HeaderValue::from_static)
         );
     }
-    assert_eq!(outcomes(&recorder), counts(&[]));
+    assert_eq!(outcomes(&captured), counts(&[]));
 
     let scope_denied = mounted
         .create(NO_SCOPE, "scope-check", &input, "req-scope")
@@ -1243,20 +1287,21 @@ async fn p9_authentication_failures_answer_before_the_key_is_read(pool: PgPool) 
             "Bearer error=\"insufficient_scope\""
         ))
     );
-    assert_eq!(outcomes(&recorder), counts(&[]));
+    assert_eq!(outcomes(&captured), counts(&[]));
 
     let refused = mounted
         .create(ALICE, malformed_key, &input, "req-key")
         .await;
     problem(&refused, StatusCode::BAD_REQUEST, "bad_request", "req-key");
-    assert_eq!(outcomes(&recorder), counts(&[("invalid_key", 1)]));
+    assert_eq!(outcomes(&captured), counts(&[("invalid_key", 1)]));
     assert_eq!(count(&pool, WIDGET_ROWS).await, 0);
     mounted.finish().await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn p9_the_key_grammar_is_exact(pool: PgPool) {
-    let recorder = PrometheusBuilder::new().build_recorder();
+    let recorder = DebuggingRecorder::new();
+    let captured = CapturedMetrics::new(&recorder);
     let _local = metrics::set_default_local_recorder(&recorder);
     let mounted = Mounted::on(&pool, BUDGET).await;
     let input = json!({"name": "gizmo", "color": "red"});
@@ -1294,7 +1339,7 @@ async fn p9_the_key_grammar_is_exact(pool: PgPool) {
             json!([{"name": "header.Idempotency-Key", "reason": KEY_REASON}])
         );
     }
-    assert_eq!(outcomes(&recorder), counts(&[("invalid_key", 8)]));
+    assert_eq!(outcomes(&captured), counts(&[("invalid_key", 8)]));
 
     for key in [
         "k".repeat(255),
@@ -1308,7 +1353,7 @@ async fn p9_the_key_grammar_is_exact(pool: PgPool) {
         );
     }
     assert_eq!(
-        outcomes(&recorder),
+        outcomes(&captured),
         counts(&[("invalid_key", 8), ("executed", 4)])
     );
     assert_eq!(count(&pool, WIDGET_ROWS).await, 4);
@@ -1317,7 +1362,8 @@ async fn p9_the_key_grammar_is_exact(pool: PgPool) {
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn p9_a_success_replays_byte_for_byte_behind_current_authorization(pool: PgPool) {
-    let recorder = PrometheusBuilder::new().build_recorder();
+    let recorder = DebuggingRecorder::new();
+    let captured = CapturedMetrics::new(&recorder);
     let _local = metrics::set_default_local_recorder(&recorder);
     let mounted = Mounted::on(&pool, BUDGET).await;
     let input = json!({"name": "gizmo", "color": "red"});
@@ -1328,7 +1374,7 @@ async fn p9_a_success_replays_byte_for_byte_behind_current_authorization(pool: P
         first.maybe_header("idempotent-replayed").is_none(),
         "a fresh success must not carry handler-supplied replay metadata"
     );
-    assert_eq!(outcomes(&recorder), counts(&[("executed", 1)]));
+    assert_eq!(outcomes(&captured), counts(&[("executed", 1)]));
 
     let reordered = mounted
         .server
@@ -1348,7 +1394,7 @@ async fn p9_a_success_replays_byte_for_byte_behind_current_authorization(pool: P
         "req-replay",
     );
     assert_eq!(
-        outcomes(&recorder),
+        outcomes(&captured),
         counts(&[("executed", 1), ("key_mismatch", 1)])
     );
 
@@ -1380,7 +1426,7 @@ async fn p9_a_success_replays_byte_for_byte_behind_current_authorization(pool: P
     let body = problem_body(&refused, StatusCode::FORBIDDEN, "forbidden");
     assert_eq!(body["detail"], "widget creation is not permitted");
     assert_eq!(
-        outcomes(&recorder),
+        outcomes(&captured),
         counts(&[
             ("executed", 1),
             ("key_mismatch", 2),
@@ -1409,7 +1455,7 @@ async fn p9_a_success_replays_byte_for_byte_behind_current_authorization(pool: P
     );
     assert_eq!(again.as_bytes(), first.as_bytes());
     assert_eq!(
-        outcomes(&recorder),
+        outcomes(&captured),
         counts(&[
             ("executed", 2),
             ("replayed", 2),
@@ -1423,7 +1469,8 @@ async fn p9_a_success_replays_byte_for_byte_behind_current_authorization(pool: P
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn p9_request_identity_keeps_original_uri_resource_and_operation(pool: PgPool) {
-    let recorder = PrometheusBuilder::new().build_recorder();
+    let recorder = DebuggingRecorder::new();
+    let captured = CapturedMetrics::new(&recorder);
     let _local = metrics::set_default_local_recorder(&recorder);
     let mounted = Mounted::on(&pool, BUDGET).await;
     let input = json!({"name": "gizmo", "color": "red"});
@@ -1498,7 +1545,7 @@ async fn p9_request_identity_keeps_original_uri_resource_and_operation(pool: PgP
     );
 
     assert_eq!(
-        outcomes(&recorder),
+        outcomes(&captured),
         counts(&[("executed", 4), ("key_mismatch", 4)])
     );
     assert_eq!(count(&pool, WIDGET_ROWS).await, 4);
@@ -1507,7 +1554,8 @@ async fn p9_request_identity_keeps_original_uri_resource_and_operation(pool: PgP
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn p9_rolled_back_work_and_undecodable_records_are_never_replayed(pool: PgPool) {
-    let recorder = PrometheusBuilder::new().build_recorder();
+    let recorder = DebuggingRecorder::new();
+    let captured = CapturedMetrics::new(&recorder);
     let _local = metrics::set_default_local_recorder(&recorder);
     let mounted = Mounted::on(&pool, BUDGET).await;
 
@@ -1521,7 +1569,7 @@ async fn p9_rolled_back_work_and_undecodable_records_are_never_replayed(pool: Pg
         );
         assert_eq!(body["detail"], "the widget name is reserved");
     }
-    assert_eq!(outcomes(&recorder), counts(&[("not_stored", 2)]));
+    assert_eq!(outcomes(&captured), counts(&[("not_stored", 2)]));
 
     // A success too large to store is a sanitized 500 that commits nothing.
     let huge = json!({"name": "x".repeat(STORED_BODY_BOUND), "color": "red"});
@@ -1534,7 +1582,7 @@ async fn p9_rolled_back_work_and_undecodable_records_are_never_replayed(pool: Pg
     );
     assert_eq!(body["detail"], "request failed");
     assert_eq!(
-        outcomes(&recorder),
+        outcomes(&captured),
         counts(&[("not_stored", 2), ("unstorable", 1)])
     );
     assert_eq!(count(&pool, WIDGET_ROWS).await, 0);
@@ -1564,7 +1612,7 @@ async fn p9_rolled_back_work_and_undecodable_records_are_never_replayed(pool: Pg
         assert_eq!(body["detail"], "request failed");
     }
     assert_eq!(
-        outcomes(&recorder),
+        outcomes(&captured),
         counts(&[
             ("not_stored", 2),
             ("unstorable", 1),
@@ -1578,7 +1626,8 @@ async fn p9_rolled_back_work_and_undecodable_records_are_never_replayed(pool: Pg
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn p9_a_held_key_answers_in_progress_with_a_retry_hint(pool: PgPool) {
-    let recorder = PrometheusBuilder::new().build_recorder();
+    let recorder = DebuggingRecorder::new();
+    let captured = CapturedMetrics::new(&recorder);
     let _local = metrics::set_default_local_recorder(&recorder);
     let mounted = Mounted::on(&pool, BUDGET).await;
     let input = json!({"name": "gizmo", "color": "red"});
@@ -1605,7 +1654,7 @@ async fn p9_a_held_key_answers_in_progress_with_a_retry_hint(pool: PgPool) {
     created(&replay, "req-after");
     assert_eq!(replay.as_bytes(), held.as_bytes());
     assert_eq!(
-        outcomes(&recorder),
+        outcomes(&captured),
         counts(&[("in_progress", 2), ("executed", 1), ("replayed", 1)])
     );
     assert_eq!(count(&pool, WIDGET_ROWS).await, 1);
@@ -1614,7 +1663,8 @@ async fn p9_a_held_key_answers_in_progress_with_a_retry_hint(pool: PgPool) {
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn p9_the_database_cutoff_answers_unavailable_and_the_same_key_recovers(pool: PgPool) {
-    let recorder = PrometheusBuilder::new().build_recorder();
+    let recorder = DebuggingRecorder::new();
+    let captured = CapturedMetrics::new(&recorder);
     let _local = metrics::set_default_local_recorder(&recorder);
     let mounted = Mounted::on(&pool, SHORT_BUDGET).await;
     let input = json!({"name": "gizmo", "color": "red"});
@@ -1634,7 +1684,7 @@ async fn p9_the_database_cutoff_answers_unavailable_and_the_same_key_recovers(po
         "req-expired",
     );
     assert_eq!(retry_after(&expired).as_deref(), Some("1"));
-    assert_eq!(outcomes(&recorder), counts(&[("unavailable", 1)]));
+    assert_eq!(outcomes(&captured), counts(&[("unavailable", 1)]));
     tokio::time::resume();
     assert_eq!(count(&pool, WIDGET_ROWS).await, 0);
 
@@ -1660,7 +1710,7 @@ async fn p9_the_database_cutoff_answers_unavailable_and_the_same_key_recovers(po
     assert_eq!(body["detail"], "widget handler deadline expired");
     tokio::time::resume();
     assert_eq!(
-        outcomes(&recorder),
+        outcomes(&captured),
         counts(&[
             ("unavailable", 1),
             ("in_progress", conflicts),
@@ -1674,7 +1724,8 @@ async fn p9_the_database_cutoff_answers_unavailable_and_the_same_key_recovers(po
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn p9_a_read_only_writer_answers_unavailable(pool: PgPool) {
-    let recorder = PrometheusBuilder::new().build_recorder();
+    let recorder = DebuggingRecorder::new();
+    let captured = CapturedMetrics::new(&recorder);
     let _local = metrics::set_default_local_recorder(&recorder);
     create_widgets(&pool).await;
     make_read_only(&pool).await;
@@ -1692,7 +1743,7 @@ async fn p9_a_read_only_writer_answers_unavailable(pool: PgPool) {
         "req-unavailable",
     );
     assert_eq!(retry_after(&refused).as_deref(), Some("1"));
-    assert_eq!(outcomes(&recorder), counts(&[("unavailable", 1)]));
+    assert_eq!(outcomes(&captured), counts(&[("unavailable", 1)]));
     assert_eq!(count(&pool, WIDGET_ROWS).await, 0);
     mounted.finish().await;
 }
@@ -1720,7 +1771,8 @@ async fn p9_postgres_timeouts_allow_a_same_key_retry(pool: PgPool) {
         .await
         .expect("set the timeout for new sessions");
         let mounted = Mounted::new(template_pool(&dsn, 1).await, BUDGET).await;
-        let recorder = PrometheusBuilder::new().build_recorder();
+        let recorder = DebuggingRecorder::new();
+        let captured = CapturedMetrics::new(&recorder);
         let _local = metrics::set_default_local_recorder(&recorder);
 
         let mut holder = sqlx::Connection::begin(&mut *lock_connection)
@@ -1733,14 +1785,14 @@ async fn p9_postgres_timeouts_allow_a_same_key_retry(pool: PgPool) {
         let refused = mounted.create(ALICE, setting, &input, "req-timeout").await;
         holder.rollback().await.expect("release the table lock");
 
-        let scrape = recorder.handle().render();
         assert!(
-            scrape.lines().any(|line| {
-                line.starts_with("db_client_operation_duration_seconds_count{")
-                    && line.contains("db_query_summary=\"lock and read idempotency record\"")
-                    && line.contains(&format!("error_type=\"{sqlstate}\""))
-            }),
-            "{scrape}"
+            captured.histogram_samples(
+                "db_client_operation_duration_seconds",
+                &[
+                    ("db_query_summary", "lock and read idempotency record"),
+                    ("error_type", sqlstate),
+                ],
+            ) > 0
         );
         problem(
             &refused,
@@ -1759,7 +1811,8 @@ async fn p9_postgres_timeouts_allow_a_same_key_retry(pool: PgPool) {
 }
 
 async fn uncertain_commit(pool: PgPool, fault: Fault) {
-    let recorder = PrometheusBuilder::new().build_recorder();
+    let recorder = DebuggingRecorder::new();
+    let captured = CapturedMetrics::new(&recorder);
     let _local = metrics::set_default_local_recorder(&recorder);
     create_widgets(&pool).await;
     let (proxy, proxied) = CommitProxy::start_for(&pool).await;
@@ -1793,7 +1846,7 @@ async fn uncertain_commit(pool: PgPool, fault: Fault) {
     );
     assert_eq!(retry_after(&first).as_deref(), Some("1"));
     assert!(first.maybe_header("idempotent-replayed").is_none());
-    assert_eq!(outcomes(&recorder), counts(&[("unavailable", 1)]));
+    assert_eq!(outcomes(&captured), counts(&[("unavailable", 1)]));
 
     let (retry, conflicts) =
         until_free(|| mounted.create(ALICE, "k-uncertain", &input, "req-retry")).await;
@@ -1817,7 +1870,7 @@ async fn uncertain_commit(pool: PgPool, fault: Fault) {
         1
     );
     assert_eq!(
-        outcomes(&recorder),
+        outcomes(&captured),
         counts(&[
             ("unavailable", 1),
             ("in_progress", conflicts),

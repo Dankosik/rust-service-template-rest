@@ -474,27 +474,51 @@ async fn cancellation_at_provider_completion_leaves_a_live_caller_its_own_attemp
     }
 }
 
-fn acquisition_counts(scrape: &str) -> Vec<(String, String, u64)> {
-    let label = |line: &str, name: &str| {
-        let (_, rest) = line.split_once(&format!("{name}=\"")).unwrap();
-        rest.split_once('"').unwrap().0.to_owned()
-    };
-    let mut counts: Vec<_> = scrape
-        .lines()
-        .filter(|line| line.starts_with("oauth2_token_acquisitions_total{"))
-        .map(|line| {
-            let count = line.rsplit_once(' ').unwrap().1.parse().unwrap();
-            (label(line, "grant"), label(line, "outcome"), count)
-        })
-        .collect();
-    counts.sort();
-    counts
+#[derive(Default)]
+struct RecordedMetrics {
+    acquisitions: BTreeMap<(String, String), u64>,
+    outbound_samples: usize,
+}
+
+impl RecordedMetrics {
+    fn drain(&mut self, snapshotter: &metrics_util::debugging::Snapshotter) {
+        use metrics_util::debugging::DebugValue;
+
+        for (key, _, _, value) in snapshotter.snapshot().into_vec() {
+            match value {
+                DebugValue::Counter(count)
+                    if count > 0 && key.key().name() == "oauth2_token_acquisitions_total" =>
+                {
+                    let label = |name: &str| {
+                        key.key()
+                            .labels()
+                            .find(|label| label.key() == name)
+                            .unwrap()
+                            .value()
+                            .to_owned()
+                    };
+                    *self
+                        .acquisitions
+                        .entry((label("grant"), label("outcome")))
+                        .or_default() += count;
+                }
+                DebugValue::Histogram(samples)
+                    if key.key().name() == "http_client_request_duration_seconds" =>
+                {
+                    self.outbound_samples += samples.len();
+                }
+                _ => {}
+            }
+        }
+    }
 }
 
 #[tokio::test]
 async fn every_token_request_is_counted_once_under_its_grant_and_closed_outcome() {
-    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let recorder = metrics_util::debugging::DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
     let _recorder = metrics::set_default_local_recorder(&recorder);
+    let mut captured = RecordedMetrics::default();
     let fixture = Fixture::new().await;
     let client = || {
         fixture
@@ -538,39 +562,30 @@ async fn every_token_request_is_counted_once_under_its_grant_and_closed_outcome(
         timed.await,
         Err(Error::Acquisition(AcquisitionError::Timeout))
     );
-    let dropped = client();
-    let dropped_client = dropped;
+    let dropped_client = client();
     let mut dropped = Box::pin(dropped_client.execute(fixture.request(), far()));
     tokio::select! { () = fixture.token_received() => {}, result = &mut dropped => panic!("response must be gated: {result:?}"), }
-    let outbound_counts = || {
-        let mut counts = recorder
-            .handle()
-            .render()
-            .lines()
-            .filter(|line| line.starts_with("http_client_request_duration_seconds_count"))
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
-        counts.sort();
-        counts
-    };
-    let before_capacity = outbound_counts();
-    assert_ne!(before_capacity, [] as [String; 0]);
+    captured.drain(&snapshotter);
+    let before_capacity = captured.outbound_samples;
+    assert!(before_capacity > 0);
     assert_matches!(
         dropped_client
             .execute(fixture.on_behalf_of_request("at-capacity"), far())
             .await,
         Err(Error::Acquisition(AcquisitionError::AtCapacity))
     );
-    assert_eq!(outbound_counts(), before_capacity);
+    captured.drain(&snapshotter);
+    assert_eq!(captured.outbound_samples, before_capacity);
     let mut waiter = Box::pin(dropped_client.execute(fixture.request(), far()));
     poll_pending(waiter.as_mut()).await;
     drop(waiter);
     drop(dropped);
     drop(gate);
     fixture.finish().await;
-    let count = |grant: &str, outcome: &str| (grant.to_owned(), outcome.to_owned(), 1);
+    captured.drain(&snapshotter);
+    let count = |grant: &str, outcome: &str| ((grant.to_owned(), outcome.to_owned()), 1);
     assert_eq!(
-        acquisition_counts(&recorder.handle().render()),
+        captured.acquisitions.into_iter().collect::<Vec<_>>(),
         [
             count("client_credentials", "cancelled"),
             count("client_credentials", "invalid_client"),

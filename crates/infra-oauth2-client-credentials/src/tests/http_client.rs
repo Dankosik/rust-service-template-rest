@@ -46,13 +46,16 @@ async fn a_client_requiring_a_subject_refuses_a_request_without_one_before_any_i
 
 #[tokio::test]
 async fn token_http_telemetry_distinguishes_deadline_from_cancellation() {
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
     let fixture = Fixture::new().await;
     let _gate = fixture.block_tokens();
     for (deadline_expires, expected_error, outbound_outcome) in [
         (true, AcquisitionError::Timeout, "error"),
         (false, AcquisitionError::Cancelled, "cancelled"),
     ] {
-        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
         let _recorder = metrics::set_default_local_recorder(&recorder);
         let client = fixture
             .credentials(&[], None)
@@ -74,22 +77,33 @@ async fn token_http_telemetry_distinguishes_deadline_from_cancellation() {
         };
         assert_eq!(error, expected_error);
 
-        let scrape = recorder.handle().render();
-        let mut counts = scrape
-            .lines()
-            .filter(|line| line.starts_with("http_client_request_duration_seconds_count{"));
-        let sample = counts.next().expect("the token HTTP request was observed");
-        assert!(counts.next().is_none());
-        assert!(sample.ends_with(" 1"), "{sample}");
-        assert!(
-            sample.contains(&format!("outbound_outcome=\"{outbound_outcome}\"")),
-            "{sample}"
+        let durations: Vec<_> = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter_map(|(key, _, _, value)| match value {
+                DebugValue::Histogram(samples)
+                    if key.key().name() == "http_client_request_duration_seconds" =>
+                {
+                    Some((key.key().clone(), samples.len()))
+                }
+                _ => None,
+            })
+            .collect();
+        let [(key, 1)] = durations.as_slice() else {
+            panic!("expected one token HTTP request sample, got {durations:?}");
+        };
+        let label = |name: &str| {
+            key.labels()
+                .find(|label| label.key() == name)
+                .map(metrics::Label::value)
+        };
+        assert_eq!(label("outbound.outcome"), Some(outbound_outcome), "{key:?}");
+        assert_eq!(
+            label("error.type"),
+            deadline_expires.then_some("timeout"),
+            "{key:?}"
         );
-        if deadline_expires {
-            assert!(sample.contains("error_type=\"timeout\""), "{sample}");
-        } else {
-            assert!(!sample.contains("error_type="), "{sample}");
-        }
     }
     assert!(fixture.resource_requests().is_empty());
     fixture.finish().await;

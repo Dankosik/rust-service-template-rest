@@ -11,13 +11,14 @@ use async_nats::jetstream::{self, stream};
 use infra_jobs::{EnqueueOptions, Enqueued, JobKind, enqueue};
 use infra_postgres::{PgPool, TxError, in_tx};
 use integration_tests::jobs::{CREATE_PROBE_ATTEMPTS, Probe, ProbeAction};
+use integration_tests::poll_until;
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 use sqlx::Row;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
-use tokio::time::{Instant, sleep, timeout, timeout_at};
+use tokio::time::{Instant, timeout, timeout_at};
 use tokio_util::task::AbortOnDropHandle;
 
 const RECORD_BOUND: Duration = Duration::from_secs(20);
@@ -245,21 +246,6 @@ async fn get(url: &str) -> Result<(u16, String), reqwest::Error> {
     Ok((status, body))
 }
 
-async fn poll_until(url: &str, want_status: u16, within: Duration) -> bool {
-    timeout(within, async {
-        loop {
-            if let Ok((status, _)) = get(url).await
-                && status == want_status
-            {
-                return;
-            }
-            sleep(POLL).await;
-        }
-    })
-    .await
-    .is_ok()
-}
-
 async fn listener_addr(worker: &mut Worker, message: &str) -> String {
     worker.await_record(message).await["addr"]
         .as_str()
@@ -292,23 +278,16 @@ fn completed_probe_metrics(body: &str) -> bool {
 }
 
 async fn await_completed_probe_metrics(url: &str) {
-    let mut scraped = String::new();
-    let completed = timeout(METRICS_BOUND, async {
-        loop {
-            if let Ok((status, body)) = get(url).await {
-                scraped = body;
-                if status == 200 && completed_probe_metrics(&scraped) {
-                    return;
-                }
-            }
-            sleep(POLL).await;
-        }
-    })
+    poll_until(
+        "metrics show the completed probe attempt",
+        METRICS_BOUND,
+        POLL,
+        async || {
+            let (status, scraped) = get(url).await.ok()?;
+            (status == 200 && completed_probe_metrics(&scraped)).then_some(())
+        },
+    )
     .await;
-    assert!(
-        completed.is_ok(),
-        "metrics never showed the completed probe attempt:\n{scraped}"
-    );
 }
 
 fn population_gauge(body: &str, metric: &str, population: &str) -> Option<f64> {
@@ -375,47 +354,37 @@ async fn await_capped_probe_sample(
     completed_eligible_at: f64,
     unknown_failed_at: f64,
 ) {
-    let mut scraped = String::new();
-    let sampled = timeout(METRICS_BOUND, async {
-        loop {
-            if let Ok((status, body)) = get(url).await {
-                scraped = body;
-                let populations = [
-                    ("jobs", completed_eligible_at),
-                    ("failed_jobs", unknown_failed_at),
-                ];
-                if status == 200
-                    && capped_probe_sample(&scraped, failed_kinds)
-                    && populations.iter().all(|(population, oldest)| {
-                        population_gauge(
+    let populations = [
+        ("jobs", completed_eligible_at),
+        ("failed_jobs", unknown_failed_at),
+    ];
+    poll_until(
+        "metrics show the capped queue sample",
+        METRICS_BOUND,
+        POLL,
+        async || {
+            let (status, scraped) = get(url).await.ok()?;
+            (status == 200
+                && capped_probe_sample(&scraped, failed_kinds)
+                && populations.iter().all(|(population, oldest)| {
+                    population_gauge(
+                        &scraped,
+                        "postgres_maintenance_last_attempt_success",
+                        population,
+                    ) == Some(1.0)
+                        && population_gauge(&scraped, "postgres_maintenance_present", population)
+                            == Some(1.0)
+                        && population_gauge(
                             &scraped,
-                            "postgres_maintenance_last_attempt_success",
+                            "postgres_maintenance_oldest_timestamp_seconds",
                             population,
-                        ) == Some(1.0)
-                            && population_gauge(
-                                &scraped,
-                                "postgres_maintenance_present",
-                                population,
-                            ) == Some(1.0)
-                            && population_gauge(
-                                &scraped,
-                                "postgres_maintenance_oldest_timestamp_seconds",
-                                population,
-                            )
-                            .is_some_and(|value| (value - oldest).abs() < 0.01)
-                    })
-                {
-                    return;
-                }
-            }
-            sleep(POLL).await;
-        }
-    })
+                        )
+                        .is_some_and(|value| (value - oldest).abs() < 0.01)
+                }))
+            .then_some(())
+        },
+    )
     .await;
-    assert!(
-        sampled.is_ok(),
-        "metrics never showed the capped queue sample:\n{scraped}"
-    );
 }
 
 fn operation_failed(body: &str, operation: &str) -> bool {
@@ -432,29 +401,25 @@ fn operation_failed(body: &str, operation: &str) -> bool {
 }
 
 async fn await_failed_operation(url: &str, operation: &str) {
-    let mut scraped = String::new();
-    let counted = timeout(METRICS_BOUND, async {
-        loop {
-            if let Ok((status, body)) = get(url).await {
-                scraped = body;
-                if status == 200 && operation_failed(&scraped, operation) {
-                    return;
-                }
-            }
-            sleep(POLL).await;
-        }
-    })
+    poll_until(
+        &format!("metrics count a failed {operation}"),
+        METRICS_BOUND,
+        POLL,
+        async || {
+            let (status, scraped) = get(url).await.ok()?;
+            (status == 200 && operation_failed(&scraped, operation)).then_some(())
+        },
+    )
     .await;
-    assert!(
-        counted.is_ok(),
-        "metrics never counted a failed {operation}:\n{scraped}"
-    );
 }
 
 async fn wake_listener(pool: &PgPool, except: Option<i32>) -> i32 {
-    timeout(JOB_BOUND, async {
-        loop {
-            let pid: Option<i32> = sqlx::query_scalar(
+    poll_until(
+        "the worker listens for wake notifications",
+        JOB_BOUND,
+        DB_POLL,
+        async || {
+            sqlx::query_scalar(
                 "SELECT pid FROM pg_stat_activity \
                  WHERE datname = current_database() AND query LIKE 'LISTEN%' \
                    AND pid IS DISTINCT FROM $1",
@@ -462,15 +427,10 @@ async fn wake_listener(pool: &PgPool, except: Option<i32>) -> i32 {
             .bind(except)
             .fetch_optional(pool)
             .await
-            .expect("the listener observation");
-            if let Some(pid) = pid {
-                return pid;
-            }
-            sleep(DB_POLL).await;
-        }
-    })
+            .expect("the listener observation")
+        },
+    )
     .await
-    .expect("the worker listens for wake notifications")
 }
 
 fn queue_observation(body: &str) -> std::collections::BTreeMap<String, u64> {
@@ -500,33 +460,26 @@ async fn await_failed_sample_with_last_good_values(
     before: &std::collections::BTreeMap<String, u64>,
 ) {
     // The independent global loop waits 30 seconds after the preceding pair.
-    let mut scraped = String::new();
-    let retained = timeout(Duration::from_secs(45), async {
-        loop {
-            if let Ok((status, body)) = get(url).await {
-                scraped = body;
-                if status == 200
-                    && operation_failed(&scraped, "sample")
-                    && ["jobs", "failed_jobs"].iter().all(|population| {
-                        population_gauge(
-                            &scraped,
-                            "postgres_maintenance_last_attempt_success",
-                            population,
-                        ) == Some(0.0)
-                    })
-                    && queue_observation(&scraped) == *before
-                {
-                    return;
-                }
-            }
-            sleep(POLL).await;
-        }
-    })
+    poll_until(
+        "metrics retain the last good sample after a failure",
+        Duration::from_secs(45),
+        POLL,
+        async || {
+            let (status, scraped) = get(url).await.ok()?;
+            (status == 200
+                && operation_failed(&scraped, "sample")
+                && ["jobs", "failed_jobs"].iter().all(|population| {
+                    population_gauge(
+                        &scraped,
+                        "postgres_maintenance_last_attempt_success",
+                        population,
+                    ) == Some(0.0)
+                })
+                && queue_observation(&scraped) == *before)
+                .then_some(())
+        },
+    )
     .await;
-    assert!(
-        retained.is_ok(),
-        "metrics never retained the last good sample after a failure:\n{scraped}"
-    );
 }
 
 async fn child_database_url(pool: &PgPool) -> String {
@@ -573,42 +526,23 @@ async fn probe_attempts(pool: &PgPool, id: &str) -> Vec<i32> {
 }
 
 async fn wait_completed(pool: &PgPool, id: &str) {
-    let finished = tokio::time::timeout(JOB_BOUND, async {
-        loop {
-            if job_state(pool, id).await == "completed" {
-                return;
-            }
-            tokio::time::sleep(DB_POLL).await;
-        }
-    })
+    poll_until(
+        &format!("job {id} completes"),
+        JOB_BOUND,
+        DB_POLL,
+        async || (job_state(pool, id).await == "completed").then_some(()),
+    )
     .await;
-    if finished.is_err() {
-        let state = job_state(pool, id).await;
-        panic!("job {id} did not complete within {JOB_BOUND:?}; state={state}");
-    }
     let attempts = probe_attempts(pool, id).await;
     assert_eq!(attempts, [1], "probe attempts for {id}");
 }
 
 async fn wait_running(pool: &PgPool, id: &str) {
-    let started = tokio::time::timeout(JOB_BOUND, async {
-        loop {
-            let running = job_state(pool, id).await == "running";
-            let attempts = probe_attempts(pool, id).await;
-            if running && attempts == [1] {
-                return;
-            }
-            tokio::time::sleep(DB_POLL).await;
-        }
+    poll_until("attempt is in flight", JOB_BOUND, DB_POLL, async || {
+        (job_state(pool, id).await == "running" && probe_attempts(pool, id).await == [1])
+            .then_some(())
     })
     .await;
-    if started.is_err() {
-        let state = job_state(pool, id).await;
-        let attempts = probe_attempts(pool, id).await;
-        panic!(
-            "attempt was not in flight within {JOB_BOUND:?}; state={state} attempts={attempts:?}"
-        );
-    }
 }
 
 async fn assert_claimable(pool: &PgPool, id: &str) {
@@ -780,10 +714,16 @@ async fn ready_worker_runs_a_job_and_exits_0_on_sigterm(pool: PgPool) {
     worker.await_record("jobs_worker_ready").await;
 
     let ready = format!("http://{api}/health/ready");
-    assert!(
-        poll_until(&ready, 200, READY_BOUND).await,
-        "worker never became ready at {ready}"
-    );
+    poll_until(
+        &format!("worker becomes ready at {ready}"),
+        READY_BOUND,
+        POLL,
+        async || {
+            let (status, _) = get(&ready).await.ok()?;
+            (status == 200).then_some(())
+        },
+    )
+    .await;
     let (status, body) = get(&format!("http://{api}/health/live"))
         .await
         .expect("GET /health/live");
@@ -830,19 +770,19 @@ async fn resumed_worker_exits_one_after_progress_loss_without_diagnostics(pool: 
     worker.await_record("jobs_worker_ready").await;
     let pid = Pid::from_raw(worker.pid.cast_signed());
     kill(pid, Signal::SIGSTOP).expect("suspend admitted worker");
-    let deadline = Instant::now() + Duration::from_secs(2);
-    loop {
-        match waitpid(pid, Some(WaitPidFlag::WUNTRACED | WaitPidFlag::WNOHANG)).unwrap() {
-            WaitStatus::Stopped(_, Signal::SIGSTOP) => break,
-            WaitStatus::StillAlive => {
-                assert!(Instant::now() < deadline, "worker did not stop");
-                sleep(Duration::from_millis(10)).await;
-            }
+    poll_until(
+        "worker stops on SIGSTOP",
+        Duration::from_secs(2),
+        Duration::from_millis(10),
+        async || match waitpid(pid, Some(WaitPidFlag::WUNTRACED | WaitPidFlag::WNOHANG)).unwrap() {
+            WaitStatus::Stopped(_, Signal::SIGSTOP) => Some(()),
+            WaitStatus::StillAlive => None,
             other => panic!("unexpected child state: {other:?}"),
-        }
-    }
+        },
+    )
+    .await;
     // The admitted completion bound is 2 s. No reader or scrape drives detection.
-    sleep(Duration::from_secs(3)).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
     kill(pid, Signal::SIGCONT).expect("resume admitted worker");
     let (code, stderr, stdout) = worker.wait().await;
     assert_eq!(code, Some(1), "{stdout}\n{stderr}");

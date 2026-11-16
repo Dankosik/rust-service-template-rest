@@ -13,7 +13,7 @@ workspace = true
 
 [features]
 default = []
-test-support = []
+test-support = ["dep:pem"]
 
 [dependencies]
 aws-lc-rs = { workspace = true, features = ["alloc", "aws-lc-sys", "prebuilt-nasm"] }
@@ -25,6 +25,7 @@ jsonwebtoken = { workspace = true, features = ["aws_lc_rs", "use_pem"] }
 metrics = { workspace = true }
 foldhash = { workspace = true, features = ["std"] }
 moka = { workspace = true, features = ["sync"] }
+pem = { workspace = true, optional = true }
 secrecy = { workspace = true }
 serde = { workspace = true, features = ["std", "derive"] }
 serde_json = { workspace = true, features = ["std"] }
@@ -33,6 +34,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
-metrics-exporter-prometheus = { workspace = true }
+metrics-util = { workspace = true, features = ["debugging"] }
+pem = { workspace = true }
 proptest = { workspace = true, features = ["std"] }
 regex = { workspace = true, features = ["std"] }

@@ -1,6 +1,8 @@
 use std::time::Duration;
 
+use metrics::Key;
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
+use metrics_util::debugging::{DebugValue, DebuggingRecorder};
 use sqlx::postgres::PgPoolOptions;
 
 use super::*;
@@ -126,7 +128,8 @@ fn every_boundary_failure_has_its_own_outcome() {
 
 #[tokio::test]
 async fn separate_pools_report_their_own_limits() {
-    let recorder = PrometheusBuilder::new().build_recorder();
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
     let _recorder = metrics::set_default_local_recorder(&recorder);
     let pool = |max_connections| {
         PgPoolOptions::new()
@@ -135,13 +138,21 @@ async fn separate_pools_report_their_own_limits() {
     };
     super::record_metrics(&pool(5), "write");
     super::record_metrics(&pool(20), "read");
-    let scrape = recorder.handle().render();
-    assert!(
-        scrape.contains("db_client_connection_max{db_client_connection_pool_name=\"write\"} 5")
-    );
-    assert!(
-        scrape.contains("db_client_connection_max{db_client_connection_pool_name=\"read\"} 20")
-    );
+    let snapshot = snapshotter.snapshot().into_vec();
+    for (pool_name, expected) in [("write", 5.0), ("read", 20.0)] {
+        let target = Key::from_parts(
+            CONNECTION_MAX_METRIC,
+            &[("db.client.connection.pool.name", pool_name)],
+        );
+        let actual = snapshot
+            .iter()
+            .find_map(|(composite, _, _, value)| (composite.key() == &target).then_some(value));
+        assert_eq!(
+            actual,
+            Some(&DebugValue::Gauge(expected.into())),
+            "{target}: {snapshot:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -231,13 +242,8 @@ async fn acquire_until_waits_for_the_deadline_not_for_the_pool_timeout() {
 
 #[tokio::test]
 async fn a_statement_records_its_duration_by_summary_and_by_how_it_failed() {
-    let recorder = PrometheusBuilder::new()
-        .set_buckets_for_metric(
-            Matcher::Full(OPERATION_DURATION_METRIC.to_owned()),
-            OPERATION_DURATION_BUCKETS,
-        )
-        .expect("the buckets are valid")
-        .build_recorder();
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
     let _recorder = metrics::set_default_local_recorder(&recorder);
     assert_eq!(observed("read widget", async { Ok(7) }).await.unwrap(), 7);
     let rejected = observed("write widget", async {
@@ -261,20 +267,51 @@ async fn a_statement_records_its_duration_by_summary_and_by_how_it_failed() {
     )
     .await;
     assert!(abandoned.is_err());
-    let scrape = recorder.handle().render();
-    let series = |labels: &str| {
-        format!(
-            "db_client_operation_duration_seconds_count{{db_system_name=\"postgresql\",{labels}}} 1"
-        )
-    };
-    for line in [
-        series("db_query_summary=\"read widget\""),
-        series("db_query_summary=\"write widget\",error_type=\"23505\""),
-        series("db_query_summary=\"write widget\",error_type=\"io\""),
-        series("db_query_summary=\"slow widget\",error_type=\"cancelled\""),
+    let snapshot = snapshotter.snapshot().into_vec();
+    for target in [
+        Key::from_parts(
+            OPERATION_DURATION_METRIC,
+            &[
+                ("db.system.name", "postgresql"),
+                ("db.query.summary", "read widget"),
+            ],
+        ),
+        Key::from_parts(
+            OPERATION_DURATION_METRIC,
+            &[
+                ("db.system.name", "postgresql"),
+                ("db.query.summary", "write widget"),
+                ("error.type", "23505"),
+            ],
+        ),
+        Key::from_parts(
+            OPERATION_DURATION_METRIC,
+            &[
+                ("db.system.name", "postgresql"),
+                ("db.query.summary", "write widget"),
+                ("error.type", "io"),
+            ],
+        ),
+        Key::from_parts(
+            OPERATION_DURATION_METRIC,
+            &[
+                ("db.system.name", "postgresql"),
+                ("db.query.summary", "slow widget"),
+                ("error.type", "cancelled"),
+            ],
+        ),
     ] {
-        assert!(scrape.contains(&line), "{line} is missing from:\n{scrape}");
+        let count = snapshot
+            .iter()
+            .find_map(|(composite, _, _, value)| match value {
+                DebugValue::Histogram(samples) if composite.key() == &target => Some(samples.len()),
+                _ => None,
+            });
+        assert_eq!(count, Some(1), "{target} is missing from {snapshot:?}");
     }
-    assert_eq!(scrape.matches("_count{").count(), 4, "{scrape}");
-    assert!(!scrape.contains("db.internal"), "{scrape}");
+    assert_eq!(snapshot.len(), 4, "{snapshot:?}");
+    assert!(
+        !format!("{snapshot:?}").contains("db.internal"),
+        "{snapshot:?}"
+    );
 }

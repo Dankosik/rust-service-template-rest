@@ -455,16 +455,15 @@ async fn a_refresh_failure_survives_an_eligible_401_eviction() {
 #[derive(Clone, Default)]
 struct Events(Arc<Mutex<Vec<String>>>);
 
-impl tracing::Subscriber for Events {
-    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
-        true
+impl Events {
+    fn install(&self) -> tracing::subscriber::DefaultGuard {
+        use tracing_subscriber::layer::SubscriberExt as _;
+        tracing::subscriber::set_default(tracing_subscriber::Registry::default().with(self.clone()))
     }
-    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-        tracing::span::Id::from_u64(1)
-    }
-    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-    fn event(&self, event: &tracing::Event<'_>) {
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Events {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
         struct Fields(Vec<String>);
         impl tracing::field::Visit for Fields {
             fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
@@ -483,14 +482,12 @@ impl tracing::Subscriber for Events {
         fields.0.sort();
         self.0.lock().unwrap().push(fields.0.join(" "));
     }
-    fn enter(&self, _: &tracing::span::Id) {}
-    fn exit(&self, _: &tracing::span::Id) {}
 }
 
 #[tokio::test]
 async fn a_failed_background_refresh_is_logged_with_its_error_type() {
     let events = Events::default();
-    let _subscriber = tracing::subscriber::set_default(events.clone());
+    let _subscriber = events.install();
     let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
     let fixture = Fixture::new().await;
     fixture.token_json(
@@ -532,7 +529,7 @@ async fn a_failed_background_refresh_is_logged_with_its_error_type() {
 #[tokio::test]
 async fn capacity_refused_background_refresh_keeps_the_token_and_retry_spacing() {
     let events = Events::default();
-    let _subscriber = tracing::subscriber::set_default(events.clone());
+    let _subscriber = events.install();
     let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
     let fixture = Fixture::new().await;
     fixture.token_json(

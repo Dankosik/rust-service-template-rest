@@ -202,6 +202,11 @@ struct Discovery {
 mod tests {
     use std::{sync::Arc, time::Duration};
 
+    use bytes::Bytes;
+    use http::{Request, Response, StatusCode};
+    use http_body_util::{BodyExt as _, Full};
+    use hyper::{body::Incoming, server::conn::http1, service::service_fn};
+    use hyper_util::rt::TokioIo;
     use jsonwebtoken::Algorithm;
 
     use super::{Document, JwtAlgorithm, TokenProfile};
@@ -244,53 +249,76 @@ mod tests {
 
     const FIXTURE_HOST: &str = "authn.fixture.test";
 
-    /// Serves `routes` (request target and JSON body, where `PORT` stands for
-    /// the listening port) over fixture TLS and answers any other target with
-    /// 404. Returns the address, the trusted root and the targets requested.
+    type MetadataRoute = (&'static str, StatusCode, String);
+
+    async fn serve_metadata_connection(
+        stream: tokio::net::TcpStream,
+        acceptor: tokio_rustls::TlsAcceptor,
+        port: String,
+        routes: Arc<Vec<MetadataRoute>>,
+        requested: Arc<std::sync::Mutex<Vec<String>>>,
+    ) {
+        let Ok(stream) = acceptor.accept(stream).await else {
+            return;
+        };
+        let service = service_fn(move |request: Request<Incoming>| {
+            let port = port.clone();
+            let routes = Arc::clone(&routes);
+            let requested = Arc::clone(&requested);
+            async move {
+                let target = request
+                    .uri()
+                    .path_and_query()
+                    .expect("origin-form request target")
+                    .as_str()
+                    .to_owned();
+                let body = request.into_body().collect().await?.to_bytes();
+                assert!(body.is_empty());
+                let (status, body) = routes.iter().find(|(route, ..)| *route == target).map_or(
+                    (StatusCode::NOT_FOUND, Bytes::new()),
+                    |(_, status, body)| (*status, Bytes::from(body.replace("PORT", &port))),
+                );
+                requested.lock().unwrap().push(target);
+                Ok::<_, hyper::Error>(
+                    Response::builder()
+                        .status(status)
+                        .body(Full::new(body))
+                        .unwrap(),
+                )
+            }
+        });
+        let _ = http1::Builder::new()
+            .serve_connection(TokioIo::new(stream), service)
+            .await;
+    }
+
+    /// Serves `routes` (request target, status, and body where `PORT` stands
+    /// for the listening port) over fixture TLS and answers any other target
+    /// with 404. Returns the address, the trusted root and the targets requested.
     async fn metadata_server(
-        routes: Vec<(&'static str, String)>,
+        routes: Vec<MetadataRoute>,
     ) -> (
         std::net::SocketAddr,
         Vec<u8>,
         Arc<std::sync::Mutex<Vec<String>>>,
     ) {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
         let (acceptor, root) = crate::provider::fixture_acceptor(FIXTURE_HOST);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let port = address.port().to_string();
+        let routes = Arc::new(routes);
         let requested = Arc::new(std::sync::Mutex::new(Vec::new()));
         tokio::spawn({
             let requested = Arc::clone(&requested);
             async move {
-                loop {
-                    let (stream, _) = listener.accept().await.unwrap();
-                    let mut stream = acceptor.accept(stream).await.unwrap();
-                    let mut request = Vec::new();
-                    let mut chunk = [0_u8; 4096];
-                    while !request.array_windows().any(|part| part == b"\r\n\r\n") {
-                        let read = stream.read(&mut chunk).await.unwrap();
-                        assert_ne!(read, 0);
-                        request.extend_from_slice(&chunk[..read]);
-                    }
-                    let request = String::from_utf8(request).unwrap();
-                    let target = request.split(' ').nth(1).unwrap().to_owned();
-                    let response = match routes.iter().find(|(route, _)| *route == target) {
-                        Some((_, raw)) if raw.starts_with("HTTP/") => raw.clone(),
-                        Some((_, body)) => {
-                            let body = body.replace("PORT", &port);
-                            format!(
-                                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                                body.len()
-                            )
-                        }
-                        None => "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
-                            .to_owned(),
-                    };
-                    requested.lock().unwrap().push(target);
-                    stream.write_all(response.as_bytes()).await.unwrap();
-                    let _ = stream.shutdown().await;
+                while let Ok((stream, _)) = listener.accept().await {
+                    tokio::spawn(serve_metadata_connection(
+                        stream,
+                        acceptor.clone(),
+                        port.clone(),
+                        Arc::clone(&routes),
+                        Arc::clone(&requested),
+                    ));
                 }
             }
         });
@@ -349,10 +377,19 @@ mod tests {
         let (address, root, requested) = metadata_server(vec![
             (
                 "/tenant/.well-known/openid-configuration",
+                StatusCode::OK,
                 "<html>Default page</html>".to_owned(),
             ),
-            ("/.well-known/oauth-authorization-server/tenant", metadata),
-            ("/keys", serde_json::json!({ "keys": [key] }).to_string()),
+            (
+                "/.well-known/oauth-authorization-server/tenant",
+                StatusCode::OK,
+                metadata,
+            ),
+            (
+                "/keys",
+                StatusCode::OK,
+                serde_json::json!({ "keys": [key] }).to_string(),
+            ),
         ])
         .await;
         let _prepared = prepare(address, &root, None).await.unwrap();
@@ -384,31 +421,33 @@ mod tests {
     #[tokio::test]
     async fn a_failing_oidc_location_keeps_its_error_when_rfc8414_is_absent() {
         use crate::{PreparationPhase, PreparationReason, ProviderFailure};
-        for (response, fallback, expected) in [
+        for ((status, body), fallback, expected) in [
             (
-                "HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
-                "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                (StatusCode::SERVICE_UNAVAILABLE, ""),
+                StatusCode::NOT_FOUND,
                 PreparationReason::Fetch(ProviderFailure::Status(503)),
             ),
             (
-                "HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
-                "HTTP/1.1 410 Gone\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                (StatusCode::SERVICE_UNAVAILABLE, ""),
+                StatusCode::GONE,
                 PreparationReason::Fetch(ProviderFailure::Status(503)),
             ),
             (
-                "{}",
-                "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                (StatusCode::OK, "{}"),
+                StatusCode::NOT_FOUND,
                 PreparationReason::Parse,
             ),
         ] {
             let (address, root, requested) = metadata_server(vec![
                 (
                     "/tenant/.well-known/openid-configuration",
-                    response.to_owned(),
+                    status,
+                    body.to_owned(),
                 ),
                 (
                     "/.well-known/oauth-authorization-server/tenant",
-                    fallback.to_owned(),
+                    fallback,
+                    String::new(),
                 ),
             ])
             .await;
@@ -431,7 +470,7 @@ mod tests {
         let diagnostics = Diagnostics::default();
         let _registration_anchor =
             tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
-        let dispatch = tracing::Dispatch::new(diagnostics.clone());
+        let dispatch = diagnostics.dispatch();
         let key = jwk(&rsa_signing(), Algorithm::RS256, Some("fixture"), true);
         let metadata = format!(
             r#"{{"issuer":"https://{FIXTURE_HOST}:PORT/tenant","jwks_uri":"https://{FIXTURE_HOST}:PORT/keys?tenant=private"}}"#
@@ -440,13 +479,18 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        let port = metrics::with_local_recorder(&diagnostics, || {
+        let port = metrics::with_local_recorder(diagnostics.recorder(), || {
             tracing::dispatcher::with_default(&dispatch, || {
                 runtime.block_on(async {
                     let (address, root, _) = metadata_server(vec![
-                        ("/.well-known/oauth-authorization-server/tenant", metadata),
+                        (
+                            "/.well-known/oauth-authorization-server/tenant",
+                            StatusCode::OK,
+                            metadata,
+                        ),
                         (
                             "/keys?tenant=private",
+                            StatusCode::OK,
                             serde_json::json!({ "keys": [key] }).to_string(),
                         ),
                     ])
@@ -456,7 +500,7 @@ mod tests {
                 })
             })
         });
-        let samples = diagnostics.histograms.lock().unwrap();
+        let samples = diagnostics.take_histograms();
         let labels = samples
             .iter()
             .map(|key| {
@@ -475,13 +519,13 @@ mod tests {
                 "operation=jwks,outcome=success",
             ]
         );
-        let spans = diagnostics.spans.lock().unwrap();
+        let spans = diagnostics.take_spans();
         let server = format!("server.address=\"{FIXTURE_HOST}\";server.port={port};");
         let client = format!(
             "span=authn_provider;otel.name=\"GET\";otel.kind=\"client\";http.request.method=\"GET\";{server}"
         );
         assert_eq!(
-            *spans,
+            spans,
             [
                 format!(
                     "{client}authn.operation=\"discovery\";http.response.status_code=404;\
@@ -502,13 +546,13 @@ mod tests {
         let diagnostics = Diagnostics::default();
         let _registration_anchor =
             tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
-        let dispatch = tracing::Dispatch::new(diagnostics.clone());
+        let dispatch = diagnostics.dispatch();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .start_paused(true)
             .build()
             .unwrap();
-        metrics::with_local_recorder(&diagnostics, || {
+        metrics::with_local_recorder(diagnostics.recorder(), || {
             tracing::dispatcher::with_default(&dispatch, || {
                 runtime.block_on(async {
                     // The listener never answers the TLS handshake.
@@ -538,8 +582,8 @@ mod tests {
                 });
             });
         });
-        let samples = diagnostics.histograms.lock().unwrap();
-        let spans = diagnostics.spans.lock().unwrap();
+        let samples = diagnostics.take_histograms();
+        let spans = diagnostics.take_spans();
         assert_eq!(samples.len(), 2);
         assert_eq!(spans.len(), 2);
         for (index, outcome) in ["cancelled", "provider_timeout"].into_iter().enumerate() {

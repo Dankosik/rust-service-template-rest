@@ -37,14 +37,16 @@ pub struct Operation {
     pub content: String,
 }
 
+fn valid_uuid(value: &str) -> bool {
+    value.len() == 36
+        && value.bytes().all(|byte| !byte.is_ascii_uppercase())
+        && uuid::Uuid::try_parse(value).is_ok()
+}
+
 impl Operation {
     pub fn validate(&self) -> Result<(), Error> {
         for id in [&self.scope, &self.operation_id, &self.article_id] {
-            if id.len() != 36
-                || uuid::Uuid::parse_str(id)
-                    .ok()
-                    .is_none_or(|value| value.to_string() != *id)
-            {
+            if !valid_uuid(id) {
                 return Err(Error::InvalidOperation);
             }
         }

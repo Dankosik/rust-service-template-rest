@@ -393,10 +393,10 @@ async fn relay_authenticated_connection(
 fn is_broker_auth_refusal(line: &[u8]) -> bool {
     line.starts_with(b"-ERR")
         && (line
-            .windows(b"Authorization Violation".len())
+            .array_windows()
             .any(|window| window == b"Authorization Violation")
             || line
-                .windows(b"Authentication".len())
+                .array_windows()
                 .any(|window| window == b"Authentication"))
 }
 

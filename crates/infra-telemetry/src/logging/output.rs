@@ -449,6 +449,7 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
     use std::sync::atomic::AtomicBool;
+    use std::sync::mpsc::{self, Receiver, SyncSender};
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -766,35 +767,45 @@ mod tests {
 
     #[test]
     fn loss_before_recorder_installation_is_published_without_double_counting() {
+        use metrics::{Key, Level, Metadata, Recorder as _};
+        use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+        const RESTORE_METADATA: Metadata<'static> =
+            Metadata::new(module_path!(), Level::INFO, None);
+
         let (output, guard) = start(io::sink()).expect("start writer");
         let result = guard.shutdown(Instant::now() + TEST_TIMEOUT);
         std::assert_matches!(result, LoggerShutdown::Completed(_));
         output.submit(record(b"closed\n"));
-        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-        let handle = recorder.handle();
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let target = Key::from_parts(DROPPED_METRIC, &[("reason", "closed")]);
         metrics::with_local_recorder(&recorder, || {
             for _ in 0..2 {
                 let before = TOTALS.snapshot().dropped(DropReason::Closed);
                 publish();
                 let after = TOTALS.snapshot().dropped(DropReason::Closed);
-                let rendered = handle.render();
-                let line = rendered
-                    .lines()
-                    .find(|line| {
-                        line.starts_with("telemetry_log_records_dropped_total{reason=\"closed\"}")
-                    })
-                    .expect("pre-recorder loss has a finite metric");
-                let value: u64 = line
-                    .split_whitespace()
-                    .nth(1)
-                    .expect("counter value")
-                    .parse()
-                    .expect("integer counter");
+                let snapshot = snapshotter.snapshot().into_vec();
+                let mut closed = None;
+                for (composite, _, _, value) in &snapshot {
+                    let DebugValue::Counter(count) = value else {
+                        continue;
+                    };
+                    if *count != 0 {
+                        recorder
+                            .register_counter(composite.key(), &RESTORE_METADATA)
+                            .increment(*count);
+                    }
+                    if composite.key() == &target {
+                        closed = Some(*count);
+                    }
+                }
+                let value = closed.expect("pre-recorder loss has a finite metric");
                 // Other independent logger tests may increment process totals.
                 // Absolute publication must stay within the observed interval.
                 assert!(
                     (before..=after).contains(&value),
-                    "{line}; expected {before}..={after}"
+                    "{value}; expected {before}..={after}"
                 );
             }
         });

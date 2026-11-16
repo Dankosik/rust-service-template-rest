@@ -309,17 +309,18 @@ mod tests {
     async fn only_admitted_sets_sample_acquisition_time_including_unchanged_keys() {
         let diagnostics = Diagnostics::default();
         let keys = key_set("old");
-        assert!(diagnostics.acquisitions.lock().unwrap().is_empty());
+        assert_eq!(diagnostics.acquisitions(), [] as [f64; 0]);
         let before = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs_f64();
-        let store = metrics::with_local_recorder(&diagnostics, || KeyStore::new(keys.clone()));
+        let store =
+            metrics::with_local_recorder(diagnostics.recorder(), || KeyStore::new(keys.clone()));
         let after = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs_f64();
-        let samples = diagnostics.acquisitions.lock().unwrap().clone();
+        let samples = diagnostics.acquisitions();
         assert_eq!(samples.len(), 1);
         assert!((before.min(after)..=before.max(after)).contains(&samples[0]));
         assert_matches!(
@@ -327,7 +328,7 @@ mod tests {
             SignatureRefresh::NoNewerSet
         );
 
-        assert_eq!(diagnostics.acquisitions.lock().unwrap().len(), 1);
+        assert_eq!(diagnostics.acquisitions().len(), 1);
 
         for failure in [
             KeySetFailure::Fetch(crate::ProviderFailure::Timeout),
@@ -337,7 +338,7 @@ mod tests {
             store.request_periodic();
             store.finish(store.pending().unwrap(), Err(failure));
             assert!(Arc::ptr_eq(&store.current(), &keys));
-            assert_eq!(*diagnostics.acquisitions.lock().unwrap(), samples);
+            assert_eq!(diagnostics.acquisitions(), samples);
         }
 
         // No local recorder is installed here: the owner must retain its handle.
@@ -351,7 +352,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs_f64();
-        let samples = diagnostics.acquisitions.lock().unwrap();
+        let samples = diagnostics.acquisitions();
         assert_eq!(samples.len(), 2);
         assert!((before.min(after)..=before.max(after)).contains(&samples[1]));
         assert!(store.current().has_kid("old"));
@@ -361,8 +362,9 @@ mod tests {
     async fn cancelling_an_inflight_worker_fetch_preserves_acquisition_time_and_keys() {
         let diagnostics = Diagnostics::default();
         let keys = key_set("old");
-        let store = metrics::with_local_recorder(&diagnostics, || KeyStore::new(keys.clone()));
-        let initial = diagnostics.acquisitions.lock().unwrap().clone();
+        let store =
+            metrics::with_local_recorder(diagnostics.recorder(), || KeyStore::new(keys.clone()));
+        let initial = diagnostics.acquisitions();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (_, root) = crate::provider::fixture_acceptor("jwks.test");
@@ -391,7 +393,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(*diagnostics.acquisitions.lock().unwrap(), initial);
+        assert_eq!(diagnostics.acquisitions(), initial);
         assert!(Arc::ptr_eq(&store.current(), &keys));
         assert_matches!(
             store.refresh_for_signature_miss(&keys).await,
@@ -542,8 +544,9 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn dropping_a_waiter_does_not_cancel_the_shared_fetch() {
         let diagnostics = Diagnostics::default();
-        let store = metrics::with_local_recorder(&diagnostics, || KeyStore::new(key_set("old")));
-        let initial = diagnostics.acquisitions.lock().unwrap().clone();
+        let store =
+            metrics::with_local_recorder(diagnostics.recorder(), || KeyStore::new(key_set("old")));
+        let initial = diagnostics.acquisitions();
         store.permit_unknown_refresh_for_test();
         let first = spawn_refresh(&store);
         tokio::task::yield_now().await;
@@ -551,10 +554,10 @@ mod tests {
         tokio::task::yield_now().await;
         second.abort();
         assert!(second.await.unwrap_err().is_cancelled());
-        assert_eq!(*diagnostics.acquisitions.lock().unwrap(), initial);
+        assert_eq!(diagnostics.acquisitions(), initial);
         store.finish(1, Ok(key_set("new")));
         assert_eq!(first.await.unwrap(), Some(true));
-        assert_eq!(diagnostics.acquisitions.lock().unwrap().len(), 2);
+        assert_eq!(diagnostics.acquisitions().len(), 2);
     }
 
     #[tokio::test(start_paused = true)]

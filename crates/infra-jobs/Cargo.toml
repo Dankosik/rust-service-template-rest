@@ -37,6 +37,7 @@ tracing-opentelemetry = { workspace = true }
 uuid = { workspace = true, features = ["std", "v4", "v7"] }
 
 [dev-dependencies]
+metrics-util = { workspace = true, features = ["debugging"] }
 proptest = { workspace = true, features = ["std"] }
 regex = { workspace = true, features = ["std"] }
 serde = { workspace = true, features = ["derive"] }

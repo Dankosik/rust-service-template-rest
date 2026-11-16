@@ -190,7 +190,8 @@ fn finished_exports_are_counted_by_outcome() {
         status: Status::Unset,
         instrumentation_scope: opentelemetry::InstrumentationScope::default(),
     };
-    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let recorder = metrics_util::debugging::DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
     metrics::with_local_recorder(&recorder, || {
         let export = |exporter: Fixed, timeout: Duration, spans: usize| {
             let _ = ObservedExporter {
@@ -220,13 +221,29 @@ fn finished_exports_are_counted_by_outcome() {
             4,
         );
     });
-    let rendered = recorder.handle().render();
-    for series in [
-        "otel_sdk_exporter_span_exported_total 3",
-        "otel_sdk_exporter_span_exported_total{error_type=\"timeout\"} 6",
-        "otel_sdk_exporter_span_exported_total{error_type=\"internal_failure\"} 1",
+    let snapshot = snapshotter.snapshot().into_vec();
+    for (target, expected) in [
+        (metrics::Key::from_name(TRACE_SPANS_EXPORTED_METRIC), 3),
+        (
+            metrics::Key::from_parts(TRACE_SPANS_EXPORTED_METRIC, &[("error_type", "timeout")]),
+            6,
+        ),
+        (
+            metrics::Key::from_parts(
+                TRACE_SPANS_EXPORTED_METRIC,
+                &[("error_type", "internal_failure")],
+            ),
+            1,
+        ),
     ] {
-        assert!(rendered.contains(series), "{series}: {rendered}");
+        let actual = snapshot
+            .iter()
+            .find_map(|(composite, _, _, value)| (composite.key() == &target).then_some(value));
+        assert_eq!(
+            actual,
+            Some(&metrics_util::debugging::DebugValue::Counter(expected)),
+            "{target}: {snapshot:?}"
+        );
     }
 }
 

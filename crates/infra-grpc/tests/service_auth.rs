@@ -228,12 +228,15 @@ fn with_token<T>(message: T, token: Option<&str>) -> Request<T> {
 
 /// The `grpc-status` of a call to `path`, which no generated client names.
 async fn raw_status(address: SocketAddr, path: &str, token: &str) -> String {
+    use bytes::{BufMut as _, BytesMut};
     use tower::ServiceExt as _;
 
-    let message = UnaryRequest::default().encode_to_vec();
-    let mut frame = vec![0];
-    frame.extend_from_slice(&u32::try_from(message.len()).unwrap().to_be_bytes());
-    frame.extend_from_slice(&message);
+    let message = UnaryRequest::default();
+    let len = message.encoded_len();
+    let mut frame = BytesMut::with_capacity(5 + len);
+    frame.put_u8(0);
+    frame.put_u32(u32::try_from(len).unwrap());
+    message.encode(&mut frame).unwrap();
     let request = http::Request::builder()
         .method("POST")
         .uri(path)
@@ -241,7 +244,7 @@ async fn raw_status(address: SocketAddr, path: &str, token: &str) -> String {
         .header("te", "trailers")
         .header("authorization", format!("Bearer {token}"))
         .body(tonic::body::Body::new(http_body_util::Full::new(
-            bytes::Bytes::from(frame),
+            frame.freeze(),
         )))
         .unwrap();
     let client = infra_grpc::Client::try_new(

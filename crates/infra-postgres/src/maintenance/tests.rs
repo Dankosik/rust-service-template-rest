@@ -1,4 +1,4 @@
-use metrics_exporter_prometheus::PrometheusBuilder;
+use metrics_util::debugging::DebuggingRecorder;
 
 use super::*;
 
@@ -15,7 +15,8 @@ async fn the_first_scheduled_pass_starts_at_once_and_the_next_waits_the_interval
 
 #[tokio::test(start_paused = true)]
 async fn an_owner_cancelled_before_start_runs_no_pass_and_publishes_no_observer() {
-    let recorder = PrometheusBuilder::new().build_recorder();
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
     let _recording = metrics::set_default_local_recorder(&recorder);
     let cancel = CancellationToken::new();
     cancel.cancel();
@@ -35,9 +36,10 @@ async fn an_owner_cancelled_before_start_runs_no_pass_and_publishes_no_observer(
 
     assert_eq!(attempts, 0);
     assert!(
-        !recorder
-            .handle()
-            .render()
-            .contains("postgres_maintenance_observer_enabled")
+        snapshotter
+            .snapshot()
+            .into_vec()
+            .iter()
+            .all(|(key, ..)| key.key().name() != "postgres_maintenance_observer_enabled")
     );
 }

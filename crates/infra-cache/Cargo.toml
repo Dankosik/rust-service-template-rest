@@ -47,6 +47,7 @@ tracing-log = { workspace = true, features = ["std", "log-tracer"] }
 tracing-subscriber = { workspace = true, features = ["std", "fmt", "registry"] }
 base64 = { workspace = true, features = ["std"] }
 metrics-exporter-prometheus = { workspace = true }
+metrics-util = { workspace = true, features = ["debugging"] }
 pem = { workspace = true }
 rcgen = { workspace = true, features = ["pem", "aws_lc_rs"] }
 tempfile = { workspace = true, features = ["getrandom"] }

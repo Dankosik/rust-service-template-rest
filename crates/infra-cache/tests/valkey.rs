@@ -43,18 +43,28 @@ fn cache_url() -> String {
 }
 
 fn upstream_addr(url: &str) -> SocketAddr {
-    let host_port = url
-        .strip_prefix("redis://")
-        .and_then(|rest| rest.split(['/', '?']).next())
-        .filter(|host_port| !host_port.is_empty() && !host_port.contains('@'));
-    let Some(host_port) = host_port else {
+    let Ok(info) = redis::IntoConnectionInfo::into_connection_info(url) else {
         panic!(
             "CACHE_URL must be a plaintext redis://host:port with no password; run scripts/ci/test-integration-cache.sh"
         );
     };
-    host_port.parse().unwrap_or_else(|_| {
-        panic!("CACHE_URL host:port could not be parsed; run scripts/ci/test-integration-cache.sh")
-    })
+    let settings = info.redis_settings();
+    let (redis::ConnectionAddr::Tcp(host, port), None, None) =
+        (info.addr(), settings.username(), settings.password())
+    else {
+        panic!(
+            "CACHE_URL must be a plaintext redis://host:port with no password; run scripts/ci/test-integration-cache.sh"
+        );
+    };
+    let ip = host
+        .trim_matches(['[', ']'])
+        .parse::<IpAddr>()
+        .unwrap_or_else(|_| {
+            panic!(
+                "CACHE_URL host:port could not be parsed; run scripts/ci/test-integration-cache.sh"
+            )
+        });
+    SocketAddr::new(ip, *port)
 }
 
 fn unique_key() -> String {

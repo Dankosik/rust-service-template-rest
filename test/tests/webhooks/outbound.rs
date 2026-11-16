@@ -1,4 +1,9 @@
-use std::{collections::BTreeMap, num::NonZeroU32, time::Duration};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    num::NonZeroU32,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use base64::Engine as _;
 use infra_jobs::{Engine, KindsBuilder};
@@ -17,9 +22,14 @@ use tokio_util::{
     sync::{CancellationToken, DropGuard},
     task::TaskTracker,
 };
+use wiremock::{
+    Mock, MockServer, ResponseTemplate,
+    matchers::{method, path, query_param},
+};
 
 const CURRENT_KEY: &str = "whsec_QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=";
 const PREVIOUS_KEY: &str = "whsec_QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI=";
+const POLL: Duration = Duration::from_millis(20);
 
 #[derive(Debug, derive_more::From, derive_more::Display)]
 enum Step {
@@ -121,119 +131,56 @@ impl RunningDispatcher {
     }
 }
 
-async fn until(what: &str, mut ready: impl AsyncFnMut() -> Option<()>) {
-    super::bounded(what, async {
-        loop {
-            if ready().await.is_some() {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await;
-}
-
 async fn job_is(pool: &PgPool, id: &str, state: &str, attempts: i16) {
-    until("the delivery reaches its persisted outcome", async || {
-        let row = sqlx::query("SELECT state, attempts FROM background_jobs WHERE id::text = $1")
-            .bind(id)
-            .fetch_one(pool)
-            .await
-            .expect("delivery row");
-        (row.try_get::<String, _>("state").expect("state") == state
-            && row.try_get::<i16, _>("attempts").expect("attempts") == attempts)
-            .then_some(())
-    })
+    integration_tests::poll_until(
+        "the delivery reaches its persisted outcome",
+        super::WAIT,
+        POLL,
+        async || {
+            let row =
+                sqlx::query("SELECT state, attempts FROM background_jobs WHERE id::text = $1")
+                    .bind(id)
+                    .fetch_one(pool)
+                    .await
+                    .expect("delivery row");
+            (row.try_get::<String, _>("state").expect("state") == state
+                && row.try_get::<i16, _>("attempts").expect("attempts") == attempts)
+                .then_some(())
+        },
+    )
     .await;
 }
 
-async fn read_headers<S: tokio::io::AsyncRead + Unpin>(stream: &mut S) -> Vec<u8> {
-    let mut request = Vec::new();
-    let mut chunk = [0_u8; 256];
-    let header_end = loop {
-        if let Some(position) = request
-            .array_windows()
-            .position(|bytes| bytes == b"\r\n\r\n")
-        {
-            break position + 4;
-        }
-        let read = stream
-            .read(&mut chunk)
-            .await
-            .expect("fixture reads request");
-        assert!(read > 0, "fixture receives a complete request");
-        request.extend_from_slice(&chunk[..read]);
-        assert!(
-            request.len() <= 4096,
-            "fixture request headers remain bounded"
-        );
-    };
-    let content_length = header(&request[..header_end], "content-length")
-        .parse::<usize>()
-        .expect("content length is an integer");
-    while request.len() < header_end + content_length {
-        let read = stream
-            .read(&mut chunk)
-            .await
-            .expect("fixture reads request body");
-        assert!(read > 0, "fixture receives the complete request body");
-        request.extend_from_slice(&chunk[..read]);
-    }
-    request
-}
-
-async fn reply_peer(
-    status: u16,
-    content_length: usize,
-) -> (
-    std::net::SocketAddr,
-    tokio::sync::oneshot::Receiver<Vec<u8>>,
-    JoinHandle<()>,
-) {
+async fn truncated_gone_peer(
+    declared_length: usize,
+) -> (std::net::SocketAddr, JoinHandle<Vec<u8>>) {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("fixture listener");
     let address = listener.local_addr().expect("fixture address");
-    let (sent, captured) = tokio::sync::oneshot::channel();
-    let server = tokio::spawn(async move {
+    let peer = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.expect("fixture accepts connection");
-        let headers = read_headers(&mut stream).await;
-        sent.send(headers)
-            .expect("request capture remains available");
+        let mut received = Vec::new();
+        let mut chunk = [0_u8; 256];
+        while !received.ends_with(b"{\"event\":\"status\"}") {
+            let read = stream
+                .read(&mut chunk)
+                .await
+                .expect("fixture reads request");
+            assert!(read > 0, "fixture receives complete status request");
+            received.extend_from_slice(&chunk[..read]);
+        }
         let response = format!(
-            "HTTP/1.1 {status} fixture\r\nContent-Length: {content_length}\r\nConnection: close\r\n\r\n"
+            "HTTP/1.1 410 Gone\r\nContent-Length: {declared_length}\r\nConnection: close\r\n\r\n"
         );
         stream
             .write_all(response.as_bytes())
             .await
             .expect("fixture writes response");
         stream.shutdown().await.expect("fixture closes response");
+        received
     });
-    (address, captured, server)
-}
-
-fn header(headers: &[u8], name: &str) -> String {
-    let header_end = headers
-        .array_windows()
-        .position(|bytes| bytes == b"\r\n\r\n")
-        .map_or(headers.len(), |position| position + 4);
-    let text =
-        std::str::from_utf8(&headers[..header_end]).expect("fixture request is ASCII headers");
-    text.lines()
-        .filter_map(|line| line.split_once(':'))
-        .find(|(field, _)| field.eq_ignore_ascii_case(name))
-        .map_or_else(
-            || panic!("request contains {name}"),
-            |(_, value)| value.trim().to_owned(),
-        )
-}
-
-fn request_body(request: &[u8]) -> &[u8] {
-    let boundary = request
-        .array_windows()
-        .position(|bytes| bytes == b"\r\n\r\n")
-        .expect("request header boundary");
-    &request[boundary + 4..]
+    (address, peer)
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -308,15 +255,33 @@ async fn caller_rollback_leaves_no_delivery(pool: PgPool) {
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn queued_statuses_retry_except_for_gone_and_complete_on_any_2xx(pool: PgPool) {
-    for (status, content_length, expected_state) in [
-        (401, 0, "pending"),
-        (404, 0, "pending"),
-        (410, 0, "failed"),
-        (410, 1, "failed"),
-        (410, 65_537, "failed"),
-        (204, 0, "completed"),
+    for (status, truncated_length, expected_state) in [
+        (401, None, "pending"),
+        (404, None, "pending"),
+        (410, None, "failed"),
+        (410, Some(1), "failed"),
+        (410, Some(65_537), "failed"),
+        (204, None, "completed"),
     ] {
-        let (address, captured, peer) = reply_peer(status, content_length).await;
+        let mut mock_server = None;
+        let mut truncated_peer = None;
+        let address = if let Some(declared_length) = truncated_length {
+            let (addr, peer) = truncated_gone_peer(declared_length).await;
+            truncated_peer = Some(peer);
+            addr
+        } else {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/events"))
+                .and(query_param("source", "queue"))
+                .respond_with(ResponseTemplate::new(status))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let addr = *server.address();
+            mock_server = Some(server);
+            addr
+        };
         let configured = outbound(&["partner"]);
         let id = enqueue(&pool, &configured, "partner", b"{\"event\":\"status\"}").await;
         let running = RunningDispatcher::start(
@@ -368,16 +333,24 @@ async fn queued_statuses_retry_except_for_gone_and_complete_on_any_2xx(pool: PgP
             ),
             _ => unreachable!("fixed status table"),
         }
-        let request = super::bounded("fixture request capture", captured)
-            .await
-            .expect("fixture captures request");
-        assert!(
-            request.starts_with(b"POST /events?source=queue HTTP/1.1\r\n"),
-            "queued path and query reach the admitted receiver"
-        );
-        super::bounded("fixture peer joins", peer)
-            .await
-            .expect("fixture succeeds");
+        if let Some(peer) = truncated_peer {
+            let request = super::bounded("fixture peer joins", peer)
+                .await
+                .expect("fixture succeeds");
+            assert!(
+                request.starts_with(b"POST /events?source=queue HTTP/1.1\r\n"),
+                "queued path and query reach the admitted receiver"
+            );
+        } else if let Some(server) = mock_server {
+            let requests = server
+                .received_requests()
+                .await
+                .expect("wiremock records requests");
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0].url.path(), "/events");
+            assert_eq!(requests[0].url.query(), Some("source=queue"));
+            server.verify().await;
+        }
         running.stop().await;
         if expected_state == "pending" {
             sqlx::query(
@@ -403,31 +376,55 @@ async fn reclaim_repeats_the_external_delivery_and_fences_the_late_completion(po
     let (second_sent, second_received) = tokio::sync::oneshot::channel();
     let (release_first, first_released) = tokio::sync::oneshot::channel();
     let (release_second, second_released) = tokio::sync::oneshot::channel();
+    let slots = Arc::new(Mutex::new(VecDeque::from([
+        (first_sent, first_released),
+        (second_sent, second_released),
+    ])));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "test webhook receiver fixture has no OpenAPI document"
+    )]
+    let app = axum::Router::new().route(
+        "/events",
+        axum::routing::post({
+            let slots = Arc::clone(&slots);
+            move |headers: axum::http::HeaderMap, body: axum::body::Bytes| {
+                let (sent, released) = slots
+                    .lock()
+                    .expect("delivery slot lock")
+                    .pop_front()
+                    .expect("expected at most two deliveries");
+                async move {
+                    let webhook_id = headers
+                        .get("webhook-id")
+                        .and_then(|value| value.to_str().ok())
+                        .expect("webhook-id header")
+                        .to_owned();
+                    sent.send((webhook_id, body.to_vec()))
+                        .expect("delivery capture");
+                    released.await.expect("delivery release");
+                    axum::http::StatusCode::NO_CONTENT
+                }
+            }
+        }),
+    );
+    let (stop_peer, peer_stopped) = tokio::sync::oneshot::channel::<()>();
     let peer = tokio::spawn(async move {
-        let (mut first, _) = listener.accept().await.expect("first delivery");
-        first_sent
-            .send(read_headers(&mut first).await)
-            .expect("first capture");
-        // The first request already reached the receiver; hold only its response.
-        let (mut second, _) = listener.accept().await.expect("replacement delivery");
-        second_sent
-            .send(read_headers(&mut second).await)
-            .expect("replacement capture");
-        let response = b"HTTP/1.1 204 fixture\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-        first_released.await.expect("old executor may continue");
-        first.write_all(response).await.expect("late reply");
-        first.shutdown().await.expect("old connection closes");
-        second_released.await.expect("replacement may complete");
-        second.write_all(response).await.expect("replacement reply");
-        second.shutdown().await.expect("replacement closes");
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                let _ = peer_stopped.await;
+            })
+            .await
+            .expect("receiver serves both deliveries");
     });
     let body = b"{\"event\":\"late-completion\"}";
     let id = enqueue(&pool, &outbound(&["partner"]), "partner", body).await;
     let original =
         RunningDispatcher::start(&pool, dispatcher(&[("partner", "/events")], address), 1);
-    let first = super::bounded("first request reached the receiver", first_received)
-        .await
-        .expect("first request");
+    let (first_id, first_body) =
+        super::bounded("first request reached the receiver", first_received)
+            .await
+            .expect("first request");
     original.started.stop_claiming();
     let generation: i64 =
         sqlx::query_scalar("SELECT claim_generation FROM background_jobs WHERE id::text = $1")
@@ -445,13 +442,14 @@ async fn reclaim_repeats_the_external_delivery_and_fences_the_late_completion(po
     .expect("stage expiry while the first response is held");
     let replacement =
         RunningDispatcher::start(&pool, dispatcher(&[("partner", "/events")], address), 1);
-    let second = super::bounded("reclaim delivers before the old response", second_received)
-        .await
-        .expect("replacement request");
-    assert_eq!(header(&first, "webhook-id"), id);
-    assert_eq!(header(&second, "webhook-id"), id);
-    assert_eq!(request_body(&first), body);
-    assert_eq!(request_body(&second), body);
+    let (second_id, second_body) =
+        super::bounded("reclaim delivers before the old response", second_received)
+            .await
+            .expect("replacement request");
+    assert_eq!(first_id, id);
+    assert_eq!(second_id, id);
+    assert_eq!(first_body, body);
+    assert_eq!(second_body, body);
     job_is(&pool, &id, "running", 2).await;
     let reclaimed: i64 =
         sqlx::query_scalar("SELECT claim_generation FROM background_jobs WHERE id::text = $1")
@@ -479,6 +477,7 @@ async fn reclaim_repeats_the_external_delivery_and_fences_the_late_completion(po
         .send(())
         .expect("release the replacement response");
     job_is(&pool, &id, "completed", 2).await;
+    stop_peer.send(()).expect("stop receiver after completion");
     super::bounded("both receiver connections join", peer)
         .await
         .expect("receiver succeeds");
@@ -504,7 +503,12 @@ async fn legacy_job_uses_current_path_and_rotated_keys_despite_invalid_saved_rou
     .await
     .expect("obsolete routing values do not constrain the legacy common payload");
 
-    let (address, captured, peer) = reply_peer(200, 0).await;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
     let oversized = format!("/{}", "a".repeat(65_534));
     let running = RunningDispatcher::start(
         &pool,
@@ -513,7 +517,7 @@ async fn legacy_job_uses_current_path_and_rotated_keys_despite_invalid_saved_rou
                 ("oversized", &oversized),
                 ("partner", "/current%2Fpath?binding=live%26well"),
             ],
-            address,
+            *server.address(),
         ),
         1,
     );
@@ -528,25 +532,42 @@ async fn legacy_job_uses_current_path_and_rotated_keys_despite_invalid_saved_rou
     assert_eq!(reason, "permanent");
     assert_eq!(summary, "invalid_payload");
     job_is(&pool, &id, "completed", 1).await;
-    let request = super::bounded("fixture request capture", captured)
+    let requests = server
+        .received_requests()
         .await
-        .expect("fixture captures request");
-    assert!(
-        request.starts_with(b"POST /current%2Fpath?binding=live%26well HTTP/1.1\r\n"),
-        "escaped path and query from the current endpoint replace obsolete routing"
+        .expect("wiremock records requests");
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert_eq!(
+        request.url.path(),
+        "/current%2Fpath",
+        "escaped path from the current endpoint replaces obsolete routing"
     );
-    let timestamp = header(&request, "webhook-timestamp")
+    assert_eq!(
+        request.url.query(),
+        Some("binding=live%26well"),
+        "escaped query from the current endpoint replaces obsolete routing"
+    );
+    let timestamp = request
+        .headers
+        .get("webhook-timestamp")
+        .and_then(|value| value.to_str().ok())
+        .expect("webhook-timestamp header")
         .parse::<i64>()
         .expect("timestamp is an integer");
     let expected = KeyRing::from_encoded(CURRENT_KEY, Some(PREVIOUS_KEY))
         .expect("fixture keys")
         .signatures(id.as_bytes(), timestamp, body)
         .expect("signature framing");
-    assert_eq!(header(&request, "webhook-signature"), expected);
-    assert_eq!(request_body(&request), body);
-    super::bounded("fixture peer joins", peer)
-        .await
-        .expect("fixture succeeds");
+    assert_eq!(
+        request
+            .headers
+            .get("webhook-signature")
+            .and_then(|value| value.to_str().ok()),
+        Some(expected.as_str())
+    );
+    assert_eq!(request.body, body);
+    server.verify().await;
     running.stop().await;
     super::close_pools(&[&pool]).await;
 }

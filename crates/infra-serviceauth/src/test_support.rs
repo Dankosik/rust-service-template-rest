@@ -11,10 +11,7 @@ use aws_lc_rs::{
     rand::SystemRandom,
     signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, KeyPair as _},
 };
-use base64::{
-    Engine as _,
-    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
-};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use jsonwebtoken::{
     Algorithm, DecodingKey,
     jwk::{Jwk, PublicKeyUse},
@@ -69,15 +66,9 @@ impl TestKey {
 
     #[must_use]
     pub fn pem(&self) -> String {
-        let body = STANDARD.encode(&self.pkcs8);
-        let lines: Vec<&str> = body
-            .as_bytes()
-            .chunks(64)
-            .map(|line| std::str::from_utf8(line).expect("base64 is ASCII"))
-            .collect();
-        format!(
-            "-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----\n",
-            lines.join("\n")
+        pem::encode_config(
+            &pem::Pem::new("PRIVATE KEY", self.pkcs8.as_slice()),
+            pem::EncodeConfig::new().set_line_ending(pem::LineEnding::LF),
         )
     }
 

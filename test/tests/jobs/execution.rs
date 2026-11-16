@@ -256,20 +256,8 @@ async fn an_expired_checkout_does_not_use_an_idle_connection(pool: PgPool) {
     super::close_pools(&[&jobs]).await;
 }
 
-async fn until<T>(what: &str, bound: Duration, mut ready: impl AsyncFnMut() -> Option<T>) -> T {
-    let result = tokio::time::timeout(bound, async {
-        loop {
-            if let Some(found) = ready().await {
-                return found;
-            }
-            tokio::time::sleep(POLL).await;
-        }
-    })
-    .await;
-    match result {
-        Ok(found) => found,
-        Err(elapsed) => panic!("{what} did not happen within {bound:?}: {elapsed}"),
-    }
+async fn until<T>(what: &str, bound: Duration, ready: impl AsyncFnMut() -> Option<T>) -> T {
+    integration_tests::poll_until(what, bound, POLL, ready).await
 }
 
 async fn absent_for(bound: Duration, mut check: impl AsyncFnMut()) {

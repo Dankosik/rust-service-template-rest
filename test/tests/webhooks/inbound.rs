@@ -11,7 +11,7 @@ use infra_webhooks::inbound::{
     Verifier, async_trait,
 };
 use infra_webhooks::protocol::KeyRing;
-use integration_tests::dsn_for;
+use integration_tests::{dsn_for, poll_until};
 use sqlx::Row;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use tokio::sync::Notify;
@@ -22,6 +22,7 @@ use super::commit_proxy::{CommitProxy, Fault};
 
 const ENDPOINT: &str = "partner/a?#";
 const KEY: &str = "whsec_Q0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0M=";
+const POLL: Duration = Duration::from_millis(20);
 
 fn receiver(pool: PgPool) -> Receiver {
     Receiver::new(
@@ -131,18 +132,6 @@ async fn job_count(pool: &PgPool) -> i64 {
 async fn proxied_pool(pool: &PgPool) -> (CommitProxy, PgPool) {
     let (proxy, proxied) = CommitProxy::start_for(pool).await;
     (proxy, super::template_pool(&proxied, 3).await)
-}
-
-async fn until<T>(what: &str, mut ready: impl AsyncFnMut() -> Option<T>) -> T {
-    super::bounded(what, async {
-        loop {
-            if let Some(value) = ready().await {
-                return value;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
 }
 
 #[test]
@@ -549,9 +538,12 @@ async fn stale_fenced_completion_rolls_back_consumer_effects(pool: PgPool) {
     .expect("claim becomes stale");
     assert_eq!(stale.rows_affected(), 1);
     consumer.release.notify_one();
-    until("the stale processor attempt ends", async || {
-        (running.started.in_flight() == 0).then_some(())
-    })
+    poll_until(
+        "the stale processor attempt ends",
+        super::WAIT,
+        POLL,
+        async || (running.started.in_flight() == 0).then_some(()),
+    )
     .await;
     let effects: i64 = sqlx::query_scalar("SELECT count(*) FROM webhook_effects")
         .fetch_one(&pool)
@@ -605,9 +597,12 @@ async fn unknown_processor_commit_does_not_add_a_competing_retry(pool: PgPool) {
     .await;
     proxy.arm((Fault::ForwardThenDrop, "SET state = 'completed'"));
     consumer.release.notify_one();
-    until("the unknown processor attempt ends", async || {
-        (running.started.in_flight() == 0).then_some(())
-    })
+    poll_until(
+        "the unknown processor attempt ends",
+        super::WAIT,
+        POLL,
+        async || (running.started.in_flight() == 0).then_some(()),
+    )
     .await;
     assert_eq!(proxy.fired(), Some(Fault::ForwardThenDrop));
     let effects: Vec<Vec<u8>> = sqlx::query_scalar("SELECT message_id FROM webhook_effects")
@@ -637,17 +632,22 @@ async fn missing_consumer_spends_attempts_and_exhausts_the_normal_budget(pool: P
         .await
         .expect("historical attempt count");
     let running = RunningProcessor::start(&pool, Consumers::new());
-    until("the missing binding spends its retry attempt", async || {
-        let row = sqlx::query(
-            "SELECT state, attempts FROM background_jobs WHERE kind = 'webhooks.process'",
-        )
-        .fetch_one(&pool)
-        .await
-        .expect("job row");
-        (row.try_get::<String, _>("state").expect("state") == "pending"
-            && row.try_get::<i16, _>("attempts").expect("attempts") == 24)
-            .then_some(())
-    })
+    poll_until(
+        "the missing binding spends its retry attempt",
+        super::WAIT,
+        POLL,
+        async || {
+            let row = sqlx::query(
+                "SELECT state, attempts FROM background_jobs WHERE kind = 'webhooks.process'",
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("job row");
+            (row.try_get::<String, _>("state").expect("state") == "pending"
+                && row.try_get::<i16, _>("attempts").expect("attempts") == 24)
+                .then_some(())
+        },
+    )
     .await;
     sqlx::query(
         "UPDATE background_jobs SET not_before = now() \
@@ -656,16 +656,21 @@ async fn missing_consumer_spends_attempts_and_exhausts_the_normal_budget(pool: P
     .execute(&pool)
     .await
     .expect("make the final retry eligible without waiting for backoff");
-    let row = until("the missing binding exhausts its budget", async || {
-        let row = sqlx::query(
-            "SELECT state, attempts, failure_reason FROM background_jobs \
-             WHERE kind = 'webhooks.process'",
-        )
-        .fetch_one(&pool)
-        .await
-        .expect("job row");
-        (row.try_get::<String, _>("state").expect("state") == "failed").then_some(row)
-    })
+    let row = poll_until(
+        "the missing binding exhausts its budget",
+        super::WAIT,
+        POLL,
+        async || {
+            let row = sqlx::query(
+                "SELECT state, attempts, failure_reason FROM background_jobs \
+                 WHERE kind = 'webhooks.process'",
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("job row");
+            (row.try_get::<String, _>("state").expect("state") == "failed").then_some(row)
+        },
+    )
     .await;
     assert_eq!(row.try_get::<i16, _>("attempts").expect("attempts"), 25);
     assert_eq!(
@@ -715,7 +720,8 @@ async fn mounted_receipt_cutoff_reserves_response_time_and_same_identity_recover
     }
 
     // template:begin http-idempotency:test-webhook-cutoff-metric-recorder
-    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let recorder = metrics_util::debugging::DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
     let _local = metrics::set_default_local_recorder(&recorder);
     // template:end http-idempotency:test-webhook-cutoff-metric-recorder
     let writer = super::template_pool(&dsn_for(&pool).await, 1).await;
@@ -785,21 +791,32 @@ async fn mounted_receipt_cutoff_reserves_response_time_and_same_identity_recover
     assert_eq!(receipt_count(&pool).await, 1);
     assert_eq!(job_count(&pool).await, 1);
     // template:begin http-idempotency:test-webhook-cutoff-metric-assertions
-    let scrape = recorder.handle().render();
-    let outcomes: Vec<_> = scrape
-        .lines()
-        .filter(|line| line.starts_with("webhook_ingress_outcomes_total{"))
+    let outcomes: std::collections::BTreeMap<String, u64> = snapshotter
+        .snapshot()
+        .into_vec()
+        .into_iter()
+        .filter(|(key, _, _, _)| key.key().name() == "webhook_ingress_outcomes_total")
+        .filter_map(|(key, _, _, value)| {
+            let outcome = key
+                .key()
+                .labels()
+                .find(|label| label.key() == "outcome")?
+                .value()
+                .to_owned();
+            let metrics_util::debugging::DebugValue::Counter(count) = value else {
+                return None;
+            };
+            Some((outcome, count))
+        })
         .collect();
-    assert_eq!(outcomes.len(), 3, "{scrape}");
-    for (outcome, count) in [("deadline_exceeded", 3), ("accepted", 1), ("duplicate", 1)] {
-        assert!(
-            outcomes
-                .iter()
-                .any(|line| line.contains(&format!("outcome=\"{outcome}\""))
-                    && line.ends_with(&format!(" {count}"))),
-            "{scrape}"
-        );
-    }
+    assert_eq!(
+        outcomes,
+        std::collections::BTreeMap::from([
+            ("accepted".to_owned(), 1),
+            ("deadline_exceeded".to_owned(), 3),
+            ("duplicate".to_owned(), 1),
+        ])
+    );
     // template:end http-idempotency:test-webhook-cutoff-metric-assertions
     super::close_pools(&[&writer, &pool]).await;
 }
@@ -1085,37 +1102,101 @@ async fn unknown_cleanup_commit_does_not_count_deleted_receipts(pool: PgPool) {
     super::close_pools(&[&pool]).await;
 }
 
-async fn receipt_population_sample(pool: &PgPool) -> String {
-    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+struct ReceiptPopulationSample {
+    present: bool,
+    oldest_timestamp_seconds: f64,
+    removed_rows: u64,
+}
+
+fn has_label(key: &metrics_util::CompositeKey, name: &str, value: &str) -> bool {
+    key.key()
+        .labels()
+        .any(|l| l.key() == name && l.value() == value)
+}
+
+async fn receipt_population_sample(pool: &PgPool) -> ReceiptPopulationSample {
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
     let _local = metrics::set_default_local_recorder(&recorder);
     let cancel = CancellationToken::new();
     let cleanup = receiver(pool.clone()).run_cleanup(cancel.clone());
     tokio::pin!(cleanup);
-    let observed = async {
-        loop {
-            let scrape = recorder.handle().render();
-            if scrape.contains(
-                "postgres_maintenance_last_attempt_success{population=\"webhook_receipts\"} 1",
-            ) && scrape.contains("webhook_receipt_cleanup_runs_total{outcome=\"completed\"} 1")
-            {
-                return scrape;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    };
-    let scrape = tokio::select! {
+    let mut observed: Option<(bool, f64)> = None;
+    let mut completed_runs = 0_u64;
+    let mut removed_rows: Option<u64> = None;
+    let sample = tokio::select! {
         () = &mut cleanup => panic!("tracked owner ended before cancellation"),
-        scrape = super::bounded("receipt population sample and cleanup", observed) => scrape,
+        sample = poll_until(
+            "receipt population sample and cleanup",
+            super::WAIT,
+            Duration::from_millis(5),
+            async || {
+                let mut gauges = std::collections::BTreeMap::new();
+                for (key, _, _, value) in snapshotter.snapshot().into_vec() {
+                    let name = key.key().name();
+                    match value {
+                        DebugValue::Gauge(v) if has_label(&key, "population", "webhook_receipts") => {
+                            gauges.insert(name.to_owned(), v.into_inner());
+                        }
+                        DebugValue::Counter(n)
+                            if name == "webhook_receipt_cleanup_runs_total"
+                                && has_label(&key, "outcome", "completed") =>
+                        {
+                            completed_runs += n;
+                        }
+                        DebugValue::Counter(n)
+                            if name == "postgres_cleanup_removed_rows_total"
+                                && has_label(&key, "cleanup", "webhook_receipts") =>
+                        {
+                            *removed_rows.get_or_insert(0) += n;
+                        }
+                        _ => {}
+                    }
+                }
+                if gauges
+                    .get("postgres_maintenance_last_attempt_success")
+                    .copied()
+                    == Some(1.0)
+                {
+                    let present = gauges
+                        .get("postgres_maintenance_present")
+                        .expect("present gauge published with attempt success")
+                        .to_bits()
+                        == 1.0_f64.to_bits();
+                    let oldest = *gauges
+                        .get("postgres_maintenance_oldest_timestamp_seconds")
+                        .expect("oldest gauge published with attempt success");
+                    observed = Some((present, oldest));
+                }
+                let (present, oldest_timestamp_seconds) = observed?;
+                (completed_runs >= 1).then(|| ReceiptPopulationSample {
+                    present,
+                    oldest_timestamp_seconds,
+                    removed_rows: removed_rows.expect("cleanup pass registers removed_rows"),
+                })
+            },
+        ) => sample,
     };
+    metrics::gauge!(
+        "postgres_maintenance_observer_enabled",
+        "population" => "webhook_receipts"
+    )
+    .set(1.0);
     cancel.cancel();
     super::bounded("receipt owner cancellation", cleanup).await;
-    assert!(
-        recorder
-            .handle()
-            .render()
-            .contains("postgres_maintenance_observer_enabled{population=\"webhook_receipts\"} 0",)
-    );
-    scrape
+    let enabled = snapshotter
+        .snapshot()
+        .into_vec()
+        .into_iter()
+        .find_map(|(key, _, _, value)| {
+            (key.key().name() == "postgres_maintenance_observer_enabled"
+                && has_label(&key, "population", "webhook_receipts"))
+            .then_some(value)
+        });
+    assert_eq!(enabled, Some(DebugValue::Gauge(0.0.into())));
+    sample
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
@@ -1159,22 +1240,14 @@ async fn observation_includes_locked_receipts_and_becomes_empty_after_cleanup(
             .fetch_all(&mut *tx)
             .await
             .expect("hold receipts against cleanup");
-        let scrape = receipt_population_sample(&pool).await;
+        let sample = receipt_population_sample(&pool).await;
+        assert!(sample.present);
         assert!(
-            scrape.contains("postgres_maintenance_present{population=\"webhook_receipts\"} 1",)
+            (sample.oldest_timestamp_seconds - oldest).abs() < 0.001,
+            "{} != {oldest}",
+            sample.oldest_timestamp_seconds
         );
-        let oldest_metric =
-            "postgres_maintenance_oldest_timestamp_seconds{population=\"webhook_receipts\"} ";
-        let sampled: f64 = scrape
-            .lines()
-            .find_map(|line| line.strip_prefix(oldest_metric))
-            .expect("dated oldest sample")
-            .parse()
-            .expect("numeric eligibility timestamp");
-        assert!((sampled - oldest).abs() < 0.001, "{sampled} != {oldest}");
-        assert!(
-            scrape.contains("postgres_cleanup_removed_rows_total{cleanup=\"webhook_receipts\"} 0",)
-        );
+        assert_eq!(sample.removed_rows, 0);
         assert_eq!(receipt_count(&pool).await, 2);
         Ok(())
     })
@@ -1182,12 +1255,9 @@ async fn observation_includes_locked_receipts_and_becomes_empty_after_cleanup(
     .expect("release receipt locks");
 
     assert_eq!(receiver(pool.clone()).remove_expired().await, Ok(1));
-    let scrape = receipt_population_sample(&pool).await;
-    for metric in ["present", "oldest_timestamp_seconds"] {
-        assert!(scrape.contains(&format!(
-            "postgres_maintenance_{metric}{{population=\"webhook_receipts\"}} 0",
-        )));
-    }
+    let sample = receipt_population_sample(&pool).await;
+    assert!(!sample.present);
+    assert_eq!(sample.oldest_timestamp_seconds.to_bits(), 0.0_f64.to_bits());
     assert_eq!(receipt_count(&pool).await, 1, "retention remains intact");
     super::close_pools(&[&pool]).await;
 }
