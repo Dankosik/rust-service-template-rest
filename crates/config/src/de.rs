@@ -21,8 +21,19 @@ pub(crate) fn value_free<E: serde::de::Error>(message: impl std::fmt::Display) -
     E::custom(format_args!("{VALUE_FREE}{message}"))
 }
 
-/// Buffer the scalar kind before config-rs can coerce it. Callers supply
-/// the value-free diagnostic for either a rejected kind or malformed text.
+/// A scalar buffered by kind before config-rs can coerce it: a file
+/// supplies `Typed`, an environment variable `Text`. Without the buffer
+/// config-rs reads `1.5` as 2 for a count and `true`, `yes` or `off` as 1.0
+/// or 0.0 for a ratio.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Scalar<T> {
+    Typed(T),
+    Text(String),
+}
+
+/// Callers supply the value-free diagnostic for either a rejected kind or
+/// malformed text.
 #[allow(
     dead_code,
     reason = "removing OIDC introspection and outbound authentication leaves no caller"
@@ -32,30 +43,16 @@ where
     D: serde::Deserializer<'de>,
     T: Deserialize<'de> + FromStr,
 {
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum Input<T> {
-        Typed(T),
-        Text(String),
-    }
-
-    match Input::<T>::deserialize(deserializer).map_err(|_| value_free(message))? {
-        Input::Typed(value) => Ok(value),
-        Input::Text(value) => value.parse().map_err(|_| value_free(message)),
+    match Scalar::<T>::deserialize(deserializer).map_err(|_| value_free(message))? {
+        Scalar::Typed(value) => Ok(value),
+        Scalar::Text(value) => value.parse().map_err(|_| value_free(message)),
     }
 }
 
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum CountInput<T> {
-    Integer(T),
-    Text(String),
-}
-
-impl<T: FromStr> CountInput<T> {
+impl<T: FromStr> Scalar<T> {
     fn into_count<E: serde::de::Error>(self) -> Result<T, E> {
         match self {
-            Self::Integer(value) => Ok(value),
+            Self::Typed(value) => Ok(value),
             Self::Text(value) => value.parse().map_err(|_| invalid_count()),
         }
     }
@@ -73,7 +70,7 @@ where
     D: serde::Deserializer<'de>,
     T: Deserialize<'de> + FromStr,
 {
-    CountInput::deserialize(deserializer)
+    Scalar::deserialize(deserializer)
         .map_err(|_| invalid_count::<D::Error>())?
         .into_count()
 }
@@ -83,19 +80,10 @@ where
     D: serde::Deserializer<'de>,
     T: Deserialize<'de> + FromStr,
 {
-    Option::<CountInput<T>>::deserialize(deserializer)
+    Option::<Scalar<T>>::deserialize(deserializer)
         .map_err(|_| invalid_count::<D::Error>())?
-        .map(CountInput::into_count)
+        .map(Scalar::into_count)
         .transpose()
-}
-
-// Buffer the scalar kind before config-rs coerces `true`, `yes`, or `off`
-// into 1.0 or 0.0.
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum RatioInput {
-    Number(f64),
-    Text(String),
 }
 
 fn invalid_ratio<E: serde::de::Error>() -> E {
@@ -108,9 +96,9 @@ pub(crate) fn ratio<'de, D>(deserializer: D) -> Result<f64, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    match RatioInput::deserialize(deserializer).map_err(|_| invalid_ratio::<D::Error>())? {
-        RatioInput::Number(value) => Ok(value),
-        RatioInput::Text(value) => value.trim().parse().map_err(|_| invalid_ratio()),
+    match Scalar::<f64>::deserialize(deserializer).map_err(|_| invalid_ratio::<D::Error>())? {
+        Scalar::Typed(value) => Ok(value),
+        Scalar::Text(value) => value.trim().parse().map_err(|_| invalid_ratio()),
     }
 }
 
