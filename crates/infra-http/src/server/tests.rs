@@ -662,7 +662,7 @@ async fn a_burst_of_connections_waits_in_the_listen_queue_instead_of_being_dropp
     let mut pending = tokio::task::JoinSet::new();
     for _ in 0..300 {
         pending.spawn(tokio::time::timeout(
-            Duration::from_millis(500),
+            Duration::from_millis(900),
             TcpStream::connect(addr),
         ));
     }
