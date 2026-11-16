@@ -100,7 +100,34 @@ impl Default for HttpConfig {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "http.grace_period ({grace:?}) must be >= http.drain_timeout ({drain_timeout:?}) plus the {tail:?} {teardown}"
+)]
+pub struct GraceBudgetError {
+    grace: Duration,
+    drain_timeout: Duration,
+    tail: Duration,
+    teardown: &'static str,
+}
+
 impl HttpConfig {
+    pub fn check_grace_budget(
+        &self,
+        tail: Duration,
+        teardown: &'static str,
+    ) -> Result<(), GraceBudgetError> {
+        if self.grace_period < self.drain_timeout.saturating_add(tail) {
+            return Err(GraceBudgetError {
+                grace: self.grace_period,
+                drain_timeout: self.drain_timeout,
+                tail,
+                teardown,
+            });
+        }
+        Ok(())
+    }
+
     #[must_use]
     pub fn connection_cap(&self) -> Option<NonZeroU32> {
         NonZeroU32::new(self.max_connections)

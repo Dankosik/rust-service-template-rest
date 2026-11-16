@@ -14,7 +14,7 @@ use infra_messaging::CloseOutcome;
 use infra_postgres::PgPool;
 // template:end jobs:worker-shutdown-postgres-imports
 use infra_telemetry::{LoggerShutdown, ProviderShutdown, SHUTDOWN_JOIN_SLACK};
-use service_config::HttpConfig;
+use service_config::{GraceBudgetError, HttpConfig};
 use tokio::time::Instant;
 
 use crate::background::Background;
@@ -40,26 +40,11 @@ const SHUTDOWN_TAIL: Duration = ATTEMPT_CLEANUP
 
 pub(crate) const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
-#[derive(Debug, thiserror::Error)]
-#[error(
-    "http.grace_period ({grace:?}) must be >= http.drain_timeout ({drain_timeout:?}) plus the \
-     {tail:?} jobs worker teardown tail (cleanup, listeners, background join, dependency close, telemetry flush, SDK join slack, runtime shutdown)"
-)]
-pub(crate) struct GraceBudgetError {
-    grace: Duration,
-    drain_timeout: Duration,
-    tail: Duration,
-}
-
 pub(crate) fn validate_grace_budget(http: &HttpConfig) -> Result<(), GraceBudgetError> {
-    if http.grace_period < http.drain_timeout.saturating_add(SHUTDOWN_TAIL) {
-        return Err(GraceBudgetError {
-            grace: http.grace_period,
-            drain_timeout: http.drain_timeout,
-            tail: SHUTDOWN_TAIL,
-        });
-    }
-    Ok(())
+    http.check_grace_budget(
+        SHUTDOWN_TAIL,
+        "jobs worker teardown tail (cleanup, listeners, background join, dependency close, telemetry flush, SDK join slack, runtime shutdown)",
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]

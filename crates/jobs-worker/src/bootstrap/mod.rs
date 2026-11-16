@@ -43,7 +43,7 @@ pub(crate) enum WorkerError {
     #[error("configuration is invalid: {0}")]
     Config(#[from] service_config::ValidationError),
     #[error(transparent)]
-    GraceBudget(#[from] shutdown::GraceBudgetError),
+    GraceBudget(#[from] service_config::GraceBudgetError),
     #[error("build tokio runtime: {0}")]
     Runtime(#[source] std::io::Error),
     #[error("install stop signal handlers: {0}")]

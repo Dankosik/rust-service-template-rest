@@ -15,7 +15,7 @@ use infra_postgres::{CloseOutcome, PgPool};
 use infra_telemetry::{
     LoggerGuard, LoggerShutdown, ProviderShutdown, SHUTDOWN_JOIN_SLACK, TracerProviderHandle,
 };
-use service_config::HttpConfig;
+use service_config::{GraceBudgetError, HttpConfig};
 use tokio::time::Instant;
 
 use super::background::{Background, JoinOutcome};
@@ -32,25 +32,11 @@ pub(crate) const SHUTDOWN_TAIL: Duration = DIAGNOSTICS_SHUTDOWN
     .saturating_add(SHUTDOWN_JOIN_SLACK)
     .saturating_add(super::RUNTIME_SHUTDOWN_TIMEOUT);
 
-#[derive(Debug, thiserror::Error)]
-#[error(
-    "http.grace_period ({grace:?}) must be >= http.drain_timeout ({drain_timeout:?}) plus the {tail:?} teardown tail (diagnostics, background join, dependency close, telemetry flush, SDK join, runtime)"
-)]
-pub(crate) struct GraceBudgetError {
-    grace: Duration,
-    drain_timeout: Duration,
-    tail: Duration,
-}
-
 pub(crate) fn validate_grace_budget(http: &HttpConfig) -> Result<(), GraceBudgetError> {
-    if http.grace_period < http.drain_timeout.saturating_add(SHUTDOWN_TAIL) {
-        return Err(GraceBudgetError {
-            grace: http.grace_period,
-            drain_timeout: http.drain_timeout,
-            tail: SHUTDOWN_TAIL,
-        });
-    }
-    Ok(())
+    http.check_grace_budget(
+        SHUTDOWN_TAIL,
+        "teardown tail (diagnostics, background join, dependency close, telemetry flush, SDK join, runtime)",
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

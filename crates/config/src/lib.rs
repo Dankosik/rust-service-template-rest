@@ -58,7 +58,7 @@ use validate::Violations;
 pub use app::{AppConfig, BuildInfo};
 pub use cli::LoadOptions;
 pub use health::HealthConfig;
-pub use http::HttpConfig;
+pub use http::{GraceBudgetError, HttpConfig};
 // template:begin grpc:config-export
 pub use grpc::{GrpcConfig, GrpcListenerSecurity, GrpcSecurity, GrpcTlsMaterial};
 // template:end grpc:config-export
