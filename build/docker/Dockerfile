@@ -31,6 +31,9 @@
 # - JEMALLOC_SYS_WITH_MALLOC_CONF bakes `thp:never` into the allocator: on a
 #   host whose transparent huge pages are `always`, khugepaged refills the
 #   pages jemalloc returned (docs/backend-library-selection.md).
+# - PGO=train builds the service twice so the release build reads a profile
+#   of the requests build/docker/pgo-train.sh sends; a profile differs between
+#   builds, so the binary is not reproducible. The default builds once.
 
 ARG SERVICE_PACKAGE=service
 ARG IMAGE_TESTS=none
@@ -144,11 +147,33 @@ ARG RAILWAY_GIT_COMMIT_SHA
 ENV VERGEN_GIT_SHA=${RAILWAY_GIT_COMMIT_SHA:-${VCS_REF}}
 COPY . .
 
+# PGO=train compiles the service with counters, runs it against
+# build/docker/pgo-train.sh, merges what it counted and builds again with that
+# profile. One `build` serves both compilations: cargo-auditable's rustc
+# wrapper changes the workspace crates' symbol names, and a profile recorded
+# under other names is ignored without a warning. The counted build has its
+# own target directory, and the build scripts' own counts are dropped before
+# the service runs.
 FROM source AS service-build
+ARG PGO=none
 ARG SERVICE_PACKAGE
 ARG SERVICE_BIN=service
 ARG SOURCE_DATE_EPOCH=0
-RUN cargo auditable build --release --locked -p "${SERVICE_PACKAGE}" --bin "${SERVICE_BIN}" \
+RUN build() { cargo auditable build --release --locked -p "${SERVICE_PACKAGE}" --bin "${SERVICE_BIN}" "$@"; } \
+ && case "${PGO}" in \
+      none) ;; \
+      train) rustup component add llvm-tools-preview \
+        && export RUSTFLAGS="-Cprofile-generate=/pgo/raw" \
+        && build --target-dir /pgo/target \
+        && rm -rf /pgo/raw \
+        && sh build/docker/pgo-train.sh "/pgo/target/release/${SERVICE_BIN}" \
+        && "$(rustc --print sysroot)/lib/rustlib/$(rustc --print host-tuple)/bin/llvm-profdata" \
+             merge --sparse -o /pgo/service.profdata /pgo/raw \
+        && rm -rf /pgo/target /pgo/raw \
+        && export RUSTFLAGS="-Cprofile-use=/pgo/service.profdata" ;; \
+      *) echo "PGO is none or train" >&2; exit 1 ;; \
+    esac \
+ && build \
  && mkdir -p /out && cp "target/release/${SERVICE_BIN}" "/out/${SERVICE_BIN}" \
  && touch -d "@${SOURCE_DATE_EPOCH}" "/out/${SERVICE_BIN}"
 # template:begin postgres:docker-migrator-output
@@ -177,9 +202,11 @@ ARG APP_VERSION=unknown
 ARG VCS_REF=unknown
 ARG RAILWAY_GIT_COMMIT_SHA
 ARG SOURCE_URL=""
+ARG PGO=none
 LABEL org.opencontainers.image.version="${APP_VERSION}" \
       org.opencontainers.image.revision="${RAILWAY_GIT_COMMIT_SHA:-$VCS_REF}" \
-      org.opencontainers.image.source="${SOURCE_URL}"
+      org.opencontainers.image.source="${SOURCE_URL}" \
+      service.build.pgo="${PGO}"
 ARG SERVICE_BIN=service
 COPY --from=service-build "/out/${SERVICE_BIN}" /service
 # template:begin postgres:docker-migrator-runtime

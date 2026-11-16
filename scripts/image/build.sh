@@ -84,6 +84,7 @@ arguments+=(
 	--build-arg "SOURCE_URL=${SOURCE_URL:-}"
 	--build-arg "SOURCE_DATE_EPOCH=${source_date_epoch}"
 	--build-arg "IMAGE_TESTS=${IMAGE_TESTS:-none}"
+	--build-arg "PGO=${PGO:-none}"
 	-f build/docker/Dockerfile
 )
 [[ -z ${RUNTIME_IMAGE_CACHE_FROM:-} ]] || arguments+=(--cache-from "${RUNTIME_IMAGE_CACHE_FROM}")

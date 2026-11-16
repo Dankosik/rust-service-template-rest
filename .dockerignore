@@ -37,3 +37,5 @@ vendor/*
 !test/tests/
 !test/fixtures/
 !env/config/
+# PGO=train runs the instrumented service against these requests.
+!build/docker/pgo-train.sh
