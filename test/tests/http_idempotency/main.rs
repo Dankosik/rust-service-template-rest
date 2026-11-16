@@ -22,6 +22,7 @@ use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use backon::{ConstantBuilder, Retryable};
 use futures_util::FutureExt as _;
 use futures_util::future::join_all;
 use infra_idempotency_store::{
@@ -29,10 +30,9 @@ use infra_idempotency_store::{
     CallerKind, CleanupError, Digest, HeaderPair, Record, ScopeKey, StartupError, Store,
 };
 use infra_postgres::{Dsn, Isolation, PgPool, Tx};
-use integration_tests::{close_pools, dsn_for};
+use integration_tests::{close_pools, dsn_for, poll_until};
 use sqlx::Executor as _;
 use tokio::sync::watch;
-use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use commit_proxy::{CommitProxy, ReadyBoundary};
@@ -296,18 +296,22 @@ async fn execute(
 }
 
 async fn once_free(store: &Store, scope: Digest, record: &Record, work: &Work) -> Outcome<Refusal> {
-    let deadline = Instant::now() + WAIT;
-    loop {
-        let outcome = execute(store, scope, INPUT, record, work).await;
-        if !matches!(outcome, Ok(Attempted::InProgress)) {
-            return outcome;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the key stayed held for {WAIT:?}"
-        );
-        tokio::time::sleep(RETRY_PAUSE).await;
-    }
+    bounded(
+        "the key is released",
+        (|| async {
+            match execute(store, scope, INPUT, record, work).await {
+                Ok(Attempted::InProgress) => Err(()),
+                outcome => Ok(outcome),
+            }
+        })
+        .retry(
+            ConstantBuilder::default()
+                .with_delay(RETRY_PAUSE)
+                .without_max_times(),
+        ),
+    )
+    .await
+    .expect("retry stays open until timeout")
 }
 
 async fn bounded<F: Future>(what: &str, future: F) -> F::Output {
@@ -686,22 +690,25 @@ async fn p4_waiting_for_an_expired_row_preserves_retention_and_replay(pool: PgPo
         let response = success(r#"{"id":2}"#);
         let (written, before_release) = bounded("the blocked record write to commit", async {
             tokio::join!(execute(&store, scope, INPUT, &response, &work), async {
-                loop {
-                    let blocked: bool = sqlx::query_scalar(
-                        "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
-                         WHERE datname = current_database() AND application_name = $1 \
-                         AND wait_event_type = 'Lock' AND $2 = ANY(pg_blocking_pids(pid)))",
-                    )
-                    .bind(APP)
-                    .bind(holder_pid)
-                    .fetch_one(&pool)
-                    .await
-                    .expect("observe the writer waiting on the row lock");
-                    if blocked {
-                        break;
-                    }
-                    tokio::time::sleep(RETRY_PAUSE).await;
-                }
+                poll_until(
+                    "the writer waits on the row lock",
+                    WAIT,
+                    RETRY_PAUSE,
+                    async || {
+                        let blocked: bool = sqlx::query_scalar(
+                            "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
+                             WHERE datname = current_database() AND application_name = $1 \
+                             AND wait_event_type = 'Lock' AND $2 = ANY(pg_blocking_pids(pid)))",
+                        )
+                        .bind(APP)
+                        .bind(holder_pid)
+                        .fetch_one(&pool)
+                        .await
+                        .expect("observe the writer waiting on the row lock");
+                        blocked.then_some(())
+                    },
+                )
+                .await;
                 // Spend the original TTL while PostgreSQL is waiting for the lock.
                 tokio::time::sleep(retention + RETRY_PAUSE).await;
                 if delete_while_locked {
@@ -966,10 +973,12 @@ async fn p4_the_cleanup_task_runs_at_once_and_returns_promptly_on_cancel(pool: P
     let task = tokio::spawn(store.run_cleanup(cancel.clone()));
 
     let completed = format!("{CLEANUP_RUNS_METRIC}{{outcome=\"completed\"}} 1");
-    bounded("the first cleanup run", async {
-        while !recorder.handle().render().contains(&completed) {
-            tokio::time::sleep(RETRY_PAUSE).await;
-        }
+    poll_until("the first cleanup run", WAIT, RETRY_PAUSE, async || {
+        recorder
+            .handle()
+            .render()
+            .contains(&completed)
+            .then_some(())
     })
     .await;
     assert_eq!(count(&pool, EXPIRED).await, 0);
@@ -988,24 +997,18 @@ async fn p4_the_cleanup_task_runs_at_once_and_returns_promptly_on_cancel(pool: P
     assert!(scrape.contains(
         "postgres_cleanup_passes_total{cleanup=\"http_idempotency\",outcome=\"completed\"} 1"
     ));
-    let cancelled_passes = scrape.lines().find_map(|line| {
-        line.strip_prefix(
-            "postgres_cleanup_passes_total{cleanup=\"http_idempotency\",outcome=\"cancelled\"} ",
-        )
-    });
-    assert_eq!(
-        cancelled_passes.map_or(0, |value| value.parse::<u64>().expect("cleanup pass count")),
-        0,
+    assert!(
+        !scrape.contains(
+            "postgres_cleanup_passes_total{cleanup=\"http_idempotency\",outcome=\"cancelled\"}"
+        ) || scrape.contains(
+            "postgres_cleanup_passes_total{cleanup=\"http_idempotency\",outcome=\"cancelled\"} 0\n"
+        ),
         "idle cancellation creates no cleanup pass: {scrape}"
     );
     close_pools(&[&store_pool]).await;
 }
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
-#[expect(
-    clippy::float_cmp,
-    reason = "discrete gauges and the same stored PostgreSQL timestamp must match exactly"
-)]
 async fn p4_population_distinguishes_unknown_empty_and_locked_expired_records(pool: PgPool) {
     // Cleanup's SKIP LOCKED result cannot establish an empty population. The
     // observer must see the expired row while its lock is held, and must ignore
@@ -1033,18 +1036,28 @@ async fn p4_population_distinguishes_unknown_empty_and_locked_expired_records(po
             .await
             .expect("the population's oldest row remains locked");
 
-        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
         let _local = metrics::set_default_local_recorder(&recorder);
-        let handle = recorder.handle();
-        let gauge = |name: &str| {
-            let prefix = format!("{name}{{population=\"http_idempotency\"}} ");
-            handle
-                .render()
-                .lines()
-                .find_map(|line| line.strip_prefix(&prefix))
-                .expect("the population gauge exists")
-                .parse::<f64>()
-                .expect("a numeric sample")
+        let snapshot_gauges = || -> std::collections::BTreeMap<String, f64> {
+            snapshotter
+                .snapshot()
+                .into_vec()
+                .into_iter()
+                .filter_map(|(key, _, _, value)| {
+                    if !key
+                        .key()
+                        .labels()
+                        .any(|l| l.key() == "population" && l.value() == "http_idempotency")
+                    {
+                        return None;
+                    }
+                    let metrics_util::debugging::DebugValue::Gauge(v) = value else {
+                        return None;
+                    };
+                    Some((key.key().name().to_owned(), v.into_inner()))
+                })
+                .collect()
         };
         // Occupied admission makes the first observation pending, without
         // substituting a mock or a fake sample for the provider's query.
@@ -1055,40 +1068,52 @@ async fn p4_population_distinguishes_unknown_empty_and_locked_expired_records(po
         let store = Store::new(store_pool.clone(), RETENTION).expect("retention fits PostgreSQL");
         let mut task = Box::pin(store.run_cleanup(cancel.clone()));
         assert!(futures_util::poll!(&mut task).is_pending());
-        assert_eq!(gauge("postgres_maintenance_observer_enabled"), 1.0);
+        let initial = snapshot_gauges();
+        assert_eq!(initial["postgres_maintenance_observer_enabled"], 1.0);
         assert_eq!(
-            gauge("postgres_maintenance_last_success_timestamp_seconds"),
+            initial["postgres_maintenance_last_success_timestamp_seconds"],
             0.0
         );
-        assert!(gauge("postgres_maintenance_present").is_nan());
-        assert!(gauge("postgres_maintenance_oldest_timestamp_seconds").is_nan());
+        assert!(initial["postgres_maintenance_present"].is_nan());
+        assert!(initial["postgres_maintenance_oldest_timestamp_seconds"].is_nan());
         drop(admission);
 
-        bounded("the independently polled population sample", async {
-            tokio::select! {
-                () = &mut task => panic!("maintenance ended before cancellation"),
-                () = async {
-                    while gauge("postgres_maintenance_last_attempt_success") != 1.0 {
-                        tokio::time::sleep(RETRY_PAUSE).await;
-                    }
-                } => {}
-            }
-        })
-        .await;
-        assert_eq!(gauge("postgres_maintenance_present"), f64::from(expired));
+        let sampled = tokio::select! {
+            () = &mut task => panic!("maintenance ended before cancellation"),
+            sampled = poll_until(
+                "the independently polled population sample",
+                WAIT,
+                RETRY_PAUSE,
+                async || {
+                    let gauges = snapshot_gauges();
+                    (gauges
+                        .get("postgres_maintenance_last_attempt_success")
+                        .copied()
+                        == Some(1.0))
+                    .then_some(gauges)
+                },
+            ) => sampled,
+        };
+        assert_eq!(sampled["postgres_maintenance_present"], f64::from(expired));
         assert_eq!(
-            gauge("postgres_maintenance_oldest_timestamp_seconds"),
+            sampled["postgres_maintenance_oldest_timestamp_seconds"],
             expected_oldest.unwrap_or(0.0)
         );
-        assert!(gauge("postgres_maintenance_database_observed_timestamp_seconds") > 0.0);
-        assert_eq!(gauge("postgres_maintenance_clock_valid"), 1.0);
+        assert!(sampled["postgres_maintenance_database_observed_timestamp_seconds"] > 0.0);
+        assert_eq!(sampled["postgres_maintenance_clock_valid"], 1.0);
         assert_eq!(count(&pool, LIVE_RECORDS).await, 1);
         assert_eq!(count(&pool, EXPIRED).await, i64::from(expired));
+        metrics::gauge!(
+            "postgres_maintenance_observer_enabled",
+            "population" => "http_idempotency"
+        )
+        .set(1.0);
         cancel.cancel();
         tokio::time::timeout(CANCEL_BUDGET, &mut task)
             .await
             .expect("both maintenance loops finish on cancellation");
-        assert_eq!(gauge("postgres_maintenance_observer_enabled"), 0.0);
+        let stopped = snapshot_gauges();
+        assert_eq!(stopped["postgres_maintenance_observer_enabled"], 0.0);
         holder.rollback().await.expect("release the oldest row");
         sqlx::query(
             "DELETE FROM http_idempotency_records WHERE expires_at <= statement_timestamp()",

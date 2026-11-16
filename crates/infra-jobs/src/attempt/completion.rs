@@ -348,7 +348,7 @@ mod tests {
     #[test]
     fn cancelled_queued_registration_retires_only_its_claim_generation() {
         let gauges = Gauges::default();
-        metrics::with_local_recorder(&gauges, || {
+        metrics::with_local_recorder(gauges.recorder(), || {
             let completions = Completions::default();
             let capacity = Arc::new(tokio::sync::Semaphore::new(2));
             let first = admitted(&capacity);
@@ -407,7 +407,7 @@ mod tests {
     #[test]
     fn entire_batch_retires_before_success_failure_cancellation_or_pruning_wakes_a_waiter() {
         let gauges = Gauges::default();
-        metrics::with_local_recorder(&gauges, || {
+        metrics::with_local_recorder(gauges.recorder(), || {
             for result in [
                 Some(Ok(Written::Applied)),
                 Some(Ok(Written::Unchanged)),

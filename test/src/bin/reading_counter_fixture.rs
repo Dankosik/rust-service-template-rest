@@ -1,7 +1,9 @@
 use std::{
-    collections::BTreeMap, ffi::OsString, num::NonZeroU32, process::ExitCode, time::Duration,
+    collections::BTreeMap, ffi::OsString, net::SocketAddr, num::NonZeroU32, path::PathBuf,
+    process::ExitCode, time::Duration,
 };
 
+use clap::{Parser, Subcommand};
 use infra_postgres::{Dsn, Isolation, PoolOptions, SessionSettingsSource};
 use infra_webhooks::{
     outbound::{Dispatcher, Endpoint, Producer},
@@ -50,46 +52,94 @@ fn register(
     Ok(())
 }
 
-struct Arguments {
-    mode: String,
-    flags: BTreeMap<String, String>,
+#[derive(Debug, Parser)]
+#[command(
+    name = "reading-counter-fixture",
+    disable_version_flag = true,
+    disable_help_subcommand = true
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
 }
 
-impl Arguments {
-    fn parse(args: impl Iterator<Item = OsString>) -> Result<Self, ReceiverError> {
-        let mut args = args.map(|value| value.into_string().map_err(|_| "arguments must be UTF-8"));
-        let mode = args.next().ok_or("a fixture mode is required")??;
-        let mut flags = BTreeMap::new();
-        while let Some(flag) = args.next() {
-            let flag = flag?;
-            if !flag.starts_with("--") || flags.contains_key(&flag) {
-                return Err("flags require unique --name value pairs".into());
-            }
-            let value = args.next().ok_or("flag requires a value")??;
-            flags.insert(flag, value);
-        }
-        Ok(Self { mode, flags })
-    }
+#[derive(Debug, Subcommand)]
+enum Command {
+    Migrate {
+        #[arg(long, default_value = "producer")]
+        target: String,
+    },
+    Accept(AcceptArgs),
+    Read {
+        #[arg(long)]
+        operation_json: String,
+        #[arg(long, default_value = "local")]
+        channel: String,
+    },
+    Receiver(ReceiverArgs),
+    Replay {
+        #[arg(long)]
+        operation_json: String,
+        #[arg(long, default_value = ENDPOINT)]
+        endpoint: String,
+    },
+    BrokerInit {
+        #[arg(long)]
+        nats_url: String,
+        #[arg(long)]
+        stream: String,
+        #[arg(long)]
+        subject: String,
+    },
+    BrokerCleanup {
+        #[arg(long)]
+        nats_url: String,
+        #[arg(long)]
+        stream: String,
+    },
+}
 
-    fn take(&mut self, flag: &str) -> Result<String, ReceiverError> {
-        self.flags
-            .remove(flag)
-            .ok_or_else(|| format!("missing {flag}").into())
-    }
+#[derive(Debug, clap::Args)]
+struct AcceptArgs {
+    #[arg(long, default_value = "reading.accepted")]
+    subject: String,
+    #[arg(long, default_value = ENDPOINT)]
+    endpoint: String,
+    #[arg(
+        long,
+        conflicts_with = "operation_json",
+        required_unless_present = "operation_json"
+    )]
+    operations_file: Option<PathBuf>,
+    #[arg(long, required_unless_present = "operations_file")]
+    operation_json: Option<String>,
+}
 
-    fn optional(&mut self, flag: &str, default: &str) -> String {
-        self.flags
-            .remove(flag)
-            .unwrap_or_else(|| default.to_owned())
-    }
-
-    fn complete(&self) -> Result<(), ReceiverError> {
-        if self.flags.is_empty() {
-            Ok(())
-        } else {
-            Err("unknown fixture flag".into())
-        }
-    }
+#[derive(Debug, clap::Args)]
+struct ReceiverArgs {
+    #[arg(long)]
+    nats_url: String,
+    #[arg(long)]
+    stream: String,
+    #[arg(long)]
+    subject: String,
+    #[arg(long)]
+    consumer: String,
+    #[arg(long)]
+    http_bind: SocketAddr,
+    #[arg(long, default_value_t = 250)]
+    run_seconds: u64,
+    #[arg(
+        long,
+        requires_all = ["hold_operation", "fault_ready", "fault_release"]
+    )]
+    hold_channel: Option<String>,
+    #[arg(long, requires = "hold_channel")]
+    hold_operation: Option<String>,
+    #[arg(long, requires = "hold_channel")]
+    fault_ready: Option<PathBuf>,
+    #[arg(long, requires = "hold_channel")]
+    fault_release: Option<PathBuf>,
 }
 
 fn channel(value: &str) -> Result<Channel, ReceiverError> {
@@ -168,10 +218,8 @@ async fn accept_one(
     }
 }
 
-async fn accept(pool: &PgPool, args: &mut Arguments) -> Result<bool, ReceiverError> {
-    let subject = args.optional("--subject", "reading.accepted");
-    let endpoint = args.optional("--endpoint", ENDPOINT);
-    let operations = if let Some(path) = args.flags.remove("--operations-file") {
+async fn accept(pool: &PgPool, args: AcceptArgs) -> Result<bool, ReceiverError> {
+    let operations = if let Some(path) = args.operations_file {
         const MAX_BATCH_BYTES: usize = 128 * 1024 + 256;
         let file = tokio::fs::File::open(path).await?;
         if file.metadata().await?.len() > MAX_BATCH_BYTES as u64 {
@@ -193,21 +241,19 @@ async fn accept(pool: &PgPool, args: &mut Arguments) -> Result<bool, ReceiverErr
         }
         values
     } else {
-        vec![operation(&args.take("--operation-json")?)?]
+        let raw = args.operation_json.ok_or("missing --operation-json")?;
+        vec![operation(&raw)?]
     };
-    args.complete()?;
     for operation in operations {
-        if !accept_one(pool, operation, &subject, &endpoint).await? {
+        if !accept_one(pool, operation, &args.subject, &args.endpoint).await? {
             return Ok(false);
         }
     }
     Ok(true)
 }
 
-async fn read(pool: &PgPool, args: &mut Arguments) -> Result<bool, ReceiverError> {
-    let operation = operation(&args.take("--operation-json")?)?;
-    let selected = args.optional("--channel", "local");
-    args.complete()?;
+async fn read(pool: &PgPool, operation_json: &str, selected: &str) -> Result<bool, ReceiverError> {
+    let operation = operation(operation_json)?;
     if selected == "request" {
         match reading_counter::read_request(pool, &operation).await {
             Ok(value) => emit(
@@ -219,7 +265,7 @@ async fn read(pool: &PgPool, args: &mut Arguments) -> Result<bool, ReceiverError
             }
         }
     } else {
-        match reading_counter::read_effect(pool, channel(&selected)?, &operation).await {
+        match reading_counter::read_effect(pool, channel(selected)?, &operation).await {
             Ok(value) => emit(
                 &json!({"status":if value.is_some() {"present"} else {"absent"},"effect":value}),
             ),
@@ -232,43 +278,34 @@ async fn read(pool: &PgPool, args: &mut Arguments) -> Result<bool, ReceiverError
     Ok(true)
 }
 
-async fn receiver(pool: &PgPool, args: &mut Arguments) -> Result<(), ReceiverError> {
-    let hold = if let Some(selected) = args.flags.remove("--hold-channel") {
+async fn receiver(pool: &PgPool, args: ReceiverArgs) -> Result<(), ReceiverError> {
+    let hold = if let Some(selected) = args.hold_channel {
         let channel = channel(&selected)?;
         if channel == Channel::Local {
             return Err("receiver hold channel must be outbox or webhook".into());
         }
         Some(CompletionHold {
             channel,
-            operation_id: args.take("--hold-operation")?,
-            ready: args.take("--fault-ready")?.into(),
-            release: args.take("--fault-release")?.into(),
+            operation_id: args.hold_operation.ok_or("missing --hold-operation")?,
+            ready: args.fault_ready.ok_or("missing --fault-ready")?,
+            release: args.fault_release.ok_or("missing --fault-release")?,
         })
     } else {
         None
     };
     let options = ReceiverOptions {
-        nats_url: args.take("--nats-url")?,
-        stream: args.take("--stream")?,
-        subject: args.take("--subject")?,
-        consumer: args.take("--consumer")?,
-        http_bind: args.take("--http-bind")?.parse()?,
-        run_for: Duration::from_secs(args.optional("--run-seconds", "250").parse()?),
+        nats_url: args.nats_url,
+        stream: args.stream,
+        subject: args.subject,
+        consumer: args.consumer,
+        http_bind: args.http_bind,
+        run_for: Duration::from_secs(args.run_seconds),
         hold,
     };
-    args.complete()?;
     Box::pin(reading_counter_receiver::run(pool, options)).await
 }
 
-async fn broker(args: &mut Arguments) -> Result<bool, ReceiverError> {
-    let url = args.take("--nats-url")?;
-    let name = args.take("--stream")?;
-    let subject = if args.mode == "broker-init" {
-        Some(args.take("--subject")?)
-    } else {
-        None
-    };
-    args.complete()?;
+async fn broker(url: String, name: String, subject: Option<String>) -> Result<bool, ReceiverError> {
     let client = async_nats::connect(url).await?;
     let jetstream = async_nats::jetstream::new(client.clone());
     if let Some(subject) = subject {
@@ -293,19 +330,32 @@ async fn broker(args: &mut Arguments) -> Result<bool, ReceiverError> {
     Ok(true)
 }
 
-async fn command(mut args: Arguments) -> Result<bool, ReceiverError> {
-    if matches!(args.mode.as_str(), "broker-init" | "broker-cleanup") {
-        return tokio::time::timeout(Duration::from_secs(10), broker(&mut args)).await?;
+async fn command(cmd: Command) -> Result<bool, ReceiverError> {
+    match cmd {
+        Command::BrokerInit {
+            nats_url,
+            stream,
+            subject,
+        } => {
+            return tokio::time::timeout(
+                Duration::from_secs(10),
+                broker(nats_url, stream, Some(subject)),
+            )
+            .await?;
+        }
+        Command::BrokerCleanup { nats_url, stream } => {
+            return tokio::time::timeout(Duration::from_secs(10), broker(nats_url, stream, None))
+                .await?;
+        }
+        _ => {}
     }
     let Ok(pool) = open_pool().await else {
         emit(&json!({"status":"unknown","error":"database unavailable"}));
         return Ok(false);
     };
     let result = async {
-        match args.mode.as_str() {
-            "migrate" => {
-                let target = args.optional("--target", "producer");
-                args.complete()?;
+        match cmd {
+            Command::Migrate { target } => {
                 match target.as_str() {
                     "producer" => migrate::MIGRATOR.run(&pool).await?,
                     "receiver" => {}
@@ -315,16 +365,20 @@ async fn command(mut args: Arguments) -> Result<bool, ReceiverError> {
                 emit(&json!({"status":"migrated","target":target}));
                 Ok(true)
             }
-            "accept" => accept(&pool, &mut args).await,
-            "read" => read(&pool, &mut args).await,
-            "receiver" => {
-                receiver(&pool, &mut args).await?;
+            Command::Accept(args) => accept(&pool, args).await,
+            Command::Read {
+                operation_json,
+                channel,
+            } => read(&pool, &operation_json, &channel).await,
+            Command::Receiver(args) => {
+                receiver(&pool, args).await?;
                 Ok(true)
             }
-            "replay" => {
-                let operation = operation(&args.take("--operation-json")?)?;
-                let endpoint = args.optional("--endpoint", ENDPOINT);
-                args.complete()?;
+            Command::Replay {
+                operation_json,
+                endpoint,
+            } => {
+                let operation = operation(&operation_json)?;
                 let outbound = Producer::new([endpoint.clone()]);
                 match reading_counter::replay(&pool, &operation, &outbound, &endpoint).await {
                     Ok(accepted) => {
@@ -337,7 +391,9 @@ async fn command(mut args: Arguments) -> Result<bool, ReceiverError> {
                     }
                 }
             }
-            _ => Err("unknown fixture mode".into()),
+            Command::BrokerInit { .. } | Command::BrokerCleanup { .. } => {
+                Err("broker subcommands execute before pool admission".into())
+            }
         }
     }
     .await;
@@ -358,13 +414,15 @@ fn main() -> ExitCode {
             register,
         );
     }
-    let result = (|| {
-        let arguments = Arguments::parse(remaining.into_iter())?;
+    let result = (|| -> Result<bool, ReceiverError> {
+        let cli = Cli::try_parse_from(
+            std::iter::once(OsString::from("reading-counter-fixture")).chain(remaining),
+        )?;
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
             .build()?;
-        let result = runtime.block_on(command(arguments));
+        let result = runtime.block_on(command(cli.command));
         runtime.shutdown_timeout(Duration::from_secs(1));
         result
     })();

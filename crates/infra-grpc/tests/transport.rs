@@ -672,7 +672,7 @@ async fn client_observation_fallback_preserves_raw_request_routing() {
         let authentication = request(()).into_parts().0.into_headers();
         let mut request = builder
             .body(tonic::body::Body::new(http_body_util::Full::new(
-                bytes::Bytes::from(grpc_frame("raw route")),
+                grpc_frame("raw route"),
             )))
             .unwrap();
         request.headers_mut().extend(authentication);
@@ -1949,17 +1949,19 @@ async fn raw_call(address: SocketAddr, path: &str) -> String {
 
 const ECHO_SERVICE_UNARY: &str = "/example.v1.EchoService/Unary";
 
-fn grpc_frame(message: &str) -> Vec<u8> {
+fn grpc_frame(message: &str) -> bytes::Bytes {
+    use bytes::{BufMut as _, BytesMut};
     use prost::Message as _;
 
     let payload = UnaryRequest {
         message: message.to_owned(),
-    }
-    .encode_to_vec();
-    let mut frame = vec![0];
-    frame.extend_from_slice(&u32::try_from(payload.len()).unwrap().to_be_bytes());
-    frame.extend_from_slice(&payload);
-    frame
+    };
+    let len = payload.encoded_len();
+    let mut frame = BytesMut::with_capacity(5 + len);
+    frame.put_u8(0);
+    frame.put_u32(u32::try_from(len).unwrap());
+    payload.encode(&mut frame).unwrap();
+    frame.freeze()
 }
 
 #[tokio::test]
@@ -2743,11 +2745,8 @@ fn stalled_unary_response(
     peer_polled: Arc<Notify>,
     dropped: impl Send + 'static,
 ) -> http::Response<axum::body::Body> {
-    let first = send_data.then(|| {
-        Ok::<_, std::convert::Infallible>(http_body::Frame::data(bytes::Bytes::from(grpc_frame(
-            "reply",
-        ))))
-    });
+    let first = send_data
+        .then(|| Ok::<_, std::convert::Infallible>(http_body::Frame::data(grpc_frame("reply"))));
     let frames = futures_util::stream::iter(first).chain(futures_util::stream::once(async move {
         let _dropped = dropped;
         peer_polled.notify_one();

@@ -4,6 +4,7 @@ use axum::{extract::State, http::StatusCode, response::IntoResponse as _, routin
 use health::{Readiness, RefreshPolicy};
 use infra_http::{Drained, HardenOptions, Server, ServerOptions};
 use infra_postgres::{CloseOutcome, PgPool, PostgresProbe};
+use integration_tests::poll_until;
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
     net::{TcpListener, TcpStream},
@@ -94,7 +95,8 @@ impl Instance {
         let refresh = tokio::spawn({
             let readiness = readiness.clone();
             let cancel = cancel.clone();
-            async move { readiness.refresh_until(cancel).await }.with_subscriber(events.clone())
+            async move { readiness.refresh_until(cancel).await }
+                .with_subscriber(events.subscriber())
         });
         // Diagnostics are absent. A small fixed application cap makes admission
         // pressure observable without multiplying thousands of sockets.
@@ -156,20 +158,19 @@ impl Instance {
         reason = "print the observed bounded failure class with --no-capture"
     )]
     async fn state(&mut self, ready: bool) {
-        timeout(WAIT, async {
-            loop {
+        poll_until(
+            "HTTP readiness reaches the expected state",
+            WAIT,
+            Duration::from_millis(20),
+            async || {
                 let response = self.get("/health/ready").await;
                 let status = response.status();
                 let _ = response.bytes().await.unwrap();
                 std::assert_matches!(status, StatusCode::OK | StatusCode::SERVICE_UNAVAILABLE);
-                if (status == StatusCode::OK) == ready {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .expect("HTTP readiness reaches the expected state");
+                ((status == StatusCode::OK) == ready).then_some(())
+            },
+        )
+        .await;
         // template:begin postgres-grpc-consumers:recovery-state-grpc
         self.grpc.state(ready).await;
         // template:end postgres-grpc-consumers:recovery-state-grpc
@@ -242,23 +243,23 @@ impl Instance {
         drop(connections);
         // Socket teardown is asynchronous. Wait for admission, then require
         // the independently updated row through the same listener and pool.
-        timeout(CALL, async {
-            loop {
-                if let Ok(response) = self
+        poll_until(
+            "HTTP admission recovers after connection release",
+            CALL,
+            Duration::from_millis(10),
+            async || {
+                let response = self
                     .client
                     .get(format!("http://{}/health/live", self.address))
                     .send()
                     .await
-                {
-                    assert_eq!(response.status(), StatusCode::OK);
-                    let _ = response.bytes().await.unwrap();
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
+                    .ok()?;
+                assert_eq!(response.status(), StatusCode::OK);
+                let _ = response.bytes().await.unwrap();
+                Some(())
+            },
+        )
+        .await;
         self.useful(expected).await;
         self.state(true).await;
     }

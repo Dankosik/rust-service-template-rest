@@ -64,10 +64,17 @@ tokio-util = { workspace = true }
 url = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
+bytes = { workspace = true, features = ["std"] }
 futures-util = { workspace = true, features = ["async-await"] }
+http = { workspace = true }
+http-body-util = { workspace = true }
+hyper = { workspace = true, features = ["server", "http1"] }
+hyper-util = { workspace = true, features = ["tokio"] }
+metrics-util = { workspace = true, features = ["debugging"] }
 # template:begin oidc-jwt:authn-jwt-dev-dependency
 proptest = { workspace = true, features = ["std"] }
 # template:end oidc-jwt:authn-jwt-dev-dependency
 rcgen = { workspace = true, features = ["pem", "aws_lc_rs"] }
 tokio = { workspace = true, features = ["io-util", "net", "rt-multi-thread", "test-util"] }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs", "tls12"] }
+tracing-subscriber = { workspace = true, features = ["std", "registry"] }

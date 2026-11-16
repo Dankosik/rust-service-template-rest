@@ -1221,7 +1221,7 @@ mod tests {
         // caching a sibling thread's NoSubscriber interest for shared callsites.
         let _registration_anchor =
             tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
-        let dispatch = tracing::Dispatch::new(diagnostics.clone());
+        let dispatch = diagnostics.dispatch();
         let verifier = crate::Verifier::jwt(verifier(
             rsa_key_set("fixture", None),
             &[JwtAlgorithm::Rs256],
@@ -1238,7 +1238,7 @@ mod tests {
             .enable_time()
             .build()
             .unwrap();
-        metrics::with_local_recorder(&diagnostics, || {
+        metrics::with_local_recorder(diagnostics.recorder(), || {
             tracing::dispatcher::with_default(&dispatch, || {
                 assert_eq!(
                     runtime.block_on(verifier.verify(&token)),
@@ -1246,7 +1246,7 @@ mod tests {
                 );
             });
         });
-        let counters = diagnostics.counters.lock().unwrap();
+        let counters = diagnostics.take_counters();
         assert!(counters.iter().any(|(key, value)| {
             key.name() == "authn_token_verifications_total"
                 && *value == 1
@@ -1254,7 +1254,7 @@ mod tests {
                     .labels()
                     .any(|label| label.key() == "reason" && label.value() == "missing_claim")
         }));
-        let events = diagnostics.events.lock().unwrap();
+        let events = diagnostics.events();
         assert!(
             events
                 .iter()
@@ -1293,7 +1293,7 @@ mod tests {
             .enable_time()
             .build()
             .unwrap();
-        metrics::with_local_recorder(&diagnostics, || {
+        metrics::with_local_recorder(diagnostics.recorder(), || {
             // Success counters bind to the recorder installed at preparation.
             let verifier = crate::Verifier::jwt(engine);
             runtime.block_on(async {
@@ -1336,7 +1336,7 @@ mod tests {
                 drop(pending);
             });
         });
-        assert_authentication_counters(&diagnostics.counters.lock().unwrap());
+        assert_authentication_counters(&diagnostics.take_counters());
     }
 
     fn labeled(key: &metrics::Key, labels: &[(&str, &str)]) -> bool {
@@ -1351,9 +1351,9 @@ mod tests {
             .iter()
             .filter(|(key, _)| key.name() == "authn_token_verifications_total")
             .collect::<Vec<_>>();
-        assert_eq!(verifications.len(), 2);
+        assert_eq!(verifications.len(), 1);
         assert!(verifications.iter().all(|(key, value)| {
-            *value == 1
+            *value == 2
                 && labeled(
                     key,
                     &[

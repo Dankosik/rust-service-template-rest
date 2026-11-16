@@ -56,6 +56,7 @@ tracing-subscriber = { workspace = true, features = ["std", "fmt", "env-filter",
 [dev-dependencies]
 futures-util = { workspace = true, features = ["std"] }
 log = { workspace = true }
+metrics-util = { workspace = true, features = ["debugging"] }
 opentelemetry-proto = { workspace = true, features = ["gen-tonic-messages", "trace"] }
 prost = { workspace = true, features = ["std"] }
 tempfile = { workspace = true, features = ["getrandom"] }

@@ -295,4 +295,25 @@ fn sdk_log_cap(directive: &str) -> SdkCap {
 // template:end object-storage:telemetry-sdk-log-cap
 
 #[cfg(test)]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "synchronous fixture polling waits for owned child completion within its existing timeout"
+)]
+pub(super) fn wait_for_child(
+    mut child: std::process::Child,
+    timeout: std::time::Duration,
+) -> std::process::Output {
+    let deadline = std::time::Instant::now() + timeout;
+    while child.try_wait().expect("poll test child").is_none() {
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("test child exceeded its bounded completion wait");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    child.wait_with_output().expect("collect test child")
+}
+
+#[cfg(test)]
 pub(crate) mod tests;

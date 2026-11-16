@@ -1,39 +1,49 @@
-use std::collections::HashMap;
-use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
+use metrics::{Key, Level, Metadata, Recorder as _};
+use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
 
-use metrics::atomics::AtomicU64;
-use metrics::{Counter, Gauge, Histogram, Key, KeyName, Metadata, Recorder, SharedString, Unit};
+const RESTORE_METADATA: Metadata<'static> = Metadata::new(module_path!(), Level::INFO, None);
 
-#[derive(Default)]
-pub(crate) struct Gauges(Mutex<HashMap<Key, Arc<AtomicU64>>>);
+#[derive(Debug)]
+pub(crate) struct Gauges {
+    recorder: DebuggingRecorder,
+    snapshotter: Snapshotter,
+}
 
-impl Gauges {
-    pub(crate) fn get(&self, name: &'static str, kind: Option<&'static str>) -> f64 {
-        let key = match kind {
-            Some(kind) => Key::from_parts(name, &[("kind", kind)]),
-            None => Key::from_name(name),
-        };
-        f64::from_bits(self.0.lock().unwrap()[&key].load(Ordering::Acquire))
+impl Default for Gauges {
+    fn default() -> Self {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        Self {
+            recorder,
+            snapshotter,
+        }
     }
 }
 
-impl Recorder for Gauges {
-    fn describe_counter(&self, _: KeyName, _: Option<Unit>, _: SharedString) {}
-    fn describe_gauge(&self, _: KeyName, _: Option<Unit>, _: SharedString) {}
-    fn describe_histogram(&self, _: KeyName, _: Option<Unit>, _: SharedString) {}
-
-    fn register_counter(&self, _: &Key, _: &Metadata<'_>) -> Counter {
-        Counter::noop()
+impl Gauges {
+    pub(crate) fn recorder(&self) -> &DebuggingRecorder {
+        &self.recorder
     }
 
-    fn register_gauge(&self, key: &Key, _: &Metadata<'_>) -> Gauge {
-        Gauge::from_arc(Arc::clone(
-            self.0.lock().unwrap().entry(key.clone()).or_default(),
-        ))
-    }
-
-    fn register_histogram(&self, _: &Key, _: &Metadata<'_>) -> Histogram {
-        Histogram::noop()
+    pub(crate) fn get(&self, name: &'static str, kind: Option<&'static str>) -> f64 {
+        let target = match kind {
+            Some(kind) => Key::from_parts(name, &[("kind", kind)]),
+            None => Key::from_name(name),
+        };
+        let mut found = None;
+        // `Snapshotter::snapshot` swaps every gauge to zero; restore each raw
+        // value so subsequent decrements and untouched series stay intact.
+        for (composite, _, _, value) in self.snapshotter.snapshot().into_vec() {
+            if let DebugValue::Gauge(gauge) = value {
+                let raw = gauge.into_inner();
+                self.recorder
+                    .register_gauge(composite.key(), &RESTORE_METADATA)
+                    .set(raw);
+                if composite.key() == &target {
+                    found = Some(raw);
+                }
+            }
+        }
+        found.unwrap_or_else(|| panic!("missing gauge {target}"))
     }
 }

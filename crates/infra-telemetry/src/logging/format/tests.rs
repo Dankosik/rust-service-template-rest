@@ -369,49 +369,33 @@ fn escaped_field_keys_count_toward_the_complete_record_limit() {
 /// Runs the actual global limits in a fresh test process so saturation never
 /// rejects unrelated subscriber fixtures executing in the parent process.
 #[test]
-#[expect(
-    clippy::disallowed_methods,
-    reason = "synchronous fixture polling waits for owned child or thread completion within its existing timeout"
-)]
 fn processwide_capacity_is_bounded_and_recovers() {
     const CHILD: &str = "RUST_TELEMETRY_FORMAT_CAPACITY_CHILD";
     if std::env::var_os(CHILD).as_deref() != Some(std::ffi::OsStr::new("1")) {
-        let mut child =
-            std::process::Command::new(std::env::current_exe().expect("test executable"))
-                .args([
-                    "--exact",
-                    "logging::format::tests::processwide_capacity_is_bounded_and_recovers",
-                    "--test-threads=1",
-                ])
-                .env(CHILD, "1")
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn()
-                .expect("capacity test child starts");
-        let deadline = Instant::now() + Duration::from_secs(20);
-        loop {
-            if child.try_wait().expect("capacity child status").is_some() {
-                let output = child.wait_with_output().expect("capacity child reaped");
-                assert!(
-                    String::from_utf8_lossy(&output.stdout).contains("1 passed;"),
-                    "the isolated test must run exactly its selected case: {}",
-                    String::from_utf8_lossy(&output.stdout),
-                );
-                assert!(
-                    output.status.success(),
-                    "capacity child failed: stdout={} stderr={}",
-                    String::from_utf8_lossy(&output.stdout),
-                    String::from_utf8_lossy(&output.stderr),
-                );
-                return;
-            }
-            if Instant::now() >= deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                panic!("capacity child exceeded its bounded deadline");
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        let child = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "logging::format::tests::processwide_capacity_is_bounded_and_recovers",
+                "--test-threads=1",
+            ])
+            .env(CHILD, "1")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("capacity test child starts");
+        let output = super::super::wait_for_child(child, Duration::from_secs(20));
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("1 passed;"),
+            "the isolated test must run exactly its selected case: {}",
+            String::from_utf8_lossy(&output.stdout),
+        );
+        assert!(
+            output.status.success(),
+            "capacity child failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        return;
     }
 
     for format in [LoggingFormat::Json, LoggingFormat::Text] {

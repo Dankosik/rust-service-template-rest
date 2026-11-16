@@ -833,7 +833,7 @@ mod tests {
             .connect_lazy("postgres://localhost/unused")
             .unwrap();
         let gauges = Gauges::default();
-        metrics::with_local_recorder(&gauges, || {
+        metrics::with_local_recorder(gauges.recorder(), || {
             let mut kinds = crate::KindsBuilder::new();
             kinds.register(crate::Policy::default(), |_: crate::Job<Ordinary>| async {
                 Ok(())
@@ -1006,7 +1006,7 @@ mod tests {
     #[tokio::test]
     async fn supervisor_custody_survives_unpolled_drop_and_abort() {
         let gauges = Gauges::default();
-        let _local = metrics::set_default_local_recorder(&gauges);
+        let _local = metrics::set_default_local_recorder(gauges.recorder());
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgres://localhost/unused")
             .unwrap();

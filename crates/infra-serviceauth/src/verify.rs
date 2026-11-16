@@ -944,52 +944,81 @@ mod tests {
 
     #[test]
     fn outcomes_are_counted_by_closed_reason_and_the_clock_is_unavailable() {
-        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-        let handle = recorder.handle();
-        let _guard = metrics::set_default_local_recorder(&recorder);
-        let case = Case::new();
-        let now = unix_now().unwrap();
-        let token = case.signed(|_, claims| {
-            claims["iat"] = now.into();
-            claims["exp"] = (now + 60).into();
+        use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let token = metrics::with_local_recorder(&recorder, || {
+            let case = Case::new();
+            let now = unix_now().unwrap();
+            let token = case.signed(|_, claims| {
+                claims["iat"] = now.into();
+                claims["exp"] = (now + 60).into();
+            });
+            let header = format!("Bearer {token}");
+            assert_eq!(
+                case.verifier
+                    .authenticate([header.as_bytes()])
+                    .unwrap()
+                    .name()
+                    .as_str(),
+                "orders"
+            );
+            assert_eq!(
+                case.verifier.authenticate(std::iter::empty()),
+                Err(Failure::Missing)
+            );
+            assert_eq!(
+                case.verifier.authenticate([b"Bearer a b".as_slice()]),
+                Err(Failure::Malformed)
+            );
+            assert_eq!(
+                case.verifier.authenticate([b"Bearer a.b.c".as_slice()]),
+                Err(Failure::Invalid)
+            );
+            assert_eq!(
+                case.verifier
+                    .verify(token.as_bytes(), || Err(Reason::Clock)),
+                Err(Reason::Clock)
+            );
+            assert_eq!(Reason::Clock.failure(), Failure::Unavailable);
+            token
         });
-        let header = format!("Bearer {token}");
+        let snapshot = snapshotter.snapshot();
+        assert!(!format!("{snapshot:?}").contains(&token), "{snapshot:?}");
+        let mut counts: Vec<_> = snapshot
+            .into_vec()
+            .into_iter()
+            .map(|(key, _, _, value)| {
+                let mut labels: Vec<_> = key
+                    .key()
+                    .labels()
+                    .map(|label| (label.key().to_owned(), label.value().to_owned()))
+                    .collect();
+                labels.sort();
+                (key.key().name().to_owned(), labels, value)
+            })
+            .collect();
+        counts.sort_by(|left, right| (left.0.as_str(), &left.1).cmp(&(right.0.as_str(), &right.1)));
+        let counter = |outcome: &str, reason: &str| {
+            (
+                VERIFICATIONS_METRIC.to_owned(),
+                vec![
+                    ("outcome".to_owned(), outcome.to_owned()),
+                    ("reason".to_owned(), reason.to_owned()),
+                ],
+                DebugValue::Counter(1),
+            )
+        };
         assert_eq!(
-            case.verifier
-                .authenticate([header.as_bytes()])
-                .unwrap()
-                .name()
-                .as_str(),
-            "orders"
+            counts,
+            [
+                counter("failure", "header"),
+                counter("failure", "malformed"),
+                counter("failure", "missing"),
+                counter("success", "verified"),
+            ]
         );
-        assert_eq!(
-            case.verifier.authenticate(std::iter::empty()),
-            Err(Failure::Missing)
-        );
-        assert_eq!(
-            case.verifier.authenticate([b"Bearer a b".as_slice()]),
-            Err(Failure::Malformed)
-        );
-        assert_eq!(
-            case.verifier.authenticate([b"Bearer a.b.c".as_slice()]),
-            Err(Failure::Invalid)
-        );
-        assert_eq!(
-            case.verifier
-                .verify(token.as_bytes(), || Err(Reason::Clock)),
-            Err(Reason::Clock)
-        );
-        assert_eq!(Reason::Clock.failure(), Failure::Unavailable);
-        let rendered = handle.render();
-        for line in [
-            r#"service_auth_verifications_total{outcome="success",reason="verified"} 1"#,
-            r#"service_auth_verifications_total{outcome="failure",reason="missing"} 1"#,
-            r#"service_auth_verifications_total{outcome="failure",reason="malformed"} 1"#,
-            r#"service_auth_verifications_total{outcome="failure",reason="header"} 1"#,
-        ] {
-            assert!(rendered.contains(line), "{line} in {rendered}");
-        }
-        assert!(!rendered.contains(&token), "{rendered}");
     }
 
     /// A committed token, so another implementation of the contract can be

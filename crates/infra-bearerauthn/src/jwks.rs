@@ -493,18 +493,18 @@ pub(crate) mod tests {
         // caching a sibling thread's NoSubscriber interest for shared callsites.
         let _registration_anchor =
             tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
-        let dispatch = tracing::Dispatch::new(diagnostics.clone());
+        let dispatch = diagnostics.dispatch();
         // Unknown key parameters fall back to the library's Other family.
         // A wrongly typed consumed common field exercises malformed entries.
         let entries = vec![serde_json::json!({"kid":"private-key-id","use":false}); 100];
         let bytes = serde_json::to_vec(&serde_json::json!({"keys":entries})).unwrap();
-        let parsed = metrics::with_local_recorder(&diagnostics, || {
+        let parsed = metrics::with_local_recorder(diagnostics.recorder(), || {
             tracing::dispatcher::with_default(&dispatch, || {
                 parse_key_set(&bytes, &[JwtAlgorithm::Rs256])
             })
         });
         assert_eq!(parsed.err(), Some(KeySetFailure::NoUsableKeys));
-        let counters = diagnostics.counters.lock().unwrap();
+        let counters = diagnostics.take_counters();
         assert!(
             counters.iter().any(|(key, value)| {
                 key.name() == "authn_jwks_key_rejections_total"
@@ -515,7 +515,7 @@ pub(crate) mod tests {
             }),
             "recorded counters: {counters:?}"
         );
-        let events = diagnostics.events.lock().unwrap();
+        let events = diagnostics.events();
         assert_eq!(
             events
                 .iter()

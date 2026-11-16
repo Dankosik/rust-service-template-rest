@@ -230,7 +230,11 @@ async fn a_reply_inside_the_command_timeout_is_not_cut_short() {
 
 #[tokio::test]
 async fn each_outcome_records_into_its_own_series() {
-    let recorder = observation_recorder();
+    use metrics::Key;
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
     let _recorder = metrics::set_default_local_recorder(&recorder);
     let server = FakeServer::start().await;
     let cache = admitted(&format!("redis://{}", server.address), true, true);
@@ -241,18 +245,29 @@ async fn each_outcome_records_into_its_own_series() {
         namespace.set("key", b"value", Duration::from_secs(1)).await,
         Ok(())
     );
-    let scrape = recorder.handle().render();
-    let count = |operation: &str, outcome: &str| {
-        let series = format!(
-            "cache_operation_duration_seconds_count{{cache=\"series\",operation=\"{operation}\",outcome=\"{outcome}\"}} "
+    let snapshot = snapshotter.snapshot().into_vec();
+    let count = |operation: &'static str, outcome: &'static str| {
+        let target = Key::from_parts(
+            "cache_operation_duration_seconds",
+            &[
+                ("cache", "series"),
+                ("operation", operation),
+                ("outcome", outcome),
+            ],
         );
-        scrape
-            .lines()
-            .find_map(|line| line.strip_prefix(series.as_str()))
-            .unwrap_or_else(|| panic!("{series} missing from {scrape}"))
-            .to_owned()
+        snapshot
+            .iter()
+            .find_map(|(composite, _, _, value)| match value {
+                DebugValue::Histogram(samples) if composite.key() == &target => Some(samples.len()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{target} missing from {snapshot:?}"))
     };
-    assert_eq!(count("get", "miss"), "2");
-    assert_eq!(count("set", "ok"), "1");
-    assert_eq!(scrape.matches("_count{").count(), 2, "{scrape}");
+    assert_eq!(count("get", "miss"), 2);
+    assert_eq!(count("set", "ok"), 1);
+    let histogram_series = snapshot
+        .iter()
+        .filter(|(_, _, _, value)| matches!(value, DebugValue::Histogram(_)))
+        .count();
+    assert_eq!(histogram_series, 2, "{snapshot:?}");
 }

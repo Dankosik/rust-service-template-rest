@@ -37,6 +37,6 @@ tracing = { workspace = true, features = ["std"] }
 zeroize = { workspace = true, features = ["alloc"] }
 
 [dev-dependencies]
-metrics-exporter-prometheus = { workspace = true }
+metrics-util = { workspace = true, features = ["debugging"] }
 proptest = { workspace = true, features = ["std"] }
 regex = { workspace = true, features = ["std"] }

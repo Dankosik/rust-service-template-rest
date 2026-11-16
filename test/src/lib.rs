@@ -83,3 +83,21 @@ pub async fn close_pools(pools: &[&PgPool]) {
         );
     }
 }
+
+pub async fn poll_until<T>(
+    what: &str,
+    bound: Duration,
+    interval: Duration,
+    mut ready: impl AsyncFnMut() -> Option<T>,
+) -> T {
+    tokio::time::timeout(bound, async {
+        loop {
+            if let Some(found) = ready().await {
+                return found;
+            }
+            tokio::time::sleep(interval).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|elapsed| panic!("{what} did not happen within {bound:?}: {elapsed}"))
+}

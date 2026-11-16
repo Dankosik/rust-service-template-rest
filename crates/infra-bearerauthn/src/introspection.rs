@@ -342,6 +342,11 @@ fn retention(principal: &Principal, ttl: Duration, now: SystemTime) -> Duration 
 
 #[cfg(test)]
 mod tests {
+    use bytes::Bytes;
+    use http::{HeaderMap, Method, Request, Response, StatusCode, Uri, header};
+    use http_body_util::{BodyExt as _, Full};
+    use hyper::{body::Incoming, server::conn::http1, service::service_fn};
+    use hyper_util::rt::TokioIo;
     use std::{
         num::NonZeroUsize,
         sync::{
@@ -351,7 +356,6 @@ mod tests {
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
     use tokio::{
-        io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
         sync::Semaphore,
         task::{JoinHandle, JoinSet},
@@ -373,105 +377,128 @@ mod tests {
 
     const FIXTURE_HOST: &str = "provider.test";
 
-    fn complete_request(request: &[u8]) -> bool {
-        let Some(head_end) = request.array_windows().position(|part| part == b"\r\n\r\n") else {
-            return false;
-        };
-        let head = String::from_utf8_lossy(&request[..head_end]).to_ascii_lowercase();
-        let length = head
-            .lines()
-            .find_map(|line| line.strip_prefix("content-length:"))
-            .map_or(0, |value| value.trim().parse::<usize>().unwrap());
-        request.len() >= head_end + 4 + length
+    #[derive(Clone, Debug)]
+    struct RecordedRequest {
+        method: Method,
+        uri: Uri,
+        headers: HeaderMap,
+        body: Bytes,
+    }
+
+    #[derive(Clone)]
+    struct FixtureState {
+        calls: Arc<AtomicUsize>,
+        received: Arc<Semaphore>,
+        requests: Arc<Mutex<Vec<RecordedRequest>>>,
+        response: Arc<Mutex<(StatusCode, Bytes)>>,
+        gate: Arc<Mutex<Option<Arc<Semaphore>>>>,
+    }
+
+    async fn serve_fixture_connection(
+        stream: tokio::net::TcpStream,
+        acceptor: tokio_rustls::TlsAcceptor,
+        state: FixtureState,
+    ) {
+        tokio::time::timeout(Duration::from_secs(5), async move {
+            let stream = acceptor.accept(stream).await.unwrap();
+            let service = service_fn(move |request: Request<Incoming>| {
+                let state = state.clone();
+                async move {
+                    let (parts, body) = request.into_parts();
+                    let body = body.collect().await?.to_bytes();
+                    assert!(body.len() <= 128 * 1024);
+                    state.requests.lock().unwrap().push(RecordedRequest {
+                        method: parts.method,
+                        uri: parts.uri,
+                        headers: parts.headers,
+                        body,
+                    });
+                    let (status, response_body) = state.response.lock().unwrap().clone();
+                    let gate = state.gate.lock().unwrap().clone();
+                    state.calls.fetch_add(1, Ordering::SeqCst);
+                    state.received.add_permits(1);
+                    if let Some(gate) = gate {
+                        gate.acquire().await.unwrap().forget();
+                    }
+                    Ok::<_, hyper::Error>(
+                        Response::builder()
+                            .status(status)
+                            .header(header::CONTENT_TYPE, "application/json")
+                            .body(Full::new(response_body))
+                            .unwrap(),
+                    )
+                }
+            });
+            // A cancelled caller can close its TLS stream before the response.
+            let _ = http1::Builder::new()
+                .keep_alive(false)
+                .serve_connection(TokioIo::new(stream), service)
+                .await;
+        })
+        .await
+        .unwrap();
+    }
+
+    async fn run_fixture_server(
+        listener: TcpListener,
+        acceptor: tokio_rustls::TlsAcceptor,
+        state: FixtureState,
+        cancel: CancellationToken,
+    ) {
+        let mut connections = JoinSet::new();
+        loop {
+            let stream = tokio::select! {
+                () = cancel.cancelled() => break,
+                Some(result) = connections.join_next(), if !connections.is_empty() => { result.unwrap(); continue; },
+                accepted = listener.accept() => accepted.unwrap().0,
+            };
+            connections.spawn(serve_fixture_connection(
+                stream,
+                acceptor.clone(),
+                state.clone(),
+            ));
+        }
+        connections.abort_all();
+        while let Some(result) = connections.join_next().await {
+            if let Err(error) = result {
+                assert!(error.is_cancelled());
+            }
+        }
     }
 
     struct Fixture {
         endpoint: EndpointUrl,
         provider: ProviderClient,
-        calls: Arc<AtomicUsize>,
-        received: Arc<Semaphore>,
-        requests: Arc<Mutex<Vec<Vec<u8>>>>,
-        response: Arc<Mutex<Vec<u8>>>,
+        state: FixtureState,
         gate: Arc<Mutex<Option<Arc<Semaphore>>>>,
         cancel: CancellationToken,
         task: JoinHandle<()>,
     }
 
     impl Fixture {
-        #[expect(
-            clippy::excessive_nesting,
-            reason = "test fixture keeps connection ownership, bounded exchanges and abort/join teardown together"
-        )]
         async fn new() -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
             let (acceptor, root) = fixture_acceptor(FIXTURE_HOST);
-            let calls = Arc::new(AtomicUsize::new(0));
-            let received = Arc::new(Semaphore::new(0));
-            let requests = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
-            let response = Arc::new(Mutex::new(Vec::<u8>::new()));
             let gate = Arc::new(Mutex::new(None::<Arc<Semaphore>>));
+            let state = FixtureState {
+                calls: Arc::new(AtomicUsize::new(0)),
+                received: Arc::new(Semaphore::new(0)),
+                requests: Arc::new(Mutex::new(Vec::new())),
+                response: Arc::new(Mutex::new((
+                    StatusCode::OK,
+                    Bytes::from(active_response("subject", epoch_now() + 600)),
+                ))),
+                gate: Arc::clone(&gate),
+            };
             let cancel = CancellationToken::new();
-            let task = tokio::spawn({
-                let cancel = cancel.clone();
-                let calls = calls.clone();
-                let received = received.clone();
-                let requests = requests.clone();
-                let response = response.clone();
-                let gate = gate.clone();
-                async move {
-                    let mut connections = JoinSet::new();
-                    loop {
-                        let stream = tokio::select! {
-                            () = cancel.cancelled() => break,
-                            Some(result) = connections.join_next(), if !connections.is_empty() => { result.unwrap(); continue; },
-                            accepted = listener.accept() => accepted.unwrap().0,
-                        };
-                        let acceptor = acceptor.clone();
-                        let calls = calls.clone();
-                        let received = received.clone();
-                        let requests = requests.clone();
-                        let response = response.clone();
-                        let gate = gate.clone();
-                        connections.spawn(async move {
-                            tokio::time::timeout(Duration::from_secs(5), async {
-                                let mut stream = acceptor.accept(stream).await.unwrap();
-                                let mut request = Vec::new();
-                                let mut chunk = [0_u8; 4096];
-                                loop {
-                                    let read = stream.read(&mut chunk).await.unwrap();
-                                    assert_ne!(read, 0);
-                                    request.extend_from_slice(&chunk[..read]);
-                                    assert!(request.len() <= 128 * 1024);
-                                    if complete_request(&request) {
-                                        break;
-                                    }
-                                }
-                                requests.lock().unwrap().push(request);
-                                let bytes = response.lock().unwrap().clone();
-                                let gate = gate.lock().unwrap().clone();
-                                calls.fetch_add(1, Ordering::SeqCst);
-                                received.add_permits(1);
-                                if let Some(gate) = gate {
-                                    gate.acquire().await.unwrap().forget();
-                                }
-                                // A cancelled caller can close its TLS stream before the response.
-                                let _ = stream.write_all(&bytes).await;
-                                let _ = stream.shutdown().await;
-                            })
-                            .await
-                            .unwrap();
-                        });
-                    }
-                    connections.abort_all();
-                    while let Some(result) = connections.join_next().await {
-                        if let Err(error) = result {
-                            assert!(error.is_cancelled());
-                        }
-                    }
-                }
-            });
-            let fixture = Self {
+            let task = tokio::spawn(run_fixture_server(
+                listener,
+                acceptor,
+                state.clone(),
+                cancel.clone(),
+            ));
+            Self {
                 endpoint: EndpointUrl::parse(&format!(
                     "https://{FIXTURE_HOST}:{}/introspect",
                     address.port()
@@ -484,26 +511,19 @@ mod tests {
                     CancellationToken::new(),
                 )
                 .unwrap(),
-                calls,
-                received,
-                requests,
-                response,
+                state,
                 gate,
                 cancel,
                 task,
-            };
-            fixture.respond("200 OK", &active_response("subject", epoch_now() + 600));
-            fixture
+            }
         }
 
-        fn respond(&self, status: &str, body: &[u8]) {
-            let mut response = format!("HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n", body.len()).into_bytes();
-            response.extend_from_slice(body);
-            *self.response.lock().unwrap() = response;
+        fn respond(&self, status: StatusCode, body: &[u8]) {
+            *self.state.response.lock().unwrap() = (status, Bytes::copy_from_slice(body));
         }
 
-        fn requests(&self) -> Vec<Vec<u8>> {
-            self.requests.lock().unwrap().clone()
+        fn requests(&self) -> Vec<RecordedRequest> {
+            self.state.requests.lock().unwrap().clone()
         }
 
         fn block_responses(&self) -> Arc<Semaphore> {
@@ -513,7 +533,7 @@ mod tests {
         }
 
         async fn received(&self) {
-            tokio::time::timeout(Duration::from_secs(5), self.received.acquire())
+            tokio::time::timeout(Duration::from_secs(5), self.state.received.acquire())
                 .await
                 .unwrap()
                 .unwrap()
@@ -543,7 +563,7 @@ mod tests {
         }
 
         fn calls(&self) -> usize {
-            self.calls.load(Ordering::SeqCst)
+            self.state.calls.load(Ordering::SeqCst)
         }
 
         async fn finish(self) {
@@ -587,18 +607,24 @@ mod tests {
         let verifier = IntrospectionVerifier::try_new(options, fixture.provider.clone()).unwrap();
         verify(&verifier, b"Bearer a+b/=").await.unwrap();
         let requests = fixture.requests();
-        let request = String::from_utf8(requests[0].clone()).unwrap();
-        let (head, body) = request.split_once("\r\n\r\n").unwrap();
-        assert!(head.starts_with("POST /introspect HTTP/1.1\r\n"), "{head}");
-        assert!(
-            head.lines()
-                .any(|line| line == "content-type: application/x-www-form-urlencoded")
+        assert_eq!(requests.len(), 1);
+        let request = &requests[0];
+        assert_eq!(request.method, Method::POST);
+        assert_eq!(request.uri, "/introspect");
+        assert_eq!(
+            request.headers.get(header::CONTENT_TYPE).unwrap(),
+            "application/x-www-form-urlencoded"
         );
-        assert!(
-            head.contains("\r\nauthorization: Basic YSUzQWI6Yytk\r\n"),
-            "{head}"
+        assert_eq!(
+            request.headers.get(header::AUTHORIZATION).unwrap(),
+            "Basic YSUzQWI6Yytk"
         );
-        assert_eq!(body, "token=a%2Bb%2F%3D&token_type_hint=access_token");
+        assert!(!format!("{:?}", request.headers).contains("a+b"));
+        assert!(!format!("{:?}", request.headers).contains("a%2Bb"));
+        assert_eq!(
+            request.body.as_ref(),
+            b"token=a%2Bb%2F%3D&token_type_hint=access_token"
+        );
         fixture.finish().await;
     }
 
@@ -705,10 +731,10 @@ mod tests {
         let fixture = Fixture::new().await;
         let verifier = fixture.verifier(None);
         let token = parse_bearer([b"Bearer first".as_slice()]).unwrap();
-        for (status, code, label) in [
-            ("401 Unauthorized", 401, "provider_status_4xx"),
-            ("503 Service Unavailable", 503, "provider_status_5xx"),
-            ("204 No Content", 204, "provider_status_other"),
+        for (status, label) in [
+            (StatusCode::UNAUTHORIZED, "provider_status_4xx"),
+            (StatusCode::SERVICE_UNAVAILABLE, "provider_status_5xx"),
+            (StatusCode::NO_CONTENT, "provider_status_other"),
         ] {
             fixture.respond(status, b"");
             let error = verifier
@@ -718,7 +744,7 @@ mod tests {
             assert_eq!(
                 error,
                 VerificationError::unavailable(VerificationReason::Provider(
-                    ProviderFailure::Status(code)
+                    ProviderFailure::Status(status.as_u16())
                 ))
             );
             assert_eq!(error.reason.label(), label);
@@ -750,7 +776,10 @@ mod tests {
         verify(&cached, b"Bearer second").await.unwrap();
         assert_eq!(fixture.calls(), 4);
         let independent = fixture.verifier(Some(cache_options(2)));
-        fixture.respond("200 OK", &active_response("new-subject", epoch_now() + 600));
+        fixture.respond(
+            StatusCode::OK,
+            &active_response("new-subject", epoch_now() + 600),
+        );
         assert_eq!(
             verify(&independent, b"Bearer first")
                 .await
@@ -783,7 +812,7 @@ mod tests {
         let verifier = fixture.verifier(Some(options));
         verify(&verifier, b"Bearer first").await.unwrap();
         tokio::time::sleep(Duration::from_millis(1200)).await;
-        fixture.respond("503 Service Unavailable", b"{}");
+        fixture.respond(StatusCode::SERVICE_UNAVAILABLE, b"{}");
         verify(&verifier, b"Bearer first").await.unwrap();
         assert_eq!(fixture.calls(), 1);
         tokio::time::sleep(Duration::from_millis(1000)).await;
@@ -807,7 +836,7 @@ mod tests {
             (b"{".to_vec(), Some(Failure::Unavailable)),
             (active_response("subject", epoch_now() - 1), None),
         ] {
-            fixture.respond("200 OK", &response);
+            fixture.respond(StatusCode::OK, &response);
             let before = fixture.calls();
             for _ in 0..2 {
                 assert_eq!(verify(&verifier, b"Bearer first").await.err(), expected);
@@ -823,26 +852,26 @@ mod tests {
         let oversized = serde_json::to_vec(&serde_json::json!({"active":true,"iss":"https://issuer.example","aud":"api","exp":epoch_now()+600,"sub":"subject","custom":"x".repeat(64*1024)})).unwrap();
         for (status, response, expected, retained) in [
             (
-                "200 OK",
+                StatusCode::OK,
                 active_response("subject", epoch_now() + 600),
                 None,
                 true,
             ),
-            ("200 OK", oversized, None, false),
+            (StatusCode::OK, oversized, None, false),
             (
-                "200 OK",
+                StatusCode::OK,
                 active_response("subject", epoch_now() - 1),
                 None,
                 false,
             ),
             (
-                "200 OK",
+                StatusCode::OK,
                 br#"{"active":false}"#.to_vec(),
                 Some(Failure::Invalid),
                 false,
             ),
             (
-                "503 Service Unavailable",
+                StatusCode::SERVICE_UNAVAILABLE,
                 b"{}".to_vec(),
                 Some(Failure::Unavailable),
                 false,
@@ -877,7 +906,10 @@ mod tests {
                 fixture.received().await;
             }
             if expected.is_some() {
-                fixture.respond("200 OK", &active_response("recovered", epoch_now() + 600));
+                fixture.respond(
+                    StatusCode::OK,
+                    &active_response("recovered", epoch_now() + 600),
+                );
                 assert_eq!(
                     verify(&verifier, b"Bearer shared").await.unwrap().subject(),
                     Some("recovered")
@@ -916,9 +948,9 @@ mod tests {
     #[tokio::test]
     async fn caller_deadline_and_cancellation_remain_distinct_when_authentication_stops() {
         let diagnostics = Diagnostics::default();
-        let _recorder = metrics::set_default_local_recorder(&diagnostics);
+        let _recorder = metrics::set_default_local_recorder(diagnostics.recorder());
         let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
-        let _dispatch = tracing::subscriber::set_default(diagnostics.clone());
+        let _dispatch = tracing::dispatcher::set_default(&diagnostics.dispatch());
         for (drop_on_stop, stopped, inbound, provider) in [
             (false, Stopped::Deadline, "timeout", "caller_deadline"),
             (false, Stopped::Cancelled, "cancelled", "cancelled"),
@@ -956,7 +988,7 @@ mod tests {
             }
             tokio::time::resume();
 
-            let counters = std::mem::take(&mut *diagnostics.counters.lock().unwrap());
+            let counters = diagnostics.take_counters();
             let [(key, 1)] = counters.as_slice() else {
                 panic!("expected one inbound authentication outcome, got {counters:?}");
             };
@@ -967,7 +999,7 @@ mod tests {
                         .any(|value| value.key() == label && value.value() == inbound)
                 );
             }
-            let samples = std::mem::take(&mut *diagnostics.histograms.lock().unwrap());
+            let samples = diagnostics.take_histograms();
             let [sample] = samples.as_slice() else {
                 panic!("expected one provider histogram sample, got {samples:?}");
             };
@@ -977,7 +1009,7 @@ mod tests {
                     .labels()
                     .any(|label| label.key() == "outcome" && label.value() == provider)
             );
-            let spans = std::mem::take(&mut *diagnostics.spans.lock().unwrap());
+            let spans = diagnostics.take_spans();
             assert!(spans.iter().any(|span| {
                 span.contains("authn.operation=\"introspection\";")
                     && span.contains(&format!("error.type=\"{provider}\";"))
@@ -989,8 +1021,9 @@ mod tests {
     #[tokio::test]
     async fn provider_deadline_is_distinct_from_caller_cancellation_in_exchange_telemetry() {
         let diagnostics = Diagnostics::default();
-        let _recorder = metrics::set_default_local_recorder(&diagnostics);
-        let _dispatch = tracing::subscriber::set_default(diagnostics.clone());
+        let _recorder = metrics::set_default_local_recorder(diagnostics.recorder());
+        let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+        let _dispatch = tracing::dispatcher::set_default(&diagnostics.dispatch());
         let token = parse_bearer([b"Bearer slow".as_slice()]).unwrap();
         for cache in [None, Some(cache_options(1))] {
             let fixture = Fixture::new().await;
@@ -1016,7 +1049,7 @@ mod tests {
                     Err(Failure::Unavailable)
                 );
                 tokio::time::resume();
-                let samples = std::mem::take(&mut *diagnostics.histograms.lock().unwrap());
+                let samples = diagnostics.take_histograms();
                 assert_eq!(samples.len(), 1);
                 assert_eq!(samples[0].name(), "authn_provider_request_duration_seconds");
                 assert!(
@@ -1024,7 +1057,7 @@ mod tests {
                         .labels()
                         .any(|label| { label.key() == "outcome" && label.value() == expected })
                 );
-                let spans = std::mem::take(&mut *diagnostics.spans.lock().unwrap());
+                let spans = diagnostics.take_spans();
                 assert!(spans.iter().any(|span| {
                     span.contains("authn.operation=\"introspection\";")
                         && span.contains(&format!("error.type=\"{expected}\";"))
@@ -1114,13 +1147,13 @@ mod tests {
             let mut response: serde_json::Value =
                 serde_json::from_slice(&active_response("old", expiry)).unwrap();
             response["nbf"] = not_before.into();
-            fixture.respond("200 OK", &serde_json::to_vec(&response).unwrap());
+            fixture.respond(StatusCode::OK, &serde_json::to_vec(&response).unwrap());
             verifier
                 .verify_with_now(&token, &context, move || Ok(base))
                 .await
                 .unwrap();
             let before = fixture.calls();
-            fixture.respond("503 Service Unavailable", b"{}");
+            fixture.respond(StatusCode::SERVICE_UNAVAILABLE, b"{}");
             // Still physically retained: the changed calendar alone forces provider work.
             let error = verifier
                 .verify_with_now(&token, &context, move || Ok(changed))
@@ -1138,7 +1171,7 @@ mod tests {
                 Some("old")
             );
             assert_eq!(fixture.calls(), before + 1);
-            fixture.respond("200 OK", &active_response("replacement", base + 900));
+            fixture.respond(StatusCode::OK, &active_response("replacement", base + 900));
             assert_eq!(
                 verifier
                     .verify_with_now(&token, &context, move || Ok(changed))
@@ -1168,7 +1201,7 @@ mod tests {
         let token = parse_bearer([b"Bearer provenance".as_slice()]).unwrap();
         let key = super::token_digest(&token);
         for (elapsed_seconds, replacement) in [(0, false), (60, false), (60, true)] {
-            fixture.respond("200 OK", &active_response("old", base + 60));
+            fixture.respond(StatusCode::OK, &active_response("old", base + 60));
             let verifier = fixture.verifier(Some(cache_options(1)));
             verifier
                 .verify_with_now(&token, &context, move || Ok(base))
@@ -1202,7 +1235,7 @@ mod tests {
                 .unwrap();
                 cache.retained.insert(key, newer).await;
             }
-            fixture.respond("503 Service Unavailable", b"{}");
+            fixture.respond(StatusCode::SERVICE_UNAVAILABLE, b"{}");
             gate.add_permits(1);
             assert!(
                 tokio::time::timeout(Duration::from_secs(5), publication)
@@ -1228,7 +1261,7 @@ mod tests {
     async fn unusable_clock_refuses_dispatch_and_retained_trust_then_recovers() {
         let context = OperationContext::unbounded();
         let fixture = Fixture::new().await;
-        fixture.respond("200 OK", &active_response("extreme", u64::MAX));
+        fixture.respond(StatusCode::OK, &active_response("extreme", u64::MAX));
         let token = parse_bearer([b"Bearer clock".as_slice()]).unwrap();
         for options in [None, Some(cache_options(1))] {
             let verifier = fixture.verifier(options);
@@ -1295,7 +1328,7 @@ mod tests {
             let mut response: serde_json::Value =
                 serde_json::from_slice(&active_response("fresh", expiry)).unwrap();
             response["nbf"] = not_before.into();
-            fixture.respond("200 OK", &serde_json::to_vec(&response).unwrap());
+            fixture.respond(StatusCode::OK, &serde_json::to_vec(&response).unwrap());
             let verifier = fixture.verifier(Some(cache_options(1)));
             let gate = fixture.block_responses();
             let before = fixture.calls();
@@ -1343,7 +1376,7 @@ mod tests {
         let context = OperationContext::unbounded();
         let fixture = Fixture::new().await;
         let base = epoch_now();
-        fixture.respond("200 OK", &active_response("old", base + 60));
+        fixture.respond(StatusCode::OK, &active_response("old", base + 60));
         let verifier = fixture.verifier(Some(
             IntrospectionCacheOptions::try_new(1, Duration::from_secs(2)).unwrap(),
         ));
@@ -1353,13 +1386,13 @@ mod tests {
             .await
             .unwrap();
         tokio::time::sleep(Duration::from_millis(1200)).await;
-        fixture.respond("200 OK", &active_response("new", base + 600));
+        fixture.respond(StatusCode::OK, &active_response("new", base + 600));
         verifier
             .verify_with_now(&token, &context, move || Ok(base + 60))
             .await
             .unwrap();
         tokio::time::sleep(Duration::from_millis(1000)).await;
-        fixture.respond("503 Service Unavailable", b"{}");
+        fixture.respond(StatusCode::SERVICE_UNAVAILABLE, b"{}");
         assert_eq!(
             verifier
                 .verify_with_now(&token, &context, move || Ok(base + 60))

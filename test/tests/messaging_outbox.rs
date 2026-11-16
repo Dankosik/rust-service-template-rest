@@ -30,7 +30,7 @@ use infra_webhooks::inbound::{
 };
 use infra_webhooks::protocol::KeyRing;
 // template:end inbound-webhooks:outbox-test-messaging-outbox-inbound-imports-2
-use integration_tests::{close_pools, dsn_for};
+use integration_tests::{close_pools, dsn_for, poll_until};
 use sqlx::Row;
 use tokio::sync::Notify;
 use tokio::time::{Instant, timeout};
@@ -46,6 +46,7 @@ mod relay;
 use relay::AckDroppingRelay;
 
 const WAIT: Duration = Duration::from_secs(10);
+const POLL: Duration = Duration::from_millis(20);
 const CLOSE_BUDGET: Duration = Duration::from_secs(5);
 const APP: &str = "integration-tests-outbox";
 const OUTBOX_KIND: &str = "publish_domain_event";
@@ -307,19 +308,6 @@ async fn close(messaging: Messaging) {
     );
 }
 
-async fn until<T>(what: &str, mut check: impl AsyncFnMut() -> Option<T>) -> T {
-    timeout(WAIT, async {
-        loop {
-            if let Some(value) = check().await {
-                return value;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .unwrap_or_else(|_| panic!("{what} did not happen within {WAIT:?}"))
-}
-
 async fn job(pool: &PgPool, key: &str) -> JobRow {
     let row = sqlx::query(
         "SELECT id::text AS id, state, attempts, failure_reason, error_summary \
@@ -508,15 +496,22 @@ async fn business_rollback_hides_intent_commit_publishes_exact_prepared_event(po
             .expect("outbox publisher registry is valid"),
     )
     .await;
-    until(
+    poll_until(
         "committed outbox event is synchronously acknowledged by JetStream",
+        WAIT,
+        POLL,
         async || (fixture.published().await == 1).then_some(()),
     )
     .await;
-    let row = until("acknowledged publication is fenced complete", async || {
-        let row = job(&business, &event_key("event-commit")).await;
-        (row.state == "completed").then_some(row)
-    })
+    let row = poll_until(
+        "acknowledged publication is fenced complete",
+        WAIT,
+        POLL,
+        async || {
+            let row = job(&business, &event_key("event-commit")).await;
+            (row.state == "completed").then_some(row)
+        },
+    )
     .await;
     assert_eq!(row.attempts, 1);
     assert!(row.failure_reason.is_none());
@@ -601,8 +596,10 @@ async fn live_event_identity_is_idempotent_only_for_equal_immutable_intent(pool:
         })
         .await
     });
-    until(
+    poll_until(
         "the conflicting insert waits for the live unique key",
+        WAIT,
+        POLL,
         async || {
             let waiting: i64 = sqlx::query_scalar(
                 "SELECT count(*) FROM pg_stat_activity \
@@ -669,8 +666,10 @@ async fn lost_broker_ack_retries_then_republishes_the_same_immutable_identity(po
             .expect("outbox publisher registry is valid"),
     )
     .await;
-    let retrying = until(
+    let retrying = poll_until(
         "lost broker ACK spends an attempt and retains a pending outbox intent",
+        WAIT,
+        POLL,
         async || {
             let row = job(&jobs, &key).await;
             (relay.dropped_ack.is_cancelled()
@@ -717,8 +716,10 @@ async fn lost_broker_ack_retries_then_republishes_the_same_immutable_identity(po
             .expect("retry publisher registry is valid"),
     )
     .await;
-    let completed = until(
+    let completed = poll_until(
         "same immutable identity receives duplicate broker ACK and completes",
+        WAIT,
+        POLL,
         async || {
             let row = job(&jobs, &key).await;
             (row.state == "completed").then_some(row)
@@ -769,8 +770,10 @@ async fn final_attempt_publication_failure_leaves_a_visible_failed_job(pool: PgP
             .expect("outbox publisher registry is valid"),
     )
     .await;
-    let failed = until(
+    let failed = poll_until(
         "a refused final attempt leaves the job visibly failed",
+        WAIT,
+        POLL,
         async || {
             let row = job(&jobs, &key).await;
             (row.state == "failed").then_some(row)
@@ -827,8 +830,10 @@ async fn malformed_stored_intent_is_terminal_and_never_false_completion(pool: Pg
             .expect("outbox publisher registry is valid"),
     )
     .await;
-    let failed = until(
+    let failed = poll_until(
         "malformed intent becomes visible terminal history",
+        WAIT,
+        POLL,
         async || {
             let row = job(&jobs, &key).await;
             (row.state == "failed").then_some(row)
@@ -874,7 +879,7 @@ async fn durable_consumer_effect_dedupes_same_logical_id_after_broker_window(poo
         )
         .await
         .expect("first publication ACKs");
-    until("first durable effect commits", async || {
+    poll_until("first durable effect commits", WAIT, POLL, async || {
         let effects: i64 = sqlx::query_scalar("SELECT count(*) FROM messaging_effects")
             .fetch_one(&effects)
             .await
@@ -894,8 +899,10 @@ async fn durable_consumer_effect_dedupes_same_logical_id_after_broker_window(poo
         )
         .await
         .expect("same-ID publication after broker window ACKs");
-    until(
+    poll_until(
         "second broker delivery reaches the real consumer",
+        WAIT,
+        POLL,
         async || (invoked.load(Ordering::SeqCst) >= 2).then_some(()),
     )
     .await;
@@ -1030,8 +1037,10 @@ async fn committed_effect_after_lost_settlement(pool: PgPool, drop_request: bool
     let state = state.cached_info();
     if drop_request {
         assert!(state.ack_floor.stream_sequence < ack.sequence);
-        until(
+        poll_until(
             "lost source ACK redelivers the committed effect",
+            WAIT,
+            POLL,
             async || (invoked.load(Ordering::SeqCst) >= 2).then_some(()),
         )
         .await;
@@ -1042,7 +1051,7 @@ async fn committed_effect_after_lost_settlement(pool: PgPool, drop_request: bool
             "the broker already processed the lost ACK reply"
         );
     }
-    until("the durable settles", async || {
+    poll_until("the durable settles", WAIT, POLL, async || {
         let durable: consumer::PullConsumer = stream.get_consumer(&fixture.durable).await.unwrap();
         let info = durable.cached_info();
         (info.ack_floor.stream_sequence >= ack.sequence && info.num_ack_pending == 0).then_some(())
@@ -1193,8 +1202,10 @@ async fn dedicated_publisher_progresses_while_real_inbound_webhook_processing_sl
             .expect("dedicated publisher registry is valid"),
     )
     .await;
-    until(
+    poll_until(
         "dedicated publisher receives the broker ACK despite ordinary saturation",
+        WAIT,
+        POLL,
         async || (fixture.published().await == 1).then_some(()),
     )
     .await;

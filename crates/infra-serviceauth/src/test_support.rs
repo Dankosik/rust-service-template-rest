@@ -69,6 +69,8 @@ impl TestKey {
 
     #[must_use]
     pub fn pem(&self) -> String {
+        // `test-support` is a normal Cargo feature, so depending on `pem` 4 here
+        // would duplicate `jsonwebtoken`'s `pem` 3 in `cargo-deny`.
         let body = STANDARD.encode(&self.pkcs8);
         let lines: Vec<&str> = body
             .as_bytes()

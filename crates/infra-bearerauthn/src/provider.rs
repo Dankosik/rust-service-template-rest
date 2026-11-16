@@ -914,7 +914,7 @@ mod tests {
         let diagnostics = Diagnostics::default();
         let _registration_anchor =
             tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
-        let dispatch = tracing::Dispatch::new(diagnostics.clone());
+        let dispatch = diagnostics.dispatch();
         for content_type in ["", "content-type: text/plain\r\n"] {
             let response = format!(
                 "HTTP/1.1 200 OK\r\n{content_type}content-length: 16\r\n\r\n{{\"active\":false}}"
@@ -936,7 +936,7 @@ mod tests {
             );
             server.await.unwrap();
         }
-        let spans = diagnostics.spans.lock().unwrap();
+        let spans = diagnostics.take_spans();
         let provider_spans = spans
             .iter()
             .filter(|span| span.starts_with("span=authn_provider;"))

@@ -104,7 +104,11 @@ mod tests {
         reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
     )]
     async fn the_pool_follows_the_file_and_keeps_its_password_while_the_file_is_unreadable() {
-        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        use metrics::Key;
+        use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
         let _recorder = metrics::set_default_local_recorder(&recorder);
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("password");
@@ -117,10 +121,11 @@ mod tests {
         let pool = PgPoolOptions::new().connect_lazy_with(dsn.connect_options());
         assert_eq!(password(&pool).as_deref(), Some("first"));
         assert!(
-            !recorder
-                .handle()
-                .render()
-                .contains("postgres_password_file_refreshes_total")
+            snapshotter
+                .snapshot()
+                .into_vec()
+                .iter()
+                .all(|(key, ..)| key.key().name() != REFRESHES_METRIC)
         );
 
         let mut refresh = Refresh::default();
@@ -146,22 +151,21 @@ mod tests {
         assert!(!refresh.unreadable);
         assert_eq!(password(&pool).as_deref(), Some("third"));
         dir.close().unwrap();
-        let scrape = recorder.handle().render();
-        let mut samples: Vec<_> = scrape
-            .lines()
-            .filter(|line| line.starts_with("postgres_password_file_refreshes_total{"))
-            .collect();
-        samples.sort_unstable();
-        assert_eq!(
-            samples,
-            [
-                "postgres_password_file_refreshes_total{outcome=\"installed\"} 3",
-                "postgres_password_file_refreshes_total{outcome=\"read_failed\"} 3",
-                "postgres_password_file_refreshes_total{outcome=\"unchanged\"} 1",
-            ]
-        );
+        let snapshot = snapshotter.snapshot().into_vec();
+        assert_eq!(snapshot.len(), 3, "{snapshot:?}");
+        for (outcome, expected) in [("installed", 3), ("read_failed", 3), ("unchanged", 1)] {
+            let target = Key::from_parts(REFRESHES_METRIC, &[("outcome", outcome)]);
+            let actual = snapshot
+                .iter()
+                .find_map(|(composite, _, _, value)| match value {
+                    DebugValue::Counter(count) if composite.key() == &target => Some(*count),
+                    _ => None,
+                });
+            assert_eq!(actual, Some(expected), "{target}: {snapshot:?}");
+        }
+        let debug = format!("{snapshot:?}");
         for secret in [file.to_str().unwrap(), "first", "second", "third"] {
-            assert!(!scrape.contains(secret));
+            assert!(!debug.contains(secret));
         }
     }
 }

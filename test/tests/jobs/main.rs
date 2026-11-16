@@ -67,24 +67,19 @@ pub(crate) async fn bounded<F: Future>(what: &str, future: F) -> F::Output {
 }
 
 pub(crate) async fn wait_for_lock_waiter(pool: &PgPool) {
-    bounded("a lock waiter", async {
-        loop {
-            let waiting: i64 = sqlx::query_scalar(
-                "SELECT count(*) FROM pg_stat_activity \
-                 WHERE datname = current_database() \
-                   AND wait_event_type = 'Lock' \
-                   AND application_name = $1 \
-                   AND pid <> pg_backend_pid()",
-            )
-            .bind(APP)
-            .fetch_one(pool)
-            .await
-            .expect("pg_stat_activity");
-            if waiting > 0 {
-                return;
-            }
-            tokio::time::sleep(POLL).await;
-        }
+    integration_tests::poll_until("a lock waiter", WAIT, POLL, async || {
+        let waiting: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity \
+             WHERE datname = current_database() \
+               AND wait_event_type = 'Lock' \
+               AND application_name = $1 \
+               AND pid <> pg_backend_pid()",
+        )
+        .bind(APP)
+        .fetch_one(pool)
+        .await
+        .expect("pg_stat_activity");
+        (waiting > 0).then_some(())
     })
     .await;
 }

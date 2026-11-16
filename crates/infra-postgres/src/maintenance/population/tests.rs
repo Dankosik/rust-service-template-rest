@@ -1,11 +1,87 @@
-use metrics_exporter_prometheus::PrometheusBuilder;
+use metrics::{Key, Level, Metadata, Recorder as _};
+use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
 
 use super::*;
 
+const RESTORE_METADATA: Metadata<'static> = Metadata::new(module_path!(), Level::INFO, None);
+
+struct TestMetrics {
+    recorder: DebuggingRecorder,
+    snapshotter: Snapshotter,
+}
+
+impl TestMetrics {
+    fn new() -> Self {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        Self {
+            recorder,
+            snapshotter,
+        }
+    }
+
+    fn snapshot(&self) -> Vec<(metrics_util::CompositeKey, DebugValue)> {
+        // `Snapshotter::snapshot` resets counters and gauges to zero; restore
+        // them so repeated assertions see retained gauges and cumulative totals.
+        self.snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .map(|(composite, _, _, value)| {
+                match &value {
+                    DebugValue::Counter(count) if *count != 0 => {
+                        self.recorder
+                            .register_counter(composite.key(), &RESTORE_METADATA)
+                            .increment(*count);
+                    }
+                    DebugValue::Gauge(gauge) => {
+                        self.recorder
+                            .register_gauge(composite.key(), &RESTORE_METADATA)
+                            .set(gauge.into_inner());
+                    }
+                    _ => {}
+                }
+                (composite, value)
+            })
+            .collect()
+    }
+
+    fn gauge(&self, name: &str) -> f64 {
+        let target = Key::from_parts(
+            format!("postgres_maintenance_{name}"),
+            &[("population", "jobs")],
+        );
+        self.snapshot()
+            .into_iter()
+            .find_map(|(composite, value)| match value {
+                DebugValue::Gauge(gauge) if composite.key() == &target => Some(gauge.into_inner()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing {target}"))
+    }
+
+    fn counter(&self, target: &Key) -> u64 {
+        self.snapshot()
+            .into_iter()
+            .find_map(|(composite, value)| match value {
+                DebugValue::Counter(count) if composite.key() == target => Some(count),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing {target}"))
+    }
+
+    fn observation_count(&self, outcome: &'static str) -> u64 {
+        self.counter(&Key::from_parts(
+            OBSERVATIONS_METRIC,
+            &[("population", "jobs"), ("outcome", outcome)],
+        ))
+    }
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_read_past_the_budget_fails_the_attempt_and_keeps_the_last_sample() {
-    let recorder = PrometheusBuilder::new().build_recorder();
-    let _recording = metrics::set_default_local_recorder(&recorder);
+    let metrics = TestMetrics::new();
+    let _recording = metrics::set_default_local_recorder(&metrics.recorder);
     let mut observer = MaintenanceObserver::start(MaintenancePopulation::Cleanup(Cleanup::Jobs));
     let observed_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -22,44 +98,27 @@ async fn a_read_past_the_budget_fails_the_attempt_and_keeps_the_last_sample() {
         .await;
     observer.sample(std::future::pending()).await;
 
-    let scrape = recorder.handle().render();
-    assert!(scrape.contains(r#"outcome="success"} 1"#), "{scrape}");
-    assert!(scrape.contains(r#"outcome="failed"} 1"#), "{scrape}");
-    assert!(scrape.contains(r#"postgres_maintenance_present{population="jobs"} 1"#));
-    assert!(scrape.contains(r#"postgres_maintenance_last_attempt_success{population="jobs"} 0"#));
-}
-
-fn population_gauge(recorder: &metrics_exporter_prometheus::PrometheusRecorder, name: &str) -> f64 {
-    let name = format!("postgres_maintenance_{name}");
-    recorder
-        .handle()
-        .render()
-        .lines()
-        .find(|line| line.starts_with(&format!("{name}{{population=\"jobs\"}} ")))
-        .and_then(|line| line.rsplit_once(' '))
-        .unwrap_or_else(|| panic!("missing {name}"))
-        .1
-        .parse()
-        .unwrap()
+    assert_eq!(metrics.observation_count("success"), 1);
+    assert_eq!(metrics.observation_count("failed"), 1);
+    assert_eq!(metrics.gauge("present"), 1.0);
+    assert_eq!(metrics.gauge("last_attempt_success"), 0.0);
 }
 
 #[test]
 fn population_failure_and_cancellation_retain_dated_success_until_recovery() {
-    let recorder = PrometheusBuilder::new().build_recorder();
-    metrics::with_local_recorder(&recorder, || {
+    let metrics = TestMetrics::new();
+    metrics::with_local_recorder(&metrics.recorder, || {
         let mut observer =
             MaintenanceObserver::start(MaintenancePopulation::Cleanup(Cleanup::Jobs));
-        assert!(population_gauge(&recorder, "present").is_nan());
-        assert!(population_gauge(&recorder, "oldest_timestamp_seconds").is_nan());
+        assert!(metrics.gauge("present").is_nan());
+        assert!(metrics.gauge("oldest_timestamp_seconds").is_nan());
+        assert_eq!(metrics.gauge("last_success_timestamp_seconds"), 0.0);
         assert_eq!(
-            population_gauge(&recorder, "last_success_timestamp_seconds"),
-            0.0
-        );
-        assert!(
-            recorder
-                .handle()
-                .render()
-                .contains("postgres_cleanup_removed_rows_total{cleanup=\"jobs\"} 0")
+            metrics.counter(&Key::from_parts(
+                CLEANUP_REMOVED_ROWS_METRIC,
+                &[("cleanup", "jobs")]
+            )),
+            0
         );
 
         let database_time = observer.previous_clock.wall.unwrap();
@@ -68,57 +127,38 @@ fn population_failure_and_cancellation_retain_dated_success_until_recovery() {
             observed_at_unix_seconds: database_time,
             oldest_at_unix_seconds: Some(oldest),
         });
-        let receipt = population_gauge(&recorder, "last_success_timestamp_seconds");
+        let receipt = metrics.gauge("last_success_timestamp_seconds");
         for cause in [
             MaintenanceFailure::Acquire,
             MaintenanceFailure::TimedOut,
             MaintenanceFailure::CommitUnknown,
         ] {
             observer.attempt().failed(cause);
-            assert_eq!(population_gauge(&recorder, "present"), 1.0);
+            assert_eq!(metrics.gauge("present"), 1.0);
+            assert_eq!(metrics.gauge("oldest_timestamp_seconds"), oldest);
             assert_eq!(
-                population_gauge(&recorder, "oldest_timestamp_seconds"),
-                oldest
-            );
-            assert_eq!(
-                population_gauge(&recorder, "database_observed_timestamp_seconds"),
+                metrics.gauge("database_observed_timestamp_seconds"),
                 database_time
             );
-            assert_eq!(
-                population_gauge(&recorder, "last_success_timestamp_seconds"),
-                receipt
-            );
-            assert_eq!(population_gauge(&recorder, "last_attempt_success"), 0.0);
+            assert_eq!(metrics.gauge("last_success_timestamp_seconds"), receipt);
+            assert_eq!(metrics.gauge("last_attempt_success"), 0.0);
         }
         drop(observer.attempt());
-        assert_eq!(
-            population_gauge(&recorder, "oldest_timestamp_seconds"),
-            oldest
-        );
-        assert_eq!(
-            population_gauge(&recorder, "last_success_timestamp_seconds"),
-            receipt
-        );
-        let scrape = recorder.handle().render();
+        assert_eq!(metrics.gauge("oldest_timestamp_seconds"), oldest);
+        assert_eq!(metrics.gauge("last_success_timestamp_seconds"), receipt);
         for (outcome, value) in [("success", 1), ("failed", 3), ("cancelled", 1)] {
-            assert!(
-                scrape.lines().any(|line| line
-                    .starts_with("postgres_maintenance_observations_total{")
-                    && line.contains(&format!("outcome=\"{outcome}\""))
-                    && line.ends_with(&format!(" {value}"))),
-                "{scrape}"
-            );
+            assert_eq!(metrics.observation_count(outcome), value);
         }
         observer.attempt().record_sample(PopulationSample {
             observed_at_unix_seconds: database_time,
             oldest_at_unix_seconds: None,
         });
-        assert_eq!(population_gauge(&recorder, "present"), 0.0);
-        assert_eq!(population_gauge(&recorder, "oldest_timestamp_seconds"), 0.0);
-        assert_eq!(population_gauge(&recorder, "last_attempt_success"), 1.0);
-        assert_eq!(population_gauge(&recorder, "clock_valid"), 1.0);
+        assert_eq!(metrics.gauge("present"), 0.0);
+        assert_eq!(metrics.gauge("oldest_timestamp_seconds"), 0.0);
+        assert_eq!(metrics.gauge("last_attempt_success"), 1.0);
+        assert_eq!(metrics.gauge("clock_valid"), 1.0);
         drop(observer);
-        assert_eq!(population_gauge(&recorder, "observer_enabled"), 0.0);
+        assert_eq!(metrics.gauge("observer_enabled"), 0.0);
     });
 }
 
@@ -136,8 +176,8 @@ fn clock_inconsistency_never_replaces_a_valid_population_with_empty() {
         (1001.0, 1002.0, f64::NAN, None),
         (1001.0, 1002.0, 1001.0, Some(f64::INFINITY)),
     ] {
-        let recorder = PrometheusBuilder::new().build_recorder();
-        metrics::with_local_recorder(&recorder, || {
+        let metrics = TestMetrics::new();
+        metrics::with_local_recorder(&metrics.recorder, || {
             let mut observer =
                 MaintenanceObserver::start(MaintenancePopulation::Cleanup(Cleanup::Jobs));
             let base = tokio::time::Instant::now();
@@ -170,16 +210,10 @@ fn clock_inconsistency_never_replaces_a_valid_population_with_empty() {
                     monotonic: base + Duration::from_secs(2),
                 },
             );
-            assert_eq!(population_gauge(&recorder, "clock_valid"), 0.0);
-            assert_eq!(population_gauge(&recorder, "present"), 1.0);
-            assert_eq!(
-                population_gauge(&recorder, "oldest_timestamp_seconds"),
-                400.0
-            );
-            assert_eq!(
-                population_gauge(&recorder, "last_success_timestamp_seconds"),
-                1000.0
-            );
+            assert_eq!(metrics.gauge("clock_valid"), 0.0);
+            assert_eq!(metrics.gauge("present"), 1.0);
+            assert_eq!(metrics.gauge("oldest_timestamp_seconds"), 400.0);
+            assert_eq!(metrics.gauge("last_success_timestamp_seconds"), 1000.0);
             let mut resumed = observer.attempt();
             resumed.requested = MaintenanceClock {
                 wall: Some(receipt_wall + 1.0),
@@ -195,8 +229,8 @@ fn clock_inconsistency_never_replaces_a_valid_population_with_empty() {
                     monotonic: base + Duration::from_secs(4),
                 },
             );
-            assert_eq!(population_gauge(&recorder, "clock_valid"), 1.0);
-            assert_eq!(population_gauge(&recorder, "present"), 0.0);
+            assert_eq!(metrics.gauge("clock_valid"), 1.0);
+            assert_eq!(metrics.gauge("present"), 0.0);
         });
     }
 }

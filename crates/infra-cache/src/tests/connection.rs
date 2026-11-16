@@ -1,4 +1,55 @@
+use metrics::{Key, Level, Metadata, Recorder as _};
+use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
+
 use super::*;
+
+const RESTORE_METADATA: Metadata<'static> = Metadata::new(module_path!(), Level::INFO, None);
+
+struct TestMetrics {
+    recorder: DebuggingRecorder,
+    snapshotter: Snapshotter,
+}
+
+impl TestMetrics {
+    fn new() -> Self {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        Self {
+            recorder,
+            snapshotter,
+        }
+    }
+
+    fn recorder(&self) -> &DebuggingRecorder {
+        &self.recorder
+    }
+
+    fn snapshot(&self) -> Vec<(metrics_util::CompositeKey, DebugValue)> {
+        // `Snapshotter::snapshot` resets counters and gauges to zero; restore
+        // them so repeated assertions see active in-flight work and cumulative totals.
+        self.snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .map(|(composite, _, _, value)| {
+                match &value {
+                    DebugValue::Counter(count) if *count != 0 => {
+                        self.recorder
+                            .register_counter(composite.key(), &RESTORE_METADATA)
+                            .increment(*count);
+                    }
+                    DebugValue::Gauge(gauge) if gauge.into_inner() != 0.0 => {
+                        self.recorder
+                            .register_gauge(composite.key(), &RESTORE_METADATA)
+                            .increment(gauge.into_inner());
+                    }
+                    _ => {}
+                }
+                (composite, value)
+            })
+            .collect()
+    }
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_refused_auth_is_retried_after_the_client_gives_up() {
@@ -474,22 +525,30 @@ async fn the_first_connection_dials_without_waiting_for_a_call() {
         .await;
 }
 
-fn assert_work_metrics(
-    recorder: &metrics_exporter_prometheus::PrometheusRecorder,
-    in_flight: usize,
-    refused: usize,
-    retirements: usize,
-) {
-    let scrape = recorder.handle().render();
+fn assert_work_metrics(metrics: &TestMetrics, in_flight: u32, refused: u64, retirements: u64) {
+    let snapshot = metrics.snapshot();
     for (name, expected) in [
-        ("cache_commands_in_flight", in_flight),
-        ("cache_command_admission_refused_total", refused),
-        ("cache_connection_retirements_total", retirements),
+        (
+            crate::observe::COMMANDS_IN_FLIGHT_METRIC,
+            DebugValue::Gauge(f64::from(in_flight).into()),
+        ),
+        (
+            crate::observe::ADMISSION_REFUSED_METRIC,
+            DebugValue::Counter(refused),
+        ),
+        (
+            crate::observe::RETIREMENTS_METRIC,
+            DebugValue::Counter(retirements),
+        ),
     ] {
-        let series = format!("{name} {expected}");
-        assert!(
-            scrape.lines().any(|line| line == series),
-            "{series} missing from {scrape}"
+        let target = Key::from_name(name);
+        let actual = snapshot
+            .iter()
+            .find_map(|(composite, value)| (composite.key() == &target).then_some(value));
+        assert_eq!(
+            actual,
+            Some(&expected),
+            "{target} missing from {snapshot:?}"
         );
     }
 }
@@ -502,11 +561,11 @@ async fn reliability_admission_bounds_connection_waits_without_cancelling_setup(
     use std::task::Poll;
 
     let server = FakeServer::start().await;
-    let recorder = observation_recorder();
-    let cache = metrics::with_local_recorder(&recorder, || {
+    let metrics = TestMetrics::new();
+    let cache = metrics::with_local_recorder(metrics.recorder(), || {
         admitted(&format!("redis://{}", server.address), true, true)
     });
-    assert_work_metrics(&recorder, 0, 0, 0);
+    assert_work_metrics(&metrics, 0, 0, 0);
     let namespace = cache.namespace("waiting");
     let mut waiting = Vec::new();
     // No scheduler yield: the supervisor has not published a connection yet.
@@ -515,19 +574,19 @@ async fn reliability_admission_bounds_connection_waits_without_cancelling_setup(
         assert!(futures_util::poll!(command.as_mut()).is_pending());
         waiting.push(command);
     }
-    assert_work_metrics(&recorder, 256, 0, 0);
+    assert_work_metrics(&metrics, 256, 0, 0);
     // Another link shares the unlabelled series without resetting active work.
-    let other = metrics::with_local_recorder(&recorder, || {
+    let other = metrics::with_local_recorder(metrics.recorder(), || {
         admitted(&format!("redis://{}", server.address), true, true)
     });
-    assert_work_metrics(&recorder, 256, 0, 0);
+    assert_work_metrics(&metrics, 256, 0, 0);
     drop(other);
     let mut excess = Box::pin(namespace.get("refused"));
     assert_eq!(
         futures_util::poll!(excess.as_mut()),
         Poll::Ready(Err(crate::Unavailable))
     );
-    assert_work_metrics(&recorder, 256, 1, 0);
+    assert_work_metrics(&metrics, 256, 1, 0);
     let probe = cache.probe();
     let mut waiting_probe = probe.check();
     assert!(futures_util::poll!(waiting_probe.as_mut()).is_pending());
@@ -536,21 +595,21 @@ async fn reliability_admission_bounds_connection_waits_without_cancelling_setup(
         futures_util::poll!(excess_probe.as_mut()),
         Poll::Ready(Err(_))
     );
-    assert_work_metrics(&recorder, 257, 2, 0);
+    assert_work_metrics(&metrics, 257, 2, 0);
     drop(waiting_probe);
     drop(waiting.pop());
-    assert_work_metrics(&recorder, 255, 2, 0);
+    assert_work_metrics(&metrics, 255, 2, 0);
     let mut replacement = Box::pin(namespace.get("replacement"));
     assert!(futures_util::poll!(replacement.as_mut()).is_pending());
     drop(waiting);
-    assert_work_metrics(&recorder, 1, 2, 0);
+    assert_work_metrics(&metrics, 1, 2, 0);
     assert_eq!(replacement.await, Ok(None));
-    assert_work_metrics(&recorder, 0, 2, 0);
+    assert_work_metrics(&metrics, 0, 2, 0);
     probe
         .check()
         .await
         .expect("setup and probe capacity survive acquisition cancellation");
-    assert_work_metrics(&recorder, 0, 2, 0);
+    assert_work_metrics(&metrics, 0, 2, 0);
     assert_eq!(server.connections(), 1);
     assert_eq!(server.command_count("GET", Some("waiting:pending")), 0);
     assert_eq!(server.command_count("GET", Some("waiting:refused")), 0);
@@ -645,8 +704,8 @@ async fn reliability_full_application_window_leaves_probe_and_maintenance_admiss
 #[tokio::test]
 async fn reliability_stalled_generations_recover_without_replaying_writes() {
     let server = FakeServer::start().await;
-    let recorder = observation_recorder();
-    let cache = metrics::with_local_recorder(&recorder, || {
+    let metrics = TestMetrics::new();
+    let cache = metrics::with_local_recorder(metrics.recorder(), || {
         admitted(&format!("redis://{}", server.address), true, true)
     });
     let namespace = cache.namespace("stalled");
@@ -666,7 +725,7 @@ async fn reliability_stalled_generations_recover_without_replaying_writes() {
             started.elapsed() < Duration::from_millis(500),
             "SET exceeded its 100 ms budget plus scheduling allowance"
         );
-        assert_work_metrics(&recorder, 0, 0, cycle + 1);
+        assert_work_metrics(&metrics, 0, 0, cycle + 1);
         server
             .wait_for(
                 Duration::from_secs(4),
@@ -692,7 +751,7 @@ async fn reliability_stalled_generations_recover_without_replaying_writes() {
         namespace.delete("delete-once").await,
         Err(crate::Unavailable)
     );
-    assert_work_metrics(&recorder, 0, 0, 4);
+    assert_work_metrics(&metrics, 0, 0, 4);
     server
         .wait_for(
             Duration::from_secs(4),
@@ -714,8 +773,8 @@ async fn reliability_a_probe_reply_timeout_retires_the_connection() {
     use std::task::Poll;
 
     let server = FakeServer::start().await;
-    let recorder = observation_recorder();
-    let cache = metrics::with_local_recorder(&recorder, || {
+    let metrics = TestMetrics::new();
+    let cache = metrics::with_local_recorder(metrics.recorder(), || {
         Cache::start(CacheOptions {
             command_timeout: Duration::from_secs(5),
             ..options(&format!("redis://{}", server.address), true, true, None)
@@ -737,7 +796,7 @@ async fn reliability_a_probe_reply_timeout_retires_the_connection() {
             || server.command_count("PING", None) > before,
         ) => {}
     }
-    assert_work_metrics(&recorder, 1, 0, 0);
+    assert_work_metrics(&metrics, 1, 0, 0);
     let late_key = "late";
     let peer_key = "peer";
     let mut late = Box::pin(namespace.get(late_key));
@@ -755,30 +814,30 @@ async fn reliability_a_probe_reply_timeout_retires_the_connection() {
                 && server.command_count("GET", Some(&format!("probe_timeout:{peer_key}"))) == 1,
         ) => {}
     }
-    assert_work_metrics(&recorder, 3, 0, 0);
+    assert_work_metrics(&metrics, 3, 0, 0);
     let error = tokio::time::timeout(Duration::from_secs(6), pending_probe)
         .await
         .expect("probe must observe its own reply timeout")
         .expect_err("the stalled connection did not answer PING");
     assert_eq!(error.to_string(), "cache ping failed: timeout");
-    assert_work_metrics(&recorder, 2, 0, 1);
+    assert_work_metrics(&metrics, 2, 0, 1);
     // No yield after the timeout: peers already observe retirement, and reused
     // capacity cannot dispatch another command on the old generation.
     assert_eq!(
         futures_util::poll!(peer.as_mut()),
         Poll::Ready(Err(crate::Unavailable))
     );
-    assert_work_metrics(&recorder, 1, 0, 1);
+    assert_work_metrics(&metrics, 1, 0, 1);
     let mut replacement = Box::pin(namespace.get("replacement"));
     assert!(futures_util::poll!(replacement.as_mut()).is_pending());
-    assert_work_metrics(&recorder, 2, 0, 1);
+    assert_work_metrics(&metrics, 2, 0, 1);
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(4), replacement)
             .await
             .expect("normal supervisor recovery"),
         Ok(None)
     );
-    assert_work_metrics(&recorder, 1, 0, 1);
+    assert_work_metrics(&metrics, 1, 0, 1);
     assert!(server.connections() > old);
     // This peer kept its old identity unpolled while the successor served
     // a response. Its late failure must not withdraw that successor.
@@ -786,7 +845,7 @@ async fn reliability_a_probe_reply_timeout_retires_the_connection() {
         futures_util::poll!(late.as_mut()),
         Poll::Ready(Err(crate::Unavailable))
     );
-    assert_work_metrics(&recorder, 0, 0, 1);
+    assert_work_metrics(&metrics, 0, 0, 1);
     assert_eq!(namespace.get("successor-after-old-failure").await, Ok(None));
     server
         .wait_for(
@@ -805,8 +864,8 @@ async fn a_caller_stop_before_the_ceiling_keeps_the_connection_for_peers() {
 
     let server = FakeServer::start().await;
     *server.observed.slow_get_delay.lock().expect("delay lock") = Duration::from_millis(300);
-    let recorder = observation_recorder();
-    let cache = metrics::with_local_recorder(&recorder, || {
+    let metrics = TestMetrics::new();
+    let cache = metrics::with_local_recorder(metrics.recorder(), || {
         Cache::start(CacheOptions {
             command_timeout: Duration::from_secs(5),
             ..options(&format!("redis://{}", server.address), true, true, None)
@@ -835,7 +894,7 @@ async fn a_caller_stop_before_the_ceiling_keeps_the_connection_for_peers() {
         3,
         "a stopped GET never reached the connection"
     );
-    assert_work_metrics(&recorder, 0, 0, 0);
+    assert_work_metrics(&metrics, 0, 0, 0);
     assert_eq!(server.connections(), connections);
 }
 
@@ -1104,8 +1163,8 @@ async fn cancellation_after_write_dispatch_leaves_a_stalled_server_to_maintenanc
     use operation_context::OperationContext;
 
     let server = FakeServer::start().await;
-    let recorder = observation_recorder();
-    let cache = metrics::with_local_recorder(&recorder, || {
+    let metrics = TestMetrics::new();
+    let cache = metrics::with_local_recorder(metrics.recorder(), || {
         Cache::start(CacheOptions {
             command_timeout: Duration::from_secs(1),
             ..options(&format!("redis://{}", server.address), true, true, None)
@@ -1122,7 +1181,7 @@ async fn cancellation_after_write_dispatch_leaves_a_stalled_server_to_maintenanc
         result = &mut write => panic!("stalled write completed: {result:?}"),
         () = server.wait_for(Duration::from_secs(1), "write must reach provider", || server.command_count("SET", Some("cancel_effect:once")) == 1) => {},
     }
-    assert_work_metrics(&recorder, 1, 0, 0);
+    assert_work_metrics(&metrics, 1, 0, 0);
     context.cancel();
     assert_eq!(
         tokio::time::timeout(Duration::from_millis(200), write)
@@ -1132,7 +1191,7 @@ async fn cancellation_after_write_dispatch_leaves_a_stalled_server_to_maintenanc
     );
     // The caller stopped before its ceiling; only the maintenance PING may
     // judge the server.
-    assert_work_metrics(&recorder, 0, 0, 0);
+    assert_work_metrics(&metrics, 0, 0, 0);
     server
         .wait_for(
             Duration::from_secs(5),
@@ -1202,8 +1261,8 @@ async fn reliability_namespace_and_probe_retain_owner_until_live_maintenance_is_
     use health::Probe;
 
     let server = FakeServer::start().await;
-    let recorder = observation_recorder();
-    let cache = metrics::with_local_recorder(&recorder, || {
+    let metrics = TestMetrics::new();
+    let cache = metrics::with_local_recorder(metrics.recorder(), || {
         admitted(&format!("redis://{}", server.address), true, true)
     });
     let namespace = cache.namespace("lifetime");
@@ -1222,9 +1281,9 @@ async fn reliability_namespace_and_probe_retain_owner_until_live_maintenance_is_
             || server.command_count("PING", None) > pings,
         )
         .await;
-    assert_work_metrics(&recorder, 0, 0, 0);
+    assert_work_metrics(&metrics, 0, 0, 0);
     drop(probe);
-    assert_work_metrics(&recorder, 0, 0, 1);
+    assert_work_metrics(&metrics, 0, 0, 1);
     server
         .wait_for(
             Duration::from_millis(500),
@@ -1233,7 +1292,7 @@ async fn reliability_namespace_and_probe_retain_owner_until_live_maintenance_is_
         )
         .await;
     // The supervisor's exit cleanup cannot retire the same generation twice.
-    assert_work_metrics(&recorder, 0, 0, 1);
+    assert_work_metrics(&metrics, 0, 0, 1);
 }
 
 #[tokio::test]
@@ -1248,8 +1307,8 @@ async fn reliability_namespace_and_probe_retain_owner_until_live_maintenance_is_
 async fn reliability_rejected_unchanged_password_recovers_without_traffic() {
     use std::sync::atomic::Ordering;
 
-    let recorder = observation_recorder();
-    let _recorder = metrics::set_default_local_recorder(&recorder);
+    let metrics = TestMetrics::new();
+    let _recorder = metrics::set_default_local_recorder(metrics.recorder());
 
     let captured = CapturedLogs::default();
     let writer = captured.clone();
@@ -1274,7 +1333,7 @@ async fn reliability_rejected_unchanged_password_recovers_without_traffic() {
     let namespace = cache.namespace("retry_password");
     assert_eq!(namespace.get("ready").await, Ok(None));
     assert!(
-        password_refresh_samples(&recorder).is_empty(),
+        password_refresh_samples(&metrics).is_empty(),
         "connection setup is not maintenance"
     );
     *server.observed.auth_reply_delay.lock().expect("delay lock") = Duration::from_millis(900);
@@ -1293,7 +1352,7 @@ async fn reliability_rejected_unchanged_password_recovers_without_traffic() {
         .await;
     let connections = server.connections();
     assert!(
-        password_refresh_samples(&recorder).is_empty(),
+        password_refresh_samples(&metrics).is_empty(),
         "a pending reply has no completed outcome"
     );
     server.require_password(&pending);
@@ -1316,10 +1375,10 @@ async fn reliability_rejected_unchanged_password_recovers_without_traffic() {
     );
     assert_eq!(namespace.get("recovered").await, Ok(None));
     assert_eq!(
-        password_refresh_samples(&recorder),
+        password_refresh_samples(&metrics),
         [
-            "cache_password_file_refreshes_total{outcome=\"auth_accepted\",reason=\"none\"} 1",
-            "cache_password_file_refreshes_total{outcome=\"refresh_failed\",reason=\"auth\"} 1",
+            ("auth_accepted".to_owned(), "none".to_owned(), 1),
+            ("refresh_failed".to_owned(), "auth".to_owned(), 1),
         ]
     );
 
@@ -1333,12 +1392,11 @@ async fn reliability_rejected_unchanged_password_recovers_without_traffic() {
         .await
         .expect("expected credential diagnostic was not emitted");
     assert_eq!(namespace.get("usable-during-file-outage").await, Ok(None));
-    assert!(
-        password_refresh_samples(&recorder).contains(
-            &"cache_password_file_refreshes_total{outcome=\"read_failed\",reason=\"none\"} 1"
-                .to_owned()
-        )
-    );
+    assert!(password_refresh_samples(&metrics).contains(&(
+        "read_failed".to_owned(),
+        "none".to_owned(),
+        1,
+    )));
     assert_eq!(
         server.observed.auth_successes.load(Ordering::SeqCst),
         authenticated
@@ -1370,29 +1428,29 @@ async fn reliability_rejected_unchanged_password_recovers_without_traffic() {
             Duration::from_secs(7),
             "unchanged successful read was not observed",
             || {
-                password_refresh_samples(&recorder)
+                password_refresh_samples(&metrics)
                     .iter()
-                    .any(|sample| sample.contains("outcome=\"unchanged\""))
+                    .any(|(outcome, _, _)| outcome == "unchanged")
             },
         )
         .await;
     assert_eq!(
-        password_refresh_samples(&recorder),
+        password_refresh_samples(&metrics),
         [
-            "cache_password_file_refreshes_total{outcome=\"auth_accepted\",reason=\"none\"} 2",
-            "cache_password_file_refreshes_total{outcome=\"read_failed\",reason=\"none\"} 1",
-            "cache_password_file_refreshes_total{outcome=\"refresh_failed\",reason=\"auth\"} 1",
-            "cache_password_file_refreshes_total{outcome=\"unchanged\",reason=\"none\"} 1",
+            ("auth_accepted".to_owned(), "none".to_owned(), 2),
+            ("read_failed".to_owned(), "none".to_owned(), 1),
+            ("refresh_failed".to_owned(), "auth".to_owned(), 1),
+            ("unchanged".to_owned(), "none".to_owned(), 1),
         ]
     );
-    let scrape = recorder.handle().render();
+    let debug = format!("{:?}", metrics.snapshot());
     for secret in [
         initial.as_str(),
         pending.as_str(),
         later.as_str(),
         file.path().to_str().expect("UTF-8 fixture path"),
     ] {
-        assert!(!scrape.contains(secret));
+        assert!(!debug.contains(secret));
     }
 }
 
@@ -1463,15 +1521,26 @@ async fn a_hung_password_read_is_never_joined_by_a_second() {
     }
 }
 
-fn password_refresh_samples(
-    recorder: &metrics_exporter_prometheus::PrometheusRecorder,
-) -> Vec<String> {
-    let mut samples: Vec<_> = recorder
-        .handle()
-        .render()
-        .lines()
-        .filter(|line| line.starts_with("cache_password_file_refreshes_total{"))
-        .map(str::to_owned)
+fn password_refresh_samples(metrics: &TestMetrics) -> Vec<(String, String, u64)> {
+    let mut samples: Vec<_> = metrics
+        .snapshot()
+        .into_iter()
+        .filter(|(composite, _)| {
+            composite.key().name() == crate::observe::PASSWORD_REFRESHES_METRIC
+        })
+        .map(|(composite, value)| {
+            let DebugValue::Counter(count) = value else {
+                panic!("unexpected refresh metric value: {value:?}");
+            };
+            let label = |name: &str| {
+                composite
+                    .key()
+                    .labels()
+                    .find_map(|label| (label.key() == name).then(|| label.value().to_owned()))
+                    .unwrap_or_else(|| panic!("missing {name} label on {}", composite.key()))
+            };
+            (label("outcome"), label("reason"), count)
+        })
         .collect();
     samples.sort_unstable();
     samples
@@ -1484,8 +1553,8 @@ fn password_refresh_samples(
 )]
 async fn password_refresh_timeout_is_observed_but_cancelled_work_is_not() {
     for cancel in [false, true] {
-        let recorder = observation_recorder();
-        let _recorder = metrics::set_default_local_recorder(&recorder);
+        let metrics = TestMetrics::new();
+        let _recorder = metrics::set_default_local_recorder(metrics.recorder());
         let server = FakeServer::start().await;
         let initial = ephemeral_password();
         let replacement = ephemeral_password();
@@ -1515,7 +1584,7 @@ async fn password_refresh_timeout_is_observed_but_cancelled_work_is_not() {
             )
             .await;
         assert!(
-            password_refresh_samples(&recorder).is_empty(),
+            password_refresh_samples(&metrics).is_empty(),
             "sending AUTH does not complete authentication"
         );
         if cancel {
@@ -1528,7 +1597,7 @@ async fn password_refresh_timeout_is_observed_but_cancelled_work_is_not() {
                 || server.closed_through(old),
             )
             .await;
-        let samples = password_refresh_samples(&recorder);
+        let samples = password_refresh_samples(&metrics);
         if cancel {
             assert!(
                 samples.is_empty(),
@@ -1537,9 +1606,7 @@ async fn password_refresh_timeout_is_observed_but_cancelled_work_is_not() {
         } else {
             assert_eq!(
                 samples,
-                [
-                    "cache_password_file_refreshes_total{outcome=\"refresh_failed\",reason=\"timeout\"} 1"
-                ]
+                [("refresh_failed".to_owned(), "timeout".to_owned(), 1)]
             );
         }
     }
