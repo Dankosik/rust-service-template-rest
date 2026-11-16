@@ -84,6 +84,12 @@ tracing = { workspace = true, features = ["std", "attributes"] }
 utoipa = { workspace = true, features = ["macros", "yaml"] }
 utoipa-axum = { workspace = true }
 
+# jemalloc compiles background purging out of Mach-O builds and
+# tikv-jemalloc-sys leaves it off on musl; the feature would bake
+# `background_thread:true` into binaries that refuse it at startup.
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
+tikv-jemallocator = { workspace = true, features = ["background_threads"] }
+
 [dev-dependencies]
 similar = { workspace = true, features = ["text"] }
 # template:begin grpc:service-grpc-example-dependencies

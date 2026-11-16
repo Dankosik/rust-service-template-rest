@@ -135,6 +135,22 @@ if require_pool:
     print("runtime image opened the postgres pool")
 ' "${starting_event}" "${expected_commit}" "${RUNTIME_IMAGE_POSTGRES_DSN:+true}" <<<"${logs}"
 
+# A manifest feature and a Dockerfile ENV select the allocator options, so
+# only the built binary and its running threads show that both arrived.
+allocator_options='background_thread:true,thp:never'
+assert_allocator_options() {
+	[[ $(docker cp "$1:$2" - | tar -xO | grep -aFc "${allocator_options}") -ge 1 ]] || {
+		echo "$2 does not carry the jemalloc options ${allocator_options}" >&2
+		exit 1
+	}
+}
+assert_allocator_options "${container}" /service
+[[ $(docker top "${container}" -eLo pid,comm | grep -Fc jemalloc_bg_thd) -ge 1 ]] || {
+	echo "the service runs no jemalloc background thread" >&2
+	exit 1
+}
+echo "runtime image allocator purges in the background: ${allocator_options}"
+
 stop_started=$(date +%s)
 docker stop --time 45 "${container}" >/dev/null
 stop_seconds=$(($(date +%s) - stop_started))
@@ -187,6 +203,7 @@ if [[ ${jobs} == postgres || ${messaging} == nats-jetstream ]]; then
 		expected='postgres.enabled must be true to run the jobs worker'
 	fi
 	[[ -z ${worker_refusal} ]] || expected=${worker_refusal}
+	assert_allocator_options "${worker}" /jobs-worker
 	worker_output=$(docker start --attach "${worker}" 2>&1 || true)
 	worker_exit=$(docker inspect -f '{{.State.ExitCode}}' "${worker}")
 	refusal=$(grep -Fo "${expected}" <<<"${worker_output}" | head -n 1 || true)

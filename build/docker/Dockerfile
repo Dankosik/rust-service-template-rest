@@ -28,6 +28,9 @@
 #   the historical byte-equality experiment documented in delivery policy.
 #   Locked resolution is not a future binary/image equality guarantee: APT
 #   inputs, this frontend tag and tool/package availability can change.
+# - JEMALLOC_SYS_WITH_MALLOC_CONF bakes `thp:never` into the allocator: on a
+#   host whose transparent huge pages are `always`, khugepaged refills the
+#   pages jemalloc returned (docs/backend-library-selection.md).
 
 ARG SERVICE_PACKAGE=service
 
@@ -75,6 +78,7 @@ RUN cargo chef prepare --recipe-path recipe.json
 # resolution, as the separate cooks do.
 FROM chef AS cooked
 ENV CARGO_INCREMENTAL=0
+ENV JEMALLOC_SYS_WITH_MALLOC_CONF=thp:never
 COPY --from=planner /src/recipe.json recipe.json
 # Optional profiling dependency must be visible even during a default cook.
 COPY --from=planner /src/vendor/hotpath /src/vendor/hotpath
