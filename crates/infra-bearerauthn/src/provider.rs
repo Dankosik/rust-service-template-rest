@@ -221,7 +221,6 @@ impl ProviderClient {
             .post(url.clone())
             .basic_auth(&client_id, Some(&client_secret))
             .form(form);
-        context.check().map_err(|_| ProviderFailure::Timeout)?;
         let result = Exchange::start("introspection", "POST", url)
             .run(request, ExchangeMode::Introspection(context))
             .await;
@@ -328,7 +327,6 @@ impl Exchange {
                         std::mem::DropGuard::dismiss(guard).record(&span, Some(stopped_label(stopped)));
                         return Err(ProviderFailure::Timeout);
                     }
-                    () = tokio::time::sleep(PROVIDER_TIMEOUT) => Err(ProviderFailure::Timeout),
                     result = receive => result,
                 }
             }
@@ -817,6 +815,29 @@ mod tests {
         assert!(first.starts_with(b"GET /keys HTTP/1.1\r\n"));
         assert!(replacement.starts_with(b"GET /keys HTTP/1.1\r\n"));
         assert_eq!(resolver.calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn a_provider_redirect_is_reported_instead_of_followed() {
+        let response = format!(
+            "HTTP/1.1 302 Found\r\nlocation: https://{FIXTURE_HOST}/elsewhere\r\ncontent-length: 0\r\n\r\n"
+        )
+        .into_bytes();
+        let (address, root, server) = tls_server(response, false).await;
+        let url = fixture_url(address);
+        let result = Exchange::start("discovery", "GET", &url)
+            .run(
+                fixture_client(address, &root).client.get(url.clone()),
+                ExchangeMode::Document { deadline: None },
+            )
+            .await;
+        assert_eq!(result, Err(ProviderFailure::Status(302)));
+        assert!(
+            server
+                .await
+                .unwrap()
+                .starts_with(b"GET /introspect HTTP/1.1\r\n")
+        );
     }
 
     // template:begin oidc-jwt:authn-provider-tls-bounds-test

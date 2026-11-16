@@ -7,7 +7,8 @@ use crate::claims::Scopes;
 
 /// A verified identity. Construction remains crate-private so callers cannot
 /// attach unverified request data as a principal.
-#[derive(Clone, Eq, PartialEq, derive_more::Debug)]
+/// It has no `PartialEq`: equality would compare the retained bearer token.
+#[derive(Clone, derive_more::Debug)]
 #[debug("Principal([VERIFIED_IDENTITY_REDACTED])")]
 pub struct Principal {
     identity: Arc<Identity>,
@@ -24,32 +25,6 @@ pub(crate) struct Identity {
     pub(crate) access_token: secrecy::SecretString,
     pub(crate) actor: Option<Actor>,
 }
-
-// `secrecy::SecretString` intentionally has no `PartialEq`, so this compares
-// its exposed text alongside the other verified fields.
-impl PartialEq for Identity {
-    fn eq(&self, other: &Self) -> bool {
-        use secrecy::ExposeSecret;
-        let Self {
-            issuer,
-            subject,
-            client_id,
-            scopes,
-            payload,
-            access_token,
-            actor,
-        } = self;
-        issuer == &other.issuer
-            && subject == &other.subject
-            && client_id == &other.client_id
-            && scopes == &other.scopes
-            && payload == &other.payload
-            && access_token.expose_secret() == other.access_token.expose_secret()
-            && actor == &other.actor
-    }
-}
-
-impl Eq for Identity {}
 
 impl Principal {
     pub(crate) fn new(identity: Identity, expiry_epoch_seconds: u64) -> Self {
@@ -122,6 +97,25 @@ impl Principal {
     #[must_use]
     pub fn actor(&self) -> Option<&Actor> {
         self.identity.actor.as_ref()
+    }
+}
+
+#[cfg(test)]
+impl Principal {
+    /// Every verified field, so tests compare principals without a public
+    /// equality over the retained token.
+    pub(crate) fn fields(&self) -> impl PartialEq + std::fmt::Debug + '_ {
+        use secrecy::ExposeSecret as _;
+        let identity = &*self.identity;
+        (
+            (&identity.issuer, &identity.subject, &identity.client_id),
+            (
+                self.scopes(),
+                &identity.payload,
+                identity.access_token.expose_secret(),
+            ),
+            (&identity.actor, self.expiry_epoch_seconds),
+        )
     }
 }
 

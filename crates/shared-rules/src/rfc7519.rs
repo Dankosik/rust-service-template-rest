@@ -7,6 +7,13 @@ pub const fn is_expired(expiry: u64, now: u64, leeway: u64) -> bool {
     }
 }
 
+/// RFC 7519 §4.1.5 makes `nbf` inclusive: a token is usable from that second
+/// on, `leeway` seconds earlier for clock skew. All arguments are in whole seconds.
+#[must_use]
+pub const fn is_not_yet_valid(not_before: u64, now: u64, leeway: u64) -> bool {
+    not_before > now.saturating_add(leeway)
+}
+
 /// A `NumericDate` (RFC 7519 §2) given as a JSON number with a fraction, in
 /// whole seconds: finite, not negative, and below `2^64`, rounded to the
 /// nearest second as `jsonwebtoken` reads `exp` and `nbf`. `None` for any
@@ -24,7 +31,17 @@ pub fn numeric_date_seconds(value: f64) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::numeric_date_seconds;
+    use super::{is_expired, is_not_yet_valid, numeric_date_seconds};
+
+    #[test]
+    fn the_lifetime_window_bounds_are_widened_by_the_leeway() {
+        assert!(!is_expired(100, 129, 30));
+        assert!(is_expired(100, 130, 30));
+        assert!(!is_expired(100, 10, 30));
+        assert!(!is_not_yet_valid(130, 100, 30));
+        assert!(is_not_yet_valid(131, 100, 30));
+        assert!(!is_not_yet_valid(u64::MAX, u64::MAX - 1, 30));
+    }
 
     #[test]
     fn a_fractional_date_rounds_to_the_nearest_second() {

@@ -127,11 +127,6 @@ impl Verifier {
                 .map_or(Outcome::Cancelled, Outcome::from_stopped);
             counter(transport, outcome).increment(1);
         });
-        if let Err(stopped) = context.check() {
-            counter(transport, Outcome::from_stopped(stopped)).increment(1);
-            DropGuard::dismiss(outcome);
-            return Err(Failure::Unavailable);
-        }
         let result = match parse_bearer(authorization) {
             Ok(token) => self.verify_with_context(&token, context).await,
             Err(failure) => Err(failure),

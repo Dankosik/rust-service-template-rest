@@ -25,6 +25,8 @@ const MAX_REMEMBERED_FOR: Duration = REFRESH_INTERVAL;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TokenProfile {
     /// Accepts a token with no `typ` header, a generic JWT type, or an access-token type; `client_id` falls back to the `azp`, `appid`, and `cid` claims.
+    /// An untyped ID token from the same issuer whose `aud` is a configured audience
+    /// also passes (RFC 8725 section 3.12); `Rfc9068` or an API-only audience excludes it.
     ResourceServer,
     /// Requires an access-token `typ` header and the RFC 9068 claims `sub`, `client_id`, `jti`, and `iat`.
     Rfc9068,
@@ -244,7 +246,7 @@ mod tests {
         Failure, Transport, VerificationReason,
         jwks::{
             KeySet,
-            tests::{JWT_SIGNING_DER, ec_signing, jwk, key_set, rsa_signing},
+            tests::{JWT_SIGNING_DER, ec_signing, ed_signing, jwk, key_set, rsa_signing},
         },
         parse_bearer,
         refresh::SignatureRefresh,
@@ -449,7 +451,7 @@ mod tests {
         assert!(futures_util::poll!(first.as_mut()).is_pending());
         assert!(futures_util::poll!(survivor.as_mut()).is_pending());
         tokio::time::advance(Duration::from_millis(11)).await;
-        assert_eq!(first.await, Err(Failure::Unavailable));
+        assert_eq!(first.await.err(), Some(Failure::Unavailable));
         assert_eq!(keys.pending(), Some(1));
         keys.finish(1, Ok(rsa_key_set("rotated", None)));
         let principal = tokio::time::timeout(Duration::from_secs(1), survivor)
@@ -477,8 +479,8 @@ mod tests {
 
         let stale = ec_token(&installed, "stable", &serde_json::json!({}));
         assert_eq!(
-            verify_at(&verifier, &stale, 1_000).await,
-            Err(VerificationReason::Signature)
+            verify_at(&verifier, &stale, 1_000).await.err(),
+            Some(VerificationReason::Signature)
         );
     }
 
@@ -674,6 +676,33 @@ mod tests {
             &serde_json::json!({}),
         );
         check(&verifier, &token).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_ed25519_key_verifies_eddsa_and_refuses_a_damaged_signature() {
+        let (signing, key) = ed_signing("ed");
+        let verifier = verifier(
+            key_set(&[key], &[JwtAlgorithm::EdDsa]),
+            &[JwtAlgorithm::EdDsa],
+        );
+        let token = signed(
+            &signing,
+            Algorithm::EdDSA,
+            Some("ed"),
+            &serde_json::json!({}),
+        );
+        assert_eq!(
+            check(&verifier, &token).await.unwrap().subject(),
+            Some("subject")
+        );
+        let (unsigned, signature) = token.rsplit_once('.').unwrap();
+        let mut signature = URL_SAFE_NO_PAD.decode(signature).unwrap();
+        signature[0] ^= 1;
+        let damaged = format!("{unsigned}.{}", URL_SAFE_NO_PAD.encode(signature));
+        assert_eq!(
+            check(&verifier, &damaged).await.unwrap_err(),
+            VerificationReason::Signature
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -1241,8 +1270,8 @@ mod tests {
         metrics::with_local_recorder(diagnostics.recorder(), || {
             tracing::dispatcher::with_default(&dispatch, || {
                 assert_eq!(
-                    runtime.block_on(verifier.verify(&token)),
-                    Err(Failure::Invalid)
+                    runtime.block_on(verifier.verify(&token)).err(),
+                    Some(Failure::Invalid)
                 );
             });
         });
@@ -1306,29 +1335,33 @@ mod tests {
                 assert_eq!(
                     verifier
                         .authenticate(std::iter::empty(), Transport::Http)
-                        .await,
-                    Err(Failure::Missing)
+                        .await
+                        .err(),
+                    Some(Failure::Missing)
                 );
                 assert_eq!(
                     verifier
                         .authenticate([b"Bearer =".as_slice()], Transport::Grpc)
-                        .await,
-                    Err(Failure::Malformed)
+                        .await
+                        .err(),
+                    Some(Failure::Malformed)
                 );
                 let expired = operation_context::OperationContext::with_timeout(Duration::ZERO);
                 assert_eq!(
                     verifier
                         .authenticate_with_context([header.as_bytes()], Transport::Grpc, &expired)
-                        .await,
-                    Err(Failure::Unavailable)
+                        .await
+                        .err(),
+                    Some(Failure::Unavailable)
                 );
                 let cancelled = operation_context::OperationContext::unbounded();
                 cancelled.cancel();
                 assert_eq!(
                     verifier
                         .authenticate_with_context([header.as_bytes()], Transport::Grpc, &cancelled)
-                        .await,
-                    Err(Failure::Unavailable)
+                        .await
+                        .err(),
+                    Some(Failure::Unavailable)
                 );
                 let mut pending =
                     Box::pin(verifier.authenticate([unknown_header.as_bytes()], Transport::Http));
@@ -1445,8 +1478,8 @@ mod tests {
         let never_remembered = verify_at(&ec_verifier(&signing, "k"), &token, 1_000)
             .await
             .unwrap();
-        assert_eq!(hit, full);
-        assert_eq!(hit, never_remembered);
+        assert_eq!(hit.fields(), full.fields());
+        assert_eq!(hit.fields(), never_remembered.fields());
         assert_eq!(hit.scopes(), ["a", "b"]);
         assert_eq!(hit.expires_at(), EXP);
     }
@@ -1620,6 +1653,18 @@ mod tests {
             verify_at(&memo, &token, 1_000).await.unwrap();
         }
         assert!(remembered_count(&memo) <= MAX_REMEMBERED);
+    }
+
+    /// The memo's own clock is real, so its expiry needs a real wait.
+    #[tokio::test]
+    async fn the_memo_drops_an_entry_once_its_retention_ends() {
+        let signing = ec_signing();
+        let memo = ec_verifier(&signing, "k");
+        let token = ec_token(&signing, "k", &serde_json::json!({ "exp": 1_001 }));
+        verify_at(&memo, &token, 1_000).await.unwrap();
+        assert!(memo.remembered.get(token.as_bytes()).is_some());
+        tokio::time::sleep(Duration::from_millis(1_200)).await;
+        assert!(memo.remembered.get(token.as_bytes()).is_none());
     }
 
     #[tokio::test]
