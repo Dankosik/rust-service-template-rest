@@ -34,4 +34,6 @@ __pycache__/
 /.cursor/
 /.grok/
 /.opencode/
+/.agents/agents/
+/.agents/rules/
 # template:end source-template:gitignore-generated-harnesses

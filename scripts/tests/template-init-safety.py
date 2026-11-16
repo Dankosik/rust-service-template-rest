@@ -865,6 +865,7 @@ def check(source: Path) -> None:
             "crates/infra-postgres", "crates/migrate", "migrations", "env/docker-compose.yml",
             "Grok.md", "QWEN.md", ".agents/codex-project.toml",
             ".agents/adapters/qwen", ".agents/adapters/cursor", ".agents/adapters/grok", ".agents/adapters/opencode",
+            ".agents/adapters/antigravity", ".agents/rules/antigravity-harness.md", ".agents/agents",
             ".codex/config.toml", ".codex/agents", ".cursor/rules/agent-harness.mdc", ".cursor/agents",
             ".grok/rules/harness.md", ".grok/agents", ".grok/roles", "opencode.json", ".opencode/.gitignore",
             ".opencode/rules/harness.md", ".opencode/agents", ".opencode/commands/orchestrator.md",
@@ -874,7 +875,8 @@ def check(source: Path) -> None:
                 raise AssertionError(f"none/claude output retained {removed}")
         if local_adapter_note.read_text(encoding="utf-8") != "service-owned sibling\n":
             raise AssertionError("initializer changed unrelated product-root content")
-        for empty_parent in (".cursor", ".grok", ".qwen", ".opencode/commands", ".opencode/plugins", ".opencode/rules"):
+        for empty_parent in (".cursor", ".grok", ".qwen", ".opencode/commands", ".opencode/plugins", ".opencode/rules",
+                             ".agents/rules"):
             if (target / empty_parent).exists():
                 raise AssertionError(f"initializer retained an empty removed-pack parent: {empty_parent}")
         for parent in (".codex", ".cursor", ".grok", ".opencode", ".qwen"):

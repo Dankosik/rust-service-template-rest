@@ -85,6 +85,13 @@ QWEN_READONLY_TOOLS = (
     "  - run_shell_command"
 )
 
+# Antigravity's documented tool names: an omitted list leaves a subagent without
+# edit or terminal tools, and an unmapped name can hang it.
+ANTIGRAVITY_MUTABLE_TOOLS = (
+    "[view_file, grep_search, run_command, replace_file_content, write_to_file, invoke_subagent, send_message]"
+)
+ANTIGRAVITY_READONLY_TOOLS = "[view_file, grep_search, run_command]"
+
 LEAD_DESC = (
     "Unit: Use when bound ACCEPTANCE_UNIT_LEAD for an implementation unit or "
     "final delivery validation. Own the assigned boundary; Skip sibling scheduling."
@@ -164,6 +171,7 @@ def _preflight(repo: Path, selected: tuple[str, ...]) -> None:
         ".cursor/agents",
         ".opencode",
         ".opencode/agents",
+        ".agents/agents",
     ):
         _check_no_symlink(repo, rel, kind="dir")
 
@@ -248,6 +256,7 @@ def _render_roles(repo: Path) -> tuple[list[str], dict[str, dict[str, bytes]]]:
         ".grok/roles": {},
         ".cursor/agents": {},
         ".opencode/agents": {},
+        ".agents/agents": {},
     }
     role_names: list[str] = []
 
@@ -312,6 +321,7 @@ def _render_roles(repo: Path) -> tuple[list[str], dict[str, dict[str, bytes]]]:
             claude_tools = CLAUDE_READONLY_TOOLS
             qwen_tools = QWEN_READONLY_TOOLS
             grok_capability = "read-only"
+            antigravity_tools = ANTIGRAVITY_READONLY_TOOLS
         elif role_class == "mutable-worker":
             common = _read_text_no_symlink(repo, ".agents/role-classes/mutable-worker.md").rstrip("\n")
             fallback = _read_text_no_symlink(repo, ".agents/role-classes/mutable-worker-fallback.md").rstrip("\n")
@@ -320,6 +330,7 @@ def _render_roles(repo: Path) -> tuple[list[str], dict[str, dict[str, bytes]]]:
             claude_tools = CLAUDE_MUTABLE_TOOLS
             qwen_tools = QWEN_MUTABLE_TOOLS
             grok_capability = "all"
+            antigravity_tools = ANTIGRAVITY_MUTABLE_TOOLS
         else:
             _fail(f"{rel} has unsupported class {role_class}")
             raise AssertionError("unreachable")
@@ -397,6 +408,11 @@ def _render_roles(repo: Path) -> tuple[list[str], dict[str, dict[str, bytes]]]:
             "\n".join(opencode_lines) + f"\n{common}\n\n{fallback}\n\n{schema_line}\n\n{body}\n"
         ).encode("utf-8")
 
+        rendered[".agents/agents"][f"{name}.md"] = (
+            f"---\nname: {name}\ndescription: \"{description}\"\ntools: {antigravity_tools}\n"
+            f"mainAgent: false\nsubagent: true\n---\n\n{common}\n\n{fallback}\n\n{schema_line}\n\n{body}\n"
+        ).encode("utf-8")
+
     if not role_names:
         _fail(".agents/roles contains no canonical role files")
 
@@ -449,6 +465,18 @@ def _render_roles(repo: Path) -> tuple[list[str], dict[str, dict[str, bytes]]]:
         "    adjudicator-agent: allow\n---\n\n"
         "Load [Ledger Orchestrator](../../.agents/skills/orchestrator/SKILL.md)\n"
         "and [OpenCode adapter](../../docs/agent-harness/opencode.md).\n"
+    ).encode("utf-8")
+    rendered[".agents/agents"]["acceptance-unit-lead.md"] = (
+        f'---\nname: acceptance-unit-lead\ndescription: "{LEAD_DESC}"\n'
+        f"tools: {ANTIGRAVITY_MUTABLE_TOOLS}\nmainAgent: false\nsubagent: true\n---\n\n"
+        "Load [Acceptance-Unit Lead](../skills/acceptance-unit-lead/SKILL.md)\n"
+        f"and [Antigravity adapter](../../docs/agent-harness/antigravity.md).\n{lead_tail}"
+    ).encode("utf-8")
+    rendered[".agents/agents"]["orchestrator.md"] = (
+        f'---\nname: orchestrator\ndescription: "{ORCH_DESC}"\n'
+        f"tools: {ANTIGRAVITY_MUTABLE_TOOLS}\nmainAgent: true\nsubagent: false\n---\n\n"
+        "Load [Ledger Orchestrator](../skills/orchestrator/SKILL.md)\n"
+        "and [Antigravity adapter](../../docs/agent-harness/antigravity.md).\n"
     ).encode("utf-8")
 
     return role_names, rendered

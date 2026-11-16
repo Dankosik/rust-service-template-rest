@@ -51,7 +51,7 @@ invocation when it selects the requested workflow, without reducing every
 message to an invocation and a path.
 
 Use `$<skill>` in Codex and `/<skill>` in Claude Code, Qwen Code, Grok Build,
-Cursor, or OpenCode. The syntax selects the entry point; it does not change the
+Cursor, OpenCode, or Antigravity. The syntax selects the entry point; it does not change the
 task. In Grok Build, the primary-session message launches the work. OpenCode
 discovers `.agents/skills` through the `skill` tool; `/orchestrator` binds the
 Orchestrator carrier.

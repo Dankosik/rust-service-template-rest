@@ -31,7 +31,7 @@ HTTP_IDEMPOTENCY = ("none", "postgres")
 JOBS = ("none", "postgres")
 WEBHOOKS = ("none", "durable")
 INBOUND_WEBHOOKS = ("none", "standard-webhooks")
-HARNESSES = ("core", "codex", "claude", "qwen", "cursor", "grok", "opencode", "all")
+HARNESSES = ("core", "codex", "claude", "qwen", "cursor", "grok", "opencode", "antigravity", "all")
 _RUNTIME_FILES = frozenset({"Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "template.lock", "Makefile", "build.rs"})
 _RUNTIME_PREFIXES = (
     "api/",
@@ -71,6 +71,7 @@ _ROLE_LAYOUTS = {
     ".grok/roles": "toml",
     ".cursor/agents": "md",
     ".opencode/agents": "md",
+    ".agents/agents": "md",
 }
 _SKILL_LAYOUTS = (".claude/skills", ".qwen/skills")
 _SESSION_ROLE_NAMES = {
@@ -79,6 +80,7 @@ _SESSION_ROLE_NAMES = {
     ".grok/agents": frozenset({"orchestrator", "acceptance-unit-lead"}),
     ".cursor/agents": frozenset({"acceptance-unit-lead"}),
     ".opencode/agents": frozenset({"orchestrator", "acceptance-unit-lead"}),
+    ".agents/agents": frozenset({"orchestrator", "acceptance-unit-lead"}),
 }
 _CARRIER_NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
