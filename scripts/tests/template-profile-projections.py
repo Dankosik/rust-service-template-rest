@@ -588,7 +588,9 @@ def _project(source: Path, candidate: str, initializer, inputs, destination: Pat
     except (OSError, ValueError) as error:
         raise initializer.Refusal(f"projected image input coverage: {error}") from error
     nodes = _tree(destination, initializer)
-    _assert_tls_fixture_ownership(initializer, nodes, profiles.removals["tls-fixtures"])
+    _assert_tls_fixture_ownership(
+        initializer, nodes, (relative.rstrip("/") for relative in profiles.removals["tls-fixtures"])
+    )
     _assert_workspace_dependencies_inherited(initializer, nodes)
     _assert_profile_output(initializer, nodes, "unconditional operation context", (
         "crates/operation-context/Cargo.toml",

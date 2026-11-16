@@ -1,9 +1,4 @@
-#![allow(
-    clippy::expect_used,
-    clippy::unwrap_used,
-    clippy::panic,
-    reason = "relay failures are test failures"
-)]
+#![expect(clippy::expect_used, reason = "relay failures are test failures")]
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

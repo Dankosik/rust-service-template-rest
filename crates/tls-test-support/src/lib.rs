@@ -13,7 +13,7 @@ pub struct TlsMaterial {
 
 impl TlsMaterial {
     #[must_use]
-    #[allow(
+    #[expect(
         clippy::expect_used,
         reason = "fixture setup failures are test failures"
     )]
@@ -38,7 +38,7 @@ impl TlsMaterial {
 }
 
 #[must_use]
-#[allow(
+#[expect(
     clippy::expect_used,
     reason = "fixture setup failures are test failures"
 )]
