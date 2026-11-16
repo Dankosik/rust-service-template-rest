@@ -14,8 +14,8 @@ read -r -a buf <<<"${BUF:?BUF is unset; run make grpc-check}"
 "${buf[@]}" lint
 
 if [[ -f "${root}/tools/grpc-codegen/Cargo.toml" ]]; then
-  cargo clippy --locked --manifest-path "${root}/tools/grpc-codegen/Cargo.toml" --all-targets -- -D warnings
-  RUSTDOCFLAGS="${RUSTDOCFLAGS:+${RUSTDOCFLAGS} }-D warnings" cargo doc --locked --manifest-path "${root}/tools/grpc-codegen/Cargo.toml" --no-deps --document-private-items
+  CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${root}/target/grpc-codegen}" cargo clippy --locked --manifest-path "${root}/tools/grpc-codegen/Cargo.toml" --all-targets -- -D warnings
+  CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${root}/target/grpc-codegen}" RUSTDOCFLAGS="${RUSTDOCFLAGS:+${RUSTDOCFLAGS} }-D warnings" cargo doc --locked --manifest-path "${root}/tools/grpc-codegen/Cargo.toml" --no-deps --document-private-items
 fi
 
 temporary=$(mktemp -d)

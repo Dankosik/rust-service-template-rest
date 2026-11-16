@@ -29,9 +29,11 @@ passes never prove CI admission, container behavior, or a release.
 `vendor/<crate>` holds a crates.io archive wired via `[patch.crates-io]`, with
 provenance and retirement criteria in its `PATCHES.md`. Because Dependabot and
 `cargo-deny` skip path dependencies, `make dependency-drift` fails on registry
-bypasses, base-version OSV advisories, or a missing `Upstream reviewed:` line,
+bypasses, base-version OSV advisories or crates.io yanks, generator/runtime
+`prost`/`tonic` pin drift, or a missing `Upstream reviewed:` line,
 and the weekly `--upstream` workflow opens an issue for post-cooldown upstream
-releases and outdated `tools/versions.env` pins (promtool tracks Prometheus 3.5 LTS).
+releases and outdated `tools/versions.env` pins, including `GO_VERSION`
+(promtool tracks Prometheus 3.5 LTS).
 
 When `dependency-drift` names a fork:
 
@@ -90,7 +92,7 @@ condition.
 | `tools/versions.env` + `<git-common-dir>/tools` + `taiki-e/install-action` | Plain `KEY=value` needs no parser (`mise` reopens only if tools outgrow Cargo + Go + Node + Docker); prebuilt binaries avoid ~6 min of CI Cargo tool compilation. |
 | Static `cargo-chef` & `cargo-auditable` archives in `Dockerfile` | Avoids 67 s of builder compilation on cold builds while embedding `pkg:cargo` dependency graphs for Trivy/CycloneDX SBOM admission (`grype`/`syft` and `cargo-cyclonedx` rejected to keep one scanner/SBOM container). |
 | `npx` (`--ignore-scripts` + publish-age cooldown), `go run`, `uvx`/`pipx`, digest-pinned containers | Hardens tool downloads through npm publish-age gates, the Go checksum DB, and OCI digests without custom per-tool installer scripts; `make actionlint` disables host `shellcheck`/`pyflakes` for runner parity. |
-| `cargo-deny` (Linux targets, `multiple-versions = "deny"`) + `cargo-shear` + CodeQL Rust (`build-mode: none`) | Scopes license/advisory checks to shipped Linux targets, catches orphaned deps across profile projections (`cargo-machete`/`cargo-udeps` rejected), and excludes tests/`vendor/` examples in CodeQL (~15.5 → ~7 min). |
+| `cargo-deny` (Linux targets, `all-features = true`, `[licenses] include-dev = true`, `multiple-versions = "deny"`) + `cargo-shear` + CodeQL Rust (`build-mode: none`) | Covers optional `hotpath`/`integration` features and dev licenses across shipped Linux targets, catches orphaned deps across profile projections (`cargo-machete`/`cargo-udeps` rejected), and excludes tests/`vendor/` examples in CodeQL (~15.5 → ~7 min). |
 | `cargo-nextest` + `cargo test --doc`; local-only `cargo-mutants` | Parallel test binaries cut serial `cargo test` wall time (127 s → 34–37 s locally); mutation testing (17 min on one module) stays an on-demand adequacy aid rather than a PR gate. |
 | Post-merge heavy proofs + `secrets`-gated short jobs + `green` diff base | Keeps PR feedback fast while bounding concurrent runner contention under a 20-runner cap and ensuring superseded `main` runs never skip unproved commits. |
 | BuildKit `type=registry` cache in `cd.yml` only; `ARG IMAGE_TESTS=none` default | `type=gha` lacks `ACTIONS_RUNTIME_TOKEN` in `run:` steps and exceeds the 10 GB Actions cache budget alongside `Swatinem/rust-cache`; skipping `IMAGE_TESTS=unit` when CI runs saves 65–70 s/build (enable `IMAGE_TESTS=unit` when `REPOSITORY_CI = none`). |

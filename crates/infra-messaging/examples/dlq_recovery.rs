@@ -654,7 +654,8 @@ mod tests {
     #[test]
     #[expect(
         clippy::disallowed_methods,
-        reason = "the subprocess fixture polls for exit and reaps the child on timeout"
+        clippy::exit,
+        reason = "the subprocess fixture polls for exit, reaps the child on timeout, and exits directly from the child branch"
     )]
     fn invalid_invocation_returns_failure_with_a_broken_stderr_pipe() {
         use std::process::{Command, Stdio};

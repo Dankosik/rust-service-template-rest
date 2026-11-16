@@ -5,7 +5,7 @@ SHELL := /bin/sh
 .DEFAULT_GOAL := help
 
 # Every tool version is pinned once in tools/versions.env; CI reads the same
-# file. `make tools-check` proves the pins resolve.
+# file. `make tools-check` proves manifest shape, Cargo pins, Dockerfile parity, and cooldowns.
 include tools/versions.env
 
 CARGO ?= cargo
@@ -195,9 +195,16 @@ test: $(filter $(TOOLS_ROOT)/%,$(CARGO_NEXTEST)) ## Run the ordinary workspace u
 	$(CARGO) test --doc --workspace --no-fail-fast $(CARGO_FLAGS)
 
 HOTPATH_PROFILE_FEATURES := hotpath,hotpath-alloc,hotpath-mcp,hotpath-cpu,hotpath/hotpath-prometheus
-profiling-check: ## Compile the optional hotpath profiling configurations of the service package
-	$(CARGO) check $(CARGO_FLAGS) --manifest-path crates/service/Cargo.toml --all-targets --features hotpath
-	$(CARGO) check $(CARGO_FLAGS) --manifest-path crates/service/Cargo.toml --all-targets --features $(HOTPATH_PROFILE_FEATURES)
+profiling-check: ## Lint and document the optional hotpath profiling configurations
+	$(CARGO) clippy $(CARGO_FLAGS) --manifest-path crates/service/Cargo.toml --all-targets --features hotpath -- -D warnings
+	$(CARGO) clippy $(CARGO_FLAGS) --manifest-path crates/service/Cargo.toml --all-targets --features $(HOTPATH_PROFILE_FEATURES) -- -D warnings
+	@for pkg in infra-http infra-telemetry infra-postgres infra-jobs infra-webhooks; do \
+		if [ -f "crates/$$pkg/Cargo.toml" ]; then \
+			$(CARGO) clippy $(CARGO_FLAGS) -p "$$pkg" --all-targets --features "$$pkg/hotpath" -- -D warnings && \
+			RUSTDOCFLAGS="$(RUSTDOCFLAGS) -D warnings" $(CARGO) doc $(CARGO_FLAGS) -p "$$pkg" --no-deps --document-private-items --features "$$pkg/hotpath" || exit; \
+		fi; \
+	done
+	RUSTDOCFLAGS="$(RUSTDOCFLAGS) -D warnings" $(CARGO) doc $(CARGO_FLAGS) --manifest-path crates/service/Cargo.toml --no-deps --document-private-items --features $(HOTPATH_PROFILE_FEATURES)
 	$(CARGO) tree $(CARGO_FLAGS) --manifest-path crates/service/Cargo.toml --features $(HOTPATH_PROFILE_FEATURES) -e features -i hotpath
 
 test-package: $(filter $(TOOLS_ROOT)/%,$(CARGO_NEXTEST)) ## Run one crate's tests; requires PKG=<crate name>
@@ -219,7 +226,7 @@ mutants: $(filter $(TOOLS_ROOT)/%,$(CARGO_MUTANTS) $(CARGO_NEXTEST)) ## List the
 	$(VALIDATION_LOCK) $(NEXTEST_PATH) $(CARGO_MUTANTS) mutants --test-tool nextest --package $(PKG) $(if $(FILE),--file $(FILE)) --cargo-arg=--locked --output target/mutants
 
 native-transport-regressions: ## Run locked serial native transport regressions
-	$(VALIDATION_LOCK) python3 scripts/ci/native-transport-regressions.py
+	$(VALIDATION_LOCK) env CARGO_TARGET_DIR="$${CARGO_TARGET_DIR:-$(CURDIR)/target}" python3 scripts/ci/native-transport-regressions.py
 
 test-integration-messaging: ## JetStream adapter proof against a throwaway Compose NATS; ALLOW_HEAVY=1, REQUIRE_DOCKER=1 to fail without Docker
 	$(HEAVY_GUARD)
@@ -288,6 +295,10 @@ lint lint-changed: export RUSTDOCFLAGS := $(RUSTDOCFLAGS) -D warnings
 lint: ## Clippy over all targets and rustdoc, warnings as errors
 	$(CARGO) clippy --workspace --all-targets --keep-going $(INTEGRATION_LINT_FEATURES) $(MESSAGING_LINT_FEATURES) $(CACHE_LINT_FEATURES) $(OBJECT_STORAGE_LINT_FEATURES) $(OUTBOUND_AUTH_LINT_FEATURES) $(CARGO_FLAGS) -- -D warnings
 	$(CARGO) doc --keep-going --workspace --no-deps --document-private-items $(INTEGRATION_LINT_FEATURES) $(MESSAGING_LINT_FEATURES) $(CACHE_LINT_FEATURES) $(OBJECT_STORAGE_LINT_FEATURES) $(OUTBOUND_AUTH_LINT_FEATURES) $(CARGO_FLAGS)
+	@if [ -f tools/grpc-codegen/Cargo.toml ]; then \
+		CARGO_TARGET_DIR="$${CARGO_TARGET_DIR:-$(CURDIR)/target/grpc-codegen}" $(CARGO) clippy --manifest-path tools/grpc-codegen/Cargo.toml --all-targets --keep-going $(CARGO_FLAGS) -- -D warnings && \
+		CARGO_TARGET_DIR="$${CARGO_TARGET_DIR:-$(CURDIR)/target/grpc-codegen}" $(CARGO) doc --keep-going --manifest-path tools/grpc-codegen/Cargo.toml --no-deps --document-private-items $(CARGO_FLAGS); \
+	fi
 
 lint-changed: ## Clippy and rustdoc, warnings as errors, over the crates in PKGS="<crate> <crate>"
 	$(REQUIRE_PKGS)
@@ -308,7 +319,7 @@ check-instructions: check-skills agent-harness-check ## Every selected instructi
 $(TOOLS_ROOT)/%:
 	$(CARGO) install --locked --root "$(TOOLS_ROOT)/$(firstword $(subst /, ,$*))" --version "$(patsubst $(notdir $@)-%,%,$(firstword $(subst /, ,$*)))" $(notdir $@)
 
-tools-check: $(CARGO_TOOLS) ## Prove tools/versions.env: shape, image digests, pinned Cargo tools resolve
+tools-check: $(CARGO_TOOLS) ## Prove tools/versions.env shape, Cargo pins, Dockerfile parity, and 7-day cooldowns
 	CARGO_DENY="$(CARGO_DENY)" CARGO_NEXTEST="$(CARGO_NEXTEST)" CARGO_SHEAR="$(CARGO_SHEAR)" ZIZMOR="$(ZIZMOR)" bash scripts/ci/tools-check.sh
 
 deny: $(filter $(TOOLS_ROOT)/%,$(CARGO_DENY)) ## Advisories, licenses, bans, and sources over the locked graph (deny.toml)

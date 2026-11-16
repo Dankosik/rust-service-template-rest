@@ -391,7 +391,7 @@ optional = true
 package = "reqwest-middleware"
 
 [dependencies.rmcp]
-version = "=2.1.0"
+version = "=3.9.0"
 features = ["server", "transport-streamable-http-server", "transport-streamable-http-server-session"]
 optional = true
 

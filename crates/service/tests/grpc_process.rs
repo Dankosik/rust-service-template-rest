@@ -1126,6 +1126,10 @@ fn register_background_fixture(
 }
 
 #[test]
+#[expect(
+    clippy::exit,
+    reason = "child-only fixture bypasses libtest output after completing runtime and telemetry cleanup"
+)]
 fn registered_background_fixture() {
     if std::env::var_os(BACKGROUND_SCENARIO).is_none() {
         return;

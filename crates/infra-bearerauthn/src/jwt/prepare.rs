@@ -255,7 +255,7 @@ mod tests {
         stream: tokio::net::TcpStream,
         acceptor: tokio_rustls::TlsAcceptor,
         port: String,
-        routes: Arc<Vec<MetadataRoute>>,
+        routes: Arc<[MetadataRoute]>,
         requested: Arc<std::sync::Mutex<Vec<String>>>,
     ) {
         let Ok(stream) = acceptor.accept(stream).await else {
@@ -306,7 +306,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let port = address.port().to_string();
-        let routes = Arc::new(routes);
+        let routes: Arc<[MetadataRoute]> = Arc::from(routes);
         let requested = Arc::new(std::sync::Mutex::new(Vec::new()));
         tokio::spawn({
             let requested = Arc::clone(&requested);

@@ -401,6 +401,41 @@ compose_pgbouncer_host_dsn() { echo pgbouncer; }
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("npx cooldown days", result.stderr)
         make_mk.write_text(original_mk)
+        for path in (".railway/package.json", ".railway/.npmrc"):
+            target = self.root / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(ROOT / path, target)
+        result = self.check_script(name, EMPTY_BANNER="0", VERSION_STATUS="0")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        npmrc = self.root / ".railway/.npmrc"
+        original_npmrc = npmrc.read_text()
+        npmrc.write_text("ignore-scripts=true\nmin-release-age=3\n")
+        result = self.check_script(name, EMPTY_BANNER="0", VERSION_STATUS="0")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("min-release-age", result.stderr)
+        npmrc.write_text("ignore-scripts=false\nmin-release-age=7\n")
+        result = self.check_script(name, EMPTY_BANNER="0", VERSION_STATUS="0")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("ignore-scripts", result.stderr)
+        npmrc.write_text(original_npmrc)
+        if (ROOT / "tools/grpc-codegen/Cargo.toml").is_file():
+            for path in ("Cargo.toml", "tools/grpc-codegen/Cargo.toml"):
+                target = self.root / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy(ROOT / path, target)
+            codegen_toml = self.root / "tools/grpc-codegen/Cargo.toml"
+            original_codegen = codegen_toml.read_text()
+            codegen_toml.write_text(
+                re.sub(
+                    r'(tonic-prost-build\s*=\s*\{\s*version\s*=\s*)"[^"]+"',
+                    r'\1"=0.0.1"',
+                    original_codegen,
+                )
+            )
+            result = self.check_script(name, EMPTY_BANNER="0", VERSION_STATUS="0")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("tonic-prost-build", result.stderr)
+            codegen_toml.write_text(original_codegen)
         cargo_cfg = self.root / ".cargo/config.toml"
         cargo_cfg.write_text(cargo_cfg.read_text().replace('"7 days"', '"3 days"'))
         result = self.check_script(name, EMPTY_BANNER="0", VERSION_STATUS="0")

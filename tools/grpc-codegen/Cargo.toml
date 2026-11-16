@@ -12,7 +12,7 @@ resolver = "3"
 [dependencies]
 prost = { version = "=0.14.4", default-features = false, features = ["std"] }
 prost-types = { version = "=0.14.4", default-features = false, features = ["std"] }
-tonic-prost-build = { version = "=0.14.9", default-features = false, features = ["cleanup-markdown"] }
+tonic-prost-build = { version = "=0.14.8", default-features = false, features = ["cleanup-markdown"] }
 
 [lints.rust]
 unsafe_code = "forbid"
@@ -22,6 +22,8 @@ rust_2018_idioms = { level = "warn", priority = -1 }
 
 [lints.rustdoc]
 broken_intra_doc_links = "deny"
+private_intra_doc_links = "deny"
+bare_urls = "warn"
 
 [lints.clippy]
 all = { level = "warn", priority = -1 }
@@ -30,6 +32,11 @@ unwrap_used = "warn"
 expect_used = "warn"
 panic = "warn"
 todo = "warn"
+unimplemented = "warn"
+exit = "warn"
+mem_forget = "warn"
+rc_buffer = "warn"
+rc_mutex = "warn"
 allow_attributes_without_reason = "warn"
 dbg_macro = "warn"
 disallowed_methods = "warn"

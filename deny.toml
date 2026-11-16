@@ -8,8 +8,10 @@
 # Only the targets the service is built and tested for. Without this list
 # cargo-deny evaluates every target, and macOS-only crates (libproc, mach2,
 # bindgen) would enter license and advisory decisions about the Linux binary.
+# `all-features = true` covers optional `hotpath`, `integration`, and
+# `test-support` graphs that default workspace resolution omits.
 targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
-all-features = false
+all-features = true
 
 [advisories]
 unmaintained = "all"
@@ -17,6 +19,7 @@ unsound = "all"
 yanked = "deny"
 
 [licenses]
+include-dev = true
 # Permissive licenses that the current graph uses; cargo-deny warns on an
 # allowance no crate matches, so a new license is added when a crate brings
 # it. CC0-1.0 covers axum-tracing-opentelemetry and

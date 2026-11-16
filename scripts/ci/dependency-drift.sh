@@ -53,6 +53,14 @@ latest() {
 		fetch "https://proxy.golang.org/${package}/@latest" | jq -r '
 			"\(.Version | ltrimstr("v")) \((now - (.Time[:19] + "Z" | fromdateiso8601)) / 86400 | floor)"'
 		;;
+	go-toolchain)
+		local mod_ver
+		mod_ver=$(fetch "https://proxy.golang.org/${package}/@v/list" |
+			awk -v prefix="v0.0.1-go${line}" 'index($0, prefix) == 1 && /^v0\.0\.1-go[0-9]+\.[0-9]+\.[0-9]+\.linux-amd64$/' |
+			sort -V | tail -n1)
+		fetch "https://proxy.golang.org/${package}/@v/${mod_ver}.info" | jq -r '
+			"\(.Version | capture("-go(?<v>[0-9]+\\.[0-9]+\\.[0-9]+)\\.").v) \((now - (.Time[:19] + "Z" | fromdateiso8601)) / 86400 | floor)"'
+		;;
 	github)
 		fetch "https://api.github.com/repos/${package}/releases?per_page=50" | jq -r --arg line "${line}" '
 			[.[] | select((.draft or .prerelease) | not)
@@ -78,6 +86,22 @@ for pkg in lock.get("package", []):
 unused = bool(lock.get("patch", {}).get("unused"))
 print(f"PATCH_UNUSED\t{'1' if unused else '0'}")
 
+codegen_manifest = pathlib.Path("tools/grpc-codegen/Cargo.toml")
+if codegen_manifest.is_file():
+    ws_deps = tomllib.loads(pathlib.Path("Cargo.toml").read_text(encoding="utf-8")).get("workspace", {}).get("dependencies", {})
+    gen_deps = tomllib.loads(codegen_manifest.read_text(encoding="utf-8")).get("dependencies", {})
+    for gen_name, ws_name in (
+        ("prost", "prost"),
+        ("prost-types", "prost-types"),
+        ("tonic-prost-build", "tonic-prost"),
+    ):
+        gen_entry = gen_deps.get(gen_name)
+        ws_entry = ws_deps.get(ws_name)
+        gen_ver = gen_entry.get("version") if isinstance(gen_entry, dict) else gen_entry
+        ws_ver = ws_entry.get("version") if isinstance(ws_entry, dict) else ws_entry
+        if ws_ver is not None and gen_ver != ws_ver:
+            print(f"PIN_MISMATCH\t{gen_name}\t{gen_ver}\t{ws_name}\t{ws_ver}")
+
 for patches in sorted(pathlib.Path("vendor").glob("*/PATCHES.md")):
     manifest = tomllib.loads((patches.parent / "Cargo.toml").read_text(encoding="utf-8"))
     package = manifest.get("package", {})
@@ -96,6 +120,10 @@ while IFS=$'\t' read -r kind patches name version sources; do
 		patch_unused=${patches}
 		continue
 	fi
+	if [[ ${kind} == PIN_MISMATCH ]]; then
+		finding "tools/grpc-codegen/Cargo.toml pins ${patches} to ${name}, Cargo.toml pins ${version} to ${sources}"
+		continue
+	fi
 	reviewed=$(sed -n 's/^Upstream reviewed: \([0-9][^ ]*\)$/\1/p' "${patches}" | head -n1)
 	[[ -n ${reviewed} ]] || finding "${name}: ${patches} records no \`Upstream reviewed: <version>\` line"
 
@@ -109,8 +137,18 @@ while IFS=$'\t' read -r kind patches name version sources; do
 		jq -r '[.vulns[]?.id] | join(", ")')
 	[[ -z ${advisories} ]] || finding "${name} ${version}: fork base is affected by ${advisories}"
 
+	crate_json=$(fetch "https://crates.io/api/v1/crates/${name}")
+	yanked=$(jq -r --arg ver "${version}" '[.versions[] | select(.num == $ver) | if .yanked then "true" else "false" end][0] // "missing"' <<<"${crate_json}")
+	case "${yanked}" in
+	false) ;;
+	true) finding "${name} ${version}: fork base is yanked on crates.io" ;;
+	*) finding "${name} ${version}: fork base version is absent on crates.io" ;;
+	esac
+
 	if [[ ${upstream} == true ]]; then
-		read -r newest age < <(latest crates "${name}" '')
+		read -r newest age < <(jq -r '
+			[.versions[] | select((.yanked | not) and (.num | test("-") | not))][0]
+			| "\(.num) \((now - (.created_at[:19] + "Z" | fromdateiso8601)) / 86400 | floor)"' <<<"${crate_json}")
 		if [[ ${newest} != "${version}" && ${newest} != "${reviewed}" && ${age} -ge ${cooldown_days} ]]; then
 			finding "${name}: upstream ${newest} (${age} days old) is unreviewed; fork base ${version}, reviewed ${reviewed:-none}"
 		fi
@@ -143,6 +181,7 @@ REDOCLY_CLI_VERSION|npm|@redocly/cli|
 JSCPD_VERSION|npm|jscpd|
 SQUAWK_CLI_VERSION|npm|squawk-cli|
 RUFF_VERSION|pypi|ruff|
+GO_VERSION|go-toolchain|golang.org/toolchain|
 OASDIFF_VERSION|go|github.com/oasdiff/oasdiff|
 GITLEAKS_VERSION|go|github.com/zricethezav/gitleaks/v8|
 ACTIONLINT_VERSION|go|github.com/rhysd/actionlint|

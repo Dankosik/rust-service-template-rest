@@ -860,12 +860,12 @@ fn get_current_elapsed_ns() -> u64 {
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for HotPathMcpServer {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         let mut server_info = Implementation::default();
         server_info.name = "hotpath".into();
         server_info.version = env!("CARGO_PKG_VERSION").into();
 
-        let mut info = ServerInfo::default();
+        let mut info = ServerConfig::default();
         info.protocol_version = ProtocolVersion::V_2024_11_05;
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.server_info = server_info;
@@ -932,7 +932,7 @@ pub(crate) fn start_mcp_server_once() {
 
                     let mut config = StreamableHttpServerConfig::default();
                     config.sse_keep_alive = Some(Duration::from_secs(15));
-                    config.stateful_mode = true;
+                    config.legacy_session_mode = true;
                     config.cancellation_token = cancellation_token.clone();
 
                     let service = StreamableHttpService::new(
