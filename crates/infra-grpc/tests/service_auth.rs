@@ -157,7 +157,7 @@ fn readiness() -> Readiness {
         RefreshPolicy {
             interval: Duration::from_mins(1),
             probe_budget: Duration::from_secs(1),
-            failure_threshold: 1,
+            failure_threshold: std::num::NonZeroU32::MIN,
         },
     )
 }

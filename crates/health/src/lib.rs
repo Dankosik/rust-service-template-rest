@@ -9,6 +9,7 @@
 //! completion gap expires, a late check cannot restore readiness.
 
 use std::fmt;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -42,10 +43,6 @@ pub trait Probe: Send + Sync + 'static {
 pub struct ProbeError(CompactString);
 
 impl ProbeError {
-    pub fn new(message: impl Into<CompactString>) -> Self {
-        Self(message.into())
-    }
-
     #[must_use]
     pub const fn from_static(message: &'static str) -> Self {
         Self(CompactString::const_new(message))
@@ -88,6 +85,47 @@ pub enum NotReady {
     },
 }
 
+/// Why [`Readiness::arm_progress`] refused to arm.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum ArmError {
+    #[error(transparent)]
+    Refused(NotReady),
+    /// An armed completion gap already expired; it outranks any refusal.
+    #[error("readiness progress was lost")]
+    ProgressLost,
+}
+
+/// A failed probe round as stored in [`Check`]; [`NotReady`] adds the
+/// reader-side refusals.
+#[derive(Clone, Debug)]
+enum ProbeFailure {
+    TimedOut {
+        probe: &'static str,
+        budget: Duration,
+    },
+    Failed {
+        probe: &'static str,
+        error: ProbeError,
+    },
+}
+
+impl From<ProbeFailure> for NotReady {
+    fn from(failure: ProbeFailure) -> Self {
+        match failure {
+            ProbeFailure::TimedOut { probe, budget } => Self::TimedOut { probe, budget },
+            ProbeFailure::Failed { probe, error } => Self::ProbeFailed { probe, error },
+        }
+    }
+}
+
+fn outcome_label(outcome: &Result<(), ProbeFailure>) -> &'static str {
+    match outcome {
+        Ok(()) => "ok",
+        Err(ProbeFailure::TimedOut { .. }) => "timed_out",
+        Err(ProbeFailure::Failed { .. }) => "failed",
+    }
+}
+
 const CHECKS_METRIC: &str = "readiness_checks_total";
 
 const PROBE_CHECKS_METRIC: &str = "readiness_probe_checks_total";
@@ -113,7 +151,7 @@ pub struct RefreshPolicy {
     /// own (a gRPC health `Watch` client drops the backend at once), so one
     /// slow round-trip must not evict an instance. A service that is not
     /// ready yet reports a failure at once.
-    pub failure_threshold: u32,
+    pub failure_threshold: NonZeroU32,
 }
 
 impl RefreshPolicy {
@@ -188,7 +226,7 @@ impl State {
             return None;
         }
         let check = self.last_check.as_ref()?;
-        if now.duration_since(check.at) <= stale_after {
+        if check.is_fresh_at(now, stale_after) {
             return None;
         }
         let loss = ProgressLoss {
@@ -215,6 +253,25 @@ impl State {
         }
         newly_expired
     }
+
+    fn verdict(&self, now: Instant, stale_after: Duration) -> Result<(), NotReady> {
+        if self.draining {
+            return Err(NotReady::Draining);
+        }
+        if let Some(loss) = self.progress_loss() {
+            return Err(loss.not_ready());
+        }
+        let Some(check) = &self.last_check else {
+            return Err(NotReady::NotEvaluated);
+        };
+        if !check.is_fresh_at(now, stale_after) {
+            return Err(NotReady::Stale {
+                age: now.duration_since(check.at),
+                stale_after,
+            });
+        }
+        check.verdict.clone().map_err(NotReady::from)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -223,9 +280,16 @@ struct Check {
     at: Instant,
     /// A failure below `failure_threshold` may still be published as ready.
     /// Readers apply drain and staleness before returning this verdict.
-    verdict: Result<(), NotReady>,
+    verdict: Result<(), ProbeFailure>,
     /// Failed checks in a row, including absorbed ones.
     consecutive_failures: u32,
+}
+
+impl Check {
+    /// Fresh up to and including exactly `stale_after`.
+    fn is_fresh_at(&self, now: Instant, stale_after: Duration) -> bool {
+        now.duration_since(self.at) <= stale_after
+    }
 }
 
 #[derive(Clone)]
@@ -273,7 +337,7 @@ impl Readiness {
         );
         metrics::describe_gauge!(
             READY_METRIC,
-            "1 while the published readiness verdict is ready, 0 otherwise."
+            "1 while the last completed check is ready and the service is neither draining nor past an armed progress bound, 0 otherwise; readiness_last_completed_timestamp_seconds shows an unarmed refresher that stopped."
         );
         metrics::describe_gauge!(
             LAST_COMPLETED_METRIC,
@@ -328,32 +392,40 @@ impl Readiness {
         }
     }
 
+    /// Check every probe and return the verdict a reader would now see.
+    pub async fn admit(&self) -> Result<(), NotReady> {
+        self.refresh().await;
+        self.tx
+            .borrow()
+            .verdict(Instant::now(), self.policy.stale_after())
+    }
+
     /// The admitted check retains its timestamp; arming never renews its age.
-    pub fn arm_progress(&self) -> Result<(), NotReady> {
+    pub fn arm_progress(&self) -> Result<(), ArmError> {
         let mut result = Ok(());
         let mut newly_expired = None;
         self.tx.send_if_modified(|state| {
-            if state.draining || matches!(state.progress, Progress::Stopped) {
-                result = Err(NotReady::Draining);
+            if state.progress_loss().is_some() {
+                result = Err(ArmError::ProgressLost);
                 return false;
             }
-            if let Some(loss) = state.progress_loss() {
-                result = Err(loss.not_ready());
+            if state.draining || matches!(state.progress, Progress::Stopped) {
+                result = Err(ArmError::Refused(NotReady::Draining));
                 return false;
             }
             let Some(check) = &state.last_check else {
-                result = Err(NotReady::NotEvaluated);
+                result = Err(ArmError::Refused(NotReady::NotEvaluated));
                 return false;
             };
             if let Err(reason) = &check.verdict {
-                result = Err(reason.clone());
+                result = Err(ArmError::Refused(reason.clone().into()));
                 return false;
             }
             let changed = matches!(state.progress, Progress::Unarmed);
             state.progress = Progress::Armed;
             newly_expired = state.expire_progress(Instant::now(), self.policy.stale_after());
-            if let Some(loss) = newly_expired {
-                result = Err(loss.not_ready());
+            if newly_expired.is_some() {
+                result = Err(ArmError::ProgressLost);
             }
             changed || newly_expired.is_some()
         });
@@ -366,7 +438,11 @@ impl Readiness {
     /// Observe and retain an expired armed completion gap under the publication
     /// lock. Generic unarmed readers do not acquire a process obligation.
     #[must_use]
-    pub fn progress_loss(&self) -> Option<ProgressLoss> {
+    pub fn progress_lost(&self) -> bool {
+        self.progress_loss().is_some()
+    }
+
+    fn progress_loss(&self) -> Option<ProgressLoss> {
         let mut loss = None;
         let mut newly_expired = None;
         self.tx.send_if_modified(|state| {
@@ -381,27 +457,32 @@ impl Readiness {
     }
 
     /// Close future progress obligations before cancelling process work.
-    /// A gap already expired at this stop boundary remains terminal.
-    #[must_use]
-    pub fn stop_progress(&self) -> Option<ProgressLoss> {
-        let mut loss = None;
+    /// A gap already expired at this stop boundary remains terminal and is
+    /// still reported by [`Self::progress_lost`].
+    pub fn stop_progress(&self) {
         let mut newly_expired = None;
         self.tx.send_if_modified(|state| {
             let changed = matches!(state.progress, Progress::Unarmed | Progress::Armed);
             newly_expired = state.stop_progress(self.policy.stale_after());
-            loss = state.progress_loss();
             changed
         });
         if let Some(loss) = newly_expired {
             loss.log();
         }
-        loss
     }
 
-    /// Wait independently of probes and readers for terminal progress loss.
-    /// After stop, keep waiting for cancellation so tracked process-lifetime
-    /// observers do not return early. `None` means cancellation only.
-    pub async fn wait_for_progress_loss(&self, cancel: CancellationToken) -> Option<ProgressLoss> {
+    /// Call `on_loss` once for a terminal progress loss, independently of
+    /// probes and readers, then return only when `cancel` fires, so a tracked
+    /// process-lifetime observer never ends early, after stop included.
+    pub async fn observe_progress(&self, cancel: CancellationToken, on_loss: impl FnOnce()) {
+        if self.wait_for_progress_loss(&cancel).await.is_some() {
+            on_loss();
+            cancel.cancelled().await;
+        }
+    }
+
+    /// `None` means cancellation only.
+    async fn wait_for_progress_loss(&self, cancel: &CancellationToken) -> Option<ProgressLoss> {
         let mut changed = self.tx.subscribe();
         loop {
             if let Some(loss) = self.progress_loss() {
@@ -445,15 +526,7 @@ impl Readiness {
             .ok()
             .filter(|elapsed| !elapsed.is_zero())
             .map_or(f64::NAN, |elapsed| elapsed.as_secs_f64());
-        // Literal labels select the metrics facade's static-label fast path.
-        match &observed {
-            Ok(()) => metrics::counter!(CHECKS_METRIC, "outcome" => "ok"),
-            Err(NotReady::TimedOut { .. }) => {
-                metrics::counter!(CHECKS_METRIC, "outcome" => "timed_out")
-            }
-            Err(_) => metrics::counter!(CHECKS_METRIC, "outcome" => "failed"),
-        }
-        .increment(1);
+        metrics::counter!(CHECKS_METRIC, "outcome" => outcome_label(&observed)).increment(1);
         let failure_threshold = self.policy.failure_threshold;
         let stale_after = self.policy.stale_after();
         let mut transition_to_log = None;
@@ -482,8 +555,8 @@ impl Readiness {
                 // Readers refused the previous verdict as stale before this
                 // round replaced it; nothing else reports that gap.
                 late_by = previous
-                    .map(|previous| at.duration_since(previous.at))
-                    .filter(|age| *age > stale_after);
+                    .filter(|previous| !previous.is_fresh_at(at, stale_after))
+                    .map(|previous| at.duration_since(previous.at));
             }
             // Written under the lock so it cannot overwrite a concurrent drain.
             let ready = !state.draining && state.progress_loss().is_none() && next.verdict.is_ok();
@@ -499,6 +572,7 @@ impl Readiness {
             tracing::warn!(?age, ?stale_after, "readiness_refresh_late");
         }
         if let Some((reason, consecutive_failures)) = absorbed_failure {
+            let reason = NotReady::from(reason);
             tracing::warn!(
                 %reason,
                 consecutive_failures,
@@ -508,7 +582,10 @@ impl Readiness {
         }
         match transition_to_log {
             Some(Ok(())) => tracing::info!("readiness_recovered"),
-            Some(Err(reason)) => tracing::warn!(%reason, "readiness_lost"),
+            Some(Err(reason)) => {
+                let reason = NotReady::from(reason);
+                tracing::warn!(%reason, "readiness_lost");
+            }
             None => {}
         }
     }
@@ -537,7 +614,7 @@ impl Readiness {
             .await;
     }
 
-    async fn check_probes(&self) -> Result<(), NotReady> {
+    async fn check_probes(&self) -> Result<(), ProbeFailure> {
         let budget = self.policy.probe_budget;
         let deadline = timer_deadline(Instant::now(), budget);
         let outcomes = join_all(self.probes.iter().map(|probe| async move {
@@ -548,22 +625,21 @@ impl Readiness {
             };
             let outcome = match reply {
                 Some(Ok(())) => Ok(()),
-                Some(Err(error)) => Err(NotReady::ProbeFailed {
+                Some(Err(error)) => Err(ProbeFailure::Failed {
                     probe: probe_name,
                     error,
                 }),
-                None => Err(NotReady::TimedOut {
+                None => Err(ProbeFailure::TimedOut {
                     probe: probe_name,
                     budget,
                 }),
             };
-            let label = match &outcome {
-                Ok(()) => "ok",
-                Err(NotReady::TimedOut { .. }) => "timed_out",
-                Err(_) => "failed",
-            };
-            metrics::counter!(PROBE_CHECKS_METRIC, "probe" => probe_name, "outcome" => label)
-                .increment(1);
+            metrics::counter!(
+                PROBE_CHECKS_METRIC,
+                "probe" => probe_name,
+                "outcome" => outcome_label(&outcome)
+            )
+            .increment(1);
             outcome
         }))
         .await;
@@ -592,21 +668,20 @@ fn timer_deadline(start: Instant, delay: Duration) -> Option<Instant> {
 /// including when the previous verdict expires while this round is running.
 fn apply_failure_threshold(
     previous: Option<&Check>,
-    observed: Result<(), NotReady>,
-    failure_threshold: u32,
+    observed: Result<(), ProbeFailure>,
+    failure_threshold: NonZeroU32,
     at: Instant,
     stale_after: Duration,
 ) -> Check {
     let consecutive_failures = match (&observed, previous) {
         (Ok(()), _) => 0,
-        (Err(_), Some(previous)) => previous.consecutive_failures + 1,
+        (Err(_), Some(previous)) => previous.consecutive_failures.saturating_add(1),
         (Err(_), None) => 1,
     };
-    let was_published_ready = previous.is_some_and(|previous| {
-        previous.verdict.is_ok() && at.duration_since(previous.at) <= stale_after
-    });
+    let was_published_ready = previous
+        .is_some_and(|previous| previous.verdict.is_ok() && previous.is_fresh_at(at, stale_after));
     let hold_ready =
-        was_published_ready && observed.is_err() && consecutive_failures < failure_threshold;
+        was_published_ready && observed.is_err() && consecutive_failures < failure_threshold.get();
     Check {
         at,
         verdict: if hold_ready { Ok(()) } else { observed },
@@ -616,7 +691,10 @@ fn apply_failure_threshold(
 
 /// The new verdict when it flips between ready and not ready. The first
 /// check at startup is not a flip; admission logs its own outcome.
-fn readiness_transition(previous: Option<&Check>, next: &Check) -> Option<Result<(), NotReady>> {
+fn readiness_transition(
+    previous: Option<&Check>,
+    next: &Check,
+) -> Option<Result<(), ProbeFailure>> {
     let previous = previous?;
     (previous.verdict.is_ok() != next.verdict.is_ok()).then(|| next.verdict.clone())
 }
@@ -624,30 +702,16 @@ fn readiness_transition(previous: Option<&Check>, next: &Check) -> Option<Result
 impl ReadinessReader {
     /// A verdict older than [`RefreshPolicy::stale_after`] is refused.
     pub fn verdict(&self) -> Result<(), NotReady> {
-        let state = self.rx.borrow();
-        if state.draining {
-            return Err(NotReady::Draining);
-        }
-        if let Some(loss) = state.progress_loss() {
-            return Err(loss.not_ready());
-        }
-        let Some(check) = &state.last_check else {
-            return Err(NotReady::NotEvaluated);
-        };
-        let age = check.at.elapsed();
-        if age > self.stale_after {
-            return Err(NotReady::Stale {
-                age,
-                stale_after: self.stale_after,
-            });
-        }
-        check.verdict.clone()
+        self.rx.borrow().verdict(Instant::now(), self.stale_after)
     }
 
     // template:begin grpc:health-changed-verdict
     /// Resolves for an unseen publication, which may carry the same verdict, or once
     /// at the current check's stale boundary. A caller must re-read
     /// [`Self::verdict`] afterwards so a publication race sees the current drain state.
+    ///
+    /// Cancel safe: the stale edge is recorded only when it is delivered, so
+    /// dropping this future in `select!` loses no event.
     pub async fn wait_for_verdict_event(&mut self) -> Result<(), OwnerDropped> {
         if self.rx.has_changed().map_err(|_| OwnerDropped)? {
             return self.rx.changed().await.map_err(|_| OwnerDropped);

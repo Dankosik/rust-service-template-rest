@@ -19,7 +19,7 @@ impl Probe for Flaky {
         if self.healthy.load(Ordering::Relaxed) {
             Ok(())
         } else {
-            Err(ProbeError::new("connection refused"))
+            Err(ProbeError::from_static("connection refused"))
         }
     }
 }
@@ -40,7 +40,7 @@ fn policy() -> RefreshPolicy {
     RefreshPolicy {
         interval: Duration::from_millis(50),
         probe_budget: Duration::from_millis(20),
-        failure_threshold: 3,
+        failure_threshold: std::num::NonZeroU32::new(3).unwrap(),
     }
 }
 
@@ -180,7 +180,7 @@ async fn a_failed_round_starting_fresh_cannot_revive_readiness_after_expiry() {
 #[tokio::test]
 async fn never_healthy_instance_fails_immediately() {
     let (readiness, _, _) = flaky(false);
-    readiness.refresh().await;
+    std::assert_matches!(readiness.admit().await, Err(NotReady::ProbeFailed { .. }));
     std::assert_matches!(
         readiness.reader().verdict(),
         Err(NotReady::ProbeFailed { .. })
@@ -231,9 +231,15 @@ async fn a_verdict_nobody_refreshes_goes_stale() {
 #[tokio::test(start_paused = true)]
 async fn arming_uses_the_admitted_completion_and_refuses_failed_admission() {
     let (readiness, flag, _) = flaky(false);
-    assert_eq!(readiness.arm_progress(), Err(NotReady::NotEvaluated));
+    assert_eq!(
+        readiness.arm_progress(),
+        Err(ArmError::Refused(NotReady::NotEvaluated))
+    );
     readiness.refresh().await;
-    std::assert_matches!(readiness.arm_progress(), Err(NotReady::ProbeFailed { .. }));
+    std::assert_matches!(
+        readiness.arm_progress(),
+        Err(ArmError::Refused(NotReady::ProbeFailed { .. }))
+    );
     assert!(readiness.progress_loss().is_none());
     flag.store(true, Ordering::Relaxed);
     readiness.refresh().await;
@@ -248,8 +254,14 @@ async fn arming_uses_the_admitted_completion_and_refuses_failed_admission() {
     let (late, _, _) = flaky(true);
     late.refresh().await;
     tokio::time::advance(policy().stale_after() + Duration::from_nanos(1)).await;
-    std::assert_matches!(late.arm_progress(), Err(NotReady::Stale { .. }));
-    assert!(late.progress_loss().is_some());
+    assert_eq!(late.arm_progress(), Err(ArmError::ProgressLost));
+    assert!(late.progress_lost());
+    late.start_drain();
+    assert_eq!(
+        late.arm_progress(),
+        Err(ArmError::ProgressLost),
+        "a lost gap outranks the drain refusal"
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -264,7 +276,8 @@ async fn armed_late_success_retains_the_gap_before_an_observer_can_run() {
     std::assert_matches!(readiness.reader().verdict(), Err(NotReady::Stale { .. }));
     readiness.refresh().await;
     assert_eq!(readiness.progress_loss(), Some(loss));
-    assert_eq!(readiness.stop_progress(), Some(loss));
+    readiness.stop_progress();
+    assert_eq!(readiness.progress_loss(), Some(loss));
     readiness.start_drain();
     readiness.refresh().await;
     assert_eq!(readiness.progress_loss(), Some(loss));
@@ -277,7 +290,7 @@ async fn progress_observer_needs_no_readers_or_new_completions() {
     readiness.refresh().await;
     readiness.arm_progress().unwrap();
     let cancel = CancellationToken::new();
-    let mut observer = Box::pin(readiness.wait_for_progress_loss(cancel));
+    let mut observer = Box::pin(readiness.wait_for_progress_loss(&cancel));
     assert!(futures_util::FutureExt::now_or_never(observer.as_mut()).is_none());
     tokio::time::advance(policy().stale_after()).await;
     assert!(
@@ -311,7 +324,8 @@ async fn stop_and_drain_close_obligations_but_preserve_an_already_expired_gap() 
             if drain {
                 readiness.start_drain();
             } else {
-                assert_eq!(readiness.stop_progress().is_some(), expired);
+                readiness.stop_progress();
+                assert_eq!(readiness.progress_lost(), expired);
             }
             tokio::time::advance(policy().stale_after() * 2).await;
             assert_eq!(readiness.progress_loss().is_some(), expired);
@@ -321,7 +335,7 @@ async fn stop_and_drain_close_obligations_but_preserve_an_already_expired_gap() 
             assert_eq!(readiness.reader().verdict(), Err(NotReady::Draining));
             if !expired {
                 let cancel = CancellationToken::new();
-                let mut observer = Box::pin(readiness.wait_for_progress_loss(cancel.clone()));
+                let mut observer = Box::pin(readiness.wait_for_progress_loss(&cancel));
                 assert!(futures_util::FutureExt::now_or_never(observer.as_mut()).is_none());
                 cancel.cancel();
                 assert_eq!(observer.await, None, "stop alone cannot end tracked work");
@@ -341,7 +355,7 @@ async fn failed_and_timed_out_completed_rounds_keep_armed_progress_recoverable()
         async fn check(&self) -> Result<(), ProbeError> {
             match self.0.load(Ordering::Relaxed) {
                 0 => Ok(()),
-                1 => Err(ProbeError::new("unavailable")),
+                1 => Err(ProbeError::from_static("unavailable")),
                 _ => std::future::pending().await,
             }
         }
@@ -382,7 +396,7 @@ async fn terminal_progress_withdraws_the_gauge_and_logs_once_without_false_recov
     flag.store(true, Ordering::Relaxed);
     readiness.refresh().await;
     assert!(readiness.progress_loss().is_some());
-    let _ = readiness.stop_progress();
+    readiness.stop_progress();
     readiness.start_drain();
     readiness.refresh().await;
     assert_sample(&recorder.handle().render(), "readiness_ready 0");
@@ -542,6 +556,48 @@ async fn every_probe_is_checked_and_the_first_failure_in_registration_order_is_n
     );
     assert_eq!(healthy_calls.load(Ordering::Relaxed), 1);
     assert_eq!(failing_calls.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_budget_beyond_the_clock_runs_probes_without_a_deadline() {
+    let readiness = Readiness::new(
+        vec![Box::new(Slow {
+            name: "slow",
+            delay: Duration::from_secs(60),
+        })],
+        RefreshPolicy {
+            probe_budget: Duration::MAX,
+            ..policy()
+        },
+    );
+    assert_eq!(readiness.admit().await, Ok(()));
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_drain_during_an_in_flight_check_wins_over_its_success() {
+    struct Gated(Arc<tokio::sync::Notify>);
+    #[async_trait::async_trait]
+    impl Probe for Gated {
+        fn name(&self) -> &'static str {
+            "gated"
+        }
+        async fn check(&self) -> Result<(), ProbeError> {
+            self.0.notified().await;
+            Ok(())
+        }
+    }
+    let recorder = recorder();
+    let _recorder = metrics::set_default_local_recorder(&recorder);
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let readiness = Readiness::new(vec![Box::new(Gated(gate.clone()))], policy());
+    let refresh = readiness.refresh();
+    tokio::pin!(refresh);
+    assert!(futures_util::FutureExt::now_or_never(refresh.as_mut()).is_none());
+    readiness.start_drain();
+    gate.notify_one();
+    refresh.await;
+    assert_eq!(readiness.reader().verdict(), Err(NotReady::Draining));
+    assert_sample(&recorder.handle().render(), "readiness_ready 0");
 }
 
 #[tokio::test(start_paused = true)]
@@ -845,7 +901,7 @@ async fn an_unrepresentable_stale_edge_waits_for_publication_or_cancellation() {
     assert_eq!(readiness.arm_progress(), Ok(()));
 
     let cancel = CancellationToken::new();
-    let progress = readiness.wait_for_progress_loss(cancel.clone());
+    let progress = readiness.wait_for_progress_loss(&cancel);
     let mut reader = readiness.reader();
     let publication = reader.wait_for_verdict_event();
     tokio::pin!(progress, publication);
@@ -930,6 +986,26 @@ async fn wait_for_verdict_event_delivers_each_stale_edge_once_without_a_probe() 
     assert_eq!(calls.load(Ordering::Relaxed), 2);
 }
 
+#[tokio::test(start_paused = true)]
+async fn a_verdict_event_wait_dropped_in_select_keeps_the_stale_edge() {
+    let (readiness, _, _) = flaky(true);
+    readiness.refresh().await;
+    let mut reader = readiness.reader();
+    tokio::select! {
+        result = reader.wait_for_verdict_event() => panic!("a fresh check resolved early: {result:?}"),
+        () = tokio::time::sleep(policy().stale_after() / 2) => {}
+    }
+    tokio::time::advance(policy().stale_after()).await;
+    let event =
+        tokio::time::timeout(Duration::from_millis(1), reader.wait_for_verdict_event()).await;
+    assert_eq!(
+        event,
+        Ok(Ok(())),
+        "the dropped wait must not swallow the stale edge"
+    );
+    std::assert_matches!(reader.verdict(), Err(NotReady::Stale { .. }));
+}
+
 #[tokio::test]
 async fn wait_for_verdict_event_reports_when_the_owner_is_dropped() {
     let readiness = Readiness::new(Vec::new(), policy());
@@ -944,7 +1020,7 @@ proptest! {
 
     #[test]
     fn the_failure_threshold_never_outlives_its_streak_or_a_stale_gap(
-        failure_threshold in 0_u32..6,
+        failure_threshold in 1_u32..6,
         stale_after_ms in 1_u64..100,
         steps in proptest::collection::vec((any::<bool>(), 0_u64..150), 1..40),
     ) {
@@ -959,9 +1035,14 @@ proptest! {
         for (succeeds, gap_ms) in steps {
             elapsed_ms += gap_ms;
             let at = origin + Duration::from_millis(elapsed_ms);
-            let observed = if succeeds { Ok(()) } else { Err(NotReady::NotEvaluated) };
+            let observed = if succeeds {
+                Ok(())
+            } else {
+                Err(ProbeFailure::TimedOut { probe: "model", budget: Duration::ZERO })
+            };
+            let threshold = NonZeroU32::new(failure_threshold).unwrap();
             let check =
-                apply_failure_threshold(previous.as_ref(), observed, failure_threshold, at, stale_after);
+                apply_failure_threshold(previous.as_ref(), observed, threshold, at, stale_after);
 
             streak = if succeeds { 0 } else { streak + 1 };
             let fresh_ready = published.is_some_and(|(ready, at_ms)| {
@@ -971,15 +1052,6 @@ proptest! {
 
             prop_assert_eq!(check.verdict.is_ok(), expect_ready);
             prop_assert_eq!(check.consecutive_failures, streak);
-            if succeeds {
-                prop_assert_eq!(&check.verdict, &Ok(()));
-            }
-            if streak >= failure_threshold && !succeeds {
-                prop_assert!(check.verdict.is_err());
-            }
-            if gap_ms > stale_after_ms && !succeeds {
-                prop_assert!(check.verdict.is_err());
-            }
             published = Some((expect_ready, elapsed_ms));
             previous = Some(check);
         }

@@ -985,7 +985,7 @@ async fn responsive_saturation_recovers_work_and_readiness_under_current_policy(
     let policy = health::RefreshPolicy {
         interval: Duration::from_secs(2),
         probe_budget: Duration::from_secs(4),
-        failure_threshold: 3,
+        failure_threshold: std::num::NonZeroU32::new(3).unwrap(),
     };
     let readiness =
         health::Readiness::new(vec![Box::new(PostgresProbe::new(ours.clone()))], policy);

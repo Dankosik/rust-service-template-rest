@@ -34,7 +34,7 @@ use std::time::Duration;
 
 use futures_util::FutureExt;
 
-use health::{Probe, Readiness, RefreshPolicy};
+use health::{ArmError, Probe, Readiness, RefreshPolicy};
 use infra_http::{BoundListener, HardenOptions, ServerOptions};
 use infra_telemetry::{
     LoggingFormat, LoggingOptions, Metrics, diagnostics_router, install_panic_hook,
@@ -393,7 +393,7 @@ fn pending_failure(background: &Background, serving: &Serving) -> Option<Bootstr
     serving
         .readiness
         .as_ref()
-        .and_then(Readiness::progress_loss)
+        .filter(|readiness| readiness.progress_lost())
         .map(|_| progress_error())
 }
 
@@ -410,7 +410,7 @@ fn stop_progress(
     failure: Option<BootstrapError>,
 ) -> Option<BootstrapError> {
     if let Some(readiness) = &serving.readiness {
-        let _ = readiness.stop_progress();
+        readiness.stop_progress();
     }
     failure.or_else(|| pending_failure(background, serving))
 }
@@ -419,14 +419,10 @@ fn start_progress(
     readiness: &Readiness,
     background: &mut Background,
 ) -> Result<(), BootstrapError> {
-    if let Err(error) = readiness.arm_progress() {
-        // A lost refresh outranks the refusal it caused: report the loss.
-        return Err(if readiness.progress_loss().is_some() {
-            progress_error()
-        } else {
-            BootstrapError::Admission(error)
-        });
-    }
+    readiness.arm_progress().map_err(|error| match error {
+        ArmError::ProgressLost => progress_error(),
+        ArmError::Refused(reason) => BootstrapError::Admission(reason),
+    })?;
     background.spawn("readiness", {
         let readiness = readiness.clone();
         let cancel = background.child_token();
@@ -435,14 +431,9 @@ fn start_progress(
     BackgroundRegistration { background }.spawn("readiness_progress", {
         let readiness = readiness.clone();
         move |cancel, reporter| async move {
-            if readiness
-                .wait_for_progress_loss(cancel.clone())
-                .await
-                .is_some()
-            {
-                reporter.report();
-                cancel.cancelled().await;
-            }
+            readiness
+                .observe_progress(cancel, || reporter.report())
+                .await;
             Ok::<(), std::convert::Infallible>(())
         }
     });
@@ -576,11 +567,7 @@ async fn start(
         None => None,
     };
     // template:end grpc:bootstrap-grpc-bind-before-ready
-    readiness.refresh().await;
-    readiness
-        .reader()
-        .verdict()
-        .map_err(BootstrapError::Admission)?;
+    readiness.admit().await.map_err(BootstrapError::Admission)?;
     start_progress(readiness, background)?;
 
     let server_options = ServerOptions {
@@ -666,7 +653,7 @@ mod tests {
                 RefreshPolicy {
                     interval: Duration::from_secs(1),
                     probe_budget: Duration::from_secs(1),
-                    failure_threshold: 3,
+                    failure_threshold: std::num::NonZeroU32::new(3).unwrap(),
                 },
             );
             readiness.refresh().await;
@@ -699,7 +686,7 @@ mod tests {
             }
             tokio::time::advance(Duration::from_secs(5)).await;
             readiness.refresh().await;
-            assert_eq!(readiness.progress_loss().is_some(), late);
+            assert_eq!(readiness.progress_lost(), late);
             assert!(background.is_empty());
         }
     }

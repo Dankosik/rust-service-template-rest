@@ -1,4 +1,4 @@
-use health::{Probe, Readiness, RefreshPolicy};
+use health::{ArmError, Probe, Readiness, RefreshPolicy};
 use infra_http::{HardenOptions, Server, ServerOptions};
 use infra_telemetry::{Metrics, diagnostics_router};
 use service_config::Config;
@@ -53,24 +53,16 @@ pub(super) fn start_progress(
     readiness: &Readiness,
     background: &Background,
 ) -> Result<(), WorkerError> {
-    readiness.arm_progress().map_err(|error| {
-        if readiness.progress_loss().is_some() {
-            WorkerError::BackgroundStopped(READINESS_PROGRESS)
-        } else {
-            WorkerError::Admission(error)
-        }
+    readiness.arm_progress().map_err(|error| match error {
+        ArmError::ProgressLost => WorkerError::BackgroundStopped(READINESS_PROGRESS),
+        ArmError::Refused(reason) => WorkerError::Admission(reason),
     })?;
     let observed = readiness.clone();
     let reporter = background.clone();
     background.spawn(READINESS_PROGRESS, |cancel| async move {
-        if observed
-            .wait_for_progress_loss(cancel.clone())
-            .await
-            .is_some()
-        {
-            reporter.record_failure(READINESS_PROGRESS);
-            cancel.cancelled().await;
-        }
+        observed
+            .observe_progress(cancel, || reporter.record_failure(READINESS_PROGRESS))
+            .await;
     });
     let readiness = readiness.clone();
     background.spawn("readiness_refresher", |cancel| async move {

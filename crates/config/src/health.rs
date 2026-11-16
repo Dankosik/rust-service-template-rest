@@ -3,6 +3,7 @@
 //! Probes are checked on an interval by a background task, never per
 //! request, so an unauthenticated probe request never reaches a dependency.
 
+use std::num::NonZeroU32;
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -29,7 +30,7 @@ pub struct HealthConfig {
     /// round-trip must not evict an instance that is still serving.
     /// Admission and a never-ready instance report the first failure at once.
     #[serde(deserialize_with = "crate::de::unsigned_count")]
-    pub failure_threshold: u32,
+    pub failure_threshold: NonZeroU32,
 }
 
 impl Default for HealthConfig {
@@ -37,7 +38,7 @@ impl Default for HealthConfig {
         Self {
             refresh_interval: Duration::from_secs(2),
             probe_budget: Duration::from_secs(4),
-            failure_threshold: 3,
+            failure_threshold: NonZeroU32::MIN.saturating_add(2),
         }
     }
 }
@@ -58,7 +59,7 @@ impl HealthConfig {
         ));
         v.check(int_range(
             "health.failure_threshold",
-            u64::from(self.failure_threshold),
+            u64::from(self.failure_threshold.get()),
             1,
             100,
         ));

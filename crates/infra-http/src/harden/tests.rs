@@ -661,7 +661,7 @@ async fn probes_are_answered_while_every_in_flight_permit_is_held() {
         health::RefreshPolicy {
             interval: Duration::from_secs(1),
             probe_budget: Duration::from_secs(1),
-            failure_threshold: 1,
+            failure_threshold: std::num::NonZeroU32::MIN,
         },
     );
     readiness.refresh().await;

@@ -279,7 +279,7 @@ fn pending_failure(resources: &Resources, background: &Background) -> Option<Wor
     resources
         .readiness
         .as_ref()
-        .and_then(Readiness::progress_loss)
+        .filter(|readiness| readiness.progress_lost())
         .map(|_| WorkerError::BackgroundStopped(READINESS_PROGRESS))
 }
 
@@ -287,7 +287,7 @@ fn pending_failure(resources: &Resources, background: &Background) -> Option<Wor
 /// a stop signal.
 fn settle_end(resources: &Resources, background: &Background, ended: Ended) -> Ended {
     if let Some(readiness) = &resources.readiness {
-        let _ = readiness.stop_progress();
+        readiness.stop_progress();
     }
     match ended {
         Ended::Failure(_) => ended,
@@ -352,11 +352,7 @@ async fn prepare(
         .clone();
     // A refused verdict leaves the bound listeners to teardown.
     listeners::bind_listeners(config, &metrics, &readiness, background, resources).await?;
-    readiness.refresh().await;
-    readiness
-        .reader()
-        .verdict()
-        .map_err(WorkerError::Admission)?;
+    readiness.admit().await.map_err(WorkerError::Admission)?;
     listeners::start_progress(&readiness, background)?;
     Ok(Prepared {
         // template:begin jobs:worker-bootstrap-prepared-jobs-value
@@ -475,7 +471,7 @@ mod tests {
         let policy = health::RefreshPolicy {
             interval: Duration::from_secs(1),
             probe_budget: Duration::from_secs(1),
-            failure_threshold: 3,
+            failure_threshold: std::num::NonZeroU32::new(3).unwrap(),
         };
         let readiness = health::Readiness::new(Vec::new(), policy);
         readiness.refresh().await;
@@ -522,7 +518,7 @@ mod tests {
                 health::RefreshPolicy {
                     interval: Duration::from_secs(1),
                     probe_budget: Duration::from_secs(1),
-                    failure_threshold: 3,
+                    failure_threshold: std::num::NonZeroU32::new(3).unwrap(),
                 },
             );
             readiness.refresh().await;
@@ -558,7 +554,7 @@ mod tests {
             }
             tokio::time::advance(Duration::from_secs(5)).await;
             readiness.refresh().await;
-            assert_eq!(readiness.progress_loss().is_some(), late);
+            assert_eq!(readiness.progress_lost(), late);
             assert!(background.tracker.is_empty());
         }
     }
