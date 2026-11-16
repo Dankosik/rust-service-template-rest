@@ -89,6 +89,41 @@ async fn a_refused_auth_is_retried_after_the_client_gives_up() {
     assert_eq!(namespace.get("key").await, Ok(None));
 }
 
+#[test]
+fn late_reconnect_delays_spread_below_the_ceiling_instead_of_pinning_to_it() {
+    let chain = crate::connection::SETUP_BACKOFF_MAX_RETRIES + 1;
+    let mut backoff = crate::connection::SetupBackoff::new();
+    let delays: Vec<Duration> = (0..20 * chain).map(|_| backoff.next_delay()).collect();
+
+    let ceiling = Duration::from_secs(2);
+    assert!(
+        delays
+            .iter()
+            .all(|delay| (Duration::from_millis(100)..=ceiling).contains(delay)),
+        "{delays:?}"
+    );
+    let pauses: Vec<Duration> = delays
+        .iter()
+        .copied()
+        .skip(chain - 1)
+        .step_by(chain)
+        .collect();
+    assert!(
+        pauses.iter().all(|pause| *pause >= Duration::from_secs(1)),
+        "a chain must end in a pause: {pauses:?}"
+    );
+    let late: Vec<Duration> = delays
+        .iter()
+        .copied()
+        .filter(|delay| *delay >= Duration::from_secs(1))
+        .collect();
+    let distinct: std::collections::BTreeSet<Duration> = late.iter().copied().collect();
+    assert!(
+        distinct.len() > late.len() / 2,
+        "clients restarted together must not retry in lockstep: {late:?}"
+    );
+}
+
 #[tokio::test]
 async fn a_server_error_reply_redis_rs_does_not_name_is_a_response_failure() {
     let recorder = observation_recorder();
