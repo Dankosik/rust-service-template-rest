@@ -127,8 +127,6 @@ impl ReplayableResponse {
         Record {
             status,
             headers,
-            // Share the captured bytes with persistence without copying the body
-            // retained for the first response.
             body: self.body.clone(),
         }
     }

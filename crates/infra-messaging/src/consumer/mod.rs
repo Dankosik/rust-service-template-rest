@@ -29,9 +29,7 @@ const ACK_WAIT: Duration = HANDLER_TIMEOUT
     .saturating_add(BROKER_OPERATION_BUDGET)
     .saturating_add(BROKER_OPERATION_BUDGET)
     .saturating_add(Duration::from_secs(1));
-/// Pause after a recoverable pull-stream error before polling again.
 const STREAM_ERROR_BACKOFF: Duration = Duration::from_secs(1);
-/// Lifetime of one capacity-reserved pull request.
 const PULL_EXPIRES: Duration = Duration::from_secs(30);
 /// Time past `PULL_EXPIRES` to wait for the broker's own expiry answer, which
 /// ends an idle pull cleanly; without it the local timer races that answer
@@ -231,7 +229,6 @@ impl Consumer {
         }
     }
 
-    /// Reserves free handler/settlement slots before each one-shot pull.
     /// Drain returns received but unadmitted messages and joins admitted work;
     /// dropping the join set at forced shutdown aborts every delivery.
     async fn run(
@@ -434,8 +431,6 @@ impl Consumer {
         }
     }
 
-    /// Admits up to `slots` deliveries of one pull batch, reaping finished
-    /// deliveries meanwhile.
     async fn fill(
         &self,
         messages: &mut pull::Batch,
@@ -673,10 +668,9 @@ pub(crate) fn describe_metrics() {
 }
 
 impl ConsumerHandle {
-    /// Requests an end to admission, interrupting admission-only waits.
     /// Admitted work keeps its handler and settlement allowances. Locally held
-    /// unadmitted deliveries get a best-effort delayed NAK without waiting for
-    /// broker capacity after stop; ack-wait retains redelivery ownership.
+    /// unadmitted deliveries get a best-effort delayed NAK; ack-wait retains
+    /// redelivery ownership.
     pub fn drain(&self) {
         self.stop.cancel();
     }
@@ -692,7 +686,6 @@ impl ConsumerHandle {
         }
     }
 
-    /// Cancels unfinished work; the supervisor aborts every delivery.
     pub fn abort(&self) {
         self.stop.cancel();
         self.force.cancel();
@@ -719,10 +712,8 @@ impl ConsumerHandle {
 
 impl Drop for ConsumerHandle {
     fn drop(&mut self) {
-        // Exhausted cleanup has no budget left to observe a join. Dropping the
-        // supervisor handle aborts the task, which drops its pipeline and
-        // aborts every delivery; runtime shutdown remains the final resource
-        // owner.
+        // Exhausted cleanup has no budget to observe a join; dropping the
+        // supervisor handle aborts the task and every delivery.
         self.abort();
     }
 }

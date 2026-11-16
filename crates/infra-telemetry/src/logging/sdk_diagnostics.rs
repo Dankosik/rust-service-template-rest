@@ -120,8 +120,8 @@ fn add(counter: &AtomicU64, amount: u64) {
     });
 }
 
-// Unknown fields never format Debug/Display or retain strings. In particular,
-// receiver text and URL/body diagnostics cannot enter a later output layer.
+// Unknown fields never format Debug/Display or retain strings, so receiver
+// text and URL/body diagnostics cannot reach an output layer.
 #[derive(Default)]
 struct ReportedCounts {
     dropped: Option<u64>,

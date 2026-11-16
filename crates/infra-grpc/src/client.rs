@@ -21,45 +21,32 @@ use shared_rules::error_chain::DisplayErrorChain;
 use tokio::time::Instant;
 use tokio_util::sync::DropGuard;
 
-/// Explicit security selected for one trusted operator destination.
-///
-/// The destination scheme must agree: `http` for plaintext, `https` for TLS.
-/// Tonic applies TLS only to `https`, so a mismatch is rejected rather than
-/// silently connecting in plaintext.
+/// Tonic applies TLS only to `https`, so a scheme mismatch is rejected rather than silently
+/// connecting in plaintext.
 #[derive(Clone, Debug)]
 pub enum ClientSecurity {
     Plaintext,
-    /// TLS-verified `https` connection with the given trust material.
     Tls(ClientTlsMaterial),
 }
 
-/// Trust material for normal TLS verification. Without a CA the native roots
-/// are trusted. This adapter never loads a path or disables hostname
-/// verification.
+/// Without a CA the native roots are trusted; hostname verification is never disabled.
 #[derive(Clone, Debug, Default)]
 pub struct ClientTlsMaterial {
-    /// PEM CA certificate to trust; `None` trusts the native roots.
     pub ca_certificate_pem: Option<String>,
-    /// Client certificate and key for mTLS; `None` presents no client identity.
     pub identity: Option<ClientIdentity>,
 }
 
-/// Client certificate and key for mTLS.
 #[derive(Clone, Debug)]
 pub struct ClientIdentity {
     pub certificate_pem: String,
     pub private_key_pem: SecretString,
 }
 
-/// Bounds both the endpoint's dial and the connector's TCP connect.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The interval promised by this adapter's required local budget.
 #[derive(Clone, Copy, Debug)]
 pub enum ClientTimeout {
-    /// Bounds readiness, queueing, response headers, DATA and terminal trailers.
     FullRpc(Duration),
-    /// Bounds opening only. A supplied caller deadline still bounds the whole RPC.
     OpeningOnly(Duration),
 }
 
@@ -75,17 +62,8 @@ impl ClientTimeout {
     }
 }
 
-/// One lazy, shared channel for a configured dependency.
-///
-/// Construction performs neither DNS nor network I/O. Each call injects the
-/// current trace context. Tonic clients record span and metrics from the
-/// decoded RPC outcome. Direct HTTP service callers observe the response
-/// status as their body yields it.
-///
-/// An [`OperationContext`] in the request extensions, such as the one a
-/// handler received, also bounds the call: the earliest of its deadline and
-/// this client's wins for opening and lifetime, and its cancellation cancels
-/// the call.
+/// An [`OperationContext`] in the request extensions also bounds the call: the earlier
+/// deadline wins and its cancellation cancels the call.
 #[derive(Clone, derive_more::Debug)]
 pub struct Client {
     channel: Channel,
@@ -96,14 +74,6 @@ pub struct Client {
 }
 
 impl Client {
-    /// Parses an explicit trusted destination and constructs a lazy channel.
-    ///
-    /// `timeout` bounds the entire RPC from adapter entry through readiness,
-    /// queueing, headers, DATA and trailers. A shorter caller `grpc-timeout`
-    /// wins; the local policy itself adds no wire metadata. Use
-    /// [`Self::with_timeout_policy`] with [`ClientTimeout::OpeningOnly`] for
-    /// intentionally long-lived streams. Cancellation does not imply rollback
-    /// or that a request already handed to tonic was never dispatched.
     pub fn try_new(
         destination: &str,
         security: ClientSecurity,
@@ -112,11 +82,6 @@ impl Client {
         Self::with_timeout_policy(destination, security, ClientTimeout::FullRpc(timeout))
     }
 
-    /// Constructs the shared channel with an explicit RPC interval policy.
-    ///
-    /// Both policies have a finite opening budget. Supplied caller metadata
-    /// always bounds the whole RPC and is reduced by adapter readiness waiting
-    /// before handoff to tonic; its internal queue/transit remain unobservable.
     pub fn with_timeout_policy(
         destination: &str,
         security: ClientSecurity,
@@ -129,11 +94,10 @@ impl Client {
             http::Uri::try_from(destination).map_err(|_| Error::InvalidDestination)?;
         let mut endpoint = Endpoint::from(destination)
             .connect_timeout(CONNECT_TIMEOUT)
-            // gRPC's keepalive guide asks clients not to ping much more
-            // often than once a minute, and only while a call is open.
+            // gRPC's keepalive guide: no pings much more often than once a minute, only
+            // while a call is open.
             .http2_keep_alive_interval(Duration::from_mins(1))
             .keep_alive_timeout(Duration::from_secs(20))
-            // The listener's fixed windows; see `infra_http::HTTP2_CONNECTION_WINDOW`.
             .initial_connection_window_size(infra_http::HTTP2_CONNECTION_WINDOW)
             .initial_stream_window_size(infra_http::HTTP2_STREAM_WINDOW);
         let expected_scheme = match security {
@@ -154,8 +118,6 @@ impl Client {
         connector.set_keepalive(Some(Duration::from_mins(1)));
         connector.set_connect_timeout(Some(CONNECT_TIMEOUT));
         Ok(Self {
-            // This path places tonic's connect timer outside TLS as well as
-            // DNS/TCP, so the shared channel can release a stalled full dial.
             channel: endpoint.connect_with_connector_lazy(connector),
             destination: endpoint.uri().clone(),
             timeout,
@@ -169,8 +131,7 @@ impl tower::Service<Request<Body>> for Client {
     type Error = tonic::Status;
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
-    /// Always ready: each call waits for the channel itself, so a wrapper may
-    /// clone this client and call it without driving readiness first.
+    /// Always ready: each call waits for the channel itself.
     fn poll_ready(&mut self, _context: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
     }
@@ -180,10 +141,8 @@ impl tower::Service<Request<Body>> for Client {
     }
 }
 
-/// One concrete client's request and fixed cutoffs, captured before credentials.
-/// Preparation performs no I/O and cannot be moved to another client's policy.
-/// The call is already observed: dropped without [`PreparedCall::send`] or
-/// [`PreparedCall::refuse`], it is recorded as `Canceled`.
+/// Dropped without [`PreparedCall::send`] or [`PreparedCall::refuse`], the call is recorded
+/// as `Canceled`.
 pub struct PreparedCall {
     channel: Channel,
     request: Request<Body>,
@@ -205,8 +164,6 @@ impl std::fmt::Debug for PreparedCall {
 }
 
 impl Client {
-    /// Captures the original opening and response bounds before credential work.
-    /// It starts the client span and counts the call as started.
     #[must_use]
     pub fn prepare_call(&self, mut request: Request<Body>) -> PreparedCall {
         let origin = Instant::now();
@@ -259,37 +216,28 @@ fn earliest(left: Option<Deadline>, right: Option<Deadline>) -> Option<Deadline>
 }
 
 impl PreparedCall {
-    /// The fixed budget covering credentials, readiness and response headers.
     #[must_use]
     pub const fn opening_context(&self) -> &OperationContext {
         &self.opening
     }
 
-    /// Metadata for credentials. Dispatch derives the wire `grpc-timeout`
-    /// from the original caller and parent deadlines.
+    /// Dispatch derives the wire `grpc-timeout` from the original caller and parent deadlines.
     pub fn headers_mut(&mut self) -> &mut http::HeaderMap {
         self.request.headers_mut()
     }
 
-    /// Ends this call without dispatch, recording the status its caller
-    /// receives instead of the `Canceled` of an abandoned call.
     #[must_use]
     pub fn refuse(self, status: tonic::Status) -> tonic::Status {
         self.call.finish(status.code());
         status
     }
 
-    /// Dispatches this prepared request within its original budget.
     pub async fn send(self) -> Result<Response<Body>, tonic::Status> {
         self.send_inner(|_| Ok(()), None).await
     }
 
-    /// Like [`Self::send`], with a synchronous callback that runs once for the
-    /// code carried by the peer's `grpc-status` in the response headers or
-    /// trailers. If the response ends without that header, the callback
-    /// receives the code mapped from a non-200 HTTP status.
-    /// Local failures and bodies abandoned before a status is available skip
-    /// the callback. Generated-client metrics use the decoded RPC outcome.
+    /// The callback runs once with the peer's `grpc-status` code, or the code mapped from a
+    /// non-200 HTTP status when none arrives; local failures and abandoned bodies skip it.
     pub async fn send_with_response_status(
         self,
         on_status: impl FnOnce(tonic::Code) + Send + 'static,
@@ -297,8 +245,6 @@ impl PreparedCall {
         self.send_with_dispatch_check(|| Ok(()), on_status).await
     }
 
-    /// Like [`Self::send_with_response_status`], with a final check after the
-    /// channel is ready and before it receives the request.
     pub async fn send_with_dispatch_check(
         self,
         check: impl FnOnce() -> Result<(), tonic::Status> + Send,
@@ -328,7 +274,6 @@ impl PreparedCall {
         let mut request = Request::from_parts(parts, body);
         let stopped = |reason| Side::Client.stopped(reason);
         let result = async {
-            // Biased: an opening already stopped answers before any channel work.
             let result = tokio::select! {
                 biased;
                 reason = opening.wait_stopped() => Err(stopped(reason)),
@@ -341,7 +286,6 @@ impl PreparedCall {
                     ready.call(request).await.map_err(transport_status)
                 } => result,
             };
-            // A terminal failure that becomes ready late also loses to the original cutoff.
             opening.check().map_err(stopped)?;
             result
         }
@@ -398,8 +342,7 @@ fn apply_forwarded_timeout(
     Ok(())
 }
 
-/// Checks each PEM input first so a failure names it; tonic's own build error
-/// does not say which input it rejected.
+/// Names the rejected PEM input, which tonic's build error does not.
 fn client_tls(material: &ClientTlsMaterial) -> Result<ClientTlsConfig, Error> {
     let mut config = match &material.ca_certificate_pem {
         Some(ca) => {
@@ -421,12 +364,10 @@ fn client_tls(material: &ClientTlsMaterial) -> Result<ClientTlsConfig, Error> {
     Ok(config)
 }
 
-/// The caller sees a fixed status, because a handler may forward it to its
-/// own caller; the cause is logged inside the client span. When the call's
-/// supplied `grpc-timeout` runs out inside tonic's channel, that is the
-/// caller's deadline, not a transport fault: the answer is
-/// `DEADLINE_EXCEEDED`, so a caller that retries `UNAVAILABLE` does not
-/// repeat a call the server may still be running.
+/// The caller sees a fixed status (a handler may forward it); the cause is logged in the
+/// client span. A supplied `grpc-timeout` expiring inside tonic's channel maps to
+/// `DEADLINE_EXCEEDED`, so a caller retrying `UNAVAILABLE` does not repeat a call the server
+/// may still run.
 #[expect(
     clippy::needless_pass_by_value,
     reason = "used as a `map_err` callback, which hands over the owned error"

@@ -220,12 +220,10 @@ fn default_provider_concurrency() -> NonZeroU32 {
 }
 
 const fn default_cache_capacity() -> usize {
-    // Bound retained results without implying a throughput target.
     256
 }
 
 const fn default_cache_ttl() -> Duration {
-    // Keep the opt-in delay in revocation detection short.
     Duration::from_secs(30)
 }
 

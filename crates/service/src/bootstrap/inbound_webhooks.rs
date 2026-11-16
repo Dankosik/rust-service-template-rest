@@ -10,10 +10,8 @@ use service_config::{Config, InboundWebhooksConfig};
 
 use super::BootstrapError;
 
-/// Build a receiver from the immutable startup snapshot. An empty endpoint
-/// map is a retained, inert route; an active endpoint cannot reach listener
-/// admission without PostgreSQL and every referenced key. Consumer bindings
-/// are the worker's: an admitted receipt is durable until one processes it.
+/// An empty endpoint map is a retained, inert route. Consumer bindings are the
+/// worker's: an admitted receipt is durable until one processes it.
 pub(super) fn prepare(
     config: &Config,
     postgres_pool: Option<&PgPool>,
@@ -43,8 +41,7 @@ pub(super) fn prepare(
     Ok(WebhookState::active(receiver))
 }
 
-/// Decode the secret that one endpoint's key reference names. The worker
-/// shares the endpoint section but holds no secrets, so this check is ours.
+/// The worker shares the endpoint section but holds no secrets, so this check is ours.
 fn signing_key(
     webhooks: &InboundWebhooksConfig,
     endpoint: &str,

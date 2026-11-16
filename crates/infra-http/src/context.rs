@@ -16,7 +16,6 @@ use operation_context::{Deadline, OperationContext, Stopped};
 use crate::body::hold_guard_until_end;
 use crate::problem::{Code, Problem, sanitized_internal_error};
 
-/// Fixed request-opening budget installed by the hardened chain.
 #[derive(Clone, Debug)]
 pub struct RequestContext {
     operation: OperationContext,
@@ -29,8 +28,6 @@ impl RequestContext {
         &self.operation
     }
 
-    /// Track an awaited read of the incoming request body for timeout classification.
-    ///
     /// Pass only the body-read future. If it is dropped while pending, a later
     /// opening deadline is classified independently of that read.
     pub async fn read_body<F: Future>(&self, read: F) -> F::Output {
@@ -70,10 +67,8 @@ impl ResponseContext {
 // template:begin request-budget:http-request-deadline
 const MAX_RESPONSE_RESERVE: Duration = Duration::from_millis(100);
 
-/// The conservative deadline shared with request-scoped dependencies.
-///
-/// The opening middleware projects its exact cutoff here. Consumers may observe the instant but
-/// cannot introduce a second request budget.
+/// The opening middleware projects its exact cutoff here; consumers cannot introduce a second
+/// request budget.
 #[derive(Clone, Copy, Debug)]
 pub struct RequestDeadline {
     at: tokio::time::Instant,
@@ -88,7 +83,6 @@ impl RequestDeadline {
         })
     }
 
-    /// The existing absolute request deadline; observing it never extends the budget.
     #[must_use]
     pub const fn at(&self) -> tokio::time::Instant {
         self.at
@@ -127,8 +121,7 @@ impl<S: Send + Sync> FromRequestParts<S> for ResponseContext {
     }
 }
 
-/// A clone of the request extension `T` the hardened chain installed, or the
-/// sanitized 500 for a handler mounted outside that chain.
+/// A handler mounted outside the hardened chain gets the sanitized 500.
 #[expect(
     clippy::result_large_err,
     reason = "the error is the extractor's axum rejection, a Response"

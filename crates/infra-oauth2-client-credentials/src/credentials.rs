@@ -85,10 +85,8 @@ pub struct RefreshDriver {
 }
 
 impl RefreshDriver {
-    /// Runs refreshes inline until shutdown or final external-owner release.
-    /// This method spawns no tasks; completion observes all owned refresh work.
-    /// Final owner release cancels any in-flight refresh and discards queued
-    /// requests.
+    /// Spawns no tasks. Final owner release cancels any in-flight refresh and
+    /// discards queued requests.
     pub async fn run(mut self, shutdown: impl Future<Output = ()>) {
         tokio::pin!(shutdown);
         loop {
@@ -154,8 +152,7 @@ impl Cached {
             .map(|failure| failure.error)
     }
 
-    /// Moves the next background attempt to at least `from + refresh_retry()`,
-    /// without pulling an existing schedule earlier.
+    /// Never pulls an existing schedule earlier.
     fn defer_refresh(&mut self, from: Instant) {
         let next = from + refresh_retry();
         if let Some(service) = self.service.as_mut() {
@@ -170,9 +167,7 @@ struct CompletedFailure {
 }
 
 impl Credentials {
-    /// Prepares credentials without performing DNS, token, or resource I/O.
-    /// The integration must drive and await the returned [`RefreshDriver`].
-    /// Dropping or completing that driver closes any surviving clients.
+    /// Performs no I/O. Dropping or completing the [`RefreshDriver`] closes any surviving clients.
     pub fn prepare(options: Options) -> Result<(Self, RefreshDriver), ConfigurationError> {
         let admitted = admit_options(options)?;
         let token_http =
@@ -269,9 +264,7 @@ impl Credentials {
         Ok(acquired)
     }
 
-    /// Returns the cached service token while it is reusable, otherwise
-    /// requests a new one. Waiting for another caller's request spends this
-    /// caller's deadline.
+    /// Waiting for another caller's request spends this caller's deadline.
     pub(crate) async fn service_token(
         &self,
         deadline: AcquisitionDeadline<'_>,

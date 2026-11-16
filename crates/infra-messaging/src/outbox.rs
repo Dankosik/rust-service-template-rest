@@ -45,7 +45,6 @@ pub enum OutboxEnqueueError {
     PayloadTooLarge { bytes: usize, max_bytes: usize },
     #[error("outbox event identity conflicts with a live immutable intent")]
     EventIdConflict,
-    /// The duplicate row disappeared before it could be compared.
     #[error("outbox live identity changed; retry the caller transaction")]
     LiveIdentityChanged,
     #[error(transparent)]
@@ -66,10 +65,7 @@ enum IntentError {
     Envelope(#[from] EnvelopeError),
 }
 
-/// Register the sole outbox job kind for a dedicated one-slot publisher engine.
-///
-/// The caller owns engine construction, pool admission, and lifecycle. This
-/// helper only creates the checked registry consumed by that engine.
+/// The caller owns engine construction, pool admission, and lifecycle.
 pub fn kinds(producer: Producer) -> Result<Kinds, infra_jobs::KindError> {
     let mut kinds = KindsBuilder::new();
     kinds.register(POLICY, Publisher { producer });
@@ -97,14 +93,12 @@ impl<'a> OutboxText<'a> {
 }
 
 impl PreparedEvent {
-    /// Enqueues this immutable event inside the caller's already-open transaction.
-    ///
-    /// Never creates a connection or commits. A duplicate live key is accepted
-    /// only when the jobs owner confirms byte-for-byte equal intent; a vanished
-    /// live key returns the caller to its existing transaction retry policy.
-    /// Borrowed metadata is checked cooperatively before cloning or base64
-    /// construction; dropping this future during that check sends no SQL.
-    /// Direct callers own finite input, concurrent-call and deadline bounds.
+    /// Never commits. A duplicate live key is accepted only when the jobs
+    /// owner confirms byte-for-byte equal intent; a vanished live key returns
+    /// the caller to its transaction retry policy. Metadata is checked
+    /// cooperatively before cloning; dropping this future during that check
+    /// sends no SQL. Direct callers own finite input, concurrent-call and
+    /// deadline bounds.
     pub async fn enqueue(&self, tx: &mut Tx<'_>) -> Result<OutboxEnqueued, OutboxEnqueueError> {
         let intent = self.prepare_outbox_intent().await?;
         let key = event_key(&intent.message_id);
@@ -161,7 +155,6 @@ impl PreparedEvent {
             let mut offset = 0;
             while offset < field.len() {
                 let end = field.floor_char_boundary(offset + budget);
-                // The remaining budget is smaller than the next character.
                 if end == offset {
                     tokio::task::yield_now().await;
                     budget = PREFLIGHT_BYTES_PER_POLL;
@@ -273,9 +266,7 @@ impl PublishDomainEvent {
                 .decode(&self.payload_base64)
                 .map_err(|_| IntentError::Base64)?,
         );
-        // Reject a stored row whose payload is not JSON before dispatch;
-        // corruption then becomes a permanent job failure instead of a
-        // malformed stream event.
+        // Corruption becomes a permanent job failure instead of a malformed stream event.
         serde_json::from_slice::<serde::de::IgnoredAny>(&payload)
             .map_err(|_| IntentError::NotJson)?;
         Ok(PreparedEvent::from_parts(PreparedEventParts {
@@ -318,7 +309,6 @@ mod tests {
     };
     use crate::prepared::{PreparedEvent, PreparedEventParts};
 
-    /// The stored parts of an event, as outbox storage keeps them.
     struct Parts {
         subject: String,
         message_id: String,

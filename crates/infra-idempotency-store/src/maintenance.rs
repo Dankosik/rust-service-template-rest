@@ -56,12 +56,10 @@ impl Store {
         }
     }
 
-    /// Delete expired records in batches of at most 500 until a batch
-    /// deletes fewer. Return confirmed deletions, which do not certify that
-    /// the population is empty. Each batch runs in its own `READ COMMITTED`
-    /// transaction and skips locked records; on failure, earlier batches stay
-    /// committed, and a timeout leaves the current batch's commit outcome
-    /// unconfirmed.
+    /// Returns confirmed deletions, which do not certify that the population is
+    /// empty. Each batch is its own transaction and skips locked records; on
+    /// failure earlier batches stay committed, and a timeout leaves the current
+    /// batch's commit outcome unconfirmed.
     pub async fn remove_expired(&self) -> Result<u64, CleanupError> {
         self.cleanup_pass(None).await.map(|pass| pass.removed_rows)
     }

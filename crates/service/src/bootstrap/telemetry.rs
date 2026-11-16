@@ -52,7 +52,6 @@ pub(super) fn tracing_options(config: &Config) -> TracingOptions {
     }
 }
 
-/// One record with the non-secret facts an operator needs on every boot.
 pub(super) fn log_startup_summary(config: &Config, exporter: &ExporterState) {
     exporter.log();
     tracing::info!(

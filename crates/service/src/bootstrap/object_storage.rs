@@ -3,9 +3,8 @@ use service_config::{Config, ObjectStorageCredentials, ObjectStorageProvider};
 
 use super::BootstrapError;
 
-/// Build the optional object storage client. Nothing is sent: the bucket is
-/// not a readiness dependency, and a service that cannot serve without it
-/// pushes `storage.probe()` into the readiness probes instead.
+/// Nothing is sent: the bucket is not a readiness dependency; a service that
+/// cannot serve without it pushes `storage.probe()` into the readiness probes.
 pub(super) fn open(config: &Config) -> Result<Option<ObjectStorage>, BootstrapError> {
     let settings = &config.object_storage;
     let provider = match settings.provider {

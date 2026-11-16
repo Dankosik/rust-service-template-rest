@@ -118,9 +118,8 @@ fn issuer_url(
 }
 
 // template:begin oidc-jwt:bootstrap-auth-jwt-algorithm-converter
-/// Attribute a preparation failure to the input that was being read when it
-/// failed. Discovery and issuer agreement belong to `authn.issuer`; a fetch
-/// from an explicitly configured key set belongs to `authn.jwks_uri`.
+/// Discovery and issuer agreement belong to `authn.issuer`; a fetch from an
+/// explicitly configured key set belongs to `authn.jwks_uri`.
 fn authentication_preparation_error(
     mode: &'static str,
     explicit_jwks_uri: bool,

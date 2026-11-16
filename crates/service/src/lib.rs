@@ -11,8 +11,7 @@ pub use bootstrap::GrpcRegistration;
 use std::ffi::OsString;
 use std::process::ExitCode;
 
-/// Run the service. `args` is the whole command line, program name first,
-/// as [`service_config::LoadOptions`] parses it.
+/// `args` is the whole command line, program name first.
 // template:begin grpc:service-run-grpc-doc
 ///
 /// No application gRPC service is registered: a selected gRPC listener
@@ -32,9 +31,7 @@ where
 }
 
 // template:begin grpc:service-run-with-grpc
-/// Run the service with one generated gRPC registration hook, which
-/// bootstrap calls only when `grpc.enabled` is true. `args` is as for
-/// [`run`].
+/// The registration hook runs only when `grpc.enabled` is true.
 pub fn run_with_grpc<I>(args: I, registration: GrpcRegistration) -> ExitCode
 where
     I: IntoIterator<Item = OsString>,

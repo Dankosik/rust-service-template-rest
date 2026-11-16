@@ -8,10 +8,8 @@ use super::cleanup::{CLEANUP_REMOVED_ROWS_METRIC, Cleanup};
 use crate::observe::observed;
 use crate::transaction::{Isolation, Tx, TxError, TxOptions, in_tx_with};
 
-/// Delay after a population observation attempt, including failed attempts.
 pub const MAINTENANCE_OBSERVATION_INTERVAL: Duration = Duration::from_secs(30);
 
-/// One absolute foreground deadline from permit admission through read commit.
 const MAINTENANCE_OBSERVATION_BUDGET: Duration = Duration::from_secs(8);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -178,7 +176,6 @@ fn describe_observer() {
 }
 
 impl MaintenanceObserver {
-    /// Start once for this population's process owner, never once per sample.
     #[must_use]
     pub fn start(population: MaintenancePopulation) -> Self {
         describe_observer();
@@ -213,16 +210,14 @@ impl MaintenanceObserver {
         this.failures.increment(0);
         this.cancellations.increment(0);
         if let MaintenancePopulation::Cleanup(cleanup) = population {
-            // Register the writer before its first pass without resetting progress.
             metrics::counter!(CLEANUP_REMOVED_ROWS_METRIC, "cleanup" => cleanup.label())
                 .increment(0);
         }
         this
     }
 
-    /// One attempt within the observation budget, counted from before
-    /// `read` waits for a permit or a connection. An invalid sample clock keeps
-    /// the preceding dated sample.
+    /// The budget counts from before `read` waits for a permit or a connection. An
+    /// invalid sample clock keeps the preceding dated sample.
     pub async fn sample(
         &mut self,
         read: impl Future<Output = Result<PopulationSample, MaintenanceFailure>>,
@@ -251,8 +246,7 @@ impl MaintenanceObserver {
         }
     }
 
-    /// Count an attempt that published no sample; one run of them is one
-    /// warning.
+    /// One run of unsuccessful attempts is one warning.
     fn record_unsuccessful(&mut self, outcome: AttemptOutcome, cause: &'static str) {
         self.last_attempt_success.set(0.0);
         self.observations(outcome).increment(1);
@@ -390,9 +384,7 @@ impl Drop for MaintenanceAttempt<'_> {
     }
 }
 
-/// Run one population read in a read-only transaction whose limits end a stuck
-/// statement with its own failure before the observation budget cancels the
-/// attempt.
+/// The limits end a stuck statement with its own failure before the budget cancels the attempt.
 pub async fn in_observation_tx<F>(
     pool: &PgPool,
     read: F,

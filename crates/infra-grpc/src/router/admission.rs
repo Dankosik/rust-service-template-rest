@@ -30,8 +30,8 @@ impl AdmissionLimit {
 #[derive(Clone, Copy)]
 struct OpeningWait(Duration);
 
-/// Admission before authentication. Only the opening future owns this permit;
-/// response headers release it independently of call custody.
+/// Only the opening future owns this permit; response headers release it independently of
+/// call custody.
 pub(super) async fn admit_opening(
     State(limit): State<AdmissionLimit>,
     mut request: Request,
@@ -47,8 +47,7 @@ pub(super) async fn admit_opening(
     next.run(request).await
 }
 
-/// Authenticated business admission. The future owns the permit until headers,
-/// then transfers it to the terminal response owner.
+/// The future owns the permit until headers, then hands it to the terminal response owner.
 pub(super) async fn admit_business_call(
     State(limit): State<AdmissionLimit>,
     request: Request,
@@ -67,7 +66,6 @@ pub(super) async fn admit_business_call(
     response
 }
 
-/// Leave time within the opening budget to drain and return the refusal.
 fn patience(request: &Request, max_wait: Duration) -> Duration {
     opening_context(request)
         .and_then(operation_context::OperationContext::remaining)
@@ -76,8 +74,7 @@ fn patience(request: &Request, max_wait: Duration) -> Duration {
         .min(max_wait)
 }
 
-/// A call that waits is served once capacity frees within its budget.
-/// Refusing it earlier would refuse work the process could still do.
+/// Refusing a waiting call earlier would refuse work the process could still do.
 async fn acquire(
     permits: Arc<Semaphore>,
     patience: Duration,
@@ -105,9 +102,8 @@ async fn acquire(
 #[derive(Clone)]
 pub(crate) struct Shed;
 
-/// The refusal: `RESOURCE_EXHAUSTED`, so a client that retries `UNAVAILABLE`
-/// without a delay adds no load, carrying the same catalog identity as HTTP's
-/// shed answer. `RetryInfo` gives a client that honors it the delay.
+/// `RESOURCE_EXHAUSTED`, so a client retrying `UNAVAILABLE` without delay adds no load;
+/// `RetryInfo` gives the delay.
 async fn reject_at_capacity(request: Request) -> Response {
     let status = Failure::new(service_failure::Code::ServiceUnavailable)
         .retry_after(AT_CAPACITY_RETRY_AFTER)

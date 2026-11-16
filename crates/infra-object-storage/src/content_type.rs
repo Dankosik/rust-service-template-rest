@@ -1,9 +1,6 @@
-/// Longest content type the client sends; far above any registered media type.
 const MAX_CONTENT_TYPE_BYTES: usize = 1024;
 
-/// A `Content-Type` value stored with the object: visible ASCII, spaces and tabs,
-/// at most 1024 bytes, such as `application/json` or
-/// `application/vnd.example+json;version=1`.
+/// Visible ASCII, spaces and tabs, at most 1024 bytes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContentType(String);
 

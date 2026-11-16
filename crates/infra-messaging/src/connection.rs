@@ -56,8 +56,8 @@ impl NativeConnection {
             .reconnect_delay_callback(move |attempts| reconnect_delay(attempts, random))
             .require_tls(!options.allow_plaintext)
             .event_callback(move |event| {
-                // Close acknowledgement lets the owner retire telemetry.
-                // Submit this final event before publishing completion.
+                // Submit the final event before publishing completion so the owner can retire
+                // telemetry.
                 report_connection_event(&event);
                 if matches!(event, async_nats::Event::Closed) {
                     closed_event_tx.send_replace(true);
@@ -141,7 +141,6 @@ impl NativeConnection {
     }
 }
 
-/// Client options that authenticate with the configured credential source.
 async fn connect_options(
     credentials: Option<&Credentials>,
     deadline: Instant,
@@ -174,9 +173,8 @@ async fn connect_options(
     }
 }
 
-/// Preserve the SDK's immediate attempts and capped backoff while spreading
-/// each later attempt independently. The SDK still owns all retry and sleep.
-/// The spread only shortens a delay, so it never exceeds the SDK's own.
+/// Keeps the SDK's immediate attempts and capped backoff, spreading each later
+/// attempt; the spread only shortens a delay, so it never exceeds the SDK's.
 fn reconnect_delay(attempts: usize, random: &dyn SecureRandom) -> Duration {
     if attempts <= 1 {
         return Duration::ZERO;
@@ -193,15 +191,13 @@ fn reconnect_delay(attempts: usize, random: &dyn SecureRandom) -> Duration {
 }
 
 fn spread_reconnect_delay(base: Duration, sample: Result<u16, GetRandomFailed>) -> Duration {
-    // A failed random sample spreads nothing.
     let spread = sample.map_or(Duration::ZERO, |sample| {
         shared_rules::jitter::share_of_window(base / 10, sample)
     });
     base.saturating_sub(spread)
 }
 
-/// Classifies an unusable credentials source and logs why, without the path
-/// or any of its content.
+/// Logs why a credentials source is unusable, never its path or content.
 fn credentials_failure(error: CredentialsFileError) -> MessagingError {
     let failure = match error {
         CredentialsFileError::Unreadable(_) => {
@@ -219,11 +215,7 @@ fn credentials_failure(error: CredentialsFileError) -> MessagingError {
     failure
 }
 
-/// Classifies a failed first connection and logs which stage refused it.
-///
-/// `Connection` covers name resolution, TLS and the socket alike; the client's
-/// kind is a closed vocabulary that tells them apart. Its source can quote a
-/// server URL and stays out of the log.
+/// The client's error source can quote a server URL, so only its closed kind is logged.
 fn connect_failure(error: &async_nats::ConnectError, budget: Duration) -> MessagingError {
     let (failure, error_type) = match error.kind() {
         ConnectErrorKind::Authentication => (MessagingError::Authentication, "authentication"),
@@ -249,11 +241,8 @@ fn connect_failure(error: &async_nats::ConnectError, budget: Duration) -> Messag
     failure
 }
 
-/// Counts every connection event and logs the ones an operator acts on.
-///
-/// The client reports a slow consumer once per dropped message, so that
-/// event is only counted. Server and client error text is arbitrary and stays
-/// out of the log; `error.type` names the client's closed variant.
+/// The client reports a slow consumer once per dropped message, so it is only
+/// counted. Server and client error text is arbitrary and stays out of the log.
 fn report_connection_event(event: &async_nats::Event) {
     use async_nats::{ClientError, Event, ServerError};
 

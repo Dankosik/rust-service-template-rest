@@ -19,8 +19,6 @@ mod admission;
 
 pub(crate) use admission::Shed;
 
-/// Operator limits of the listener and its business calls, from the `grpc`
-/// configuration section.
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
     /// Upper bound for a business call's time to response headers,
@@ -41,20 +39,6 @@ pub struct Limits {
     pub max_connection_age: Option<Duration>,
 }
 
-/// Serves registered services and standard health behind the gRPC middleware
-/// chain. Health is public. A business call passes, outside in: observation,
-/// the opening budget, admission of its opening, the authentication and
-/// caller admission this build compiles in, and the business concurrency
-/// limit.
-// template:begin service-auth:grpc-router-caller-rule-errors-doc
-/// Returns [`Error::MissingCallerRule`] when a caller table is incomplete.
-// template:end service-auth:grpc-router-caller-rule-errors-doc
-// template:begin authn:grpc-router-unauthenticated-doc
-/// Returns [`Error::UnauthenticatedBusinessCalls`] when `verifier` is `None`
-/// and no service-token verifier replaces it, and
-/// [`Error::ScopesWithServiceTokens`] when a scope requirement is declared
-/// while service tokens replace bearer authentication.
-// template:end authn:grpc-router-unauthenticated-doc
 pub fn router(
     mut services: Services,
     readiness: ::health::ReadinessReader,
@@ -67,9 +51,6 @@ pub fn router(
         services.attach_reflection()?;
     }
     services.learn(tonic_health::pb::FILE_DESCRIPTOR_SET)?;
-    // The placeholder for a build without the service-auth region, which
-    // replaces it below; `allow`, not `expect`, because only some profile
-    // combinations leave it unread.
     #[allow(
         unused_variables,
         reason = "bearer authentication alone reads it; service tokens replace it"
@@ -93,8 +74,8 @@ pub fn router(
         ));
     }
     // template:begin service-auth:grpc-router-admit-callers
-    // Inside bearer authentication. Without a service-token verifier,
-    // admission only removes `Authorization` before the handler.
+    // Inside bearer authentication; without a service-token verifier it only
+    // strips `Authorization` before the handler.
     let business = business.layer(axum::middleware::from_fn_with_state(
         admission,
         crate::service_auth::admit_caller,
@@ -136,8 +117,6 @@ pub fn router(
     ))
 }
 
-/// Listener options for the gRPC port: the operator's connection bounds and
-/// the fixed head limits.
 #[must_use]
 pub fn server_options(limits: Limits) -> infra_http::ServerOptions {
     infra_http::ServerOptions {
@@ -148,7 +127,6 @@ pub fn server_options(limits: Limits) -> infra_http::ServerOptions {
     }
 }
 
-/// Adds health the way tonic `Routes` adds a service: one `/{NAME}/{*rest}` route.
 fn with_health(
     router: axum::Router,
     readiness: ::health::ReadinessReader,
@@ -167,11 +145,9 @@ fn with_health(
     )))
 }
 
-/// Caller-owned lifetime for work continuing after the response headers: the
-/// caller's own `grpc-timeout` and the call's cancellation, without the
-/// server's opening cap. A handler reads it from the request extensions. It
-/// is a separate type so it never collides with the opening
-/// [`OperationContext`](operation_context::OperationContext) extension.
+/// Caller-owned lifetime after the response headers (caller `grpc-timeout`, no
+/// server cap). A separate type so it never collides with the opening
+/// `OperationContext` extension.
 #[derive(Clone, Debug)]
 pub struct ResponseContext(operation_context::OperationContext);
 
@@ -186,9 +162,8 @@ impl ResponseContext {
     }
 }
 
-/// Bounds opening from before authentication while preserving a separate
-/// caller lifetime. Once the opening context stops, that stop wins over any
-/// result produced after it, so every later layer checks it again.
+/// Once the opening context stops, that stop wins over any later result, so
+/// every later layer checks it again.
 async fn opening(
     State(cap): State<Option<Duration>>,
     mut request: Request,
@@ -225,24 +200,18 @@ async fn opening(
     response
 }
 
-/// The opening context the [`opening`] layer puts on every business call
-/// before any layer inside it runs; `None` only if that layer is missing.
 pub(crate) fn opening_context(request: &Request) -> Option<&operation_context::OperationContext> {
     request
         .extensions()
         .get::<operation_context::OperationContext>()
 }
 
-/// Longest wait for the rest of a rejected call's request body.
 const REJECT_DRAIN: Duration = Duration::from_millis(100);
-/// Stop draining after the frame that takes the total past this many bytes.
 const REJECT_DRAIN_BYTES: usize = 64 * 1024;
 
-/// Answers a call rejected before its handler, after reading the rest of its
-/// request body within a small bound. A caller sends its request DATA after
-/// the headers, so an immediate answer closes the stream while that DATA is
-/// in flight; h2 answers the late DATA with a stream reset, and after 1024
-/// such resets on one connection closes it, with every other call on it.
+/// Drains the rest of the request body first: answering at once closes the
+/// stream while DATA is in flight, h2 resets it, and after 1024 such resets
+/// closes the connection with every other call on it.
 #[allow(
     dead_code,
     reason = "only the optional bearer and service authentication profiles use the full drain"
@@ -280,7 +249,6 @@ mod tests {
 
         let frames = Arc::new(AtomicUsize::new(0));
         let polled = Arc::clone(&frames);
-        // Ten 16 KiB frames: the fifth takes the read past 64 KiB.
         let body = futures_util::stream::iter(0..10).map(move |_| {
             polled.fetch_add(1, Ordering::SeqCst);
             Ok::<_, Infallible>(Bytes::from(vec![0_u8; 16 * 1024]))

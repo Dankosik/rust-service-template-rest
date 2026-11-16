@@ -25,13 +25,12 @@ use opentelemetry_semantic_conventions::attribute;
 use parking_lot::Mutex;
 use secrecy::{ExposeSecret, SecretString};
 
-/// Counter: spans in batches whose SDK exporter returned success or failure.
-/// `error_type` is finite. Success does not prove receiver acceptance or delivery;
-/// SDK queue loss and reported rejection have separate observed metrics.
+/// Success does not prove receiver acceptance; SDK queue loss and reported
+/// rejection have separate metrics.
 pub(crate) const TRACE_SPANS_EXPORTED_METRIC: &str = "otel_sdk_exporter_span_exported_total";
 
-/// Gauge: 1 when the OTLP trace exporter was configured and initialized at
-/// startup, 0 otherwise. A startup-configuration signal, not delivery health.
+/// 1 when the OTLP trace exporter initialized at startup, 0 otherwise; not
+/// delivery health.
 pub(crate) const TRACE_EXPORTER_ACTIVE_METRIC: &str = "service_startup_trace_exporter_active";
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -72,8 +71,7 @@ impl EndpointSource {
     }
 }
 
-/// How the exporter ended up after startup. A startup-configuration signal,
-/// not continuous delivery health.
+/// A startup-configuration signal, not continuous delivery health.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExporterState {
     Initialized {
@@ -155,12 +153,9 @@ const SPAN_QUEUE_CAPACITY: usize = 16_384;
 /// Not extra flush time.
 pub const SHUTDOWN_JOIN_SLACK: Duration = Duration::from_millis(500);
 
-/// Call before the subscriber is installed so the returned handle can feed
-/// the OpenTelemetry layer. The global tracer provider keeps a clone of the
-/// SDK provider.
-///
-/// Exporter build failures do not error; they degrade and are reported in the
-/// handle.
+/// Call before the subscriber is installed so the handle can feed the
+/// OpenTelemetry layer. Exporter build failures degrade and are reported in
+/// the handle.
 pub fn install_tracer_provider(
     options: &TracingOptions,
 ) -> Result<TracerProviderHandle, TracingError> {
@@ -244,14 +239,11 @@ impl TracerProviderHandle {
         self.provider.tracer(INSTRUMENTATION_SCOPE)
     }
 
-    /// Stop the provider off the async workers within the caller's deadline.
-    ///
     /// The SDK receives the time left when its blocking job starts, minus
-    /// [`SHUTDOWN_JOIN_SLACK`]. The SDK's `shutdown_with_timeout` blocks, so it
-    /// always runs on a blocking thread. An exhausted allowance skips the wait
-    /// but still submits that call with a zero budget, so the shared span
-    /// processors are told to stop; its unconfirmed completion is reported
-    /// without extending the deadline.
+    /// [`SHUTDOWN_JOIN_SLACK`]. An exhausted allowance skips the wait but still
+    /// submits the call with a zero budget, so the shared span processors are
+    /// told to stop; unconfirmed completion is reported without extending the
+    /// deadline.
     pub async fn shutdown(self, deadline: tokio::time::Instant) -> ProviderShutdown {
         self.shutdown_with_budget(Duration::MAX, deadline).await
     }
@@ -301,7 +293,6 @@ impl TracerProviderHandle {
     }
 }
 
-/// Outcome of [`TracerProviderHandle::shutdown`], not a delivery receipt.
 #[must_use]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProviderShutdown {
@@ -388,10 +379,9 @@ pub(crate) fn describe_metrics() {
     );
 }
 
-/// The batch processor's exporter: counts the spans of every finished export
-/// under [`TRACE_SPANS_EXPORTED_METRIC`], classified by the SDK exporter
-/// result, and latches the drain's failures into [`ProviderShutdownReasons`].
-/// These counts do not establish collector acceptance or persistence.
+/// Counts the spans of every finished export under
+/// [`TRACE_SPANS_EXPORTED_METRIC`] and latches the drain's failures into
+/// [`ProviderShutdownReasons`].
 #[derive(Debug)]
 struct ObservedExporter<E> {
     inner: E,

@@ -106,7 +106,6 @@ bitflags::bitflags! {
 
 const _: () = assert!(LoggerShutdownReasons::all().bits() & DRAINING == 0);
 
-/// A local writer result; completion makes no remote-delivery claim.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LoggerShutdown {
     Completed(LogSnapshot),
@@ -215,8 +214,7 @@ impl Output {
     }
 }
 
-/// Owns local output through explicit deadline-bounded shutdown.
-/// Dropping this guard closes admission and detaches without waiting or doing I/O.
+/// Dropping the guard closes admission and detaches without waiting or I/O.
 #[derive(Debug)]
 #[must_use = "retain the logger guard and explicitly shut it down before process exit"]
 pub struct LoggerGuard {
@@ -226,7 +224,6 @@ pub struct LoggerGuard {
 }
 
 impl LoggerGuard {
-    /// Marks the start of final-drain observation without closing admission.
     /// Repeated calls retain the original marker and all latched failures.
     pub fn begin_shutdown(&self) {
         self.shared.drain.fetch_or(DRAINING, Ordering::Relaxed);
@@ -237,8 +234,7 @@ impl LoggerGuard {
         self.shared.counters.snapshot()
     }
 
-    /// Closes admission and waits only within the absolute deadline.
-    /// Requires no async runtime and performs no sink I/O on the caller thread.
+    /// Needs no async runtime and does no sink I/O on the caller thread.
     #[must_use]
     pub fn shutdown(mut self, deadline: Instant) -> LoggerShutdown {
         self.begin_shutdown();
@@ -302,7 +298,6 @@ impl LoggerGuard {
 impl Drop for LoggerGuard {
     fn drop(&mut self) {
         self.shared.close();
-        // Dropping a JoinHandle detaches; it never invokes a second wait.
         drop(self.worker.take());
     }
 }

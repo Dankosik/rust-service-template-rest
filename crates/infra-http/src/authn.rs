@@ -15,8 +15,6 @@ use crate::contract::{Access, FinalizeError, Policy, layer_routes};
 pub use crate::problem::responses::GatewayTimeout;
 use crate::problem::{Code, Problem, sanitized_internal_error};
 
-/// A principal verified by the final authentication layer.
-///
 /// The wrapped principal is private, so handlers can inspect only identity
 /// values the selected verifier accepted. The extractor never parses an
 /// inbound header and cannot manufacture an anonymous identity.
@@ -48,7 +46,6 @@ impl VerifiedPrincipal {
         self.0.scopes()
     }
 
-    /// Deserialize application claims from the same accepted verification evidence.
     pub fn claims<T: serde::de::DeserializeOwned>(
         &self,
     ) -> Result<T, infra_bearerauthn::ClaimAccessError> {
@@ -91,9 +88,6 @@ where
     }
 }
 
-/// Consume an assembled contract, validate its effective security policy, and
-/// apply the single outer authentication layer to every real endpoint.
-///
 /// A real endpoint absent from the document remains a served, sanitized 500
 /// rather than a silent bypass.
 pub fn finalize<S>(

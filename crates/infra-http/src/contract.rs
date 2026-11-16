@@ -16,16 +16,12 @@ use crate::probes::{is_health_probe_operation, is_health_probe_route};
 use crate::problem::SANITIZED_DETAIL;
 use crate::problem::sanitized_internal_error;
 
-/// A closed finalization error naming the first operation that failed; no
-/// partially served contract is returned.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum FinalizeError {
-    /// A protected operation requires enabled authentication.
     #[error(
         "HTTP contract finalization failed: {method} {path} is protected and requires enabled authentication"
     )]
     ProtectedOperation { path: String, method: String },
-    /// An operation's effective security policy is unsupported or ambiguous.
     #[error(
         "HTTP contract finalization failed: {method} {path} has an unsupported or ambiguous effective security policy ({fault})"
     )]
@@ -43,8 +39,6 @@ pub enum FinalizeError {
     ReservedProbeRoute { path: String, method: String },
 }
 
-/// Finalize a document whose operations are all public.
-///
 /// A served route the document does not describe is not opened: it answers a
 /// sanitized 500 at request time.
 pub fn finalize_public<S>(contract: OpenApiRouter<S>) -> Result<Router<S>, FinalizeError>
@@ -92,7 +86,6 @@ pub(crate) enum Access {
     ),
 }
 
-/// One operation's access, after refusing a reserved probe template.
 fn compile_operation(
     document: &OpenApi,
     path: &str,
@@ -245,7 +238,6 @@ async fn enforce_public(State(policy): State<Policy>, request: Request, next: Ne
     }
 }
 
-/// Normalize a finalized router mounted beneath an outer axum nest.
 pub(crate) fn contract_path(extensions: &axum::http::Extensions) -> Option<&str> {
     let matched = extensions.get::<axum::extract::MatchedPath>()?.as_str();
     let inner = extensions
@@ -257,7 +249,6 @@ pub(crate) fn contract_path(extensions: &axum::http::Extensions) -> Option<&str>
     Some(inner)
 }
 
-/// The one security scheme name a requirement may use.
 const BEARER_SCHEME: &str = "bearerAuth";
 
 #[derive(Clone, Copy, Debug)]
@@ -278,11 +269,8 @@ impl PolicyFault {
 }
 
 impl Access {
-    /// An operation's effective security. A requirement object must have
-    /// exactly one `bearerAuth` key, whose scope list may be empty; any other
-    /// scheme, an anonymous `{}`, or a multi-key (AND-of-schemes) requirement
-    /// is unsupported and fails finalization instead of silently narrowing
-    /// access.
+    /// Any scheme other than one `bearerAuth` key, an anonymous `{}`, or an
+    /// AND-of-schemes requirement fails finalization instead of silently narrowing access.
     fn from_operation(document: &OpenApi, operation: &Operation) -> Result<Self, PolicyFault> {
         let security = operation.security.as_ref().or(document.security.as_ref());
         let Some(requirements) = security.filter(|requirements| !requirements.is_empty()) else {

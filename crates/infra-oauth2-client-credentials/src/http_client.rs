@@ -19,10 +19,7 @@ pub struct AuthenticatedClient {
 }
 
 impl Credentials {
-    /// Binds this credential owner to an HTTP resource client. Requests carry
-    /// the service token, or one exchanged for an attached [`crate::OnBehalfOf`]; see
-    /// [`AuthenticatedClient::execute`] and
-    /// [`AuthenticatedClient::require_on_behalf_of`].
+    /// Requests carry the service token, or one exchanged for an attached [`crate::OnBehalfOf`].
     #[must_use]
     pub fn http(&self, resource: Client) -> AuthenticatedClient {
         AuthenticatedClient {
@@ -34,22 +31,16 @@ impl Credentials {
 }
 
 impl AuthenticatedClient {
-    /// Refuses a request without [`crate::OnBehalfOf`] instead of sending the service
-    /// token. See [`crate::OnBehalfOf`] for when a binding requires a subject.
+    /// Refuses a request without [`crate::OnBehalfOf`] instead of sending the service token.
     #[must_use]
     pub fn require_on_behalf_of(mut self) -> Self {
         self.subject_required = true;
         self
     }
 
-    /// Acquires credentials, injects Bearer, and spends the original deadline.
-    /// A request carrying [`crate::OnBehalfOf`] in its extensions is sent with a
-    /// token exchanged for that subject instead of the service token; the
-    /// extension is always removed before dispatch. Responses are never
-    /// replayed. A token that expired during request preparation is refused
-    /// before dispatch, and on receiving a 401 status, the client stops reusing
-    /// the token it used if the token is at least 30 seconds old, even if
-    /// reading the response body fails.
+    /// The [`crate::OnBehalfOf`] extension is always removed before dispatch. Responses are
+    /// never replayed. A token that expired during preparation is refused before dispatch; a 401
+    /// stops reuse of the token if it is 30 seconds old, even if reading the body fails.
     pub async fn execute(
         &self,
         request: Request<Bytes>,

@@ -40,9 +40,8 @@ pub use self::provider::Provider;
 pub use self::put_body::PutBody;
 use self::response_limit::ResponseLimit;
 
-/// A transfer with no progress for this long fails; the pinned behavior
-/// version's default, stated because an explicit config would otherwise
-/// take the builder's 20 s.
+/// The pinned behavior version's default, stated because an explicit config
+/// would otherwise take the builder's 20 s.
 const STALL_GRACE: Duration = Duration::from_secs(5);
 const PRESIGN_MIN: Duration = Duration::from_secs(1);
 /// The `SigV4` limit, and R2's; Railway would allow 90 days.
@@ -51,15 +50,13 @@ const PRESIGN_MAX: Duration = Duration::from_hours(7 * 24);
 /// [`Debug`] prints the provider name and limits only.
 pub struct ObjectStorageOptions {
     pub provider: Provider,
-    /// The S3 bucket name (on Railway the hashed `BUCKET`, not the display name).
+    /// On Railway the hashed `BUCKET`, not the display name.
     pub bucket: String,
     pub credentials: CredentialSource,
     pub max_object_bytes: u64,
-    /// Operations admitted at once; the excess is refused with
-    /// [`ObjectStorageError::Busy`]. A download holds its slot until it ends,
-    /// is dropped, or its operation stops.
+    /// The excess is refused with [`ObjectStorageError::Busy`]. A download holds its
+    /// slot until it ends, is dropped, or its operation stops.
     pub max_concurrency: usize,
-    /// Bound for the complete operation, including preparation, retries and body.
     pub operation_timeout: Duration,
 }
 
@@ -75,7 +72,7 @@ impl std::fmt::Debug for ObjectStorageOptions {
     }
 }
 
-/// Cheap to clone; clones share admission.
+/// Clones share admission.
 #[derive(Clone)]
 pub struct ObjectStorage {
     inner: Arc<Inner>,
@@ -117,10 +114,8 @@ impl PutOptions {
         self
     }
 
-    /// Fail with [`ObjectStorageError::AlreadyExists`] instead of replacing an
-    /// existing object (`If-None-Match: *`). The put makes exactly one
-    /// attempt, so `AlreadyExists` never answers a retry of this call's own
-    /// lost success.
+    /// Sets `If-None-Match: *`. The put makes one attempt, so `AlreadyExists` never
+    /// answers a retry of this call's own lost success.
     #[must_use]
     pub fn create_only(mut self) -> Self {
         self.create_only = true;
@@ -131,14 +126,11 @@ impl PutOptions {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ObjectMetadata {
     pub size: u64,
-    /// The stored `Content-Type` value as the provider returned it; not
-    /// validated as a [`ContentType`].
+    /// As the provider returned it; not validated as a [`ContentType`].
     pub content_type: Option<String>,
-    /// The provider's `Last-Modified` time; `None` when it sent none or the
-    /// value is not representable as a `SystemTime`.
+    /// `None` when absent or not representable as a `SystemTime`.
     pub last_modified: Option<SystemTime>,
-    /// The raw `ETag` header value: quote characters and any `-N` part suffix
-    /// are kept; it is not a content digest.
+    /// Raw header value, quotes and any `-N` part suffix kept; not a content digest.
     pub e_tag: Option<String>,
 }
 
@@ -161,8 +153,7 @@ impl ObjectMetadata {
     }
 }
 
-/// A presigned GET URL. It is a bearer credential until it expires: hand it
-/// only to its intended recipient and never log it. [`Debug`] redacts it.
+/// A bearer credential until it expires: never log it. [`Debug`] redacts it.
 #[derive(Clone, derive_more::Debug)]
 #[debug("PresignedUrl([REDACTED])")]
 pub struct PresignedUrl(String);
@@ -175,12 +166,9 @@ impl PresignedUrl {
 }
 
 impl ObjectStorage {
-    /// Performs no I/O. The SDK config is built directly, so no ambient
-    /// `AWS_*` variable, profile file, or proxy variable can change the
-    /// endpoint, region, retries, or checksum behavior. Credentials come from
-    /// [`CredentialSource`] alone: an access key pair, or for
-    /// [`CredentialSource::WorkloadIdentity`] the variables and endpoints the
-    /// platform provides for that identity.
+    /// Performs no I/O. The SDK config is built directly so no ambient `AWS_*`
+    /// variable, profile file, or proxy variable can change endpoint, region,
+    /// retries, or checksum behavior; credentials come from [`CredentialSource`] alone.
     pub fn try_new(options: ObjectStorageOptions) -> Result<Self, ConfigError> {
         let admitted = provider::admit(&options.provider, &options.bucket)?;
         // None would refuse every call as `Busy`; more would panic the semaphore.
@@ -208,8 +196,7 @@ impl ObjectStorage {
             max_concurrency,
             operation_timeout,
         } = options;
-        // Every operation overrides these per call; only the bucket probe
-        // runs on the client defaults.
+        // Every operation overrides these per call; only the bucket probe uses client defaults.
         let (timeout, retry) = call_policy(Call::Read, operation_timeout, operation_timeout);
         let mut config = aws_sdk_s3::Config::builder()
             .behavior_version(BehaviorVersion::v2026_01_12())
@@ -218,8 +205,7 @@ impl ObjectStorage {
             .http_client(http_client)
             .interceptor(ResponseLimit::ErrorBody)
             .force_path_style(admitted.path_style)
-            // Send and validate only what a provider has proven; uploads
-            // name CRC64NVME where it is accepted (see `UploadChecksum`).
+            // Send and validate only what a provider has proven; see `UploadChecksum`.
             .request_checksum_calculation(RequestChecksumCalculation::WhenRequired)
             .response_checksum_validation(ResponseChecksumValidation::WhenRequired)
             .retry_config(retry)
@@ -254,8 +240,6 @@ impl ObjectStorage {
         self.inner.provider_name
     }
 
-    /// Store an object, replacing any existing one unless
-    /// [`PutOptions::create_only`] is set.
     pub async fn put(
         &self,
         key: &ObjectKey,
@@ -266,13 +250,9 @@ impl ObjectStorage {
             .await
     }
 
-    /// Store within the caller's original remaining budget and this client's
-    /// existing ceiling. A stop before the first request poll maps to
-    /// `Unavailable`, whereas a stop interrupting an already-polled request maps
-    /// to `OutcomeUnknown` without granting replay authority. A known provider
-    /// answer from a live SDK poll remains internally final when that poll
-    /// crosses the cooperative cutoff; the outer caller remains responsible for
-    /// its own terminal deadline.
+    /// A stop before the first request poll maps to `Unavailable`; a stop interrupting
+    /// a polled request maps to `OutcomeUnknown` without replay authority. A provider
+    /// answer from a live poll stays final if that poll crosses the cutoff.
     pub async fn put_with_context(
         &self,
         key: &ObjectKey,
@@ -299,9 +279,8 @@ impl ObjectStorage {
         } else {
             (Call::UnconditionalMutation, None)
         };
-        // Under the client's `WhenRequired` the SDK sends the named
-        // algorithm but computes no checksum value. An upload that carries
-        // CRC64NVME therefore switches this one call to `WhenSupported`.
+        // Under `WhenRequired` the SDK sends the named algorithm but computes no value,
+        // so an upload carrying CRC64NVME switches this call to `WhenSupported`.
         let mut call_config = self.operation_config(&context, call);
         if checksum.is_some() {
             call_config =
@@ -332,9 +311,8 @@ impl ObjectStorage {
                 guard.succeed();
                 Ok(())
             }
-            // The body broke its declared length: report refused input
-            // (`Rejected`), not the transport error or unknown outcome it
-            // caused; see [`PutBody::stream`].
+            // A body that broke its declared length is `Rejected`, not the transport error
+            // or unknown outcome it caused; see [`PutBody::stream`].
             Ok(Err(_)) | Err(_) if body.source.mismatched() => {
                 Err(guard.fail(&LocalFailure::UploadLengthMismatch.into()))
             }
@@ -343,18 +321,14 @@ impl ObjectStorage {
         }
     }
 
-    /// Start a download. The returned [`Download`] holds its admission slot
-    /// through confirmed EOF/integrity, failure, drop, cancellation, or its
-    /// original operation cutoff; an unpolled retained download releases its
-    /// adapter-owned body, permit, and observation at that cutoff.
+    /// The [`Download`] holds its slot through confirmed EOF/integrity, failure,
+    /// drop, cancellation, or the original operation cutoff.
     pub async fn get(&self, key: &ObjectKey) -> Result<Download, ObjectStorageError> {
         self.get_with_context(key, &OperationContext::unbounded())
             .await
     }
 
-    /// Start a download within the caller's original remaining budget. A
-    /// stopped context maps to `Unavailable` and cannot yield a newly obtained
-    /// body chunk or successful EOF.
+    /// A stopped context maps to `Unavailable` and cannot yield a new chunk or EOF.
     pub async fn get_with_context(
         &self,
         key: &ObjectKey,
@@ -363,7 +337,7 @@ impl ObjectStorage {
         let call = Call::Read;
         let (context, mut guard) = self.begin(parent, Operation::Get)?;
         let permit = self.admit(&mut guard)?;
-        // Keep the SDK's large send future off every GET caller's stack.
+        // Keeps the SDK's large send future off every GET caller's stack.
         let request = Box::pin(
             self.inner
                 .client
@@ -380,11 +354,9 @@ impl ObjectStorage {
             .await
             .map_err(|interrupted| interrupted.fail(&mut guard, call))?;
         guard.answered_by(&result);
-        // Unlike mutation finality, a still-open GET rejects a late header
-        // response before it can transfer body custody.
+        // Unlike mutation finality, a still-open GET rejects a late header response.
         Self::check(&context, &mut guard)?;
-        // Compute header decisions before committing their mapping, so a
-        // stopped context takes precedence over preparation that finishes late.
+        // Map after the check so a stopped context beats preparation that finishes late.
         let output = match result {
             Ok(output) => output,
             Err(sdk_error) => {
@@ -397,26 +369,23 @@ impl ObjectStorage {
         Self::check(&context, &mut guard)?;
         let metadata = metadata.map_err(|failure| guard.fail(&failure))?;
         let mut download = Download::open(metadata, output.body, guard, permit, context);
-        // hyper never polls a response body declared empty, so nothing would
-        // observe an empty object's end: read it here, which records the
-        // outcome and releases the slot.
+        // hyper never polls a body declared empty, so read it here to record the outcome
+        // and release the slot.
         if download.metadata().size == 0 {
             download.next_chunk().await?;
         }
         Ok(download)
     }
 
-    /// Read an object's metadata. The size is reported even above
-    /// `max_object_bytes`; only reading the body is bounded. On a provider
-    /// whose `HEAD` reply carries no error body (Amazon S3 among them), a
-    /// missing bucket also maps to [`ObjectStorageError::NotFound`].
+    /// The size is reported even above `max_object_bytes`; only reading the body is
+    /// bounded. Where `HEAD` carries no error body (Amazon S3), a missing bucket
+    /// also maps to [`ObjectStorageError::NotFound`].
     pub async fn head(&self, key: &ObjectKey) -> Result<ObjectMetadata, ObjectStorageError> {
         self.head_with_context(key, &OperationContext::unbounded())
             .await
     }
 
-    /// Read metadata within the caller's original remaining budget and local
-    /// ceiling. A stopped context maps to `Unavailable` before dispatch.
+    /// A stopped context maps to `Unavailable` before dispatch.
     pub async fn head_with_context(
         &self,
         key: &ObjectKey,
@@ -454,17 +423,15 @@ impl ObjectStorage {
         Ok(metadata)
     }
 
-    /// Delete an object. A missing key is success, as in S3.
+    /// A missing key is success, as in S3.
     pub async fn delete(&self, key: &ObjectKey) -> Result<(), ObjectStorageError> {
         self.delete_with_context(key, &OperationContext::unbounded())
             .await
     }
 
-    /// Delete within the caller's original remaining budget and local ceiling.
-    /// A stop before the first request poll maps to `Unavailable`, whereas a
-    /// stop interrupting an already-polled request maps to `OutcomeUnknown`
-    /// without granting replay authority. A definitive provider answer from a
-    /// poll that began live still applies if that poll crosses the cutoff.
+    /// A stop before the first request poll maps to `Unavailable`; a stop interrupting
+    /// a polled request maps to `OutcomeUnknown` without replay authority. A definitive
+    /// answer from a poll that began live still applies if it crosses the cutoff.
     pub async fn delete_with_context(
         &self,
         key: &ObjectKey,
@@ -493,13 +460,10 @@ impl ObjectStorage {
         Ok(())
     }
 
-    /// Presign a GET for `expires_in`, between 1 second and 7 days. This is a
-    /// local signature: nothing is sent to the store, and no admission slot
-    /// is used. Under [`CredentialSource::WorkloadIdentity`] it may first
-    /// load the credentials, and the URL stops working when those temporary
-    /// credentials expire, which may be before `expires_in`. The URL works
-    /// without extra headers, so it carries no expected bucket owner even on
-    /// Amazon S3.
+    /// Local signature: nothing is sent and no admission slot is used. Under
+    /// [`CredentialSource::WorkloadIdentity`] the URL stops working when the
+    /// temporary credentials expire, possibly before `expires_in`. It carries no
+    /// expected bucket owner, even on Amazon S3, because it must work without headers.
     pub async fn presign_get(
         &self,
         key: &ObjectKey,
@@ -509,8 +473,7 @@ impl ObjectStorage {
             .await
     }
 
-    /// Sign within the caller's budget. URL expiry remains an independent
-    /// bearer-credential lifetime.
+    /// URL expiry is an independent bearer-credential lifetime.
     pub async fn presign_get_with_context(
         &self,
         key: &ObjectKey,
@@ -522,8 +485,7 @@ impl ObjectStorage {
         if !(PRESIGN_MIN..=PRESIGN_MAX).contains(&expires_in) {
             return Err(guard.fail(&LocalFailure::PresignExpiry.into()));
         }
-        // `PRESIGN_MAX` is the SDK's one-week signing limit; the conversion is
-        // a backstop for that limit, not a second input decision.
+        // `PRESIGN_MAX` is the SDK's signing limit; this conversion is a backstop.
         let config = PresigningConfig::expires_in(expires_in)
             .map_err(|_| guard.fail(&LocalFailure::PresignExpiry.into()))?;
         let request = self
@@ -540,9 +502,8 @@ impl ObjectStorage {
             .map_err(|interrupted| interrupted.fail(&mut guard, call))?;
         Self::check(&context, &mut guard)?;
         match result {
-            // The URL must work alone. The SDK signs headers as headers, not
-            // query parameters, so a header here (such as the expected bucket
-            // owner, which is therefore not sent) would have to accompany it.
+            // The URL must work alone: the SDK signs headers as headers, so one here (such
+            // as the expected bucket owner, hence not sent) would have to accompany it.
             Ok(request) if request.headers().next().is_some() => {
                 Err(guard.fail(&LocalFailure::PresignedHeaders.into()))
             }
@@ -580,8 +541,7 @@ impl ObjectStorage {
             .map_err(|_| guard.fail(&LocalFailure::Busy.into()))
     }
 
-    /// Fix the complete operation cutoff before admission, preparation, or
-    /// SDK construction. Every later stage spends this same child context.
+    /// Every later stage spends this same child context.
     fn begin(
         &self,
         parent: &OperationContext,
@@ -615,8 +575,8 @@ impl ObjectStorage {
     }
 }
 
-/// The stored size a get may stream, refused in this order: a range
-/// response, a missing or negative size, then a size over `max_object_bytes`.
+/// Refuses, in order: a range response, a missing or negative size, then a size
+/// over `max_object_bytes`.
 fn download_metadata(
     output: &GetObjectOutput,
     max_object_bytes: u64,
@@ -636,9 +596,8 @@ fn download_metadata(
     Ok(metadata)
 }
 
-/// rustls with aws-lc-rs. An explicit client reads no proxy variable (the
-/// pinned behavior version's default client would), and hyper follows no
-/// redirect, so a signed request reaches only its origin.
+/// An explicit client reads no proxy variable (the default would) and hyper
+/// follows no redirect, so a signed request reaches only its origin.
 fn https_client() -> SharedHttpClient {
     aws_smithy_http_client::Builder::new()
         .tls_provider(tls::Provider::Rustls(
@@ -647,9 +606,8 @@ fn https_client() -> SharedHttpClient {
         .build_https()
 }
 
-/// `HeadBucket` probe named `object_storage`. Failure text carries only the
-/// bounded error type. The probe bypasses the object-operation semaphore.
-/// It runs on the client's read policy with the full `operation_timeout`.
+/// Failure text carries only the bounded error type. Bypasses the object-operation
+/// semaphore and uses the read policy with the full `operation_timeout`.
 #[derive(Clone, Debug)]
 pub struct BucketProbe {
     storage: ObjectStorage,

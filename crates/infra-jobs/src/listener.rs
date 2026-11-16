@@ -10,9 +10,6 @@ use crate::engine::{Operation, POLL_INTERVAL, Shared, observe_failure, observe_r
 /// Leave room in the worker's background join budget for the other tasks.
 const LISTENER_CLOSE_BUDGET: Duration = Duration::from_secs(1);
 
-/// Wake the claim loop of every engine in this process that registers the
-/// kind of a due job enqueue committed.
-///
 /// The listener holds one connection of its own, outside the engine pool,
 /// opened with the pool's connect options. Polling stays the recovery path:
 /// a lost connection or notification only delays a claim until the next tick.
@@ -37,10 +34,9 @@ fn listener_pool(engine_pool: &PgPool) -> PgPool {
         .connect_lazy_with(engine_pool.connect_options().as_ref().clone())
 }
 
-/// Give the listener's pool the engine pool's current connect options before
-/// it opens a connection. The engine pool is the one a rotated password
-/// reaches (`infra_postgres::refresh_password_periodically`); the options
-/// copied when the listener started would be refused after a rotation.
+/// The engine pool is the one a rotated password reaches
+/// (`infra_postgres::refresh_password_periodically`); options copied when the
+/// listener started would be refused after a rotation.
 fn follow_connect_options(engine_pool: &PgPool, listener_pool: &PgPool) {
     listener_pool.set_connect_options(engine_pool.connect_options().as_ref().clone());
 }
@@ -74,16 +70,14 @@ async fn listen(shared: &Shared, pool: &PgPool) -> ! {
     }
 }
 
-/// The driver reports a closed listener connection as no notification and
-/// keeps the I/O error to itself; this stands in for it so that the loss is
-/// counted and logged like any other listener failure.
+/// The driver reports a closed connection as no notification and keeps the I/O
+/// error to itself; this stands in so the loss is counted and logged.
 fn connection_lost() -> sqlx::Error {
     sqlx::Error::Io(std::io::ErrorKind::ConnectionAborted.into())
 }
 
-/// The listener leaves reconnecting to [`listen`], which first takes the
-/// engine pool's current connect options; the driver's own reconnect would
-/// use the ones this connection was opened with.
+/// Reconnecting is left to [`listen`], which first takes the engine pool's
+/// current connect options; the driver's own reconnect would reuse stale ones.
 async fn subscribe(pool: &PgPool) -> Result<PgListener, sqlx::Error> {
     let mut listener = PgListener::connect_with(pool).await?;
     listener.eager_reconnect(false);

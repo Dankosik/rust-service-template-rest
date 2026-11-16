@@ -293,7 +293,6 @@ fn shutdown(handle: TracerProviderHandle) -> ProviderShutdown {
 }
 
 /// Each request is observed before the test permits its scripted response.
-/// The finite script's thread is joined after the last response.
 #[expect(
     clippy::disallowed_methods,
     reason = "finite collector fixture owns blocking accept and joins its scripted thread"
@@ -324,8 +323,7 @@ fn scripted_collector(
     (Collector { addr, requests }, release, thread)
 }
 
-/// Configure only batch size and timer for deterministic test scheduling;
-/// the real SDK batch processor and exporter wrapper own all completion.
+/// Only batch size and timer are configured, for deterministic scheduling.
 fn batch_handle(exporter: impl SpanExporter + 'static) -> TracerProviderHandle {
     let drain = Arc::default();
     let processor = sdktrace::BatchSpanProcessor::builder(ObservedExporter {

@@ -48,8 +48,6 @@ impl Origin {
         self.scheme == Scheme::HTTPS
     }
 
-    /// Whether `uri` names this origin: the same scheme, no userinfo, the
-    /// host ASCII case-insensitively, and the port, defaulted by scheme.
     fn admits(&self, uri: &Uri) -> bool {
         let default_port = if self.is_https() { 443 } else { 80 };
         uri.scheme() == Some(&self.scheme)
@@ -87,15 +85,11 @@ pub(crate) fn admit_test_http_origin(url: &Url) -> Result<Origin, BuildError> {
     Origin::try_new(url)
 }
 
-/// Admits an absolute request on the configured origin and sets its `Host`.
-/// A caller `Host` header could route the request to another virtual host,
-/// so it is refused. The host compares ASCII case-insensitively with the
-/// origin's serialized host; any other spelling of the same address, such as
-/// a non-canonical IP literal, is refused rather than normalized.
-///
-/// The transport's own request properties are then set, whatever the caller
-/// wrote: the version it speaks and the framing of the buffered body. A
-/// request without `Accept` gets `*/*`, the value reqwest sent.
+/// A caller `Host` could route to another virtual host, so it is refused. The host compares
+/// ASCII case-insensitively with the origin's serialized host; other spellings of one
+/// address, such as a non-canonical IP literal, are refused rather than normalized. The
+/// version and body framing are then set whatever the caller wrote; a missing `Accept` gets
+/// `*/*`, as reqwest sent.
 pub(crate) fn admit_request(
     origin: &Origin,
     mut request: Request<Bytes>,
@@ -114,11 +108,9 @@ pub(crate) fn admit_request(
     Ok(request)
 }
 
-/// States the length of the buffered body. Hyper sends a caller
-/// `Content-Length` as written, so a value other than the body's length would
-/// leave bytes on a pooled connection for the provider to read as the next
-/// request. A request with content, or whose method expects content, carries
-/// its length (RFC 9110 section 8.6); any other carries none.
+/// Hyper sends a caller `Content-Length` as written, so a wrong value would leave bytes on a
+/// pooled connection for the provider to read as the next request. Content, or a method that
+/// expects it, carries its length (RFC 9110 section 8.6); any other carries none.
 fn frame_body(request: &mut Request<Bytes>) {
     let length = request.body().len();
     let expects_content = matches!(

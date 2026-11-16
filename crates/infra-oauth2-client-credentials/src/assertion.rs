@@ -16,8 +16,7 @@ const ASSERTION_BACKDATE_SECS: u64 = 10;
 const ASSERTION_TYP: &str = "client-authentication+jwt";
 const CLIENT_ASSERTION_TYPE: &str = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
 
-/// Builds and signs client assertions. Construction proves the key matches
-/// its algorithm; every subsequent token request signs a fresh one.
+/// Construction proves the key matches its algorithm.
 pub(crate) struct Signer {
     key: jsonwebtoken::EncodingKey,
     header: jsonwebtoken::Header,

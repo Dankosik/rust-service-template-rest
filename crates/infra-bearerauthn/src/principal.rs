@@ -91,7 +91,6 @@ impl Principal {
         self.identity.client_id.as_deref()
     }
 
-    /// The normalized, exact-case scopes from verified token evidence.
     #[must_use]
     pub fn scopes(&self) -> &[String] {
         self.identity.scopes.as_slice()

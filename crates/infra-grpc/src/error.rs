@@ -1,6 +1,4 @@
-/// Closed transport failures. A message may name the registration contract,
-/// a service or a method path the service itself declared, but never request
-/// data, bearer material, a peer path, a certificate, or a key.
+/// Messages never carry request data, bearer material, peer paths, certificates or keys.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum Error {
     #[error("gRPC client destination is not a valid URI")]
@@ -50,8 +48,6 @@ pub enum Error {
     // template:end service-auth:grpc-caller-rule-errors
 }
 
-/// TLS certificate material that cannot be used, the only failure of
-/// [`server_tls_config`](crate::server_tls_config).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum TlsMaterialError {
     #[error("gRPC TLS certificate chain is invalid")]

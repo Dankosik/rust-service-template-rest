@@ -38,10 +38,8 @@ use tracing_subscriber::layer::SubscriberExt as _;
 const TYPE: &str = "example-svc+jwt";
 const ECHO: &str = "/example.v1.EchoService";
 
-/// The caller a handler saw, and whether `authorization` reached it.
 type Seen = (Option<String>, bool);
 
-/// What each handler call saw.
 #[derive(Clone, Default)]
 struct Echo {
     seen: Arc<Mutex<Vec<Seen>>>,
@@ -130,7 +128,6 @@ impl Keys {
         )
     }
 
-    /// A token `key` signs, claiming `issuer`, for `audience`, issued `age` seconds ago.
     fn token(key: &TestKey, issuer: &str, audience: &str, age: u64) -> String {
         let issued_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -226,7 +223,6 @@ fn with_token<T>(message: T, token: Option<&str>) -> Request<T> {
     request
 }
 
-/// The `grpc-status` of a call to `path`, which no generated client names.
 async fn raw_status(address: SocketAddr, path: &str, token: &str) -> String {
     use tower::ServiceExt as _;
 
@@ -313,7 +309,6 @@ async fn a_valid_token_names_its_caller_and_every_contract_breach_is_refused() {
     }
     assert_eq!(echo.seen().len(), 1, "no refused call reached the handler");
 
-    // A method whose rule does not list the caller, and a path without a rule.
     let status = client(address)
         .server_stream(with_token(ServerStreamRequest::default(), Some(&valid)))
         .await
@@ -360,7 +355,6 @@ async fn the_outbound_binding_signs_for_its_receiver_and_refuses_a_caller_author
         assert_eq!(response.into_inner().message, "signed");
     }
     assert_eq!(echo.seen(), vec![(Some("orders".to_owned()), false); 2]);
-    // A handle for another receiver signs a token this receiver refuses.
     let mut elsewhere =
         EchoServiceClient::new(resource().with_service_tokens(source.receiver("billing").unwrap()));
     let status = elsewhere.unary(UnaryRequest::default()).await.unwrap_err();
@@ -370,7 +364,6 @@ async fn the_outbound_binding_signs_for_its_receiver_and_refuses_a_caller_author
         .await
         .unwrap_err();
     assert_eq!(status.code(), Code::Internal);
-    // Without service authentication the handle sends nothing.
     let mut open = EchoServiceClient::new(
         resource().with_service_tokens(TokenSource::disabled().receiver("catalog").unwrap()),
     );
@@ -403,8 +396,6 @@ fn bearer_retained() -> bool {
 #[tokio::test]
 async fn without_a_verifier_bearer_or_nothing_admits_calls_and_no_token_reaches_the_handler() {
     // template:begin authn:grpc-service-auth-test-without-verifier-bearer
-    // With bearer authentication retained, a listener that verifies no
-    // service token needs its bearer verifier.
     let readiness = readiness();
     let refused = infra_grpc::router(
         echo_services(&Echo::default()),
@@ -497,7 +488,6 @@ fn a_router_refuses_to_build_while_a_method_has_no_rule() {
             Err(Error::MissingCallerRule(format!("{ECHO}/ClientStream"))),
             "a declared table must be complete even before tokens are verified"
         );
-        // Reflection, once added, needs its two rules as well.
         let echo = Echo::default();
         let mut services = echo_services(&echo);
         services.add_reflection().unwrap();
@@ -568,7 +558,6 @@ fn caller_rules_name_registered_methods_once_with_valid_callers() {
     );
 }
 
-/// Every event field and span field, and every exported span, as text.
 #[derive(Clone, Default)]
 struct Capture(Arc<Mutex<String>>);
 
@@ -633,7 +622,6 @@ async fn token_text_never_reaches_logs_or_spans_and_the_span_names_the_caller() 
     let spans = exporter.get_finished_spans().unwrap();
     let rendered = format!("{spans:?}");
     for token in [&valid, &foreign] {
-        // Every part of the token, signature included, stays out.
         for part in token.split('.') {
             assert!(!logged.contains(part), "log carries token text: {logged}");
             assert!(

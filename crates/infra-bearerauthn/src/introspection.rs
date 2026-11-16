@@ -373,7 +373,6 @@ mod tests {
 
     const FIXTURE_HOST: &str = "provider.test";
 
-    /// The head has ended and the `content-length` body has arrived.
     fn complete_request(request: &[u8]) -> bool {
         let Some(head_end) = request.array_windows().position(|part| part == b"\r\n\r\n") else {
             return false;
@@ -503,7 +502,6 @@ mod tests {
             *self.response.lock().unwrap() = response;
         }
 
-        /// Every request the provider received, in arrival order.
         fn requests(&self) -> Vec<Vec<u8>> {
             self.requests.lock().unwrap().clone()
         }

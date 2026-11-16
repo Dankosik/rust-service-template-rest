@@ -677,7 +677,6 @@ fn logged_messages(lines: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// Captures complete, uncompressed requests from the production HTTP exporter.
 /// The existing OIDC runtime owns the receiver and its bounded shutdown.
 struct Collector {
     endpoint: String,
@@ -762,7 +761,6 @@ fn attribute<'a>(span: &'a Span, key: &str) -> Option<&'a Value> {
         .as_ref()
 }
 
-/// Raw scan, kept for the checks that a private value appears in no byte.
 fn exported_contains(bodies: &[Vec<u8>], value: &[u8]) -> bool {
     bodies
         .iter()
@@ -890,7 +888,6 @@ fn assert_server_privacy_outputs(
             .any(|event| event.name == "authn_verification_failed")),
         "missing exported authn refusal event"
     );
-    // The actual successful and refused RPCs retain their numeric status.
     for code in [0_i64, 16] {
         assert!(
             unary

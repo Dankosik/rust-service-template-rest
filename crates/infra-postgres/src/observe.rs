@@ -64,9 +64,8 @@ const fn strictly_increasing(buckets: &[f64]) -> bool {
 
 pub(crate) const OPERATION_DURATION_METRIC: &str = "db_client_operation_duration_seconds";
 
-/// OpenTelemetry semantic convention boundaries; the composition root hands
-/// [`HISTOGRAMS`] to the Prometheus recorder, or omitted metrics fall back to
-/// default buckets.
+/// OpenTelemetry semantic convention boundaries; the recorder must be given
+/// [`HISTOGRAMS`], or these metrics fall back to default buckets.
 pub(crate) const OPERATION_DURATION_BUCKETS: &[f64] =
     &[0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0];
 
@@ -103,7 +102,6 @@ pub(crate) fn describe() {
     );
 }
 
-/// Record occupancy and capacity under a stable name unique to this pool in the recorder.
 pub fn record_metrics(pool: &PgPool, pool_name: &'static str) {
     let size = f64::from(pool.size());
     #[expect(
@@ -127,7 +125,6 @@ pub fn record_metrics(pool: &PgPool, pool_name: &'static str) {
         .set(f64::from(pool.options().get_max_connections()));
 }
 
-/// Observe one pool under the same naming contract as [`record_metrics`].
 /// A late tick shifts the schedule instead of bursting to catch up.
 pub async fn record_metrics_periodically(
     pool: PgPool,
@@ -147,8 +144,7 @@ pub async fn record_metrics_periodically(
         .await;
 }
 
-/// This observer owns no timeout, retry or connection cleanup; `budget` only
-/// labels the timeout event.
+/// Owns no timeout, retry or cleanup; `budget` only labels the timeout event.
 pub(crate) async fn acquisition<T>(
     operation: &'static str,
     budget: Duration,
@@ -179,16 +175,11 @@ pub(crate) async fn acquisition<T>(
 
 const CANCELLED: &str = "cancelled";
 
-/// Poll a PostgreSQL operation and record how long it takes to finish or be
-/// dropped. The measurement includes any waits inside the supplied future.
+/// `summary` becomes the `db.query.summary` label and the span name, so it must
+/// come from a bounded set of static values.
 ///
-/// The caller chooses a stable `summary` for the operation. It becomes the
-/// `db.query.summary` metric label and the span name, so it must come from a
-/// bounded set of static values.
-///
-/// The operation gets a client span only inside another span. A background
-/// loop that polls outside any span would otherwise start a one-span trace
-/// per tick. Its operations are still measured.
+/// A client span starts only inside another span, so a background loop polling
+/// outside any span does not start a one-span trace per tick; it is still measured.
 pub async fn observed<T>(
     summary: &'static str,
     statement: impl Future<Output = Result<T, sqlx::Error>>,
@@ -253,8 +244,7 @@ fn record_statement_error(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TransactionOutcome {
     Committed,
-    /// The closure returned `Err`. Dropping the transaction queues rollback
-    /// without waiting for PostgreSQL to acknowledge it.
+    /// The closure returned `Err`; the rollback is queued without waiting for acknowledgement.
     RolledBack,
     AcquireFailed,
     BeginFailed,
@@ -263,10 +253,8 @@ pub(crate) enum TransactionOutcome {
     Cancelled,
 }
 
-// One table feeds both the span label and the histogram so each value has a
-// single spelling. `metrics` keeps a static key only for literal label
-// values; a runtime value allocates the label vector and its retained copy on
-// every transaction.
+// One table feeds the span label and the histogram. `metrics` keeps a static key
+// only for literal label values; a runtime value allocates per transaction.
 macro_rules! transaction_outcomes {
     ($($variant:ident => $label:literal),* $(,)?) => {
         impl TransactionOutcome {
@@ -309,9 +297,7 @@ impl TransactionOutcome {
     }
 }
 
-/// The client span of one transaction. It carries the target the operator
-/// configured and no statement text; the outcome and a bounded `error.type`
-/// are recorded when the transaction ends.
+/// Carries the configured target and no statement text.
 pub(crate) fn transaction_span(pool: &PgPool) -> Span {
     let target = pool.connect_options();
     tracing::info_span!(
@@ -327,8 +313,7 @@ pub(crate) fn transaction_span(pool: &PgPool) -> Span {
     )
 }
 
-/// One transaction being observed. Dropping it records the outcome it holds;
-/// until the boundary sets one, that is `cancelled`.
+/// Dropping it records the held outcome, `cancelled` until the boundary sets one.
 pub(crate) struct TransactionObservation {
     started: Instant,
     span: Span,
@@ -344,8 +329,7 @@ impl TransactionObservation {
         }
     }
 
-    /// Record how long the wait for a connection took, whether or not one
-    /// arrived.
+    /// Recorded whether or not a connection arrived.
     pub(crate) fn waited(&self) {
         metrics::histogram!(
             CONNECTION_WAIT_METRIC,
@@ -358,8 +342,7 @@ impl TransactionObservation {
         self.outcome = outcome;
     }
 
-    /// End with the boundary's own failure: its SQLSTATE when the server
-    /// supplied one, otherwise the driver's failure class.
+    /// SQLSTATE when the server supplied one, otherwise the driver's failure class.
     pub(crate) fn fail(&mut self, error: TxError) -> TxError {
         let source = error.driver();
         match sqlstate(source) {

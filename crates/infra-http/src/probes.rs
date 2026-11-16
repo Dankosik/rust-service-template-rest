@@ -24,10 +24,8 @@ const LIVE_BODY: &str = "ok";
 const READY_BODY: &str = "ok";
 const NOT_READY_BODY: &str = "not ready";
 
-/// The probes as (route template, operation id). A matched `GET` on one is
-/// served without an access-log line unless enabled, and every request to one
-/// skips in-flight admission, so a saturated service still answers its
-/// platform probes.
+/// (route template, operation id). A matched `GET` is served without an
+/// access-log line unless enabled, and every request skips in-flight admission.
 const HEALTH_PROBES: [(&str, &str); 2] = [
     (LIVE_PATH, LIVE_OPERATION_ID),
     (READY_PATH, READY_OPERATION_ID),
@@ -64,12 +62,9 @@ where
 /// `GET /health/live` for the private diagnostics listener.
 ///
 /// The application listener refuses connections over `http.max_connections`
-/// without an answer, the liveness probe's among them, and a platform that
-/// counts those refusals restarts an instance that is full, not dead. The
-/// diagnostics listener has its own connection cap and no caller traffic, so
-/// liveness polled there reports the process alone. Readiness is left out
-/// on purpose: an instance that cannot accept a connection should leave
-/// rotation, so that probe belongs on the listener the traffic uses.
+/// unanswered, so a platform counting those would restart a full instance.
+/// Readiness is left out on purpose: an instance that cannot accept a
+/// connection should leave rotation, so that probe belongs on the traffic listener.
 pub fn liveness_router() -> axum::Router {
     #[expect(
         clippy::disallowed_methods,

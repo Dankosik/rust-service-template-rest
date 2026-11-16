@@ -14,8 +14,6 @@ use super::{KEY_HEADER, REPLAYED_HEADER};
 
 const SUPPORTED_IDEMPOTENCY_METHODS: [&str; 4] = ["POST", "PUT", "PATCH", "DELETE"];
 
-/// A local authoring error on the one route carrier being composed.
-///
 /// Diagnostic details come from route declarations, never request data.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("idempotent route composition is invalid: {subject}: {rule}")]

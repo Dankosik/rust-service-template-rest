@@ -165,13 +165,9 @@ impl Expiry<SubjectKey, Arc<Token>> for ExchangedExpiry {
 }
 
 impl Credentials {
-    /// Returns a live exchanged token for `subject`, exchanging it when the
-    /// cache has none. Concurrent misses for one subject wait on the exchange
-    /// of the first caller, bounded by that caller's `deadline`
-    /// and [`FETCH_TIMEOUT`]. When that caller is dropped or out of budget,
-    /// its exchange is cancelled and a waiting caller starts its own; a
-    /// waiter never fails because of another caller's deadline. Exchanges
-    /// for different subjects run concurrently.
+    /// Concurrent misses for one subject wait on the first caller's exchange, bounded by
+    /// that caller's `deadline` and [`FETCH_TIMEOUT`]. If it is dropped or out of budget,
+    /// a waiter starts its own; a waiter never fails on another caller's deadline.
     pub(crate) async fn exchange(
         &self,
         subject: &SecretString,

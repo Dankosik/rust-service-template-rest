@@ -29,7 +29,6 @@ const RETRY_DELAYS: [Duration; 4] = [
     Duration::from_secs(120),
 ];
 const MAX_DELIVERIES: usize = RETRY_DELAYS.len() + 1;
-/// Redelivery delay after a dead-letter publication fails.
 const SETTLEMENT_RETRY_DELAY: Duration = Duration::from_secs(30);
 const HANDLER_TOTAL: &str = "messaging_handler_total";
 const HANDLER_DURATION_SECONDS: &str = "messaging_handler_duration_seconds";
@@ -60,10 +59,8 @@ struct EventMetrics {
     outcomes: Outcomes<Outcome>,
 }
 
-/// Handler outcome metrics per handled event type, so an operator can tell
-/// which one fails or runs slowly. The label values are the payload types'
-/// constants, a set closed at admission; schema versions of one type share
-/// its label.
+/// Label values are the payload types' constants, closed at admission; schema
+/// versions of one type share its label.
 #[derive(Debug)]
 struct HandlerMetrics {
     registered: foldhash::HashMap<&'static str, EventMetrics>,
@@ -133,8 +130,7 @@ fn settlement(outcome: Outcome, delivery_attempt: usize) -> Settlement {
     }
 }
 
-/// Builds the dead-letter transfer message; `None` when the delivery's
-/// stored time cannot form a transfer identity.
+/// `None` when the delivery's stored time cannot form a transfer identity.
 fn transfer_message(
     source: &Message,
     info: &Info<'_>,
@@ -260,7 +256,6 @@ impl DeliveryHandler {
         .await
     }
 
-    /// Runs the typed handler inside the delivery span and settles the source.
     async fn process(
         &self,
         message: &Message,
@@ -312,7 +307,6 @@ impl DeliveryHandler {
         Ok(())
     }
 
-    /// Copies the source to the dead-letter stream, then acknowledges it.
     /// A failed transfer keeps the source for a later redelivery.
     async fn dead_letter(
         &self,
@@ -381,10 +375,8 @@ impl DeliveryHandler {
     }
 }
 
-/// Runs the typed handler of one delivery under the handler time limit.
-///
-/// The handler context is cancelled when the invocation ends, by return, time
-/// limit or panic, so work the handler started with it stops too.
+/// The handler context is cancelled when the invocation ends (return, time
+/// limit or panic), so work started with it stops too.
 async fn run_handler(
     registry: &Registry,
     subject: &str,
@@ -531,7 +523,6 @@ mod tests {
             handled
                 .outcomes
                 .record(Outcome::Retryable, Duration::from_millis(5));
-            // A routed type without a handler and a type no route knows.
             for unhandled in ["order.shipped", "sentinel.publisher.chosen"] {
                 let metrics = metrics.get(unhandled);
                 assert_eq!(metrics.event_type, UNREGISTERED);
@@ -561,8 +552,8 @@ mod tests {
         }
     }
 
-    /// A handler hands its context cancellation to work it starts. That work must hear when
-    /// the delivery is over, or it outlives a handler the adapter gave up on.
+    /// Work started with the handler context must hear when the delivery is
+    /// over, or it outlives a handler the adapter gave up on.
     #[tokio::test(start_paused = true)]
     #[expect(
         clippy::excessive_nesting,

@@ -709,7 +709,6 @@ async fn the_ready_gauge_is_the_published_verdict() {
         let (readiness, _, _) = flaky(true);
         readiness.refresh().await;
         readiness.start_drain();
-        // A check that passes during the drain does not bring it back.
         readiness.refresh().await;
     }
     assert_eq!(ready(&draining).as_deref(), Some("readiness_ready 0"));

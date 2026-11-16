@@ -12,18 +12,15 @@ use crate::{JobId, StartupError};
 
 pub use crate::state::{FailureReason, JobState};
 
-/// The bound the engine puts on one of its own statements, acquire and
-/// acknowledgement included; one operator call, transaction admission and
-/// commit included, fits the same bound.
+/// Covers acquire and acknowledgement; one operator call, transaction
+/// admission and commit included, fits the same bound.
 pub const OPERATION_TIMEOUT: Duration = crate::engine::OPERATION_BACKSTOP;
 pub const STARTUP_TIMEOUT: Duration = crate::session::STARTUP_CHECK_BUDGET;
 const MAX_PAGE_LIMIT: u16 = 500;
 const MAX_HANDLED_KINDS: usize = 1024;
 const MAX_HANDLED_BYTES: usize = MAX_HANDLED_KINDS * (MAX_KIND_LEN + 1) - 1;
 const CURSOR_PREFIX: &str = "v1:";
-/// The statement bound of one operator transaction. The retention and
-/// sampling statements in `maintenance` keep their own bounds and owners; this
-/// policy covers only the operator's statements.
+/// The retention and sampling statements in `maintenance` keep their own bounds.
 const STATEMENT_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -176,7 +173,6 @@ impl Inspection {
         Self::page(after, limit, Filter::Failed)
     }
 
-    /// Scan a window for live rows outside the explicitly supplied fleet kinds.
     /// An empty string explicitly declares that no kinds are handled.
     pub fn unhandled(
         handled_kinds: &str,
@@ -206,8 +202,7 @@ impl Inspection {
         }
     }
 
-    /// The admitted sorted, deduplicated fleet kinds for an unhandled inspection.
-    /// Other inspection modes carry no declared handled set.
+    /// `None` unless the inspection is `unhandled`.
     #[must_use]
     pub const fn handled_kinds(&self) -> Option<&BTreeSet<String>> {
         match &self.0 {
@@ -236,7 +231,7 @@ impl Inspection {
     }
 }
 
-/// Payload-free queue observation. No field holds stored error or trace content.
+/// No field holds stored error or trace content.
 ///
 /// Every timestamp is a UTC RFC 3339 string with six fractional digits
 /// (`YYYY-MM-DDTHH:MM:SS.ffffffZ`), as the inspection statements render it.
@@ -245,7 +240,6 @@ pub struct JobSnapshot {
     pub id: JobId,
     pub kind: String,
     pub state: JobState,
-    /// The current cycle's claim generation, as a decimal string.
     pub version: String,
     pub attempts: i32,
     pub failure_reason: Option<FailureReason>,
@@ -253,7 +247,6 @@ pub struct JobSnapshot {
     pub not_before: String,
     pub claim_expires_at: Option<String>,
     pub finished_at: Option<String>,
-    /// How many earlier failed cycles were archived by redrives.
     pub recovery_count: i32,
 }
 
@@ -276,16 +269,14 @@ pub struct Redriven {
     pub new_version: String,
 }
 
-/// Recovery refusal or database failure. Formatting deliberately omits raw causes.
+/// Formatting deliberately omits raw causes.
 ///
 /// No variant carries `#[error]`, so thiserror derives only `source` and the
 /// `From` conversions; the hand-written [`fmt::Display`] keeps causes out.
 #[derive(thiserror::Error)]
 pub enum OperatorError {
     Missing,
-    /// The job no longer matches the target's kind, version, or failed state.
     Stale,
-    /// A live job with the same unique key blocks the redrive.
     Conflict,
     Database(#[from] sqlx::Error),
     Transaction(#[from] TxError),
@@ -399,10 +390,8 @@ macro_rules! snapshot_query {
     };
 }
 
-/// Observe safe columns with a two-second statement backstop inside the caller's
-/// read-only transaction. A page bounds scanned rows before filtering;
-/// unavailable observations propagate rather than turning a timeout into an
-/// empty page.
+/// A page bounds scanned rows before filtering; a failed observation
+/// propagates rather than turning a timeout into an empty page.
 pub async fn inspect(
     tx: &mut Tx<'_>,
     inspection: &Inspection,
@@ -473,10 +462,8 @@ fn page_result(
     })
 }
 
-/// Hold the target's row for the caller's transaction. Existence alone decides
-/// [`OperatorError::Missing`]; the mutation's kind/version/failed predicate is
-/// the single authoritative identity check, so this statement locks the row
-/// without comparing it.
+/// Existence alone decides [`OperatorError::Missing`]; the mutation's
+/// kind/version/failed predicate is the single authoritative identity check.
 async fn lock_job_row(tx: &mut Tx<'_>, id: JobId) -> Result<(), OperatorError> {
     apply_statement_timeout(tx).await?;
     observed(
@@ -504,9 +491,8 @@ fn conflict_or_database(error: sqlx::Error) -> OperatorError {
     }
 }
 
-/// Redrive the same failed identity, archiving its previous cycle atomically.
-/// The result remains provisional until the caller's commit is acknowledged, and
-/// failures must propagate out of the caller's transaction so recovery rolls back.
+/// Archives the previous cycle atomically. Failures must propagate out of the
+/// caller's transaction so recovery rolls back.
 pub async fn redrive(tx: &mut Tx<'_>, target: &RecoveryTarget) -> Result<Redriven, OperatorError> {
     lock_job_row(tx, target.id).await?;
     observed(
@@ -538,9 +524,6 @@ pub async fn redrive(tx: &mut Tx<'_>, target: &RecoveryTarget) -> Result<Redrive
     .ok_or(OperatorError::Stale)
 }
 
-/// Permanently abandon one exact failed cycle. The result remains provisional
-/// until the caller's commit is acknowledged.
-///
 /// A job that relays an event, such as an outbox relay job, takes that event
 /// with it: the operator must reconcile the event the discarded job would have
 /// published.

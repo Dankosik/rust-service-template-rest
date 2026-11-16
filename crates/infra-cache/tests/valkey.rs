@@ -84,7 +84,7 @@ fn connect_url(url: &str, command_timeout: Duration) -> Cache {
 
 struct Proxy {
     port: u16,
-    // Request abort before dropping the stop sender during fixture teardown.
+    // Aborted before the stop sender drops during teardown.
     task: AbortOnDropHandle<()>,
     stop: Option<tokio::sync::oneshot::Sender<()>>,
 }

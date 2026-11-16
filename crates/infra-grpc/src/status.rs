@@ -5,17 +5,13 @@ use service_failure::SANITIZED_DETAIL;
 use tonic::Status;
 use tonic_types::{ErrorDetails, StatusExt as _};
 
-/// `google.rpc.ErrorInfo.domain` of every catalog failure: the service name,
-/// within which a reason is unique. The initializer writes the derived
+/// The service name, within which a reason is unique; the initializer writes the derived
 /// service's name here.
 pub const ERROR_DOMAIN: &str = "service";
 
-/// A failure from the shared catalog, returned by a handler or the transport
-/// as a status: `Err(Failure::new(service_failure::Code::NotFound).into())`.
-///
-/// The status code and message are fixed by the catalog code.
-/// `google.rpc.ErrorInfo` carries the code in upper case as the reason a
-/// client matches on, in [`ERROR_DOMAIN`].
+/// A failure from the shared catalog, returned as a status:
+/// `Err(Failure::new(service_failure::Code::NotFound).into())`. `ErrorInfo` carries the
+/// upper-case code as the reason a client matches on.
 #[derive(Clone, Debug)]
 pub struct Failure {
     code: service_failure::Code,
@@ -23,7 +19,6 @@ pub struct Failure {
 }
 
 impl Failure {
-    /// A failure for `code` carrying `ErrorInfo` with the upper-cased code as reason in [`ERROR_DOMAIN`].
     #[must_use]
     pub fn new(code: service_failure::Code) -> Self {
         Self {
@@ -36,16 +31,13 @@ impl Failure {
         }
     }
 
-    /// Adds `google.rpc.RetryInfo` with the delay before another attempt. It
-    /// does not make a client retry.
+    /// Does not make a client retry.
     #[must_use]
     pub fn retry_after(mut self, after: Duration) -> Self {
         self.details.set_retry_info(Some(after));
         self
     }
 
-    /// Adds a `google.rpc.BadRequest` field violation: the request field as a
-    /// protobuf field path such as `message`, and the constraint that failed.
     /// Never pass the submitted value.
     #[must_use]
     pub fn field_violation(
@@ -57,8 +49,6 @@ impl Failure {
         self
     }
 
-    /// The status for a transport-owned answer whose code or message differs
-    /// from the catalog projection.
     pub(crate) fn into_status_as(self, grpc: tonic::Code, message: &'static str) -> Status {
         Status::with_error_details(grpc, message, self.details)
     }
@@ -71,14 +61,10 @@ impl From<Failure> for Status {
     }
 }
 
-/// The sanitized answer to a failure the transport must not describe, such as
-/// a panic or a missing transport invariant.
 pub(crate) fn internal_status() -> Status {
     Failure::new(service_failure::Code::InternalServerError).into()
 }
 
-/// The catalog code a status answers with: its `ErrorInfo` reason, when the
-/// domain is [`ERROR_DOMAIN`] and the reason is a published code.
 pub(crate) fn catalog_code(status: &Status) -> Option<service_failure::Code> {
     let info = status.get_details_error_info()?;
     if info.domain != ERROR_DOMAIN {
@@ -90,7 +76,6 @@ pub(crate) fn catalog_code(status: &Status) -> Option<service_failure::Code> {
         .find(|code| code.as_str().eq_ignore_ascii_case(&info.reason))
 }
 
-/// The status code and fixed safe message of each catalog code.
 #[allow(
     clippy::match_same_arms,
     reason = "Optional profiles remove complete match arms independently."

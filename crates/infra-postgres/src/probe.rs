@@ -1,13 +1,10 @@
-//! The probe shares the pool so readiness can reflect saturation in the
-//! pool that serves requests. The background refresher applies its failure
-//! threshold and bounds the whole check. The acquire budget bounds the wait
-//! for a connection inside it.
+//! The probe shares the request pool so readiness reflects its saturation; the
+//! refresher owns the failure threshold and the whole-check bound.
 
 use health::{Probe, ProbeError};
 use sqlx::Connection;
 use sqlx::postgres::PgPool;
 
-/// `health::Probe` over a pooled ping.
 #[derive(Clone, Debug)]
 pub struct PostgresProbe {
     pool: PgPool,
@@ -34,10 +31,8 @@ impl Probe for PostgresProbe {
     }
 }
 
-/// The verdict message names the failure class without dependency
-/// internals; the driver's own text can quote server details. A server
-/// rejection carries its SQLSTATE, a bounded code that tells an
-/// authentication failure (`28P01`) from other rejections.
+/// Names the failure class without dependency internals, since the driver's text
+/// can quote server details; a server rejection carries its bounded SQLSTATE.
 fn probe_error(err: &sqlx::Error) -> ProbeError {
     match err {
         sqlx::Error::PoolTimedOut => {

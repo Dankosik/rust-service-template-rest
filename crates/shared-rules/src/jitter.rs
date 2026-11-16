@@ -27,7 +27,6 @@ mod tests {
             share_of_window(Duration::from_nanos(1), 32_768),
             Duration::ZERO
         );
-        // 21845 is a third of u16::MAX.
         assert_eq!(
             share_of_window(Duration::from_secs(3), 21_845),
             Duration::from_secs(1)

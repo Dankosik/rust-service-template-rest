@@ -25,8 +25,7 @@ pub(crate) const PUBLICATION_WINDOW_BYTES: usize = 64 * 1024 * 1024;
 /// transport, credential and resident-memory policy.
 #[derive(Clone)]
 pub struct MessagingOptions {
-    /// Shown by the broker's connection reports, so an operator can tell
-    /// this process's connection from its neighbors'.
+    /// Shown in the broker's connection reports.
     pub connection_name: String,
     /// A URL can carry credentials, so `Debug` shows only the count.
     pub servers: Vec<String>,
@@ -150,8 +149,6 @@ pub enum CloseOutcome {
 }
 
 impl Messaging {
-    /// Connects and admits the source stream before the process accepts work.
-    ///
     /// Publication metrics bind to the metrics recorder installed at this
     /// call, and handler metrics to the one installed at [`Self::consumer`],
     /// so install the recorder first. Each broker round trip is bounded by
@@ -216,7 +213,6 @@ impl Messaging {
         }
     }
 
-    /// Admits a typed registry against the configured durable consumer.
     pub async fn consumer(&self, registry: Registry) -> Result<Consumer, MessagingError> {
         if self.shared.refuses_work() {
             return Err(MessagingError::Unavailable);
@@ -311,8 +307,7 @@ impl MessagingStartup {
         Ok(messaging)
     }
 
-    /// Closes any retained native client with the observation and cancellation
-    /// guarantees of [`Messaging::close`]. An owner without a retained client
+    /// Same guarantees as [`Messaging::close`]; without a retained client it
     /// returns [`CloseOutcome::Complete`].
     pub async fn close(self, deadline: Instant, cancel: &CancellationToken) -> CloseOutcome {
         match self.phase {

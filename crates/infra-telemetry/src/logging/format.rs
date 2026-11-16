@@ -266,8 +266,7 @@ impl Scratch {
         self.add_field(key, start);
     }
 
-    /// A string value of an event, written as the JSON string [`Self::push`] would
-    /// write and cut at a character boundary where the room runs out.
+    /// Cut at a character boundary where the room runs out.
     fn push_text(&mut self, key: &'static str, text: fmt::Arguments<'_>) {
         if self.values.failed {
             return;

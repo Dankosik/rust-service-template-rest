@@ -45,8 +45,7 @@ impl Service {
         let mut child = command.spawn().expect("spawn service binary");
         let stdout = child.stdout.take().expect("piped stdout");
         let (tx, lines) = mpsc::channel();
-        // Drain stdout for the process lifetime so the child never blocks
-        // on a full pipe.
+        // Keeps the child from blocking on a full pipe.
         let reader = std::thread::spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                 if tx.send(line).is_err() {

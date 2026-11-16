@@ -1,15 +1,13 @@
 use std::fmt;
 
-/// Longest key every supported provider stores.
 const MAX_KEY_BYTES: usize = 1024;
 
-/// An object key in the portable grammar: 1 to 1024 bytes of
-/// `[A-Za-z0-9._~-]` in `/`-separated segments, with no empty, `.`, or `..`
-/// segment and no leading or trailing `/`.
+/// 1 to 1024 bytes of `[A-Za-z0-9._~-]` in `/`-separated segments, none empty,
+/// `.`, or `..`, with no leading or trailing `/`.
 ///
-/// ASCII only because R2 normalizes Unicode keys, so two distinct UTF-8 keys
-/// could name one object. Keys still reach provider logs and, at DEBUG, the
-/// SDK's own logs: never put personal data in a key.
+/// ASCII only because R2 normalizes Unicode keys, so two UTF-8 keys could name
+/// one object. Keys reach provider logs and, at DEBUG, SDK logs: never put
+/// personal data in one.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct ObjectKey(String);
 

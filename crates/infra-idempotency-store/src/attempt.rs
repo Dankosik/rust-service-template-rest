@@ -60,7 +60,7 @@ pub enum CallerKind {
 }
 
 impl CallerKind {
-    /// The stored `caller_kind`. The column's `CHECK` constraint in
+    /// The `CHECK` constraint in
     /// `migrations/20260923000001_create_http_idempotency_records.sql` admits
     /// only these strings, so a new variant needs a migration first.
     const fn as_str(self) -> &'static str {
@@ -415,8 +415,7 @@ fn classify(err: &sqlx::Error) -> AttemptError {
     }
 }
 
-/// Log a failure with only bounded fields, never driver text, and return its
-/// class.
+/// Logs only bounded fields, never driver text.
 fn failed(
     err: &sqlx::Error,
     phase: &'static str,

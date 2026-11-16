@@ -64,14 +64,8 @@ pub enum ContractError {
     Yaml(#[source] Box<dyn Error + Send + Sync>),
 }
 
-/// Every operation the service serves, with its contract, as one
-/// [`OpenApiRouter`] whose [`AppState`] is still unapplied. Bootstrap
-/// finalizes it, supplies the state, and hardens the routes; [`document`]
-/// consumes the document-only path.
-///
-/// The template composes nothing fallible yet. The `Result` is the seam for
-/// the first fallible route, so neither this signature nor bootstrap changes
-/// when it arrives.
+/// The `Result` is the seam for the first fallible route, so neither this
+/// signature nor bootstrap changes when it arrives.
 // template:begin http-idempotency:service-api-contract-idempotency-doc
 ///
 /// An idempotent operation is such a route, added here as
@@ -97,7 +91,6 @@ fn assemble() -> OpenApiRouter<AppState> {
     // template:end inbound-webhooks:service-api-webhooks-router
 }
 
-/// The OpenAPI document of [`contract`].
 pub fn document() -> Result<Document, ContractError> {
     contract(
         // template:begin http-idempotency:service-api-document-composer
@@ -107,8 +100,6 @@ pub fn document() -> Result<Document, ContractError> {
     .map(OpenApiRouter::into_openapi)
 }
 
-/// The committed form of [`document`]: the generated-file header followed
-/// by the YAML rendering, ending in one newline.
 pub fn render() -> Result<String, ContractError> {
     let yaml = document()?
         .to_yaml()

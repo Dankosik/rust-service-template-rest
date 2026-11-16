@@ -22,8 +22,7 @@ struct AuthObservations {
     latest_public_user: Option<String>,
 }
 
-/// One NATS connection relay that observes a broker authorization refusal and
-/// retains only the latest public CONNECT subject. It neither validates nor
+/// Retains only the latest public CONNECT subject; it neither validates nor
 /// supplies authentication.
 pub(crate) struct AuthObservingRelay {
     pub(crate) url: String,
@@ -280,8 +279,7 @@ impl AckDroppingRelay {
     }
 }
 
-/// A broker publication acknowledgement for the expected stream. The parser
-/// keeps the relay from confusing unrelated JSON replies with publish truth.
+/// Keeps the relay from mistaking unrelated JSON replies for a publish ack.
 pub(crate) fn is_stream_publish_ack(payload: &[u8], stream: &str) -> bool {
     serde_json::from_slice::<serde_json::Value>(payload)
         .is_ok_and(|reply| reply["stream"] == stream && reply["seq"].is_u64())
@@ -388,8 +386,8 @@ async fn relay_authenticated_connection(
     }
 }
 
-/// NATS's broker-owned authorization refusal remains the test oracle. Do not
-/// treat an arbitrary protocol error, a timeout, or a parser failure as proof.
+/// Only the broker's own authorization refusal counts, not any protocol error,
+/// timeout or parser failure.
 fn is_broker_auth_refusal(line: &[u8]) -> bool {
     line.starts_with(b"-ERR")
         && (line
@@ -400,7 +398,6 @@ fn is_broker_auth_refusal(line: &[u8]) -> bool {
                 .any(|window| window == b"Authentication"))
 }
 
-/// Extracts only the fixture user's public subject from the CONNECT JWT.
 /// The relay does not retain the JWT, seed, nonce, or signature.
 fn public_user_from_connect(line: &[u8]) -> Option<String> {
     use base64::Engine as _;

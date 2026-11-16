@@ -26,9 +26,7 @@ pub struct AuthenticatedClient {
 }
 
 impl AuthenticatedClient {
-    /// Refuses a call without [`crate::OnBehalfOf`] instead of sending the
-    /// service token. See [`crate::OnBehalfOf`] for when a binding requires a
-    /// subject.
+    /// Refuses a call without [`crate::OnBehalfOf`] instead of sending the service token.
     #[must_use]
     pub fn require_on_behalf_of(mut self) -> Self {
         self.subject_required = true;
@@ -37,20 +35,11 @@ impl AuthenticatedClient {
 }
 
 impl Credentials {
-    /// Binds this credential owner to a gRPC resource client.
-    ///
-    /// The returned service removes an [`crate::OnBehalfOf`] extension before
-    /// dispatch and sends the token exchanged for that subject; without one it
-    /// sends the service token unless
-    /// [`AuthenticatedClient::require_on_behalf_of`] is set. A caller-supplied
-    /// `Authorization` header and a missing required subject are refused as
-    /// `INTERNAL` before dispatch. A response carrying
-    /// `grpc-status: UNAUTHENTICATED` in the initial headers or polled trailers,
-    /// or an HTTP 401 that ends without a `grpc-status`, stops reuse of the token that call
-    /// used once it is at least 30 seconds old. Responses are never replayed.
-    /// The service is always ready, and acquisition
-    /// failures map to `DEADLINE_EXCEEDED`, `CANCELLED`, `UNAVAILABLE`, or
-    /// `UNAUTHENTICATED` by cause.
+    /// The service removes an [`crate::OnBehalfOf`] extension before dispatch and sends the
+    /// token exchanged for that subject. A caller-supplied `Authorization` header and a missing
+    /// required subject are refused as `INTERNAL`. A response with `grpc-status: UNAUTHENTICATED`
+    /// in the initial headers or polled trailers, or an HTTP 401 without a `grpc-status`, stops
+    /// reuse of that call's token once it is 30 seconds old. Responses are never replayed.
     #[must_use]
     pub fn grpc(&self, resource: Client) -> AuthenticatedClient {
         AuthenticatedClient {

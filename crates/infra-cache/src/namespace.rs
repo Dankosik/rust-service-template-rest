@@ -185,8 +185,7 @@ impl CacheNamespace {
         }
     }
 
-    /// Reserve both argument slots and payload bytes (excluding RESP framing)
-    /// to avoid growing either buffer when adding arguments.
+    /// Reserves argument slots and payload bytes (excluding RESP framing) up front.
     fn keyed_command(
         &self,
         operation: Operation,
@@ -222,9 +221,8 @@ fn valid_namespace(name: &str) -> bool {
         && bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
 }
 
-/// Write the prefixed key as one Redis argument without a temporary String.
-/// [`redis::Cmd`]'s [`write_arg_fmt`](redis::RedisWrite::write_arg_fmt) writes
-/// directly into its preallocated payload buffer.
+/// Writes the prefixed key as one argument straight into the command's
+/// payload buffer through [`write_arg_fmt`](redis::RedisWrite::write_arg_fmt).
 struct NamespacedKey<'a> {
     namespace: &'static str,
     key: &'a str,
