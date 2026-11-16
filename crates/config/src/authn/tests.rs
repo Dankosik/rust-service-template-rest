@@ -2,18 +2,17 @@ use super::*;
 use crate::LoadOptions;
 use crate::load::load_from;
 use crate::test_support::{BUILD, assert_secret_in_file, env, write};
-use crate::validate::validate_with;
+use crate::validate::admit_with;
 use std::assert_matches;
 
-fn parse(toml: &str) -> Result<AuthnConfig, toml::de::Error> {
+fn parse(toml: &str) -> Result<AuthnInput, toml::de::Error> {
     toml::from_str(toml)
 }
 
 #[test]
 fn omitted_section_defaults_to_inert_none() {
-    let config = AuthnConfig::default();
-    assert_matches!(config, AuthnConfig::None {});
-    validate_with(|v| config.validate(v)).unwrap();
+    let config = AuthnInput::default();
+    assert_matches!(admit_with(|v| config.admit(v)), Ok(AuthnConfig::None));
 }
 
 // template:begin oidc-jwt:authn-config-jwt-tests
@@ -172,7 +171,8 @@ fn jwt_normalizes_scalar_or_list_audiences_without_changing_values() {
     )
     .unwrap();
 
-    validate_with(|v| scalar.validate(v)).unwrap();
+    let scalar = admit_with(|v| scalar.admit(v)).unwrap();
+    let list = admit_with(|v| list.admit(v)).unwrap();
 
     let AuthnConfig::OidcJwt {
         audience,
@@ -213,7 +213,7 @@ fn jwt_rejects_empty_algorithms_and_invalid_audience_shape() {
     )
     .unwrap();
     assert!(
-        validate_with(|v| empty_algorithms.validate(v))
+        admit_with(|v| empty_algorithms.admit(v))
             .unwrap_err()
             .names("authn.algorithms")
     );
@@ -238,16 +238,19 @@ fn jwt_accepts_an_optional_nonblank_jwks_uri() {
         };
         jwks_uri
     };
-    assert_eq!(jwks_uri(source("")), None);
+    assert_eq!(
+        jwks_uri(admit_with(|v| source("").admit(v)).unwrap()),
+        None
+    );
     let explicit = source("jwks_uri = \"https://issuer.example/keys\"\n");
-    validate_with(|v| explicit.validate(v)).unwrap();
+    let explicit = admit_with(|v| explicit.admit(v)).unwrap();
     assert_eq!(
         jwks_uri(explicit).as_deref(),
         Some("https://issuer.example/keys")
     );
     let blank = source("jwks_uri = \"  \"\n");
     assert!(
-        validate_with(|v| blank.validate(v))
+        admit_with(|v| blank.admit(v))
             .unwrap_err()
             .names("authn.jwks_uri")
     );
@@ -263,6 +266,7 @@ fn jwt_debug_redacts_trust_inputs() {
         "#,
     )
     .unwrap();
+    let config = admit_with(|v| config.admit(v)).unwrap();
     let diagnostic = format!("{config:?}");
     assert!(diagnostic.contains("oidc-jwt"));
     assert!(!diagnostic.contains("private-issuer"));
@@ -284,6 +288,7 @@ fn introspection_requires_structural_inputs_and_uses_nonzero_default_capacity() 
         "#,
     )
     .unwrap();
+    let config = admit_with(|v| config.admit(v)).unwrap();
     let AuthnConfig::OidcIntrospection {
         provider_concurrency,
         cache_enabled,
@@ -298,7 +303,6 @@ fn introspection_requires_structural_inputs_and_uses_nonzero_default_capacity() 
     assert!(!cache_enabled);
     assert_eq!(*cache_capacity, 256);
     assert_eq!(*cache_ttl, Duration::from_secs(30));
-    validate_with(|v| config.validate(v)).unwrap();
 
     let missing_secret = parse(
         r#"
@@ -311,7 +315,7 @@ fn introspection_requires_structural_inputs_and_uses_nonzero_default_capacity() 
     )
     .unwrap();
     assert!(
-        validate_with(|v| missing_secret.validate(v))
+        admit_with(|v| missing_secret.admit(v))
             .unwrap_err()
             .names("authn.introspection_client_secret")
     );
@@ -344,6 +348,7 @@ fn introspection_debug_redacts_trust_inputs_and_credentials() {
         "#,
     )
     .unwrap();
+    let config = admit_with(|v| config.admit(v)).unwrap();
     let diagnostic = format!("{config:?}");
     assert!(diagnostic.contains("oidc-introspection"));
     for private_value in [
@@ -361,7 +366,7 @@ fn introspection_debug_redacts_trust_inputs_and_credentials() {
 
 #[test]
 fn modes_reject_foreign_provider_fields() {
-    assert_matches!(parse("mode = \"none\"\n").unwrap(), AuthnConfig::None {});
+    assert_matches!(parse("mode = \"none\"\n").unwrap(), AuthnInput::None {});
     for source in [
         "mode = \"none\"\nissuer = \"issuer\"\n",
         "mode = \"oidc-jwt\"\nissuer = \"issuer\"\naudience = \"service\"\nintrospection_endpoint = \"endpoint\"\n",
@@ -439,10 +444,7 @@ fn introspection_environment_decodes_and_redacts_the_secret() {
         assert_eq!(audience.as_slice(), ["00123"]);
         assert_eq!(introspection_client_id, "false");
         assert_eq!(
-            introspection_client_secret
-                .as_ref()
-                .unwrap()
-                .expose_secret(),
+            introspection_client_secret.expose_secret(),
             "000042"
         );
         assert!(!format!("{cfg:?}").contains("000042"));

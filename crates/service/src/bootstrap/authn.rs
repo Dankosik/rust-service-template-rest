@@ -67,10 +67,6 @@ pub(super) async fn prepare(
                     source,
                 },
             )?;
-            let client_secret = AuthnConfig::require_introspection_client_secret(
-                introspection_client_secret.as_ref(),
-            )?
-            .clone();
             let provider_concurrency = std::num::NonZeroUsize::try_from(*provider_concurrency)
                 .map_err(|_| {
                     service_config::ValidationError::new(
@@ -92,7 +88,7 @@ pub(super) async fn prepare(
                 audiences: audience.as_slice().to_vec(),
                 endpoint,
                 client_id: introspection_client_id.clone(),
-                client_secret,
+                client_secret: introspection_client_secret.clone(),
                 provider_concurrency,
                 cache: cache_enabled.then_some(cache),
             })
@@ -104,7 +100,7 @@ pub(super) async fn prepare(
             })
         }
         // template:end oidc-introspection:bootstrap-prepare-auth-introspection
-        AuthnConfig::None {} => Ok(PreparedAuth::None),
+        AuthnConfig::None => Ok(PreparedAuth::None),
     }
 }
 
