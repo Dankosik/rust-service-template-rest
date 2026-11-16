@@ -41,6 +41,14 @@ Measured on a dedicated 4-vCPU Xeon 8280 DigitalOcean c-4 (`linux/amd64`, Debian
 Repeated Bearer JWT verification dropped from `21.7 µs` to `216 ns` (RS256) and `100.0 µs` to `248 ns` (ES256) with `moka` bounded by token `exp` and cleared on JWKS refresh. Reopen if tokens are predominantly single-use or verification depends on per-request inputs beyond token, key set, and clock.
 <!-- template:end oidc-jwt:docs-library-selection-bearer-jwt-memo -->
 
+### Runtime workers
+
+Measured on a 4-vCPU Xeon 8168 DigitalOcean c-4 (Debian 13, wrk with 64 connections on two other CPUs, median of three interleaved 15 s rounds). Workers equal to the CPUs the process may use is the choice.
+
+- **More workers than CPUs trades tail latency for throughput.** On two CPUs, 24 workers against two served a trivial route at 33.4 against 28.9 thousand req/s and 64 KiB JSON at 3,748 against 3,480 req/s, because threads stop parking (0.04 against 0.50 voluntary context switches per request); p99 rose from 4.0 to 33.7 ms and from 29.9 to 91.1 ms, and resident memory from 33 to 52 MB and from 47 to 123 MB.
+- **A current-thread runtime on one CPU gains nothing** over the multi-thread runtime with one worker: 16.8 against 17.4 thousand req/s on the trivial route, 2,306 against 2,265 on 64 KiB JSON, 1.2 MB less memory.
+- **A fractional CPU quota needs an explicit count.** `std::thread::available_parallelism` rounds a quota down. Under a 1.5-CPU quota one worker served 17.1 of 19 thousand offered req/s at a 3.9 ms median; two workers served 18.9 thousand at 0.75 ms with no throttled period, and 23.1 of 24 thousand offered with p99 4.4 ms and 3.5 throttled periods in 15 s.
+
 ### Global allocator
 
 Measured on a 4-vCPU Xeon 8280 DigitalOcean c-4 (`linux/amd64`, fat LTO, 5 interleaved 20 s rounds plus a 30-minute mixed soak against PostgreSQL):

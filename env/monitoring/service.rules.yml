@@ -260,6 +260,18 @@ groups:
           summary: A process uses over 80% of its open-file limit
           description: '{{ $labels.instance }} of {{ $labels.job }} holds {{ $value | humanizePercentage }} of its open-file limit.'
           runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#openfilesnearlimit
+      - alert: MemoryNearLimit
+        expr: |
+          process_resident_memory_bytes{job=~"service|jobs-worker"}
+          / on(job,instance)
+          process_memory_limit_bytes{job=~"service|jobs-worker"}
+          > 0.85
+        for: 15m
+        labels: {severity: ticket}
+        annotations:
+          summary: A process uses over 85% of its memory limit
+          description: '{{ $labels.instance }} of {{ $labels.job }} holds {{ $value | humanizePercentage }} of its memory limit.'
+          runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#memorynearlimit
   # template:begin grpc:monitoring-grpc-slo
   - name: service-grpc-slo
     rules:
