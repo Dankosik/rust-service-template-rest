@@ -4,6 +4,7 @@ use std::sync::Arc;
 use itertools::Itertools;
 use parking_lot::Mutex;
 use secrecy::{ExposeSecret as _, SecretString};
+use tokio::sync::Semaphore;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum CredentialsFileError {
@@ -51,14 +52,18 @@ impl CredentialsFileError {
 pub(crate) struct CredentialsFile {
     path: Arc<Path>,
     last_jwt: Arc<Mutex<String>>,
+    reading: Arc<Semaphore>,
 }
 
 impl CredentialsFile {
     pub(crate) async fn admit(path: PathBuf) -> Result<Self, CredentialsFileError> {
-        let (jwt, _) = read(&path).await?;
+        let path: Arc<Path> = path.into();
+        let reading = Arc::new(Semaphore::new(1));
+        let (jwt, _) = read(&path, &reading).await?;
         Ok(Self {
-            path: path.into(),
+            path,
             last_jwt: Arc::new(Mutex::new(jwt)),
+            reading,
         })
     }
 
@@ -66,7 +71,7 @@ impl CredentialsFile {
         &self,
         nonce: &[u8],
     ) -> Result<async_nats::Auth, CredentialsFileError> {
-        let credentials = read(&self.path).await;
+        let credentials = read(&self.path, &self.reading).await;
         let (jwt, key) = credentials.inspect_err(|error| {
             error.observe_challenge_failure();
             tracing::warn!(
@@ -91,12 +96,32 @@ impl CredentialsFile {
     }
 }
 
-async fn read(path: &Path) -> Result<(String, nkeys::KeyPair), CredentialsFileError> {
-    let content = tokio::fs::read_to_string(path)
-        .await
-        .map(SecretString::from)
-        .map_err(|error| CredentialsFileError::Unreadable(error.kind()))?;
+async fn read(
+    path: &Arc<Path>,
+    reading: &Arc<Semaphore>,
+) -> Result<(String, nkeys::KeyPair), CredentialsFileError> {
+    let permit = reading
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| CredentialsFileError::Unreadable(std::io::ErrorKind::ResourceBusy))?;
+    let path = Arc::clone(path);
+    let content = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        read_file(&path)
+    })
+    .await
+    .map_err(|_| CredentialsFileError::Unreadable(std::io::ErrorKind::Other))??;
     parse(content.expose_secret())
+}
+
+#[expect(
+    clippy::disallowed_methods,
+    reason = "owned blocking read; `read` keeps at most one in flight"
+)]
+fn read_file(path: &Path) -> Result<SecretString, CredentialsFileError> {
+    std::fs::read_to_string(path)
+        .map(SecretString::from)
+        .map_err(|error| CredentialsFileError::Unreadable(error.kind()))
 }
 
 fn parse(content: &str) -> Result<(String, nkeys::KeyPair), CredentialsFileError> {
@@ -285,5 +310,69 @@ mod tests {
         );
         assert!(!scrape.contains("sentinel"));
         assert!(!scrape.contains("user.jwt.value"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[expect(
+        clippy::disallowed_methods,
+        clippy::disallowed_types,
+        reason = "test-owned credentials fixtures; the FIFO writer runs on an owned blocking thread"
+    )]
+    async fn a_hung_credentials_read_is_never_joined_by_a_second() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("user.creds");
+        let user = nkeys::KeyPair::new_user();
+        std::fs::write(&path, creds("user.jwt.value", &user)).unwrap();
+        let credentials = CredentialsFile::admit(path.clone()).await.unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let status = std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(50),
+                credentials.answer(b"nonce")
+            )
+            .await
+            .is_err(),
+            "the FIFO read must hang"
+        );
+        let second = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            credentials.answer(b"nonce"),
+        )
+        .await;
+
+        let fifo = directory.path().join("stale");
+        std::fs::rename(&path, &fifo).unwrap();
+        std::fs::write(&path, creds("user.jwt.value", &user)).unwrap();
+        tokio::task::spawn_blocking(move || {
+            use std::io::Write;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(fifo)
+                .and_then(|mut writer| writer.write_all(b"stale"))
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            second.unwrap().err(),
+            Some(CredentialsFileError::Unreadable(
+                std::io::ErrorKind::ResourceBusy
+            )),
+            "a second read must fail at once instead of starting another"
+        );
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while credentials.answer(b"nonce").await.is_err() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the released read must free the slot"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
     }
 }
