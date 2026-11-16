@@ -24,7 +24,8 @@ use serde::Deserialize;
 use serde_with::base64::Base64;
 use serde_with::serde_as;
 use time::OffsetDateTime;
-use time::macros::{datetime, utc_datetime};
+use time::format_description::well_known::Rfc3339;
+use time::macros::utc_datetime;
 
 const FIXTURE_PATH_ENV: &str = "GO_WIRE_FIXTURES";
 const EXPORT_PATH_ENV: &str = "GO_WIRE_RUST_EXPORT";
@@ -82,8 +83,7 @@ struct WireRecord {
     body: Vec<u8>,
     stream: String,
     stream_sequence: u64,
-    #[serde(with = "time::serde::rfc3339")]
-    stored_at: OffsetDateTime,
+    stored_at: String,
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
@@ -238,7 +238,7 @@ fn verify_go_record_in_rust(fixture: &FixtureCase) {
     let expected_transfer = dead_letter_id(
         &fixture.inbound.stream,
         fixture.inbound.stream_sequence,
-        fixture.inbound.stored_at,
+        parse_timestamp(&fixture.inbound.stored_at),
         source_publication_id,
     )
     .unwrap_or_else(|error| panic!("{}: Rust DLQ id rejected Go source: {error}", fixture.name));
@@ -264,7 +264,7 @@ fn verify_go_record_in_rust(fixture: &FixtureCase) {
         payload: Bytes::from(fixture.dlq.body.clone()),
         stream: fixture.dlq.stream.clone(),
         stream_sequence: fixture.dlq.stream_sequence,
-        stored_at: fixture.dlq.stored_at,
+        stored_at: parse_timestamp(&fixture.dlq.stored_at),
     })
     .unwrap_or_else(|error| panic!("{}: Go DLQ record rejected by Rust: {error}", fixture.name));
     assert_eq!(
@@ -373,7 +373,7 @@ fn rust_production_records() -> Vec<WireRecord> {
         body: prepared.payload().to_vec(),
         stream: "RUST_EXPORTS".to_owned(),
         stream_sequence: 1,
-        stored_at: datetime!(2026-09-26 12:37:00.000000003 UTC),
+        stored_at: "2026-09-26T12:37:00.000000003Z".to_owned(),
     }]
 }
 
@@ -409,6 +409,10 @@ fn header_values(headers: &HeaderMap) -> BTreeMap<String, String> {
             (name.to_string(), values[0].to_string())
         })
         .collect()
+}
+
+fn parse_timestamp(value: &str) -> OffsetDateTime {
+    OffsetDateTime::parse(value, &Rfc3339).expect("fixture timestamp is RFC3339")
 }
 
 fn schema_version(value: &str) -> u16 {
