@@ -263,7 +263,7 @@ jobs:
         run: cargo fetch --locked
       - name: Install pinned Cargo tools
         if: needs.changes.outputs.rust_source == 'true' || needs.changes.outputs.cargo_dependencies == 'true'
-        uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-nextest@${{ env.CARGO_NEXTEST_VERSION }},cargo-shear@${{ env.CARGO_SHEAR_VERSION }}
       - name: Format
@@ -499,7 +499,7 @@ jobs:
           rustup toolchain install
           rustup show active-toolchain
       - name: Install pinned Cargo tools
-        uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-deny@${{ env.CARGO_DENY_VERSION }},zizmor@${{ env.ZIZMOR_VERSION }}
       - name: Dependency policy
@@ -613,7 +613,7 @@ jobs:
         run: make python-lint
       - name: Install pinned Cargo tools
         if: needs.changes.outputs.tool_manifest == 'true'
-        uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-deny@${{ env.CARGO_DENY_VERSION }},cargo-nextest@${{ env.CARGO_NEXTEST_VERSION }},cargo-shear@${{ env.CARGO_SHEAR_VERSION }},zizmor@${{ env.ZIZMOR_VERSION }}
       - name: Tool manifest
@@ -979,7 +979,7 @@ jobs:
         run: grep -v '^#' tools/versions.env | grep . >>"${GITHUB_ENV}"
       - name: Install pinned Cargo tools
         if: matrix.part != 'source'
-        uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-nextest@${{ env.CARGO_NEXTEST_VERSION }},cargo-shear@${{ env.CARGO_SHEAR_VERSION }}
       - name: Source suites
