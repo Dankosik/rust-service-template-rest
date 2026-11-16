@@ -19,7 +19,7 @@ mod admission;
 
 pub(crate) use admission::Shed;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
     pub request_timeout: Duration,
     pub max_in_flight: Option<NonZeroU32>,
@@ -187,15 +187,10 @@ pub(crate) fn opening_context(request: &Request) -> Option<&operation_context::O
 const REJECT_DRAIN: Duration = Duration::from_millis(100);
 const REJECT_DRAIN_BYTES: usize = 64 * 1024;
 
-#[allow(
-    dead_code,
-    reason = "only the optional bearer and service authentication profiles use the full drain"
-)]
 pub(crate) async fn reject(request: Request, status: tonic::Status) -> Response {
-    reject_with_drain(request, status, REJECT_DRAIN).await
-}
-
-async fn reject_with_drain(request: Request, status: tonic::Status, drain: Duration) -> Response {
+    let drain = opening_context(&request)
+        .and_then(operation_context::OperationContext::remaining)
+        .map_or(REJECT_DRAIN, |remaining| REJECT_DRAIN.min(remaining / 2));
     let mut body = request.into_body();
     let _ = tokio::time::timeout(drain, async {
         let mut read = 0;

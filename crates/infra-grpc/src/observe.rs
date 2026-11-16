@@ -4,7 +4,7 @@ use std::sync::{Arc, LazyLock, Once, OnceLock};
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
-use foldhash::{HashMap, HashSet};
+use foldhash::HashMap;
 use futures_util::FutureExt as _;
 use opentelemetry::context::FutureExt as _;
 use parking_lot::Mutex;
@@ -23,10 +23,10 @@ pub(crate) const SERVER_ADMISSION_WAIT_SECONDS: &str = "grpc_server_admission_wa
 const SERVER_ADMISSION_WAITING: &str = "grpc_server_admission_waiting";
 const SERVER_FAILURES: &str = "grpc_server_failures_total";
 const CLIENT_STARTED: &str = "grpc_client_started_total";
-const CLIENT_DIAGNOSTIC_BYTES: usize = 1024;
 const CLIENT_HANDLED: &str = "grpc_client_handled_total";
 pub(crate) const CLIENT_HANDLING_SECONDS: &str = "grpc_client_handling_seconds";
-pub const HANDLING_SECONDS_BUCKETS: &[f64] = &[
+const DIAGNOSTIC_BYTES: usize = 1024;
+const HANDLING_SECONDS_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
 ];
 
@@ -77,7 +77,7 @@ impl Call {
     pub(crate) fn start<B>(
         series: &Arc<Series>,
         request: &http::Request<B>,
-        destination: Option<&http::Uri>,
+        destination: Option<&Destination>,
     ) -> Self {
         let started = Instant::now();
         let handles = series.handles(request);
@@ -128,29 +128,32 @@ fn make_span<B>(
     request: &http::Request<B>,
     handles: &Handles,
     side: Side,
-    destination: Option<&http::Uri>,
+    destination: Option<&Destination>,
 ) -> tracing::Span {
     let span = otel_trace_span!(
         "GRPC request",
-        otel.name = &*handles.span_name,
+        otel.name = handles.span_name(),
         otel.kind = ?side.span_kind(),
     );
-    span.set_attribute("rpc.system", "grpc");
-    span.set_attribute("rpc.service", Arc::clone(&handles.service));
-    span.set_attribute("rpc.method", Arc::clone(&handles.method));
+    span.set_attribute("rpc.system.name", "grpc");
+    if let Some(method) = &handles.rpc_method {
+        span.set_attribute("rpc.method", Arc::clone(method));
+    } else {
+        span.set_attribute("rpc.method", "_OTHER");
+        let original = request.uri().path().trim_start_matches('/');
+        if !original.is_empty() && original.len() <= DIAGNOSTIC_BYTES {
+            span.set_attribute("rpc.method_original", original.to_owned());
+        }
+    }
     if let Some(destination) = destination {
-        if let Some(host) = destination.host()
-            && !host.is_empty()
-            && host.len() <= CLIENT_DIAGNOSTIC_BYTES
-        {
-            let address = host.trim_start_matches('[').trim_end_matches(']');
-            span.set_attribute("server.address", address.to_owned());
-            if let Some(port) = destination.port_u16() {
+        if let Some(address) = &destination.address {
+            span.set_attribute("server.address", Arc::clone(address));
+            if let Some(port) = destination.port {
                 span.set_attribute("server.port", i64::from(port));
             }
         }
         let user_agent = otel_http::user_agent(request);
-        if !user_agent.is_empty() && user_agent.len() <= CLIENT_DIAGNOSTIC_BYTES {
+        if !user_agent.is_empty() && user_agent.len() <= DIAGNOSTIC_BYTES {
             span.set_attribute("user_agent.original", user_agent.to_owned());
         }
     }
@@ -158,9 +161,33 @@ fn make_span<B>(
 }
 
 fn update_span(span: &tracing::Span, code: tonic::Code, side: Side) {
-    span.set_attribute("rpc.grpc.status_code", i64::from(code as i32));
+    let name = status_code_name(code);
+    span.set_attribute("rpc.status_code", name);
     if otel_http::grpc::status_is_error(code as u16, matches!(side, Side::Server)) {
+        span.set_attribute("error.type", name);
         span.set_status(opentelemetry::trace::Status::error(""));
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Destination {
+    address: Option<Arc<str>>,
+    port: Option<u16>,
+}
+
+impl Destination {
+    pub(crate) fn new(uri: &http::Uri) -> Self {
+        let address: Option<Arc<str>> = uri
+            .host()
+            .filter(|host| !host.is_empty() && host.len() <= DIAGNOSTIC_BYTES)
+            .map(|host| {
+                host.strip_prefix('[')
+                    .and_then(|host| host.strip_suffix(']'))
+                    .unwrap_or(host)
+                    .into()
+            });
+        let port = address.as_ref().and_then(|_| uri.port_u16());
+        Self { address, port }
     }
 }
 
@@ -206,7 +233,7 @@ pub(crate) struct Series {
 
 enum Kind {
     Server {
-        described: HashMap<Box<str>, OnceLock<Arc<Handles>>>,
+        described: HashMap<Box<str>, (CallType, OnceLock<Arc<Handles>>)>,
     },
     Client {
         admitted: ArcSwap<HashMap<Box<str>, Arc<Handles>>>,
@@ -215,9 +242,8 @@ enum Kind {
 }
 
 struct Handles {
-    span_name: Box<str>,
-    service: Arc<str>,
-    method: Arc<str>,
+    rpc_method: Option<Arc<str>>,
+    labels: Box<[metrics::Label]>,
     handled_metric: &'static str,
     started: metrics::Counter,
     handling_seconds: metrics::Histogram,
@@ -226,11 +252,11 @@ struct Handles {
 }
 
 impl Series {
-    pub(crate) fn server(methods: HashSet<Box<str>>) -> Arc<Self> {
+    pub(crate) fn server(methods: HashMap<Box<str>, CallType>) -> Arc<Self> {
         Arc::new(Self::new(Kind::Server {
             described: methods
                 .into_iter()
-                .map(|path| (path, OnceLock::new()))
+                .map(|(path, call_type)| (path, (call_type, OnceLock::new())))
                 .collect(),
         }))
     }
@@ -263,17 +289,26 @@ impl Series {
 
     fn handles<B>(&self, request: &http::Request<B>) -> Arc<Handles> {
         let labelled = match &self.kind {
-            Kind::Server { described } => described
-                .get_key_value(request.uri().path())
-                .map(|(path, handles)| Arc::clone(handles.get_or_init(|| self.register(path)))),
+            Kind::Server { described } => {
+                let path = request.uri().path();
+                described
+                    .get_key_value(path)
+                    .map(|(path, (call_type, handles))| {
+                        Arc::clone(handles.get_or_init(|| self.register(path, Some(*call_type))))
+                    })
+            }
             Kind::Client {
                 admitted,
                 admit_lock,
             } => client_path(request)
                 .and_then(|path| self.admit_client_path(admitted, admit_lock, path)),
         };
-        labelled
-            .unwrap_or_else(|| Arc::clone(self.unknown.get_or_init(|| self.register(UNKNOWN_PATH))))
+        labelled.unwrap_or_else(|| {
+            let unknown = self
+                .unknown
+                .get_or_init(|| self.register(UNKNOWN_PATH, None));
+            Arc::clone(unknown)
+        })
     }
 
     fn admit_client_path(
@@ -293,25 +328,29 @@ impl Series {
         if current.len() >= CLIENT_METHOD_LIMIT {
             return None;
         }
-        let handles = self.register(path);
+        let handles = self.register(path, None);
         let mut next = (**current).clone();
         next.insert(path.into(), Arc::clone(&handles));
         admitted.store(Arc::new(next));
         Some(handles)
     }
 
-    fn register(&self, path: &str) -> Arc<Handles> {
-        let (service, method) = service_and_method(path);
+    fn register(&self, path: &str, call_type: Option<CallType>) -> Arc<Handles> {
+        let recognized = crate::protocol::split_method_path(path);
+        let (service, method) = recognized.unwrap_or(("unknown", "unknown"));
+        let mut labels = Vec::with_capacity(4);
+        if let Kind::Server { .. } = self.kind {
+            let call_type = call_type.map_or("unknown", CallType::label);
+            labels.push(metrics::Label::new("grpc_type", call_type));
+        }
+        labels.push(metrics::Label::new("grpc_service", service.to_owned()));
+        labels.push(metrics::Label::new("grpc_method", method.to_owned()));
         Arc::new(Handles {
-            span_name: format!("{service}/{method}").into(),
-            service: service.into(),
-            method: method.into(),
+            rpc_method: recognized.map(|(service, method)| format!("{service}/{method}").into()),
+            started: metrics::counter!(self.started_metric, labels.clone()),
+            handling_seconds: metrics::histogram!(self.handling_seconds_metric, labels.clone()),
+            labels: labels.into_boxed_slice(),
             handled_metric: self.handled_metric,
-            started: metrics::counter!(self.started_metric, call_labels(service, method)),
-            handling_seconds: metrics::histogram!(
-                self.handling_seconds_metric,
-                call_labels(service, method)
-            ),
             handled: Default::default(),
             failed: std::array::from_fn(|_| OnceLock::new()),
         })
@@ -319,11 +358,15 @@ impl Series {
 }
 
 impl Handles {
+    fn span_name(&self) -> &str {
+        self.rpc_method.as_deref().unwrap_or("grpc")
+    }
+
     fn handled(&self, code: tonic::Code, elapsed: Duration) {
         self.handling_seconds.record(elapsed.as_secs_f64());
         self.handled[code as usize]
             .get_or_init(|| {
-                let mut labels = call_labels(&self.service, &self.method);
+                let mut labels = self.labels.to_vec();
                 labels.push(metrics::Label::new("grpc_code", code_name(code)));
                 metrics::counter!(self.handled_metric, labels)
             })
@@ -333,7 +376,7 @@ impl Handles {
     fn failed(&self, failure: service_failure::Code) {
         self.failed[failure as usize]
             .get_or_init(|| {
-                let mut labels = call_labels(&self.service, &self.method);
+                let mut labels = self.labels.to_vec();
                 labels.push(metrics::Label::new("failure_code", failure.as_str()));
                 metrics::counter!(SERVER_FAILURES, labels)
             })
@@ -354,15 +397,32 @@ fn client_path<B>(request: &http::Request<B>) -> Option<&str> {
     matches.then_some(path)
 }
 
-fn service_and_method(path: &str) -> (&str, &str) {
-    crate::protocol::split_method_path(path).unwrap_or(("unknown", "unknown"))
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum CallType {
+    Unary,
+    ClientStream,
+    ServerStream,
+    BidiStream,
 }
 
-fn call_labels(service: &str, method: &str) -> Vec<metrics::Label> {
-    vec![
-        metrics::Label::new("grpc_service", service.to_owned()),
-        metrics::Label::new("grpc_method", method.to_owned()),
-    ]
+impl CallType {
+    pub(crate) const fn new(client_streaming: bool, server_streaming: bool) -> Self {
+        match (client_streaming, server_streaming) {
+            (false, false) => Self::Unary,
+            (true, false) => Self::ClientStream,
+            (false, true) => Self::ServerStream,
+            (true, true) => Self::BidiStream,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Unary => "unary",
+            Self::ClientStream => "client_stream",
+            Self::ServerStream => "server_stream",
+            Self::BidiStream => "bidi_stream",
+        }
+    }
 }
 
 fn describe() {
@@ -420,6 +480,28 @@ fn describe() {
     });
 }
 
+const fn status_code_name(code: tonic::Code) -> &'static str {
+    match code {
+        tonic::Code::Ok => "OK",
+        tonic::Code::Cancelled => "CANCELLED",
+        tonic::Code::Unknown => "UNKNOWN",
+        tonic::Code::InvalidArgument => "INVALID_ARGUMENT",
+        tonic::Code::DeadlineExceeded => "DEADLINE_EXCEEDED",
+        tonic::Code::NotFound => "NOT_FOUND",
+        tonic::Code::AlreadyExists => "ALREADY_EXISTS",
+        tonic::Code::PermissionDenied => "PERMISSION_DENIED",
+        tonic::Code::ResourceExhausted => "RESOURCE_EXHAUSTED",
+        tonic::Code::FailedPrecondition => "FAILED_PRECONDITION",
+        tonic::Code::Aborted => "ABORTED",
+        tonic::Code::OutOfRange => "OUT_OF_RANGE",
+        tonic::Code::Unimplemented => "UNIMPLEMENTED",
+        tonic::Code::Internal => "INTERNAL",
+        tonic::Code::Unavailable => "UNAVAILABLE",
+        tonic::Code::DataLoss => "DATA_LOSS",
+        tonic::Code::Unauthenticated => "UNAUTHENTICATED",
+    }
+}
+
 const fn code_name(code: tonic::Code) -> &'static str {
     match code {
         tonic::Code::Ok => "OK",
@@ -449,13 +531,117 @@ mod tests {
     use tower::Service as _;
 
     #[test]
-    fn paths_split_into_service_and_method() {
+    fn call_types_follow_the_descriptor_streaming_flags() {
+        assert_eq!(CallType::new(false, false).label(), "unary");
+        assert_eq!(CallType::new(true, false).label(), "client_stream");
+        assert_eq!(CallType::new(false, true).label(), "server_stream");
+        assert_eq!(CallType::new(true, true).label(), "bidi_stream");
+    }
+
+    #[test]
+    fn status_code_names_are_the_canonical_names() {
+        assert_eq!(status_code_name(tonic::Code::Ok), "OK");
+        assert_eq!(status_code_name(tonic::Code::Cancelled), "CANCELLED");
         assert_eq!(
-            service_and_method("/example.v1.EchoService/Unary"),
-            ("example.v1.EchoService", "Unary")
+            status_code_name(tonic::Code::DeadlineExceeded),
+            "DEADLINE_EXCEEDED"
         );
-        assert_eq!(service_and_method("no-slash"), ("unknown", "unknown"));
-        assert_eq!(service_and_method(UNKNOWN_PATH), ("unknown", "unknown"));
+        assert_eq!(
+            status_code_name(tonic::Code::Unauthenticated),
+            "UNAUTHENTICATED"
+        );
+    }
+
+    #[test]
+    fn spans_carry_the_stable_rpc_attributes_on_each_side() {
+        use opentelemetry::trace::TracerProvider as _;
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        let exporter = opentelemetry_sdk::trace::InMemorySpanExporter::default();
+        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")));
+        let _anchor = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+        let guard = tracing::subscriber::set_default(subscriber);
+        let server = Series::server(
+            std::iter::once(("/example.v1.EchoService/Unary".into(), CallType::Unary)).collect(),
+        );
+        let client = Arc::new(Series::new(Kind::Client {
+            admitted: ArcSwap::default(),
+            admit_lock: Mutex::new(()),
+        }));
+        let request = |path: &str| http::Request::builder().uri(path).body(()).unwrap();
+        Call::start(&server, &request("/example.v1.EchoService/Unary"), None)
+            .finish(tonic::Code::Unauthenticated);
+        Call::start(&server, &request("/example.v1.EchoService/Invented"), None)
+            .finish(tonic::Code::Unimplemented);
+        let mut known = request("/example.v1.EchoService/Unary");
+        known
+            .extensions_mut()
+            .insert(tonic::GrpcMethod::new("example.v1.EchoService", "Unary"));
+        let destination = Destination::new(&"http://[::1]:50051".parse().unwrap());
+        Call::start(&client, &known, Some(&destination)).finish(tonic::Code::Unauthenticated);
+        drop(guard);
+
+        let spans = exporter.get_finished_spans().unwrap();
+        let text = |span: &opentelemetry_sdk::trace::SpanData, key: &str| {
+            span.attributes
+                .iter()
+                .find(|attribute| attribute.key.as_str() == key)
+                .map(|attribute| attribute.value.as_str().into_owned())
+        };
+        let [known_server, unknown_server, known_client] = spans.as_slice() else {
+            panic!("three spans: {spans:?}");
+        };
+        for span in &spans {
+            assert_eq!(text(span, "rpc.system.name").as_deref(), Some("grpc"));
+            for deprecated in ["rpc.system", "rpc.service", "rpc.grpc.status_code"] {
+                assert_eq!(text(span, deprecated), None, "{deprecated}");
+            }
+        }
+        assert_eq!(known_server.name, "example.v1.EchoService/Unary");
+        assert_eq!(
+            text(known_server, "rpc.method").as_deref(),
+            Some("example.v1.EchoService/Unary")
+        );
+        assert_eq!(
+            text(known_server, "rpc.status_code").as_deref(),
+            Some("UNAUTHENTICATED")
+        );
+        assert_eq!(text(known_server, "error.type"), None);
+        assert_eq!(unknown_server.name, "grpc");
+        assert_eq!(
+            text(unknown_server, "rpc.method").as_deref(),
+            Some("_OTHER")
+        );
+        assert_eq!(
+            text(unknown_server, "rpc.method_original").as_deref(),
+            Some("example.v1.EchoService/Invented")
+        );
+        assert_eq!(
+            text(unknown_server, "error.type").as_deref(),
+            Some("UNIMPLEMENTED")
+        );
+        assert_eq!(
+            text(known_client, "error.type").as_deref(),
+            Some("UNAUTHENTICATED")
+        );
+        assert_eq!(text(known_client, "server.address").as_deref(), Some("::1"));
+        assert_eq!(text(known_client, "server.port").as_deref(), Some("50051"));
+        assert_eq!(text(known_client, "rpc.method_original"), None);
+    }
+
+    #[test]
+    fn a_destination_keeps_the_configured_host_without_brackets() {
+        let parse = |uri: &str| Destination::new(&uri.parse().unwrap());
+        let ipv6 = parse("http://[::1]:50051");
+        assert_eq!(ipv6.address.as_deref(), Some("::1"));
+        assert_eq!(ipv6.port, Some(50051));
+        let name = parse("https://grpc.example.test");
+        assert_eq!(name.address.as_deref(), Some("grpc.example.test"));
+        assert_eq!(name.port, None);
     }
 
     #[test]

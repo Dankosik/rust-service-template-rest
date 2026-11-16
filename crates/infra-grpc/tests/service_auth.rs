@@ -18,7 +18,7 @@ use grpc_contracts::example::v1::{
 };
 use health::{Readiness, RefreshPolicy};
 use infra_grpc::{Caller, ClientSecurity, Error, Limits, Services, server_options};
-use infra_http::Server;
+use infra_http::{Drained, Server};
 use infra_serviceauth::{
     JwtType, KeyId, ServiceName, SigningOptions, TokenSource, TrustRegistry, Verifier,
     test_support::{TestKey, now_secs, registry},
@@ -308,7 +308,10 @@ async fn a_valid_token_names_its_caller_and_every_contract_breach_is_refused() {
     let status = raw_status(address, "/example.v1.EchoService/Missing", &valid).await;
     assert_eq!(status, "7", "a path outside the table is PERMISSION_DENIED");
     assert_eq!(echo.seen().len(), 1);
-    drop(server.drain(Duration::from_secs(3)).await);
+    assert_eq!(
+        server.drain(Duration::from_secs(3)).await.unwrap(),
+        Drained::Complete
+    );
 }
 
 #[tokio::test]
@@ -349,22 +352,30 @@ async fn the_outbound_binding_signs_for_its_receiver_and_refuses_a_caller_author
         EchoServiceClient::new(resource().with_service_tokens(source.receiver("billing").unwrap()));
     let status = elsewhere.unary(UnaryRequest::default()).await.unwrap_err();
     assert_eq!(status.code(), Code::Unauthenticated);
+    assert_eq!(status.message(), "authentication failed");
+    assert_eq!(reason(&status), "UNAUTHORIZED");
     let status = catalog
         .unary(with_token(UnaryRequest::default(), Some("caller-supplied")))
         .await
         .unwrap_err();
     assert_eq!(status.code(), Code::Internal);
+    assert_eq!(
+        status.message(),
+        "authorization conflicts with the service token"
+    );
+    assert_eq!(reason(&status), "");
     let mut open = EchoServiceClient::new(
         resource().with_service_tokens(TokenSource::disabled().receiver("catalog").unwrap()),
     );
+    let status = open.unary(UnaryRequest::default()).await.unwrap_err();
+    assert_eq!(status.code(), Code::Unauthenticated);
+    assert_eq!(status.message(), "authentication failed");
+    assert_eq!(reason(&status), "UNAUTHORIZED");
+    assert_eq!(echo.seen().len(), 2, "no refused call reached the handler");
     assert_eq!(
-        open.unary(UnaryRequest::default())
-            .await
-            .unwrap_err()
-            .code(),
-        Code::Unauthenticated
+        server.drain(Duration::from_secs(3)).await.unwrap(),
+        Drained::Complete
     );
-    drop(server.drain(Duration::from_secs(3)).await);
 }
 
 #[allow(
@@ -402,96 +413,87 @@ async fn without_a_verifier_bearer_or_nothing_admits_calls_and_no_token_reaches_
     assert_eq!(unary(address, Some(&token)).await.unwrap(), "hello");
     assert_eq!(unary(address, None).await.unwrap(), "hello");
     assert_eq!(echo.seen(), vec![(None, false), (None, false)]);
-    drop(server.drain(Duration::from_secs(3)).await);
+    assert_eq!(
+        server.drain(Duration::from_secs(3)).await.unwrap(),
+        Drained::Complete
+    );
 }
 
 // template:begin authn:grpc-service-auth-test-scopes-refused
-#[test]
-fn a_scope_requirement_cannot_be_dropped_for_service_tokens() {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
+#[tokio::test]
+async fn a_scope_requirement_cannot_be_dropped_for_service_tokens() {
+    let mut services = echo_services(&Echo::default());
+    services
+        .require_scopes(&format!("{ECHO}/Unary"), &["echo.read"])
         .unwrap();
-    runtime.block_on(async {
-        let mut services = echo_services(&Echo::default());
-        services
-            .require_scopes(&format!("{ECHO}/Unary"), &["echo.read"])
-            .unwrap();
-        services.authenticate_callers(Keys::new().verifier());
-        let readiness = readiness();
-        let refused = infra_grpc::router(services, readiness.reader(), None, limits());
-        assert_eq!(refused.err(), Some(Error::ScopesWithServiceTokens));
-    });
+    services.authenticate_callers(Keys::new().verifier());
+    let readiness = readiness();
+    let refused = infra_grpc::router(services, readiness.reader(), None, limits());
+    assert_eq!(refused.err(), Some(Error::ScopesWithServiceTokens));
 }
 // template:end authn:grpc-service-auth-test-scopes-refused
 
-#[test]
-fn a_router_refuses_to_build_while_a_method_has_no_rule() {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    runtime.block_on(async {
-        let keys = Keys::new();
-        let build = |services: Services| {
-            let readiness = readiness();
-            async move {
-                infra_grpc::router(
-                    services,
-                    readiness.reader(),
-                    // template:begin authn:grpc-service-auth-test-refusal-bearer-argument
-                    None,
-                    // template:end authn:grpc-service-auth-test-refusal-bearer-argument
-                    limits(),
-                )
-                .map(|_| ())
-            }
-        };
-        let mut services = Services::new();
-        services
-            .describe(grpc_contracts::FILE_DESCRIPTOR_SET)
-            .unwrap();
-        services
-            .add(EchoServiceServer::new(Echo::default()))
-            .unwrap();
-        services.authenticate_callers(keys.verifier());
-        assert_eq!(
-            build(services).await,
-            Err(Error::MissingCallerRule(format!("{ECHO}/Unary"))),
-            "a verifier without any rule"
-        );
-        let mut services = Services::new();
-        services
-            .describe(grpc_contracts::FILE_DESCRIPTOR_SET)
-            .unwrap();
-        services
-            .add(EchoServiceServer::new(Echo::default()))
-            .unwrap();
-        services
-            .allow_callers(&format!("{ECHO}/Unary"), &["orders"])
-            .unwrap();
-        assert_eq!(
-            build(services).await,
-            Err(Error::MissingCallerRule(format!("{ECHO}/ClientStream"))),
-            "a declared table must be complete even before tokens are verified"
-        );
-        let echo = Echo::default();
-        let mut services = echo_services(&echo);
-        services.add_reflection().unwrap();
-        assert_eq!(
-            build(services).await,
-            Err(Error::MissingCallerRule(
-                "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo".to_owned()
-            ))
-        );
-        let mut services = echo_services(&echo);
-        services.add_reflection().unwrap();
-        for path in infra_grpc::REFLECTION_PATHS {
-            services.allow_callers(path, &[]).unwrap();
+#[tokio::test]
+async fn a_router_refuses_to_build_while_a_method_has_no_rule() {
+    let keys = Keys::new();
+    let build = |services: Services| {
+        let readiness = readiness();
+        async move {
+            infra_grpc::router(
+                services,
+                readiness.reader(),
+                // template:begin authn:grpc-service-auth-test-refusal-bearer-argument
+                None,
+                // template:end authn:grpc-service-auth-test-refusal-bearer-argument
+                limits(),
+            )
+            .map(|_| ())
         }
-        services.authenticate_callers(keys.verifier());
-        assert_eq!(build(services).await, Ok(()));
-    });
+    };
+    let mut services = Services::new();
+    services
+        .describe(grpc_contracts::FILE_DESCRIPTOR_SET)
+        .unwrap();
+    services
+        .add(EchoServiceServer::new(Echo::default()))
+        .unwrap();
+    services.authenticate_callers(keys.verifier());
+    assert_eq!(
+        build(services).await,
+        Err(Error::MissingCallerRule(format!("{ECHO}/Unary"))),
+        "a verifier without any rule"
+    );
+    let mut services = Services::new();
+    services
+        .describe(grpc_contracts::FILE_DESCRIPTOR_SET)
+        .unwrap();
+    services
+        .add(EchoServiceServer::new(Echo::default()))
+        .unwrap();
+    services
+        .allow_callers(&format!("{ECHO}/Unary"), &["orders"])
+        .unwrap();
+    assert_eq!(
+        build(services).await,
+        Err(Error::MissingCallerRule(format!("{ECHO}/ClientStream"))),
+        "a declared table must be complete even before tokens are verified"
+    );
+    let echo = Echo::default();
+    let mut services = echo_services(&echo);
+    services.add_reflection().unwrap();
+    assert_eq!(
+        build(services).await,
+        Err(Error::MissingCallerRule(
+            "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo".to_owned()
+        ))
+    );
+    let mut services = echo_services(&echo);
+    services.add_reflection().unwrap();
+    for path in infra_grpc::REFLECTION_PATHS {
+        services.allow_callers(path, &[]).unwrap();
+    }
+    services.authenticate_callers(keys.verifier());
+    assert_eq!(build(services).await, Ok(()));
 }
 
 #[test]
@@ -597,7 +599,10 @@ async fn token_text_never_reaches_logs_or_spans_and_the_span_names_the_caller() 
         .server_stream(with_token(ServerStreamRequest::default(), Some(&valid)))
         .await
         .unwrap_err();
-    drop(server.drain(Duration::from_secs(3)).await);
+    assert_eq!(
+        server.drain(Duration::from_secs(3)).await.unwrap(),
+        Drained::Complete
+    );
 
     let logged = capture.0.lock().clone();
     assert!(

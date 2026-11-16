@@ -14,7 +14,9 @@ use tokio::sync::OwnedSemaphorePermit;
 use tokio_util::task::AbortOnDropHandle;
 
 use crate::observe::Call;
-use crate::protocol::{header_status_code, http_status_code};
+use crate::protocol::{
+    GRPC_MESSAGE, GRPC_STATUS, GRPC_STATUS_DETAILS, header_status_code, http_status_code,
+};
 use crate::status::internal_status;
 
 use operation_context::{OperationContext, Stopped};
@@ -101,7 +103,7 @@ impl Side {
 }
 
 fn header_catalog_code(headers: &HeaderMap) -> Option<service_failure::Code> {
-    headers.get("grpc-status-details-bin")?;
+    headers.get(GRPC_STATUS_DETAILS)?;
     tonic::Status::from_header_map(headers)
         .as_ref()
         .and_then(crate::status::catalog_code)
@@ -343,7 +345,7 @@ where
         .map(|reason| side.stopped(reason));
     let initial = if let Some(status) = stopped {
         observation.record_local_stop(&status);
-        for name in ["grpc-status", "grpc-message", "grpc-status-details-bin"] {
+        for name in [GRPC_STATUS, GRPC_MESSAGE, GRPC_STATUS_DETAILS] {
             response.headers_mut().remove(name);
         }
         let _ = status.add_header(response.headers_mut());
@@ -703,7 +705,11 @@ mod tests {
             .unwrap();
         Call::start(
             &crate::observe::Series::server(
-                std::iter::once("/test.Service/Stream".into()).collect(),
+                std::iter::once((
+                    "/test.Service/Stream".into(),
+                    crate::observe::CallType::BidiStream,
+                ))
+                .collect(),
             ),
             &request,
             None,
@@ -909,6 +915,190 @@ mod tests {
         assert!(upload_dropped.load(Ordering::SeqCst));
         assert!(outgoing.frame().await.is_none());
         assert!(tokio::time::timeout(BUDGET, done).await.unwrap().is_err());
+    }
+
+    struct PanicBody(Arc<AtomicBool>);
+
+    const PANIC: &str = "source panic";
+
+    impl Drop for PanicBody {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    impl Body for PanicBody {
+        type Data = Bytes;
+        type Error = tonic::Status;
+
+        fn poll_frame(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
+            std::panic::resume_unwind(Box::new(PANIC))
+        }
+    }
+
+    fn held_permit(permits: &Arc<Semaphore>) -> Held {
+        Held {
+            permit: Some(Arc::clone(permits).try_acquire_owned().unwrap()),
+            ..Held::default()
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_server_body_panic_answers_internal_and_releases_the_call() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _recorder = metrics::set_default_local_recorder(&recorder);
+        let permits = Arc::new(Semaphore::new(1));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let mut body = response(
+            PanicBody(Arc::clone(&dropped)),
+            ResponseCustody {
+                on_status: None,
+                context: Some(deadline_context()),
+                held: held_permit(&permits),
+            },
+        );
+        let done = body.watcher_done.take().unwrap();
+        let trailers = body
+            .frame()
+            .await
+            .unwrap()
+            .unwrap()
+            .into_trailers()
+            .unwrap();
+        let status = tonic::Status::from_header_map(&trailers).unwrap();
+        assert_eq!(status.code(), tonic::Code::Internal);
+        assert_eq!(status.message(), service_failure::SANITIZED_DETAIL);
+        assert_eq!(
+            crate::status::catalog_code(&status),
+            Some(service_failure::Code::InternalServerError)
+        );
+        assert!(dropped.load(Ordering::SeqCst));
+        assert_eq!(permits.available_permits(), 1);
+        assert!(tokio::time::timeout(BUDGET, done).await.unwrap().is_err());
+        assert!(body.frame().await.is_none());
+        drop(body);
+        let rendered = handle.render();
+        assert!(rendered.contains("grpc_code=\"Internal\"} 1"), "{rendered}");
+        assert!(!rendered.contains("grpc_code=\"Canceled\""), "{rendered}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_client_body_panic_reaches_the_caller_after_ending_the_call_cancelled() {
+        let decoded = Arc::new(Mutex::new(Vec::new()));
+        let observer = tonic::client::ResponseStatusObserver::new({
+            let decoded = Arc::clone(&decoded);
+            move |code| decoded.lock().push(code)
+        });
+        let responded = Arc::new(Mutex::new(Vec::new()));
+        let on_status: ResponseStatusObserver = Box::new({
+            let responded = Arc::clone(&responded);
+            move |code| responded.lock().push(code)
+        });
+        let permits = Arc::new(Semaphore::new(1));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let mut body = ResponseBody::start(
+            PanicBody(Arc::clone(&dropped)),
+            Observation::Decoded {
+                span: tracing::Span::none(),
+                observer,
+            },
+            None,
+            ResponseCustody {
+                on_status: Some(on_status),
+                context: Some(deadline_context()),
+                held: held_permit(&permits),
+            },
+            tonic::Status::code,
+            None,
+            Outcome::bare(tonic::Code::Unknown),
+        );
+        let done = body.watcher_done.take().unwrap();
+        let mut context = Context::from_waker(Waker::noop());
+        let payload = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            Pin::new(&mut body).poll_frame(&mut context)
+        }))
+        .unwrap_err();
+        assert_eq!(payload.downcast_ref::<&str>(), Some(&PANIC));
+        assert_eq!(*decoded.lock(), [tonic::Code::Cancelled]);
+        assert!(
+            responded.lock().is_empty(),
+            "a panic carries no response code"
+        );
+        assert!(dropped.load(Ordering::SeqCst));
+        assert_eq!(permits.available_permits(), 1);
+        assert!(body.is_end_stream());
+        assert!(tokio::time::timeout(BUDGET, done).await.unwrap().is_err());
+        assert!(body.frame().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn an_upload_source_panic_reaches_the_sender_and_ends_the_upload() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let (mut outgoing, guard) = upload(tonic::body::Body::new(PanicBody(Arc::clone(&dropped))));
+        let mut context = Context::from_waker(Waker::noop());
+        let payload = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            Pin::new(&mut outgoing).poll_frame(&mut context)
+        }))
+        .unwrap_err();
+        assert_eq!(payload.downcast_ref::<&str>(), Some(&PANIC));
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "the source is released while its guard is still held"
+        );
+        assert!(outgoing.is_end_stream());
+        assert!(outgoing.frame().await.is_none());
+        drop(guard);
+    }
+
+    #[test]
+    fn a_watcher_lost_with_its_runtime_ends_the_call_internal() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let _recorder = metrics::set_default_local_recorder(&recorder);
+        let permits = Arc::new(Semaphore::new(1));
+        let source = ProbeBody::pending();
+        let dropped = Arc::clone(&source.dropped);
+        let polls = Arc::clone(&source.polls);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let mut body = {
+            let _entered = runtime.enter();
+            response(
+                source,
+                ResponseCustody {
+                    on_status: None,
+                    context: Some(deadline_context()),
+                    held: held_permit(&permits),
+                },
+            )
+        };
+        drop(runtime);
+        let mut context = Context::from_waker(Waker::noop());
+        let Poll::Ready(Some(Ok(frame))) = Pin::new(&mut body).poll_frame(&mut context) else {
+            unreachable!("a lost watcher ends the call with trailers");
+        };
+        let status = tonic::Status::from_header_map(&frame.into_trailers().unwrap()).unwrap();
+        assert_eq!(status.code(), tonic::Code::Internal);
+        assert_eq!(
+            crate::status::catalog_code(&status),
+            Some(service_failure::Code::InternalServerError)
+        );
+        assert_eq!(polls.load(Ordering::SeqCst), 0);
+        assert!(dropped.load(Ordering::SeqCst));
+        assert_eq!(permits.available_permits(), 1);
+        assert!(matches!(
+            Pin::new(&mut body).poll_frame(&mut context),
+            Poll::Ready(None)
+        ));
+        drop(body);
+        let rendered = handle.render();
+        assert!(rendered.contains("grpc_code=\"Internal\"} 1"), "{rendered}");
     }
 
     #[test]

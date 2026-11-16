@@ -18,11 +18,11 @@ pub enum Error {
     DuplicateService(&'static str),
     #[error("gRPC service {0} is in no described file descriptor set")]
     UndescribedService(&'static str),
+    // template:begin authn:grpc-unauthenticated-business-calls-error
     #[error("gRPC scope requirement for {0} must name a described method of a registered service")]
     UnregisteredMethodPath(String),
     #[error("gRPC scope requirement is declared twice for {0}")]
     DuplicateScopeRequirement(String),
-    // template:begin authn:grpc-unauthenticated-business-calls-error
     #[error("gRPC business calls need a bearer verifier unless service tokens replace it")]
     UnauthenticatedBusinessCalls,
     #[error(

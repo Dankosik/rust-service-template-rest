@@ -313,51 +313,51 @@ groups:
       - record: job:slo_grpc_slow:ratio_rate5m
         expr: |
           1 - (
-            sum by(job) (rate(grpc_server_handling_seconds_bucket{job=~"service|jobs-worker",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+",le="0.5"}[5m]))
+            sum by(job) (rate(grpc_server_handling_seconds_bucket{job=~"service|jobs-worker",grpc_type="unary",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+",le="0.5"}[5m]))
             /
-            sum by(job) (rate(grpc_server_handling_seconds_count{job=~"service|jobs-worker",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+"}[5m]))
+            sum by(job) (rate(grpc_server_handling_seconds_count{job=~"service|jobs-worker",grpc_type="unary",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+"}[5m]))
           )
       - record: job:slo_grpc_slow:ratio_rate30m
         expr: |
           1 - (
-            sum by(job) (rate(grpc_server_handling_seconds_bucket{job=~"service|jobs-worker",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+",le="0.5"}[30m]))
+            sum by(job) (rate(grpc_server_handling_seconds_bucket{job=~"service|jobs-worker",grpc_type="unary",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+",le="0.5"}[30m]))
             /
-            sum by(job) (rate(grpc_server_handling_seconds_count{job=~"service|jobs-worker",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+"}[30m]))
+            sum by(job) (rate(grpc_server_handling_seconds_count{job=~"service|jobs-worker",grpc_type="unary",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+"}[30m]))
           )
       - record: job:slo_grpc_slow:ratio_rate1h
         expr: |
           1 - (
-            sum by(job) (rate(grpc_server_handling_seconds_bucket{job=~"service|jobs-worker",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+",le="0.5"}[1h]))
+            sum by(job) (rate(grpc_server_handling_seconds_bucket{job=~"service|jobs-worker",grpc_type="unary",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+",le="0.5"}[1h]))
             /
-            sum by(job) (rate(grpc_server_handling_seconds_count{job=~"service|jobs-worker",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+"}[1h]))
+            sum by(job) (rate(grpc_server_handling_seconds_count{job=~"service|jobs-worker",grpc_type="unary",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+"}[1h]))
           )
       - record: job:slo_grpc_slow:ratio_rate2h
         expr: |
           1 - (
-            sum by(job) (rate(grpc_server_handling_seconds_bucket{job=~"service|jobs-worker",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+",le="0.5"}[2h]))
+            sum by(job) (rate(grpc_server_handling_seconds_bucket{job=~"service|jobs-worker",grpc_type="unary",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+",le="0.5"}[2h]))
             /
-            sum by(job) (rate(grpc_server_handling_seconds_count{job=~"service|jobs-worker",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+"}[2h]))
+            sum by(job) (rate(grpc_server_handling_seconds_count{job=~"service|jobs-worker",grpc_type="unary",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+"}[2h]))
           )
       - record: job:slo_grpc_slow:ratio_rate6h
         expr: |
           1 - (
-            sum by(job) (rate(grpc_server_handling_seconds_bucket{job=~"service|jobs-worker",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+",le="0.5"}[6h]))
+            sum by(job) (rate(grpc_server_handling_seconds_bucket{job=~"service|jobs-worker",grpc_type="unary",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+",le="0.5"}[6h]))
             /
-            sum by(job) (rate(grpc_server_handling_seconds_count{job=~"service|jobs-worker",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+"}[6h]))
+            sum by(job) (rate(grpc_server_handling_seconds_count{job=~"service|jobs-worker",grpc_type="unary",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+"}[6h]))
           )
       - record: job:slo_grpc_slow:ratio_rate1d
         expr: |
           1 - (
-            sum by(job) (rate(grpc_server_handling_seconds_bucket{job=~"service|jobs-worker",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+",le="0.5"}[1d]))
+            sum by(job) (rate(grpc_server_handling_seconds_bucket{job=~"service|jobs-worker",grpc_type="unary",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+",le="0.5"}[1d]))
             /
-            sum by(job) (rate(grpc_server_handling_seconds_count{job=~"service|jobs-worker",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+"}[1d]))
+            sum by(job) (rate(grpc_server_handling_seconds_count{job=~"service|jobs-worker",grpc_type="unary",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+"}[1d]))
           )
       - record: job:slo_grpc_slow:ratio_rate3d
         expr: |
           1 - (
-            sum by(job) (rate(grpc_server_handling_seconds_bucket{job=~"service|jobs-worker",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+",le="0.5"}[3d]))
+            sum by(job) (rate(grpc_server_handling_seconds_bucket{job=~"service|jobs-worker",grpc_type="unary",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+",le="0.5"}[3d]))
             /
-            sum by(job) (rate(grpc_server_handling_seconds_count{job=~"service|jobs-worker",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+"}[3d]))
+            sum by(job) (rate(grpc_server_handling_seconds_count{job=~"service|jobs-worker",grpc_type="unary",grpc_service!~"grpc\\.health\\.v1\\.Health|grpc\\.reflection\\..+"}[3d]))
           )
       - alert: GRPCErrorBudgetBurn
         expr: |
@@ -411,8 +411,8 @@ groups:
         for: 2m
         labels: {severity: page, long_window: 1h}
         annotations:
-          summary: gRPC calls slower than 500 ms burns the 99% under 500 ms latency error budget 14.4x faster than sustainable
-          description: '{{ $labels.job }}: {{ $value | humanizePercentage }} of grpc calls slower than 500 ms over 1h, against a budget of 0.01.'
+          summary: unary gRPC calls slower than 500 ms burn the 99% under 500 ms latency error budget 14.4x faster than sustainable
+          description: '{{ $labels.job }}: {{ $value | humanizePercentage }} of unary grpc calls slower than 500 ms over 1h, against a budget of 0.01.'
           runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#grpclatencybudgetburn
       - alert: GRPCLatencyBudgetBurn
         expr: |
@@ -422,8 +422,8 @@ groups:
         for: 15m
         labels: {severity: page, long_window: 6h}
         annotations:
-          summary: gRPC calls slower than 500 ms burns the 99% under 500 ms latency error budget 6x faster than sustainable
-          description: '{{ $labels.job }}: {{ $value | humanizePercentage }} of grpc calls slower than 500 ms over 6h, against a budget of 0.01.'
+          summary: unary gRPC calls slower than 500 ms burn the 99% under 500 ms latency error budget 6x faster than sustainable
+          description: '{{ $labels.job }}: {{ $value | humanizePercentage }} of unary grpc calls slower than 500 ms over 6h, against a budget of 0.01.'
           runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#grpclatencybudgetburn
       - alert: GRPCLatencyBudgetBurn
         expr: |
@@ -433,8 +433,8 @@ groups:
         for: 1h
         labels: {severity: ticket, long_window: 1d}
         annotations:
-          summary: gRPC calls slower than 500 ms burns the 99% under 500 ms latency error budget 3x faster than sustainable
-          description: '{{ $labels.job }}: {{ $value | humanizePercentage }} of grpc calls slower than 500 ms over 1d, against a budget of 0.01.'
+          summary: unary gRPC calls slower than 500 ms burn the 99% under 500 ms latency error budget 3x faster than sustainable
+          description: '{{ $labels.job }}: {{ $value | humanizePercentage }} of unary grpc calls slower than 500 ms over 1d, against a budget of 0.01.'
           runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#grpclatencybudgetburn
       - alert: GRPCLatencyBudgetBurn
         expr: |
@@ -444,8 +444,8 @@ groups:
         for: 3h
         labels: {severity: ticket, long_window: 3d}
         annotations:
-          summary: gRPC calls slower than 500 ms burns the 99% under 500 ms latency error budget 1x faster than sustainable
-          description: '{{ $labels.job }}: {{ $value | humanizePercentage }} of grpc calls slower than 500 ms over 3d, against a budget of 0.01.'
+          summary: unary gRPC calls slower than 500 ms burn the 99% under 500 ms latency error budget 1x faster than sustainable
+          description: '{{ $labels.job }}: {{ $value | humanizePercentage }} of unary grpc calls slower than 500 ms over 3d, against a budget of 0.01.'
           runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#grpclatencybudgetburn
   # template:end grpc:monitoring-grpc-slo
   # template:begin postgres:monitoring-postgres-pool

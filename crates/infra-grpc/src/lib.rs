@@ -21,13 +21,13 @@ pub use client::{
     Client, ClientIdentity, ClientSecurity, ClientTimeout, ClientTlsMaterial, PreparedCall,
 };
 pub use error::{Error, TlsMaterialError};
-pub use observe::{HANDLING_SECONDS_BUCKETS, HISTOGRAMS};
-pub use protocol::{client_response_code, grpc_timeout, metadata_grpc_timeout};
+pub use observe::HISTOGRAMS;
+pub use protocol::grpc_timeout;
 pub use router::{Limits, ResponseContext, router, server_options};
 pub use services::Services;
 // template:begin service-auth:grpc-service-auth-exports
 pub use infra_serviceauth::Caller;
-pub use service_auth::{REFLECTION_PATHS, SERVICE_AUTH_CALLS_METRIC, ServiceTokenClient};
+pub use service_auth::{REFLECTION_PATHS, ServiceTokenClient};
 // template:end service-auth:grpc-service-auth-exports
 pub use status::{ERROR_DOMAIN, Failure};
 pub use tls::{ServerTlsMaterial, server_tls_config};

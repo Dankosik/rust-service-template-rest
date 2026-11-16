@@ -8,6 +8,7 @@ use tonic_reflection::pb::{v1, v1alpha};
 
 use crate::Error;
 use crate::health::HealthServer;
+use crate::observe::CallType;
 use crate::protocol::{method_path, split_method_path};
 
 const REFLECTION_SERVICE: &str = v1::server_reflection_server::SERVICE_NAME;
@@ -16,7 +17,7 @@ const REFLECTION_SERVICE: &str = v1::server_reflection_server::SERVICE_NAME;
 pub struct Services {
     pub(crate) routes: tonic::service::RoutesBuilder,
     pub(crate) names: BTreeSet<&'static str>,
-    described: HashMap<String, Vec<String>>,
+    described: HashMap<String, Vec<(String, CallType)>>,
     descriptor_sets: Vec<&'static [u8]>,
     pub(crate) reflection: bool,
     // template:begin authn:grpc-services-scopes-field
@@ -43,7 +44,7 @@ impl Services {
     pub(crate) fn learn(&mut self, encoded_file_descriptor_set: &[u8]) -> Result<(), Error> {
         let set = prost_types::FileDescriptorSet::decode(encoded_file_descriptor_set)
             .map_err(|_| Error::InvalidFileDescriptorSet)?;
-        let mut described: HashMap<String, Vec<String>> = HashMap::default();
+        let mut described: HashMap<String, Vec<(String, CallType)>> = HashMap::default();
         for file in set.file {
             let package = file.package.as_deref().unwrap_or_default();
             for service in file.service {
@@ -56,7 +57,11 @@ impl Services {
                 let methods: Vec<_> = service
                     .method
                     .into_iter()
-                    .map(|method| method.name.unwrap_or_default())
+                    .map(|method| {
+                        let call_type =
+                            CallType::new(method.client_streaming(), method.server_streaming());
+                        (method.name.unwrap_or_default(), call_type)
+                    })
                     .collect();
                 if let Some(previous) = described.get(&name).or_else(|| self.described.get(&name)) {
                     if previous != &methods
@@ -150,18 +155,20 @@ impl Services {
                 && self
                     .described
                     .get(service)
-                    .is_some_and(|methods| methods.iter().any(|known| known == method))
+                    .is_some_and(|methods| methods.iter().any(|(known, _)| known == method))
         })
     }
 
-    pub(crate) fn method_paths(&self) -> HashSet<Box<str>> {
+    pub(crate) fn method_paths(&self) -> HashMap<Box<str>, CallType> {
         self.names
             .iter()
             .copied()
             .chain([HealthServer::NAME])
             .flat_map(|service| {
                 let methods = self.described.get(service).into_iter().flatten();
-                methods.map(move |method| method_path(service, method).into_boxed_str())
+                methods.map(move |(method, call_type)| {
+                    (method_path(service, method).into_boxed_str(), *call_type)
+                })
             })
             .collect()
     }
@@ -216,7 +223,7 @@ impl Services {
     ) -> Result<crate::service_auth::CallerAdmission, Error> {
         if self.caller_verifier.is_some() || !self.caller_rules.is_empty() {
             for service in &self.names {
-                for method in self.described.get(*service).into_iter().flatten() {
+                for (method, _) in self.described.get(*service).into_iter().flatten() {
                     let path = method_path(service, method);
                     if !self.caller_rules.contains_key(&path) {
                         return Err(Error::MissingCallerRule(path));

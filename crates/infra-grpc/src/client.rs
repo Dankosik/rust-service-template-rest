@@ -1,8 +1,8 @@
-use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+use futures_util::future::BoxFuture;
 use http::{Request, Response};
 use hyper_util::client::legacy::connect::HttpConnector;
 use secrecy::{ExposeSecret as _, SecretString};
@@ -40,7 +40,7 @@ pub struct ClientIdentity {
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClientTimeout {
     FullRpc(Duration),
     OpeningOnly(Duration),
@@ -62,7 +62,7 @@ impl ClientTimeout {
 pub struct Client {
     channel: Channel,
     #[debug(skip)]
-    destination: http::Uri,
+    destination: crate::observe::Destination,
     timeout: ClientTimeout,
     series: Arc<crate::observe::Series>,
 }
@@ -108,7 +108,7 @@ impl Client {
         connector.set_connect_timeout(Some(CONNECT_TIMEOUT));
         Ok(Self {
             channel: endpoint.connect_with_connector_lazy(connector),
-            destination: endpoint.uri().clone(),
+            destination: crate::observe::Destination::new(endpoint.uri()),
             timeout,
             series: crate::observe::Series::client(),
         })
@@ -118,7 +118,7 @@ impl Client {
 impl tower::Service<Request<Body>> for Client {
     type Response = Response<Body>;
     type Error = tonic::Status;
-    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+    type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
 
     fn poll_ready(&mut self, _context: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
@@ -210,13 +210,6 @@ impl PreparedCall {
 
     pub async fn send(self) -> Result<Response<Body>, tonic::Status> {
         self.send_inner(|_| Ok(()), None).await
-    }
-
-    pub async fn send_with_response_status(
-        self,
-        on_status: impl FnOnce(tonic::Code) + Send + 'static,
-    ) -> Result<Response<Body>, tonic::Status> {
-        self.send_with_dispatch_check(|| Ok(()), on_status).await
     }
 
     pub async fn send_with_dispatch_check(
