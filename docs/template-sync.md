@@ -22,11 +22,11 @@ make template-init \
   AGENT_HARNESS=claude
 ```
 
-[`Makefile`](../Makefile) and [`scripts/lib/template_state.py`](../scripts/lib/template_state.py)
+[`Makefile`](../Makefile) and [`scripts/template/state.py`](../scripts/template/state.py)
 own all profile flags, allowed values, defaults, and cross-profile prerequisites
-(`scripts/init-module.sh --repo .` accepts the same flags in `--kebab-case`;
-unset ambient shell `JOBS=<n>` before running `make template-init` unless
-selecting the `JOBS` profile).
+(`python3 scripts/template/init.py --repo .` accepts the same flags in
+`--kebab-case`; unset ambient shell `JOBS=<n>` before running `make
+template-init` unless selecting the `JOBS` profile).
 
 The initializer validates inputs before mutating the checkout, renames the
 service package and main binary (keeping `crates/service/`, the library target,
@@ -34,12 +34,15 @@ and `openapi`), prunes unselected packs, `source_only` paths, and unused
 `[workspace.dependencies]`, prunes `Cargo.lock` offline via `cargo metadata
 --offline` (verifying remaining package checksums against the template lock),
 formats Rust code, regenerates OpenAPI, materializes selected harness adapters,
-and writes `template.lock` without staging or committing.
+removes the one-shot initializer (`scripts/template/init.py` and
+`scripts/template/profiles.json`), and writes `template.lock` without staging or
+committing.
 
 `template.lock` records initialization postconditions (`Cargo.toml`,
-`Cargo.lock`, code, and typed config remain runtime truth). Re-running with
-identical inputs verifies identity and structure without touching service edits;
-changing profiles after initialization is refused.
+`Cargo.lock`, code, and typed config remain runtime truth). Re-running from a
+template checkout (`python3 /path/to/template/scripts/template/init.py --repo . ...`)
+with identical inputs verifies identity and structure without touching service
+edits; changing profiles after initialization is refused.
 
 ## Adopt a committed source
 
@@ -49,8 +52,8 @@ at the template's `green` branch so post-merge CI and CodeQL have already passed
 ([Red main](ci-cd-production-ready.md#red-main)):
 
 ```sh
-scripts/template-sync.sh --check --from /path/to/template --repo /path/to/service
-scripts/template-sync.sh --apply --from /path/to/template --repo /path/to/service
+python3 scripts/template/sync.py --check --from /path/to/template --repo /path/to/service
+python3 scripts/template/sync.py --apply --from /path/to/template --repo /path/to/service
 ```
 
 `--check` exits `0` on parity, `1` on drift, and `2` on refusal. `--apply`
@@ -68,11 +71,11 @@ manifest.
   (`INTEGRATION_LINT_FEATURES += --features <crate>/integration` adds feature
   lint coverage); sync refuses root `Makefile` edits or overrides of
   `TEMPLATE_STANDARD_TARGETS`.
-- **CI script hooks:** Portable scripts under `scripts/ci/` optionally source
-  service-owned `scripts/ci/service-changed-surfaces.sh`,
-  `scripts/ci/service-database.sh`, `scripts/ci/service-runtime-image.sh`, and
-  `scripts/ci/service-runtime-binaries.json`; inspect each sourcing script for
-  its hook interface.
+- **Service script hooks:** Portable scripts under `scripts/verify/`,
+  `scripts/image/`, and `scripts/profiles/` optionally read service-owned
+  `scripts/service/changed-surfaces.sh`, `scripts/service/database.sh`,
+  `scripts/service/runtime-image.sh`, and `scripts/service/runtime-binaries.json`;
+  inspect each caller for its hook interface.
 - **Local skills and harness settings:** Place an empty regular `.service-owned`
   file beside `.agents/skills/<name>/SKILL.md` to preserve a service-local skill
   across sync. Claude and Qwen settings merge only their managed subagent-depth
@@ -80,9 +83,10 @@ manifest.
 
 ## Design choices
 
-Initializer and sync use Bash entrypoints over stdlib-only Python 3.11+ and Git
-plumbing (`scripts/lib/template_profiles.json` stays source-only). Copier and
-`cargo-generate` were rejected for lacking exact-manifest ownership, selective
-dirty refusal, and one-shot physical pruning; `git archive` was rejected because
-export attributes can alter committed bytes. Reopen if a maintained tool meets
-these constraints at lower maintenance cost.
+Initializer and sync (`scripts/template/init.py` and `scripts/template/sync.py`)
+are stdlib-only Python 3.11+ entrypoints over Git plumbing
+(`scripts/template/profiles.json` stays source-only). Copier and `cargo-generate`
+were rejected for lacking exact-manifest ownership, selective dirty refusal, and
+one-shot physical pruning; `git archive` was rejected because export attributes
+can alter committed bytes. Reopen if a maintained tool meets these constraints
+at lower maintenance cost.

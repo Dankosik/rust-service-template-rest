@@ -2,7 +2,7 @@ name: dependency-drift
 
 # Weekly drift that no Dependabot ecosystem covers: the vendored [patch] forks
 # behind their upstream releases and the tools/versions.env pins. The report
-# (scripts/ci/dependency-drift.sh --upstream) replaces the body of the one open
+# (scripts/checks/dependency_drift.sh --upstream) replaces the body of the one open
 # `dependency-drift` issue, and the issue closes when the report is clean.
 # docs/ci-cd-production-ready.md#vendored-forks describes the update.
 
@@ -36,7 +36,7 @@ jobs:
         run: |
           set -euo pipefail
           status=0
-          report=$(bash scripts/ci/dependency-drift.sh --upstream) || status=$?
+          report=$(bash scripts/checks/dependency_drift.sh --upstream) || status=$?
           printf '%s\n' "${report}"
           ((status <= 1)) || exit "${status}"
           issue=$(gh issue list --label dependency-drift --state open --limit 1 --json number --jq '.[0].number // empty')

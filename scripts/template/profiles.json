@@ -1,0 +1,513 @@
+{
+  "schema_version": 1,
+  "source_only": [
+    "make/source.mk",
+    "scripts/template/check_init.sh",
+    "scripts/template/matrix.py",
+    "scripts/tests/template-owned-purity.py",
+    "scripts/tests/template-profile-projections.py",
+    "scripts/tests/template-init-safety.py",
+    "scripts/tests/template-sync-canary.py",
+    "docs/assets/banner.png"
+  ],
+  "source-template": {
+    "remove_when_unselected": []
+  },
+  "postgres": {
+    "remove_when_none": [
+      "vendor/sqlx-core/",
+      "crates/infra-postgres/",
+      "crates/migrate/",
+      "migrations/",
+      "crates/config/src/postgres.rs",
+      "crates/config/src/postgres/",
+      "crates/service/src/bootstrap/postgres.rs",
+      "test/tests/postgres.rs",
+      "test/tests/postgres/",
+      "test/tests/support/commit_proxy.rs",
+      "test/fixtures/migrations/",
+      "test/src/lib.rs",
+      "env/pgbouncer/",
+      "scripts/profiles/migration_validate.sh",
+      "scripts/profiles/migration_history.sh",
+      "scripts/profiles/sqlx_prepare.sh",
+      "scripts/tests/test_migration_history.py",
+      ".sqlx/",
+      "make/profile-postgres.mk",
+      "env/monitoring/postgres-maintenance.rules.yml",
+      "env/monitoring/tests/postgres-maintenance-rules.yml"
+    ]
+  },
+  "authn": {
+    "remove_when_unselected": [
+      "crates/infra-bearerauthn/",
+      "crates/config/src/authn.rs",
+      "crates/config/src/authn/",
+      "crates/infra-http/src/authn.rs",
+      "crates/service/src/bootstrap/authn.rs"
+    ]
+  },
+  "oidc-jwt": {
+    "remove_when_unselected": [
+      "crates/infra-bearerauthn/src/jwks.rs",
+      "crates/infra-bearerauthn/src/jwt.rs",
+      "crates/infra-bearerauthn/src/jwt/prepare.rs",
+      "crates/infra-bearerauthn/src/refresh.rs",
+      "crates/infra-bearerauthn/tests/fixtures/authn-jwt-signing-key.der"
+    ]
+  },
+  "oidc-introspection": {
+    "remove_when_unselected": [
+      "crates/infra-bearerauthn/src/introspection.rs"
+    ]
+  },
+  "identity": [
+    {
+      "path": "Cargo.toml",
+      "old": "https://github.com/Dankosik/rust-service-template-rest",
+      "template": "https://github.com/{repository_path}",
+      "count": 1,
+      "encoding": "url"
+    },
+    {
+      "path": "crates/service/Cargo.toml",
+      "old": "name = \"service\"",
+      "template": "name = \"{service_name}\"",
+      "count": 2,
+      "encoding": "toml_string"
+    },
+    {
+      "path": "crates/service/Cargo.toml",
+      "old": "description = \"Service entrypoint and runtime composition root.\"",
+      "template": "description = \"{description}\"",
+      "count": 1,
+      "encoding": "toml_string"
+    },
+    {
+      "path": "crates/config/src/observability.rs",
+      "old": "service_name: \"service\".to_owned(),",
+      "template": "service_name: \"{service_name}\".to_owned(),",
+      "count": 1,
+      "encoding": "rust_string"
+    },
+    {
+      "path": "crates/infra-grpc/src/status.rs",
+      "old": "pub const ERROR_DOMAIN: &str = \"service\";",
+      "template": "pub const ERROR_DOMAIN: &str = \"{service_name}\";",
+      "count": 1,
+      "encoding": "rust_string"
+    },
+    {
+      "path": "crates/service/src/api.rs",
+      "old": "rust-service-template-rest",
+      "template": "{service_name}",
+      "count": 1,
+      "encoding": "rust_string"
+    },
+    {
+      "path": "crates/service/src/api.rs",
+      "old": "HTTP contract served by the `service` binary: platform probes and feature operations, with RFC 9457 problem responses from one closed catalog.",
+      "template": "{description}",
+      "count": 1,
+      "encoding": "rust_string"
+    },
+    {
+      "path": "crates/service/tests/lifecycle.rs",
+      "old": "CARGO_BIN_EXE_service",
+      "template": "CARGO_BIN_EXE_{service_name}",
+      "count": 1,
+      "encoding": "text"
+    },
+    {
+      "path": "make/service.mk",
+      "old": "SERVICE_PACKAGE ?= service",
+      "template": "SERVICE_PACKAGE ?= {service_name}",
+      "count": 1,
+      "encoding": "text"
+    },
+    {
+      "path": "make/service.mk",
+      "old": "SERVICE_BIN ?= service",
+      "template": "SERVICE_BIN ?= {service_name}",
+      "count": 1,
+      "encoding": "text"
+    },
+    {
+      "path": "make/service.mk",
+      "old": "RUNTIME_IMAGE ?= service:ci",
+      "template": "RUNTIME_IMAGE ?= {service_name}:ci",
+      "count": 1,
+      "encoding": "text"
+    },
+    {
+      "path": "build/docker/Dockerfile",
+      "old": "ARG SERVICE_PACKAGE=service",
+      "template": "ARG SERVICE_PACKAGE={service_name}",
+      "count": 1,
+      "encoding": "text"
+    },
+    {
+      "path": "build/docker/Dockerfile",
+      "old": "ARG SERVICE_BIN=service",
+      "template": "ARG SERVICE_BIN={service_name}",
+      "count": 2,
+      "encoding": "text"
+    },
+    {
+      "path": "README.md",
+      "old": "# rust-service-template-rest\n",
+      "template": "# {service_name}\n",
+      "count": 1,
+      "encoding": "markdown"
+    },
+    {
+      "path": "README.md",
+      "old": "Rust REST API service template on Tokio and axum, built to be developed by coding agents.",
+      "template": "{description}",
+      "count": 1,
+      "encoding": "markdown"
+    },
+    {
+      "path": "README.md",
+      "old": "Repository: https://github.com/Dankosik/rust-service-template-rest",
+      "template": "Repository: {repository}",
+      "count": 1,
+      "encoding": "url"
+    },
+    {
+      "path": ".github/CODEOWNERS",
+      "old": "* @Dankosik",
+      "template": "* {codeowner}",
+      "count": 1,
+      "encoding": "text"
+    },
+    {
+      "path": ".github/CODEOWNERS",
+      "old": "/crates/ @Dankosik",
+      "template": "/crates/ {codeowner}",
+      "count": 1,
+      "encoding": "text"
+    },
+    {
+      "path": ".github/CODEOWNERS",
+      "old": "/.github/workflows/ @Dankosik",
+      "template": "/.github/workflows/ {codeowner}",
+      "count": 1,
+      "encoding": "text"
+    },
+    {
+      "path": ".github/CODEOWNERS",
+      "old": "/Cargo.toml @Dankosik",
+      "template": "/Cargo.toml {codeowner}",
+      "count": 1,
+      "encoding": "text"
+    },
+    {
+      "path": ".github/CODEOWNERS",
+      "old": "/Cargo.lock @Dankosik",
+      "template": "/Cargo.lock {codeowner}",
+      "count": 1,
+      "encoding": "text"
+    },
+    {
+      "path": ".github/CODEOWNERS",
+      "old": "/rust-toolchain.toml @Dankosik",
+      "template": "/rust-toolchain.toml {codeowner}",
+      "count": 1,
+      "encoding": "text"
+    },
+    {
+      "path": ".gitleaks.toml",
+      "old": "rust-service-template-rest gitleaks configuration",
+      "template": "{service_name} gitleaks configuration",
+      "count": 1,
+      "encoding": "toml_string"
+    },
+    {
+      "path": "SECURITY.md",
+      "old": "https://github.com/Dankosik/rust-service-template-rest/security/advisories/new",
+      "template": "https://github.com/{repository_path}/security/advisories/new",
+      "count": 1,
+      "encoding": "url"
+    },
+    {
+      "path": ".github/ISSUE_TEMPLATE/config.yml",
+      "old": "https://github.com/Dankosik/rust-service-template-rest/security/advisories/new",
+      "template": "https://github.com/{repository_path}/security/advisories/new",
+      "count": 1,
+      "encoding": "url"
+    },
+    {
+      "path": ".github/ISSUE_TEMPLATE/config.yml",
+      "old": "https://github.com/Dankosik/rust-service-template-rest#documentation",
+      "template": "https://github.com/{repository_path}#documentation",
+      "count": 1,
+      "encoding": "url"
+    },
+    {
+      "path": ".railway/railway.ts",
+      "old": "const name = \"service\";",
+      "template": "const name = \"{service_name}\";",
+      "count": 1,
+      "encoding": "json_string"
+    },
+    {
+      "path": ".railway/railway.ts",
+      "old": "github(\"Dankosik/rust-service-template-rest\")",
+      "template": "github(\"{repository_path}\")",
+      "count": 1,
+      "encoding": "json_string"
+    }
+  ],
+  "grpc": {
+    "remove_when_unselected": [
+      "api/proto/",
+      "buf.yaml",
+      "crates/config/src/grpc.rs",
+      "crates/config/src/grpc/",
+      "crates/config/src/integrations/grpc_tests.rs",
+      "crates/grpc-contracts/",
+      "crates/infra-grpc/",
+      "crates/infra-telemetry/src/traces/tests/delivery/",
+      "crates/service/examples/grpc.rs",
+      "crates/service/src/bootstrap/grpc.rs",
+      "docs/decisions/grpc-decisions.md",
+      "scripts/profiles/grpc_check.sh",
+      "scripts/profiles/grpc_generate.sh",
+      "tools/grpc-codegen/",
+      "vendor/tonic/"
+    ]
+  },
+  "runtime-progress": {
+    "remove_when_unselected": [
+      "crates/service/examples/runtime_progress.rs",
+      "crates/service/tests/runtime_progress.rs",
+      "scripts/profiles/runtime_progress.sh",
+      "build/docker/runtime-progress.Dockerfile"
+    ]
+  },
+  "grpc-authn": {
+    "remove_when_unselected": [
+      "crates/infra-grpc/src/authn.rs"
+    ]
+  },
+  "grpc-transport-tests": {
+    "remove_when_unselected": [
+      "crates/infra-grpc/tests/transport.rs"
+    ]
+  },
+  "postgres-grpc-consumers": {
+    "remove_when_unselected": []
+  },
+  "postgres-grpc-auth": {
+    "remove_when_unselected": []
+  },
+  "grpc-jwt": {
+    "remove_when_unselected": [
+      "crates/service/tests/grpc_process.rs"
+    ]
+  },
+  "outbound-auth-grpc": {
+    "remove_when_unselected": [
+      "crates/infra-oauth2-client-credentials/src/grpc.rs",
+      "crates/infra-oauth2-client-credentials/src/tests/grpc.rs"
+    ]
+  },
+  "client-integrations": {
+    "remove_when_unselected": [
+      "crates/config/src/integrations.rs",
+      "crates/config/src/integrations/"
+    ]
+  },
+  "config-url": {
+    "remove_when_unselected": []
+  },
+  "outbound-auth": {
+    "remove_when_unselected": [
+      "crates/config/src/integrations/tests.rs",
+      "crates/infra-oauth2-client-credentials/",
+      "docs/decisions/outbound-machine-authentication-decisions.md"
+    ]
+  },
+  "outbound-http": {
+    "remove_when_unselected": [
+      "crates/infra-outbound-http/",
+      "docs/decisions/outbound-http-decisions.md",
+      "test/tests/outbound_http.rs"
+    ]
+  },
+  "tls-fixtures": {
+    "remove_when_unselected": [
+      "crates/tls-test-support/"
+    ]
+  },
+  "request-budget": {
+    "remove_when_unselected": []
+  },
+  "http-idempotency": {
+    "remove_when_unselected": [
+      "crates/infra-idempotency-store/",
+      "crates/infra-http/src/idempotency/",
+      "crates/service/src/bootstrap/idempotency.rs",
+      "crates/config/src/http_idempotency.rs",
+      "crates/config/src/http_idempotency/",
+      "migrations/20260923000001_create_http_idempotency_records.sql",
+      "migrations/20260928190000_compress_http_idempotency_bodies_with_lz4.sql",
+      "migrations/20261002150000_tune_http_idempotency_records_autovacuum.sql",
+      "test/tests/http_idempotency/"
+    ]
+  },
+  "http-idempotency-mounted": {
+    "remove_when_unselected": [
+      "test/tests/http_idempotency/mounted.rs"
+    ]
+  },
+  "test-introspection-fixtures": {
+    "remove_when_unselected": []
+  },
+  "jobs": {
+    "remove_when_unselected": [
+      "crates/infra-jobs/",
+      "crates/config/src/jobs.rs",
+      "crates/config/src/jobs/",
+      "crates/jobs-worker/src/operator.rs",
+      "crates/jobs-worker/src/bootstrap/jobs.rs",
+      "crates/jobs-worker/src/bootstrap/postgres.rs",
+      "migrations/20260924000001_create_background_jobs.sql",
+      "migrations/20261001120000_add_background_job_errors.sql",
+      "migrations/20261002150001_add_background_job_recovery_history.sql",
+      "migrations/20261002150002_index_failed_background_jobs.sql",
+      "migrations/20261112120000_preserve_background_job_payload_text.sql",
+      "test/src/jobs.rs",
+      "test/src/bin/",
+      "test/tests/jobs/"
+    ]
+  },
+  "test-digest": {
+    "remove_when_unselected": []
+  },
+  "test-metrics": {
+    "remove_when_unselected": []
+  },
+  "jobs-reference": {
+    "remove_when_unselected": [
+      "test/src/reading_counter.rs",
+      "test/src/reading_counter_receiver.rs",
+      "test/src/bin/reading_counter_fixture.rs",
+      "test/fixtures/migrations/reading_counter/",
+      "test/tests/jobs/reliability.rs"
+    ]
+  },
+  "jobs-http-idempotency": {
+    "remove_when_unselected": [
+      "test/tests/jobs/http_idempotency.rs"
+    ]
+  },
+  "messaging": {
+    "remove_when_unselected": [
+      "vendor/async-nats/",
+      "crates/domain-events/",
+      "crates/infra-messaging/",
+      "crates/nats-test-support/",
+      "crates/config/src/messaging.rs",
+      "crates/config/src/messaging/",
+      "crates/jobs-worker/src/bootstrap/messaging.rs",
+      "env/nats/nats-server.conf",
+      "env/nats/auth-rotation/",
+      "env/nats/credential-rotation.conf",
+      "scripts/profiles/messaging_go_compat.sh"
+    ]
+  },
+  "worker": {
+    "remove_when_unselected": [
+      "crates/jobs-worker/"
+    ]
+  },
+  "service-secrets": {
+    "remove_when_unselected": []
+  },
+  "integration": {
+    "remove_when_unselected": [
+      "env/docker-compose.yml",
+      "scripts/profiles/compose.sh"
+    ]
+  },
+  "container-integration": {
+    "remove_when_unselected": [
+      "scripts/profiles/integration.sh"
+    ]
+  },
+  "outbox": {
+    "remove_when_unselected": [
+      "crates/infra-messaging/src/outbox.rs",
+      "crates/jobs-worker/src/bootstrap/outbox.rs",
+      "test/tests/messaging_outbox.rs",
+      "test/tests/messaging_recovery.rs",
+      "test/fixtures/messaging_recovery.sql"
+    ]
+  },
+  "webhooks-common": {
+    "remove_when_unselected": [
+      "crates/infra-webhooks/",
+      "test/tests/webhooks/"
+    ]
+  },
+  "webhooks": {
+    "remove_when_unselected": [
+      "crates/config/src/webhooks.rs",
+      "crates/config/src/webhooks/",
+      "crates/infra-webhooks/src/outbound.rs",
+      "crates/infra-webhooks/src/outbound/",
+      "test/tests/webhooks/outbound.rs"
+    ]
+  },
+  "inbound-webhooks": {
+    "remove_when_unselected": [
+      "crates/config/src/inbound_webhooks.rs",
+      "crates/config/src/inbound_webhooks/",
+      "crates/infra-http/src/webhooks.rs",
+      "crates/service/src/bootstrap/inbound_webhooks.rs",
+      "crates/infra-webhooks/src/inbound.rs",
+      "crates/infra-webhooks/src/inbound/",
+      "migrations/20260926022945_create_webhook_receipts.sql",
+      "migrations/20260926130000_native_webhook_receipts.sql",
+      "test/tests/webhooks/inbound.rs"
+    ]
+  },
+  "rustls": {
+    "remove_when_unselected": []
+  },
+  "cache": {
+    "remove_when_unselected": [
+      "crates/infra-cache/",
+      "crates/config/src/cache.rs",
+      "crates/config/src/cache/",
+      "crates/service/src/bootstrap/cache.rs",
+      "docs/decisions/cache-decisions.md"
+    ]
+  },
+  "jsonwebtoken": {
+    "remove_when_unselected": []
+  },
+  "object-storage": {
+    "remove_when_unselected": [
+      "vendor/aws-smithy-http-client/",
+      "crates/infra-object-storage/",
+      "crates/config/src/object_storage.rs",
+      "crates/config/src/object_storage/",
+      "crates/service/src/bootstrap/object_storage.rs",
+      "docs/decisions/object-storage-decisions.md"
+    ]
+  },
+  "service-auth": {
+    "remove_when_unselected": [
+      "crates/infra-serviceauth/",
+      "crates/config/src/service_auth.rs",
+      "crates/config/src/service_auth/",
+      "crates/infra-grpc/src/service_auth.rs",
+      "crates/infra-grpc/tests/service_auth.rs",
+      "crates/service/src/bootstrap/service_auth.rs",
+      "docs/decisions/service-authentication-decisions.md"
+    ]
+  }
+}

@@ -75,7 +75,7 @@ async fn idle_pull_expiry_is_not_a_failed_batch() {
     metrics::set_global_recorder(recorder).expect("this binary installs one recorder");
 
     let url = std::env::var("NATS_URL")
-        .expect("NATS_URL is required; run this suite through test-integration-messaging.sh");
+        .expect("NATS_URL is required; run scripts/profiles/integration.sh messaging");
     let suffix = std::process::id();
     let (stream_name, subject, durable) = (
         format!("TEST_IDLE_{suffix}"),

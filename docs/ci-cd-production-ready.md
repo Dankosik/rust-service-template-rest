@@ -5,7 +5,7 @@ What the pipeline proves about a candidate, the decisions behind each gate
 and failed runs.
 
 [`.github/workflows/`](../.github/workflows),
-[`scripts/ci/changed-surfaces.sh`](../scripts/ci/changed-surfaces.sh),
+[`scripts/verify/surfaces.py`](../scripts/verify/surfaces.py),
 [`deny.toml`](../deny.toml), [`tools/versions.env`](../tools/versions.env), and
 [`make/template.mk`](../make/template.mk) are the source of truth for job names,
 triggers, surface routing, tool pins, and gate commands. [AGENTS.md](../AGENTS.md#validation-budget)
@@ -91,7 +91,7 @@ condition.
 | --- | --- |
 | `tools/versions.env` + `<git-common-dir>/tools` + `taiki-e/install-action` | Plain `KEY=value` needs no parser (`mise` reopens only if tools outgrow Cargo + Go + Node + Docker); prebuilt binaries avoid ~6 min of CI Cargo tool compilation. |
 | Static `cargo-chef` & `cargo-auditable` archives in `Dockerfile` | Avoids 67 s of builder compilation on cold builds while embedding `pkg:cargo` dependency graphs for Trivy/CycloneDX SBOM admission (`grype`/`syft` and `cargo-cyclonedx` rejected to keep one scanner/SBOM container). |
-| `npx` (`--ignore-scripts` + publish-age cooldown), `go run`, `uvx`/`pipx`, digest-pinned containers | Hardens tool downloads through npm publish-age gates, the Go checksum DB, and OCI digests without custom per-tool installer scripts; `make actionlint` disables host `shellcheck`/`pyflakes` for runner parity. |
+| [`scripts/checks/npx.py`](../scripts/checks/npx.py) (`--ignore-scripts` + 7-day publish-age cooldown), `go run`, `uvx`/`pipx`, digest-pinned containers | Hardens tool downloads through npm publish-age gates (`make tools-check` rejects direct `npx`), the Go checksum DB, and OCI digests without custom per-tool installer scripts (`shellcheck` and `lychee` fall back to local host binaries outside CI when Docker is unavailable); `make actionlint` disables host `shellcheck`/`pyflakes` for runner parity. |
 | `cargo-deny` (Linux targets, `all-features = true`, `[licenses] include-dev = true`, `multiple-versions = "deny"`) + `cargo-shear` + CodeQL Rust (`build-mode: none`) | Covers optional `hotpath`/`integration` features and dev licenses across shipped Linux targets, catches orphaned deps across profile projections (`cargo-machete`/`cargo-udeps` rejected), and excludes tests/`vendor/` examples in CodeQL (~15.5 → ~7 min). |
 | `cargo-nextest` + `cargo test --doc`; local-only `cargo-mutants` | Parallel test binaries cut serial `cargo test` wall time (127 s → 34–37 s locally); mutation testing (17 min on one module) stays an on-demand adequacy aid rather than a PR gate. |
 | Post-merge heavy proofs + `secrets`-gated short jobs + `green` diff base | Keeps PR feedback fast while bounding concurrent runner contention under a 20-runner cap and ensuring superseded `main` runs never skip unproved commits. |

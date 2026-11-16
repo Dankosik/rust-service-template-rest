@@ -24,9 +24,9 @@ This source patches `src/{lib,client,connector,options,tls}.rs`,
   allocates the full count before replicated deliveries arrive.
 
 Retire this vendor directory, root Cargo patch/exclusion, `messaging`
-profile/Docker/classifier carriers, `lychee.toml` logo exclusion, and vendor
-fixture `.gitleaks.toml` rules together when a published `async-nats` release
-provides equivalent request pruning, ACK/permit custody, passive occupancy
-observation (never replaced with permit acquisition or `wait_for_acks`), bounded
-transport/close-lease recovery, and reordered `Batch Completed` handling,
-passing `make native-transport-regressions` and messaging integration proofs.
+profile/Docker/classifier carriers, and vendor fixture `.gitleaks.toml` rules
+together when a published `async-nats` release provides equivalent request
+pruning, ACK/permit custody, passive occupancy observation (never replaced with
+permit acquisition or `wait_for_acks`), bounded transport/close-lease recovery,
+and reordered `Batch Completed` handling, passing
+`make native-transport-regressions` and messaging integration proofs.

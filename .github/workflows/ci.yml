@@ -1,6 +1,6 @@
 name: ci
 
-# Jobs are selected by the changed surfaces that scripts/ci/changed-surfaces.sh
+# Jobs are selected by the changed surfaces that scripts/verify/surfaces.py
 # reports; `make verify` reads the same classifier. `required` is the one
 # status to protect: it fails on any failed or cancelled gate and accepts a
 # gate the surfaces did not select. Pull requests run the gate; the long
@@ -79,6 +79,7 @@ jobs:
       agent_instructions: ${{ steps.surfaces.outputs.agent_instructions }}
       documentation: ${{ steps.surfaces.outputs.documentation }}
       validation_system: ${{ steps.surfaces.outputs.validation_system }}
+      template_engine: ${{ steps.surfaces.outputs.template_engine }}
       module_initializer: ${{ steps.surfaces.outputs.module_initializer }}
       initializer_runtime: ${{ steps.surfaces.outputs.initializer_runtime }}
       initializer_matrix: ${{ steps.surfaces.outputs.initializer_matrix }}
@@ -87,69 +88,20 @@ jobs:
       artifact_matrix: ${{ steps.surfaces.outputs.artifact_matrix }}
       duplication: ${{ steps.surfaces.outputs.duplication }}
       architecture: ${{ steps.surfaces.outputs.architecture }}
+      quality_tooling: ${{ steps.surfaces.outputs.quality_tooling }}
       base_sha: ${{ steps.surfaces.outputs.base_sha }}
-      post_merge: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
+      post_merge: ${{ steps.surfaces.outputs.post_merge }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
           persist-credentials: false
-      - name: Resolve the last green base
-        # A green ancestor covers the merges whose own runs were replaced
-        # while pending; without one the previous push is the base.
-        id: green
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          BEFORE_SHA: ${{ github.event.before }}
-        run: |
-          set -euo pipefail
-          base=${BEFORE_SHA}
-          # A missing branch prints the error body, not a commit.
-          green=$(gh api "repos/${GITHUB_REPOSITORY}/branches/green" --jq .commit.sha 2>/dev/null || true)
-          if [[ ${green} =~ ^[0-9a-f]{40}$ && $(gh api "repos/${GITHUB_REPOSITORY}/compare/${green}...${GITHUB_SHA}" --jq .status) == ahead ]]; then
-            base=${green}
-          fi
-          echo "sha=${base}" >>"${GITHUB_OUTPUT}"
-      - name: Fetch exact comparison base
-        if: >-
-          !startsWith(github.ref, 'refs/tags/') &&
-          github.event_name != 'workflow_dispatch' &&
-          github.event_name != 'schedule' &&
-          (steps.green.outputs.sha || github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before) != '' &&
-          (steps.green.outputs.sha || github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before) != '0000000000000000000000000000000000000000'
-        env:
-          BASE_SHA: ${{ steps.green.outputs.sha || github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
-        run: git fetch --no-tags --depth=1 origin "${BASE_SHA}"
       - name: Classify changed surfaces
         id: surfaces
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ steps.green.outputs.sha || github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
-        # Tags, schedules, manual runs, and a push without a readable base
-        # select every surface; a diff event is classified by both the base
-        # and the head classifier. A selected initializer plans the runtime
-        # graphs the same diff can affect (scripts/ci/initializer-matrix.py).
-        run: |
-          set -euo pipefail
-          paths=${RUNNER_TEMP}/changed-paths
-          surfaces=${RUNNER_TEMP}/surfaces
-          if [[ "${EVENT_NAME}" == schedule || "${EVENT_NAME}" == workflow_dispatch || "${GITHUB_REF}" == refs/tags/* || -z "${BASE_SHA}" || "${BASE_SHA}" == 0000000000000000000000000000000000000000 ]]; then
-            resolved_base_sha=
-            bash ./scripts/ci/changed-surfaces.sh --all >"${surfaces}"
-            plan=(--all)
-            : >"${paths}"
-          else
-            resolved_base_sha=${BASE_SHA}
-            bash ./scripts/ci/git-changed-paths.sh --diff "${BASE_SHA}" HEAD >"${paths}"
-            bash ./scripts/ci/changed-surfaces.sh --union "${BASE_SHA}" <"${paths}" >"${surfaces}"
-            plan=(--union "${BASE_SHA}")
-          fi
-          printf 'base_sha=%s\n' "${resolved_base_sha}" | tee -a "${GITHUB_OUTPUT}" >>"${GITHUB_STEP_SUMMARY}"
-          tee -a "${GITHUB_OUTPUT}" <"${surfaces}" >>"${GITHUB_STEP_SUMMARY}"
-          if grep -Eq '^initializer_(runtime|artifacts)=true$' "${surfaces}"; then
-            python3 ./scripts/ci/initializer-matrix.py "${plan[@]}" <"${paths}" | tee -a "${GITHUB_OUTPUT}" >>"${GITHUB_STEP_SUMMARY}"
-          fi
+        uses: ./.github/actions/resolve-changes # zizmor: ignore[self-repository]
+        with:
+          github_token: ${{ github.token }}
+          plan_initializer: "true"
 
   # template:begin grpc:ci-grpc-job
   grpc:
@@ -164,7 +116,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
       - name: Install pinned toolchain
-        run: rustup toolchain install
+        uses: ./.github/actions/rust-toolchain # zizmor: ignore[self-repository]
       - name: Restore generator cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -211,7 +163,9 @@ jobs:
       needs.changes.outputs.migrations == 'true' ||
       needs.changes.outputs.agent_instructions == 'true' ||
       needs.changes.outputs.duplication == 'true' ||
-      needs.changes.outputs.architecture == 'true'
+      needs.changes.outputs.architecture == 'true' ||
+      needs.changes.outputs.quality_tooling == 'true' ||
+      needs.changes.outputs.template_engine == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -224,7 +178,9 @@ jobs:
             needs.changes.outputs.openapi == 'true' ||
             needs.changes.outputs.migrations == 'true' ||
             needs.changes.outputs.duplication == 'true' ||
-            needs.changes.outputs.architecture == 'true' }}
+            needs.changes.outputs.architecture == 'true' ||
+            needs.changes.outputs.quality_tooling == 'true' ||
+            needs.changes.outputs.template_engine == 'true' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -257,7 +213,7 @@ jobs:
                 needs.changes.outputs.rust_source == 'true' ||
                 needs.changes.outputs.cargo_dependencies == 'true') }}
       - name: Load tool manifest
-        run: grep -v '^#' tools/versions.env | grep . >>"${GITHUB_ENV}"
+        uses: ./.github/actions/load-versions # zizmor: ignore[self-repository]
       - name: Fetch locked Cargo packages
         if: env.NEEDS_RUST == 'true'
         run: cargo fetch --locked
@@ -286,7 +242,16 @@ jobs:
         run: |
           set -euo pipefail
           git fetch --no-tags --depth=1 origin "${BASE_SHA}"
-          bash ./scripts/ci/git-changed-paths.sh --diff "${BASE_SHA}" HEAD | bash ./scripts/ci/affected-crates.sh | tee -a "${GITHUB_OUTPUT}" >>"${GITHUB_STEP_SUMMARY}"
+          json=$(python3 ./scripts/verify/affected_crates.py --base "${BASE_SHA}" --format json)
+          python3 -c '
+          import json, sys
+          data = json.loads(sys.argv[1])
+          pkgs = " ".join(data["packages"])
+          print(f"mode={data[\"mode\"]}")
+          print(f"fallback={\"true\" if data[\"fallback\"] else \"false\"}")
+          print(f"lint_packages={pkgs}")
+          print(f"test_packages={pkgs}")
+          ' "${json}" | tee -a "${GITHUB_OUTPUT}" >>"${GITHUB_STEP_SUMMARY}"
       - name: Lint, build, test
         id: lint-build-test
         if: >-
@@ -351,8 +316,7 @@ jobs:
         run: |
           set -euo pipefail
           git fetch --no-tags --depth=1 origin "${BASE_SHA}"
-          git show "${BASE_SHA}:api/openapi/service.yaml" >/tmp/openapi-base.yaml
-          make openapi-breaking BASE_OPENAPI=/tmp/openapi-base.yaml
+          make openapi-breaking-since BASE_REF="${BASE_SHA}"
       # template:begin postgres:ci-quality-migrations
       - name: Migrations
         # Static append-only history against the base, the lint of the added
@@ -377,12 +341,16 @@ jobs:
         if: needs.changes.outputs.agent_instructions == 'true'
         run: make check-instructions
       - name: Readability checker prerequisites
-        if: needs.changes.outputs.duplication == 'true' || needs.changes.outputs.architecture == 'true'
+        if: >-
+          needs.changes.outputs.duplication == 'true' ||
+          needs.changes.outputs.architecture == 'true' ||
+          needs.changes.outputs.quality_tooling == 'true' ||
+          needs.changes.outputs.template_engine == 'true'
         run: |
           command -v python3
           command -v npx
       - name: Readability checker self-test
-        if: needs.changes.outputs.duplication == 'true' || needs.changes.outputs.architecture == 'true'
+        if: needs.changes.outputs.quality_tooling == 'true'
         run: make quality-check-self-test
       - name: Rust duplication
         if: needs.changes.outputs.duplication == 'true'
@@ -391,7 +359,7 @@ jobs:
         if: needs.changes.outputs.architecture == 'true'
         run: make architecture-check
       - name: Readability profile projections
-        if: needs.changes.outputs.duplication == 'true' || needs.changes.outputs.architecture == 'true'
+        if: needs.changes.outputs.quality_tooling == 'true' || needs.changes.outputs.template_engine == 'true'
         env:
           # The two webhook projections compile their tests over this job's
           # dependencies; each projection writes its sources before it builds.
@@ -480,7 +448,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Load tool manifest
-        run: grep -v '^#' tools/versions.env | grep . >>"${GITHUB_ENV}"
+        uses: ./.github/actions/load-versions # zizmor: ignore[self-repository]
       - name: Dependency review
         if: >-
           github.event_name == 'pull_request' && (
@@ -495,9 +463,7 @@ jobs:
           comment-summary-in-pr: never
       - name: Install pinned toolchain
         if: needs.changes.outputs.cargo_dependencies == 'true' || needs.changes.outputs.dependency_policy == 'true'
-        run: |
-          rustup toolchain install
-          rustup show active-toolchain
+        uses: ./.github/actions/rust-toolchain # zizmor: ignore[self-repository]
       - name: Install pinned Cargo tools
         uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
@@ -532,7 +498,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Load tool manifest
-        run: grep -v '^#' tools/versions.env | grep . >>"${GITHUB_ENV}"
+        uses: ./.github/actions/load-versions # zizmor: ignore[self-repository]
       - name: Restore Go tool caches
         id: go-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -583,7 +549,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Load tool manifest
-        run: grep -v '^#' tools/versions.env | grep . >>"${GITHUB_ENV}"
+        uses: ./.github/actions/load-versions # zizmor: ignore[self-repository]
       - name: Restore Go tool caches
         if: needs.changes.outputs.github_workflows == 'true'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -605,7 +571,7 @@ jobs:
             make shellcheck
           else
             git fetch --no-tags --depth=1 origin "${BASE_SHA}"
-            files=$(bash ./scripts/ci/git-changed-paths.sh --diff "${BASE_SHA}" HEAD | while IFS= read -r file; do if [[ ${file} == *.sh && -f ${file} ]]; then printf '%s ' "${file}"; fi; done)
+            files=$(python3 ./scripts/verify/changed_paths.py --base "${BASE_SHA}" | while IFS= read -r file; do if [[ ${file} == *.sh && -f ${file} ]]; then printf '%s ' "${file}"; fi; done)
             make shellcheck SHELL_FILES="${files% }"
           fi
       - name: Python
@@ -713,7 +679,7 @@ jobs:
       # The graphs share no BuildKit layer (each build gets its own builder),
       # so a leg takes the sum of its graphs: graph 65 runs alone, and the two
       # core representatives share a leg no longer than an initializer part
-      # (scripts/ci/initializer-matrix.py ARTIFACT_LEGS). Every leg reports its
+      # (scripts/template/matrix.py ARTIFACT_LEGS). Every leg reports its
       # own result; the aggregate is success only when each selected leg
       # passed with its uploaded proof. With the initializer's cap it leaves
       # about six of the account's twenty runners to pull-request gates while
@@ -829,7 +795,7 @@ jobs:
         if: matrix.suite == 'db'
         run: make test-integration-db
       - name: Load tool manifest
-        run: grep -v '^#' tools/versions.env | grep . >>"${GITHUB_ENV}"
+        uses: ./.github/actions/load-versions # zizmor: ignore[self-repository]
       - name: Restore sqlx-cli
         # sqlx-cli publishes no release binaries; make builds the pinned
         # version once and this cache keeps it until the pin moves.
@@ -866,47 +832,17 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: false
-      - name: Generate actual Go wire records
+      - name: Go wire compatibility
         if: matrix.suite == 'services' && needs.changes.outputs.messaging_integration == 'true'
-        run: bash ./scripts/messaging-go-compat.sh generate "${RUNNER_TEMP}/go-wire/records.json"
-      - name: Export actual Rust wire records
-        if: matrix.suite == 'services' && needs.changes.outputs.messaging_integration == 'true'
-        env:
-          GO_WIRE_FIXTURES: ${{ runner.temp }}/go-wire/records.json
-          GO_WIRE_RUST_EXPORT: ${{ runner.temp }}/go-wire/rust-export.json
-        run: cargo test --locked -p infra-messaging --test wire_compat -- --ignored --exact rust_production_wire_exports_for_go
-      - name: Verify actual Go and Rust wire records
-        if: matrix.suite == 'services' && needs.changes.outputs.messaging_integration == 'true'
-        run: |
-          set -euo pipefail
-          bash ./scripts/messaging-go-compat.sh verify-rust "${RUNNER_TEMP}/go-wire/records.json" "${RUNNER_TEMP}/go-wire/rust-export.json"
-          bash ./scripts/messaging-go-compat.sh check "${RUNNER_TEMP}/go-wire/records.json"
-      - name: Compile every suite for the cache
+        run: make messaging-go-compat GO_WIRE_DIR="${RUNNER_TEMP}/go-wire"
+      - name: Compile service suites for the cache
         # The first save owns the leg's cache key. A push that selected some of
         # its suites would keep the others cold until the lockfile changes, so
         # the run that saves compiles them all; a selected suite is already built.
         if: >-
+          matrix.suite == 'services' &&
           github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
-        env:
-          INTEGRATION_COMPOSE_MANAGED: "1"
-          DATABASE_URL: compile-only
-          PGBOUNCER_DATABASE_URL: compile-only
-          NATS_URL: compile-only
-          CACHE_URL: compile-only
-          OBJECT_STORAGE_TEST_ENDPOINT: compile-only
-          SUITE: ${{ matrix.suite }}
-        run: |
-          set -euo pipefail
-          suites=(db)
-          [[ ${SUITE} == db ]] || suites=(messaging cache object-storage)
-          for suite in "${suites[@]}"; do
-            if [[ -f scripts/ci/test-integration-${suite}.sh ]]; then
-              bash "./scripts/ci/test-integration-${suite}.sh" --no-run
-            fi
-          done
-          if [[ ${SUITE} == services && -f scripts/messaging-go-compat.sh ]]; then
-            cargo test --locked -p infra-messaging --test wire_compat --no-run
-          fi
+        run: make integration-compile INTEGRATION_SUITE=services
       - name: Upload Go wire provenance
         if: always() && matrix.suite == 'services' && needs.changes.outputs.messaging_integration == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -929,9 +865,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
       - name: Install pinned toolchain
-        run: |
-          rustup toolchain install
-          rustup show active-toolchain
+        uses: ./.github/actions/rust-toolchain # zizmor: ignore[self-repository]
       - name: Keycloak proof
         # No Cargo cache: one crate's test build, selected only when the
         # OAuth surface changes, is not worth a saved target of its own.
@@ -952,7 +886,7 @@ jobs:
       max-parallel: 4
       # With `initializer (projections)` the parts are `make
       # template-init-check`: the `source` part runs the source suites, every
-      # other part a group of runtime graphs. scripts/ci/initializer-matrix.py owns the
+      # other part a group of runtime graphs. scripts/template/matrix.py owns the
       # grouping and keeps only the graphs the diff can affect; a push without
       # a readable base, a tag, a schedule, or a manual run selects them all.
       matrix: ${{ fromJSON(needs.changes.outputs.initializer_matrix || '{"include":[{"part":"source","cache":"source","save":true}]}') }}
@@ -964,7 +898,7 @@ jobs:
       - name: Install pinned toolchain
         uses: ./.github/actions/rust-toolchain # zizmor: ignore[self-repository]
       - name: Cargo caches
-        # One cache per family of parts (scripts/ci/initializer-matrix.py):
+        # One cache per family of parts (scripts/template/matrix.py):
         # every part restores it, and only the family's saving part writes it,
         # on a push to main that ran all of its graphs. image-derived restores
         # the same keys.
@@ -976,7 +910,7 @@ jobs:
       - name: Fetch locked Cargo packages
         run: cargo fetch --locked
       - name: Load tool manifest
-        run: grep -v '^#' tools/versions.env | grep . >>"${GITHUB_ENV}"
+        uses: ./.github/actions/load-versions # zizmor: ignore[self-repository]
       - name: Install pinned Cargo tools
         if: matrix.part != 'source'
         uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
@@ -986,7 +920,7 @@ jobs:
         if: matrix.part == 'source'
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
-        run: bash ./scripts/ci/template-init-check.sh --source-checks
+        run: bash ./scripts/template/check_init.sh --source-checks
       - name: Runtime graphs
         if: matrix.part != 'source'
         env:
@@ -995,7 +929,7 @@ jobs:
           # The runner has Docker; graphs with retained database suites fail
           # rather than refuse if it is ever missing.
           REQUIRE_DOCKER: "1"
-        run: bash ./scripts/ci/template-init-check.sh --runtime-graphs "${GRAPHS}"
+        run: bash ./scripts/template/check_init.sh --runtime-graphs "${GRAPHS}"
 
   initializer-projections:
     # The canonical projections need no Cargo, so they run beside the matrix
@@ -1074,7 +1008,7 @@ jobs:
               failed.append("changes=" + str(needs.get("changes", {}).get("result")))
           for name, state in sorted(needs.items()):
               result = state.get("result")
-              if result not in {"success", "skipped"}:
+              if name != "changes" and result not in {"success", "skipped"}:
                   failed.append(f"{name}={result}")
           if failed:
               print("CI gates did not pass: " + ", ".join(failed), file=sys.stderr)

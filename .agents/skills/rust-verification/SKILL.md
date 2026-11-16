@@ -7,7 +7,7 @@ description: "Evidence boundary. Use for verification-only work or deciding whet
 
 **Evidence boundary.** Bound every verification claim to the exact behavior whose failure the executed check would catch, naming that observable before running the command.
 
-**Surface mapping.** Map each workspace check to what it actually proves: `make lint` proves static lint conformance, `make check-skills` proves skill shape, process tests prove binary startup, probes, metrics, `SIGTERM` drain, and exit codes, and a baseline run proves emitted startup/shutdown logs.
+**Surface mapping.** Map each workspace check to what it actually proves: `make lint` proves static lint conformance, `make check-instructions` proves skill shape and harness carrier parity, process tests prove binary startup, probes, metrics, `SIGTERM` drain, and exit codes, and a baseline run proves emitted startup/shutdown logs.
 
 **Executed scope.** Count only executed, non-skipped checks that observe the claimed boundary—separating compilation, lockfile resolution, and sleep-timed runs from behavioral proof, and separating local test passes from CI, container, collector-delivery, or production outcomes.
 

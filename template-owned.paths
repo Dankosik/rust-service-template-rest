@@ -1,6 +1,6 @@
 # Whole-file portable ownership for committed-source sync. Directory entries
 # own their descendants; generated adapters and managed settings are derived by
-# scripts/lib/template_state.py rather than copied from this manifest.
+# scripts/template/state.py rather than copied from this manifest.
 template-owned.paths
 AGENTS.md
 .agents/skills/
@@ -32,28 +32,16 @@ docs/build-speed.md
 Makefile
 make/template.mk
 tools/versions.env
-scripts/template-sync.sh
-scripts/lib/template_sync.py
-scripts/lib/template_state.py
-scripts/agent-harness-sync.py
-scripts/check-skills.py
-scripts/ci/affected-crates.sh
-scripts/ci/changed-surfaces.sh
-scripts/ci/git-changed-paths.sh
-scripts/ci/cargo-artifact.py
-scripts/ci/publish-image-metadata.sh
-scripts/ci/runtime-image-build.sh
-scripts/ci/runtime-image-check.sh
-scripts/ci/tools-check.sh
-scripts/ci/validation-lock.sh
-scripts/ci/validation-lock.py
-scripts/tests/validation-lock-test.py
-scripts/ci/verify.sh
-scripts/ci/architecture-check.py
-scripts/tests/quality-checks.py
-
-scripts/ci/image-inputs-check.py
-scripts/tests/image-inputs-check.py
-scripts/ci/runtime-image-inventory.py
-scripts/ci/runtime-image-scan.sh
-scripts/tests/runtime-image-inventory.py
+scripts/verify/
+scripts/checks/
+scripts/image/
+scripts/harness/
+scripts/template/state.py
+scripts/template/sync.py
+scripts/tests/test_lock.py
+scripts/tests/test_verify.py
+scripts/tests/test_checks_and_image.py
+scripts/tests/test_quality.py
+scripts/tests/test_image_inputs.py
+scripts/tests/test_image_inventory.py
+scripts/tests/test_profile_runners.py

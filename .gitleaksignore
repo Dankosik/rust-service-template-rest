@@ -54,3 +54,10 @@ dac9459c3b859aaab4062a25c94f972c209f14c0:specs/consumer-lifecycle/completion-rec
 dac9459c3b859aaab4062a25c94f972c209f14c0:specs/consumer-lifecycle/completion-records/ci/final-pair-observations.json:generic-api-key:1249
 dac9459c3b859aaab4062a25c94f972c209f14c0:specs/consumer-lifecycle/completion-records/ci/final-pair-observations.json:generic-api-key:1274
 dac9459c3b859aaab4062a25c94f972c209f14c0:specs/consumer-lifecycle/completion-records/ci/final-pair-observations.json:generic-api-key:1299
+
+# Exact historical synthetic localhost k6 load-script headers in retired hotpath
+# spec bundles (retired from .gitleaks.toml path allowlists; reopen on any new
+# commit or non-fixture credential).
+5927ffbba351af2f7fb8635316bbfa4ae5b31da6:specs/hotpath-optimizations/scripts/load.js:generic-api-key:12
+5927ffbba351af2f7fb8635316bbfa4ae5b31da6:specs/hotpath-profiling/scripts/load.js:generic-api-key:12
+5927ffbba351af2f7fb8635316bbfa4ae5b31da6:specs/hotpath-remaining-optimizations/scripts/load.js:generic-api-key:12

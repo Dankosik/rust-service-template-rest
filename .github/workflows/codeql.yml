@@ -35,57 +35,19 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
-      rust_source: ${{ steps.surfaces.outputs.rust_source }}
-      cargo_dependencies: ${{ steps.surfaces.outputs.cargo_dependencies }}
       github_workflows: ${{ steps.surfaces.outputs.github_workflows }}
       rust_analysis: ${{ steps.surfaces.outputs.rust_analysis }}
+      post_merge: ${{ steps.surfaces.outputs.post_merge }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 1
           persist-credentials: false
-      - name: Resolve the last green base
-        id: green
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          BEFORE_SHA: ${{ github.event.before }}
-        run: |
-          set -euo pipefail
-          base=${BEFORE_SHA}
-          # A missing branch prints the error body, not a commit.
-          green=$(gh api "repos/${GITHUB_REPOSITORY}/branches/green" --jq .commit.sha 2>/dev/null || true)
-          if [[ ${green} =~ ^[0-9a-f]{40}$ && $(gh api "repos/${GITHUB_REPOSITORY}/compare/${green}...${GITHUB_SHA}" --jq .status) == ahead ]]; then
-            base=${green}
-          fi
-          echo "sha=${base}" >>"${GITHUB_OUTPUT}"
       - name: Classify changed surfaces
         id: surfaces
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ steps.green.outputs.sha || github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
-        # A change to this workflow or the Rust analysis configuration re-runs
-        # the Rust analysis it changes, as a Rust source change does.
-        run: |
-          set -euo pipefail
-          if [[ "${EVENT_NAME}" == schedule || "${EVENT_NAME}" == workflow_dispatch || "${GITHUB_REF}" == refs/tags/* ]]; then
-            bash ./scripts/ci/changed-surfaces.sh --all >"${RUNNER_TEMP}/surfaces"
-          elif [[ -n "${BASE_SHA}" && "${BASE_SHA}" != 0000000000000000000000000000000000000000 ]]; then
-            git fetch --no-tags --depth=1 origin "${BASE_SHA}"
-            bash ./scripts/ci/git-changed-paths.sh --diff "${BASE_SHA}" HEAD >"${RUNNER_TEMP}/paths"
-            bash ./scripts/ci/changed-surfaces.sh --union "${BASE_SHA}" <"${RUNNER_TEMP}/paths" >"${RUNNER_TEMP}/surfaces"
-            if grep -Eq '^(\.github/workflows/codeql\.yml|\.github/codeql/rust\.yml)$' "${RUNNER_TEMP}/paths"; then
-              echo analysis_config=true >>"${RUNNER_TEMP}/surfaces"
-            fi
-          else
-            bash ./scripts/ci/changed-surfaces.sh --all >"${RUNNER_TEMP}/surfaces"
-          fi
-          cat "${RUNNER_TEMP}/surfaces" >>"${GITHUB_OUTPUT}"
-          if grep -Eq '^(rust_source|cargo_dependencies|analysis_config)=true$' "${RUNNER_TEMP}/surfaces"; then
-            echo rust_analysis=true >>"${GITHUB_OUTPUT}"
-          else
-            echo rust_analysis=false >>"${GITHUB_OUTPUT}"
-          fi
+        uses: ./.github/actions/resolve-changes # zizmor: ignore[self-repository]
+        with:
+          github_token: ${{ github.token }}
 
   analyze-actions:
     needs: changes
@@ -113,7 +75,7 @@ jobs:
   analyze-rust:
     needs: changes
     if: >-
-      github.event_name != 'pull_request' && github.event_name != 'merge_group' &&
+      needs.changes.outputs.post_merge == 'true' &&
       needs.changes.outputs.rust_analysis == 'true'
     name: Analyze (rust)
     runs-on: ubuntu-latest
@@ -127,9 +89,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install pinned toolchain
-        run: |
-          rustup toolchain install
-          rustup show active-toolchain
+        uses: ./.github/actions/rust-toolchain # zizmor: ignore[self-repository]
       - name: Initialize CodeQL
         id: init
         uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
@@ -183,24 +143,23 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
-      - name: Reject failed or cancelled analyses
-        # Classification must succeed before skipped jobs can be intentional.
-        # Explicit always() also removes the step's implicit status guard.
-        if: always() && (needs.changes.result != 'success' || contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled'))
-        run: exit 1
-      # Keep these predicates aligned with the analysis job selectors.
-      - name: Require selected Actions analysis success
-        if: >-
-          always() && (
-            needs.changes.outputs.github_workflows == 'true'
-          ) && needs.analyze-actions.result != 'success'
-        run: exit 1
-      - name: Require selected Rust analysis success
-        if: >-
-          always() && (
-            github.event_name != 'pull_request' && github.event_name != 'merge_group' &&
-            needs.changes.outputs.rust_analysis == 'true'
-          ) && needs.analyze-rust.result != 'success'
-        run: exit 1
-      - name: Accept applicable analyses
-        run: echo "all applicable CodeQL analyses passed"
+      - name: Verify required CodeQL analyses
+        if: always()
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          python3 -c '
+          import json, os, sys
+          needs = json.loads(os.environ["NEEDS_JSON"])
+          failed = []
+          if needs.get("changes", {}).get("result") != "success":
+              failed.append("changes=" + str(needs.get("changes", {}).get("result")))
+          for name, state in sorted(needs.items()):
+              result = state.get("result")
+              if name != "changes" and result not in {"success", "skipped"}:
+                  failed.append(f"{name}={result}")
+          if failed:
+              print("CodeQL analyses did not pass: " + ", ".join(failed), file=sys.stderr)
+              sys.exit(1)
+          print("all applicable CodeQL analyses passed")
+          '

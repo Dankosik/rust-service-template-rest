@@ -202,7 +202,7 @@ impl Fixture {
 
 fn nats_url() -> String {
     std::env::var("NATS_URL")
-        .expect("NATS_URL is required; run this suite through test-integration-messaging.sh")
+        .expect("NATS_URL is required; run scripts/profiles/integration.sh messaging")
 }
 
 fn deadline() -> Instant {

@@ -36,7 +36,7 @@ automatically during deploys):
   tolerates the new schema during build-to-cutover overlap.
 <!-- template:end postgres:docs-railway-postgres-migrate -->
 
-`make docs-check` (`scripts/ci/image-inputs-check.py`) verifies that
+`make docs-check` (`scripts/checks/image_inputs.py`) verifies that
 `build.watchPatterns` in `.railway/railway.ts` covers `Dockerfile`,
 `.dockerignore`, and `rust-toolchain.toml` inputs so docs/CI/agent edits do not
 trigger redeployments.
