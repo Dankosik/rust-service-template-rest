@@ -4,7 +4,7 @@
 an on-call operator Prometheus recording and alert rules over the metrics the
 service and `jobs-worker` already emit. Pages fire on symptoms a client sees,
 an error or latency budget burning or the service gone; tickets cover lost
-capacity, crash loops and work that stopped draining. Each alert carries a
+capacity, crash loops, a starved runtime and work that stopped draining. Each alert carries a
 `severity` (`page` or `ticket`) and a `runbook_url` to its section below.
 [`scripts/tests/service-rules.yml`](../scripts/tests/service-rules.yml) proves
 every alert fires on its fault and stays silent otherwise; `make
@@ -161,6 +161,39 @@ Readiness changed at least four times in 30 minutes. A dependency fails
 intermittently around the readiness threshold. Look at
 `readiness_probe_checks_total` by `probe` and `outcome`, and at the dependency's
 own latency against the probe timeout.
+
+### RuntimeSchedulerLagging
+
+More than 1% of the 100 ms runtime progress samples ran over 100 ms late for
+15 minutes: tasks wait that long for a worker, and request latency follows.
+`tokio_busy_ratio` near 1 means the workers are saturated; add replicas or
+raise `runtime.worker_threads` up to the CPU allocation. A low ratio with late
+samples means workers are held off the CPU: a blocking call inside a task, or
+the container's CPU limit throttling the process.
+`runtime_scheduler_lag_max_seconds` gives the longest single stall.
+
+A build with `RUSTFLAGS="--cfg tokio_unstable"` adds per-poll and queue detail
+(`tokio_mean_poll_duration`, `tokio_budget_forced_yield_count`,
+`tokio_blocking_queue_depth` and 31 more names) for under 1% CPU per request on
+a DigitalOcean c-4. The default build leaves it off because Tokio exempts that
+API from its compatibility guarantee.
+
+### RuntimeThreadsElevated
+
+A process has held over 64 threads beyond its runtime workers for 15 minutes.
+Blocking-pool threads exit after 10 idle seconds, so that many are busy at
+once: DNS lookups against a resolver that stopped answering, file reads on a
+stalled volume, or blocking work a handler submits faster than it finishes.
+Find what the blocked threads wait on before raising any limit; the pool stops
+growing at 512 threads and queues without bound after that.
+
+### OpenFilesNearLimit
+
+A process uses over 80% of its open-file limit (`process_open_fds` against
+`process_max_fds`); past the limit every accept and outbound connect fails with
+`EMFILE`. The service raises its soft limit to the hard limit at startup, so
+the limit is the platform's. Compare against `http.max_connections` and the
+pool sizes: a count that grows without matching traffic is a descriptor leak.
 
 <!-- template:begin postgres:docs-alerting-postgres-runbooks -->
 ### PostgresPoolSaturated

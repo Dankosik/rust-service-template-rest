@@ -221,6 +221,45 @@ groups:
           summary: Readiness flipped at least four times in 30 minutes
           description: '{{ $labels.instance }} of {{ $labels.job }} changed readiness {{ $value }} times in 30 minutes.'
           runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#servicereadinessflapping
+  - name: service-runtime
+    rules:
+      - alert: RuntimeSchedulerLagging
+        expr: |
+          1 - (
+            sum by(job,instance) (rate(runtime_scheduler_lag_seconds_bucket{job=~"service|jobs-worker",le="0.1"}[5m]))
+            /
+            sum by(job,instance) (rate(runtime_scheduler_lag_seconds_count{job=~"service|jobs-worker"}[5m]))
+          ) > 0.01
+        for: 15m
+        labels: {severity: ticket}
+        annotations:
+          summary: More than 1% of runtime progress samples run over 100 ms late
+          description: '{{ $labels.instance }} of {{ $labels.job }}: {{ $value | humanizePercentage }} of scheduler samples ran over 100 ms late.'
+          runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#runtimeschedulerlagging
+      - alert: RuntimeThreadsElevated
+        expr: |
+          process_threads{job=~"service|jobs-worker"}
+          - on(job,instance)
+          tokio_workers_count{job=~"service|jobs-worker"}
+          > 64
+        for: 15m
+        labels: {severity: ticket}
+        annotations:
+          summary: A process holds over 64 threads beyond its runtime workers
+          description: '{{ $labels.instance }} of {{ $labels.job }} runs {{ $value }} threads beyond its runtime workers.'
+          runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#runtimethreadselevated
+      - alert: OpenFilesNearLimit
+        expr: |
+          process_open_fds{job=~"service|jobs-worker"}
+          / on(job,instance)
+          process_max_fds{job=~"service|jobs-worker"}
+          > 0.8
+        for: 15m
+        labels: {severity: ticket}
+        annotations:
+          summary: A process uses over 80% of its open-file limit
+          description: '{{ $labels.instance }} of {{ $labels.job }} holds {{ $value | humanizePercentage }} of its open-file limit.'
+          runbook_url: https://github.com/Dankosik/rust-service-template-rest/blob/main/docs/alerting.md#openfilesnearlimit
   # template:begin grpc:monitoring-grpc-slo
   - name: service-grpc-slo
     rules:
