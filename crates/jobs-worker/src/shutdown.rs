@@ -53,6 +53,7 @@ pub(crate) struct GraceBudgetError {
     tail: Duration,
 }
 
+/// Reject a grace period that cannot hold the drain plus the teardown tail.
 pub(crate) fn validate_grace_budget(http: &HttpConfig) -> Result<(), GraceBudgetError> {
     if http.grace_period < http.drain_timeout.saturating_add(SHUTDOWN_TAIL) {
         return Err(GraceBudgetError {
