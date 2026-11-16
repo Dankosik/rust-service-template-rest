@@ -129,7 +129,6 @@ async fn failed_refresh_only_absorbs_a_previous_ready_that_is_fresh_at_completio
                     Duration::ZERO
                 };
             tokio::time::advance(age).await;
-            // No read is needed to mark the prior publication stale.
             readiness.refresh().await;
             let verdict = readiness.reader().verdict();
             if expired {
@@ -270,7 +269,6 @@ async fn armed_late_success_retains_the_gap_before_an_observer_can_run() {
     readiness.refresh().await;
     readiness.arm_progress().unwrap();
     tokio::time::advance(policy().stale_after() + Duration::from_nanos(1)).await;
-    // No observer or reader sees the gap before this success publishes.
     readiness.refresh().await;
     let loss = readiness.progress_loss().expect("terminal completion gap");
     std::assert_matches!(readiness.reader().verdict(), Err(NotReady::Stale { .. }));
@@ -602,8 +600,6 @@ async fn a_drain_during_an_in_flight_check_wins_over_its_success() {
 
 #[tokio::test(start_paused = true)]
 async fn a_slow_probe_does_not_spend_another_probes_budget() {
-    // Each probe needs most of the budget; one after the other they
-    // would overrun it.
     let delay = policy().probe_budget * 3 / 4;
     let readiness = Readiness::new(
         vec![
@@ -708,13 +704,11 @@ async fn each_probe_is_counted_by_its_own_outcome_in_every_check() {
             &format!("readiness_probe_checks_total{{probe=\"{probe}\",outcome=\"{outcome}\"}} 2"),
         );
     }
-    // The check itself is counted once per round, under the first failure.
     assert_sample(&scrape, "readiness_checks_total{outcome=\"timed_out\"} 2");
 }
 
 #[tokio::test(start_paused = true)]
 async fn the_ready_gauge_is_the_published_verdict() {
-    // One recorder per scenario: each owner writes the same series.
     let ready = |recorder: &metrics_exporter_prometheus::PrometheusRecorder| {
         recorder
             .handle()
@@ -845,8 +839,6 @@ async fn completion_metrics_date_only_finished_checks_and_survive_stopped_refres
 async fn absorbed_failures_flips_and_a_late_refresh_are_logged() {
     let events = Events::default();
     let _guard = tracing::subscriber::set_default(events.clone());
-    // Keep callsite interest independent of a sibling test's thread-local
-    // subscriber; tracing-core otherwise has a single-dispatcher fast path.
     let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
     let (readiness, flag, _) = flaky(true);
     readiness.refresh().await;
@@ -1028,8 +1020,6 @@ proptest! {
         let origin = Instant::now();
         let mut elapsed_ms = 0_u64;
         let mut previous: Option<Check> = None;
-        // Model: the streak of failed rounds, whether the last published round
-        // was ready, and when it completed.
         let mut streak = 0_u32;
         let mut published: Option<(bool, u64)> = None;
         for (succeeds, gap_ms) in steps {

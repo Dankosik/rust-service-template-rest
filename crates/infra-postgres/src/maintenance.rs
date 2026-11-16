@@ -39,7 +39,6 @@ pub async fn run_scheduled_cleanup<E, P, S>(
     cleanup: Cleanup,
     runs_metric: &'static str,
     cancel: &CancellationToken,
-    // Not `AsyncFnMut`: the compiler cannot prove its futures `Send` for a spawned owner.
     mut pass: impl FnMut() -> P,
     mut sample: impl FnMut() -> S,
 ) where
@@ -49,11 +48,9 @@ pub async fn run_scheduled_cleanup<E, P, S>(
     if cancel.is_cancelled() {
         return;
     }
-    // Started under the passes' check, so a cancelled owner never publishes an observer start.
     let mut observer = MaintenanceObserver::start(MaintenancePopulation::Cleanup(cleanup));
     let passes = async {
         let mut schedule = CleanupSchedule::new(cleanup);
-        // `run_until_cancelled` polls these loops before the token, so each checks it first.
         while !cancel.is_cancelled() {
             schedule.next().await;
             if cancel.is_cancelled() {

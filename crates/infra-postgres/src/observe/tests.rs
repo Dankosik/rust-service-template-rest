@@ -166,7 +166,6 @@ async fn a_transaction_that_gets_no_connection_records_its_wait_and_its_outcome(
     let recorder = builder.build_recorder();
     let _recorder = metrics::set_default_local_recorder(&recorder);
     describe();
-    // Port 1 on loopback is refused at once; the pool retries until its acquire budget ends.
     let dsn =
         Dsn::admit_with_environment("postgres://app:pw@127.0.0.1:1/app?sslmode=disable", |_| {
             false
@@ -192,7 +191,6 @@ async fn a_transaction_that_gets_no_connection_records_its_wait_and_its_outcome(
 
 #[tokio::test]
 async fn acquire_until_waits_for_the_deadline_not_for_the_pool_timeout() {
-    // Port 1 on loopback is refused at once; the pool retries until its acquire timeout ends.
     let dsn =
         Dsn::admit_with_environment("postgres://app:pw@127.0.0.1:1/app?sslmode=disable", |_| {
             false

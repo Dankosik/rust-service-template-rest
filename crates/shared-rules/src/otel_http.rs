@@ -1,10 +1,5 @@
-/// The `http.request.method` value for a method no convention names.
 pub const OTHER_METHOD: &str = "_OTHER";
 
-/// The `http.request.method` value for `method`: the method itself when the
-/// conventions name it (RFC 9110, `PATCH`, and `QUERY`), otherwise
-/// [`OTHER_METHOD`], so a caller-chosen method cannot add a telemetry series.
-/// Methods are case-sensitive, so `get` is not `GET`.
 #[must_use]
 pub fn request_method(method: &str) -> &'static str {
     match method {

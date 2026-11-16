@@ -26,8 +26,6 @@ pub enum StartupError {
 
 impl Store {
     pub async fn check_startup(&self) -> Result<(), StartupError> {
-        // Migration-history admission owns schema compatibility; this check
-        // keeps only the live writer property.
         let writable = observed("check idempotency session", async {
             let mut connection =
                 infra_postgres::acquire(&self.pool, "check idempotency startup").await?;
@@ -56,10 +54,6 @@ impl Store {
         }
     }
 
-    /// Returns confirmed deletions, which do not certify that the population is
-    /// empty. Each batch is its own transaction and skips locked records; on
-    /// failure earlier batches stay committed, and a timeout leaves the current
-    /// batch's commit outcome unconfirmed.
     pub async fn remove_expired(&self) -> Result<u64, CleanupError> {
         self.cleanup_pass(None).await.map(|pass| pass.removed_rows)
     }
@@ -82,7 +76,6 @@ impl Store {
     }
 
     async fn delete_expired_batch(tx: &mut Tx<'_>, batch_limit: u32) -> Result<u64, sqlx::Error> {
-        // The tuple locator is consumed under its row lock within this statement.
         let deleted = observed(
             "delete expired idempotency records",
             sqlx::query!(

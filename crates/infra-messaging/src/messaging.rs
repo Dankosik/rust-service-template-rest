@@ -17,36 +17,24 @@ use crate::registry::Registry;
 use crate::topology::{ConsumerAdmission, admit_topology};
 use crate::wire::HEADER_LIMIT_BYTES;
 
-/// One native publication window shared by source, outbox and dead-letter
-/// publication; its permits are `floor(window / envelope_limit)`.
 pub(crate) const PUBLICATION_WINDOW_BYTES: usize = 64 * 1024 * 1024;
 
-/// Configuration already validated by the composition root, which owns the
-/// transport, credential and resident-memory policy.
 #[derive(Clone)]
 pub struct MessagingOptions {
-    /// Shown in the broker's connection reports.
     pub connection_name: String,
-    /// A URL can carry credentials, so `Debug` shows only the count.
     pub servers: Vec<String>,
-    /// `None` connects without credentials.
     pub credentials: Option<Credentials>,
     pub root_ca_path: Option<PathBuf>,
     pub allow_plaintext: bool,
-    /// Authenticate TLS before accepting server INFO and discovered destinations.
     pub tls_first: bool,
     pub source_stream: String,
     pub max_payload_bytes: usize,
-    /// Durable consumer settings; `None` means this process only publishes.
     pub consumer: Option<ConsumerOptions>,
 }
 
 #[derive(Clone, Debug)]
 pub enum Credentials {
-    /// The content of a credentials file. `Debug` redacts it.
     Inline(SecretString),
-    /// A credentials file read again for every connection, for a platform
-    /// that rotates it.
     File(PathBuf),
 }
 
@@ -55,7 +43,6 @@ impl std::fmt::Debug for MessagingOptions {
         formatter
             .debug_struct("MessagingOptions")
             .field("connection_name", &self.connection_name)
-            // A server URL can carry a user and password.
             .field("server_count", &self.servers.len())
             .field("credentials", &self.credentials)
             .field("root_ca_path", &self.root_ca_path)
@@ -73,14 +60,10 @@ pub struct ConsumerOptions {
     pub durable_name: String,
     pub filter_subject: String,
     pub dlq_subject: String,
-    /// The stream that stores `dlq_subject`; `None` asks the broker which
-    /// stream does.
     pub dlq_stream: Option<String>,
     pub concurrency: NonZeroUsize,
 }
 
-/// Cloning yields another handle to the same connection and shared state;
-/// [`Messaging::close`] drains and closes that connection for every handle.
 #[derive(Clone, Debug)]
 pub struct Messaging {
     pub(crate) shared: Arc<Shared>,
@@ -142,24 +125,17 @@ impl Shared {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CloseOutcome {
     Complete,
-    /// Cancellation or the effective deadline ended the caller's wait.
-    /// Native force-close was requested; completion has not been confirmed.
     WaitInterrupted,
     UnobservedClose,
 }
 
 impl Messaging {
-    /// Publication metrics bind to the metrics recorder installed at this
-    /// call, and handler metrics to the one installed at [`Self::consumer`],
-    /// so install the recorder first. Each broker round trip is bounded by
-    /// [`BROKER_OPERATION_BUDGET`] inside `deadline`.
     pub async fn connect(
         options: MessagingOptions,
         deadline: Instant,
         cancel: CancellationToken,
     ) -> Result<Self, MessagingError> {
         let mut startup = Self::prepare(options, deadline, cancel.clone())?;
-        // Keep native connection state off every caller's future stack.
         match Box::pin(startup.admit()).await {
             Ok(messaging) => Ok(messaging),
             Err(error) => {
@@ -172,7 +148,6 @@ impl Messaging {
         }
     }
 
-    /// Prepares a retained startup owner without network I/O.
     pub fn prepare(
         options: MessagingOptions,
         deadline: Instant,
@@ -227,14 +202,6 @@ impl Messaging {
         Consumer::admit(Arc::clone(&self.shared), admission, registry).await
     }
 
-    /// Closes shared admission and waits for native termination and final
-    /// event submission, bounded by `deadline` and one [`BROKER_OPERATION_BUDGET`].
-    ///
-    /// A client already closed, with its final event observed, returns
-    /// [`CloseOutcome::Complete`] even with cancellation or an elapsed deadline.
-    /// Otherwise cancellation or expiry requests native force-close and returns
-    /// [`CloseOutcome::WaitInterrupted`] without waiting for either observation. The
-    /// native client retains ownership of the requested termination.
     pub async fn close(self, deadline: Instant, cancel: &CancellationToken) -> CloseOutcome {
         self.shared.begin_drain();
         self.shared.connection.close(deadline, cancel).await
@@ -242,8 +209,6 @@ impl Messaging {
 }
 
 impl MessagingStartup {
-    /// Connects and verifies topology while retaining native cleanup ownership.
-    /// On success ownership transfers to the returned admitted dependency.
     pub async fn admit(&mut self) -> Result<Messaging, MessagingError> {
         let options = &self.options;
         let deadline = self.deadline;
@@ -253,8 +218,6 @@ impl MessagingStartup {
         crate::connection::describe_metrics();
         crate::consumer::describe_metrics();
         crate::credentials::describe_metrics();
-        // The connection is retained before topology admission, so `close`
-        // owns it when admission fails.
         let connection = match &mut self.phase {
             StartupPhase::Admitted => {
                 return Err(MessagingError::Configuration(
@@ -273,8 +236,6 @@ impl MessagingStartup {
             .timeout(BROKER_OPERATION_BUDGET)
             .ack_timeout(BROKER_OPERATION_BUDGET)
             .max_ack_inflight(self.publication_permits)
-            // An exhausted window refuses at once as `Rejected` instead of
-            // queueing inside the adapter.
             .backpressure_on_inflight(false)
             .build(client.clone());
         let consumer = admit_topology(
@@ -307,8 +268,6 @@ impl MessagingStartup {
         Ok(messaging)
     }
 
-    /// Same guarantees as [`Messaging::close`]; without a retained client it
-    /// returns [`CloseOutcome::Complete`].
     pub async fn close(self, deadline: Instant, cancel: &CancellationToken) -> CloseOutcome {
         match self.phase {
             StartupPhase::Connected(connection) => connection.close(deadline, cancel).await,

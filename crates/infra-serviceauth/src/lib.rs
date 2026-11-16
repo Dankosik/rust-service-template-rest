@@ -1,11 +1,3 @@
-//! Caller-signed service tokens.
-//!
-//! A calling service signs a short ES256 JWT for one receiver with its own
-//! key ([`TokenSource`]). The receiver verifies it only against the keys its
-//! [`TrustRegistry`] holds for that caller ([`Verifier`]) and learns who
-//! called ([`Caller`]). Which caller may call which method is the
-//! transport's table; this crate performs no I/O and knows no transport.
-
 mod source;
 mod trust;
 mod verify;
@@ -30,21 +22,17 @@ fn unix_seconds() -> Option<u64> {
         .map(|elapsed| elapsed.as_secs())
 }
 
-/// A service's name in the trust domain: its tokens' `iss` and `sub`, and the
-/// audience it accepts. One to 63 lowercase ASCII letters, digits and
-/// hyphens, neither first nor last a hyphen (an RFC 1123 label).
+/// RFC 1123 §2.1
 #[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd, derive_more::Debug, derive_more::Display)]
 #[debug("{_0:?}")]
 #[display("{_0}")]
 pub struct ServiceName(Arc<str>);
 
-/// A name outside the service-name grammar. It never echoes the input.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("{}", Self::MESSAGE)]
 pub struct InvalidServiceName;
 
 impl InvalidServiceName {
-    /// The grammar's one wording, shared with the trust registry's refusal.
     pub(crate) const MESSAGE: &str = "a service name is 1 to 63 lowercase letters, digits and hyphens, not starting or ending with a hyphen";
 }
 
@@ -81,10 +69,7 @@ impl From<ServiceName> for Arc<str> {
     }
 }
 
-/// The `typ` header that names one trust domain's service tokens, such as
-/// `example-svc+jwt` (RFC 8725 section 3.11). Compared as a media type:
-/// ASCII case-insensitively, with or without the `application/` prefix
-/// (RFC 7515 section 4.1.9). Tokens carry the short lowercase form.
+/// RFC 8725 §3.11, RFC 7515 §4.1.9
 #[derive(Clone, Eq, PartialEq, derive_more::Debug)]
 #[debug("{_0:?}")]
 pub struct JwtType(Arc<str>);
@@ -120,19 +105,15 @@ impl JwtType {
     }
 }
 
-/// A `kid` this crate admits: 1 to 256 visible ASCII characters, so the
-/// registry and a signer cannot disagree on an invisible difference.
 #[derive(Clone, Eq, PartialEq, derive_more::Debug)]
 #[debug("{_0:?}")]
 pub struct KeyId(Arc<str>);
 
-/// A key id outside the key-id grammar. It never echoes the input.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("{}", Self::MESSAGE)]
 pub struct InvalidKeyId;
 
 impl InvalidKeyId {
-    /// The grammar's one wording, shared with the trust registry's refusal.
     pub(crate) const MESSAGE: &str = "the key id is not 1 to 256 visible ASCII characters";
 }
 
@@ -233,8 +214,6 @@ mod tests {
         }
     }
 
-    /// A value one grammar admits or refuses, judged by a regex written from
-    /// the grammar's doc comment instead of by the parser's own checks.
     mod grammar {
         use super::*;
         use proptest::prelude::*;

@@ -21,21 +21,10 @@ pub(crate) use admission::Shed;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
-    /// Upper bound for a business call's time to response headers,
-    /// authentication included. A caller's shorter `grpc-timeout` wins.
     pub request_timeout: Duration,
-    /// Independent bounds on pre-header openings and admitted business calls
-    /// through terminal status, shared by router clones. A call over a bound
-    /// waits for a permit within its opening budget and the shared
-    /// [`Limits::max_admission_wait`]. `None` disables both bounds.
     pub max_in_flight: Option<NonZeroU32>,
-    /// Total time a call can wait for permits across both queues. Zero refuses
-    /// a call at once when no permit is available. The remaining opening
-    /// budget less the refusal reserve also bounds the wait.
     pub max_admission_wait: Duration,
-    /// Accepted connections at once; `None` accepts without a bound.
     pub max_connections: Option<NonZeroU32>,
-    /// Age after which a connection gets GOAWAY; `None` sets no age.
     pub max_connection_age: Option<Duration>,
 }
 
@@ -74,8 +63,6 @@ pub fn router(
         ));
     }
     // template:begin service-auth:grpc-router-admit-callers
-    // Inside bearer authentication; without a service-token verifier it only
-    // strips `Authorization` before the handler.
     let business = business.layer(axum::middleware::from_fn_with_state(
         admission,
         crate::service_auth::admit_caller,
@@ -84,8 +71,6 @@ pub fn router(
     // template:begin authn:grpc-router-authenticate
     let scopes = std::sync::Arc::new(std::mem::take(&mut services.scopes));
     let business = if service_tokens {
-        // A service token names a caller and carries no scope, so a declared
-        // requirement could only be dropped.
         if !scopes.is_empty() {
             return Err(Error::ScopesWithServiceTokens);
         }
@@ -145,9 +130,6 @@ fn with_health(
     )))
 }
 
-/// Caller-owned lifetime after the response headers (caller `grpc-timeout`, no
-/// server cap). A separate type so it never collides with the opening
-/// `OperationContext` extension.
 #[derive(Clone, Debug)]
 pub struct ResponseContext(operation_context::OperationContext);
 
@@ -162,8 +144,6 @@ impl ResponseContext {
     }
 }
 
-/// Once the opening context stops, that stop wins over any later result, so
-/// every later layer checks it again.
 async fn opening(
     State(cap): State<Option<Duration>>,
     mut request: Request,
@@ -209,9 +189,6 @@ pub(crate) fn opening_context(request: &Request) -> Option<&operation_context::O
 const REJECT_DRAIN: Duration = Duration::from_millis(100);
 const REJECT_DRAIN_BYTES: usize = 64 * 1024;
 
-/// Drains the rest of the request body first: answering at once closes the
-/// stream while DATA is in flight, h2 resets it, and after 1024 such resets
-/// closes the connection with every other call on it.
 #[allow(
     dead_code,
     reason = "only the optional bearer and service authentication profiles use the full drain"

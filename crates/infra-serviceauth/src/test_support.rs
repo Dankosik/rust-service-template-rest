@@ -1,7 +1,3 @@
-//! Test keys and hand-built tokens for tests that exercise a real verifier.
-//! Signing still needs a key the trust registry holds: nothing here
-//! constructs a [`Caller`](crate::Caller) or bypasses verification.
-
 #![expect(
     clippy::expect_used,
     reason = "test fixtures fail with their setup context"
@@ -69,8 +65,6 @@ impl TestKey {
 
     #[must_use]
     pub fn pem(&self) -> String {
-        // `test-support` is a normal Cargo feature, so depending on `pem` 4 here
-        // would duplicate `jsonwebtoken`'s `pem` 3 in `cargo-deny`.
         let body = STANDARD.encode(&self.pkcs8);
         let lines: Vec<&str> = body
             .as_bytes()

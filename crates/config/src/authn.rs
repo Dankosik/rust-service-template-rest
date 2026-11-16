@@ -1,9 +1,3 @@
-//! Optional inbound authentication profile and its static trust inputs.
-//!
-//! This section validates configuration shape only. Provider URL admission,
-//! discovery, credentials use, and verification belong to the authentication
-//! adapter.
-
 // template:begin oidc-introspection:authn-nonzero-import
 use std::{num::NonZeroU32, time::Duration};
 // template:end oidc-introspection:authn-nonzero-import
@@ -178,7 +172,6 @@ impl Default for AuthnInput {
     }
 }
 
-/// The admitted inbound authentication profile.
 #[derive(Clone, Default)]
 pub enum AuthnConfig {
     #[default]
@@ -188,9 +181,7 @@ pub enum AuthnConfig {
         issuer: String,
         audience: Audiences,
         token_profile: TokenProfile,
-        /// Nonempty.
         algorithms: Vec<JwtAlgorithm>,
-        /// `None` uses OIDC discovery, then RFC 8414 metadata.
         jwks_uri: Option<String>,
     },
     // template:end oidc-jwt:authn-admitted-jwt-variant
@@ -266,8 +257,6 @@ const fn default_cache_ttl() -> Duration {
     Duration::from_secs(30)
 }
 
-// The tagged enum buffers field values, so config-rs reports failures at
-// `authn` alone. These messages name the rejected field.
 fn deserialize_provider_concurrency<'de, D>(deserializer: D) -> Result<NonZeroU32, D::Error>
 where
     D: Deserializer<'de>,

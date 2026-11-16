@@ -52,12 +52,10 @@ pub struct Producer {
 pub struct PublishAck {
     pub stream: String,
     pub sequence: u64,
-    /// True when the broker recognized the publication as a duplicate and stored nothing new.
     pub duplicate: bool,
 }
 
 impl Producer {
-    /// Bounded by `context` and at most one [`BROKER_OPERATION_BUDGET`].
     pub async fn publish(
         &self,
         event: &PreparedEvent,
@@ -137,7 +135,6 @@ fn source_message(
         return Err(PublishError::Rejected);
     }
     let mut headers = encode_prepared(event).map_err(|_| PublishError::Rejected)?;
-    // The consumer's delivery span continues this trace.
     crate::trace::inject(span, &mut headers);
     headers.insert(async_nats::header::NATS_EXPECTED_STREAM, expected_stream);
     validate_header_bytes(&headers).map_err(|_| PublishError::Rejected)?;
@@ -162,17 +159,12 @@ impl From<PublicationFailure> for PublishError {
     }
 }
 
-/// Unlike [`Producer::publish`], this records no span, outcome metric or
-/// drain check; the caller owns those. A full publication window still counts
-/// toward `messaging_publish_admission_refused_total`.
 pub(crate) async fn send_publication(
     shared: &Shared,
     subject: impl ToSubject,
     message: PublishMessage,
     context: &OperationContext,
 ) -> Result<PublishAck, PublicationFailure> {
-    // The caller's cancellation token is shared rather than given a child,
-    // which would register with its parent on every publication.
     let local = Deadline::new(Instant::now(), BROKER_OPERATION_BUDGET);
     let context = OperationContext::new(
         Some(
@@ -202,8 +194,6 @@ pub(crate) async fn send_publication(
             duplicate: ack.duplicate,
         })
     };
-    // Nothing awaits between the check above and the first poll of the
-    // exchange, so a cancellation or timeout here may follow dispatch.
     tokio::select! {
         biased;
         _ = context.wait_stopped() => Err(PublicationFailure::Ambiguous),
@@ -211,9 +201,6 @@ pub(crate) async fn send_publication(
     }
 }
 
-/// `Rejected` only where the broker or client proves nothing was stored: a
-/// closed list of kinds and codes. Every other failure may follow a stored
-/// publication, so it is `Ambiguous`.
 fn classify_publish(
     error: &async_nats::jetstream::context::PublishError,
     admission_refused: &metrics::Counter,
@@ -334,7 +321,6 @@ mod tests {
         };
         let prepared = PreparedEvent::prepare("orders.created", &event, 4)
             .expect("null fits four payload bytes");
-        // Native NATS header framing is the independent wire-size oracle.
         let fixed = concat!(
             "NATS/1.0\r\n",
             "Message-Id: event-1\r\n",

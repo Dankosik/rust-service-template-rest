@@ -1,10 +1,3 @@
-//! The process logger: one subscriber per process, with `log` records bridged
-//! by `tracing-log`'s `LogTracer`, installed before the subscriber.
-//!
-//! Spans at INFO and above exist under every directive, so a quieter
-//! `log.level` neither stops trace export nor strips the request fields and
-//! trace context from the records that remain.
-
 mod format;
 mod output;
 mod sdk_diagnostics;
@@ -51,25 +44,17 @@ pub enum LoggingError {
     WorkerStart(#[source] std::io::Error),
 }
 
-/// The global `log` bridge is installed first. If another subscriber takes the
-/// global slot before this function installs its own, the function returns
-/// [`LoggingError::AlreadyInstalled`] and leaves the bridge installed.
 #[expect(
     clippy::disallowed_methods,
     reason = "startup transfers the stdout handle to the owned writer thread; callbacks perform no sink IO"
 )]
 pub fn install_subscriber(options: &LoggingOptions<'_>) -> Result<LoggerGuard, LoggingError> {
     let (targets, filter) = directive_filters(options.level)?;
-    // `has_been_set` stays true after a scoped default is dropped; outside a
-    // scope the current default is the global one, `NoSubscriber` until set.
     if tracing::dispatcher::has_been_set()
         && tracing::dispatcher::get_default(|current| !current.is::<NoSubscriber>())
     {
         return Err(LoggingError::AlreadyInstalled);
     }
-    // Source location, thread, and busy/idle timings would be added to every
-    // span, sampled or not, at about 2% of a small request's instructions;
-    // no dashboard or runbook reads them.
     let otel = options.tracer_provider.map(|handle| {
         tracing_opentelemetry::layer()
             .with_tracer(handle.tracer())
@@ -90,8 +75,6 @@ pub fn install_subscriber(options: &LoggingOptions<'_>) -> Result<LoggerGuard, L
         // template:end object-storage:telemetry-sdk-log-cap-apply
         .with(otel)
         .with(format);
-    // The bridge goes first: a taken `log` slot after the subscriber was set
-    // would leave a subscriber whose writer this early return closes.
     let max_level = subscriber.max_level_hint().unwrap_or(LevelFilter::TRACE);
     tracing_log::LogTracer::builder()
         .with_max_level(max_level.as_log())
@@ -102,15 +85,8 @@ pub fn install_subscriber(options: &LoggingOptions<'_>) -> Result<LoggerGuard, L
     Ok(guard)
 }
 
-/// Replace Rust's hook with a payload-free error event and build-authored location.
-/// Runtime thread names and backtraces are withheld.
-///
-/// Install after the subscriber: the hook writes only through `tracing`, so
-/// a panic before a subscriber exists is lost instead of reaching stderr.
 pub fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
-        // The writer reports its own failure through independent counters;
-        // sending its panic back into the same output would recurse.
         if output::on_writer_thread() {
             return;
         }
@@ -150,14 +126,6 @@ fn directive_filters(directive: &str) -> Result<DirectiveFilters, LoggingError> 
     })
 }
 
-/// The directive's filter under the process-wide [`Admission`] rules: SDK
-/// diagnostic targets are refused except known diagnostics, which
-/// [`Layer::event_enabled`] counts through [`sdk_diagnostics::observe`] as
-/// their only output; `log` bridge records are decided per event; every span
-/// at INFO and above is enabled.
-///
-/// The server, job attempt, and client spans are INFO; a plain filter with
-/// `log.level = warn` would disable them.
 struct WithInfoSpans<F>(F);
 
 fn is_span_at_info_or_above(metadata: &Metadata<'_>) -> bool {
@@ -179,7 +147,6 @@ fn admission(metadata: &Metadata<'_>) -> Admission {
             Admission::Never
         }
     } else if metadata.target() == "log" {
-        // Bridged origin lives in fields; decide before either output in event_enabled.
         Admission::Deferred
     } else if is_span_at_info_or_above(metadata) {
         Admission::Always
@@ -190,7 +157,6 @@ fn admission(metadata: &Metadata<'_>) -> Admission {
 
 impl<S: Subscriber, F: Layer<S>> Layer<S> for WithInfoSpans<F> {
     fn register_callsite(&self, metadata: &'static Metadata<'static>) -> Interest {
-        // `EnvFilter` records its span directives here, so it is asked first.
         let interest = self.0.register_callsite(metadata);
         match admission(metadata) {
             Admission::Always => Interest::always(),
@@ -219,7 +185,6 @@ impl<S: Subscriber, F: Layer<S>> Layer<S> for WithInfoSpans<F> {
     }
 
     fn max_level_hint(&self) -> Option<LevelFilter> {
-        // Known SDK numeric facts remain observable even with log.level=off.
         Some(LevelFilter::TRACE)
     }
 
@@ -244,13 +209,6 @@ impl<S: Subscriber, F: Layer<S>> Layer<S> for WithInfoSpans<F> {
     }
 }
 
-/// The directive as `Targets` when that filters exactly like `EnvFilter`.
-///
-/// `EnvFilter` takes a shared lock on every span operation to track span
-/// directives (`target[span{field}]`); `Targets` decides once per callsite.
-/// `Targets` reads an empty segment (`info,`) or empty level (`app=`) as
-/// `error` where `EnvFilter` skips it or reads `trace`, so those stay with
-/// `EnvFilter`.
 fn static_targets(directive: &str) -> Option<Targets> {
     if directive.contains('[')
         || directive
@@ -272,11 +230,6 @@ fn within(target: &str, root: &str) -> bool {
 type SdkCap =
     tracing_subscriber::filter::FilterFn<Box<dyn Fn(&tracing::Metadata<'_>) -> bool + Send + Sync>>;
 
-/// The AWS SDK logs S3 endpoint parameters, which include object keys, at
-/// DEBUG and whole requests at TRACE. Its `aws_*` targets stay at INFO or
-/// quieter, so a global `debug` never records or exports a key. A target
-/// the directive names (`aws_smithy_runtime=debug`) is exempt with
-/// everything under it; an unnamed sibling stays capped.
 fn sdk_log_cap(directive: &str) -> SdkCap {
     let named: Vec<String> = directive
         .split(',')

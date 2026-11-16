@@ -1,9 +1,3 @@
-//! Exact-byte Standard Webhooks v1 framing and verification.
-//!
-//! This module owns only wire evidence: base64 key decoding, canonical signed
-//! framing, timestamp admission, and HMAC verification. It deliberately has
-//! no knowledge of endpoints, JSON, persistence, or HTTP routing.
-
 use std::fmt::NumBuffer;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -26,8 +20,6 @@ const ENCODED_TAG_BYTES: usize = base64::encoded_len(TAG_BYTES, true).expect("HM
 
 pub const MAX_MESSAGE_ID_BYTES: usize = 255;
 
-/// Accepts the Standard Webhooks base64 form with its optional `whsec_`
-/// prefix. The encoded value is never retained or exposed.
 #[derive(Clone, derive_more::Debug)]
 #[debug("SigningKey([REDACTED])")]
 pub struct SigningKey(hmac::Key);
@@ -56,17 +48,12 @@ impl KeyRing {
         Self { active, previous }
     }
 
-    /// A composition root that resolves each key by reference decodes
-    /// individual [`SigningKey`] values and uses [`Self::new`] instead.
     pub fn from_encoded(active: &str, previous: Option<&str>) -> Result<Self, InvalidKey> {
         let active = SigningKey::from_encoded(active)?;
         let previous = previous.map(SigningKey::from_encoded).transpose()?;
         Ok(Self::new(active, previous))
     }
 
-    /// `timestamp` is the `webhook-timestamp` value in Unix seconds. The
-    /// active signature comes first; a predecessor adds one space-separated
-    /// v1 candidate.
     pub fn signatures(
         &self,
         message_id: &[u8],
@@ -90,8 +77,6 @@ impl KeyRing {
         Ok(signatures)
     }
 
-    /// The expected tag is computed once per key, so the work is at most two
-    /// HMACs over the body however many candidates the caller supplies.
     pub fn verify(
         &self,
         headers: &HeaderMap,
@@ -139,7 +124,6 @@ impl VerifiedMessage {
     }
 }
 
-/// The configured key is not standard base64, or does not decode to 24–64 bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("webhook signing key is invalid")]
 pub struct InvalidKey;
@@ -152,8 +136,6 @@ pub enum ProtocolError {
     MissingHeader,
     #[error("webhook signature evidence is ambiguous")]
     ConflictingHeader,
-    /// The message identifier is empty, contains the signed delimiter, or exceeds
-    /// [`MAX_MESSAGE_ID_BYTES`].
     #[error("webhook message identifier is invalid")]
     InvalidMessageId,
     #[error("webhook timestamp is invalid")]
@@ -200,7 +182,6 @@ pub(crate) fn ensure_message_id_len(message_id: &[u8]) -> Result<(), ProtocolErr
         .ok_or(ProtocolError::InvalidMessageId)
 }
 
-/// A signed identity also excludes the `.` that delimits the signed content.
 fn ensure_message_id(message_id: &[u8]) -> Result<(), ProtocolError> {
     ensure_message_id_len(message_id)?;
     (!message_id.contains(&b'.')).ok_or(ProtocolError::InvalidMessageId)
@@ -215,8 +196,6 @@ fn parse_timestamp(value: &HeaderValue) -> Result<i64, ProtocolError> {
 }
 
 fn ensure_timestamp_window(timestamp: i64, now: SystemTime) -> Result<(), ProtocolError> {
-    // i128 holds the distance between any i64 timestamp and a clock before or
-    // after the epoch without overflow.
     let now = match now.duration_since(UNIX_EPOCH) {
         Ok(duration) => i128::from(duration.as_secs()),
         Err(error) => -i128::from(error.duration().as_secs()),
@@ -236,7 +215,6 @@ fn tag(key: &SigningKey, message_id: &[u8], timestamp: i64, body: &[u8]) -> hmac
 }
 
 fn matches_v1_signature(headers: &HeaderMap, expected: &hmac::Tag) -> bool {
-    // Reserve base64's conservative decoded-length bound, including padding slack.
     let mut scratch = [0; ENCODED_TAG_BYTES / 4 * 3];
     headers
         .get_all(WEBHOOK_SIGNATURE)
@@ -261,7 +239,6 @@ mod tests {
 
     use super::{KeyRing, MAX_BODY_BYTES, MAX_MESSAGE_ID_BYTES, ProtocolError, SigningKey};
 
-    // Published Rust reference vector at
     // https://github.com/standard-webhooks/standard-webhooks/blob/59104160f10908d80ee571a81460e1c9c0c05355/libraries/rust/src/lib.rs#L175-L185
     const UPSTREAM_KEY: &str = "whsec_C2FVsBQIhrscChlQIMV+b5sSYspob7oD";
     const UPSTREAM_SIGNATURE: &str = "v1,tZ1I4/hDygAJgO5TYxiSd6Sd0kDW6hPenDe+bTa3Kkw=";
@@ -491,8 +468,6 @@ mod tests {
         }
     }
 
-    // The header limit admits thousands of candidates, so the HMAC work must
-    // stay at most one per key, not one per candidate.
     #[test]
     fn many_signature_candidates_do_not_multiply_the_hmac_work() {
         let keys = KeyRing::from_encoded(ARBITRARY_BYTES_KEY, Some(UPSTREAM_KEY)).unwrap();
@@ -649,7 +624,6 @@ mod tests {
         let encoded = signature.strip_suffix('=').unwrap();
         assert!(!accepted(encoded), "missing padding");
         assert!(!accepted(&format!("{encoded}==")), "extra padding");
-        // The last data character carries two trailing bits that must be zero.
         let last = encoded.chars().last().unwrap();
         let alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
         let at = alphabet.find(last).unwrap();
@@ -663,8 +637,6 @@ mod tests {
 
         use super::*;
 
-        /// Bytes a header value carries and the signed frame admits: no
-        /// controls and no `.`.
         fn message_id() -> impl Strategy<Value = Vec<u8>> {
             proptest::collection::vec(
                 prop_oneof![0x20_u8..0x2e, 0x2f_u8..0x7f, 0x80_u8..=0xff],
@@ -731,8 +703,6 @@ mod tests {
                         "body"
                     );
                 }
-                // One candidate only, so every byte of it, its `v1,` prefix, its
-                // padding and its non-zero trailing bits included, must matter.
                 let single = KeyRing::from_encoded(UPSTREAM_KEY, None).unwrap();
                 let candidate = single.signatures(&id, timestamp, &body).unwrap().into_bytes();
                 if let Some(headers) = header_map(&id, &timestamp_text, &flip(&candidate, index, mask)) {

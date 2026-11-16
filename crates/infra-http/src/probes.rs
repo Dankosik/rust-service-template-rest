@@ -1,11 +1,3 @@
-//! Liveness is process-only: if the handler runs, the process is alive.
-//! Readiness is the cached verdict owned by the `health` crate; the handler
-//! never touches a dependency and exposes no dependency detail.
-//!
-//! Probe bodies stay `text/plain` (`ok` / `not ready`) on purpose: kube and
-//! other platform probes match that contract. They do not use the Problem
-//! envelope the rest of the hardened router answers with.
-
 use axum::extract::{FromRef, State};
 use axum::http::StatusCode;
 use health::ReadinessReader;
@@ -24,25 +16,15 @@ const LIVE_BODY: &str = "ok";
 const READY_BODY: &str = "ok";
 const NOT_READY_BODY: &str = "not ready";
 
-/// (route template, operation id). A matched `GET` is served without an
-/// access-log line unless enabled, and every request skips in-flight admission.
 const HEALTH_PROBES: [(&str, &str); 2] = [
     (LIVE_PATH, LIVE_OPERATION_ID),
     (READY_PATH, READY_OPERATION_ID),
 ];
 
-/// Whether a matched route template is a probe route, also beneath an outer
-/// nest: the hardened chain wraps the nest, so it sees the prefixed template
-/// and no `NestedPath`. The suffix alone would also exempt a service route
-/// such as `/vendors/{id}/health/ready`, so contract finalization refuses
-/// every operation with such a template except the probes themselves (see
-/// [`is_health_probe_operation`]).
 pub(crate) fn is_health_probe_route(route: &str) -> bool {
     HEALTH_PROBES.iter().any(|(path, _)| route.ends_with(path))
 }
 
-/// Whether a documented operation is a probe: its template ends with the
-/// probe's, also beneath a nest, and it carries the probe's operation id.
 pub(crate) fn is_health_probe_operation(path: &str, operation_id: Option<&str>) -> bool {
     HEALTH_PROBES
         .iter()
@@ -59,12 +41,6 @@ where
         .routes(routes!(ready))
 }
 
-/// `GET /health/live` for the private diagnostics listener.
-///
-/// The application listener refuses connections over `http.max_connections`
-/// unanswered, so a platform counting those would restart a full instance.
-/// Readiness is left out on purpose: an instance that cannot accept a
-/// connection should leave rotation, so that probe belongs on the traffic listener.
 pub fn liveness_router() -> axum::Router {
     #[expect(
         clippy::disallowed_methods,

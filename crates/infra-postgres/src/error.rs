@@ -1,7 +1,5 @@
 use std::borrow::Cow;
 
-/// Only the five-byte uppercase-alphanumeric format, so the value is safe as a
-/// log field or metric label.
 #[must_use]
 pub fn sqlstate(err: &sqlx::Error) -> Option<Cow<'_, str>> {
     err.as_database_error()?.code().filter(|code| {
@@ -12,9 +10,6 @@ pub fn sqlstate(err: &sqlx::Error) -> Option<Cow<'_, str>> {
     })
 }
 
-/// Transient: with a SQLSTATE, classes `08` and `53`, `40001`, `40P01`, `40003`,
-/// `57P01`-`57P03`, `57014`, `55P03`, `25P03`, `25P04`, `25006`; without one, a
-/// timed-out or closed pool and failed socket or TLS sessions.
 #[must_use]
 pub fn is_transient(err: &sqlx::Error) -> bool {
     match sqlstate(err) {
@@ -46,7 +41,6 @@ pub fn is_transient(err: &sqlx::Error) -> bool {
     }
 }
 
-/// Pair with [`sqlstate`]; `database` covers any server-reported error.
 #[must_use]
 pub const fn failure_cause(err: &sqlx::Error) -> &'static str {
     match err {

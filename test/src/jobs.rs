@@ -56,8 +56,6 @@ impl Drop for PanicPayloadDrop {
     }
 }
 
-/// The attempts table a jobs test creates. No key on `(job_id, attempt)`:
-/// a released attempt reuses its number.
 pub const CREATE_PROBE_ATTEMPTS: &str = "CREATE TABLE probe_attempts (seq bigserial PRIMARY KEY, job_id uuid NOT NULL, attempt integer NOT NULL, started_at timestamptz NOT NULL DEFAULT clock_timestamp())";
 
 pub async fn handle(job: Job<Probe>) -> Result<(), JobError> {

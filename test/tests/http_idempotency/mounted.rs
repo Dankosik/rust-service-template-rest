@@ -64,8 +64,6 @@ const PRIMARY_WIDGETS: &str = "/primary/widgets";
 const SECONDARY_WIDGETS: &str = "/secondary/widgets";
 const KEY: &str = "idempotency-key";
 const WIDGET_ROWS: &str = "SELECT count(*) FROM widgets";
-/// The request budget, above the provider's own three-second bound, so a slow
-/// TLS handshake is never mistaken for a boundary outcome.
 const BUDGET: Duration = Duration::from_secs(5);
 const SHORT_BUDGET: Duration = Duration::from_secs(2);
 const MAX_BODY_BYTES: usize = 2 * 1_048_576;
@@ -188,9 +186,6 @@ async fn create_widget(
     headers: axum::http::HeaderMap,
     Json(mut input): Json<NewWidget>,
 ) -> Response {
-    // The route's declared `widgets:write` scope is checked by the final
-    // authentication layer before this handler runs; only the operation's own
-    // authorization (revoked-client denial) remains here.
     if !may_create(&principal) {
         return forbidden();
     }
@@ -259,8 +254,6 @@ async fn replace_widget(
         .await
 }
 
-/// The seven replayable fields, with Content-Language deliberately repeated.
-/// The HTTP boundary, rather than this operation, decides which fields persist.
 fn created_response(widget: Widget) -> Response {
     let location = widget.location();
     let id = widget.id;
@@ -285,9 +278,6 @@ fn created_response(widget: Widget) -> Response {
         LAST_MODIFIED,
         HeaderValue::from_static("Sun, 06 Nov 1994 08:49:37 GMT"),
     );
-    // The outer idempotency boundary owns this reserved response metadata.
-    // Supplying a conflicting handler value proves it cannot be captured or
-    // returned as a replay claim.
     headers.insert("idempotent-replayed", HeaderValue::from_static("false"));
     response
 }
@@ -532,9 +522,6 @@ impl FromRef<WidgetState> for Arc<dyn CreateWidgets> {
 }
 
 fn widget_contract(composer: &mut Composer) -> OpenApiRouter<WidgetState> {
-    // As `service::api::contract` assembles it: the transport router
-    // registers the shared problem responses the family references (the
-    // 403 among them must resolve), and the composer adds its own.
     OpenApiRouter::with_openapi(bearer_document())
         .merge(infra_http::router())
         .routes(
@@ -580,8 +567,6 @@ impl Mounted {
         std::assert_matches!(activation, Activation::Active { .. }, "{activation:?}");
         let routes = infra_http::authn::finalize(contract, provider.verifier())
             .expect("the mounted auth contract finalizes");
-        // The two outer mounts intentionally share the same inner routes. The
-        // route layer must use OriginalUri so their request identities differ.
         let mounted = Router::new()
             .nest(PRIMARY_PREFIX, routes.clone())
             .nest(SECONDARY_PREFIX, routes);
@@ -889,7 +874,6 @@ async fn authorized_without_idempotency(
     assert_eq!(claims.scope, "widgets:write");
     assert_eq!(principal.scopes(), ["widgets:write"]);
     assert!(principal.claims::<BTreeMap<String, u64>>().is_err());
-    // The verified token stays available only as a token-exchange subject.
     assert_ne!(
         secrecy::ExposeSecret::expose_secret(principal.access_token()),
         ""
@@ -948,8 +932,6 @@ async fn final_document_controls_head_policy_and_preserves_native_fallbacks() {
         .merge(infra_http::router())
         .routes(routes!(authorized_without_idempotency, public_head))
         .routes(routes!(inherited_get));
-    // The inherited operation deliberately has no failure-documentation family:
-    // runtime startup owns security, while the OpenAPI gate owns completeness.
     let router = infra_http::authn::finalize(contract, provider.verifier())
         .unwrap()
         .with_state(readiness_reader());
@@ -1092,8 +1074,6 @@ async fn outer_http_timeout_cancels_inflight_verification_and_owns_504() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn authentication_and_scope_authorization_work_without_a_composer() {
-    // Keep the router and provider tasks on the test thread so this recorder
-    // cannot observe counters from concurrently running tests.
     let recorder = DebuggingRecorder::new();
     let captured = CapturedMetrics::new(&recorder);
     let _local = metrics::set_default_local_recorder(&recorder);
@@ -1418,8 +1398,6 @@ async fn p9_a_success_replays_byte_for_byte_behind_current_authorization(pool: P
         "req-header",
     );
 
-    // Authorization runs on every attempt: the same caller through a revoked
-    // client is refused before any replay and counted as not stored.
     let refused = mounted
         .create(ALICE_REVOKED, "k-1", &input, "req-refused")
         .await;
@@ -1435,7 +1413,6 @@ async fn p9_a_success_replays_byte_for_byte_behind_current_authorization(pool: P
         ])
     );
 
-    // Another input under the same key is a mismatch, and the record stays.
     let changed = json!({"name": "gizmo", "color": "blue"});
     let mismatch = mounted.create(ALICE, "k-1", &changed, "req-changed").await;
     problem(
@@ -1489,8 +1466,6 @@ async fn p9_request_identity_keeps_original_uri_resource_and_operation(pool: PgP
         "req-resource-two",
     );
 
-    // The key namespace has no operation ID, but request method/path still
-    // prevent a POST success from replaying through the PUT operation.
     let post = mounted
         .create(ALICE, "k-operation", &input, "req-post")
         .await;
@@ -1505,8 +1480,6 @@ async fn p9_request_identity_keeps_original_uri_resource_and_operation(pool: PgP
         "req-put",
     );
 
-    // Both mounts resolve the same inner route. A replay here would prove the
-    // middleware hashed its rewritten URI instead of OriginalUri.
     let primary = mounted
         .create_at(PRIMARY_WIDGETS, ALICE, "k-original", &input, "req-primary")
         .await;
@@ -1527,7 +1500,6 @@ async fn p9_request_identity_keeps_original_uri_resource_and_operation(pool: PgP
         "req-secondary",
     );
 
-    // Query order also stays raw request identity.
     let ordered = format!("{PRIMARY_WIDGETS}?a=1&b=2");
     let first_query = mounted
         .create_at(&ordered, ALICE, "k-query", &input, "req-query-one")
@@ -1571,7 +1543,6 @@ async fn p9_rolled_back_work_and_undecodable_records_are_never_replayed(pool: Pg
     }
     assert_eq!(outcomes(&captured), counts(&[("not_stored", 2)]));
 
-    // A success too large to store is a sanitized 500 that commits nothing.
     let huge = json!({"name": "x".repeat(STORED_BODY_BOUND), "color": "red"});
     let unstorable = mounted.create(ALICE, "k-3", &huge, "req-huge").await;
     let body = problem(
@@ -1669,8 +1640,6 @@ async fn p9_the_database_cutoff_answers_unavailable_and_the_same_key_recovers(po
     let mounted = Mounted::on(&pool, SHORT_BUDGET).await;
     let input = json!({"name": "gizmo", "color": "red"});
 
-    // The inner cutoff cancels work inside its transaction, leaving time for
-    // the canonical unavailable response before the outer timeout.
     mounted.hold.arm();
     let advance = async {
         mounted.hold.entered().await;

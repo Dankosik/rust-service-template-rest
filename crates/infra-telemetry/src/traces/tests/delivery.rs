@@ -19,7 +19,6 @@ use tracing_subscriber::layer::SubscriberExt as _;
 
 use super::*;
 
-// The TLS fixture crates are in the workspace only with gRPC retained.
 // template:begin grpc:telemetry-tls-delivery-tests
 mod tls;
 // template:end grpc:telemetry-tls-delivery-tests
@@ -292,7 +291,6 @@ fn shutdown(handle: TracerProviderHandle) -> ProviderShutdown {
     runtime().block_on(handle.shutdown(tokio::time::Instant::now() + WAIT))
 }
 
-/// Each request is observed before the test permits its scripted response.
 #[expect(
     clippy::disallowed_methods,
     reason = "finite collector fixture owns blocking accept and joins its scripted thread"
@@ -323,7 +321,6 @@ fn scripted_collector(
     (Collector { addr, requests }, release, thread)
 }
 
-/// Only batch size and timer are configured, for deterministic scheduling.
 fn batch_handle(exporter: impl SpanExporter + 'static) -> TracerProviderHandle {
     let drain = Arc::default();
     let processor = sdktrace::BatchSpanProcessor::builder(ObservedExporter {
@@ -367,7 +364,6 @@ fn a_receiver_failure_only_poisons_the_drain_if_it_completes_after_shutdown_begi
         assert_eq!(collector.received().span_names(), ["first batch"]);
         if !during_drain {
             release.send(()).unwrap();
-            // FIFO control completion proves the earlier exporter call finished.
             handle
                 .provider
                 .force_flush()
@@ -507,8 +503,6 @@ fn collector_diagnostics_cannot_escape_to_local_records_or_span_events() {
                     drain: Arc::default(),
                 };
                 let (dispatch, logger, records) = capture(format, level, Some(&handle));
-                // Queue the response permission before the blocking export; the
-                // collector still reads the real request before responding.
                 release.send(()).unwrap();
                 tracing::dispatcher::with_default(&dispatch, || {
                     tracing::info_span!("ordinary_span").in_scope(|| {

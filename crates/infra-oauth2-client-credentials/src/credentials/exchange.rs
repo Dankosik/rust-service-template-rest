@@ -22,9 +22,6 @@ pub(crate) struct ExchangeState {
 
 impl ExchangeState {
     pub(super) fn new(capacity: u32) -> Self {
-        // Rounded down: moka admits an entry only while the total weight stays
-        // within the limit, so a rounded-up weight would retain fewer subjects
-        // than configured.
         let minimum_weight = EXCHANGE_CACHE_BYTES / capacity;
         Self {
             cache: moka::future::Cache::builder()
@@ -97,8 +94,6 @@ enum ExchangeFlight<'a> {
     Waiter(ExchangeReceiver),
 }
 
-/// Only the fetching caller owns the sender. If it drops this guard before
-/// [`Self::publish`], waiters wake without an outcome and can start a new attempt.
 struct ExchangeLeader<'a> {
     flights: &'a ExchangeFlights,
     key: SubjectKey,
@@ -121,8 +116,6 @@ impl Drop for ExchangeLeader<'_> {
     }
 }
 
-/// The SHA-256 digest of a subject's access token, keying its exchanged
-/// tokens. It has no `Debug`, so the digest never reaches a log.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct SubjectKey([u8; 32]);
 
@@ -138,7 +131,6 @@ impl SubjectKey {
     }
 }
 
-/// Retention is best-effort. Each reader checks reuse on the Tokio clock.
 struct ExchangedExpiry;
 
 impl Expiry<SubjectKey, Arc<Token>> for ExchangedExpiry {
@@ -165,9 +157,6 @@ impl Expiry<SubjectKey, Arc<Token>> for ExchangedExpiry {
 }
 
 impl Credentials {
-    /// Concurrent misses for one subject wait on the first caller's exchange, bounded by
-    /// that caller's `deadline` and [`FETCH_TIMEOUT`]. If it is dropped or out of budget,
-    /// a waiter starts its own; a waiter never fails on another caller's deadline.
     pub(crate) async fn exchange(
         &self,
         subject: &SecretString,
@@ -202,8 +191,6 @@ impl Credentials {
             self.check_admission(deadline)?;
             match inner.exchange.join(key) {
                 ExchangeFlight::Leader(leader) => {
-                    // A previous exchange may have finished between the cache
-                    // miss and this registration.
                     let result = if let Some(token) = inner.exchange.reusable(key).await {
                         Ok(token)
                     } else {

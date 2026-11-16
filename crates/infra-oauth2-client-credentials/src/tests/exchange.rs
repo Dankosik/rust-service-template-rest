@@ -200,8 +200,6 @@ async fn an_exchanged_token_past_its_reuse_cutoff_is_exchanged_once_more() {
             .unwrap();
     };
     execute().await;
-    // Only the Tokio clock moves past the cutoff of a sixty-second token, so
-    // the cache still holds the entry and the reuse check alone refuses it.
     advance(Duration::from_secs(51)).await;
     fixture.token_json("200 OK", &exchange_response("second"));
     execute().await;

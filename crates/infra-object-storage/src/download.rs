@@ -14,24 +14,6 @@ use crate::error::{Failure, LocalFailure};
 use crate::observe::OperationGuard;
 use crate::{ObjectMetadata, ObjectStorageError, error};
 
-/// An open download. Dropping it releases the admission slot and owned SDK
-/// body; the operation is recorded as `cancelled` unless it already ended or
-/// its operation context has stopped, in which case it records `unavailable`.
-/// A terminal failure releases the body before the error is returned, even if
-/// the failed `Download` is retained. Neither behavior claims socket closure
-/// or completion of work owned by the SDK.
-///
-/// It is an [`http_body::Body`] of exactly [`ObjectMetadata::size`] bytes,
-/// so it can be returned as a response body. The slot and the SDK body live
-/// through confirmed EOF/integrity under the original operation context. Its
-/// weak timer releases unpolled retained custody at the same cutoff. A
-/// presigned URL remains the appropriate path for a remote slow reader.
-/// Already delivered bytes are caller-owned. The final chunk is withheld until
-/// the body confirms EOF and the SDK has completed any supported full-object
-/// checksum validation. The SDK permits absent checksums and skips composite
-/// (`-N`) or invalid-base64 checksums. Success does not attest that a checksum
-/// was validated; a feature requiring end-to-end integrity checks its own
-/// authoritative digest.
 #[derive(Debug)]
 pub struct Download {
     metadata: ObjectMetadata,
@@ -56,9 +38,6 @@ enum Status {
     Failed(ObjectStorageError),
 }
 
-/// The operation lifetime, body, final chunk, permit, and observation move as
-/// one cell. Terminal code takes this entire cell while holding the short lock,
-/// then destroys and observes it after the lock is released.
 #[derive(Debug)]
 struct Resources {
     context: OperationContext,
@@ -79,8 +58,6 @@ struct Completion {
     resources: Resources,
     outcome: Outcome,
     waker: Option<Waker>,
-    /// A ready SDK poll may have produced bytes or an error at the cutoff. It
-    /// is discarded only after releasing the resource-cell lock.
     discarded: Option<Result<Bytes, ByteStreamError>>,
 }
 
@@ -101,8 +78,6 @@ impl Completion {
     }
 }
 
-/// A provider poll can advance custody without returning a caller payload.
-/// Empty buffers cross the lock boundary before their destructor runs.
 enum ReadStep {
     Buffered,
     Empty(Bytes),
@@ -151,8 +126,6 @@ impl State {
         (result, completion)
     }
 
-    /// Bytes not yet returned to the reader, including a withheld final
-    /// chunk; `None` once the download failed.
     fn unread_bytes(&self) -> Option<u64> {
         match &self.status {
             Status::Open(resources) => Some(
@@ -177,8 +150,6 @@ impl State {
             return self.close_failed(Failure::stopped(stopped));
         }
         self.waker = Some(context.waker().clone());
-        // `poll_chunk` loops over ready empty and buffered chunks without
-        // returning, so it spends the task's cooperative budget by hand.
         let Poll::Ready(coop) = tokio::task::coop::poll_proceed(context) else {
             return (Poll::Pending, None);
         };
@@ -186,8 +157,6 @@ impl State {
         if polled.is_ready() {
             coop.made_progress();
         }
-        // Strict GET finality: a body poll that crossed the original cutoff
-        // cannot yield a new chunk, error mapping, or successful EOF.
         if let Some(stopped) = resources.context.stopped() {
             let (result, mut completion) = self.close_failed(Failure::stopped(stopped));
             if let (Some(completion), Poll::Ready(item)) = (&mut completion, polled) {
@@ -276,7 +245,6 @@ impl Download {
                 _permit: permit,
             }),
         }));
-        // Capture before the timer can first poll so an unexpected exit frees custody.
         let exit = std::mem::DropGuard::new(Arc::downgrade(&shared), |weak| {
             if let Some(shared) = weak.upgrade() {
                 terminate(
@@ -315,9 +283,6 @@ impl Download {
         context: &mut Context<'_>,
     ) -> Poll<Result<Option<Bytes>, ObjectStorageError>> {
         loop {
-            // `Drop` would release custody too, but a caller that catches the
-            // panic may keep this `Download`; the slot and the body must not
-            // wait for it to be dropped.
             let polled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 self.shared.lock().poll(context)
             }));
@@ -341,8 +306,6 @@ impl Download {
         }
     }
 
-    /// Consume and collect unread bytes under the original context. Returned
-    /// bytes outlive admission and need a budget at their consumer.
     pub async fn into_bytes(mut self) -> Result<Bytes, ObjectStorageError> {
         let unread_bytes = self.shared.lock().unread_bytes().unwrap_or(0);
         let mut buffer = Vec::with_capacity(usize::try_from(unread_bytes).unwrap_or(0));
@@ -377,8 +340,6 @@ impl http_body::Body for Download {
     }
 
     fn size_hint(&self) -> SizeHint {
-        // Hyper may skip an exact-zero body, so a failed download reports no
-        // exact size and keeps its error visible.
         self.shared
             .lock()
             .unread_bytes()

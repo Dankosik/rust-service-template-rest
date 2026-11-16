@@ -1,6 +1,3 @@
-//! Proves a derived service uses the same process, listener, and shutdown path
-//! as the service binary; deliberately registers no default business service.
-
 use std::pin::Pin;
 use std::process::ExitCode;
 
@@ -85,8 +82,6 @@ fn accepted(message: String) -> Result<String, Status> {
     }
 }
 
-/// `Echo` keeps no state; a server that reads a dependency takes it from
-/// the state here, as an HTTP handler takes it through `State`.
 fn register(
     services: &mut Services,
     _state: &service::AppState,
@@ -95,8 +90,6 @@ fn register(
     services.describe(grpc_contracts::FILE_DESCRIPTOR_SET)?;
     services.add(EchoServiceServer::new(Echo))?;
     // template:begin service-auth:grpc-example-caller-rules
-    // Who may call each method when service tokens are verified: a method
-    // without a rule would stop the process from starting.
     for method in ["Unary", "ClientStream", "ServerStream", "BidiStream"] {
         services.allow_callers(
             &format!("/example.v1.EchoService/{method}"),

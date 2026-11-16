@@ -9,7 +9,6 @@ pub(crate) fn agent() -> ureq::Agent {
         .new_agent()
 }
 
-/// An error status is a response, not an error.
 pub(crate) fn get(url: &str) -> Result<(u16, String), ureq::Error> {
     agent().get(url).call().map(|mut response| {
         let status = response.status().as_u16();

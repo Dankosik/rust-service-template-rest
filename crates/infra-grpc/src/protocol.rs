@@ -4,7 +4,6 @@ use http::{HeaderMap, HeaderName, StatusCode};
 
 pub(crate) const GRPC_TIMEOUT: HeaderName = HeaderName::from_static("grpc-timeout");
 const MAX_TIMEOUT_DIGITS: usize = 8;
-/// The largest wire timeout is eight digits of hours. Tonic panics on longer durations.
 const WIRE_TIMEOUT_MAX: Duration = Duration::from_hours(99_999_999);
 
 pub(crate) fn split_method_path(path: &str) -> Option<(&str, &str)> {
@@ -17,7 +16,6 @@ pub(crate) fn method_path(service: &str, method: &str) -> String {
     format!("/{service}/{method}")
 }
 
-/// Tonic's own parser is private; a malformed value is absent.
 #[must_use]
 pub fn grpc_timeout(headers: &HeaderMap) -> Option<Duration> {
     headers
@@ -85,7 +83,6 @@ pub(crate) fn set_grpc_timeout(headers: &mut HeaderMap, remaining: Duration) {
     }
 }
 
-/// Without `grpc-status` the HTTP mapping is provisional until the stream ends.
 pub fn client_response_code<B>(response: &http::Response<B>) -> Option<tonic::Code> {
     decoded_header_status_code(response.headers()).or_else(|| http_status_code(response.status()))
 }
@@ -103,8 +100,6 @@ pub(crate) fn header_status_code(headers: &HeaderMap) -> Option<tonic::Code> {
         .map(|value| tonic::Code::from_bytes(value.as_bytes()))
 }
 
-/// Per gRPC's HTTP-to-gRPC status mapping, as tonic's client applies it; `None` for `200`,
-/// whose status the trailers carry.
 pub(crate) fn http_status_code(status: StatusCode) -> Option<tonic::Code> {
     match status {
         StatusCode::OK => None,

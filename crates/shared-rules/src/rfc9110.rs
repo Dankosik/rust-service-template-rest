@@ -1,6 +1,4 @@
-/// Whether the `Content-Type` value names `application/json`. The comparison
-/// ignores ASCII case, parameters, and optional whitespace around the media
-/// type (RFC 9110 §8.3.1).
+/// RFC 9110 §8.3.1
 #[must_use]
 pub fn is_json_content_type(content_type: &str) -> bool {
     let media_type = content_type

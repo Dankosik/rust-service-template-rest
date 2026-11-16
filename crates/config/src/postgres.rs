@@ -1,20 +1,3 @@
-//! PostgreSQL profile switch, connection source, and pool capacity.
-//!
-//! The profile is inert until `enabled` is set. The DSN is the only
-//! connection source and, being secret-like, arrives only as its `APP__`
-//! variable; its admission rules (URL form, explicit `sslmode`, no libpq side
-//! channels) live in `infra-postgres`, which is the crate that knows what
-//! the driver would otherwise read. Timeouts are template constants there
-//! as well; the pool size is the one capacity value without a universal
-//! safe answer, so it is the one an operator sets. Two keys describe the
-//! deployment rather than tune it: where the password comes from when the
-//! platform rotates it, and whether a pooler in front of the database lets
-//! the service publish its session budgets. One key bounds a migration run,
-//! because an index built concurrently takes as long as that database's
-//! table is large.
-//!
-//! [`MigrationConfig`] is the narrower snapshot the migration binary loads.
-
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -80,14 +63,11 @@ impl Default for PostgresInput {
             password_file: None,
             session_budgets: PostgresSessionBudgets::Startup,
             max_connections: const { NonZeroU32::new(4).expect("4 is nonzero") },
-            // Above the two-minute statement budget of a transactional
-            // migration, so a few of them fit in one run.
             migration_deadline: Duration::from_mins(5),
         }
     }
 }
 
-/// An enabled PostgreSQL profile: the connection source is present.
 #[derive(Clone, Debug)]
 pub struct PostgresConfig {
     pub dsn: SecretString,
@@ -98,8 +78,6 @@ pub struct PostgresConfig {
 }
 
 impl PostgresInput {
-    /// `None` when the profile is disabled. The pool size range holds
-    /// whether or not the profile is enabled.
     pub(crate) fn admit(
         self,
         violations: &mut Violations,
@@ -146,13 +124,11 @@ pub(crate) struct MigrationInput {
     postgres: PostgresInput,
 }
 
-/// The sections the migration binary reads, admitted.
 #[derive(Clone, Debug, Default)]
 pub struct MigrationConfig {
     pub app: AppConfig,
     pub log: LogConfig,
     pub observability: ObservabilityConfig,
-    /// `None` when `postgres.enabled` is false.
     pub postgres: Option<PostgresConfig>,
 }
 

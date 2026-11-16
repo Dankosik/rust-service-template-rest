@@ -1,13 +1,3 @@
-//! HTTP idempotency retention: the one runtime knob the optional
-//! PostgreSQL-backed idempotency pack adds.
-//!
-//! The section has no enabled switch of its own; `postgres.enabled` and
-//! whether any operation is composed as idempotent together decide activity
-//! (see [`HttpIdempotencyConfig::required_retention`]). There is no usable
-//! default, so a derived service that activates the pack must set a value
-//! explicitly. A set value keeps any sub-microsecond part it names; the
-//! record store truncates it once, after this range check has already run.
-
 use std::time::Duration;
 
 use serde::Deserialize;

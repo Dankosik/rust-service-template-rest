@@ -11,8 +11,6 @@ mod dead_letter;
 pub(crate) use dead_letter::{DeadLetterReason, dead_letter_bounds, dead_letter_headers};
 pub use dead_letter::{DeadLetterRecord, dead_letter_id, restore_dead_letter};
 
-/// The encoded header limit of one envelope; the Go service enforces the same
-/// limit, so either side accepts what the other publishes.
 pub const HEADER_LIMIT_BYTES: usize = 8 * 1024;
 pub const MESSAGE_ID: &str = "Message-Id";
 pub const EVENT_TYPE: &str = "Event-Type";
@@ -22,15 +20,11 @@ pub const NATS_MSG_ID: &str = "Nats-Msg-Id";
 pub const ORIGINAL_SUBJECT: &str = "Original-Subject";
 pub const DEAD_LETTER_REASON: &str = "Dead-Letter-Reason";
 
-/// NATS enforces this encoded-header ceiling independently of message size.
 pub(crate) const NATIVE_HEADER_LIMIT_BYTES: usize = 65_535;
 pub(crate) const IDENTITY_MAX_BYTES: usize = 256;
 const SHA256_HEX_LEN: usize = 64;
-/// The `NATS/1.0` status line and the blank line that ends a header block.
 const HEADER_PREAMBLE_BYTES: usize = "NATS/1.0\r\n\r\n".len();
 
-// A `&str` header name is validated and copied on every insert and lookup;
-// these are built at compile time.
 pub(crate) mod header_name {
     use async_nats::HeaderName;
 
@@ -54,8 +48,6 @@ pub struct InboundEnvelope {
     pub(crate) payload: Bytes,
 }
 
-/// The bounds enforced by [`PreparedEvent`] keep these headers within
-/// [`HEADER_LIMIT_BYTES`].
 pub fn encode_prepared(event: &PreparedEvent) -> Result<HeaderMap, EnvelopeError> {
     let mut headers = HeaderMap::new();
     headers.insert(header_name::MESSAGE_ID, event.message_id());
@@ -69,8 +61,6 @@ pub fn encode_prepared(event: &PreparedEvent) -> Result<HeaderMap, EnvelopeError
     Ok(headers)
 }
 
-/// `Nats-Msg-Id` is validated and not returned; the logical identity is
-/// `Message-Id`.
 pub fn decode_envelope(
     subject: &str,
     headers: &HeaderMap,
@@ -79,8 +69,6 @@ pub fn decode_envelope(
     if !valid_subject(subject) {
         return Err(EnvelopeError::Subject);
     }
-    // One pass reads the five identity headers and sums the encoded size;
-    // each `HeaderMap::get` would hash the name with SipHash.
     let mut encoded = HEADER_PREAMBLE_BYTES;
     let mut found = Found::default();
     for (header, values) in headers.iter() {
@@ -207,7 +195,6 @@ pub(crate) fn schema_label(version: u16) -> String {
     format!("v{version}")
 }
 
-/// Reads a [`schema_label`]: `v` and a positive decimal without leading zeros.
 fn parse_schema(value: &str) -> Result<u16, EnvelopeError> {
     value
         .strip_prefix('v')
@@ -225,17 +212,12 @@ pub(crate) fn validate_outbound_identity(value: &str) -> Result<(), EnvelopeErro
     validate_outbound_whitespace(value)
 }
 
-/// The NATS reader trims surrounding whitespace before handing off a header.
 pub(crate) fn validate_outbound_whitespace(value: &str) -> Result<(), EnvelopeError> {
     (value.trim().len() == value.len()).ok_or(EnvelopeError::Identity)
 }
 
-/// JSON Schema spelling of the control-character rule in [`valid_identity`].
 pub(crate) const IDENTITY_SCHEMA_PATTERN: &str = "^[^\\u0000-\\u001F\\u007F-\\u009F]*$";
 
-/// Whether `value` is 1..=[`IDENTITY_MAX_BYTES`] bytes without a control character. `Cc` is
-/// U+0000..=U+001F and U+007F..=U+009F; in UTF-8 the last range is 0x7F or
-/// 0xC2 followed by 0x80..=0x9F, so no character needs decoding.
 pub(crate) const fn valid_identity(value: &str) -> bool {
     let bytes = value.as_bytes();
     if bytes.is_empty() || bytes.len() > IDENTITY_MAX_BYTES {
@@ -314,8 +296,6 @@ pub fn prefixed_digest_hex(prefix: &str, digest: &[u8; 32]) -> String {
     id
 }
 
-/// Whether `value` is Go's zero `time.Time{}`, January 1 of year 1 UTC, which
-/// a Go publisher writes for an unset creation time.
 pub(crate) fn is_zero_time(value: OffsetDateTime) -> bool {
     value.year() == 1 && value.ordinal() == 1 && value.time() == time::Time::MIDNIGHT
 }

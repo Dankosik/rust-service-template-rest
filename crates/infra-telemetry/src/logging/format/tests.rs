@@ -77,8 +77,6 @@ fn is_marked(line: &str, format: LoggingFormat) -> bool {
 #[test]
 fn a_value_cut_between_characters_stays_valid_text_and_names_the_cut() {
     for format in [LoggingFormat::Json, LoggingFormat::Text] {
-        // Two bytes a character and four an escape: a cut that split either
-        // would not parse.
         let wide = "é\n".repeat(20_000);
         let (records, snapshot) = capture(format, || {
             payload(&wide);
@@ -208,8 +206,6 @@ impl fmt::Debug for Reentrant<'_> {
         );
         let message = "nested_formatter_event";
         let values = [Some(&message as &dyn tracing::field::Value)];
-        // Explicit dispatch reaches the real layer even with scoped defaults,
-        // whose get_default deliberately suppresses nested macro events.
         self.0
             .event(&Event::new(&META, &META.fields().value_set_all(&values)));
         out.write_str("admitted_outer_value")
@@ -366,8 +362,6 @@ fn escaped_field_keys_count_toward_the_complete_record_limit() {
         );
     }
 }
-/// Runs the actual global limits in a fresh test process so saturation never
-/// rejects unrelated subscriber fixtures executing in the parent process.
 #[test]
 fn processwide_capacity_is_bounded_and_recovers() {
     const CHILD: &str = "RUST_TELEMETRY_FORMAT_CAPACITY_CHILD";
@@ -455,8 +449,6 @@ fn callback_capacity(format: LoggingFormat) {
     tracing::dispatcher::with_default(&dispatch, || {
         tracing::info!(value = %Streaming(&denied_writes));
     });
-    // These observations are made while every admitted callback is stopped
-    // inside its source Display, before it can finish or release a permit.
     assert!(!*release.0.lock().expect("callback release lock"));
     assert_eq!(
         guard.snapshot().dropped(DropReason::Busy),
@@ -496,8 +488,6 @@ fn callback_capacity(format: LoggingFormat) {
 
 fn span_capacity(format: LoggingFormat) {
     let (records, snapshot) = capture(format, || {
-        // These are independent roots, so the event field-table ceiling
-        // cannot be mistaken for cache-slot admission failure.
         let mut spans = Vec::from_fn(1024, |item| tracing::info_span!(parent: None, "held", item));
         tracing::info!(parent: spans.last().expect("1024th span"), "at_span_capacity");
         let rejected = tracing::info_span!(parent: None, "over_capacity", item = 1024);

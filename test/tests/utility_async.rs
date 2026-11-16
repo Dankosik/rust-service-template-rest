@@ -31,7 +31,6 @@ async fn fanout_is_bounded_without_spawning_one_task_per_item() {
             active.fetch_sub(1, Ordering::SeqCst);
             Ok::<_, std::convert::Infallible>(id * 2)
         })
-        // buffered retains input order; buffer_unordered yields completion order.
         .buffered(3)
         .try_collect::<Vec<_>>();
     let values = tokio::time::timeout(Duration::from_secs(1), work)
@@ -131,8 +130,6 @@ impl CpuRecipe {
         }
     }
 
-    // Mutable access serializes registration with close: TaskTracker::close
-    // alone neither closes admission nor prevents new task registrations.
     fn submit(
         &mut self,
         source: &[u8],
@@ -154,8 +151,6 @@ impl CpuRecipe {
                     TryAcquireError::Closed => CpuAdmissionError::Closed,
                 })?;
 
-        // Admission precedes payload copying, decoding and spawning. Copy only
-        // this slice: a tiny Bytes view could retain a much larger allocation.
         let source = source.to_vec();
         let blocking = tokio::task::spawn_blocking(move || {
             let _permit = permit;
@@ -175,8 +170,6 @@ impl CpuRecipe {
         });
         let (sender, receiver) = oneshot::channel();
         let completions = Arc::clone(&self.completions);
-        // The tracked observer owns the blocking JoinHandle, independently of
-        // the result receiver. It observes panics even after a caller timeout.
         let _observer = self.tasks.spawn(async move {
             let result = match blocking.await {
                 Ok(result) => result,
@@ -208,8 +201,6 @@ impl CpuRecipe {
     }
 }
 
-// Only the executable tests use this bounded rendezvous/fault control. A real
-// feature copies its finite computation and lifecycle, not this instrumentation.
 enum CpuTestFinish {
     Compute,
     Fail,
@@ -284,7 +275,6 @@ async fn cpu_recipe_enforces_finite_input_and_returns_a_separately_owned_result(
         .unwrap();
     assert_eq!(counts.succeeded, 2);
     assert_eq!(maximum.len(), CPU_MAX_BYTES);
-    // Completed results remain caller-owned after actual capacity is released.
     drop(recipe);
     assert_eq!(result.len(), 2 * CPU_RECORD_BYTES);
 }
@@ -310,7 +300,6 @@ async fn cancelling_a_cpu_waiter_does_not_admit_replacement_or_complete_the_join
         recipe.submit(&1_u128.to_le_bytes(), 2, None),
         Err(CpuAdmissionError::Closed)
     );
-    // This is an incomplete wait, not cancellation of the blocking closure.
     assert!(
         tokio::time::timeout(Duration::from_millis(1), recipe.wait())
             .await
@@ -419,8 +408,6 @@ async fn retry_is_bounded_and_only_repeats_eligible_failures() {
     .unwrap();
     assert_eq!(result, Err(FetchError::Permanent));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    // These are read-like operations. Cancellation/retry never rolls back an
-    // already accepted remote effect, and CommitUnknown must not enter this loop.
 }
 
 #[tokio::test]

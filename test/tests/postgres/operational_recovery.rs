@@ -33,8 +33,6 @@ const POLICY: RefreshPolicy = RefreshPolicy {
     failure_threshold: std::num::NonZeroU32::new(3).unwrap(),
 };
 
-// An independently written row makes a successful response distinguish fresh
-// dependency work from a cached ready verdict or a canned Echo response.
 async fn value(pool: &PgPool) -> Result<String, sqlx::Error> {
     let mut connection = infra_postgres::acquire(pool, "recovery consumer").await?;
     sqlx::query_scalar("SELECT value FROM recovery_value")
@@ -98,8 +96,6 @@ impl Instance {
             async move { readiness.refresh_until(cancel).await }
                 .with_subscriber(events.subscriber())
         });
-        // Diagnostics are absent. A small fixed application cap makes admission
-        // pressure observable without multiplying thousands of sockets.
         let server = Server::bind(
             "127.0.0.1:0".parse().unwrap(),
             http_router(pool.clone(), &readiness),
@@ -227,8 +223,6 @@ impl Instance {
             );
             connections.push(held);
         }
-        // An actual response on the held socket establishes admission before
-        // these new sockets compete; there is no sleep-based assumption.
         for path in ["/health/live", "/health/ready", "/useful"] {
             assert!(
                 self.client
@@ -241,8 +235,6 @@ impl Instance {
             );
         }
         drop(connections);
-        // Socket teardown is asynchronous. Wait for admission, then require
-        // the independently updated row through the same listener and pool.
         poll_until(
             "HTTP admission recovers after connection release",
             CALL,
@@ -295,9 +287,6 @@ fn propagate_link_panic(result: Result<(), JoinError>) {
     }
 }
 
-// The current commit relay owns one-shot transaction faults; this fixture needs
-// a reversible interruption shared by *all* connections of both instance pools.
-// It carries bytes unchanged and has no PostgreSQL protocol or outcome policy.
 struct DependencyLink {
     address: SocketAddr,
     available: watch::Sender<bool>,
@@ -410,7 +399,6 @@ async fn consumers_recover_from_local_pressure_shared_interruption_and_admission
     let mut held = a.pool.acquire().await.unwrap();
     let started = Instant::now();
     a.state(false).await;
-    // The dependency itself remains responsive through A's held pool slot.
     assert_eq!(
         sqlx::query_scalar::<_, i32>("SELECT 7")
             .fetch_one(&mut *held)
@@ -442,8 +430,6 @@ async fn consumers_recover_from_local_pressure_shared_interruption_and_admission
     link.interrupt(true);
     tokio::join!(a.state(false), b.state(false));
     tokio::join!(a.refused_work(), b.refused_work());
-    // Keep failing rounds running beyond the freshness bound. The consumer
-    // result must stay an ordinary completed PostgreSQL failure, never stale.
     tokio::time::sleep(POLICY.stale_after() + Duration::from_secs(1)).await;
     tokio::join!(a.state(false), b.state(false));
     println!(
@@ -600,8 +586,6 @@ mod grpc {
             let echo = EchoServiceClient::new(
                 Client::try_new(&destination, ClientSecurity::Plaintext, CALL).unwrap(),
             );
-            // Watch has no whole-stream deadline: one stream must span all
-            // failure/recovery phases. Each observation below stays bounded.
             let mut health = HealthClient::new(
                 Client::with_timeout_policy(
                     &destination,
@@ -709,8 +693,6 @@ mod grpc {
 
     // template:end postgres-grpc-consumers:recovery-grpc-module-6
     // template:begin postgres-grpc-auth:recovery-provider
-    /// Reuse the current real-TLS introspection support; no fabricated Principal
-    /// or weakened gRPC authentication chain is introduced for database proof.
     #[expect(
         clippy::disallowed_methods,
         reason = "local non-shipped identity provider fixture"

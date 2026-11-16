@@ -3,11 +3,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use domain_events::{Event, EventPayload};
+use foldhash::HashMap;
 use operation_context::OperationContext;
 use serde::de::DeserializeOwned;
-// Every key is a compile-time constant, so a caller cannot choose colliding
-// keys; SipHash would cost two thirds of each lookup.
-use foldhash::HashMap;
 
 use crate::contract::{PayloadSchema, payload_schema};
 use crate::error::HandlerError;
@@ -16,25 +14,17 @@ use bytes::Bytes;
 use time::OffsetDateTime;
 
 type HandlerFuture = Pin<Box<dyn Future<Output = Result<(), HandlerError>> + Send>>;
-/// `None` when the payload is not the handler's type.
 type ErasedHandler = Arc<
     dyn Fn(String, OffsetDateTime, Bytes, OperationContext) -> Option<HandlerFuture> + Send + Sync,
 >;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DispatchError {
-    /// No handler is registered for this event type and schema version on
-    /// this subject. The handler never ran.
     Unhandled,
-    /// The payload is not the JSON the handler's type reads. The handler
-    /// never ran.
     Undecodable,
     Handler(HandlerError),
 }
 
-/// Event type and schema version. Every registered key comes from an
-/// [`EventPayload`] constant, so building one to look up a route does not
-/// allocate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct RouteKey<'a> {
     pub(crate) event_type: &'a str,
@@ -179,8 +169,6 @@ impl Registry {
                 event_type,
                 schema_version,
             } = route.key;
-            // The subject itself stays out of the error: an invalid one can
-            // hold a line break.
             if !valid_subject(&route.subject) {
                 return Err(RegistryError::InvalidSubject {
                     event_type: event_type.to_owned(),
@@ -207,8 +195,6 @@ impl Registry {
         Ok(Self { routes: mapped })
     }
 
-    /// The handler gets an [`OperationContext`] with the fixed delivery
-    /// deadline and cancellation; broker metadata stays outside feature code.
     pub fn register<T, F, Fut>(&mut self, handler: F) -> Result<(), RegistryError>
     where
         T: EventPayload + DeserializeOwned + 'static,
@@ -241,8 +227,6 @@ impl Registry {
         Ok(())
     }
 
-    /// Whether a handler is registered. Routes alone do not count: a
-    /// registry with routes and no handler only publishes.
     #[must_use]
     pub fn has_handlers(&self) -> bool {
         self.routes.values().any(|entry| entry.handler.is_some())
@@ -286,8 +270,6 @@ impl Registry {
             occurred_at,
             payload,
         } = envelope;
-        // The map is covariant in the key, so the inbound type looks up the
-        // `'static` keys without a copy.
         let routes: &HashMap<RouteKey<'_>, RouteEntry> = &self.routes;
         let handler = routes
             .get(&RouteKey {
@@ -465,13 +447,9 @@ mod tests {
             Ok(())
         );
         for (subject, event_type, schema) in [
-            // A schema version published before its consumer was deployed.
             ("orders.created", "order.created", "v3"),
-            // A type no route knows.
             ("orders.created", "order.cancelled", "v1"),
-            // A handled type on another subject.
             ("orders.shipped", "order.created", "v2"),
-            // A route this process only publishes to.
             ("orders.shipped", "order.shipped", "v1"),
         ] {
             assert_eq!(

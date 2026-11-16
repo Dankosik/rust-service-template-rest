@@ -36,13 +36,10 @@ pub struct Composer {
 #[derive(Debug)]
 pub enum Activation {
     Inactive,
-    /// The store must be checked and maintained before readiness admission.
     Active {
         store: Store,
         operations: NonZeroUsize,
     },
-    /// Idempotent operations are served by a composer without a store, which
-    /// startup must refuse.
     Unconfigured {
         operations: NonZeroUsize,
     },
@@ -57,8 +54,6 @@ impl Composer {
         }
     }
 
-    /// A composer without a store, for rendering the document and tests.
-    /// Its routes answer a sanitized 500 and it performs no I/O.
     #[must_use]
     pub fn inert() -> Self {
         Self {
@@ -67,10 +62,6 @@ impl Composer {
         }
     }
 
-    /// Key handling stays inside final authentication, which finalization requires
-    /// so capture receives a verified caller. Declare every header that can change
-    /// the intended effect as an inline request parameter so its values
-    /// participate in retry matching.
     pub fn route<S>(
         &mut self,
         routes: UtoipaMethodRouter<S>,
@@ -98,10 +89,6 @@ impl Composer {
         ))
     }
 
-    /// The target document must already include the `ProblemComponents`
-    /// registration from [`crate::router()`]: the generated family references
-    /// the shared [`Problem`] and [`crate::problem::InvalidParam`] schemas and
-    /// the shared 413/500 responses.
     #[must_use]
     pub fn components(&self) -> utoipa::openapi::OpenApi {
         IdempotencyComponents::openapi()
@@ -121,14 +108,11 @@ impl Composer {
 
 #[derive(Clone)]
 struct RouteState {
-    /// `None` under an inert composer, whose routes answer a wiring failure.
     store: Option<Store>,
     operation_id: Arc<str>,
     fingerprint_headers: Arc<[HeaderName]>,
 }
 
-/// Capture the attempt after final contract authentication and before
-/// ordinary extraction, run the handler, then seal replay metadata.
 async fn run_attempt(State(state): State<RouteState>, request: Request, next: Next) -> Response {
     let operation_id = Arc::clone(&state.operation_id);
     match capture_attempt(state, request).await {
@@ -259,9 +243,6 @@ fn invalid_key() -> Response {
 }
 
 fn seal_replay_metadata(mut response: Response, operation_id: &str) -> Response {
-    // Seal replay metadata after the handler returns. Neither a supplied header
-    // nor a 2xx status proves replay: a success must carry execute's private
-    // provenance.
     let provenance = response.extensions_mut().remove::<Provenance>();
     response.headers_mut().remove(REPLAYED_HEADER);
     if !response.status().is_success() {

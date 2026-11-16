@@ -30,8 +30,6 @@ impl AdmissionLimit {
 #[derive(Clone, Copy)]
 struct OpeningWait(Duration);
 
-/// Only the opening future owns this permit; response headers release it independently of
-/// call custody.
 pub(super) async fn admit_opening(
     State(limit): State<AdmissionLimit>,
     mut request: Request,
@@ -47,7 +45,6 @@ pub(super) async fn admit_opening(
     next.run(request).await
 }
 
-/// The future owns the permit until headers, then hands it to the terminal response owner.
 pub(super) async fn admit_business_call(
     State(limit): State<AdmissionLimit>,
     request: Request,
@@ -74,7 +71,6 @@ fn patience(request: &Request, max_wait: Duration) -> Duration {
         .min(max_wait)
 }
 
-/// Refusing a waiting call earlier would refuse work the process could still do.
 async fn acquire(
     permits: Arc<Semaphore>,
     patience: Duration,
@@ -94,7 +90,6 @@ async fn acquire(
     permit
         .ok()
         .and_then(Result::ok)
-        // Tokio's timeout can return a ready permit after the wait budget.
         .filter(|_| waited < patience)
         .map(|permit| (permit, waited))
 }
@@ -102,14 +97,10 @@ async fn acquire(
 #[derive(Clone)]
 pub(crate) struct Shed;
 
-/// `RESOURCE_EXHAUSTED`, so a client retrying `UNAVAILABLE` without delay adds no load;
-/// `RetryInfo` gives the delay.
 async fn reject_at_capacity(request: Request) -> Response {
     let status = Failure::new(service_failure::Code::ServiceUnavailable)
         .retry_after(AT_CAPACITY_RETRY_AFTER)
         .into_status_as(tonic::Code::ResourceExhausted, AT_CAPACITY_DETAIL);
-    // Leave part of the remaining budget to return the status even if
-    // the upload never finishes.
     let drain = opening_context(&request)
         .and_then(operation_context::OperationContext::remaining)
         .map_or(REJECT_DRAIN, |remaining| REJECT_DRAIN.min(remaining / 2));

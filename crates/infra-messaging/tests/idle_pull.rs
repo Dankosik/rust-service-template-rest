@@ -2,8 +2,6 @@
     clippy::expect_used,
     reason = "integration tests make failures and broker setup explicit"
 )]
-//! Its own test binary: the stream-error counter is process-wide and
-//! unlabelled, so other suites' deliberate failures would pollute it.
 
 use std::time::Duration;
 
@@ -53,7 +51,6 @@ async fn provision(
         .create_stream(stream::Config {
             name: dlq_stream.to_owned(),
             subjects: vec![dlq_subject.to_owned()],
-            // Leave room for original subject and transfer identity headers.
             max_message_size: 16 * 1024,
             ..Default::default()
         })
@@ -71,9 +68,6 @@ async fn provision(
     jetstream
 }
 
-/// An idle pull ends with the broker's own expiry answer, not a failed batch:
-/// the local bound outlasts `expires`, so a quiet stream raises no stream
-/// error. One pull lifetime and a margin pass before the check.
 #[tokio::test]
 async fn idle_pull_expiry_is_not_a_failed_batch() {
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();

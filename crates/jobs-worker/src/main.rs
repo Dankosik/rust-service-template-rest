@@ -1,7 +1,5 @@
 use std::process::ExitCode;
 
-// jemalloc: 3-11% less worker CPU per job than glibc malloc, with no more
-// resident memory over a 20-minute soak; see docs/backend-library-selection.md.
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
@@ -76,9 +74,6 @@ fn register(
     register_outbound(registration)?;
     // template:end webhooks:worker-webhooks-register-outbound
     // template:begin inbound-webhooks:worker-webhooks-register-inbound
-    // Bind each configured endpoint to its adapter here:
-    // `consumers.bind("partner", Arc::new(Partner))?`. The template has no
-    // business consumer, so a configured endpoint refuses startup below.
     let consumers = Consumers::new();
     consumers.require(
         registration

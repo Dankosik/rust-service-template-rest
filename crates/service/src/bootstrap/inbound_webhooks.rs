@@ -10,8 +10,6 @@ use service_config::{Config, InboundWebhooksConfig};
 
 use super::BootstrapError;
 
-/// An empty endpoint map is a retained, inert route. Consumer bindings are the
-/// worker's: an admitted receipt is durable until one processes it.
 pub(super) fn prepare(
     config: &Config,
     postgres_pool: Option<&PgPool>,
@@ -41,7 +39,6 @@ pub(super) fn prepare(
     Ok(WebhookState::active(receiver))
 }
 
-/// The worker shares the endpoint section but holds no secrets, so this check is ours.
 fn signing_key(
     webhooks: &InboundWebhooksConfig,
     endpoint: &str,

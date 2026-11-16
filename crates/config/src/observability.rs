@@ -135,7 +135,7 @@ fn otlp_endpoint(endpoint: &str) -> Result<(), ValidationError> {
             "must not contain whitespace or controls",
         ));
     }
-    // RFC 9110 section 4.2.4: an http(s) URI carries no userinfo.
+    // RFC 9110 §4.2.4
     if shared_rules::uri::authority_has_userinfo(endpoint) {
         return Err(ValidationError::new(key, "must not include userinfo"));
     }

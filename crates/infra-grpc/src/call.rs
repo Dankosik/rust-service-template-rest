@@ -20,7 +20,6 @@ use crate::status::internal_status;
 use operation_context::{OperationContext, Stopped};
 use tokio_util::sync::DropGuard;
 
-/// Moves one value through `Clone`-only HTTP extensions; one owner takes it.
 #[derive_where::derive_where(Clone)]
 pub(crate) struct Handoff<T>(Arc<AtomicTake<T>>);
 
@@ -36,7 +35,6 @@ impl<T> Handoff<T> {
 
 #[derive(Default)]
 pub(crate) struct ResponseCustody {
-    /// The lifetime that stops the response; `None` starts no stop watcher.
     pub(crate) context: Option<OperationContext>,
     pub(crate) held: Held,
     pub(crate) on_status: Option<ResponseStatusObserver>,
@@ -44,7 +42,6 @@ pub(crate) struct ResponseCustody {
 
 pub(crate) type ResponseStatusObserver = Box<dyn FnOnce(tonic::Code) + Send>;
 
-/// Dropped in declaration order after the response body and call record.
 #[derive(Default)]
 #[expect(dead_code, reason = "each guard acts only when dropped")]
 pub(crate) struct Held {
@@ -81,7 +78,6 @@ pub(crate) enum Side {
 }
 
 impl Side {
-    /// A server answers its own deadline with the catalog failure; a client with the bare status.
     pub(crate) fn deadline(self) -> tonic::Status {
         match self {
             Self::Server => crate::Failure::new(service_failure::Code::GatewayTimeout).into(),
@@ -105,9 +101,6 @@ impl Side {
 }
 
 fn header_catalog_code(headers: &HeaderMap) -> Option<service_failure::Code> {
-    // The catalog code travels only in the details, which tonic writes only
-    // when they are non-empty; without them its parse, which clones the whole
-    // map, is skipped on every successful call.
     headers.get("grpc-status-details-bin")?;
     tonic::Status::from_header_map(headers)
         .as_ref()
@@ -118,8 +111,6 @@ fn header_catalog_code(headers: &HeaderMap) -> Option<service_failure::Code> {
 struct Outcome {
     code: tonic::Code,
     failure: Option<service_failure::Code>,
-    // The credential callback uses the response code even when decoding
-    // status metadata changes the status reported by the client.
     response_code: Option<tonic::Code>,
 }
 
@@ -143,8 +134,6 @@ impl Outcome {
         }
     }
 
-    /// A server's own failure comes from the status tonic leaves in the extensions, skipping
-    /// a header decode.
     fn from_response<B>(observation: &Observation, response: &http::Response<B>) -> Option<Self> {
         let side = observation.side();
         match (side, response.extensions().get::<tonic::Status>()) {
@@ -228,7 +217,6 @@ struct OpenCall<B: Body> {
     on_status: Option<ResponseStatusObserver>,
 }
 
-/// A locally generated status waits in `Trailers` until the body is polled once more.
 enum Phase<B: Body> {
     Open(OpenCall<B>),
     Trailers(HeaderMap),
@@ -254,7 +242,6 @@ impl<B: Body> Completion<B> {
         if let (Some(code), Some(on_status)) = (self.outcome.response_code, self.open.on_status) {
             on_status(code);
         }
-        // Remaining fields, including feature destructors, drop outside the lock.
     }
 }
 
@@ -288,7 +275,6 @@ impl<B: Body> State<B> {
             open.resources.observation.record_local_stop(status);
         }
         let mut trailers = HeaderMap::new();
-        // Locally generated sanitized statuses always encode.
         let _ = status.add_header(&mut trailers);
         self.close(
             Phase::Trailers(trailers),
@@ -332,7 +318,6 @@ impl<B: Body> State<B> {
     }
 }
 
-/// Pass-through response custody. The stop watcher holds only a Weak reference.
 struct ResponseBody<B: Body> {
     state: Arc<Mutex<State<B>>>,
     watcher: Option<AbortOnDropHandle<()>>,
@@ -351,7 +336,6 @@ where
     B: Body<Data = Bytes> + Unpin + Send + 'static,
 {
     let side = observation.side();
-    // Check the original lifetime at handoff; headers do not restart it.
     let stopped = custody
         .context
         .as_ref()
@@ -464,7 +448,6 @@ where
             self.watcher_done = Some(receiver);
         }
         self.watcher = Some(AbortOnDropHandle::new(tokio::spawn(async move {
-            // Captured before first poll: abortion also drops the sender.
             #[cfg(test)]
             let _done = done;
             let result = AssertUnwindSafe(async {
@@ -534,7 +517,6 @@ where
                 }))
             };
             match polled {
-                // A stop observed after the poll wins over whatever it yielded.
                 Ok(polled) => {
                     if let Some(status) = state.stopped_status() {
                         state.end_with(&status)
@@ -579,7 +561,6 @@ impl<B: Body> Drop for ResponseBody<B> {
     fn drop(&mut self) {
         let phase = std::mem::replace(&mut self.state.lock().phase, Phase::Done);
         drop(self.watcher.take());
-        // Call's drop records cancellation only while still open.
         drop(phase);
     }
 }
@@ -589,7 +570,6 @@ struct UploadState {
     waker: Option<Waker>,
 }
 
-/// The opening future, then response custody, owns source cancellation.
 pub(crate) struct UploadGuard(Arc<Mutex<UploadState>>);
 struct Upload(Arc<Mutex<UploadState>>);
 
@@ -630,7 +610,6 @@ impl Body for Upload {
         let Some(body) = state.body.as_mut() else {
             return Poll::Ready(None);
         };
-        // Leave source destruction outside the lock even on an unwinding poll.
         let polled =
             std::panic::catch_unwind(AssertUnwindSafe(|| Pin::new(body).poll_frame(context)));
         let ended = matches!(polled, Ok(Poll::Ready(None | Some(Err(_)))) | Err(_));
@@ -918,8 +897,6 @@ mod tests {
                 },
             },
         );
-        // Only tests retain this completion receiver. Its sender is owned by
-        // the watcher future, so closure observes destruction after abort.
         let done = body.watcher_done.take().unwrap();
         drop(body);
         assert!(

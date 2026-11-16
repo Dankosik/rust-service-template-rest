@@ -1,10 +1,3 @@
-//! Only the operation name, the kind, and the request id are `tracing` fields,
-//! because the JSON log layer serializes every span field and repeats it on
-//! each record inside the request; HTTP attributes go to the OpenTelemetry
-//! span alone. This runs after routing and after the request id is set, so
-//! nothing is `Span::record`ed afterwards, since every record re-serializes
-//! the span's fields.
-
 use std::mem::DropGuard;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -46,8 +39,6 @@ pub(crate) const ADMISSION_WAIT_METRIC: &str = "http_server_admission_wait_secon
 
 pub(crate) const SHED_REQUESTS_METRIC: &str = "http_server_shed_requests_total";
 
-/// Every histogram this crate records. A composition root hands it to the
-/// Prometheus recorder; a metric left out renders the default buckets.
 pub const HISTOGRAMS: &[(&str, &[f64])] = &[
     (REQUEST_DURATION_METRIC, LATENCY_BUCKETS),
     (ADMISSION_WAIT_METRIC, LATENCY_BUCKETS),
@@ -78,8 +69,6 @@ pub(crate) fn describe() {
 
 pub(crate) const UNMATCHED_ROUTE: &str = "<unmatched>";
 
-/// The status recorded for a request its caller abandoned before the
-/// response head; no response was sent.
 const CLIENT_CLOSED_REQUEST: StatusCode = match StatusCode::from_u16(499) {
     Ok(status) => status,
     Err(_) => panic!("499 is a valid status code"),
@@ -110,8 +99,6 @@ pub(crate) async fn observe(
     next: Next,
 ) -> Response {
     let started = Instant::now();
-    // Own the accepted header while the request moves into the next service;
-    // the borrowed string also remains available for response completion.
     let request_id = request.extensions().get::<RequestId>().cloned();
     let request_id_text = request_id
         .as_ref()
@@ -151,14 +138,9 @@ pub(crate) async fn observe(
     let traced = next.run(request).instrument(span.clone());
     let response = match fallback {
         None => traced.await,
-        // The span is disabled: keep the caller's context current instead,
-        // so it still reaches the response header and outbound calls.
         Some(context) => traced.with_context(context).await,
     };
 
-    // Complete the Problem before metrics and logging read the response head.
-    // These observations do not wait for a streaming body; only the active
-    // gauge below follows the body's lifetime.
     let mut response = complete_problem(response, request_id_text);
     let status = response.status();
     let extensions = response.extensions();
@@ -228,7 +210,6 @@ impl Pending<'_> {
     }
 }
 
-/// Other OpenTelemetry HTTP attributes go to the span alone; see the module doc.
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 fn make_span(
     request: &Request,
@@ -249,8 +230,6 @@ fn make_span(
         request_id,
     );
     span.set_attribute("http.request.method", method);
-    // An unmatched request has no route template; an empty string would read
-    // as a value.
     if let Some(route) = route {
         span.set_attribute("http.route", route.to_owned());
     }
@@ -263,8 +242,6 @@ fn make_span(
     span
 }
 
-/// HTTP/1 origin-form targets carry no scheme. Use the listener's scheme
-/// when the request target omits it.
 fn url_scheme(uri: &Uri, connection: Option<&ConnectionInfo>) -> &'static str {
     let scheme = match uri.scheme_str() {
         Some("https") => ListenerScheme::Https,
@@ -278,7 +255,6 @@ fn url_scheme(uri: &Uri, connection: Option<&ConnectionInfo>) -> &'static str {
 fn update_span_from_response(span: &tracing::Span, status: StatusCode) {
     span.set_attribute("http.response.status_code", i64::from(status.as_u16()));
     if status.is_server_error() {
-        // The conventions name a failed response by its status code.
         span.set_attribute("error.type", status_label(status));
         span.set_status(opentelemetry::trace::Status::error(""));
     }
@@ -317,17 +293,8 @@ impl MethodSlot {
     }
 }
 
-/// One route's histograms by normalized method and status code.
 type RouteDurations = HashMap<(&'static str, u16), Histogram>;
 
-/// Metric handles by series, resolved on first use so a request neither
-/// rebuilds label strings nor looks its series up in the recorder. The keys
-/// are the router's route templates, [`UNMATCHED_ROUTE`], the normalized
-/// methods and the status codes the service answers with, so the table is
-/// bounded by the router and no caller-chosen value adds an entry.
-///
-/// A handle resolved while no recorder is installed stays a no-op; the
-/// composition root installs the recorder before the router serves.
 #[derive(Debug, Default)]
 struct Series {
     active: EnumMap<MethodSlot, OnceLock<Gauge>>,
@@ -391,8 +358,6 @@ fn duration_histogram(method: &'static str, route: &str, status: StatusCode) -> 
     metrics::histogram!(REQUEST_DURATION_METRIC, labels)
 }
 
-// Keep typed values at static addresses so their numeric text can be borrowed
-// for every supported status, including extension codes.
 /* jscpd:ignore-start */
 static STATUS_CODES: [StatusCode; 900] = {
     let mut codes = [StatusCode::CONTINUE; 900];
@@ -423,7 +388,6 @@ mod tests {
     use axum::body::Body;
     use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
 
-    /// Sorted: the snapshot lists its keys in no fixed order.
     fn duration_series(snapshotter: &Snapshotter) -> Vec<Vec<(String, String)>> {
         let mut series: Vec<_> = snapshotter
             .snapshot()
@@ -587,7 +551,6 @@ mod tests {
         );
         let request = Request::builder().uri("/hang").body(Body::empty()).unwrap();
 
-        // The caller gives up long before the request budget.
         let abandoned = tokio::time::timeout(Duration::from_millis(10), app.oneshot(request)).await;
 
         assert!(abandoned.is_err());
@@ -705,7 +668,6 @@ mod tests {
         for expected in [
             opentelemetry::KeyValue::new("method", method.to_owned()),
             opentelemetry::KeyValue::new("route", route.to_owned()),
-            // The OTel event visitor represents this unsigned tracing field as text.
             opentelemetry::KeyValue::new("status", status.to_string()),
         ] {
             assert!(access.attributes.contains(&expected), "{access:?}");
@@ -760,8 +722,6 @@ mod tests {
             .unwrap();
         let span = exported_span(request).await;
 
-        // No route template and a client error: the method alone names the
-        // span, and a 404 is not a server failure.
         assert_eq!(span.name, "GET");
         std::assert_matches!(span.status, Status::Unset);
         for absent in ["http.route", "user_agent.original", "error.type"] {
@@ -771,7 +731,6 @@ mod tests {
             attribute(&span, "http.response.status_code"),
             Some(404.into())
         );
-        // An absolute-form target (HTTP/2 `:scheme`) names its own scheme.
         assert_eq!(attribute(&span, "url.scheme"), Some("https".into()));
         assert_private_values_absent(&span);
         assert_access_event(&span, "GET", "<unmatched>", 404);

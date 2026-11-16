@@ -1,11 +1,3 @@
-//! Loader controls accepted on the command line.
-//!
-//! Flags select configuration sources; they never set individual keys.
-//! `--help` exits 0 and a flag error exits 2 (clap's convention), both
-//! printed by clap. `--version` is not a loader flag: binaries publish
-//! identity through [`crate::BuildInfo`] / `app.version`, not clap's crate
-//! version.
-
 use std::path::{Path, PathBuf};
 
 use clap::Parser;

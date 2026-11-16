@@ -1,11 +1,3 @@
-//! Optional cache profile: DSN, TLS escape hatches, and the command budget.
-//!
-//! The section is inert until `dsn` is set. The DSN is secret-like, so it
-//! arrives only as its `APP__` variable. URL shape, TLS, and password
-//! admission stay in `infra-cache`, which is the crate that parses what the
-//! driver would connect to. `command_timeout` is the one budget an operator
-//! sets; connect and keepalive ceilings are template constants there.
-
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -78,7 +70,6 @@ impl Default for CacheInput {
     }
 }
 
-/// The cache profile. Without a `dsn` the service runs without a cache.
 #[derive(Clone, Debug)]
 pub struct CacheConfig {
     pub dsn: Option<SecretString>,
@@ -99,16 +90,12 @@ impl Default for CacheConfig {
             client_certificate: None,
             allow_plaintext: false,
             allow_unauthenticated: false,
-            // A hang guard, not a latency target: a slow reply is waited for.
-            // Admission still keeps one degraded call inside half a request.
             command_timeout: Duration::from_secs(2),
         }
     }
 }
 
 impl CacheInput {
-    /// `request_timeout` is `http.request_timeout`: one degraded call of an
-    /// active cache must leave at least half of it for the source of truth.
     pub(crate) fn admit(
         self,
         app_env: &str,
@@ -125,8 +112,6 @@ impl CacheInput {
             self.allow_unauthenticated,
             app_env,
         ));
-        // A certificate without its key, or a key without its certificate,
-        // would silently present nothing.
         let client_certificate = match (self.client_cert_path, self.client_key_path) {
             (Some(cert_path), Some(key_path)) => Ok(Some(CacheClientCertificate {
                 cert_path,
@@ -149,8 +134,6 @@ impl CacheInput {
             Duration::from_millis(1),
             Duration::from_secs(10),
         ));
-        // The comparison needs both timeouts in range; the cache range above
-        // also keeps the doubling far from overflow.
         let command_timeout = match (command_timeout, request_timeout) {
             (Ok(()), Some(limit)) if self.dsn.is_some() && self.command_timeout * 2 > limit => {
                 Err(v.reject(ValidationError::new(
@@ -178,7 +161,6 @@ impl CacheInput {
     }
 }
 
-/// Both halves of the mutual-TLS identity the client presents.
 #[derive(Clone, Debug)]
 pub struct CacheClientCertificate {
     pub cert_path: PathBuf,

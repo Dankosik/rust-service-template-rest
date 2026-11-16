@@ -1,28 +1,3 @@
-//! Typed, admitted, immutable runtime configuration.
-//!
-//! Precedence, last wins: code defaults → `--config` file → `--config-overlay`
-//! files in order → `APP__SECTION__KEY` variables, read from the files of
-//! `--secrets-dir` and then from the environment. A later source may override
-//! individual keys in an earlier table. Replacing the table with a value
-//! fails startup, since it could hide unknown keys before decoding. Secret-like
-//! keys may carry a value only through a variable.
-//!
-//! Loading has two steps. Decoding fills the operator's input types and
-//! rejects unknown keys; it stops at its first failure, as `serde` does.
-//! Admission then checks every rule, reports all violations together, and
-//! builds [`Config`], whose types hold only admitted states: a disabled
-//! listener is `None`, an enabled one carries its address and security. A
-//! rule spanning two sections lives in the one that depends on the other.
-//! Rules that need process structure, such as the drain-plus-teardown tail
-//! against the grace period, or a binary's role, stay in the composition root.
-//!
-//! The migration and jobs operator loaders apply the shared input rules, then
-//! ignore sections outside their own snapshots when decoding.
-//!
-//! The loader is [`config`](https://docs.rs/config) with `serde`; the
-//! variable-name and file pre-scans and the secrets directory in [`load()`]
-//! add what the crate does not.
-
 mod app;
 mod health;
 mod http;
@@ -140,7 +115,6 @@ pub use webhooks::{WebhookEndpointConfig, WebhooksConfig};
 // template:end webhooks:config-webhooks-export
 pub use validate::{ValidationError, ValidationErrors};
 
-/// What the operator supplied, decoded but not yet admitted.
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub(crate) struct ConfigInput {
@@ -189,7 +163,6 @@ pub(crate) struct ConfigInput {
 }
 
 impl ConfigInput {
-    /// Check every rule and build the snapshot, or report every violation.
     pub(crate) fn admit(self) -> Result<Config, ValidationErrors> {
         let mut violations = Violations::default();
         let v = &mut violations;
@@ -227,7 +200,6 @@ impl ConfigInput {
         let authn = self.authn.admit(v);
         // template:end authn:config-admit
         // template:begin service-auth:config-service-auth-admit
-        // Only an enabled listener is admitted or rejected; a disabled one is `Ok(None)`.
         let grpc_enabled = !matches!(grpc, Ok(None));
         let service_auth = self.service_auth.admit(&self.app.env, grpc_enabled, v);
         // template:end service-auth:config-service-auth-admit
@@ -297,13 +269,11 @@ impl ConfigInput {
     }
 }
 
-/// The admitted snapshot [`load()`] returns.
 #[derive(Clone, Debug, Default)]
 pub struct Config {
     pub app: AppConfig,
     pub http: HttpConfig,
     // template:begin grpc:config-field
-    /// The native gRPC listener; `None` when `grpc.enabled` is false.
     pub grpc: Option<GrpcConfig>,
     // template:end grpc:config-field
     // template:begin inbound-webhooks:config-inbound-webhooks-field
@@ -320,7 +290,6 @@ pub struct Config {
     pub cache: CacheConfig,
     // template:end cache:config-field
     // template:begin object-storage:config-field
-    /// Object storage; `None` when `object_storage.provider` is `none`.
     pub object_storage: Option<ObjectStorageConfig>,
     // template:end object-storage:config-field
     // template:begin client-integrations:config-field
@@ -333,7 +302,6 @@ pub struct Config {
     pub service_auth: ServiceAuthConfig,
     // template:end service-auth:config-service-auth-field
     // template:begin postgres:config-field
-    /// PostgreSQL; `None` when `postgres.enabled` is false.
     pub postgres: Option<PostgresConfig>,
     // template:end postgres:config-field
     // template:begin http-idempotency:config-http-idempotency-field

@@ -11,7 +11,6 @@ use crate::{CacheError, CacheOptions, ClientCertificate, ServerEndpoint};
 const KEEPALIVE_TIME: Duration = Duration::from_secs(30);
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
 const KEEPALIVE_RETRIES: u32 = 3;
-/// Linux `TCP_USER_TIMEOUT`: a half-open connection is failed and reconnected.
 #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
 const USER_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -45,7 +44,6 @@ pub(crate) fn admit(options: CacheOptions) -> Result<Admitted, CacheError> {
         admit_password(info.redis_settings(), password_file, allow_unauthenticated)?;
     let tls_certificates =
         read_tls_certificates(root_ca_path.as_deref(), client_certificate.as_ref())?;
-    // RESP3 supplies an idle disconnection notification to the supervisor.
     let settings = info
         .redis_settings()
         .clone()
@@ -72,15 +70,12 @@ pub(crate) fn check_runtime() -> Result<(), CacheError> {
     if tokio::runtime::Handle::try_current().is_err() {
         return Err(CacheError::NoRuntime);
     }
-    // Tokio exposes a missing time driver as a panic at timer construction.
     std::panic::catch_unwind(|| drop(tokio::time::sleep(Duration::ZERO)))
         .map_err(|_| CacheError::NoTimeDriver)?;
 
     let io_error = |error: std::io::Error| CacheError::IoDriverCheck { kind: error.kind() };
     let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).map_err(io_error)?;
     socket.set_nonblocking(true).map_err(io_error)?;
-    // Tokio exposes a missing I/O driver as a panic on registration. An
-    // unconnected socket exercises that path without binding or dialing.
     std::panic::catch_unwind(|| tokio::net::TcpStream::from_std(socket.into()))
         .map_err(|_| CacheError::NoIoDriver)?
         .map(drop)
@@ -164,8 +159,6 @@ fn read_tls_certificates(
 )]
 fn read_root_ca(path: &Path) -> Result<Vec<u8>, CacheError> {
     let bytes = std::fs::read(path).map_err(|error| CacheError::CaFile { kind: error.kind() })?;
-    // redis-rs adds the same certificates to a rustls root store when it
-    // builds the client, where a malformed one is only a generic build error.
     let mut roots = rustls::RootCertStore::empty();
     for certificate in pem_certificates(&bytes).ok_or(CacheError::InvalidCa)? {
         roots.add(certificate).map_err(|_| CacheError::InvalidCa)?;
@@ -173,9 +166,6 @@ fn read_root_ca(path: &Path) -> Result<Vec<u8>, CacheError> {
     Ok(bytes)
 }
 
-/// redis-rs hands the pair to rustls only when it dials, where a key that
-/// does not belong to the certificate is a configuration error on every
-/// connection attempt. Building the signing key here makes it a startup error.
 #[expect(
     clippy::disallowed_methods,
     reason = "startup cache admission owns finite TLS material reads before serving"
@@ -199,8 +189,6 @@ fn read_client_certificate(
         &rustls::crypto::aws_lc_rs::default_provider(),
     )
     .map_err(|error| match error {
-        // The key matched against a leaf that is not a parseable X.509
-        // certificate; the certificate, not the key, needs replacing.
         rustls::Error::InvalidCertificate(_) => CacheError::InvalidClientCertificate,
         _ => CacheError::InvalidClientKey,
     })?;
@@ -233,10 +221,6 @@ fn tcp_settings() -> redis::io::tcp::TcpSettings {
     settings
 }
 
-/// redis-rs builds its TLS config from the process default provider. Install
-/// aws-lc-rs at admission so the cache client carries the guarantee instead of
-/// depending on a composition root remembering it; an already-installed
-/// provider is kept.
 fn install_tls_provider() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 }

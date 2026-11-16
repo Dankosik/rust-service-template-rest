@@ -134,8 +134,6 @@ async fn handler_runs_in_the_trace_of_the_publication() {
         .finish(deadline())
         .await
         .expect("bounded consumer drain must join its pull task");
-    // The exported names are low-cardinality: the subject of a publication
-    // and the durable's filter for a delivery.
     for (name, kind, operation) in [
         (
             format!("publish {}", fixture.subject),
@@ -481,8 +479,6 @@ async fn pulls_reserve_handler_slots_and_drain_leaves_unadmitted_messages_at_the
         assert_ne!(first_id, second_id);
         assert!([first_id.as_str(), second_id.as_str()].contains(&"event-in-flight-1"));
         assert!([first_id.as_str(), second_id.as_str()].contains(&"event-in-flight-2"));
-        // Observe broker ownership while the slots remain occupied, including
-        // the interval in which the old client stream issued its next batch.
         let observed_until = Instant::now() + Duration::from_secs(1);
         let mut cadence = tokio::time::interval(Duration::from_millis(20));
         while Instant::now() < observed_until {

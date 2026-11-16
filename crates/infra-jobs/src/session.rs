@@ -20,8 +20,6 @@ pub(crate) const STARTUP_CHECK_BUDGET: Duration = Duration::from_secs(5);
 pub(crate) async fn check_startup(pool: &PgPool) -> Result<(), StartupError> {
     let read = async {
         let mut connection = infra_postgres::acquire(pool, "check jobs startup").await?;
-        // Whether the current session has the worker's required defaults. Migration-history
-        // admission owns schema compatibility; this check keeps only live session properties.
         observed(
             "check jobs session",
             sqlx::query!("SELECT current_setting('server_encoding') AS \"server_encoding!\", \

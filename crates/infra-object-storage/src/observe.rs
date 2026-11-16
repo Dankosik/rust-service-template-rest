@@ -1,7 +1,3 @@
-//! One duration histogram and one span per operation, carrying no key, bucket,
-//! endpoint, URL, or provider message. The span and failure event carry the
-//! provider's request identifiers; on Amazon S3 the span also carries the region.
-
 use std::sync::OnceLock;
 use std::time::Instant;
 
@@ -20,7 +16,6 @@ const OPERATION_DURATION_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0,
 ];
 
-/// A metric left out of the recorder renders default buckets.
 pub const HISTOGRAMS: &[(&str, &[f64])] =
     &[(OPERATION_DURATION_METRIC, OPERATION_DURATION_BUCKETS)];
 
@@ -46,7 +41,6 @@ impl Operation {
         }
     }
 
-    /// Follows OpenTelemetry's `Service.Operation` convention for AWS SDK client spans.
     fn rpc_names(self) -> (&'static str, &'static str) {
         match self {
             Self::Put => ("S3.PutObject", "PutObject"),
@@ -76,8 +70,6 @@ impl Outcome {
     }
 }
 
-/// Registered on first use so the scrape shows only recorded series; a handle
-/// stays bound to its first recorder, so bootstrap installs it before the client.
 #[derive(Default, derive_more::Debug)]
 #[debug("Histograms {{ .. }}")]
 pub(crate) struct Histograms(EnumMap<Operation, EnumMap<Outcome, OnceLock<Histogram>>>);
@@ -145,9 +137,6 @@ impl OperationGuard {
         }
     }
 
-    /// `x-amz-request-id` and S3's `x-amz-id-2`, which its support asks for. Later
-    /// failures (such as a checksum-failing body) report them too; after a retry they
-    /// name the last attempt.
     pub(crate) fn answered_by(&mut self, answer: &(impl RequestId + RequestIdExt)) {
         self.request_id = answer.request_id().and_then(identifier);
         self.extended_request_id = answer.extended_request_id().and_then(identifier);
@@ -164,11 +153,6 @@ impl OperationGuard {
         self.finish(Outcome::Ok);
     }
 
-    /// `failure.error_type` is bounded: a provider error code, HTTP status, transport
-    /// class, or fixed local label. The caller's error carries no provider detail,
-    /// so this event is the operator's only record without tracing: a failure of the
-    /// store, configuration, or data warns; an answer about the object or admission
-    /// limit stays at DEBUG.
     pub(crate) fn fail(&mut self, failure: &Failure) -> ObjectStorageError {
         self.span.record("error.type", failure.error_type.as_str());
         self.span.record("otel.status_code", "ERROR");
@@ -224,11 +208,8 @@ impl Drop for OperationGuard {
     }
 }
 
-/// S3's `x-amz-id-2` is under 100 bytes.
 const MAX_IDENTIFIER_BYTES: usize = 128;
 
-/// Kept only as a short visible-ASCII token, so a store cannot put arbitrary
-/// text into a log line.
 fn identifier(value: &str) -> Option<CompactString> {
     let bounded = !value.is_empty()
         && value.len() <= MAX_IDENTIFIER_BYTES

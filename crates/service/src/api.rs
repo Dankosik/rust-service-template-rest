@@ -64,13 +64,6 @@ pub enum ContractError {
     Yaml(#[source] Box<dyn Error + Send + Sync>),
 }
 
-/// The `Result` is the seam for the first fallible route, so neither this
-/// signature nor bootstrap changes when it arrives.
-// template:begin http-idempotency:service-api-contract-idempotency-doc
-///
-/// An idempotent operation is such a route, added here as
-/// `.routes(idempotency.route(routes!(handler))?)`.
-// template:end http-idempotency:service-api-contract-idempotency-doc
 pub fn contract(
     // template:begin http-idempotency:service-api-contract-composer
     idempotency: &mut Composer,
@@ -203,7 +196,6 @@ mod idempotency_tests {
         Ok(contract(idempotency)?.routes(idempotency.route(utoipa_axum::routes!(idempotent))?))
     }
 
-    /// Activation counts only routes that composed successfully.
     fn finished(
         compose: impl FnOnce(&mut Composer) -> Result<OpenApiRouter<AppState>, ContractError>,
     ) -> Activation {
@@ -254,8 +246,6 @@ mod idempotency_tests {
 
     #[test]
     fn composing_the_test_route_adds_exactly_one_served_operation() {
-        // The plain contract serves only what is composed into it: nothing,
-        // so the boundary stays inactive, until an operation opts in.
         std::assert_matches!(finished(contract), Activation::Inactive);
         std::assert_matches!(
             finished(with_test_route),

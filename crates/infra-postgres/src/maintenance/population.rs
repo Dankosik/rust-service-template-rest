@@ -71,8 +71,6 @@ impl From<TxError> for MaintenanceFailure {
     }
 }
 
-/// How far local and database clocks may disagree before a sample is
-/// rejected; an operational assumption, not proof of synchronization.
 const CLOCK_TOLERANCE_SECONDS: f64 = 5.0;
 
 #[derive(Clone, Copy, Debug)]
@@ -216,8 +214,6 @@ impl MaintenanceObserver {
         this
     }
 
-    /// The budget counts from before `read` waits for a permit or a connection. An
-    /// invalid sample clock keeps the preceding dated sample.
     pub async fn sample(
         &mut self,
         read: impl Future<Output = Result<PopulationSample, MaintenanceFailure>>,
@@ -246,7 +242,6 @@ impl MaintenanceObserver {
         }
     }
 
-    /// One run of unsuccessful attempts is one warning.
     fn record_unsuccessful(&mut self, outcome: AttemptOutcome, cause: &'static str) {
         self.last_attempt_success.set(0.0);
         self.observations(outcome).increment(1);
@@ -331,8 +326,6 @@ impl MaintenanceAttempt<'_> {
             oldest_at_unix_seconds: oldest,
         } = sample;
         self.observer.previous_clock = received;
-        // Publish the dated sample before its final success markers. A scrape
-        // between writes may conservatively observe unknown, never fresh absence.
         self.observer.last_attempt_success.set(0.0);
         self.observer.database_observed.set(observed_at);
         self.observer.present.set(f64::from(oldest.is_some()));
@@ -384,7 +377,6 @@ impl Drop for MaintenanceAttempt<'_> {
     }
 }
 
-/// The limits end a stuck statement with its own failure before the budget cancels the attempt.
 pub async fn in_observation_tx<F>(
     pool: &PgPool,
     read: F,

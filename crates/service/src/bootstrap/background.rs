@@ -11,7 +11,6 @@ pub(crate) struct BackgroundFailure {
     pub(crate) panicked: bool,
 }
 
-/// Startup-only; cannot change the root cancellation token, runtime or shutdown budget.
 #[derive(derive_more::Debug)]
 #[debug("BackgroundRegistration {{ .. }}")]
 pub struct BackgroundRegistration<'a> {
@@ -19,15 +18,6 @@ pub struct BackgroundRegistration<'a> {
 }
 
 impl BackgroundRegistration<'_> {
-    /// `start` must construct its future promptly. On cancellation, close feature
-    /// admission and wait for every admitted operation before returning `Ok`.
-    /// On live work failure, close admission, call the reporter immediately,
-    /// then retain completion ownership until all admitted work ends before
-    /// returning `Err`. Reporting failure does not complete or detach the task.
-    ///
-    /// An early `Ok`, any panic, or any `Err` is a failure: exit 1 while
-    /// serving, degraded (exit 3) during cleanup. The join deadline bounds the
-    /// wait, not a started blocking operation; expiry cannot certify its termination.
     pub fn spawn<F, E>(
         &mut self,
         name: &'static str,
@@ -45,8 +35,6 @@ impl BackgroundRegistration<'_> {
     }
 }
 
-/// Reporting starts the root's failure transition without ending the manager,
-/// which still owns closing admission and joining its admitted work.
 #[derive(derive_more::Debug)]
 pub struct BackgroundFailureReporter {
     name: &'static str,
@@ -55,7 +43,6 @@ pub struct BackgroundFailureReporter {
 }
 
 impl BackgroundFailureReporter {
-    /// Repeated reports cannot replace the first observed process failure.
     pub fn report(&self) {
         self.record(false);
     }
@@ -75,7 +62,6 @@ impl BackgroundFailureReporter {
     }
 }
 
-/// Private composition owner; dependencies must outlive every registered future.
 pub(crate) struct Background {
     tasks: JoinSet<()>,
     cancel: CancellationToken,
@@ -96,8 +82,6 @@ impl Background {
         self.cancel.child_token()
     }
 
-    /// Track a task until teardown joins it. Returning before
-    /// [`Self::child_token`] fires, or panicking, is a failure of the service.
     pub(crate) fn spawn(
         &mut self,
         name: &'static str,
@@ -231,7 +215,6 @@ mod tests {
         let mut background = Background::new(cancel.clone());
         let mut observer = background.observer();
         super::super::start_progress(&readiness, &mut background).unwrap();
-        // Neither tracked future has run yet; both remain live across the gap.
         tokio::time::advance(policy.stale_after() + Duration::from_secs(1)).await;
         let failure =
             tokio::time::timeout(Duration::from_secs(1), background_failure(&mut observer))
@@ -283,7 +266,6 @@ mod tests {
 
     #[tokio::test]
     async fn reported_failure_keeps_the_manager_owned_until_its_completion() {
-        // No Debug or Display: the public capability accepts an opaque failure.
         struct PrivateFailure;
 
         let cancel = CancellationToken::new();

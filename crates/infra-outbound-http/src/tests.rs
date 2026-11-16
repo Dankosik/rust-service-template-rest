@@ -351,9 +351,6 @@ async fn context_cancellation_ends_an_incomplete_buffered_body() {
     assert!(server.await.expect_err("fixture cancelled").is_cancelled());
 }
 
-// Tracing setup is a real synchronous extension point before dispatch. Tokio
-// 1.53 advances the paused clock on the first poll, then yields; timer wakeups
-// are immaterial here because the dispatch boundary must check time itself.
 struct AdvanceOnAttemptStart(Duration);
 
 impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for AdvanceOnAttemptStart {
@@ -379,7 +376,6 @@ async fn setup_spends_the_fixed_parent_or_operation_end_before_dispatch() {
     use tracing_subscriber::layer::SubscriberExt as _;
 
     let material = TlsMaterial::new(FIXTURE_HOST);
-    // The overflowing operation end must leave the representable parent end.
     for (operation, parent) in [(1, 2), (2, 1), (u64::MAX, 1)] {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mut ceiling = limits();
@@ -439,8 +435,6 @@ async fn dispatch_can_be_refused_after_request_setup() {
     );
 }
 
-// A terminal subscriber is allowed to spend time after the operation result
-// was fixed. That must not change the returned result or add a second sample.
 struct AdvanceOnAttemptFinish;
 
 impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for AdvanceOnAttemptFinish {
@@ -541,8 +535,6 @@ async fn ready_response_after_the_fixed_end_is_timeout() {
         result = &mut exchange => panic!("response is still gated: {result:?}"),
         result = request_received => result.unwrap(),
     }
-    // Replace the request's waker while its response is gated. Hyper wakes it
-    // when the response is ready; leave execute unpolled until after expiry.
     let response_ready = Arc::new(ResponseWake(tokio::sync::Notify::new()));
     let waker = std::task::Waker::from(response_ready.clone());
     assert!(
@@ -758,8 +750,6 @@ async fn the_client_sets_host_and_a_default_accept_on_the_wire() {
 
 #[tokio::test]
 async fn an_empty_body_is_framed_by_its_method_on_the_wire() {
-    // A provider may answer 411 to a content method without a length, and a
-    // length on a request without content would be read from the next one.
     for (method, sent, expected) in [
         (http::Method::POST, None, ["content-length: 0"].as_slice()),
         (http::Method::POST, Some("7"), &["content-length: 0"]),

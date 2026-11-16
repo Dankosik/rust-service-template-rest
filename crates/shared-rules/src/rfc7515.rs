@@ -1,16 +1,12 @@
-/// The parts of a JWS in compact serialization (RFC 7515 §7.1),
-/// `header.payload.signature`, each still base64url-encoded.
+/// RFC 7515 §7.1
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Compact<'a> {
-    /// `header.payload`: the bytes the signature covers.
     pub signing_input: &'a [u8],
     pub header: &'a [u8],
     pub payload: &'a [u8],
     pub signature: &'a [u8],
 }
 
-/// Splits `token` at its last two dots; `None` with fewer than two. Any
-/// further dot stays in the header, which then fails base64url decoding.
 #[must_use]
 pub fn compact(token: &[u8]) -> Option<Compact<'_>> {
     let (signing_input, signature) = split_last_dot(token)?;
@@ -28,10 +24,7 @@ fn split_last_dot(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
     Some((&bytes[..dot], &bytes[dot + 1..]))
 }
 
-/// The `application/` subtype a `typ` header value names, as written; `None`
-/// for a value under another top-level type. RFC 7515 §4.1.9 has a value
-/// without `/` read as if `application/` preceded it. Use [`typ_is`] to
-/// compare the subtype without regard to ASCII case.
+/// RFC 7515 §4.1.9
 #[must_use]
 pub fn typ_subtype(typ: &str) -> Option<&str> {
     match typ.split_once('/') {

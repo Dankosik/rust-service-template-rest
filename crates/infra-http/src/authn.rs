@@ -15,9 +15,6 @@ use crate::contract::{Access, FinalizeError, Policy, layer_routes};
 pub use crate::problem::responses::GatewayTimeout;
 use crate::problem::{Code, Problem, sanitized_internal_error};
 
-/// The wrapped principal is private, so handlers can inspect only identity
-/// values the selected verifier accepted. The extractor never parses an
-/// inbound header and cannot manufacture an anonymous identity.
 #[derive(Clone, Debug)]
 pub struct VerifiedPrincipal(Principal);
 
@@ -52,14 +49,11 @@ impl VerifiedPrincipal {
         self.0.claims()
     }
 
-    /// The verified `exp` claim as Unix time in seconds, without leeway.
     #[must_use]
     pub fn expires_at(&self) -> u64 {
         self.0.expires_at()
     }
 
-    /// The verified bearer token, only as the subject of an RFC 8693 token
-    /// exchange; never forward it as an outbound `Authorization` header.
     #[must_use]
     pub fn access_token(&self) -> &secrecy::SecretString {
         self.0.access_token()
@@ -88,8 +82,6 @@ where
     }
 }
 
-/// A real endpoint absent from the document remains a served, sanitized 500
-/// rather than a silent bypass.
 pub fn finalize<S>(
     contract: OpenApiRouter<S>,
     verifier: Verifier,
@@ -117,7 +109,6 @@ async fn authenticate(
     mut request: Request,
     next: Next,
 ) -> Response {
-    // Identity comes only from verification in this layer.
     request.extensions_mut().remove::<Principal>();
     let AuthState { verifier, policy } = state;
     let Some(path) = crate::contract::contract_path(request.extensions()) else {
@@ -169,9 +160,6 @@ async fn settle_protected(
     mut request: Request,
     next: Next,
 ) -> Response {
-    // The opening deadline or cancellation wins over the verifier's
-    // unavailable result and handler start: a stopped request answers 504
-    // (deadline) or 503 (cancelled) and never reaches the handler.
     if let Some(stopped) = operation.stopped() {
         return stopped_response(stopped);
     }
@@ -197,8 +185,6 @@ fn stopped_response(stopped: Stopped) -> Response {
     }
 }
 
-/// At least one alternative's scopes must all be granted; an alternative with
-/// no scopes is any authenticated caller.
 fn grants_any(alternatives: &[Box<[String]>], principal: &Principal) -> bool {
     alternatives
         .iter()

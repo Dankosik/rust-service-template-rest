@@ -6,17 +6,12 @@ use zeroize::Zeroizing;
 
 use crate::{AcquisitionError, Algorithm, ConfigurationError, Options};
 
-/// RFC 7523 section 2.2 and the OIDF client-assertion notice: one string
-/// audience, a fresh `jti`, and an assertion signed for at most this long.
+/// RFC 7523 §2.2
 const ASSERTION_LIFETIME_SECS: u64 = 60;
-/// An assertion is dated this far back, as Go's `oauth2/jws` does, so a
-/// provider whose clock is slightly behind does not see it as issued in the
-/// future or expiring too late.
 const ASSERTION_BACKDATE_SECS: u64 = 10;
 const ASSERTION_TYP: &str = "client-authentication+jwt";
 const CLIENT_ASSERTION_TYPE: &str = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
 
-/// Construction proves the key matches its algorithm.
 pub(crate) struct Signer {
     key: jsonwebtoken::EncodingKey,
     header: jsonwebtoken::Header,
@@ -63,8 +58,7 @@ impl Signer {
         ]
     }
 
-    /// Signs one fresh assertion. Never cached: RFC 7523bis requires a
-    /// single-use `jti` and every shortlisted server enforces it.
+    /// RFC 7523bis
     pub(crate) fn sign(&self) -> Result<Zeroizing<String>, AcquisitionError> {
         let elapsed = SystemTime::now()
             .duration_since(UNIX_EPOCH)

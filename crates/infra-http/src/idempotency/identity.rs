@@ -1,7 +1,3 @@
-//! Domain strings, caller tags, query-presence bytes, and length prefixes are
-//! a persistent format: changing them changes identity against live records.
-//! Preserve the exact framing pinned by the scope/request test vectors.
-
 use std::borrow::Cow;
 
 use axum::http::header::CONTENT_TYPE;
@@ -34,8 +30,6 @@ pub(super) fn caller_identity(
     })
 }
 
-/// An initial quote selects the Structured Fields grammar permanently. Other
-/// values keep the compatible visible-ASCII grammar.
 pub(super) fn decode_key<'a>(values: impl IntoIterator<Item = &'a [u8]>) -> Option<Cow<'a, [u8]>> {
     let mut values = values.into_iter();
     let value = values.next()?;
@@ -85,8 +79,6 @@ pub(super) fn request_fingerprint(
     trailers: Option<&HeaderMap>,
 ) -> Digest {
     let mut hasher = Sha256::new();
-    // Keep the old format for routes without extra headers. On other routes,
-    // a live v1 record must refuse replay because it cannot prove equality.
     hasher.update(if fingerprint_headers.is_empty() {
         REQUEST_DOMAIN
     } else {
@@ -111,14 +103,11 @@ pub(super) fn request_fingerprint(
         }
     }
     frame(&mut hasher, body);
-    // An absent or empty trailer section keeps the persisted v1 fingerprint.
     if let Some(trailers) = trailers.filter(|trailers| !trailers.is_empty()) {
         hasher.update(b"trailers/v1\0");
         let mut fields = trailers
             .iter()
             .collect::<smallvec::SmallVec<[(&HeaderName, &axum::http::HeaderValue); 4]>>();
-        // Stable sort removes ordering between field names while keeping the
-        // order of repeated values for each name.
         fields.sort_by(|(left, _), (right, _)| left.as_str().cmp(right.as_str()));
         for (name, value) in fields {
             frame(&mut hasher, name.as_str().as_bytes());

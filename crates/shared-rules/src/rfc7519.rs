@@ -1,4 +1,4 @@
-/// RFC 7519 §4.1.4 makes expiration exclusive. All arguments are in whole seconds.
+/// RFC 7519 §4.1.4
 #[must_use]
 pub const fn is_expired(expiry: u64, now: u64, leeway: u64) -> bool {
     match now.checked_sub(leeway) {
@@ -7,17 +7,13 @@ pub const fn is_expired(expiry: u64, now: u64, leeway: u64) -> bool {
     }
 }
 
-/// RFC 7519 §4.1.5 makes `nbf` inclusive: a token is usable from that second
-/// on, `leeway` seconds earlier for clock skew. All arguments are in whole seconds.
+/// RFC 7519 §4.1.5
 #[must_use]
 pub const fn is_not_yet_valid(not_before: u64, now: u64, leeway: u64) -> bool {
     not_before > now.saturating_add(leeway)
 }
 
-/// A `NumericDate` (RFC 7519 §2) given as a JSON number with a fraction, in
-/// whole seconds: finite, not negative, and below `2^64`, rounded to the
-/// nearest second as `jsonwebtoken` reads `exp` and `nbf`. `None` for any
-/// other number.
+/// RFC 7519 §2
 #[must_use]
 #[expect(
     clippy::cast_possible_truncation,
@@ -49,7 +45,6 @@ mod tests {
         assert_eq!(numeric_date_seconds(-0.0), Some(0));
         assert_eq!(numeric_date_seconds(1_700_000_000.4), Some(1_700_000_000));
         assert_eq!(numeric_date_seconds(1_700_000_000.5), Some(1_700_000_001));
-        // The largest double below 2^64.
         assert_eq!(
             numeric_date_seconds(18_446_744_073_709_549_568.0),
             Some(18_446_744_073_709_549_568)

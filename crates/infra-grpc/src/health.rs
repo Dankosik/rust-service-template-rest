@@ -8,7 +8,6 @@ use tonic_health::pb::{HealthCheckRequest, HealthCheckResponse};
 
 pub(crate) type HealthServer = tonic_health::pb::health_server::HealthServer<Adapter>;
 
-/// Readiness-backed standard health service.
 #[derive(Debug)]
 pub(crate) struct Adapter {
     readiness: ReadinessReader,
@@ -54,8 +53,6 @@ impl Health for Adapter {
     }
 }
 
-/// Ends after reporting drain, so watchers never hold the listener drain. An unknown service
-/// stays open as `SERVICE_UNKNOWN`, per the health protocol.
 fn watch(
     mut reader: ReadinessReader,
     known: bool,
@@ -63,7 +60,6 @@ fn watch(
     async_stream::stream! {
         let mut sent = None;
         loop {
-            // Drop the verdict before awaiting so it is not held across the wait.
             let (status, draining) = {
                 let verdict = reader.verdict();
                 let status = if known {

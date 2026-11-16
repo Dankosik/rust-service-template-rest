@@ -230,13 +230,17 @@ workspace enums and structs exhaustive (omitting `#[non_exhaustive]`) and keep
 comments).
 
 Agents are the sole readers of this codebase: express facts through names,
-types, tests, and assertions first. Restrict documents to decision reasons,
-runbooks, and policies that code, committed contracts, and `make help` leave
-unstated. Write no comment by default; add one only where a reader of the code
-alone would likely make a wrong change: a non-code reason (including a concrete
-boundary divergence that rules out an apparent `std` or dependency
-replacement), an external constraint, or an invariant spanning items. Keep it
-to the fewest words that carry that fact, and never restate names, signatures,
-returned error variants, the order of calls, or a lint's `reason`. Product-output
-doc comments (`utoipa` descriptions, `clap` help, config section notes) are
-exempt. Update or delete comments on touched items.
+types, tests, and assertions. Restrict documents to decision reasons, runbooks,
+and policies that code, committed contracts, and `make help` leave unstated.
+
+Write no explanatory comments, because an explained workaround outlives the
+fix it stands in for. When code seems to need an explanation, rename it,
+restructure it, encode the invariant in a type or assertion, pin the behavior
+(including a divergence that rules out an apparent `std` or dependency
+replacement) with a test, or fix the cause. Only three kinds of comment remain:
+product-output doc comments (`utoipa` descriptions, `clap` help, config section
+notes); a one-line pointer to an external constraint the code cannot carry (an
+RFC section, provider limit, or upstream issue link) that names it without
+restating it; and tool markers such as `template:` regions. Record a rejected
+alternative in `docs/decisions/`, and delete every other comment on items you
+touch.

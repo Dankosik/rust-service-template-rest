@@ -1,6 +1,3 @@
-//! The panic hook and subscriber are process-wide; one child process per
-//! format captures their actual output.
-
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 

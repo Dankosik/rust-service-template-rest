@@ -10,14 +10,11 @@ use crate::transaction::{Tx, TxError, TxOptions, in_tx_with, set_statement_timeo
 
 pub(crate) const CLEANUP_DURATION_METRIC: &str = "postgres_cleanup_pass_duration_seconds";
 
-/// Reaches 3600 s so long passes, which have no deadline, stay visible.
 pub(crate) const CLEANUP_DURATION_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0,
     600.0, 1200.0, 1800.0, 3600.0,
 ];
 
-/// Matches the jobs retention backstop plus pool acquisition, the statement,
-/// and commit acknowledgement.
 const CLEANUP_BATCH_BUDGET: Duration = Duration::from_secs(12);
 const CLEANUP_STATEMENT_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -100,9 +97,6 @@ fn describe_cleanup() {
     );
 }
 
-/// Start inside the polled pass before its first wait. Record a batch only
-/// after its commit is confirmed; dropping an unfinished pass records
-/// cancellation and keeps earlier confirmed progress.
 #[derive(Debug)]
 pub struct CleanupPass {
     cleanup: Cleanup,
@@ -176,9 +170,6 @@ impl CleanupPass {
         }
     }
 
-    /// Stops when a batch removes fewer than `batch_limit` rows (which does not
-    /// prove the population is empty) or the owner cancels. Counts only acknowledged
-    /// commits; earlier confirmed batches stay committed on failure.
     #[allow(
         clippy::too_many_arguments,
         reason = "each cleanup owner supplies its pool, transaction options, cancellation, batch cap, metric, log event, and delete query"
@@ -233,7 +224,6 @@ impl CleanupPass {
         self.await_batch(
             failure_message,
             in_tx_with(pool, options, async |tx| -> Result<u64, BatchError> {
-                // The server still bounds its statements if the client stops waiting.
                 set_statement_timeout(tx, CLEANUP_STATEMENT_TIMEOUT).await?;
                 delete(tx, batch_limit).await.map_err(BatchError::from)
             }),

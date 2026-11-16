@@ -31,7 +31,6 @@ pub(crate) const QUEUE_WAIT_BUCKETS: &[f64] = &[
 pub(crate) struct Claimed {
     pub(crate) registered: Arc<Registered>,
     pub(crate) attempt: AttemptId,
-    /// The claim's fence: every outcome write matches it.
     pub(crate) generation: i64,
     pub(crate) payload: Vec<u8>,
     pub(crate) trace: Carrier,
@@ -39,8 +38,6 @@ pub(crate) struct Claimed {
     pub(crate) kind_slot: Option<KindSlot>,
 }
 
-/// Wake on release because the claim loop can consume the last free place
-/// concurrently with it. The loop coalesces wakes and applies its cooldown.
 #[derive(Debug)]
 pub(crate) struct KindSlot {
     permit: Option<OwnedSemaphorePermit>,
@@ -48,8 +45,6 @@ pub(crate) struct KindSlot {
 }
 
 impl KindSlot {
-    /// The claim loop is the only taker and asked for no more than the free
-    /// part, so a place is free for every row it drew.
     fn take(running_slots: &Arc<Semaphore>, wake: &Arc<Notify>) -> Option<Self> {
         let permit = Arc::clone(running_slots).try_acquire_owned().ok()?;
         Some(Self {
@@ -64,13 +59,11 @@ impl Drop for KindSlot {
         let Some(permit) = self.permit.take() else {
             return;
         };
-        // Released before the wake, so the woken loop sees the free place.
         drop(permit);
         self.wake.notify_one();
     }
 }
 
-/// Tokio's permit limit can be smaller than a configured `u32` on 32-bit.
 pub(crate) fn admission_slots(limit: NonZeroU32) -> Semaphore {
     let permits = usize::try_from(limit.get()).unwrap_or(Semaphore::MAX_PERMITS);
     Semaphore::new(permits.min(Semaphore::MAX_PERMITS))
@@ -121,8 +114,6 @@ pub(crate) async fn run_claim_loop(
             return;
         };
         let requested = slots.num_permits();
-        // The turn covers the statement's pooled connection and ends with the
-        // round it produced; dispatching those rows happens without it.
         let round = {
             let Some(_turn) = statement_turn(&shared, &stop).await else {
                 return;
@@ -139,11 +130,8 @@ pub(crate) async fn run_claim_loop(
 
 #[derive(Clone, Copy)]
 enum Next {
-    /// The last round filled every free slot: more work is likely due.
     Now,
-    /// The last round found work: poll again after the cooldown.
     Soon,
-    /// The last round found nothing: wait for a wake or the poll tick.
     Idle,
 }
 
@@ -230,28 +218,6 @@ async fn send_claim(shared: &Shared, policy: &PolicyBinds<'_>, requested: i64) -
     }
 }
 
-/// The same statement settles what a claim finds: a job whose attempt budget
-/// is spent fails as `exhausted` instead of running, a rescued expired lease
-/// records why, and every running claim spends one attempt and takes a new
-/// claim generation. A snooze or release gives the attempt back
-/// ([`crate::attempt`]).
-///
-/// Each per-kind scan locks rows while it reads them (`SKIP LOCKED` inside the
-/// lateral). Choosing ids first and locking them afterwards hands concurrent
-/// workers the same few ids: the losers claim nothing until the next poll.
-///
-/// A kind's `claim_limit` is the free slots, or the free part of its
-/// `max_running` when that is smaller; it bounds the kind's due and expired
-/// rows together through the rank.
-///
-/// The two state literals are the access path as much as the filter:
-/// `state = 'pending'` and `state = 'running'` prove the partial
-/// `background_jobs_pending` and `background_jobs_running` predicates, so each
-/// scan reads its kind's own index. A bind or a computed state would forfeit
-/// that proof and leave a sequential scan. The fenced
-/// [`complete_query`](crate::attempt::complete_query) write wants its primary
-/// key instead, so it says the equivalent `claim_expires_at IS NOT NULL`, which
-/// the table's CHECK makes equal to `state = 'running'`.
 #[expect(
     clippy::too_many_lines,
     reason = "one statement, and its binds beside it"
@@ -386,7 +352,6 @@ async fn claim(
     .await
 }
 
-// These columns and each round's live claim limits must share registry order.
 struct PolicyBinds<'a> {
     registry: &'a crate::Kinds,
     names: Vec<&'static str>,
@@ -415,10 +380,6 @@ impl<'a> PolicyBinds<'a> {
     }
 }
 
-/// Shared by the database lease and the local deadline.
-///
-/// The database counts from the statement timestamp. The worker counts from
-/// before pool acquisition so it can stop writing before the lease expires.
 fn lease_offset(timeout: Duration) -> Duration {
     timeout.saturating_add(LEASE_RESERVE)
 }
@@ -427,8 +388,6 @@ fn saturating_micros(duration: Duration) -> i64 {
     i64::try_from(duration.as_micros()).unwrap_or(i64::MAX)
 }
 
-/// Counts come from `u32` limits, so the fallback never runs; it would claim
-/// one row rather than unbounded ones.
 fn slot_count(count: usize) -> i64 {
     i64::try_from(count).unwrap_or(1)
 }
@@ -533,8 +492,6 @@ fn dispatch_known(
     }
 }
 
-/// Stop writing before another worker can rescue the claim. Starting before
-/// pool acquisition leaves at least [`CANCEL_MARGIN`] before database expiry.
 fn local_deadline(claim_started_at: Instant, lease_offset: Duration) -> Instant {
     claim_started_at
         .checked_add(lease_offset)
@@ -648,14 +605,12 @@ mod tests {
         let second = KindSlot::take(&running, &wake).expect("a free place");
         assert!(KindSlot::take(&running, &wake).is_none());
 
-        // The kind was full: the place is free again before the wake is stored.
         drop(first);
         assert_eq!(running.available_permits(), 1);
         tokio::time::timeout(Duration::from_secs(1), wake.notified())
             .await
             .expect("the release of a full kind wakes the loop");
 
-        // A concurrent claim can use the other free place before this release.
         drop(second);
         assert_eq!(running.available_permits(), 2);
         tokio::time::timeout(Duration::from_secs(1), wake.notified())

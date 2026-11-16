@@ -142,8 +142,6 @@ async fn lost_dlq_or_source_ack_reply_preserves_the_transfer_and_settles_without
         if lose_dlq_ack {
             wait_for_source_unacked(&fixture).await;
         }
-        // A lost DLQ PubAck spends the five-second request budget, then the
-        // adapter requests the broker's actual 30-second delayed redelivery.
         wait_for_source_ack_within(&fixture, 1, Duration::from_secs(45)).await;
         handle
             .finish(Instant::now() + Duration::from_secs(10))
@@ -278,8 +276,6 @@ async fn unhandled_and_undecodable_deliveries_share_a_dead_letter_reason_and_dif
         .expect("operator-provisioned durable consumer is admitted")
         .start(&cancel);
 
-    // A schema version published before its consumer was deployed, then the
-    // handled version with a payload that is not the handler's type.
     let newer = registry(&fixture)
         .prepare(&event("event-newer-schema"), 1024)
         .expect("newer-schema fixture starts from a valid production envelope");

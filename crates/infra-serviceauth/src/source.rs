@@ -9,8 +9,6 @@ use zeroize::Zeroizing;
 
 use crate::{JwtType, KeyId, MAX_TOKEN_LIFETIME_SECONDS, ServiceName, unix_seconds};
 
-/// A handle reuses its token while it is younger than this, so every token it
-/// sends has more than half its lifetime left by this service's clock.
 const REUSE_SECONDS: u64 = MAX_TOKEN_LIFETIME_SECONDS / 2;
 
 #[derive(Clone, derive_more::Debug)]
@@ -18,14 +16,11 @@ pub struct SigningOptions {
     pub name: ServiceName,
     #[debug(skip)]
     pub jwt_type: JwtType,
-    /// The `kid` under which receivers' trust registries hold the public key.
     pub key_id: KeyId,
-    /// PKCS#8 PEM of an EC P-256 private key.
     #[debug(skip)]
     pub private_key: SecretString,
 }
 
-/// Why a token source or a token could not be produced. Never key material.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum SigningError {
     #[error("the signing key is not a PKCS#8 PEM EC P-256 private key")]
@@ -61,15 +56,11 @@ impl fmt::Debug for TokenSource {
 }
 
 impl TokenSource {
-    /// The source while service authentication is off: every handle sends
-    /// no token.
     #[must_use]
     pub const fn disabled() -> Self {
         Self(Signing::Disabled)
     }
 
-    /// The source of a service that verifies callers but holds no signing
-    /// key: asking it for a receiver handle is a composition error.
     #[must_use]
     pub const fn without_key() -> Self {
         Self(Signing::WithoutKey)
@@ -92,7 +83,6 @@ impl TokenSource {
         Ok(Self(Signing::Key(Arc::new(signer))))
     }
 
-    /// A handle that signs tokens addressed to `receiver`, one per outbound client.
     pub fn receiver(&self, receiver: &str) -> Result<ReceiverTokens, SigningError> {
         let audience = ServiceName::parse(receiver).map_err(|_| SigningError::InvalidReceiver)?;
         let state = match &self.0 {
@@ -145,7 +135,6 @@ impl fmt::Debug for ReceiverTokens {
 }
 
 impl ReceiverTokens {
-    /// `None` while service authentication is off.
     pub fn authorization(&self) -> Result<Option<HeaderValue>, SigningError> {
         let ReceiverState::Active(active) = &self.0 else {
             return Ok(None);
@@ -309,7 +298,6 @@ mod tests {
         assert_eq!(at(&catalog, NOW + 29), first);
         let renewed = at(&catalog, NOW + 30);
         assert_ne!(renewed, first);
-        // A clock that steps back signs anew rather than reuse a future token.
         assert_ne!(at(&catalog, NOW + 10), renewed);
     }
 

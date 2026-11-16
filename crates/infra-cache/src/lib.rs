@@ -1,7 +1,3 @@
-//! Standalone TCP only — no Sentinel, Cluster, or Unix socket. The connection
-//! always speaks RESP3 (`HELLO 3`), so the server must be Redis-compatible at
-//! 6.0 or later.
-
 mod admission;
 mod connection;
 mod credentials;
@@ -22,8 +18,6 @@ use self::connection::Link;
 pub use self::observe::HISTOGRAMS;
 use self::observe::NamespaceHistograms;
 
-/// Bound of one whole connection setup attempt. A startup check that waits
-/// for the first connection should allow at least this long.
 pub const STARTUP_TIMEOUT: Duration = connection::SETUP_TIMEOUT;
 
 #[derive(Debug)]
@@ -32,25 +26,17 @@ pub struct CacheOptions {
     pub password_file: Option<PathBuf>,
     pub root_ca_path: Option<PathBuf>,
     pub client_certificate: Option<ClientCertificate>,
-    /// Permit a non-TLS address. Callers must already have applied the local-only policy.
     pub allow_plaintext: bool,
-    /// Permit a DSN with no password and no password file. Callers must
-    /// already have applied the local-only policy.
     pub allow_unauthenticated: bool,
-    /// Includes the wait for a reconnect.
     pub command_timeout: Duration,
 }
 
-/// Both files are read once, at admission.
 #[derive(Clone, Debug)]
 pub struct ClientCertificate {
-    /// Leaf first.
     pub cert_path: PathBuf,
     pub key_path: PathBuf,
 }
 
-/// Local startup errors from [`Cache::start`]. Display never includes the DSN,
-/// a password, or Redis error text.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum CacheError {
     #[error("cache DSN is invalid")]
@@ -97,11 +83,6 @@ pub enum CacheError {
     ClientBuild,
 }
 
-/// Distinct from a cache miss (`Ok(None)`): covers an outage, timeout,
-/// cancellation, a retired connection generation, and a server error reply
-/// such as `WRONGTYPE`, `OOM`, or `READONLY`. A command refused locally
-/// because every slot is taken returns the same error without contacting the
-/// server; `cache_command_admission_refused_total` tells the two apart.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("cache unavailable")]
 pub struct Unavailable;
@@ -121,20 +102,12 @@ pub struct ServerEndpoint {
     pub tls: bool,
 }
 
-/// Clones, namespaces, and probes share the connection and keep it alive; the
-/// last one dropped stops its supervisor.
 #[derive(Clone, Debug)]
 pub struct Cache {
     link: Arc<Link>,
 }
 
 impl Cache {
-    /// Must be called from a Tokio runtime with the time and I/O drivers enabled.
-    /// Configured password and TLS files are read synchronously, so an async
-    /// caller runs this on the blocking pool with the runtime entered.
-    ///
-    /// Install the intended metrics recorder first: the connection's counter
-    /// and gauge handles bind to the recorder current here.
     pub fn start(options: CacheOptions) -> Result<Self, CacheError> {
         let command_timeout = options.command_timeout;
         let Admitted {
@@ -149,7 +122,6 @@ impl Cache {
         })
     }
 
-    /// Readiness probe. Not registered by default: a cache outage is degradation.
     #[must_use]
     pub fn probe(&self) -> CacheProbe {
         CacheProbe {
@@ -163,10 +135,6 @@ impl Cache {
     }
 }
 
-/// The caller's startup/readiness budget can cancel the probe. Cancelling
-/// while PING is still pending before its reply deadline leaves the connection
-/// available to other commands. A probe that reaches its own reply deadline
-/// with PING still pending retires the connection.
 #[derive(Clone, Debug)]
 pub struct CacheProbe {
     cache: Cache,
@@ -185,15 +153,10 @@ impl health::Probe for CacheProbe {
     }
 }
 
-/// A cache namespace name matching `^[a-z][a-z0-9_]{0,63}$`. It prefixes
-/// every key as `{namespace}:` and labels the cache metrics, so it is
-/// `'static` to keep label cardinality bounded. [`namespace!`] checks a
-/// literal at compile time.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Namespace(&'static str);
 
 impl Namespace {
-    /// `None` when `name` is outside the grammar.
     #[must_use]
     pub const fn new(name: &'static str) -> Option<Self> {
         if namespace::valid_namespace(name) {
@@ -204,14 +167,9 @@ impl Namespace {
     }
 }
 
-/// Builds a [`Namespace`] from a string literal; a name outside
-/// `^[a-z][a-z0-9_]{0,63}$` fails to build (`cargo check` alone does not
-/// evaluate the constant).
-///
 /// ```
 /// const SESSIONS: infra_cache::Namespace = infra_cache::namespace!("sessions");
 /// ```
-///
 /// ```compile_fail,E0080
 /// let _ = infra_cache::namespace!("Sessions");
 /// ```
@@ -225,8 +183,6 @@ macro_rules! namespace {
     };
 }
 
-/// Each operation/outcome histogram handle binds to the recorder current at
-/// its first recorded result and remains shared by clones of this namespace.
 #[derive(Clone, Debug)]
 pub struct CacheNamespace {
     cache: Cache,

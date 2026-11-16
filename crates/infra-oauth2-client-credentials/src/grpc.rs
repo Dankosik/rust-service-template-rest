@@ -26,7 +26,6 @@ pub struct AuthenticatedClient {
 }
 
 impl AuthenticatedClient {
-    /// Refuses a call without [`crate::OnBehalfOf`] instead of sending the service token.
     #[must_use]
     pub fn require_on_behalf_of(mut self) -> Self {
         self.subject_required = true;
@@ -35,11 +34,6 @@ impl AuthenticatedClient {
 }
 
 impl Credentials {
-    /// The service removes an [`crate::OnBehalfOf`] extension before dispatch and sends the
-    /// token exchanged for that subject. A caller-supplied `Authorization` header and a missing
-    /// required subject are refused as `INTERNAL`. A response with `grpc-status: UNAUTHENTICATED`
-    /// in the initial headers or polled trailers, or an HTTP 401 without a `grpc-status`, stops
-    /// reuse of that call's token once it is 30 seconds old. Responses are never replayed.
     #[must_use]
     pub fn grpc(&self, resource: Client) -> AuthenticatedClient {
         AuthenticatedClient {
@@ -102,10 +96,7 @@ impl Service<Request<Body>> for AuthenticatedClient {
     }
 }
 
-/// Both refusals are this service's own composition mistakes. They are
-/// `INTERNAL`, as gRFC A54 has a channel report failed call credentials: a
-/// code reserved for the application would blame the inbound caller when a
-/// handler forwards the status.
+/// gRFC A54
 fn admission_status(refusal: AdmissionRefusal) -> Status {
     match refusal {
         AdmissionRefusal::AuthorizationConflict => {
@@ -115,11 +106,6 @@ fn admission_status(refusal: AdmissionRefusal) -> Status {
     }
 }
 
-/// A caller deadline is `DEADLINE_EXCEEDED`; a cancelled call is `CANCELLED`;
-/// a failure that may pass unchanged later is `UNAVAILABLE`; any other is
-/// `UNAUTHENTICATED`, as gRPC clients report credentials that could not
-/// produce call metadata. The closed
-/// reason stays reachable as the status source and never crosses the wire.
 fn acquisition_status(error: AcquisitionError) -> Status {
     let mut status = match error {
         AcquisitionError::Timeout => Status::deadline_exceeded("credential acquisition timed out"),

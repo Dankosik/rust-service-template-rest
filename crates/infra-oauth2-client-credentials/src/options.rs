@@ -6,8 +6,7 @@ use crate::ConfigurationError;
 
 const EXCHANGE_CACHE_CAPACITY_RANGE: std::ops::RangeInclusive<u32> = 1..=65_536;
 
-/// The client-assertion signing algorithm. One algorithm per key (RFC 8725bis
-/// section 3.1), so it is always stated and never defaulted.
+/// RFC 8725bis §3.1
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Algorithm {
     Rs256,
@@ -28,24 +27,16 @@ impl From<Algorithm> for jsonwebtoken::Algorithm {
 #[derive(Clone, derive_more::Debug)]
 #[debug("Options([REDACTED])")]
 pub struct Options {
-    /// The token endpoint URL; must be HTTPS without userinfo or fragment and
-    /// must not contain whitespace or control characters.
     pub token_url: String,
     pub client_id: String,
     pub private_key: SecretString,
     pub key_id: String,
     pub algorithm: Algorithm,
-    /// The audience asserted in the signed client assertion, normally the
-    /// authorization server's issuer identifier.
     pub assertion_audience: String,
-    /// Scopes requested from the provider; each is an RFC 6749 scope token, and an empty list requests none.
+    /// RFC 6749 §3.3
     pub scopes: Vec<String>,
     pub audience: Option<String>,
-    /// Best-effort retained subject count, from 1 to 65,536, alongside a 16 MiB
-    /// Bearer payload target. Zero does not disable the cache; it is refused.
     pub exchange_cache_capacity: u32,
-    /// Maximum simultaneous token attempts shared by both grants. Must be
-    /// positive and supported as a semaphore permit count on this target.
     pub provider_concurrency: u32,
 }
 
@@ -91,7 +82,6 @@ fn admitted_provider_concurrency(value: u32) -> Result<usize, ConfigurationError
 pub(crate) fn admit_options(options: Options) -> Result<Admitted, ConfigurationError> {
     let permits = admitted_provider_concurrency(options.provider_concurrency)?;
     let error = |key, reason| Err(ConfigurationError { key, reason });
-    // Direct construction of `Options` bypasses the configuration loader.
     if options.client_id.trim().is_empty() {
         return error("client_id", "must be nonempty");
     }
@@ -121,8 +111,6 @@ pub(crate) fn admit_options(options: Options) -> Result<Admitted, ConfigurationE
     if !EXCHANGE_CACHE_CAPACITY_RANGE.contains(&options.exchange_cache_capacity) {
         return error("exchange_cache_capacity", "must be from 1 to 65536");
     }
-    // `Url::parse` silently strips tabs and newlines, so refuse them first with
-    // the rule that actually failed.
     if shared_rules::uri::has_whitespace_or_control(&options.token_url) {
         return error("token_url", "must not contain whitespace or controls");
     }

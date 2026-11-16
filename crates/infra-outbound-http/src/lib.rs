@@ -1,6 +1,3 @@
-//! A fixed-origin HTTPS client with finite exchange limits. The provider owns request
-//! content and interpretation.
-
 mod observe;
 mod policy;
 mod transport;
@@ -27,8 +24,6 @@ pub use url::Url;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
-/// `http` 1.5 panics when the header count Hyper reserves, plus a third and rounded up to a
-/// power of two, exceeds its 32,768-slot index table.
 pub const MAX_RESPONSE_HEADER_COUNT: usize = 24_576;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -83,10 +78,6 @@ pub enum Error {
     },
 }
 
-/// Requests with a caller-supplied `Host` are rejected; `Host` comes from the configured
-/// origin. Sends HTTP/1.1, removes `Transfer-Encoding`, sets `Content-Length` to the
-/// buffered length for nonempty bodies and `POST`/`PUT`/`PATCH` (removed for other empty
-/// requests), and adds `Accept: */*` when absent.
 #[derive(Clone, derive_more::Debug)]
 pub struct Client {
     origin: policy::Origin,
@@ -125,17 +116,12 @@ impl Client {
         }
     }
 
-    /// Replaces any caller `traceparent`/`tracestate`. Off by default: a trace identifier is
-    /// data shared with the provider, so enable it only for an origin in the same trace
-    /// domain.
     #[must_use]
     pub fn with_trace_context(mut self) -> Self {
         self.propagate_trace_context = true;
         self
     }
 
-    /// For downstream mock tests: only `http` origins with a literal loopback IP and no
-    /// userinfo. Production code must use [`Client::try_new`].
     #[cfg(feature = "test-support")]
     pub fn try_new_for_test_http(origin: &Url, limits: Limits) -> Result<Self, BuildError> {
         limits.validate()?;
@@ -148,19 +134,11 @@ impl Client {
         ))
     }
 
-    /// The request follows the preparation rules on [`Client`]. An [`OperationContext`]
-    /// request extension additionally bounds cancellation and cutoff; the end is fixed at
-    /// entry at the earlier of `deadline` and entry plus [`Limits::operation_timeout`], and
-    /// admission, setup, DNS and body collection spend it. Terminal observation callbacks
-    /// can delay return beyond the deadline without changing the result. Dropping the future
-    /// ends the exchange without undoing a provider-side effect.
     pub async fn execute(
         &self,
         request: Request<Bytes>,
         deadline: Instant,
     ) -> Result<Response<Bytes>, Error> {
-        // Built directly rather than through `begin_operation`: a parent made
-        // here could never be cancelled, so its child token is pure cost.
         let operation = OperationContext::from_deadline(
             Deadline::at(deadline)
                 .earlier(Deadline::new(Instant::now(), self.limits.operation_timeout)),
@@ -169,15 +147,11 @@ impl Client {
             .await
     }
 
-    /// Later execution may only shorten this context, never restart its deadline.
     #[must_use]
     pub fn begin_operation(&self, parent: &OperationContext) -> OperationContext {
         parent.child(self.limits.operation_timeout)
     }
 
-    /// The request follows the preparation rules on [`Client`]. A cutoff maps to
-    /// [`Error::Timeout`] and cancellation to [`Error::Cancelled`]; neither undoes a remote
-    /// effect.
     pub async fn execute_with_context(
         &self,
         request: Request<Bytes>,
@@ -187,8 +161,6 @@ impl Client {
             .await
     }
 
-    /// The callback runs once on response headers, before body admission, so it may see a
-    /// status even if the exchange later fails.
     pub async fn execute_with_response_status(
         &self,
         request: Request<Bytes>,
@@ -199,9 +171,6 @@ impl Client {
             .await
     }
 
-    /// The check runs after request preparation, just before transport handoff.
-    /// [`Error::DispatchRefused`] when it returns `false` and the operation is still active;
-    /// a later timeout or cancellation takes precedence.
     pub async fn execute_with_dispatch_check(
         &self,
         request: Request<Bytes>,
@@ -239,10 +208,6 @@ impl Client {
         if self.propagate_trace_context {
             attempt.inject_trace_context(request.headers_mut());
         }
-        // The success decision is made here, after the last await: leaving the
-        // exchange span and dropping the body run after the exchange's own last
-        // check and spend the same budget. Terminal observation can delay
-        // return but cannot reopen this decision.
         let result = self
             .exchange(request, &stops, &mut attempt, check, on_status)
             .await
@@ -287,7 +252,6 @@ impl Client {
     }
 }
 
-/// The operation's stop wins over the request's.
 struct StopScopes<'a> {
     operation: &'a OperationContext,
     request: Option<&'a OperationContext>,
@@ -339,8 +303,6 @@ async fn buffer_response(
         if let Ok(data) = frame.map_err(map_body_error)?.into_data() {
             append_within(&mut collected, &data, limit);
         }
-        // A frame's `Bytes` can share a large read buffer, so each frame
-        // is dropped here, before the next poll.
     }
     let buffered = Bytes::from(collected);
     drop(body);
@@ -354,8 +316,6 @@ fn stopped_error(stopped: Stopped) -> Error {
     }
 }
 
-/// Capacity grows as data arrives, so a declared `Content-Length` cannot reserve memory for
-/// unsent bytes.
 fn append_within(collected: &mut Vec<u8>, data: &[u8], limit: usize) {
     let required = collected.len().saturating_add(data.len());
     if required > collected.capacity() {

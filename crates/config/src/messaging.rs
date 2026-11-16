@@ -1,8 +1,3 @@
-//! `JetStream` connection and delivery-admission configuration.
-//!
-//! This section owns startup input only. It never contacts a broker or
-//! reconciles operator-owned streams.
-
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 
@@ -17,23 +12,15 @@ use crate::validate::{
     Rejected, ValidationError, Violations, int_range, missing, non_blank, required,
 };
 
-/// Header bytes one delivery may add to its payload: `HEADER_LIMIT_BYTES` of
-/// the `infra-messaging` wire decoder. Metadata is budgeted separately.
 const DELIVERY_OVERHEAD_BYTES: u64 = 8 * KIB;
-/// Payload and header MiB held at once: `PUBLICATION_WINDOW_BYTES` of
-/// `infra-messaging`, so an admitted payload also fits one publication.
 const MAX_RESIDENT_DELIVERY_MIB: u64 = 64;
 const MAX_RESIDENT_DELIVERY_BYTES: u64 = MAX_RESIDENT_DELIVERY_MIB * MIB;
 
 const PRODUCER_ACTIVE: &str = "a producer is active";
 const CONSUMER_ACTIVE: &str = "a consumer is active";
 
-/// A broker's default `max_payload` is 1 MiB for payload and headers
-/// together, so the default must leave room below it; the Go template defaults
-/// to the same value.
 const DEFAULT_MAX_PAYLOAD: ByteSize = ByteSize::kib(256);
 
-/// What the operator supplied for `[messaging]`, before admission.
 #[expect(
     clippy::struct_excessive_bools,
     reason = "NATS trust, authentication and TLS-first are independent operator capabilities"
@@ -115,9 +102,6 @@ impl Default for MessagingInput {
     }
 }
 
-/// Admitted `JetStream` connection settings. An empty `urls` means no broker
-/// is configured; a binary that needs one checks its role with
-/// [`Self::validate_producer`] or [`Self::validate_consumer`].
 #[expect(
     clippy::struct_excessive_bools,
     reason = "NATS trust, authentication and TLS-first are independent operator capabilities"
@@ -196,7 +180,6 @@ impl MessagingInput {
             1,
             MAX_RESIDENT_DELIVERY_BYTES - DELIVERY_OVERHEAD_BYTES,
         ));
-        // The payload range keeps the product far from overflow.
         let concurrency = payload.and_then(|()| {
             v.take(resident_delivery_bound(
                 self.max_payload_bytes,
@@ -235,8 +218,6 @@ impl MessagingConfig {
         self.allow_plaintext || self.trusted_network
     }
 
-    /// What a binary that publishes needs: a broker, credentials unless the
-    /// operator allowed none, and the stream it publishes to.
     pub fn validate_producer(&self) -> Result<(), ValidationError> {
         if !self.is_active() {
             return Err(missing("messaging.urls", PRODUCER_ACTIVE));
@@ -259,8 +240,6 @@ impl MessagingConfig {
         )
     }
 
-    /// What a binary that consumes needs: the producer requirements and the
-    /// consumer's operator-owned names.
     pub fn validate_consumer(&self) -> Result<(), ValidationError> {
         self.validate_producer()?;
         self.required_consumer_keys()?;
@@ -307,7 +286,6 @@ fn resident_delivery_bound(
     Ok(())
 }
 
-/// Every URL is checked; the scheme rules follow only when each parsed.
 fn validate_urls(
     urls: &[String],
     tls_first: bool,
@@ -339,7 +317,6 @@ fn validate_urls(
 }
 
 fn url_scheme(index: usize, raw: &str) -> Result<String, ValidationError> {
-    // The key names the entry; a URL is never echoed.
     let key = format!("messaging.urls[{index}]");
     non_blank(&key, raw)?;
     if shared_rules::uri::has_whitespace_or_control(raw) {
@@ -366,8 +343,6 @@ fn url_scheme(index: usize, raw: &str) -> Result<String, ValidationError> {
     }
 }
 
-/// How the broker connection authenticates; the inline secret never appears
-/// in `Debug` output.
 #[derive(Clone, Debug)]
 pub enum MessagingCredentials {
     Inline(SecretString),
@@ -381,8 +356,6 @@ pub struct ConsumerKeys<'a> {
     pub dlq_subject: &'a str,
 }
 
-/// A TOML list, or one comma-separated `APP__MESSAGING__URLS` value. Each
-/// part keeps its exact bytes; validation rejects an empty one.
 fn url_list<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
 where
     D: serde::Deserializer<'de>,

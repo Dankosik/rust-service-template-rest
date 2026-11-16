@@ -1,8 +1,6 @@
 use std::borrow::Cow;
 
-/// `token` written as one reference token (RFC 6901 §3): `~` becomes `~0`,
-/// then `/` becomes `~1`. Escaping `/` first would turn the `~` it writes
-/// into `~01`.
+/// RFC 6901 §3
 #[must_use]
 pub fn escape(token: &str) -> Cow<'_, str> {
     if token.contains(['~', '/']) {

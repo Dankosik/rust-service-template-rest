@@ -1,4 +1,3 @@
-/// Messages never carry request data, bearer material, peer paths, certificates or keys.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum Error {
     #[error("gRPC client destination is not a valid URI")]

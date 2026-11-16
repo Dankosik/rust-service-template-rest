@@ -398,7 +398,6 @@ impl Fixture {
         }
         let echo = Echo::new();
         let mut services = Services::new();
-        // Before the contract is described: reflection serves it all the same.
         services
             .add_reflection()
             .expect("reflection registers once");
@@ -481,7 +480,6 @@ impl Fixture {
     }
 }
 
-/// Defaults, without a connection age and with an admission wait as long as the call budget.
 fn limits() -> Limits {
     Limits {
         request_timeout: Duration::from_secs(8),
@@ -881,8 +879,6 @@ fn a_scope_requirement_needs_a_described_method_of_a_registered_service_and_is_d
 // template:end authn:grpc-transport-test-insufficient-scope
 
 // template:begin authn:grpc-transport-test-rejection-flood
-/// Answering before the request DATA arrives makes h2 reset each stream and close the
-/// connection after 1024 resets.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rejected_calls_do_not_close_the_shared_connection() {
     let fixture = Fixture::plaintext().await;
@@ -939,8 +935,6 @@ async fn the_deadline_bounds_authentication_too() {
     fixture.stop().await;
 }
 
-// Composed-router calls let cancellation and follower entry be observed without
-// waiting for a network reset to reach the server. The verifier is still real.
 fn opening_app(verifier: Verifier, echo: &Echo, capacity: u32) -> axum::Router {
     opening_app_waiting(verifier, echo, capacity, limits().max_admission_wait)
 }
@@ -1649,7 +1643,6 @@ async fn duplex_progresses_before_request_eof_and_drop_stops_upload_and_recovers
     .unwrap()
     .unwrap_err();
     assert_eq!(shed.code(), Code::ResourceExhausted);
-    // The sender remains alive: only cancellation can close this upload source.
     drop(response);
     timeout(WAIT, upload_dropped.notified())
         .await
@@ -1865,8 +1858,6 @@ async fn unread_flow_controlled_response_releases_server_work_at_caller_deadline
         .await
         .unwrap()
         .unwrap();
-    // The raw peer has no local timer and never polls DATA. The server's timer
-    // must drop its source even after HTTP/2 receive credit has been exhausted.
     timeout(WAIT, fixture.echo.stream_dropped.notified())
         .await
         .expect("unread server stream is released");
@@ -1976,13 +1967,10 @@ async fn metadata_up_to_16_kib_is_served_and_larger_metadata_is_refused() {
             .insert("x-padding", "a".repeat(padding).parse().unwrap());
         async move { timeout(WAIT, echo.unary(call)).await.expect("padded call") }
     };
-    // HTTP/2 counts each header's name and value plus 32 bytes; the call's
-    // own headers leave room for 15 KiB of padding under the 16 KiB list.
     assert_eq!(
         call(15 * 1024).await.unwrap().into_inner().message,
         "padded"
     );
-    // hyper answers HTTP 431 before the router, so no grpc-status is sent.
     let refused = call(17 * 1024).await.unwrap_err();
     assert_eq!(refused.code(), Code::Unknown);
     assert!(refused.message().contains("431"), "{}", refused.message());
@@ -2444,7 +2432,6 @@ async fn reflection_lists_only_registered_services_in_both_versions() {
         assert_ne!(files.file_descriptor_proto, [] as [Vec<u8>; 0]);
     }
 
-    // Older tools ask only for the version `v1` replaced.
     let mut older = v1alpha::server_reflection_client::ServerReflectionClient::new(
         plaintext_client(fixture.address),
     );
@@ -2576,8 +2563,6 @@ fn a_service_is_described_before_it_is_added_and_added_once() {
     );
 }
 
-/// Counted on one thread, so the local recorder sees the server's tasks and
-/// the client's.
 #[tokio::test]
 async fn calls_are_counted_by_described_method_whatever_ended_them() {
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
@@ -2651,8 +2636,6 @@ async fn calls_are_counted_by_described_method_whatever_ended_them() {
     .await
     .unwrap_or_else(|_| panic!("metrics settle: {}", handle.render()));
     assert!(!rendered.contains("Invented"), "{rendered}");
-    // Only a catalog failure is counted as one: tonic's own `Unimplemented`
-    // carries no reason, and the abandoned call got no answer.
     assert_eq!(
         rendered.matches("grpc_server_failures_total{").count(),
         2,
@@ -2683,8 +2666,6 @@ async fn a_stream_is_counted_with_the_status_that_ended_it() {
         .expect("the stream opens")
         .unwrap()
         .into_inner();
-        // tonic encodes the messages that are ready together, so a stream
-        // that panics at once may end before its first message is sent.
         let ended = loop {
             match timeout(WAIT, stream.message())
                 .await
@@ -2861,7 +2842,6 @@ async fn a_call_whose_deadline_runs_out_is_deadline_exceeded_not_unavailable() {
 
 #[tokio::test(start_paused = true)]
 async fn stalled_tls_dial_is_released_and_the_same_client_recovers() {
-    // Real I/O establishes the handshake before the controlled clock advances.
     tokio::time::resume();
     for shorter_caller in [false, true] {
         let pki = Pki::new(&["127.0.0.1"]);
@@ -2906,8 +2886,6 @@ async fn stalled_tls_dial_is_released_and_the_same_client_recovers() {
         if shorter_caller {
             let (mut client, result) = timeout(WAIT, &mut call).await.unwrap().unwrap();
             assert_eq!(result.unwrap_err().code(), Code::DeadlineExceeded);
-            // Keep readiness driven after cancellation, using the same dial's
-            // original ceiling rather than granting this call another five seconds.
             call = tokio::spawn(async move {
                 let result = client
                     .unary(request(UnaryRequest {
@@ -2919,8 +2897,6 @@ async fn stalled_tls_dial_is_released_and_the_same_client_recovers() {
         } else {
             assert!(!call.is_finished(), "the full RPC budget still has time");
         }
-        // Drain ClientHello bytes; neither call cancellation nor elapsed time
-        // before the dial ceiling should have closed the retained socket.
         loop {
             match stalled.try_read(&mut handshake) {
                 Ok(0) => panic!("the dial ended before its ceiling"),
@@ -3099,7 +3075,6 @@ async fn answer_introspection(
             Ok::<_, hyper::Error>(introspection_response(unscoped))
         });
     let _ = hyper::server::conn::http1::Builder::new()
-        // Even empty fields occupy at least four wire bytes each.
         .max_headers(1024)
         .keep_alive(false)
         .half_close(true)
@@ -3177,7 +3152,6 @@ async fn introspection_wire_limit_includes_headers_and_body() {
     for extra_headers in [0, 150] {
         let headers = "X:\r\n".repeat(extra_headers);
         for total in [4096, 4097] {
-            // Both resulting body sizes have four content-length digits.
             let head =
                 format!("POST / HTTP/1.1\r\nHost: provider.test\r\n{headers}Content-Length: ");
             let body_len = total - head.len() - "0000\r\n\r\n".len();

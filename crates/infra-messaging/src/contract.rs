@@ -28,8 +28,6 @@ pub enum ContractError {
         event_type: &'static str,
         schema_version: u16,
     },
-    /// Two different types render under one schema name; rename one with
-    /// `#[schema(as = ...)]`.
     #[error("schema name {0} is used by two different types")]
     SchemaName(String),
     #[error("payload schema cannot be rendered")]
@@ -37,12 +35,6 @@ pub enum ContractError {
 }
 
 impl Registry {
-    /// Local schema references move into the payload's definitions; external
-    /// ones are preserved and may need a separate schema resource.
-    ///
-    /// The document has no operations, because a route does not say whether
-    /// this process publishes or consumes it. Keys are sorted, so the same
-    /// routes always render the same document.
     pub fn asyncapi(&self, title: &str, version: &str) -> Result<Value, ContractError> {
         let mut channels = BTreeMap::<&str, BTreeMap<String, Value>>::new();
         let mut schemas = BTreeMap::<String, Value>::new();
@@ -94,17 +86,12 @@ impl Registry {
 const CREATED_AT_DESCRIPTION: &str =
     "RFC 3339 time; a consumer refuses the zero time 0001-01-01T00:00:00Z as malformed.";
 
-/// The payload schema's local references resolve independently of the
-/// surrounding `AsyncAPI` document.
 fn message(
     event_type: &str,
     schema_version: u16,
     payload: &str,
     definitions: &BTreeMap<String, Value>,
 ) -> Value {
-    // JSON Schema counts characters and cannot bound UTF-8 bytes, so the
-    // description carries the byte limit a producer outside this crate must
-    // honour; the character bound and pattern are the parts a validator checks.
     let identity = json!({
         "type": "string",
         "minLength": 1,
@@ -148,7 +135,7 @@ fn payload_schema_reference(name: &str) -> String {
         .remove(b'.')
         .remove(b'_')
         .remove(b'~');
-    // RFC 6901 §6 applies URI fragment encoding after JSON Pointer escaping.
+    // RFC 6901 §6
     let token = shared_rules::rfc6901::escape(name);
     format!(
         "#/$defs/{}",
@@ -156,8 +143,6 @@ fn payload_schema_reference(name: &str) -> String {
     )
 }
 
-/// Visit only JSON Schema subschemas. Annotation and extension values, including
-/// objects with a literal `$ref` member, are instance data rather than schemas.
 fn relocate_schema_refs(schema: &mut Value) {
     let Some(schema) = schema.as_object_mut() else {
         return;
@@ -449,7 +434,6 @@ mod tests {
     }
 
     fn literal_metadata_schema() -> utoipa::openapi::Object {
-        // utoipa's derive omits field annotations on serde_json::Value.
         utoipa::openapi::ObjectBuilder::new()
             .default(Some(json!({ "$ref": "#/components/schemas/default" })))
             .examples([json!({ "items": { "$ref": "#/components/schemas/example" } })])

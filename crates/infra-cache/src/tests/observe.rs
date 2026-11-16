@@ -13,8 +13,6 @@ fn redis_errors_map_to_bounded_error_types() {
         let error = redis::RedisError::from((kind, "hunter2 must not leak"));
         assert_eq!(crate::connection::error_type(&error).label(), expected);
     }
-    // With redis-rs timeouts disabled, a timed-out socket (TCP_USER_TIMEOUT)
-    // is the only timeout redis-rs reports; it is not a generic I/O failure.
     for kind in [std::io::ErrorKind::TimedOut, std::io::ErrorKind::WouldBlock] {
         let timed_out = redis::RedisError::from(std::io::Error::from(kind));
         assert_eq!(crate::connection::error_type(&timed_out).label(), "timeout");
@@ -103,7 +101,6 @@ async fn set_admits_only_valid_floored_ttls_before_dispatch_and_observation() {
             "invalid TTL takes precedence over stopped context: {ttl:?}"
         );
     }
-    // The GET reply fences any earlier commands on the same connection.
     assert_eq!(namespace.get("ready").await, Ok(None));
     assert_eq!(server.command_count("SET", None), 0);
     assert_eq!(
@@ -159,9 +156,6 @@ async fn a_dropped_get_records_cancelled_without_the_key() {
             });
         }
     });
-    // A command timeout far above the drop below: on a stalled
-    // runner both timers could otherwise be due at one poll, and the
-    // command's own would record `timeout`.
     let cache = Cache::start(CacheOptions {
         command_timeout: Duration::from_secs(30),
         ..options(&format!("redis://{address}"), true, true, None)

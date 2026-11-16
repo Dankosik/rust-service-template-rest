@@ -10,34 +10,22 @@ use compact_str::CompactString;
 use operation_context::Stopped;
 use shared_rules::error_chain::causes;
 
-/// Each variant tells the caller what it may do next. Display and Debug never
-/// contain a key, bucket, endpoint, URL, or provider text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, enum_map::Enum, thiserror::Error)]
 pub enum ObjectStorageError {
     #[error("object not found")]
     NotFound,
     #[error("object already exists")]
     AlreadyExists,
-    /// A put sends nothing; a get refuses the body after receiving headers.
     #[error("object exceeds the configured size limit")]
     TooLarge,
-    /// Nothing was sent.
     #[error("object storage admission limit reached")]
     Busy,
-    /// Retrying is safe: a failed read, no workload-identity credentials (nothing
-    /// sent), or a provider refusal before applying a mutation (409, 429, 503, S3's
-    /// `RequestTimeout`). A mutation makes one attempt, so none can have applied.
     #[error("object storage unavailable")]
     Unavailable,
-    /// Permanent (400, 403, a missing bucket): credentials, configuration, or input are wrong.
     #[error("object storage rejected the request")]
     Rejected,
-    /// A timeout, lost response, or 500, 502, 504. Reconcile before relying on either
-    /// state; a create-only retry may find this call's own object.
     #[error("object storage mutation outcome is unknown")]
     OutcomeUnknown,
-    /// Checksum mismatch, a range or unsized response, or a body differing from its
-    /// declared size; absent or skipped checksums do not.
     #[error("object storage integrity check failed")]
     Integrity,
 }
@@ -173,7 +161,6 @@ pub(crate) fn interpret_delete_result(
 ) -> Result<(), Failure> {
     match result {
         Ok(_) => Ok(()),
-        // S3 and R2 answer 204 for an absent key; some stores report NoSuchKey.
         Err(error) if error.code() == Some("NoSuchKey") => Ok(()),
         Err(error) => Err(from_sdk(Call::UnconditionalMutation, error)),
     }
@@ -197,8 +184,6 @@ where
             };
             (FailureKind::Status { status, code }, error_type)
         }
-        // The SDK reports a failed credential load as a dispatch failure, though it
-        // precedes signing.
         SdkError::DispatchFailure(_)
             if shared_rules::error_chain::causes(error).any(
                 <dyn std::error::Error>::is::<
@@ -216,7 +201,6 @@ where
             (FailureKind::Lost, CompactString::const_new("timeout"))
         }
         SdkError::DispatchFailure(_) => (FailureKind::Lost, CompactString::const_new("dispatch")),
-        // A response that could not be read, and any future variant.
         _ => (FailureKind::Lost, CompactString::const_new("response")),
     };
     Failure {
@@ -236,12 +220,9 @@ fn classify(call: Call, kind: FailureKind<'_>) -> ObjectStorageError {
         FailureKind::NoCredentials => E::Unavailable,
         FailureKind::Lost => call.ambiguous(),
         FailureKind::Status { status, code } => match (classification_status(status, code), code) {
-            // A missing bucket is a configuration failure even on a read.
             (_, Some("NoSuchBucket")) => E::Rejected,
             (404, _) if call == Call::Read => E::NotFound,
             (412, _) if call == Call::CreateOnly => E::AlreadyExists,
-            // A conflicting write, throttling, load shedding, or a body the provider stopped
-            // waiting for (S3's `400 RequestTimeout`); one attempt means this is the only reply.
             (409 | 429 | 503, _) | (_, Some("RequestTimeout")) => E::Unavailable,
             (501, _) => E::Rejected,
             (500..=599, _) => call.ambiguous(),
@@ -250,9 +231,6 @@ fn classify(call: Call, kind: FailureKind<'_>) -> ObjectStorageError {
     }
 }
 
-/// S3 can answer a PUT or DELETE with 200 and an `<Error>` body when it fails
-/// after accepting the request, so a success status carries no cause: the code
-/// names it, and an unknown code is a server failure because it may have applied.
 fn classification_status(status: u16, code: Option<&str>) -> u16 {
     if !(200..300).contains(&status) {
         return status;
@@ -348,7 +326,6 @@ mod tests {
                 E::Rejected,
             ),
             (Call::Read, status(501, Some("NotImplemented")), E::Rejected),
-            // A 2xx reply with an error body is classified by its code.
             (
                 Unconditional,
                 status(200, Some("InternalError")),

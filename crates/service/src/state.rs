@@ -11,8 +11,6 @@ pub struct AppState {
     pub webhooks: WebhookState,
     // template:end inbound-webhooks:service-state-webhooks-field
     // template:begin service-auth:service-state-service-tokens-field
-    /// This service's outbound token source: one handle per receiver,
-    /// `TokenSource::receiver("catalog")`, for gRPC and HTTP clients.
     pub service_tokens: infra_serviceauth::TokenSource,
     // template:end service-auth:service-state-service-tokens-field
 }

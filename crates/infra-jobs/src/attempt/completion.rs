@@ -43,7 +43,6 @@ impl Completions {
     }
 }
 
-/// One writer per deadline, so no writer holds another deadline's queue.
 #[derive(Default)]
 struct CompletionGroup {
     queued: Mutex<Vec<QueuedCompletion>>,
@@ -57,8 +56,6 @@ enum WriteTurn<'a> {
 
 struct QueuedCompletion {
     fence: ClaimFence,
-    // Fields drop in declaration order: the membership retires before reply
-    // closure can wake a waiter that immediately registers another completion.
     membership: MetricMembership,
     slots: Arc<AttemptSlots>,
     reply: oneshot::Sender<CompletionReply>,
@@ -79,8 +76,6 @@ impl QueuedCompletion {
 }
 
 impl CompletionGroup {
-    /// Dropping a waiting supervisor removes only its own queued registration.
-    /// Once taken by the writer, the batch owns retirement instead.
     fn register<'a>(
         &'a self,
         fence: ClaimFence,
@@ -121,7 +116,6 @@ impl CompletionGroup {
             reply = &mut *response => return WriteTurn::Reply(reply.unwrap_or(Err(Unacknowledged))),
             writer = self.writer.lock() => writer,
         };
-        // The previous writer may have sent our reply between the two polls.
         match response.try_recv() {
             Ok(reply) => WriteTurn::Reply(reply),
             Err(TryRecvError::Closed) => WriteTurn::Reply(Err(Unacknowledged)),
@@ -130,7 +124,6 @@ impl CompletionGroup {
     }
 }
 
-/// Retire the entire batch before a reply or sender closure can wake a waiter.
 struct CompletionBatch {
     queued: Vec<QueuedCompletion>,
     pruned_replies: Vec<oneshot::Sender<CompletionReply>>,
@@ -144,8 +137,6 @@ impl CompletionBatch {
         }
     }
 
-    /// Retire the entries `stale` selects, keeping the order of the rest. Their
-    /// senders stay open until the batch finishes or drops.
     fn prune(&mut self, stale: impl FnMut(&mut QueuedCompletion) -> bool) {
         self.pruned_replies.extend(
             self.queued
@@ -163,7 +154,6 @@ impl CompletionBatch {
 
     fn finish(mut self, results: Vec<CompletionReply>) {
         let replies = self.retire();
-        // Also close pruned replies only after every entry and SQL buffer is gone.
         drop(self);
         for (reply, result) in replies.into_iter().zip(results) {
             let _ = reply.send(result);
@@ -177,12 +167,6 @@ impl Drop for CompletionBatch {
     }
 }
 
-/// Every outcome write fences on `claim_expires_at IS NOT NULL`, which the
-/// table's CHECK makes equivalent to `state = 'running'`. A literal
-/// `state = 'running'` proves the partial `background_jobs_running` predicate,
-/// and after ANALYZE saw few running rows the planner scans that whole index
-/// for the id, dead entries of every job claimed since the last VACUUM
-/// included. This predicate leaves the primary key as the only access path.
 pub(crate) fn complete_query(
     fence: ClaimFence,
 ) -> sqlx::query::Query<'static, sqlx::Postgres, sqlx::postgres::PgArguments> {
@@ -219,8 +203,6 @@ async fn write_batch(shared: &Shared, mut batch: CompletionBatch, deadline: Inst
     if batch.queued.is_empty() || deadline_reached_or_cleanup_ended(&shared.cleanup, deadline) {
         return;
     }
-    // The batch's bind arrays live in this scope so the statement future ends,
-    // and its borrow of them with it, before any reply wakes a waiter.
     let result = {
         let (ids, generations): (SmallVec<[uuid::Uuid; 16]>, SmallVec<[i64; 16]>) = batch
             .queued

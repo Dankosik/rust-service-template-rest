@@ -12,7 +12,6 @@ use crate::protocol::{method_path, split_method_path};
 
 const REFLECTION_SERVICE: &str = v1::server_reflection_server::SERVICE_NAME;
 
-/// Health is attached later, outside the business concurrency limit and authentication.
 #[derive(Debug, Default)]
 pub struct Services {
     pub(crate) routes: tonic::service::RoutesBuilder,
@@ -35,10 +34,6 @@ impl Services {
         Self::default()
     }
 
-    /// A generated server does not list its methods; the set lets a scope requirement name a
-    /// real method and a metric carry a label no caller can invent. Kept for
-    /// [`Services::add_reflection`] to serve, hence `'static`. Describe a contract before
-    /// adding its servers.
     pub fn describe(&mut self, encoded_file_descriptor_set: &'static [u8]) -> Result<(), Error> {
         self.learn(encoded_file_descriptor_set)?;
         self.descriptor_sets.push(encoded_file_descriptor_set);
@@ -103,9 +98,6 @@ impl Services {
         Ok(())
     }
 
-    /// Serves `grpc.reflection.v1` and the `v1alpha` it replaced, as grpc-go does: older
-    /// tools ask only for `v1alpha`. Reflection is a business route: admitted, limited and
-    /// deadline-bound like any registered service.
     pub fn add_reflection(&mut self) -> Result<(), Error> {
         if std::mem::replace(&mut self.reflection, true) {
             return Err(Error::DuplicateService(REFLECTION_SERVICE));
@@ -125,8 +117,6 @@ impl Services {
             let builder = self.descriptor_sets.iter().fold(builder, |builder, set| {
                 builder.register_encoded_file_descriptor_set(set)
             });
-            // Tonic lists every described service by default. Explicit names
-            // limit ListServices while retaining all descriptors for lookup.
             self.names
                 .iter()
                 .copied()
@@ -164,7 +154,6 @@ impl Services {
         })
     }
 
-    /// Only these paths become metric labels.
     pub(crate) fn method_paths(&self) -> HashSet<Box<str>> {
         self.names
             .iter()
@@ -178,8 +167,6 @@ impl Services {
     }
 
     // template:begin authn:grpc-services-require-scopes
-    /// A method with no declared requirement admits any authenticated caller, as an OpenAPI
-    /// operation without scopes does.
     pub fn require_scopes(&mut self, path: &str, scopes: &[&str]) -> Result<(), Error> {
         if !self.is_registered_method(path) {
             return Err(Error::UnregisteredMethodPath(path.to_owned()));
@@ -194,10 +181,6 @@ impl Services {
     // template:end authn:grpc-services-require-scopes
 
     // template:begin service-auth:grpc-services-allow-callers
-    /// An empty list admits nobody. Every method of every added service, and each of
-    /// [`REFLECTION_PATHS`](crate::REFLECTION_PATHS) once reflection is added, needs a rule.
-    /// Rules are enforced only with [`Services::authenticate_callers`]; without it
-    /// [`router`](crate::router()) only checks that a declared table is complete.
     pub fn allow_callers(&mut self, path: &str, callers: &[&str]) -> Result<(), Error> {
         let reflection = self.reflection && crate::REFLECTION_PATHS.contains(&path);
         if !(self.is_registered_method(path) || reflection) {
@@ -224,17 +207,10 @@ impl Services {
         Ok(())
     }
 
-    /// Replaces bearer authentication on this listener. Without it
-    /// [`router`](crate::router()) uses the bearer verifier where compiled in and refuses to
-    /// build when none is given; a build without bearer authentication serves business calls
-    /// without a token, which configuration permits only in development.
     pub fn authenticate_callers(&mut self, verifier: infra_serviceauth::Verifier) {
         self.caller_verifier = Some(verifier);
     }
 
-    /// Complete whenever service tokens are verified or any rule is declared. A registration
-    /// that declares none and verifies no token is left to bearer authentication or, in
-    /// development, none.
     pub(crate) fn take_caller_admission(
         &mut self,
     ) -> Result<crate::service_auth::CallerAdmission, Error> {

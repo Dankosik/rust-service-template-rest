@@ -74,7 +74,6 @@ mod effect {
         }
     }
 
-    /// One attempt only. In particular, an unknown COMMIT never replays this closure.
     pub(super) async fn attempt(
         pool: &PgPool,
         event: &Event<Increment>,
@@ -90,15 +89,10 @@ mod effect {
         .await
     }
 
-    /// Join the caller's READ COMMITTED transaction; the caller alone commits it.
-    ///
-    /// Fixed bound SQL belongs to the optional example schema, not production migrations.
-    /// Arbitration must be an INSERT first: a plain read cannot settle a racing COMMIT.
     pub(super) async fn apply(
         tx: &mut Tx<'_>,
         event: &Event<Increment>,
     ) -> Result<Applied, EffectError> {
-        // Text keeps every nanosecond; PostgreSQL timestamptz would truncate precision.
         let occurred_at = event
             .occurred_at
             .format(&Rfc3339)
@@ -130,7 +124,6 @@ mod effect {
             .await?;
             return Ok(Applied::First);
         }
-        // A fresh statement sees the winner after unique-index arbitration waited for it.
         let same: Option<bool> = sqlx::query_scalar(
             "SELECT event_type = $3 AND schema_version = $4 AND occurred_at = $5 \
              AND counter_id = $6 AND delta = $7 FROM recovery_effect_receipts \
@@ -152,7 +145,6 @@ mod effect {
         }
     }
 
-    /// A cancellation or database failure never acknowledges an unresolved effect.
     pub(super) async fn handle(
         pool: &PgPool,
         event: &Event<Increment>,
@@ -259,7 +251,6 @@ async fn durable_receipt_survives_restart_and_rejects_changed_meaning(pool: PgPo
             infra_messaging::HandlerError::Permanent
         );
     }
-    // A receipt from another contract version cannot stand in for this meaning.
     for sql in [
         "UPDATE recovery_effect_receipts SET event_type = 'other.kind'",
         "UPDATE recovery_effect_receipts SET event_type = 'recovery.counter.incremented', schema_version = 2",
@@ -431,7 +422,6 @@ async fn unknown_commit_is_unresolved_until_later_same_identity_arbitration(pool
         );
         assert_eq!(proxy.fired(), Some(fault));
         let committed = fault == commit_proxy::Fault::ForwardThenDrop;
-        // Observe durable state independently before the explicit reconciliation attempt.
         let receipts: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM recovery_effect_receipts WHERE logical_id = $1",
         )

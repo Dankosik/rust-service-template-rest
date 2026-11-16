@@ -1,7 +1,3 @@
-//! Connection-layer outcomes (hyper 431, the accept-cap close, a
-//! protocol-sniff deadline close) are not `Problem` values even when a
-//! matching `Code` exists in the catalog.
-
 use std::time::Duration;
 
 use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE, RETRY_AFTER};
@@ -44,21 +40,14 @@ pub(crate) const fn http_status(code: Code) -> StatusCode {
         Code::TooManyRequests => StatusCode::TOO_MANY_REQUESTS,
         Code::InternalServerError => StatusCode::INTERNAL_SERVER_ERROR,
         Code::ServiceUnavailable => StatusCode::SERVICE_UNAVAILABLE,
-        // The caller had not delivered the request body when the budget expired.
         Code::RequestTimeout => StatusCode::REQUEST_TIMEOUT,
-        // The server's own budget expired while the caller waited.
         Code::GatewayTimeout => StatusCode::GATEWAY_TIMEOUT,
     }
 }
 
-/// The `type` of every problem. RFC 9457 defines `about:blank` as a problem
-/// with no semantics beyond its HTTP status and asks for the status phrase as
-/// its `title`; the `code` extension member names the specific failure.
+// RFC 9457 §4.2.1
 const ABOUT_BLANK: &str = "about:blank";
 
-/// The HTTP status phrase, as RFC 9457 asks of an `about:blank` problem. The
-/// `http` crate still spells 413 and 422 as RFC 9110 renamed them from, so
-/// those two are the registered phrases here.
 fn http_title(code: Code) -> &'static str {
     match http_status(code) {
         StatusCode::PAYLOAD_TOO_LARGE => "Content Too Large",
@@ -69,8 +58,6 @@ fn http_title(code: Code) -> &'static str {
 
 /// Which part of a request failed validation, following the RFC 9457
 /// extension-member example. Never carries the submitted value.
-// `deny_unknown_fields` on a type that is only serialized has no serde
-// effect; it is what renders `additionalProperties: false` in the schema.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct InvalidParam {
@@ -85,13 +72,6 @@ pub struct InvalidParam {
 }
 
 /// RFC 9457 problem details with a stable `code` from the closed failure catalog.
-// Where the schema deliberately differs from the Rust type: optional members
-// are omitted, never `null`, which the `nullable = false` annotations tell the
-// contract; `code` is a plain `string` rather than the closed `Code` enum,
-// because oasdiff treats a new enum value in a response as a breaking change
-// and the catalog grows with features; `deny_unknown_fields` is there for the
-// reason given on [`InvalidParam`]. The examples are `Code::BadRequest` as the catalog renders it, so a catalog
-// edit regenerates them instead of leaving a stale copy.
 #[serde_with::skip_serializing_none]
 #[derive(Clone, Debug, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -165,14 +145,12 @@ impl Problem {
         self
     }
 
-    /// Filled by problem completion; callers do not thread the id.
     #[must_use]
     fn with_request_id(mut self, id: &str) -> Self {
         self.request_id = Some(CompactString::from(id));
         self
     }
 
-    /// Adds a failed request part by name with the reason; never the submitted value.
     #[must_use]
     pub fn invalid_param(
         mut self,
@@ -186,7 +164,6 @@ impl Problem {
         self
     }
 
-    /// Emit a `Retry-After` header rounded up to whole seconds (at least one).
     #[must_use]
     pub fn retry_after(mut self, after: Duration) -> Self {
         self.retry_after = Some(after);
@@ -197,9 +174,6 @@ impl Problem {
 impl IntoResponse for Problem {
     fn into_response(self) -> Response {
         let retry_after = self.retry_after;
-        // Problem contains only infallibly serializable strings and integers.
-        // The extension lets the transport complete the body (request id) and
-        // lets the access log read the code.
         let mut response = (
             http_status(self.code),
             [(
@@ -227,21 +201,18 @@ pub(crate) fn complete_problem(mut response: Response, request_id: Option<&str>)
         return response;
     };
     let problem = problem.with_request_id(id);
-    // Keep the status and headers already set by the response's owner.
     *response.body_mut() = axum::Json(&problem).into_response().into_body();
     response.headers_mut().remove(CONTENT_LENGTH);
     response.extensions_mut().insert(problem);
     response
 }
 
-/// Whole seconds, rounded up and at least one.
 fn retry_after_value(after: Duration) -> HeaderValue {
     let seconds = after
         .as_secs()
         .checked_add(u64::from(after.subsec_nanos() != 0));
     match seconds {
         Some(seconds) => HeaderValue::from(seconds.max(1)),
-        // The only overflow is the exact ceiling u64::MAX + 1.
         None => HeaderValue::from_static("18446744073709551616"),
     }
 }
@@ -263,21 +234,6 @@ pub(crate) fn sanitized_internal_error() -> Response {
     sanitized_problem().into_response()
 }
 
-/// Reusable problem responses (`#/components/responses/<Name>`) and their
-/// registration in the document.
-///
-/// Each newtype is the declared shape of one status an operation can answer
-/// with a [`Problem`]; an operation references it as
-/// `(status = <code>, response = <Name>)`. The types exist for the document
-/// and are not constructed at runtime: the runtime value is always a
-/// `Problem`, whose code fixes the status. Their names are distinct from
-/// [`Code`] on purpose: `Code::BadRequest` is what a handler returns,
-/// `responses::BadRequest` is what the contract declares. A new status joins
-/// this module with its first operation; the shared transport set is
-/// [`responses::TransportProblemResponses`]. A response family owned by one
-/// optional pack lives with that pack's seam instead: `authn`, `webhooks`, and
-/// `idempotency`. Doc comments on the newtypes are the response descriptions
-/// in the contract.
 pub mod responses {
     use utoipa::{IntoResponses, OpenApi, ToResponse};
 

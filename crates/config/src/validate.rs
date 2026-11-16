@@ -11,8 +11,6 @@ pub struct ValidationError {
 }
 
 impl ValidationError {
-    /// A violated rule for `key`. Composition roots use it for rules that
-    /// depend on a transport constant this crate does not know.
     #[must_use]
     pub fn new(key: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
@@ -22,7 +20,6 @@ impl ValidationError {
     }
 }
 
-/// Every rule a loaded snapshot violated, in section order. Never empty.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("{}", join(.0))]
 pub struct ValidationErrors(Vec<ValidationError>);
@@ -32,7 +29,6 @@ impl ValidationErrors {
         self.0.iter()
     }
 
-    /// Whether any violation names `key`.
     #[must_use]
     pub fn names(&self, key: &str) -> bool {
         self.0.iter().any(|error| error.key == key)
@@ -56,8 +52,6 @@ fn join(errors: &[ValidationError]) -> String {
         .join("; ")
 }
 
-/// A section admission refused its input; the reason is recorded in the
-/// [`Violations`] that issued this marker, which no other path constructs.
 #[derive(Debug)]
 #[allow(
     dead_code,
@@ -65,8 +59,6 @@ fn join(errors: &[ValidationError]) -> String {
 )]
 pub(crate) struct Rejected(());
 
-/// Collects every violated rule of one admission, so an operator sees all of
-/// them in one startup failure rather than one per restart.
 #[derive(Debug, Default)]
 pub(crate) struct Violations(Vec<ValidationError>);
 
@@ -94,8 +86,6 @@ impl Violations {
         Rejected(())
     }
 
-    /// The admitted value when no rule was violated. A [`Rejected`] value
-    /// always arrives with a recorded violation, so it cannot pass.
     pub(crate) fn finish<T>(self, admitted: Result<T, Rejected>) -> Result<T, ValidationErrors> {
         match admitted {
             Ok(value) if self.0.is_empty() => Ok(value),
@@ -104,7 +94,6 @@ impl Violations {
     }
 }
 
-/// Run one admission step alone, as [`crate::ConfigInput::admit`] runs it.
 #[cfg(test)]
 pub(crate) fn admit_with<T>(
     admit: impl FnOnce(&mut Violations) -> Result<T, Rejected>,
@@ -114,7 +103,6 @@ pub(crate) fn admit_with<T>(
     violations.finish(admitted)
 }
 
-/// Run one section validator alone and return what it reported.
 #[cfg(test)]
 pub(crate) fn validate_with(
     validate: impl FnOnce(&mut Violations),
@@ -189,9 +177,6 @@ pub(crate) fn required<T>(
     value.ok_or_else(|| missing(key, condition))
 }
 
-/// `key` is absent although `condition` requires it. A secret-like key names
-/// its variable: a config file may not carry its value, so the variable, or a
-/// secrets-directory file of the same name, is the only place to set it.
 pub(crate) fn missing(key: &str, condition: &str) -> ValidationError {
     let mut message = format!("is required when {condition}");
     if is_secret_like_key(key) {

@@ -27,7 +27,6 @@ struct PerTransport {
     refused: EnumMap<Refusal, OnceLock<metrics::Counter>>,
 }
 
-/// Prepared success handles and lazy refusal handles per inbound transport.
 pub(crate) struct TransportCounters(EnumMap<Transport, PerTransport>);
 
 impl TransportCounters {
@@ -95,9 +94,6 @@ impl Refusal {
 }
 
 impl Verifier {
-    /// Fixture-only: [`Verifier::authenticate_with_context`] under a fresh
-    /// 3-second budget that is not linked to any caller's deadline or
-    /// cancellation.
     #[cfg(any(test, feature = "test-support"))]
     pub async fn authenticate<'a>(
         &self,
@@ -112,16 +108,6 @@ impl Verifier {
         .await
     }
 
-    /// Parses and verifies under the caller's original deadline and cancellation.
-    /// A stopped caller is never counted as invalid credentials.
-    ///
-    /// Pass every `Authorization` value of the request. A second value is
-    /// [`Failure::Malformed`]. No value or a single value with a valid scheme
-    /// other than Bearer is [`Failure::Missing`].
-    /// Records exactly one `authn_verifications_total` outcome labelled with
-    /// `transport`: `timeout` when the context's deadline has expired, including
-    /// when the transport drops this future to enforce it. Cancellation and
-    /// abandonment before the deadline are recorded as `cancelled`.
     pub async fn authenticate_with_context<'a>(
         &self,
         authorization: impl IntoIterator<Item = &'a [u8]>,

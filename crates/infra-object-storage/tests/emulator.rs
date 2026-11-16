@@ -1,7 +1,3 @@
-//! The client against a real S3 implementation: versitygw from
-//! `env/docker-compose.yml`. Run through `make test-integration-object-storage`,
-//! which starts the emulator and sets `OBJECT_STORAGE_TEST_ENDPOINT`.
-
 #![expect(
     clippy::unwrap_used,
     clippy::panic,
@@ -18,7 +14,6 @@ use infra_object_storage::{
 };
 use secrecy::SecretString;
 
-/// The Compose service creates it; the client never manages buckets.
 const BUCKET: &str = "template-bucket";
 
 struct Emulator {

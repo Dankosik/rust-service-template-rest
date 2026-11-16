@@ -14,10 +14,6 @@ use crate::topology::{classify_topology, validate_server};
 
 static PUBLISH_SLOTS: Mutex<BTreeMap<String, BTreeSet<usize>>> = Mutex::new(BTreeMap::new());
 
-/// Timestamped native permit occupancy, sampled only by the existing probe.
-///
-/// The first resource with a name keeps the original series. Concurrent
-/// resources with that name lease reusable slots to bound the extra series.
 #[derive(Debug)]
 pub(crate) struct PublishWork {
     connection: String,
@@ -85,7 +81,6 @@ impl PublishWork {
 
 impl Drop for PublishWork {
     fn drop(&mut self) {
-        // Invalidate the retired series before another resource can reuse it.
         self.in_flight.set(f64::NAN);
         self.last_observed.set(0.0);
         self.capacity.set(f64::NAN);
@@ -100,14 +95,6 @@ impl Drop for PublishWork {
     }
 }
 
-/// A readiness probe whose I/O runs only in health's background refresher.
-///
-/// Each check passively records native publication permits, including abandoned
-/// ACK cleanup, before any health refusal. `messaging_publish_work_in_flight`
-/// is NaN and its observation timestamp is zero until the first check. Treat
-/// stale, future or invalid timestamps and failed scrapes as unknown occupancy.
-/// This is a dated snapshot, not a continuously live count or delivery proof;
-/// `messaging_publish_capacity` is the fixed native admission limit.
 #[derive(Clone, Debug)]
 pub struct MessagingProbe {
     pub(crate) shared: Arc<Shared>,

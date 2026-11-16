@@ -7,7 +7,6 @@ pub(crate) struct SignalError {
     signal: &'static str,
 }
 
-/// Native streams remain owned by the synchronous entrypoint through runtime shutdown.
 /* jscpd:ignore-start */
 pub(crate) struct Signals {
     #[cfg(unix)]

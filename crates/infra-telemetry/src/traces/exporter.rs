@@ -1,27 +1,3 @@
-//! The OTLP span exporter, built from typed configuration and the standard
-//! `OTEL_EXPORTER_OTLP_*` variables.
-//!
-//! The typed endpoint wins over the standard endpoint variables. Otherwise the
-//! SDK usually resolves the URL. If `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` holds
-//! only whitespace, we pass an explicit traces URL from the general endpoint
-//! when available so the SDK can use that fallback.
-//! This template always builds OTLP/HTTP protobuf and does not honor
-//! `OTEL_EXPORTER_OTLP_PROTOCOL`.
-//! When the typed endpoint selects the collector, ambient header variables
-//! are refused because the SDK would merge them into the typed request, so
-//! one collector's credential is never sent to another.
-//! `OTEL_EXPORTER_OTLP_COMPRESSION` and its traces variant select `gzip`
-//! or `none`, and any other value degrades the exporter; the default is
-//! uncompressed, as the specification has it.
-//! The collector is verified with the platform trust store unless
-//! `OTEL_EXPORTER_OTLP_CERTIFICATE` names a PEM file of trusted
-//! certificates, which then are the only ones trusted;
-//! `OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE` with
-//! `OTEL_EXPORTER_OTLP_CLIENT_KEY` presents a client certificate. Each has
-//! a traces variant that wins. The SDK's OTLP/HTTP exporter reads none of
-//! them, and its default client follows ambient proxies and redirects, so
-//! this module always builds the exporter's HTTP client.
-
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
@@ -63,9 +39,6 @@ fn non_blank(value: OsString) -> Option<OsString> {
 pub(super) enum Endpoint<'a> {
     Typed(&'a str),
     Environment,
-    /// The `OTEL_EXPORTER_OTLP_ENDPOINT` root, given to the SDK as its own
-    /// traces URL, because the SDK would read the blank traces variable
-    /// first and fail to parse it.
     EnvironmentRoot(String),
 }
 
@@ -78,15 +51,11 @@ impl Endpoint<'_> {
     }
 }
 
-/// A blank variable is vacant. The SDK falls back to `localhost:4318` for
-/// an empty one and fails on a blank one, so the decision is made here.
 pub(super) fn resolve_endpoint(
     typed_endpoint: Option<&str>,
     env: impl Fn(&str) -> Option<OsString>,
 ) -> Result<Option<Endpoint<'_>>, TracingError> {
     if let Some(endpoint) = typed_endpoint.filter(|endpoint| !endpoint.trim().is_empty()) {
-        // The SDK reads the traces header variable whenever it holds
-        // Unicode, even empty, and the general one only otherwise.
         let name = if env(OTEL_EXPORTER_OTLP_TRACES_HEADERS)
             .is_some_and(|value| value.to_str().is_some())
         {
@@ -165,9 +134,6 @@ impl CollectorTrust {
     }
 }
 
-/// Degrades to [`ExporterState::Degraded`](super::ExporterState::Degraded)
-/// with the fixed reason `exporter_build`; the text stays out of logs and is
-/// read only by tests. Names the variable, never file content.
 #[derive(Debug, thiserror::Error)]
 pub(super) enum ExporterError {
     #[error(transparent)]
@@ -227,10 +193,6 @@ pub(super) fn span_exporter(
     Ok(builder.build()?)
 }
 
-/// The compression the standard variables select, read as the SDK reads
-/// them: the traces variable, then the general one, an empty value vacant.
-/// The SDK skips a value it cannot apply with a warning nobody sees, so such
-/// a value fails the build here instead.
 fn compression(
     env: &impl Fn(&str) -> Option<OsString>,
 ) -> Result<Option<opentelemetry_otlp::Compression>, ExporterError> {
@@ -259,9 +221,6 @@ fn collector_client(
     trust: &CollectorTrust,
     timeout: Duration,
 ) -> Result<reqwest::blocking::Client, ExporterError> {
-    // The blocking client starts its own runtime thread and waits for it,
-    // which an async worker must not do; the SDK builds its client the same
-    // way.
     std::thread::scope(|scope| {
         std::thread::Builder::new()
             .spawn_scoped(scope, || trusting_client(trust, timeout))
@@ -280,8 +239,6 @@ fn trusting_client(
     trust: &CollectorTrust,
     timeout: Duration,
 ) -> Result<reqwest::blocking::Client, ExporterError> {
-    // The SDK sets its timeout on the client it builds, so a supplied
-    // client carries the same one while refusing ambient proxies and redirects.
     let mut builder = reqwest::blocking::Client::builder()
         .timeout(timeout)
         .redirect(reqwest::redirect::Policy::none())
@@ -322,10 +279,6 @@ fn trusting_client(
     builder.build().map_err(ExporterError::Client)
 }
 
-/// The export timeout as the SDK resolves it from the environment: the
-/// traces variable, then the general one, in milliseconds, then ten seconds.
-/// Set on the exporter as well, so the SDK's retry deadline, a supplied
-/// client, and the export classification share this one value.
 pub(super) fn export_timeout(env: &impl Fn(&str) -> Option<OsString>) -> Duration {
     [
         OTEL_EXPORTER_OTLP_TRACES_TIMEOUT,
@@ -336,9 +289,6 @@ pub(super) fn export_timeout(env: &impl Fn(&str) -> Option<OsString>) -> Duratio
     .map_or(OTEL_EXPORTER_OTLP_TIMEOUT_DEFAULT, Duration::from_millis)
 }
 
-/// The SDK uses a programmatic endpoint verbatim. Apply the
-/// `OTEL_EXPORTER_OTLP_ENDPOINT` rule to a collector root so
-/// `http://collector:4318` posts to `/v1/traces`, not `/`.
 fn traces_url(endpoint: &str) -> String {
     match endpoint.parse::<Uri>() {
         Ok(uri) if uri.path() == "/" && uri.query().is_none() => {
@@ -352,8 +302,6 @@ fn root_traces_url(root: &str) -> String {
     format!("{}/v1/traces", root.trim_suffix('/'))
 }
 
-/// The SDK silently drops unusable headers. Check each entry before duplicate
-/// names overwrite it and report only its position, since it may be a credential.
 pub(super) fn parse_headers(raw: &str) -> Result<HashMap<String, String>, TracingError> {
     let mut headers = HashMap::new();
     for (index, entry) in raw.split(',').enumerate() {
@@ -379,10 +327,6 @@ pub(super) fn parse_headers(raw: &str) -> Result<HashMap<String, String>, Tracin
     Ok(headers)
 }
 
-// opentelemetry-otlp 0.33 (manifest 0.33.0, lockfile 0.33.1) decodes each pair
-// after '%' with from_str_radix (including a leading '+'). A malformed pair or
-// invalid UTF-8 anywhere makes with_headers send the entire original value,
-// which was already checked.
 fn decoded_otlp_header_value(value: &str) -> Option<String> {
     let (prefix, escapes) = value.split_once('%')?;
     let mut decoded = Vec::with_capacity(value.len());

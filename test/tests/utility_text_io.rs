@@ -36,8 +36,6 @@ fn normalization_and_graphemes_have_explicit_meanings() {
     assert_eq!(decomposed.nfc().collect::<String>(), "é");
     assert_eq!(decomposed.graphemes(true).count(), 1);
     assert_eq!("👨‍👩‍👧‍👦".graphemes(true).count(), 1);
-    // Do not change an identifier's normalization or a public length contract
-    // simply because these utilities are available.
 }
 
 #[test]
@@ -46,7 +44,6 @@ fn recursive_file_operations_keep_errors_and_relative_paths() {
     fs_err::create_dir(dir.path().join("nested")).unwrap();
     fs_err::write(dir.path().join("top.txt"), "top").unwrap();
     fs_err::write(dir.path().join("nested/child.txt"), "child").unwrap();
-    // Collect errors before filtering entries; filter_map(Result::ok) hides failures.
     let entries = walkdir::WalkDir::new(dir.path())
         .follow_links(false)
         .into_iter()

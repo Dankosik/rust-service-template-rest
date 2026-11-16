@@ -1,6 +1,3 @@
-//! The `log` logger and the subscriber are process-wide, so this conflict
-//! runs in its own test binary.
-
 use infra_telemetry::{LoggingError, LoggingFormat, LoggingOptions, install_subscriber};
 
 struct Taken;

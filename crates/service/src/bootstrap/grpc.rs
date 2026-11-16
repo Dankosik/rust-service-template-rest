@@ -14,8 +14,6 @@ use super::service_auth::PreparedServiceAuth;
 // template:end service-auth:bootstrap-grpc-service-auth-import
 use super::{BootstrapError, PreparedAuth};
 
-/// Called once, only when `grpc.enabled` is true, after dependencies opened,
-/// with the state the HTTP routes also receive. Must return promptly.
 pub type GrpcRegistration = fn(
     &mut infra_grpc::Services,
     &crate::AppState,
@@ -29,7 +27,6 @@ pub(super) struct Prepared {
     pub(super) options: ServerOptions,
 }
 
-/// Runs before readiness admission, so a refused registration or verifier binds nothing.
 pub(super) fn prepare(
     grpc: &GrpcConfig,
     registration: Option<GrpcRegistration>,
@@ -56,7 +53,6 @@ pub(super) fn prepare(
     // template:begin grpc-authn:bootstrap-grpc-verifier
     let verifier = match auth {
         PreparedAuth::Enabled(verifier) => Some((**verifier).clone()),
-        // Service tokens replace bearer authentication on this listener.
         PreparedAuth::None if service_tokens => None,
         PreparedAuth::None => {
             return Err(ValidationError::new(
@@ -107,7 +103,6 @@ fn limits(grpc: &GrpcConfig) -> infra_grpc::Limits {
     }
 }
 
-/// Does not read paths or perform network I/O.
 fn tls(security: &GrpcListenerSecurity) -> Result<Option<Arc<ServerConfig>>, ValidationError> {
     let GrpcListenerSecurity::Tls(material) = security else {
         return Ok(None);

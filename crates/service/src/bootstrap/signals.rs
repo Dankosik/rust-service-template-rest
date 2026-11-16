@@ -5,7 +5,6 @@ use tokio::time::Instant;
 #[error("stop signal receiver closed unexpectedly")]
 pub(crate) struct SignalError;
 
-/// Native streams stay owned through the runtime's final shutdown.
 /* jscpd:ignore-start */
 pub(crate) struct Signals {
     #[cfg(unix)]

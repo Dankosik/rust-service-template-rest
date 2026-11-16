@@ -13,15 +13,12 @@ use crate::credentials::{CredentialsFile, CredentialsFileError};
 use crate::error::MessagingError;
 use crate::messaging::{CloseOutcome, Credentials, MessagingOptions};
 
-/// async-nats 0.50 caps its reconnect backoff at 4 s, reached from the
-/// thirteenth attempt (`connector.rs`).
 const RECONNECT_BACKOFF_CAP: Duration = Duration::from_secs(4);
 const RECONNECT_CAP_ATTEMPT: usize = 13;
 
 #[derive(Clone, Debug)]
 pub(crate) struct NativeConnection {
     pub(crate) client: async_nats::Client,
-    /// Final event submission is separate from native runner completion.
     closed_event: watch::Receiver<bool>,
 }
 
@@ -56,8 +53,6 @@ impl NativeConnection {
             .reconnect_delay_callback(move |attempts| reconnect_delay(attempts, random))
             .require_tls(!options.allow_plaintext)
             .event_callback(move |event| {
-                // Submit the final event before publishing completion so the owner can retire
-                // telemetry.
                 report_connection_event(&event);
                 if matches!(event, async_nats::Event::Closed) {
                     closed_event_tx.send_replace(true);
@@ -67,8 +62,6 @@ impl NativeConnection {
         if options.tls_first {
             connect = connect.tls_first();
         } else if any_tls {
-            // Ordinary TLS sees INFO before the TLS handshake. Mixed
-            // seeds cannot share a single discovery trust boundary.
             connect = connect.ignore_discovered_servers();
         }
         if let Some(root_ca) = options.root_ca_path.clone() {
@@ -87,8 +80,6 @@ impl NativeConnection {
         })
     }
 
-    // Completion at entry takes precedence over cancellation and deadline.
-    // When the wait is interrupted, the native client owns the requested termination.
     pub(crate) async fn close(
         &self,
         deadline: Instant,
@@ -102,11 +93,9 @@ impl NativeConnection {
             return CloseOutcome::Complete;
         }
         let drain = async {
-            // The second check observes a close that `drain` itself completed.
             if !closed_now() && client.drain().await.is_err() && !closed_now() {
                 return CloseOutcome::UnobservedClose;
             }
-            // A submitted Closed event cannot stand in for native resource release.
             if !client.wait_closed().await {
                 return CloseOutcome::UnobservedClose;
             }
@@ -129,7 +118,6 @@ impl NativeConnection {
         if outcome != CloseOutcome::Complete {
             client.force_close();
             if outcome == CloseOutcome::UnobservedClose && Instant::now() < deadline {
-                // Forced closure does not gain a fresh wait budget.
                 tokio::select! {
                     biased;
                     () = cancel.cancelled() => {}
@@ -150,7 +138,6 @@ async fn connect_options(
         None => Ok(async_nats::ConnectOptions::new()),
         Some(Credentials::Inline(credentials)) => async_nats::ConnectOptions::new()
             .credentials(credentials.expose_secret())
-            // The client's parse error is free text about the credentials.
             .map_err(|_| credentials_failure(CredentialsFileError::Malformed)),
         Some(Credentials::File(path)) => {
             let file = bounded_operation(deadline, cancel, async {
@@ -173,13 +160,10 @@ async fn connect_options(
     }
 }
 
-/// Keeps the SDK's immediate attempts and capped backoff, spreading each later
-/// attempt; the spread only shortens a delay, so it never exceeds the SDK's.
 fn reconnect_delay(attempts: usize, random: &dyn SecureRandom) -> Duration {
     if attempts <= 1 {
         return Duration::ZERO;
     }
-    // Cap before shifting so even usize::MAX cannot wrap into a short retry.
     let base = if attempts >= RECONNECT_CAP_ATTEMPT {
         RECONNECT_BACKOFF_CAP
     } else {
@@ -197,7 +181,6 @@ fn spread_reconnect_delay(base: Duration, sample: Result<u16, GetRandomFailed>) 
     base.saturating_sub(spread)
 }
 
-/// Logs why a credentials source is unusable, never its path or content.
 fn credentials_failure(error: CredentialsFileError) -> MessagingError {
     let failure = match error {
         CredentialsFileError::Unreadable(_) => {
@@ -215,7 +198,6 @@ fn credentials_failure(error: CredentialsFileError) -> MessagingError {
     failure
 }
 
-/// The client's error source can quote a server URL, so only its closed kind is logged.
 fn connect_failure(error: &async_nats::ConnectError, budget: Duration) -> MessagingError {
     let (failure, error_type) = match error.kind() {
         ConnectErrorKind::Authentication => (MessagingError::Authentication, "authentication"),
@@ -241,8 +223,6 @@ fn connect_failure(error: &async_nats::ConnectError, budget: Duration) -> Messag
     failure
 }
 
-/// The client reports a slow consumer once per dropped message, so it is only
-/// counted. Server and client error text is arbitrary and stays out of the log.
 fn report_connection_event(event: &async_nats::Event) {
     use async_nats::{ClientError, Event, ServerError};
 
@@ -367,8 +347,6 @@ mod tests {
         let events = Events::default();
         let subscriber = tracing_subscriber::registry().with(events.clone());
         tracing::subscriber::with_default(subscriber, || {
-            // Keep callsite interest independent of a sibling test's
-            // thread-local subscriber.
             let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
             test();
         });
@@ -438,7 +416,6 @@ mod tests {
             let line = format!("messaging_connection_events_total{{result=\"{result}\"}} {count}");
             assert!(scrape.contains(&line), "{line} is missing from:\n{scrape}");
         }
-        // A slow consumer is reported once per dropped message and only counted.
         let logged: Vec<_> = events
             .iter()
             .map(|event| {

@@ -84,7 +84,6 @@ fn workload_identity_is_built_without_io_and_only_for_amazon() {
     });
     amazon.credentials = CredentialSource::WorkloadIdentity;
     assert_eq!(format!("{:?}", amazon.credentials), "WorkloadIdentity");
-    // No runtime and no network: credentials load on the first call.
     assert_eq!(
         ObjectStorage::try_new(amazon).unwrap().provider_name(),
         "amazon_s3"
@@ -302,7 +301,7 @@ async fn collected_s3_replies_keep_native_errors_at_the_limit_and_are_lost_above
     ] {
         for status in [StatusCode::OK, StatusCode::FORBIDDEN] {
             if method == Method::GET && status.is_success() {
-                continue; // Successful GET is covered by the checked streaming test.
+                continue;
             }
             for length in [LIMIT, LIMIT + 1] {
                 let payload = Bytes::from(format!(
@@ -333,7 +332,7 @@ async fn collected_s3_replies_keep_native_errors_at_the_limit_and_are_lost_above
                     _ => unreachable!(),
                 };
                 let expected = if length == LIMIT {
-                    ObjectStorageError::Rejected // Native NoSuchBucket classification.
+                    ObjectStorageError::Rejected
                 } else if method == Method::GET {
                     ObjectStorageError::Unavailable
                 } else {
@@ -377,7 +376,6 @@ async fn create_only_put_sends_if_none_match_once_and_maps_412() {
 #[tokio::test]
 async fn a_provider_without_proven_checksums_gets_no_checksum_headers() {
     let stub = Stub::start(|_, _| ok_empty()).await;
-    // Railway's admission refuses plaintext, so build its policy on the stub.
     let mut storage = stub.storage(|_| {});
     std::sync::Arc::get_mut(&mut storage.inner)
         .unwrap()
@@ -433,7 +431,6 @@ async fn mutations_make_one_attempt() {
     let stub =
         Stub::start(|_, _| xml_error(StatusCode::INTERNAL_SERVER_ERROR, "InternalError")).await;
     let storage = stub.storage(|_| {});
-    // A request body: axum's `Body` is `Send` but not `Sync`.
     let body = Body::from("streamed");
     assert_eq!(
         storage
@@ -467,8 +464,6 @@ async fn a_stream_that_differs_from_its_length_is_rejected() {
 
 #[tokio::test]
 async fn empty_stream_preparation_and_response_share_one_put_timeout() {
-    // Each phase fits alone; together they exceed the two-second call budget.
-    // Delays model slow input/provider I/O, rather than synchronize test tasks.
     let delay = Duration::from_millis(1500);
     let stub = Stub::start_with_delay(delay, |_, _| ok_empty()).await;
     let storage = stub.storage(|options| options.max_concurrency = 1);
@@ -486,7 +481,6 @@ async fn empty_stream_preparation_and_response_share_one_put_timeout() {
     .await
     .unwrap();
     let sent = stub.seen().len();
-    // A timed-out call releases its slot, even though the provider may finish.
     let follow_up = storage
         .put(&key(), Bytes::new().into(), PutOptions::default())
         .await;
@@ -515,7 +509,6 @@ async fn oversized_put_sends_nothing() {
 async fn get_reads_the_body_and_validates_a_returned_checksum() {
     use aws_smithy_checksums::ChecksumAlgorithm;
 
-    // Successful GET stays streaming even above the control-response ceiling.
     for payload in [
         Bytes::from_static(b"{\"ok\":true}"),
         Bytes::from(vec![b'x'; 1024 * 1024 + 1]),
@@ -586,8 +579,6 @@ async fn get_with_a_wrong_checksum_fails_integrity_at_the_end() {
         Err(ObjectStorageError::Integrity)
     );
 
-    // A reader that stops at the declared length, as hyper does for a
-    // response body, never receives the bytes that complete the object.
     let mut download = storage.get(&key()).await.unwrap();
     let mut received = 0;
     let failure = loop {
@@ -605,9 +596,6 @@ async fn get_with_a_wrong_checksum_fails_integrity_at_the_end() {
 async fn get_distinguishes_short_eof_from_an_interrupted_body() {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-    // HTTP ends a 204 body at the headers, even if the provider claims a
-    // positive length. For a 200 with the same headers, closing early is a
-    // transport error before the SDK's content-length check sees EOF.
     for (status, expected) in [
         ("204 No Content", ObjectStorageError::Integrity),
         ("200 OK", ObjectStorageError::Unavailable),
@@ -671,8 +659,6 @@ async fn an_empty_object_ends_inside_get() {
     let stub = Stub::start(|_, _| object(b"", &[])).await;
     let storage = stub.storage(|options| options.max_concurrency = 1);
     let download = storage.get(&key()).await.unwrap();
-    // An HTTP server never polls a body that is already at its end, so the
-    // outcome and the slot must not wait for a reader.
     assert!(http_body::Body::is_end_stream(&download));
     assert_eq!(http_body::Body::size_hint(&download).exact(), Some(0));
     let rendered = handle.render();
@@ -715,7 +701,6 @@ async fn missing_objects_are_not_found_and_reads_retry() {
     assert_eq!(stub.seen().len(), 1);
 
     let stub = Stub::start(|_, _| xml_error(StatusCode::SERVICE_UNAVAILABLE, "SlowDown")).await;
-    // Two jittered backoffs of at most 1 s each fit this budget.
     let storage = stub.storage(|options| options.operation_timeout = Duration::from_secs(10));
     assert_eq!(
         storage.get(&key()).await.err(),
@@ -726,8 +711,6 @@ async fn missing_objects_are_not_found_and_reads_retry() {
 
 #[tokio::test]
 async fn a_hung_read_attempt_leaves_room_for_a_retry() {
-    // The first response never arrives inside the 4 s budget. The attempt
-    // bound (half of it) gives up on it, and the retry is answered at once.
     let stub = Stub::start_delaying(
         |index| Duration::from_secs(if index == 0 { 30 } else { 0 }),
         |_, _| object(b"{}", &[]),
@@ -743,7 +726,6 @@ async fn a_hung_read_attempt_leaves_room_for_a_retry() {
 
 #[tokio::test]
 async fn a_mutation_keeps_the_whole_budget_for_its_one_attempt() {
-    // Slower than a read attempt's share of the 2 s budget, but inside it.
     let stub = Stub::start_with_delay(Duration::from_millis(1300), |_, _| ok_empty()).await;
     let storage = stub.storage(|_| {});
     let result = put_json(&storage).await;
@@ -860,7 +842,6 @@ async fn admission_refuses_excess_and_a_download_holds_its_slot() {
     let mut completed = storage.get(&key()).await.unwrap();
     while completed.next_chunk().await.unwrap().is_some() {}
     assert_eq!(completed.next_chunk().await.unwrap(), None);
-    // A completed download releases admission even while the value is retained.
     storage.head(&key()).await.unwrap();
 }
 
@@ -900,7 +881,6 @@ async fn unreachable_endpoint_is_unavailable_for_reads_and_unknown_for_writes() 
 async fn presign_is_bounded_and_redacted() {
     let stub = Stub::start(|_, _| ok_empty()).await;
     let mut storage = stub.storage(|_| {});
-    // As on Amazon S3: the owner header would have to travel with the URL.
     std::sync::Arc::get_mut(&mut storage.inner)
         .unwrap()
         .expected_bucket_owner = Some("123456789012".to_owned());
@@ -972,8 +952,6 @@ async fn the_span_names_the_region_only_on_amazon() {
     );
 }
 
-// First registration can race a dispatcher rebuild in tracing-core 0.1.36; a
-// fresh callsite lifetime avoids it.
 #[expect(
     clippy::disallowed_methods,
     clippy::print_stdout,
@@ -1091,7 +1069,6 @@ async fn a_failure_reports_the_request_identifiers_of_its_response() {
         let mut response = xml_error(StatusCode::FORBIDDEN, "AccessDenied");
         let headers = response.headers_mut();
         if index == 1 {
-            // Not an identifier: a store may send any header text.
             headers.insert("x-amz-request-id", "not an identifier".parse().unwrap());
         } else {
             headers.insert("x-amz-request-id", REQUEST_ID.parse().unwrap());
@@ -1139,7 +1116,6 @@ async fn a_failure_reports_the_request_identifiers_of_its_response() {
     assert_eq!(failed.len(), 2);
     assert!(!failed[1].contains("request_id"), "{}", failed[1]);
 
-    // A GET whose answer arrives as its context stops still names the reply.
     let context = operation_context::OperationContext::with_timeout(Duration::from_secs(2));
     let mut late = stub.storage(|_| {});
     let inner = Arc::get_mut(&mut late.inner).unwrap();
@@ -1184,7 +1160,6 @@ async fn metrics_carry_only_operation_and_outcome() {
     let stub = Stub::start(|_, _| xml_error(StatusCode::NOT_FOUND, "NoSuchKey")).await;
     let storage = stub.storage(|_| {});
     metrics::with_local_recorder(&recorder, || {
-        // Handles bind on first use, so resolve them under this recorder.
         let guard = storage.start_observation(crate::observe::Operation::Head);
         drop(guard);
         storage
@@ -1582,8 +1557,6 @@ impl aws_sdk_s3::config::Intercept for StopAfterSdkAnswer {
         _config: &mut aws_smithy_types::config_bag::ConfigBag,
     ) -> Result<(), aws_smithy_runtime_api::box_error::BoxError> {
         if self.deadline {
-            // This deliberately non-preemptible SDK callback crosses the real
-            // cutoff in the final poll. It is not task synchronization.
             #[expect(
                 clippy::disallowed_methods,
                 reason = "the synchronous SDK fixture deliberately crosses the cutoff inside one final poll"
@@ -1656,7 +1629,6 @@ async fn final_sdk_answers_preserve_mutations_but_reject_late_get_headers() {
     }
 }
 
-// Acquiring the occupied slot synchronizes on release, not on a guessed sleep.
 #[tokio::test]
 async fn an_unpolled_get_expires_and_admits_fresh_work() {
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
@@ -1691,8 +1663,6 @@ async fn an_unpolled_get_expires_and_admits_fresh_work() {
     assert_eq!(http_body::Body::size_hint(&held).lower(), 0);
     assert_eq!(http_body::Body::size_hint(&held).upper(), None);
     assert!(!http_body::Body::is_end_stream(&held));
-    // Hyper's framing can skip an exact-zero body even when is_end_stream is false;
-    // no explicit Content-Length.
     let held = Arc::new(Mutex::new(Some(held)));
     let consumer =
         Stub::start(move |_, _| Response::new(Body::new(held.lock().unwrap().take().unwrap())))

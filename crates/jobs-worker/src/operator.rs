@@ -79,7 +79,6 @@ impl Request {
         }
     }
 
-    /// The operation was never invoked, so a mutation certainly did not commit.
     fn failed_before_start(&self, cause: Cause) -> FailureReceipt {
         FailureReceipt {
             outcome: if self.is_mutation() {
@@ -92,8 +91,6 @@ impl Request {
         }
     }
 
-    /// An admission check refused before the operation: `detail` names which
-    /// refusal, since each one asks the operator for a different remedy.
     fn refused(&self, cause: Cause, detail: &'static str) -> FailureReceipt {
         FailureReceipt {
             detail: Some(FailureDetail::Admission { detail }),
@@ -101,7 +98,6 @@ impl Request {
         }
     }
 
-    /// The operation may have run, so a mutation's commit is unknown.
     fn failed_after_start(&self, cause: Cause) -> FailureReceipt {
         FailureReceipt {
             outcome: if self.is_mutation() {
@@ -425,7 +421,6 @@ async fn serve(config: &PostgresConfig, request: &Request) -> Report {
     };
     let Ok(dsn) = Dsn::admit_with(config.dsn.expose_secret(), config.password_file.as_deref())
     else {
-        // Do not repeat an arbitrary URL parameter from DsnError::Parameter.
         return request.failed_before_start(Cause::Dsn).into();
     };
     let options =
@@ -446,7 +441,6 @@ async fn serve(config: &PostgresConfig, request: &Request) -> Report {
         Err(cause) => return request.failed_before_start(cause).into(),
     };
     let result = verify_and_execute(&pool, &mut signals, request).await;
-    // A missing close acknowledgement never changes a known commit outcome.
     let cleanup_incomplete =
         infra_postgres::close(&pool, DEPENDENCY_CLOSE).await != CloseOutcome::Complete;
     Report {
@@ -492,8 +486,6 @@ async fn verify_and_execute(
     }
 }
 
-// Fixed names rather than the errors' text: a driver message can carry
-// server-side detail, and the receipt promises bounded diagnostics.
 const fn connect_detail(error: &ConnectError) -> &'static str {
     match error {
         ConnectError::Timeout { .. } => "timeout",
@@ -522,8 +514,6 @@ const fn startup_detail(error: StartupError) -> &'static str {
     }
 }
 
-/// Prefer an already observed result to cancellation; pending stops prevent
-/// invoking the next stage. Dropping the future precedes dependency close.
 async fn bounded<T>(
     signals: &mut Signals,
     budget: Duration,

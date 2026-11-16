@@ -1,10 +1,3 @@
-//! Immutable named outbound integration configuration.
-//!
-//! This section admits configuration shape only. Token URL, scope and cache
-//! capacity admission belong to the credentials adapter, as destination
-//! admission belongs to the gRPC transport. Neither section constructs a
-//! credential owner or performs token or resource I/O.
-
 use std::collections::BTreeMap;
 
 use secrecy::SecretString;
@@ -88,10 +81,7 @@ pub struct OAuthConfig {
 }
 
 impl OAuthConfig {
-    /// One retained token per user active within a token lifetime on one
-    /// replica.
     const DEFAULT_EXCHANGE_CACHE_CAPACITY: u32 = 1024;
-    /// Matches introspection's default while bounding distinct token attempts.
     const DEFAULT_PROVIDER_CONCURRENCY: std::num::NonZeroU32 =
         std::num::NonZeroU32::new(32).expect("32 is nonzero");
 }
@@ -120,9 +110,6 @@ pub enum OAuthAlgorithm {
     Es256,
 }
 
-/// Decoded by hand so a refused value is answered with the accepted ones:
-/// config-rs reports a derived enum's mismatch without naming them, and this
-/// key has no default to fall back on.
 impl<'de> Deserialize<'de> for OAuthAlgorithm {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where

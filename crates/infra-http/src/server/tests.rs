@@ -213,8 +213,6 @@ async fn cancelling_drain_forces_in_flight_connection_cleanup() {
 #[tokio::test]
 async fn accept_timeout_is_distinct_and_forces_connection_cleanup() {
     let (mut server, peer) = pending_request().await;
-    // Control the native acceptance owner independently of the real
-    // open request: the deadline must include its unconfirmed join.
     let stalled = tokio::spawn(std::future::pending());
     let abort = stalled.abort_handle();
     let accept = std::mem::replace(
@@ -254,8 +252,6 @@ async fn accept_failure_stays_sticky_and_drain_preserves_it_while_cleaning_conne
             .unwrap(),
         failure
     );
-    // Fault observation leaves the native join for drain, while the
-    // real open request still needs forced cleanup.
     let result = server.drain(Duration::from_millis(20)).await;
     std::assert_matches!(result, Err(ServerError::AcceptTask(error)) if error.is_cancelled());
     assert_peer_closed(peer).await;
@@ -287,7 +283,6 @@ async fn accept_panic_after_stop_is_still_observed() {
             .unwrap(),
         AcceptFailure::Panicked
     );
-    // Observing the fault does not consume acceptance's join outcome.
     std::assert_matches!(server.drain(Duration::from_secs(1)).await, Err(ServerError::AcceptTask(error)) if error.is_panic()
     );
     drop(peer);
@@ -311,8 +306,6 @@ async fn silent_client_is_closed_after_the_header_timeout() {
 async fn a_stalled_http2_preface_is_closed_after_the_header_timeout() {
     let server = Server::bind(loopback(), app(), options()).await.unwrap();
     let mut stalled = TcpStream::connect(server.local_addr()).await.unwrap();
-    // A strict prefix of the HTTP/2 preface leaves the protocol undecided,
-    // which is before hyper's own header timer starts.
     stalled.write_all(b"PRI * HTTP/2.0\r\n").await.unwrap();
     let mut buf = [0u8; 1];
     let closed = tokio::time::timeout(Duration::from_secs(2), stalled.read(&mut buf)).await;
@@ -360,13 +353,9 @@ async fn an_undecided_protocol_cannot_be_read_after_the_deadline() {
 #[tokio::test(start_paused = true)]
 async fn a_decided_protocol_is_never_timed_out() {
     let cases: [&[&[u8]]; 4] = [
-        // An HTTP/1 request line differs from the preface at once.
         &[b"GET"],
-        // It differs after a prefix that matched.
         &[b"PR", b"OPFIND"],
-        // The whole preface, in two reads.
         &[b"PRI * HTTP/2.0\r\n", b"\r\nSM\r\n\r\n"],
-        // The whole preface and the first frame bytes in one read.
         &[b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\0\0"],
     ];
     for chunks in cases {
@@ -389,8 +378,6 @@ async fn drain_does_not_wait_for_a_connection_that_sent_nothing() {
     let server = Server::bind(loopback(), app(), opts).await.unwrap();
     let addr = server.local_addr();
     let mut silent = TcpStream::connect(addr).await.unwrap();
-    // Connections are accepted in order, so an answer on a later one
-    // proves the silent one already has its task.
     assert!(fetch(addr, "/ok").await.starts_with("HTTP/1.1 200 "));
     let drained = server.drain(Duration::from_secs(2)).await.unwrap();
     assert_eq!(drained, Drained::Complete);
@@ -414,8 +401,6 @@ async fn oversized_header_is_431() {
     let outcome =
         tokio::time::timeout(Duration::from_secs(2), stream.read_to_end(&mut response)).await;
     let text = String::from_utf8_lossy(&response);
-    // hyper answers, then closes with unread request bytes pending, which
-    // surfaces as EOF or a reset depending on timing.
     std::assert_matches!(outcome, Ok(Ok(_) | Err(_)), "{outcome:?}");
     assert!(
         text.starts_with("HTTP/1.1 431 "),
@@ -432,7 +417,6 @@ async fn connection_cap_refuses_the_excess() {
     let server = Server::bind(loopback(), app(), opts).await.unwrap();
     let addr = server.local_addr();
     let first = TcpStream::connect(addr).await.unwrap();
-    // Let the accept loop take the permit before the second connect.
     tokio::time::sleep(Duration::from_millis(50)).await;
     let mut second = TcpStream::connect(addr).await.unwrap();
     second
@@ -441,7 +425,6 @@ async fn connection_cap_refuses_the_excess() {
         .unwrap();
     let mut buf = Vec::new();
     let outcome = tokio::time::timeout(Duration::from_secs(2), second.read_to_end(&mut buf)).await;
-    // Closed with unread bytes pending: EOF or a reset, never a response.
     std::assert_matches!(
         outcome,
         Ok(Ok(0) | Err(_)),
@@ -466,8 +449,6 @@ async fn a_connection_past_its_age_closes_once_idle_and_new_ones_are_served() {
     kept.write_all(b"GET /ok HTTP/1.1\r\nHost: localhost\r\n\r\n")
         .await
         .unwrap();
-    // The keep-alive response, then EOF when the age is reached: far
-    // sooner than the five-second idle bound.
     let mut response = Vec::new();
     let closed =
         tokio::time::timeout(Duration::from_secs(2), kept.read_to_end(&mut response)).await;
@@ -556,11 +537,7 @@ async fn drain_does_not_wait_for_an_unfinished_tls_handshake() {
     );
     let addr = server.local_addr();
     let mut stalled = TcpStream::connect(addr).await.unwrap();
-    // The first byte of a handshake record: the handshake has begun and
-    // cannot finish.
     stalled.write_all(&[0x16]).await.unwrap();
-    // Connections are accepted in order, so a completed handshake on a
-    // later one proves the stalled one already has its task.
     let later = TcpStream::connect(addr).await.unwrap();
     let later = TlsConnector::from(Arc::new(client_config))
         .connect(ServerName::try_from("localhost").unwrap(), later)

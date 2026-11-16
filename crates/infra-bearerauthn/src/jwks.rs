@@ -25,7 +25,6 @@ pub enum JwtAlgorithm {
     EdDsa,
 }
 
-/// The bounds of an RSA modulus that aws-lc verifiers accept.
 const MIN_RSA_MODULUS_BITS: usize = 2048;
 const MAX_RSA_MODULUS_BITS: usize = 8192;
 
@@ -53,9 +52,6 @@ impl From<SignatureVerificationError> for VerificationError {
 
 struct JwtKey {
     kid: Option<String>,
-    /// One aws-lc key per algorithm the key serves. A JWK without `alg` serves
-    /// every configured algorithm of its family, as Nimbus and go-oidc do.
-    /// Parsing once keeps RSA Montgomery setup off the request path.
     parsed_keys: Vec<(JwtAlgorithm, ParsedPublicKey)>,
 }
 
@@ -72,14 +68,9 @@ pub(crate) struct KeySet {
     generation: u64,
 }
 
-/// Parsed sets in this process have distinct [`KeySet::generation`] values
-/// until the counter wraps.
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 impl KeySet {
-    /// Names this parsed set, not its content: a refresh that fetches the
-    /// same keys installs a set with a new generation. A decision derived from
-    /// the keys stays valid exactly while the installed set has this value.
     pub(crate) const fn generation(&self) -> u64 {
         self.generation
     }
@@ -158,8 +149,6 @@ fn parse_key_set(bytes: &[u8], configured: &[JwtAlgorithm]) -> Result<KeySet, Ke
             Err(reason) => *rejected.entry(reason).or_default() += 1,
         }
     }
-    // Aggregate per-entry rejection evidence into one event per closed reason.
-    // Neither provider-controlled entry count nor key identifiers multiply logs.
     for (reason, count) in rejected {
         tracing::debug!(
             reason = reason.label(),
@@ -219,8 +208,7 @@ fn permits_signature_verification(jwk: &Jwk) -> bool {
         .common
         .key_operations
         .as_ref()
-        // RFC 7517 section 4.3 only says what the key may do; other listed
-        // operations are the publisher's concern, not a verifier's.
+        // RFC 7517 §4.3
         .is_none_or(|operations| operations.contains(&KeyOperations::Verify))
 }
 
@@ -284,8 +272,6 @@ enum KeyVerification {
     Raw(&'static dyn signature::VerificationAlgorithm),
 }
 
-/// Decoded public key material, checked with aws-lc at admission so an
-/// unusable entry is skipped instead of failing every token that names it.
 enum KeyMaterial {
     Rsa { modulus: Vec<u8>, exponent: Vec<u8> },
     Raw(Vec<u8>),
@@ -314,10 +300,8 @@ impl KeyMaterial {
 fn key_material(parameters: &AlgorithmParameters) -> Option<KeyMaterial> {
     match parameters {
         AlgorithmParameters::RSA(parameters) => {
-            // Some IdPs emit a leading zero byte; install the minimal encoding.
             let modulus = without_leading_zeros(&URL_SAFE_NO_PAD.decode(&parameters.n).ok()?)?;
             let exponent = without_leading_zeros(&URL_SAFE_NO_PAD.decode(&parameters.e).ok()?)?;
-            // aws-lc parsing does not bound the size, but its verifiers do.
             let bits = modulus.len() * 8 - modulus[0].leading_zeros() as usize;
             (MIN_RSA_MODULUS_BITS..=MAX_RSA_MODULUS_BITS)
                 .contains(&bits)
@@ -362,8 +346,6 @@ pub(crate) enum KeySetFailure {
     NoUsableKeys,
 }
 
-/// Startup reports a failed key-set acquisition in the
-/// [`Jwks`](crate::PreparationPhase::Jwks) phase.
 impl From<KeySetFailure> for PreparationReason {
     fn from(failure: KeySetFailure) -> Self {
         match failure {
@@ -397,8 +379,6 @@ pub(crate) mod tests {
     pub(crate) const JWT_SIGNING_DER: &[u8] =
         include_bytes!("../tests/fixtures/authn-jwt-signing-key.der");
 
-    /// Fixture signing uses jsonwebtoken, which needs its crypto provider;
-    /// verification itself does not.
     pub(crate) fn ensure_crypto_provider() {
         let _ = jsonwebtoken::crypto::aws_lc::DEFAULT_PROVIDER.install_default();
     }
@@ -411,8 +391,6 @@ pub(crate) mod tests {
         EncodingKey::from_ec_der(&rcgen::KeyPair::generate().unwrap().serialize_der())
     }
 
-    /// An Ed25519 signing key and its public JWK. jsonwebtoken derives a JWK
-    /// only from a 48-byte PKCS #8 v1 key, so the JWK is written here.
     pub(crate) fn ed_signing(kid: &str) -> (EncodingKey, serde_json::Value) {
         use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair as _};
 
@@ -515,7 +493,6 @@ pub(crate) mod tests {
             (8192, true),
             (8200, false),
         ] {
-            // The most significant byte fixes the bit length; the low bit keeps it odd.
             let mut modulus = vec![0xff_u8; bits.div_ceil(8)];
             modulus[0] = 0xff >> (modulus.len() * 8 - bits);
             let key = serde_json::json!({
@@ -546,13 +523,9 @@ pub(crate) mod tests {
     #[test]
     fn rejected_entries_are_counted_per_reason_in_one_event_without_key_ids() {
         let diagnostics = Diagnostics::default();
-        // Two independent registrations avoid tracing's single-dispatch shortcut
-        // caching a sibling thread's NoSubscriber interest for shared callsites.
         let _registration_anchor =
             tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         let dispatch = diagnostics.dispatch();
-        // Unknown key parameters fall back to the library's Other family.
-        // A wrongly typed consumed common field exercises malformed entries.
         let entries = vec![serde_json::json!({"kid":"private-key-id","use":false}); 100];
         let bytes = serde_json::to_vec(&serde_json::json!({"keys":entries})).unwrap();
         let parsed = metrics::with_local_recorder(diagnostics.recorder(), || {

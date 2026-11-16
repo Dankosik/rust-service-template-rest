@@ -8,10 +8,7 @@ use std::{borrow::Cow, fmt};
 use crate::TokenProfile;
 // template:end oidc-jwt:authn-claims-jwt-import
 
-/// Tolerated clock skew between the issuer and this verifier at the moment of
-/// a check (RFC 7519 allows "a few minutes" at most); half of jsonwebtoken's
-/// 60-second default keeps an expired token's grace short. Retention never
-/// adds it: leeway forgives skew in a check, it does not extend reuse.
+/// RFC 7519 §4.1.4
 const LEEWAY_SECONDS: u64 = 30;
 
 #[derive(Clone)]
@@ -46,7 +43,6 @@ impl ClaimPolicy {
     }
 }
 
-/// `aud`, or `scope`/`scp` (whose single string is space-delimited): one string or an array.
 enum Values<'a> {
     One(Cow<'a, str>),
     Many(Vec<Cow<'a, str>>),
@@ -73,7 +69,6 @@ impl<'de: 'a, 'a> Deserialize<'de> for Values<'a> {
                 self,
                 mut seq: A,
             ) -> Result<Self::Value, A::Error> {
-                // The size hint comes from the untrusted payload; cap the preallocation.
                 let mut values = Vec::with_capacity(seq.size_hint().unwrap_or(0).min(64));
                 while let Some(BorrowableString(value)) = seq.next_element()? {
                     values.push(value);
@@ -85,13 +80,10 @@ impl<'de: 'a, 'a> Deserialize<'de> for Values<'a> {
     }
 }
 
-/// A bare [`Cow<str>`](Cow) element always deserializes as owned; `#[serde(borrow)]`
-/// lets an escape-free string borrow from the payload.
 #[derive(Deserialize)]
 struct BorrowableString<'a>(#[serde(borrow)] Cow<'a, str>);
 
-/// The outermost RFC 8693 `act` object. Both engines treat a missing or null
-/// claim as absent and ignore nested actors.
+/// RFC 8693 §4.1
 #[derive(Deserialize)]
 struct RawAct<'a> {
     #[serde(borrow)]
@@ -101,8 +93,6 @@ struct RawAct<'a> {
 }
 
 impl RawAct<'_> {
-    /// `sub` must be non-empty; an empty value is malformed evidence, not an
-    /// absent actor, so the caller maps `Err` to its own malformed reason.
     fn into_actor(self) -> Result<Actor, ()> {
         if self.sub.is_empty() {
             return Err(());
@@ -133,7 +123,6 @@ struct JwtClaims<'a> {
     #[serde(borrow)]
     aud: Option<Values<'a>>,
     exp: Option<NumericDate>,
-    /// A `null` or non-numeric `nbf` is malformed, not absent.
     #[serde(default, deserialize_with = "present_numeric_date")]
     nbf: Option<u64>,
     #[serde(borrow)]
@@ -159,7 +148,6 @@ struct JwtClaims<'a> {
 // template:end oidc-jwt:authn-claims-jwt-type
 
 // template:begin oidc-introspection:authn-claims-introspection-envelope
-/// Only `active` is read before the provider says the token is active.
 #[derive(Deserialize)]
 struct Envelope {
     active: bool,
@@ -187,8 +175,6 @@ struct ActiveClaims<'a> {
 // template:end oidc-introspection:authn-claims-introspection-envelope
 
 // template:begin oidc-jwt:authn-claims-jwt-validation
-/// A validated JWT principal with the one time claim, besides `exp`, that a
-/// later decision at another instant needs.
 #[derive(Clone, Debug)]
 pub(crate) struct VerifiedJwt {
     pub(crate) principal: Principal,
@@ -196,17 +182,12 @@ pub(crate) struct VerifiedJwt {
 }
 
 impl VerifiedJwt {
-    /// The principal if `exp` and `nbf` admit this token at `now`, with the
-    /// same leeway and reasons as validating the payload at `now`.
     pub(crate) fn deliver(&self, now: u64) -> Result<Principal, VerificationError> {
         check_lifetime(self.principal.expires_at(), self.not_before, now)?;
         Ok(self.principal.clone())
     }
 }
 
-/// Validates a payload after signature verification. Required registered claims
-/// precede lifetime, issuer, and audience checks, preserving jsonwebtoken's order;
-/// identity, the selected token profile, and scopes follow.
 pub(crate) fn validate_jwt_claims(
     payload: Vec<u8>,
     policy: &ClaimPolicy,
@@ -227,7 +208,7 @@ pub(crate) fn validate_jwt_claims(
     check_lifetime(expiry, claims.nbf, now)?;
     policy.check_issuer_and_audience(&issuer, &audience)?;
     let subject = non_empty(claims.sub);
-    // Resource-server identity accepts aliases; RFC 9068 requires `client_id` itself.
+    // RFC 9068 §2.2
     let standard_client_id = non_empty(claims.client_id);
     let has_standard_client_id = standard_client_id.is_some();
     let client_id = standard_client_id.or_else(|| {
@@ -270,7 +251,7 @@ pub(crate) fn validate_jwt_claims(
     })
 }
 
-/// An RFC 7519 `NumericDate`; fractions go through [`shared_rules::rfc7519::numeric_date_seconds`].
+/// RFC 7519 §2
 struct NumericDate(u64);
 
 impl<'de> Deserialize<'de> for NumericDate {
@@ -294,7 +275,6 @@ impl<'de> Deserialize<'de> for NumericDate {
     }
 }
 
-/// Reads a supplied member as a [`NumericDate`]; `null` is not one.
 fn present_numeric_date<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<u64>, D::Error> {
@@ -320,8 +300,7 @@ impl VerifiedIntrospection {
     }
 }
 
-/// Validates an RFC 7662 response. A response this crate cannot read is
-/// unavailable trust; an active response lacking required claims is invalid.
+/// RFC 7662 §2.2
 pub(crate) fn validate_introspection_claims(
     bytes: &[u8],
     policy: &ClaimPolicy,
@@ -330,13 +309,9 @@ pub(crate) fn validate_introspection_claims(
 ) -> Result<VerifiedIntrospection, VerificationError> {
     let malformed = || VerificationError::unavailable(VerificationReason::MalformedClaims);
     let invalid = VerificationError::invalid;
-    // Keep the provider evidence intact, excluding only JSON boundary whitespace.
-    // Envelope deserialization still validates the entire response before active.
     let payload = std::str::from_utf8(bytes)
         .map_err(|_| malformed())?
         .trim_matches([' ', '\t', '\r', '\n']);
-    // Decode active claims separately so an inactive response may omit them or
-    // give them other shapes; unreadable active evidence is unavailable trust.
     let JsonObject(envelope) =
         serde_json::from_str::<JsonObject<Envelope>>(payload).map_err(|_| malformed())?;
     if !envelope.active {
@@ -409,7 +384,6 @@ fn non_empty(value: Option<Cow<'_, str>>) -> Option<String> {
 pub(crate) struct Scopes(Vec<String>);
 
 impl Scopes {
-    /// Each engine maps a malformed scope to its own failure class.
     fn from_claim(scope: Option<Values<'_>>) -> Result<Self, ()> {
         let mut values: Vec<String> = match scope {
             None => Vec::new(),
@@ -664,7 +638,7 @@ mod tests {
                 "{missing}"
             );
         }
-        // RFC 9068 requires `iat` but not a past one; `exp` bounds the token.
+        // RFC 9068 §2.2
         assert!(verify(serde_json::json!({"iat": 131})).is_ok());
     }
 

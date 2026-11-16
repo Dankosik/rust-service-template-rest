@@ -158,8 +158,6 @@ fn an_unregistered_rejection_says_that_no_code_was_registered() {
     );
 }
 
-/// `Url` parses these to a URL without userinfo; the typed configuration
-/// section refuses them, so direct construction does too.
 #[test]
 fn a_token_url_with_an_at_sign_in_its_raw_authority_is_refused() {
     for token_url in [
@@ -208,9 +206,6 @@ fn a_pre_epoch_clock_is_reported_separately_from_the_private_key() {
     assert_eq!(error.key, "system_clock");
 }
 
-/// `Url` admits a path of any length; the request target an `http::Uri`
-/// carries is capped, so preparation refuses it under the token URL key
-/// instead of every attempt reporting an invalid provider response.
 #[test]
 fn a_token_url_longer_than_a_request_target_may_be_is_refused_at_preparation() {
     let error = Credentials::prepare(Options {

@@ -45,7 +45,6 @@ impl Service {
         let mut child = command.spawn().expect("spawn service binary");
         let stdout = child.stdout.take().expect("piped stdout");
         let (tx, lines) = mpsc::channel();
-        // Keeps the child from blocking on a full pipe.
         let reader = std::thread::spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                 if tx.send(line).is_err() {
@@ -177,8 +176,6 @@ fn serves_probes_and_metrics_then_drains_on_sigterm_with_exit_zero() {
         "service_startup_trace_exporter_active 0",
         "readiness_checks_total{outcome=\"ok\"}",
         "readiness_ready 1",
-        // Published at zero before any shed, so a scrape tells "never shed"
-        // from "not exported".
         "http_server_shed_requests_total 0",
     ] {
         assert!(
@@ -247,8 +244,6 @@ fn resumed_service_exits_one_after_progress_loss_without_diagnostics_or_probe_re
             other => panic!("unexpected child state: {other:?}"),
         }
     }
-    // B = 500 ms + 3 * 500 ms = 2 s. This proves recovery after
-    // scheduling resumes, not a supervisor running while the process is stopped.
     std::thread::sleep(Duration::from_secs(3));
     kill(pid, Signal::SIGCONT).expect("resume admitted service");
     let (code, stdout, stderr) = service.wait_output();
@@ -308,7 +303,6 @@ fn a_full_application_listener_refuses_probes_with_or_without_diagnostics() {
         service.await_record("service_ready");
         let app_live = format!("http://{api}/health/live");
 
-        // Idle connections hold every permit until the header timeout (5 s).
         #[expect(
             clippy::disallowed_types,
             reason = "synchronous process fixture retains these connections until its listener-capacity assertion ends"
@@ -390,7 +384,6 @@ fn a_cache_outage_at_startup_still_becomes_ready() {
         ("APP__CACHE__DSN", &dsn),
         ("APP__CACHE__ALLOW_PLAINTEXT", "true"),
         ("APP__CACHE__ALLOW_UNAUTHENTICATED", "true"),
-        // The fixture's 2 s request budget admits at most half of it.
         ("APP__CACHE__COMMAND_TIMEOUT", "1s"),
     ]);
     let startup = service.await_record("cache_unavailable_at_startup");
@@ -420,7 +413,6 @@ fn production_plaintext_cache_dsn_exits_before_the_listener() {
     let mut service = Service::spawn(&[
         ("APP__APP__ENV", "production"),
         ("APP__CACHE__DSN", "redis://127.0.0.1:6379"),
-        // The fixture's 2 s request budget admits at most half of it.
         ("APP__CACHE__COMMAND_TIMEOUT", "1s"),
     ]);
     let deadline = Instant::now() + Duration::from_secs(15);
@@ -441,8 +433,6 @@ fn production_plaintext_cache_dsn_exits_before_the_listener() {
 
 #[test]
 fn a_stop_signal_during_startup_ends_it_before_a_listener_is_bound() {
-    // Accepts the connection and never answers, so the cache startup check
-    // holds startup for its whole bound.
     #[expect(
         clippy::disallowed_methods,
         clippy::disallowed_types,
@@ -517,7 +507,6 @@ fn assert_stop_reaches_blocking_password_file(
     env.extend_from_slice(extra);
     let service = Service::spawn(&env);
     service.await_record("service_starting");
-    // Let startup reach the password-file open before sending the stop.
     std::thread::sleep(Duration::from_millis(100));
     service.terminate();
     let (code, stderr) = service.wait();
@@ -620,7 +609,6 @@ fn an_r2_endpoint_outside_cloudflare_exits_before_the_listener() {
     ))
     .wait_output();
     assert_eq!(code, Some(1), "stderr: {stderr}");
-    // Provider endpoint admission runs after the shared logger is installed.
     let records = records(&stdout);
     let failure = records
         .iter()
@@ -654,7 +642,6 @@ fn active_inbound_webhook_endpoint_refuses_without_postgres_before_listener_admi
     ])
     .wait_output();
     assert_eq!(code, Some(1));
-    // Cross-section configuration validation refuses before telemetry exists.
     assert!(stderr.contains("postgres.enabled"), "stderr: {stderr}");
     assert!(
         stdout.is_empty(),
@@ -791,8 +778,6 @@ fn stopped_stdout_does_not_block_requests_or_process_exit() {
         200,
         Duration::from_secs(10)
     ));
-    // Keep the OS pipe open and completely unread. Queue saturation, observed
-    // through the independent metrics listener, proves the writer cannot drain.
     for _ in 0..2048 {
         assert_eq!(get(&format!("http://{api}/missing")).unwrap().0, 404);
     }

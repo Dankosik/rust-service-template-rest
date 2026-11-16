@@ -38,8 +38,6 @@ const SHUTDOWN_TAIL: Duration = ATTEMPT_CLEANUP
     .saturating_add(TELEMETRY_STAGE)
     .saturating_add(RUNTIME_SHUTDOWN_TIMEOUT);
 
-/// Final bounded runtime wait, reserved inside the process grace period.
-/// Its return does not establish that already-running blocking work terminated.
 pub(crate) const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Debug, thiserror::Error)]
@@ -53,7 +51,6 @@ pub(crate) struct GraceBudgetError {
     tail: Duration,
 }
 
-/// Reject a grace period that cannot hold the drain plus the teardown tail.
 pub(crate) fn validate_grace_budget(http: &HttpConfig) -> Result<(), GraceBudgetError> {
     if http.grace_period < http.drain_timeout.saturating_add(SHUTDOWN_TAIL) {
         return Err(GraceBudgetError {
@@ -68,8 +65,6 @@ pub(crate) fn validate_grace_budget(http: &HttpConfig) -> Result<(), GraceBudget
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Outcome {
     Graceful,
-    /// A stage overran or failed, a background task or the signal receiver
-    /// failed, or telemetry did not close; the process still exited on its own.
     Degraded,
 }
 
@@ -149,7 +144,6 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
         .await;
     }
     // template:begin messaging:worker-shutdown-drop-consumer
-    // The native owner requests abort on Drop; only finish above establishes completion.
     drop(resources.consumer.take());
     // template:end messaging:worker-shutdown-drop-consumer
     let listeners_outcome = close_listeners(
@@ -163,7 +157,6 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
         join_background(&background, budget.remaining(BACKGROUND_JOIN)),
     )
     .await;
-    // Forced acknowledgement and dependency close share this single allocation.
     let dependency_deadline = budget.stage_deadline(DEPENDENCY_CLOSE);
     if !background.tracker.is_empty() {
         outcome = Outcome::Degraded;
@@ -292,8 +285,6 @@ async fn drain(
         let ((), messaging_error) = tokio::join!(jobs, messages);
         messaging_error
     };
-    // A drain that completed together with the deadline or a second signal
-    // counts as completed.
     let forced = tokio::select! {
         biased;
         messaging_error = joined => messaging_error.map(|error| ("messaging", Some(error))),
@@ -431,8 +422,6 @@ async fn close_diagnostics(server: Option<Server>, budget: Duration) -> Outcome 
     };
     match server.drain(budget).await {
         Ok(Drained::Complete) => tracing::info!("diagnostics_stopped"),
-        // Only a scrape that outlived the budget after the accept loop joined
-        // is exempt from the degraded vote.
         Ok(Drained::TimedOut { .. }) => {
             tracing::warn!(
                 reason = "scrape_outlived_shutdown_budget",
@@ -450,7 +439,6 @@ async fn close_diagnostics(server: Option<Server>, budget: Duration) -> Outcome 
 async fn join_background(background: &Background, budget: Duration) -> Outcome {
     background.cancel.cancel();
     background.tracker.close();
-    // `run` aborts what is still tracked and logs the summary event.
     if tokio::time::timeout(budget, background.tracker.wait())
         .await
         .is_err()
@@ -490,8 +478,6 @@ async fn close_pool(pool: &PgPool, budget: Duration) -> Outcome {
 
 // template:begin messaging:worker-shutdown-close-messaging-fn
 async fn close_messaging(broker: Option<BrokerResource>, deadline: Instant) -> Outcome {
-    // The root token is already cancelled here, and close gives up at
-    // once under a cancelled token, so close gets a fresh one.
     let cancel = tokio_util::sync::CancellationToken::new();
     let closed = match broker {
         Some(BrokerResource::Starting(startup)) => startup.close(deadline, &cancel).await,

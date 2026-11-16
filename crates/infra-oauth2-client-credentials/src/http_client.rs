@@ -19,7 +19,6 @@ pub struct AuthenticatedClient {
 }
 
 impl Credentials {
-    /// Requests carry the service token, or one exchanged for an attached [`crate::OnBehalfOf`].
     #[must_use]
     pub fn http(&self, resource: Client) -> AuthenticatedClient {
         AuthenticatedClient {
@@ -31,16 +30,12 @@ impl Credentials {
 }
 
 impl AuthenticatedClient {
-    /// Refuses a request without [`crate::OnBehalfOf`] instead of sending the service token.
     #[must_use]
     pub fn require_on_behalf_of(mut self) -> Self {
         self.subject_required = true;
         self
     }
 
-    /// The [`crate::OnBehalfOf`] extension is always removed before dispatch. Responses are
-    /// never replayed. A token that expired during preparation is refused before dispatch; a 401
-    /// stops reuse of the token if it is 30 seconds old, even if reading the body fails.
     pub async fn execute(
         &self,
         request: Request<Bytes>,
@@ -53,10 +48,6 @@ impl AuthenticatedClient {
         .await
     }
 
-    /// Acquires credentials and completes the resource exchange within one fixed
-    /// context, clamped to the resource client's local ceiling before token work.
-    /// Request context extensions additionally bound credentials and dispatch.
-    /// Cancellation stops this caller's wait without closing the credential owner.
     pub async fn execute_with_context(
         &self,
         mut request: Request<Bytes>,
@@ -78,8 +69,6 @@ impl AuthenticatedClient {
             let request_stop = request_context
                 .as_ref()
                 .map_or(Ok(()), OperationContext::check);
-            // Observe the deadline after sampling the request stop so a cutoff
-            // reached by then takes precedence.
             acquisition_context
                 .check()
                 .and(request_stop)

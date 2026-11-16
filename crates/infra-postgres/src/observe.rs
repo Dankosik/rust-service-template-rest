@@ -64,8 +64,6 @@ const fn strictly_increasing(buckets: &[f64]) -> bool {
 
 pub(crate) const OPERATION_DURATION_METRIC: &str = "db_client_operation_duration_seconds";
 
-/// OpenTelemetry semantic convention boundaries; the recorder must be given
-/// [`HISTOGRAMS`], or these metrics fall back to default buckets.
 pub(crate) const OPERATION_DURATION_BUCKETS: &[f64] =
     &[0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0];
 
@@ -125,7 +123,6 @@ pub fn record_metrics(pool: &PgPool, pool_name: &'static str) {
         .set(f64::from(pool.options().get_max_connections()));
 }
 
-/// A late tick shifts the schedule instead of bursting to catch up.
 pub async fn record_metrics_periodically(
     pool: PgPool,
     pool_name: &'static str,
@@ -144,7 +141,6 @@ pub async fn record_metrics_periodically(
         .await;
 }
 
-/// Owns no timeout, retry or cleanup; `budget` only labels the timeout event.
 pub(crate) async fn acquisition<T>(
     operation: &'static str,
     budget: Duration,
@@ -175,11 +171,6 @@ pub(crate) async fn acquisition<T>(
 
 const CANCELLED: &str = "cancelled";
 
-/// `summary` becomes the `db.query.summary` label and the span name, so it must
-/// come from a bounded set of static values.
-///
-/// A client span starts only inside another span, so a background loop polling
-/// outside any span does not start a one-span trace per tick; it is still measured.
 pub async fn observed<T>(
     summary: &'static str,
     statement: impl Future<Output = Result<T, sqlx::Error>>,
@@ -244,7 +235,6 @@ fn record_statement_error(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TransactionOutcome {
     Committed,
-    /// The closure returned `Err`; the rollback is queued without waiting for acknowledgement.
     RolledBack,
     AcquireFailed,
     BeginFailed,
@@ -253,8 +243,6 @@ pub(crate) enum TransactionOutcome {
     Cancelled,
 }
 
-// One table feeds the span label and the histogram. `metrics` keeps a static key
-// only for literal label values; a runtime value allocates per transaction.
 macro_rules! transaction_outcomes {
     ($($variant:ident => $label:literal),* $(,)?) => {
         impl TransactionOutcome {
@@ -297,7 +285,6 @@ impl TransactionOutcome {
     }
 }
 
-/// Carries the configured target and no statement text.
 pub(crate) fn transaction_span(pool: &PgPool) -> Span {
     let target = pool.connect_options();
     tracing::info_span!(
@@ -313,7 +300,6 @@ pub(crate) fn transaction_span(pool: &PgPool) -> Span {
     )
 }
 
-/// Dropping it records the held outcome, `cancelled` until the boundary sets one.
 pub(crate) struct TransactionObservation {
     started: Instant,
     span: Span,
@@ -329,7 +315,6 @@ impl TransactionObservation {
         }
     }
 
-    /// Recorded whether or not a connection arrived.
     pub(crate) fn waited(&self) {
         metrics::histogram!(
             CONNECTION_WAIT_METRIC,
@@ -342,7 +327,6 @@ impl TransactionObservation {
         self.outcome = outcome;
     }
 
-    /// SQLSTATE when the server supplied one, otherwise the driver's failure class.
     pub(crate) fn fail(&mut self, error: TxError) -> TxError {
         let source = error.driver();
         match sqlstate(source) {

@@ -1,9 +1,3 @@
-//! `sqlx` takes connect options when the pool is built; this task hands it new
-//! ones through `Pool::set_connect_options` when the file `postgres.password_file`
-//! names is rewritten. Open connections are left alone: the server authenticates
-//! a session once. [`crate::pool::MAX_CONNECTION_LIFETIME`] is an age threshold
-//! for retirement, not forced interruption or a hard revocation deadline.
-
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -15,12 +9,8 @@ use crate::dsn::{DsnError, password_from};
 
 const REFRESHES_METRIC: &str = "postgres_password_file_refreshes_total";
 
-/// Until changed options are installed and accepted, new connections can fail
-/// with `28P01` and the pool returns that instead of retrying; this cadence does
-/// not bound the cutover.
 pub const PASSWORD_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
-/// A failed read leaves the last installed options in use.
 pub async fn refresh_password_periodically(
     pool: PgPool,
     password_file: PathBuf,
@@ -46,7 +36,6 @@ pub async fn refresh_password_periodically(
 #[derive(Default)]
 struct Refresh {
     current: Option<Zeroizing<String>>,
-    /// Whether the last read failed, so one outage is one warning.
     unreadable: bool,
 }
 

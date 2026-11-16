@@ -29,16 +29,11 @@ const MAX_RETAINED_PAYLOAD_BYTES: usize = 64 * 1024;
 #[debug("IntrospectionOptions([REDACTED])")]
 pub struct IntrospectionOptions {
     pub issuer: crate::IssuerUrl,
-    /// Audiences of which a token must name at least one; non-empty, with no
-    /// empty entry.
     pub audiences: Vec<String>,
     pub endpoint: crate::EndpointUrl,
     pub client_id: String,
     pub client_secret: secrecy::SecretString,
-    /// Maximum simultaneous introspection requests, at most [`Semaphore::MAX_PERMITS`]; a request
-    /// over the limit is refused as unavailable.
     pub provider_concurrency: NonZeroUsize,
-    /// Verified-response cache settings; `None` introspects every token.
     pub cache: Option<IntrospectionCacheOptions>,
 }
 
@@ -49,7 +44,6 @@ pub struct IntrospectionCacheOptions {
 }
 
 impl IntrospectionCacheOptions {
-    /// Selects a best-effort capacity of 1–1024 entries and a fixed TTL of 1–300 seconds.
     pub fn try_new(capacity: usize, ttl: Duration) -> Result<Self, PreparationError> {
         if !CACHE_CAPACITY.contains(&capacity) || !CACHE_TTL.contains(&ttl) {
             return Err(PreparationError::invalid_options());
@@ -58,8 +52,6 @@ impl IntrospectionCacheOptions {
     }
 }
 
-/// Prepares an introspection verifier. Install the metrics recorder first:
-/// the verifier registers its counters here.
 pub fn prepare_introspection(options: IntrospectionOptions) -> Result<Verifier, PreparationError> {
     IntrospectionVerifier::try_new(options, ProviderClient::try_new()?).map(Verifier::introspection)
 }
@@ -116,10 +108,7 @@ impl PositiveCache {
     }
 }
 
-/// The index holds a weak reference. Any waiting caller can drive the same
-/// future, and the last departing caller drops it and releases its permit.
 struct FillWaiter<'a> {
-    // Drop the strong reference before cleaning up the weak index entry.
     shared: Shared<FillFuture>,
     registration: FillRegistration<'a>,
 }
@@ -199,8 +188,6 @@ impl IntrospectionVerifier {
         }))
     }
 
-    /// Shares provider work across misses. Each waiter checks cache eligibility
-    /// at its own lookup.
     pub(crate) async fn verify(
         self: &Arc<Self>,
         token: &BearerToken<'_>,
@@ -260,7 +247,6 @@ impl IntrospectionVerifier {
             if let Fill::Fresh(value) = filled {
                 return value.deliver(now()?);
             }
-            // A cache hit seen by another waiter may expire before this one resumes.
         }
     }
 
@@ -270,8 +256,6 @@ impl IntrospectionVerifier {
         context: &OperationContext,
         now: &impl Fn() -> Result<u64, VerificationError>,
     ) -> Result<VerifiedIntrospection, VerificationError> {
-        // Every path to the provider passes here: an unusable clock refuses
-        // the call before it spends a permit or reaches the provider.
         now()?;
         let _permit = self
             .permits
@@ -297,7 +281,6 @@ impl IntrospectionVerifier {
     }
 }
 
-/// Fixes each entry's lifetime when it is inserted; reads never extend it.
 struct Retention {
     ttl: Duration,
 }
@@ -323,7 +306,6 @@ impl Expiry<TokenDigest, VerifiedIntrospection> for Retention {
     }
 }
 
-/// A fresh result can be delivered to its waiters even when its retention is zero.
 fn retention(principal: &Principal, ttl: Duration, now: SystemTime) -> Duration {
     match now.duration_since(UNIX_EPOCH) {
         Ok(now) if principal.payload_len() <= MAX_RETAINED_PAYLOAD_BYTES => {
@@ -424,7 +406,6 @@ mod tests {
                     )
                 }
             });
-            // A cancelled caller can close its TLS stream before the response.
             let _ = http1::Builder::new()
                 .keep_alive(false)
                 .serve_connection(TokioIo::new(stream), service)
@@ -804,7 +785,6 @@ mod tests {
         fixture.finish().await;
     }
 
-    // Moka keeps its own clock, so this one test waits in real time.
     #[tokio::test]
     async fn lifetime_does_not_slide_and_expired_entries_never_mask_provider_failure() {
         let fixture = Fixture::new().await;
@@ -904,7 +884,6 @@ mod tests {
             *fixture.gate.lock().unwrap() = None;
             assert_eq!(verify(&verifier, b"Bearer shared").await.err(), expected);
             assert_eq!(fixture.calls(), before + if retained { 1 } else { 2 });
-            // Drain the optional second exchange's arrival before the next case.
             if !retained {
                 fixture.received().await;
             }
@@ -980,7 +959,6 @@ mod tests {
                 Stopped::Cancelled => context.cancel(),
             }
             if drop_on_stop {
-                // The transport's deadline layer owns and drops the pending branch.
                 tokio::select! {
                     biased;
                     reason = context.wait_stopped() => assert_eq!(reason, stopped),
@@ -1158,14 +1136,12 @@ mod tests {
                 .unwrap();
             let before = fixture.calls();
             fixture.respond(StatusCode::SERVICE_UNAVAILABLE, b"{}");
-            // Still physically retained: the changed calendar alone forces provider work.
             let error = verifier
                 .verify_with_now(&token, &context, move || Ok(changed))
                 .await
                 .unwrap_err();
             assert_eq!(error.failure, Failure::Unavailable);
             assert_eq!(fixture.calls(), before + 1);
-            // Rejecting old evidence must not delete it or poison later valid clock samples.
             assert_eq!(
                 verifier
                     .verify_with_now(&token, &context, move || Ok(base))
@@ -1222,7 +1198,6 @@ mod tests {
             let mut publication = Box::pin(publication.wait());
             assert!(futures_util::poll!(publication.as_mut()).is_pending());
             if elapsed_seconds == 0 {
-                // Simulate removal of the cache entry while the token is still valid.
                 cache.retained.invalidate(&key).await;
             }
             let mut waiter = Box::pin(
@@ -1353,7 +1328,6 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-            // The joined waiter resumes only after the leader published fresh evidence.
             *clock.lock().unwrap() = delivery;
             let result = tokio::time::timeout(Duration::from_secs(5), waiter)
                 .await
@@ -1363,7 +1337,6 @@ mod tests {
                 expected
             );
             assert_eq!(fixture.calls(), before + 1);
-            // A caller-local delivery rejection neither retries nor invalidates retention.
             verifier
                 .verify_with_now(&token, &context, move || Ok(base))
                 .await
@@ -1374,7 +1347,6 @@ mod tests {
         fixture.finish().await;
     }
 
-    // Moka's monotonic retention clock is independent of Tokio's test clock.
     #[tokio::test]
     async fn replacement_starts_its_own_fixed_retention() {
         let context = OperationContext::unbounded();

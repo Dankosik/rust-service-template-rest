@@ -83,9 +83,6 @@ impl Observed {
     }
 }
 
-/// Exporter and transport crates, denied process-wide: their events carry no
-/// tracing context that would tell an export call from the service's own
-/// use of the same crate.
 pub(super) fn is_denied_target(target: &str) -> bool {
     [
         "opentelemetry",
@@ -120,8 +117,6 @@ fn add(counter: &AtomicU64, amount: u64) {
     });
 }
 
-// Unknown fields never format Debug/Display or retain strings, so receiver
-// text and URL/body diagnostics cannot reach an output layer.
 #[derive(Default)]
 struct ReportedCounts {
     dropped: Option<u64>,

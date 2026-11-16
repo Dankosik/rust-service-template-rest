@@ -1,8 +1,6 @@
 use super::*;
 use std::assert_matches;
 
-/// The share arithmetic is `shared_rules::jitter`'s; this owner adds the
-/// unjittered fallback when the random source fails.
 #[test]
 fn refresh_spread_spans_its_window_and_vanishes_on_source_failure() {
     for window in [
@@ -36,11 +34,6 @@ async fn assert_no_token_request(fixture: &Fixture) {
 
 #[tokio::test]
 async fn a_service_token_is_refreshed_within_its_sampled_lead_before_the_reuse_cutoff() {
-    // The lead is a quarter of the reuse window (lifetime minus ten seconds),
-    // at most five minutes, less up to a tenth of itself: 11 s reuses for 1 s
-    // and refreshes from 750–775 ms, 60 s from 37.5–38.75 s, 3600 s from
-    // 3290–3320 s. Each row checks just before the earliest and just after
-    // the latest eligibility, both inside the reuse window.
     for (lifetime, quiet_until, refreshed_by) in [
         (11, Duration::from_millis(700), Duration::from_millis(850)),
         (60, Duration::from_secs(37), Duration::from_secs(39)),
@@ -106,8 +99,6 @@ async fn an_exchanged_token_is_never_refreshed_in_the_background() {
     };
     execute().await;
     fixture.token_received().await;
-    // Past every lead a service token of this lifetime would refresh within,
-    // still before the 3590 s reuse cutoff.
     advance(Duration::from_secs(3321)).await;
     execute().await;
     assert_no_token_request(&fixture).await;
@@ -155,7 +146,6 @@ async fn near_its_cutoff_a_token_is_replaced_in_the_background_while_callers_reu
         .execute(fixture.request(), deadline(Duration::from_secs(10)))
         .await
         .unwrap();
-    // Inside every sampled lead (270–300 seconds) before the 3590 s cutoff.
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(3321)).await;
     tokio::time::resume();

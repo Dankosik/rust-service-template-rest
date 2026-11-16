@@ -1,5 +1,3 @@
-//! One owned supervisor; redis-rs owns transport and multiplexing.
-
 use std::future::{Future, poll_fn};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -26,29 +24,20 @@ use crate::observe::{
     RETIREMENTS_METRIC,
 };
 
-/// Bounds one whole setup attempt: password read, dial, TLS, and `HELLO`.
 pub(crate) const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
 const CONNECTED_PROBE_MIN_BUDGET: Duration = Duration::from_secs(5);
 const PASSWORD_READ_TIMEOUT: Duration = Duration::from_secs(5);
 const SETUP_BACKOFF_MIN_DELAY: Duration = Duration::from_millis(100);
 const SETUP_BACKOFF_MAX_DELAY: Duration = Duration::from_secs(2);
-/// backon's jitter adds up to one more base delay, so a base capped at half
-/// the ceiling spreads late retries and chain pauses over its upper half
-/// instead of pinning every client of a restarted shared server to it.
 const SETUP_BACKOFF_BASE_CAP: Duration = Duration::from_secs(1);
-/// Minimum spacing between published generations, so a server that accepts
-/// and then drops every connection cannot drive a reconnect loop.
 const MIN_GENERATION_SPACING: Duration = Duration::from_secs(2);
 const SETUP_BACKOFF_FACTOR: f32 = 2.0;
-/// Bound one reconnect chain; the supervisor starts the next after a pause.
 pub(crate) const SETUP_BACKOFF_MAX_RETRIES: usize = 6;
 const PING_INTERVAL: Duration = Duration::from_secs(2);
 const PASSWORD_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
-/// Shared by every namespace, including commands waiting for a connection.
 const APPLICATION_SLOTS: usize = 256;
 const PROBE_SLOTS: usize = 1;
 const CALLER_PIPELINE_CAPACITY: usize = APPLICATION_SLOTS + PROBE_SLOTS;
-// One additional producer runs maintenance PING and AUTH serially.
 const PIPELINE_BUFFER_SIZE: usize = CALLER_PIPELINE_CAPACITY + 1;
 
 #[cfg(test)]
@@ -93,15 +82,12 @@ pub(crate) fn error_type(error: &redis::RedisError) -> ErrorType {
     if error.is_timeout() {
         return ErrorType::Timeout;
     }
-    // RESP3 authenticates inside `HELLO`, whose refusal is a plain server error.
     if matches!(error.code(), Some("WRONGPASS" | "NOAUTH")) {
         return ErrorType::Auth;
     }
     match error.kind() {
         redis::ErrorKind::Io => ErrorType::Io,
         redis::ErrorKind::AuthenticationFailed => ErrorType::Auth,
-        // redis-rs names only some server codes; `WRONGTYPE`, `OOM` and the
-        // other unnamed codes are `Extension`, still a server error reply.
         redis::ErrorKind::Server(_) | redis::ErrorKind::Extension => ErrorType::ServerErrorReply,
         redis::ErrorKind::Parse => ErrorType::Parse,
         _ => ErrorType::Other,
@@ -113,8 +99,6 @@ pub(crate) struct Link {
     pub(crate) command_timeout: Duration,
     shared: Arc<Shared>,
     application_slots: Semaphore,
-    /// Separate from the application slots so application load cannot
-    /// hide readiness.
     probe_slots: Semaphore,
     admission_refused: Counter,
     commands_in_flight: Gauge,
@@ -137,7 +121,6 @@ struct Shared {
 enum State {
     Connecting,
     Connected(Arc<Generation>),
-    /// Observable during backoff; the supervisor keeps retrying.
     SetupFailed(ErrorType),
     Closed,
 }
@@ -145,11 +128,7 @@ enum State {
 struct Generation {
     connection: MultiplexedConnection,
     caller_capacity: Arc<Semaphore>,
-    // Each message owns a caller reservation, which bounds the channel.
     abandoned: mpsc::UnboundedSender<AbandonedReply>,
-    /// Once cancelled, [`Shared::acquire`] stops handing out this generation
-    /// even while [`State::Connected`] still names it. The supervisor then
-    /// withdraws it through [`Shared::retire`].
     retired: CancellationToken,
 }
 
@@ -198,8 +177,6 @@ impl CommandScope {
     }
 }
 
-/// The reservation outlives the driver's queue entry, including when the
-/// caller leaves before the driver answers.
 struct Exchange<'a, F>
 where
     F: Future + Send + 'static,
@@ -244,7 +221,6 @@ where
     }
 
     fn poll_reply(&mut self, cx: &mut Context<'_>) -> Poll<F::Output> {
-        // Arm retirement before a poll that could unwind into this exchange's drop.
         let mut reply = match std::mem::replace(&mut self.reply, ReplyState::Retire) {
             ReplyState::Unpolled(reply) | ReplyState::Pending(reply) => reply,
             settled => {
@@ -269,10 +245,6 @@ where
     }
 }
 
-/// A server error reply such as `WRONGTYPE` or `OOM` consumed its own slot,
-/// so later replies stay matched and peers on the generation are unaffected.
-/// `READONLY` still retires: after a failover the configured endpoint may
-/// resolve to the new primary, and only a new connection reaches it.
 fn command_keeps_generation<T>(reply: &redis::RedisResult<T>) -> bool {
     reply.as_ref().err().is_none_or(|error| {
         error_type(error) == ErrorType::ServerErrorReply && error.code() != Some("READONLY")
@@ -285,8 +257,6 @@ where
     F::Output: Send + 'static,
 {
     fn drop(&mut self) {
-        // The unconstrained first poll has room to enqueue, so re-polling
-        // can collect a delivered reply without dispatching new work.
         if matches!(self.reply, ReplyState::Pending(_)) && !std::thread::panicking() {
             let _ = self.poll_reply(&mut Context::from_waker(Waker::noop()));
         }
@@ -332,8 +302,6 @@ impl std::fmt::Debug for Link {
     }
 }
 
-// A transition notifies only after publishing the new state and releasing the
-// writer lock, so a woken `acquire` sees the published state immediately.
 impl Shared {
     fn close(&self) {
         let write = self.write.lock();
@@ -389,7 +357,6 @@ impl Shared {
             return settled;
         }
         loop {
-            // Construction captures any subsequent notify_waiters(), even before the first poll.
             let changed = self.changed.notified();
             if let Some(settled) = self.settled() {
                 return settled;
@@ -454,18 +421,14 @@ impl Link {
         let context = &scope.context;
         context.check().map_err(CommandError::Stopped)?;
         let _slot = self.claim_slot(&self.application_slots)?;
-        // Acquisition first: a connected link then never arms the deadline timer.
         let generation = tokio::select! {
             biased;
             result = self.shared.acquire() => result,
             stopped = context.wait_stopped() => return Err(CommandError::Stopped(stopped)),
         };
-        // Acquisition may have completed at the caller's cutoff.
         context.check().map_err(CommandError::Stopped)?;
         let generation = generation?;
         let exchange = async {
-            // The generation's reservation includes abandoned queries. A free
-            // reservation guarantees room in the redis-rs sender.
             let reservation = generation.reserve().await?;
             tokio::task::consume_budget().await;
             context.check().map_err(CommandError::Stopped)?;
@@ -488,8 +451,6 @@ impl Link {
                     .map_or_else(|| error_type(&error).into(), CommandError::Stopped)
             })
         };
-        // A delivered reply has already cleared its slot. Observe it before
-        // stopping the wait so a stop at the ceiling cannot retire an answered exchange.
         tokio::select! {
             biased;
             reply = exchange => reply,
@@ -522,8 +483,6 @@ impl Link {
         let reply = match first_poll {
             Poll::Ready(reply) => reply,
             Poll::Pending => {
-                // Start the deadline after enqueueing PING, so every earlier command
-                // has already started its own budget.
                 let deadline = Deadline::new(Instant::now(), budget);
                 exchange.reply_deadline = Some(deadline);
                 reply_until(
@@ -568,15 +527,12 @@ fn register_link_metrics() -> LinkMetrics {
         commands_in_flight: metrics::gauge!(COMMANDS_IN_FLIGHT_METRIC),
         retirements: metrics::counter!(RETIREMENTS_METRIC),
     };
-    // Exported at zero so a scrape tells "no events yet" from "not exported".
     metrics.admission_refused.increment(0);
-    // Several links may share the unlabelled series: never reset active work.
     metrics.commands_in_flight.increment(0.0);
     metrics.retirements.increment(0);
     metrics
 }
 
-// Captured before spawn so an exit before the first poll also closes the link.
 struct SupervisorExit {
     shared: Arc<Shared>,
     server: ServerEndpoint,
@@ -585,8 +541,6 @@ struct SupervisorExit {
 impl Drop for SupervisorExit {
     fn drop(&mut self) {
         if std::thread::panicking() {
-            // The process panic hook names the location, not that cache
-            // recovery has stopped for the rest of the process.
             tracing::error!(
                 server.address = %self.server.host,
                 server.port = self.server.port,
@@ -639,7 +593,6 @@ async fn ping_until(
 }
 
 fn ping_keeps_generation(reply: &redis::RedisResult<()>) -> bool {
-    // ACL can refuse PING while still allowing cache operations.
     reply
         .as_ref()
         .err()
@@ -685,8 +638,6 @@ async fn run_supervisor(
                 next_attempt = Instant::now() + MIN_GENERATION_SPACING;
                 backoff = SetupBackoff::new();
                 let mut drain = std::pin::pin!(drain_abandoned_replies(replies));
-                // Withdraw the generation before the drain releases its
-                // reservations, including on unwind.
                 let _retire =
                     std::mem::DropGuard::new(&generation, |generation| shared.retire(generation));
                 tokio::select! {
@@ -711,8 +662,6 @@ async fn run_supervisor(
     }
 }
 
-/// Delays between failed setup attempts: a jittered exponential chain from
-/// [`SETUP_BACKOFF_MIN_DELAY`], then a jittered pause and a fresh chain.
 pub(crate) struct SetupBackoff {
     chain: <backon::ExponentialBuilder as BackoffBuilder>::Backoff,
 }
@@ -774,7 +723,6 @@ async fn setup_attempt<'a>(
     };
     let result = match timeout(SETUP_TIMEOUT, setup).await {
         Err(_elapsed) => Err(ErrorType::Timeout),
-        // The server disconnected the new connection before publication.
         Ok(Ok(_)) if retired.is_cancelled() => Err(ErrorType::Io),
         Ok(connected) => connected,
     };
@@ -799,8 +747,6 @@ async fn credentialed_client<'a>(
     let Some(file) = password_file else {
         return Ok((admitted.clone(), None));
     };
-    // Not `auth`: an unreadable mount must not look like a revoked
-    // password, which an operator would answer by rotating the secret.
     let password = file.read().await.map_err(|error| {
         warn_password_file_unreadable(server, error);
         ErrorType::Other
@@ -829,8 +775,6 @@ async fn connect(
     client: &redis::Client,
     retired: CancellationToken,
 ) -> Result<MultiplexedConnection, ErrorType> {
-    // redis-rs defaults (500 ms response, 1 s connect) would cut the command
-    // context and the setup bound short; those own every deadline here.
     let config = redis::AsyncConnectionConfig::new()
         .set_response_timeout(None)
         .set_connection_timeout(None)
@@ -859,10 +803,7 @@ async fn maintain(
         tokio::select! {
             biased;
             () = generation.retired.cancelled() => return,
-            // Keep the start-to-start refresh cadence while letting an older
-            // PING run after a refresh that consumed its entire interval.
             () = sleep_until(next_refresh), if rotation.is_some() && next_refresh <= next_ping => {
-                // A rejected AUTH must not add its duration to the next refresh.
                 next_refresh = Instant::now() + PASSWORD_REFRESH_INTERVAL;
                 if let Some(rotation) = rotation.as_mut()
                     && rotation.refresh_and_record(server, generation, command_timeout).await
@@ -872,10 +813,6 @@ async fn maintain(
                 }
             }
             () = sleep_until(next_ping) => {
-                // Replies are FIFO, so this PING waits behind every command
-                // sent before it. A budget shorter than `command_timeout`
-                // would retire the generation, and fail those commands, before
-                // their own budget ends.
                 if let Err((error, disposition)) = ping_until(generation, command_timeout).await {
                     tracing::warn!(
                         server.address = %server.host,
@@ -903,7 +840,6 @@ enum RefreshOutcome {
     ReadFailed(ReadFailure),
     Unchanged,
     AuthAccepted,
-    /// The server refused the new password; the authenticated session stays.
     AuthRefused,
     Failed(ErrorType),
 }
@@ -964,8 +900,6 @@ impl<'a> Rotation<'a> {
         generation: &Generation,
         command_timeout: Duration,
     ) -> RefreshOutcome {
-        // A read that outlives the bound is unreadable, not a connection
-        // failure: the authenticated session stays usable.
         let read_deadline = Instant::now() + PASSWORD_READ_TIMEOUT;
         let password = match timeout_at(read_deadline, self.file.read()).await {
             Ok(Ok(password)) => password,
@@ -977,7 +911,6 @@ impl<'a> Rotation<'a> {
         }
         let mut command = redis::cmd("AUTH");
         command.arg(self.file.username()).arg(password.as_str());
-        // File I/O must not consume the time owed to commands ahead of AUTH.
         let result = query_until(generation, &command, || {
             let now = Instant::now();
             Deadline::new(

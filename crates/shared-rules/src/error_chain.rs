@@ -3,14 +3,6 @@ use std::fmt;
 
 const MAX_CHAIN_ENTRIES: usize = 64;
 
-/// Up to 64 entries, starting with `error`, for a caller looking for a cause
-/// of a given type.
-///
-/// A [`std::io::Error`] that wraps a custom error returns that error's source
-/// from `source()`, skipping the wrapped error itself; a TLS connector hands
-/// over a `rustls::Error` that way. This walk yields that payload before its sources.
-/// [`DisplayErrorChain`] keeps the plain `source()` chain, because an I/O error already
-/// prints its payload's text.
 pub fn causes<'a>(
     error: &'a (dyn Error + 'static),
 ) -> impl Iterator<Item = &'a (dyn Error + 'static)> {
@@ -25,7 +17,6 @@ pub fn causes<'a>(
     })
 }
 
-/// Up to 63 sources of `error`, following [`Error::source`].
 pub fn sources<'a>(
     error: &'a (dyn Error + 'static),
 ) -> impl Iterator<Item = &'a (dyn Error + 'static)> {
@@ -45,7 +36,6 @@ fn bounded_chain<'a>(
         .take(MAX_CHAIN_ENTRIES)
 }
 
-/// Displays up to 64 entries starting with the error, separated by `: `.
 #[derive(Clone, Copy, Debug)]
 pub struct DisplayErrorChain<'a>(pub &'a (dyn Error + 'static));
 
@@ -172,7 +162,6 @@ mod tests {
             "std skips the payload, which is why the walk steps into it"
         );
         let messages: Vec<String> = causes(&io).map(ToString::to_string).collect();
-        // The I/O error prints its payload's text, then the payload follows.
         assert_eq!(
             messages,
             ["certificate expired", "certificate expired", "clock"]

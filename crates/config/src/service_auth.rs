@@ -1,9 +1,3 @@
-//! Service-to-service authentication with caller-signed tokens.
-//!
-//! This section admits configuration shape only. Caller-name, token-type,
-//! trust-registry and key admission belong to the service authentication
-//! adapter, which bootstrap runs before any listener binds.
-
 use secrecy::SecretString;
 use serde::Deserialize;
 
@@ -50,7 +44,6 @@ impl std::fmt::Debug for ServiceAuthInput {
     }
 }
 
-/// How this service authenticates service-to-service calls.
 #[derive(Clone, Default)]
 pub enum ServiceAuthConfig {
     #[default]
@@ -59,7 +52,6 @@ pub enum ServiceAuthConfig {
         name: String,
         jwt_type: String,
         trust: String,
-        /// `None`: the service verifies callers but calls no one.
         signing_key: Option<ServiceSigningKey>,
     },
 }
@@ -125,7 +117,6 @@ impl ServiceAuthInput {
     }
 }
 
-/// `None` when both parts are absent and the service only verifies callers.
 fn signing_key(
     key_id: Option<String>,
     private_key: Option<SecretString>,
@@ -147,8 +138,6 @@ fn signing_key(
     }
 }
 
-/// The identity this service signs its own tokens with; `private_key` is
-/// redacted in `Debug`.
 #[derive(Clone, Debug)]
 pub struct ServiceSigningKey {
     pub key_id: String,

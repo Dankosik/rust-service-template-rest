@@ -54,10 +54,8 @@ use self::signals::Signals;
 
 pub(crate) const BUILD_INFO: BuildInfo = BuildInfo::from_package_version(env!("CARGO_PKG_VERSION"));
 
-/// Distinguishes a teardown overrun from a crash.
 const EXIT_DEGRADED_SHUTDOWN: u8 = 3;
 
-/// Running blocking work may outlive this wait and is never certified terminated.
 const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
 const METRICS_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(10);
@@ -112,8 +110,6 @@ pub(crate) enum BootstrapError {
     HttpIdempotencyStartup(#[from] infra_idempotency_store::StartupError),
     // template:end http-idempotency:bootstrap-http-idempotency-errors
     // template:begin inbound-webhooks:bootstrap-webhooks-errors
-    /// Configuration admits endpoints only with `postgres.enabled`, so this
-    /// is a composition defect, not operator input.
     #[error("inbound webhook endpoints are configured but no PostgreSQL pool was opened")]
     InboundWebhooksWithoutPostgres,
     #[error("inbound webhook endpoint {endpoint} references unavailable key {key}")]
@@ -144,7 +140,6 @@ pub(crate) enum BootstrapError {
     Panicked,
 }
 
-/// Keeps a filesystem read from postponing SIGTERM handling.
 #[allow(
     dead_code,
     reason = "the postgres and cache profiles are optional; a dependency-free service retains no blocking startup call"
@@ -163,7 +158,6 @@ where
         .map_err(Into::into)
 }
 
-/// Later failures do not call `process::exit`, so destructors run.
 pub(crate) fn run<I>(
     args: I,
     // template:begin grpc:bootstrap-run-registration-parameter
@@ -214,8 +208,6 @@ where
     match outcome {
         Ok(Outcome::Graceful) => ExitCode::SUCCESS,
         Ok(Outcome::Degraded) => ExitCode::from(EXIT_DEGRADED_SHUTDOWN),
-        // Once the subscriber is installed, `serve` or the panic hook has
-        // logged the failure; stderr only carries failures before that.
         Err(err) => {
             if logger_installed {
                 ExitCode::FAILURE
@@ -247,7 +239,6 @@ async fn serve(
     let mut tracer_provider = None;
     let mut logger = None;
 
-    // Only cleanup may consume mutated state after this guarded operation fails.
     let failure = AssertUnwindSafe(async {
         let race = {
             let startup = async {
@@ -263,10 +254,6 @@ async fn serve(
                 })?);
                 *logger_installed = true;
                 install_panic_hook();
-                // Docker, containerd and systemd start processes with a soft limit of
-                // 1024 open files for `select(2)` callers. Nothing here calls `select`,
-                // so raise it to the hard limit, as Go does since 1.19; otherwise
-                // every connection past about a thousand fails to accept.
                 if let Err(error) = rlimit::increase_nofile_limit(u64::MAX) {
                     tracing::warn!(error = %error, "open_file_limit_unchanged");
                 }
@@ -304,7 +291,6 @@ async fn serve(
                 started = startup => started.map(|()| StartupRace::Completed),
             }
         };
-        // Faults are sticky, including when a stop won the select's priority.
         let mut failure = pending_failure(&background, &serving);
         let mut ready = false;
         match race {
@@ -337,8 +323,6 @@ async fn serve(
     .catch_unwind()
     .await
     .unwrap_or(Some(BootstrapError::Panicked));
-    // No await separates signal selection (or unwind) from this final stop
-    // arbitration. Cancellation must not hide an already elapsed completion gap.
     let failure = stop_progress(&background, &serving, failure);
     let deadline = *deadline.get_or_insert_with(|| {
         signals.first_stop().unwrap_or_else(Instant::now) + config.http.grace_period
@@ -447,8 +431,6 @@ fn background_error(failure: BackgroundFailure) -> BootstrapError {
     }
 }
 
-/// What startup opens lands in `dependencies` or `background`, so teardown
-/// releases it on every path, including a startup dropped at a stop signal.
 #[allow(
     clippy::too_many_lines,
     reason = "startup is one ordered sequence; each step names the profile that owns it"
@@ -509,7 +491,6 @@ async fn start(
         },
     ));
 
-    // Built before any route or registration reads it, so both transports share it.
     let state = crate::AppState {
         readiness: readiness.reader(),
         // template:begin inbound-webhooks:bootstrap-webhooks-route-state
@@ -539,8 +520,6 @@ async fn start(
         None
     };
     // template:end grpc:bootstrap-grpc-prepare-finish
-    // The routes and the committed OpenAPI document are the two halves of
-    // one contract. Assembly is pure, so it runs before readiness admission.
     let contract = crate::api::contract(
         // template:begin http-idempotency:bootstrap-http-idempotency-contract-composer
         &mut composer,
@@ -555,7 +534,6 @@ async fn start(
     // template:begin http-idempotency:bootstrap-http-idempotency-activation
     idempotency::activate(composer, config, background).await?;
     // template:end http-idempotency:bootstrap-http-idempotency-activation
-    // Sockets are reserved before the ready verdict; none accepts until admission succeeds.
     let app_listener = BoundListener::bind(config.http.addr).await?;
     let diagnostics_listener = match config.observability.metrics.addr {
         Some(addr) => Some(BoundListener::bind(addr).await?),
@@ -598,10 +576,6 @@ async fn start(
     tracing::info!(addr = %app_listener.local_addr(), "http listener bound");
 
     if let Some(listener) = diagnostics_listener {
-        // Intentionally unhardened: Prometheus text on a private listener.
-        // `server_options` is shared HTTP transport policy, not `harden`.
-        // Liveness is served here as well: this listener has its own
-        // connection cap, so a full application listener cannot fail it.
         let diagnostics = diagnostics_router(metrics.clone()).merge(infra_http::liveness_router());
         let server = serving
             .diagnostics
@@ -636,8 +610,6 @@ enum PreparedAuth {
 mod tests {
     use super::*;
 
-    /// The global recorder installs once per test binary, so every test that
-    /// starts the process shares it.
     fn shared_metrics() -> Metrics {
         static METRICS: std::sync::OnceLock<Metrics> = std::sync::OnceLock::new();
         METRICS
@@ -697,7 +669,6 @@ mod tests {
         let mut config = Config::default();
         config.http.addr = "127.0.0.1:0".parse().unwrap();
         config.observability.metrics.addr = Some(occupied.local_addr().unwrap());
-        // An unadmitted startup must skip this wait entirely.
         config.http.readiness_propagation_delay = Duration::from_secs(20);
         let metrics = shared_metrics();
         let mut background = Background::new(CancellationToken::new());
@@ -815,8 +786,6 @@ mod tests {
         }
     }
 
-    /// The composition root installs the verifier whenever configuration
-    /// says `jwt`: a process that skipped it would serve this call.
     #[tokio::test]
     async fn a_process_verifying_service_tokens_refuses_a_tokenless_grpc_call() {
         use grpc_contracts::example::v1::{UnaryRequest, echo_service_client::EchoServiceClient};

@@ -10,7 +10,6 @@ use time::OffsetDateTime;
 use crate::error::EnvelopeError;
 use crate::registry::{Registry, route_key};
 
-/// Serialized, routed event intent. Retrying never reserializes or reroutes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedEvent {
     subject: Subject,
@@ -48,12 +47,6 @@ impl Registry {
 }
 
 impl PreparedEvent {
-    /// Serialization runs once and synchronously, retaining at most
-    /// `max_payload_bytes`; excess output is counted so a later serializer
-    /// error still wins. Neither the deadline nor the output bound can preempt
-    /// a serializer callback or bound its allocations: custom serializers must
-    /// be finite and nonblocking, and callers bound the source size,
-    /// cardinality and concurrent preparation.
     pub fn prepare<T: EventPayload + Serialize>(
         subject: impl Into<String>,
         event: &Event<T>,
@@ -83,13 +76,10 @@ impl PreparedEvent {
         let occurred_at = event.occurred_at.to_offset(time::UtcOffset::UTC);
         crate::wire::validate_outbound_identity(&event.id)?;
         let key = route_key::<T>();
-        // route_key checks the event type's length and control characters at compile time.
         crate::wire::validate_outbound_whitespace(key.event_type)?;
         if crate::wire::is_zero_time(occurred_at) {
             return Err(EnvelopeError::CreatedAtRequired);
         }
-        // The created-at text is derived at encode time; check the range here
-        // so preparation, not a later publication attempt, rejects it.
         crate::wire::check_timestamp(occurred_at)?;
         Ok(Self {
             subject,
@@ -102,11 +92,6 @@ impl PreparedEvent {
         })
     }
 
-    /// Rebuilds an event from stored parts, checking a concrete subject, identities of at most
-    /// [`IDENTITY_MAX_BYTES`](crate::wire::IDENTITY_MAX_BYTES) bytes, so the
-    /// five headers stay far below
-    /// [`HEADER_LIMIT_BYTES`](crate::wire::HEADER_LIMIT_BYTES), a positive
-    /// schema version, and a creation time that is set and can be formatted.
     pub(crate) fn from_parts(parts: PreparedEventParts) -> Result<Self, EnvelopeError> {
         let PreparedEventParts {
             subject,
@@ -152,9 +137,6 @@ impl PreparedEvent {
     pub fn message_id(&self) -> &str {
         &self.message_id
     }
-    /// The identity the broker deduplicates this publication by. It equals
-    /// [`Self::message_id`] except for a redrive, which publishes the same
-    /// event again under a new publication identity.
     #[must_use]
     pub fn publication_id(&self) -> &str {
         &self.publication_id
@@ -167,7 +149,6 @@ impl PreparedEvent {
     pub const fn schema_version(&self) -> u16 {
         self.schema_version
     }
-    /// The `Event-Schema` header value, such as `v1`.
     #[must_use]
     pub fn schema_label(&self) -> String {
         crate::wire::schema_label(self.schema_version)
@@ -212,8 +193,6 @@ fn payload_depth_allowed(bytes: &[u8]) -> bool {
     true
 }
 
-// Keep accepting writes past the ceiling so a later serialization error still
-// takes precedence over the size refusal. Only the retained prefix is bounded.
 struct PayloadWriter {
     bytes: Vec<u8>,
     total_bytes: usize,
@@ -312,7 +291,6 @@ mod tests {
     impl Serialize for StreamingPayload {
         fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
             self.calls.set(self.calls.get() + 1);
-            // This hint must not become an allocation request.
             let mut sequence = serializer.serialize_seq(Some(usize::MAX))?;
             for _ in 0..self.elements {
                 sequence.serialize_element(&0_u8)?;

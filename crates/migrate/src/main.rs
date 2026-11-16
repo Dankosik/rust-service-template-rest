@@ -64,8 +64,6 @@ fn main() -> ExitCode {
         Ok(config) => config,
         Err(err) => return finish_config_failure(err.to_string(), target, started),
     };
-    // The migration binary's own records survive a quieter service directive:
-    // operators and deploy hooks read them, including the terminal record.
     let level = format!("{},migrate_record=info", config.log.level);
     let logger = match install_subscriber(&LoggingOptions {
         level: &level,
@@ -120,22 +118,16 @@ fn finish_run(
 ) -> ExitCode {
     let cleanup_deadline = Instant::now() + CLEANUP_TIMEOUT;
     logger.begin_shutdown();
-    // Submit the terminal record before runtime shutdown can spend the shared
-    // cleanup allowance on detached blocking work such as a DNS lookup.
     let primary = finish(outcome, target, started);
     if let Some(runtime) = runtime {
         runtime.shutdown_timeout(cleanup_deadline.saturating_duration_since(Instant::now()));
     }
-    // The snapshot remains local: another record after closing would require
-    // another drain. Telemetry loss cannot change or replay the database result.
     let _ = logger.shutdown(cleanup_deadline);
     primary
 }
 
 fn finish(outcome: Result<Report, Failure>, target: Option<i64>, started: Instant) -> ExitCode {
     let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-    // One terminal record per run, read by operators and deploy hooks. An
-    // absent version field means none exists or it was not observed.
     match outcome {
         Ok(report) => {
             tracing::event!(
@@ -206,14 +198,10 @@ async fn apply(config: &MigrationConfig, target: Option<i64>) -> Result<Report, 
     run_until_stop(&options).await
 }
 
-/// Dropping the run drops the connection; the server then ends the session,
-/// the advisory lock, and any open transaction.
 async fn run_until_stop(options: &RunOptions<'_>) -> Result<Report, Failure> {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};
-        // SIGINT first, as in the service: a failed SIGTERM install then
-        // cannot drop a live SIGTERM stream, which would swallow the signal.
         let mut interrupt = signal(SignalKind::interrupt()).map_err(Failure::Signals)?;
         let mut terminate = signal(SignalKind::terminate()).map_err(Failure::Signals)?;
         tokio::select! {

@@ -8,15 +8,8 @@ use infra_postgres::{Tx, TxError, TxOptions, in_tx_with_acquire_deadline};
 
 use super::{Incoming, async_trait};
 
-/// `tx` stays open, and holds a pooled connection, until `process` returns
-/// and the job completes in it. Keep `process` to database effects. For an
-/// effect outside PostgreSQL, enqueue a job on `tx` and let that job make the
-/// call, so a slow recipient holds neither a transaction nor a connection.
 #[async_trait]
 pub trait Consumer: Send + Sync + 'static {
-    /// An `Err` rolls back every effect made on `tx`, and its [`JobError`] class
-    /// decides whether the job is retried. Do not complete the job: [`Processor`]
-    /// completes it in the same transaction after `Ok`.
     async fn process(&self, tx: &mut Tx<'_>, incoming: &Incoming) -> Result<(), JobError>;
 }
 
@@ -135,8 +128,6 @@ impl Handler<Incoming> for Processor {
         match completed {
             Ok(()) => Ok(()),
             Err(ProcessFailure::Consumer(error)) => {
-                // Every endpoint shares one job kind, so the attempt's own
-                // event that follows cannot say whose consumer this was.
                 tracing::info!(
                     webhook.endpoint = endpoint_id,
                     permanent = error.is_permanent(),
@@ -144,8 +135,6 @@ impl Handler<Incoming> for Processor {
                 );
                 Err(error)
             }
-            // `From` keeps the cause chain in the job's error summary and
-            // turns a pool acquire timeout into a refunded snooze.
             Err(other) => Err(JobError::from(other)),
         }
     }

@@ -51,8 +51,6 @@ const WAIT: Duration = Duration::from_secs(10);
 const RETRY_PAUSE: Duration = Duration::from_millis(20);
 const CANCEL_BUDGET: Duration = Duration::from_secs(1);
 
-// Scope digests. The advisory lock key is a digest's first eight bytes, so
-// every scope differs there.
 const SCOPE: Digest = [0x11; 32];
 const OTHER_CALLER: Digest = [0x12; 32];
 const OTHER_SCOPE: Digest = [0x13; 32];
@@ -379,10 +377,6 @@ async fn p1_a_record_committed_under_the_work_is_kept_and_the_work_rolls_back(po
     let record = success(r#"{"id":1}"#);
     let work = Work::default();
 
-    // Arbitration admits one attempt per scope to its work. Should a record
-    // of the scope commit under that work anyway, here written past the
-    // store, the attempt's write leaves it in place and the work rolls back:
-    // a second effect for a live key never commits.
     let caller = caller("fixture-subject");
     let refused: Outcome<Refusal> = store
         .attempt(
@@ -518,13 +512,10 @@ async fn p3_corrupt_columns_are_integrity_failures_even_for_a_mismatch(pool: PgP
         record
     );
 
-    // Only this per-test database admits a NULL body, to exercise the decoder
-    // independently of the table's ordinary NOT NULL guard.
     sqlx::query("ALTER TABLE http_idempotency_records ALTER COLUMN body DROP NOT NULL")
         .execute(&pool)
         .await
         .expect("the fixture permits a corrupt body");
-    // A mismatch never reads the body, so only a replay sees a corrupt one.
     for (corruption, mismatch_sees_it) in [
         (
             "UPDATE http_idempotency_records SET headers = \
@@ -575,9 +566,6 @@ async fn p3_corrupt_columns_are_integrity_failures_even_for_a_mismatch(pool: PgP
 async fn p3_a_long_verified_caller_identity_commits_and_replays(pool: PgPool) {
     create_effects(&pool).await;
     let (store_pool, store) = replica(&dsn_for(&pool).await).await;
-    // This is deliberately larger than PostgreSQL's btree entry limit and
-    // non-repeating. A raw caller-value index would reject the committed
-    // record; digest-backed scope identity must preserve the caller domain.
     let mut caller_value = String::new();
     for part in 0..2_048 {
         write!(&mut caller_value, "caller-{part:08x};").expect("String writes do not fail");
@@ -709,7 +697,6 @@ async fn p4_waiting_for_an_expired_row_preserves_retention_and_replay(pool: PgPo
                     },
                 )
                 .await;
-                // Spend the original TTL while PostgreSQL is waiting for the lock.
                 tokio::time::sleep(retention + RETRY_PAUSE).await;
                 if delete_while_locked {
                     sqlx::query("DELETE FROM http_idempotency_records WHERE scope_key = $1")
@@ -767,7 +754,6 @@ async fn p4_an_expired_key_can_execute_while_a_replay_is_in_flight(pool: PgPool)
 
     let seeded = execute(&writer, SCOPE, INPUT, &original, &work).await;
     assert_eq!(committed(seeded), original);
-    // Hold the live read's completion while the server transaction stays open.
     proxy.arm_ready_hold(ReadyBoundary::ExecuteSync);
     let (replay, afresh) = bounded("replay across expiry", async {
         tokio::join!(execute(&replaying, SCOPE, INPUT, &original, &work), async {
@@ -793,8 +779,6 @@ async fn p4_an_expired_key_can_execute_while_a_replay_is_in_flight(pool: PgPool)
 async fn p4_a_retention_with_a_sub_microsecond_part_writes_its_record(pool: PgPool) {
     create_effects(&pool).await;
     let store_pool = template_pool(&dsn_for(&pool).await, 1).await;
-    // Configuration accepts nanosecond units; `sqlx` binds an interval only
-    // in whole microseconds.
     let store = Store::new(store_pool.clone(), Duration::new(3_600, 123_456_789))
         .expect("retention fits PostgreSQL");
     let record = success(r#"{"id":1}"#);
@@ -823,14 +807,11 @@ async fn p4_cleanup_drains_the_backlog_and_keeps_live_and_held_records(pool: PgP
     let (pool_2, replica_2) = replica(&dsn).await;
     let record = success(r#"{"id":1}"#);
     let work = Work::default();
-    // The attempt that executes below replaces an expired record of its own.
     let first = execute(&replica_1, SCOPE, INPUT, &record, &work).await;
     assert_eq!(committed(first), record);
     expire(&pool, SCOPE).await;
     seed(&pool, SEED_EXPIRED, BACKLOG).await;
     seed(&pool, SEED_LIVE, LIVE).await;
-    // One expired row stays locked, as an attempt's write holds it until its
-    // commit.
     #[expect(
         clippy::disallowed_methods,
         reason = "the test holds a raw transaction open to keep a lock"
@@ -851,9 +832,6 @@ async fn p4_cleanup_drains_the_backlog_and_keeps_live_and_held_records(pool: PgP
             work.hold.release();
             removed
         },);
-    // Every expired record went, in more than one batch: the backlog less its
-    // locked row, which was skipped without waiting, plus the executing
-    // attempt's own expired record.
     let drained = u64::try_from(BACKLOG).expect("a row count");
     assert_eq!(removed, Ok(drained));
     let scrape = recorder.handle().render();
@@ -891,8 +869,6 @@ async fn p4_cleanup_keeps_confirmed_progress_after_failure_and_counts_waiting_ca
     let store_pool = template_pool(&dsn_for(&pool).await, 1).await;
     let store = Store::new(store_pool.clone(), RETENTION).expect("retention fits PostgreSQL");
     seed(&pool, SEED_EXPIRED, 501).await;
-    // The oldest 500 rows form the first committed batch. The remaining row
-    // rejects deletion, so the second transaction must not count as progress.
     sqlx::query(
         "UPDATE http_idempotency_records SET expires_at = now() - interval '2 hours' \
          WHERE scope_key <> sha256(int8send(501::bigint))",
@@ -924,8 +900,6 @@ async fn p4_cleanup_keeps_confirmed_progress_after_failure_and_counts_waiting_ca
     ] {
         assert!(scrape.contains(line), "{line} missing from {scrape}");
     }
-    // Close admission, without creating another server fault, to exercise two
-    // direct calls that are simultaneously waiting for the only pool slot.
     let held = infra_postgres::acquire(&store_pool, "hold cleanup admission")
         .await
         .unwrap();
@@ -1010,9 +984,6 @@ async fn p4_the_cleanup_task_runs_at_once_and_returns_promptly_on_cancel(pool: P
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn p4_population_distinguishes_unknown_empty_and_locked_expired_records(pool: PgPool) {
-    // Cleanup's SKIP LOCKED result cannot establish an empty population. The
-    // observer must see the expired row while its lock is held, and must ignore
-    // a live row. Existing cleanup tests prove deletion, not this read contract.
     seed(&pool, SEED_LIVE, 1).await;
     let store_pool = template_pool(&dsn_for(&pool).await, 1).await;
     for expired in [true, false] {
@@ -1059,8 +1030,6 @@ async fn p4_population_distinguishes_unknown_empty_and_locked_expired_records(po
                 })
                 .collect()
         };
-        // Occupied admission makes the first observation pending, without
-        // substituting a mock or a fake sample for the provider's query.
         let admission = infra_postgres::acquire(&store_pool, "hold sampler admission")
             .await
             .expect("the sole slot");
@@ -1154,9 +1123,6 @@ async fn p6_an_aborted_statement_is_internal_and_the_same_key_can_retry(pool: Pg
     let record = success(r#"{"id":1}"#);
     let caller = caller("fixture-subject");
 
-    // PostgreSQL marks the transaction failed after division by zero. The
-    // store's normal record write then observes SQLSTATE 25P02 and classifies
-    // it as an internal fault, not transient unavailability.
     let aborted: Outcome<()> = store
         .attempt(
             &ScopeKey::from_digest(SCOPE),

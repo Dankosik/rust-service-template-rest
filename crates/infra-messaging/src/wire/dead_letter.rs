@@ -27,8 +27,6 @@ const RETAINED_HEADERS: [HeaderName; 6] = [
 ];
 
 outcome_label! {
-    /// Why a delivery moved to the dead-letter stream; the `Dead-Letter-Reason`
-    /// header value and the `messaging_dead_letter_total` label.
     pub(crate) enum DeadLetterReason {
         Malformed => "malformed",
         Permanent => "permanent",
@@ -55,8 +53,6 @@ fn transfer_headers<T>(
     ]
 }
 
-/// Reserve for the 12-byte framing of a new block and for re-encoding
-/// retained fields from a noncanonical block the client accepted.
 pub(crate) fn dead_letter_bounds(
     source_bytes: usize,
     subject_bytes: usize,
@@ -66,7 +62,6 @@ pub(crate) fn dead_letter_bounds(
         .into_values()
         .max()?;
     let transfer_id_bytes = DEAD_LETTER_ID_PREFIX.len() + SHA256_HEX_LEN;
-    // The fallback Message-Id line is larger than the mutually exclusive provenance marker.
     let identity_bytes = checked_header_line_bytes(MESSAGE_ID, transfer_id_bytes)?
         .max(checked_header_line_bytes(ORIGINAL_ID_PRESENT.as_ref(), 1)?);
     let additions = transfer_headers(transfer_id_bytes, subject_bytes, reason_bytes, stream_bytes)
@@ -74,9 +69,6 @@ pub(crate) fn dead_letter_bounds(
         .try_fold(identity_bytes, |bytes, (name, value_bytes)| {
             bytes.checked_add(checked_header_line_bytes(name.as_ref(), value_bytes)?)
         })?;
-    // The client accepts bare LF and a missing final newline. Re-encoding can
-    // add one CR and one space per retained line, a CR on the version line,
-    // a final blank CRLF, and the last missing LF.
     let framing_reserve = HEADER_PREAMBLE_BYTES.max(RETAINED_HEADERS.len() * 2 + 4);
     let framed_source = source_bytes.checked_add(framing_reserve)?;
     Some(DeadLetterBounds {
@@ -125,9 +117,6 @@ pub struct DeadLetterRecord {
     pub stored_at: OffsetDateTime,
 }
 
-/// Reconstructs an original event with Go's deterministic `redrive-` ID.
-/// An unmarked legacy transfer ID shared by both identity headers is rejected
-/// as ambiguous.
 pub fn restore_dead_letter(record: DeadLetterRecord) -> Result<PreparedEvent, EnvelopeError> {
     let subject = header_value(&record.headers, header_name::ORIGINAL_SUBJECT).to_owned();
     if !valid_subject(&subject) {
@@ -154,7 +143,6 @@ pub fn restore_dead_letter(record: DeadLetterRecord) -> Result<PreparedEvent, En
     if is_zero_time(occurred_at) {
         return Err(EnvelopeError::DeadLetterCreatedAtRequired);
     }
-    // Go includes an empty hash component when the stored record has no Nats-Msg-Id.
     let publication_id = record_id(
         "redrive-",
         &record.stream,
@@ -178,8 +166,6 @@ fn has_ambiguous_original_id(
     message_id: &str,
     stored_publication_id: &str,
 ) -> bool {
-    // Go and older Rust transfers use their deterministic ID as a fallback
-    // Message-Id. A genuine collision in a new Rust transfer carries provenance.
     message_id == stored_publication_id
         && header_value(headers, ORIGINAL_ID_PRESENT) != "1"
         && message_id
@@ -192,7 +178,6 @@ fn has_ambiguous_original_id(
             })
 }
 
-/// Go-compatible deterministic transfer identity for dead-letter publication.
 pub fn dead_letter_id(
     stream: &str,
     stream_sequence: u64,
@@ -269,7 +254,6 @@ mod tests {
                 assert_eq!(transferred.get("tracestate").unwrap().as_str(), trace);
             }
         }
-        // A small stream also bounds the source headers below the adapter cap.
         let bounds = dead_letter_bounds(128, 14, 10).unwrap();
         assert_eq!(bounds.headers, bounds.total);
     }

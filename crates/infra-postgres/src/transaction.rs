@@ -1,8 +1,3 @@
-//! `COMMIT` may have succeeded on the server after the client stopped hearing
-//! from it. [`TxError`] separates a definitely rejected commit, which may be
-//! retried, from an unknown outcome, which must be reconciled against the
-//! operation's own identity.
-
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll, ready};
@@ -26,12 +21,8 @@ pub enum TxError {
     Acquire(#[source] sqlx::Error),
     #[error("postgres transaction: begin: {0}")]
     Begin(#[source] sqlx::Error),
-    /// The commit was rejected or never sent (including a failed pre-commit check);
-    /// nothing was written.
     #[error("postgres transaction: not committed: {0}")]
     CommitFailed(#[source] sqlx::Error),
-    /// No definitive commit result arrived; the server may have committed.
-    /// Reconcile instead of retrying blindly.
     #[error("postgres transaction: commit outcome unknown: {0}")]
     CommitUnknown(#[source] sqlx::Error),
 }
@@ -48,29 +39,19 @@ impl TxError {
     }
 }
 
-/// A statement's success proves the transaction is alive; an empty statement proves nothing.
 #[derive(Debug)]
 pub struct Tx<'c> {
     conn: &'c mut PgConnection,
-    /// Whether the last statement succeeded, proving the transaction is not
-    /// aborted. Cleared when a statement starts and by [`Tx::connection`].
     proven_alive: bool,
 }
 
 impl Tx<'_> {
-    /// The borrowed connection, for savepoints or APIs that take a connection.
-    ///
-    /// The commit that follows first checks the transaction is not aborted, unless
-    /// a later statement through `tx` succeeds. Do not issue transaction-control
-    /// SQL through this connection.
     pub fn connection(&mut self) -> &mut PgConnection {
         self.proven_alive = false;
         self.conn
     }
 }
 
-/// `is_local = true` lasts until the transaction ends, so PostgreSQL restores
-/// the session timeout itself.
 pub async fn set_statement_timeout(tx: &mut Tx<'_>, timeout: Duration) -> Result<(), sqlx::Error> {
     observed(
         "set statement timeout",
@@ -87,8 +68,6 @@ pub async fn set_statement_timeout(tx: &mut Tx<'_>, timeout: Duration) -> Result
 type DriverFuture<'e, T> = Pin<Box<dyn Future<Output = Result<T, sqlx::Error>> + Send + 'e>>;
 type DriverStream<'e, T> = Pin<Box<dyn Stream<Item = Result<T, sqlx::Error>> + Send + 'e>>;
 
-/// Each statement withdraws the proof when it starts and restores it only on a
-/// complete, error-free answer.
 impl<'c> Executor<'c> for &'c mut Tx<'_> {
     type Database = Postgres;
 
@@ -119,8 +98,6 @@ impl<'c> Executor<'c> for &'c mut Tx<'_> {
         })
     }
 
-    // A prepare or describe answered from the statement cache never reaches the
-    // server, so it proves nothing.
     fn prepare_with<'e>(
         self,
         sql: SqlStr,
@@ -166,10 +143,6 @@ impl<T> Stream for Proving<'_, T> {
     }
 }
 
-/// sqlx 0.9 does not roll back a `BEGIN` whose future is cancelled: its guard
-/// acts only after the depth was incremented, which follows the server's answer.
-/// The pool's return ping succeeds, so the connection would re-enter the pool
-/// inside an open transaction.
 struct DiscardOnDrop {
     connection: PoolConnection<Postgres>,
     discard: bool,
@@ -211,8 +184,6 @@ pub struct TxOptions {
 }
 
 impl TxOptions {
-    /// Literals, so `begin_with` takes a static string instead of dynamic SQL
-    /// behind `AssertSqlSafe`.
     fn begin_statement(self) -> Option<&'static str> {
         match (self.isolation, self.read_only) {
             (Isolation::ServerDefault, false) => None,
@@ -247,8 +218,6 @@ where
     transaction(pool, options, None, f).await
 }
 
-/// [`in_tx_with`] with `deadline` bounding only the wait for a connection, as
-/// [`acquire_until`] describes.
 pub async fn in_tx_with_acquire_deadline<T, E, F>(
     pool: &PgPool,
     deadline: tokio::time::Instant,
@@ -275,8 +244,6 @@ where
     let span = observe::transaction_span(pool);
     let mut observed = TransactionObservation::start(span.clone());
     async {
-        // Keeps the native pool wait out of callers' transaction futures; nested callers
-        // otherwise exceed Clippy's size and Rust's hotpath layout-query depth limits.
         let acquired = Box::pin(async {
             match deadline {
                 Some(deadline) => acquire_until(pool, "transaction", deadline).await,
@@ -301,8 +268,6 @@ where
             conn: &mut tx,
             proven_alive: true,
         };
-        // Dropping `tx` queues the rollback and the pool's return ping sends it; a
-        // rejected rollback fails that ping and the pool closes the connection.
         let value = match f(&mut handle).await {
             Ok(value) => value,
             Err(err) => {
@@ -310,12 +275,7 @@ where
                 return Err(err);
             }
         };
-        // A read-only transaction wrote nothing a silent rollback could lose.
         if !(options.read_only || handle.proven_alive) {
-            // PostgreSQL answers `COMMIT` in an aborted transaction with a silent
-            // `ROLLBACK` and sqlx does not check the command tag (pgx reports it as
-            // `ErrTxCommitRollback`), so this statement proves liveness: an aborted
-            // transaction answers `25P02`. The commit is never sent after a failure here.
             (&mut *tx)
                 .execute("SELECT 1")
                 .await
@@ -331,9 +291,6 @@ where
     .await
 }
 
-/// A deferred constraint (class `23`) or transaction rollback (class `40`)
-/// reported by `COMMIT` means the server rolled back, except `40003` (statement
-/// completion unknown) and every transport failure.
 fn classify_commit(err: sqlx::Error) -> TxError {
     let rejected = sqlstate(&err)
         .is_some_and(|code| code.starts_with("23") || (code.starts_with("40") && code != "40003"));

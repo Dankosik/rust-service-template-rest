@@ -27,9 +27,6 @@ macro_rules! outcome_label {
 }
 pub(crate) use outcome_label;
 
-/// A count and a duration per outcome label, registered once with the
-/// installed recorder. Emitting through the macros instead looks each metric
-/// up and allocates its labels on every publish and delivery.
 #[derive(derive_more::Debug)]
 #[debug("Outcomes")]
 pub(crate) struct Outcomes<O: OutcomeLabel> {
@@ -37,8 +34,6 @@ pub(crate) struct Outcomes<O: OutcomeLabel> {
 }
 
 impl<O: OutcomeLabel> Outcomes<O> {
-    /// `label_key` names the label each outcome's value goes under;
-    /// `event_type`, when given, labels every outcome with that event type.
     pub(crate) fn register(
         total: &'static str,
         duration: &'static str,

@@ -109,8 +109,6 @@ impl FullPipeline {
 }
 
 async fn fill_with_cancelled_commands(namespace: &CacheNamespace) {
-    // The live GET already holds one place. The unpolled driver retains the
-    // abandoned sends, and the maintenance PING fills the last place.
     for _ in 0..APPLICATION_SLOTS {
         let mut abandoned = pin!(namespace.get("abandoned"));
         assert!(futures_util::poll!(abandoned.as_mut()).is_pending());
@@ -154,8 +152,6 @@ async fn dropping_a_mutation_waiting_for_capacity_does_not_enqueue_it() {
             let wake = Arc::new(DriverWake::default());
             let waker = Waker::from(wake.clone());
             pipeline.poll_driver(&waker);
-            // The driver has drained the queue and is listening for another
-            // send. Drop without giving the mutation a normal poll.
             drop(mutation);
             assert!(
                 !wake.0.load(Ordering::Relaxed),

@@ -45,8 +45,6 @@ impl Transition {
     }
 }
 
-/// Carries only the values its statement binds. Labels stay with
-/// [`Transition`], so a timed-out retry is a [`Self::Retry`] here.
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Write<'a> {
     Retry {
@@ -96,16 +94,9 @@ impl Written {
     }
 }
 
-/// An outcome write that did not acknowledge and needs no further
-/// observation: its writer already counted and logged the failure, or its
-/// batch ended without an answer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Unacknowledged;
 
-/// The supervisor routes completion through
-/// [`complete_batched`](super::completion::complete_batched). A handler can
-/// complete the claim in its own transaction via
-/// [`Job::complete_in_tx`](crate::kind::Job::complete_in_tx).
 pub(super) fn write_of(transition: &Transition) -> Option<Write<'_>> {
     Some(match transition {
         Transition::Complete => return None,
@@ -135,7 +126,6 @@ pub(super) async fn send_outcome(
     write: Write<'_>,
     deadline: Instant,
 ) -> Result<Written, Unacknowledged> {
-    // An sqlx statement future is about 16 KiB; box it once so the supervisor stays small.
     let result = backstop(Box::pin(async {
         let mut connection = infra_postgres::acquire(&shared.pool, "record job outcome")
             .await
@@ -201,8 +191,6 @@ async fn execute(
                 ),
             )
         }
-        // A cancelled attempt gives its unit back and keeps `not_before`, so the job
-        // keeps its place in claim order instead of queueing behind the backlog.
         Write::Release => (
             "release job",
             sqlx::query!(
@@ -303,9 +291,6 @@ impl RetryCause {
     }
 }
 
-/// The nominal delay after attempt `n` is `n^4` seconds: 1 s, 16 s, 81 s, and
-/// so on. The retry statement in [`execute`] jitters it by ±10% and raises it
-/// to the cause's floor.
 fn retry_or_exhaust(number: u16, policy: Policy, text: &str, cause: RetryCause) -> Transition {
     let summary = sanitize_summary(text);
     if number >= policy.max_attempts {
@@ -321,9 +306,6 @@ fn retry_or_exhaust(number: u16, policy: Policy, text: &str, cause: RetryCause) 
     }
 }
 
-/// The rejected payload is never quoted: it holds untrusted producer or handler
-/// input, and a value copied here would be stored, logged, and exported. The
-/// category, line, and column locate the defect without it.
 fn payload_summary(kind: &str, error: &serde_json::Error) -> String {
     let category = match error.classify() {
         serde_json::error::Category::Io => "io",

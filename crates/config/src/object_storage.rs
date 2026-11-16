@@ -1,15 +1,3 @@
-//! Optional S3-compatible object storage: provider, bucket, credentials, and
-//! limits.
-//!
-//! With `provider = "none"`, startup skips provider-specific checks and client
-//! creation. It still checks the ranges for `max_object_bytes`,
-//! `max_concurrency`, and `operation_timeout`.
-//!
-//! This section owns which keys a provider and credential source accept, the
-//! environment-only secret, and the local-only emulator provider.
-//! `infra-object-storage` validates the shape of the endpoint origin, region,
-//! bucket name, and owner account when it builds the client.
-
 use std::time::Duration;
 
 use bytesize::{ByteSize, GIB, MIB};
@@ -22,8 +10,6 @@ use crate::validate::{
     Rejected, ValidationError, Violations, duration_range, int_range, non_blank, required,
 };
 
-/// Largest object without multipart: R2's single-upload limit (5 GiB minus
-/// 5 MiB), the smallest documented across the supported providers.
 const MAX_OBJECT_BYTES_CEILING: u64 = 5 * GIB - 5 * MIB;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -93,18 +79,13 @@ impl Default for ObjectStorageInput {
             credentials: CredentialsKind::AccessKey,
             access_key_id: String::new(),
             secret_access_key: None,
-            // Both production consumers stay under 2 MiB; buffered reads
-            // cost up to max_concurrency x max_object_bytes of memory.
             max_object_bytes: ByteSize::mib(8),
             max_concurrency: 8,
-            // The shortest per-call budget of the production consumers.
             operation_timeout: Duration::from_secs(5),
         }
     }
 }
 
-/// The provider and the keys it accepts. An optional `region` is `None` when
-/// the operator left it blank.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ObjectStorageProvider {
     AmazonS3 {
@@ -135,7 +116,6 @@ pub enum ObjectStorageCredentials {
         access_key_id: String,
         secret_access_key: SecretString,
     },
-    /// The AWS identity the platform gives the workload.
     WorkloadIdentity,
 }
 
@@ -149,8 +129,6 @@ impl ObjectStorageCredentials {
     }
 }
 
-/// Object storage as admitted; absent from [`crate::Config`] when
-/// `object_storage.provider` is `none`.
 #[derive(Clone, Debug)]
 pub struct ObjectStorageConfig {
     pub provider: ObjectStorageProvider,
@@ -263,8 +241,6 @@ impl ObjectStorageInput {
         })
     }
 
-    /// The endpoint and optional region of every provider that takes an
-    /// endpoint other than Amazon S3 and R2.
     fn admit_endpoint_provider(
         &self,
         accepts_path_style: bool,

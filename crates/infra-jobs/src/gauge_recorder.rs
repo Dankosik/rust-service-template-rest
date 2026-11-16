@@ -31,8 +31,6 @@ impl Gauges {
             None => Key::from_name(name),
         };
         let mut found = None;
-        // `Snapshotter::snapshot` swaps every gauge to zero; restore each raw
-        // value so subsequent decrements and untouched series stay intact.
         for (composite, _, _, value) in self.snapshotter.snapshot().into_vec() {
             if let DebugValue::Gauge(gauge) = value {
                 let raw = gauge.into_inner();

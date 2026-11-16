@@ -126,9 +126,6 @@ async fn success_carries_request_id_and_nosniff() {
 
 #[tokio::test]
 async fn a_known_body_length_survives_the_chain() {
-    // hyper writes `Content-Length` from the exact size hint; a layer
-    // that wraps the body without forwarding it turns every response
-    // into a chunked one.
     let response = app(&options())
         .oneshot(request(Method::GET, "/ok"))
         .await
@@ -350,8 +347,6 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for EventFields {
     }
 }
 
-// Keep panic assertions under one capturing subscriber: an uninstrumented
-// sibling can otherwise register the shared recovery callsite as disabled.
 #[tokio::test]
 async fn panic_is_a_sanitized_500_problem() {
     let events = Arc::new(Mutex::new(Vec::new()));
@@ -507,7 +502,6 @@ async fn a_request_over_the_limit_waits_for_a_permit_and_is_served() {
     )]
     let routes = holding_routes(started.clone(), gate.clone()).route("/ok", get(|| async { "ok" }));
     let mut options = options();
-    // The holders must outlast the wait below.
     options.request_timeout = Duration::from_secs(5);
     let app = harden(routes, &options);
 
@@ -565,7 +559,6 @@ async fn a_request_is_shed_when_a_permit_frees_after_its_wait_budget() {
     assert_eq!(started.load(Ordering::SeqCst), 1);
 }
 
-/// Omit the opening deadline so the holder can outlive the waiter's patience.
 #[tokio::test(start_paused = true)]
 async fn a_request_that_waits_out_its_patience_is_shed_and_logged() {
     let started = Arc::new(tokio::sync::Notify::new());

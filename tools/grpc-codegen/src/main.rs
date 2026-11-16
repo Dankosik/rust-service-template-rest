@@ -1,8 +1,3 @@
-//! Buf owns schema compilation and builds the set with its imports: prost
-//! resolves an imported message type from the set. This tool runs stock tonic
-//! codegen over it and does not invoke protoc. Well-known types map to
-//! `prost_types` and emit nothing; any other imported package is generated
-//! beside the owned ones unless an `extern_path` names the crate that owns it.
 
 use std::{
     env,

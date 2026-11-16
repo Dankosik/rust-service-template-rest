@@ -8,8 +8,6 @@ pub(crate) enum AdmissionRefusal {
     SubjectRequired,
 }
 
-/// Strips the subject extension even when admission fails, so it never
-/// reaches the resource.
 pub(crate) fn admit_request_subject<B>(
     request: &mut Request<B>,
     required: bool,

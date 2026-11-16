@@ -41,13 +41,6 @@ type PostgresMessages = Box<
 
 impl<'a> Registration<'a> {
     // template:begin outbox:worker-with-postgres-messages
-    /// Declare routes through `messages` during ordinary registration. This hook
-    /// declares consumer intent before dependency I/O and receives the same registry
-    /// after pool admission and migration-history verification, before broker admission.
-    /// It must perform only bounded synchronous composition: no I/O, pool creation,
-    /// task spawning or retries. The worker retains pool and shutdown ownership.
-    /// Refuses a second factory; a factory error, panic, duplicate handler, or empty
-    /// consumer registry later refuses startup through the existing cleanup path.
     pub fn with_postgres_messages(
         &mut self,
         factory: impl FnOnce(
@@ -69,20 +62,6 @@ impl<'a> Registration<'a> {
         self.config
     }
 
-    /// `start` builds the task from a token cancelled at the background-join
-    /// stage, which then joins it.
-    ///
-    /// The task must run until that token is cancelled. One that returns or
-    /// panics earlier stops the worker with exit code 1, and the failure
-    /// names it by `name`. A panic after cancellation still makes shutdown
-    /// degraded. The worker bounds cooperative joining, requests abort when
-    /// it expires, and distinguishes acknowledged termination from unfinished
-    /// work before closing dependencies. Registration itself must return
-    /// promptly and must not perform blocking provider I/O.
-    ///
-    /// `start` runs synchronously inside this call, so a panic while it
-    /// builds the future unwinds registration: the worker reports the
-    /// anonymous lifecycle panic, not a failure named `name`.
     pub fn spawn<F>(&self, name: &'static str, start: impl FnOnce(CancellationToken) -> F)
     where
         F: Future<Output = ()> + Send + 'static,
@@ -90,8 +69,6 @@ impl<'a> Registration<'a> {
         self.background.spawn(name, start);
     }
 
-    /// A new child of the background token, cancelled at the background-join
-    /// stage. Cancelling it does not stop the worker.
     #[must_use]
     pub fn shutdown(&self) -> CancellationToken {
         self.background.cancel.child_token()
@@ -104,11 +81,6 @@ const BUILD_INFO: BuildInfo = BuildInfo::from_package_version(env!("CARGO_PKG_VE
 
 const EXIT_DEGRADED_SHUTDOWN: u8 = 3;
 
-/// The first item of `args` is the program name, as in [`std::env::args_os`].
-/// A composition with no retained capability refuses after configuration is
-/// loaded. `--help` prints clap's help and exits 0; a flag error prints one
-/// generic usage line and exits 2. Later failures do not call
-/// [`std::process::exit`].
 pub fn run<I, R>(args: I, register: R) -> ExitCode
 where
     I: IntoIterator<Item = OsString>,
@@ -120,7 +92,6 @@ where
             let result = if error.kind() == clap::error::ErrorKind::DisplayHelp {
                 ProcessResult::Reported(error.print().is_ok())
             } else {
-                // clap's detailed usage errors can repeat arbitrary rejected values.
                 let _ = process_failure("invalid command arguments; use --help for usage");
                 ProcessResult::Usage
             };
@@ -197,7 +168,6 @@ fn start(
         shutdown::RUNTIME_SHUTDOWN_TIMEOUT
             .min(deadline.saturating_duration_since(tokio::time::Instant::now())),
     );
-    // Native signal streams remain alive until the explicit runtime shutdown returns.
     drop(signals);
     outcome
 }

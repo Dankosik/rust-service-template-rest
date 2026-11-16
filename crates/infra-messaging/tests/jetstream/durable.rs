@@ -77,8 +77,6 @@ async fn consumer_admission_checks_the_filter_for_handled_subjects_only() {
         .expect("fixture routes are valid")
     };
 
-    // The process only publishes `PublishedElsewhere`; its durable need not
-    // select that subject.
     let mut publishes_elsewhere = routes();
     publishes_elsewhere
         .register::<ExampleEvent, _, _>(|_, _| async { Ok(()) })
@@ -125,8 +123,6 @@ async fn durable_deleted_between_pulls_stops_the_consumer() {
         .consumer(registry)
         .await
         .expect("adapter creates its named durable consumer");
-    // No pull is waiting yet, so the broker has no request to terminate with
-    // `Consumer Deleted`; the next pull meets a subject nobody answers.
     fixture
         .jetstream
         .delete_consumer_from_stream(&fixture.durable, &fixture.stream)
@@ -330,8 +326,6 @@ async fn an_unanswered_identity_check_blocks_pulls_without_losing_the_consumer()
         messaging.probe().check().await.is_ok(),
         "the NATS connection itself is healthy"
     );
-    // Observe across the five-second request budget and its one-second retry
-    // backoff; a fail-open lookup would admit the retained event here.
     assert!(
         timeout(Duration::from_secs(7), observed_rx.recv())
             .await

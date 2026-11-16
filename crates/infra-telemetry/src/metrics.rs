@@ -1,6 +1,3 @@
-//! Prometheus metrics through the `metrics` facade: one recorder per process.
-//! Each crate that emits a histogram owns its name and any bucket override.
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,17 +13,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::traces::{ExporterState, TRACE_EXPORTER_ACTIVE_METRIC};
 
-/// Buckets in seconds for a histogram no emitter registered, the Prometheus
-/// client default. Without buckets the exporter renders a summary, whose
-/// quantiles cannot be aggregated across replicas.
 const DEFAULT_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
 ];
 
-/// The recorder keeps every histogram sample, 24 bytes with its timestamp,
-/// until upkeep folds it into the buckets. Each second bounds that to one
-/// second of traffic: at 26k requests per second it cut the service's peak
-/// resident memory from 16.8 to 13 MB with unchanged CPU and throughput.
 const HISTOGRAM_UPKEEP_INTERVAL: Duration = Duration::from_secs(1);
 
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
@@ -39,7 +29,6 @@ const SCHEDULER_LAG_BUCKETS: &[f64] = &[
     0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0,
 ];
 
-/// Shared with the scrape owner; no callbacks or await while holding the lock.
 #[derive(Debug, Default)]
 struct Progress {
     sample: Mutex<Option<ProgressSample>>,
@@ -108,8 +97,6 @@ pub struct Metrics {
 }
 
 impl Metrics {
-    /// The built-in scheduler lag buckets take precedence over any entry for
-    /// `runtime_scheduler_lag_seconds`.
     pub fn install(histograms: &[(&str, &[f64])]) -> Result<Self, MetricsError> {
         let mut builder = PrometheusBuilder::new().set_buckets(DEFAULT_BUCKETS)?;
         for &(name, buckets) in histograms {
@@ -152,10 +139,6 @@ impl Metrics {
         self.handle.render()
     }
 
-    /// Run once under the process background tracker. The first sample waits a
-    /// full interval; resumed lateness is retained in the histogram and
-    /// maximum, with no catch-up samples. Scrapes compute age independently,
-    /// so a stalled sampler becomes stale.
     pub async fn runtime_progress(self, cancel: CancellationToken) {
         let mut expected = Instant::now() + PROGRESS_INTERVAL;
         loop {
@@ -190,7 +173,6 @@ impl Metrics {
     }
 }
 
-/// Uses the stable subset; `--cfg tokio_unstable` adds poll and queue detail.
 pub async fn runtime_metrics(interval: Duration, cancel: CancellationToken) {
     let reporter = tokio_metrics::RuntimeMetricsReporterBuilder::default()
         .with_interval(interval)
@@ -198,10 +180,6 @@ pub async fn runtime_metrics(interval: Duration, cancel: CancellationToken) {
     let _ = cancel.run_until_cancelled(reporter).await;
 }
 
-/// Serve on the private diagnostics listener, never the application one. That
-/// listener is outside the application `harden` chain: Prometheus text, not
-/// Problem JSON; no scrape HTTP metrics, spans, or access logs. `http.*`
-/// `ServerOptions` still apply as transport policy.
 #[expect(
     clippy::disallowed_methods,
     reason = "the private Prometheus listener is outside the application OpenAPI contract"
@@ -280,7 +258,6 @@ mod tests {
         assert_eq!(value(&first, SCHEDULER_AGE_METRIC), 0.0);
         assert_eq!(value(&first, SCHEDULER_LAG_MAX_METRIC), 0.0);
 
-        // Keep the sampler unpolled while the scrape path still makes progress.
         tokio::time::advance(Duration::from_millis(2100)).await;
         assert_eq!(value(&scraper.render(), SCHEDULER_AGE_METRIC), 2.1);
         assert!(sampler.as_mut().now_or_never().is_none());

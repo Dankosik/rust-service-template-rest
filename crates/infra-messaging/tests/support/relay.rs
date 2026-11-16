@@ -22,8 +22,6 @@ struct AuthObservations {
     latest_public_user: Option<String>,
 }
 
-/// Retains only the latest public CONNECT subject; it neither validates nor
-/// supplies authentication.
 pub(crate) struct AuthObservingRelay {
     pub(crate) url: String,
     close_first: CancellationToken,
@@ -154,7 +152,6 @@ impl AckDroppingRelay {
         Self::start_with_filters(|_, _| false, move |_, payload| drop_reply(payload)).await
     }
 
-    /// Withholds the second pull so the test can deliver it after replacing the durable.
     pub(crate) async fn intercept_second_pull(
         subject: String,
     ) -> (Self, oneshot::Receiver<(String, Bytes)>) {
@@ -188,7 +185,6 @@ impl AckDroppingRelay {
         (relay, pull)
     }
 
-    /// Withholds the first source +ACK request, or its broker confirmation.
     pub(crate) async fn start_source_ack(stream: &str, durable: &str, drop_request: bool) -> Self {
         let identity = format!(".{stream}.{durable}.");
         let reply_subject = Arc::new(Mutex::new(None::<String>));
@@ -248,7 +244,6 @@ impl AckDroppingRelay {
             let (broker_read, broker_write) = broker.into_split();
             let requests = relay_frames(client_read, broker_write, to_broker, &dropped);
             let replies = relay_frames(broker_read, client_write, to_client, &dropped);
-            // Closing either peer ends both directions, with no detached relay task.
             tokio::select! {
                 result = requests => result.expect("relay requests"),
                 result = replies => result.expect("relay replies"),
@@ -279,7 +274,6 @@ impl AckDroppingRelay {
     }
 }
 
-/// Keeps the relay from mistaking unrelated JSON replies for a publish ack.
 pub(crate) fn is_stream_publish_ack(payload: &[u8], stream: &str) -> bool {
     serde_json::from_slice::<serde_json::Value>(payload)
         .is_ok_and(|reply| reply["stream"] == stream && reply["seq"].is_u64())
@@ -386,8 +380,6 @@ async fn relay_authenticated_connection(
     }
 }
 
-/// Only the broker's own authorization refusal counts, not any protocol error,
-/// timeout or parser failure.
 fn is_broker_auth_refusal(line: &[u8]) -> bool {
     line.starts_with(b"-ERR")
         && (line
@@ -398,7 +390,6 @@ fn is_broker_auth_refusal(line: &[u8]) -> bool {
                 .any(|window| window == b"Authentication"))
 }
 
-/// The relay does not retain the JWT, seed, nonce, or signature.
 fn public_user_from_connect(line: &[u8]) -> Option<String> {
     use base64::Engine as _;
 

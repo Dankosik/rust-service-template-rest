@@ -1,7 +1,3 @@
-//! Valkey proof for the cache client. `CACHE_URL` is a plaintext `redis://`
-//! URL of a disposable real server with fixture ACL administration rights.
-//! `scripts/ci/test-integration-cache.sh` starts that server; this file does not.
-
 #![expect(
     clippy::expect_used,
     clippy::panic,
@@ -94,7 +90,6 @@ fn connect_url(url: &str, command_timeout: Duration) -> Cache {
 
 struct Proxy {
     port: u16,
-    // Aborted before the stop sender drops during teardown.
     task: AbortOnDropHandle<()>,
     stop: Option<tokio::sync::oneshot::Sender<()>>,
 }
@@ -130,7 +125,6 @@ impl Proxy {
     }
 
     async fn stop(&mut self) {
-        // A second stop (restart after an outage) must not poll the finished task again.
         if let Some(stop) = self.stop.take() {
             let _ = stop.send(());
             let _ = tokio::time::timeout(Duration::from_secs(1), &mut self.task).await;
@@ -208,8 +202,6 @@ fn tls_acceptor(material: &tls::TlsMaterial) -> TlsAcceptor {
     acceptor(material, None)
 }
 
-/// A TLS endpoint that, given `client_ca`, refuses a client that presents no
-/// certificate signed by it, as a server with `tls-auth-clients yes` does.
 fn acceptor(material: &tls::TlsMaterial, client_ca: Option<&[u8]>) -> TlsAcceptor {
     let provider = Arc::new(tokio_rustls::rustls::crypto::aws_lc_rs::default_provider());
     let builder = ServerConfig::builder_with_provider(provider.clone())

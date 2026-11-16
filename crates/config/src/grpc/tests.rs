@@ -132,7 +132,6 @@ fn a_call_budget_must_fit_inside_the_shared_drain() {
         ..HttpConfig::default()
     };
     admit_with(|violations| over().admit(Some(http.effective_drain_budget()), violations)).unwrap();
-    // A drain budget HTTP itself rejected is not compared against.
     admit_with(|violations| over().admit(None, violations)).unwrap();
 }
 

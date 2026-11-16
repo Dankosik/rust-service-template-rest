@@ -27,20 +27,9 @@ mod exchange;
 use self::exchange::ExchangeState;
 
 const FAILURE_WINDOW: Duration = Duration::from_secs(1);
-/// A reusable token is replaced in the background once at most this much, or a
-/// quarter, of its reuse remains, as Azure.Core refreshes five minutes early.
 const REFRESH_AHEAD: Duration = Duration::from_mins(5);
-/// Minimum spacing between background refresh attempts. The next attempt is
-/// scheduled at least this far ahead, so a failed attempt or a refused enqueue
-/// keeps its spacing.
 const REFRESH_RETRY: Duration = Duration::from_secs(30);
 
-/// The verified inbound access token a caller acts on behalf of (RFC 8693).
-/// Attached to a request's extensions, it replaces the service token with one
-/// exchanged for the subject it names. A binding that only ever acts for a
-/// verified user can [`require it`](crate::AuthenticatedClient::require_on_behalf_of),
-/// so a forgotten subject is an error and never a request made with the
-/// service's own authority.
 #[derive(Clone, derive_more::Debug)]
 #[debug("OnBehalfOf([REDACTED])")]
 pub struct OnBehalfOf(SecretString);
@@ -59,11 +48,6 @@ pub struct Credentials(pub(crate) Arc<Owner>);
 pub(crate) struct Owner {
     pub(crate) inner: Arc<Inner>,
     refresh_requests: mpsc::Sender<RefreshRequest>,
-    // Dropping the final external owner drops both senders. The driver never
-    // owns Owner, so its own Inner reference cannot keep credentials alive.
-    // This oneshot is the prompt release boundary: it cancels a queued or
-    // in-flight refresh. `refresh_requests.is_closed()` is a separate liveness
-    // probe for whether the driver has stopped.
     _owner_release: oneshot::Sender<()>,
 }
 
@@ -72,9 +56,6 @@ struct RefreshRequest {
     deadline: Instant,
 }
 
-/// The refresh lifetime owned by the integration's composition root.
-/// Drive [`Self::run`] while credentials are used and await its completion before
-/// dropping dependencies. Dropping this driver closes all surviving clients.
 #[must_use = "drive and await RefreshDriver::run for the integration lifetime"]
 #[derive(derive_more::Debug)]
 #[debug("RefreshDriver([REDACTED])")]
@@ -85,8 +66,6 @@ pub struct RefreshDriver {
 }
 
 impl RefreshDriver {
-    /// Spawns no tasks. Final owner release cancels any in-flight refresh and
-    /// discards queued requests.
     pub async fn run(mut self, shutdown: impl Future<Output = ()>) {
         tokio::pin!(shutdown);
         loop {
@@ -112,9 +91,6 @@ impl RefreshDriver {
 
 impl Drop for RefreshDriver {
     fn drop(&mut self) {
-        // Close before clearing: once `refresh_pending` reads false, no enqueue
-        // can succeed, so a caller in [`Credentials::schedule_refresh_ahead`]
-        // never leaves the flag set for a request no driver will run.
         self.requests.close();
         self.inner.cached().refresh_pending = false;
     }
@@ -122,10 +98,7 @@ impl Drop for RefreshDriver {
 
 pub(crate) struct Inner {
     endpoint: TokenEndpoint,
-    /// The last service token; never held across an `.await`.
     cached: Mutex<Cached>,
-    /// Held by the one caller requesting a new service token, so requests
-    /// for it never overlap.
     pub(crate) service_request: tokio::sync::Mutex<()>,
     pub(crate) exchange: ExchangeState,
 }
@@ -134,8 +107,6 @@ pub(crate) struct Inner {
 pub(crate) struct Cached {
     pub(crate) service: Option<ServiceToken>,
     failure: Option<CompletedFailure>,
-    /// True from enqueue until the driver finishes the attempt. The driver
-    /// clears it after every attempt, so one caller may schedule the next.
     pub(crate) refresh_pending: bool,
 }
 
@@ -152,7 +123,6 @@ impl Cached {
             .map(|failure| failure.error)
     }
 
-    /// Never pulls an existing schedule earlier.
     fn defer_refresh(&mut self, from: Instant) {
         let next = from + refresh_retry();
         if let Some(service) = self.service.as_mut() {
@@ -167,7 +137,6 @@ struct CompletedFailure {
 }
 
 impl Credentials {
-    /// Performs no I/O. Dropping or completing the [`RefreshDriver`] closes any surviving clients.
     pub fn prepare(options: Options) -> Result<(Self, RefreshDriver), ConfigurationError> {
         let admitted = admit_options(options)?;
         let token_http =
@@ -233,9 +202,6 @@ impl Credentials {
         self.check_lifecycle(deadline)
     }
 
-    /// Inserts a sensitive Bearer header for the service token or, when
-    /// `on_behalf_of` is set, a token exchanged for its subject. Returns what
-    /// was used, so a resource can invalidate exactly that token.
     pub(crate) async fn authorize(
         &self,
         headers: &mut HeaderMap,
@@ -264,7 +230,6 @@ impl Credentials {
         Ok(acquired)
     }
 
-    /// Waiting for another caller's request spends this caller's deadline.
     pub(crate) async fn service_token(
         &self,
         deadline: AcquisitionDeadline<'_>,
@@ -274,7 +239,6 @@ impl Credentials {
         if let Some(token) = self.reusable_service_token(now) {
             return Ok(token);
         }
-        // Boxed so that the reuse path above keeps a small future.
         Box::pin(self.acquire_service_token(deadline)).await
     }
 
@@ -324,9 +288,6 @@ impl Credentials {
         Some(token)
     }
 
-    /// Queues one background refresh of a token reuse found due for one,
-    /// unless a failure or a queued attempt suppresses it. The caller holds
-    /// the cached guard across the read and the send.
     fn schedule_refresh_ahead(&self, cached: &mut Cached, now: Instant, token: &Arc<Token>) {
         if cached.refresh_pending || cached.completed_failure(now).is_some() {
             return;
@@ -416,7 +377,6 @@ impl Inner {
     }
 }
 
-/// Caller-local refusals stay private to the caller that hit them.
 fn is_cacheable_failure(error: AcquisitionError) -> bool {
     match error {
         AcquisitionError::AtCapacity | AcquisitionError::Cancelled | AcquisitionError::Timeout => {
@@ -458,8 +418,6 @@ pub(crate) fn acquisition_deadline<'a>(
     context: &'a OperationContext,
     request_context: Option<&'a OperationContext>,
 ) -> AcquisitionDeadline<'a> {
-    // Keep acquisition bounded when the resource deadline cannot be expressed
-    // as an Instant. That fallback belongs to the adapter.
     let (cutoff, expiry) = match context.deadline().and_then(Deadline::instant) {
         Some(cutoff) => (cutoff, AcquisitionError::Timeout),
         None => (
@@ -475,8 +433,6 @@ pub(crate) fn acquisition_deadline<'a>(
     }
 }
 
-/// Reclassifies an attempt that ended at [`FETCH_TIMEOUT`] as
-/// [`AcquisitionError::Unavailable`] while the caller still has budget.
 fn provider_timeout(error: AcquisitionError) -> AcquisitionError {
     match error {
         AcquisitionError::Timeout => AcquisitionError::Unavailable,
@@ -491,18 +447,12 @@ pub(crate) fn acquisition_stopped(stopped: Stopped) -> AcquisitionError {
     }
 }
 
-/// The single sampled background-refresh instant for a reusable service token:
-/// the smaller of five minutes and a quarter of its reusable lifetime, with the
-/// lead reduced by at most one tenth.
 fn service_refresh_after(requested_at: Instant, reuse_until: Instant) -> Instant {
     let maximum_lead = REFRESH_AHEAD.min(reuse_until.saturating_duration_since(requested_at) / 4);
     let lead = maximum_lead.saturating_sub(sampled_refresh_spread(maximum_lead / 10));
     reuse_until - lead
 }
 
-/// The window is at most 30 seconds (one tenth of the maximum refresh lead).
-/// Callers add the sample to a minimum interval or subtract it from a maximum
-/// lead, so jitter never moves a refresh past its documented bound.
 fn sampled_refresh_spread(window: Duration) -> Duration {
     let mut bytes = [0_u8; 2];
     let sample = aws_lc_rs::rand::fill(&mut bytes).map(|()| u16::from_be_bytes(bytes));
@@ -513,8 +463,6 @@ pub(crate) fn refresh_spread(
     window: Duration,
     sample: Result<u16, aws_lc_rs::error::Unspecified>,
 ) -> Duration {
-    // Source failure discards the bytes and falls back to the unjittered
-    // base: the maximum lead or the base retry interval.
     sample.map_or(Duration::ZERO, |sample| {
         shared_rules::jitter::share_of_window(window, sample)
     })

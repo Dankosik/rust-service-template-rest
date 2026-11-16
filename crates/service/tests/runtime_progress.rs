@@ -1,22 +1,3 @@
-//! Explicit, external R5 quota proof; never runs in the ordinary test suite.
-//!
-//! Run through `make runtime-progress-proof`; its wrapper supplies the immutable
-//! `RUNTIME_PROGRESS_IMAGE`, `RUNTIME_PROGRESS_SOURCE`, results directory and
-//! container name prefix for teardown.
-//! Docker must support cgroup v2 and host.docker.internal:host-gateway. The
-//! driver and its finite OIDC/S3 peers stay outside the service's CPU quota.
-//! The image's org.opencontainers.image.revision label must equal the supplied
-//! source identity. Every process uses the resolved image ID, never a moving tag.
-//! Numeric failures retain every run and reopen the frozen design; they never
-//! cause a retry with a different rate, quota, deadline, or acceptance threshold.
-//!
-//! The service runs under a 100 ms / 100 ms cgroup v2 quota (1 CPU) with
-//! `runtime.worker_threads=1` and one blocking CPU permit, so traffic, uploads,
-//! preparation and stdout backpressure contend for the sole worker. Rising
-//! `cpu.stat` throttling plus 90%+ interval occupancy proves the quota was
-//! exercised; the uncooperative negative control proves the sampler and gap
-//! oracle catch sole-worker starvation.
-
 #![cfg(unix)]
 #![expect(
     clippy::expect_used,
@@ -56,7 +37,6 @@ const JWT_KEY: &[u8] =
 const CHEAP_BODY: &str = const_str_1k();
 
 const fn const_str_1k() -> &'static str {
-    // A fixed independent oracle, not a digest or a probe substituted for Echo.
     concat!(
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
@@ -118,7 +98,6 @@ impl Evidence {
     }
 }
 
-/// Every CLI child is killed and waited on its bound; output readers are joined.
 async fn docker(arguments: &[String], within: Duration) -> Result<String> {
     command_output("docker", arguments, within).await
 }
@@ -302,8 +281,6 @@ async fn serve_peer(
     connections.shutdown().await;
 }
 
-/// HTTP/1 requests are finite. Handles transport chunks separately from S3's
-/// aws-chunked content encoding, including the final checksum trailer.
 async fn read_http<S: AsyncRead + Unpin>(stream: &mut S) -> Result<(String, Vec<u8>)> {
     let mut head = Vec::new();
     while !head.ends_with(b"\r\n\r\n") {
@@ -333,7 +310,6 @@ async fn read_http<S: AsyncRead + Unpin>(stream: &mut S) -> Result<(String, Vec<
             let size = usize::from_str_radix(line.trim().split(';').next().unwrap(), 16)
                 .map_err(failure)?;
             if size == 0 {
-                // Trailer section: either CRLF or bounded fields ending CRLFCRLF.
                 let mut trailers = Vec::new();
                 loop {
                     if trailers.len() >= 16 * 1024 {
@@ -477,8 +453,6 @@ struct Container {
 }
 
 fn container_command(image: &str, name: &str, peers: &Peers, primary_failure: bool) -> Vec<String> {
-    // A stopped cat holds the read end open without consuming it: this blocks
-    // the actual application writer even though Docker continuously drains cat.
     let shell = "mkfifo /tmp/runtime-progress.stdout; cat /tmp/runtime-progress.stdout & echo $! > /tmp/runtime-progress.reader; exec /proof/runtime_progress > /tmp/runtime-progress.stdout";
     let mut command = args(&[
         "run",
@@ -633,8 +607,6 @@ async fn http_get(address: &str, path: &str) -> Result<(u16, String)> {
             .ok_or("missing HTTP status")?
             .parse::<u16>()
             .map_err(failure)?;
-        // Hyper's metrics response is a sized body; decoding a transport-chunked
-        // response here keeps the observer independent of that optimization.
         let body = if head
             .to_ascii_lowercase()
             .contains("transfer-encoding: chunked")
@@ -815,8 +787,6 @@ async fn traffic(
         let label = label.clone();
         requests.spawn(async move {
             let _permit = permit;
-            // A spawned driver future can first run after its scheduled
-            // window; it must not replay a missed CPU offer then either.
             if work == "cpu" && Instant::now() >= end {
                 return dropped_offer(&evidence, &label, work, offer, scheduled, start, "cpu_window_ended");
             }
@@ -1086,15 +1056,12 @@ fn sampler_limit_checks(scrape: &Scrape, failures: &mut Vec<String>, label: &str
     .unwrap_or(f64::NAN);
     require(
         failures,
-        // Exact equality of finite positive counts; no rounding tolerance
-        // may conceal even one observation above the bound.
         count.is_finite() && count > 0.0 && within_two.total_cmp(&count).is_eq(),
         format!(
             "{label}: sampler histogram exceeds2s or is unavailable at {}s",
             scrape.completed
         ),
     );
-    // Inclusive le=2 alone cannot establish the strict frozen boundary.
     let maximum = metric(&scrape.body, "runtime_scheduler_lag_max_seconds").unwrap_or(f64::NAN);
     require(
         failures,
@@ -1238,9 +1205,6 @@ fn metrics_checks(
         .iter()
         .find(|scrape| scrape.completed >= 32.0)
         .copied();
-    // The percentile snapshot includes the mixed boundary's upkeep spill;
-    // it is not the final oracle for later cumulative observations. Retain
-    // every adverse maximum/bucket, even if a later scrape looks healthy.
     for scrape in metrics
         .iter()
         .copied()
@@ -1263,9 +1227,6 @@ fn metrics_checks(
             - metric(initial_metrics, "runtime_scheduler_samples_total").unwrap_or(0.0);
         let drops = total_metric(&after.body, "telemetry_log_records_dropped_total")
             - total_metric(initial_metrics, "telemetry_log_records_dropped_total");
-        // Histogram upkeep can lag its sampler counter by one second. Include
-        // the tail through recovery in the numerator, but never let those
-        // extra healthy recovery samples dilute the mixed-window denominator.
         let slow = count - within_half;
         evidence.record(json!({"event": "sampler_summary", "phase": label, "histogram_samples_including_boundary_spill": count, "mixed_samples": samples, "lag_over_500ms_including_boundary_spill": slow, "lag_le_2s": within_two, "log_drops": drops}));
         require(
@@ -1341,8 +1302,6 @@ fn sampler_oracle_retains_late_violations_and_requires_a_fresh_final_observation
     let healthy = check(&scrapes, &final_metrics);
     assert!(healthy.is_empty(), "healthy control: {healthy:?}");
 
-    // Keep the first >=32s scrape and the final scrape healthy. A later
-    // retained violation must fail independently of those favorable samples.
     for (old, new, expected) in [
         (
             "runtime_scheduler_lag_max_seconds 0.1",
@@ -1457,7 +1416,6 @@ async fn recovery_snapshot(
 async fn pause_stdout(container: &Container, evidence: &Evidence, start: Instant) -> Result<()> {
     sleep_until(start).await;
     reader_signal(&container.name, "STOP", evidence).await?;
-    // STOP acknowledgement starts the full undrained interval.
     sleep_until(Instant::now() + Duration::from_secs(10)).await;
     reader_signal(&container.name, "CONT", evidence).await
 }
@@ -1487,8 +1445,6 @@ async fn observe_pressure_end(
     let sent = start.elapsed().as_secs_f64();
     let boundary = format!("{label}-pressure-end");
     let counters = cgroup(&container.name, &boundary, evidence).await;
-    // Close the occupancy bracket after the cgroup reads too: delayed reads
-    // cannot borrow a timely earlier pair and masquerade as pressure-end data.
     let snapshot = container.client.snapshot(evidence, &boundary).await;
     evidence.record(json!({"event": "pressure_boundary", "phase": label,
         "phase_request_s": sent, "phase_completion_s": start.elapsed().as_secs_f64()}));
@@ -1521,8 +1477,6 @@ fn qualified_occupancy(before: &Value, after: &Value) -> Result<(u64, u64)> {
             "invalid pressure bracket: elapsed={elapsed}ns, occupied={occupied}ns"
         ));
     }
-    // Both operands are bounded by 32 seconds, so this exact integer ratio
-    // cannot overflow or round an interval below 90% into qualification.
     if occupied * 10 < elapsed * 9 {
         return Err(format!(
             "pressure occupancy below90%: {occupied}ns/{elapsed}ns"
@@ -1545,13 +1499,13 @@ fn occupancy_qualification_keeps_exact_ratio_and_rejects_invalid_brackets() {
     );
     for invalid in [
         Value::Null,
-        after(40_000_000_000, 27_999_999_999), // One nanosecond below 90%.
-        after(42_000_000_001, 33_000_000_001), // Late pressure bracket.
-        after(39_999_999_999, 30_000_000_000), // Incomplete pressure window.
-        after(10_000_000_000, 1_000_000_000),  // Stale pair.
-        after(9_000_000_000, 1_000_000_000),   // Clock reset.
-        after(40_000_000_000, 999_999_999),    // Occupancy reset.
-        after(40_000_000_000, 32_000_000_000), // More work than elapsed time.
+        after(40_000_000_000, 27_999_999_999),
+        after(42_000_000_001, 33_000_000_001),
+        after(39_999_999_999, 30_000_000_000),
+        after(10_000_000_000, 1_000_000_000),
+        after(9_000_000_000, 1_000_000_000),
+        after(40_000_000_000, 999_999_999),
+        after(40_000_000_000, 32_000_000_000),
     ] {
         assert!(qualified_occupancy(&before, &invalid).is_err(), "{invalid}");
     }
@@ -1566,8 +1520,6 @@ async fn expired_cpu_window_accounts_every_offer_without_dispatching_requests() 
         task_errors: Arc::default(),
     };
     let client = Client {
-        // Lazy transport is never polled for a request: a late offer must end
-        // at the driver boundary before any RPC is attempted.
         channel: tonic::transport::Endpoint::from_static("http://127.0.0.1:9").connect_lazy(),
         token: "unused".to_owned(),
     };
@@ -1702,8 +1654,6 @@ async fn offer_mixed_load(
         recovery_snapshot(container, evidence, label, start, &recovery_since),
         observe_pressure_end(container, evidence, label, start),
     );
-    // Retain all source timelines, including refused and late calls, through
-    // traffic's event records. Each bounded task has finished before return.
     evidence.record(json!({"event": "source_totals", "phase": label, "cpu_scheduled_offers": 30_000, "cpu_accounted_offers": cpu.len(), "upload_offers": upload.len(), "prepare_offers": prepare.len(), "log_offers": logs.len()}));
     require(
         failures,
@@ -1783,9 +1733,6 @@ async fn final_metrics_observation(
     label: &str,
     start: Instant,
 ) -> Scrape {
-    // All load generators and scheduled observations have reached the fixed
-    // 40-second boundary and joined. Take one designated final observation;
-    // a failed/stale response must not fall back to an earlier good scrape.
     let final_started = Instant::now();
     let response = http_get(&container.metrics, "/metrics").await;
     let final_metrics = Scrape {
@@ -1952,8 +1899,6 @@ async fn mixed_sequence(
     let initial_metrics = http_get(&container.metrics, "/metrics").await?.1;
     evidence
         .record(json!({"event": "metrics_before_mixed", "phase": label, "body": initial_metrics}));
-    // This paired occupancy observation is the last external operation before
-    // mixed scheduling; setup reads cannot pad its measured pressure bracket.
     let initial = container
         .client
         .snapshot(evidence, &format!("{label}-before"))
@@ -2092,8 +2037,6 @@ async fn negative_control(
                 .record(json!({"event": "negative_freeze_rpc", "result": format!("{result:?}")}));
         },
         async {
-            // Absolute external cutoff cannot be delayed by the container's sole
-            // frozen worker. Kill the owned process if it has not resumed.
             sleep_until(start + Duration::from_secs(12)).await;
             docker(&args(&["kill", &container.name]), Duration::from_secs(5)).await
         },
@@ -2268,8 +2211,6 @@ async fn cleanup_containers(prefix: &str, evidence: &Evidence, failures: &mut Ve
     }
 }
 
-/// Catches what source and paused-clock tests cannot: a worker polling monopoly,
-/// early permit release, stale zero-lag report, or logging sink wait.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "explicit release-image R5 proof; needs Docker cgroup v2, image/source/results inputs; about six minutes"]
 async fn bounded_sources_preserve_process_progress_under_one_cpu_quota() {
@@ -2308,8 +2249,6 @@ async fn bounded_sources_preserve_process_progress_under_one_cpu_quota() {
     let mut failures = Vec::new();
     let peers = Peers::start(&evidence).await;
     if let Ok(peers) = peers {
-        // Cleanup and evidence retention also run after an assertion inside a
-        // fixture helper; no Tokio child or external peer survives the test.
         let result = std::panic::AssertUnwindSafe(async {
             let pinned = pinned?;
             experiment(&pinned, &prefix, &peers, &evidence, &mut failures).await

@@ -1,8 +1,3 @@
-//! Process-owned JWKS refresh shared by every request.
-//!
-//! One worker performs every fetch, so a request that stops waiting never
-//! cancels the fetch other requests wait for.
-
 use std::{
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -21,32 +16,15 @@ use crate::{
 };
 
 pub(crate) const REFRESH_INTERVAL: Duration = Duration::from_mins(15);
-/// Up to 10% earlier, so replicas started together do not fetch in lockstep.
 const MAX_REFRESH_SPREAD: Duration = Duration::from_secs(REFRESH_INTERVAL.as_secs() / 10);
-/// A caller can force a signature miss. Each verifier starts at most one
-/// request-triggered fetch per cooldown. A miss during cooldown can join a
-/// pending fetch. If none is pending, another miss after cooldown or the next
-/// periodic fetch can pick up the rotation.
-///
-/// Cost: a cooldown miss cannot tell a forged `kid` from a freshly rotated one,
-/// so for up to this long after a ticket is issued or startup keys are installed,
-/// a valid token signed with a new key gets a non-retryable 401 `invalid_token`. Answering
-/// 503 instead would let any caller turn forged `kid` values into unavailability
-/// signals and client retries; the rotation's own later traffic triggers the
-/// fetch once the cooldown ends.
 const REFRESH_COOLDOWN: Duration = Duration::from_secs(30);
 const REFRESH_METRIC: &str = "authn_jwks_refreshes_total";
 const ACQUISITION_METRIC: &str = "authn_jwks_last_successful_acquisition_timestamp_seconds";
 
 #[derive(derive_more::Debug)]
 pub(crate) enum SignatureRefresh {
-    /// A newer set than the one the token was checked against is installed:
-    /// by a fetch that finished after the request, or by one that finished
-    /// between that check and the request.
     #[debug("NewerSet(..)")]
     NewerSet(Arc<KeySet>),
-    /// The last acquisition succeeded and left the caller's checked set installed.
-    /// Another fetch is still blocked by the cooldown.
     NoNewerSet,
     Unavailable,
 }
@@ -54,9 +32,6 @@ pub(crate) enum SignatureRefresh {
 struct State {
     requested_ticket: u64,
     finished_ticket: u64,
-    /// The latest ticket whose fetch installed a set; the startup set is 0. A
-    /// waiter compares it with its own ticket because a later failure may
-    /// finish before the waiter is polled.
     last_successful_ticket: u64,
     cooldown_started_at: Instant,
     stopped: bool,
@@ -128,8 +103,6 @@ impl KeyStore {
         checked: &Arc<KeySet>,
     ) -> SignatureRefresh {
         let mut admission = Admission::Answer(SignatureRefresh::Unavailable);
-        // Inspect the cooldown and claim or join a ticket under the same watch
-        // write lock; only issuing a ticket modifies the state.
         self.state.send_if_modified(|state| {
             let installed = self.keys.load();
             admission = if state.stopped {
@@ -153,8 +126,6 @@ impl KeyStore {
             Admission::Answer(answer) => return answer,
             Admission::Join(ticket) | Admission::Request(ticket) => ticket,
         };
-        // wait_for checks the current snapshot too, covering a fetch that finished
-        // before this subscription. Dropping this waiter leaves the worker running.
         let mut state = self.state.subscribe();
         match state
             .wait_for(|state| state.stopped || state.finished_ticket >= ticket)
@@ -182,7 +153,6 @@ impl KeyStore {
         self.state.borrow().pending()
     }
 
-    /// Records a finished fetch; every ticket up to `ticket` is served by it.
     pub(crate) fn finish(&self, ticket: u64, replacement: Result<Arc<KeySet>, KeySetFailure>) {
         let (result, reason) = match &replacement {
             Ok(_) => ("success", "success"),
@@ -269,7 +239,6 @@ fn refresh_period() -> Duration {
 }
 
 fn refresh_period_for_sample(sample: Result<u16, aws_lc_rs::error::Unspecified>) -> Duration {
-    // A failed random sample only drops the spread; refresh keeps the full interval.
     let spread = sample.map_or(Duration::ZERO, |sample| {
         shared_rules::jitter::share_of_window(MAX_REFRESH_SPREAD, sample)
     });
@@ -343,7 +312,6 @@ mod tests {
             assert_eq!(diagnostics.acquisitions(), samples);
         }
 
-        // No local recorder is installed here: the owner must retain its handle.
         store.request_periodic();
         let before = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -385,7 +353,6 @@ mod tests {
             vec![crate::JwtAlgorithm::Rs256],
             cancel.clone(),
         ));
-        // Hold the accepted socket without completing TLS so the real fetch stays pending.
         let (_socket, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept())
             .await
             .unwrap()
@@ -602,14 +569,12 @@ mod tests {
         tokio::task::yield_now().await;
         store.finish(1, Ok(key_set("new")));
         assert_eq!(rotation.await.unwrap(), Some(true));
-        // The token missed in the old set while that fetch was finishing.
         let SignatureRefresh::NewerSet(keys) = store.refresh_for_signature_miss(&checked).await
         else {
             panic!("the newer installed set must be offered");
         };
         assert!(keys.has_kid("new"));
         assert_eq!(store.pending(), None);
-        // A token checked against the installed set is really unknown.
         assert_matches!(
             store.refresh_for_signature_miss(&keys).await,
             SignatureRefresh::NoNewerSet

@@ -413,7 +413,6 @@ async fn typed_refusal_leaves_no_outbox_intent_and_allows_corrected_same_id(pool
                 .expect("fixed occurrence"),
             payload: invalid,
         };
-        // Commit even a refused preparation, so rollback cannot hide an intent.
         let rejected = in_tx(&jobs, async |tx| -> Result<_, Step> {
             match registry.prepare(&event, 1024) {
                 Ok(prepared) => Ok(Ok(prepared.enqueue(tx).await?)),
@@ -1009,8 +1008,6 @@ async fn committed_effect_after_lost_settlement(pool: PgPool, drop_request: bool
         .consumer(effect_registry(&fixture, &effects, &invoked))
         .await
         .expect("real durable consumer admits");
-    // The administrator shortens only this fixture's redelivery wait. The
-    // adapter still waits its real five-second settlement request budget.
     let stream = fixture.jetstream.get_stream(&fixture.stream).await.unwrap();
     let durable: consumer::PullConsumer = stream.get_consumer(&fixture.durable).await.unwrap();
     let mut config = durable.cached_info().config.clone();

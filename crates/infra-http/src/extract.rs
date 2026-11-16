@@ -23,9 +23,6 @@ const QUERY_DETAIL: &str = "query string does not match the operation parameters
 const PATH_DETAIL: &str = "path does not match the operation parameters";
 const SCHEMA_REASON: &str = "is missing or does not match the declared schema";
 
-/// A location longer than this is left out of `invalid_params`: a body
-/// member's name is caller-supplied, and the problem must not reflect an
-/// unbounded one.
 const MAX_PARAM_NAME_BYTES: usize = 256;
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -43,7 +40,6 @@ where
         reason = "the native JSON decoder retains the deserialization path"
     )]
     async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
-        // Match axum's media-type check before collecting the bounded body.
         let json_content_type = request
             .headers()
             .get(CONTENT_TYPE)
@@ -79,7 +75,6 @@ where
 {
     fn into_response(self) -> Response {
         let Ok(body) = serde_json::to_vec(&self.0) else {
-            // serde's message can quote the value, so it stays out of the log.
             tracing::error!(
                 response_type = std::any::type_name::<T>(),
                 "http_response_serialization_failed"
@@ -147,8 +142,6 @@ where
 
 fn json_problem(rejection: &JsonRejection, bytes: &[u8]) -> Problem {
     match rejection {
-        // Axum checks the end of the document only after typed decoding
-        // succeeds. Check the entire document when that decoder stops early.
         JsonRejection::JsonDataError(_)
             if !std::str::from_utf8(bytes)
                 .is_ok_and(|text| serde_json::from_str::<IgnoredAny>(text).is_ok()) =>
@@ -178,8 +171,6 @@ fn query_problem(rejection: &QueryRejection) -> Problem {
     )
 }
 
-/// `names` are the route template's parameters in order; they name a
-/// parameter axum identifies only by position, or not at all for a single one.
 fn path_problem(rejection: &PathRejection, names: Option<&RawPathParams>) -> Problem {
     use axum::extract::path::ErrorKind;
 
@@ -217,8 +208,6 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for TrackedPath<T> {
             Err(error) => error,
         };
         let message = error.inner().to_string();
-        // Axum erases Serde's error hooks. The tracked position distinguishes
-        // errors on route keys or the root map from errors decoding a value.
         let mut path = error.path().iter();
         match (path.next(), path.next()) {
             (None, _) => {
@@ -256,8 +245,6 @@ impl PathIssue {
                 wiring_failure("path")
             }
             Self::UnknownField => wiring_failure("path"),
-            // A duplicate route binding needs two captures. A one-capture
-            // scalar can return the same message from value validation.
             Self::DuplicateField if params.iter().nth(1).is_some() => wiring_failure("path"),
             Self::MissingField(_) | Self::DuplicateField => invalid_path(None),
             Self::UnknownVariant(path) => {
@@ -288,7 +275,6 @@ fn invalid_path(name: Option<&str>) -> Problem {
     )
 }
 
-/// The handler's extractor does not fit its route: logged, sanitized for the caller.
 fn wiring_failure(extractor: &'static str) -> Problem {
     tracing::error!(extractor, "http_extractor_wiring_failed");
     sanitized_problem()
@@ -303,7 +289,6 @@ fn with_param(problem: Problem, name: Option<CompactString>) -> Problem {
     }
 }
 
-/// Axum's extractors record this through `serde_path_to_error` in the rejection's source chain.
 fn failed_member<'a, E>(
     rejection: &'a (dyn StdError + 'static),
 ) -> Option<&'a serde_path_to_error::Path>
@@ -315,8 +300,6 @@ where
         .map(serde_path_to_error::Error::path)
 }
 
-/// The RFC 6901 pointer of a body member, or `None` for the document root or
-/// a position the deserializer could not name.
 fn body_pointer(path: &serde_path_to_error::Path) -> Option<CompactString> {
     let mut pointer = CompactString::default();
     for segment in path {
@@ -568,7 +551,6 @@ mod tests {
     #[tokio::test]
     async fn a_missing_or_undeclared_member_is_a_422_without_the_submitted_value() {
         for (body, name) in [
-            // A member missing from the document root has no location.
             (r#"{"lines":[]}"#, None),
             (
                 r#"{"slug":"a","lines":[],"extra":"submitted-secret"}"#,

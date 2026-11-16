@@ -2,12 +2,6 @@ use std::fmt;
 
 const MAX_KEY_BYTES: usize = 1024;
 
-/// 1 to 1024 bytes of `[A-Za-z0-9._~-]` in `/`-separated segments, none empty,
-/// `.`, or `..`, with no leading or trailing `/`.
-///
-/// ASCII only because R2 normalizes Unicode keys, so two UTF-8 keys could name
-/// one object. Keys reach provider logs and, at DEBUG, SDK logs: never put
-/// personal data in one.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct ObjectKey(String);
 
@@ -42,7 +36,6 @@ impl ObjectKey {
     }
 }
 
-/// Only the length: a key can carry business identifiers.
 impl fmt::Debug for ObjectKey {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter

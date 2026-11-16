@@ -40,7 +40,6 @@ pub(crate) struct PeerRegistry {
 }
 
 impl PeerRegistry {
-    /// The peer list is never held across an `.await`.
     fn lock(&self) -> MutexGuard<'_, Peers> {
         self.peers.lock()
     }
@@ -97,7 +96,6 @@ impl PeerRegistry {
         (peers.registered_kinds(), Arc::clone(&peers.sample_revision))
     }
 
-    /// A change can invalidate a sample even if the same kinds later return.
     pub(crate) fn publish_if_current(&self, revision: &Arc<()>, publish: impl FnOnce()) -> bool {
         let peers = self.lock();
         if !Arc::ptr_eq(&peers.sample_revision, revision) {

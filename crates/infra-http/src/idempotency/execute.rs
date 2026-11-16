@@ -18,8 +18,6 @@ use super::stored::{self, ReplayableResponse};
 use crate::context::RequestDeadline;
 use crate::problem::{Code, Problem, sanitized_internal_error};
 
-/// Idempotent request outcomes at the HTTP idempotency boundary, one
-/// `outcome` label per `Outcome` variant.
 pub const HTTP_IDEMPOTENCY_OUTCOMES_METRIC: &str = "http_idempotency_outcomes_total";
 
 const RETRY_AFTER_HINT: Duration = Duration::from_secs(1);
@@ -44,8 +42,6 @@ pub(super) enum Outcome {
 
 impl Outcome {
     pub(super) fn record(self) {
-        // Literal label values let `metrics` keep a static key; a runtime
-        // value allocates the label vector and its retained copy per call.
         macro_rules! outcomes {
             ($($variant:ident => $label:literal),* $(,)?) => {
                 match self {
@@ -81,9 +77,6 @@ pub(super) struct Attempt {
     pub(super) outcome: AttemptOutcome,
 }
 
-/// Private provenance sealed onto the successful response returned from the
-/// idempotency seam. The outer route boundary turns it into wire metadata only
-/// after the handler has returned.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Provenance {
     Executed,
@@ -125,25 +118,6 @@ where
 }
 
 impl Idempotency {
-    /// Commit participating work at most once for this captured caller, key,
-    /// and request during the configured retention period.
-    ///
-    /// Authorization and validation remain in the handler before this call,
-    /// including on replay. The closure receives the provider-owned
-    /// transaction only when no live record decided the attempt.
-    ///
-    /// Only a storable 2xx response permits committing work and its replay
-    /// record together. A non-2xx work response rolls back and is returned
-    /// unchanged; an unstorable success rolls back and becomes a sanitized
-    /// failure, subject to the request deadline.
-    ///
-    /// The handler must return the [`Response`] this call produces, or keep its
-    /// extensions: a 2xx response without them is a wiring failure and
-    /// becomes a sanitized 500.
-    ///
-    /// Only effects issued through the supplied [`Tx`] share this guarantee.
-    /// External effects are not covered, and work may run again on a retry
-    /// after rollback. A timeout during COMMIT does not guarantee rollback.
     pub async fn execute<W, R>(self, work: W) -> Response
     where
         W: AsyncFnOnce(&mut Tx<'_>) -> R,
@@ -214,9 +188,6 @@ pub(super) enum Rollback {
 struct Answer {
     response: Response,
     outcome: Outcome,
-    // Only Problems synthesized by this boundary yield to the request
-    // deadline. A handler's non-2xx response, even a Problem, follows the
-    // computed path.
     yield_to_request_timeout: bool,
 }
 
@@ -243,10 +214,6 @@ impl Answer {
         guard: DropGuard<&'a AttemptOutcome, impl FnOnce(&'a AttemptOutcome)>,
     ) -> Response {
         if self.yield_to_request_timeout && Instant::now() >= deadline {
-            // Let the request deadline enforced by `context::opening` produce
-            // the final 504 for an expired boundary failure: it drops this
-            // future, which drops the guard and records abandonment. Completed
-            // work and replay responses bypass this wait.
             return std::future::pending().await;
         }
         DropGuard::dismiss(guard).record(self.outcome);
@@ -333,7 +300,6 @@ fn key_mismatch() -> Response {
 }
 
 fn in_progress(scope: &ScopeKey, operation_id: &str) -> Response {
-    // An expected answer to a concurrent retry; the request span carries the request id.
     tracing::info!(
         scope_digest = %ScopeDigest(scope.digest()),
         operation = operation_id,
@@ -353,8 +319,6 @@ impl fmt::Display for ScopeDigest<'_> {
     }
 }
 
-/// The route can answer a refusal after dropping the execution future. Share
-/// the recording state across both lifetimes so that refusal counts once.
 #[derive(Clone, Default)]
 pub(super) struct AttemptOutcome(Arc<AtomicBool>);
 
@@ -429,7 +393,6 @@ mod tests {
         }
     }
 
-    // The only store outcome the mounted PostgreSQL suite cannot provoke.
     #[tokio::test]
     async fn an_internal_store_failure_is_a_sanitized_500() {
         let answer = map_attempted(Err(AttemptError::Internal), &scope(), "test");

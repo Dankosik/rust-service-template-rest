@@ -5,14 +5,10 @@ use serde::Deserialize;
 
 use crate::claims::Scopes;
 
-/// A verified identity. Construction remains crate-private so callers cannot
-/// attach unverified request data as a principal.
-/// It has no `PartialEq`: equality would compare the retained bearer token.
 #[derive(Clone, derive_more::Debug)]
 #[debug("Principal([VERIFIED_IDENTITY_REDACTED])")]
 pub struct Principal {
     identity: Arc<Identity>,
-    // Keep expiry outside the shared allocation for the const accessor.
     expiry_epoch_seconds: u64,
 }
 
@@ -34,8 +30,6 @@ impl Principal {
         }
     }
 
-    /// Deserializes immutable claims from the accepted provider evidence.
-    /// Duplicate custom members use the last value, before decoding the requested type.
     pub fn claims<T: serde::de::DeserializeOwned>(&self) -> Result<T, ClaimAccessError> {
         let invalid_shape = |_| ClaimAccessError::InvalidShape;
         let mut input = ClaimJson(&self.identity.payload);
@@ -58,9 +52,6 @@ impl Principal {
         self.identity.subject.as_deref()
     }
 
-    /// The first non-empty `client_id`, `azp`, `appid`, or `cid` claim of a
-    /// JWT, or the `client_id` member of an introspection response. An empty
-    /// value is absent. A principal always has a subject, a client id, or both.
     #[must_use]
     pub fn client_id(&self) -> Option<&str> {
         self.identity.client_id.as_deref()
@@ -71,29 +62,22 @@ impl Principal {
         self.identity.scopes.as_slice()
     }
 
-    /// True when every scope in `required` was granted; an empty `required`
-    /// is any authenticated caller.
     #[must_use]
     pub fn has_scopes(&self, required: &[String]) -> bool {
         self.identity.scopes.contains_all(required)
     }
 
-    /// The verified `exp` claim as Unix time in seconds, without leeway.
     #[must_use]
     pub const fn expires_at(&self) -> u64 {
         self.expiry_epoch_seconds
     }
 
-    /// The exact bearer token text this principal was verified from. It is
-    /// the subject token of an RFC 8693 exchange; never forward it as an
-    /// outbound `Authorization` header.
     #[must_use]
     pub fn access_token(&self) -> &secrecy::SecretString {
         &self.identity.access_token
     }
 
-    /// The outermost RFC 8693 `act` claim's identity, when the verified
-    /// evidence named one. Nested actors are not exposed.
+    /// RFC 8693 §4.1
     #[must_use]
     pub fn actor(&self) -> Option<&Actor> {
         self.identity.actor.as_ref()
@@ -102,8 +86,6 @@ impl Principal {
 
 #[cfg(test)]
 impl Principal {
-    /// Every verified field, so tests compare principals without a public
-    /// equality over the retained token.
     pub(crate) fn fields(&self) -> impl PartialEq + std::fmt::Debug + '_ {
         use secrecy::ExposeSecret as _;
         let identity = &*self.identity;
@@ -119,9 +101,7 @@ impl Principal {
     }
 }
 
-/// The current actor delegated to act on a subject's behalf (RFC 8693 §4.1).
-/// `may_act` is an authorization-server input, not receiver evidence, and is
-/// never exposed here.
+/// RFC 8693 §4.1
 #[derive(Clone, Eq, PartialEq, derive_more::Debug)]
 #[debug("Actor([REDACTED])")]
 pub struct Actor {
@@ -151,7 +131,6 @@ pub enum ClaimAccessError {
     InvalidShape,
 }
 
-// Keep serde_json's ordinary limit of 127 nested containers.
 const MAX_CLAIM_NESTING: u8 = 127;
 
 enum ClaimValue<'a> {
@@ -191,8 +170,6 @@ impl ClaimValue<'_> {
     }
 }
 
-// Walk containers to collapse duplicate members. Serde owns the scalar and
-// key grammar, and the final typed decode sees the original numeric text.
 struct ClaimJson<'a>(&'a str);
 
 impl<'a> ClaimJson<'a> {
@@ -226,9 +203,6 @@ impl<'a> ClaimJson<'a> {
             Some(b'{' | b'[') if depth == 0 => Err(ClaimAccessError::InvalidShape),
             Some(b'{') => {
                 self.take('{');
-                // `IndexMap` preserves insertion order (keeping the first key
-                // first for serde_json's special first-key features) while
-                // replacing duplicate members in place with their last value.
                 let mut members = IndexMap::with_hasher(foldhash::fast::RandomState::default());
                 if !self.take('}') {
                     loop {

@@ -6,11 +6,6 @@ use tokio::task::AbortHandle;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-/// Every task runs until its token is cancelled, and nothing cancels before
-/// teardown, so a task that ends earlier is a panic or a defect: the worker
-/// stops rather than run without it, as the service does. A task spawned
-/// through [`Self::spawn`] reports that end by name. The engines spawn their
-/// loops on [`Self::tracker`] and report through `Started::failed`.
 #[derive(Clone)]
 pub(crate) struct Background {
     pub(crate) cancel: CancellationToken,
@@ -77,8 +72,6 @@ impl Background {
         {
             return name;
         }
-        // `self` owns the sender, so the receiver cannot close while `self`
-        // is borrowed; this only keeps the function total.
         std::future::pending().await
     }
 }

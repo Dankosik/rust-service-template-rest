@@ -8,11 +8,7 @@ use tokio::time::Instant;
 
 use crate::AcquisitionError;
 
-/// A token stops being reused this long before it expires, as in Go's `oauth2`.
 const REUSE_MARGIN: Duration = Duration::from_secs(10);
-/// A resource rejection stops reuse only for a token at least this old.
-/// The provider would answer a younger one with the same token, so a resource
-/// that refuses every token costs one token request per this period.
 pub(crate) const EVICTION_MIN_AGE: Duration = Duration::from_secs(30);
 
 #[derive(derive_more::Debug)]
@@ -20,21 +16,17 @@ pub(crate) const EVICTION_MIN_AGE: Duration = Duration::from_secs(30);
 pub(crate) struct Token {
     pub(crate) header: HeaderValue,
     pub(crate) requested_at: Instant,
-    /// `None` when the provider gave no lifetime: use only for its requesting call.
     expires_at: Option<Instant>,
     rejected: AtomicBool,
 }
 
 impl Token {
-    /// The provider's lifetime is counted from the start of acquisition.
     pub(crate) fn bearer(
         access_token: &str,
         requested_at: Instant,
         expires_in: Option<u64>,
     ) -> Result<Self, AcquisitionError> {
         let value = zeroize::Zeroizing::new(format!("Bearer {access_token}"));
-        // The parser treats leading spaces as scheme separators. Match the
-        // original token so provider whitespace is rejected rather than trimmed.
         if shared_rules::rfc6750::token([value.as_bytes()]) != Ok(access_token) {
             return Err(AcquisitionError::InvalidResponse);
         }
@@ -84,7 +76,6 @@ impl Token {
 
     pub(crate) fn reject_if_old_enough(&self) {
         if Instant::now().saturating_duration_since(self.requested_at) >= EVICTION_MIN_AGE {
-            // Reuse reads this bit alone; no other state is published with it.
             self.rejected.store(true, Ordering::Relaxed);
         }
     }

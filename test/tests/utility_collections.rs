@@ -30,7 +30,6 @@ fn ordered_map_replaces_values_without_reordering_other_keys() {
         values.keys().copied().collect_vec(),
         ["first", "second", "third"]
     );
-    // shift_remove, not swap_remove: relative order is part of this example.
     assert_eq!(values.shift_remove("first"), Some(1));
     assert_eq!(
         values.into_iter().collect_vec(),

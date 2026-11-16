@@ -35,8 +35,6 @@ impl Operation {
         }
     }
 
-    /// A stopped caller discards a read reply as a timeout or cancellation.
-    /// A confirmed mutation is final and keeps its result.
     fn is_read(self) -> bool {
         match self {
             Self::Get => true,
@@ -76,10 +74,6 @@ impl CacheNamespace {
         .await
     }
 
-    /// The TTL is floored to whole milliseconds, which must be in `1..=i64::MAX`.
-    /// Redis owns absolute-expiry arithmetic and can still refuse an admitted TTL.
-    /// A timed-out or stopped write is never replayed and may still apply on the
-    /// server.
     pub async fn set(&self, key: &str, value: &[u8], ttl: Duration) -> Result<(), SetError> {
         self.set_bounded(key, value, ttl, &self.standalone_command_scope())
             .await
@@ -110,7 +104,6 @@ impl CacheNamespace {
         let operation = Operation::Set;
         let options =
             SetOptions::default().with_expiration(SetExpiry::PX(milliseconds.cast_unsigned()));
-        // Value, `PX`, and an expiry of at most 20 decimal digits (u64).
         let mut command = self.keyed_command(
             operation,
             key,
@@ -181,7 +174,6 @@ impl CacheNamespace {
         }
     }
 
-    /// Reserves argument slots and payload bytes (excluding RESP framing) up front.
     fn keyed_command(
         &self,
         operation: Operation,
@@ -224,8 +216,6 @@ pub(crate) const fn valid_namespace(name: &str) -> bool {
     true
 }
 
-/// Writes the prefixed key as one argument straight into the command's
-/// payload buffer through [`write_arg_fmt`](redis::RedisWrite::write_arg_fmt).
 struct NamespacedKey<'a> {
     namespace: &'static str,
     key: &'a str,
