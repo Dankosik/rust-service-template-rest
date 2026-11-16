@@ -9,8 +9,7 @@ use std::num::NonZeroU32;
 use secrecy::{ExposeSecret as _, SecretString};
 use serde::Deserialize;
 
-use crate::ValidationError;
-use crate::validate::{non_blank, validate_endpoint_id};
+use crate::validate::{Violations, non_blank, validate_endpoint_id};
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -38,13 +37,12 @@ pub struct WebhookEndpointConfig {
 }
 
 impl WebhooksConfig {
-    pub(crate) fn validate(&self) -> Result<(), ValidationError> {
+    pub(crate) fn validate(&self, violations: &mut Violations) {
         for (endpoint_id, endpoint) in &self.endpoints {
-            validate_endpoint_id("webhooks.endpoints", endpoint_id)?;
+            violations.check(validate_endpoint_id("webhooks.endpoints", endpoint_id));
             let key = format!("webhooks.endpoints.{endpoint_id}.secret");
-            non_blank(&key, endpoint.secret.expose_secret())?;
+            violations.check(non_blank(&key, endpoint.secret.expose_secret()));
         }
-        Ok(())
     }
 }
 

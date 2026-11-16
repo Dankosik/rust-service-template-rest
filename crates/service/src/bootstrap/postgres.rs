@@ -11,21 +11,21 @@ pub(super) async fn open(
     background: &mut Background,
     retained: &mut Option<PgPool>,
 ) -> Result<(), BootstrapError> {
-    if !config.postgres.enabled {
+    let Some(postgres) = &config.postgres else {
         return Ok(());
-    }
-    let raw = config.postgres.required_dsn()?.clone();
-    let password_file = config.postgres.password_file.clone();
+    };
+    let raw = postgres.dsn.clone();
+    let password_file = postgres.password_file.clone();
     let dsn = super::blocking_startup("postgres", move || {
         Dsn::admit_with(raw.expose_secret(), password_file.as_deref())
     })
     .await?;
     let options = PoolOptions {
-        max_connections: config.postgres.max_connections,
+        max_connections: postgres.max_connections,
         // Same process identity as traces (`service.name`).
         application_name: &config.observability.otel.service_name,
         default_isolation: infra_postgres::Isolation::ServerDefault,
-        session_settings_source: match config.postgres.session_budgets {
+        session_settings_source: match postgres.session_budgets {
             service_config::PostgresSessionBudgets::Startup => SessionSettingsSource::Startup,
             service_config::PostgresSessionBudgets::Server => SessionSettingsSource::Server,
         },
@@ -37,7 +37,7 @@ pub(super) async fn open(
         postgres.port = dsn.port(),
         postgres.database = dsn.database(),
         postgres.sslmode = dsn.ssl_mode_name(),
-        postgres.max_connections = config.postgres.max_connections,
+        postgres.max_connections = postgres.max_connections,
         "postgres_pool_opened"
     );
     background.spawn(

@@ -530,9 +530,9 @@ async fn start(
     };
 
     // template:begin grpc:bootstrap-grpc-prepare-start
-    let grpc_prepared = if config.grpc.enabled {
+    let grpc_prepared = if let Some(listener) = &config.grpc {
         Some(grpc::prepare(
-            config,
+            listener,
             grpc_registration,
             &state,
             readiness,
@@ -572,10 +572,7 @@ async fn start(
     };
     // template:begin grpc:bootstrap-grpc-bind-before-ready
     let grpc_listener = match grpc_prepared {
-        Some(grpc) => Some((
-            BoundListener::bind(config.grpc.required_addr()?).await?,
-            grpc,
-        )),
+        Some(grpc) => Some((BoundListener::bind(grpc.addr).await?, grpc)),
         None => None,
     };
     // template:end grpc:bootstrap-grpc-bind-before-ready
@@ -841,15 +838,20 @@ mod tests {
         let key = TestKey::new("orders/1");
         let mut config = Config::default();
         config.http.addr = "127.0.0.1:0".parse().unwrap();
-        config.grpc.enabled = true;
-        config.grpc.addr = Some("127.0.0.1:0".parse().unwrap());
-        config.grpc.security = Some(service_config::GrpcSecurity::Plaintext);
+        config.grpc = Some(service_config::GrpcConfig {
+            addr: "127.0.0.1:0".parse().unwrap(),
+            security: service_config::GrpcListenerSecurity::Plaintext,
+            request_timeout: Duration::from_secs(8),
+            max_in_flight: 256,
+            admission_wait: Duration::from_secs(1),
+            max_connections: 4096,
+            max_connection_age: Duration::from_mins(30),
+        });
         config.service_auth = service_config::ServiceAuthConfig::Jwt {
             name: "catalog".to_owned(),
             jwt_type: "example-svc+jwt".to_owned(),
             trust: registry(&[("orders", &[&key])]),
-            key_id: None,
-            private_key: None,
+            signing_key: None,
         };
         let metrics = shared_metrics();
         let mut background = Background::new(CancellationToken::new());

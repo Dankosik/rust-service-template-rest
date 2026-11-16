@@ -2,85 +2,172 @@ use super::*;
 use crate::LoadOptions;
 use crate::load::{Error, load_from};
 use crate::test_support::{BUILD, assert_secret_in_file, env, write};
+use crate::validate::{ValidationErrors, admit_with};
 use std::assert_matches;
 
-fn railway() -> ObjectStorageConfig {
-    ObjectStorageConfig {
-        provider: ObjectStorageProvider::Railway,
+fn railway() -> ObjectStorageInput {
+    ObjectStorageInput {
+        provider: ProviderKind::Railway,
         bucket: "results-jdhhd8oe18xi".to_owned(),
         endpoint: "https://t3.storageapi.dev".to_owned(),
         access_key_id: "tid_example".to_owned(),
         secret_access_key: Some(SecretString::from("hunter2".to_owned())),
-        ..ObjectStorageConfig::default()
+        ..ObjectStorageInput::default()
     }
 }
 
-fn key_of(config: &ObjectStorageConfig, env: &str) -> String {
-    config.validate(env).unwrap_err().key
+fn amazon() -> ObjectStorageInput {
+    ObjectStorageInput {
+        provider: ProviderKind::AmazonS3,
+        endpoint: String::new(),
+        region: "eu-central-1".to_owned(),
+        expected_bucket_owner: "123456789012".to_owned(),
+        ..railway()
+    }
+}
+
+fn admit(
+    input: ObjectStorageInput,
+    env: &str,
+) -> Result<Option<ObjectStorageConfig>, ValidationErrors> {
+    admit_with(|v| input.admit(env, v))
+}
+
+fn keys(input: ObjectStorageInput, env: &str) -> Vec<String> {
+    admit(input, env)
+        .unwrap_err()
+        .iter()
+        .map(|error| error.key.clone())
+        .collect()
+}
+
+fn key_of(input: ObjectStorageInput, env: &str) -> String {
+    let mut keys = keys(input, env);
+    assert_eq!(keys.len(), 1, "{keys:?}");
+    keys.remove(0)
 }
 
 #[test]
 fn defaults_are_inert() {
-    let config = ObjectStorageConfig::default();
-    assert_eq!(config.provider, ObjectStorageProvider::None);
-    assert_eq!(config.max_object_bytes, ByteSize::mib(8));
-    assert_eq!(config.max_concurrency, 8);
-    assert_eq!(config.operation_timeout, Duration::from_secs(5));
-    config.validate("production").unwrap();
+    let input = ObjectStorageInput::default();
+    assert_eq!(input.provider, ProviderKind::None);
+    assert_eq!(input.max_object_bytes, ByteSize::mib(8));
+    assert_eq!(input.max_concurrency, 8);
+    assert_eq!(input.operation_timeout, Duration::from_secs(5));
+    assert!(admit(input, "production").unwrap().is_none());
 }
 
 #[test]
 fn an_active_provider_needs_bucket_and_credentials() {
-    railway().validate("production").unwrap();
+    let admitted = admit(railway(), "production").unwrap().unwrap();
+    assert_eq!(admitted.bucket, "results-jdhhd8oe18xi");
+    assert_eq!(
+        admitted.provider,
+        ObjectStorageProvider::Railway {
+            endpoint: "https://t3.storageapi.dev".to_owned(),
+            region: None,
+        }
+    );
     for (mutate, key) in [
         (
-            (|config: &mut ObjectStorageConfig| config.bucket.clear()) as fn(&mut _),
+            (|input: &mut ObjectStorageInput| input.bucket.clear()) as fn(&mut _),
             "object_storage.bucket",
         ),
         (
-            |config| config.access_key_id.clear(),
+            |input| input.access_key_id.clear(),
             "object_storage.access_key_id",
         ),
         (
-            |config| config.secret_access_key = None,
+            |input| input.secret_access_key = None,
             "object_storage.secret_access_key",
         ),
-        (|config| config.endpoint.clear(), "object_storage.endpoint"),
+        (|input| input.endpoint.clear(), "object_storage.endpoint"),
     ] {
-        let mut config = railway();
-        mutate(&mut config);
-        assert_eq!(key_of(&config, "production"), key);
+        let mut input = railway();
+        mutate(&mut input);
+        assert_eq!(key_of(input, "production"), key);
     }
 }
 
 #[test]
+fn every_violated_rule_is_reported_together() {
+    let input = ObjectStorageInput {
+        bucket: String::new(),
+        endpoint: String::new(),
+        access_key_id: String::new(),
+        max_concurrency: 0,
+        ..railway()
+    };
+    assert_eq!(
+        keys(input, "production"),
+        [
+            "object_storage.max_concurrency",
+            "object_storage.endpoint",
+            "object_storage.bucket",
+            "object_storage.access_key_id"
+        ]
+    );
+}
+
+#[test]
+fn blank_optional_regions_are_absent() {
+    let mut input = railway();
+    input.region = "  ".to_owned();
+    let admitted = admit(input, "production").unwrap().unwrap();
+    assert_matches!(
+        admitted.provider,
+        ObjectStorageProvider::Railway { region: None, .. }
+    );
+}
+
+#[test]
 fn providers_accept_only_their_own_keys() {
-    let mut amazon = railway();
-    amazon.provider = ObjectStorageProvider::AmazonS3;
-    let error = amazon.validate("production").unwrap_err();
+    let mut other = railway();
+    other.provider = ProviderKind::AmazonS3;
+    let errors = admit(other.clone(), "production").unwrap_err();
+    let error = errors.iter().next().unwrap();
     assert_eq!(error.key, "object_storage.endpoint");
     assert_eq!(
         error.message,
         "must be empty when object_storage.provider = amazon_s3"
     );
-    amazon.endpoint.clear();
-    assert_eq!(key_of(&amazon, "production"), "object_storage.region");
-    amazon.region = "eu-central-1".to_owned();
+    assert!(errors.names("object_storage.region"));
+    assert!(errors.names("object_storage.expected_bucket_owner"));
+    other.endpoint.clear();
     assert_eq!(
-        key_of(&amazon, "production"),
+        keys(other.clone(), "production"),
+        [
+            "object_storage.region",
+            "object_storage.expected_bucket_owner"
+        ]
+    );
+    other.region = "eu-central-1".to_owned();
+    assert_eq!(
+        key_of(other, "production"),
         "object_storage.expected_bucket_owner"
     );
-    amazon.expected_bucket_owner = "123456789012".to_owned();
-    amazon.validate("production").unwrap();
+    assert_eq!(
+        admit(amazon(), "production").unwrap().unwrap().provider,
+        ObjectStorageProvider::AmazonS3 {
+            region: "eu-central-1".to_owned(),
+            expected_bucket_owner: "123456789012".to_owned(),
+        }
+    );
 
     let mut r2 = railway();
-    r2.provider = ObjectStorageProvider::CloudflareR2;
+    r2.provider = ProviderKind::CloudflareR2;
     r2.region = "eu-central-1".to_owned();
-    assert_eq!(key_of(&r2, "production"), "object_storage.region");
+    assert_eq!(key_of(r2.clone(), "production"), "object_storage.region");
     r2.region = "auto".to_owned();
-    r2.validate("production").unwrap();
+    assert_eq!(
+        admit(r2.clone(), "production").unwrap().unwrap().provider,
+        ObjectStorageProvider::CloudflareR2 {
+            endpoint: "https://t3.storageapi.dev".to_owned(),
+        }
+    );
     r2.expected_bucket_owner = "123456789012".to_owned();
-    let error = r2.validate("production").unwrap_err();
+    let errors = admit(r2, "production").unwrap_err();
+    let error = errors.iter().next().unwrap();
     assert_eq!(error.key, "object_storage.expected_bucket_owner");
     assert_eq!(
         error.message,
@@ -91,59 +178,71 @@ fn providers_accept_only_their_own_keys() {
 #[test]
 fn cloudflare_r2_trims_blank_and_auto_regions() {
     let mut r2 = railway();
-    r2.provider = ObjectStorageProvider::CloudflareR2;
+    r2.provider = ProviderKind::CloudflareR2;
     for accepted in ["", "   ", "auto", " auto ", "\tauto\n"] {
         r2.region = accepted.to_owned();
-        r2.validate("production").unwrap();
+        admit(r2.clone(), "production").unwrap();
     }
     for rejected in ["eu-central-1", " eu-central-1 ", "AUTO"] {
         r2.region = rejected.to_owned();
-        assert_eq!(key_of(&r2, "production"), "object_storage.region");
+        assert_eq!(key_of(r2.clone(), "production"), "object_storage.region");
     }
 }
 
 #[test]
 fn workload_identity_is_amazon_only_and_takes_no_access_key() {
-    let mut amazon = railway();
-    amazon.provider = ObjectStorageProvider::AmazonS3;
-    amazon.endpoint.clear();
-    amazon.region = "eu-central-1".to_owned();
-    amazon.expected_bucket_owner = "123456789012".to_owned();
-    amazon.credentials = ObjectStorageCredentials::WorkloadIdentity;
+    let mut input = amazon();
+    input.credentials = CredentialsKind::WorkloadIdentity;
     assert_eq!(
-        key_of(&amazon, "production"),
-        "object_storage.access_key_id"
+        keys(input.clone(), "production"),
+        [
+            "object_storage.access_key_id",
+            "object_storage.secret_access_key"
+        ]
     );
-    amazon.access_key_id.clear();
+    input.access_key_id.clear();
     assert_eq!(
-        key_of(&amazon, "production"),
+        key_of(input.clone(), "production"),
         "object_storage.secret_access_key"
     );
-    amazon.secret_access_key = None;
-    amazon.validate("production").unwrap();
+    input.secret_access_key = None;
+    assert_matches!(
+        admit(input, "production").unwrap().unwrap().credentials,
+        ObjectStorageCredentials::WorkloadIdentity
+    );
 
     let mut other = railway();
-    other.credentials = ObjectStorageCredentials::WorkloadIdentity;
+    other.credentials = CredentialsKind::WorkloadIdentity;
     other.access_key_id.clear();
     other.secret_access_key = None;
-    assert_eq!(key_of(&other, "production"), "object_storage.credentials");
+    assert_eq!(key_of(other, "production"), "object_storage.credentials");
 }
 
 #[test]
 fn path_style_belongs_to_the_generic_provider() {
     let mut generic = railway();
-    generic.provider = ObjectStorageProvider::S3Compatible;
+    generic.provider = ProviderKind::S3Compatible;
     generic.path_style = true;
-    generic.validate("production").unwrap();
+    assert_matches!(
+        admit(generic.clone(), "production")
+            .unwrap()
+            .unwrap()
+            .provider,
+        ObjectStorageProvider::S3Compatible {
+            path_style: true,
+            ..
+        }
+    );
     generic.expected_bucket_owner = "123456789012".to_owned();
     assert_eq!(
-        key_of(&generic, "production"),
+        key_of(generic, "production"),
         "object_storage.expected_bucket_owner"
     );
 
     let mut other = railway();
     other.path_style = true;
-    let error = other.validate("production").unwrap_err();
+    let errors = admit(other, "production").unwrap_err();
+    let error = errors.iter().next().unwrap();
     assert_eq!(error.key, "object_storage.path_style");
     assert_eq!(
         error.message,
@@ -154,51 +253,58 @@ fn path_style_belongs_to_the_generic_provider() {
 #[test]
 fn the_emulator_provider_is_local_only() {
     let mut local = railway();
-    local.provider = ObjectStorageProvider::Local;
-    assert_eq!(key_of(&local, "production"), "object_storage.provider");
-    local.validate("local").unwrap();
-    local.validate("development").unwrap();
+    local.provider = ProviderKind::Local;
+    assert_eq!(
+        key_of(local.clone(), "production"),
+        "object_storage.provider"
+    );
+    for env in ["local", "development"] {
+        assert_matches!(
+            admit(local.clone(), env).unwrap().unwrap().provider,
+            ObjectStorageProvider::Local { .. }
+        );
+    }
 }
 
 #[test]
 fn limits_are_bounded_even_when_inert() {
     for (mutate, key) in [
         (
-            (|config: &mut ObjectStorageConfig| config.max_object_bytes = ByteSize::b(0))
+            (|input: &mut ObjectStorageInput| input.max_object_bytes = ByteSize::b(0))
                 as fn(&mut _),
             "object_storage.max_object_bytes",
         ),
         (
-            |config| config.max_object_bytes = ByteSize::b(MAX_OBJECT_BYTES_CEILING + 1),
+            |input| input.max_object_bytes = ByteSize::b(MAX_OBJECT_BYTES_CEILING + 1),
             "object_storage.max_object_bytes",
         ),
         (
-            |config| config.max_concurrency = 0,
+            |input| input.max_concurrency = 0,
             "object_storage.max_concurrency",
         ),
         (
-            |config| config.max_concurrency = 513,
+            |input| input.max_concurrency = 513,
             "object_storage.max_concurrency",
         ),
         (
-            |config| config.operation_timeout = Duration::from_millis(999),
+            |input| input.operation_timeout = Duration::from_millis(999),
             "object_storage.operation_timeout",
         ),
         (
-            |config| config.operation_timeout = Duration::from_secs(901),
+            |input| input.operation_timeout = Duration::from_secs(901),
             "object_storage.operation_timeout",
         ),
     ] {
-        let mut config = ObjectStorageConfig::default();
-        mutate(&mut config);
-        assert_eq!(key_of(&config, "production"), key);
+        let mut input = ObjectStorageInput::default();
+        mutate(&mut input);
+        assert_eq!(key_of(input, "production"), key);
     }
     assert_eq!(MAX_OBJECT_BYTES_CEILING, 5_363_466_240);
 }
 
 #[test]
 fn debug_output_redacts_the_secret() {
-    let rendered = format!("{:?}", railway());
+    let rendered = format!("{:?}", admit(railway(), "production").unwrap());
     assert!(!rendered.contains("hunter2"), "{rendered}");
 }
 
@@ -222,13 +328,24 @@ fn object_storage_environment_maps_railway_bucket_variables() {
         ]),
     )
     .unwrap();
-    let storage = &cfg.object_storage;
-    assert_eq!(storage.provider, crate::ObjectStorageProvider::Railway);
-    assert_eq!(storage.bucket, "results-jdhhd8oe18xi");
+    let storage = cfg.object_storage.as_ref().unwrap();
     assert_eq!(
-        storage.secret_access_key.as_ref().unwrap().expose_secret(),
-        "hunter2"
+        storage.provider,
+        crate::ObjectStorageProvider::Railway {
+            endpoint: "https://t3.storageapi.dev".to_owned(),
+            region: Some("auto".to_owned()),
+        }
     );
+    assert_eq!(storage.bucket, "results-jdhhd8oe18xi");
+    let crate::ObjectStorageCredentials::AccessKey {
+        access_key_id,
+        secret_access_key,
+    } = &storage.credentials
+    else {
+        panic!("expected access key credentials");
+    };
+    assert_eq!(access_key_id, "tid_example");
+    assert_eq!(secret_access_key.expose_secret(), "hunter2");
     assert_eq!(storage.max_object_bytes.as_u64(), 2 * 1024 * 1024);
     assert_eq!(storage.max_concurrency, 32);
     assert_eq!(storage.operation_timeout, Duration::from_secs(10));
@@ -249,8 +366,8 @@ fn object_storage_environment_selects_credentials_and_addressing() {
         ]),
     )
     .unwrap();
-    assert_eq!(
-        amazon.object_storage.credentials,
+    assert_matches!(
+        amazon.object_storage.unwrap().credentials,
         crate::ObjectStorageCredentials::WorkloadIdentity
     );
 
@@ -271,10 +388,13 @@ fn object_storage_environment_selects_credentials_and_addressing() {
     )
     .unwrap();
     assert_eq!(
-        generic.object_storage.provider,
-        crate::ObjectStorageProvider::S3Compatible
+        generic.object_storage.unwrap().provider,
+        crate::ObjectStorageProvider::S3Compatible {
+            endpoint: "https://ceph.internal.example:8443".to_owned(),
+            region: None,
+            path_style: true,
+        }
     );
-    assert!(generic.object_storage.path_style);
 }
 
 #[test]
@@ -302,8 +422,8 @@ fn object_storage_credentials_selector_in_a_file_is_public() {
         env(&[]),
     )
     .unwrap();
-    assert_eq!(
-        cfg.object_storage.credentials,
+    assert_matches!(
+        cfg.object_storage.unwrap().credentials,
         crate::ObjectStorageCredentials::WorkloadIdentity
     );
 }

@@ -1,6 +1,6 @@
 use serde::Deserialize;
 
-use crate::validate::{ValidationError, non_blank};
+use crate::validate::{Violations, non_blank};
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -32,7 +32,7 @@ impl Default for LogConfig {
 }
 
 impl LogConfig {
-    pub(crate) fn validate(&self) -> Result<(), ValidationError> {
-        non_blank("log.level", &self.level)
+    pub(crate) fn validate(&self, v: &mut Violations) {
+        v.check(non_blank("log.level", &self.level));
     }
 }

@@ -1,52 +1,81 @@
 use super::*;
 use crate::load::{Error, load_from, load_migration_from};
 use crate::test_support::{BUILD, env, write};
+use crate::validate::admit_with;
 use crate::{LoadOptions, LogFormat};
 use std::assert_matches;
 
+fn dsn() -> SecretString {
+    SecretString::from("postgres://u:p@h:5432/d?sslmode=require".to_owned())
+}
+
 #[test]
 fn defaults_are_inert() {
-    let config = PostgresConfig::default();
-    assert!(!config.enabled);
-    assert!(config.dsn.is_none());
-    assert_eq!(config.max_connections.get(), 4);
-    assert_eq!(config.password_file, None);
-    assert_eq!(config.session_budgets, PostgresSessionBudgets::Startup);
-    assert_eq!(config.migration_deadline, Duration::from_mins(5));
-    config.validate().unwrap();
+    let input = PostgresInput::default();
+    assert!(!input.enabled);
+    assert!(input.dsn.is_none());
+    assert_eq!(input.max_connections.get(), 4);
+    assert_eq!(input.password_file, None);
+    assert_eq!(input.session_budgets, PostgresSessionBudgets::Startup);
+    assert_eq!(input.migration_deadline, Duration::from_mins(5));
+    assert!(admit_with(|v| input.admit(v)).unwrap().is_none());
 }
 
 #[test]
 fn enabled_requires_a_dsn() {
-    let config = PostgresConfig {
+    let input = PostgresInput {
         enabled: true,
-        ..PostgresConfig::default()
+        ..PostgresInput::default()
     };
-    let err = config.validate().unwrap_err();
-    assert_eq!(err.key, "postgres.dsn");
-    assert!(PostgresConfig::default().required_dsn().is_err());
+    let errors = admit_with(|v| input.admit(v)).unwrap_err();
+    assert!(errors.names("postgres.dsn"));
 }
 
 #[test]
 fn a_disabled_profile_may_keep_its_dsn_placeholder() {
-    let config = PostgresConfig {
+    let input = PostgresInput {
         enabled: false,
-        dsn: Some(SecretString::from(
-            "postgres://u:p@h:5432/d?sslmode=require".to_owned(),
-        )),
-        ..PostgresConfig::default()
+        dsn: Some(dsn()),
+        ..PostgresInput::default()
     };
-    config.validate().unwrap();
+    assert!(admit_with(|v| input.admit(v)).unwrap().is_none());
 }
 
 #[test]
-fn pool_size_is_bounded() {
-    let config = PostgresConfig {
-        max_connections: NonZeroU32::new(501).unwrap(),
-        ..PostgresConfig::default()
+fn an_enabled_profile_carries_its_dsn() {
+    let input = PostgresInput {
+        enabled: true,
+        dsn: Some(dsn()),
+        ..PostgresInput::default()
     };
-    let err = config.validate().unwrap_err();
-    assert_eq!(err.key, "postgres.max_connections");
+    let config = admit_with(|v| input.admit(v)).unwrap().unwrap();
+    assert_eq!(config.max_connections.get(), 4);
+}
+
+#[rstest::rstest]
+#[case::disabled(false)]
+#[case::enabled(true)]
+fn pool_size_is_bounded(#[case] enabled: bool) {
+    let input = PostgresInput {
+        enabled,
+        dsn: Some(dsn()),
+        max_connections: NonZeroU32::new(501).unwrap(),
+        ..PostgresInput::default()
+    };
+    let errors = admit_with(|v| input.admit(v)).unwrap_err();
+    assert!(errors.names("postgres.max_connections"));
+}
+
+#[test]
+fn every_postgres_violation_is_reported_together() {
+    let input = PostgresInput {
+        enabled: true,
+        max_connections: NonZeroU32::new(501).unwrap(),
+        ..PostgresInput::default()
+    };
+    let errors = admit_with(|v| input.admit(v)).unwrap_err();
+    assert!(errors.names("postgres.dsn"));
+    assert!(errors.names("postgres.max_connections"));
 }
 
 #[test]
@@ -72,17 +101,18 @@ fn only_migration_loading_enforces_the_deadline_range() {
         let variables = [("APP__POSTGRES__MIGRATION_DEADLINE", deadline)];
         load_from(&options, BUILD, env(&variables)).unwrap();
         let err = load_migration_from(&options, BUILD, env(&variables)).unwrap_err();
-        assert_matches!(err, Error::Validate(error) if error.key == "postgres.migration_deadline");
+        assert_matches!(err, Error::Validate(errors) if errors.names("postgres.migration_deadline"));
     }
 }
 
 #[test]
 fn debug_output_redacts_the_dsn() {
     let config = PostgresConfig {
-        dsn: Some(SecretString::from(
-            "postgres://u:hunter2@h:5432/d?sslmode=require".to_owned(),
-        )),
-        ..PostgresConfig::default()
+        dsn: SecretString::from("postgres://u:hunter2@h:5432/d?sslmode=require".to_owned()),
+        password_file: None,
+        session_budgets: PostgresSessionBudgets::Startup,
+        max_connections: NonZeroU32::MIN,
+        migration_deadline: Duration::from_mins(5),
     };
     let rendered = format!("{config:?}");
     assert!(!rendered.contains("hunter2"), "{rendered}");
@@ -114,19 +144,18 @@ fn migration_snapshot_ignores_the_sections_it_does_not_read() {
     assert!(load_from(&options, BUILD, env(&variables)).is_err());
 
     let cfg = load_migration_from(&options, BUILD, env(&variables)).unwrap();
-    assert!(cfg.postgres.enabled);
-    assert_eq!(cfg.postgres.max_connections.get(), 2);
-    assert!(cfg.postgres.dsn.is_some());
+    let postgres = cfg.postgres.unwrap();
+    assert_eq!(postgres.max_connections.get(), 2);
     assert_eq!(
-        cfg.postgres.password_file.as_deref(),
+        postgres.password_file.as_deref(),
         Some(std::path::Path::new("/run/secrets/postgres-password"))
     );
     assert_eq!(
-        cfg.postgres.session_budgets,
+        postgres.session_budgets,
         crate::PostgresSessionBudgets::Server
     );
     assert_eq!(
-        cfg.postgres.migration_deadline,
+        postgres.migration_deadline,
         std::time::Duration::from_hours(2)
     );
     assert_eq!(cfg.log.format, LogFormat::Text);
@@ -157,7 +186,7 @@ fn migration_snapshot_keeps_the_rules_of_its_own_sections() {
         env(&[("APP__POSTGRES__ENABLED", "true")]),
     )
     .unwrap_err();
-    assert_matches!(&missing_dsn, Error::Validate(error) if error.key == "postgres.dsn", "{missing_dsn}");
+    assert_matches!(&missing_dsn, Error::Validate(errors) if errors.names("postgres.dsn"), "{missing_dsn}");
 
     let dir = tempfile::tempdir().unwrap();
     let leaked = write(

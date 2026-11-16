@@ -2,7 +2,7 @@ use std::num::NonZeroU32;
 
 use infra_jobs::Engine;
 use infra_messaging::MessagingError;
-use service_config::Config;
+use service_config::{Config, PostgresConfig};
 
 use super::messaging::RetainedMessages;
 use super::{RetainedCapabilities, WorkerError};
@@ -10,14 +10,15 @@ use crate::resources::Resources;
 
 pub(super) fn admit_pool_inputs(
     config: &Config,
+    postgres: &PostgresConfig,
     capabilities: &RetainedCapabilities,
 ) -> Result<(), WorkerError> {
     config
         .jobs
-        .validate_pool_capacity_with_outbox(&config.postgres, capabilities.jobs.is_some())?;
+        .validate_pool_capacity_with_outbox(postgres, capabilities.jobs.is_some())?;
     // Retaining a message consumer already validated the producer policy on this config.
     if capabilities.messages.is_none() {
-        config.messaging.validate_producer(&config.app.env)?;
+        config.messaging.validate_producer()?;
     }
     Ok(())
 }

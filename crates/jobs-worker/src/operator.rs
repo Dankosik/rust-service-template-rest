@@ -335,7 +335,10 @@ impl Report {
 )]
 pub(crate) fn run(options: &LoadOptions, request: &Request) -> bool {
     let report = match service_config::load_jobs_operator(options) {
-        Ok(config) => run_configured(&config.postgres, request),
+        Ok(config) => match &config.postgres {
+            Some(postgres) => run_configured(postgres, request),
+            None => request.failed_before_start(Cause::PostgresDisabled).into(),
+        },
         Err(error) => {
             let _ = process_failure(&error);
             request.failed_before_start(Cause::Configuration).into()
@@ -357,9 +360,6 @@ pub(crate) fn run(options: &LoadOptions, request: &Request) -> bool {
 }
 
 fn run_configured(config: &PostgresConfig, request: &Request) -> Report {
-    if !config.enabled {
-        return request.failed_before_start(Cause::PostgresDisabled).into();
-    }
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -383,10 +383,8 @@ async fn serve(config: &PostgresConfig, request: &Request) -> Report {
             return request.failed_before_start(Cause::Signals).into();
         }
     };
-    let Ok(raw) = config.required_dsn() else {
-        return request.failed_before_start(Cause::Dsn).into();
-    };
-    let Ok(dsn) = Dsn::admit_with(raw.expose_secret(), config.password_file.as_deref()) else {
+    let Ok(dsn) = Dsn::admit_with(config.dsn.expose_secret(), config.password_file.as_deref())
+    else {
         // Do not repeat an arbitrary URL parameter from DsnError::Parameter.
         return request.failed_before_start(Cause::Dsn).into();
     };

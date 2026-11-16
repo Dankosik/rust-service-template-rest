@@ -16,10 +16,11 @@ pub(super) async fn open(
     let client_certificate =
         config
             .cache
-            .client_certificate()?
+            .client_certificate
+            .clone()
             .map(|certificate| ClientCertificate {
-                cert_path: certificate.cert_path.to_path_buf(),
-                key_path: certificate.key_path.to_path_buf(),
+                cert_path: certificate.cert_path,
+                key_path: certificate.key_path,
             });
     let options = CacheOptions {
         dsn: dsn.clone(),

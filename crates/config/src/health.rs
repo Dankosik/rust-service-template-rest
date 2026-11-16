@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::validate::{ValidationError, duration_range, int_range};
+use crate::validate::{Violations, duration_range, int_range};
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, default)]
@@ -43,25 +43,24 @@ impl Default for HealthConfig {
 }
 
 impl HealthConfig {
-    pub(crate) fn validate(&self) -> Result<(), ValidationError> {
-        duration_range(
+    pub(crate) fn validate(&self, v: &mut Violations) {
+        v.check(duration_range(
             "health.refresh_interval",
             self.refresh_interval,
             Duration::from_millis(100),
             Duration::from_mins(5),
-        )?;
-        duration_range(
+        ));
+        v.check(duration_range(
             "health.probe_budget",
             self.probe_budget,
             Duration::from_millis(100),
             Duration::from_secs(30),
-        )?;
-        int_range(
+        ));
+        v.check(int_range(
             "health.failure_threshold",
             u64::from(self.failure_threshold),
             1,
             100,
-        )?;
-        Ok(())
+        ));
     }
 }

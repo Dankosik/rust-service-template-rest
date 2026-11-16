@@ -4,7 +4,7 @@
 //! reconciles operator-owned streams.
 
 use std::num::NonZeroU32;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use bytesize::{ByteSize, KIB, MIB};
 use secrecy::SecretString;
@@ -13,7 +13,9 @@ use url::Url;
 
 use crate::app::local_development_only;
 use crate::de::{blank_as_none, blank_secret_as_none, value_free};
-use crate::validate::{ValidationError, int_range, missing, non_blank, required};
+use crate::validate::{
+    Rejected, ValidationError, Violations, int_range, missing, non_blank, required,
+};
 
 /// Header bytes one delivery may add to its payload: `HEADER_LIMIT_BYTES` of
 /// the `infra-messaging` wire decoder. Metadata is budgeted separately.
@@ -26,52 +28,58 @@ const MAX_RESIDENT_DELIVERY_BYTES: u64 = MAX_RESIDENT_DELIVERY_MIB * MIB;
 const PRODUCER_ACTIVE: &str = "a producer is active";
 const CONSUMER_ACTIVE: &str = "a consumer is active";
 
+/// A broker's default `max_payload` is 1 MiB for payload and headers
+/// together, so the default must leave room below it; the Go template defaults
+/// to the same value.
+const DEFAULT_MAX_PAYLOAD: ByteSize = ByteSize::kib(256);
+
+/// What the operator supplied for `[messaging]`, before admission.
 #[expect(
     clippy::struct_excessive_bools,
     reason = "NATS trust, authentication and TLS-first are independent operator capabilities"
 )]
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, default)]
-pub struct MessagingConfig {
+pub(crate) struct MessagingInput {
     #[serde(deserialize_with = "url_list")]
-    pub urls: Vec<String>,
+    urls: Vec<String>,
     #[serde(default, deserialize_with = "blank_secret_as_none")]
-    pub credentials: Option<SecretString>,
+    credentials: Option<SecretString>,
     /// Path to a NATS credentials file, the alternative to `credentials` for
     /// a platform that rotates it: the client reads the file again for every
     /// connection. Missing, empty, or whitespace-only is unset (`None`).
     #[serde(default, deserialize_with = "blank_as_none")]
-    pub credentials_file: Option<PathBuf>,
+    credentials_file: Option<PathBuf>,
     /// Optional PEM root CA path for the operator-selected broker. Missing,
     /// empty, or whitespace-only is unset (`None`).
     #[serde(default, deserialize_with = "blank_as_none")]
-    pub root_ca_path: Option<PathBuf>,
+    root_ca_path: Option<PathBuf>,
     /// Permit `nats://` only for a local or development process.
-    pub allow_plaintext: bool,
+    allow_plaintext: bool,
     /// Perform TLS before INFO; every configured URL must use `tls://`.
-    pub tls_first: bool,
+    tls_first: bool,
     /// The operator declares the private network the broker trust boundary,
     /// as `grpc.security = "plaintext"` does for gRPC: `nats://` is admitted
     /// in every environment. Credentials stay required outside local and
     /// development.
-    pub trusted_network: bool,
+    trusted_network: bool,
     /// Permit a connection without credentials only for a local or
     /// development process.
-    pub allow_unauthenticated: bool,
+    allow_unauthenticated: bool,
     #[serde(default, deserialize_with = "blank_as_none")]
-    pub source_stream: Option<String>,
-    pub max_payload_bytes: ByteSize,
+    source_stream: Option<String>,
+    max_payload_bytes: ByteSize,
     #[serde(default, deserialize_with = "blank_as_none")]
-    pub consumer_durable: Option<String>,
+    consumer_durable: Option<String>,
     #[serde(default, deserialize_with = "blank_as_none")]
-    pub consumer_filter_subject: Option<String>,
+    consumer_filter_subject: Option<String>,
     #[serde(default, deserialize_with = "blank_as_none")]
-    pub dlq_subject: Option<String>,
+    dlq_subject: Option<String>,
     #[serde(deserialize_with = "crate::de::unsigned_count")]
-    pub consumer_concurrency: NonZeroU32,
+    consumer_concurrency: NonZeroU32,
 }
 
-impl Default for MessagingConfig {
+impl Default for MessagingInput {
     fn default() -> Self {
         Self {
             urls: Vec::new(),
@@ -83,15 +91,122 @@ impl Default for MessagingConfig {
             trusted_network: false,
             allow_unauthenticated: false,
             source_stream: None,
-            // A broker's default `max_payload` is 1 MiB for payload and
-            // headers together, so the default must leave room below it; the
-            // Go template defaults to the same value.
-            max_payload_bytes: ByteSize::kib(256),
+            max_payload_bytes: DEFAULT_MAX_PAYLOAD,
             consumer_durable: None,
             consumer_filter_subject: None,
             dlq_subject: None,
             consumer_concurrency: NonZeroU32::MIN,
         }
+    }
+}
+
+/// Admitted `JetStream` connection settings. An empty `urls` means no broker
+/// is configured; a binary that needs one checks its role with
+/// [`Self::validate_producer`] or [`Self::validate_consumer`].
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "NATS trust, authentication and TLS-first are independent operator capabilities"
+)]
+#[derive(Clone, Debug)]
+pub struct MessagingConfig {
+    pub urls: Vec<String>,
+    pub credentials: Option<MessagingCredentials>,
+    pub root_ca_path: Option<PathBuf>,
+    pub allow_plaintext: bool,
+    pub tls_first: bool,
+    pub trusted_network: bool,
+    pub allow_unauthenticated: bool,
+    pub source_stream: Option<String>,
+    pub max_payload_bytes: ByteSize,
+    pub consumer_durable: Option<String>,
+    pub consumer_filter_subject: Option<String>,
+    pub dlq_subject: Option<String>,
+    pub consumer_concurrency: NonZeroU32,
+}
+
+impl Default for MessagingConfig {
+    fn default() -> Self {
+        Self {
+            urls: Vec::new(),
+            credentials: None,
+            root_ca_path: None,
+            allow_plaintext: false,
+            tls_first: false,
+            trusted_network: false,
+            allow_unauthenticated: false,
+            source_stream: None,
+            max_payload_bytes: DEFAULT_MAX_PAYLOAD,
+            consumer_durable: None,
+            consumer_filter_subject: None,
+            dlq_subject: None,
+            consumer_concurrency: NonZeroU32::MIN,
+        }
+    }
+}
+
+impl MessagingInput {
+    pub(crate) fn admit(
+        self,
+        app_env: &str,
+        v: &mut Violations,
+    ) -> Result<MessagingConfig, Rejected> {
+        let plaintext = v.take(local_development_only(
+            "messaging.allow_plaintext",
+            self.allow_plaintext,
+            app_env,
+        ));
+        let unauthenticated = v.take(local_development_only(
+            "messaging.allow_unauthenticated",
+            self.allow_unauthenticated,
+            app_env,
+        ));
+        let credentials = match (self.credentials, self.credentials_file) {
+            (Some(_), Some(_)) => Err(v.reject(ValidationError::new(
+                "messaging.credentials_file",
+                "cannot be set together with messaging.credentials",
+            ))),
+            (Some(inline), None) => Ok(Some(MessagingCredentials::Inline(inline))),
+            (None, Some(file)) => Ok(Some(MessagingCredentials::File(file))),
+            (None, None) => Ok(None),
+        };
+        let urls = validate_urls(
+            &self.urls,
+            self.tls_first,
+            self.allow_plaintext || self.trusted_network,
+            v,
+        );
+        let payload = v.take(int_range(
+            "messaging.max_payload_bytes",
+            self.max_payload_bytes.as_u64(),
+            1,
+            MAX_RESIDENT_DELIVERY_BYTES - DELIVERY_OVERHEAD_BYTES,
+        ));
+        // The payload range keeps the product far from overflow.
+        let concurrency = payload.and_then(|()| {
+            v.take(resident_delivery_bound(
+                self.max_payload_bytes,
+                self.consumer_concurrency,
+            ))
+        });
+        plaintext?;
+        unauthenticated?;
+        urls?;
+        concurrency?;
+        Ok(MessagingConfig {
+            urls: self.urls,
+            credentials: credentials?,
+            root_ca_path: self.root_ca_path,
+            allow_plaintext: self.allow_plaintext,
+            tls_first: self.tls_first,
+            trusted_network: self.trusted_network,
+            allow_unauthenticated: self.allow_unauthenticated,
+            source_stream: self.source_stream,
+            max_payload_bytes: self.max_payload_bytes,
+            consumer_durable: self.consumer_durable,
+            consumer_filter_subject: self.consumer_filter_subject,
+            dlq_subject: self.dlq_subject,
+            consumer_concurrency: self.consumer_concurrency,
+        })
     }
 }
 
@@ -105,12 +220,13 @@ impl MessagingConfig {
         self.allow_plaintext || self.trusted_network
     }
 
-    pub fn validate_producer(&self, app_env: &str) -> Result<(), ValidationError> {
-        let credentials = self.validate(app_env)?;
+    /// What a binary that publishes needs: a broker, credentials unless the
+    /// operator allowed none, and the stream it publishes to.
+    pub fn validate_producer(&self) -> Result<(), ValidationError> {
         if !self.is_active() {
             return Err(missing("messaging.urls", PRODUCER_ACTIVE));
         }
-        if credentials.is_none() && !self.allow_unauthenticated {
+        if self.credentials.is_none() && !self.allow_unauthenticated {
             return Err(ValidationError::new(
                 "messaging.credentials",
                 "one of messaging.credentials or messaging.credentials_file is required unless messaging.allow_unauthenticated = true",
@@ -118,18 +234,6 @@ impl MessagingConfig {
         }
         self.required_source_stream()?;
         Ok(())
-    }
-
-    pub fn credential_source(&self) -> Result<Option<MessagingCredentials<'_>>, ValidationError> {
-        match (&self.credentials, &self.credentials_file) {
-            (Some(_), Some(_)) => Err(ValidationError::new(
-                "messaging.credentials_file",
-                "cannot be set together with messaging.credentials",
-            )),
-            (Some(inline), None) => Ok(Some(MessagingCredentials::Inline(inline))),
-            (None, Some(file)) => Ok(Some(MessagingCredentials::File(file))),
-            (None, None) => Ok(None),
-        }
     }
 
     pub fn required_source_stream(&self) -> Result<&str, ValidationError> {
@@ -140,8 +244,10 @@ impl MessagingConfig {
         )
     }
 
-    pub fn validate_consumer(&self, app_env: &str) -> Result<(), ValidationError> {
-        self.validate_producer(app_env)?;
+    /// What a binary that consumes needs: the producer requirements and the
+    /// consumer's operator-owned names.
+    pub fn validate_consumer(&self) -> Result<(), ValidationError> {
+        self.validate_producer()?;
         self.required_consumer_keys()?;
         Ok(())
     }
@@ -165,94 +271,92 @@ impl MessagingConfig {
             )?,
         })
     }
+}
 
-    pub(crate) fn validate(
-        &self,
-        app_env: &str,
-    ) -> Result<Option<MessagingCredentials<'_>>, ValidationError> {
-        local_development_only("messaging.allow_plaintext", self.allow_plaintext, app_env)?;
-        local_development_only(
-            "messaging.allow_unauthenticated",
-            self.allow_unauthenticated,
-            app_env,
-        )?;
-        let credentials = self.credential_source()?;
-        self.validate_urls()?;
-
-        int_range(
-            "messaging.max_payload_bytes",
-            self.max_payload_bytes.as_u64(),
-            1,
-            MAX_RESIDENT_DELIVERY_BYTES - DELIVERY_OVERHEAD_BYTES,
-        )?;
-        // The range above keeps the product far from overflow.
-        let resident = u64::from(self.consumer_concurrency.get())
-            * (self.max_payload_bytes.as_u64() + DELIVERY_OVERHEAD_BYTES);
-        if resident > MAX_RESIDENT_DELIVERY_BYTES {
-            return Err(ValidationError::new(
-                "messaging.consumer_concurrency",
-                format!(
-                    "{} × (messaging.max_payload_bytes {} + {} KiB headers) = {resident} bytes exceeds the {MAX_RESIDENT_DELIVERY_MIB} MiB resident delivery bound",
-                    self.consumer_concurrency,
-                    self.max_payload_bytes.as_u64(),
-                    DELIVERY_OVERHEAD_BYTES / KIB,
-                ),
-            ));
-        }
-        Ok(credentials)
+fn resident_delivery_bound(
+    max_payload_bytes: ByteSize,
+    consumer_concurrency: NonZeroU32,
+) -> Result<(), ValidationError> {
+    let resident = u64::from(consumer_concurrency.get())
+        * (max_payload_bytes.as_u64() + DELIVERY_OVERHEAD_BYTES);
+    if resident > MAX_RESIDENT_DELIVERY_BYTES {
+        return Err(ValidationError::new(
+            "messaging.consumer_concurrency",
+            format!(
+                "{consumer_concurrency} × (messaging.max_payload_bytes {} + {} KiB headers) = {resident} bytes exceeds the {MAX_RESIDENT_DELIVERY_MIB} MiB resident delivery bound",
+                max_payload_bytes.as_u64(),
+                DELIVERY_OVERHEAD_BYTES / KIB,
+            ),
+        ));
     }
+    Ok(())
+}
 
-    fn validate_urls(&self) -> Result<(), ValidationError> {
-        let mut plaintext = false;
-        for (index, raw) in self.urls.iter().enumerate() {
-            // The key names the entry; a URL is never echoed.
-            let key = format!("messaging.urls[{index}]");
-            non_blank(&key, raw)?;
-            if shared_rules::uri::has_whitespace_or_control(raw) {
-                return Err(ValidationError::new(
-                    key,
-                    "must not contain whitespace or controls",
-                ));
-            }
-            let url = Url::parse(raw)
-                .map_err(|_| ValidationError::new(key.clone(), "must be a valid NATS URL"))?;
-            if url.host_str().is_none()
-                || !url.username().is_empty()
-                || url.password().is_some()
-                || shared_rules::uri::authority_has_userinfo(raw)
-            {
-                return Err(ValidationError::new(
-                    key,
-                    "must not contain userinfo and must name a host",
-                ));
-            }
-            match url.scheme() {
-                "tls" => {}
-                "nats" => plaintext = true,
-                _ => return Err(ValidationError::new(key, "must use nats:// or tls://")),
-            }
+/// Every URL is checked; the scheme rules follow only when each parsed.
+fn validate_urls(
+    urls: &[String],
+    tls_first: bool,
+    plaintext_admitted: bool,
+    v: &mut Violations,
+) -> Result<(), Rejected> {
+    let mut plaintext = false;
+    let mut rejected = Ok(());
+    for (index, raw) in urls.iter().enumerate() {
+        match url_scheme(index, raw) {
+            Ok(scheme) => plaintext |= scheme == "nats",
+            Err(error) => rejected = Err(v.reject(error)),
         }
-        if plaintext && self.tls_first {
-            return Err(ValidationError::new(
-                "messaging.tls_first",
-                "requires every configured URL to use tls://",
-            ));
-        }
-        if plaintext && !self.plaintext_admitted() {
-            return Err(ValidationError::new(
-                "messaging.allow_plaintext",
-                "must be true for nats:// URLs in local/development; set messaging.trusted_network = true elsewhere",
-            ));
-        }
+    }
+    rejected?;
+    if plaintext && tls_first {
+        return Err(v.reject(ValidationError::new(
+            "messaging.tls_first",
+            "requires every configured URL to use tls://",
+        )));
+    }
+    if plaintext && !plaintext_admitted {
+        return Err(v.reject(ValidationError::new(
+            "messaging.allow_plaintext",
+            "must be true for nats:// URLs in local/development; set messaging.trusted_network = true elsewhere",
+        )));
+    }
+    Ok(())
+}
 
-        Ok(())
+fn url_scheme(index: usize, raw: &str) -> Result<String, ValidationError> {
+    // The key names the entry; a URL is never echoed.
+    let key = format!("messaging.urls[{index}]");
+    non_blank(&key, raw)?;
+    if shared_rules::uri::has_whitespace_or_control(raw) {
+        return Err(ValidationError::new(
+            key,
+            "must not contain whitespace or controls",
+        ));
+    }
+    let url = Url::parse(raw)
+        .map_err(|_| ValidationError::new(key.clone(), "must be a valid NATS URL"))?;
+    if url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || shared_rules::uri::authority_has_userinfo(raw)
+    {
+        return Err(ValidationError::new(
+            key,
+            "must not contain userinfo and must name a host",
+        ));
+    }
+    match url.scheme() {
+        scheme @ ("tls" | "nats") => Ok(scheme.to_owned()),
+        _ => Err(ValidationError::new(key, "must use nats:// or tls://")),
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-pub enum MessagingCredentials<'a> {
-    Inline(&'a SecretString),
-    File(&'a Path),
+/// How the broker connection authenticates; the inline secret never appears
+/// in `Debug` output.
+#[derive(Clone, Debug)]
+pub enum MessagingCredentials {
+    Inline(SecretString),
+    File(PathBuf),
 }
 
 #[derive(Clone, Copy, Debug)]

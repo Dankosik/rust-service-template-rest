@@ -2,6 +2,7 @@ use super::*;
 use crate::LoadOptions;
 use crate::load::load_from;
 use crate::test_support::{BUILD, assert_secret_in_file, env, write};
+use crate::validate::validate_with;
 use std::assert_matches;
 
 fn parse(toml: &str) -> Result<AuthnConfig, toml::de::Error> {
@@ -12,7 +13,7 @@ fn parse(toml: &str) -> Result<AuthnConfig, toml::de::Error> {
 fn omitted_section_defaults_to_inert_none() {
     let config = AuthnConfig::default();
     assert_matches!(config, AuthnConfig::None {});
-    config.validate().unwrap();
+    validate_with(|v| config.validate(v)).unwrap();
 }
 
 // template:begin oidc-jwt:authn-config-jwt-tests
@@ -171,7 +172,7 @@ fn jwt_normalizes_scalar_or_list_audiences_without_changing_values() {
     )
     .unwrap();
 
-    scalar.validate().unwrap();
+    validate_with(|v| scalar.validate(v)).unwrap();
 
     let AuthnConfig::OidcJwt {
         audience,
@@ -211,9 +212,10 @@ fn jwt_rejects_empty_algorithms_and_invalid_audience_shape() {
         "#,
     )
     .unwrap();
-    assert_eq!(
-        empty_algorithms.validate().unwrap_err().key,
-        "authn.algorithms"
+    assert!(
+        validate_with(|v| empty_algorithms.validate(v))
+            .unwrap_err()
+            .names("authn.algorithms")
     );
 
     for audience in ["[]", "[\"service\", \"  \"]", "\"  \""] {
@@ -238,14 +240,16 @@ fn jwt_accepts_an_optional_nonblank_jwks_uri() {
     };
     assert_eq!(jwks_uri(source("")), None);
     let explicit = source("jwks_uri = \"https://issuer.example/keys\"\n");
-    explicit.validate().unwrap();
+    validate_with(|v| explicit.validate(v)).unwrap();
     assert_eq!(
         jwks_uri(explicit).as_deref(),
         Some("https://issuer.example/keys")
     );
-    assert_eq!(
-        source("jwks_uri = \"  \"\n").validate().unwrap_err().key,
-        "authn.jwks_uri"
+    let blank = source("jwks_uri = \"  \"\n");
+    assert!(
+        validate_with(|v| blank.validate(v))
+            .unwrap_err()
+            .names("authn.jwks_uri")
     );
 }
 
@@ -294,7 +298,7 @@ fn introspection_requires_structural_inputs_and_uses_nonzero_default_capacity() 
     assert!(!cache_enabled);
     assert_eq!(*cache_capacity, 256);
     assert_eq!(*cache_ttl, Duration::from_secs(30));
-    config.validate().unwrap();
+    validate_with(|v| config.validate(v)).unwrap();
 
     let missing_secret = parse(
         r#"
@@ -306,9 +310,10 @@ fn introspection_requires_structural_inputs_and_uses_nonzero_default_capacity() 
         "#,
     )
     .unwrap();
-    assert_eq!(
-        missing_secret.validate().unwrap_err().key,
-        "authn.introspection_client_secret"
+    assert!(
+        validate_with(|v| missing_secret.validate(v))
+            .unwrap_err()
+            .names("authn.introspection_client_secret")
     );
     assert!(
         parse(
@@ -495,7 +500,7 @@ fn introspection_environment_rejects_out_of_range_cache_settings() {
         .unwrap_err();
         assert_matches!(
             &error,
-            crate::Error::Validate(error) if error.key == expected_key,
+            crate::Error::Validate(error) if error.names(expected_key),
             "{error}"
         );
     }

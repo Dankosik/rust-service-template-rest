@@ -1,20 +1,36 @@
 use std::path::Path;
 
 use super::*;
-use crate::Config;
 use crate::LoadOptions;
 use crate::load::load_from;
 use crate::test_support::{BUILD, assert_secret_in_file, assert_unknown_env_key_fails, env, write};
+use crate::validate::{ValidationErrors, admit_with};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
 
+fn admit(
+    input: CacheInput,
+    app_env: &str,
+    request_timeout: Duration,
+) -> Result<CacheConfig, ValidationErrors> {
+    admit_with(|v| input.admit(app_env, Some(request_timeout), v))
+}
+
+fn rejected_keys(input: CacheInput, app_env: &str) -> Vec<String> {
+    admit(input, app_env, REQUEST_TIMEOUT)
+        .unwrap_err()
+        .iter()
+        .map(|error| error.key.clone())
+        .collect()
+}
+
 #[test]
 fn defaults_are_inert() {
-    let config = CacheConfig::default();
-    assert!(!config.is_active());
+    let config = admit(CacheInput::default(), "production", REQUEST_TIMEOUT).unwrap();
+    assert!(config.dsn.is_none());
     assert_eq!(config.password_file, None);
     assert_eq!(config.command_timeout, Duration::from_secs(2));
-    config.validate("production", REQUEST_TIMEOUT).unwrap();
+    assert!(config.client_certificate.is_none());
 }
 
 #[test]
@@ -32,107 +48,112 @@ fn debug_output_redacts_the_dsn() {
 #[test]
 fn allow_flags_are_refused_outside_local_development() {
     for app_env in ["production", "staging"] {
-        let plaintext = CacheConfig {
+        let plaintext = CacheInput {
             allow_plaintext: true,
-            ..CacheConfig::default()
+            ..CacheInput::default()
         };
-        assert_eq!(
-            plaintext
-                .validate(app_env, REQUEST_TIMEOUT)
-                .unwrap_err()
-                .key,
-            "cache.allow_plaintext"
-        );
-        let unauthenticated = CacheConfig {
+        assert_eq!(rejected_keys(plaintext, app_env), ["cache.allow_plaintext"]);
+        let unauthenticated = CacheInput {
             allow_unauthenticated: true,
-            ..CacheConfig::default()
+            ..CacheInput::default()
         };
         assert_eq!(
-            unauthenticated
-                .validate(app_env, REQUEST_TIMEOUT)
-                .unwrap_err()
-                .key,
-            "cache.allow_unauthenticated"
+            rejected_keys(unauthenticated, app_env),
+            ["cache.allow_unauthenticated"]
         );
     }
-    let local = CacheConfig {
-        allow_plaintext: true,
-        allow_unauthenticated: true,
-        ..CacheConfig::default()
-    };
-    local.validate("local", REQUEST_TIMEOUT).unwrap();
-    local.validate("development", REQUEST_TIMEOUT).unwrap();
+    for app_env in ["local", "development"] {
+        let local = CacheInput {
+            allow_plaintext: true,
+            allow_unauthenticated: true,
+            ..CacheInput::default()
+        };
+        let admitted = admit(local, app_env, REQUEST_TIMEOUT).unwrap();
+        assert!(admitted.allow_plaintext && admitted.allow_unauthenticated);
+    }
 }
 
 #[test]
 fn a_client_certificate_and_its_key_are_set_together() {
-    let certificate_only = CacheConfig {
+    let certificate_only = CacheInput {
         client_cert_path: Some(PathBuf::from("/run/tls/client.crt")),
-        ..CacheConfig::default()
+        ..CacheInput::default()
     };
     assert_eq!(
-        certificate_only
-            .validate("production", REQUEST_TIMEOUT)
-            .unwrap_err()
-            .key,
-        "cache.client_key_path"
+        rejected_keys(certificate_only, "production"),
+        ["cache.client_key_path"]
     );
-    let key_only = CacheConfig {
+    let key_only = CacheInput {
         client_key_path: Some(PathBuf::from("/run/tls/client.key")),
-        ..CacheConfig::default()
+        ..CacheInput::default()
     };
     assert_eq!(
-        key_only
-            .validate("production", REQUEST_TIMEOUT)
-            .unwrap_err()
-            .key,
-        "cache.client_cert_path"
+        rejected_keys(key_only, "production"),
+        ["cache.client_cert_path"]
     );
-    let both = CacheConfig {
+    let both = CacheInput {
         client_cert_path: Some(PathBuf::from("/run/tls/client.crt")),
         client_key_path: Some(PathBuf::from("/run/tls/client.key")),
-        ..CacheConfig::default()
+        ..CacheInput::default()
     };
-    both.validate("production", REQUEST_TIMEOUT).unwrap();
+    let certificate = admit(both, "production", REQUEST_TIMEOUT)
+        .unwrap()
+        .client_certificate
+        .unwrap();
+    assert_eq!(certificate.cert_path, Path::new("/run/tls/client.crt"));
+    assert_eq!(certificate.key_path, Path::new("/run/tls/client.key"));
+}
+
+#[test]
+fn every_violated_rule_is_reported_together() {
+    let input = CacheInput {
+        allow_plaintext: true,
+        client_cert_path: Some(PathBuf::from("/run/tls/client.crt")),
+        command_timeout: Duration::ZERO,
+        ..CacheInput::default()
+    };
+    assert_eq!(
+        rejected_keys(input, "production"),
+        [
+            "cache.allow_plaintext",
+            "cache.client_key_path",
+            "cache.command_timeout"
+        ]
+    );
 }
 
 #[test]
 fn command_timeout_is_bounded() {
     for command_timeout in [Duration::ZERO, Duration::from_millis(10_001)] {
-        let config = CacheConfig {
+        let input = CacheInput {
             command_timeout,
-            ..CacheConfig::default()
+            ..CacheInput::default()
         };
         assert_eq!(
-            config
-                .validate("production", REQUEST_TIMEOUT)
-                .unwrap_err()
-                .key,
-            "cache.command_timeout"
+            rejected_keys(input, "production"),
+            ["cache.command_timeout"]
         );
     }
-    let edges = CacheConfig {
+    let edges = CacheInput {
         command_timeout: Duration::from_secs(10),
-        ..CacheConfig::default()
+        ..CacheInput::default()
     };
-    edges.validate("production", REQUEST_TIMEOUT).unwrap();
+    admit(edges, "production", REQUEST_TIMEOUT).unwrap();
 }
 
 #[test]
 fn an_active_cache_must_leave_half_the_request_budget() {
-    let mut config = Config::default();
-    config.app.version = "0.0.0".to_owned();
-    config.app.commit = "test".to_owned();
-    config.cache.dsn = Some(SecretString::from(
-        "rediss://:secret@cache.example:6379".to_owned(),
-    ));
-    config.cache.command_timeout = Duration::from_millis(100);
-    config.http.request_timeout = Duration::from_millis(150);
-    let err = config.validate().unwrap_err();
-    assert_eq!(err.key, "cache.command_timeout");
+    let active = || CacheInput {
+        dsn: Some(SecretString::from(
+            "rediss://:secret@cache.example:6379".to_owned(),
+        )),
+        command_timeout: Duration::from_millis(100),
+        ..CacheInput::default()
+    };
+    let errors = admit(active(), "production", Duration::from_millis(150)).unwrap_err();
+    assert!(errors.names("cache.command_timeout"));
 
-    config.http.request_timeout = Duration::from_millis(200);
-    config.validate().unwrap();
+    admit(active(), "production", Duration::from_millis(200)).unwrap();
 }
 
 #[test]
@@ -232,14 +253,9 @@ fn cache_client_certificate_paths_are_set_from_the_environment_together() {
         ]),
     )
     .unwrap();
-    assert_eq!(
-        cfg.cache.client_cert_path.as_deref(),
-        Some(std::path::Path::new("/run/tls/client.crt"))
-    );
-    assert_eq!(
-        cfg.cache.client_key_path.as_deref(),
-        Some(std::path::Path::new("/run/tls/client.key"))
-    );
+    let certificate = cfg.cache.client_certificate.as_ref().unwrap();
+    assert_eq!(certificate.cert_path, Path::new("/run/tls/client.crt"));
+    assert_eq!(certificate.key_path, Path::new("/run/tls/client.key"));
 
     let err = load_from(
         &LoadOptions::default(),

@@ -13,7 +13,7 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use crate::de::blank_as_none;
-use crate::validate::{ValidationError, duration_range, required};
+use crate::validate::{ValidationError, Violations, duration_range, required};
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -45,16 +45,15 @@ impl HttpIdempotencyConfig {
         )
     }
 
-    pub(crate) fn validate(&self) -> Result<(), ValidationError> {
+    pub(crate) fn validate(&self, violations: &mut Violations) {
         if let Some(retention) = self.retention {
-            duration_range(
+            violations.check(duration_range(
                 Self::RETENTION_KEY,
                 retention,
                 Duration::from_mins(1),
                 Duration::from_hours(30 * 24),
-            )?;
+            ));
         }
-        Ok(())
     }
 }
 

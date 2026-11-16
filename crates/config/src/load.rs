@@ -9,7 +9,7 @@ use serde::de::DeserializeOwned;
 
 use crate::app::BuildInfo;
 use crate::secret_policy::first_secret_like_key;
-use crate::{Config, LoadOptions, ValidationError};
+use crate::{Config, ConfigInput, LoadOptions, ValidationErrors};
 
 mod rejection;
 mod variables;
@@ -68,12 +68,12 @@ pub enum Error {
     #[error("configuration is invalid: {0}")]
     Deserialize(String),
     #[error("configuration is invalid: {0}")]
-    Validate(ValidationError),
+    Validate(ValidationErrors),
 }
 
-impl From<ValidationError> for Error {
-    fn from(error: ValidationError) -> Self {
-        Self::Validate(error)
+impl From<ValidationErrors> for Error {
+    fn from(errors: ValidationErrors) -> Self {
+        Self::Validate(errors)
     }
 }
 
@@ -91,10 +91,9 @@ where
     K: Into<OsString>,
     V: Into<OsString>,
 {
-    let mut snapshot: Config = merge(options, environment, AuthnAudienceHandling::Apply)?;
-    snapshot.app.apply_build_info(build);
-    snapshot.validate()?;
-    Ok(snapshot)
+    let mut input: ConfigInput = merge(options, environment, AuthnAudienceHandling::Apply)?;
+    input.app.apply_build_info(build);
+    Ok(input.admit()?)
 }
 
 // template:begin postgres:load-migration
@@ -115,11 +114,10 @@ where
     K: Into<OsString>,
     V: Into<OsString>,
 {
-    let mut snapshot: crate::MigrationConfig =
+    let mut input: crate::postgres::MigrationInput =
         merge(options, environment, AuthnAudienceHandling::Skip)?;
-    snapshot.app.apply_build_info(build);
-    snapshot.validate()?;
-    Ok(snapshot)
+    input.app.apply_build_info(build);
+    Ok(input.admit()?)
 }
 // template:end postgres:load-migration
 
@@ -137,10 +135,9 @@ where
     K: Into<OsString>,
     V: Into<OsString>,
 {
-    let snapshot: crate::JobsOperatorConfig =
+    let input: crate::jobs::JobsOperatorInput =
         merge(options, environment, AuthnAudienceHandling::Skip)?;
-    snapshot.validate()?;
-    Ok(snapshot)
+    Ok(input.admit()?)
 }
 // template:end jobs:load-jobs-operator
 

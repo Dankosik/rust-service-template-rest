@@ -1,10 +1,16 @@
 use std::assert_matches;
 use std::num::NonZeroU32;
 
+use std::time::Duration;
+
+use secrecy::SecretString;
+
 use super::*;
 use crate::LoadOptions;
+use crate::PostgresSessionBudgets;
 use crate::load::{Error, load_from, load_jobs_operator_from};
 use crate::test_support::{BUILD, env, write};
+use crate::validate::validate_with;
 
 fn parse(toml: &str) -> Result<JobsConfig, toml::de::Error> {
     toml::from_str(toml)
@@ -18,8 +24,11 @@ fn workers(max_workers: u32) -> JobsConfig {
 
 fn postgres(max_connections: u32) -> PostgresConfig {
     PostgresConfig {
+        dsn: SecretString::from("postgres://localhost/app".to_owned()),
+        password_file: None,
+        session_budgets: PostgresSessionBudgets::Startup,
         max_connections: NonZeroU32::new(max_connections).unwrap(),
-        ..PostgresConfig::default()
+        migration_deadline: Duration::from_mins(5),
     }
 }
 
@@ -27,7 +36,7 @@ fn postgres(max_connections: u32) -> PostgresConfig {
 fn default_is_one_and_validates() {
     let config = JobsConfig::default();
     assert_eq!(config.max_workers, NonZeroU32::MIN);
-    config.validate().unwrap();
+    validate_with(|v| config.validate(v)).unwrap();
 }
 
 #[rstest::rstest]
@@ -36,11 +45,11 @@ fn default_is_one_and_validates() {
 #[case::maximum(500, true)]
 fn validate_bounds(#[case] max_workers: u32, #[case] accepted: bool) {
     let config = workers(max_workers);
-    match config.validate() {
+    match validate_with(|v| config.validate(v)) {
         Ok(()) => assert!(accepted),
-        Err(err) => {
+        Err(errors) => {
             assert!(!accepted);
-            assert_eq!(err.key, "jobs.max_workers");
+            assert!(errors.names("jobs.max_workers"));
         }
     }
 }
@@ -93,7 +102,7 @@ fn eight_workers_need_ten_connections() {
 #[test]
 fn defaults_satisfy_the_pool_bound() {
     JobsConfig::default()
-        .validate_pool_capacity(&PostgresConfig::default())
+        .validate_pool_capacity(&postgres(4))
         .unwrap();
 }
 
@@ -181,51 +190,56 @@ fn jobs_operator_ignores_unrelated_sections_and_worker_capacity() {
         ]),
     )
     .unwrap();
-    assert!(cfg.postgres.enabled);
-    assert!(cfg.postgres.dsn.is_some());
-    assert_eq!(cfg.postgres.max_connections.get(), 1);
+    assert_eq!(cfg.postgres.unwrap().max_connections.get(), 1);
 }
 
 #[test]
 fn jobs_operator_uses_the_shared_source_precedence() {
+    fn connections(config: crate::JobsOperatorConfig) -> u32 {
+        config.postgres.unwrap().max_connections.get()
+    }
+    let enabled = [
+        ("APP__POSTGRES__ENABLED", "true"),
+        ("APP__POSTGRES__DSN", "postgres://localhost/app"),
+    ];
     let dir = tempfile::tempdir().unwrap();
     let secrets = tempfile::tempdir().unwrap();
     let mut options = LoadOptions::default();
-    let defaults = load_jobs_operator_from(&options, env(&[])).unwrap();
-    assert_eq!(defaults.postgres.max_connections.get(), 4);
+    let defaults = load_jobs_operator_from(&options, env(&enabled)).unwrap();
+    assert_eq!(connections(defaults), 4);
 
     options.config = Some(write(
         &dir,
         "base.toml",
         "[postgres]\nmax_connections = 5\n",
     ));
-    let base = load_jobs_operator_from(&options, env(&[])).unwrap();
-    assert_eq!(base.postgres.max_connections.get(), 5);
-    for connections in [6, 7] {
+    let base = load_jobs_operator_from(&options, env(&enabled)).unwrap();
+    assert_eq!(connections(base), 5);
+    for expected in [6, 7] {
         options.config_overlay.push(write(
             &dir,
-            &format!("overlay-{connections}.toml"),
-            &format!("[postgres]\nmax_connections = {connections}\n"),
+            &format!("overlay-{expected}.toml"),
+            &format!("[postgres]\nmax_connections = {expected}\n"),
         ));
-        let overlay = load_jobs_operator_from(&options, env(&[])).unwrap();
-        assert_eq!(overlay.postgres.max_connections.get(), connections);
+        let overlay = load_jobs_operator_from(&options, env(&enabled)).unwrap();
+        assert_eq!(connections(overlay), expected);
     }
     write(&secrets, "APP__POSTGRES__MAX_CONNECTIONS", "8");
     write(&secrets, "APP__POSTGRES__DSN", "postgres://localhost/app");
     options.secrets_dir = Some(secrets.path().to_owned());
-    let secret = load_jobs_operator_from(&options, env(&[])).unwrap();
-    assert_eq!(secret.postgres.max_connections.get(), 8);
-    assert!(secret.postgres.dsn.is_some());
-    let environment = load_jobs_operator_from(
+    let secret =
+        load_jobs_operator_from(&options, env(&[("APP__POSTGRES__ENABLED", "true")])).unwrap();
+    assert_eq!(connections(secret), 8);
+    let blanked = load_jobs_operator_from(
         &options,
         env(&[
+            ("APP__POSTGRES__ENABLED", "true"),
             ("APP__POSTGRES__MAX_CONNECTIONS", "9"),
             ("APP__POSTGRES__DSN", ""),
         ]),
     )
-    .unwrap();
-    assert_eq!(environment.postgres.max_connections.get(), 9);
-    assert!(environment.postgres.dsn.is_none());
+    .unwrap_err();
+    assert_matches!(&blanked, Error::Validate(errors) if errors.names("postgres.dsn"), "{blanked}");
 }
 
 #[test]
@@ -243,7 +257,7 @@ fn jobs_operator_keeps_postgres_validation_and_value_free_errors() {
         ("APP__POSTGRES__ENABLED", "true", "postgres.dsn"),
     ] {
         let error = load_jobs_operator_from(&options, env(&[(name, value)])).unwrap_err();
-        assert_matches!(&error, Error::Validate(error) if error.key == key, "{error}");
+        assert_matches!(&error, Error::Validate(errors) if errors.names(key), "{error}");
     }
     let secret = "fixture-private-value";
     let error =

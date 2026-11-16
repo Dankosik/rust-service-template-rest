@@ -4,7 +4,9 @@ use health::Readiness;
 use infra_grpc::ServerTlsMaterial;
 use infra_http::ServerOptions;
 use rustls::ServerConfig;
-use service_config::{Config, GrpcConfig, GrpcListenerSecurity, ValidationError};
+use std::net::SocketAddr;
+
+use service_config::{GrpcConfig, GrpcListenerSecurity, ValidationError};
 
 use super::background::{Background, BackgroundRegistration};
 // template:begin service-auth:bootstrap-grpc-service-auth-import
@@ -21,6 +23,7 @@ pub type GrpcRegistration = fn(
 ) -> Result<(), infra_grpc::Error>;
 
 pub(super) struct Prepared {
+    pub(super) addr: SocketAddr,
     pub(super) router: axum::Router,
     pub(super) tls: Option<Arc<ServerConfig>>,
     pub(super) options: ServerOptions,
@@ -28,7 +31,7 @@ pub(super) struct Prepared {
 
 /// Runs before readiness admission, so a refused registration or verifier binds nothing.
 pub(super) fn prepare(
-    config: &Config,
+    grpc: &GrpcConfig,
     registration: Option<GrpcRegistration>,
     state: &crate::AppState,
     readiness: &Readiness,
@@ -64,7 +67,7 @@ pub(super) fn prepare(
         }
     };
     // template:end grpc-authn:bootstrap-grpc-verifier
-    let limits = limits(&config.grpc);
+    let limits = limits(grpc);
     let mut services = infra_grpc::Services::new();
     if let Some(registration) = registration {
         registration(
@@ -87,8 +90,9 @@ pub(super) fn prepare(
         limits,
     )?;
     Ok(Prepared {
+        addr: grpc.addr,
         router,
-        tls: tls(&config.grpc)?,
+        tls: tls(&grpc.security)?,
         options: infra_grpc::server_options(limits),
     })
 }
@@ -104,19 +108,14 @@ fn limits(grpc: &GrpcConfig) -> infra_grpc::Limits {
 }
 
 /// Does not read paths or perform network I/O.
-fn tls(grpc: &GrpcConfig) -> Result<Option<Arc<ServerConfig>>, ValidationError> {
-    let GrpcListenerSecurity::Tls {
-        certificate,
-        private_key,
-        client_ca,
-    } = grpc.listener_security()?
-    else {
+fn tls(security: &GrpcListenerSecurity) -> Result<Option<Arc<ServerConfig>>, ValidationError> {
+    let GrpcListenerSecurity::Tls(material) = security else {
         return Ok(None);
     };
     let material = ServerTlsMaterial {
-        certificate_pem: certificate,
-        private_key_pem: private_key,
-        client_ca_pem: client_ca,
+        certificate_pem: &material.certificate,
+        private_key_pem: &material.private_key,
+        client_ca_pem: material.client_ca.as_deref(),
     };
     infra_grpc::server_tls_config(material)
         .map(Some)
@@ -132,19 +131,18 @@ fn tls(grpc: &GrpcConfig) -> Result<Option<Arc<ServerConfig>>, ValidationError> 
 
 #[cfg(test)]
 mod tests {
-    use service_config::GrpcSecurity;
+    use service_config::GrpcTlsMaterial;
 
     use super::*;
 
     #[test]
     fn unusable_tls_material_names_its_configuration_key() {
-        let config = GrpcConfig {
-            security: Some(GrpcSecurity::Tls),
-            certificate: Some("not a certificate".to_owned()),
-            private_key: Some("not a key".into()),
-            ..GrpcConfig::default()
-        };
-        let err = tls(&config).expect_err("garbage PEM must not form a server config");
+        let security = GrpcListenerSecurity::Tls(GrpcTlsMaterial {
+            certificate: "not a certificate".to_owned(),
+            private_key: "not a key".into(),
+            client_ca: None,
+        });
+        let err = tls(&security).expect_err("garbage PEM must not form a server config");
         assert_eq!(err.key, "grpc.certificate");
     }
 }

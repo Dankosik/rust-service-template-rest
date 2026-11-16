@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use secrecy::SecretString;
 use serde::Deserialize;
 
-use crate::validate::{ValidationError, non_blank};
+use crate::validate::{ValidationError, Violations, non_blank};
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -94,48 +94,58 @@ pub struct OtelExporterConfig {
 }
 
 impl ObservabilityConfig {
-    pub(crate) fn validate(&self) -> Result<(), ValidationError> {
-        non_blank("observability.otel.service_name", &self.otel.service_name)?;
-        let arg = self.otel.traces_sampler_arg;
-        if !arg.is_finite() {
-            return Err(ValidationError::new(
-                "observability.otel.traces_sampler_arg",
-                "must be finite",
-            ));
-        }
-        if !(0.0..=1.0).contains(&arg) {
-            return Err(ValidationError::new(
-                "observability.otel.traces_sampler_arg",
-                format!("must be in range [0, 1], got {arg}"),
-            ));
-        }
+    pub(crate) fn validate(&self, v: &mut Violations) {
+        v.check(non_blank(
+            "observability.otel.service_name",
+            &self.otel.service_name,
+        ));
+        v.check(sampler_arg(self.otel.traces_sampler_arg));
         if let Some(endpoint) = self.otel.exporter.otlp_endpoint.as_deref() {
-            let key = "observability.otel.exporter.otlp_endpoint";
-            let is_http_url = endpoint.starts_with("http://") || endpoint.starts_with("https://");
-            if !is_http_url {
-                return Err(ValidationError::new(
-                    key,
-                    "must be an http:// or https:// URL",
-                ));
-            }
-            if shared_rules::uri::has_whitespace_or_control(endpoint) {
-                return Err(ValidationError::new(
-                    key,
-                    "must not contain whitespace or controls",
-                ));
-            }
-            // RFC 9110 section 4.2.4: an http(s) URI carries no userinfo.
-            if shared_rules::uri::authority_has_userinfo(endpoint) {
-                return Err(ValidationError::new(key, "must not include userinfo"));
-            }
+            v.check(otlp_endpoint(endpoint));
         }
-        Ok(())
     }
+}
+
+fn sampler_arg(arg: f64) -> Result<(), ValidationError> {
+    let key = "observability.otel.traces_sampler_arg";
+    if !arg.is_finite() {
+        return Err(ValidationError::new(key, "must be finite"));
+    }
+    if !(0.0..=1.0).contains(&arg) {
+        return Err(ValidationError::new(
+            key,
+            format!("must be in range [0, 1], got {arg}"),
+        ));
+    }
+    Ok(())
+}
+
+fn otlp_endpoint(endpoint: &str) -> Result<(), ValidationError> {
+    let key = "observability.otel.exporter.otlp_endpoint";
+    let is_http_url = endpoint.starts_with("http://") || endpoint.starts_with("https://");
+    if !is_http_url {
+        return Err(ValidationError::new(
+            key,
+            "must be an http:// or https:// URL",
+        ));
+    }
+    if shared_rules::uri::has_whitespace_or_control(endpoint) {
+        return Err(ValidationError::new(
+            key,
+            "must not contain whitespace or controls",
+        ));
+    }
+    // RFC 9110 section 4.2.4: an http(s) URI carries no userinfo.
+    if shared_rules::uri::authority_has_userinfo(endpoint) {
+        return Err(ValidationError::new(key, "must not include userinfo"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::validate::validate_with;
 
     #[test]
     fn sampler_names_follow_opentelemetry_spelling() {
@@ -162,12 +172,13 @@ mod tests {
     fn sampler_arg_bounds() {
         let mut cfg = ObservabilityConfig::default();
         cfg.otel.traces_sampler_arg = 1.5;
-        assert_eq!(
-            cfg.validate().unwrap_err().key,
-            "observability.otel.traces_sampler_arg"
+        assert!(
+            validate_with(|v| cfg.validate(v))
+                .unwrap_err()
+                .names("observability.otel.traces_sampler_arg")
         );
         cfg.otel.traces_sampler_arg = f64::NAN;
-        assert!(cfg.validate().is_err());
+        assert!(validate_with(|v| cfg.validate(v)).is_err());
     }
 
     #[test]
@@ -191,7 +202,7 @@ mod tests {
         );
         let blank: ObservabilityConfig = toml::from_str("[metrics]\naddr = \"\"\n").unwrap();
         assert_eq!(blank.metrics.addr, None);
-        blank.validate().unwrap();
+        validate_with(|v| blank.validate(v)).unwrap();
         let omitted: ObservabilityConfig = toml::from_str("[metrics]\n").unwrap();
         assert_eq!(
             omitted.metrics.addr,
@@ -203,12 +214,13 @@ mod tests {
     fn occupied_otlp_endpoint_must_be_http() {
         let mut cfg = ObservabilityConfig::default();
         cfg.otel.exporter.otlp_endpoint = Some("collector:4318".into());
-        assert_eq!(
-            cfg.validate().unwrap_err().key,
-            "observability.otel.exporter.otlp_endpoint"
+        assert!(
+            validate_with(|v| cfg.validate(v))
+                .unwrap_err()
+                .names("observability.otel.exporter.otlp_endpoint")
         );
         cfg.otel.exporter.otlp_endpoint = Some("http://collector:4318".into());
-        cfg.validate().unwrap();
+        validate_with(|v| cfg.validate(v)).unwrap();
     }
 
     #[test]
@@ -221,9 +233,10 @@ mod tests {
         ] {
             let mut cfg = ObservabilityConfig::default();
             cfg.otel.exporter.otlp_endpoint = Some(endpoint.into());
-            assert_eq!(
-                cfg.validate().unwrap_err().key,
-                "observability.otel.exporter.otlp_endpoint",
+            assert!(
+                validate_with(|v| cfg.validate(v))
+                    .unwrap_err()
+                    .names("observability.otel.exporter.otlp_endpoint"),
                 "{endpoint:?}"
             );
         }

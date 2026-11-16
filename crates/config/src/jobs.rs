@@ -7,22 +7,33 @@ use std::num::NonZeroU32;
 
 use serde::Deserialize;
 
-use crate::postgres::PostgresConfig;
-use crate::validate::{ValidationError, int_range};
+use crate::postgres::{PostgresConfig, PostgresInput};
+use crate::validate::{ValidationError, ValidationErrors, Violations, int_range};
 
 const WORKER_MANAGEMENT_CONNECTIONS: u64 = 2;
 
-/// The only section jobs operator commands read. Unrelated sections are
-/// ignored, while the shared loader still enforces namespace and file rules.
-#[derive(Clone, Debug, Default, Deserialize)]
+/// What jobs operator commands decoded; the only section they read. Unrelated
+/// sections are ignored, while the shared loader still enforces namespace and
+/// file rules.
+#[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-pub struct JobsOperatorConfig {
-    pub postgres: PostgresConfig,
+pub(crate) struct JobsOperatorInput {
+    postgres: PostgresInput,
 }
 
-impl JobsOperatorConfig {
-    pub(crate) fn validate(&self) -> Result<(), ValidationError> {
-        self.postgres.validate()
+/// The only section jobs operator commands read, admitted.
+#[derive(Clone, Debug, Default)]
+pub struct JobsOperatorConfig {
+    /// `None` when `postgres.enabled` is false.
+    pub postgres: Option<PostgresConfig>,
+}
+
+impl JobsOperatorInput {
+    pub(crate) fn admit(self) -> Result<JobsOperatorConfig, ValidationErrors> {
+        let mut violations = Violations::default();
+        let postgres = self.postgres.admit(&mut violations);
+        let admitted = postgres.map(|postgres| JobsOperatorConfig { postgres });
+        violations.finish(admitted)
     }
 }
 
@@ -98,13 +109,13 @@ impl JobsConfig {
     }
     // template:end outbox:jobs-outbox-capacity
 
-    pub(crate) fn validate(&self) -> Result<(), ValidationError> {
-        int_range(
+    pub(crate) fn validate(&self, violations: &mut Violations) {
+        violations.check(int_range(
             "jobs.max_workers",
             u64::from(self.max_workers.get()),
             1,
             500,
-        )
+        ));
     }
 }
 

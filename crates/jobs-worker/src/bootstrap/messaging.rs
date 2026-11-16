@@ -37,7 +37,7 @@ impl RetainedMessages {
         if !consumes_messages {
             return Ok(None);
         }
-        config.messaging.validate_consumer(&config.app.env)?;
+        config.messaging.validate_consumer()?;
         Ok(Some(Self {
             registry: registration.messages,
             // template:begin outbox:worker-bootstrap-postgres-messages-value
@@ -111,9 +111,9 @@ fn messaging_options(
     Ok(MessagingOptions {
         connection_name: worker_identity(&config.observability.otel.service_name),
         servers: messaging.urls.clone(),
-        credentials: messaging.credential_source()?.map(|source| match source {
+        credentials: messaging.credentials.as_ref().map(|source| match source {
             MessagingCredentials::Inline(secret) => Credentials::Inline(secret.clone()),
-            MessagingCredentials::File(path) => Credentials::File(path.to_path_buf()),
+            MessagingCredentials::File(path) => Credentials::File(path.clone()),
         }),
         root_ca_path: messaging.root_ca_path.clone(),
         allow_plaintext: messaging.plaintext_admitted(),

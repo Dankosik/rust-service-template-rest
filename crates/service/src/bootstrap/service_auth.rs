@@ -1,7 +1,7 @@
 use infra_serviceauth::{
     JwtType, KeyId, ServiceName, SigningOptions, TokenSource, TrustRegistry, Verifier,
 };
-use service_config::{Config, ServiceAuthConfig, ServiceSigningKey, ValidationError};
+use service_config::{Config, ServiceAuthConfig, ValidationError};
 
 pub(super) struct PreparedServiceAuth {
     /// `Some` exactly when `service_auth.mode = "jwt"`.
@@ -15,8 +15,7 @@ pub(super) fn prepare(config: &Config) -> Result<PreparedServiceAuth, Validation
         name,
         jwt_type,
         trust,
-        key_id,
-        private_key,
+        signing_key,
     } = &config.service_auth
     else {
         return Ok(PreparedServiceAuth {
@@ -31,13 +30,11 @@ pub(super) fn prepare(config: &Config) -> Result<PreparedServiceAuth, Validation
         JwtType::parse(jwt_type).map_err(|error| invalid("service_auth.jwt_type", &error))?;
     let trust =
         TrustRegistry::parse(trust).map_err(|error| invalid("service_auth.trust", &error))?;
-    let signing_key =
-        ServiceSigningKey::from_optional_parts(key_id.as_deref(), private_key.as_ref())?;
     let tokens = match signing_key {
         Some(key) => TokenSource::try_new(SigningOptions {
             name: name.clone(),
             jwt_type: jwt_type.clone(),
-            key_id: KeyId::parse(key.key_id)
+            key_id: KeyId::parse(&key.key_id)
                 .map_err(|error| invalid("service_auth.key_id", &error))?,
             private_key: key.private_key.clone(),
         })
@@ -60,18 +57,19 @@ pub(super) fn prepare(config: &Config) -> Result<PreparedServiceAuth, Validation
 mod tests {
     use super::*;
     use infra_serviceauth::test_support::{TestKey, registry};
+    use service_config::ServiceSigningKey;
 
     fn jwt(trust: String, signing: Option<(&str, String)>) -> Config {
-        let (key_id, private_key) = signing.map_or((None, None), |(key_id, pem)| {
-            (Some(key_id.to_owned()), Some(pem.into()))
+        let signing_key = signing.map(|(key_id, pem)| ServiceSigningKey {
+            key_id: key_id.to_owned(),
+            private_key: pem.into(),
         });
         Config {
             service_auth: ServiceAuthConfig::Jwt {
                 name: "catalog".to_owned(),
                 jwt_type: "example-svc+jwt".to_owned(),
                 trust,
-                key_id,
-                private_key,
+                signing_key,
             },
             ..Config::default()
         }

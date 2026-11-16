@@ -10,7 +10,7 @@ use crate::listener_limits::{
     DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_IN_FLIGHT, DEFAULT_REQUEST_TIMEOUT, connection_age_range,
     connection_count_range, in_flight_range, request_budget_fits_drain, request_timeout_range,
 };
-use crate::validate::{ValidationError, duration_range, int_range};
+use crate::validate::{ValidationError, Violations, duration_range, int_range};
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, default)]
@@ -129,71 +129,111 @@ impl HttpConfig {
             .saturating_sub(self.readiness_propagation_delay)
     }
 
-    pub(crate) fn validate(&self) -> Result<(), ValidationError> {
+    /// Returns the timings dependent sections compare against, each only
+    /// when it passed its own rules, so a rejected value causes no second
+    /// violation elsewhere.
+    pub(crate) fn validate(&self, v: &mut Violations) -> HttpTimings {
         let second = Duration::from_secs(1);
         let ten_minutes = Duration::from_mins(10);
-        duration_range("http.grace_period", self.grace_period, second, ten_minutes)?;
-        duration_range(
+        // An ordering rule compares values that are each in range.
+        let grace_ok = duration_range("http.grace_period", self.grace_period, second, ten_minutes);
+        let drain_ok = duration_range(
             "http.drain_timeout",
             self.drain_timeout,
             second,
             ten_minutes,
-        )?;
-        if self.drain_timeout > self.grace_period {
-            return Err(ValidationError::new(
-                "http.drain_timeout",
-                format!(
-                    "must be <= http.grace_period ({}), got {}",
-                    humantime::format_duration(self.grace_period),
-                    humantime::format_duration(self.drain_timeout)
-                ),
-            ));
+        );
+        let ranges_ok = grace_ok.is_ok() && drain_ok.is_ok();
+        let drain_in_range = drain_ok.is_ok();
+        v.check(grace_ok);
+        v.check(drain_ok);
+        let mut drain_fits_grace = false;
+        if ranges_ok {
+            if self.drain_timeout > self.grace_period {
+                v.check(Err(ValidationError::new(
+                    "http.drain_timeout",
+                    format!(
+                        "must be <= http.grace_period ({}), got {}",
+                        humantime::format_duration(self.grace_period),
+                        humantime::format_duration(self.drain_timeout)
+                    ),
+                )));
+            } else {
+                drain_fits_grace = true;
+            }
         }
-        if self.readiness_propagation_delay >= self.drain_timeout {
-            return Err(ValidationError::new(
-                "http.readiness_propagation_delay",
-                format!(
-                    "must be less than http.drain_timeout ({}), got {}",
-                    humantime::format_duration(self.drain_timeout),
-                    humantime::format_duration(self.readiness_propagation_delay)
-                ),
-            ));
+        let mut propagation_fits_drain = false;
+        if drain_in_range && drain_fits_grace {
+            if self.readiness_propagation_delay >= self.drain_timeout {
+                v.check(Err(ValidationError::new(
+                    "http.readiness_propagation_delay",
+                    format!(
+                        "must be less than http.drain_timeout ({}), got {}",
+                        humantime::format_duration(self.drain_timeout),
+                        humantime::format_duration(self.readiness_propagation_delay)
+                    ),
+                )));
+            } else {
+                propagation_fits_drain = true;
+            }
         }
-        duration_range(
+        v.check(duration_range(
             "http.header_read_timeout",
             self.header_read_timeout,
             Duration::from_millis(100),
             Duration::from_mins(5),
-        )?;
-        request_timeout_range("http.request_timeout", self.request_timeout)?;
-        request_budget_fits_drain(
-            "http.request_timeout",
-            self.request_timeout,
-            self.effective_drain_budget(),
-            "requests",
-        )?;
+        ));
+        let request_timeout_ok =
+            request_timeout_range("http.request_timeout", self.request_timeout);
+        let request_timeout_in_range = request_timeout_ok.is_ok();
+        v.check(request_timeout_ok);
+        if request_timeout_in_range && propagation_fits_drain {
+            v.check(request_budget_fits_drain(
+                "http.request_timeout",
+                self.request_timeout,
+                self.effective_drain_budget(),
+                "requests",
+            ));
+        }
 
-        int_range(
+        v.check(int_range(
             "http.max_header_bytes",
             self.max_header_bytes.as_u64(),
             u64::from(HTTP1_MIN_READ_BUFFER_BYTES),
             ByteSize::mib(1).as_u64(),
-        )?;
-        int_range(
+        ));
+        v.check(int_range(
             "http.max_body_bytes",
             self.max_body_bytes.as_u64(),
             1,
             ByteSize::gib(1).as_u64(),
-        )?;
-        in_flight_range("http.max_in_flight", self.max_in_flight)?;
-        connection_count_range("http.max_connections", self.max_connections)?;
-        connection_age_range("http.max_connection_age", self.max_connection_age)
+        ));
+        v.check(in_flight_range("http.max_in_flight", self.max_in_flight));
+        v.check(connection_count_range(
+            "http.max_connections",
+            self.max_connections,
+        ));
+        v.check(connection_age_range(
+            "http.max_connection_age",
+            self.max_connection_age,
+        ));
+        HttpTimings {
+            drain_budget: propagation_fits_drain.then(|| self.effective_drain_budget()),
+            request_timeout: request_timeout_in_range.then_some(self.request_timeout),
+        }
     }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct HttpTimings {
+    pub(crate) drain_budget: Option<Duration>,
+    pub(crate) request_timeout: Option<Duration>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::validate::validate_with;
 
     #[test]
     fn a_connection_age_is_off_at_zero_or_at_least_a_second() {
@@ -202,21 +242,30 @@ mod tests {
             max_connection_age: Duration::from_mins(30),
             ..HttpConfig::default()
         };
-        aged.validate().unwrap();
+        validate_with(|v| {
+            aged.validate(v);
+        })
+        .unwrap();
         assert_eq!(aged.connection_age_cap(), Some(Duration::from_mins(30)));
         let too_short = HttpConfig {
             max_connection_age: Duration::from_millis(500),
             ..HttpConfig::default()
         };
-        assert_eq!(
-            too_short.validate().unwrap_err().key,
-            "http.max_connection_age"
+        assert!(
+            validate_with(|v| {
+                too_short.validate(v);
+            })
+            .unwrap_err()
+            .names("http.max_connection_age")
         );
     }
 
     #[test]
     fn defaults_validate() {
-        HttpConfig::default().validate().unwrap();
+        validate_with(|v| {
+            HttpConfig::default().validate(v);
+        })
+        .unwrap();
     }
 
     #[test]
@@ -225,8 +274,11 @@ mod tests {
             request_timeout: Duration::from_secs(11),
             ..HttpConfig::default()
         };
-        let err = cfg.validate().unwrap_err();
-        assert_eq!(err.key, "http.request_timeout");
+        let errors = validate_with(|v| {
+            cfg.validate(v);
+        })
+        .unwrap_err();
+        assert!(errors.names("http.request_timeout"));
     }
 
     #[test]
@@ -235,9 +287,12 @@ mod tests {
             readiness_propagation_delay: Duration::from_secs(25),
             ..HttpConfig::default()
         };
-        assert_eq!(
-            cfg.validate().unwrap_err().key,
-            "http.readiness_propagation_delay"
+        assert!(
+            validate_with(|v| {
+                cfg.validate(v);
+            })
+            .unwrap_err()
+            .names("http.readiness_propagation_delay")
         );
     }
 
@@ -247,7 +302,10 @@ mod tests {
             max_connections: 0,
             ..HttpConfig::default()
         };
-        unbounded.validate().unwrap();
+        validate_with(|v| {
+            unbounded.validate(v);
+        })
+        .unwrap();
         assert_eq!(unbounded.connection_cap(), None);
         assert_eq!(
             HttpConfig::default().connection_cap().map(NonZeroU32::get),
@@ -261,6 +319,12 @@ mod tests {
             max_header_bytes: ByteSize::kib(4),
             ..HttpConfig::default()
         };
-        assert_eq!(cfg.validate().unwrap_err().key, "http.max_header_bytes");
+        assert!(
+            validate_with(|v| {
+                cfg.validate(v);
+            })
+            .unwrap_err()
+            .names("http.max_header_bytes")
+        );
     }
 }

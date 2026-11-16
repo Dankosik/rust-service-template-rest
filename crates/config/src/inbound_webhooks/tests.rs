@@ -2,7 +2,15 @@ use super::{InboundWebhookEndpointConfig, InboundWebhooksConfig};
 use crate::LoadOptions;
 use crate::load::{Error, load_from};
 use crate::test_support::{BUILD, env, write};
+use crate::validate::{ValidationErrors, validate_with};
 use std::assert_matches;
+
+fn validated(
+    config: &InboundWebhooksConfig,
+    postgres_enabled: bool,
+) -> Result<(), ValidationErrors> {
+    validate_with(|v| config.validate(postgres_enabled, v))
+}
 
 fn with_endpoint(active_key: &str, previous_key: Option<&str>) -> InboundWebhooksConfig {
     let mut config = InboundWebhooksConfig::default();
@@ -21,37 +29,39 @@ fn defaults_are_inert() {
     let config = InboundWebhooksConfig::default();
     assert!(config.endpoints.is_empty());
     assert!(config.secrets.is_empty());
-    config.validate(false).unwrap();
+    validated(&config, false).unwrap();
 }
 
 #[test]
 fn a_configured_endpoint_requires_postgres() {
     let config = with_endpoint("partner_v2", None);
-    assert_eq!(config.validate(false).unwrap_err().key, "postgres.enabled");
-    config.validate(true).unwrap();
+    assert!(
+        validated(&config, false)
+            .unwrap_err()
+            .names("postgres.enabled")
+    );
+    validated(&config, true).unwrap();
 }
 
 #[test]
 fn rejects_an_empty_key_reference() {
-    let err = with_endpoint("", None).validate(true).unwrap_err();
-    assert_eq!(err.key, "inbound_webhooks.endpoints.partner.active_key");
+    let errors = validated(&with_endpoint("", None), true).unwrap_err();
+    assert!(errors.names("inbound_webhooks.endpoints.partner.active_key"));
 }
 
 #[test]
 fn rejects_a_reference_no_secret_variable_can_name() {
     for reference in ["Partner_V2", "partner__v2", "partner_"] {
-        let err = with_endpoint(reference, None).validate(true).unwrap_err();
-        assert_eq!(err.key, "inbound_webhooks.endpoints.partner.active_key");
+        let errors = validated(&with_endpoint(reference, None), true).unwrap_err();
+        assert!(errors.names("inbound_webhooks.endpoints.partner.active_key"));
     }
 }
 
 #[test]
 fn rejects_reused_active_and_previous_references() {
-    let err = with_endpoint("partner_v2", Some("partner_v2"))
-        .validate(true)
-        .unwrap_err();
-    assert_eq!(err.key, "inbound_webhooks.endpoints.partner.previous_key");
-    assert!(err.message.contains("must differ"), "{err}");
+    let errors = validated(&with_endpoint("partner_v2", Some("partner_v2")), true).unwrap_err();
+    assert!(errors.names("inbound_webhooks.endpoints.partner.previous_key"));
+    assert!(errors.to_string().contains("must differ"), "{errors}");
 }
 
 #[test]
