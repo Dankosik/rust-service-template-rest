@@ -24,10 +24,12 @@ test-support = []
 
 [dependencies]
 derive_more = { workspace = true, features = ["debug"] }
+enum-map = { workspace = true, features = ["derive"] }
 foldhash = { workspace = true, features = ["std"] }
 indexmap = { workspace = true }
 operation-context = { workspace = true }
 # template:begin oidc-jwt:authn-jwt-dependency
+arc-swap = { workspace = true }
 base64 = { workspace = true, features = ["alloc"] }
 jsonwebtoken = { workspace = true, features = ["aws_lc_rs"] }
 # template:end oidc-jwt:authn-jwt-dependency

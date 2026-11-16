@@ -1,14 +1,16 @@
+use std::borrow::Cow;
 use std::time::Duration;
 
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD;
 use bytes::Bytes;
 use infra_jobs::{
     EnqueueOptions, Enqueued, Handler, Job, JobError, JobKind, Kinds, KindsBuilder,
     LivePayloadComparison, Policy, compare_live_payload, enqueue,
 };
 use infra_postgres::Tx;
-use serde::{Deserialize, Serialize};
+use serde::de::IntoDeserializer as _;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_with::base64::Base64;
+use serde_with::{DeserializeAs, SerializeAs, serde_as};
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 
@@ -202,6 +204,40 @@ impl Handler<PublishDomainEvent> for Publisher {
     }
 }
 
+#[derive(Clone, Copy)]
+#[cfg_attr(test, derive(Debug))]
+struct InvalidBase64;
+
+/// Defers corrupt Base64 strings to [`PublishDomainEvent::to_prepared`] as a
+/// permanent intent error; failing [`Deserialize`] would make `infra-jobs`
+/// retry the row as an undecodable job payload.
+struct Base64Payload;
+
+impl SerializeAs<Result<Bytes, InvalidBase64>> for Base64Payload {
+    fn serialize_as<S: Serializer>(
+        source: &Result<Bytes, InvalidBase64>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match source {
+            Ok(bytes) => <Base64 as SerializeAs<Bytes>>::serialize_as(bytes, serializer),
+            Err(InvalidBase64) => Err(serde::ser::Error::custom("payload is not base64")),
+        }
+    }
+}
+
+impl<'de> DeserializeAs<'de, Result<Bytes, InvalidBase64>> for Base64Payload {
+    fn deserialize_as<D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Result<Bytes, InvalidBase64>, D::Error> {
+        let encoded = Cow::<str>::deserialize(deserializer)?;
+        Ok(<Base64 as DeserializeAs<'_, Bytes>>::deserialize_as(
+            encoded.as_ref().into_deserializer(),
+        )
+        .map_err(|_: serde::de::value::Error| InvalidBase64))
+    }
+}
+
+#[serde_as]
 #[derive(Clone, Deserialize, Serialize)]
 #[cfg_attr(test, derive(Debug))]
 struct PublishDomainEvent {
@@ -214,7 +250,9 @@ struct PublishDomainEvent {
     schema_version: u16,
     occurred_at_unix_seconds: i64,
     occurred_at_nanosecond: u32,
-    payload_base64: String,
+    #[serde(rename = "payload_base64")]
+    #[serde_as(as = "Base64Payload")]
+    payload: Result<Bytes, InvalidBase64>,
 }
 
 impl JobKind for PublishDomainEvent {
@@ -224,15 +262,15 @@ impl JobKind for PublishDomainEvent {
 impl From<&PreparedEvent> for PublishDomainEvent {
     fn from(event: &PreparedEvent) -> Self {
         Self {
-            payload_base64: STANDARD.encode(event.payload()),
+            payload: Ok(event.payload().clone()),
             ..Self::with_text(event, &event.outbox_text())
         }
     }
 }
 
 impl PublishDomainEvent {
-    /// Empty strings keep the JSON keys and quotes in the preflight count
-    /// without cloning caller text or encoding the body.
+    /// Empty strings and an empty payload keep the JSON keys and quotes in the
+    /// preflight count without cloning caller text or encoding the body.
     fn for_metadata_sizing(event: &PreparedEvent) -> Self {
         Self::with_text(event, &OutboxText::default())
     }
@@ -247,7 +285,7 @@ impl PublishDomainEvent {
             schema_version: event.schema_version(),
             occurred_at_unix_seconds: event.occurred_at().unix_timestamp(),
             occurred_at_nanosecond: event.occurred_at().nanosecond(),
-            payload_base64: String::new(),
+            payload: Ok(Bytes::new()),
         }
     }
 }
@@ -261,11 +299,10 @@ impl PublishDomainEvent {
             .ok()
             .and_then(|time| time.replace_nanosecond(self.occurred_at_nanosecond).ok())
             .ok_or(IntentError::Timestamp)?;
-        let payload = Bytes::from(
-            STANDARD
-                .decode(&self.payload_base64)
-                .map_err(|_| IntentError::Base64)?,
-        );
+        let payload = self
+            .payload
+            .clone()
+            .map_err(|InvalidBase64| IntentError::Base64)?;
         // Corruption becomes a permanent job failure instead of a malformed stream event.
         serde_json::from_slice::<serde::de::IgnoredAny>(&payload)
             .map_err(|_| IntentError::NotJson)?;
@@ -298,8 +335,6 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll, Wake, Waker};
 
-    use base64::Engine as _;
-    use base64::engine::general_purpose::STANDARD;
     use bytes::Bytes;
     use time::OffsetDateTime;
 
@@ -349,13 +384,15 @@ mod tests {
     #[test]
     fn storage_preserves_exact_padded_base64_payload_bytes() {
         let event = prepared(Bytes::from_static(br#"{"escaped":"\\\\u0000","n":1.0}"#));
-        let stored = PublishDomainEvent::from(&event);
+        let encoded = serde_json::to_vec(&PublishDomainEvent::from(&event)).unwrap();
+        let wire: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
 
-        assert_eq!(stored.format_version, FORMAT_VERSION);
+        assert_eq!(wire["version"], FORMAT_VERSION);
         assert_eq!(
-            stored.payload_base64,
+            wire["payload_base64"],
             "eyJlc2NhcGVkIjoiXFxcXHUwMDAwIiwibiI6MS4wfQ=="
         );
+        let stored: PublishDomainEvent = serde_json::from_slice(&encoded).unwrap();
         let restored = stored
             .to_prepared()
             .expect("stored immutable intent is valid");
@@ -367,10 +404,20 @@ mod tests {
 
     #[test]
     fn stored_intent_rejects_invalid_base64_before_broker_dispatch() {
-        let mut stored = PublishDomainEvent::from(&prepared(Bytes::from_static(br"{}")));
-        stored.payload_base64 = "not-base64".to_owned();
+        let baseline = serde_json::to_value(PublishDomainEvent::from(&prepared(
+            Bytes::from_static(br"{}"),
+        )))
+        .unwrap();
 
+        let mut corrupt = baseline.clone();
+        corrupt["payload_base64"] = serde_json::Value::String("not-base64".to_owned());
+        let stored: PublishDomainEvent =
+            serde_json::from_value(corrupt).expect("corrupt base64 still decodes as an outbox job");
         std::assert_matches!(stored.to_prepared(), Err(IntentError::Base64));
+
+        let mut non_string = baseline;
+        non_string["payload_base64"] = serde_json::Value::Null;
+        assert!(serde_json::from_value::<PublishDomainEvent>(non_string).is_err());
     }
 
     #[test]
@@ -387,7 +434,9 @@ mod tests {
         parts.publication_id = "redrive-8e51b5a19b7924ce".to_owned();
         let event = parts.event();
 
-        let restored = PublishDomainEvent::from(&event)
+        let encoded = serde_json::to_vec(&PublishDomainEvent::from(&event)).unwrap();
+        let restored = serde_json::from_slice::<PublishDomainEvent>(&encoded)
+            .unwrap()
             .to_prepared()
             .expect("stored redrive intent is valid");
 
@@ -407,7 +456,7 @@ mod tests {
             schema_version: u16::MAX,
             occurred_at_unix_seconds: 253_402_300_799,
             occurred_at_nanosecond: 999_999_999,
-            payload_base64: String::new(),
+            payload: Ok(Bytes::new()),
         };
 
         for intent in [compact, wide] {
@@ -538,7 +587,7 @@ mod tests {
 
     fn serialized_len(intent: &PublishDomainEvent, payload_bytes: usize) -> usize {
         let mut candidate = intent.clone();
-        candidate.payload_base64 = STANDARD.encode(vec![0; payload_bytes]);
+        candidate.payload = Ok(Bytes::from(vec![0; payload_bytes]));
         serde_json::to_vec(&candidate)
             .expect("primitive intent serializes")
             .len()

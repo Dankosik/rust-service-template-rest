@@ -13,24 +13,16 @@ use crate::{JwtType, KeyId, MAX_TOKEN_LIFETIME_SECONDS, ServiceName, unix_second
 /// sends has more than half its lifetime left by this service's clock.
 const REUSE_SECONDS: u64 = MAX_TOKEN_LIFETIME_SECONDS / 2;
 
-#[derive(Clone)]
+#[derive(Clone, derive_more::Debug)]
 pub struct SigningOptions {
     pub name: ServiceName,
+    #[debug(skip)]
     pub jwt_type: JwtType,
     /// The `kid` under which receivers' trust registries hold the public key.
     pub key_id: KeyId,
     /// PKCS#8 PEM of an EC P-256 private key.
+    #[debug(skip)]
     pub private_key: SecretString,
-}
-
-impl fmt::Debug for SigningOptions {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("SigningOptions")
-            .field("name", &self.name)
-            .field("key_id", &self.key_id)
-            .finish_non_exhaustive()
-    }
 }
 
 /// Why a token source or a token could not be produced. Never key material.

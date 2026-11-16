@@ -244,18 +244,11 @@ where
         .map_err(|error| Error::Deserialize(describe_rejection(&error, &variable_keys, carrier)))
 }
 
-#[derive(Clone)]
+#[derive(Clone, derive_more::Debug)]
 struct ScannedFile {
     path: PathBuf,
+    #[debug(skip)]
     text: String,
-}
-
-impl std::fmt::Debug for ScannedFile {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ScannedFile")
-            .field("path", &self.path)
-            .finish_non_exhaustive()
-    }
 }
 
 impl config::Source for ScannedFile {

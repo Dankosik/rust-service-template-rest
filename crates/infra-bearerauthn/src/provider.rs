@@ -54,6 +54,33 @@ pub enum ProviderFailure {
     Transfer,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, enum_map::Enum)]
+pub(crate) enum ProviderReason {
+    Timeout,
+    Connect,
+    Status4xx,
+    Status5xx,
+    StatusOther,
+    MediaType,
+    TooLarge,
+    Transfer,
+}
+
+impl ProviderReason {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Timeout => "provider_timeout",
+            Self::Connect => "provider_connect",
+            Self::Status4xx => "provider_status_4xx",
+            Self::Status5xx => "provider_status_5xx",
+            Self::StatusOther => "provider_status_other",
+            Self::MediaType => "provider_media_type",
+            Self::TooLarge => "provider_too_large",
+            Self::Transfer => "provider_transfer",
+        }
+    }
+}
+
 impl ProviderFailure {
     /// A timed-out connection attempt is both; the budget is the cause.
     fn from_transport(error: &reqwest::Error) -> Self {
@@ -66,17 +93,21 @@ impl ProviderFailure {
         }
     }
 
-    pub(crate) const fn label(self) -> &'static str {
+    pub(crate) const fn reason(self) -> ProviderReason {
         match self {
-            Self::Timeout => "provider_timeout",
-            Self::Connect => "provider_connect",
-            Self::Status(400..=499) => "provider_status_4xx",
-            Self::Status(500..=599) => "provider_status_5xx",
-            Self::Status(_) => "provider_status_other",
-            Self::MediaType => "provider_media_type",
-            Self::TooLarge => "provider_too_large",
-            Self::Transfer => "provider_transfer",
+            Self::Timeout => ProviderReason::Timeout,
+            Self::Connect => ProviderReason::Connect,
+            Self::Status(400..=499) => ProviderReason::Status4xx,
+            Self::Status(500..=599) => ProviderReason::Status5xx,
+            Self::Status(_) => ProviderReason::StatusOther,
+            Self::MediaType => ProviderReason::MediaType,
+            Self::TooLarge => ProviderReason::TooLarge,
+            Self::Transfer => ProviderReason::Transfer,
         }
+    }
+
+    pub(crate) const fn label(self) -> &'static str {
+        self.reason().label()
     }
 }
 

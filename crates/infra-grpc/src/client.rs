@@ -143,24 +143,20 @@ impl tower::Service<Request<Body>> for Client {
 
 /// Dropped without [`PreparedCall::send`] or [`PreparedCall::refuse`], the call is recorded
 /// as `Canceled`.
+#[derive(derive_more::Debug)]
 pub struct PreparedCall {
+    #[debug(skip)]
     channel: Channel,
+    #[debug(skip)]
     request: Request<Body>,
     opening: OperationContext,
     lifetime: OperationContext,
+    #[debug(skip)]
     forwarded: Option<Deadline>,
+    #[debug(skip)]
     call: crate::observe::Call,
+    #[debug(skip)]
     guard: DropGuard,
-}
-
-impl std::fmt::Debug for PreparedCall {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("PreparedCall")
-            .field("opening", &self.opening)
-            .field("lifetime", &self.lifetime)
-            .finish_non_exhaustive()
-    }
 }
 
 impl Client {

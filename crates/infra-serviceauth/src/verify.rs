@@ -91,7 +91,8 @@ impl Reason {
 
 /// The verified calling service. Only verification constructs it, so
 /// unverified request data can never pose as a caller.
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq, derive_more::Debug)]
+#[debug("Caller({name:?})")]
 pub struct Caller {
     name: ServiceName,
 }
@@ -100,12 +101,6 @@ impl Caller {
     #[must_use]
     pub const fn name(&self) -> &ServiceName {
         &self.name
-    }
-}
-
-impl fmt::Debug for Caller {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.debug_tuple("Caller").field(&self.name).finish()
     }
 }
 

@@ -8,6 +8,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use arc_swap::ArcSwap;
 use tokio::sync::watch;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -50,9 +51,7 @@ pub(crate) enum SignatureRefresh {
     Unavailable,
 }
 
-#[derive(Clone)]
 struct State {
-    keys: Arc<KeySet>,
     requested_ticket: u64,
     finished_ticket: u64,
     /// The latest ticket whose fetch installed a set; the startup set is 0. A
@@ -86,6 +85,7 @@ enum Admission {
 }
 
 pub(crate) struct KeyStore {
+    keys: ArcSwap<KeySet>,
     state: watch::Sender<State>,
     last_acquisition: metrics::Gauge,
 }
@@ -93,8 +93,8 @@ pub(crate) struct KeyStore {
 impl KeyStore {
     pub(crate) fn new(keys: Arc<KeySet>) -> Arc<Self> {
         metrics::describe_counter!(REFRESH_METRIC, "JWKS refresh outcomes by closed reason");
+        let keys = ArcSwap::new(keys);
         let state = watch::Sender::new(State {
-            keys,
             requested_ticket: 0,
             finished_ticket: 0,
             last_successful_ticket: 0,
@@ -109,17 +109,18 @@ impl KeyStore {
         let last_acquisition = metrics::gauge!(ACQUISITION_METRIC);
         last_acquisition.set(acquisition_timestamp(SystemTime::now()));
         Arc::new(Self {
+            keys,
             state,
             last_acquisition,
         })
     }
 
     pub(crate) fn current(&self) -> Arc<KeySet> {
-        self.state.borrow().keys.clone()
+        self.keys.load_full()
     }
 
     pub(crate) fn generation(&self) -> u64 {
-        self.state.borrow().keys.generation()
+        self.keys.load().generation()
     }
 
     pub(crate) async fn refresh_for_signature_miss(
@@ -130,10 +131,11 @@ impl KeyStore {
         // Inspect the cooldown and claim or join a ticket under the same watch
         // write lock; only issuing a ticket modifies the state.
         self.state.send_if_modified(|state| {
+            let installed = self.keys.load();
             admission = if state.stopped {
                 Admission::Answer(SignatureRefresh::Unavailable)
-            } else if !Arc::ptr_eq(&state.keys, checked) {
-                Admission::Answer(SignatureRefresh::NewerSet(state.keys.clone()))
+            } else if !Arc::ptr_eq(&installed, checked) {
+                Admission::Answer(SignatureRefresh::NewerSet(Arc::clone(&installed)))
             } else if let Some(ticket) = state.pending() {
                 Admission::Join(ticket)
             } else if state.cooldown_started_at.elapsed() < REFRESH_COOLDOWN {
@@ -159,7 +161,8 @@ impl KeyStore {
             .await
         {
             Ok(state) if !state.stopped && state.last_successful_ticket >= ticket => {
-                SignatureRefresh::NewerSet(state.keys.clone())
+                drop(state);
+                SignatureRefresh::NewerSet(self.keys.load_full())
             }
             _ => SignatureRefresh::Unavailable,
         }
@@ -195,7 +198,7 @@ impl KeyStore {
         };
         self.state.send_modify(|state| {
             if let Ok(keys) = replacement {
-                state.keys = keys;
+                self.keys.store(keys);
                 state.last_successful_ticket = ticket;
                 self.last_acquisition
                     .set(acquisition_timestamp(SystemTime::now()));

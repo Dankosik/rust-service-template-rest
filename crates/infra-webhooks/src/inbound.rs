@@ -137,6 +137,10 @@ impl Receiver {
         self.endpoints.contains_key(endpoint_id)
     }
 
+    pub fn endpoint_ids(&self) -> impl ExactSizeIterator<Item = &str> {
+        self.endpoints.keys().map(String::as_str)
+    }
+
     /// A duplicate must pass verification again. A successful result means the
     /// receipt transaction was acknowledged; it never claims the consumer ran.
     /// `deadline` bounds only the wait for a pooled connection. Each attempt
@@ -468,6 +472,35 @@ mod tests {
         assert_eq!(
             outcome,
             Err(ReceiveError::Rejected(Rejection::new("body_too_large")))
+        );
+    }
+
+    #[test]
+    fn incoming_debug_redacts_message_id_content_type_and_body() {
+        let with_type = Incoming::new(
+            "partner",
+            Bytes::from_static(b"secret-id"),
+            Some(b"application/secret"),
+            Bytes::from_static(b"secret-body"),
+        );
+        assert_eq!(
+            format!("{with_type:?}"),
+            r#"Incoming { version: 1, endpoint_id: "partner", message_id: "[REDACTED]", content_type: true, body: "[REDACTED]" }"#
+        );
+        assert_eq!(
+            format!("{with_type:#?}"),
+            "Incoming {\n    version: 1,\n    endpoint_id: \"partner\",\n    message_id: \"[REDACTED]\",\n    content_type: true,\n    body: \"[REDACTED]\",\n}"
+        );
+
+        let without_type = Incoming::new(
+            "partner",
+            Bytes::from_static(b"secret-id"),
+            None,
+            Bytes::from_static(b"secret-body"),
+        );
+        assert_eq!(
+            format!("{without_type:?}"),
+            r#"Incoming { version: 1, endpoint_id: "partner", message_id: "[REDACTED]", content_type: false, body: "[REDACTED]" }"#
         );
     }
 }

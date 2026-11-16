@@ -33,6 +33,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true, features = ["std"] }
 zeroize = { workspace = true, features = ["alloc"] }
 # template:begin webhooks:webhooks-outbound-dependencies
+enum-map = { workspace = true, features = ["derive"] }
 httpdate = { workspace = true }
 infra-outbound-http = { workspace = true }
 serde_json = { workspace = true, features = ["std"] }

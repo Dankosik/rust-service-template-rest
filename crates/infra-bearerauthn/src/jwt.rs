@@ -1269,16 +1269,19 @@ mod tests {
             .unwrap();
         metrics::with_local_recorder(diagnostics.recorder(), || {
             tracing::dispatcher::with_default(&dispatch, || {
-                assert_eq!(
-                    runtime.block_on(verifier.verify(&token)).err(),
-                    Some(Failure::Invalid)
-                );
+                for _ in 0..2 {
+                    assert_eq!(
+                        runtime.block_on(verifier.verify(&token)).err(),
+                        Some(Failure::Invalid)
+                    );
+                }
             });
         });
+        assert_eq!(diagnostics.registered_counters().len(), 1);
         let counters = diagnostics.take_counters();
         assert!(counters.iter().any(|(key, value)| {
             key.name() == "authn_token_verifications_total"
-                && *value == 1
+                && *value == 2
                 && key
                     .labels()
                     .any(|label| label.key() == "reason" && label.value() == "missing_claim")
@@ -1323,8 +1326,10 @@ mod tests {
             .build()
             .unwrap();
         metrics::with_local_recorder(diagnostics.recorder(), || {
-            // Success counters bind to the recorder installed at preparation.
+            // Success counters bind to the recorder installed at preparation;
+            // refusal series register lazily on first occurrence and reuse handles.
             let verifier = crate::Verifier::jwt(engine);
+            assert_eager_success_registrations(&diagnostics.registered_counters());
             runtime.block_on(async {
                 for transport in [Transport::Http, Transport::Grpc] {
                     verifier
@@ -1332,13 +1337,15 @@ mod tests {
                         .await
                         .unwrap();
                 }
-                assert_eq!(
-                    verifier
-                        .authenticate(std::iter::empty(), Transport::Http)
-                        .await
-                        .err(),
-                    Some(Failure::Missing)
-                );
+                for _ in 0..2 {
+                    assert_eq!(
+                        verifier
+                            .authenticate(std::iter::empty(), Transport::Http)
+                            .await
+                            .err(),
+                        Some(Failure::Missing)
+                    );
+                }
                 assert_eq!(
                     verifier
                         .authenticate([b"Bearer =".as_slice()], Transport::Grpc)
@@ -1369,6 +1376,7 @@ mod tests {
                 drop(pending);
             });
         });
+        assert_eq!(diagnostics.registered_counters().len(), 8);
         assert_authentication_counters(&diagnostics.take_counters());
     }
 
@@ -1377,6 +1385,38 @@ mod tests {
             key.labels()
                 .any(|label| label.key() == *name && label.value() == *value)
         })
+    }
+
+    fn assert_eager_success_registrations(registered: &[metrics::Key]) {
+        assert_eq!(
+            registered.len(),
+            3,
+            "registered at preparation: {registered:?}"
+        );
+        assert!(registered.iter().any(|key| {
+            key.name() == "authn_token_verifications_total"
+                && labeled(
+                    key,
+                    &[
+                        ("mode", "jwt"),
+                        ("outcome", "success"),
+                        ("reason", "verified"),
+                    ],
+                )
+        }));
+        for transport in ["http", "grpc"] {
+            assert!(registered.iter().any(|key| {
+                key.name() == crate::authenticate::AUTHN_VERIFICATIONS_METRIC
+                    && labeled(
+                        key,
+                        &[
+                            ("transport", transport),
+                            ("result", "success"),
+                            ("failure", "none"),
+                        ],
+                    )
+            }));
+        }
     }
 
     fn assert_authentication_counters(counters: &[(metrics::Key, u64)]) {
@@ -1401,26 +1441,29 @@ mod tests {
             .filter(|(key, _)| key.name() == crate::authenticate::AUTHN_VERIFICATIONS_METRIC)
             .collect::<Vec<_>>();
         assert_eq!(outcomes.len(), 7);
-        for (transport, result, failure) in [
-            ("http", "success", "none"),
-            ("grpc", "success", "none"),
-            ("http", "failure", "missing"),
-            ("grpc", "failure", "malformed"),
-            ("grpc", "timeout", "timeout"),
-            ("grpc", "cancelled", "cancelled"),
-            ("http", "cancelled", "cancelled"),
+        for (transport, result, failure, expected_count) in [
+            ("http", "success", "none", 1),
+            ("grpc", "success", "none", 1),
+            ("http", "failure", "missing", 2),
+            ("grpc", "failure", "malformed", 1),
+            ("grpc", "timeout", "timeout", 1),
+            ("grpc", "cancelled", "cancelled", 1),
+            ("http", "cancelled", "cancelled", 1),
         ] {
-            assert!(outcomes.iter().any(|(key, value)| {
-                *value == 1
-                    && labeled(
-                        key,
-                        &[
-                            ("transport", transport),
-                            ("result", result),
-                            ("failure", failure),
-                        ],
-                    )
-            }));
+            assert!(
+                outcomes.iter().any(|(key, value)| {
+                    *value == expected_count
+                        && labeled(
+                            key,
+                            &[
+                                ("transport", transport),
+                                ("result", result),
+                                ("failure", failure),
+                            ],
+                        )
+                }),
+                "missing ({transport}, {result}, {failure}, {expected_count}) in {outcomes:?}"
+            );
         }
     }
 

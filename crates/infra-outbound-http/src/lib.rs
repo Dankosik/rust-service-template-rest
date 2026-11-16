@@ -13,7 +13,7 @@ mod tests;
 #[path = "../../../test/fixtures/tls.rs"]
 mod tls;
 
-use std::{fmt, time::Duration};
+use std::time::Duration;
 
 use http_body_util::{BodyExt as _, Full, Limited};
 use operation_context::{Deadline, OperationContext, Stopped};
@@ -83,29 +83,19 @@ pub enum Error {
     },
 }
 
-///
 /// Requests with a caller-supplied `Host` are rejected; `Host` comes from the configured
 /// origin. Sends HTTP/1.1, removes `Transfer-Encoding`, sets `Content-Length` to the
 /// buffered length for nonempty bodies and `POST`/`PUT`/`PATCH` (removed for other empty
 /// requests), and adds `Accept: */*` when absent.
-#[derive(Clone)]
+#[derive(Clone, derive_more::Debug)]
 pub struct Client {
     origin: policy::Origin,
+    #[debug(skip)]
     server: observe::Server,
     limits: Limits,
     propagate_trace_context: bool,
+    #[debug(skip)]
     transport: transport::Transport,
-}
-
-impl fmt::Debug for Client {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("Client")
-            .field("origin", &self.origin)
-            .field("limits", &self.limits)
-            .field("propagate_trace_context", &self.propagate_trace_context)
-            .finish_non_exhaustive()
-    }
 }
 
 impl Client {
