@@ -19,6 +19,41 @@ const DEFAULT_BUCKETS: &[f64] = &[
 
 const HISTOGRAM_UPKEEP_INTERVAL: Duration = Duration::from_secs(1);
 
+const MEMORY_LIMIT_METRIC: &str = "process_memory_limit_bytes";
+const CGROUP_MEMORY_LIMIT_FILES: [&str; 2] = [
+    "/sys/fs/cgroup/memory.max",
+    "/sys/fs/cgroup/memory/memory.limit_in_bytes",
+];
+const CGROUP_V1_UNLIMITED_FLOOR: u64 = 1 << 60;
+
+#[expect(
+    clippy::disallowed_methods,
+    reason = "one finite read of a control-group file at startup, before a request is served"
+)]
+fn cgroup_memory_limit() -> Option<u64> {
+    CGROUP_MEMORY_LIMIT_FILES
+        .iter()
+        .find_map(|path| parse_memory_limit(&std::fs::read_to_string(path).ok()?))
+}
+
+fn parse_memory_limit(contents: &str) -> Option<u64> {
+    contents
+        .trim()
+        .parse()
+        .ok()
+        .filter(|bytes| *bytes < CGROUP_V1_UNLIMITED_FLOOR)
+}
+
+fn publish_memory_limit() {
+    if let Some(limit) = cgroup_memory_limit() {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a byte count above 2^53 loses only sub-page precision in a gauge"
+        )]
+        metrics::gauge!(MEMORY_LIMIT_METRIC).set(limit as f64);
+    }
+}
+
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 const SCHEDULER_LAG_METRIC: &str = "runtime_scheduler_lag_seconds";
 const SCHEDULER_LAG_MAX_METRIC: &str = "runtime_scheduler_lag_max_seconds";
@@ -119,6 +154,12 @@ impl Metrics {
         crate::logging::describe_metrics();
         crate::logging::publish_observations();
         Progress::describe_and_initialize();
+        metrics::describe_gauge!(
+            MEMORY_LIMIT_METRIC,
+            metrics::Unit::Bytes,
+            "Memory limit of the control group the process started in; absent when the group has no limit."
+        );
+        publish_memory_limit();
         Ok(Self {
             handle,
             process,
@@ -219,6 +260,14 @@ mod tests {
             source.downcast_ref::<BuildError>(),
             Some(BuildError::EmptyBucketsOrQuantiles)
         );
+    }
+
+    #[test]
+    fn a_control_group_without_a_memory_limit_publishes_none() {
+        assert_eq!(parse_memory_limit("536870912\n"), Some(536_870_912));
+        assert_eq!(parse_memory_limit("max\n"), None);
+        assert_eq!(parse_memory_limit("9223372036854771712\n"), None);
+        assert_eq!(parse_memory_limit(""), None);
     }
 
     fn value(exposition: &str, series: &str) -> f64 {
