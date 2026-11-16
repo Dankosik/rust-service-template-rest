@@ -32,6 +32,10 @@ const CONNECTED_PROBE_MIN_BUDGET: Duration = Duration::from_secs(5);
 const PASSWORD_READ_TIMEOUT: Duration = Duration::from_secs(5);
 const SETUP_BACKOFF_MIN_DELAY: Duration = Duration::from_millis(100);
 const SETUP_BACKOFF_MAX_DELAY: Duration = Duration::from_secs(2);
+/// backon's jitter adds up to one more base delay, so a base capped at half
+/// the ceiling spreads late retries and chain pauses over its upper half
+/// instead of pinning every client of a restarted shared server to it.
+const SETUP_BACKOFF_BASE_CAP: Duration = Duration::from_secs(1);
 /// Minimum spacing between published generations, so a server that accepts
 /// and then drops every connection cannot drive a reconnect loop.
 const MIN_GENERATION_SPACING: Duration = Duration::from_secs(2);
@@ -665,13 +669,7 @@ async fn run_supervisor(
     password_file: Option<&PasswordFile>,
     command_timeout: Duration,
 ) {
-    let backoff_policy = backon::ExponentialBuilder::default()
-        .with_min_delay(SETUP_BACKOFF_MIN_DELAY)
-        .with_max_delay(SETUP_BACKOFF_MAX_DELAY)
-        .with_factor(SETUP_BACKOFF_FACTOR)
-        .with_max_times(SETUP_BACKOFF_MAX_RETRIES)
-        .with_jitter();
-    let mut backoff = backoff_policy.build();
+    let mut backoff = SetupBackoff::new();
     let mut next_attempt = Instant::now();
     loop {
         sleep_until(next_attempt).await;
@@ -685,7 +683,7 @@ async fn run_supervisor(
                     return;
                 }
                 next_attempt = Instant::now() + MIN_GENERATION_SPACING;
-                backoff = backoff_policy.build();
+                backoff = SetupBackoff::new();
                 let mut drain = std::pin::pin!(drain_abandoned_replies(replies));
                 // Withdraw the generation before the drain releases its
                 // reservations, including on unwind.
@@ -707,16 +705,44 @@ async fn run_supervisor(
                     error.type = error.label(),
                     "cache_connection_failed"
                 );
-                let delay = if let Some(delay) = backoff.next() {
-                    delay
-                } else {
-                    backoff = backoff_policy.build();
-                    SETUP_BACKOFF_MAX_DELAY
-                };
-                // backon's jitter is additive after its cap; cap the final delay.
-                next_attempt = Instant::now() + delay.min(SETUP_BACKOFF_MAX_DELAY);
+                next_attempt = Instant::now() + backoff.next_delay();
             }
         }
+    }
+}
+
+/// Delays between failed setup attempts: a jittered exponential chain from
+/// [`SETUP_BACKOFF_MIN_DELAY`], then a jittered pause and a fresh chain.
+pub(crate) struct SetupBackoff {
+    chain: <backon::ExponentialBuilder as BackoffBuilder>::Backoff,
+}
+
+impl SetupBackoff {
+    pub(crate) fn new() -> Self {
+        Self {
+            chain: Self::policy(SETUP_BACKOFF_MIN_DELAY)
+                .with_max_times(SETUP_BACKOFF_MAX_RETRIES)
+                .build(),
+        }
+    }
+
+    fn policy(min_delay: Duration) -> backon::ExponentialBuilder {
+        backon::ExponentialBuilder::default()
+            .with_min_delay(min_delay)
+            .with_max_delay(SETUP_BACKOFF_BASE_CAP)
+            .with_factor(SETUP_BACKOFF_FACTOR)
+            .with_jitter()
+    }
+
+    pub(crate) fn next_delay(&mut self) -> Duration {
+        let delay = self.chain.next().unwrap_or_else(|| {
+            *self = Self::new();
+            Self::policy(SETUP_BACKOFF_BASE_CAP)
+                .build()
+                .next()
+                .unwrap_or(SETUP_BACKOFF_MAX_DELAY)
+        });
+        delay.min(SETUP_BACKOFF_MAX_DELAY)
     }
 }
 
