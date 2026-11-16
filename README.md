@@ -27,7 +27,7 @@ lints and CI, and written as instructions the agent follows. You describe the
 behavior. The agent builds it inside fixed boundaries and proves it before
 merge.
 
-Works with Claude Code, Codex, Cursor, Qwen Code, Grok and OpenCode.
+Works with Claude Code, Codex, Cursor, Qwen Code, Grok, OpenCode and Antigravity.
 
 ## Start a service
 

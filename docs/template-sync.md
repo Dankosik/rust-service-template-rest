@@ -63,8 +63,8 @@ keyword, `REPOSITORY` plain HTTPS GitHub owner/repo URL, `CODEOWNER` `@user` or
 `@org/team`, single-line `DESCRIPTION` up to 256 characters; invalid, duplicate,
 or conflicting inputs refuse before writing). `DATABASE` defaults to `none`
 (`none` | `postgres`). `AGENT_HARNESS` defaults to `all` (`core` for canonical
-instructions only, `codex`, `claude`, `qwen`, `cursor`, `grok`, `opencode`, or
-`all`).
+instructions only, `codex`, `claude`, `qwen`, `cursor`, `grok`, `opencode`,
+`antigravity`, or `all`).
 
 <!-- template:begin authn:docs-template-init-authn -->
 `AUTHN` (`--authn`) defaults to `none` (`none` | `oidc-jwt` | `oidc-introspection`); at most one engine is retained, defaulting at runtime to `authn.mode = "none"`. `oidc-introspection` retains its optional disabled-by-default positive cache; `oidc-jwt` and `none` prune it.

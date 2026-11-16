@@ -19,6 +19,7 @@ AGENTS.md
 .agents/adapters/opencode/rules/harness.md
 .agents/adapters/opencode/commands/orchestrator.md
 .agents/adapters/opencode/plugins/task-subagents.js
+.agents/adapters/antigravity/rules/antigravity-harness.md
 docs/spec-first-workflow.md
 docs/spec-first-workflow/
 docs/agent-harness.md

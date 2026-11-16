@@ -36,7 +36,7 @@ SERVICE_AUTH_CHOICES = ("none", "jwt")
 OUTBOX_CHOICES = ("none", "postgres")
 WEBHOOKS_CHOICES = ("none", "durable")
 INBOUND_WEBHOOKS_CHOICES = ("none", "standard-webhooks")
-HARNESS_CHOICES = ("core", "codex", "claude", "qwen", "cursor", "grok", "opencode", "all")
+HARNESS_CHOICES = ("core", "codex", "claude", "qwen", "cursor", "grok", "opencode", "antigravity", "all")
 
 
 @dataclass(frozen=True)
@@ -123,6 +123,14 @@ ADAPTERS: dict[str, AdapterPack] = {
             (".agents/adapters/opencode/plugins/task-subagents.js", ".opencode/plugins/task-subagents.js"),
         ),
         role_dirs=((".opencode/agents", "md"),),
+    ),
+    "antigravity": AdapterPack(
+        canonical=(".agents/adapters/antigravity/rules/antigravity-harness.md",),
+        generated=(".agents/rules/antigravity-harness.md", ".agents/agents/"),
+        static_copies=(
+            (".agents/adapters/antigravity/rules/antigravity-harness.md", ".agents/rules/antigravity-harness.md"),
+        ),
+        role_dirs=((".agents/agents", "md"),),
     ),
 }
 

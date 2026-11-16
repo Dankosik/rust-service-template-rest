@@ -382,7 +382,7 @@ docs-check: ## Image-input watch coverage and relative Markdown links/fragments
 		trap 'rm -rf "$$stage"' EXIT && \
 		python3 -c 'import os, shutil, subprocess, sys; dst = sys.argv[1]; files = subprocess.check_output(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"]).split(b"\0"); [os.makedirs(os.path.dirname(os.path.join(dst, p)), exist_ok=True) or shutil.copy2(p, os.path.join(dst, p)) for r in files if r and os.path.isfile(p := r.decode()) and not os.path.islink(p)]' "$$stage" && \
 		python3 scripts/agent-harness-sync.py --apply --repo "$$stage" >/dev/null && \
-		harness_md="$$(cd "$$stage" && find CLAUDE.md QWEN.md Grok.md .claude .qwen .cursor .grok .opencode -type f -name '*.md' 2>/dev/null)" && \
+		harness_md="$$(cd "$$stage" && find CLAUDE.md QWEN.md Grok.md .claude .qwen .cursor .grok .opencode .agents/agents .agents/rules -type f -name '*.md' 2>/dev/null)" && \
 		run_lychee "$$stage" $$harness_md; \
 	fi
 
