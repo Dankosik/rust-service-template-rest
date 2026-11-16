@@ -6,8 +6,6 @@ use service_config::{Config, HttpIdempotencyConfig, ValidationError};
 
 use super::BootstrapError;
 
-/// Has a store only when both the pool and a retention are set; otherwise
-/// activation refuses the missing value if an idempotent operation is served.
 pub(super) fn prepare(
     config: &Config,
     postgres_pool: Option<&PgPool>,
@@ -22,7 +20,6 @@ pub(super) fn prepare(
         })
 }
 
-/// An inactive boundary makes no query, starts no task, and requires no value.
 pub(super) async fn activate(
     composer: Composer,
     config: &Config,
@@ -47,8 +44,6 @@ fn unconfigured(config: &Config) -> BootstrapError {
     }
 }
 
-/// Needs `postgres.enabled`, a set `http_idempotency.retention`, and the store's
-/// schema on a writable session.
 async fn start(
     store: Store,
     operations: std::num::NonZeroUsize,
@@ -95,7 +90,6 @@ mod tests {
     async fn an_inactive_boundary_touches_no_store_and_spawns_no_task() {
         let composer = Composer::inert();
         let mut background = Background::new(CancellationToken::new());
-        // An active boundary would refuse this default configuration.
         activate(composer, &Config::default(), &mut background)
             .await
             .expect("an inactive boundary requires no value");

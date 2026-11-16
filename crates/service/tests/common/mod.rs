@@ -18,7 +18,6 @@ pub(crate) fn baseline_env(command: &mut Command) -> &mut Command {
         .env("APP__LOG__FORMAT", "json")
 }
 
-/// The reader thread keeps the child from blocking on a full pipe.
 #[expect(
     clippy::expect_used,
     reason = "a broken fixture or setup fails the test"
@@ -53,7 +52,6 @@ pub(crate) fn agent() -> ureq::Agent {
         .new_agent()
 }
 
-/// An error status is a response, not an error.
 pub(crate) fn get(url: &str) -> Result<(u16, String), ureq::Error> {
     agent().get(url).call().map(|mut response| {
         let status = response.status().as_u16();

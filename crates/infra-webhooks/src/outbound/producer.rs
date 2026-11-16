@@ -9,9 +9,6 @@ use infra_postgres::Tx;
 use super::{Delivery, EMPTY_DELIVERY_JSON, delivery_version};
 use crate::protocol::MAX_BODY_BYTES;
 
-// Preflight inspects caller-sized strings in chunks of this many bytes and
-// yields between them, so a caller's deadline or cancellation can stop the
-// O(n) check before any insert.
 const PREFLIGHT_BYTES_PER_POLL: usize = 4096;
 
 pub const JSON_CONTENT_TYPE: &str = "application/json";
@@ -22,7 +19,6 @@ pub struct Producer {
 }
 
 impl Producer {
-    /// No I/O. Endpoint ID syntax is owned by configuration validation.
     #[must_use]
     pub fn new(endpoint_ids: impl IntoIterator<Item = String>) -> Self {
         Self {
@@ -30,9 +26,6 @@ impl Producer {
         }
     }
 
-    /// Returns the job ID, which is the Standard Webhooks message ID.
-    /// Validation failures happen before any insert. A JSON body uses
-    /// [`JSON_CONTENT_TYPE`].
     pub async fn enqueue(
         &self,
         tx: &mut Tx<'_>,
@@ -57,8 +50,6 @@ impl Producer {
         }
     }
 
-    /// Error precedence: body size, endpoint, content type (even past the jobs
-    /// ceiling), then the exact serialized size.
     async fn preflight(
         &self,
         endpoint_id: &str,
@@ -92,8 +83,6 @@ impl Producer {
     }
 }
 
-/// The JSON-escaped length of `field` without its quotes, inspecting at most
-/// `budget` bytes per poll. `admit` sees each fragment before it is escaped.
 async fn escaped_len(
     field: &str,
     budget: &mut usize,
@@ -110,7 +99,6 @@ async fn escaped_len(
         }
         let (fragment, tail) = rest.split_at(end);
         admit(fragment)?;
-        // The envelope already counts the quotes.
         len += json_payload_len(fragment).map_err(serialize_failed)? - 2;
         *budget -= end;
         rest = tail;
@@ -118,8 +106,6 @@ async fn escaped_len(
     Ok(len)
 }
 
-/// Return `Pending` once after waking the task, so any executor polls again.
-/// The crate's outbound profile has no runtime to ask for a yield.
 async fn yield_once() {
     let mut yielded = false;
     poll_fn(|cx| {
@@ -147,7 +133,6 @@ pub enum OutboundError {
     InvalidContentType,
     #[error("outbound webhook enqueue failed")]
     Enqueue(#[source] EnqueueError),
-    /// A no-unique-key delivery unexpectedly received a duplicate result.
     #[error("outbound webhook enqueue unexpectedly deduplicated")]
     UnexpectedDuplicate,
 }
@@ -167,7 +152,6 @@ mod tests {
                 let mut delivery = super::Delivery {
                     version: super::delivery_version(),
                     endpoint_id: endpoint_id.to_owned(),
-                    // The multibyte value straddles a preflight fragment.
                     content_type: format!("{}é\t\\\"", "x".repeat(4095)),
                     body: bytes::Bytes::from(vec![0xff; body_bytes]),
                 };
@@ -240,8 +224,6 @@ mod tests {
         let outbound = super::Producer::new(["partner".to_owned()]);
         let content_type = format!("{}\n", "x".repeat(8192));
         let mut preflight = std::pin::pin!(outbound.preflight("partner", 0, &content_type));
-        // Each Pending wakes itself, so an executor that only polls on a wake
-        // still reaches the verdict; the number of yields is not the contract.
         let verdict = (0..64)
             .find_map(|_| {
                 let before = notifications.0.load(Ordering::Relaxed);

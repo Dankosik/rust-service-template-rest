@@ -146,7 +146,6 @@ impl Fixture {
                 name: dlq_stream.clone(),
                 subjects: vec![dlq_subject.clone()],
                 max_messages: dlq_max_messages,
-                // Leave room for original subject and transfer identity headers.
                 max_message_size: 16 * 1024,
                 discard: stream::DiscardPolicy::New,
                 ..Default::default()
@@ -399,8 +398,6 @@ fn assert_dead_letter(
     );
 }
 
-/// Installs one process-wide OpenTelemetry layer; a delivery runs in its own
-/// task. Returns the exporter that keeps every finished span of the process.
 fn install_tracing() -> &'static opentelemetry_sdk::trace::InMemorySpanExporter {
     use opentelemetry::trace::TracerProvider as _;
     use tracing_subscriber::layer::SubscriberExt as _;

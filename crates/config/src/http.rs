@@ -86,10 +86,6 @@ impl Default for HttpConfig {
         Self {
             addr: SocketAddr::from(([0, 0, 0, 0], 8080)),
             grace_period: Duration::from_secs(45),
-            // 25s rather than the whole grace period: the teardown after the
-            // drain (diagnostics, background join, dependency close,
-            // telemetry flush) needs the remaining budget. Load does not
-            // encode that tail; the composition root does.
             drain_timeout: Duration::from_secs(25),
             readiness_propagation_delay: Duration::from_secs(15),
             header_read_timeout: Duration::from_secs(5),
@@ -98,16 +94,40 @@ impl Default for HttpConfig {
             max_body_bytes: ByteSize::mib(1),
             max_in_flight: DEFAULT_MAX_IN_FLIGHT,
             max_connections: DEFAULT_MAX_CONNECTIONS,
-            // Off: an HTTP/1 proxy that reuses an idle connection just as
-            // the server closes it sees a failed request. HTTP/2 GOAWAY has
-            // no such race, which is why the gRPC listener sets an age.
             max_connection_age: Duration::ZERO,
             access_log_health_probes: false,
         }
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "http.grace_period ({grace:?}) must be >= http.drain_timeout ({drain_timeout:?}) plus the {tail:?} {teardown}"
+)]
+pub struct GraceBudgetError {
+    grace: Duration,
+    drain_timeout: Duration,
+    tail: Duration,
+    teardown: &'static str,
+}
+
 impl HttpConfig {
+    pub fn check_grace_budget(
+        &self,
+        tail: Duration,
+        teardown: &'static str,
+    ) -> Result<(), GraceBudgetError> {
+        if self.grace_period < self.drain_timeout.saturating_add(tail) {
+            return Err(GraceBudgetError {
+                grace: self.grace_period,
+                drain_timeout: self.drain_timeout,
+                tail,
+                teardown,
+            });
+        }
+        Ok(())
+    }
+
     #[must_use]
     pub fn connection_cap(&self) -> Option<NonZeroU32> {
         NonZeroU32::new(self.max_connections)
@@ -129,13 +149,9 @@ impl HttpConfig {
             .saturating_sub(self.readiness_propagation_delay)
     }
 
-    /// Returns the timings dependent sections compare against, each only
-    /// when it passed its own rules, so a rejected value causes no second
-    /// violation elsewhere.
     pub(crate) fn validate(&self, v: &mut Violations) -> HttpTimings {
         let second = Duration::from_secs(1);
         let ten_minutes = Duration::from_mins(10);
-        // An ordering rule compares values that are each in range.
         let grace_ok = duration_range("http.grace_period", self.grace_period, second..=ten_minutes);
         let drain_ok = duration_range(
             "http.drain_timeout",

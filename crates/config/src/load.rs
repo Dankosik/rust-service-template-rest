@@ -1,6 +1,3 @@
-//! Build the snapshot from defaults, files, and the `APP__` variables: the
-//! secrets directory's files, then the process environment over them.
-
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -183,7 +180,6 @@ where
             .get("authn")
             .and_then(|section| section.get("audience"))
         {
-            // config-rs converts TOML datetimes to strings before serde sees them.
             file_audience_has_datetime = audience.is_datetime()
                 || audience
                     .as_array()
@@ -267,7 +263,6 @@ impl config::Source for ScannedFile {
     }
 }
 
-/// Retain the checked bytes so a file replacement cannot change what is merged.
 #[expect(
     clippy::disallowed_methods,
     reason = "pre-runtime configuration admission owns this file read; startup can wait on the filesystem"
@@ -281,7 +276,6 @@ fn scan_file(
         error,
     })?;
     let table: toml::Table = toml::from_str(&text).map_err(|error| {
-        // Parsing fails before secret admission, so keep only the location.
         let message = match error.span() {
             Some(span) => format!("invalid TOML at byte {}", span.start),
             None => "invalid TOML".to_owned(),
@@ -318,7 +312,6 @@ fn scan_file(
     ))
 }
 
-/// A scalar replacing a table can erase an unknown key before decoding sees it.
 fn first_table_override<'a>(
     table: &'a toml::Table,
     table_keys: &mut BTreeSet<String>,
@@ -341,10 +334,6 @@ fn first_table_override<'a>(
     None
 }
 
-/// The first key, as a dotted path, that no `APP__` variable can name. A
-/// file entry `Partner` and a variable segment `__PARTNER__` would be two
-/// entries, and the file's one could never receive an environment-only
-/// secret or an override.
 fn first_unaddressable_key<'a>(table: &'a toml::Table, path: &mut Vec<&'a str>) -> Option<String> {
     for (key, value) in table {
         path.push(key);
@@ -367,8 +356,6 @@ fn first_unaddressable_key<'a>(table: &'a toml::Table, path: &mut Vec<&'a str>) 
     None
 }
 
-/// An array has no index syntax in `APP__` names, and a later source can
-/// replace it wholesale before typed decoding sees any keys inside it.
 fn first_key_in_array(value: &toml::Value) -> Option<String> {
     match value {
         toml::Value::Array(items) => items.iter().enumerate().find_map(|(index, item)| {

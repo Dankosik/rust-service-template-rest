@@ -1,8 +1,3 @@
-//! Exact-record inspection and immutable dead-letter redrive example.
-//!
-//! `inspect CONNECTION STREAM SEQUENCE SELECTION [--payload]` is read-only.
-//! `redrive SELECTION` reads its connection and one-use grant from the configured mount.
-
 #[expect(
     clippy::disallowed_types,
     reason = "the finite CLI owns bounded manifest files and durable fsync custody"
@@ -63,8 +58,6 @@ struct Record {
 
 impl Record {
     fn from_native(stream: String, message: RawMessage) -> Result<Self> {
-        // `STANDARD` accepts only canonical base64, so the accepted text is
-        // kept as it is; decoding checks it and feeds the digest.
         let payload = STANDARD
             .decode(&message.payload)
             .map_err(|_| "payload_encoding")?;
@@ -99,9 +92,6 @@ impl Record {
 }
 
 fn stored_headers(encoded: &str) -> Result<HeaderMap> {
-    // The native RawMessage -> StreamMessage conversion inserts repeated
-    // names. Preserve all source values here, in original order, so the wire
-    // owner's first-value identity rules also hold for operator reconstruction.
     let raw = STANDARD.decode(encoded).map_err(|_| "header_encoding")?;
     if raw.is_empty() {
         return Ok(HeaderMap::new());
@@ -119,8 +109,6 @@ fn stored_headers(encoded: &str) -> Result<HeaderMap> {
         let (name, value) = line.split_once(':').ok_or("header_line")?;
         let preserve_identity = matches!(name, MESSAGE_ID | EVENT_TYPE);
         let name: HeaderName = name.parse().map_err(|_| "header_name")?;
-        // Remove only the wire separator so restore can reject identity
-        // whitespace that the receiving NATS parser would otherwise trim.
         let mut value = if preserve_identity {
             value.trim_prefix(' ')
         } else {
@@ -321,8 +309,6 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
     serde_json::from_slice(&read_file(path)?).map_err(|_| "file_format")
 }
 
-// tempfile creates a private file; persistence and directory fsync cover crash
-// boundaries before dispatch. Selections use no-clobber; only state is replaced.
 #[expect(
     clippy::disallowed_methods,
     clippy::disallowed_types,
@@ -360,8 +346,6 @@ async fn fetch(client: async_nats::Client, stream: &str, sequence: u64) -> Resul
         message: RawMessage,
     }
     let context = async_nats::jetstream::new(client);
-    // Keep a missing stream distinct from a missing sequence: the preflight
-    // reports `stream_unavailable`, the request below `record_unavailable`.
     context
         .get_stream(stream)
         .await
@@ -443,8 +427,6 @@ async fn inspect(args: &[String], resources: &mut Resources) -> Result<()> {
 }
 
 fn owned_connection(selection: &Selection, selection_hash: &str) -> Result<Connection> {
-    // The controller creates this private mount and grant only after verifying
-    // every original container and network. There is no remote/assumption flag.
     let root = std::env::var_os("MESSAGING_RECOVERY_SESSION").ok_or("owned_session_required")?;
     let root = Path::new(&root);
     let generation =
@@ -532,8 +514,6 @@ async fn redrive(args: &[String], resources: &mut Resources, deadline: Instant) 
         finish(&state_path, &state)?;
         return Ok(());
     }
-    // An earlier positive ACK is retained, but never skips the current identity
-    // and lifecycle checks. Retrying ambiguity prepares exactly the same ID.
     if state.publication != Publication::Confirmed {
         let rejected = state.publication.after_rejection();
         let startup = Messaging::prepare(
@@ -565,9 +545,6 @@ async fn redrive(args: &[String], resources: &mut Resources, deadline: Instant) 
         };
         let producer = messaging.producer();
         resources.publisher = Some(Publisher::Admitted(messaging));
-        // Persist `ambiguous` before dispatch. A crash after this write must
-        // leave evidence that publication may have happened; writing after
-        // `publish` would report `not_attempted` for a possible publication.
         state.publication = Publication::Ambiguous;
         state.ack = None;
         save(&state_path, &state, Persist::Replace)?;
@@ -620,7 +597,6 @@ async fn main() -> ExitCode {
     if result.is_ok() && closed {
         return ExitCode::SUCCESS;
     }
-    // A failed diagnostic write must preserve the command's exit status.
     let mut stderr = io::stderr().lock();
     if let Err(reason) = result {
         let _ = writeln!(
@@ -660,9 +636,7 @@ mod tests {
 
         const CHILD: &str = "DLQ_RECOVERY_BROKEN_STDERR_CHILD";
         if std::env::var_os(CHILD).is_some() {
-            // The test harness flags are invalid CLI arguments for dlq_recovery.
             assert_eq!(super::main(), ExitCode::FAILURE);
-            // A harness that did not run this test would exit zero.
             std::process::exit(1);
         }
 

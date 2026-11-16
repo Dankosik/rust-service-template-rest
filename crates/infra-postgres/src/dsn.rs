@@ -1,13 +1,3 @@
-//! `sqlx` is permissive: constructors start from the libpq environment, fall
-//! back to `.pgpass`, accept Unix sockets and `allow`/`prefer` TLS fallback,
-//! and warn with key *and value* on an unknown parameter. The template's
-//! policy is one explicit, self-contained URL whose diagnostics never carry a
-//! value, so this module checks the URL text before `sqlx` sees it and reads
-//! the driver's interpretation back.
-//!
-//! The password may come from a file the platform rewrites on rotation; the URL
-//! then carries none, so there is still exactly one source.
-
 use std::path::{Path, PathBuf};
 
 use sqlx::ConnectOptions;
@@ -15,13 +5,8 @@ use sqlx::postgres::{PgConnectOptions, PgSslMode};
 use url::Url;
 use zeroize::Zeroizing;
 
-/// Variables `sqlx` still merges into an admitted URL
-/// (`sqlx-postgres/src/options/mod.rs`); every other libpq variable is
-/// overwritten by a required component, so it is not refused.
 const AMBIENT_ENVIRONMENT: [&str; 4] = ["PGSSLROOTCERT", "PGSSLCERT", "PGSSLKEY", "PGOPTIONS"];
 
-/// Messages name the rule, never the value; a key is quoted only when it is the
-/// operator's own parameter.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum DsnError {
     #[error("postgres dsn is empty")]
@@ -80,22 +65,16 @@ impl std::fmt::Debug for Dsn {
 }
 
 impl Dsn {
-    /// A non-empty `PGSSLROOTCERT`, `PGSSLCERT`, `PGSSLKEY`, or `PGOPTIONS` in the
-    /// environment is refused too.
     pub fn admit(raw: &str) -> Result<Self, DsnError> {
         Self::admit_with(raw, None)
     }
 
-    /// [`Dsn::admit`] with the password read from `password_file`; the URL must then
-    /// carry none, and the file's trailing line breaks are not part of it.
     pub fn admit_with(raw: &str, password_file: Option<&Path>) -> Result<Self, DsnError> {
         Self::admit_from(raw, password_file, |name| {
             std::env::var_os(name).is_some_and(|value| !value.is_empty())
         })
     }
 
-    /// [`Dsn::admit`] with an explicit occupancy lookup, so tests need not mutate
-    /// the process environment.
     #[cfg(test)]
     pub(crate) fn admit_with_environment<F>(raw: &str, occupied: F) -> Result<Self, DsnError>
     where
@@ -132,13 +111,10 @@ impl Dsn {
         if options.get_host().contains(',') {
             return Err(DsnError::MultipleHosts);
         }
-        // URL brackets around an IPv6 literal are not accepted by the dial or TLS ServerName.
         let options = match url.host() {
             Some(url::Host::Ipv6(host)) => options.host(&host.to_string()),
             _ => options,
         };
-        // Without a URL password the driver took one from `PGPASSWORD` or `.pgpass`;
-        // the file's value replaces it.
         let options = match password_file {
             Some(path) => options.password(&read_password(path)?),
             None => options,
@@ -176,7 +152,6 @@ impl Dsn {
 
     #[must_use]
     pub fn ssl_mode_name(&self) -> &'static str {
-        // `allow` and `prefer` never pass admission; named only to keep the match total.
         match self.options.get_ssl_mode() {
             PgSslMode::Disable => "disable",
             PgSslMode::Allow => "allow",
@@ -206,7 +181,6 @@ pub(crate) fn password_from(content: String) -> Result<Zeroizing<String>, DsnErr
     Ok(password)
 }
 
-/// Every component the driver would otherwise take from the environment, `.pgpass`, or defaults.
 fn require_components(url: &Url, password_from_file: bool) -> Result<(), DsnError> {
     if url.host_str().is_none_or(str::is_empty) {
         return Err(DsnError::Missing("host"));
@@ -230,9 +204,6 @@ fn require_components(url: &Url, password_from_file: bool) -> Result<(), DsnErro
     Ok(())
 }
 
-/// `allow` and `prefer` negotiate TLS per attempt, so connections from one pool
-/// could differ in protection. `sslrootcert` names a private CA file; `sqlx`
-/// ignores it under `require`, so it is admitted only where it is verified.
 fn check_parameters(url: &Url) -> Result<(), DsnError> {
     let mut verifies_certificate = None;
     let mut has_root_cert = false;
@@ -263,7 +234,6 @@ fn check_parameters(url: &Url) -> Result<(), DsnError> {
     Ok(())
 }
 
-/// Capped so a pathological key cannot flood a log line.
 fn bounded(key: &str) -> String {
     const MAX: usize = 32;
     match key.char_indices().nth(MAX) {
@@ -337,8 +307,6 @@ mod tests {
             socket.write_all(b"S").await.unwrap();
             let mut record_header = [0; 5];
             socket.read_exact(&mut record_header).await.unwrap();
-            // A real rustls ClientHello requires a successful ServerName conversion of the
-            // dialed IPv6 host.
             assert_eq!(record_header[0], 22);
             assert_eq!(record_header[1], 3);
             assert!(u16::from_be_bytes([record_header[3], record_header[4]]) > 0);
@@ -348,7 +316,6 @@ mod tests {
         })
         .await
         .expect("IPv6 TCP and TLS opening are bounded");
-        // The fixture closes at ClientHello; it cannot authenticate a server.
         assert!(connected.is_err());
     }
 
@@ -565,7 +532,6 @@ mod tests {
     fn diagnostics_and_debug_never_carry_credentials() {
         let dsn = parse(VALID).unwrap();
         let rendered = format!("{dsn:?}");
-        // No assertion messages: a failure must not print the rendering.
         assert!(rendered.contains("db.internal"));
         assert!(!rendered.contains("s3cret"));
         assert!(!rendered.contains("app:"));

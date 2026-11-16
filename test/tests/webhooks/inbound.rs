@@ -34,8 +34,6 @@ fn receiver(pool: PgPool) -> Receiver {
     )
 }
 
-/// The pool's own bound, so a direct call waits as long as it did before
-/// admission took the caller's deadline.
 fn admission_deadline() -> tokio::time::Instant {
     tokio::time::Instant::now() + infra_postgres::ACQUIRE_TIMEOUT
 }
@@ -165,7 +163,6 @@ fn incoming_preserves_base64_json_bytes_and_decodes_original_body() {
             assert_eq!(incoming.message_id(), b"id\x80\xff");
             assert_eq!(incoming.content_type(), content_type);
             assert_eq!(incoming.body(), body);
-            // Compare serializer output directly, before any PostgreSQL JSON normalization.
             assert_eq!(
                 serde_json::to_vec(&incoming).expect("payload bytes"),
                 expected.as_bytes()
@@ -565,7 +562,6 @@ async fn unknown_processor_commit_does_not_add_a_competing_retry(pool: PgPool) {
         .execute(&pool)
         .await
         .expect("consumer effects table");
-    // Historical accepted jobs retain IDs above the new admission bound.
     let legacy_message_id = vec![b'x'; 512];
     let incoming: Incoming = serde_json::from_value(serde_json::json!({
         "version": 1,
@@ -943,7 +939,6 @@ async fn a_provider_verifier_shares_the_receipt_path_beside_standard_webhooks(po
         receive("standard", provider_headers("shared", "delivery-2")).await,
         Err(ReceiveError::Rejected(Rejection::new("missing_header")))
     );
-    // The receipt key is indexed, so an identity outside 1 to 255 bytes is refused.
     for identity in [String::new(), "d".repeat(256)] {
         assert_eq!(
             receive("provider", provider_headers("shared", &identity)).await,
@@ -963,7 +958,6 @@ async fn a_provider_verifier_shares_the_receipt_path_beside_standard_webhooks(po
             .await,
         Err(ReceiveError::Rejected(Rejection::new("body_too_large")))
     );
-    // The unsigned Content-Type can outgrow the job payload; no retry fits it.
     let mut padded = provider_headers("shared", "delivery-4");
     padded.insert(
         http::header::CONTENT_TYPE,
@@ -1386,8 +1380,6 @@ async fn a_server_limit_below_the_webhook_limit_answers_413_without_content_leng
     use tower::ServiceExt as _;
 
     let app = mounted_receiver_with_limit(receiver(pool.clone()), Duration::from_secs(8), 16);
-    // A streamed body carries no Content-Length, so the server limit cuts it
-    // while the webhook route reads it.
     let body = Body::from_stream(futures_util::stream::once(async {
         Ok::<Bytes, std::io::Error>(Bytes::from_static(&[b'x'; 32]))
     }));
@@ -1503,7 +1495,6 @@ async fn receipt_migration_preserves_historical_pairs_jobs_and_admission_approxi
                 admission_deadline(),
             )
             .await,
-        // The 512-byte legacy identity exceeds the bound that precedes signature work.
         Err(ReceiveError::Rejected(Rejection::new("invalid_message_id")))
     );
     assert_eq!(receipt_count(&pool).await, 3);

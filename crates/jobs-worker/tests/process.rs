@@ -428,8 +428,6 @@ fn blocked_stdout_worker_child() {
         }
         Err("registration deliberately refused".into())
     });
-    // run has already returned after explicit logger and runtime cleanup.
-    // Avoid libtest writing its own result into the deliberately full pipe.
     std::process::exit(if result == std::process::ExitCode::FAILURE {
         1
     } else {

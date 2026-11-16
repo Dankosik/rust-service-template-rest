@@ -1,12 +1,3 @@
-//! The adapter against a real authorization server: a throwaway Keycloak
-//! container. Run through `ALLOW_HEAVY=1 make test-integration-oauth`, which starts it
-//! (`scripts/ci/test-integration-oauth.sh`) and sets `OAUTH_TEST_KEYCLOAK_URL`.
-//!
-//! This proves what the local fixture cannot: that a real server accepts the
-//! client assertion for every supported algorithm, issues a service token and
-//! an exchanged token for these request forms, and reports refusals with the
-//! error codes the adapter classifies.
-
 use std::{sync::Mutex, time::Duration};
 
 use bytes::Bytes;
@@ -85,8 +76,6 @@ impl Realm {
         realm
             .client(&serde_json::json!({"clientId": TARGET, "publicClient": false}))
             .await;
-        // Its tokens name `caller-*` clients in `aud`, as token exchange
-        // requires of a subject token.
         realm
             .client(&serde_json::json!({
                 "clientId": UPSTREAM,
@@ -283,7 +272,6 @@ fn public_jwk(algorithm: Algorithm, key: &KeyPair) -> Jwk {
     .unwrap();
     let mut jwk = Jwk::from_encoding_key(&encoding, algorithm.into()).unwrap();
     jwk.common.key_id = Some(KEY_ID.to_owned());
-    // Keycloak ignores a key that does not declare itself a signing key.
     jwk.common.public_key_use = Some(jsonwebtoken::jwk::PublicKeyUse::Signature);
     jwk
 }
@@ -300,8 +288,6 @@ fn audience_mapper(client_id: &str) -> serde_json::Value {
     })
 }
 
-/// The claims of an access token Keycloak returned over this direct
-/// connection; the resource server, not this client, verifies signatures.
 fn claims(token: &crate::token::Token) -> Claims {
     let bearer = token.header.to_str().unwrap();
     jsonwebtoken::dangerous::insecure_decode::<Claims>(bearer.strip_prefix("Bearer ").unwrap())
@@ -383,8 +369,7 @@ async fn refusals_carry_the_error_code_keycloak_reports() {
         AcquisitionError::Rejected(Rejection::InvalidScope)
     );
 
-    // RFC 8693 section 2.2.2 reports an unusable subject token as
-    // `invalid_request`, so it is not distinguishable from a malformed form.
+    // RFC 8693 §2.2.2
     let subject = SecretString::from("not-a-token");
     assert_eq!(
         registered

@@ -170,7 +170,6 @@ async fn publisher_admits_explicit_default_persistence_without_a_dead_letter_str
         .unwrap();
 }
 
-/// Fixture byte count follows the NATS header framing, independently of adapter sizing.
 fn encoded_headers(headers: &async_nats::HeaderMap) -> usize {
     let mut encoded = String::from("NATS/1.0\r\n");
     for (name, values) in headers.iter() {
@@ -183,14 +182,11 @@ fn encoded_headers(headers: &async_nats::HeaderMap) -> usize {
     encoded.len()
 }
 
-/// Independent native line encoding, including the replacement publication ID.
 fn transfer_additions(subject: &str, stream: &str) -> usize {
     let id = "x".repeat(68);
     format!("Message-Id: {id}\r\nNats-Msg-Id: {id}\r\nOriginal-Subject: {subject}\r\nDead-Letter-Reason: permanent\r\nNats-Expected-Stream: {stream}\r\n").len()
 }
 
-// Six retained fields can each gain a space and a CR. The block can also
-// gain a version-line CR, a final LF, and a blank CRLF.
 const TRANSFER_FRAMING_RESERVE_BYTES: usize = 16;
 
 #[tokio::test]
@@ -433,8 +429,6 @@ async fn selected_routes_without_handlers_obey_the_native_header_ceiling() {
         fixture.jetstream.update_stream(config).await.unwrap();
         let mut options = options(&fixture, Some(consumer_options(&fixture)), 1024);
         options.consumer.as_mut().unwrap().filter_subject = format!("{}.events.>", fixture.subject);
-        // Both the handled route and selected publish-only route lie below this
-        // filter; no long subject enters a broker control line during admission.
         let mut source = fixture
             .jetstream
             .get_stream(&fixture.stream)
@@ -510,8 +504,6 @@ async fn admission_names_the_broker_limit_that_cannot_carry_one_delivery() {
         .max_payload;
     let (_guard, logged) = capture_logs();
 
-    // One delivery is the payload limit plus 8 KiB of headers, and the
-    // server bounds the two together.
     let refused = Box::pin(Messaging::connect(
         options(&fixture, None, server_max_payload),
         deadline(),
@@ -525,7 +517,6 @@ async fn admission_names_the_broker_limit_that_cannot_carry_one_delivery() {
         "{refused:?}"
     );
 
-    // A consumer's source stream must bound its own messages.
     let unbounded = format!("{}_UNBOUNDED", fixture.stream);
     fixture
         .jetstream
@@ -551,7 +542,6 @@ async fn admission_names_the_broker_limit_that_cannot_carry_one_delivery() {
         "{refused:?}"
     );
 
-    // A stream that admits more than one delivery is refused too.
     let refused = Box::pin(Messaging::connect(
         options(&fixture, Some(consumer_options(&fixture)), 512),
         deadline(),

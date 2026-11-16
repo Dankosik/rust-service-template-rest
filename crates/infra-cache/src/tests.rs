@@ -64,7 +64,6 @@ fn temp_file(contents: impl AsRef<[u8]>) -> tempfile::NamedTempFile {
     file
 }
 
-/// Names the leaked secret by position so the failure never reprints it.
 fn assert_no_leak(err: &(impl std::fmt::Display + std::fmt::Debug), secrets: &[&str]) {
     let rendered = format!("{err} {err:?}");
     for (index, secret) in secrets.iter().enumerate() {
@@ -211,13 +210,11 @@ async fn serve_resp(
         if socket.observed.silence_all.load(Ordering::SeqCst)
             || socket.id <= socket.observed.silence_through.load(Ordering::SeqCst)
         {
-            // Keep reading to see EOF and count commands, never answering.
             continue;
         }
         if arguments.first().is_some_and(|command| command == "AUTH")
             && socket.observed.silence_auth.load(Ordering::SeqCst)
         {
-            // Keep observing the socket's actual EOF while AUTH has no reply.
             continue;
         }
         let auth_error = format!(

@@ -118,7 +118,6 @@ async fn assertion_header_and_claims_are_verifiable_and_two_requests_differ_in_j
         assert_eq!(claims.aud, ASSERTION_AUDIENCE);
         assert_eq!(claims.exp - claims.iat, 60);
         assert_eq!(claims.iat, claims.nbf);
-        // Dated ten seconds back for a provider whose clock is behind.
         let now = jsonwebtoken::get_current_timestamp();
         assert!((10..=15).contains(&(now - claims.iat)));
         assert_ne!(claims.jti, "");
@@ -280,8 +279,6 @@ async fn exchange_rejects_a_token_when_processing_crosses_the_attempt_deadline()
                 .labels()
                 .any(|label| label.key() == "outbound.outcome" && label.value() == "response")
         {
-            // The transport has accepted the buffered response. Cross the
-            // attempt deadline before control returns to OAuth for decoding.
             advance_during_metric(Duration::from_secs(5));
         }
     });
@@ -316,7 +313,6 @@ async fn a_token_that_expires_after_acquisition_is_not_sent_to_the_resource() {
                 .labels()
                 .any(|label| label.key() == "outcome" && label.value() == "success")
         {
-            // Advance after successful admission, before returning to the binding.
             advance_during_metric(Duration::from_secs(1));
         }
     });
@@ -421,8 +417,6 @@ async fn cancellation_at_provider_completion_leaves_a_live_caller_its_own_attemp
                     caller.cancel();
                 }
             });
-            // The real provider response is already decoded when its terminal
-            // counter registers, so cancellation arrives during acquisition polling.
             let _recorder = metrics::set_default_local_recorder(&recorder);
             fixture.token_json(
                 StatusCode::BAD_REQUEST,

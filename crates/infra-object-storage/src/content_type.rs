@@ -1,6 +1,5 @@
 const MAX_CONTENT_TYPE_BYTES: usize = 1024;
 
-/// Visible ASCII, spaces and tabs, at most 1024 bytes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContentType(String);
 

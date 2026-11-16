@@ -36,8 +36,6 @@ pub(super) async fn bind_listeners(
     watch_listener(Listeners::HEALTH, health, background);
     tracing::info!(addr = %health.local_addr(), "http listener bound");
     if let Some(addr) = config.observability.metrics.addr {
-        // Liveness is served here as well, as in the service, so one probe
-        // target fits both processes.
         let routes = diagnostics_router(metrics.clone()).merge(infra_http::liveness_router());
         let diagnostics = resources
             .listeners

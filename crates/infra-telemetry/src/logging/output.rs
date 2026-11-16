@@ -8,14 +8,9 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 pub(super) const MAX_RECORD_BYTES: usize = 16 * 1024;
-/// With [`MAX_RECORD_BYTES`] and the capture limits, bounds the memory the
-/// log pipeline can hold.
 const QUEUE_RECORDS: usize = 512;
-/// Coalesces buffered writes before flushing an idle sink; once clean, the
-/// writer parks without a timer until a record arrives or shutdown closes.
 const FLUSH_INTERVAL: Duration = Duration::from_millis(10);
 const JOIN_POLL: Duration = Duration::from_millis(1);
-/// Above every [`LoggerShutdownReasons`] bit, so the drain state holds both.
 const DRAINING: u32 = 1 << 31;
 const DROPPED_METRIC: &str = "telemetry_log_records_dropped_total";
 const SINK_ERRORS_METRIC: &str = "telemetry_log_sink_errors_total";
@@ -25,7 +20,6 @@ thread_local! {
     static WRITER_CONTEXT: Cell<bool> = const { Cell::new(false) };
 }
 
-// The shared hook must not recursively submit the writer's own panic.
 pub(super) fn on_writer_thread() -> bool {
     WRITER_CONTEXT.try_with(Cell::get).unwrap_or(false)
 }
@@ -74,7 +68,6 @@ impl SinkOperation {
     }
 }
 
-/// Local observations, independent of recorder installation or scrape timing.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct LogSnapshot {
     pub(super) dropped: EnumMap<DropReason, u64>,
@@ -143,10 +136,6 @@ impl Counters {
 
 #[derive(Debug)]
 struct Shared {
-    // No formatting, sink calls, or waits occur under this admission lock.
-    // `submit` holds a read guard across its check and send and `close` drops
-    // the shutdown sender under the write guard, so once `close` returns no
-    // record is admitted and an idle worker wakes immediately.
     closed: RwLock<Option<crossbeam_channel::Sender<()>>>,
     drain: AtomicU32,
     counters: Counters,
@@ -157,11 +146,7 @@ impl Shared {
         let _ = self.closed.write().take();
     }
 
-    /// Latches `reason` only once [`LoggerGuard::begin_shutdown`] has marked
-    /// the drain; earlier failures do not make a later drain incomplete.
     fn latch_drain_failure(&self, reason: LoggerShutdownReasons) {
-        // The marker and each completed observation share one atomic ordering.
-        // A failure already in flight is included if it finishes after begin.
         let _ = self
             .drain
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |state| {
@@ -214,7 +199,6 @@ impl Output {
     }
 }
 
-/// Dropping the guard closes admission and detaches without waiting or I/O.
 #[derive(Debug)]
 #[must_use = "retain the logger guard and explicitly shut it down before process exit"]
 pub struct LoggerGuard {
@@ -224,7 +208,6 @@ pub struct LoggerGuard {
 }
 
 impl LoggerGuard {
-    /// Repeated calls retain the original marker and all latched failures.
     pub fn begin_shutdown(&self) {
         self.shared.drain.fetch_or(DRAINING, Ordering::Relaxed);
     }
@@ -234,7 +217,6 @@ impl LoggerGuard {
         self.shared.counters.snapshot()
     }
 
-    /// Needs no async runtime and does no sink I/O on the caller thread.
     #[must_use]
     pub fn shutdown(mut self, deadline: Instant) -> LoggerShutdown {
         self.begin_shutdown();
@@ -283,8 +265,6 @@ impl LoggerGuard {
             )]
             thread::sleep(remaining.min(JOIN_POLL));
         }
-        // Taken only once finished: joining an unfinished writer would block
-        // past the deadline, while `Drop` detaches it.
         if let Some(worker) = self.worker.take()
             && worker.join().is_err()
         {
@@ -316,8 +296,6 @@ pub(super) fn start<W: Write + Send + 'static>(writer: W) -> io::Result<(Output,
         .name("telemetry-writer".into())
         .spawn(move || {
             WRITER_CONTEXT.set(true);
-            // The closure owns the sink/receiver so both are destroyed before ack,
-            // including during an unwind. Never retain or format the panic payload.
             let shared: &Shared = &worker_shared;
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
                 write_records(writer, records, &shutdown_rx, shared);
@@ -348,8 +326,6 @@ fn write_records<W: Write>(
     shared: &Shared,
 ) {
     let mut dirty = false;
-    // The sink accepted part of a line before failing; the next line starts
-    // on a new one, or it would be glued onto that prefix.
     let mut torn = false;
     loop {
         let record = if let Ok(record) = records.try_recv() {
@@ -439,8 +415,6 @@ pub(super) fn describe_metrics() {
     );
 }
 
-/// Publish absolute process totals so observations before recorder installation
-/// and repeated upkeep calls neither disappear nor count twice.
 pub(super) fn publish() {
     let snapshot = TOTALS.snapshot();
     for (reason, &dropped) in &snapshot.dropped {
@@ -704,8 +678,6 @@ mod tests {
             gate.entered
                 .recv_timeout(TEST_TIMEOUT)
                 .expect("writer entered sink");
-            // Retain the real thread solely to join fixture cleanup after the
-            // assertion. The deadline branch returns before a join is eligible.
             let worker = guard.worker.take().expect("owned writer thread");
             let began = Instant::now();
             if explicit_shutdown {
@@ -728,8 +700,6 @@ mod tests {
             assert!(!worker.is_finished());
             output.submit(record(b"rejected after close\n"));
             gate.release.send(()).expect("release fixture for cleanup");
-            // The fixture's own recv has a timeout, so even a broken output
-            // cleanup cannot leave this join waiting on an unbounded gate.
             drop(output);
             worker.join().expect("join released fixture");
             assert_eq!(
@@ -808,8 +778,6 @@ mod tests {
                     }
                 }
                 let value = closed.expect("pre-recorder loss has a finite metric");
-                // Other independent logger tests may increment process totals.
-                // Absolute publication must stay within the observed interval.
                 assert!(
                     (before..=after).contains(&value),
                     "{value}; expected {before}..={after}"

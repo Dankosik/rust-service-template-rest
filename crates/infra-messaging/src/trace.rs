@@ -19,9 +19,6 @@ fn trace_header(key: &str) -> Option<(&'static str, HeaderName, usize)> {
     TRACE_HEADERS.into_iter().find(|(name, _, _)| *name == key)
 }
 
-/// Only the two trace headers are admitted, at most [`TRACEPARENT_MAX_BYTES`]
-/// and [`TRACESTATE_MAX_BYTES`] of them, so with the five identity headers
-/// they stay far below [`crate::wire::HEADER_LIMIT_BYTES`].
 pub(crate) fn inject(span: &tracing::Span, headers: &mut HeaderMap) {
     let context = span.context();
     global::get_text_map_propagator(|propagator| {
@@ -29,14 +26,11 @@ pub(crate) fn inject(span: &tracing::Span, headers: &mut HeaderMap) {
     });
 }
 
-/// Makes the publisher's span the parent of `span`, which must not have been
-/// entered yet. A delivery without a valid trace context starts its own trace.
 pub(crate) fn set_remote_parent(span: &tracing::Span, headers: &HeaderMap) {
     let context = global::get_text_map_propagator(|propagator| {
         propagator.extract_with_context(&opentelemetry::Context::new(), &HeaderExtractor(headers))
     });
     if context.span().span_context().is_valid() {
-        // Without an OpenTelemetry layer there is no span to attach to.
         let _ = span.set_parent(context);
     }
 }
@@ -48,8 +42,6 @@ impl Injector for HeaderInjector<'_> {
         let Some((_, name, max_bytes)) = trace_header(key) else {
             return;
         };
-        // A header value is written to the wire as is, so it must not carry a
-        // line break.
         if !value.is_empty()
             && value.len() <= max_bytes
             && value

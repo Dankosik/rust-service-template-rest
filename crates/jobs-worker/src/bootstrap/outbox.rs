@@ -16,7 +16,6 @@ pub(super) fn admit_pool_inputs(
     config
         .jobs
         .validate_pool_capacity_with_outbox(postgres, capabilities.jobs.is_some())?;
-    // Retaining a message consumer already validated the producer policy on this config.
     if capabilities.messages.is_none() {
         config.messaging.validate_producer()?;
     }
@@ -27,7 +26,6 @@ pub(super) async fn publisher(
     resources: &Resources,
     ordinary: Option<&Engine>,
 ) -> Result<Engine, WorkerError> {
-    // `connect_messaging` admitted the broker before any engine is built.
     let messaging = resources
         .admitted_messaging()
         .ok_or(MessagingError::Connection)?;
@@ -39,7 +37,6 @@ pub(super) async fn publisher(
     }) {
         return Err(WorkerError::PublisherKindConflict);
     }
-    // One listener and one retention loop serve both engines of this process.
     let publisher = match ordinary {
         Some(ordinary) => ordinary.beside(kinds, NonZeroU32::MIN),
         None => Engine::new(

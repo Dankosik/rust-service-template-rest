@@ -1,33 +1,18 @@
 use crate::de::VALUE_FREE;
 
-/// Sections whose values stay out of a decode failure whichever source set
-/// them; their `Debug` output redacts the same trust inputs.
 const VALUE_FREE_SECTIONS: &[&str] = &[
     // template:begin client-integrations:load-value-free-section
     "integrations",
     // template:end client-integrations:load-value-free-section
 ];
 
-/// Render a decode failure without a value a variable supplied.
-///
-/// Variables are the only secret source, and config-rs and serde quote the
-/// value they refuse, sometimes lowercased, trimmed, or parsed. So a failure
-/// at a key a variable sets is rebuilt from its key and its expected form,
-/// never from the decoder's text, and so is one inside a section of
-/// [`VALUE_FREE_SECTIONS`]. Only a message that names keys alone (an unknown
-/// or missing field) or carries [`VALUE_FREE`] is shown as written, as is a
-/// failure at any other key only a file sets. `variable_keys` are the dotted
-/// keys the variables of this load set, and `carrier` names where those
-/// variables come from.
 pub(super) fn describe_rejection(
     error: &config::ConfigError,
     variable_keys: &[String],
     carrier: &str,
 ) -> String {
     let (key, rejection) = classify(error);
-    // `urls[0]` is an element of the value at `urls`.
     let value_key = key.map(|key| key.split_once('[').map_or(key, |(head, _)| head));
-    // A failure that names no key may come from any source.
     let variable_may_set = value_key.is_none_or(|key| {
         variable_keys
             .iter()
@@ -80,8 +65,6 @@ fn classify(error: &config::ConfigError) -> (Option<&str>, Rejection<'_>) {
         {
             (None, Rejection::AsWritten)
         }
-        // serde ends these forms with its own `, expected <form>`; a value
-        // quoted earlier in the message cannot follow the last one.
         config::ConfigError::Message(message)
             if QUOTES_VALUE.iter().any(|form| message.starts_with(form)) =>
         {
@@ -114,10 +97,6 @@ mod tests {
         describe_rejection(error, &["http.addr".to_owned()], "the environment")
     }
 
-    /// The classification matches serde's own wording. A serde release that
-    /// rewords a form fails here instead of silently changing what an
-    /// operator sees: a value form that stops matching loses its expected
-    /// form, and a key-only form that stops matching loses its key names.
     #[test]
     fn serde_value_forms_keep_the_expected_form_and_drop_the_value() {
         for error in [

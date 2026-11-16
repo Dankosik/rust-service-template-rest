@@ -5,7 +5,6 @@ use std::assert_matches;
 async fn a_client_requiring_a_subject_refuses_a_request_without_one_before_any_io() {
     let fixture = Fixture::new().await;
     let credentials = fixture.credentials(&[], None);
-    // A reusable service token is cached, so a fallback would have one to send.
     credentials
         .http(fixture.resource_client())
         .execute(fixture.request(), deadline(Duration::from_secs(10)))
@@ -256,7 +255,7 @@ async fn token_failures_are_sanitized_and_never_dispatch_the_resource() {
             AcquisitionError::InvalidResponse,
         ),
         (
-            // RFC 6749 section 5.1 defines a number; a string is not admitted.
+            // RFC 6749 §5.1
             json_response(
                 StatusCode::OK,
                 &serde_json::json!({"access_token":"token", "token_type":"Bearer", "expires_in":"3600"}),

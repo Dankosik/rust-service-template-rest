@@ -1,9 +1,3 @@
-//! `axum::serve` is intentionally unconfigurable: it sets no timer, so
-//! hyper's header-read timeout is silently disabled, and it exposes no
-//! header-size or connection bounds. This accept loop owns those limits and
-//! the graceful drain; the composition root decides when to stop and how
-//! long to wait.
-
 use std::future::Future;
 use std::hash::{BuildHasher as _, Hasher as _, RandomState};
 use std::mem::DropGuard;
@@ -33,31 +27,9 @@ pub(crate) const CONNECTIONS_REFUSED_METRIC: &str = "http_server_connections_ref
 
 #[derive(Clone, Copy, Debug)]
 pub struct ServerOptions {
-    /// Time an HTTP/1 connection may take to deliver a complete request head.
-    /// hyper restarts it whenever an HTTP/1 connection goes idle, so it is
-    /// also the HTTP/1 keep-alive idle bound. hyper starts it only once it
-    /// knows the protocol, so the same duration first bounds that decision: a
-    /// client that connects and sends nothing, or only the start of the
-    /// HTTP/2 preface, is closed after it. The two waits can add, not replace.
-    /// HTTP/2 request headers are bounded by `max_header_bytes`, not by this
-    /// value; HTTP/2 idle uses a separate PING cadence.
     pub header_read_timeout: Duration,
-    /// Read-buffer ceiling for one request head. HTTP/1 overflow answers
-    /// hyper-native 431 before the router (not a [`crate::Problem`]). hyper
-    /// refuses an HTTP/1 buffer below 8 KiB, so a smaller value is raised to
-    /// 8 KiB for HTTP/1. HTTP/2 applies it as the uncompressed header-list
-    /// size, capped at `u32::MAX`.
     pub max_header_bytes: usize,
-    /// Accepted connections at once; `None` accepts without a bound.
     pub max_connections: Option<NonZeroU32>,
-    /// Age from socket acceptance, including TLS preparation, after which a
-    /// connection is told to finish and close as at drain (one still being
-    /// prepared is dropped). HTTP/2 gets GOAWAY and open streams complete;
-    /// HTTP/1 closes after the response in flight. A reconnecting client is
-    /// balanced again, which a long-lived connection behind a connection-level
-    /// balancer never is. Each age is spread by up to 10% either way, as grpc-go
-    /// does, so connections opened together do not close together. `None` keeps
-    /// a connection for as long as its peer does.
     pub max_connection_age: Option<Duration>,
 }
 
@@ -75,7 +47,6 @@ pub enum ServerError {
     AcceptTimeout,
 }
 
-/// An unexpected accept-loop termination, independent of joining the task.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AcceptFailure {
     Ended,
@@ -85,12 +56,7 @@ pub enum AcceptFailure {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Drained {
     Complete,
-    /// The accept loop joined, but the budget expired with connections still
-    /// open. Force cancellation was requested; completion is not confirmed.
-    /// `remaining_connections` is the count at force cancellation.
-    TimedOut {
-        remaining_connections: usize,
-    },
+    TimedOut { remaining_connections: usize },
 }
 
 #[derive(Debug)]
@@ -104,8 +70,6 @@ pub struct Server {
 
 #[derive(Clone, Debug)]
 struct ConnectionShutdown {
-    /// Stop accepting and ask every connection to finish its current request
-    /// and close; a connection still being prepared is dropped.
     finish: CancellationToken,
     force: CancellationToken,
 }
@@ -165,9 +129,6 @@ impl BoundListener {
     }
 
     // template:begin grpc:http-bound-listener-tls
-    /// The handshake is bounded by [`ServerOptions::header_read_timeout`].
-    /// A handshake error, timeout, or drain closes the connection before any
-    /// request can be in flight.
     #[must_use]
     pub fn serve_tls(
         self,
@@ -206,8 +167,6 @@ impl BoundListener {
 }
 
 impl Server {
-    /// Initialize request-visible state before calling: the accept task can
-    /// serve requests before this returns.
     pub async fn bind(
         addr: SocketAddr,
         app: Router,
@@ -221,11 +180,6 @@ impl Server {
         self.local_addr
     }
 
-    /// Observe a sticky accept-loop fault without borrowing or joining this
-    /// server. An expected stop leaves this future pending. The first poll
-    /// reports a fault already recorded, so a non-blocking check may poll once
-    /// (`now_or_never`); after a normal stop or sender drop the future stays
-    /// pending.
     pub fn accept_failure(&self) -> impl Future<Output = AcceptFailure> + Send + 'static + use<> {
         let mut failure = self.accept_failure.clone();
         async move {
@@ -241,22 +195,14 @@ impl Server {
         }
     }
 
-    /// [`ServerError::AcceptTask`] (accept loop failed) still runs the connection
-    /// drain within the same deadline but drops its [`Drained`] result.
-    /// [`ServerError::AcceptTimeout`] (termination unconfirmed) force-cancels the
-    /// remaining connections and returns without joining them.
     pub async fn drain(mut self, budget: Duration) -> Result<Drained, ServerError> {
         let deadline = deadline_after(budget);
         self.connection_shutdown.finish.cancel();
-        // Keep the handle in self across await: dropping this waiter must
-        // still abort acceptance rather than detach its task.
         let Ok(joined) = timeout_at(deadline, &mut self.accept_loop).await else {
             self.connection_shutdown.force.cancel();
             return Err(ServerError::AcceptTimeout);
         };
 
-        // Close the tracker only after the join: the accept loop is the only
-        // task that spawns connections into it.
         self.connections.close();
         let drained = if timeout_at(deadline, self.connections.wait()).await.is_ok() {
             Drained::Complete
@@ -271,8 +217,6 @@ impl Server {
     }
 }
 
-/// `Instant + Duration` panics past the clock's range, so a budget too long to
-/// represent waits as long as tokio's own `timeout` would: thirty years.
 fn deadline_after(budget: Duration) -> Instant {
     const FAR_FUTURE: Duration = Duration::from_hours(24 * 365 * 30);
     let now = Instant::now();
@@ -281,51 +225,25 @@ fn deadline_after(budget: Duration) -> Instant {
 
 impl Drop for Server {
     fn drop(&mut self) {
-        // Covers a dropped server and a cancelled drain waiter. These are
-        // requests only; synchronous Drop cannot confirm task completion.
         self.connection_shutdown.finish.cancel();
         self.connection_shutdown.force.cancel();
     }
 }
 
-/// HTTP/2 PING cadence, independent of `header_read_timeout` (the HTTP/1 idle bound).
 const HTTP2_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(20);
 const HTTP2_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// Fixed HTTP/2 receive windows for this listener and every
-/// `infra_grpc::Client`. h2 0.4 closes a connection with
-/// `ENHANCE_YOUR_CALM` once its unread DATA frames under 256 bytes exhaust a
-/// budget of half the initial connection window (`DataFrameBudget::Auto`);
-/// hyper exposes no other knob for it. Adaptive windows pin that window to
-/// 65,535 bytes, so about 140 unread tiny frames (a token-by-token stream, a
-/// burst of small records) reset every call on the connection. 8 MiB gives
-/// a 4 MiB budget, over 16,000 unread tiny frames. A window is only what a
-/// peer may send ahead of the reader, so a stalled connection holds at most
-/// the connection window, half the 16 MiB adaptive windows could reach.
 pub const HTTP2_CONNECTION_WINDOW: u32 = 8 * 1024 * 1024;
-/// Per-stream share of [`HTTP2_CONNECTION_WINDOW`], so one stalled stream
-/// cannot take the whole connection. 2 MiB is hyper's client default.
 pub const HTTP2_STREAM_WINDOW: u32 = 2 * 1024 * 1024;
 
-/// Concurrent HTTP/2 streams per connection. hyper's default of 200 queues
-/// every call beyond it silently on the one channel a service keeps to its
-/// neighbour, below the default `max_in_flight` of 256 a caller may send.
-/// Admission, which queues a request for a permit until `request_timeout`
-/// and then sheds it, is the intended limit; this only has to stay above it.
-/// `http.max_in_flight` accepts up to 100,000, so a value above 4096 brings
-/// the silent stream queue back: raise this constant with it. Memory is
-/// bounded by the connection window, not by the stream count.
 const HTTP2_MAX_CONCURRENT_STREAMS: u32 = 4096;
 
 fn connection_builder(options: ServerOptions) -> auto::Builder<TokioExecutor> {
     let mut builder = auto::Builder::new(TokioExecutor::new());
     builder
         .http1()
-        // hyper panics when `header_read_timeout` is set without a timer, and
-        // `axum::serve` sets none, which is why it cannot bound header reads.
         .timer(TokioTimer::new())
         .header_read_timeout(options.header_read_timeout)
-        // Direct callers can bypass configuration validation.
         .max_buf_size(
             options
                 .max_header_bytes
@@ -335,11 +253,7 @@ fn connection_builder(options: ServerOptions) -> auto::Builder<TokioExecutor> {
     builder
         .http2()
         .timer(TokioTimer::new())
-        // `max_header_bytes` here is the uncompressed HTTP/2 header-list
-        // size, not the HTTP/1 read buffer whose overflow is hyper-native 431.
         .max_header_list_size(u32::try_from(options.max_header_bytes).unwrap_or(u32::MAX))
-        // HTTP/2 PING keep-alive is not `http.header_read_timeout`: that key
-        // is the HTTP/1 idle bound.
         .keep_alive_interval(Some(HTTP2_KEEP_ALIVE_INTERVAL))
         .keep_alive_timeout(HTTP2_KEEP_ALIVE_TIMEOUT)
         .initial_connection_window_size(HTTP2_CONNECTION_WINDOW)
@@ -348,7 +262,6 @@ fn connection_builder(options: ServerOptions) -> auto::Builder<TokioExecutor> {
     builder
 }
 
-// A failed preparation closes the connection before hyper owns it.
 fn serve_listener<F, Fut, IO>(
     bound: BoundListener,
     app: Router,
@@ -375,7 +288,6 @@ where
         "Accepted connections closed without a response because the connection cap was reached."
     );
     if options.max_connections.is_some() {
-        // Published at zero, so a scrape tells "never refused" from "not exported".
         metrics::counter!(CONNECTIONS_REFUSED_METRIC).increment(0);
     }
     let (failure, accept_failure) = watch::channel(None);
@@ -441,8 +353,6 @@ async fn accept_loop<F, Fut, IO>(
         let (stream, peer) = match accepted {
             Ok(accepted) => accepted,
             Err(err) => {
-                // Transient accept errors (EMFILE, ECONNABORTED) recover on
-                // their own; back off briefly instead of spinning.
                 tracing::warn!(error = %err, "http_accept_failed");
                 tokio::select! {
                     () = finish.cancelled() => break,
@@ -455,18 +365,12 @@ async fn accept_loop<F, Fut, IO>(
             None => None,
             Some(Ok(permit)) => Some(permit),
             Some(Err(_)) => {
-                // At the connection cap, close the socket without an HTTP
-                // response. The router can return 503 with Retry-After when
-                // it sheds a request at its handler limit.
                 metrics::counter!(CONNECTIONS_REFUSED_METRIC).increment(1);
                 tracing::debug!(%peer, "http_connection_refused");
                 drop(stream);
                 continue;
             }
         };
-        // HTTP/2 writes headers, data, and trailers as separate small
-        // segments; with Nagle on, each can wait for the peer's delayed ACK
-        // (about 40 ms). Failing to set it only costs latency.
         let _ = stream.set_nodelay(true);
         let connection = serve_connection(
             stream,
@@ -478,14 +382,10 @@ async fn accept_loop<F, Fut, IO>(
             connection_shutdown.clone(),
         );
         connections.spawn(async move {
-            // Keep admission for connection preparation and the entire hyper
-            // connection, releasing it on every exit path.
             let _permit = permit;
             connection.await;
         });
     }
-    // Dropping the listener here refuses new connections at once; the
-    // accepted ones keep running in their tracked tasks.
     drop(listener);
 }
 
@@ -513,7 +413,6 @@ where
         let serve = async move {
             let closing = wind_down(&finish, age_deadline);
             tokio::pin!(closing);
-            // No request can be in flight before preparation ends.
             let io = tokio::select! {
                 biased;
                 () = closing.as_mut() => None,
@@ -523,9 +422,6 @@ where
                 return;
             };
             let io = SniffDeadline::new(io, options.header_read_timeout);
-            // Not `serve_connection_with_upgrades`: hyper hands an upgraded socket
-            // to a task outside this one, so drain and the connection cap would
-            // stop counting it while it stays open.
             let service = ServiceBuilder::new()
                 .layer(Extension(ConnectionInfo {
                     scheme,
@@ -551,7 +447,6 @@ where
             biased;
             () = async {
                 force.cancelled().await;
-                // select drops the losing connection future before its branch runs.
                 forced.store(true, Ordering::Relaxed);
             } => {},
             () = serve => {},
@@ -569,8 +464,6 @@ async fn wind_down(finish: &CancellationToken, age_deadline: Option<Instant>) {
     }
 }
 
-/// `age` scaled by a factor drawn from 0.9 to 1.1. The draw is the standard
-/// library's randomly keyed hasher: enough to spread closes, not a secret.
 fn spread(age: Duration) -> Duration {
     const AGE_SPREAD_PERMILLE: u32 = 100;
     let draw = RandomState::new().build_hasher().finish() % u64::from(2 * AGE_SPREAD_PERMILLE + 1);

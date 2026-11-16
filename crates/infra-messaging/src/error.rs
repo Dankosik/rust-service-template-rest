@@ -16,9 +16,6 @@ pub enum MessagingError {
     Cancelled,
     #[error("messaging resource is draining or its consumer failed")]
     Unavailable,
-    /// The configured payload limit is zero or cannot fit one publication, or
-    /// the server, a stream or the consumer's pull budget cannot carry what
-    /// the configured limits admit.
     #[error("messaging resource bounds are invalid")]
     Bounds,
 }
@@ -68,8 +65,6 @@ pub enum PublishError {
     Ambiguous,
 }
 
-/// Carries no cause: log it in the handler, which runs inside the delivery
-/// span, so the record shares its trace with `messaging_delivery_failed`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum HandlerError {
     #[error("event handler requested retry")]

@@ -22,17 +22,8 @@ use crate::problem::responses::{
 };
 use crate::problem::{Code, Problem, body_too_large, sanitized_internal_error};
 
-/// Webhook ingress results. Label `outcome` is `accepted`, `duplicate`,
-/// `rejected`, `unavailable`, `deadline_exceeded`, or `unknown_endpoint`.
-/// A configured endpoint adds its ID as `endpoint`, and a rejection adds a static
-/// `reason`: the receiver's, or `body_too_large` / `body_unreadable` when the
-/// body could not be read within its limit. A requested ID that matches no configured
-/// endpoint is caller-controlled and never becomes a label.
 pub(crate) const WEBHOOK_INGRESS_OUTCOMES_METRIC: &str = "webhook_ingress_outcomes_total";
 
-/// The route is retained when the inbound profile is selected even if no
-/// endpoint is configured.  That inert state deliberately answers unknown
-/// endpoint before a body is read or signature work starts.
 #[derive(Clone, derive_more::Debug)]
 pub struct WebhookState {
     #[debug("{}", active.active.is_some())]
@@ -47,8 +38,6 @@ impl WebhookState {
         }
     }
 
-    /// A receiver whose endpoint bindings have already passed startup
-    /// admission in the composition root.
     #[must_use]
     pub fn active(receiver: Receiver) -> Self {
         Self {
@@ -163,8 +152,6 @@ enum WebhookProblemResponses {
 #[openapi(components(responses(NotFound, WebhookRejected, ServiceUnavailable, GatewayTimeout)))]
 struct WebhookComponents;
 
-/// The state is any type that hands out a [`WebhookState`], so a route mounted
-/// without one does not compile.
 #[must_use]
 pub fn router<S>() -> OpenApiRouter<S>
 where
@@ -259,8 +246,6 @@ async fn receive(
             metrics.record_rejection(rejection.reason());
             Problem::new(Code::WebhookRejected).into_response()
         }
-        // The store's pool acquisition shares the same cutoff and can report
-        // its failure before the outer timeout is polled.
         Err(ReceiveError::Unavailable) if tokio::time::Instant::now() >= attempt_end => {
             receipt_deadline_exceeded(metrics)
         }
@@ -388,11 +373,6 @@ impl EndpointMetrics {
     }
 }
 
-/// Whether a body read failed at a length limit. axum boxes the transport
-/// limit's error into [`axum::Error`] when a request has no `Content-Length`,
-/// so the limit can sit anywhere in the source chain. The inbound-webhooks
-/// and http-idempotency profiles each keep a copy: a shared one in
-/// `problem.rs` is dead code in a projection that drops both.
 fn caused_by_length_limit(error: &(dyn std::error::Error + 'static)) -> bool {
     shared_rules::error_chain::causes(error)
         .any(<dyn std::error::Error>::is::<http_body_util::LengthLimitError>)
@@ -440,7 +420,6 @@ mod tests {
             let _ = state.active.unknown_endpoint();
             let _ = cloned.active.unknown_endpoint();
         });
-        // The snapshot lists its keys in no fixed order.
         let mut samples: Vec<(Vec<Label>, u64)> = snapshotter
             .snapshot()
             .into_vec()

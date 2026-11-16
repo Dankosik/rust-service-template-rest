@@ -1,10 +1,3 @@
-//! No other production crate names the table; the integration tests seed and
-//! corrupt it directly. A feature's persistence adapter reaches
-//! the transaction's connection through the PostgreSQL provider, which the
-//! seam never re-exports. `http_idempotency_records` intentionally omits a
-//! caller-identity index because verified caller strings are unbounded for a
-//! btree key and no runtime query filters by caller alone.
-
 mod attempt;
 mod maintenance;
 
@@ -19,18 +12,11 @@ pub use attempt::{
 pub use infra_postgres::CleanupError;
 pub use maintenance::{CLEANUP_REMOVED_METRIC, CLEANUP_RUNS_METRIC, StartupError};
 
-/// Every transaction of the store names its isolation, because the server
-/// default may be stricter. Arbitration needs a new snapshot per statement
-/// (see [`attempt`]), and under a stricter level the cleanup's row lock fails
-/// with a serialization error on a record replaced or removed since its
-/// snapshot, where this level re-checks the row.
 const READ_COMMITTED: TxOptions = TxOptions {
     isolation: Isolation::ReadCommitted,
     read_only: false,
 };
 
-// Leave room for adding the interval to the server timestamp. An interval
-// near the wire-format limit can encode successfully and still overflow there.
 const MAX_RETENTION_DAYS: u64 = 36_500;
 const MAX_RETENTION: Duration = Duration::from_hours(MAX_RETENTION_DAYS * 24);
 
@@ -51,7 +37,6 @@ impl Store {
         }
         Ok(Self {
             pool,
-            // SQLx rejects sub-microsecond precision when encoding a PostgreSQL interval.
             retention: Duration::new(retention.as_secs(), retention.subsec_micros() * 1_000),
         })
     }

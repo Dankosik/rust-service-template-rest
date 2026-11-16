@@ -1,8 +1,3 @@
-//! The span is built as the HTTP adapter's observe builds its own: only the
-//! operation name and kind are `tracing` fields because the JSON log layer serializes every
-//! span field on each record inside the call; RPC attributes go to the OpenTelemetry span
-//! alone and nothing is `Span::record`ed afterwards.
-
 use std::mem::DropGuard;
 use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, LazyLock, Once, OnceLock};
@@ -31,13 +26,10 @@ const CLIENT_STARTED: &str = "grpc_client_started_total";
 const CLIENT_DIAGNOSTIC_BYTES: usize = 1024;
 const CLIENT_HANDLED: &str = "grpc_client_handled_total";
 pub(crate) const CLIENT_HANDLING_SECONDS: &str = "grpc_client_handling_seconds";
-/// Prometheus client default buckets; explicit so `go-grpc-middleware` `_bucket` dashboard
-/// queries work when the recorder defaults differ.
 pub const HANDLING_SECONDS_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
 ];
 
-/// A metric left out of this list renders the default buckets.
 pub const HISTOGRAMS: &[(&str, &[f64])] = &[
     (SERVER_HANDLING_SECONDS, HANDLING_SECONDS_BUCKETS),
     (CLIENT_HANDLING_SECONDS, HANDLING_SECONDS_BUCKETS),
@@ -59,8 +51,6 @@ pub(crate) async fn observe(
         .instrument(call.span().clone());
     let mut response = match &fallback {
         None => answer.await,
-        // Disabled span: keep the caller's context current so it still reaches outbound
-        // calls.
         Some(context) => answer.with_context(context.clone()).await,
     }
     .unwrap_or_else(|_panic| crate::status::internal_status().into_http());
@@ -75,8 +65,6 @@ pub(crate) async fn observe(
     .map(axum::body::Body::new)
 }
 
-/// A call dropped before it finishes was abandoned by its caller and is recorded as
-/// `Canceled`, as grpc-go does.
 pub(crate) struct Call {
     handles: Arc<Handles>,
     side: Side,
@@ -112,8 +100,6 @@ impl Call {
         self.side
     }
 
-    /// Several catalog failures share one status code; during an incident which one is the
-    /// question.
     pub(crate) fn failed(&self, failure: service_failure::Code) {
         self.span.set_attribute("failure.code", failure.as_str());
         self.handles.failed(failure);
@@ -152,7 +138,6 @@ fn make_span<B>(
     span.set_attribute("rpc.system", "grpc");
     span.set_attribute("rpc.service", Arc::clone(&handles.service));
     span.set_attribute("rpc.method", Arc::clone(&handles.method));
-    // Tonic applies the channel's authority after the adapter starts the span.
     if let Some(destination) = destination {
         if let Some(host) = destination.host()
             && !host.is_empty()
@@ -184,7 +169,6 @@ pub(crate) fn record_shed() {
     metrics::counter!(SERVER_SHED).increment(1);
 }
 
-/// Keep the guard through admission waiting so cancellation records the wait too.
 #[must_use]
 pub(crate) fn admission_waiting() -> impl Drop {
     describe();
@@ -195,7 +179,6 @@ pub(crate) fn admission_waiting() -> impl Drop {
     })
 }
 
-/// Zero publication tells "never shed" from "not exported".
 pub(crate) fn register_shed() {
     describe();
     metrics::counter!(SERVER_SHED).increment(0);
@@ -211,10 +194,6 @@ static CLIENT_SERIES: LazyLock<Arc<Series>> = LazyLock::new(|| {
     }))
 });
 
-/// Handles are registered on first use so a call does not rebuild labels or look up the
-/// recorder. The server labels only described methods and counts other paths as `unknown`,
-/// so a caller-chosen path cannot create a series; clients share a finite, never-evicted
-/// candidate set. This limits observation, never routing.
 #[derive(derive_more::Debug)]
 #[debug("Series {{ .. }}")]
 pub(crate) struct Series {
@@ -226,7 +205,6 @@ pub(crate) struct Series {
 }
 
 enum Kind {
-    /// Fixed at startup, so finding handles takes no lock.
     Server {
         described: HashMap<Box<str>, OnceLock<Arc<Handles>>>,
     },
@@ -315,8 +293,6 @@ impl Series {
         if current.len() >= CLIENT_METHOD_LIMIT {
             return None;
         }
-        // Admission and handle registration share `admit_lock`. Racing
-        // first calls cannot allocate recorder series beyond the bound.
         let handles = self.register(path);
         let mut next = (**current).clone();
         next.insert(path.into(), Arc::clone(&handles));
@@ -365,8 +341,6 @@ impl Handles {
     }
 }
 
-/// Validated before any label is allocated. The public extension is forgeable, so a match
-/// still passes the global admission cap.
 fn client_path<B>(request: &http::Request<B>) -> Option<&str> {
     let method = request.extensions().get::<tonic::GrpcMethod<'static>>()?;
     if method.service().len() > CLIENT_COMPONENT_LIMIT
@@ -494,19 +468,12 @@ mod tests {
         assert_eq!(code_name(tonic::Code::Unauthenticated), "Unauthenticated");
     }
 
-    /// One recorder owns the process-wide client handles; resetting that registry for tests
-    /// would evade its bound.
     #[tokio::test]
     #[expect(
         clippy::too_many_lines,
         reason = "one process-wide metric registry must cover admission and terminal paths without a test-only reset"
     )]
     async fn client_observation_is_global_bounded_and_terminal_exactly_once() {
-        // The registry pins each series to the recorder current at its first
-        // use, so another test in this binary that starts a client call first
-        // (`client::tests`) leaves those series outside this test's recorder.
-        // nextest runs each test in its own process; `cargo test` shares one,
-        // so there the test runs again alone in a child process.
         const OWN_PROCESS: &str = "INFRA_GRPC_CLIENT_OBSERVATION_OWN_PROCESS";
         const WAIT: Duration = Duration::from_secs(5);
         #[expect(
@@ -772,8 +739,6 @@ mod tests {
         .unwrap();
         drop(response);
 
-        // Raw paths, mismatched public extensions and extra URI segments must
-        // never reserve a label, even before the admission set is saturated.
         let oversized: &'static str = Box::leak("x".repeat(257).into_boxed_str());
         for (path, method) in [
             ("/raw.Service/Chosen".to_owned(), None),
@@ -804,8 +769,6 @@ mod tests {
             Some((boundary, boundary)),
         )));
 
-        // Reconstructing the public adapter on every attempt cannot reset the
-        // registry. Public GrpcMethod metadata is not an unforgeability proof.
         for index in 0..=CLIENT_METHOD_LIMIT {
             let method: &'static str = Box::leak(format!("Method{index}").into_boxed_str());
             let mut client =
@@ -933,7 +896,6 @@ mod tests {
             infra_http::Drained::Complete
         );
 
-        // Adapter entry, not the first poll, starts the opening budget.
         tokio::time::pause();
         let mut client = crate::Client::try_new(
             "http://127.0.0.1:1",

@@ -28,8 +28,6 @@ impl RequestContext {
         &self.operation
     }
 
-    /// Pass only the body-read future. If it is dropped while pending, a later
-    /// opening deadline is classified independently of that read.
     pub async fn read_body<F: Future>(&self, read: F) -> F::Output {
         read_body(Some(self), read).await
     }
@@ -47,13 +45,6 @@ pub(crate) async fn read_body<F: Future>(context: Option<&RequestContext>, read:
     read.await
 }
 
-/// Cancellation lineage for work deliberately continuing after response headers.
-/// No generic HTTP response deadline is imposed; dependencies retain their own caps.
-///
-/// The hardened chain hands the lineage's cancellation guard to the response
-/// body, so it is cancelled when the body ends, fails, or is dropped. The
-/// [`RequestContext`] shares this cancellation token, so cancelling the
-/// response lineage also stops opening work.
 #[derive(Clone, Debug)]
 pub struct ResponseContext(OperationContext);
 
@@ -67,8 +58,6 @@ impl ResponseContext {
 // template:begin request-budget:http-request-deadline
 const MAX_RESPONSE_RESERVE: Duration = Duration::from_millis(100);
 
-/// The opening middleware projects its exact cutoff here; consumers cannot introduce a second
-/// request budget.
 #[derive(Clone, Copy, Debug)]
 pub struct RequestDeadline {
     at: tokio::time::Instant,
@@ -88,8 +77,6 @@ impl RequestDeadline {
         self.at
     }
 
-    /// The cutoff for a PostgreSQL attempt. The reserve leaves time for the
-    /// in-memory response without consuming the entire budget of a short request.
     #[must_use]
     pub fn attempt_end(&self) -> Option<tokio::time::Instant> {
         self.at
@@ -121,7 +108,6 @@ impl<S: Send + Sync> FromRequestParts<S> for ResponseContext {
     }
 }
 
-/// A handler mounted outside the hardened chain gets the sanitized 500.
 #[expect(
     clippy::result_large_err,
     reason = "the error is the extractor's axum rejection, a Response"
@@ -142,8 +128,6 @@ pub(crate) fn missing_extension<T>() -> Response {
     sanitized_internal_error()
 }
 
-/// When the request reached admission. The opening budget counts from here, so
-/// the time a request waited for an in-flight permit is spent from it.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Arrival(pub(crate) tokio::time::Instant);
 
@@ -171,9 +155,6 @@ pub(crate) async fn opening(
             .map(|_| version)
     };
     let guard = response_context.cancellation().clone().drop_guard();
-    // The raw context is the extension outbound clients read for parent
-    // deadline and cancellation; the wrapper below is the handler-facing
-    // extractor.
     request.extensions_mut().insert(context.operation.clone());
     request.extensions_mut().insert(context.clone());
     request
@@ -186,7 +167,6 @@ pub(crate) async fn opening(
     // template:end request-budget:http-request-deadline-projection
     let response = tokio::select! {
         biased;
-        // Check the live reads before `select!` drops the handler's future.
         stopped = async {
             let reason = context.operation.wait_stopped().await;
             stopped_response(reason, upload_version())
@@ -207,11 +187,8 @@ fn stopped_response(reason: Stopped, upload: Option<Version>) -> Response {
     }
 }
 
-/// The handler was waiting for body bytes the caller had not sent, so the
-/// caller was slow: 408, not the server's own 504. RFC 9110 §15.5.9 asks for
-/// `Connection: close`, since an HTTP/1.1 caller may still be sending; HTTP/2
-/// forbids the field and resets the stream instead.
 fn upload_timeout_response(version: Version) -> Response {
+    // RFC 9110 §15.5.9
     let mut response = Problem::new(Code::RequestTimeout)
         .detail("request body was not received within the request budget")
         .into_response();

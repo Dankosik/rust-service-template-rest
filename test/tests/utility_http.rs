@@ -15,7 +15,6 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Filters {
-    // Option<Vec<_>> does not have the desired single-value query semantics.
     #[serde(default)]
     tag: Vec<String>,
 }
@@ -35,8 +34,6 @@ fn query_lists_handle_zero_one_and_multiple_occurrences() {
     assert!(Query::<Filters>::try_from_uri(&uri).is_err());
 }
 
-// Tests extractor composition only. Real routes must map their rejection
-// paths to Problem with the request ID, as the HTTP architecture requires.
 async fn inspect_query(
     Query(filters): Query<Filters>,
     TypedHeader(agent): TypedHeader<UserAgent>,
@@ -83,7 +80,6 @@ fn url_query_encoding_does_not_use_string_concatenation() {
         ]
     );
     assert_eq!(target.host_str(), Some("api.example.test"));
-    // Parsing/joining a URL is not an origin allowlist.
     let replaced = target.join("https://other.example.test/path").unwrap();
     assert_ne!(replaced.origin(), target.origin());
 }
@@ -120,6 +116,4 @@ async fn a_reusable_http_client_has_explicit_timeouts_and_no_hidden_retry_stack(
         .await
         .unwrap();
     assert_eq!(body, json!({"id": 1}));
-    // The mock verifies the number of requests. Production clients additionally
-    // select the project's TLS provider/roots and their provider-specific policy.
 }

@@ -14,20 +14,14 @@ const UNDEFINED_TABLE: &str = "42P01";
 pub enum HistoryError {
     #[error("embedded migrations are pending")]
     Pending,
-    /// Includes an unknown version inside the embedded range and duplicate embedded versions.
     #[error("the migration history does not match the embedded migrations")]
     Mismatch,
-    /// The history table exists in the database but is outside this
-    /// session's `search_path`, so its absence is a visibility failure.
     #[error("the migration history table is not visible to this session")]
     NotVisible,
     #[error("the migration history is unavailable")]
     Unavailable,
 }
 
-/// Creates no bookkeeping and takes no lock. Bounded by
-/// [`HISTORY_VERIFY_BUDGET`], including acquire. A version above the newest
-/// embedded migration belongs to a later release and is admitted.
 pub async fn verify_history(pool: &PgPool) -> Result<(), HistoryError> {
     let check = async {
         let mut conn = infra_postgres::acquire(pool, "check migration history").await?;
@@ -37,7 +31,6 @@ pub async fn verify_history(pool: &PgPool) -> Result<(), HistoryError> {
         Ok(Ok(HistoryRead::History(history))) => history,
         Ok(Ok(HistoryRead::Missing)) => Vec::new(),
         Ok(Ok(HistoryRead::NotVisible)) => return Err(HistoryError::NotVisible),
-        // A failed row is divergent history, not an unavailable database.
         Ok(Err(MigrateError::Dirty(_))) => return Err(HistoryError::Mismatch),
         Ok(Err(_)) | Err(_) => return Err(HistoryError::Unavailable),
     };
@@ -57,8 +50,6 @@ enum HistoryRead {
 async fn read_history(conn: &mut PgConnection, table: &str) -> Result<HistoryRead, MigrateError> {
     match applied_history(conn, table).await {
         Ok(history) => Ok(HistoryRead::History(history)),
-        // A table outside this session's search_path is a visibility failure, not
-        // an empty history, and must not send the operator to the migrator.
         Err(MigrateError::Execute(err)) if sqlstate(&err).as_deref() == Some(UNDEFINED_TABLE) => {
             if history_table_exists_elsewhere(conn, table).await? {
                 Ok(HistoryRead::NotVisible)
@@ -108,11 +99,6 @@ pub(crate) enum PendingError {
     DuplicateVersion(i64),
 }
 
-/// Mirrors `Migrator::run`: down migrations are skipped (the embedded set
-/// rejects them separately). A version above the newest embedded one belongs
-/// to a later release and is admitted, as Flyway does, so a rolled-back
-/// release still migrates and starts. Duplicate embedded versions are
-/// [`PendingError::DuplicateVersion`] before any history is compared.
 pub(crate) fn pending<'m>(
     migrator: &'m Migrator,
     history: &[AppliedMigration],
@@ -172,7 +158,6 @@ mod tests {
             migration(first, "create widget", MigrationType::Simple, false),
             migration(second, "create gadget", MigrationType::Simple, false),
         ]);
-        // Both fixtures are `SELECT 1`, so they share one checksum.
         let checksum = migrator
             .iter()
             .next()

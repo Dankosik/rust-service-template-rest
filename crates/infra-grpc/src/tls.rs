@@ -7,12 +7,10 @@ use secrecy::{ExposeSecret as _, SecretString};
 
 use crate::TlsMaterialError;
 
-/// Borrows the key so building a config needs no clone of its [`SecretString`].
 #[derive(Clone, Copy, Debug)]
 pub struct ServerTlsMaterial<'a> {
     pub certificate_pem: &'a str,
     pub private_key_pem: &'a SecretString,
-    /// PEM CA for client certificates; `Some` makes them mandatory.
     pub client_ca_pem: Option<&'a str>,
 }
 
@@ -51,9 +49,6 @@ fn certificates(input: &str) -> Option<Vec<CertificateDer<'static>>> {
     (!certificates.is_empty()).then_some(certificates)
 }
 
-/// Rustls parses only the leaf, so a broken intermediate would pass startup and fail every
-/// handshake that needs it. Trust anchors skip this: rustls admits X.509 v1 roots that this
-/// parse refuses.
 pub(crate) fn chain(input: &str) -> Result<Vec<CertificateDer<'static>>, TlsMaterialError> {
     let certificates = certificates(input).ok_or(TlsMaterialError::InvalidCertificate)?;
     for certificate in &certificates {

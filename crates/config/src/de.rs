@@ -5,14 +5,8 @@ use secrecy::SecretString;
 use serde::Deserialize;
 use serde::de::Unexpected;
 
-/// Marks a decode message this crate wrote without the value it rejects, so
-/// the loader shows it as written. No variable holds NUL, so no supplied
-/// value can forge the mark: an environment variable cannot contain one, and
-/// the loader refuses a secrets-directory file that does.
 pub(crate) const VALUE_FREE: char = '\0';
 
-/// A decode error whose `message` names the expected form without the
-/// refused value, marked [`VALUE_FREE`] so the loader shows it as written.
 #[allow(
     dead_code,
     reason = "removing every profile with a value-free decoder leaves the constructor without a caller"
@@ -21,10 +15,6 @@ pub(crate) fn value_free<E: serde::de::Error>(message: impl std::fmt::Display) -
     E::custom(format_args!("{VALUE_FREE}{message}"))
 }
 
-/// A scalar buffered by kind before config-rs can coerce it: a file
-/// supplies `Typed`, an environment variable `Text`. Without the buffer
-/// config-rs reads `1.5` as 2 for a count and `true`, `yes` or `off` as 1.0
-/// or 0.0 for a ratio.
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum Scalar<T> {
@@ -32,8 +22,6 @@ enum Scalar<T> {
     Text(String),
 }
 
-/// Callers supply the value-free diagnostic for either a rejected kind or
-/// malformed text.
 #[allow(
     dead_code,
     reason = "removing OIDC introspection and outbound authentication leaves no caller"
@@ -90,8 +78,6 @@ fn invalid_ratio<E: serde::de::Error>() -> E {
     E::invalid_value(Unexpected::Other("a malformed number"), &"a number")
 }
 
-/// A decimal number from a file number or environment text; booleans and
-/// words are refused rather than read as 1.0 or 0.0.
 pub(crate) fn ratio<'de, D>(deserializer: D) -> Result<f64, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -104,8 +90,6 @@ where
 
 const LISTEN_ADDR_FORM: &str = "an IP address and port, or :port; hostnames are not resolved";
 
-/// Missing, empty, or whitespace-only text is vacant (`None`); a present
-/// value is stored trimmed, as text or as the path it names.
 pub(crate) fn blank_as_none<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -118,11 +102,6 @@ where
     }))
 }
 
-/// Missing, empty, or whitespace-only secret is absent (`None`).
-///
-/// Trim decides vacancy only; a present secret keeps the deserialized
-/// bytes, including padding. Downstream parsers (DSN, OTLP headers) trim
-/// their own input.
 pub(crate) fn blank_secret_as_none<'de, D>(
     deserializer: D,
 ) -> Result<Option<SecretString>, D::Error>
@@ -154,9 +133,6 @@ fn invalid_listen_addr<E: serde::de::Error>(value: &str) -> E {
     E::invalid_value(Unexpected::Str(value), &LISTEN_ADDR_FORM)
 }
 
-/// Parse an IP listen address: `ip:port`, or the Go-style `:port` meaning
-/// IPv4 all-interfaces (`0.0.0.0`). Hostnames are refused; load does not
-/// do DNS. Explicit IPv6 forms such as `[::1]:9000` are unchanged.
 fn parse_listen_addr(value: &str) -> Option<SocketAddr> {
     let trimmed = value.trim();
     match trimmed.strip_prefix(':') {

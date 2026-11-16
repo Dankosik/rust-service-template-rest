@@ -15,7 +15,7 @@ use infra_postgres::{CloseOutcome, PgPool};
 use infra_telemetry::{
     LoggerGuard, LoggerShutdown, ProviderShutdown, SHUTDOWN_JOIN_SLACK, TracerProviderHandle,
 };
-use service_config::HttpConfig;
+use service_config::{GraceBudgetError, HttpConfig};
 use tokio::time::Instant;
 
 use super::background::{Background, JoinOutcome};
@@ -32,25 +32,11 @@ pub(crate) const SHUTDOWN_TAIL: Duration = DIAGNOSTICS_SHUTDOWN
     .saturating_add(SHUTDOWN_JOIN_SLACK)
     .saturating_add(super::RUNTIME_SHUTDOWN_TIMEOUT);
 
-#[derive(Debug, thiserror::Error)]
-#[error(
-    "http.grace_period ({grace:?}) must be >= http.drain_timeout ({drain_timeout:?}) plus the {tail:?} teardown tail (diagnostics, background join, dependency close, telemetry flush, SDK join, runtime)"
-)]
-pub(crate) struct GraceBudgetError {
-    grace: Duration,
-    drain_timeout: Duration,
-    tail: Duration,
-}
-
 pub(crate) fn validate_grace_budget(http: &HttpConfig) -> Result<(), GraceBudgetError> {
-    if http.grace_period < http.drain_timeout.saturating_add(SHUTDOWN_TAIL) {
-        return Err(GraceBudgetError {
-            grace: http.grace_period,
-            drain_timeout: http.drain_timeout,
-            tail: SHUTDOWN_TAIL,
-        });
-    }
-    Ok(())
+    http.check_grace_budget(
+        SHUTDOWN_TAIL,
+        "teardown tail (diagnostics, background join, dependency close, telemetry flush, SDK join, runtime)",
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -82,29 +68,20 @@ impl Budget {
     }
 }
 
-/// Dependencies startup opened. Teardown closes them after the background
-/// join stage on every exit path; an unconfirmed abort shares the dependency
-/// stage's deadline and does not certify that the task stopped.
 #[derive(Default)]
 pub(crate) struct Dependencies {
     // template:begin postgres:shutdown-dependencies-postgres-field
-    /// HTTP connection tasks are not in the background set; `close` waits for any
-    /// pooled connections they still hold. Work that outlives close is
-    /// dropped by `runtime.shutdown_timeout`.
     pub(crate) postgres: Option<PgPool>,
     // template:end postgres:shutdown-dependencies-postgres-field
     // template:begin cache:service-shutdown-dependencies-cache-field
-    /// Not a readiness probe; the connection closes when it drops.
     pub(crate) cache: Option<Cache>,
     // template:end cache:service-shutdown-dependencies-cache-field
     // template:begin object-storage:service-shutdown-dependencies-object-storage-field
-    /// Not a readiness probe; idle connections close when it drops.
     pub(crate) object_storage: Option<ObjectStorage>,
     // template:end object-storage:service-shutdown-dependencies-object-storage-field
 }
 
 impl Dependencies {
-    /// Returns whether a dependency outlived `deadline`.
     fn close(
         self,
         #[allow(unused_variables, reason = "dependency-free profiles perform no close")]
@@ -152,7 +129,6 @@ impl Dependencies {
     }
 }
 
-/// Resources become visible to cleanup immediately, before the next await.
 #[derive(Default)]
 pub(crate) struct Serving {
     pub(crate) readiness: Option<Readiness>,
@@ -175,7 +151,6 @@ pub(crate) struct Plan<'a> {
     pub(crate) logger: Option<LoggerGuard>,
 }
 
-/// Catch one stage's unwind without spending a new budget or skipping later owners.
 async fn stage(name: &'static str, future: impl Future<Output = bool>) -> bool {
     if let Ok(degraded) = AssertUnwindSafe(future).catch_unwind().await {
         degraded
@@ -206,13 +181,11 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
         stop_serving(&mut serving, http_config, signals, &budget).await
     })
     .await;
-    // Diagnostics outlives the drain: it serves `/health/live` and `/metrics`.
     degraded |= stage(
         "diagnostics",
         stop_diagnostics(serving.diagnostics.take(), &budget),
     )
     .await;
-    // Any listener not taken because its stage unwound still requests cleanup on drop.
     drop(serving);
 
     background.cancel();
@@ -237,7 +210,6 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
         }
     })
     .await;
-    // Forced acknowledgement and dependency close share this allocation.
     let dependency_deadline = budget.stage_deadline(DEPENDENCY_CLOSE);
     degraded |= stage("background_forced", async {
         if background.is_empty() {
@@ -265,8 +237,6 @@ async fn finish_telemetry(
     budget: &Budget,
     mut degraded: bool,
 ) -> Outcome {
-    // Trace export and log closure share five seconds; the SDK join allowance
-    // remains explicit in the process tail. Reserve one second for the logger.
     let telemetry_deadline =
         budget.stage_deadline(TELEMETRY_FLUSH.saturating_add(SHUTDOWN_JOIN_SLACK));
     if let Some(logger) = &logger {

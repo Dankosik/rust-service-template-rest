@@ -15,7 +15,6 @@ use super::{KEY_HEADER, REPLAYED_HEADER};
 
 const SUPPORTED_IDEMPOTENCY_METHODS: [&str; 4] = ["POST", "PUT", "PATCH", "DELETE"];
 
-/// Diagnostic details come from route declarations, never request data.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("idempotent route composition is invalid: {subject}: {rule}")]
 pub struct CompositionError {

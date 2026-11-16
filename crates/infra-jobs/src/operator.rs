@@ -1,7 +1,3 @@
-//! All mutations borrow the caller's transaction. Their results are provisional
-//! until that caller receives an acknowledged commit. No operation runs a
-//! handler, republishes an event, or retries an uncertain transaction.
-
 use std::{borrow::Cow, collections::BTreeSet, fmt, time::Duration};
 
 use infra_postgres::{Tx, TxError, observed};
@@ -12,15 +8,12 @@ use crate::{JobId, StartupError};
 
 pub use crate::state::{FailureReason, JobState};
 
-/// Covers acquire and acknowledgement; one operator call, transaction
-/// admission and commit included, fits the same bound.
 pub const OPERATION_TIMEOUT: Duration = crate::engine::OPERATION_BACKSTOP;
 pub const STARTUP_TIMEOUT: Duration = crate::session::STARTUP_CHECK_BUDGET;
 const MAX_PAGE_LIMIT: u16 = 500;
 const MAX_HANDLED_KINDS: usize = 1024;
 const MAX_HANDLED_BYTES: usize = MAX_HANDLED_KINDS * (MAX_KIND_LEN + 1) - 1;
 const CURSOR_PREFIX: &str = "v1:";
-/// The retention and sampling statements in `maintenance` keep their own bounds.
 const STATEMENT_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -175,7 +168,6 @@ impl Inspection {
         Self::page(after, limit, Filter::Failed)
     }
 
-    /// An empty string explicitly declares that no kinds are handled.
     pub fn unhandled(
         handled_kinds: &str,
         after: Option<&str>,
@@ -204,7 +196,6 @@ impl Inspection {
         }
     }
 
-    /// `None` unless the inspection is `unhandled`.
     #[must_use]
     pub const fn handled_kinds(&self) -> Option<&BTreeSet<String>> {
         match &self.0 {
@@ -233,10 +224,6 @@ impl Inspection {
     }
 }
 
-/// No field holds stored error or trace content.
-///
-/// Every timestamp is a UTC RFC 3339 string with six fractional digits
-/// (`YYYY-MM-DDTHH:MM:SS.ffffffZ`), as the inspection statements render it.
 #[derive(Debug)]
 pub struct JobSnapshot {
     pub id: JobId,
@@ -271,10 +258,6 @@ pub struct Redriven {
     pub new_version: String,
 }
 
-/// Formatting deliberately omits raw causes.
-///
-/// No variant carries `#[error]`, so thiserror derives only `source` and the
-/// `From` conversions; the hand-written [`fmt::Display`] keeps causes out.
 #[derive(thiserror::Error)]
 pub enum OperatorError {
     Missing,
@@ -392,8 +375,6 @@ macro_rules! snapshot_query {
     };
 }
 
-/// A page bounds scanned rows before filtering; a failed observation
-/// propagates rather than turning a timeout into an empty page.
 pub async fn inspect(
     tx: &mut Tx<'_>,
     inspection: &Inspection,
@@ -417,8 +398,6 @@ pub async fn inspect(
             limit,
             filter,
         } => {
-            // Enqueue never generates the nil UUID and a cursor never holds
-            // it, so the first page starts after nil.
             let after = after.map_or(uuid::Uuid::nil(), |id| id.0);
             let rows = observed(
                 "inspect jobs",
@@ -435,8 +414,6 @@ pub async fn inspect(
     }
 }
 
-/// The page's completeness and cursor count every scanned row; the filter
-/// selects the items among them. One row that does not decode fails the page.
 fn page_result(
     rows: Vec<SnapshotRow>,
     limit: u16,
@@ -464,8 +441,6 @@ fn page_result(
     })
 }
 
-/// Existence alone decides [`OperatorError::Missing`]; the mutation's
-/// kind/version/failed predicate is the single authoritative identity check.
 async fn lock_job_row(tx: &mut Tx<'_>, id: JobId) -> Result<(), OperatorError> {
     apply_statement_timeout(tx).await?;
     observed(
@@ -493,8 +468,6 @@ fn conflict_or_database(error: sqlx::Error) -> OperatorError {
     }
 }
 
-/// Archives the previous cycle atomically. Failures must propagate out of the
-/// caller's transaction so recovery rolls back.
 pub async fn redrive(tx: &mut Tx<'_>, target: &RecoveryTarget) -> Result<Redriven, OperatorError> {
     lock_job_row(tx, target.id).await?;
     observed(
@@ -526,9 +499,6 @@ pub async fn redrive(tx: &mut Tx<'_>, target: &RecoveryTarget) -> Result<Redrive
     .ok_or(OperatorError::Stale)
 }
 
-/// A job that relays an event, such as an outbox relay job, takes that event
-/// with it: the operator must reconcile the event the discarded job would have
-/// published.
 pub async fn discard(tx: &mut Tx<'_>, target: &RecoveryTarget) -> Result<(), OperatorError> {
     lock_job_row(tx, target.id).await?;
     let result = observed("discard failed job", sqlx::query!(

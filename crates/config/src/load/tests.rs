@@ -109,8 +109,6 @@ fn empty_dsn_and_otlp_headers_are_vacant_none() {
 
 #[test]
 fn rejected_environment_values_are_not_echoed() {
-    // config-rs lowercases a refused boolean and parses a refused
-    // number before quoting it, so no spelling may reach the message.
     for value in [
         "Hunter2 \"Quoted\"\nSecret",
         " hunter2 secret ",
@@ -147,8 +145,6 @@ fn rejected_environment_values_are_not_echoed() {
 
 #[test]
 fn a_decode_failure_that_names_only_keys_is_unchanged() {
-    // The unknown field is reported even when a sibling's value happens
-    // to be a word of the message.
     let err = load_from(
         &LoadOptions::default(),
         BUILD,
@@ -713,8 +709,6 @@ fn secrets_directory_supplies_variables_and_the_environment_overrides_it() {
     reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
 )]
 fn secrets_directory_follows_the_links_of_a_mounted_volume() {
-    // A Kubernetes volume keeps the files under `..data` and links each
-    // name to it, so an update swaps one link.
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path().join("..data");
     std::fs::create_dir(&data).unwrap();
@@ -771,8 +765,6 @@ fn secrets_directory_failures_name_the_path_and_no_content() {
         Err(Error::ReadSecret { .. })
     );
 
-    // Not Unicode, and a NUL byte, which would let a value forge the
-    // mark of a value-free message.
     for content in [&b"hunter2\xff"[..], &b"\0hunter2"[..]] {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("APP__LOG__LEVEL");

@@ -20,21 +20,12 @@ use crate::peers::{PeerRegistration, PeerRegistry};
 use crate::session::StartupError;
 
 pub const POLL_INTERVAL: Duration = Duration::from_secs(1);
-/// Recovery reserve added to each kind's attempt timeout.
-///
-/// The cancellation margin and the time from starting pool acquisition to
-/// starting the attempt reduce the time left to write its outcome after a timeout.
 pub const LEASE_RESERVE: Duration = Duration::from_mins(1);
-/// How far the worker's own cancellation leads the database expiry, so the
-/// supervisor stops writing before another worker can rescue the lease.
 pub(crate) const CANCEL_MARGIN: Duration = Duration::from_secs(2);
 pub(crate) const RECORD_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 pub(crate) const OPERATION_BACKSTOP: Duration = Duration::from_secs(12);
 const OPERATION_FAILURES_METRIC: &str = "jobs_worker_operation_failures_total";
 
-/// Not `Clone`, and [`Self::start`] consumes it: a second claim loop on the
-/// same state would let [`Started::drained`] resolve before its attempts end
-/// and exceed each kind's `max_running`.
 pub struct Engine {
     shared: Arc<Shared>,
     peer: PeerRegistration,
@@ -46,22 +37,15 @@ pub struct Started {
     failure: CancellationToken,
 }
 
-/// Cumulative local observations when forced cleanup ended.
-/// These counters do not attribute zero-row queue writes to this worker.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DrainEnd {
     pub known_results: usize,
-    /// Attempts classified as cancelled, including handlers dropped after grace.
     pub cancelled: usize,
-    /// Acknowledged one-row release writes.
     pub released: usize,
     pub uncertain: usize,
     pub timed_out: bool,
 }
 
-/// `BEGIN` and commit failures report as [`Self::Statement`]. An unknown commit
-/// does not prove the write absent: the retention batch may have deleted its
-/// rows before the commit outcome was lost.
 #[derive(Debug, thiserror::Error)]
 pub enum OperationError {
     #[error("acquire")]
@@ -83,9 +67,6 @@ impl OperationError {
     }
 }
 
-/// No commit-unknown variant: the engine's only writing transaction is the
-/// idempotent retention delete, so a retry after an unknown commit reaches the
-/// same state as a retry after a failed statement.
 impl From<infra_postgres::TxError> for OperationError {
     fn from(error: infra_postgres::TxError) -> Self {
         match error {
@@ -98,25 +79,11 @@ impl From<infra_postgres::TxError> for OperationError {
 }
 
 impl Engine {
-    /// Call [`Self::check_startup`] before starting it. Does no I/O.
-    ///
-    /// This engine owns what a worker process needs once: the `LISTEN`
-    /// connection, completed retention, and registered-kind sampling. Engines
-    /// made with [`Self::beside`] share them.
-    ///
-    /// Construction registers this engine's kinds as a process peer and drops
-    /// the published sampling result, so a sample that did not see them is
-    /// never published as current.
     #[must_use]
     pub fn new(pool: PgPool, registry: Kinds, max_workers: NonZeroU32) -> Self {
         Self::build(pool, registry, max_workers, Role::Owner)
     }
 
-    /// A second engine on the same pool with its own kinds, slots, and claim
-    /// loop, so its work is not delayed by this engine's occupied slots.
-    ///
-    /// It claims under this engine's worker id, and this engine's listener,
-    /// retention, and sampling serve it: start both.
     #[must_use]
     pub fn beside(&self, registry: Kinds, max_workers: NonZeroU32) -> Self {
         Self::build(
@@ -160,20 +127,14 @@ impl Engine {
         self.shared.registry.names()
     }
 
-    /// Check UTF8, READ COMMITTED defaults and a writable session, bounded to 5 s.
     pub async fn check_startup(&self) -> Result<(), StartupError> {
         crate::session::check_startup(&self.shared.pool).await
     }
 
-    /// Delete expired completed jobs once and return how many were deleted;
-    /// earlier batches stay committed on failure. A short batch ends the pass
-    /// without proving empty inventory: locked eligible rows can remain.
     pub async fn remove_expired(&self) -> Result<u64, OperationError> {
         maintenance::remove_expired(&self.shared).await
     }
 
-    /// Spawns the claim loop, and for an engine built with [`Self::new`] also
-    /// the listener, retention, and process-wide sampling.
     #[must_use]
     pub fn start(self, tracker: &TaskTracker, cancel: &CancellationToken) -> Started {
         crate::attempt::describe_metrics();
@@ -239,7 +200,6 @@ impl fmt::Debug for Engine {
 }
 
 impl Started {
-    /// Stop new claim rounds; an already dispatched claim retains custody.
     pub fn stop_claiming(&self) {
         self.stop.cancel();
     }
@@ -253,8 +213,6 @@ impl Started {
         self.shared.drain.wait().await;
     }
 
-    /// Supervisors retain ownership; this method never writes queue rows. The
-    /// first call fixes the cleanup deadline even if this future is dropped.
     #[must_use]
     pub async fn cancel_and_finish(&self, budget: Duration) -> DrainEnd {
         self.stop_claiming();
@@ -264,8 +222,6 @@ impl Started {
             () = self.drained() => {}
             () = tokio::time::sleep_until(deadline) => {}
         }
-        // A deadline and an exit can share a clock tick. Keep the first
-        // observation for every waiter on this cleanup.
         let timed_out = *self
             .shared
             .cleanup
@@ -281,14 +237,6 @@ impl Started {
         }
     }
 
-    /// Resolves when one of these happens, logged as `jobs_engine_task_stopped`
-    /// with the task that caused it:
-    ///
-    /// - an attempt supervisor ends without retiring;
-    /// - the claim loop, or the retention, listener, or sampling task this
-    ///   engine started, ends before its cancellation;
-    /// - any of those tasks panics, even while cancellation is in progress;
-    /// - a supervisor panics, even after it retired.
     pub async fn failed(&self) {
         self.failure.cancelled().await;
     }
@@ -311,7 +259,6 @@ enum Role<'a> {
 
 enum Run {
     Claim {
-        // Deregister the peer before releasing drain waiters, even before the first poll.
         _peer: PeerRegistration,
         _exit: DrainParticipant,
     },
@@ -394,8 +341,6 @@ impl AttemptDrain {
     }
 
     fn finish(&self, retire: impl FnOnce(&mut DrainState)) {
-        // Publish the timestamp with the state change that completes the drain.
-        // Earlier exits update the count silently so only the last exit wakes waiters.
         self.0.send_if_modified(|state| {
             retire(state);
             if state.claim_loop_exited && state.in_flight == 0 {
@@ -422,15 +367,9 @@ impl Drop for DrainParticipant {
     }
 }
 
-/// Armed before submission, so custody does not depend on the supervisor being
-/// polled. An abnormal end, or an abort while the supervisor runs, fails the
-/// engine and stops new claim rounds through `stop`, the claim-stop token of the
-/// engine that admitted the claim. The running round keeps its custody.
 pub(crate) struct SupervisorGuard {
     stop: CancellationToken,
     failure: CancellationToken,
-    /// The attempt's job, named in the record: the guard drops outside the
-    /// attempt span, so the span's fields do not reach it.
     job_id: crate::kind::JobId,
     kind: &'static str,
     retired: bool,
@@ -477,8 +416,6 @@ impl Drop for SupervisorGuard {
     }
 }
 
-/// An end before the token was cancelled, or any panic during shutdown, fails
-/// the engine. The worker's staged shutdown owns the stop order after that.
 fn task_guard(
     task: &'static str,
     token: CancellationToken,
@@ -504,10 +441,6 @@ pub(crate) struct Shared {
     pub(crate) registry: Kinds,
     max_workers: NonZeroU32,
     pub(crate) slots: Arc<Semaphore>,
-    /// Held by the engine's own statements (claim, retention, sampling) while
-    /// they use a pooled connection, so they take one connection between them:
-    /// the pool budget is `jobs.max_workers + 2`, one connection per attempt
-    /// slot plus this one and readiness.
     pub(crate) statement_turn: tokio::sync::Mutex<()>,
     pub(crate) cleanup: ForcedCleanup,
     pub(crate) counters: Counters,
@@ -530,8 +463,6 @@ impl fmt::Debug for Shared {
     }
 }
 
-/// [`Self::begin`] fixes the deadline before it fires the token, so a
-/// supervisor that sees the cancellation also sees the deadline.
 #[derive(Default)]
 pub(crate) struct ForcedCleanup {
     force: CancellationToken,

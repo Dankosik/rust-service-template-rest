@@ -1,18 +1,3 @@
-//! Bounded JSON/text capture. Only complete records reach the output owner.
-//!
-//! Event fields precede sorted span fields; event values win over spans and
-//! the nearest span wins over its ancestors. Reserved keys remain unique.
-//!
-//! A record that does not fit its 16 KiB is cut, not dropped: a string value
-//! is cut at a character boundary, any other field that no longer fits is left
-//! out with every later one, and the record carries `truncated=true`. So does
-//! an event whose span has no cached fields, which is written without them.
-//!
-//! Custom `Debug`/`Display` callbacks must be finite, trusted and nonblocking.
-//! Emitters own source size, collection cardinality and concurrent work within
-//! their operation deadline. Bounded output cannot preempt a callback or bound
-//! its private allocations; borrowed strings are refused before avoidable copying.
-
 use std::cell::Cell;
 use std::fmt::{self, Write as _};
 use std::io;
@@ -77,7 +62,6 @@ impl FormatLayer {
     }
 }
 
-/// Reservations precede allocations; rejected callbacks never access extensions.
 struct Permit(&'static AtomicUsize);
 
 impl Permit {
@@ -98,7 +82,6 @@ impl Drop for Permit {
 }
 
 fn enter_format() -> Result<impl Drop, DropReason> {
-    // A thread whose local is gone is treated as already formatting.
     let already = FORMATTING
         .try_with(|active| active.replace(true))
         .unwrap_or(true);
@@ -114,8 +97,6 @@ fn enter_format() -> Result<impl Drop, DropReason> {
     }))
 }
 
-/// Grows with what is written; `limit` bounds it, escaped strings and
-/// `collect_str` streaming included.
 struct Bytes<const INLINE: usize = 0> {
     buf: SmallVec<[u8; INLINE]>,
     limit: usize,
@@ -165,8 +146,6 @@ impl<const INLINE: usize> Bytes<INLINE> {
         }
         let needed = self.buf.len() + bytes.len();
         if needed > self.buf.capacity() {
-            // Doubling stops at the limit: a cached span keeps this buffer,
-            // and its memory bound is the limit, not the next power of two.
             let capacity = needed
                 .max(self.buf.capacity().saturating_mul(2))
                 .min(self.limit);
@@ -213,8 +192,6 @@ struct Entry {
 struct Scratch {
     values: Bytes<SCRATCH_CAPACITY>,
     fields: ArrayVec<Entry, MAX_EVENT_FIELDS>,
-    /// The record lacks something its call site gave: a value or field that did
-    /// not fit, or the fields of a span with no cache.
     truncated: bool,
 }
 
@@ -235,8 +212,6 @@ impl Scratch {
         });
     }
 
-    /// Nothing more is captured. A span cache cannot be cut, so for a span this
-    /// leaves it without one; an event keeps every field captured before it.
     fn stop(&mut self) {
         self.values.failed = true;
         self.truncated = true;
@@ -258,7 +233,6 @@ impl Scratch {
         let start = self.values.len();
         self.values.json(value);
         if self.values.failed {
-            // A partly written value is no value: the field stays out.
             self.values.buf.truncate(start);
             self.truncated = true;
             return;
@@ -266,7 +240,6 @@ impl Scratch {
         self.add_field(key, start);
     }
 
-    /// Cut at a character boundary where the room runs out.
     fn push_text(&mut self, key: &'static str, text: fmt::Arguments<'_>) {
         if self.values.failed {
             return;
@@ -284,7 +257,6 @@ impl Scratch {
         let written = fmt::write(&mut quoted, text);
         let cut = quoted.cut;
         if written.is_err() && !cut {
-            // The value's own formatting failed: the field stays out.
             self.values.buf.truncate(start);
             self.truncated = true;
             return;
@@ -311,9 +283,6 @@ impl Scratch {
         self.add_field(field.key, start);
     }
 
-    /// Writes the captured span fields into `cache`, the last value of a key
-    /// winning; old values absent from a delta follow it. Whether they all
-    /// fit: a `cache` that did not is partly overwritten and must be discarded.
     fn compact_into(&self, cache: &mut SpanFields) -> bool {
         if self.values.failed {
             return false;
@@ -345,8 +314,6 @@ impl Scratch {
     }
 }
 
-/// The inside of a JSON string, escaped as `serde_json` escapes it, written
-/// until one byte short of the buffer's limit: the closing quote's.
 struct Quoted<'a, const INLINE: usize> {
     values: &'a mut Bytes<INLINE>,
     cut: bool,
@@ -379,15 +346,12 @@ impl<const INLINE: usize> fmt::Write for Quoted<'_, INLINE> {
 }
 
 impl<const INLINE: usize> Quoted<'_, INLINE> {
-    /// Stopping the formatter here also ends a source that streams.
     fn stop(&mut self) -> fmt::Result {
         self.cut = true;
         Err(fmt::Error)
     }
 }
 
-/// Whether JSON needs `byte` escaped. Every other byte, UTF-8 continuation
-/// bytes included, is copied as it is.
 const fn needs_escape(byte: u8) -> bool {
     matches!(byte, b'"' | b'\\' | 0..=0x1f)
 }
@@ -421,8 +385,6 @@ struct SpanFields {
 enum Source {
     Span,
     Event,
-    /// An event bridged from `log`, whose origin also arrives as `log.*`
-    /// fields that the normalized metadata already carries.
     BridgedEvent,
 }
 
@@ -481,8 +443,6 @@ impl Visit for Capture<'_> {
     fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
         let name = field.name();
         if self.source == Source::Span {
-            // As `tracing-subscriber` 0.3.23's `JsonVisitor::record_debug`
-            // does: a `log.*` field is dropped and a raw identifier loses `r#`.
             if name.starts_with("log.") {
                 return;
             }
@@ -513,7 +473,6 @@ impl FormatLayer {
     where
         S: Subscriber + for<'a> LookupSpan<'a>,
     {
-        // Keep allocation outside the write_record hotpath measurement.
         let mut scratch = Scratch::new(MAX_RECORD_BYTES);
         let mut line = Bytes::new(MAX_RECORD_BYTES, LINE_CAPACITY);
         self.write_record(event, ctx, &mut scratch, &mut line)?;
@@ -546,12 +505,9 @@ impl FormatLayer {
         let event_fields = scratch.fields.len();
         let span = ctx.event_span(event);
         if let Some(span) = &span {
-            // Leaf first avoids Scope::from_root's growable ancestry buffer.
             for span in span.scope() {
                 let extensions = span.extensions();
                 let Some(cached) = extensions.get::<SpanFields>() else {
-                    // The span had no room for its fields, or outgrew it. The
-                    // event is more useful without them than not at all.
                     scratch.truncated = true;
                     continue;
                 };
@@ -668,7 +624,6 @@ where
     }
 
     fn on_record(&self, id: &Id, values: &SpanRecord<'_>, ctx: Context<'_, S>) {
-        // A refused guard leaves prior cached data intact and never touches extensions.
         let Some(_guard) = self.admit() else {
             return;
         };
@@ -685,8 +640,6 @@ where
             return;
         };
         let delta_fields = scratch.fields.len();
-        // Old values join the delta before its own repeated keys collapse, so
-        // only the compacted fields need to fit the span's bytes.
         scratch.values.limit = MAX_RECORD_BYTES;
         for field in &cached.fields {
             if !scratch.fields[..delta_fields]
@@ -697,7 +650,6 @@ where
             }
         }
         if !scratch.compact_into(cached) {
-            // Absence is permanent for this span: updates never recreate the cache.
             extensions.remove::<SpanFields>();
             drop(extensions);
             self.output.record_drop(DropReason::SpanCapacity);
@@ -716,9 +668,6 @@ where
     }
 }
 
-/// The record's fields after its header, then its tail. A record that fits
-/// is written whole. One that does not is written again with room for the
-/// truncation marker, so the marker always fits.
 fn write_body(
     line: &mut Bytes,
     values: &[u8],
@@ -728,7 +677,6 @@ fn write_body(
     format: LoggingFormat,
 ) {
     let (event, spans) = fields.split_at_mut(event_fields);
-    // A total ordering avoids stable-sort allocation while retaining capture order.
     event.sort_unstable_by_key(|field| (field.key, field.start));
     spans.sort_unstable_by_key(|field| (field.key, field.start));
     let header = line.len();
@@ -793,9 +741,6 @@ fn write_all_fields(
     true
 }
 
-/// As much of the JSON string body `inner` as the line has room for, between
-/// quotes. It is cut between characters and between escape sequences, so what
-/// is written is a valid string.
 fn write_cut_string(line: &mut Bytes, inner: &[u8]) {
     let room = line.room().saturating_sub(2);
     let mut end = 0;
@@ -829,8 +774,6 @@ fn write_key(line: &mut Bytes, key: &str, format: LoggingFormat) {
 }
 
 fn write_timestamp(line: &mut Bytes) {
-    // `humantime` panics before the Unix epoch and refuses years after 9999;
-    // `tracing-subscriber`'s formatter writes the same RFC 3339 form there.
     let now = std::time::SystemTime::now();
     if now >= std::time::UNIX_EPOCH
         && write!(line, "{}", humantime::format_rfc3339_micros(now)).is_ok()

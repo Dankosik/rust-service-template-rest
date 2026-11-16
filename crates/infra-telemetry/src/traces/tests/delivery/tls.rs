@@ -93,7 +93,6 @@ impl Pki {
     }
 }
 
-/// One export through the exporter the trust material builds.
 fn export(collector: &Collector, trust: &CollectorTrust) -> OTelSdkResult {
     span_exporter(
         &Endpoint::Typed(&format!("https://{}/v1/traces", collector.addr)),
@@ -123,8 +122,6 @@ fn a_certificate_file_is_what_makes_a_private_collector_trusted() {
     export(&collector, &trust).expect("the certificate file's CA signed the collector");
     assert_eq!(collector.received().path, "/v1/traces");
 
-    // Only the file's certificates are trusted: another CA's file does not
-    // fall back to anything that would accept this collector.
     let other = Pki::new();
     let stranger = CollectorTrust {
         certificate: Some(other.certificate_file()),

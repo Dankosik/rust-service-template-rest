@@ -1,6 +1,5 @@
 use super::*;
 
-/// Holds replacement connections until the test restores the network path.
 struct OutageRelay {
     url: String,
     pause: CancellationToken,
@@ -66,9 +65,6 @@ impl OutageRelay {
     }
 }
 
-/// Terminates TLS for one reconnecting client while preserving the real broker
-/// behind it. The first fixture owns IPv4; the replacement owns IPv6 on the
-/// same port, so `localhost` must make a new native dial to reach it.
 struct TlsRotationRelay {
     stop: CancellationToken,
     accepted: tokio::sync::watch::Receiver<usize>,
@@ -211,8 +207,6 @@ fn tls_fixture() -> (tempfile::NamedTempFile, tokio_rustls::TlsAcceptor) {
     (root, acceptor)
 }
 
-/// The wire fixture answers the native opening PING, then observes the
-/// adapter's real topology request before disconnecting to cause recovery.
 async fn serve_until_topology(socket: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin) {
     use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
 
@@ -281,8 +275,6 @@ async fn ordinary_tls_and_mixed_seeds_ignore_untrusted_info_destinations() {
         }
         let mut server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.expect("seed connection");
-            // Native discovery would reject this invalid address before CONNECT.
-            // It arrives before TLS authenticates the server.
             socket
                 .write_all(&info("http://untrusted.invalid"))
                 .await
@@ -373,7 +365,6 @@ async fn authenticated_tls_first_and_trusted_plaintext_info_allow_discovery() {
         let recovery = timeout(Duration::from_secs(5), async {
             let (socket, _) = discovered.accept().await.expect("discovered connection");
             if tls_first {
-                // Scheme-less INFO addresses still require authenticated TLS.
                 let _socket = tls.accept(socket).await.expect("discovered TLS handshake");
             }
         })
@@ -503,9 +494,6 @@ async fn close_waits_for_the_terminal_connection_event() {
         release: Mutex::new(release_rx),
         control_failed: Arc::clone(&control_failed),
     });
-    // The native callback runs on this test's current-thread runtime. The
-    // observer below owns a separate executor so it can inspect close while
-    // the real subscriber holds the callback before its last effect returns.
     let _subscriber = tracing::subscriber::set_default(subscriber);
     let messaging = Box::pin(Messaging::connect(
         options(&fixture, None, 1024),
@@ -624,8 +612,6 @@ async fn cancelled_close_returns_before_native_termination_and_termination_remai
             assert!(futures_util::poll!(&mut closing).is_pending());
         }
         cancel.cancel();
-        // The current-thread native runner cannot process force-close until
-        // this task yields, so this poll distinguishes the caller's wait.
         assert_eq!(
             futures_util::poll!(&mut closing),
             Poll::Ready(infra_messaging::CloseOutcome::WaitInterrupted)
@@ -716,8 +702,6 @@ async fn a_consumer_recovers_after_its_broker_connection_is_interrupted() {
 
     relay.pause.cancel();
     timeout(Duration::from_secs(3), async {
-        // Only this Messaging client uses the relay. Its replacement dial
-        // proves it processed the old connection's EOF, and INFO stays held.
         relay.replacement_held.cancelled().await;
         assert!(messaging.probe().check().await.is_err());
     })

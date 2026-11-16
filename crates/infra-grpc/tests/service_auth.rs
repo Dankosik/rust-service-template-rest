@@ -152,8 +152,6 @@ fn readiness() -> Readiness {
     )
 }
 
-/// Echo with every method admitting orders, except server streaming,
-/// which admits billing only.
 fn echo_services(echo: &Echo) -> Services {
     let mut services = Services::new();
     services
@@ -370,8 +368,6 @@ async fn the_outbound_binding_signs_for_its_receiver_and_refuses_a_caller_author
     drop(server.drain(Duration::from_secs(3)).await);
 }
 
-/// Whether this projection retains bearer authentication, which then admits
-/// the calls a process does not verify as service tokens.
 #[allow(
     unused_mut,
     unused_assignments,
@@ -401,7 +397,6 @@ async fn without_a_verifier_bearer_or_nothing_admits_calls_and_no_token_reaches_
     if bearer_retained() {
         return;
     }
-    // Development only: no token is needed, and one sent never reaches the handler.
     let echo = Echo::default();
     let (server, address) = serve(echo_services(&echo)).await;
     let token = Keys::token(&Keys::new().orders, "orders", "catalog", 0);
@@ -587,8 +582,6 @@ async fn token_text_never_reaches_logs_or_spans_and_the_span_names_the_caller() 
     let subscriber = tracing_subscriber::registry()
         .with(capture.clone())
         .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")));
-    // A second live dispatcher keeps callsite interest per-dispatch, so tests
-    // that run alongside without a subscriber cannot disable these callsites.
     let _registration_anchor = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
     let _guard = tracing::subscriber::set_default(subscriber);
 

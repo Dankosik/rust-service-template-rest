@@ -4,12 +4,10 @@ use infra_serviceauth::{
 use service_config::{Config, ServiceAuthConfig, ValidationError};
 
 pub(super) struct PreparedServiceAuth {
-    /// `Some` exactly when `service_auth.mode = "jwt"`.
     pub(super) verifier: Option<Verifier>,
     pub(super) tokens: TokenSource,
 }
 
-/// The adapter owns the name, type, registry and key grammar; each refusal names its key.
 pub(super) fn prepare(config: &Config) -> Result<PreparedServiceAuth, ValidationError> {
     let ServiceAuthConfig::Jwt {
         name,

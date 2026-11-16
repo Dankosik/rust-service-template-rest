@@ -31,8 +31,6 @@ impl Gauges {
             Some(kind) => Key::from_parts(name, &[("kind", kind)]),
             None => Key::from_name(name),
         };
-        // `Snapshotter::snapshot` swaps every gauge to zero; restore each raw
-        // value so subsequent decrements and untouched series stay intact.
         let series = self.snapshotter.snapshot().into_hashmap();
         for (composite, (_, _, value)) in &series {
             if let DebugValue::Gauge(gauge) = value {

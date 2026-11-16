@@ -18,12 +18,10 @@ pub(crate) struct Listeners {
 }
 
 impl Listeners {
-    /// Names each listener's watch task, its stop failure, and its close stage.
     pub(crate) const HEALTH: &'static str = "health_listener";
     pub(crate) const DIAGNOSTICS: &'static str = "diagnostics_listener";
 }
 
-/// Retained as each resource opens so shutdown can close a partial startup.
 #[derive(Default)]
 pub(crate) struct Resources {
     pub(crate) tracer_provider: Option<TracerProviderHandle>,

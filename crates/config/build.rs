@@ -1,12 +1,3 @@
-//! Stamp the full git revision into this crate as `VERGEN_GIT_SHA`.
-//!
-//! Binaries read it through [`service_config::BuildInfo::from_package_version`].
-//! The image build has no `.git`; it passes the revision in `VERGEN_GIT_SHA`,
-//! which wins when nonblank. The name predates this script and stays, because
-//! the Dockerfile, CI and derived services' pipelines set it. Without either
-//! source the stamp is `unknown`, never a placeholder that telemetry would
-//! publish as if it were a revision.
-
 use std::process::Command;
 
 const STAMP: &str = "VERGEN_GIT_SHA";
@@ -22,8 +13,6 @@ fn main() {
     println!("cargo:rustc-env={STAMP}={revision}");
 }
 
-/// `HEAD`'s full SHA, rebuilding when `HEAD` moves to another branch or its
-/// branch gains a commit. `--git-path` resolves both inside a linked worktree.
 #[expect(
     clippy::disallowed_methods,
     reason = "a build script runs before any async runtime exists"
@@ -33,7 +22,6 @@ fn checked_out_revision() -> Option<String> {
     let mut watched = vec!["HEAD".to_owned(), "packed-refs".to_owned()];
     watched.extend(git(&["symbolic-ref", "-q", "HEAD"]));
     for name in watched {
-        // Cargo reruns on every build for a path that does not exist.
         if let Some(path) = git(&["rev-parse", "--git-path", &name])
             && std::path::Path::new(&path).exists()
         {

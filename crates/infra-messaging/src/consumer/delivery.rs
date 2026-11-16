@@ -21,7 +21,6 @@ use crate::registry::{DispatchError, Registry};
 use crate::wire;
 
 pub(super) const HANDLER_TIMEOUT: Duration = Duration::from_secs(30);
-/// Delays before the second to fifth delivery; the fifth failure dead-letters.
 const RETRY_DELAYS: [Duration; 4] = [
     Duration::from_secs(1),
     Duration::from_secs(5),
@@ -40,17 +39,12 @@ pub(super) struct DeliveryHandler {
     shared: Arc<Shared>,
     registry: Registry,
     metrics: HandlerMetrics,
-    /// The durable's filter: the low-cardinality name of what it processes.
     filter_subject: String,
-    /// `process <filter>`, the exported name of every delivery span.
     span_name: String,
     dead_letter_subject: String,
     dead_letter_stream: String,
 }
 
-/// `event_type` label of a delivery whose type has no registered handler,
-/// including a malformed envelope. Its own header text is publisher-chosen
-/// and never becomes a label.
 const UNREGISTERED: &str = "unregistered";
 
 #[derive(Debug)]
@@ -59,8 +53,6 @@ struct EventMetrics {
     outcomes: Outcomes<Outcome>,
 }
 
-/// Label values are the payload types' constants, closed at admission; schema
-/// versions of one type share its label.
 #[derive(Debug)]
 struct HandlerMetrics {
     registered: foldhash::HashMap<&'static str, EventMetrics>,
@@ -116,8 +108,6 @@ enum Settlement {
 fn settlement(outcome: Outcome, delivery_attempt: usize) -> Settlement {
     match outcome {
         Outcome::Success => Settlement::Acknowledge,
-        // The dead-letter reason is the Go wire vocabulary, which has one
-        // word for every delivery that a retry cannot help.
         Outcome::Permanent | Outcome::Unhandled | Outcome::Undecodable => {
             Settlement::DeadLetter(wire::DeadLetterReason::Permanent)
         }
@@ -130,7 +120,6 @@ fn settlement(outcome: Outcome, delivery_attempt: usize) -> Settlement {
     }
 }
 
-/// `None` when the delivery's stored time cannot form a transfer identity.
 fn transfer_message(
     source: &Message,
     info: &Info<'_>,
@@ -179,9 +168,6 @@ impl DeliveryHandler {
         }
     }
 
-    /// Leaves a delivery unacknowledged when its `JetStream` metadata cannot
-    /// establish the attempt count and deterministic dead-letter identity.
-    /// The broker can redeliver it when the acknowledgment wait expires.
     pub(super) async fn handle(
         &self,
         message: Message,
@@ -216,8 +202,6 @@ impl DeliveryHandler {
                 .await;
         };
         let metrics = self.metrics.get(envelope.event_type());
-        // A delivery the broker redelivered after its last settlement was
-        // lost, such as an unconfirmed dead-letter acknowledgement.
         if delivery_attempt > MAX_DELIVERIES {
             return self
                 .dead_letter(
@@ -275,8 +259,6 @@ impl DeliveryHandler {
             label,
             outcome != Outcome::Success,
         );
-        // A handler's cause stays with the handler, which logs it inside this
-        // span; the adapter reports only its closed outcome vocabulary.
         match outcome {
             Outcome::Success => {}
             Outcome::Panicked => tracing::error!(
@@ -307,7 +289,6 @@ impl DeliveryHandler {
         Ok(())
     }
 
-    /// A failed transfer keeps the source for a later redelivery.
     async fn dead_letter(
         &self,
         source: &Message,
@@ -327,8 +308,6 @@ impl DeliveryHandler {
         };
         let reason = reason.label();
 
-        // The transfer copies malformed source bytes: native send enforces
-        // broker bounds.
         let context = OperationContext::new(
             Some(Deadline::new(Instant::now(), BROKER_OPERATION_BUDGET)),
             cancel.clone(),
@@ -375,8 +354,6 @@ impl DeliveryHandler {
     }
 }
 
-/// The handler context is cancelled when the invocation ends (return, time
-/// limit or panic), so work started with it stops too.
 async fn run_handler(
     registry: &Registry,
     subject: &str,
@@ -397,7 +374,6 @@ async fn run_handler(
         reason = context.wait_stopped() => return stopped(reason),
         result = AssertUnwindSafe(dispatch).catch_unwind() => result,
     };
-    // A final synchronous poll can cross the cutoff before returning Ready.
     if let Some(reason) = context.stopped() {
         return stopped(reason);
     }
@@ -411,11 +387,6 @@ async fn run_handler(
     }
 }
 
-/// Confirms the consumer ACK. A lost request may redeliver; a lost reply may
-/// hide an already settled delivery. Neither proves the source was deleted.
-///
-/// The shared inbox avoids per-ACK subscriptions. Bound queue admission too,
-/// since the client's response timer starts only after admission.
 async fn acknowledge(client: &async_nats::Client, source: &Message) {
     let error_type = if let Some(reply) = source.reply.clone() {
         match tokio::time::timeout(
@@ -439,8 +410,6 @@ async fn acknowledge(client: &async_nats::Client, source: &Message) {
     metrics::counter!(SETTLEMENT_FAILURES_TOTAL, "operation" => "ack").increment(1);
 }
 
-/// Asks the broker to redeliver the source after `delay`; if that request is
-/// lost, ack wait redelivers it anyway.
 pub(super) async fn redeliver_after(source: &Message, delay: Duration) {
     let error_type = match tokio::time::timeout(
         BROKER_OPERATION_BUDGET,
@@ -552,8 +521,6 @@ mod tests {
         }
     }
 
-    /// Work started with the handler context must hear when the delivery is
-    /// over, or it outlives a handler the adapter gave up on.
     #[tokio::test(start_paused = true)]
     #[expect(
         clippy::excessive_nesting,
@@ -606,8 +573,6 @@ mod tests {
             registry
                 .register::<Created, _, _>(move |_, context| async move {
                     if expected == "timeout" {
-                        // advance moves the clock before yielding; dropping that
-                        // yield keeps the handler's final poll synchronous and ready.
                         let _ = tokio::time::advance(HANDLER_TIMEOUT).now_or_never();
                         assert_eq!(context.remaining(), Some(Duration::ZERO));
                     } else {

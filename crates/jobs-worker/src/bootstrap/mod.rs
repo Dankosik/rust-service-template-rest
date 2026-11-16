@@ -43,7 +43,7 @@ pub(crate) enum WorkerError {
     #[error("configuration is invalid: {0}")]
     Config(#[from] service_config::ValidationError),
     #[error(transparent)]
-    GraceBudget(#[from] shutdown::GraceBudgetError),
+    GraceBudget(#[from] service_config::GraceBudgetError),
     #[error("build tokio runtime: {0}")]
     Runtime(#[source] std::io::Error),
     #[error("install stop signal handlers: {0}")]
@@ -119,10 +119,6 @@ struct Prepared {
     // template:end messaging:worker-bootstrap-prepared-consumer
 }
 
-/// Retain cleanup ownership outside every operation that can stop or unwind.
-///
-/// `deadline` is written once, before teardown starts, so the caller can still
-/// read the process deadline after this future unwinds.
 pub(crate) async fn serve(
     config: Config,
     register: Register<'_>,
@@ -143,7 +139,6 @@ pub(crate) async fn serve(
     )
     .await
     .unwrap_or(Ended::Failure(WorkerError::Panicked));
-    // Arbitration happens before teardown can cancel an incomplete round.
     let ended = settle_end(&resources, &background, ended);
     let deadline = *deadline.insert(shutdown::stop_deadline(
         signals.first_stop(),
@@ -198,7 +193,6 @@ async fn run_worker(
     };
     let prepared = match prepared {
         Ok(prepared) => prepared,
-        // A retained failure outranks the stop or refusal that ended admission.
         Err(ended) => return pending_failure(resources, background).map_or(ended, Ended::Failure),
     };
     if let Some(ended) = pending_end(resources, background, signals) {
@@ -283,8 +277,6 @@ fn pending_failure(resources: &Resources, background: &Background) -> Option<Wor
         .map(|_| WorkerError::BackgroundStopped(READINESS_PROGRESS))
 }
 
-/// Stop readiness progress first, so a retained failure found next outranks
-/// a stop signal.
 fn settle_end(resources: &Resources, background: &Background, ended: Ended) -> Ended {
     if let Some(readiness) = &resources.readiness {
         readiness.stop_progress();
@@ -303,14 +295,9 @@ async fn prepare(
 ) -> Result<Prepared, WorkerError> {
     let identity = worker_identity(&config.observability.otel.service_name);
     let (metrics, exporter_state) = telemetry::install_observability(config, &identity, resources)?;
-    // Raise RLIMIT_NOFILE to the hard limit; see docs/backend-library-selection.md.
-    // After the subscriber, so a failure's warning is not lost.
     if let Err(error) = rlimit::increase_nofile_limit(u64::MAX) {
         tracing::warn!(error = %error, "open_file_limit_unchanged");
     }
-    // A handler may include its payload in a panic. Install before registration
-    // and keep catch diagnostics free of the payload as well. The hook writes
-    // through the subscriber, so it follows it.
     install_panic_hook();
     let mut capabilities = register_capabilities(config, register, background)?;
     telemetry::log_startup_record(
@@ -350,7 +337,6 @@ async fn prepare(
         .readiness
         .insert(Readiness::new(probes, listeners::refresh_policy(config)))
         .clone();
-    // A refused verdict leaves the bound listeners to teardown.
     listeners::bind_listeners(config, &metrics, &readiness, background, resources).await?;
     readiness.admit().await.map_err(WorkerError::Admission)?;
     listeners::start_progress(&readiness, background)?;
@@ -403,7 +389,6 @@ fn register_capabilities(
     )]
     let has_messages = false;
     // template:begin jobs:worker-bootstrap-validate-jobs
-    // Leave the registration intact for the messaging projection.
     let jobs = jobs::validate(std::mem::take(&mut registration.jobs))?;
     #[allow(
         unused_variables,
@@ -439,7 +424,6 @@ async fn wait_for_stop(
     tokio::select! {
         biased;
         result = signals.wait() => {
-            // The next notification belongs to shutdown's expedite wait.
             pending_failure(resources, background)
                 .map_or_else(|| signal_ended(result, background), Ended::Failure)
         },
@@ -566,8 +550,6 @@ mod tests {
         reason = "synchronous fixture polling waits for owned child or thread completion within its existing timeout"
     )]
     fn first_stop_preserves_a_queued_second_stop_for_drain() {
-        // Native signals are process-wide. Reuse this test binary with only
-        // this case selected so sibling lifecycle tests cannot receive them.
         const CHILD: &str = "WORKER_LIFECYCLE_SIGNAL_TEST_CHILD";
         if std::env::var_os(CHILD).is_none() {
             let thread = std::thread::current();
@@ -624,8 +606,6 @@ mod tests {
                             .success()
                     );
                 }
-                // Broadcast delivery to the independent observers establishes
-                // that both streams owned by Signals have pending notifications.
                 tokio::time::timeout(Duration::from_secs(2), async {
                     assert_eq!(terminate_seen.recv().await, Some(()));
                     assert_eq!(interrupt_seen.recv().await, Some(()));

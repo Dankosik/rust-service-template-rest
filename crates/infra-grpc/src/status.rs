@@ -5,13 +5,8 @@ use service_failure::SANITIZED_DETAIL;
 use tonic::Status;
 use tonic_types::{ErrorDetails, StatusExt as _};
 
-/// The service name, within which a reason is unique; the initializer writes the derived
-/// service's name here.
 pub const ERROR_DOMAIN: &str = "service";
 
-/// A failure from the shared catalog, returned as a status:
-/// `Err(Failure::new(service_failure::Code::NotFound).into())`. `ErrorInfo` carries the
-/// upper-case code as the reason a client matches on.
 #[derive(Clone, Debug)]
 pub struct Failure {
     code: service_failure::Code,
@@ -31,14 +26,12 @@ impl Failure {
         }
     }
 
-    /// Does not make a client retry.
     #[must_use]
     pub fn retry_after(mut self, after: Duration) -> Self {
         self.details.set_retry_info(Some(after));
         self
     }
 
-    /// Never pass the submitted value.
     #[must_use]
     pub fn field_violation(
         mut self,
@@ -100,8 +93,6 @@ const fn projection(code: service_failure::Code) -> (tonic::Code, &'static str) 
         // template:end inbound-webhooks:grpc-webhook-status
         service_failure::Code::Unauthorized => UNAUTHENTICATED,
         // template:begin authn:grpc-authentication-status
-        // A bearer the server could not parse is still a credential failure
-        // in gRPC, which has no 400 for it; the reason tells the cases apart.
         service_failure::Code::AuthenticationRequired
         | service_failure::Code::AuthenticationMalformed
         | service_failure::Code::AuthenticationInvalid => UNAUTHENTICATED,
@@ -148,8 +139,6 @@ mod tests {
             let info = details.error_info().expect("error info");
             assert_eq!(info.domain, ERROR_DOMAIN);
             assert!(info.metadata.is_empty());
-            // `google.rpc.ErrorInfo.reason`: `[A-Z][A-Z0-9_]+[A-Z0-9]`, at
-            // most 63 characters.
             let reason = info.reason.as_bytes();
             assert_eq!(info.reason, code.as_str().to_ascii_uppercase());
             assert!((3..=63).contains(&reason.len()), "{code}");

@@ -1,7 +1,3 @@
-/// The value a secret file holds: its text without the trailing line breaks
-/// (`\n`, and `\r` from a Windows line end) that editors, `echo`, and
-/// heredocs add. Shell command substitution, `$(< file)`, likewise drops
-/// every trailing newline. Every other byte, spaces included, is kept.
 #[must_use]
 pub fn value(mut text: String) -> String {
     let length = text.trim_end_matches(['\r', '\n']).len();

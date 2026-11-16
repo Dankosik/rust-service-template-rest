@@ -1,8 +1,3 @@
-//! Finite workload for the whole-process quota proof. This example is not shipped.
-//!
-//! Every operation enters the existing Echo service through production gRPC
-//! admission. The external driver owns offered load and the provider peers.
-
 use std::convert::Infallible;
 use std::mem::DropGuard;
 use std::pin::Pin;
@@ -43,7 +38,6 @@ static LOG_VALUE: [u8; 4096] = [b'L'; 4096];
 
 type CpuReply = oneshot::Receiver<Result<Vec<u8>, Status>>;
 
-/// Wall duration including preemption, not CPU time.
 struct CpuOccupancy {
     epoch: Instant,
     completed: Duration,
@@ -119,8 +113,6 @@ struct Counts {
     log_attempted: AtomicU64,
 }
 
-/// The registration lock serializes admission with closing the tracker.
-/// It is never held across an await or during the actual computation.
 struct Cpu {
     admission: Arc<Semaphore>,
     registration: Mutex<()>,
@@ -161,8 +153,6 @@ impl Cpu {
             })?;
         let id = self.counts.cpu_admitted.fetch_add(1, Ordering::SeqCst) + 1;
         let started = Instant::now();
-        // Copy/decode/spawn only after non-waiting admission. Fixed input and
-        // cardinality are independent of the caller's message and callbacks.
         let input = CPU_SOURCE.to_vec();
         let counts = Arc::clone(&self.counts);
         let occupancy = Arc::clone(&self.occupancy);
@@ -215,8 +205,6 @@ impl Cpu {
             .occupancy
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // One timestamp under the same lock pairs elapsed time with completed
-        // and currently active work; no computation or await holds this lock.
         let (observed, occupied) = occupancy.snapshot(Instant::now());
         CpuObservation {
             observed_ns: u64::try_from(observed.as_nanos()).unwrap_or(u64::MAX),
@@ -238,8 +226,6 @@ impl Cpu {
             () = cancel.cancelled() => {},
             () = self.failure.notified() => {},
         }
-        // Close and submission use the same gate. A successor already admitted
-        // after a failed closure released its permit remains in this tracker.
         self.close();
         if self.counts.cpu_failed.load(Ordering::SeqCst) != 0 {
             reporter.report();
@@ -255,9 +241,6 @@ impl Cpu {
         if self.counts.cpu_failed.load(Ordering::SeqCst) == 0 {
             Ok(())
         } else {
-            // Also catches a failure whose notification races the final join.
-            // The root's existing absolute deadline/exit mapping owns failure;
-            // reporting never certifies actual CPU work completed.
             reporter.report();
             Err(())
         }
@@ -360,8 +343,6 @@ impl Echo {
                 counts.upload_cancelled.fetch_add(1, Ordering::SeqCst);
             }
         });
-        // The driver caps offers at two; the adopted adapter also has two
-        // non-waiting slots. This generator ends after exactly 4097 frames.
         let frames = futures_util::stream::iter((0..=EMPTY_FRAMES).map(|frame| {
             Ok::<_, Infallible>(if frame < EMPTY_FRAMES {
                 Bytes::new()
@@ -469,8 +450,6 @@ impl EchoService for Echo {
             }
             Some("snapshot") => self.snapshot(),
             Some("freeze") => {
-                // Deliberately wrong execution boundary, only for the finite
-                // negative control. It cannot become a shipped handler.
                 let until = Instant::now() + Duration::from_secs(9);
                 let mut value = 1_u64;
                 for _ in 0..100_000_000_000_u64 {
@@ -568,7 +547,6 @@ mod tests {
             (Duration::from_secs(10), Duration::ZERO)
         );
         occupancy.enter(at(10), at(8));
-        // The operation has not completed, but its elapsed active portion counts.
         assert_eq!(
             occupancy.snapshot(at(13)),
             (Duration::from_secs(13), Duration::from_secs(3))

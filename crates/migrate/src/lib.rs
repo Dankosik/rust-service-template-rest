@@ -32,7 +32,6 @@ mod tests {
         )
     }
 
-    /// The resolver replaced `_` with spaces.
     fn is_canonical_description(description: &str) -> bool {
         !description.is_empty()
             && description.split(' ').all(|word| {

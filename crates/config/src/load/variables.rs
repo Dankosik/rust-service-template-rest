@@ -15,16 +15,10 @@ pub(crate) fn variable_name(key: &str) -> String {
     )
 }
 
-/// A byte a key segment may hold once a variable name is lowercased: the
-/// config-rs path identifier alphabet.
 fn is_name_byte(byte: u8) -> bool {
     matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-')
 }
 
-/// Whether the part of a variable name after `APP__` is a key path: every
-/// segment a plain identifier. config-rs would report an empty segment as an
-/// unknown field with an empty name, and would read `NAME[0]` or `A.B` as a
-/// path of its own, building a key no rule here expects a variable to set.
 fn is_key_path(suffix: &str) -> bool {
     suffix.split(ENV_SEPARATOR).all(|segment| {
         !segment.is_empty()
@@ -37,10 +31,6 @@ fn is_key_path(suffix: &str) -> bool {
 pub(crate) const ADDRESSABLE_KEY_FORM: &str =
     "lowercase letters, digits, `_`, or `-`, without `__` or a trailing `_`";
 
-/// Whether an `APP__` variable can address the key `name`. The loader
-/// lowercases a variable name and splits it on `__`, so a key outside that
-/// form never meets its environment counterpart: the file and the
-/// environment would name two entries.
 pub(crate) fn is_env_addressable(name: &str) -> bool {
     !name.is_empty()
         && name.bytes().all(is_name_byte)
@@ -56,9 +46,6 @@ pub(super) struct Variable {
 
 pub(super) type Variables = std::collections::BTreeMap<String, Variable>;
 
-/// Record a variable whose name is `APP__` and `suffix`, refusing a second
-/// spelling of its name: which of the two values won would depend on the
-/// order the carrier listed them in.
 fn admit(variables: &mut Variables, name: &str, suffix: &str, value: String) -> Result<(), Error> {
     let name_key = name.to_ascii_lowercase();
     let key = suffix.to_ascii_lowercase().replace(ENV_SEPARATOR, ".");
@@ -114,9 +101,6 @@ pub(super) fn audience_list(variables: &Variables) -> Result<Option<Vec<String>>
 }
 // template:end authn:load-audience-list
 
-/// The `APP__` variables of one load under their lowercased names: the
-/// secrets directory's files, then the process environment, whose value wins
-/// for a name both carry.
 pub(super) fn collect_variables<I, K, V>(
     secrets_dir: Option<&Path>,
     environment: I,
@@ -132,8 +116,6 @@ where
     };
     variables.extend(read_environment(environment)?);
     for (name, child) in &variables {
-        // Skip the separator after APP; each remaining `__` is a dot boundary
-        // in `child.key`.
         for (end, _) in name.match_indices(ENV_SEPARATOR).skip(1) {
             if let Some(parent) = variables.get(&name[..end]) {
                 return Err(Error::OverlappingVariables {
@@ -146,9 +128,6 @@ where
     Ok(variables)
 }
 
-/// The `APP__*` variables of the process environment. A name that is not
-/// Unicode fails the key-path check as well: its replacement character is no
-/// identifier byte.
 fn read_environment<I, K, V>(environment: I) -> Result<Variables, Error>
 where
     I: IntoIterator<Item = (K, V)>,
@@ -168,7 +147,6 @@ where
                 name: name.into_owned(),
             });
         }
-        // A lossy conversion would hand a credential on with its bytes changed.
         let Ok(value) = value.into().into_string() else {
             return Err(Error::NonUnicodeEnvValue {
                 name: name.into_owned(),
@@ -179,11 +157,6 @@ where
     Ok(variables)
 }
 
-/// The variables a secrets directory holds: each entry named `APP__...` is
-/// one variable and its content the value. Every other entry is skipped,
-/// which leaves out the `..data` links a Kubernetes volume keeps beside its
-/// files. A value ends before its trailing line breaks, since most tools
-/// write one; every other byte is kept, and a NUL byte is refused.
 #[expect(
     clippy::disallowed_methods,
     reason = "pre-runtime configuration admission owns finite secret-directory reads; startup can wait on the filesystem"
@@ -214,9 +187,6 @@ fn read_secrets_dir(dir: &Path) -> Result<Variables, Error> {
     Ok(variables)
 }
 
-/// A secret file's text as a variable value: NUL is refused, since the
-/// environment cannot carry it and `VALUE_FREE` relies on that; trailing line
-/// breaks end the value.
 fn secret_value(text: String) -> std::io::Result<String> {
     if text.contains('\0') {
         return Err(std::io::Error::new(

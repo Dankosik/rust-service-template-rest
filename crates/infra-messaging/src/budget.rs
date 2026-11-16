@@ -6,15 +6,12 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::MessagingError;
 
-/// Bounds every broker round trip, inside any longer caller deadline.
 pub const BROKER_OPERATION_BUDGET: Duration = Duration::from_secs(5);
 
 pub(crate) fn within_operation_budget(deadline: Instant) -> Instant {
     deadline.min(Instant::now() + BROKER_OPERATION_BUDGET)
 }
 
-/// Reports cancellation when observed before the deadline, or timeout if the
-/// deadline has already elapsed when cancellation is observed.
 pub(crate) async fn bounded_operation<T>(
     deadline: Instant,
     cancel: &CancellationToken,

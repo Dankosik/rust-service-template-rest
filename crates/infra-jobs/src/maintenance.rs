@@ -21,16 +21,12 @@ const OLDEST_AVAILABLE_AGE_METRIC: &str = "jobs_oldest_available_age_seconds";
 pub(crate) const OBSERVATION_TIMESTAMP_METRIC: &str = "jobs_observation_timestamp_seconds";
 const RETAIN_COMPLETED_FOR: Duration = Duration::from_hours(24);
 const RETENTION_BATCH_ROWS: u32 = 500;
-/// A hang guard: a slow batch is waited for.
 const RETENTION_STATEMENT_TIMEOUT: Duration = Duration::from_secs(5);
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(10);
 const POPULATION_TURN_WAIT: Duration = Duration::from_secs(1);
 const PER_KIND_STATE_SAMPLE_CAP: i64 = 1_000;
 const SAMPLE_STATEMENT_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Batches run until one is short. The first batch error is returned; earlier
-/// batches stay committed. Failed jobs remain until recovery. A short batch
-/// does not prove empty inventory: locked eligible rows can remain.
 pub(crate) async fn remove_expired(shared: &Shared) -> Result<u64, OperationError> {
     remove_expired_with_cancel(shared, None)
         .await
@@ -82,9 +78,6 @@ async fn delete_batch(shared: &Shared) -> Result<u64, OperationError> {
     backstop(async {
         in_tx(&shared.pool, async |tx| -> Result<u64, OperationError> {
             set_statement_timeout(tx, RETENTION_STATEMENT_TIMEOUT).await?;
-            // The state stays a literal: a bound state cannot prove the partial
-            // `background_jobs_terminal` predicate, so a generic plan would
-            // scan the table.
             let delete = sqlx::query!(
                 "DELETE FROM background_jobs \
                  WHERE id = ANY (ARRAY( \
@@ -160,9 +153,7 @@ async fn run_population_sampling(shared: &Shared, cancel: &CancellationToken) {
 
 #[derive(Clone, Copy)]
 enum Population {
-    /// The oldest completed job is dated by when its retention expired.
     Completed,
-    /// The oldest retained failed job is dated by when it failed.
     Failed,
 }
 

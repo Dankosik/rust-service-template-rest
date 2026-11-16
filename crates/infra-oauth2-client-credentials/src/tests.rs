@@ -56,8 +56,6 @@ mod token_request;
 const TOKEN_PATH: &str = "/token";
 const RESOURCE_PATH: &str = "/resource";
 const ASSERTION_AUDIENCE: &str = "https://issuer.example";
-/// Independent of the crate's own constants, so a typo in one does not hide
-/// behind an identical typo in the other.
 const GRANT_TYPE_TOKEN_EXCHANGE: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
 const ACCESS_TOKEN_TYPE: &str = "urn:ietf:params:oauth:token-type:access_token";
 
@@ -192,7 +190,6 @@ impl Fixture {
         Client::try_new_for_test_http(&self.origin, TOKEN_LIMITS).unwrap()
     }
 
-    /// Credentials without scopes or audience over the fixture's resource origin.
     fn client(&self) -> AuthenticatedClient {
         self.credentials(&[], None).http(self.resource_client())
     }
@@ -289,7 +286,6 @@ impl Fixture {
     }
 }
 
-/// Consumes one fixture event, failing the test if none arrives promptly.
 async fn take_event(events: &Semaphore) {
     tokio::time::timeout(Duration::from_secs(2), events.acquire())
         .await
@@ -359,7 +355,6 @@ async fn read_request(stream: &mut TcpStream) -> CapturedRequest {
         let read = stream.read(&mut chunk).await.unwrap();
         assert_ne!(read, 0, "fixture peer closed before completing headers");
         request.extend_from_slice(&chunk[..read]);
-        // Valid token responses may carry a near-1-MiB Bearer value.
         assert!(
             request.len() <= 2 * 1024 * 1024,
             "fixture request exceeded bound"
@@ -429,7 +424,6 @@ fn token_context() -> OperationContext {
     OperationContext::with_timeout(Duration::from_secs(10))
 }
 
-/// Moves the Tokio clock without waiting, leaving it running for socket I/O.
 async fn advance(duration: Duration) {
     tokio::time::pause();
     tokio::time::advance(duration).await;

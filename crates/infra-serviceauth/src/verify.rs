@@ -1,6 +1,3 @@
-//! Service token verification: one header and one payload parse, then the
-//! signature against the presenting caller's keys only.
-
 use std::{
     borrow::Cow,
     fmt,
@@ -36,7 +33,6 @@ pub enum Failure {
     Unavailable,
 }
 
-/// A closed reason for operators. Never derived from token contents.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, enum_map::Enum)]
 pub(crate) enum Reason {
     Missing,
@@ -89,8 +85,6 @@ impl Reason {
     }
 }
 
-/// The verified calling service. Only verification constructs it, so
-/// unverified request data can never pose as a caller.
 #[derive(Clone, Eq, PartialEq, derive_more::Debug)]
 #[debug("Caller({name:?})")]
 pub struct Caller {
@@ -111,19 +105,8 @@ struct Inner {
     audience: ServiceName,
     jwt_type: JwtType,
     trust: TrustRegistry,
-    /// Registered once: a registry lookup per call costs more than the increment.
     verified: metrics::Counter,
-    /// Registered on a reason's first refusal, so the exposition lists only
-    /// reasons that happened.
     refused: EnumMap<Reason, OnceLock<metrics::Counter>>,
-    /// Every check but the validity window depends only on the token's bytes
-    /// and on the audience, type and registry fixed for the process, so a
-    /// remembered token is decided by its window alone, as a full check would
-    /// decide it. It is not a replay cache: nothing is refused for
-    /// having been remembered. The cache bounds memory only; the window is
-    /// checked here on every hit. Only a token whose signature verified is
-    /// inserted, so a caller cannot choose colliding keys; `SipHash` over the
-    /// whole token cost more than the rest of a hit.
     remembered: Cache<Box<[u8]>, (Caller, Window), foldhash::quality::RandomState>,
 }
 
@@ -138,10 +121,6 @@ impl fmt::Debug for Verifier {
 }
 
 impl Verifier {
-    /// A verifier for tokens addressed to `audience`, this service's name.
-    /// The success counter is registered here, so a metrics recorder
-    /// installed later counts failures but never successes; bootstrap
-    /// installs it first.
     #[must_use]
     pub fn new(audience: ServiceName, jwt_type: JwtType, trust: TrustRegistry) -> Self {
         metrics::describe_counter!(
@@ -155,9 +134,6 @@ impl Verifier {
             trust,
             verified: metrics::counter!(VERIFICATIONS_METRIC, "outcome" => "success", "reason" => "verified"),
             refused: EnumMap::default(),
-            // A token first accepted one clock allowance before `iat` can
-            // remain valid until one allowance after `exp`. The cache TTL
-            // starts at insertion; every hit checks the token's own window.
             remembered: Cache::builder()
                 .max_capacity(MAX_REMEMBERED)
                 .time_to_live(std::time::Duration::from_secs(
@@ -171,7 +147,6 @@ impl Verifier {
         self.0.trust.callers()
     }
 
-    /// Records one outcome; a failure logs only its closed reason.
     pub fn authenticate<'a>(
         &self,
         authorization: impl IntoIterator<Item = &'a [u8]>,
@@ -207,7 +182,6 @@ impl Verifier {
                     self.0.remembered.invalidate(token);
                     Err(Reason::Expired)
                 }
-                // A clock stepped back before the window; it may step forward.
                 Err(reason) => Err(reason),
             };
         }
@@ -236,11 +210,9 @@ impl Verifier {
             signature,
         } = rfc7515::compact(token).ok_or(Reason::Header)?;
         let header = URL_SAFE_NO_PAD.decode(header).map_err(|_| Reason::Header)?;
-        // RFC 7515 section 5.2 requires UTF-8 for the whole header and payload;
-        // `serde_json::from_slice` skips an ignored member's bytes unchecked.
+        // RFC 7515 §5.2
         let header = std::str::from_utf8(&header).map_err(|_| Reason::Header)?;
         let header: TokenHeader<'_> = serde_json::from_str(header).map_err(|_| Reason::Header)?;
-        // The contract defines no extension, so `crit` is never understood.
         if header.crit {
             return Err(Reason::Header);
         }
@@ -313,8 +285,6 @@ impl Verifier {
     }
 }
 
-/// When a verified token is valid: from the later of its `iat` and `nbf`
-/// to its `exp`, each widened by the clock allowance.
 #[derive(Clone, Copy)]
 struct Window {
     valid_from: u64,
@@ -322,7 +292,6 @@ struct Window {
 }
 
 impl Window {
-    /// Expiry is checked first, so a token outside both bounds is expired.
     const fn admits(self, now: u64) -> Result<(), Reason> {
         if shared_rules::rfc7519::is_expired(self.expires_at, now, LEEWAY_SECONDS) {
             Err(Reason::Expired)
@@ -338,15 +307,7 @@ fn unix_now() -> Result<u64, Reason> {
     unix_seconds().ok_or(Reason::Clock)
 }
 
-/// The header members this crate reads; every other member is ignored, so no
-/// member supplies or fetches a key (`jwk`, `jku`, `x5u` and `x5c` included),
-/// and `kid` chooses only among the keys of the caller `iss` names. Repeated
-/// recognized members cause a parse error. The `alg` member requires a
-/// string. The `typ` and `kid` members also require strings when non-null
-/// and read `null` as missing. Any value for `crit` counts as present.
-/// `alg` is compared as the exact string, as RFC 7515 section 4.1.1 requires,
-/// so any other string (`none` and unregistered names included) is an
-/// `algorithm` failure.
+/// RFC 7515 §4.1.1
 #[derive(Deserialize)]
 struct TokenHeader<'a> {
     #[serde(borrow)]
@@ -359,10 +320,6 @@ struct TokenHeader<'a> {
     crit: bool,
 }
 
-/// The claims this crate reads; every other claim is ignored. Repeating a
-/// recognized claim or giving it the wrong non-null type is a parse error.
-/// A `null` value for `nbf` also causes a parse error. The other claims
-/// read `null` as missing.
 #[derive(Deserialize)]
 struct Claims<'a> {
     #[serde(borrow)]
@@ -377,9 +334,7 @@ struct Claims<'a> {
     nbf: Option<u64>,
 }
 
-/// `aud` as RFC 7519 allows it: one string or an array of strings. Only a
-/// single audience can match, and `#[serde(untagged)]` would buffer into owned
-/// storage instead of borrowing from the payload.
+/// RFC 7519 §4.1.3
 #[derive(Debug)]
 enum Audience<'a> {
     Single(Cow<'a, str>),
@@ -419,8 +374,6 @@ impl<'de: 'a, 'a> Deserialize<'de> for Audience<'a> {
     }
 }
 
-/// A bare [`Cow<str>`](Cow) element always deserializes as owned; `#[serde(borrow)]`
-/// lets an escape-free string borrow from the payload.
 #[derive(Deserialize)]
 struct BorrowableString<'a>(#[serde(borrow)] Cow<'a, str>);
 
@@ -430,9 +383,7 @@ impl Audience<'_> {
     }
 }
 
-/// An RFC 7519 `NumericDate`; fraction rounding (via
-/// [`shared_rules::rfc7519::numeric_date_seconds`]) moves a bound by at most
-/// half a second, inside [`LEEWAY_SECONDS`].
+/// RFC 7519 §2
 struct NumericDate(u64);
 
 impl<'de> Deserialize<'de> for NumericDate {
@@ -478,7 +429,6 @@ mod tests {
 
     type Changes<'a> = &'a [(&'a str, Option<serde_json::Value>)];
 
-    /// `None` removes the member.
     fn apply(target: &mut serde_json::Value, changes: Changes<'_>) {
         for (member, value) in changes {
             match value {
@@ -616,8 +566,6 @@ mod tests {
     fn a_contract_token_names_its_caller() {
         let case = Case::new();
         assert_eq!(case.check(&case.signed(|_, _| {})), Ok("orders".to_owned()));
-        // The audience may be a one-element array, typ a full media type,
-        // and an unknown claim or a fractional date is not a reason to refuse.
         let token = case.signed(|header, claims| {
             header["typ"] = "Application/Example-SVC+JWT".into();
             claims["aud"] = serde_json::json!(["catalog"]);
@@ -636,8 +584,6 @@ mod tests {
     #[test]
     fn another_issuers_key_never_verifies_a_caller() {
         let case = Case::new();
-        // billing's key and kid, claiming to be orders: the kid is looked
-        // up among orders's keys only.
         let header = Case::header(&case.billing);
         let forged = case.billing.sign(&header, &Case::claims());
         assert_eq!(case.check(&forged), Err(Reason::UnknownKey));
@@ -779,8 +725,6 @@ mod tests {
             let token = case.signed(|header, _| apply(header, changes));
             assert_eq!(case.check(&token), Err(expected), "{token}");
         }
-        // A key embedded in the header is never used: billing's public key
-        // offered for a token signed by billing and claiming orders.
         let mut header = Case::header(&case.orders);
         header["jwk"] = case.billing.jwk();
         let forged = case.billing.sign(&header, &Case::claims());
@@ -840,7 +784,6 @@ mod tests {
             b"{\"iss\":\"\xff\"}",
         );
         assert_eq!(case.check(&not_utf8), Err(Reason::Claims));
-        // Invalid UTF-8 in a member the verifier ignores is still refused.
         let header = format!(
             r#"{{"alg":"ES256","typ":"{TYPE}","kid":"{}","x":""#,
             case.orders.kid()
@@ -931,9 +874,6 @@ mod tests {
         );
     }
 
-    /// A committed token, so another implementation of the contract can be
-    /// checked against the same bytes: valid at `now`, refused for anything
-    /// it was not issued for.
     #[test]
     fn the_committed_contract_vector_verifies_exactly() {
         let vector: serde_json::Value =

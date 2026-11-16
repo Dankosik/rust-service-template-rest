@@ -1,20 +1,5 @@
-//! Closed catalog of the failure identities a client can match on.
-//!
-//! Each transport projects a [`Code`] into its own wire format: `infra-http`
-//! into an RFC 9457 problem, `infra-grpc` into a status carrying
-//! `google.rpc.ErrorInfo`. The catalog carries no status code, response
-//! schema, or caller-controlled detail text.
-//!
-//! A code that says no more than its HTTP status is named after that status
-//! (`not_found`, `gateway_timeout`); a code that says more names the failure
-//! (`idempotency_key_mismatch`). A code joins the catalog with its first
-//! producer or a reserved use by service handlers; a status only the
-//! connection layer answers, such as hyper's 431, has no code.
-
 use serde::ser::Serializer;
 
-/// Declares the catalog once, so the variants, the list of them and their
-/// wire spellings cannot drift apart and a profile removes one line per code.
 macro_rules! codes {
     ($($variant:ident => $wire:literal,)+) => {
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -27,8 +12,6 @@ macro_rules! codes {
         impl Code {
             pub const ALL: &'static [Code] = &[$(Self::$variant,)+];
 
-            /// The wire spelling: lowercase `snake_case` of at most 63 bytes,
-            /// so its uppercase form is a valid `google.rpc.ErrorInfo` reason.
             #[must_use]
             pub const fn as_str(self) -> &'static str {
                 match self {
@@ -75,8 +58,6 @@ pub const SANITIZED_DETAIL: &str = "request failed";
 
 pub const AT_CAPACITY_DETAIL: &str = "server is at capacity";
 
-/// Retry hint on a shed request. Short on purpose: shedding means the server
-/// stayed past capacity for the request's whole budget, not that it is down.
 pub const AT_CAPACITY_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(1);
 
 // template:begin authn:insufficient-scope-detail

@@ -1,4 +1,3 @@
-//! Subprocesses isolate the global subscriber and real stdout failure modes.
 #![expect(
     clippy::unwrap_used,
     clippy::panic,
@@ -73,8 +72,6 @@ fn run_fixture(scenario: &str, sink: Sink) -> (i32, String, String, Duration) {
             None
         }
         Sink::Stalled => {
-            // Fill the actual stdout socket before releasing the fixture. The
-            // logging thread must then wait for OS capacity until process exit.
             writer.set_nonblocking(true).unwrap();
             let bytes = [b'x'; 8192];
             let mut size = bytes.len();
@@ -228,8 +225,6 @@ fn terminal_fixture() {
     std::io::stdin().read_line(&mut go).unwrap();
     if scenario == "config" {
         let result = finish_config_failure("bad config".to_owned(), Some(7), Instant::now());
-        // Bypass the test harness's stdout reporting after intentionally
-        // breaking that descriptor; the parent owns the child.
         std::process::exit(i32::from(result != ExitCode::SUCCESS));
     }
     let level = if scenario == "warn" {
@@ -278,7 +273,5 @@ fn terminal_fixture() {
         }),
     };
     let result = finish_run(Some(runtime), logging, outcome, Some(7), Instant::now());
-    // Bypass the test harness's stdout reporting after intentionally breaking
-    // that descriptor; the parent owns the child and observes its actual exit.
     std::process::exit(i32::from(result != ExitCode::SUCCESS));
 }

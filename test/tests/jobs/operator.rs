@@ -27,8 +27,6 @@ async fn open(pool: &PgPool) -> PgPool {
     super::template_pool(&dsn_for(pool).await, 3).await
 }
 
-// A completed failed cycle derived from the queue constraints. No engine is
-// needed here: execution.rs owns creation of failures by handlers and rescue.
 async fn failed(pool: &PgPool, id: Uuid, key: &str) -> RecoveryTarget {
     let version: i64 = sqlx::query_scalar(
         "INSERT INTO background_jobs
@@ -133,8 +131,6 @@ async fn redrive_preserves_identity_archives_each_cycle_and_rejects_old_versions
     assert_eq!(history[0].as_object().unwrap().len(), 8);
     assert_eq!(history[0]["redriven_at"], after["not_before"]);
 
-    // A later failed cycle must refuse the old version even before another
-    // claim advances it: the redrive itself invalidates the previous token.
     sqlx::query(
         "UPDATE background_jobs SET state = 'failed', attempts = 1,
                  failure_reason = 'permanent', finished_at = statement_timestamp()
@@ -244,9 +240,6 @@ async fn run_operator(url: &str, args: &[&str], code: i32) -> Value {
 
     use tokio::process::Command;
 
-    // Use the existing fixture's shipped run(args, register) path. A
-    // one-connection pool and absent broker configuration cannot start
-    // an ordinary worker, but suffice for this admitted command mode.
     let child = Command::new(env!("CARGO_BIN_EXE_jobs-worker-fixture"))
         .args(args)
         .env_clear()
@@ -383,8 +376,6 @@ async fn worker_operator_refuses_read_only_sessions_for_every_command(pool: PgPo
     let url = url_for(&pool, DATABASE_URL).await;
     let id = target.id().to_string();
     let version = target.version().to_string();
-    // Existing sessions remain writable; each operator opens a new session
-    // against this database's read-only default, as a replica would expose.
     sqlx::query(
         "DO $$ BEGIN EXECUTE format(\
          'ALTER DATABASE %I SET default_transaction_read_only = on', current_database()); END $$",
@@ -439,9 +430,6 @@ async fn recovery_initial_lock_has_local_statement_budget_and_preserves_failed_c
             .fetch_one(&mut *holder)
             .await
             .unwrap();
-        // The admitted pool's ordinary statement budget is eight seconds.
-        // A local two-second timeout must fail at the first lock while it is
-        // still held, rather than escape via the caller's operation deadline.
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(5),
             in_tx(&jobs, async |tx| {
@@ -527,7 +515,6 @@ async fn concurrent_recovery_has_one_winner_after_the_row_lock(pool: PgPool) {
         let row = stored(&pool, &target).await;
         assert_eq!(row["state"], "pending");
         assert_eq!(row["recovery_history"].as_array().unwrap().len(), 1);
-        // Free this iteration's live key without changing the next case.
         sqlx::query("DELETE FROM background_jobs WHERE id::text = $1")
             .bind(target.id().to_string())
             .execute(&pool)
@@ -611,7 +598,6 @@ async fn recovery_results_remain_provisional_until_commit_is_acknowledged(pool: 
     })
     .await;
     std::assert_matches!(result, Err(OperatorError::Stale));
-    // Acquiring from the same pool flushes the queued rollback before readback.
     assert_eq!(stored(&jobs, &target).await, before);
     for fault in [Fault::DropBeforeForward, Fault::ForwardThenDrop] {
         let target = failed(&pool, Uuid::new_v4(), "uncertain").await;

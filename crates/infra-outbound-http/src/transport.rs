@@ -18,9 +18,6 @@ pub(crate) type Resolver = hyper_util::client::legacy::connect::dns::GaiResolver
 #[cfg(test)]
 pub(crate) type Resolver = crate::test_support::FixtureResolver;
 
-/// Shared because building the platform verifier is costly; losers of a first-build race are
-/// discarded. On Linux the verifier snapshots system roots at construction. Clients share
-/// its session cache, keyed by server name.
 pub(crate) fn tls_config() -> Result<&'static rustls::ClientConfig, BuildError> {
     use rustls_platform_verifier::BuilderVerifierExt as _;
 
@@ -50,14 +47,9 @@ pub(crate) fn build_transport(
 ) -> Transport {
     let mut http = HttpConnector::new_with_resolver(resolver);
     http.enforce_http(false);
-    // Half the operation budget, so a stalled connect is reported as `connect` while time
-    // remains for TLS and the response. Hyper-util divides it among one family's addresses;
-    // with Happy Eyeballs on, the vendored patch races them (vendor/hyper-util/PATCHES.md)
-    // so one that never answers does not hold back the rest.
     http.set_connect_timeout(Some(
         (limits.operation_timeout / 2).min(CONNECT_TIMEOUT_CAP),
     ));
-    // The socket options keep the reqwest 0.12 defaults this client replaced.
     http.set_nodelay(true);
     http.set_keepalive(Some(Duration::from_secs(15)));
     http.set_keepalive_interval(Some(Duration::from_secs(15)));
@@ -72,9 +64,6 @@ pub(crate) fn build_transport(
     };
     hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
         .pool_timer(hyper_util::rt::TokioTimer::new())
-        // Below common server and load-balancer keep-alive idle timeouts
-        // (60 s and more), so the client retires a connection before the
-        // provider closes it under a new request.
         .pool_idle_timeout(Duration::from_secs(30))
         .http1_max_headers(limits.response_header_count)
         .build(https.enable_http1().wrap_connector(http))

@@ -17,11 +17,6 @@ pub(crate) struct PasswordFile {
     reading: Arc<Semaphore>,
 }
 
-/// Why a read on an open connection produced no password. Only [`Io`] and
-/// [`Empty`] also occur at admission, where they become a [`CacheError`].
-///
-/// [`Io`]: ReadFailure::Io
-/// [`Empty`]: ReadFailure::Empty
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub(crate) enum ReadFailure {
     #[error("cache password file could not be read ({0})")]
@@ -55,8 +50,6 @@ impl PasswordFile {
         &self.username
     }
 
-    /// A blocking read can outlive its caller's wait. While it runs, another
-    /// read fails at once as [`ReadFailure::Busy`].
     pub(crate) async fn read(&self) -> Result<Zeroizing<String>, ReadFailure> {
         let permit = self
             .reading

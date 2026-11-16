@@ -1,5 +1,4 @@
-/// RFC 6749 §3.3 `scope-token = 1*NQCHAR`, where `NQCHAR` is
-/// `%x21 / %x23-5B / %x5D-7E`.
+/// RFC 6749 §3.3
 #[must_use]
 pub fn is_scope_token(value: &str) -> bool {
     !value.is_empty()

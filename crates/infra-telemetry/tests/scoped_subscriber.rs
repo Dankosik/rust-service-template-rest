@@ -1,5 +1,3 @@
-//! The subscriber is process-wide, so this runs in its own test binary.
-
 use infra_telemetry::{LoggingError, LoggingFormat, LoggingOptions, install_subscriber};
 use tracing::Dispatch;
 use tracing::subscriber::NoSubscriber;

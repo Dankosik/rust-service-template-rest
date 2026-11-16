@@ -22,8 +22,6 @@ use crate::registry::Registry;
 use crate::topology::{ConsumerAdmission, create_durable, get_stream_failure};
 use crate::wire;
 
-/// The broker redelivers an unsettled message after the batch identity check,
-/// handler budget and both settlement round trips.
 const ACK_WAIT: Duration = HANDLER_TIMEOUT
     .saturating_add(BROKER_OPERATION_BUDGET)
     .saturating_add(BROKER_OPERATION_BUDGET)
@@ -31,20 +29,10 @@ const ACK_WAIT: Duration = HANDLER_TIMEOUT
     .saturating_add(Duration::from_secs(1));
 const STREAM_ERROR_BACKOFF: Duration = Duration::from_secs(1);
 const PULL_EXPIRES: Duration = Duration::from_secs(30);
-/// Time past `PULL_EXPIRES` to wait for the broker's own expiry answer, which
-/// ends an idle pull cleanly; without it the local timer races that answer
-/// and reports a healthy idle expiry as a failed batch. It stays below the
-/// SDK's expires-plus-five watchdog, which ends the batch silently, so a pull
-/// the broker never answers still reaches the failed-batch arm.
 const PULL_EXPIRY_GRACE: Duration = Duration::from_secs(2);
-/// Redelivery delay of a delivery returned unhandled at drain. It outlasts
-/// this replica's unsubscription, so the broker redelivers to another pull.
 const RELEASE_DELAY: Duration = Duration::from_secs(1);
 const STREAM_ERRORS_TOTAL: &str = "messaging_consumer_stream_errors_total";
 
-/// NATS 2.15 counts the original subject and ACK reply in a pull's byte limit.
-/// V2 ACKs cover V1 too: prefix, domain, eight-byte account hash, stream,
-/// consumer, then five 64-bit decimal fields (including a signed timestamp).
 fn pull_delivery_bytes(
     payload_bytes: usize,
     subject_bytes: usize,
@@ -52,8 +40,6 @@ fn pull_delivery_bytes(
     consumer: &str,
     domain: Option<&str>,
 ) -> Option<usize> {
-    // Three separators between names, then a separator and at most 20 bytes
-    // for each numeric field. An absent or empty domain is written as "_".
     let ack_fixed_bytes = "$JS.ACK.".len() + 8 + 3 + 5 * 21;
     [
         wire::HEADER_LIMIT_BYTES,
@@ -77,7 +63,6 @@ pub struct Consumer {
     handler: Arc<DeliveryHandler>,
 }
 
-/// Terminal worker failure or incomplete shutdown. Reasons never contain input.
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum ConsumerError {
     #[error("messaging durable consumer was deleted or replaced")]
@@ -88,9 +73,6 @@ pub enum ConsumerError {
     DeadLetterTooLarge { sequence: u64 },
     #[error("messaging consumer drain exceeded its shared deadline")]
     DrainTimedOut,
-    /// The consumer task or one of its deliveries panicked or was cancelled,
-    /// or, as seen by [`ConsumerHandle::failed`], the task stopped without
-    /// reporting a failure.
     #[error("messaging consumer task exited unexpectedly")]
     TaskEnded,
 }
@@ -121,7 +103,6 @@ impl Consumer {
             deadline,
             cancel,
         } = admission;
-        // A route without a handler is publish-only and need not be consumed.
         if registry
             .handled_routes()
             .any(|route| !wire::matches_filter(&options.filter_subject, &route.subject))
@@ -150,24 +131,16 @@ impl Consumer {
         )
         .filter(|bytes| i64::try_from(*bytes).is_ok())
         .ok_or(MessagingError::Bounds)?;
-        // `consume` multiplies a full pull's budget unchecked, and the broker
-        // reads its byte limit as an i64.
         delivery_bytes
             .checked_mul(options.concurrency.get())
             .and_then(|bytes| i64::try_from(bytes).ok())
             .ok_or(MessagingError::Bounds)?;
-        // The durable consumer is application-declared: `create_consumer`
-        // creates it or updates its editable fields, and the broker refuses an
-        // incompatible change. `max_ack_pending` keeps the broker default,
-        // which bounds the durable across all replicas.
         let config = async_nats::jetstream::consumer::pull::Config {
             durable_name: Some(options.durable_name.clone()),
             filter_subject: options.filter_subject.clone(),
             deliver_policy: DeliverPolicy::All,
             ack_policy: AckPolicy::Explicit,
             ack_wait: ACK_WAIT,
-            // The adapter, not the broker, ends redelivery: it dead-letters
-            // an exhausted delivery, where a broker limit would drop it.
             max_deliver: -1,
             replay_policy: ReplayPolicy::Instant,
             ..Default::default()
@@ -197,8 +170,6 @@ impl Consumer {
         })
     }
 
-    /// Starts the pull loop. Cancelling `cancel` stops admitting new deliveries.
-    /// Admitted deliveries keep their handler and settlement allowances during drain.
     #[must_use]
     pub fn start(self, cancel: &CancellationToken) -> ConsumerHandle {
         let stop = cancel.child_token();
@@ -210,9 +181,6 @@ impl Consumer {
             let shared = Arc::clone(&self.shared);
             let result = self.run(task_stop, task_force).await;
             if let Err(error) = &result {
-                // The owner's forced cut ends this consumer only; the shared
-                // connection still serves producers, other consumers and
-                // readiness.
                 if !matches!(error, ConsumerError::DrainTimedOut) {
                     shared.mark_failed();
                     tracing::error!(reason = %error, "messaging_consumer_stopped");
@@ -229,8 +197,6 @@ impl Consumer {
         }
     }
 
-    /// Drain returns received but unadmitted messages and joins admitted work;
-    /// dropping the join set at forced shutdown aborts every delivery.
     async fn run(
         self,
         stop: CancellationToken,
@@ -243,7 +209,6 @@ impl Consumer {
             result = async {
                 let result = self.consume(&mut deliveries, &stop, &force).await;
                 if matches!(result, Err(ConsumerError::DeadLetterTooLarge { .. })) {
-                    // Keep the first failure while admitted siblings settle.
                     while deliveries.join_next().await.is_some() {}
                 }
                 result
@@ -276,9 +241,6 @@ impl Consumer {
             if stop.is_cancelled() {
                 break;
             }
-            // Pull requests address a durable by name, not creation identity.
-            // A replacement between successful full batches has no waiting
-            // request to terminate, so verify identity before every new pull.
             let loss_check = tokio::select! {
                 biased;
                 () = stop.cancelled() => break 'pulls,
@@ -291,8 +253,6 @@ impl Consumer {
                     if stop.is_cancelled() {
                         break 'pulls;
                     }
-                    // Do not admit from a same-name replacement while the
-                    // broker cannot confirm the durable's creation identity.
                     pull_failed("consumer_info", consumer_info_error_kind(&error.kind()));
                     tokio::select! {
                         biased;
@@ -385,8 +345,6 @@ impl Consumer {
                         matches!(end, BatchEnd::MaxBytesExceededBeforeFirstDelivery);
                     if retry_large_retained_record {
                         pull_failed("batch_receive", BatchReceiveError::MaxBytesExceeded.label());
-                        // A multi-message pull may report 409 before already
-                        // allocated records reach this replica's subscription.
                         if was_retrying_large_retained_record {
                             return Err(ConsumerError::RetainedMessageTooLarge);
                         }
@@ -422,8 +380,6 @@ impl Consumer {
         retry_large_retained_record: bool,
     ) -> (usize, usize) {
         if retry_large_retained_record {
-            // The caller drains every other slot before reserving a full-size
-            // delivery for a record that may predate the current source limit.
             (1, self.retained_pull_bytes)
         } else {
             let slots = self.concurrency.get() - active_deliveries;
@@ -439,9 +395,6 @@ impl Consumer {
         force: &CancellationToken,
         slots: usize,
     ) -> Result<BatchEnd, ConsumerError> {
-        // Batch has no missing-heartbeat watchdog. Bound unanswered pulls
-        // here, after the broker's expiry answer is due and before the
-        // SDK's own timer would end the batch as if it had answered.
         let expires = Instant::now() + PULL_EXPIRES + PULL_EXPIRY_GRACE;
         let mut remaining = slots;
         while remaining > 0 {
@@ -452,8 +405,6 @@ impl Consumer {
                 next = tokio::time::timeout_at(expires, messages.next()) => match next {
                     Ok(Some(Ok(message))) => {
                         if remaining == slots {
-                            // The preflight INFO and the named pull are separate requests.
-                            // Verify creation identity after this batch has delivered data.
                             let loss_check = tokio::select! {
                                 biased;
                                 () = stop.cancelled() => {
@@ -530,11 +481,7 @@ async fn durable_confirmed_lost(pull: &PullConsumer) -> bool {
     matches!(check_durable_loss(pull).await, Ok(true))
 }
 
-/// Whether the broker answers that the durable, or its stream, no longer
-/// exists, or was replaced with another creation or a push consumer.
-/// A failed or unanswered lookup is not that answer.
 async fn check_durable_loss(pull: &PullConsumer) -> Result<bool, ConsumerInfoError> {
-    // The native response timeout starts after the client's command queue admits the request.
     let result = tokio::time::timeout(BROKER_OPERATION_BUDGET, pull.get_info())
         .await
         .map_err(|_| ConsumerInfoError::new(ConsumerInfoErrorKind::TimedOut))?;
@@ -597,9 +544,6 @@ fn classify_batch_receive_error(error: &async_nats::Error) -> BatchReceiveError 
     if error.kind() != std::io::ErrorKind::Other {
         return BatchReceiveError::Other("io_error");
     }
-    // async-nats 0.50 Batch erases status/description into io::Error(Other).
-    // Recognize only the pinned SDK format. The exact byte-limit status also
-    // selects the bounded retained-record pull.
     let description = error.to_string();
     let Some(status) =
         description.strip_prefix("error while processing messages from the stream: ")
@@ -629,8 +573,6 @@ fn pull_failed(phase: &'static str, error_type: &'static str) {
     metrics::counter!(STREAM_ERRORS_TOTAL).increment(1);
 }
 
-// Missing or unsubmitted deliveries remain eligible for broker ack-wait
-// redelivery. Stop must not spend admitted work's drain window on release I/O.
 async fn release(mut messages: pull::Batch, slots: usize, stop: &CancellationToken) {
     let mut prefetched = Vec::new();
     for _ in 0..slots {
@@ -641,7 +583,6 @@ async fn release(mut messages: pull::Batch, slots: usize, stop: &CancellationTok
             prefetched.push(message);
         }
     }
-    // Ends this replica's pulls before the redelivery requests go out.
     drop(messages);
     for message in &prefetched {
         release_message(message, stop).await;
@@ -668,16 +609,10 @@ pub(crate) fn describe_metrics() {
 }
 
 impl ConsumerHandle {
-    /// Admitted work keeps its handler and settlement allowances. Locally held
-    /// unadmitted deliveries get a best-effort delayed NAK; ack-wait retains
-    /// redelivery ownership.
     pub fn drain(&self) {
         self.stop.cancel();
     }
 
-    /// Waits for the consumer's terminal failure. Also returns
-    /// [`ConsumerError::TaskEnded`] once the task stopped without one, such
-    /// as after a clean drain.
     pub async fn failed(&self) -> ConsumerError {
         let mut failure = self.failure.clone();
         match failure.wait_for(Option::is_some).await {
@@ -691,10 +626,6 @@ impl ConsumerHandle {
         self.force.cancel();
     }
 
-    /// Cancellation-safe join for a root racing drain against another signal.
-    /// Success confirms all admitted work joined after admission stopped.
-    /// The handle remains owned here when this future is dropped or times out,
-    /// allowing the root to abort and retry within its shared cleanup deadline.
     pub async fn finish(&mut self, deadline: Instant) -> Result<(), ConsumerError> {
         self.drain();
         let task = match &mut self.supervisor {
@@ -712,8 +643,6 @@ impl ConsumerHandle {
 
 impl Drop for ConsumerHandle {
     fn drop(&mut self) {
-        // Exhausted cleanup has no budget to observe a join; dropping the
-        // supervisor handle aborts the task and every delivery.
         self.abort();
     }
 }
@@ -801,8 +730,6 @@ mod tests {
             }))),
         };
         let deadline = Instant::now() + Duration::from_secs(1);
-        // The task deliberately cannot finish during drain. An unbounded join
-        // in the timeout branch consumes this independent caller deadline.
         let result =
             tokio::time::timeout_at(deadline + Duration::from_millis(1), handle.finish(deadline))
                 .await;

@@ -3,8 +3,6 @@ use rcgen::{
     KeyUsagePurpose,
 };
 
-/// Every certificate keeps rcgen's default validity window, so nothing
-/// checked in or computed from the test clock can expire.
 #[derive(Debug)]
 pub(crate) struct TlsMaterial {
     pub(crate) cert: Vec<u8>,

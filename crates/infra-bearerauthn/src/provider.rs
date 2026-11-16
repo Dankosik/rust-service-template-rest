@@ -29,12 +29,9 @@ use crate::Failure;
 use crate::{PreparationError, PreparationPhase, PreparationReason};
 
 const MAX_RESPONSE_BYTES: usize = 1_048_576;
-/// Total budget of one provider exchange; reqwest applies it until the body ends.
 pub(crate) const PROVIDER_TIMEOUT: Duration = Duration::from_secs(3);
 const REQUEST_DURATION_METRIC: &str = "authn_provider_request_duration_seconds";
 
-/// Every histogram this crate records. A composition root hands it to the
-/// Prometheus recorder; a metric left out renders the default buckets.
 pub const HISTOGRAMS: &[(&str, &[f64])] = &[(
     REQUEST_DURATION_METRIC,
     &[
@@ -42,8 +39,6 @@ pub const HISTOGRAMS: &[(&str, &[f64])] = &[(
     ],
 )];
 
-/// Why a provider exchange produced no usable body. Closed, and free of
-/// provider-supplied text, URLs and credentials.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProviderFailure {
     Timeout,
@@ -82,7 +77,6 @@ impl ProviderReason {
 }
 
 impl ProviderFailure {
-    /// A timed-out connection attempt is both; the budget is the cause.
     fn from_transport(error: &reqwest::Error) -> Self {
         if error.is_timeout() {
             Self::Timeout
@@ -111,7 +105,6 @@ impl ProviderFailure {
     }
 }
 
-/// An exact issuer identity: an HTTPS URL without a query or fragment.
 #[derive(Clone, Eq, PartialEq, derive_more::Debug)]
 #[debug("IssuerUrl([REDACTED])")]
 pub struct IssuerUrl(EndpointUrl);
@@ -125,7 +118,6 @@ impl IssuerUrl {
         Ok(Self(url))
     }
 
-    /// The unmodified accepted spelling, used for exact issuer identity.
     #[must_use]
     pub fn as_str(&self) -> &str {
         self.0.as_str()
@@ -138,8 +130,6 @@ impl IssuerUrl {
     // template:end oidc-jwt:authn-provider-issuer-url
 }
 
-/// An admitted HTTPS endpoint. [`Self::as_str`] preserves the input spelling.
-/// Provider requests use the parsed URL, which can normalize query escaping.
 #[derive(Clone, Eq, PartialEq, derive_more::Debug)]
 #[debug("EndpointUrl([REDACTED])")]
 pub struct EndpointUrl {
@@ -148,8 +138,6 @@ pub struct EndpointUrl {
 }
 
 impl EndpointUrl {
-    /// Parses an HTTPS provider endpoint with a host and no userinfo, fragment,
-    /// whitespace, or control characters.
     pub fn parse(raw: &str) -> Result<Self, PreparationError> {
         admit(raw)
     }
@@ -164,8 +152,6 @@ impl EndpointUrl {
     }
 }
 
-/// [`Url::parse`] silently drops whitespace and an empty userinfo, so the raw
-/// spelling is checked too.
 fn admit(raw: &str) -> Result<EndpointUrl, PreparationError> {
     if uri::has_whitespace_or_control(raw) {
         return Err(invalid_url());
@@ -215,9 +201,6 @@ impl ProviderClient {
     }
 
     // template:begin oidc-jwt:authn-provider-get-json
-    /// Fetches a provider document whatever media type it is served as: JWKS
-    /// is `application/jwk-set+json` (RFC 7517) and providers label both
-    /// documents inconsistently, while the JSON parse still rejects a non-JSON body.
     pub(crate) async fn get_document(
         &self,
         url: &Url,
@@ -234,8 +217,6 @@ impl ProviderClient {
     // template:end oidc-jwt:authn-provider-get-json
 
     // template:begin oidc-introspection:authn-provider-post-form-json
-    /// Posts a form with client-secret Basic authentication, form-encoding each
-    /// credential component first as RFC 6749 section 2.3.1 requires.
     pub(crate) async fn post_introspection_form_json(
         &self,
         url: &Url,
@@ -299,8 +280,6 @@ enum ExchangeMode<'a> {
     Introspection(&'a OperationContext),
 }
 
-/// One provider exchange: its client span and its duration sample. Only the
-/// configured host and port are recorded, never a path, query or credential.
 struct Exchange {
     operation: &'static str,
     started: Instant,
@@ -428,10 +407,6 @@ async fn receive(
     Ok(body)
 }
 
-/// The client policy every provider client shares, fixtures included. Trust
-/// material comes only from the configured endpoint, so a redirect or an
-/// ambient proxy cannot move a fetch to another host; no retries keep each
-/// exchange inside its budget, and no `Referer` leaks request paths.
 fn client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .tls_backend_rustls()
@@ -524,7 +499,6 @@ fn has_json_content_type(response: &reqwest::Response) -> bool {
         .is_some_and(rfc9110::is_json_content_type)
 }
 
-/// A TLS acceptor for `host` and the root certificate that trusts it.
 #[cfg(test)]
 pub(crate) fn fixture_acceptor(host: &str) -> (tokio_rustls::TlsAcceptor, Vec<u8>) {
     use tokio_rustls::rustls::{
@@ -664,8 +638,6 @@ mod tests {
         request
     }
 
-    /// A `200 OK` response whose `content-length` matches `body`; an empty
-    /// `content_type` omits the header.
     fn http_ok(content_type: &str, body: &str) -> Vec<u8> {
         let content_type = if content_type.is_empty() {
             String::new()
@@ -739,7 +711,6 @@ mod tests {
     async fn stalled_dns_expires_at_connect_budget_then_same_client_uses_later_candidate() {
         let response = http_ok("", "{}");
         let (address, root, server) = tls_server(response, false).await;
-        // Reserve a refused endpoint without releasing its port to another test.
         let refused = tokio::net::TcpSocket::new_v4().unwrap();
         refused.bind("127.0.0.1:0".parse().unwrap()).unwrap();
         let resolver = Arc::new(RecoveringResolver {
@@ -752,7 +723,6 @@ mod tests {
                 .tls_certs_only([reqwest::Certificate::from_der(&root).unwrap()]),
         )
         .unwrap();
-        // No explicit URL port: retain each resolver candidate's fixture port.
         let url = Url::parse(&format!("https://{FIXTURE_HOST}/keys")).unwrap();
         let started = tokio::time::Instant::now();
         let result = tokio::time::timeout(
@@ -962,7 +932,6 @@ mod tests {
         assert_eq!(body, br#"{"active":false}"#);
         let request = String::from_utf8(server.await.unwrap()).unwrap();
         assert!(request.starts_with("POST /introspect HTTP/1.1\r\n"));
-        // Each component is form-encoded before the Basic scheme encodes the pair.
         assert!(request.contains("authorization: Basic YSUzQWI6Yytk\r\n"));
 
         let diagnostics = Diagnostics::default();
@@ -1015,7 +984,6 @@ mod tests {
                 let mut buffer = [0_u8; 4096];
                 assert!(stalled.read(&mut buffer).await.unwrap() > 0);
                 hello.send(()).unwrap();
-                // Never answer the ClientHello; observe the client release this socket.
                 while stalled.read(&mut buffer).await.unwrap() != 0 {}
                 let (stream, _) = listener.accept().await.unwrap();
                 respond(stream, acceptor, http_ok("", "{}"), false).await

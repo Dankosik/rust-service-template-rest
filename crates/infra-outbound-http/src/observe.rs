@@ -17,12 +17,8 @@ pub const REQUEST_DURATION_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0,
 ];
 
-/// A metric left out of this list renders the default buckets.
 pub const HISTOGRAMS: &[(&str, &[f64])] = &[(REQUEST_DURATION_METRIC, REQUEST_DURATION_BUCKETS)];
 
-/// OpenTelemetry `url.template`: insert as a request extension to name the operation. Use a
-/// static template with placeholders for variable segments so requests for one operation
-/// share a metric label.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UrlTemplate(pub &'static str);
 
@@ -70,8 +66,6 @@ impl Outcome {
     }
 }
 
-/// [`Attempt::start`] returns a drop guard that borrows the stop scopes so it can record the
-/// cause when its parent drops the exchange.
 pub(crate) struct Attempt {
     started: Instant,
     method: &'static str,
@@ -144,11 +138,7 @@ impl Attempt {
                 .as_ref()
                 .map_or_else(Outcome::from_error, |_| Outcome::Response),
         );
-        // Adapters map this error to their own closed outcome and drop its
-        // source, so the client span is where it is told.
         if let Err(Error::Transport { source }) = result {
-            // Hyper and hyper-util name only the failed step in their own
-            // text and keep the reason in `source()`.
             self.span.in_scope(|| {
                 tracing::warn!(
                     error = %DisplayErrorChain(&**source),
@@ -165,7 +155,6 @@ impl Attempt {
             Outcome::Failed(class) => Some(class),
             Outcome::Response | Outcome::Cancelled => None,
         };
-        // One call: a formatting layer may re-serialize every field per record.
         tracing::record_all!(
             self.span,
             http.response.status_code = self.status.map(|status| status.as_u16()),
@@ -222,7 +211,6 @@ fn describe_histogram() {
     });
 }
 
-/// `HTTP` stands for a method that is not a known one.
 fn span_name(method: &'static str, template: Option<&'static str>) -> impl fmt::Display {
     fmt::from_fn(move |formatter| {
         formatter.write_str(if method == OTHER_METHOD {
@@ -241,8 +229,6 @@ fn is_error_status(status: StatusCode) -> bool {
     status.as_u16() >= 400
 }
 
-// Static addresses let metrics retain labels for extension codes too; `StatusCode::as_str`
-// borrows its receiver.
 /* jscpd:ignore-start */
 static STATUS_CODES: [StatusCode; 900] = {
     let mut codes = [StatusCode::CONTINUE; 900];
@@ -262,9 +248,6 @@ fn status_label(status: StatusCode) -> &'static str {
 }
 /* jscpd:ignore-end */
 
-/// Read from the typed causes the libraries retain: `tls` for certificate or handshake
-/// refusal, `connect` when no connection was established (name resolution included),
-/// `protocol` for a response head hyper refused to parse, `transport` for the rest.
 fn transport_error_type(source: &(dyn StdError + 'static)) -> &'static str {
     let causes = || shared_rules::error_chain::causes(source);
     if causes().any(<dyn StdError>::is::<rustls::Error>) {

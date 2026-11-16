@@ -4,8 +4,6 @@ use service_config::Config;
 
 use super::BootstrapError;
 
-/// An outage at startup is logged, not fatal: the cache is not a readiness
-/// probe, and callers fall back to the source of truth.
 pub(super) async fn open(
     config: &Config,
     retained: &mut Option<Cache>,
@@ -31,9 +29,6 @@ pub(super) async fn open(
         allow_unauthenticated: config.cache.allow_unauthenticated,
         command_timeout: config.cache.command_timeout,
     };
-    // `Cache::start` reads the password and TLS files synchronously and also
-    // starts its supervisor on the current runtime. Run it on the blocking
-    // pool but keep the runtime handle entered for that spawn.
     let handle = tokio::runtime::Handle::current();
     let cache = super::blocking_startup("cache", move || {
         let _entered = handle.enter();

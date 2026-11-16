@@ -25,8 +25,6 @@ fn typed_endpoint_wins_and_refuses_ambient_credentials() {
             "{pairs:?}"
         );
     }
-    // A set traces header variable, even empty or blank, is the one the
-    // SDK reads, so the general one never reaches the typed collector.
     for traces in ["", " "] {
         assert_eq!(
             resolve_endpoint(
@@ -40,14 +38,10 @@ fn typed_endpoint_wins_and_refuses_ambient_credentials() {
             collector
         );
     }
-    // Trust variables are not read by the exporter, so they cannot carry
-    // a credential to the typed collector.
     assert_eq!(
         resolve_endpoint(typed, env(&[("OTEL_EXPORTER_OTLP_CERTIFICATE", "/ca.pem")])).unwrap(),
         collector
     );
-    // Ambient endpoint variables are fine beside a typed endpoint; the
-    // typed one wins inside the SDK.
     assert_eq!(
         resolve_endpoint(typed, env(&[(OTEL_EXPORTER_OTLP_ENDPOINT, "http://other")])).unwrap(),
         collector
@@ -66,14 +60,10 @@ fn environment_endpoint_enables_export_and_nothing_disables_it() {
         resolve_endpoint(Some("  "), env(&[root])).unwrap(),
         Some(Endpoint::Environment)
     );
-    // Ambient credentials are the platform's business when the platform
-    // also supplies the endpoint.
     assert_eq!(
         resolve_endpoint(None, env(&[root, (OTEL_EXPORTER_OTLP_HEADERS, "a=b")])).unwrap(),
         Some(Endpoint::Environment)
     );
-    // The SDK would read a blank traces variable and fail, so the root is
-    // handed over; with no root a blank variable leaves export disabled.
     assert_eq!(
         resolve_endpoint(
             None,
@@ -176,10 +166,6 @@ fn collector_root_gets_the_traces_path() {
 fn https_otlp_endpoint_is_admitted_by_the_exporter_client() {
     use futures_util::FutureExt;
 
-    // Without `reqwest-rustls`, reqwest rejects `https://` only at export, so
-    // the request must run. The batch processor hosts the blocking client off
-    // the async workers; a `#[tokio::test]` runtime cannot drop reqwest's
-    // inner runtime. Nothing listens on :1: a transport error is accepted.
     let exporter = span_exporter(
         &Endpoint::Typed("https://127.0.0.1:1/v1/traces"),
         HashMap::new(),
@@ -205,8 +191,6 @@ fn https_otlp_endpoint_is_admitted_by_the_exporter_client() {
 
 #[test]
 fn gzip_compression_is_available_to_the_exporter() {
-    // `compression` passes `gzip` programmatically; without the
-    // `gzip-http` feature the build fails and tracing degrades.
     use opentelemetry_otlp::WithHttpConfig as _;
 
     opentelemetry_otlp::SpanExporter::builder()

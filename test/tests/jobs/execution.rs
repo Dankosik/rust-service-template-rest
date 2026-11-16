@@ -79,7 +79,6 @@ struct JobView {
     claim_generation: i64,
     failure_reason: Option<String>,
     error_summary: Option<String>,
-    /// The failure history, each entry as `attempt:error`.
     errors: Vec<String>,
     claim_cleared: bool,
     finished: bool,
@@ -609,8 +608,6 @@ async fn x1_a_locked_earliest_job_is_skipped_by_a_one_slot_worker(pool: PgPool) 
         .execute(&mut *hold)
         .await
         .expect("the earliest candidate is locked");
-    // One slot: a claim that chose its ids before locking would pick only the
-    // locked earliest job and claim nothing while the lock is held.
     let run = start(&jobs, locked_multi_kind_registry(), 1);
     until(
         "the next unlocked job is dispatched",
@@ -836,8 +833,6 @@ async fn x2_wake_notification_claims_before_the_next_poll(pool: PgPool) {
     finish(run, &[&jobs]).await;
 }
 
-/// Observe actual completed claim rounds, including empty rounds, without
-/// adding a test hook to the engine or making database latency the oracle.
 #[derive(Clone, Default)]
 struct WakeObservations {
     state: watch::Sender<WakeState>,
@@ -948,9 +943,6 @@ impl metrics::Recorder for WakeRecorder {
     }
 }
 
-/// Tokio documents that a running blocking task inhibits paused-time
-/// auto-advance. Its real-time watchdog bounds database/notification waits;
-/// it neither sleeps a Tokio worker nor supplies a production pickup SLO.
 struct WakeClock {
     expected: tokio::time::Instant,
     started: tokio::time::Instant,
@@ -1031,7 +1023,6 @@ impl Drop for WakeClock {
         if self.paused {
             tokio::time::resume();
         }
-        // Also releases the finite blocking wait if an assertion unwinds.
         drop(self.release.take());
     }
 }
@@ -1054,12 +1045,6 @@ async fn prove_empty_notification_rounds(
     clock: &mut WakeClock,
     kinds: &[&str],
 ) {
-    // The queue is empty. Per loop, at most one already-dispatched round, one
-    // upcoming periodic tick and one initial subscription wake can complete
-    // without a notification. Four new completions rule out all three, while
-    // only 200 ms of virtual time passes, below the one-second poll interval.
-    // Each loop is identified by its actual task, so one engine cannot provide
-    // another engine's evidence. The listener PID is checked by the caller.
     for _ in 0..4 {
         let before = recorder.observations.snapshot();
         for kind in kinds {
@@ -1149,8 +1134,6 @@ async fn x2_listener_shutdown_joins_while_postgres_is_silent(pool: PgPool) {
 
 #[sqlx::test(migrator = "migrate::MIGRATOR")]
 async fn x2_a_lost_listener_reconnects_with_the_pools_rotated_password(pool: PgPool) {
-    // Roles are cluster-wide; the tail of the per-test database name keeps
-    // this one apart and inside PostgreSQL's 63-byte identifier limit.
     let mut url = url_for(&pool, DATABASE_URL).await;
     let database = url.path().trim_start_matches('/').to_owned();
     let role = format!(
@@ -1158,7 +1141,6 @@ async fn x2_a_lost_listener_reconnects_with_the_pools_rotated_password(pool: PgP
         &database[database.len().saturating_sub(24)..]
     );
     for statement in [
-        // A failed earlier run leaves the role behind, without its database.
         format!("DROP ROLE IF EXISTS {role:?}"),
         format!("CREATE ROLE {role:?} LOGIN PASSWORD 'first'"),
         format!("GRANT ALL ON ALL TABLES IN SCHEMA public TO {role:?}"),
@@ -1174,13 +1156,11 @@ async fn x2_a_lost_listener_reconnects_with_the_pools_rotated_password(pool: PgP
     let dsn = Dsn::admit(url.as_str()).expect("the role's DSN is admitted");
     let jobs = super::template_pool(&dsn, 3).await;
     let run = start(&jobs, probe_registry(2, DEFAULT_TIMEOUT), 1);
-    // The role cannot read another role's `query`; the suite's own pool can.
     let first = until("the engine listens", super::WAIT, async || {
         listening_pid(&pool).await
     })
     .await;
 
-    // What `refresh_password_periodically` does after the platform rotates.
     sqlx::query(AssertSqlSafe(format!(
         "ALTER ROLE {role:?} PASSWORD 'second'"
     )))
@@ -1195,8 +1175,6 @@ async fn x2_a_lost_listener_reconnects_with_the_pools_rotated_password(pool: PgP
         .expect("the listener's backend is terminated");
     assert!(terminated);
 
-    // The password the listener started with is refused now (`28P01` where
-    // the server asks for one), so only the pool's current one reconnects.
     until("the engine listens again", super::WAIT, async || {
         listening_pid(&pool).await.filter(|pid| *pid != first)
     })
@@ -1283,7 +1261,6 @@ struct Capped {
     open: tokio::sync::Semaphore,
 }
 
-/// One kind bounded to a single running attempt beside an unbounded kind.
 fn capped_registry(capped: Arc<Capped>) -> infra_jobs::Kinds {
     let mut kinds = KindsBuilder::new();
     kinds.register(
@@ -1328,7 +1305,6 @@ async fn k1_a_kinds_max_running_leaves_the_other_slots_to_other_kinds(pool: PgPo
             for token in 0..3 {
                 let _ = created(enqueue(tx, &Gate { token }, EnqueueOptions::default()).await?);
             }
-            // Due after every gate job, so the claim order alone would run it last.
             let _ = created(enqueue(tx, &Stranded { token: 0 }, EnqueueOptions::default()).await?);
             Ok(())
         })
@@ -1337,8 +1313,6 @@ async fn k1_a_kinds_max_running_leaves_the_other_slots_to_other_kinds(pool: PgPo
     );
     let run = start(&jobs, capped_registry(Arc::clone(&capped)), 4);
 
-    // Four slots are free and three bounded jobs are due: one runs, two wait
-    // in the queue, and the other kind is not held behind them.
     until("the other kind completes", super::WAIT, async || {
         (states(&jobs, Stranded::NAME).await == ["completed"]).then_some(())
     })
@@ -1368,9 +1342,6 @@ async fn k1_a_kinds_max_running_leaves_the_other_slots_to_other_kinds(pool: PgPo
     capped.open.add_permits(1);
     super::wait_for_lock_waiter(&jobs).await;
 
-    // The per-kind slot, as well as the engine slot, covers the outcome write.
-    // Observe for a full polling interval, so an accidental release cannot hide
-    // behind notification or claim-loop scheduling.
     absent_for(POLL_INTERVAL + POLL, async || {
         assert_eq!(
             states(&jobs, Gate::NAME).await,
@@ -1384,7 +1355,6 @@ async fn k1_a_kinds_max_running_leaves_the_other_slots_to_other_kinds(pool: PgPo
         .expect("the capped completion lock releases");
     completed(&jobs, &running).await;
 
-    // Acknowledged completion hands its place to the next due job.
     for finished in 2..=3 {
         capped.open.add_permits(1);
         until("the next bounded job completes", super::WAIT, async || {
@@ -1968,7 +1938,6 @@ async fn w4_known_result_beats_forced_release_while_its_write_waits(pool: PgPool
         .await,
         "the next due job commits while completion is blocked",
     );
-    // The handler has ended, but its completion still owns the only slot.
     absent_for(POLL_INTERVAL + POLL, async || {
         let view = load(&jobs, &pending).await;
         assert_eq!(view.state, "pending");
@@ -2489,7 +2458,6 @@ async fn x11_retention_deletes_only_old_completed_rows_and_keeps_failed_kinds(po
     assert_eq!(count_state(&jobs, "failed").await, 4);
     assert_eq!(count_state(&jobs, "pending").await, 2);
     assert_eq!(count_state(&jobs, "running").await, 2);
-    // Retention also preserves failed kinds this engine does not register.
     for kind in [Probe::NAME, Stranded::NAME] {
         assert_eq!(count_kind_state(&jobs, kind, "failed").await, 2);
         assert_eq!(count_kind_state(&jobs, kind, "pending").await, 1);
@@ -2821,7 +2789,6 @@ async fn x3_reclaim_keeps_enqueue_and_claim_identity_with_rescue_evidence(pool: 
         rescued.error_summary.as_deref(),
         Some("lease expired; rescued")
     );
-    // The entry names the attempt whose lease expired, not the rescuing one.
     assert_eq!(rescued.errors, ["1:lease expired; rescued"]);
 
     gate.open.notify_one();
@@ -2873,8 +2840,6 @@ async fn x12_cancelled_retention_leaves_no_short_timeout_in_the_pool(pool: PgPoo
     }
     blocker.commit().await.expect("the table lock releases");
 
-    // The pool's only session ran the cancelled statement; whether it is
-    // reused or replaced, it must carry the pool default, not retention's 1 s.
     let statement_timeout: String =
         sqlx::query_scalar("SELECT current_setting('statement_timeout')")
             .fetch_one(&jobs)

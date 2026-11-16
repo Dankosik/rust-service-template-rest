@@ -19,8 +19,6 @@ use crate::wire;
 
 const MIN_SERVER_VERSION: (i64, i64, i64) = (2, 12, 3);
 
-// NATS does not advertise max_control_line in INFO. Wildcard consumers use
-// the default 4 KiB control-line budget for subjects outside the registry.
 const WILDCARD_SUBJECT_BYTES: usize = 4 * 1024;
 
 #[derive(Clone, Debug)]
@@ -39,7 +37,6 @@ pub(crate) struct DeadLetterTopology {
 }
 
 impl DeadLetterTopology {
-    /// Returns the subject budget shared by the transfer and the pull request.
     pub(crate) fn admit_routes(
         &self,
         registry: &Registry,
@@ -100,7 +97,6 @@ impl DeadLetterTopology {
     }
 }
 
-/// Retains the resolved limits until the complete consumer registry is available.
 pub(crate) async fn admit_topology(
     options: &MessagingOptions,
     envelope_limit: usize,
@@ -190,8 +186,6 @@ pub(crate) async fn admit_topology(
     }))
 }
 
-/// The source stream's message limit, which must be set and at most one
-/// admitted envelope so a delivery cannot exceed what the adapter bounds.
 fn source_message_limit(raw: i32, envelope_limit: usize) -> Result<usize, Refusal> {
     match usize::try_from(raw) {
         Ok(limit) if limit > envelope_limit => Err(Refusal::StreamMessageSize),
@@ -200,8 +194,6 @@ fn source_message_limit(raw: i32, envelope_limit: usize) -> Result<usize, Refusa
     }
 }
 
-/// Requires publication ACKs and durable storage for every publishing role.
-/// Replication, fsync and failure-zone placement still belong to the operator.
 fn validate_stream_publication(config: &StreamConfig) -> Result<(), Refusal> {
     if config.no_ack {
         return Err(Refusal::StreamNoAck);
@@ -215,8 +207,6 @@ fn validate_stream_publication(config: &StreamConfig) -> Result<(), Refusal> {
     Ok(())
 }
 
-/// Reads one stream; `role` names it in a failure log without the
-/// configured stream name.
 async fn get_stream(
     jetstream: &async_nats::jetstream::Context,
     name: &str,
@@ -275,8 +265,6 @@ pub(crate) async fn create_durable(
     })
 }
 
-/// The broker's error description can quote configuration, so only its numeric
-/// code is logged.
 fn topology_failure(
     operation: &'static str,
     stream_role: Option<&'static str>,
@@ -298,7 +286,6 @@ fn topology_failure(
     failure
 }
 
-/// Why an answering broker cannot carry this adapter's deliveries.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Refusal {
     ServerVersion,
@@ -306,9 +293,6 @@ pub(crate) enum Refusal {
     HeadersUnsupported,
     ServerMaxPayload,
     StreamMessageSizeUnset,
-    /// A stream's message limit is on the wrong side of the adapter's bound:
-    /// the source stream's must be at most one envelope, so a delivery fits
-    /// the pull budget; the dead-letter stream's must be at least one transfer.
     StreamMessageSize,
     DeadLetterIsSource,
     DeadLetterSubjectMismatch,
@@ -390,7 +374,6 @@ pub(crate) fn validate_server(
     if !info.headers {
         return Err(Refusal::HeadersUnsupported);
     }
-    // The server bounds payload and headers together.
     if info.max_payload < envelope_limit {
         return Err(Refusal::ServerMaxPayload);
     }
@@ -442,7 +425,6 @@ mod tests {
     fn a_timed_out_request_is_found_at_any_depth() {
         let direct = RequestError::new(RequestErrorKind::TimedOut);
         let wrapped = Wrapper(Box::new(RequestError::new(RequestErrorKind::TimedOut)));
-        // `io::Error::source` skips the payload it wraps.
         let in_io = Wrapper(Box::new(std::io::Error::other(RequestError::new(
             RequestErrorKind::TimedOut,
         ))));

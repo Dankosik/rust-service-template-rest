@@ -114,9 +114,6 @@ impl Example {
                 .by_ref()
                 .take(u64::try_from(DIAGNOSTIC_BYTES).expect("diagnostic byte limit") + 1)
                 .read_to_end(&mut bytes);
-            // Continue draining after the capture bound so diagnostics cannot
-            // block the child. Oversized output fails rather than hiding bytes
-            // from the existing privacy assertions.
             let drained = std::io::copy(&mut stderr, &mut std::io::sink());
             let overflow = bytes.len() > DIAGNOSTIC_BYTES || drained.as_ref().is_ok_and(|n| *n > 0);
             bytes.truncate(DIAGNOSTIC_BYTES);
@@ -273,8 +270,6 @@ impl Drop for Example {
 struct OidcFixture {
     runtime: tokio::runtime::Runtime,
     issuer: String,
-    // Owns the root file the child reads through `SSL_CERT_FILE`; the fixture
-    // outlives the child, and a failing test still removes it on drop.
     _root_dir: tempfile::TempDir,
     root_path: PathBuf,
     root_certificate: CertificateDer<'static>,
@@ -446,9 +441,6 @@ fn example_binary() -> PathBuf {
     BINARY
         .get_or_init(|| {
             let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-            // The package selection decides Cargo's feature set. The test run
-            // already built this example under the selection `make` passes;
-            // any other selection rebuilt about a hundred crates in the test.
             let selection = std::env::var("TEST_PACKAGE_SELECTION")
                 .unwrap_or_else(|_| "--workspace".to_owned());
             let output = Command::new(env!("CARGO"))
@@ -656,7 +648,6 @@ fn logged_messages(lines: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// The existing OIDC runtime owns the receiver and its bounded shutdown.
 struct Collector {
     endpoint: String,
     bodies: Arc<Mutex<Vec<Vec<u8>>>>,
@@ -875,8 +866,6 @@ fn assert_server_privacy_outputs(
             "missing exported gRPC status {code}"
         );
     }
-    // Protobuf string values are uncompressed UTF-8 at this boundary. Scan
-    // every captured byte, including names, attributes and event fields.
     for excluded in [AUTHORITY, USER_AGENT] {
         assert!(!local.contains(excluded), "{format} disclosed {excluded}");
         assert!(!stderr.contains(excluded), "stderr disclosed {excluded}");
@@ -925,8 +914,6 @@ fn grpc_server_outputs_withhold_caller_identity_and_client_keeps_destination() {
     let _ = example_binary();
     let oidc = OidcFixture::new(2);
     let client_collector = Collector::start(&oidc.runtime);
-    // This integration-test executable has no other subscriber. Use the public
-    // provider/subscriber so the real client adapter reaches an actual export.
     let provider = infra_telemetry::install_tracer_provider(&infra_telemetry::TracingOptions {
         service_name: "grpc-process-client".to_owned(),
         service_version: "test".to_owned(),
@@ -1003,7 +990,6 @@ fn tls_health_and_http_share_the_example_sigterm_lifecycle() {
         unary(&grpc, certificate.clone(), &oidc.token).expect("authenticated unary"),
         "process echo"
     );
-    // The handling time is a histogram, as grpc-ecosystem dashboards query it.
     let (status, metrics) =
         common::get(&format!("http://{diagnostics}/metrics")).expect("metrics scrape");
     assert_eq!(status, 200);
@@ -1018,8 +1004,6 @@ fn tls_health_and_http_share_the_example_sigterm_lifecycle() {
         "{metrics}"
     );
 
-    // A worker thread keeps serving the client connection while the test
-    // waits, as a live client would; hyper's graceful drain needs its PING ack.
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
         .enable_all()
@@ -1085,7 +1069,6 @@ fn register_background_fixture(
         }
         stop.cancelled().await;
         control.write_all(b"c").await.unwrap();
-        // The root must keep joining this manager after a report or stop.
         let mut release = [0_u8; 1];
         control.read_exact(&mut release).await.unwrap();
         assert_eq!(release, [b'r']);
@@ -1097,8 +1080,6 @@ fn register_background_fixture(
         }
     });
     if startup_refusal {
-        // The registered manager already belongs to cleanup when a later
-        // registration step rejects its actual descriptor input.
         services.describe(b"invalid protobuf descriptor")?;
     }
     Ok(())
@@ -1117,8 +1098,6 @@ fn registered_background_fixture() {
         [std::ffi::OsString::from("background-fixture")],
         register_background_fixture,
     );
-    // Production run has completed its runtime and telemetry cleanup. Avoid
-    // adding test-harness output to the child's process result.
     let code = if code == std::process::ExitCode::SUCCESS {
         0
     } else if code == std::process::ExitCode::from(3) {

@@ -11,8 +11,6 @@ const TRACEPARENT: &str = "traceparent";
 const TRACESTATE: &str = "tracestate";
 const TRACEPARENT_MAX_BYTES: usize = 256;
 const TRACESTATE_MAX_BYTES: usize = 512;
-/// W3C Trace Context drops list members longer than this first when
-/// `tracestate` must be truncated.
 const TRACESTATE_LONG_MEMBER_BYTES: usize = 128;
 
 pub(crate) fn capture() -> Carrier {
@@ -35,15 +33,6 @@ pub(crate) fn link(span: &tracing::Span, carrier: &Carrier) {
     }
 }
 
-/// Each present value is bounded, ASCII, and control-free; a nonempty
-/// `tracestate` also parses as a W3C list. A refused `traceparent` discards the
-/// pair; a refused `tracestate` discards only itself, because W3C Trace
-/// Context forbids a `tracestate` failure from affecting `traceparent`. A
-/// captured `tracestate` over its bound first loses whole members, as that
-/// specification orders. So a stored carrier holds only allowed values. This
-/// type does not judge `traceparent` syntax: [`link`] adds a link only when extraction
-/// reports the context valid and remote. A state-only carrier is storable, and
-/// never links for want of a valid `traceparent`.
 #[derive(Debug, Default)]
 pub(crate) struct Carrier {
     trace_parent: Option<String>,
@@ -112,8 +101,6 @@ impl Extractor for Carrier {
     }
 }
 
-/// `tracestate` within [`TRACESTATE_MAX_BYTES`]: members longer than
-/// [`TRACESTATE_LONG_MEMBER_BYTES`] go first, then members from the end.
 fn truncated_state(value: String) -> String {
     if value.len() <= TRACESTATE_MAX_BYTES {
         return value;

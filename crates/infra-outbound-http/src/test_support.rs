@@ -97,8 +97,6 @@ pub(crate) fn recorded_count(scrape: &str, required_labels: &[&str]) -> usize {
         .count()
 }
 
-/// Clients built by the public constructors in tests have none, so they cannot reach the
-/// network.
 #[derive(Clone, Default)]
 pub(crate) struct FixtureResolver(Arc<Mutex<Vec<SocketAddr>>>);
 

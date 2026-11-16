@@ -8,15 +8,6 @@ use tokio::time::{Instant, Sleep};
 
 pub(super) const HTTP2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 
-/// A socket whose reads fail once `timeout` passes with the protocol still
-/// undecided.
-///
-/// hyper-util's sniff reads until the bytes stop matching the HTTP/2 preface
-/// and has no timer (hyper #3756), so a client that connects and sends
-/// nothing, or only the start of the preface, would never be timed out.
-/// hyper's HTTP/1 header timer and HTTP/2 keep-alive start once the protocol
-/// is decided; from then on this is a pass-through. The failed read ends the
-/// connection without a response.
 pub(super) struct SniffDeadline<IO> {
     io: IO,
     undecided: Option<(usize, Pin<Box<Sleep>>)>,
@@ -49,8 +40,6 @@ impl<IO: AsyncRead + Unpin> AsyncRead for SniffDeadline<IO> {
             Poll::Ready(Ok(())) => {
                 let read = &buf.filled()[filled..];
                 let rest = &HTTP2_PREFACE[*matched..];
-                // Undecided only while everything read is a strict prefix of
-                // the preface; the end of the stream decides as well.
                 if !read.is_empty() && read.len() < rest.len() && rest.starts_with(read) {
                     *matched += read.len();
                 } else {
@@ -84,8 +73,6 @@ impl<IO: AsyncWrite + Unpin> AsyncWrite for SniffDeadline<IO> {
         Pin::new(&mut self.get_mut().io).poll_shutdown(cx)
     }
 
-    // hyper writes a response head and body as one vectored write; the
-    // default implementation would send them as separate segments.
     fn poll_write_vectored(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,

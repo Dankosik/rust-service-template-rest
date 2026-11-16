@@ -1,19 +1,10 @@
-/// Why a request's `Authorization` values carry no usable Bearer token.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NoBearer {
-    /// No value, or a scheme other than `Bearer`, whose credentials are never
-    /// read.
     Missing,
-    /// More than one value, or a `Bearer` value outside the grammar.
     Malformed,
 }
 
-/// The token of exactly one `Authorization` value of the form
-/// `Bearer 1*SP b64token` (RFC 6750 §2.1).
-///
-/// The scheme matches ASCII case-insensitively. Tabs, leading or trailing
-/// whitespace, control bytes, and non-ASCII bytes are malformed. The caller
-/// bounds how many bytes it passes.
+/// RFC 6750 §2.1
 pub fn token<'a>(values: impl IntoIterator<Item = &'a [u8]>) -> Result<&'a str, NoBearer> {
     let mut values = values.into_iter();
     let value = values.next().ok_or(NoBearer::Missing)?;
@@ -39,21 +30,17 @@ pub fn token<'a>(values: impl IntoIterator<Item = &'a [u8]>) -> Result<&'a str, 
     if !is_b64token(token) {
         return Err(NoBearer::Malformed);
     }
-    // The b64token alphabet is ASCII, so this conversion cannot fail.
     std::str::from_utf8(token).map_err(|_| NoBearer::Malformed)
 }
 
-/// RFC 9110 `tchar`, the characters of an authentication scheme.
+/// RFC 9110 §5.6.2
 fn is_tchar(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
 }
 
-/// `b64token = 1*( ALPHA / DIGIT / "-" / "." / "_" / "~" / "+" / "/" ) *"="`.
 fn is_b64token(token: &[u8]) -> bool {
     let padding = token.iter().rev().take_while(|byte| **byte == b'=').count();
     let value = &token[..token.len() - padding];
-    // A non-short-circuiting fold lets the compiler vectorize the class check;
-    // tokens are checked on every authenticated request.
     !value.is_empty()
         && value.iter().fold(true, |valid, byte| {
             valid

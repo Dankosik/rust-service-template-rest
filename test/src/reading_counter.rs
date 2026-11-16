@@ -17,8 +17,6 @@ use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row};
 use time::{UtcDateTime, format_description::well_known::Rfc3339};
 
-// Dynamic SQL is intentional: this schema belongs only to this executable fixture
-// and must never enter the template's canonical migrations or offline SQL metadata.
 pub const SCHEMA: &str =
     include_str!("../fixtures/migrations/reading_counter/0001_reading_counter.sql");
 pub const MAX_OPERATION_BYTES: usize = 1024;
@@ -26,7 +24,6 @@ pub const POOL_PRESSURE_DIR: &str = "READING_POOL_PRESSURE_DIR";
 pub const LOCAL_CHECKPOINT_DIR: &str = "READING_LOCAL_CHECKPOINT_DIR";
 pub const FAIL_OPERATION: &str = "READING_FAIL_OPERATION";
 
-/// Canonical UUID spelling avoids alternate identity encodings.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Operation {
@@ -93,11 +90,9 @@ impl Channel {
 pub struct Effect {
     pub operation: Operation,
     pub channel: Channel,
-    /// The read count when the effect was first committed, not the aggregate's later count.
     pub read_count: i64,
 }
 
-/// Durable acceptance remains readable after every transport row is removed.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Accepted {
     pub operation: Operation,
@@ -108,7 +103,6 @@ pub struct Accepted {
     pub webhook_job_id: String,
 }
 
-/// Prepared once before the application transaction; retrying preserves identity/time/bytes.
 #[derive(Clone, Debug)]
 pub struct PreparedRequest {
     operation: Operation,
@@ -191,7 +185,6 @@ pub async fn migrate(pool: &PgPool) -> Result<(), Error> {
     .await
 }
 
-/// Unknown COMMIT is returned unchanged: callers read this same identity before deciding to retry.
 pub async fn accept(
     pool: &PgPool,
     prepared: &PreparedRequest,
@@ -204,7 +197,6 @@ pub async fn accept(
     .await
 }
 
-/// The caller owns commit and must propagate this result, including failure.
 pub async fn accept_in_tx(
     tx: &mut Tx<'_>,
     prepared: &PreparedRequest,
@@ -242,8 +234,6 @@ async fn enqueue_intents(
         Enqueued::Duplicate => return Err(Error::MissingIntent),
     };
     prepared.event.enqueue(tx).await.map_err(Error::Outbox)?;
-    // The public outbox enqueue outcome has no JobId. Read its canonical stored
-    // event identity in this same transaction, before a worker can see the row.
     let outbox_job_id: String = sqlx::query_scalar("SELECT id::text FROM background_jobs WHERE kind='publish_domain_event' AND payload->>'message_id'=$1 AND state IN ('pending','running')")
         .bind(prepared.event.message_id()).fetch_one(&mut *tx).await?;
     let webhook_job_id = outbound
@@ -266,10 +256,6 @@ async fn enqueue_intents(
     })
 }
 
-/// Deliberately create fresh transports for an accepted operation after cleanup.
-/// The driver first stops old writers and reconciles all three effect authorities.
-/// Prepared event identity, time and payload survive this transport-only replay;
-/// the original accepted transport IDs remain unchanged in `reading_requests`.
 pub async fn replay(
     pool: &PgPool,
     operation: &Operation,
@@ -327,8 +313,6 @@ fn same_operation(encoded: &str, operation: &Operation) -> Result<(), Error> {
     }
 }
 
-/// Apply one durable effect, reconciling an unknown commit against its marker once.
-/// Unknown or unavailable readback never establishes success or triggers replay.
 pub async fn apply_effect(
     pool: &PgPool,
     channel: Channel,
@@ -349,8 +333,6 @@ pub async fn apply_effect(
     }
 }
 
-/// Marker uniqueness arbitrates concurrent duplicates before the aggregate changes.
-/// Both writes and caller-owned fenced completion share this transaction.
 pub async fn apply_effect_in_tx(
     tx: &mut Tx<'_>,
     channel: Channel,

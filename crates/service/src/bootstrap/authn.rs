@@ -74,8 +74,6 @@ pub(super) async fn prepare(
                         "does not fit this platform",
                     )
                 })?;
-            // Checked even with the cache off: invalid cache options are a
-            // startup error in either state.
             let cache =
                 infra_bearerauthn::IntrospectionCacheOptions::try_new(*cache_capacity, *cache_ttl)
                     .map_err(|source| BootstrapError::AuthenticationPreparation {
@@ -114,8 +112,6 @@ fn issuer_url(
 }
 
 // template:begin oidc-jwt:bootstrap-auth-jwt-algorithm-converter
-/// Discovery and issuer agreement belong to `authn.issuer`; a fetch from an
-/// explicitly configured key set belongs to `authn.jwks_uri`.
 fn authentication_preparation_error(
     mode: &'static str,
     explicit_jwks_uri: bool,

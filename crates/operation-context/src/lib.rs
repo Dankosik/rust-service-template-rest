@@ -4,7 +4,6 @@ use std::time::Duration;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-/// Origin plus duration retains finite budgets too large for Instant addition.
 #[derive(Clone, Copy, Debug)]
 pub struct Deadline {
     origin: Instant,
@@ -40,7 +39,6 @@ impl Deadline {
         self.remaining().is_zero()
     }
 
-    /// Exact cutoff when representable; absence never means an unbounded budget.
     #[must_use]
     pub fn instant(self) -> Option<Instant> {
         self.origin.checked_add(self.budget)
@@ -53,9 +51,6 @@ impl Deadline {
     }
 
     pub async fn wait(self) {
-        // The check comes before any timer: timers have millisecond
-        // resolution, so `sleep_until` alone leaves a zero budget pending on
-        // its first poll.
         while !self.expired() {
             tokio::time::sleep(self.remaining().min(Duration::from_hours(24))).await;
         }
@@ -68,7 +63,6 @@ pub enum Stopped {
     Cancelled,
 }
 
-/// Clones share one scope. Children inherit cancellation without cancelling peers.
 #[derive(Clone, Debug)]
 pub struct OperationContext {
     deadline: Option<Deadline>,
@@ -84,7 +78,6 @@ impl OperationContext {
         }
     }
 
-    /// Explicitly unbounded parent; each dependency applies its own finite ceiling.
     #[must_use]
     pub fn unbounded() -> Self {
         Self::new(None, CancellationToken::new())
@@ -119,13 +112,11 @@ impl OperationContext {
         self.cancellation.cancel();
     }
 
-    /// Derive once at operation admission; all later stages retain this child.
     #[must_use]
     pub fn child(&self, ceiling: Duration) -> Self {
         self.child_until(Deadline::new(Instant::now(), ceiling))
     }
 
-    /// [`Self::child`] with a ceiling the caller keeps, to tell its own cutoff from the parent's.
     #[must_use]
     pub fn child_until(&self, ceiling: Deadline) -> Self {
         Self::new(

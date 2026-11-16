@@ -9,7 +9,6 @@ use secrecy::{ExposeSecret, SecretString};
 use crate::error::ConfigError;
 use crate::provider::Admitted;
 
-/// [`Debug`] prints the variant only.
 #[derive(derive_more::Debug)]
 pub enum CredentialSource {
     #[debug("AccessKey")]
@@ -17,9 +16,6 @@ pub enum CredentialSource {
         access_key_id: String,
         secret_access_key: SecretString,
     },
-    /// Web identity token (EKS IRSA), container credentials endpoint (ECS, EKS Pod
-    /// Identity), then the EC2 instance profile, refreshed by the SDK.
-    /// [`crate::Provider::AmazonS3`] only.
     WorkloadIdentity,
 }
 
@@ -61,12 +57,8 @@ impl CredentialSource {
     }
 }
 
-/// Left to resolve its own endpoint, the SDK's client would read it from an AWS profile file.
 const INSTANCE_METADATA_ENDPOINT: &str = "http://169.254.169.254";
 
-/// The SDK default chain's order, minus environment access keys and profile
-/// files: the providers read only what the platform injects for the identity and
-/// the fixed instance metadata endpoint.
 fn workload_identity(
     region: &str,
     http_client: SharedHttpClient,
@@ -77,7 +69,6 @@ fn workload_identity(
     let instance_metadata = aws_config::imds::Client::builder()
         .configure(&config)
         .endpoint(INSTANCE_METADATA_ENDPOINT)
-        // A construction failure is still reported through the credentials key.
         .map_err(|_| ConfigError::Credentials)?
         .build();
     Ok(CredentialsProviderChain::first_try(

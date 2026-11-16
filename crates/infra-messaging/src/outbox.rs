@@ -21,14 +21,8 @@ use crate::wire::prefixed_digest_hex;
 
 const OUTBOX_KIND: &str = "publish_domain_event";
 const FORMAT_VERSION: u8 = 1;
-/// Caller text measured between yields, so one long field cannot hold the
-/// executor while its serialized size is counted.
 const PREFLIGHT_BYTES_PER_POLL: usize = 4096;
 
-/// A failed publication retries with the jobs backoff, whether it was rejected
-/// or ambiguous: the stored intent never changes and the broker deduplicates
-/// its publication ID. After `max_attempts` the job stays visible in the
-/// `failed` state.
 const POLICY: Policy = Policy {
     max_attempts: 25,
     timeout: Duration::from_secs(30),
@@ -67,7 +61,6 @@ enum IntentError {
     Envelope(#[from] EnvelopeError),
 }
 
-/// The caller owns engine construction, pool admission, and lifecycle.
 pub fn kinds(producer: Producer) -> Result<Kinds, infra_jobs::KindError> {
     let mut kinds = KindsBuilder::new();
     kinds.register(POLICY, Publisher { producer });
@@ -95,12 +88,6 @@ impl<'a> OutboxText<'a> {
 }
 
 impl PreparedEvent {
-    /// Never commits. A duplicate live key is accepted only when the jobs
-    /// owner confirms byte-for-byte equal intent; a vanished live key returns
-    /// the caller to its transaction retry policy. Metadata is checked
-    /// cooperatively before cloning; dropping this future during that check
-    /// sends no SQL. Direct callers own finite input, concurrent-call and
-    /// deadline bounds.
     pub async fn enqueue(&self, tx: &mut Tx<'_>) -> Result<OutboxEnqueued, OutboxEnqueueError> {
         let intent = self.prepare_outbox_intent().await?;
         let key = event_key(&intent.message_id);
@@ -124,8 +111,6 @@ impl PreparedEvent {
     }
 
     async fn prepare_outbox_intent(&self) -> Result<PublishDomainEvent, OutboxEnqueueError> {
-        // This cheap refusal preserves the raw-body error without scanning or
-        // cloning a subject that cannot leave any encoded body capacity.
         if self.subject().len() > infra_jobs::MAX_PAYLOAD_BYTES && !self.payload().is_empty() {
             return Err(OutboxEnqueueError::PayloadTooLarge {
                 bytes: self.payload().len(),
@@ -140,8 +125,6 @@ impl PreparedEvent {
                 max_bytes,
             });
         }
-        // An empty body passed the raw-body check even when metadata alone
-        // exceeded the jobs ceiling. Preserve that distinct canonical error.
         if overhead > infra_jobs::MAX_PAYLOAD_BYTES {
             return Err(infra_jobs::EnqueueError::PayloadTooLarge { bytes: overhead }.into());
         }
@@ -162,8 +145,6 @@ impl PreparedEvent {
                     budget = PREFLIGHT_BYTES_PER_POLL;
                     continue;
                 }
-                // Reuse serde's escaping over a bounded slice of the source.
-                // The sizing baseline already contributed the string quotes.
                 total += infra_jobs::json_payload_len(&field[offset..end])
                     .map_err(infra_jobs::EnqueueError::Serialize)?
                     - 2;
@@ -193,9 +174,6 @@ impl Handler<PublishDomainEvent> for Publisher {
         let event = job.payload().to_prepared().map_err(|error| {
             JobError::permanent(format!("outbox immutable intent is invalid: {error}"))
         })?;
-        // A retry keeps the publication ID. The broker deduplicates it inside
-        // the stream's duplicate window; consumers deduplicate by logical ID
-        // beyond it.
         self.producer
             .publish(&event, &job.context())
             .await
@@ -208,9 +186,6 @@ impl Handler<PublishDomainEvent> for Publisher {
 #[cfg_attr(test, derive(Debug))]
 struct InvalidBase64;
 
-/// Defers corrupt Base64 strings to [`PublishDomainEvent::to_prepared`] as a
-/// permanent intent error; failing [`Deserialize`] would make `infra-jobs`
-/// retry the row as an undecodable job payload.
 struct Base64Payload;
 
 impl SerializeAs<Result<Bytes, InvalidBase64>> for Base64Payload {
@@ -269,8 +244,6 @@ impl From<&PreparedEvent> for PublishDomainEvent {
 }
 
 impl PublishDomainEvent {
-    /// Empty strings and an empty payload keep the JSON keys and quotes in the
-    /// preflight count without cloning caller text or encoding the body.
     fn for_metadata_sizing(event: &PreparedEvent) -> Self {
         Self::with_text(event, &OutboxText::default())
     }
@@ -303,7 +276,6 @@ impl PublishDomainEvent {
             .payload
             .clone()
             .map_err(|InvalidBase64| IntentError::Base64)?;
-        // Corruption becomes a permanent job failure instead of a malformed stream event.
         serde_json::from_slice::<serde::de::IgnoredAny>(&payload)
             .map_err(|_| IntentError::NotJson)?;
         Ok(PreparedEvent::from_parts(PreparedEventParts {
@@ -322,8 +294,6 @@ fn event_key(message_id: &str) -> String {
     prefixed_digest_hex("event-", &Sha256::digest(message_id.as_bytes()).into())
 }
 
-/// Largest raw payload whose padded standard base64 fits the jobs limit next
-/// to `overhead` bytes of other serialized fields: every 3 raw bytes take 4.
 fn raw_payload_capacity(overhead: usize) -> usize {
     (infra_jobs::MAX_PAYLOAD_BYTES.saturating_sub(overhead) / 4) * 3
 }
@@ -470,8 +440,6 @@ mod tests {
     #[test]
     fn cooperative_preflight_preserves_escaped_metadata_and_the_exact_body_limit() {
         let mut parts = Parts::new(Bytes::new());
-        // UTF-8 crosses a fragment boundary, and serde must count both short
-        // escapes and six-byte control escapes without altering stored bytes.
         parts.subject = format!("{}é😀\\\"\u{0001}", "s".repeat(4095));
         parts.message_id = "logical-\"id\\".to_owned();
         parts.publication_id = "publication-😀".to_owned();
@@ -536,7 +504,6 @@ mod tests {
 
     #[test]
     fn preflight_poll_budget_is_shared_across_metadata_fields() {
-        // No field alone exceeds one poll's budget; together they do.
         let mut parts = Parts::new(Bytes::new());
         parts.subject = "s".repeat(PREFLIGHT_BYTES_PER_POLL - 100);
         parts.message_id = "i".repeat(256);

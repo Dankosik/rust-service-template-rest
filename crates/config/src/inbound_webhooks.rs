@@ -1,9 +1,3 @@
-//! Immutable configuration for Standard Webhooks receipt admission.
-//!
-//! Verification-key decoding and consumer binding remain provider and root
-//! responsibilities. This typed snapshot remains independently removable from
-//! outbound webhook delivery.
-
 use std::collections::BTreeMap;
 
 use secrecy::SecretString;
@@ -29,9 +23,6 @@ pub struct InboundWebhookEndpointConfig {
 }
 
 impl InboundWebhooksConfig {
-    /// Receipts are durable, so a configured endpoint needs PostgreSQL.
-    /// Secret presence is checked by the receiving root: the worker shares
-    /// this section but never holds verification secrets.
     pub(crate) fn validate(&self, postgres_enabled: bool, violations: &mut Violations) {
         if !self.endpoints.is_empty() && !postgres_enabled {
             violations.check(Err(ValidationError::new(
@@ -66,8 +57,6 @@ impl InboundWebhooksConfig {
     }
 }
 
-/// A reference names an `APP__INBOUND_WEBHOOKS__SECRETS__<REF>` variable,
-/// which the loader lowercases; any other spelling could never resolve.
 fn validate_key_ref(config_key: &str, reference: &str) -> Result<(), ValidationError> {
     if !is_env_addressable(reference) {
         return Err(ValidationError::new(

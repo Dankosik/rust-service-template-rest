@@ -11,13 +11,10 @@ use crate::trace_context;
 
 pub const MAX_PAYLOAD_BYTES: usize = 262_144;
 const MAX_UNIQUE_KEY_BYTES: usize = 255;
-/// `serde_json` writes one token per call, so doubling from an empty buffer
-/// costs about log2(len) reallocations per job; typical payloads fit here.
 const MIN_PAYLOAD_CAPACITY: usize = 256;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct EnqueueOptions<'a> {
-    /// The sub-microsecond part is dropped. At most [`crate::MAX_DELAY`].
     pub delay: Duration,
     pub unique_key: Option<&'a str>,
 }
@@ -59,8 +56,6 @@ pub enum EnqueueError {
     Database(#[from] sqlx::Error),
 }
 
-/// Counts without retaining the JSON. Preflights own their work budget and
-/// apply the size limit to the complete payload.
 pub fn json_payload_len<T: serde::Serialize + ?Sized>(
     value: &T,
 ) -> Result<usize, serde_json::Error> {
@@ -82,20 +77,6 @@ pub fn json_payload_len<T: serde::Serialize + ?Sized>(
     Ok(count.0)
 }
 
-/// Validation failures send nothing and leave the transaction usable. A
-/// [`EnqueueError::Database`] error means the caller's transaction is aborted;
-/// [`infra_postgres::sqlstate`] names why. With a unique
-/// key, a live job of the same kind and key yields [`Enqueued::Duplicate`]
-/// and leaves the transaction usable. Under `REPEATABLE READ` or
-/// `SERIALIZABLE`, a holder written after the caller's snapshot fails the
-/// statement with `40001` instead.
-///
-/// Serialization runs once and synchronously before database access. Retained
-/// JSON is bounded by [`MAX_PAYLOAD_BYTES`], while all successful output is
-/// counted so a later serializer error still wins over size or decoded NUL.
-/// Custom serializers must be finite, trusted, nonblocking code. Callers own
-/// source size, collection cardinality and concurrent calls within their
-/// transaction deadline; that deadline cannot preempt a serializer callback.
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub async fn enqueue<K: JobKind>(
     tx: &mut Tx<'_>,
@@ -105,8 +86,6 @@ pub async fn enqueue<K: JobKind>(
     let prepared = prepare(payload, options)?;
     let trace = trace_context::capture();
     let id = JobId::new_v7();
-    // PostgreSQL infers background_jobs_live_unique_key from the columns and
-    // live-row predicate. The index inherits unique_key's C collation.
     let inserted = observed(
         "enqueue job",
         sqlx::query!(
@@ -144,15 +123,6 @@ pub async fn enqueue<K: JobKind>(
     Ok(Enqueued::Created(id))
 }
 
-/// Call only after [`enqueue`] returns [`Enqueued::Duplicate`] for the same
-/// kind, key, and payload. The selected row stays locked until the caller
-/// commits or rolls back `tx`; [`LivePayloadComparison::NoLongerLive`] means
-/// the caller must not treat the duplicate as accepted.
-/// Equality compares serialized job payloads byte for byte. A row from an
-/// older writer is compared by re-serializing what its handler would decode;
-/// a legacy payload error leaves the transaction usable.
-/// Preparation has the same once-only serialization, late-error precedence
-/// and finite source, callback, concurrency and deadline duties as [`enqueue`].
 pub async fn compare_live_payload<K: JobKind>(
     tx: &mut Tx<'_>,
     unique_key: &str,
@@ -200,16 +170,8 @@ pub async fn compare_live_payload<K: JobKind>(
     })
 }
 
-/// The slot is spent before commit, so a skipped wake may leave the job to polling.
 const WAKE_INTERVAL: Duration = crate::claim::CLAIM_COOLDOWN;
 
-/// Every notifying commit takes PostgreSQL's notify queue lock, so notifying
-/// each enqueue would serialize concurrent committers (measured: -50% at 16
-/// connections).
-///
-/// One entry per kind because a worker wakes only for the kinds it registers:
-/// one shared interval would let one kind's notification suppress the next
-/// kind's, and that kind's worker would wait for its poll.
 fn take_wake_slot(kind: &'static str, now: Instant) -> bool {
     #[cfg(not(feature = "hotpath"))]
     static LAST: parking_lot::Mutex<BTreeMap<&'static str, Instant>> =
@@ -218,7 +180,6 @@ fn take_wake_slot(kind: &'static str, now: Instant) -> bool {
     static LAST: std::sync::LazyLock<
         hotpath::wrap::std::sync::Mutex<BTreeMap<&'static str, Instant>>,
     > = std::sync::LazyLock::new(|| {
-        // The expression arm avoids 0.28.4's unsafe export_name uniqueness check.
         hotpath::mutex!(
             std::sync::Mutex::new(BTreeMap::new()),
             label = { "jobs-wake" }
@@ -248,8 +209,6 @@ struct Prepared<'a> {
     delay_micros: i64,
 }
 
-/// Retain only the admitted prefix, but let serialization finish so a later
-/// serializer error takes precedence over the exact oversized byte count.
 #[derive(Default)]
 struct PayloadWriter {
     retained: Vec<u8>,
@@ -328,15 +287,7 @@ fn is_valid_unique_key(key: &str) -> bool {
     !key.is_empty() && key.len() <= MAX_UNIQUE_KEY_BYTES && !key.chars().any(char::is_control)
 }
 
-/// Whether serializer-produced JSON contains an escape that decodes to NUL.
-///
-/// A backslash always consumes its following escape byte. In the JSON text
-/// `\\u0000` (an escaped backslash, then `u0000`) the second backslash is
-/// consumed by the first, and its following `u0000` stays literal.
 fn contains_decoded_nul(payload: &str) -> bool {
-    // Any decoded NUL is spelled `\u0000`; the substring search is several
-    // times faster than the walk below, which then only runs for a payload
-    // that contains that text.
     if !payload.contains(r"\u0000") {
         return false;
     }
@@ -696,8 +647,6 @@ mod tests {
                     std::assert_matches!(err, EnqueueError::Serialize(_));
                 }
                 StreamFailure::None => {
-                    // Each encoded NUL string is eight bytes, plus one comma;
-                    // the surrounding brackets replace the missing first comma.
                     std::assert_matches!(
                         err,
                         EnqueueError::PayloadTooLarge { bytes }
@@ -777,9 +726,7 @@ mod tests {
         let now = tokio::time::Instant::now();
         assert!(take_wake_slot("wake.first", now));
         assert!(!take_wake_slot("wake.first", now + WAKE_INTERVAL / 2));
-        // Another kind's worker is not woken by the first kind's notification.
         assert!(take_wake_slot("wake.second", now + WAKE_INTERVAL / 2));
-        // A refused slot keeps the earlier instant, so the interval still holds.
         assert!(!take_wake_slot("wake.second", now + WAKE_INTERVAL / 2));
         assert!(take_wake_slot("wake.first", now + WAKE_INTERVAL));
     }

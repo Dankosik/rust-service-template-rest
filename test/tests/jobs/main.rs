@@ -84,8 +84,6 @@ pub(crate) async fn wait_for_lock_waiter(pool: &PgPool) {
     .await;
 }
 
-/// See a lock waiter, run `release`, then join `task`. A missed waiter still
-/// releases and joins before the test fails, so the task cannot stay parked.
 pub(crate) async fn join_after_lock_wait<T>(
     observer: &PgPool,
     release: impl Future<Output = ()>,

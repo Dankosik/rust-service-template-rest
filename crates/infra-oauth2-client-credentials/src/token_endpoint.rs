@@ -28,8 +28,6 @@ const GRANT_TOKEN_EXCHANGE: &str = "urn:ietf:params:oauth:grant-type:token-excha
 const TOKEN_TYPE_ACCESS_TOKEN: &str = "urn:ietf:params:oauth:token-type:access_token";
 const ACQUISITIONS_TOTAL: &str = "oauth2_token_acquisitions_total";
 
-/// The authorization server's token endpoint as both grants reach it: one
-/// signed, bounded, counted request per attempt, with no reuse of its own.
 pub(crate) struct TokenEndpoint {
     uri: Uri,
     http: Client,
@@ -70,7 +68,6 @@ impl TokenEndpoint {
         self.uri.host()
     }
 
-    /// The caller includes the [`FETCH_TIMEOUT`] cap in `deadline`.
     pub(crate) async fn fetch_service_token(
         &self,
         deadline: Instant,
@@ -78,7 +75,6 @@ impl TokenEndpoint {
         self.fetch_token(Grant::ClientCredentials, deadline).await
     }
 
-    /// Only the caller that owns the active exchange for the subject runs this attempt.
     pub(crate) async fn fetch_exchange(
         &self,
         subject: &SecretString,
@@ -108,8 +104,6 @@ impl TokenEndpoint {
         })
         .await
         .unwrap_or(Err(AcquisitionError::Timeout));
-        // Synchronous decoding and token admission can finish after the timer's
-        // last poll.
         let result = if Instant::now() >= deadline {
             Err(AcquisitionError::Timeout)
         } else {
@@ -289,8 +283,7 @@ fn joined_scopes(scopes: &[String]) -> Option<String> {
     }
 }
 
-/// When `expected_issued_token_type` is set, admission requires an exact
-/// match with the provider's issued type (RFC 8693 section 2.2.1).
+/// RFC 8693 §2.2.1
 fn token_from_response(
     response: &TokenResponse,
     started: Instant,

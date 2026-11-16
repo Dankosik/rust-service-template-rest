@@ -22,8 +22,6 @@ impl TestMetrics {
     }
 
     fn snapshot(&self) -> Series {
-        // `Snapshotter::snapshot` resets counters and gauges to zero; restore
-        // them so repeated assertions see retained gauges and cumulative totals.
         let series = self.snapshotter.snapshot().into_hashmap();
         for (composite, (_, _, value)) in &series {
             match value {
@@ -150,15 +148,13 @@ fn population_failure_and_cancellation_retain_dated_success_until_recovery() {
 
 #[test]
 fn clock_inconsistency_never_replaces_a_valid_population_with_empty() {
-    // Clock starts at wall=1000; request mono=1s, receipt mono=2s. Each row
-    // violates a distinct clock condition.
     for (request_wall, receipt_wall, database_time, oldest) in [
-        (1001.0, 1002.0, 1008.0, None), // database ahead of receipt bracket
-        (1001.0, 1002.0, 995.0, None),  // database behind request bracket
-        (1010.0, 1011.0, 1010.0, None), // local jump between attempts
-        (990.0, 991.0, 990.0, None),    // local backward movement
-        (1001.0, 1012.0, 1001.0, None), // local jump within attempt
-        (1001.0, 1002.0, 1001.0, Some(1003.0)), // future oldest value
+        (1001.0, 1002.0, 1008.0, None),
+        (1001.0, 1002.0, 995.0, None),
+        (1010.0, 1011.0, 1010.0, None),
+        (990.0, 991.0, 990.0, None),
+        (1001.0, 1012.0, 1001.0, None),
+        (1001.0, 1002.0, 1001.0, Some(1003.0)),
         (1001.0, 1002.0, f64::NAN, None),
         (1001.0, 1002.0, 1001.0, Some(f64::INFINITY)),
     ] {

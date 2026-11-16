@@ -1,8 +1,3 @@
-/// Whether the written authority of `url` contains an `@`.
-///
-/// A WHATWG parser consumes leading slashes and backslashes for special
-/// network schemes and drops empty userinfo. The raw check also refuses
-/// an ambiguous backslash before an `@` within the written authority.
 #[must_use]
 pub fn authority_has_userinfo(url: &str) -> bool {
     let Some((scheme, after_scheme)) = url.split_once(':') else {
@@ -22,13 +17,6 @@ pub fn authority_has_userinfo(url: &str) -> bool {
     authority[..authority_end].contains('@')
 }
 
-/// Whether `url` holds whitespace or a control character anywhere.
-///
-/// A WHATWG URL parser such as `url::Url` silently removes tabs and line
-/// breaks anywhere and controls and spaces at either end, so it would admit a
-/// URL other than the one written. Other Unicode whitespace and controls are
-/// refused with them: the parser would percent-encode them into a path no
-/// operator meant to configure.
 #[must_use]
 pub fn has_whitespace_or_control(url: &str) -> bool {
     url.chars()

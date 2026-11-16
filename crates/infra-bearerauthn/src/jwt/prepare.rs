@@ -21,28 +21,14 @@ const MAX_ECHOED_ISSUER_BYTES: usize = 256;
 #[debug("JwtOptions([REDACTED])")]
 pub struct JwtOptions {
     pub issuer: IssuerUrl,
-    /// Audiences of which a token must name at least one; non-empty, with no
-    /// empty entry.
     pub audiences: Vec<String>,
     pub token_profile: TokenProfile,
-    /// Accepted signature algorithms; non-empty.
     pub algorithms: Vec<JwtAlgorithm>,
-    /// The key set location. When set, discovery is skipped; a token's `iss`
-    /// is still compared with `issuer` exactly.
     pub jwks_uri: Option<EndpointUrl>,
 }
 
-/// The unstarted future that keeps a JWT verifier's installed key set fresh.
-/// The caller must spawn it through its process tracker; until then, keys are
-/// never refreshed.
 pub type RefreshTask = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
 
-/// Prepares initial trust before traffic admission and returns the one refresh
-/// future for bootstrap to spawn through its process tracker. Install the
-/// metrics recorder first: the verifier registers its counters here.
-/// `cancel` stops only the refresh task. The six-second startup budget starts
-/// before client construction. Synchronous work is checked after it returns
-/// because it cannot be preempted by the async deadline.
 pub async fn prepare_jwt(
     options: JwtOptions,
     cancel: CancellationToken,
@@ -118,8 +104,6 @@ fn complete_startup_stage<T>(
 }
 
 impl PreparationError {
-    /// Only echo a discovered value that satisfies the issuer grammar and fits
-    /// the diagnostic limit.
     fn issuer_mismatch(configured: &IssuerUrl, discovered: &str) -> Self {
         let discovered = if discovered.len() <= MAX_ECHOED_ISSUER_BYTES
             && IssuerUrl::parse(discovered).is_ok()
@@ -160,7 +144,6 @@ async fn fetch_discovery(
     let mut openid = issuer.url().clone();
     openid.set_path(&format!("{path}/.well-known/openid-configuration"));
     let discovery = match fetch_metadata(provider, &openid, deadline).await {
-        // A catch-all page can answer the missing OIDC endpoint with 200.
         Err(
             first @ (PreparationReason::Fetch(ProviderFailure::Status(_))
             | PreparationReason::Parse),
@@ -168,7 +151,7 @@ async fn fetch_discovery(
             let mut rfc8414 = issuer.url().clone();
             rfc8414.set_path(&format!("/.well-known/oauth-authorization-server{path}"));
             match fetch_metadata(provider, &rfc8414, deadline).await {
-                // Keep an OIDC outage visible when RFC 8414 metadata is missing or gone.
+                // RFC 8414 §3
                 Err(PreparationReason::Fetch(ProviderFailure::Status(404 | 410))) => Err(first),
                 result => result,
             }
@@ -293,9 +276,6 @@ mod tests {
             .await;
     }
 
-    /// Serves `routes` (request target, status, and body where `PORT` stands
-    /// for the listening port) over fixture TLS and answers any other target
-    /// with 404. Returns the address, the trusted root and the targets requested.
     async fn metadata_server(
         routes: Vec<MetadataRoute>,
     ) -> (
@@ -549,7 +529,6 @@ mod tests {
         metrics::with_local_recorder(diagnostics.recorder(), || {
             tracing::dispatcher::with_default(&dispatch, || {
                 runtime.block_on(async {
-                    // The listener never answers the TLS handshake.
                     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                     let address = listener.local_addr().unwrap();
                     let (_, root) = crate::provider::fixture_acceptor(FIXTURE_HOST);

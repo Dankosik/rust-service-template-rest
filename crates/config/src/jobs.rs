@@ -1,8 +1,3 @@
-//! Jobs worker capacity and its PostgreSQL-only operator snapshot.
-//!
-//! The full snapshot validates worker settings. The worker checks the
-//! implied pool bound through [`JobsConfig::validate_pool_capacity`].
-
 use std::num::NonZeroU32;
 
 use serde::Deserialize;
@@ -21,10 +16,8 @@ pub(crate) struct JobsOperatorInput {
     postgres: PostgresInput,
 }
 
-/// The only section jobs operator commands read, admitted.
 #[derive(Clone, Debug, Default)]
 pub struct JobsOperatorConfig {
-    /// `None` when `postgres.enabled` is false.
     pub postgres: Option<PostgresConfig>,
 }
 
@@ -56,9 +49,6 @@ impl Default for JobsConfig {
 }
 
 impl JobsConfig {
-    /// One connection per concurrent attempt plus at most two for the
-    /// worker's claiming, outcome recording, maintenance, and
-    /// readiness probe.
     pub fn validate_pool_capacity(&self, postgres: &PostgresConfig) -> Result<(), ValidationError> {
         let required = self.ordinary_pool_requirement();
         if u64::from(postgres.max_connections.get()) < required {
@@ -78,9 +68,6 @@ impl JobsConfig {
     }
 
     // template:begin outbox:jobs-outbox-capacity
-    /// Admit the shared pool for one reserved publisher plus any ordinary engine.
-    /// The publisher has one slot and two management connections; ordinary work
-    /// retains its existing `max_workers + 2` allowance.
     pub fn validate_pool_capacity_with_outbox(
         &self,
         postgres: &PostgresConfig,

@@ -8,9 +8,7 @@ const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug)]
 pub(crate) enum ResponseLimit {
-    /// Client-wide, before GET's generated checksum interceptor.
     ErrorBody,
-    /// Only nonstreaming operations install this operation-level hook.
     SuccessBody,
 }
 
@@ -40,14 +38,12 @@ impl Intercept for ResponseLimit {
 }
 
 fn bounded(body: SdkBody) -> SdkBody {
-    // The SDK collector discards trailers; discard first so repeated metadata cannot accumulate.
     let data = body.map_frame(|frame| Frame::data(frame.into_data().unwrap_or_default()));
     SdkBody::from_body_1_x(Limited::new(data, MAX_RESPONSE_BYTES))
 }
 
 #[cfg(test)]
 mod tests {
-
     use std::collections::VecDeque;
     use std::pin::Pin;
     use std::task::{Context, Poll};
@@ -115,7 +111,6 @@ mod tests {
             frames.push_back(Ok(Frame::data(Bytes::new())));
         }
         frames.push_back(Ok(Frame::data(Bytes::from_static(b"ok"))));
-        // SdkBody ends DATA at the first trailer; metadata after all DATA exercises discarding.
         for _ in 0..16 {
             let mut trailers = axum::http::HeaderMap::new();
             trailers.insert("x-provider-metadata", "ignored".parse().unwrap());

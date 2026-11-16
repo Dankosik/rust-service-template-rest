@@ -18,10 +18,7 @@ impl<'a> BearerToken<'a> {
     }
 }
 
-/// Parses exactly one Authorization header value as a bearer envelope, by
-/// [`shared_rules::rfc6750::token`]: foreign schemes are missing Bearer
-/// evidence without credential parsing, and anything outside RFC 6750 is
-/// malformed. The caller owns the ingress byte bound.
+/// RFC 6750 §2.1
 pub(crate) fn parse_bearer<'a>(
     headers: impl IntoIterator<Item = &'a [u8]>,
 ) -> Result<BearerToken<'a>, Failure> {
@@ -45,8 +42,6 @@ mod tests {
         assert_eq!(format!("{token:?}"), "BearerToken([REDACTED])");
     }
 
-    /// The grammar's cases are `shared_rules::rfc6750`'s; this crate maps its
-    /// two refusals onto distinct failure classes.
     #[test]
     fn a_missing_envelope_is_not_a_malformed_one() {
         assert_eq!(parse_bearer(std::iter::empty()), Err(Failure::Missing));

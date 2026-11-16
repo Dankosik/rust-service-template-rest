@@ -20,9 +20,6 @@ use completion::complete_batched;
 pub(crate) use completion::{Completions, complete_query};
 use outcome::{Ended, Transition, Unacknowledged, Written, map_outcome, send_outcome, write_of};
 
-/// After cancellation, [`drive`] keeps a success received during this grace
-/// period. The supervisor deadline and forced-cleanup deadline can end the
-/// wait sooner.
 const COOPERATIVE_GRACE: Duration = Duration::from_millis(100);
 
 const OWNED_ATTEMPTS_METRIC: &str = "jobs_owned_attempts";
@@ -47,7 +44,6 @@ pub(crate) fn describe_metrics() {
         Unit::Count,
         "Queued and in-flight completion entries currently owned"
     );
-    // Register idle observations without resetting other engines' live gauge values.
     metrics::gauge!(OWNED_ATTEMPTS_METRIC).increment(0.0);
     metrics::gauge!(COMPLETION_MEMBERSHIPS_METRIC).increment(0.0);
     metrics::describe_counter!(
@@ -71,7 +67,6 @@ pub(crate) fn describe_metrics() {
 enum Persistence {
     Applied,
     Unchanged,
-    /// Neither acknowledgement arrived; lease expiry recovers the row.
     Unknown,
 }
 
@@ -93,7 +88,6 @@ fn persistence_counter(kind: &'static str, persistence: Persistence) -> metrics:
     metrics::counter!(PERSISTENCE_METRIC, "kind" => kind, "disposition" => persistence.label())
 }
 
-/// Registered once instead of looked up by name for every attempt.
 pub(crate) struct KindMetrics {
     completed: metrics::Counter,
     duration: metrics::Histogram,
@@ -112,21 +106,14 @@ impl KindMetrics {
     }
 }
 
-/// Admission stays occupied until both the supervisor and its bookkeeping retire.
 struct AttemptSlots {
-    // Retire the metric membership before releasing capacity that can admit new work.
     _membership: MetricMembership,
     _global: tokio::sync::OwnedSemaphorePermit,
     _kind: Option<crate::claim::KindSlot>,
 }
 
-/// The metric counts a member the engine owns, an admitted attempt or a queued
-/// completion, so the guard names its membership and not claim custody.
 struct MetricMembership(metrics::Gauge);
 
-/// [`crate::Engine::start`] binds it under the installed recorder; first use
-/// binds it otherwise. A lookup per attempt would hash the name and search the
-/// recorder's registry, one of them under the completion queue lock.
 pub(crate) struct MembershipGauge {
     name: &'static str,
     handle: std::sync::OnceLock<metrics::Gauge>,
@@ -174,7 +161,6 @@ pub(crate) struct ClaimFence {
     pub(crate) generation: i64,
 }
 
-/// Claim-time exhaustion is observed only after its transaction is acknowledged.
 pub(crate) fn record_exhausted(attempt: &AttemptId, summary: Option<&str>) {
     observe_attempt(
         None,
@@ -256,7 +242,6 @@ pub(crate) fn supervise(
     }
 }
 
-/// The kind set is the registered one, so the span name stays low-cardinality.
 fn attempt_span(attempt: &AttemptId) -> tracing::Span {
     tracing::info_span!(
         "job_attempt",
@@ -358,8 +343,6 @@ async fn run_attempt(
     )
     .await;
     if let Some(summary) = terminal_summary {
-        // Count a terminal failure only when its write applies. Otherwise a
-        // later attempt or lease rescue may count it.
         if written == Some(Written::Applied) {
             observe_attempt(Some(handles), &attempt, &transition);
         } else {
@@ -387,7 +370,6 @@ async fn within<T>(
 ) -> Option<T> {
     let mut future = std::pin::pin!(future);
     let bounded = std::future::poll_fn(|cx| {
-        // A resumed poll can send SQL, even when it initially only waited for I/O.
         if deadline_reached_or_cleanup_ended(cleanup, until) {
             std::task::Poll::Ready(None)
         } else {
@@ -406,14 +388,10 @@ fn deadline_reached_or_cleanup_ended(cleanup: &ForcedCleanup, until: Instant) ->
     Instant::now() >= until || cleanup.has_ended()
 }
 
-/// A sum that would overflow `Instant` takes `limit`, which every caller already
-/// treats as the outermost bound on its own work.
 fn clamped_deadline(base: Instant, wait: Duration, limit: Instant) -> Instant {
     base.checked_add(wait).unwrap_or(limit).min(limit)
 }
 
-/// The future is already heap-pinned. Take it once so neither normal retirement
-/// nor cancellation can bypass the same synchronous destruction boundary.
 struct OwnedHandler(Option<HandlerFuture>);
 
 impl OwnedHandler {
@@ -424,7 +402,6 @@ impl OwnedHandler {
             }))
         {
             tracing::warn!("job_handler_drop_panicked");
-            // A secondary unwind here belongs to the supervisor failure guard.
             drop(payload);
         }
     }
@@ -436,9 +413,6 @@ impl Drop for OwnedHandler {
     }
 }
 
-/// Before the attempt deadline, a ready handler result wins over a drain
-/// request within the supervisor and cleanup bounds. After cancellation only
-/// success wins.
 async fn drive(
     cleanup: &ForcedCleanup,
     future: HandlerFuture,
@@ -448,7 +422,6 @@ async fn drive(
 ) -> Option<Ended> {
     let mut handler = OwnedHandler(Some(future));
     let reason = {
-        // Borrow through the poll boundary; the owner contains destruction as well.
         let mut run =
             std::pin::pin!(std::panic::AssertUnwindSafe(handler.0.as_mut()?).catch_unwind());
         let mut first_poll = true;
@@ -460,13 +433,10 @@ async fn drive(
             }
             let first = std::mem::take(&mut first_poll);
             if now >= attempt_deadline {
-                // Preparation can consume the attempt's budget before admission.
                 if first {
                     cancel.cancel();
                     return std::task::Poll::Ready(Some(Ended::Timeout));
                 }
-                // The cancellation branches supply the wakeup and reason. The
-                // handler may resume for cleanup only after its token fires.
                 return std::task::Poll::Pending;
             }
             run.as_mut().poll(cx).map(|result| Some(ended_from(result)))
@@ -477,8 +447,6 @@ async fn drive(
             () = cleanup.forced() => {}
             () = tokio::time::sleep_until(attempt_deadline) => {}
         }
-        // Both signals can arrive between polls. Refund only when forced
-        // cleanup started before the attempt expired.
         let reason = if cleanup.requested_before(attempt_deadline) {
             Ended::Cancelled
         } else {
@@ -495,10 +463,6 @@ async fn drive(
     (Instant::now() < supervisor_deadline && !cleanup.has_ended()).then_some(reason)
 }
 
-/// A result that joins after the supervisor cancelled the handler. Success
-/// means the work finished, so it is kept. An error, snooze, or panic is how
-/// the handler reacted to the cancellation, so it takes the cancellation's
-/// `reason`: a forced drain still releases the job and refunds its attempt.
 fn ended_after_cancel(result: &Result<Result<(), JobError>, Panicked>, reason: Ended) -> Ended {
     if matches!(result, Ok(Ok(()))) {
         Ended::Success

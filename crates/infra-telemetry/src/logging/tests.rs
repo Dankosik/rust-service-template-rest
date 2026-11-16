@@ -386,8 +386,6 @@ fn only_directives_without_span_filters_or_empty_parts_become_targets() {
     }
 }
 
-// Process isolation gives the cumulative SDK observations a fresh lifetime;
-// another exporter fixture must not supply the numeric facts asserted here.
 fn in_diagnostic_child() -> bool {
     const CHILD: &str = "TELEMETRY_DIAGNOSTIC_TEST_CHILD";
     if std::env::var_os(CHILD).is_none() {

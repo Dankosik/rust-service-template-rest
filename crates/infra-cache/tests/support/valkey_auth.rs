@@ -46,8 +46,6 @@ struct Exchange {
     outcome: Outcome,
 }
 
-// Only bounded classifications leave the relay; synthetic passwords are never
-// included in assertion diagnostics, logs, or metrics.
 struct Passwords {
     username: String,
     initial: String,
@@ -92,8 +90,6 @@ impl Passwords {
     }
 }
 
-/// Record exactly one parsed frame without reading bytes belonging to the next
-/// pipelined reply. The installed RESP parser owns all framing and validation.
 struct FrameReader<'a> {
     stream: &'a mut TcpStream,
     bytes: Vec<u8>,
@@ -136,7 +132,6 @@ async fn frame(stream: &mut TcpStream) -> redis::RedisResult<(Value, Vec<u8>)> {
 
 struct AuthRelay {
     port: u16,
-    // Aborted before the stop sender drops during teardown.
     task: AbortOnDropHandle<()>,
     stop: Option<oneshot::Sender<()>>,
 }
@@ -220,8 +215,6 @@ async fn relay_connection(
             let Ok((reply, bytes)) = frame(&mut outbound).await else {
                 return;
             };
-            // Forward every server byte unchanged, including unsolicited RESP3
-            // pushes. A push does not consume the request's reply slot.
             if inbound.write_all(&bytes).await.is_err() {
                 return;
             }
@@ -364,8 +357,6 @@ async fn replacement_password_is_authenticated_on_retained_and_new_connections()
     let port = relay.port;
     let key_pattern = format!("~rotation_auth:{identity}:*");
 
-    // The outer owner cleans up even when a scenario assertion panics. The
-    // current-thread runtime keeps the local recorder/subscriber on every task.
     let test_passwords = passwords.clone();
     let mut test_connection = connection.clone();
     let test_logs = logs.clone();
@@ -435,8 +426,6 @@ async fn replacement_password_is_authenticated_on_retained_and_new_connections()
         ));
         assert!(!scrape.contains("outcome=\"auth_accepted\""));
 
-        // Only server policy changes: identical pending file bytes must be
-        // retried. resetpass also rules out nopass and the retired password.
         admin::<()>(
             &mut test_connection,
             redis::cmd("ACL")
@@ -530,7 +519,6 @@ async fn replacement_password_is_authenticated_on_retained_and_new_connections()
         scenario.abort();
         let _ = scenario.await;
     }
-    // DELUSER disconnects any remaining owned sessions, including after panic.
     let removed: u64 = admin(
         &mut connection,
         redis::cmd("ACL").arg("DELUSER").arg(&passwords.username),

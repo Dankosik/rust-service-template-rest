@@ -80,11 +80,6 @@ pub(crate) fn admit_test_http_origin(url: &Url) -> Result<Origin, BuildError> {
     Origin::try_new(url)
 }
 
-/// A caller `Host` could route to another virtual host, so it is refused. The host compares
-/// ASCII case-insensitively with the origin's serialized host; other spellings of one
-/// address, such as a non-canonical IP literal, are refused rather than normalized. The
-/// version and body framing are then set whatever the caller wrote; a missing `Accept` gets
-/// `*/*`, as reqwest sent.
 pub(crate) fn admit_request(
     origin: &Origin,
     mut request: Request<Bytes>,
@@ -92,7 +87,6 @@ pub(crate) fn admit_request(
     if request.headers().contains_key(header::HOST) || !origin.admits(request.uri()) {
         return Err(Error::InvalidTarget);
     }
-    // Hyper connects before it refuses a version it cannot send.
     *request.version_mut() = Version::HTTP_11;
     frame_body(&mut request);
     let headers = request.headers_mut();
@@ -103,9 +97,7 @@ pub(crate) fn admit_request(
     Ok(request)
 }
 
-/// Hyper sends a caller `Content-Length` as written, so a wrong value would leave bytes on a
-/// pooled connection for the provider to read as the next request. Content, or a method that
-/// expects it, carries its length (RFC 9110 section 8.6); any other carries none.
+/// RFC 9110 §8.6
 fn frame_body(request: &mut Request<Bytes>) {
     let length = request.body().len();
     let expects_content = matches!(

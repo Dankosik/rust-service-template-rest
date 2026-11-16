@@ -1,21 +1,3 @@
-//! An attempt holds one explicit `READ COMMITTED` transaction:
-//!
-//! 1. One statement checks the writer and reads a live record. Equal
-//!    fingerprints replay, and different ones mismatch. Only a miss tries
-//!    to take the scope's transaction-scoped advisory lock without waiting.
-//! 2. With the lock and no record, a second statement reads again.
-//! 3. Only a record still missing in step 2 runs the work, then writes the
-//!    success record in the same transaction.
-//!
-//! Correctness rests on two PostgreSQL facts. A commit becomes visible before
-//! its transaction releases its locks, and under `READ COMMITTED` every
-//! statement takes a new snapshot. Step 1 takes its snapshot before its lock,
-//! so it can miss the record of a writer that released the lock in between;
-//! step 2 takes its snapshot after the lock and sees that record. Skipping
-//! step 2, or running under `REPEATABLE READ`, would let a duplicate run the
-//! work a second time. A decision in step 1 alone runs no work, and a live
-//! record is never replaced, so it needs no second read.
-
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -42,10 +24,6 @@ impl ScopeKey {
         &self.0
     }
 
-    /// The advisory lock key: the digest's first eight bytes as a signed
-    /// big-endian integer. A collision yields `InProgress` only when another
-    /// scope holds the lock and arbitration finds no live record for this
-    /// scope. A live record still decides replay or mismatch.
     fn lock_key(&self) -> i64 {
         let [b0, b1, b2, b3, b4, b5, b6, b7, ..] = self.0;
         i64::from_be_bytes([b0, b1, b2, b3, b4, b5, b6, b7])
@@ -59,9 +37,6 @@ pub enum CallerKind {
 }
 
 impl CallerKind {
-    /// The `CHECK` constraint in
-    /// `migrations/20260923000001_create_http_idempotency_records.sql` admits
-    /// only these strings, so a new variant needs a migration first.
     const fn as_str(self) -> &'static str {
         match self {
             Self::Subject => "subject",
@@ -102,21 +77,12 @@ pub enum Attempted<C, R> {
     InProgress,
 }
 
-/// Why [`Store::attempt`] could not decide. Nothing it ran committed, except
-/// perhaps after [`AttemptError::Unavailable`] for an uncertain commit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum AttemptError {
-    /// A transient fault, an uncertain commit, or a session that cannot
-    /// write. A retry with the identical request and key reaches normal
-    /// arbitration again.
     #[error("unavailable")]
     Unavailable,
-    /// A non-transient driver fault, a success record the write did not
-    /// store, or a caller identity PostgreSQL cannot store. Nothing committed.
     #[error("internal")]
     Internal,
-    /// A live record that does not decode. Replay is impossible until the
-    /// record expires or an operator removes it.
     #[error("integrity")]
     Integrity,
 }
@@ -162,9 +128,6 @@ impl Store {
     where
         W: AsyncFnOnce(&mut Tx<'_>) -> Result<(Record, C), R>,
     {
-        // PostgreSQL `text` cannot hold U+0000, so the success record of such a
-        // caller can never be written. Refusing before the transaction keeps
-        // the work from running only to be rolled back on every attempt.
         if caller.issuer.contains('\0') || caller.value.contains('\0') {
             return Err(refused(
                 "caller_identity",
@@ -210,8 +173,6 @@ async fn arbitrate(
     scope: &ScopeKey,
     fingerprint: &Digest,
 ) -> Result<Option<Decision>, AttemptError> {
-    // Step 1. Advisory locks work on a standby too; a lock taken there ends
-    // with the refused transaction.
     let row = observed(
         "lock and read idempotency record",
         sqlx::query!(
@@ -253,7 +214,6 @@ async fn arbitrate(
     match live {
         Some(decision) => Ok(Some(decision)),
         None if !row.acquired => Ok(Some(Decision::InProgress)),
-        // Step 2. It must stay a statement of its own after step 1.
         None => {
             let row = observed(
                 "read idempotency record",
@@ -284,9 +244,6 @@ async fn arbitrate(
     }
 }
 
-/// A live record, compared with the request's fingerprint. Both reads return
-/// the body only for an equal fingerprint, so a mismatch neither detoasts nor
-/// transfers it; a replay whose body is missing is a corrupt record.
 fn decide_live(
     stored_fingerprint: Digest,
     status: i16,
@@ -322,9 +279,6 @@ async fn write(
     record: &Record,
     retention: Duration,
 ) -> Result<(), AttemptError> {
-    // Lock the old row before starting retention, even if concurrent cleanup
-    // deletes it and the write takes the insert path. The conflict clause
-    // still protects a row written after this statement's snapshot.
     let written = observed(
         "write idempotency record",
         sqlx::query!(
@@ -389,9 +343,6 @@ fn classify_tx(err: &TxError) -> AttemptError {
         TxError::Acquire(err) => ("acquire", classify(err), None),
         TxError::Begin(err) => ("begin", classify(err), None),
         TxError::CommitFailed(err) => ("commit", classify(err), Some("commit_failed")),
-        // The transaction owner could not establish rollback. Even a permanent
-        // protocol fault may follow a successful COMMIT, so preserve uncertainty
-        // and let the identical same-key retry reconcile the durable outcome.
         TxError::CommitUnknown(_) => ("commit", AttemptError::Unavailable, Some("commit_unknown")),
     };
     failed(err.driver(), phase, class, commit_outcome)
@@ -405,7 +356,6 @@ fn classify(err: &sqlx::Error) -> AttemptError {
     }
 }
 
-/// Logs only bounded fields, never driver text.
 fn failed(
     err: &sqlx::Error,
     phase: &'static str,

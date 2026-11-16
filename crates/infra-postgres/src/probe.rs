@@ -1,6 +1,3 @@
-//! The probe shares the request pool so readiness reflects its saturation; the
-//! refresher owns the failure threshold and the whole-check bound.
-
 use health::{Probe, ProbeError};
 use sqlx::Connection;
 use sqlx::postgres::PgPool;
@@ -31,8 +28,6 @@ impl Probe for PostgresProbe {
     }
 }
 
-/// Names the failure class without dependency internals, since the driver's text
-/// can quote server details; a server rejection carries its bounded SQLSTATE.
 fn probe_error(err: &sqlx::Error) -> ProbeError {
     match err {
         sqlx::Error::PoolTimedOut => {

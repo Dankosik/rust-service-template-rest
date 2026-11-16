@@ -2,19 +2,13 @@ use serde::Deserialize;
 
 use crate::validate::{ValidationError, Violations, non_blank};
 
-/// Values the binary knows at build time and the loader uses as defaults
-/// for `app.version` and `app.commit` when the snapshot leaves them empty.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BuildInfo {
     pub version: &'static str,
-    /// The source revision stamped by this crate's build script; `unknown`
-    /// when absent.
     pub commit: &'static str,
 }
 
 impl BuildInfo {
-    /// Package version from the calling binary, commit from this crate's
-    /// `VERGEN_GIT_SHA` stamp.
     #[must_use]
     pub const fn from_package_version(version: &'static str) -> Self {
         Self {
@@ -24,9 +18,6 @@ impl BuildInfo {
     }
 }
 
-/// Whether `env` (`app.env`) names a developer environment. Only there does
-/// a section accept its plaintext, unauthenticated, or emulator escape hatch;
-/// any other spelling, a production typo included, is refused them.
 #[must_use]
 pub(crate) fn is_local_development(env: &str) -> bool {
     matches!(env, "local" | "development")

@@ -49,8 +49,6 @@ fn is_public(document: &Value, operation: &Value) -> bool {
     effective_security(document, operation).is_empty()
 }
 
-/// An anonymous alternative, an unknown scheme, a non-string scope, or an
-/// AND-combination is not the wired bearer path.
 fn uses_bearer_only(document: &Value, operation: &Value) -> bool {
     let requirements = effective_security(document, operation);
     if requirements.is_empty() {
@@ -78,7 +76,6 @@ fn uses_bearer_only(document: &Value, operation: &Value) -> bool {
     })
 }
 
-/// Follows a `$ref` into `components/responses`.
 fn response<'a>(document: &'a Value, operation: &'a Value, status: &str) -> Option<&'a Value> {
     let declared = operation["responses"].get(status)?;
     match declared["$ref"].as_str() {
@@ -123,7 +120,6 @@ fn committed_document_matches_the_generator() {
 
 #[test]
 fn document_has_the_probe_operations() {
-    // The probes are platform behavior every derived service keeps.
     let document = document();
     let ids: Vec<_> = operations(&document)
         .iter()
@@ -270,7 +266,6 @@ fn declares_optional_retry_after(response: &Value) -> bool {
     })
 }
 
-/// The components are in every retained document, referenced or not.
 #[test]
 fn retained_idempotency_document_declares_the_family_components() {
     let document = document();
@@ -295,9 +290,6 @@ fn retained_idempotency_document_declares_the_family_components() {
     }
 }
 
-/// Only `Composer::route` may declare `Idempotency-Key`: a hand-written
-/// declaration on an uncomposed operation would promise a replay that no
-/// boundary enforces.
 #[test]
 fn only_composed_operations_declare_the_idempotency_key() {
     use infra_http::idempotency::{Activation, Composer};
@@ -334,8 +326,6 @@ fn declares_idempotency_key(operation: &Value) -> bool {
 
 // template:end http-idempotency:service-openapi-http-idempotency-contract
 
-/// The classifier fails closed so a protected operation cannot slip through
-/// with an anonymous or unsupported path.
 #[rstest::rstest]
 #[case::inherited_bearer(&json!({}), false, true)]
 #[case::explicit_bearer(&json!({"security": [{"bearerAuth": []}]}), false, true)]

@@ -499,7 +499,6 @@ async fn unexpected_timer_abort_before_first_poll_fails_closed() {
     let (body, destroyed) = body(None);
     let end = tokio::time::sleep(Duration::from_mins(1)).deadline();
     let (mut download, slots) = open(body, 4, end);
-    // This task has not yielded since spawn: the exit guard must already exist.
     download.timer.abort();
     joined(&mut download.timer).await;
     tokio::time::timeout(Duration::from_secs(1), destroyed)
@@ -587,7 +586,6 @@ async fn partial_reads_spend_the_original_budget() {
     let (mut download, admission, eof) = download(Duration::from_secs(3));
     tokio::time::advance(Duration::from_secs(1)).await;
     assert_eq!(download.next_chunk().await.unwrap().unwrap(), "abc");
-    // A successful chunk must not start another three-second lifetime.
     tokio::time::advance(Duration::from_secs(2)).await;
     let _ = eof.send(());
     assert_eq!(

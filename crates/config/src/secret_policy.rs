@@ -1,30 +1,12 @@
-//! Which keys may only be set through an `APP__` variable.
-//!
-//! Baseline files describe non-secret defaults. A secret-like key may appear
-//! in a file only as an empty placeholder that documents the key; a non-empty
-//! value there is a leaked credential waiting to be committed.
-
-/// Whether a dotted key names a credential.
-///
-/// Segments are split on `.`, `_`, and `-`, so `otlp_headers`, `api_key`,
-/// and `private-key` all match; `token_url` remains a non-credential URL name
-/// and a key that ends in `password_file` or `credentials_file` a
-/// non-credential path. Operator-chosen map keys are segments too, so an
-/// integration named `token-exchange` makes its `token_url` secret-like; the
-/// guard fails closed rather than learn which segments are names.
 #[must_use]
 pub(crate) fn is_secret_like_key(key: &str) -> bool {
     let lowered = key.trim().to_ascii_lowercase();
     // template:begin oidc-jwt:secret-policy-token-profile-exception
-    // It selects a token contract, not a credential; only this exact key is
-    // exempt, so `cache.token_profile` stays secret-like.
     if lowered == "authn.token_profile" {
         return false;
     }
     // template:end oidc-jwt:secret-policy-token-profile-exception
     // template:begin object-storage:secret-policy-credentials-exception
-    // It selects how credentials are obtained, not a credential; only this
-    // exact key is exempt, so `messaging.credentials` stays secret-like.
     if lowered == "object_storage.credentials" {
         return false;
     }

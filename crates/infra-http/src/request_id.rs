@@ -1,8 +1,3 @@
-//! [`SetRequestIdLayer`](tower_http::request_id::SetRequestIdLayer) trusts the
-//! inbound header and any existing [`RequestId`] extension. Sanitize both
-//! before it establishes the ID that observation echoes in the response header
-//! and uses for Problem bodies and logs.
-
 use axum::http::header::HeaderName;
 use axum::http::{HeaderValue, Request};
 use itertools::Itertools as _;
@@ -21,10 +16,6 @@ fn is_valid(value: &[u8]) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'~' | b'-'))
 }
 
-/// A random UUID v4 per request. tower-http's `MakeRequestUuid` formats a
-/// `String` and copies it into the header value; this formats on the stack.
-/// `uuid`'s `fast-rng` draws from a thread-local CSPRNG instead of a
-/// `getrandom` system call per id.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct MakeRequestUuid;
 
@@ -36,7 +27,6 @@ impl MakeRequestId for MakeRequestUuid {
     }
 }
 
-/// Keep exactly one inbound `X-Request-ID` matching `^[A-Za-z0-9._~-]{1,128}$`.
 pub(crate) fn sanitize<B>(mut request: Request<B>) -> Request<B> {
     let keep = matches!(
         request.headers().get_all(&REQUEST_ID_HEADER).iter().at_most_one(),

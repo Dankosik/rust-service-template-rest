@@ -382,7 +382,6 @@ async fn acquisition_failure_prevents_dispatch_and_reports_whether_it_may_pass_l
             .unwrap_err();
         assert_eq!(error.code(), code);
         assert!(!error.message().contains("private"));
-        // The closed reason is the status source; it is never sent to a peer.
         let source = std::error::Error::source(&error)
             .and_then(|source| source.downcast_ref::<AcquisitionError>());
         assert_eq!(source, Some(&reason));
@@ -647,8 +646,6 @@ async fn a_reused_token_preserves_the_budget_remaining_at_transport_handoff() {
     let timeouts = resource.peer.timeouts.lock().unwrap().clone();
     assert_eq!(timeouts.len(), 4);
     assert_eq!(tokens.token_requests().len(), 1);
-    // Reused credentials add no fresh wait. The transport still subtracts its
-    // own elapsed time; encoding below a second can round down a microsecond.
     for (timeout, elapsed) in timeouts.iter().zip(elapsed).skip(1) {
         let minimum = Duration::from_secs(1).saturating_sub(elapsed + Duration::from_micros(1));
         assert!(
@@ -911,7 +908,6 @@ async fn a_client_requiring_a_subject_is_internal_without_one_before_any_io() {
     let message = || UnaryRequest {
         message: "one".to_owned(),
     };
-    // A reusable service token is cached, so a fallback would have one to send.
     resource
         .client(&credentials)
         .unary(rpc(message(), Duration::from_secs(10)))
@@ -951,8 +947,6 @@ async fn a_client_requiring_a_subject_is_internal_without_one_before_any_io() {
 
 #[tokio::test]
 async fn credentials_and_stream_spend_the_selected_resource_interval() {
-    // The body is held independently by the peer: resetting the resource clock
-    // after a cold credential wait would leave FullRpc alive at this checkpoint.
     for cached in [false, true] {
         for (opening_only, caller, expires) in [
             (false, None, true),
@@ -1023,8 +1017,6 @@ async fn credentials_and_stream_spend_the_selected_resource_interval() {
                 }));
                 super::poll_pending(frame.as_mut()).await;
                 if caller.is_some() {
-                    // A long caller lifetime survives opening expiry but still
-                    // ends relative to entry, including the credential wait.
                     super::advance(Duration::from_secs(7)).await;
                     let result = poll_fn(|cx| Poll::Ready(frame.as_mut().poll(cx))).await;
                     assert_matches!(result, Poll::Ready(Some(Ok(ref frame)))

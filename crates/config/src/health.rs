@@ -1,8 +1,3 @@
-//! Readiness refresh cadence.
-//!
-//! Probes are checked on an interval by a background task, never per
-//! request, so an unauthenticated probe request never reaches a dependency.
-
 use std::num::NonZeroU32;
 use std::time::Duration;
 

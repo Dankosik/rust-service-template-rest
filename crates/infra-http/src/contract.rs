@@ -30,17 +30,12 @@ pub enum FinalizeError {
         method: String,
         fault: &'static str,
     },
-    /// A route template ending like a probe's is reserved for the probe
-    /// handler, since the hardened chain exempts it from in-flight admission
-    /// and the access log.
     #[error(
         "HTTP contract finalization failed: {method} {path} is not a health probe but its route ends like one"
     )]
     ReservedProbeRoute { path: String, method: String },
 }
 
-/// A served route the document does not describe is not opened: it answers a
-/// sanitized 500 at request time.
 pub fn finalize_public<S>(contract: OpenApiRouter<S>) -> Result<Router<S>, FinalizeError>
 where
     S: Clone + Send + Sync + 'static,
@@ -65,7 +60,6 @@ where
     S: Clone + Send + Sync + 'static,
 {
     let (router, _) = contract.split_for_parts();
-    // axum's `route_layer` panics on a router without routes.
     if router.has_routes() {
         layer(router)
     } else {
@@ -73,10 +67,7 @@ where
     }
 }
 
-/// One operation's compiled access: open to any caller, or gated behind at
-/// least one alternative of required scopes (OpenAPI 3.1 §4.8.30: OR across
-/// alternatives, AND within one; an empty list is any authenticated caller).
-/// Scope alternatives are retained only when authentication is enabled.
+// OpenAPI 3.1 §4.8.30
 pub(crate) enum Access {
     Public,
     Protected(
@@ -115,8 +106,6 @@ fn compile_operation(
     Ok(access)
 }
 
-/// The compiled access table, shared read-only by every request: axum clones
-/// middleware state per request, so the table sits behind an `Arc`.
 #[derive(Clone)]
 pub(crate) struct Policy(Arc<CompiledPolicy>);
 
@@ -242,8 +231,6 @@ pub(crate) fn contract_path(extensions: &axum::http::Extensions) -> Option<&str>
     let matched = extensions.get::<axum::extract::MatchedPath>()?.as_str();
     let inner = extensions
         .get::<axum::extract::NestedPath>()
-        // axum keeps a nest prefix as written, so `nest("/api/", ..)` yields
-        // `/api/` while the matched path is `/api/widgets`.
         .and_then(|nested| matched.strip_prefix(nested.as_str().trim_end_matches('/')))
         .map_or(matched, |inner| if inner.is_empty() { "/" } else { inner });
     Some(inner)
@@ -269,8 +256,6 @@ impl PolicyFault {
 }
 
 impl Access {
-    /// Any scheme other than one `bearerAuth` key, an anonymous `{}`, or an
-    /// AND-of-schemes requirement fails finalization instead of silently narrowing access.
     fn from_operation(document: &OpenApi, operation: &Operation) -> Result<Self, PolicyFault> {
         let security = operation.security.as_ref().or(document.security.as_ref());
         let Some(requirements) = security.filter(|requirements| !requirements.is_empty()) else {
@@ -279,8 +264,6 @@ impl Access {
         if !declares_bearer_scheme(document) {
             return Err(PolicyFault::MissingBearerScheme);
         }
-        // utoipa offers no getter for a requirement's schemes; its serialized
-        // form is the only public view of them.
         let requirements: Vec<BTreeMap<String, Vec<String>>> = serde_json::to_value(requirements)
             .and_then(serde_json::from_value)
             .map_err(|_| PolicyFault::UnreadableRequirement)?;

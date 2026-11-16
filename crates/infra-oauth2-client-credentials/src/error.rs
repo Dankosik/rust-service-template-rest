@@ -19,13 +19,10 @@ pub enum AcquisitionError {
     Transport,
     #[error("OAuth2 token response exceeded its limit")]
     ResponseLimit,
-    /// The provider answered 5xx or 429, or did not answer within the
-    /// adapter's own attempt bound, or the credential owner has stopped.
     #[error("OAuth2 credentials are unavailable")]
     Unavailable,
     #[error("OAuth2 provider acquisition capacity is exhausted")]
     AtCapacity,
-    /// The provider refused the request. Only a known registered code is retained.
     #[error("OAuth2 provider rejected the request: {0}")]
     Rejected(Rejection),
     #[error("OAuth2 token response is invalid")]
@@ -50,9 +47,7 @@ impl AcquisitionError {
     }
 }
 
-/// Why the provider refused a token request: its `error` code (RFC 6749
-/// section 5.2, RFC 8693 section 2.2.2) when it is one of the registered
-/// ones. The code is the only part of the provider's answer that is kept.
+/// RFC 6749 §5.2, RFC 8693 §2.2.2
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(field_identifier, rename_all = "snake_case")]
 pub enum Rejection {
@@ -63,7 +58,6 @@ pub enum Rejection {
     UnsupportedGrantType,
     InvalidScope,
     InvalidTarget,
-    /// No `error` code, or one outside the registered set.
     #[serde(other)]
     Other,
 }

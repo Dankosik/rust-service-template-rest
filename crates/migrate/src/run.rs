@@ -9,21 +9,13 @@ use sqlx::postgres::PgConnection;
 
 use crate::history::{PendingError, applied_history, pending};
 
-/// Session `statement_timeout` and `idle_in_transaction_session_timeout`.
-/// DDL on a large table outlasts a request, but a statement holding a table
-/// lock must not run as long as [`RunOptions::deadline`] allows.
-/// [`apply_outside_transaction`] lifts it.
 const STATEMENT_TIMEOUT: Duration = Duration::from_mins(2);
-/// Also bounds the wait for the advisory session lock another migrator may
-/// hold. [`apply_outside_transaction`] lifts it.
 const LOCK_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Clone, Debug)]
 pub struct RunOptions<'a> {
     pub dsn: &'a Dsn,
     pub application_name: &'a str,
-    /// Bounds lock, history, and every pending migration once a session
-    /// exists; connect is outside it. Must fit the monotonic clock's range.
     pub deadline: Duration,
     pub statement_timeout: Duration,
     pub lock_timeout: Duration,
@@ -65,8 +57,6 @@ pub enum RunError {
     Deadline(Duration),
     #[error("migration deadline {0:?} exceeds the monotonic clock range")]
     InvalidDeadline(Duration),
-    /// A `-- no-transaction` migration was not started: an interrupted
-    /// concurrent build left an index that `IF NOT EXISTS` would keep.
     #[error(
         "migration {version} runs outside a transaction and the database holds invalid indexes ({indexes}); drop each with DROP INDEX CONCURRENTLY, then run again"
     )]
@@ -77,7 +67,6 @@ pub enum RunError {
     Migrate(#[from] MigrateError),
 }
 
-/// `lock_timeout` fired, including on `pg_advisory_lock`.
 const LOCK_NOT_AVAILABLE: &str = "55P03";
 
 impl RunError {
@@ -135,7 +124,6 @@ impl RunFailure {
     }
 }
 
-/// A `-- no-transaction` migration writes its history row after its statement.
 pub async fn run(migrator: &Migrator, options: &RunOptions<'_>) -> Result<Report, RunFailure> {
     run_cutoff(options.deadline)?;
     let session = SessionOptions {
@@ -144,13 +132,7 @@ pub async fn run(migrator: &Migrator, options: &RunOptions<'_>) -> Result<Report
         idle_in_transaction_timeout: options.statement_timeout,
         lock_timeout: options.lock_timeout,
         extra: &[
-            // `CREATE TABLE IF NOT EXISTS` on the history table raises a
-            // notice on every run after the first; the terminal record is
-            // the operator's evidence, not the server's chatter.
             ("client_min_messages", "warning"),
-            // A dropped session (deadline, stop signal) is noticed while a
-            // statement still runs, so its locks and transaction end within
-            // a second instead of at `statement_timeout` (PostgreSQL 14+).
             ("client_connection_check_interval", "1s"),
         ],
     };
@@ -175,8 +157,6 @@ pub async fn run(migrator: &Migrator, options: &RunOptions<'_>) -> Result<Report
             });
         }
     }
-    // A close error must not fail an applied run. On failure the connection is
-    // dropped instead, which ends the session, its lock, and any transaction.
     let _ = conn.close().await;
     Ok(report)
 }
@@ -184,12 +164,10 @@ pub async fn run(migrator: &Migrator, options: &RunOptions<'_>) -> Result<Report
 fn run_cutoff(budget: Duration) -> Result<tokio::time::Instant, RunFailure> {
     tokio::time::Instant::now()
         .checked_add(budget)
-        // Tokio rounds deadlines up to milliseconds before registering the timer.
         .filter(|deadline| deadline.checked_add(Duration::from_millis(1)).is_some())
         .ok_or_else(|| RunError::InvalidDeadline(budget).into())
 }
 
-/// The lock is held before the history is read, so `before` and `applied` describe this run.
 async fn apply_pending(
     conn: &mut PgConnection,
     migrator: &Migrator,
@@ -228,14 +206,6 @@ async fn apply_pending(
     Ok(())
 }
 
-/// Nothing rolls a `-- no-transaction` migration back, so two things differ from a
-/// transactional migration. An invalid index refuses the run before the
-/// statement starts: a failed `CREATE INDEX CONCURRENTLY` leaves one, and the
-/// `IF NOT EXISTS` that makes the file safe to rerun would otherwise accept
-/// it as built. And the statement runs under the deadline instead of the
-/// session `statement_timeout` and `lock_timeout`: a concurrent build takes
-/// as long as the table is large and waits for every older transaction to
-/// end, while holding no lock that blocks writes.
 async fn apply_outside_transaction(
     conn: &mut PgConnection,
     table: &str,
@@ -264,8 +234,6 @@ async fn invalid_indexes(conn: &mut PgConnection) -> Result<Vec<String>, Migrate
     observed(
         "SELECT pg_index",
         sqlx::query_scalar!(
-            // `relkind = 'i'` leaves out the index of a partitioned table,
-            // which is invalid by design until every partition is attached.
             r#"SELECT c.oid::regclass::text AS "name!" FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE NOT i.indisvalid AND c.relkind = 'i' ORDER BY 1"#
         )
         .fetch_all(conn),

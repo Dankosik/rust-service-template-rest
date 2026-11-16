@@ -27,8 +27,6 @@ impl TestMetrics {
     }
 
     fn snapshot(&self) -> Vec<(metrics_util::CompositeKey, DebugValue)> {
-        // `Snapshotter::snapshot` resets counters and gauges to zero; restore
-        // them so repeated assertions see active in-flight work and cumulative totals.
         self.snapshotter
             .snapshot()
             .into_vec()
@@ -291,8 +289,6 @@ async fn a_password_file_unreadable_at_setup_is_not_reported_as_auth() {
         file.path().to_path_buf(),
     ))
     .expect("start cache");
-    // The supervisor has not run on this current-thread runtime yet, so its
-    // first setup reads the file only after this removal.
     std::fs::remove_file(file.path()).expect("remove password file");
 
     let refused = tokio::time::timeout(Duration::from_secs(5), cache.probe().check())
@@ -577,8 +573,6 @@ fn assert_work_metrics(metrics: &TestMetrics, in_flight: u32, refused: u64, reti
     }
 }
 
-// These tests exercise real socket readiness and EOF. Bounded event waits keep
-// the clock running with I/O, avoiding paused-time auto-advance past OS events.
 #[tokio::test]
 async fn reliability_admission_bounds_connection_waits_without_cancelling_setup() {
     use health::Probe;
@@ -592,14 +586,12 @@ async fn reliability_admission_bounds_connection_waits_without_cancelling_setup(
     assert_work_metrics(&metrics, 0, 0, 0);
     let namespace = cache.namespace(namespace!("waiting"));
     let mut waiting = Vec::new();
-    // No scheduler yield: the supervisor has not published a connection yet.
     for _ in 0..256 {
         let mut command = Box::pin(namespace.get("pending"));
         assert!(futures_util::poll!(command.as_mut()).is_pending());
         waiting.push(command);
     }
     assert_work_metrics(&metrics, 256, 0, 0);
-    // Another link shares the unlabelled series without resetting active work.
     let other = metrics::with_local_recorder(metrics.recorder(), || {
         admitted(&format!("redis://{}", server.address), true, true)
     });
@@ -689,8 +681,6 @@ async fn reliability_full_application_window_leaves_probe_and_maintenance_admiss
         futures_util::poll!(excess_probe.as_mut()),
         Poll::Ready(Err(error)) if error.to_string() == "cache ping failed: other"
     );
-    // Leave caller futures unpolled; the supervisor must progress independently
-    // of all 257 occupied application/probe slots, even after the probe deadline.
     server
         .wait_for(
             Duration::from_secs(3),
@@ -845,8 +835,6 @@ async fn reliability_a_probe_reply_timeout_retires_the_connection() {
         .expect_err("the stalled connection did not answer PING");
     assert_eq!(error.to_string(), "cache ping failed: timeout");
     assert_work_metrics(&metrics, 2, 0, 1);
-    // No yield after the timeout: peers already observe retirement, and reused
-    // capacity cannot dispatch another command on the old generation.
     assert_eq!(
         futures_util::poll!(peer.as_mut()),
         Poll::Ready(Err(crate::Unavailable))
@@ -863,8 +851,6 @@ async fn reliability_a_probe_reply_timeout_retires_the_connection() {
     );
     assert_work_metrics(&metrics, 1, 0, 1);
     assert!(server.connections() > old);
-    // This peer kept its old identity unpolled while the successor served
-    // a response. Its late failure must not withdraw that successor.
     assert_eq!(
         futures_util::poll!(late.as_mut()),
         Poll::Ready(Err(crate::Unavailable))
@@ -1072,7 +1058,6 @@ async fn acknowledged_write_keeps_its_result_after_disconnect() {
             server.command_count("SET", Some("acknowledged_write:key")) == 1
         })
         .await;
-    // A later reply on the same FIFO connection proves the driver delivered SET.
     assert_eq!(namespace.get("fence").await, Ok(None));
     let old = server.connections();
     assert_eq!(old, 1);
@@ -1141,7 +1126,6 @@ async fn dropping_an_exchange_with_a_delivered_reply_keeps_the_connection() {
             };
             tokio::pin!(exchange);
             assert!(futures_util::poll!(exchange.as_mut()).is_pending());
-            // The later GET's reply proves the FIFO driver delivered the earlier reply.
             assert_eq!(namespace.get("fence").await, Ok(None));
             if check_probe {
                 assert!(server.command_count("PING", None) > pings);
@@ -1161,7 +1145,6 @@ async fn dropping_an_exchange_with_a_delivered_reply_keeps_the_connection() {
 fn probe_reports_the_exit_of_a_supervisor_that_never_ran() {
     use health::Probe;
 
-    // admitted() enters and then drops a current-thread runtime without driving it.
     let cache = admitted("redis://127.0.0.1:6379", true, true);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -1207,8 +1190,6 @@ async fn cancellation_after_write_dispatch_leaves_a_stalled_server_to_maintenanc
             .expect("cancellation must end waiting before the local ceiling"),
         Err(crate::SetError::Unavailable(crate::Unavailable))
     );
-    // The caller stopped before its ceiling; only the maintenance PING may
-    // judge the server.
     assert_work_metrics(&metrics, 0, 0, 0);
     server
         .wait_for(
@@ -1312,7 +1293,6 @@ async fn reliability_namespace_and_probe_retain_owner_until_live_maintenance_is_
             || server.active() == 0,
         )
         .await;
-    // The supervisor's exit cleanup cannot retire the same generation twice.
     assert_work_metrics(&metrics, 0, 0, 1);
 }
 
@@ -1375,12 +1355,6 @@ async fn reliability_rejected_unchanged_password_recovers_without_traffic() {
         "a pending reply has no completed outcome"
     );
     server.require_password(&pending);
-    // Acceptance changes while the rejected reply is still delayed. Every
-    // fixture reply arrives within 1 s; completion-relative refresh scheduling
-    // lets the PINGs at 6, 8.4 and 10.8 s push this recovery past 7 s, while
-    // the general AUTH hang guard stays at five seconds. File bytes and sockets
-    // stay unchanged and no cache operations run: the client must consume a
-    // successful reply, not merely send another AUTH.
     captured
         .wait_for(Duration::from_secs(7), |logs| {
             logs.contains("cache_password_reloaded")
@@ -1486,7 +1460,6 @@ async fn a_hung_password_read_is_never_joined_by_a_second() {
     std::fs::write(&path, "admitted\n").expect("admitted password");
     let file =
         crate::credentials::PasswordFile::admit(path.clone(), None).expect("admit password file");
-    // Opening a FIFO for reading blocks until a writer appears: a hung mount.
     std::fs::remove_file(&path).expect("remove password");
     let status = std::process::Command::new("mkfifo")
         .arg(&path)
@@ -1502,8 +1475,6 @@ async fn a_hung_password_read_is_never_joined_by_a_second() {
     );
     let second = tokio::time::timeout(Duration::from_secs(1), file.read()).await;
 
-    // Release every hung read before asserting, or a failure would hang the
-    // runtime's shutdown; the next read then sees the replaced file.
     let fifo = directory.path().join("stale");
     std::fs::rename(&path, &fifo).expect("move FIFO aside");
     std::fs::write(&path, "rotated\n").expect("rotated password");

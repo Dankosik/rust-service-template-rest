@@ -8,13 +8,6 @@ use tokio_util::sync::CancellationToken;
 
 use super::Receiver;
 
-/// Receipts become eligible for deletion after 14 days. A sender can reuse
-/// the same message ID with fresh timestamps throughout its retry horizon.
-/// This template's nominal outbound backoff runs about six and a half days.
-/// The five-minute timestamp tolerance in [`crate::protocol::KeyRing::verify`]
-/// applies to each signed request. Consumers retain business effect identity
-/// for their replay lifetime because retry floors, outages, redrives, and
-/// restores can bring a delivery back after cleanup deletes its receipt.
 const RECEIPT_RETENTION: Duration = Duration::from_hours(14 * 24);
 
 const CLEANUP_BATCH_ROWS: u32 = 500;
@@ -24,11 +17,6 @@ pub const CLEANUP_RUNS_METRIC: &str = "webhook_receipt_cleanup_runs_total";
 pub const CLEANUP_REMOVED_METRIC: &str = "webhook_receipt_cleanup_removed_receipts_total";
 
 impl Receiver {
-    /// Batches of at most 500, each its own transaction that skips receipts
-    /// another cleanup holds; an admission's `ON CONFLICT DO NOTHING` locks no
-    /// existing receipt. Confirmed counts do not certify an empty expired
-    /// population. Earlier batches stay committed; a timeout leaves the
-    /// batch's commit outcome unconfirmed.
     pub async fn remove_expired(&self) -> Result<u64, CleanupError> {
         self.remove_expired_pass(None)
             .await
@@ -69,8 +57,6 @@ impl Receiver {
         Ok(deleted.rows_affected())
     }
 
-    /// Neither failure changes readiness. Cancellation drops both loops,
-    /// including any transaction in flight.
     pub async fn run_cleanup(self, cancel: CancellationToken) {
         metrics::describe_counter!(
             CLEANUP_RUNS_METRIC,

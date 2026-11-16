@@ -1,16 +1,3 @@
-//! Middleware order is the contract, outermost first:
-//!
-//! request-id sanitize → set → nosniff → observation (OpenTelemetry server span,
-//! HTTP metrics, request-id echo, problem completion, access log) → traceparent
-//! response header → in-flight admission (waits for a permit, then sheds; probes
-//! exempt) → opening context and deadline → panic recovery → body limit
-//! → extractor body limit → routes / 404 / 405
-//!
-//! Every layer is applied with `Router::layer`, so the 404 and 405 fallbacks
-//! travel through the same chain. Cross-origin requests are fail-closed by
-//! having no CORS layer at all: an empty `CorsLayer` would answer every
-//! `OPTIONS` with 200 and hide the router's 405.
-
 use std::any::Any;
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -45,32 +32,20 @@ use crate::request_id;
 
 struct Admission {
     permits: Semaphore,
-    /// `http.request_timeout`: the request has no deadline until it is
-    /// admitted, and the budget it then gets is what this wait leaves of it.
     patience: Duration,
 }
 
 #[derive(Clone, Debug)]
 pub struct HardenOptions {
-    /// Applies to the transport stream and to axum's `DefaultBodyLimit`, whose
-    /// own default is independent of this ceiling.
     pub max_body_bytes: usize,
-    /// Per-request budget; expiry answers 504 with code `gateway_timeout`, or
-    /// 408 with code `request_timeout` while a tracked request-body read waits.
-    /// Custom body readers track each awaited read with
-    /// [`crate::RequestContext::read_body`].
     pub request_timeout: Duration,
-    /// `None` disables shedding. Health probe routes are admitted without a permit.
     pub max_in_flight: Option<NonZeroU32>,
     pub log_health_probes: bool,
 }
 
 pub fn harden(routes: Router, options: &HardenOptions) -> Router {
     observe::describe();
-    // One semaphore for the whole router: `Router::layer` applies the chain
-    // to every route, so a per-layer limit would be a per-route limit.
     let in_flight = options.max_in_flight.map(|limit| {
-        // Published at zero, so a scrape tells "never shed" from "not exported".
         metrics::counter!(observe::SHED_REQUESTS_METRIC).increment(0);
         middleware::from_fn_with_state(
             Arc::new(Admission {
@@ -91,8 +66,6 @@ pub fn harden(routes: Router, options: &HardenOptions) -> Router {
             X_CONTENT_TYPE_OPTIONS,
             HeaderValue::from_static("nosniff"),
         ))
-        // Outside opening enforcement, so every Problem is completed before it is
-        // counted and logged.
         .layer(middleware::from_fn_with_state(
             Observer::new(options.log_health_probes),
             observe::observe,
@@ -143,7 +116,6 @@ async fn limit_body(State(max_bytes): State<usize>, request: Request, next: Next
         }))
     });
     let mut response = next.run(request).await;
-    // Axum's raw extractors lose the cause when they render their 413.
     if response.status() == StatusCode::PAYLOAD_TOO_LARGE
         && overflowed.load(Ordering::Relaxed)
         && response.extensions().get::<Problem>().is_none()
@@ -167,14 +139,6 @@ fn normalize_overflow_response(response: &mut Response) {
     *response.body_mut() = body;
 }
 
-/// A request over the bound waits in arrival order for up to `request_timeout`
-/// rather than being refused while capacity may free; only then it is shed with
-/// 503 and `Retry-After`. The permit is held until the response head is ready.
-/// Probe routes skip the limit, matched by route template also beneath an
-/// outer nest: a shed liveness probe would have the platform restart a busy service.
-///
-/// The wait sits outside the opening deadline, so the request's arrival is handed on
-/// and the opening budget spends the wait from `request_timeout`.
 async fn admit(
     State(admission): State<Arc<Admission>>,
     matched: Option<MatchedPath>,
@@ -191,7 +155,6 @@ async fn admit(
         let waited = tokio::time::timeout(admission.patience, admission.permits.acquire()).await;
         let elapsed = arrived.elapsed();
         metrics::histogram!(observe::ADMISSION_WAIT_METRIC).record(elapsed.as_secs_f64());
-        // Tokio's timeout can return a ready permit after the wait budget.
         match waited {
             Ok(Ok(permit)) if elapsed < admission.patience => permit,
             _ => return shed_response(),
@@ -214,7 +177,6 @@ fn shed_response() -> Response {
     (axum::Extension(AdmissionShed), problem).into_response()
 }
 
-/// A recovered panic becomes a sanitized 500 without recording its payload.
 fn panic_to_problem(_payload: Box<dyn Any + Send + 'static>) -> Response {
     tracing::error!("http_handler_panicked");
     sanitized_internal_error()
@@ -227,7 +189,6 @@ async fn not_found() -> Response {
 }
 
 async fn method_not_allowed() -> Response {
-    // axum appends the computed `Allow` header to this response.
     Problem::new(Code::MethodNotAllowed)
         .detail("method is not allowed for this resource")
         .into_response()

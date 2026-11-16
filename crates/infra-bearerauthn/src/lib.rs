@@ -1,13 +1,3 @@
-//! Bounded bearer authentication verification.
-//!
-//! This crate owns the sealed transition from an inbound bearer envelope to a
-//! verified identity. HTTP routing, configuration loading, and authorization
-//! policy remain with their existing owners.
-//!
-//! Transports enter only through [`Verifier::authenticate_with_context`]: parse one bearer
-//! envelope, run the prepared engine, and record the transport outcome even on cancellation.
-//! It returns a sealed [`Principal`] or a closed [`Failure`].
-
 mod authenticate;
 mod bearer;
 mod claims;
@@ -98,7 +88,6 @@ pub enum PreparationPhase {
     // template:end oidc-jwt:authn-jwt-preparation-phases
 }
 
-/// A closed preparation reason. These variants never retain dependency errors.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PreparationReason {
     InvalidUrl,
@@ -237,7 +226,6 @@ impl VerificationError {
     }
 }
 
-/// Usable time since the Unix epoch; clock failure cannot supply trust evidence.
 pub(crate) fn unix_now() -> Result<std::time::Duration, VerificationError> {
     unix_time(std::time::SystemTime::now())
 }
@@ -276,8 +264,6 @@ fn record_verification(
     Err(error.failure)
 }
 
-/// Prepared success handles and lazy refusal handles per [`Verifier`].
-/// Bootstrap installs the recorder before it prepares a verifier.
 struct VerificationCounters {
     mode: &'static str,
     verified: metrics::Counter,
@@ -309,8 +295,6 @@ pub mod test_support {
 
     pub use crate::introspection::prepare_introspection_with_fixture;
 
-    /// Fixture-only custody for a real verifier transport. It cannot construct
-    /// a principal or bypass verification.
     #[derive(derive_more::Debug)]
     #[debug("FixtureTransport([REDACTED])")]
     pub struct FixtureTransport {
@@ -380,8 +364,6 @@ impl Verifier {
     }
     // template:end oidc-introspection:authn-introspection-verifier
 
-    /// Verifies one fixture's Authorization value under a fresh 3-second budget,
-    /// without recording a transport outcome.
     #[cfg(feature = "test-support")]
     pub async fn verify_fixture_authorization(
         &self,
@@ -400,8 +382,6 @@ impl Verifier {
         .await
     }
 
-    /// Verifies a token while spending the caller's original operation budget.
-    /// A stopped caller leaves shared key refresh and other cache-fill waiters running.
     pub(crate) async fn verify_with_context(
         &self,
         token: &BearerToken<'_>,
@@ -418,14 +398,11 @@ impl Verifier {
                 // template:end oidc-introspection:authn-introspection-verify
             }
         };
-        // Verification first: a ready engine then never arms the deadline timer.
         let result = tokio::select! {
             biased;
             result = verification => result,
             _ = context.wait_stopped() => return Err(Failure::Unavailable),
         };
-        // A ready synchronous engine may consume the remaining budget in one poll.
-        // A late failure is no more valid as credential evidence than late success.
         context.check().map_err(|_| Failure::Unavailable)?;
         record_verification(&self.counters, result)
     }

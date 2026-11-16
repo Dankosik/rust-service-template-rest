@@ -1,7 +1,3 @@
-//! Durable Standard Webhooks delivery through the existing jobs and HTTPS owners.
-//!
-//! Each attempt routes and signs with the worker's startup snapshot of endpoints.
-
 mod producer;
 
 use std::{
@@ -33,13 +29,8 @@ const RETRY_AFTER_CAP: Duration = Duration::from_hours(24);
 const RESPONSE_HEADER_COUNT: usize = 64;
 const RESPONSE_BODY_BYTES: usize = 64 * 1024;
 
-/// Delivery attempts by result. Label `outcome` is `delivered`, `retryable`,
-/// or `permanent`. A configured endpoint adds its operator-chosen ID as
-/// `endpoint`, and a failure adds its static `reason`.
 pub const WEBHOOK_DELIVERY_OUTCOMES_METRIC: &str = "webhook_delivery_outcomes_total";
 
-/// Jobs policy for one outbound delivery attempt. [`Dispatcher::register`]
-/// sets the concurrency bound.
 pub const DELIVERY_POLICY: Policy = Policy {
     max_attempts: 20,
     timeout: Duration::from_secs(30),
@@ -61,9 +52,6 @@ pub struct Endpoint {
 }
 
 impl Endpoint {
-    /// The destination must be an HTTPS URL with a host and without credentials
-    /// or a fragment. A URL that passes validation and transport setup but cannot be
-    /// represented as an HTTP request URI fails each delivery permanently.
     pub fn try_new(destination: &str, keys: KeyRing) -> Result<Self, EndpointError> {
         if shared_rules::uri::has_whitespace_or_control(destination)
             || shared_rules::uri::authority_has_userinfo(destination)
@@ -78,7 +66,6 @@ impl Endpoint {
         Ok(Self::from_destination(destination, client, keys))
     }
 
-    /// Production code must use [`Endpoint::try_new`].
     #[cfg(feature = "test-support")]
     pub fn with_client(
         destination: Url,
@@ -100,8 +87,6 @@ impl Endpoint {
     }
 }
 
-/// A destination with a host and no credentials or fragment; each constructor
-/// owns its scheme rule.
 fn is_admissible(destination: &Url) -> bool {
     destination.host().is_some()
         && destination.username().is_empty()
@@ -138,9 +123,6 @@ impl Dispatcher {
         }
     }
 
-    /// `max_concurrent` bounds the deliveries one engine runs at once, so a
-    /// slow receiver cannot hold every job slot; `None` leaves the engine's
-    /// slots as the only bound.
     pub fn register(
         self,
         kinds: &mut KindsBuilder,
@@ -166,7 +148,6 @@ impl Dispatcher {
             http.status = Option::<u16>::None,
             "webhook_delivery_finished"
         );
-        // The ID is no longer configured, so it is not a label.
         self.missing_endpoint
             .get_or_init(|| {
                 metrics::counter!(
@@ -217,14 +198,6 @@ impl Handler<Delivery> for Dispatcher {
     }
 }
 
-/// The durable payload of one outbound delivery.
-///
-/// `version` is written and never read: a worker from before the tag became
-/// optional refuses a row without it, so a rolling deploy or a rollback still
-/// needs it on the wire. A reader ignores it, whatever its value.
-///
-/// A payload the worker cannot decode is retried by infra-jobs, which keeps a
-/// rolling deploy safe. Do not convert decode errors to permanent failures.
 #[serde_as]
 #[derive(Clone, Serialize, Deserialize)]
 struct Delivery {
@@ -243,9 +216,6 @@ const fn delivery_version() -> u8 {
     2
 }
 
-/// [`Delivery`] serialized with empty strings and body. The size check adds
-/// each field's escaped contents and the body's Base64 length to it instead
-/// of serializing this constant envelope on every enqueue.
 const EMPTY_DELIVERY_JSON: &str = r#"{"version":2,"endpoint_id":"","content_type":"","body":""}"#;
 
 impl JobKind for Delivery {
@@ -256,9 +226,6 @@ const _: () = infra_jobs::assert_valid_kind_name(DELIVERY_KIND);
 
 #[derive(Debug, thiserror::Error)]
 pub enum EndpointError {
-    /// The destination has no host, carries credentials or a fragment, or
-    /// uses a scheme its constructor refuses: HTTPS only, except for a test
-    /// client.
     #[error("outbound webhook destination is invalid")]
     InvalidDestination,
     #[error("outbound webhook client configuration is invalid")]
@@ -332,14 +299,6 @@ enum DeliveryFailure {
 }
 
 impl DeliveryFailure {
-    /// Map an HTTP exchange error to its log and metric failure. An error can
-    /// arrive after the client has received response headers, and the receiver
-    /// may already have processed the request.
-    ///
-    /// An invalid target stays retryable, like a missing endpoint: each
-    /// endpoint's client is built for its own destination, so only a
-    /// configuration fix and a worker restart can repair it, and retries keep
-    /// the delivery until then.
     const fn from_exchange(error: &HttpError) -> Self {
         match error {
             HttpError::Timeout => Self::Timeout,
@@ -369,8 +328,6 @@ impl DeliveryFailure {
             Self::InvalidPayload => "invalid_payload",
             Self::ClockUnavailable => "clock_unavailable",
             Self::Status(_) => "response_status",
-            // The receiver asks for no more deliveries: disable or remove its
-            // static binding and restart workers.
             Self::EndpointGone => "endpoint_gone",
             Self::Timeout => "timeout",
             Self::Cancelled => "cancelled",
@@ -426,8 +383,6 @@ impl fmt::Display for DeliveryFailure {
 }
 
 impl Endpoint {
-    /// `None` when signing or request construction fails; the caller treats
-    /// either as a permanent payload failure.
     fn signed_request(
         &self,
         delivery: &Delivery,
@@ -473,8 +428,6 @@ fn classify_response(
         Ok(response) => {
             let failure = DeliveryFailure::Status(response.status());
             record_failure(endpoint_id, metrics, failure);
-            // The capped Retry-After is far inside the jobs delay limit; an
-            // invalid delay would still fall back to jobs backoff.
             Err(retry_after(response.headers(), response_time)
                 .and_then(|delay| JobError::retry_after_at_least(failure, delay).ok())
                 .unwrap_or_else(|| JobError::retryable(failure)))
@@ -523,7 +476,6 @@ fn record_failure(endpoint_id: &str, metrics: &EndpointMetrics, failure: Deliver
 fn retry_after(headers: &HeaderMap, now: SystemTime) -> Option<Duration> {
     let value = headers.get(header::RETRY_AFTER)?.to_str().ok()?;
     let delay = if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
-        // An over-long delta saturates to the cap instead of being ignored.
         Duration::from_secs(value.parse().unwrap_or(u64::MAX))
     } else {
         httpdate::parse_http_date(value)
@@ -573,8 +525,6 @@ mod tests {
 
     #[test]
     fn an_endpoint_admits_a_private_https_ip() {
-        // Endpoint URLs are trusted operator configuration; the outbound client
-        // is not an SSRF boundary and does not classify addresses.
         assert!(Endpoint::try_new("https://10.0.0.5/events", ring()).is_ok());
     }
 
@@ -755,7 +705,6 @@ mod tests {
         expected.sort();
         assert_eq!(samples, expected);
 
-        // A second dispatcher in its own local recorder binds its own lazy handles.
         let second_recorder = DebuggingRecorder::new();
         let second_snapshotter = second_recorder.snapshotter();
         let second_dispatcher = super::Dispatcher::new(BTreeMap::new());

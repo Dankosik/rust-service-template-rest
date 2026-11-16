@@ -238,8 +238,6 @@ static HTTP: LazyLock<reqwest::Client> = LazyLock::new(|| {
 });
 
 async fn get(url: &str) -> Result<(u16, String), reqwest::Error> {
-    // Without a bound, a listener that accepts and never answers would hold
-    // `poll_until` past its deadline.
     let response = HTTP.get(url).send().await?;
     let status = response.status().as_u16();
     let body = response.text().await.unwrap_or_default();
@@ -459,7 +457,6 @@ async fn await_failed_sample_with_last_good_values(
     url: &str,
     before: &std::collections::BTreeMap<String, u64>,
 ) {
-    // The independent global loop waits 30 seconds after the preceding pair.
     poll_until(
         "metrics retain the last good sample after a failure",
         Duration::from_secs(45),
@@ -781,7 +778,6 @@ async fn resumed_worker_exits_one_after_progress_loss_without_diagnostics(pool: 
         },
     )
     .await;
-    // The admitted completion bound is 2 s. No reader or scrape drives detection.
     tokio::time::sleep(Duration::from_secs(3)).await;
     kill(pid, Signal::SIGCONT).expect("resume admitted worker");
     let (code, stderr, stdout) = worker.wait().await;
@@ -833,7 +829,6 @@ async fn background_task_that_ends_stops_the_worker_with_exit_1(pool: PgPool) {
     let stopped = worker.await_record("background_task_stopped").await;
     assert_eq!(stopped["task"], "fixture", "{stopped}");
     assert_eq!(stopped["panicked"], false, "{stopped}");
-    // The refusal assertion observes the final staged record before exit.
     assert_refused(
         worker,
         "background task fixture stopped without a stop signal",
@@ -873,7 +868,6 @@ async fn handler_panic_is_recorded_by_location_and_never_by_message(pool: PgPool
     );
     assert_eq!(probe_attempts(&pool, &id).await.first(), Some(&1));
 
-    // The panic is a retried attempt: the worker keeps running and stops cleanly.
     worker.terminate();
     let (code, stderr, stdout) = worker.wait().await;
     assert_eq!(code, Some(0), "stderr: {stderr}; stdout:\n{stdout}");
@@ -990,8 +984,6 @@ async fn worker_metrics_publish_a_capped_fresh_registered_sample(pool: PgPool) {
         .await
         .expect("retained failures for registered and unknown kinds");
     }
-    // The unhandled kind is older than every registered failure. It must
-    // determine the global age without creating an arbitrary kind label.
     let unknown_failed_at: f64 = sqlx::query_scalar(
         "WITH changed AS ( \
              UPDATE background_jobs SET finished_at = statement_timestamp() - interval '1 hour' \
@@ -1043,8 +1035,6 @@ async fn worker_metrics_publish_a_capped_fresh_registered_sample(pool: PgPool) {
     )
     .await;
     locked.commit().await.expect("release the sampled jobs");
-    // Make the data statement fail immediately; a table lock could instead
-    // stall a claim holding the shared engine permit before the sample runs.
     sqlx::query("ALTER TABLE background_jobs RENAME TO unavailable_background_jobs")
         .execute(&pool)
         .await
@@ -1085,8 +1075,6 @@ async fn worker_counts_a_lost_wake_listener_and_listens_again(pool: PgPool) {
     let (_, before) = get(&metrics).await.expect("a metrics scrape");
     assert!(!operation_failed(&before, "listen"), "{before}");
 
-    // The server's closing error is not a notification, so the driver
-    // reports the terminated session only as a lost connection.
     let terminated: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
         .bind(first)
         .fetch_one(&pool)

@@ -352,8 +352,6 @@ async fn observation_records_timeout_cancellation_and_polled_drop_once() {
         ),
         1
     );
-    // A cancelled caller is not a provider failure, whether it cancels or
-    // drops; both attempts share one series.
     assert!(scrape.lines().any(|line| {
         line.starts_with("http_client_request_duration_seconds_count")
             && line.contains("outbound_outcome=\"cancelled\"")

@@ -21,15 +21,12 @@ use shared_rules::error_chain::DisplayErrorChain;
 use tokio::time::Instant;
 use tokio_util::sync::DropGuard;
 
-/// Tonic applies TLS only to `https`, so a scheme mismatch is rejected rather than silently
-/// connecting in plaintext.
 #[derive(Clone, Debug)]
 pub enum ClientSecurity {
     Plaintext,
     Tls(ClientTlsMaterial),
 }
 
-/// Without a CA the native roots are trusted; hostname verification is never disabled.
 #[derive(Clone, Debug, Default)]
 pub struct ClientTlsMaterial {
     pub ca_certificate_pem: Option<String>,
@@ -62,8 +59,6 @@ impl ClientTimeout {
     }
 }
 
-/// An [`OperationContext`] in the request extensions also bounds the call: the earlier
-/// deadline wins and its cancellation cancels the call.
 #[derive(Clone, derive_more::Debug)]
 pub struct Client {
     channel: Channel,
@@ -87,15 +82,10 @@ impl Client {
         security: ClientSecurity,
         timeout: ClientTimeout,
     ) -> Result<Self, Error> {
-        // Parsed as a URI rather than through `Endpoint::from_shared`, which
-        // turns a `unix:` destination into a socket endpoint whose `uri()` is
-        // the fixed `http://tonic` and would pass the scheme check below.
         let destination =
             http::Uri::try_from(destination).map_err(|_| Error::InvalidDestination)?;
         let mut endpoint = Endpoint::from(destination)
             .connect_timeout(CONNECT_TIMEOUT)
-            // gRPC's keepalive guide: no pings much more often than once a minute, only
-            // while a call is open.
             .http2_keep_alive_interval(Duration::from_mins(1))
             .keep_alive_timeout(Duration::from_secs(20))
             .initial_connection_window_size(infra_http::HTTP2_CONNECTION_WINDOW)
@@ -131,7 +121,6 @@ impl tower::Service<Request<Body>> for Client {
     type Error = tonic::Status;
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
-    /// Always ready: each call waits for the channel itself.
     fn poll_ready(&mut self, _context: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
     }
@@ -141,8 +130,6 @@ impl tower::Service<Request<Body>> for Client {
     }
 }
 
-/// Dropped without [`PreparedCall::send`] or [`PreparedCall::refuse`], the call is recorded
-/// as `Canceled`.
 #[derive(derive_more::Debug)]
 pub struct PreparedCall {
     #[debug(skip)]
@@ -165,8 +152,6 @@ impl Client {
         let origin = Instant::now();
         let caller = crate::grpc_timeout(request.headers());
         if caller.is_none() {
-            // Tonic's channel accepts values this grammar rejects, such as
-            // `+5S`, and would apply a timeout this call treats as absent.
             request.headers_mut().remove(crate::protocol::GRPC_TIMEOUT);
         }
         let (local_opening, local_lifetime) = self.timeout.deadlines(origin, caller);
@@ -214,7 +199,6 @@ impl PreparedCall {
         &self.opening
     }
 
-    /// Dispatch derives the wire `grpc-timeout` from the original caller and parent deadlines.
     pub fn headers_mut(&mut self) -> &mut http::HeaderMap {
         self.request.headers_mut()
     }
@@ -229,8 +213,6 @@ impl PreparedCall {
         self.send_inner(|_| Ok(()), None).await
     }
 
-    /// The callback runs once with the peer's `grpc-status` code, or the code mapped from a
-    /// non-200 HTTP status when none arrives; local failures and abandoned bodies skip it.
     pub async fn send_with_response_status(
         self,
         on_status: impl FnOnce(tonic::Code) + Send + 'static,
@@ -335,12 +317,9 @@ fn apply_forwarded_timeout(
     Ok(())
 }
 
-/// Names the rejected PEM input, which tonic's build error does not.
 fn client_tls(material: &ClientTlsMaterial) -> Result<ClientTlsConfig, Error> {
     let mut config = match &material.ca_certificate_pem {
         Some(ca) => {
-            // Parsed as trust anchors, not only as PEM: tonic drops a
-            // certificate it cannot parse and still builds the connector.
             crate::tls::roots(ca)?;
             ClientTlsConfig::new().ca_certificate(Certificate::from_pem(ca))
         }
@@ -357,10 +336,6 @@ fn client_tls(material: &ClientTlsMaterial) -> Result<ClientTlsConfig, Error> {
     Ok(config)
 }
 
-/// The caller sees a fixed status (a handler may forward it); the cause is logged in the
-/// client span. A supplied `grpc-timeout` expiring inside tonic's channel maps to
-/// `DEADLINE_EXCEEDED`, so a caller retrying `UNAVAILABLE` does not repeat a call the server
-/// may still run.
 #[expect(
     clippy::needless_pass_by_value,
     reason = "used as a `map_err` callback, which hands over the owned error"
@@ -372,8 +347,6 @@ fn transport_status(error: tonic::transport::Error) -> tonic::Status {
     {
         return Side::Client.deadline();
     }
-    // Tonic's transport error prints only `transport error` and keeps the DNS,
-    // TLS, connect or HTTP/2 reason in `source()`.
     tracing::warn!(error = %DisplayErrorChain(error), "grpc_client_transport_failed");
     tonic::Status::unavailable("transport unavailable")
 }
@@ -409,13 +382,10 @@ mod tests {
                 .code(),
             tonic::Code::DeadlineExceeded
         );
-        // Even legal wire timeouts larger than a practical Instant horizon
-        // must not overflow while a finite local budget remains enforceable.
         let largest_wire = Duration::from_hours(99_999_999);
         let (opening, _) = ClientTimeout::FullRpc(local).deadlines(origin, Some(largest_wire));
         assert!(opening.expired());
         assert!(!Deadline::new(origin, largest_wire).expired());
-        // A finite parent budget past the wire maximum is sent as that maximum.
         apply_forwarded_timeout(&mut headers, Some(Deadline::new(origin, Duration::MAX))).unwrap();
         assert_eq!(headers[crate::protocol::GRPC_TIMEOUT], "99999999H");
     }

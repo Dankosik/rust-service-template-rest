@@ -1,10 +1,7 @@
 use std::time::Duration;
 
-/// The share `sample / u16::MAX` of `window`, rounded down to a nanosecond:
-/// zero for a sample of 0 and the whole window for `u16::MAX`.
 #[must_use]
 pub fn share_of_window(window: Duration, sample: u16) -> Duration {
-    // At most `window`, so the result always fits a `Duration`.
     Duration::from_nanos_u128(window.as_nanos() * u128::from(sample) / u128::from(u16::MAX))
 }
 

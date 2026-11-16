@@ -20,7 +20,6 @@ fn emit(value: &serde_json::Value) {
     println!("{value}");
 }
 
-/// Barrier after durable readback and before transport completion.
 #[derive(Clone, Debug)]
 pub struct CompletionHold {
     pub channel: Channel,
@@ -36,7 +35,6 @@ pub struct ReceiverOptions {
     pub subject: String,
     pub consumer: String,
     pub http_bind: SocketAddr,
-    /// Finite admission window, at most 250 seconds, leaving shutdown headroom.
     pub run_for: Duration,
     pub hold: Option<CompletionHold>,
 }
@@ -72,8 +70,6 @@ async fn record(
     operation: &Operation,
     hold: Option<&CompletionHold>,
 ) -> Result<(), ReceiverError> {
-    // apply_effect owns CommitUnknown reconciliation. Even its acknowledged
-    // path is independently read back before this receiver confirms delivery.
     let _effect = reading_counter::apply_effect(pool, channel, operation).await?;
     let effect = reading_counter::read_effect(pool, channel, operation)
         .await?
@@ -88,7 +84,6 @@ async fn receive_nats(
     stop: &CancellationToken,
     hold: Option<&CompletionHold>,
 ) -> Result<(), ReceiverError> {
-    // One outstanding broker delivery and one active database operation.
     let mut messages = consumer
         .stream()
         .max_messages_per_batch(1)
@@ -111,16 +106,12 @@ async fn receive_nats(
         })
         .await;
         if !matches!(result, Ok(Ok(()))) {
-            // No ACK claims an unconfirmed effect. The same durable delivery
-            // can return after its ACK deadline, including a conflicting body.
             emit(&serde_json::json!({"status":"unconfirmed","channel":"outbox"}));
         }
     }
 }
 
 async fn request_body(socket: &mut TcpStream) -> Result<Vec<u8>, ReceiverError> {
-    // The fixture sender uses a bounded Content-Length request. Reject other
-    // framing instead of building a second general HTTP protocol stack.
     let mut request = Vec::with_capacity(2048);
     let header_end = loop {
         if let Some(index) = request
@@ -178,8 +169,6 @@ async fn receive_http(
     hold: Option<&CompletionHold>,
 ) -> Result<(), ReceiverError> {
     loop {
-        // Sequential admission bounds accepted sockets and database work to
-        // one; NATS independently owns the other receiver pool connection.
         let (mut socket, _) = tokio::select! {
             biased;
             () = stop.cancelled() => return Ok(()),
@@ -199,13 +188,11 @@ async fn receive_http(
         })
         .await;
         if !matches!(result, Ok(Ok(()))) {
-            // Closing without success preserves the sender's uncertainty.
             emit(&serde_json::json!({"status":"unconfirmed","channel":"webhook"}));
         }
     }
 }
 
-/// Both serial receive loops are joined before returning; no task is detached.
 pub async fn run(pool: &PgPool, options: ReceiverOptions) -> Result<(), ReceiverError> {
     if !options.http_bind.ip().is_loopback()
         || options.run_for.is_zero()

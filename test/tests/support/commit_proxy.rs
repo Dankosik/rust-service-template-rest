@@ -22,16 +22,9 @@ const READY_HOLD_BUDGET: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Fault {
-    /// Forward it, wait for `ReadyForQuery`, then close both sockets: the
-    /// commit happens and its acknowledgement is lost.
     ForwardThenDrop,
-    /// Forward the boundary, swallow its acknowledgement and keep both sockets
-    /// open until shutdown, even after the client abandons its connection.
     ForwardThenSilence,
-    /// Close both sockets before forwarding it: nothing commits.
     DropBeforeForward,
-    /// Forward it, then corrupt the transaction-status byte of `ReadyForQuery`.
-    /// The commit happens, but the driver cannot decode its final response.
     ForwardThenCorruptReady,
 }
 
@@ -72,9 +65,6 @@ enum Arming {
     Fired(Fault),
 }
 
-/// One held protocol response. The relay signals only after PostgreSQL has
-/// answered with `ReadyForQuery`; releasing it lets the relay finish cleanly
-/// after the client-side cancellation has dropped its connection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ReadyHoldState {
     Idle,
@@ -232,8 +222,6 @@ impl CommitProxy {
         self.address
     }
 
-    /// Act once on the next `COMMIT`. A bare [`Fault`] matches any connection;
-    /// `(fault, sql_substring)` selects a transaction sending that SQL after arming.
     pub(crate) fn arm(&self, fault: impl Into<Armed>) {
         self.silence
             .fault_baseline
@@ -241,8 +229,6 @@ impl CommitProxy {
         *lock(&self.arming) = Arming::Armed(fault.into());
     }
 
-    /// Act once on the matching autocommit statement's completion boundary.
-    /// Extended queries commit at Sync; simple queries complete in their own message.
     pub(crate) fn arm_autocommit(&self, fault: Fault, statement: &'static str) {
         self.silence
             .fault_baseline
@@ -276,8 +262,6 @@ impl CommitProxy {
         self.cancel.cancel();
     }
 
-    /// Silence the one active connection and wait until its relay has stopped.
-    /// Already-silent sockets stay open; later connections relay normally.
     pub(crate) async fn silence_connection(&self) {
         assert_eq!(self.silence.signal.receiver_count(), 1);
         let mut entered = self.silence.entered.subscribe();
@@ -289,7 +273,6 @@ impl CommitProxy {
             .expect("silence counter sender stays open");
     }
 
-    /// Wait until a fault has stopped forwarding without closing either socket.
     pub(crate) async fn silenced(&self) {
         let target = self.silence.fault_baseline.load(Ordering::Acquire);
         let mut entered = self.silence.entered.subscribe();
@@ -356,7 +339,6 @@ async fn accept(
     }
 }
 
-/// Returning drops, and so closes, both sockets.
 async fn relay(
     mut client: TcpStream,
     server: SocketAddr,
@@ -369,13 +351,10 @@ async fn relay(
     let Ok(mut upstream) = TcpStream::connect(server).await else {
         return;
     };
-    // Small messages both ways: Nagle's delay would only slow the suite.
     let _ = client.set_nodelay(true);
     let _ = upstream.set_nodelay(true);
     let mut frontend = Frontend::default();
     let mut backend = Vec::new();
-    // Once a fault forwards its boundary, stop reading the client and frame
-    // the server's answer before swallowing the final acknowledgement.
     let mut committing = None;
     let mut holding_ready = false;
     loop {
@@ -426,8 +405,6 @@ async fn relay(
                         Err(_) => return,
                     };
                     if fault == Fault::ForwardThenCorruptReady {
-                        // A complete ReadyForQuery is type + length + status.
-                        // Idle independently establishes that COMMIT ended.
                         assert_eq!(backend[ready + 5], b'I', "the server completed COMMIT");
                         backend[ready + 5] = b'?';
                         let _ = client.write_all(&backend).await;
@@ -439,9 +416,6 @@ async fn relay(
                     }
                     return;
                 } else if holding_ready {
-                    // TCP may split either frame, or separate CommandComplete
-                    // from ReadyForQuery. Keep every held byte until the latter
-                    // is complete before publishing the cancellation point.
                     match ready_for_query(&backend) {
                         Ok(None) => continue,
                         Ok(Some(_)) => ready_hold.hold(),
@@ -468,9 +442,7 @@ async fn relay(
 #[derive(Debug, Default)]
 struct Frontend {
     pending: BytesMut,
-    /// The untyped startup message has passed; every later one is typed.
     started: bool,
-    /// Prepared statements may be reused without another Parse message.
     statements: HashMap<Vec<u8>, Vec<u8>>,
     portals: HashMap<Vec<u8>, Vec<u8>>,
     matched: bool,
@@ -486,7 +458,6 @@ impl Frontend {
         }))
     }
 
-    /// Track SQL per connection and fault only its selected completion boundary.
     fn operation_fault(&mut self, message: &[u8], arming: &Mutex<Arming>) -> Option<Fault> {
         if message.first() == Some(&b'P') {
             let mut fields = message.get(5..)?.split(|byte| *byte == 0);
@@ -576,9 +547,6 @@ impl Frontend {
 #[derive(Debug)]
 struct Malformed;
 
-/// The length of the complete message at the start of `bytes`: a type byte
-/// and a big-endian `i32` length that counts itself, or the length alone for
-/// the untyped startup message. `None` while the message is incomplete.
 fn frame(bytes: &[u8], typed: bool) -> Option<Result<usize, Malformed>> {
     let start = usize::from(typed);
     let field: [u8; 4] = bytes.get(start..start + 4)?.try_into().ok()?;
@@ -592,8 +560,6 @@ fn frame(bytes: &[u8], typed: bool) -> Option<Result<usize, Malformed>> {
     (bytes.len() >= total).then_some(Ok(total))
 }
 
-/// The offset of a complete `ReadyForQuery` in backend bytes read from a
-/// message boundary, or `None` while its frame is incomplete.
 fn ready_for_query(bytes: &[u8]) -> Result<Option<usize>, Malformed> {
     let mut offset = 0;
     while let Some(length) = frame(&bytes[offset..], true) {
@@ -606,7 +572,6 @@ fn ready_for_query(bytes: &[u8]) -> Result<Option<usize>, Malformed> {
     Ok(None)
 }
 
-/// The arming state; a relay that panicked cannot leave it inconsistent.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }

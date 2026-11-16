@@ -1,9 +1,3 @@
-//! OpenTelemetry tracer provider.
-//!
-//! The provider is always installed so every request has a trace id for log
-//! correlation. The OTLP exporter that [`exporter`] builds is added only
-//! when an endpoint resolves.
-
 mod exporter;
 
 use exporter::{CollectorTrust, export_timeout, parse_headers, resolve_endpoint, span_exporter};
@@ -25,12 +19,8 @@ use opentelemetry_semantic_conventions::attribute;
 use parking_lot::Mutex;
 use secrecy::{ExposeSecret, SecretString};
 
-/// Success does not prove receiver acceptance; SDK queue loss and reported
-/// rejection have separate metrics.
 pub(crate) const TRACE_SPANS_EXPORTED_METRIC: &str = "otel_sdk_exporter_span_exported_total";
 
-/// 1 when the OTLP trace exporter initialized at startup, 0 otherwise; not
-/// delivery health.
 pub(crate) const TRACE_EXPORTER_ACTIVE_METRIC: &str = "service_startup_trace_exporter_active";
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -46,9 +36,6 @@ pub struct TracingOptions {
     pub service_name: String,
     pub service_version: String,
     pub vcs_revision: String,
-    /// Overrides the SDK's detected `service.instance.id`. `None` uses the
-    /// hostname. A blank value leaves any value from
-    /// `OTEL_RESOURCE_ATTRIBUTES` in place.
     pub instance_id: Option<String>,
     pub deployment_environment: String,
     pub sampler: ResolvedSampler,
@@ -71,7 +58,6 @@ impl EndpointSource {
     }
 }
 
-/// A startup-configuration signal, not continuous delivery health.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExporterState {
     Initialized {
@@ -136,26 +122,12 @@ pub struct TracerProviderHandle {
     drain: Arc<Mutex<DrainObservation>>,
 }
 
-/// Instrumentation scope of the `tracing` bridge; the service itself is the
-/// `service.name` resource attribute.
 const INSTRUMENTATION_SCOPE: &str = env!("CARGO_PKG_NAME");
 
-/// Spans the batch processor queues while an export runs, instead of the SDK's
-/// 2048. The processor drops a span when its queue is full and exports from one
-/// thread, so a slow or retried export (10 s timeout, three retries) leaves its
-/// spans queued: a service at a thousand spans a second fills 2048 in two
-/// seconds and 16384 in sixteen. The queue is allocated up front, one
-/// [`SpanData`] a slot. An `OTEL_BSP_MAX_QUEUE_SIZE` the SDK accepts still
-/// decides.
 const SPAN_QUEUE_CAPACITY: usize = 16_384;
 
-/// Join slack around `spawn_blocking` after the SDK's own shutdown timeout.
-/// Not extra flush time.
 pub const SHUTDOWN_JOIN_SLACK: Duration = Duration::from_millis(500);
 
-/// Call before the subscriber is installed so the handle can feed the
-/// OpenTelemetry layer. Exporter build failures degrade and are reported in
-/// the handle.
 pub fn install_tracer_provider(
     options: &TracingOptions,
 ) -> Result<TracerProviderHandle, TracingError> {
@@ -202,8 +174,6 @@ fn tracer_provider(
                     has_client_certificate: trust.client_certificate.is_some(),
                 }
             }
-            // The error's text may name files and SDK details, which stay
-            // out of logs and metrics; the fixed category is reported.
             Err(_withheld) => ExporterState::Degraded,
         },
     };
@@ -215,12 +185,6 @@ fn tracer_provider(
     })
 }
 
-/// The SDK's batch defaults, with the larger queue unless the operator set one
-/// the SDK accepts.
-///
-/// The SDK ignores a value it cannot parse and clamps the batch size to its
-/// own 2048 queue while reading the environment, so both are applied again
-/// here, after the queue is final.
 fn batch_config(env: &impl Fn(&str) -> Option<OsString>) -> sdktrace::BatchConfig {
     let size = |name| env(name)?.to_str()?.parse::<usize>().ok();
     let config = sdktrace::BatchConfigBuilder::default().with_max_queue_size(
@@ -239,11 +203,6 @@ impl TracerProviderHandle {
         self.provider.tracer(INSTRUMENTATION_SCOPE)
     }
 
-    /// The SDK receives the time left when its blocking job starts, minus
-    /// [`SHUTDOWN_JOIN_SLACK`]. An exhausted allowance skips the wait but still
-    /// submits the call with a zero budget, so the shared span processors are
-    /// told to stop; unconfirmed completion is reported without extending the
-    /// deadline.
     pub async fn shutdown(self, deadline: tokio::time::Instant) -> ProviderShutdown {
         self.shutdown_with_budget(Duration::MAX, deadline).await
     }
@@ -279,8 +238,6 @@ impl TracerProviderHandle {
                 }
             }
         };
-        // Tokio polls the inner future before its timeout. A result observed
-        // after the deadline cannot turn an expired wait into completion.
         if tokio::time::Instant::now() >= deadline {
             observed_here |= ProviderShutdownReasons::DEADLINE;
         }
@@ -336,12 +293,6 @@ enum SdkFailure {
 }
 
 impl SdkFailure {
-    /// The SDK's category, except that a failure after the whole `budget`
-    /// is a timeout: `opentelemetry-otlp` 0.33 (manifest `0.33.0`, lockfile
-    /// `0.33.1`) returns a timed-out export as
-    /// [`OTelSdkError::InternalFailure`], and
-    /// [`SdkTracerProvider::shutdown_with_timeout`]
-    /// wraps its processor's `Timeout` in one.
     fn classify(error: &OTelSdkError, elapsed: Duration, budget: Duration) -> Self {
         match error {
             OTelSdkError::Timeout(_) => Self::Timeout,
@@ -379,13 +330,9 @@ pub(crate) fn describe_metrics() {
     );
 }
 
-/// Counts the spans of every finished export under
-/// [`TRACE_SPANS_EXPORTED_METRIC`] and latches the drain's failures into
-/// [`ProviderShutdownReasons`].
 #[derive(Debug)]
 struct ObservedExporter<E> {
     inner: E,
-    /// The exporter's own timeout, which also bounds its retries.
     timeout: Duration,
     drain: Arc<Mutex<DrainObservation>>,
 }
@@ -429,8 +376,6 @@ impl<E: SpanExporter> SpanExporter for ObservedExporter<E> {
     }
 }
 
-/// Typed identity over the SDK detectors: detector values (including
-/// `OTEL_RESOURCE_ATTRIBUTES`) fill in first, typed attributes override.
 fn resource(options: &TracingOptions) -> Resource {
     let attributes = [
         KeyValue::new(attribute::SERVICE_NAME, options.service_name.clone()),

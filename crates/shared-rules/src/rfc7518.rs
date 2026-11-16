@@ -1,11 +1,7 @@
-/// RFC 7518 §6.2.1.2 and §6.2.1.3: each P-256 coordinate is exactly 32
-/// octets, leading zeros kept.
+/// RFC 7518 §6.2.1.2, §6.2.1.3
 const P256_COORDINATE_BYTES: usize = 32;
 
-/// The uncompressed SEC 1 point (`0x04 || x || y`, SEC 1 §2.3.3) for the
-/// decoded `x` and `y` members of a P-256 JWK; `None` when either coordinate
-/// is not exactly 32 octets. Whether the point lies on the curve is left to
-/// the caller's key parser.
+/// SEC 1 §2.3.3
 #[must_use]
 pub fn p256_point(x: &[u8], y: &[u8]) -> Option<[u8; 1 + 2 * P256_COORDINATE_BYTES]> {
     let x: &[u8; P256_COORDINATE_BYTES] = x.try_into().ok()?;
@@ -31,7 +27,6 @@ mod tests {
 
     #[test]
     fn a_coordinate_of_any_other_length_makes_no_point() {
-        // A coordinate with its leading zero dropped is 31 octets.
         assert_eq!(p256_point(&[1; 31], &[2; 32]), None);
         assert_eq!(p256_point(&[1; 32], &[2; 33]), None);
         assert_eq!(p256_point(&[], &[]), None);

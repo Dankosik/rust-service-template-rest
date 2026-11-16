@@ -14,9 +14,6 @@ use crate::error::{Failure, LocalFailure};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
-/// Bounds source polls per yield so ready empty frames cannot monopolize the
-/// task; Tokio's cooperative budget would not, as a custom body need not touch
-/// a Tokio resource.
 const SOURCE_POLLS_PER_YIELD: usize = 64;
 
 #[derive(Debug)]
@@ -42,12 +39,6 @@ impl UploadSource {
 }
 
 impl PutBody {
-    /// A body yielding more or fewer than `len` bytes fails the put with
-    /// [`crate::ObjectStorageError::Rejected`] instead of storing a truncated object.
-    ///
-    /// The caller owns source storage, frame sizes and concurrent uploads. Each
-    /// [`Body::poll_frame`] must do finite, trusted, nonblocking work: the wrapper
-    /// yields after 64 source polls but cannot preempt a callback that never returns.
     pub fn stream<B, E>(len: u64, body: B) -> Self
     where
         B: Body<Data = Bytes, Error = E> + Send + 'static,
@@ -71,8 +62,6 @@ impl PutBody {
         self.len == 0
     }
 
-    /// hyper never polls a body declared empty: validate it and normalize its EOF
-    /// to an in-memory body.
     pub(crate) async fn normalize_empty_stream(mut self) -> Result<Self, Failure> {
         if self.len != 0 || matches!(self.source, UploadSource::InMemory) {
             return Ok(self);
@@ -85,7 +74,6 @@ impl PutBody {
     }
 }
 
-/// The SDK can sign a checksum of in-memory bytes as a header.
 impl From<Bytes> for PutBody {
     fn from(bytes: Bytes) -> Self {
         Self {
@@ -107,8 +95,6 @@ impl From<Vec<u8>> for PutBody {
 struct LengthMismatch;
 
 struct ExactLength {
-    /// The SDK requires `Sync` and axum's `Body` is not; sound here because a body is
-    /// polled only through `&mut`.
     inner: SyncWrapper<UnsyncBoxBody<Bytes, BoxError>>,
     remaining: u64,
     held: Option<Frame<Bytes>>,

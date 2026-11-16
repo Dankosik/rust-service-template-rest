@@ -16,7 +16,6 @@ use crate::{Client, Failure};
 
 pub const SERVICE_AUTH_CALLS_METRIC: &str = "service_auth_calls_total";
 
-/// Each needs a [caller rule](crate::Services::allow_callers) wherever rules apply.
 pub const REFLECTION_PATHS: [&str; 2] = [
     "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo",
     "/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo",
@@ -71,17 +70,12 @@ impl CallerAdmission {
     }
 }
 
-/// A path without a rule admits nobody; without a verifier no rule is checked.
-/// `Authorization` never reaches the handler.
 pub(crate) async fn admit_caller(
     State(admission): State<Arc<CallerAdmission>>,
     mut request: Request,
     next: Next,
 ) -> Response {
     let Some(verifier) = &admission.verifier else {
-        // Bearer authentication already admitted the call or, in a build
-        // without bearer authentication, service authentication is off,
-        // which configuration permits only in a development environment.
         request.headers_mut().remove(AUTHORIZATION);
         return next.run(request).await;
     };
@@ -111,7 +105,6 @@ pub(crate) async fn admit_caller(
         if let Some(outcomes) = outcomes {
             outcomes.not_admitted.increment(1);
         }
-        // Only a registered method has a rule, so the label stays bounded.
         let method = if rule.is_some() { path } else { "unknown" };
         tracing::warn!(
             caller = %caller.name(),
@@ -139,7 +132,6 @@ fn verification_status(failure: infra_serviceauth::Failure) -> tonic::Status {
         infra_serviceauth::Failure::Missing
         | infra_serviceauth::Failure::Malformed
         | infra_serviceauth::Failure::Invalid => service_failure::Code::Unauthorized,
-        // A clock before the epoch: the same token may pass later unchanged.
         infra_serviceauth::Failure::Unavailable => service_failure::Code::ServiceUnavailable,
     })
     .into()
@@ -171,11 +163,7 @@ impl tower::Service<http::Request<Body>> for ServiceTokenClient {
     }
 
     fn call(&mut self, request: http::Request<Body>) -> Self::Future {
-        // Prepared first, so the call's budget, span and metrics cover the
-        // token and a refusal is counted with the status its caller receives.
         let mut prepared = self.resource.prepare_call(request);
-        // A caller-supplied value is this service's composition mistake, so
-        // it is `INTERNAL`, as the OAuth binding answers it.
         if prepared.headers_mut().contains_key(AUTHORIZATION) {
             return Box::pin(std::future::ready(Err(prepared.refuse(
                 tonic::Status::internal("authorization conflicts with the service token"),

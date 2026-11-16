@@ -10,19 +10,21 @@ pub enum Provider {
         expected_bucket_owner: String,
     },
     CloudflareR2 {
-        /// `https://<account id>[.eu|.fedramp].r2.cloudflarestorage.com`.
         endpoint: String,
     },
-    /// Endpoint and region come from the bucket's `ENDPOINT` and `REGION` variables.
-    Railway { endpoint: String, region: String },
-    /// Receives only the common S3 subset: no upload checksum and no expected bucket owner.
+    Railway {
+        endpoint: String,
+        region: String,
+    },
     S3Compatible {
         endpoint: String,
         region: String,
         path_style: bool,
     },
-    /// Plaintext is allowed; the caller must already have applied the local-only policy.
-    Local { endpoint: String, region: String },
+    Local {
+        endpoint: String,
+        region: String,
+    },
 }
 
 impl Provider {
@@ -41,9 +43,7 @@ impl Provider {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum UploadChecksum {
     Always,
-    /// Bytes only, sent as a signed header: trailer support is undocumented.
     BytesOnly,
-    /// None until a conformance run proves the provider accepts it.
     Never,
 }
 
@@ -63,9 +63,7 @@ pub(crate) struct Admitted {
     pub(crate) path_style: bool,
     pub(crate) expected_bucket_owner: Option<String>,
     pub(crate) checksum: UploadChecksum,
-    /// Only Amazon S3; elsewhere the signing region can be a placeholder (`auto`).
     pub(crate) cloud_region: Option<String>,
-    /// Only Amazon S3 has an AWS workload identity.
     pub(crate) workload_identity: bool,
 }
 
@@ -157,7 +155,6 @@ enum OriginScheme {
     HttpOrHttps,
 }
 
-/// Rejects whitespace, control characters and userinfo before parsing can normalize them away.
 fn origin(endpoint: &str, scheme: OriginScheme) -> Result<Url, ConfigError> {
     if shared_rules::uri::has_whitespace_or_control(endpoint)
         || shared_rules::uri::authority_has_userinfo(endpoint)
@@ -216,8 +213,6 @@ fn r2_host(host: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-/// Dotless DNS bucket names (3 to 63 of `[a-z0-9-]`, alphanumeric at both
-/// ends), so virtual-hosted TLS wildcards hold.
 fn valid_bucket(bucket: &str) -> bool {
     let bytes = bucket.as_bytes();
     (3..=63).contains(&bytes.len())

@@ -5,7 +5,6 @@ use service_config::Config;
 
 use super::{BootstrapError, METRICS_MAINTENANCE_INTERVAL};
 
-/// An unreachable database fails startup here rather than serving a readiness that never passes.
 pub(super) async fn open(
     config: &Config,
     background: &mut Background,
@@ -22,7 +21,6 @@ pub(super) async fn open(
     .await?;
     let options = PoolOptions {
         max_connections: postgres.max_connections,
-        // Same process identity as traces (`service.name`).
         application_name: &config.observability.otel.service_name,
         default_isolation: infra_postgres::Isolation::ServerDefault,
         session_settings_source: match postgres.session_budgets {

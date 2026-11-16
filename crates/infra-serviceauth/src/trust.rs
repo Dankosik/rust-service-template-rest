@@ -11,10 +11,7 @@ use serde::{Deserialize, Deserializer, de};
 
 use crate::{InvalidKeyId, InvalidServiceName, KeyId, ServiceName};
 
-/// The callers a receiver trusts, read once from one JSON object whose
-/// members are caller names and whose values are JWK Sets (RFC 7517) of EC
-/// P-256 public signing keys. Every entry must be usable: a registry is
-/// operator input, and a skipped key would surface only as refused calls.
+/// RFC 7517 §5
 pub struct TrustRegistry {
     callers: IndexMap<ServiceName, Vec<TrustedKey>, foldhash::quality::RandomState>,
 }
@@ -24,8 +21,6 @@ pub(crate) struct TrustedKey {
     pub(crate) key: ParsedPublicKey,
 }
 
-/// Why a registry was refused. Locates a JSON error by position or an entry
-/// by its validated caller name and key position, without exposing key material.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("{place}{reason}")]
 pub struct TrustError {
@@ -41,7 +36,6 @@ enum Place {
     Json { line: usize, column: usize },
     #[display("caller {_0}: ")]
     Caller(ServiceName),
-    /// A caller's key by its 1-based position in the caller's `keys`.
     #[display("caller {_0} key {_1}: ")]
     Key(ServiceName, usize),
 }
@@ -121,8 +115,6 @@ impl fmt::Debug for TrustRegistry {
     }
 }
 
-/// The document's members in order, or the first repeated member: a repeat
-/// is a refusal, since JSON parsers disagree about which duplicate wins.
 struct Entries(Result<Vec<(String, DuplicateCheckedJson)>, String>);
 
 impl<'de> Deserialize<'de> for Entries {
@@ -137,9 +129,6 @@ impl<'de> Deserialize<'de> for Entries {
                 let mut entries: Vec<(String, DuplicateCheckedJson)> = Vec::new();
                 let mut seen: HashSet<String> = HashSet::default();
                 let mut repeated = None;
-                // Read to the end even after a repeat: serde_json's `end_map`
-                // refuses a visitor that stops early, and `parse` turns any
-                // serde error into the unnamed document error.
                 while let Some((name, value)) = map.next_entry::<String, DuplicateCheckedJson>()? {
                     if repeated.is_none() && !seen.insert(name.clone()) {
                         repeated = Some(name.clone());
@@ -153,9 +142,6 @@ impl<'de> Deserialize<'de> for Entries {
     }
 }
 
-/// A JSON value, or `None` when an object anywhere in it repeats a member
-/// name: [`serde_json::Value`] silently keeps the last duplicate, which would
-/// drop a key set or a `kid` the operator wrote.
 struct DuplicateCheckedJson(Option<serde_json::Value>);
 
 impl<'de> Deserialize<'de> for DuplicateCheckedJson {
@@ -194,7 +180,6 @@ impl<'de> Deserialize<'de> for DuplicateCheckedJson {
                 }
                 Ok(DuplicateCheckedJson(items.map(serde_json::Value::Array)))
             }
-            // Reads to the end after a repeat, for the reason `Entries` does.
             fn visit_map<A: de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
                 let mut members = Some(serde_json::Map::new());
                 while let Some((name, DuplicateCheckedJson(value))) = map.next_entry()? {
@@ -223,7 +208,7 @@ fn parse_caller(
     let mut set = set
         .0
         .ok_or_else(|| caller_error("repeats a member name within its JWK Set"))?;
-    // RFC 7517 section 5 requires ignoring unrecognized JWK Set members.
+    // RFC 7517 §5
     let Some(serde_json::Value::Array(entries)) =
         set.as_object_mut().and_then(|set| set.remove("keys"))
     else {
@@ -245,7 +230,6 @@ fn parse_caller(
 }
 
 fn admit_key(value: serde_json::Value) -> Result<TrustedKey, &'static str> {
-    // A private (`d`) or symmetric (`k`) member means a secret was distributed.
     let object = value.as_object().ok_or("is not a JSON object")?;
     if object.contains_key("d") || object.contains_key("k") {
         return Err("contains private key material");

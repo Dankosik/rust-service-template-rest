@@ -1,8 +1,3 @@
-//! Immutable configuration for durable outbound Standard Webhooks delivery.
-//!
-//! This section owns only the operator snapshot shape. URL admission and
-//! decoded-secret validation remain with the provider that consumes the values.
-
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
 

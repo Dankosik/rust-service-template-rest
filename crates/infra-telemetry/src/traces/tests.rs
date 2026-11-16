@@ -93,8 +93,6 @@ async fn expired_or_short_shutdown_still_attempts_sdk_and_reports_unfinished_wor
             Duration::ZERO
         );
         release.send(()).unwrap();
-        // Last-provider drop follows the SDK shutdown call, so the
-        // fixture cannot leave its blocking exporter running.
         tokio::time::timeout(Duration::from_secs(2), joined)
             .await
             .unwrap()

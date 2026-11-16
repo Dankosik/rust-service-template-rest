@@ -14,9 +14,6 @@ use super::caused_by_length_limit;
 const MAX_STORED_BODY_BYTES: usize = 1024 * 1024;
 const MAX_TOTAL_STORED_HEADER_BYTES: usize = 8 * 1024;
 
-/// The only headers the idempotency boundary stores and replays. This
-/// allow-list is what keeps `Idempotent-Replayed` out of storage: the marker
-/// derives from the sealed outcome after the handler returns.
 const REPLAYABLE: [HeaderName; 7] = [
     CONTENT_TYPE,
     CONTENT_ENCODING,
@@ -122,7 +119,6 @@ impl ReplayableResponse {
                 value: value.as_bytes().to_vec(),
             })
             .collect();
-        // StatusCode only represents 100 through 999, so the sign never flips.
         let status = self.status.as_u16().cast_signed();
         Record {
             status,
@@ -152,7 +148,6 @@ pub(super) fn decode(record: Record) -> Result<ReplayableResponse, Undecodable> 
         .headers
         .into_iter()
         .map(|pair| {
-            // The spelling captured from REPLAYABLE is part of the persisted record format.
             let name = REPLAYABLE
                 .into_iter()
                 .find(|name| name.as_str() == pair.name)
@@ -177,7 +172,6 @@ pub(super) fn is_replayable_header_name(name: &str) -> bool {
         .any(|candidate| candidate.as_str().eq_ignore_ascii_case(name))
 }
 
-/// Saturates, so an overflowing total still reads as over any limit.
 fn header_bytes(headers: &[(HeaderName, HeaderValue)]) -> usize {
     headers.iter().fold(0, |total, (name, value)| {
         total

@@ -94,8 +94,6 @@ impl EventPayload for Payload {
     const SCHEMA_VERSION: u16 = 1;
 }
 
-// Independent published upstream framing/signature reference. This verifies
-// the JWT bytes without issuing a second fixture token from the same helper.
 fn verify_upstream_reference() {
     let creds = include_str!("../../../vendor/async-nats/tests/configs/TestUser.creds");
     let jwt = creds.lines().find(|line| line.starts_with("eyJ")).unwrap();
@@ -156,8 +154,6 @@ async fn expired_old_credentials_are_refused_and_file_replacement_recovers_the_c
     .catch_unwind()
     .await;
 
-    // Unmanaged supplied brokers have no runner disposal owner. Finish every
-    // cleanup independently of a failed assertion before resuming its panic.
     let closed = if let Some(messaging) = messaging {
         messaging.close(deadline(), &CancellationToken::new()).await
     } else {
@@ -191,8 +187,6 @@ async fn rotation_scenario(
 ) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("user.creds");
-    // Broker expiration uses wall time; the bounded poll below observes it
-    // instead of assuming a scheduler sleep is sufficient.
     let old = User::expiring_after(8);
     old.publish_file(&path).await;
     let cancel = CancellationToken::new();

@@ -1,6 +1,5 @@
 use serde_json::Value;
 
-/// `base` with every member of `extra` set, `null` members included.
 pub(crate) fn merged(mut base: Value, extra: &Value) -> Value {
     base.as_object_mut()
         .unwrap()

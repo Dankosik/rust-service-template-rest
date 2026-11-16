@@ -1,9 +1,3 @@
-//! Durable receipt admission and processing for inbound Standard Webhooks.
-//!
-//! A [`Verifier`] authenticates each delivery before it reaches PostgreSQL;
-//! one transaction then writes the receipt and enqueues processing, which
-//! completes its fenced job in the adopter callback's transaction.
-
 mod maintenance;
 mod processing;
 
@@ -32,12 +26,8 @@ pub use infra_postgres::CleanupError;
 pub use maintenance::{CLEANUP_REMOVED_METRIC, CLEANUP_RUNS_METRIC};
 pub use processing::{Consumer, Consumers, EndpointAlreadyBound, MissingConsumer, Processor};
 
-/// Re-exported so a consumer crate implements [`Consumer`] without its own
-/// `async-trait` dependency, as `tonic::async_trait` does for services.
 pub use async_trait::async_trait;
 
-// Under REPEATABLE READ a concurrent `ON CONFLICT DO NOTHING` fails with 40001
-// instead of reporting the duplicate, so admission pins READ COMMITTED.
 const READ_COMMITTED: TxOptions = TxOptions {
     isolation: Isolation::ReadCommitted,
     read_only: false,
@@ -46,7 +36,6 @@ const READ_COMMITTED: TxOptions = TxOptions {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReceiptOutcome {
     Accepted,
-    /// The endpoint and message identity were already retained; first admission wins.
     Duplicate,
 }
 
@@ -60,9 +49,6 @@ pub enum ReceiveError {
     Unavailable,
 }
 
-/// The type guarantees only a `'static` label. The label becomes a log field
-/// and a metric label, so a [`Verifier`] keeps its own set of reasons small and
-/// `snake_case`, and never builds one from request, signature, or key bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rejection(&'static str);
 
@@ -86,13 +72,7 @@ impl From<ProtocolError> for Rejection {
     }
 }
 
-/// [`KeyRing`] is the Standard Webhooks verifier. A provider that signs
-/// another way implements this and keeps the durable receipt, deduplication,
-/// and processing path.
 pub trait Verifier: Send + Sync + 'static {
-    /// The identity is the provider's stable ID for this message, 1 to
-    /// [`MAX_MESSAGE_ID_BYTES`](crate::protocol::MAX_MESSAGE_ID_BYTES) bytes,
-    /// equal on every redelivery. `now` is the admission time for replay windows.
     fn authenticate(
         &self,
         headers: &HeaderMap,
@@ -120,7 +100,6 @@ pub struct Receiver {
 }
 
 impl Receiver {
-    /// One receiver can mix verifier schemes. Construction does no I/O.
     #[must_use]
     pub fn new(
         pool: PgPool,
@@ -141,11 +120,6 @@ impl Receiver {
         self.endpoints.keys().map(String::as_str)
     }
 
-    /// A duplicate must pass verification again. A successful result means the
-    /// receipt transaction was acknowledged; it never claims the consumer ran.
-    /// `deadline` bounds only the wait for a pooled connection. Each attempt
-    /// keeps the pool's fixed timeout and is retried on timeout while time
-    /// remains. The caller owns any deadline for the full receipt operation.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub async fn receive(
         &self,
@@ -165,8 +139,6 @@ impl Receiver {
         .await
     }
 
-    /// Like [`Self::receive`], but the body moves into the winning receipt's
-    /// payload without a copy.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub async fn receive_bytes(
         &self,
@@ -225,9 +197,6 @@ impl Receiver {
                 match enqueue(tx, &incoming, EnqueueOptions::default()).await {
                     Ok(Enqueued::Created(_)) => Ok(ReceiptOutcome::Accepted),
                     Ok(Enqueued::Duplicate) => Err(ReceiptFailure::UnexpectedDuplicate),
-                    // Only the unsigned Content-Type can push a body within
-                    // MAX_BODY_BYTES past the job payload bound; a retry fails
-                    // the same way, so it is the request's fault.
                     Err(EnqueueError::PayloadTooLarge { .. }) => {
                         Err(ReceiptFailure::PayloadTooLarge)
                     }
@@ -260,8 +229,6 @@ enum ReceiptFailure {
     Enqueue(#[from] EnqueueError),
     #[error("webhook receipt transaction failed")]
     Transaction(#[from] TxError),
-    /// The processing job uses no job deduplication key. The receipt's key
-    /// has already admitted this delivery.
     #[error("webhook receipt enqueue unexpectedly deduplicated")]
     UnexpectedDuplicate,
     #[error("webhook receipt payload exceeds the job payload bound")]
@@ -317,9 +284,6 @@ fn receipt_unavailable(endpoint_id: &str, error: &ReceiptFailure) -> ReceiveErro
     ReceiveError::Unavailable
 }
 
-/// Both bounds are checked here as well as in [`KeyRing::verify`], so they
-/// hold for every verifier; the identity bound protects the indexed receipt
-/// key. The signed-content `.` rule stays with Standard Webhooks.
 fn admit(
     verifier: &dyn Verifier,
     headers: &HeaderMap,
@@ -338,7 +302,6 @@ enum ReceiveBody<'a> {
 }
 
 impl ReceiveBody<'_> {
-    /// Copy a borrowed body only here, after its receipt won admission.
     fn into_bytes(self) -> Bytes {
         match self {
             Self::Borrowed(body) => Bytes::copy_from_slice(body),
@@ -356,11 +319,6 @@ impl AsRef<[u8]> for ReceiveBody<'_> {
     }
 }
 
-/// The retained payload of a verified inbound delivery.
-///
-/// `version` is written and never read: a worker from before the tag became
-/// optional refuses a row without it, so a rolling deploy or a rollback still
-/// needs it on the wire. A reader ignores it, whatever its value.
 #[serde_as]
 #[derive(Clone, derive_more::Debug, Deserialize, Serialize)]
 pub struct Incoming {

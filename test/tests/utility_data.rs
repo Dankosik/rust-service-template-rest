@@ -42,8 +42,6 @@ fn nested_adapters_replace_a_post_deserialization_conversion_pass() {
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct UpdateName {
-    // The library adapter uses both layers: missing preserves, null clears,
-    // and a value replaces. Flattening to Option<String> loses that contract.
     #[expect(
         clippy::option_option,
         reason = "missing, null and value are three distinct updates"
@@ -90,9 +88,6 @@ struct NameRequest {
     name: String,
 }
 
-// Intentionally specific to this DTO. Do not stringify ValidationErrors or
-// its params: those can contain the submitted value. A real operation also
-// supplies request_id, field paths and matching OpenAPI constraints.
 fn validate_name(input: &NameRequest) -> Result<(), Box<Problem>> {
     input.validate().map_err(|_| {
         Box::new(

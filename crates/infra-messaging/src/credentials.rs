@@ -39,7 +39,6 @@ impl CredentialsFileError {
         }
     }
 
-    /// Tells a missing file from a forbidden one without the path.
     pub(crate) fn io_error_kind(self) -> Option<tracing::field::DebugValue<std::io::ErrorKind>> {
         match self {
             Self::Unreadable(kind) => Some(tracing::field::debug(kind)),
@@ -48,20 +47,15 @@ impl CredentialsFileError {
     }
 }
 
-/// The admitted credentials file. Neither the path nor the user it last read
-/// is formatted.
 #[derive(Clone, derive_more::Debug)]
 #[debug("CredentialsFile {{ .. }}")]
 pub(crate) struct CredentialsFile {
     path: Arc<Path>,
-    /// The user JWT of the last answer. It names the user and is not the
-    /// secret; the key seed is, and it is never kept.
     last_jwt: Arc<Mutex<String>>,
     reading: Arc<Semaphore>,
 }
 
 impl CredentialsFile {
-    /// Fails startup on a bad file instead of every later connection attempt.
     pub(crate) async fn admit(path: PathBuf) -> Result<Self, CredentialsFileError> {
         let path: Arc<Path> = path.into();
         let reading = Arc::new(Semaphore::new(1));
@@ -102,9 +96,6 @@ impl CredentialsFile {
     }
 }
 
-/// A blocking read can outlive its caller's wait, since the SDK drops the
-/// callback when a connection attempt times out. While one runs, another read
-/// fails at once as [`std::io::ErrorKind::ResourceBusy`].
 async fn read(
     path: &Arc<Path>,
     reading: &Arc<Semaphore>,
@@ -133,8 +124,6 @@ fn read_file(path: &Path) -> Result<SecretString, CredentialsFileError> {
         .map_err(|error| CredentialsFileError::Unreadable(error.kind()))
 }
 
-/// The first and second value that stands alone on a line between dashed
-/// marker lines, the layout `nsc` writes and the NATS clients read.
 fn parse(content: &str) -> Result<(String, nkeys::KeyPair), CredentialsFileError> {
     let mut values =
         content
@@ -160,8 +149,6 @@ fn is_marker(line: &str) -> bool {
 mod tests {
     use super::*;
 
-    /// A credentials file as `nsc generate creds` writes it. The JWT is not
-    /// a real one: only the broker reads its claims.
     fn creds(jwt: &str, user: &nkeys::KeyPair) -> String {
         format!(
             "-----BEGIN NATS USER JWT-----\n{jwt}\n------END NATS USER JWT------\n\n\
@@ -226,7 +213,6 @@ mod tests {
             .await
             .unwrap();
 
-        // Admission and an unpolled challenge supply no completed observation.
         drop(credentials.answer(b"cancelled-nonce"));
         assert!(
             !recorder
@@ -338,7 +324,6 @@ mod tests {
         let user = nkeys::KeyPair::new_user();
         std::fs::write(&path, creds("user.jwt.value", &user)).unwrap();
         let credentials = CredentialsFile::admit(path.clone()).await.unwrap();
-        // Opening a FIFO for reading blocks until a writer appears: a hung mount.
         std::fs::remove_file(&path).unwrap();
         let status = std::process::Command::new("mkfifo")
             .arg(&path)
@@ -361,8 +346,6 @@ mod tests {
         )
         .await;
 
-        // Release the hung read before asserting, or a failure would hang the
-        // runtime's shutdown.
         let fifo = directory.path().join("stale");
         std::fs::rename(&path, &fifo).unwrap();
         std::fs::write(&path, creds("user.jwt.value", &user)).unwrap();

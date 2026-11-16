@@ -1,9 +1,3 @@
-//! Optional native gRPC listener configuration.
-//!
-//! This section contains immutable operator input only. TLS parsing and the
-//! listener remain transport work, so disabled configuration performs no file
-//! or network I/O.
-
 use std::fmt;
 use std::net::SocketAddr;
 use std::num::NonZeroU32;
@@ -65,23 +59,14 @@ impl Default for GrpcInput {
             client_ca: None,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             max_in_flight: DEFAULT_MAX_IN_FLIGHT,
-            // A permit frees within a second unless the process stays
-            // saturated, and then a refusal helps a caller that fails over
-            // quickly more than a wait up to its whole deadline.
             admission_wait: Duration::from_secs(1),
             max_connections: DEFAULT_MAX_CONNECTIONS,
-            // A gRPC channel keeps one connection for the life of its
-            // process, so behind a connection-level balancer replicas added
-            // later get no calls until something closes it. Thirty minutes
-            // bounds that at a reconnect cost no caller notices.
             max_connection_age: Duration::from_mins(30),
         }
     }
 }
 
 impl GrpcInput {
-    /// The listener when `grpc.enabled`, after every listener rule passed.
-    /// A disabled section is inert: its keys are neither checked nor read.
     pub(crate) fn admit(
         self,
         drain_budget: Option<Duration>,
@@ -108,7 +93,6 @@ impl GrpcInput {
         let timeout = request_timeout_range("grpc.request_timeout", self.request_timeout);
         let timeout_in_range = timeout.is_ok();
         violations.check(timeout);
-        // Both rules below compare against a timeout that passed its own range.
         if timeout_in_range {
             if let Some(drain_budget) = drain_budget {
                 violations.check(request_budget_fits_drain(
@@ -179,28 +163,14 @@ impl GrpcInput {
     }
 }
 
-/// The admitted native gRPC listener.
 #[derive(Clone, Debug)]
 pub struct GrpcConfig {
     pub addr: SocketAddr,
     pub security: GrpcListenerSecurity,
-    /// Upper bound for a business call's time to response headers. A
-    /// caller's shorter `grpc-timeout` wins.
     pub request_timeout: Duration,
-    /// Independent bounds on business openings before authentication and calls
-    /// through terminal status, shared by router clones. Either bound sheds with
-    /// `RESOURCE_EXHAUSTED`. Zero disables both; health is outside both.
     pub max_in_flight: u32,
-    /// Longest a call over `max_in_flight` waits for a permit before it is
-    /// refused; the call's own budget also bounds the wait. Zero refuses at once.
     pub admission_wait: Duration,
-    /// Accepted connections at once. At the cap the accept loop closes the
-    /// socket with no response. Zero accepts without a bound.
     pub max_connections: u32,
-    /// Age after which a connection gets GOAWAY, so its client reconnects
-    /// and is balanced again; open calls on it finish. Each connection's age
-    /// is spread by up to 10% either way. Zero keeps a connection for as
-    /// long as its peer does.
     pub max_connection_age: Duration,
 }
 
@@ -221,7 +191,6 @@ impl GrpcConfig {
     }
 }
 
-/// Admitted listener security. `Debug` names the mode, never the material.
 #[derive(Clone)]
 pub enum GrpcListenerSecurity {
     Plaintext,
@@ -244,7 +213,6 @@ impl fmt::Debug for GrpcListenerSecurity {
     }
 }
 
-/// PEM material for the TLS listener; a present `client_ca` requires mTLS.
 #[derive(Clone, derive_more::Debug)]
 pub struct GrpcTlsMaterial {
     #[debug(skip)]

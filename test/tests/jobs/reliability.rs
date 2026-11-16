@@ -53,8 +53,6 @@ async fn batch_cli_bounds_actual_input_before_acceptance(pool: PgPool) {
     for (size, code, requests) in [(LIMIT + 1, 1, 0), (LIMIT, 0, 1)] {
         let mut batch = serde_json::to_vec(&[operation(11)]).unwrap();
         batch.resize(size, b' ');
-        // The pipe has zero metadata length in both cases. Both byte sequences
-        // are valid JSON, so the size decision is observable in the database.
         let mut child = Command::new(env!("CARGO_BIN_EXE_reading-counter-fixture"))
             .args(["accept", "--operations-file", "/dev/stdin"])
             .env_clear()
@@ -215,7 +213,6 @@ async fn marker_arbitration_keeps_aggregate_atomic_and_returns_the_first_result(
         Err(Error::Conflict)
     );
     assert_eq!(counts(&pool).await, (0, 2, 2));
-    // Receiver channels have separate effects even for the same logical operation.
     reading::apply_effect(&admitted, Channel::Outbox, &first)
         .await
         .unwrap();

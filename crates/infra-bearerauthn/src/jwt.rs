@@ -24,11 +24,9 @@ const MAX_REMEMBERED_FOR: Duration = REFRESH_INTERVAL;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TokenProfile {
-    /// Accepts a token with no `typ` header, a generic JWT type, or an access-token type; `client_id` falls back to the `azp`, `appid`, and `cid` claims.
-    /// An untyped ID token from the same issuer whose `aud` is a configured audience
-    /// also passes (RFC 8725 section 3.12); `Rfc9068` or an API-only audience excludes it.
+    /// RFC 8725 §3.12
     ResourceServer,
-    /// Requires an access-token `typ` header and the RFC 9068 claims `sub`, `client_id`, `jti`, and `iat`.
+    /// RFC 9068 §2.2
     Rfc9068,
 }
 
@@ -49,8 +47,6 @@ impl Expiry<Box<[u8]>, Remembered> for RememberedExpiry {
         remembered: &Remembered,
         created_at: MonotonicInstant,
     ) -> Option<Duration> {
-        // The wall-clock sample predates insertion. Spend that elapsed time
-        // from the retention budget rather than starting it over at insertion.
         let elapsed = created_at.saturating_duration_since(remembered.sampled_at);
         Some(remembered.held_for.saturating_sub(elapsed))
     }
@@ -59,18 +55,10 @@ impl Expiry<Box<[u8]>, Remembered> for RememberedExpiry {
 #[derive(derive_more::Debug)]
 #[debug("JwtVerifier(..)")]
 pub(crate) struct JwtVerifier {
-    // Claim policy, token profile and admitted algorithms never change after
-    // construction, so a verification depends on its token, the installed key
-    // set (`key_store`) and the clock alone.
     claim_policy: ClaimPolicy,
     token_profile: TokenProfile,
     algorithms: Vec<JwtAlgorithm>,
     key_store: Arc<KeyStore>,
-    /// Decides a token that already passed every check as a full verification
-    /// would: the signature part by the key set's generation, the lifetime
-    /// part by the clock, on every hit. Only a success is inserted, so a
-    /// caller cannot choose what it holds. It is not a replay cache. The
-    /// default `SipHash` over a whole token costs more than the rest of a hit.
     remembered: Cache<Box<[u8]>, Remembered, foldhash::quality::RandomState>,
 }
 
@@ -109,8 +97,6 @@ impl JwtVerifier {
     ) -> Result<Principal, VerificationError> {
         let bytes = token.as_bytes();
         if let Some(remembered) = self.remembered.get(bytes) {
-            // Verified against the set installed now, so the full path would
-            // find the same signature valid on its first check.
             if remembered.key_generation == self.key_store.generation() {
                 let verified = remembered.verified.deliver(now()?.as_secs());
                 if matches!(&verified, Err(error) if error.reason == VerificationReason::Expired) {
@@ -139,8 +125,6 @@ impl JwtVerifier {
         } = rfc7515::compact(token.as_bytes())
             .ok_or_else(|| VerificationError::invalid(VerificationReason::Header))?;
         let (header, algorithm) = self.admit_header(header)?;
-        // Decode into bounded stack storage; admitted keys cap the signature size.
-        // Keep `message` as the original encoded bytes that the issuer signed.
         let mut signature_bytes = [0_u8; MAX_SIGNATURE_BYTES];
         let signature = URL_SAFE_NO_PAD
             .decode_slice(signature, &mut signature_bytes)
@@ -173,9 +157,8 @@ impl JwtVerifier {
     fn admit_header(&self, header: &[u8]) -> Result<(Header, JwtAlgorithm), VerificationError> {
         let malformed = || VerificationError::invalid(VerificationReason::Header);
         let header = URL_SAFE_NO_PAD.decode(header).map_err(|_| malformed())?;
-        // jsonwebtoken's `Header` keeps the library's header admission rules.
         let header: Header = serde_json::from_slice(&header).map_err(|_| malformed())?;
-        // RFC 7515 section 4.1.11: this verifier understands no critical extension.
+        // RFC 7515 §4.1.11
         if header.crit.as_ref().is_some_and(|crit| !crit.is_empty()) {
             return Err(malformed());
         }
@@ -185,8 +168,7 @@ impl JwtVerifier {
         let typ = header.typ.as_deref();
         let admitted_type = match self.token_profile {
             TokenProfile::Rfc9068 => typ.is_some_and(is_access_token_type),
-            // An untyped or generic JWT may be an access token. One explicitly
-            // typed as another kind of JWT is not (RFC 8725 section 3.11).
+            // RFC 8725 §3.11
             TokenProfile::ResourceServer => {
                 typ.is_none_or(|typ| is_generic_jwt_type(typ) || is_access_token_type(typ))
             }
@@ -197,8 +179,6 @@ impl JwtVerifier {
         Ok((header, algorithm))
     }
 
-    /// A provider can replace a key under the same `kid`, so any signature
-    /// miss can need a newer set. The store limits refresh work across callers.
     async fn verify_signature(
         &self,
         message: &[u8],
@@ -534,7 +514,6 @@ mod tests {
                 format!("{}.{payload}.{signature}", header(r#"{"alg":"none"}"#)),
                 VerificationReason::Header,
             ),
-            // jsonwebtoken's header rules also reject malformed unused members.
             (
                 format!(
                     "{}.{payload}.{signature}",
@@ -722,8 +701,6 @@ mod tests {
         assert_eq!(verifier.key_store.pending(), None);
     }
 
-    /// Signs arbitrary header and payload bytes, which `jsonwebtoken::encode`
-    /// cannot produce.
     fn sign_raw(header: &str, payload: &[u8]) -> String {
         use aws_lc_rs::{rand::SystemRandom, signature};
         let key = signature::RsaKeyPair::from_der(JWT_SIGNING_DER).unwrap();
@@ -746,7 +723,6 @@ mod tests {
     const CORPUS_ISSUER: &str = "https://issuer.example";
     const CORPUS_HEADER: &str = r#"{"alg":"RS256","kid":"fixture"}"#;
 
-    /// Headers the library reads without a key set or a token type rule.
     const CORPUS_HEADERS: [&str; 27] = [
         r#"{"alg":"RS256"}"#,
         r#"{"alg":"RS256","kid":"unknown"}"#,
@@ -777,7 +753,6 @@ mod tests {
         "{",
     ];
 
-    /// Every registered claim in every shape, and pairs that fail two checks.
     fn claim_cases(base: &serde_json::Value, now: u64) -> Vec<(String, String)> {
         use serde_json::{Value, json};
         const ISSUER: &str = CORPUS_ISSUER;
@@ -800,9 +775,6 @@ mod tests {
             Some(json!(u64::MAX)),
             Some(json!(1e30)),
             Some((now - 100).into()),
-            // Inside the 30 s leeway and 20 s from its edge. At the edge this
-            // crate (exclusive `exp`, RFC 7519) and jsonwebtoken disagree for
-            // one second, and `now` ages while the corpus is signed.
             Some((now - 10).into()),
             Some((now + 10).into()),
             Some((now + 100).into()),
@@ -850,7 +822,6 @@ mod tests {
         exact
     }
 
-    /// Payloads that are not one plain claims object, and broken compact forms.
     fn payload_and_compact_cases(body: &str) -> Vec<(String, String)> {
         const HEADER: &str = CORPUS_HEADER;
         let mut exact = Vec::new();
@@ -927,9 +898,6 @@ mod tests {
         _issuer: String,
     }
 
-    /// This crate and `jsonwebtoken::decode`, deciding the same token under
-    /// the same issuer, audience, leeway and key. The oracle also requires a
-    /// string issuer because the library permits issuer arrays.
     struct Deciders {
         verifier: JwtVerifier,
         key: jsonwebtoken::DecodingKey,
@@ -962,9 +930,6 @@ mod tests {
             jsonwebtoken::decode::<StringIssuer>(token, &self.key, &self.validation).is_ok()
         }
 
-        /// A token outside the bearer grammar never reaches the verifier. The
-        /// second verification of an accepted token is a memo hit and must
-        /// decide as the first did.
         async fn here(&self, token: &str) -> bool {
             let header = format!("Bearer {token}");
             match parse_bearer([header.as_bytes()]) {
@@ -979,8 +944,6 @@ mod tests {
         }
     }
 
-    /// Compare the registered claims with the library under the same issuer
-    /// shape rule. No header that the library refuses may pass here.
     #[tokio::test]
     async fn registered_claim_decisions_match_the_reference_validation() {
         let deciders = Deciders::new();
@@ -998,8 +961,6 @@ mod tests {
                 differences.push(format!("{name}: {here} here, {there} in jsonwebtoken"));
             }
         }
-        // This crate adds key selection and a token type rule, so it may
-        // refuse more headers than the library, never fewer.
         for header in CORPUS_HEADERS {
             let token = sign_raw(header, body.as_bytes());
             if deciders.here(&token).await && !deciders.library(&token) {
@@ -1007,7 +968,6 @@ mod tests {
             }
         }
         assert!(differences.is_empty(), "{differences:#?}");
-        // The corpus exercises both decisions, not one constant answer.
         let accepted = exact
             .iter()
             .filter(|(_, token)| deciders.library(token))
@@ -1015,9 +975,7 @@ mod tests {
         assert!(accepted > 0 && accepted < exact.len());
     }
 
-    /// The one deliberate difference in reading a payload. RFC 7519 section
-    /// 7.2 requires a UTF-8 payload and this crate keeps it as text; the
-    /// library does not validate the text of a member it skips.
+    /// RFC 7519 §7.2
     #[tokio::test]
     async fn a_payload_that_is_not_utf8_is_refused_where_jsonwebtoken_skips_it() {
         let deciders = Deciders::new();
@@ -1038,12 +996,7 @@ mod tests {
     enum Member {
         Absent,
         Json(serde_json::Value),
-        /// Seconds from the moment the case runs, outside the leeway's edges
-        /// so that the two deciders' clock readings cannot disagree.
-        Time {
-            offset: i64,
-            fractional: bool,
-        },
+        Time { offset: i64, fractional: bool },
     }
 
     impl Member {
@@ -1089,7 +1042,6 @@ mod tests {
         })
     }
 
-    /// The accepted value half of the time, so both decisions are exercised.
     fn member(accepted: Member) -> impl proptest::strategy::Strategy<Value = Member> {
         use proptest::prelude::*;
         let time = (
@@ -1105,9 +1057,6 @@ mod tests {
         ]
     }
 
-    /// Rewrites every ASCII letter inside a JSON string, member names
-    /// included, as a `\u` escape, which a deserializer cannot borrow from
-    /// the payload.
     struct LetterEscaper;
 
     impl serde_json::ser::Formatter for LetterEscaper {
@@ -1147,7 +1096,6 @@ mod tests {
 
     fn edits() -> impl proptest::strategy::Strategy<Value = Vec<(f64, Edit)>> {
         use proptest::prelude::*;
-        // Mostly the bytes JSON gives a meaning to.
         let byte = prop_oneof![
             3 => proptest::sample::select(br#"{}[]",:\ 0123456789eE+-.truefalsn"#.to_vec()),
             1 => any::<u8>(),
@@ -1161,14 +1109,12 @@ mod tests {
     }
 
     proptest::proptest! {
-        // A failing case is printed; no seed file is left beside the source.
         #![proptest_config(proptest::prelude::ProptestConfig {
             cases: 256,
             failure_persistence: None,
             ..proptest::prelude::ProptestConfig::default()
         })]
 
-        /// Registered claim shapes and escaped strings agree with the reference validation.
         #[test]
         fn generated_registered_claims_match_the_reference_validation(
             iss in member(Member::Json(CORPUS_ISSUER.into())),
@@ -1194,10 +1140,6 @@ mod tests {
             proptest::prop_assert_eq!(here, deciders.library(&token), "payload {}", payload);
         }
 
-        /// A payload damaged anywhere after its subject agrees with the
-        /// reference validation, unless the damage leaves it
-        /// outside UTF-8. The subject stays intact because only this crate
-        /// requires an identity.
         #[test]
         fn damaged_payloads_match_the_reference_validation(edits in edits()) {
             const KEPT: &str = r#"{"sub":"subject","#;
@@ -1235,7 +1177,6 @@ mod tests {
                     String::from_utf8_lossy(&payload)
                 );
             } else {
-                // See `a_payload_that_is_not_utf8_is_refused_where_jsonwebtoken_skips_it`.
                 proptest::prop_assert!(!here, "payload {}", String::from_utf8_lossy(&payload));
             }
         }
@@ -1244,8 +1185,6 @@ mod tests {
     #[test]
     fn a_verification_failure_reports_its_closed_reason_without_claim_values() {
         let diagnostics = Diagnostics::default();
-        // Two independent registrations avoid tracing's single-dispatch shortcut
-        // caching a sibling thread's NoSubscriber interest for shared callsites.
         let _registration_anchor =
             tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         let dispatch = diagnostics.dispatch();
@@ -1316,8 +1255,6 @@ mod tests {
         let unknown_header = format!("Bearer {unknown}");
         let runtime = runtime(false);
         metrics::with_local_recorder(diagnostics.recorder(), || {
-            // Success counters bind to the recorder installed at preparation;
-            // refusal series register lazily on first occurrence and reuse handles.
             let verifier = crate::Verifier::jwt(engine);
             assert_eager_success_registrations(&diagnostics.registered_counters());
             runtime.block_on(async {
@@ -1677,7 +1614,6 @@ mod tests {
         assert!(remembered_count(&memo) <= MAX_REMEMBERED);
     }
 
-    /// The memo's own clock is real, so its expiry needs a real wait.
     #[tokio::test]
     async fn the_memo_drops_an_entry_once_its_retention_ends() {
         let signing = ec_signing();

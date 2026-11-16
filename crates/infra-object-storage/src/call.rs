@@ -8,16 +8,9 @@ use crate::ObjectStorageError;
 use crate::error::{Call, Failure};
 use crate::observe::OperationGuard;
 
-/// Standard retry for reads. A put or delete makes one attempt: the SDK keeps only
-/// the last reply, so a retry could hide an earlier applied attempt, and a
-/// create-only retry could meet its own lost success as `AlreadyExists`.
 const MAX_ATTEMPTS: u32 = 3;
-/// The SDK's default 20 s cap can outlast an interactive operation budget.
 const MAX_BACKOFF: Duration = Duration::from_secs(1);
-/// The pinned behavior version's SDK default, stated so an SDK bump cannot move it.
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(3100);
-/// Leaves room for a retry and its backoff after an attempt that hangs before
-/// response headers; the SDK sets no attempt bound.
 const READ_ATTEMPT_SHARE: u32 = 2;
 
 pub(crate) fn call_policy(
@@ -44,8 +37,6 @@ pub(crate) fn call_policy(
     (timeout, retry_config)
 }
 
-/// A definitive mutation result from a poll that began live stays authoritative
-/// even if that poll crosses the cutoff. Reads postcheck strictly before returning data.
 pub(crate) async fn within<T>(
     context: &OperationContext,
     future: impl std::future::Future<Output = T>,

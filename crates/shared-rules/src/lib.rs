@@ -1,7 +1,3 @@
-//! Rules that several crates must apply identically and that have no other
-//! common owner: optional profile crates cannot depend on each other or on
-//! the configuration loader.
-//!
 //! A rule belongs here only when all of these hold:
 //!
 //! - It is one piece of knowledge: changing it in one caller would have to
@@ -16,18 +12,9 @@
 //! - It returns plain data: values, or a closed set of outcomes. Each caller
 //!   keeps its own policy (windows, random sources, error codes and wording)
 //!   and maps the result into its own error.
-//!
-//! Code that only looks alike and changes for independent reasons stays with
-//! each caller. A function that gains a parameter or flag for one caller goes
-//! back to its callers. A module whose remaining consumers all belong to one
-//! template profile carries that profile's marker, so it leaves with them.
-//! Catch-all utility crates, per-rule micro-crates, and `#[path]` file sharing
-//! are rejected so dependency fan-in stays `std`-only and checked by
-//! `quality/architecture.json`.
 
 pub mod error_chain;
 pub mod hyper {
-    /// Hyper's HTTP/1 builder panics if its read buffer is configured below this size.
     pub const HTTP1_MIN_READ_BUFFER_BYTES: u16 = 8 * 1024;
 }
 pub mod jitter;
