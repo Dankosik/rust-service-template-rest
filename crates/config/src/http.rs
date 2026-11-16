@@ -298,30 +298,6 @@ mod tests {
     }
 
     #[test]
-    fn an_idle_connection_outlives_common_balancer_idle_timeouts() {
-        assert!(HttpConfig::default().header_read_timeout > Duration::from_mins(1));
-        let behind_google_cloud = HttpConfig {
-            header_read_timeout: Duration::from_secs(620),
-            ..HttpConfig::default()
-        };
-        validate_with(|v| {
-            behind_google_cloud.validate(v);
-        })
-        .unwrap();
-        let unbounded = HttpConfig {
-            header_read_timeout: Duration::from_mins(16),
-            ..HttpConfig::default()
-        };
-        assert!(
-            validate_with(|v| {
-                unbounded.validate(v);
-            })
-            .unwrap_err()
-            .names("http.header_read_timeout")
-        );
-    }
-
-    #[test]
     fn propagation_delay_must_leave_drain_budget() {
         let cfg = HttpConfig {
             readiness_propagation_delay: Duration::from_secs(25),
@@ -365,6 +341,30 @@ mod tests {
             })
             .unwrap_err()
             .names("http.max_header_bytes")
+        );
+    }
+
+    #[test]
+    fn an_idle_connection_outlives_common_balancer_idle_timeouts() {
+        assert!(HttpConfig::default().header_read_timeout > Duration::from_mins(1));
+        let behind_google_cloud = HttpConfig {
+            header_read_timeout: Duration::from_secs(620),
+            ..HttpConfig::default()
+        };
+        validate_with(|v| {
+            behind_google_cloud.validate(v);
+        })
+        .unwrap();
+        let unbounded = HttpConfig {
+            header_read_timeout: Duration::from_mins(16),
+            ..HttpConfig::default()
+        };
+        assert!(
+            validate_with(|v| {
+                unbounded.validate(v);
+            })
+            .unwrap_err()
+            .names("http.header_read_timeout")
         );
     }
 }
