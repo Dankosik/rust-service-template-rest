@@ -31,6 +31,9 @@
 # - JEMALLOC_SYS_WITH_MALLOC_CONF bakes `thp:never` into the allocator: on a
 #   host whose transparent huge pages are `always`, khugepaged refills the
 #   pages jemalloc returned (docs/backend-library-selection.md).
+# - PGO=train builds the service twice so the release build reads a profile
+#   of the requests build/docker/pgo-train.sh sends; a profile differs between
+#   builds, so the binary is not reproducible. The default builds once.
 
 ARG SERVICE_PACKAGE=service
 ARG IMAGE_TESTS=none
@@ -144,11 +147,37 @@ ARG RAILWAY_GIT_COMMIT_SHA
 ENV VERGEN_GIT_SHA=${RAILWAY_GIT_COMMIT_SHA:-${VCS_REF}}
 COPY . .
 
+# PGO=train compiles the service with counters, runs it against
+# build/docker/pgo-train.sh and merges what it counted. Both builds go through
+# cargo-auditable: its rustc wrapper changes the workspace crates' symbol
+# names, and a profile recorded under other names is silently ignored. The
+# counted build has its own target directory, and the build scripts' own
+# counts are dropped before the service runs.
+FROM source AS pgo-profile
+ARG PGO=none
+ARG SERVICE_PACKAGE
+ARG SERVICE_BIN=service
+RUN mkdir /pgo \
+ && case "${PGO}" in \
+      none) ;; \
+      train) rustup component add llvm-tools-preview \
+        && RUSTFLAGS="-Cprofile-generate=/pgo/raw" cargo auditable build --release --locked \
+             -p "${SERVICE_PACKAGE}" --bin "${SERVICE_BIN}" --target-dir /pgo/target \
+        && rm -rf /pgo/raw \
+        && sh build/docker/pgo-train.sh "/pgo/target/release/${SERVICE_BIN}" \
+        && "$(rustc --print sysroot)/lib/rustlib/$(rustc --print host-tuple)/bin/llvm-profdata" \
+             merge --sparse -o /pgo/service.profdata /pgo/raw \
+        && rm -rf /pgo/target /pgo/raw ;; \
+      *) echo "PGO is none or train" >&2; exit 1 ;; \
+    esac
+
 FROM source AS service-build
 ARG SERVICE_PACKAGE
 ARG SERVICE_BIN=service
 ARG SOURCE_DATE_EPOCH=0
-RUN cargo auditable build --release --locked -p "${SERVICE_PACKAGE}" --bin "${SERVICE_BIN}" \
+COPY --from=pgo-profile /pgo /pgo
+RUN if [ -f /pgo/service.profdata ]; then export RUSTFLAGS="-Cprofile-use=/pgo/service.profdata"; fi \
+ && cargo auditable build --release --locked -p "${SERVICE_PACKAGE}" --bin "${SERVICE_BIN}" \
  && mkdir -p /out && cp "target/release/${SERVICE_BIN}" "/out/${SERVICE_BIN}" \
  && touch -d "@${SOURCE_DATE_EPOCH}" "/out/${SERVICE_BIN}"
 # template:begin postgres:docker-migrator-output

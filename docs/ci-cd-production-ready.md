@@ -108,6 +108,19 @@ Measured on a 4-vCPU `linux/amd64` DigitalOcean host (`Docker 29.1`, empty cache
 
 musl's smaller image and 8–15% lower RSS do not repay up to 2x JSON CPU and ~1.8x slower musl-hosted `rustc` builds; reopen static musl only if musl `memcpy` matches glibc on this workload. Builder and runtime share Debian 13 (`trixie`), `.dockerignore` excludes `rust-toolchain.toml` so `Dockerfile` owns builder `rustup` state, and `cd.yml` uses a local composite action (rather than a reusable workflow) so keyless Fulcio certificates retain `.../.github/workflows/cd.yml@<ref>` as their signing identity.
 
+### Profile-guided build and compiler flags
+
+Measured on DigitalOcean c-4 hosts (`linux/amd64`, Debian 13, service on two CPUs with two workers, five interleaved 15 s rounds per variant); CPU per request against the default release build on the same host:
+
+| Option | Plain | JSON 1 KiB | JSON 64 KiB | Cost | Decision |
+| --- | ---: | ---: | ---: | --- | --- |
+| PGO, profile of the measured routes | −30% | −31% | −33% | builds the service twice | opt-in `PGO=train` |
+| PGO, profile of `build/docker/pgo-train.sh` as shipped (liveness, readiness, an unrouted path, metrics), through the Dockerfile | −27% | −20% | −2% | about 17 min more per image build on 4 vCPUs (760 s counted build and run, 533 s profiled build) | the shipped training set |
+| `-C target-cpu=x86-64-v3` | −0.7% | −1.0% | −0.2% | excludes hosts older than Haswell | rejected: within noise |
+| `-C force-frame-pointers=yes`, unstripped | +0.5% | −0.1% | +1.5% | binary 20.9 → 31.5 MB | not adopted |
+
+The route-specific profile also cut p99 latency by 28–32%, and routes absent from it still gained 19–30%. The shipped training set carries no payload route, so a derived service adds the dependency-free routes that carry its traffic to `build/docker/pgo-train.sh`; the profile is merged sparse, and the untrained 64 KiB path did not regress. `PGO` stays `none` by default because it compiles the service's whole dependency graph twice more on every image build, outside the cooked layer, and makes the binary differ between builds; only the service binary is profiled, since the worker and the migrator cannot run without their dependencies. Reopen `x86-64-v3` for a workload dominated by in-process computation, and frame pointers with symbols when the deployment platform allows `perf` or eBPF profiling of the container.
+
 ### Reopen conditions for deferred options
 
 - **Multi-platform image or BuildKit `rewrite-timestamp`:** Consumer deploying on non-native architecture or requiring reproducible OCI layer timestamps beyond binary-level determinism.
