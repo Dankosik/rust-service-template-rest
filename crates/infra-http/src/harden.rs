@@ -44,9 +44,6 @@ pub struct HardenOptions {
     pub max_in_flight: Option<NonZeroU32>,
     pub admission_wait: Duration,
     pub log_health_probes: bool,
-    /// While this reader reports draining, HTTP/1 responses carry
-    /// `Connection: close`, so keep-alive clients reconnect elsewhere before
-    /// the listener stops instead of losing a request sent to a closed socket.
     pub draining: Option<ReadinessReader>,
 }
 
