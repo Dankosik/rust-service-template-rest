@@ -70,7 +70,6 @@ impl Outcome {
     }
 }
 
-/// The trusted capture the middleware hands to the handler extractor.
 #[derive(Clone)]
 pub(super) struct Attempt {
     pub(super) store: Store,
@@ -183,7 +182,6 @@ impl Idempotency {
     }
 }
 
-/// Only a storable 2xx commits; any other response rolls the work back.
 #[expect(
     clippy::result_large_err,
     reason = "the store's work contract returns the rollback, which carries the handler's Response"
@@ -208,11 +206,8 @@ async fn commit_candidate(
         })
 }
 
-/// What work hands back for rollback.
 pub(super) enum Rollback {
-    /// A non-2xx response returned unchanged.
     Response(Response),
-    /// A 2xx response that cannot be durably replayed.
     Unstorable,
 }
 

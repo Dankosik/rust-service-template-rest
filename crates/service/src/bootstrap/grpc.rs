@@ -12,12 +12,8 @@ use super::service_auth::PreparedServiceAuth;
 // template:end service-auth:bootstrap-grpc-service-auth-import
 use super::{BootstrapError, PreparedAuth};
 
-/// Registers this service's generated native gRPC adapters. Bootstrap calls
-/// it once, only when `grpc.enabled` is true, after it opened the
-/// dependencies, with the state the HTTP routes also receive: a generated
-/// server takes what it needs from that state when it is constructed. The
-/// borrowed background capability registers a feature manager in the same
-/// production lifecycle; registration must return promptly.
+/// Called once, only when `grpc.enabled` is true, after dependencies opened,
+/// with the state the HTTP routes also receive. Must return promptly.
 pub type GrpcRegistration = fn(
     &mut infra_grpc::Services,
     &crate::AppState,
@@ -30,11 +26,7 @@ pub(super) struct Prepared {
     pub(super) options: ServerOptions,
 }
 
-/// Build the listener's router from the registered services before readiness
-/// admission, so a refused registration or verifier binds nothing.
-///
-/// The default service supplies no business registration; examples and derived
-/// services opt in through [`crate::run_with_grpc`].
+/// Runs before readiness admission, so a refused registration or verifier binds nothing.
 pub(super) fn prepare(
     config: &Config,
     registration: Option<GrpcRegistration>,
@@ -111,10 +103,7 @@ fn limits(grpc: &GrpcConfig) -> infra_grpc::Limits {
     }
 }
 
-/// Convert admitted TLS material into a listener config.
-///
-/// The conversion does not read paths or perform network I/O, and borrows the
-/// private key without copying it. Plaintext has no server config.
+/// Does not read paths or perform network I/O.
 fn tls(grpc: &GrpcConfig) -> Result<Option<Arc<ServerConfig>>, ValidationError> {
     let GrpcListenerSecurity::Tls {
         certificate,

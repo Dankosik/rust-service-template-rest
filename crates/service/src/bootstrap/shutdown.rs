@@ -104,8 +104,7 @@ pub(crate) struct Dependencies {
 }
 
 impl Dependencies {
-    /// Close every opened dependency. Returns whether one
-    /// outlived `deadline`.
+    /// Returns whether a dependency outlived `deadline`.
     fn close(
         self,
         #[allow(unused_variables, reason = "dependency-free profiles perform no close")]
@@ -405,7 +404,6 @@ enum ListenerKind {
     // template:end grpc:shutdown-listener-kind-grpc
 }
 
-/// Event names one listener's drain emits.
 struct DrainEvents {
     completed: &'static str,
     forced: &'static str,

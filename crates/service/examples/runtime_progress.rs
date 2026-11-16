@@ -43,7 +43,7 @@ static LOG_VALUE: [u8; 4096] = [b'L'; 4096];
 
 type CpuReply = oneshot::Receiver<Result<Vec<u8>, Status>>;
 
-/// Occupied wall duration, including preemption, never CPU-consumption time.
+/// Wall duration including preemption, not CPU time.
 struct CpuOccupancy {
     epoch: Instant,
     completed: Duration,

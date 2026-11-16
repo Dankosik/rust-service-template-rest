@@ -183,8 +183,7 @@ pub struct Config {
 }
 
 impl Config {
-    /// Validate every section. Cross-key rules that live on a section type
-    /// run there; process-structure ceilings are not encoded here.
+    /// Process-structure ceilings are not encoded here.
     pub fn validate(&self) -> Result<(), ValidationError> {
         self.app.validate()?;
         self.http.validate()?;

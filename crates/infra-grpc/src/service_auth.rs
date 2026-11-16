@@ -14,11 +14,9 @@ use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 
 use crate::{Client, Failure};
 
-/// Verified callers by outcome; caller values come only from the trust registry.
 pub const SERVICE_AUTH_CALLS_METRIC: &str = "service_auth_calls_total";
 
-/// The two request paths reflection serves once it is added; each needs a
-/// [caller rule](crate::Services::allow_callers) wherever rules apply.
+/// Each needs a [caller rule](crate::Services::allow_callers) wherever rules apply.
 pub const REFLECTION_PATHS: [&str; 2] = [
     "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo",
     "/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo",
@@ -26,16 +24,12 @@ pub const REFLECTION_PATHS: [&str; 2] = [
 
 const NOT_ADMITTED_DETAIL: &str = "the verified caller is not admitted to this method";
 
-/// The permission table and, unless service authentication is off, the
-/// verifier that names each call's caller.
 pub(crate) struct CallerAdmission {
     verifier: Option<Verifier>,
     caller_rules: HashMap<String, Box<[ServiceName]>>,
-    /// Registered once per trusted caller: an admission is the hot path.
     outcomes: HashMap<ServiceName, Outcomes>,
 }
 
-/// One trusted caller's [`SERVICE_AUTH_CALLS_METRIC`] series.
 struct Outcomes {
     admitted: metrics::Counter,
     not_admitted: metrics::Counter,
@@ -77,10 +71,8 @@ impl CallerAdmission {
     }
 }
 
-/// With a verifier, names the caller of a business call and admits it only
-/// to a method whose rule lists it; a path without a rule admits nobody.
-/// Without one, no rule is checked. Either way the `Authorization` metadata
-/// never reaches the handler.
+/// A path without a rule admits nobody; without a verifier no rule is checked.
+/// `Authorization` never reaches the handler.
 pub(crate) async fn admit_caller(
     State(admission): State<Arc<CallerAdmission>>,
     mut request: Request,
@@ -142,7 +134,6 @@ pub(crate) async fn admit_caller(
     next.run(request).await
 }
 
-/// Missing, malformed and invalid tokens are one credential failure.
 fn verification_status(failure: infra_serviceauth::Failure) -> tonic::Status {
     Failure::new(match failure {
         infra_serviceauth::Failure::Missing
@@ -154,8 +145,6 @@ fn verification_status(failure: infra_serviceauth::Failure) -> tonic::Status {
     .into()
 }
 
-/// A cloneable governed gRPC client that sends this service's token for one
-/// receiver with every call.
 #[derive(Clone, Debug)]
 pub struct ServiceTokenClient {
     tokens: ReceiverTokens,
@@ -163,7 +152,6 @@ pub struct ServiceTokenClient {
 }
 
 impl Client {
-    /// Binds this client to the token source's handle for its receiver.
     #[must_use]
     pub fn with_service_tokens(self, tokens: ReceiverTokens) -> ServiceTokenClient {
         ServiceTokenClient {
@@ -178,7 +166,6 @@ impl tower::Service<http::Request<Body>> for ServiceTokenClient {
     type Error = tonic::Status;
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
-    /// Always ready, as the governed client it wraps.
     fn poll_ready(&mut self, _context: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
     }

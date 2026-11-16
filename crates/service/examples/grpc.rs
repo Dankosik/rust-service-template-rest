@@ -1,8 +1,5 @@
-//! Minimal all-cardinality transport example using the service bootstrap.
-//!
-//! This executable deliberately registers no default business service. It is
-//! the one small feature adapter that proves a derived service uses the same
-//! process, listener, and shutdown path as the service binary.
+//! Proves a derived service uses the same process, listener, and shutdown path
+//! as the service binary; deliberately registers no default business service.
 
 use std::pin::Pin;
 use std::process::ExitCode;

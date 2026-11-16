@@ -978,9 +978,8 @@ async fn the_span_names_the_region_only_on_amazon() {
     );
 }
 
-// First registration can race a dispatcher rebuild in tracing-core 0.1.36:
-// an unrelated test thread's earlier `never` can overwrite the rebuilt interest.
-// Give the capture tests a fresh callsite/dispatcher lifetime.
+// First registration can race a dispatcher rebuild in tracing-core 0.1.36; a
+// fresh callsite lifetime avoids it.
 #[expect(
     clippy::disallowed_methods,
     clippy::print_stdout,
@@ -1698,8 +1697,8 @@ async fn an_unpolled_get_expires_and_admits_fresh_work() {
     assert_eq!(http_body::Body::size_hint(&held).lower(), 0);
     assert_eq!(http_body::Body::size_hint(&held).upper(), None);
     assert!(!http_body::Body::is_end_stream(&held));
-    // Exercise Hyper's response framing, which can skip polling an exact-zero
-    // body even when is_end_stream is false. No explicit Content-Length masks it.
+    // Hyper's framing can skip an exact-zero body even when is_end_stream is false;
+    // no explicit Content-Length.
     let held = Arc::new(Mutex::new(Some(held)));
     let consumer =
         Stub::start(move |_, _| Response::new(Body::new(held.lock().unwrap().take().unwrap())))

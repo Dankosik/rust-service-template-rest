@@ -21,7 +21,7 @@ const OLDEST_AVAILABLE_AGE_METRIC: &str = "jobs_oldest_available_age_seconds";
 pub(crate) const OBSERVATION_TIMESTAMP_METRIC: &str = "jobs_observation_timestamp_seconds";
 const RETAIN_COMPLETED_FOR: Duration = Duration::from_hours(24);
 const RETENTION_BATCH_ROWS: u32 = 500;
-/// The hang guard on one retention batch: a slow batch is waited for.
+/// A hang guard: a slow batch is waited for.
 const RETENTION_STATEMENT_TIMEOUT: Duration = Duration::from_secs(5);
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(10);
 const POPULATION_TURN_WAIT: Duration = Duration::from_secs(1);

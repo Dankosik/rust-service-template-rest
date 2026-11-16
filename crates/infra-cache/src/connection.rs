@@ -24,7 +24,6 @@ use crate::observe::{
 use crate::{CacheError, ServerEndpoint};
 
 /// Bounds one whole setup attempt: password read, dial, TLS, and `HELLO`.
-/// The same limit applies while the server is making progress.
 pub(crate) const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
 const CONNECTED_PROBE_MIN_BUDGET: Duration = Duration::from_secs(5);
 const PASSWORD_READ_TIMEOUT: Duration = Duration::from_secs(5);
@@ -611,8 +610,6 @@ async fn query_until(
     tokio::task::consume_budget().await;
     let mut connection = generation.connection.clone();
     let reply = tokio::task::unconstrained(command.query_async(&mut connection));
-    // Maintenance has a reserved entry, so its first poll enqueues before
-    // the timer starts, after every earlier command has started its budget.
     reply_until(&generation.retired, reply, deadline).await
 }
 

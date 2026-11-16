@@ -9,17 +9,15 @@ use secrecy::{ExposeSecret, SecretString};
 use crate::error::ConfigError;
 use crate::provider::Admitted;
 
-/// How the client authenticates. [`Debug`] prints the variant only.
+/// [`Debug`] prints the variant only.
 pub enum CredentialSource {
     AccessKey {
         access_key_id: String,
         secret_access_key: SecretString,
     },
-    /// The AWS identity the platform gives the workload, refreshed by the
-    /// SDK before it expires: a web identity token (EKS IAM roles for service
-    /// accounts), the container credentials endpoint (ECS task roles, EKS
-    /// Pod Identity), then the EC2 instance profile. [`crate::Provider::AmazonS3`]
-    /// only.
+    /// Web identity token (EKS IRSA), container credentials endpoint (ECS, EKS Pod
+    /// Identity), then the EC2 instance profile, refreshed by the SDK.
+    /// [`crate::Provider::AmazonS3`] only.
     WorkloadIdentity,
 }
 
@@ -70,16 +68,12 @@ impl CredentialSource {
     }
 }
 
-/// The instance metadata service at its IPv4 link-local address. Left to
-/// resolve its endpoint, the SDK's client would read it from an AWS profile
-/// file.
+/// Left to resolve its own endpoint, the SDK's client would read it from an AWS profile file.
 const INSTANCE_METADATA_ENDPOINT: &str = "http://169.254.169.254";
 
-/// The workload's AWS identity, in the SDK default chain's order. Unlike that
-/// chain it has no environment access keys and no profile files: the
-/// providers read only what the platform injects for the identity
-/// (`AWS_WEB_IDENTITY_TOKEN_FILE` and `AWS_ROLE_ARN`, the
-/// `AWS_CONTAINER_*` variables) and the fixed instance metadata endpoint.
+/// The SDK default chain's order, minus environment access keys and profile
+/// files: the providers read only what the platform injects for the identity and
+/// the fixed instance metadata endpoint.
 fn workload_identity(
     region: &str,
     http_client: SharedHttpClient,
@@ -90,8 +84,7 @@ fn workload_identity(
     let instance_metadata = aws_config::imds::Client::builder()
         .configure(&config)
         .endpoint(INSTANCE_METADATA_ENDPOINT)
-        // The fixed endpoint is a valid URI today; a construction failure is
-        // still reported through the credentials key.
+        // A construction failure is still reported through the credentials key.
         .map_err(|_| ConfigError::Credentials)?
         .build();
     Ok(CredentialsProviderChain::first_try(

@@ -87,7 +87,6 @@ pub(crate) fn dead_letter_bounds(
     })
 }
 
-/// Keeps whole first identity and trace values that fit the source header budget.
 pub(crate) fn dead_letter_headers(
     original: &HeaderMap,
     subject: &str,

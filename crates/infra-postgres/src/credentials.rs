@@ -1,12 +1,8 @@
-//! A platform that rotates the database password (a secrets manager's agent,
-//! a mounted Kubernetes secret, a sidecar that writes short-lived tokens)
-//! rewrites the file `postgres.password_file` names. `sqlx` takes its connect
-//! options when the pool is built; `Pool::set_connect_options` is the
-//! driver's own way to hand it later ones, and this task is what calls it.
-//! Connections already open are left alone: the server authenticates a
-//! session once. [`crate::pool::MAX_CONNECTION_LIFETIME`] is an age threshold for
-//! retirement at pool lifecycle points, not forced interruption of checked-out
-//! sessions or a hard revocation deadline.
+//! `sqlx` takes connect options when the pool is built; this task hands it new
+//! ones through `Pool::set_connect_options` when the file `postgres.password_file`
+//! names is rewritten. Open connections are left alone: the server authenticates
+//! a session once. [`crate::pool::MAX_CONNECTION_LIFETIME`] is an age threshold
+//! for retirement, not forced interruption or a hard revocation deadline.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -18,15 +14,11 @@ use crate::dsn::{DsnError, password_from};
 
 const REFRESHES_METRIC: &str = "postgres_password_file_refreshes_total";
 
-/// How often the password file is read again. Before changed options are
-/// installed and accepted, new connections can fail with `28P01`; the pool
-/// returns that failure instead of retrying. External delivery, read duration
-/// and server acceptance prevent this cadence from bounding the cutover.
+/// Until changed options are installed and accepted, new connections can fail
+/// with `28P01` and the pool returns that instead of retrying; this cadence does
+/// not bound the cutover.
 pub const PASSWORD_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
-/// Read the file named by [`Dsn::password_file`](crate::Dsn::password_file)
-/// every [`PASSWORD_REFRESH_INTERVAL`] until `cancel` fires. The first
-/// successful read and later changes update the options for new connections.
 /// A failed read leaves the last installed options in use.
 pub async fn refresh_password_periodically(
     pool: PgPool,
@@ -68,7 +60,6 @@ impl Refresh {
                 }
                 let options = (*pool.connect_options()).clone().password(&password);
                 pool.set_connect_options(options);
-                // The first successful read establishes the baseline for reload logs.
                 if self.current.replace(password).is_some() {
                     tracing::info!("postgres_password_reloaded");
                 }
@@ -144,7 +135,6 @@ mod tests {
         refresh.step(&pool, &file).await;
         assert!(refresh.unreadable);
         assert_eq!(password(&pool).as_deref(), Some("second"));
-        // Warning suppression must not hide completed failed reads.
         refresh.step(&pool, &file).await;
         std::fs::write(&file, "").unwrap();
         refresh.step(&pool, &file).await;

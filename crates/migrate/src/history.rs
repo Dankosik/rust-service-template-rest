@@ -14,9 +14,7 @@ const UNDEFINED_TABLE: &str = "42P01";
 pub enum HistoryError {
     #[error("embedded migrations are pending")]
     Pending,
-    /// An applied migration failed or changed, or the history holds an
-    /// unknown version inside the embedded range. Two embedded migrations
-    /// sharing one version also land here.
+    /// Includes an unknown version inside the embedded range and duplicate embedded versions.
     #[error("the migration history does not match the embedded migrations")]
     Mismatch,
     /// The history table exists in the database but is outside this
@@ -27,12 +25,9 @@ pub enum HistoryError {
     Unavailable,
 }
 
-/// Read-only startup check: no bookkeeping is created and no lock is taken.
-///
-/// Bounded by [`HISTORY_VERIFY_BUDGET`], including acquire. A version above
-/// the newest embedded migration belongs to a later release and is admitted.
-/// An absent table is treated as an empty history, so an empty embedded set
-/// can start.
+/// Creates no bookkeeping and takes no lock. Bounded by
+/// [`HISTORY_VERIFY_BUDGET`], including acquire. A version above the newest
+/// embedded migration belongs to a later release and is admitted.
 pub async fn verify_history(pool: &PgPool) -> Result<(), HistoryError> {
     let check = async {
         let mut conn = infra_postgres::acquire(pool, "check migration history").await?;
@@ -62,9 +57,8 @@ enum HistoryRead {
 async fn read_history(conn: &mut PgConnection, table: &str) -> Result<HistoryRead, MigrateError> {
     match applied_history(conn, table).await {
         Ok(history) => Ok(HistoryRead::History(history)),
-        // An absent history table means nothing is applied yet. A table that
-        // exists outside this session's search_path is a visibility failure,
-        // not an empty history, and must not send the operator to the migrator.
+        // A table outside this session's search_path is a visibility failure, not
+        // an empty history, and must not send the operator to the migrator.
         Err(MigrateError::Execute(err)) if sqlstate(&err).as_deref() == Some(UNDEFINED_TABLE) => {
             if history_table_exists_elsewhere(conn, table).await? {
                 Ok(HistoryRead::NotVisible)
@@ -76,8 +70,6 @@ async fn read_history(conn: &mut PgConnection, table: &str) -> Result<HistoryRea
     }
 }
 
-/// The runtime history table is unqualified, so the relation name is the last
-/// dotted component with surrounding quotes removed.
 async fn history_table_exists_elsewhere(
     conn: &mut PgConnection,
     table: &str,
@@ -116,14 +108,11 @@ pub(crate) enum PendingError {
     DuplicateVersion(i64),
 }
 
-/// A changed checksum is `VersionMismatch` and an applied version unknown
-/// inside the embedded range is `VersionMissing`, as in `Migrator::run`. A
-/// version above the newest embedded one belongs to a later release and is
-/// admitted, as Flyway admits future migrations by default, so a rolled-back
-/// release still migrates and starts. Down migrations are skipped, as in
-/// `Migrator::run`; the embedded set rejects them separately. Two embedded
-/// migrations sharing one version are [`PendingError::DuplicateVersion`]
-/// before any history is compared.
+/// Mirrors `Migrator::run`: down migrations are skipped (the embedded set
+/// rejects them separately). A version above the newest embedded one belongs
+/// to a later release and is admitted, as Flyway does, so a rolled-back
+/// release still migrates and starts. Duplicate embedded versions are
+/// [`PendingError::DuplicateVersion`] before any history is compared.
 pub(crate) fn pending<'m>(
     migrator: &'m Migrator,
     history: &[AppliedMigration],

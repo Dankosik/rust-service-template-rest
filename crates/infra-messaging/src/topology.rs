@@ -23,8 +23,6 @@ const MIN_SERVER_VERSION: (i64, i64, i64) = (2, 12, 3);
 // the default 4 KiB control-line budget for subjects outside the registry.
 const WILDCARD_SUBJECT_BYTES: usize = 4 * 1024;
 
-/// A configured consumer, the dead-letter topology admitted for it, and the
-/// startup budget its durable creation still runs under.
 #[derive(Clone, Debug)]
 pub(crate) struct ConsumerAdmission {
     pub(crate) options: ConsumerOptions,
@@ -33,18 +31,15 @@ pub(crate) struct ConsumerAdmission {
     pub(crate) cancel: CancellationToken,
 }
 
-/// The topology already read at startup; consumer admission adds route lengths.
 #[derive(Clone, Debug)]
 pub(crate) struct DeadLetterTopology {
     pub(crate) stream: String,
     source_max_message_bytes: usize,
-    /// The dead-letter stream's own limit; `None` means unlimited.
     dead_letter_max_message_bytes: Option<NonZeroUsize>,
 }
 
 impl DeadLetterTopology {
-    /// Admits the dead-letter transfer budget and returns the subject budget
-    /// shared by the transfer and the pull request.
+    /// Returns the subject budget shared by the transfer and the pull request.
     pub(crate) fn admit_routes(
         &self,
         registry: &Registry,
@@ -105,7 +100,6 @@ impl DeadLetterTopology {
     }
 }
 
-/// Admits the source stream and, for a consumer, its dead-letter stream.
 /// Retains the resolved limits until the complete consumer registry is available.
 pub(crate) async fn admit_topology(
     options: &MessagingOptions,
@@ -136,7 +130,6 @@ pub(crate) async fn admit_topology(
     let Some(consumer) = &options.consumer else {
         return Ok(None);
     };
-    // The stream's own message limit bounds what one delivery can hold in memory.
     let raw_source_limit = source.cached_info().config.max_message_size;
     let source_max_message_bytes =
         source_message_limit(raw_source_limit, envelope_limit).map_err(|refusal| {
@@ -248,7 +241,6 @@ pub(crate) fn get_stream_failure(error: &GetStreamError, role: &'static str) -> 
     topology_failure("get_stream", Some(role), error, broker.as_ref())
 }
 
-/// Asks the broker which stream stores `subject`.
 async fn stream_name_for_subject(
     jetstream: &async_nats::jetstream::Context,
     subject: &str,
@@ -270,7 +262,6 @@ async fn stream_name_for_subject(
     .await
 }
 
-/// Creates the durable consumer, or updates its editable fields.
 pub(crate) async fn create_durable(
     stream: &Stream,
     config: PullConfig,
@@ -284,12 +275,8 @@ pub(crate) async fn create_durable(
     })
 }
 
-/// Classifies a failed topology request and logs which request failed.
-///
-/// `stream_role` says which stream a stream request read. `broker` is the
-/// `JetStream` API error when the broker answered with one. Its numeric code
-/// is a closed vocabulary; its description can quote configuration and stays
-/// out of the log.
+/// The broker's error description can quote configuration, so only its numeric
+/// code is logged.
 fn topology_failure(
     operation: &'static str,
     stream_role: Option<&'static str>,
@@ -333,7 +320,6 @@ pub(crate) enum Refusal {
 }
 
 impl Refusal {
-    /// The closed `error.type` of this refusal.
     pub(crate) const fn error_type(self) -> &'static str {
         match self {
             Self::ServerVersion => "server_version",
@@ -371,11 +357,6 @@ impl Refusal {
     }
 }
 
-/// Classifies a refusal and logs which property of the broker caused it.
-///
-/// `required_bytes` is the admitted envelope or transfer bound; `limit_bytes`
-/// is the corresponding broker limit, when the refusal concerns one. Neither
-/// exposes message content.
 fn refusal_failure(
     operation: &'static str,
     refusal: Refusal,
@@ -416,8 +397,6 @@ pub(crate) fn validate_server(
     Ok(())
 }
 
-/// Whether the broker answered 401 or 403, which both mean the credentials
-/// were refused.
 fn is_auth_refusal(error: &async_nats::jetstream::Error) -> bool {
     matches!(error.code(), 401 | 403)
 }

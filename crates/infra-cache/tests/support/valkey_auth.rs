@@ -136,7 +136,7 @@ async fn frame(stream: &mut TcpStream) -> redis::RedisResult<(Value, Vec<u8>)> {
 
 struct AuthRelay {
     port: u16,
-    // Request abort before dropping the stop sender during fixture teardown.
+    // Aborted before the stop sender drops during teardown.
     task: AbortOnDropHandle<()>,
     stop: Option<oneshot::Sender<()>>,
 }

@@ -72,7 +72,6 @@ pub(crate) fn describe() {
     );
 }
 
-/// Label for requests the router did not match.
 pub(crate) const UNMATCHED_ROUTE: &str = "<unmatched>";
 
 /// The status recorded for a request its caller abandoned before the
@@ -82,8 +81,6 @@ const CLIENT_CLOSED_REQUEST: StatusCode = match StatusCode::from_u16(499) {
     Err(_) => panic!("499 is a valid status code"),
 };
 
-/// The middleware state: what the access log is told and the metric handles
-/// shared by every request through one [`harden`](crate::harden())ed router.
 #[derive(Clone, Debug)]
 pub(crate) struct Observer {
     log_health_probes: bool,
@@ -227,9 +224,7 @@ impl Pending<'_> {
     }
 }
 
-/// The server span. Only what every log record inside the request should
-/// carry is a `tracing` field; the other OpenTelemetry HTTP attributes go to
-/// the span alone, so the JSON log layer neither serializes nor repeats them.
+/// Other OpenTelemetry HTTP attributes go to the span alone; see the module doc.
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 fn make_span(
     request: &Request,
@@ -281,7 +276,6 @@ fn update_span_from_response(span: &tracing::Span, status: StatusCode) {
     }
 }
 
-/// One route's histograms by normalized method and status code.
 type RouteDurations = HashMap<(&'static str, u16), Histogram>;
 
 /// Metric handles by series, resolved on first use so a request neither
@@ -388,8 +382,7 @@ mod tests {
     use axum::body::Body;
     use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
 
-    /// The labels of every duration series the snapshot holds, sorted: the
-    /// snapshot lists its keys in no fixed order.
+    /// Sorted: the snapshot lists its keys in no fixed order.
     fn duration_series(snapshotter: &Snapshotter) -> Vec<Vec<(String, String)>> {
         let mut series: Vec<_> = snapshotter
             .snapshot()

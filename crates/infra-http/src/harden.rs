@@ -43,7 +43,6 @@ use crate::problem::SANITIZED_DETAIL;
 use crate::problem::{Code, Problem, body_too_large, sanitized_internal_error};
 use crate::request_id;
 
-/// The router-wide in-flight bound and how long a request waits for a permit.
 struct Admission {
     permits: Semaphore,
     /// `http.request_timeout`: the request has no deadline until it is
@@ -53,26 +52,16 @@ struct Admission {
 
 #[derive(Clone, Debug)]
 pub struct HardenOptions {
-    /// A declared length above this ceiling answers 413 before the handler.
-    /// Streaming bodies are checked as they are read. The ceiling applies
-    /// both to the transport stream and to axum's extractor `DefaultBodyLimit`;
-    /// axum's own default is independent, so omitting the extractor layer
-    /// would keep a different ceiling than `http.max_body_bytes`.
+    /// Applies to the transport stream and to axum's `DefaultBodyLimit`, whose
+    /// own default is independent of this ceiling.
     pub max_body_bytes: usize,
     /// Per-request budget; expiry answers 504 with code `gateway_timeout`, or
     /// 408 with code `request_timeout` while a tracked request-body read waits.
-    /// Built-in body readers track their reads. Custom readers can use
-    /// [`crate::RequestContext::read_body`] to track each awaited read.
-    /// Time a request spends waiting for an in-flight permit is spent from
-    /// this same budget, so the handler gets only what admission leaves.
+    /// Custom body readers track each awaited read with
+    /// [`crate::RequestContext::read_body`].
     pub request_timeout: Duration,
-    /// Concurrent handler executions before 503; `None` disables shedding. A
-    /// request over the bound waits for a permit for up to `request_timeout`
-    /// and is shed only when none frees. The health probe routes are admitted
-    /// without a permit, so a saturated service still answers its platform
-    /// probes.
+    /// `None` disables shedding. Health probe routes are admitted without a permit.
     pub max_in_flight: Option<NonZeroU32>,
-    /// Re-enable access logging for matched health probe routes.
     pub log_health_probes: bool,
 }
 
@@ -178,19 +167,14 @@ fn normalize_overflow_response(response: &mut Response) {
     *response.body_mut() = body;
 }
 
-/// Admit a request once an in-flight permit is free. A request over the bound
-/// waits for one, in arrival order, for up to `request_timeout`: it is served
-/// once capacity frees, and refusing it earlier would refuse work the process
-/// could still do. Only a request that finds none in that time is shed, with
+/// A request over the bound waits in arrival order for up to `request_timeout`
+/// rather than being refused while capacity may free; only then it is shed with
 /// 503 and `Retry-After`. The permit is held until the response head is ready.
-/// The health probe routes skip the limit: a saturated service is busy, not
-/// dead, and a shed liveness probe would have the platform restart it under
-/// load. They are matched by route template, also beneath an outer nest, so
-/// only the probe handlers are exempt.
+/// Probe routes skip the limit, matched by route template also beneath an
+/// outer nest: a shed liveness probe would have the platform restart a busy service.
 ///
-/// The wait sits outside the opening deadline, so the request's arrival is
-/// handed on and the opening budget spends the wait from `request_timeout`
-/// instead of starting over.
+/// The wait sits outside the opening deadline, so the request's arrival is handed on
+/// and the opening budget spends the wait from `request_timeout`.
 async fn admit(
     State(admission): State<Arc<Admission>>,
     matched: Option<MatchedPath>,

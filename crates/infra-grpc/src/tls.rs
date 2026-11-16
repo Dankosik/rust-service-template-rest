@@ -7,9 +7,7 @@ use secrecy::{ExposeSecret as _, SecretString};
 
 use crate::TlsMaterialError;
 
-/// Server certificate material admitted by configuration. The key is borrowed
-/// so building a config needs no clone of its [`SecretString`];
-/// [`server_tls_config`] parses it into a key that rustls then owns.
+/// Borrows the key so building a config needs no clone of its [`SecretString`].
 #[derive(Clone, Copy, Debug)]
 pub struct ServerTlsMaterial<'a> {
     pub certificate_pem: &'a str,
@@ -18,8 +16,6 @@ pub struct ServerTlsMaterial<'a> {
     pub client_ca_pem: Option<&'a str>,
 }
 
-/// TLS 1.3 server config with HTTP/2 ALPN. A client CA makes client
-/// certificates mandatory.
 pub fn server_tls_config(
     material: ServerTlsMaterial<'_>,
 ) -> Result<Arc<ServerConfig>, TlsMaterialError> {
@@ -48,8 +44,6 @@ pub fn server_tls_config(
     Ok(Arc::new(config))
 }
 
-/// Every PEM certificate in `input`; `None` when one does not decode or
-/// there is none.
 fn certificates(input: &str) -> Option<Vec<CertificateDer<'static>>> {
     let certificates = CertificateDer::pem_slice_iter(input.as_bytes())
         .collect::<Result<Vec<_>, _>>()
@@ -57,10 +51,9 @@ fn certificates(input: &str) -> Option<Vec<CertificateDer<'static>>> {
     (!certificates.is_empty()).then_some(certificates)
 }
 
-/// A presented chain, each entry parsed as an X.509 certificate. Rustls
-/// itself parses only the leaf, so a broken intermediate would otherwise
-/// pass startup and fail the handshake of every peer that needs it. Trust
-/// anchors skip this: rustls admits X.509 v1 roots that this parse refuses.
+/// Rustls parses only the leaf, so a broken intermediate would pass startup and fail every
+/// handshake that needs it. Trust anchors skip this: rustls admits X.509 v1 roots that this
+/// parse refuses.
 pub(crate) fn chain(input: &str) -> Result<Vec<CertificateDer<'static>>, TlsMaterialError> {
     let certificates = certificates(input).ok_or(TlsMaterialError::InvalidCertificate)?;
     for certificate in &certificates {

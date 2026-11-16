@@ -1,8 +1,6 @@
 //! Durable Standard Webhooks delivery through the existing jobs and HTTPS owners.
 //!
-//! Producers enqueue final bytes for a configured endpoint ID inside their business
-//! transaction. Each attempt uses the worker startup snapshot of endpoints for routing
-//! and signing, then performs one bounded exchange.
+//! Each attempt routes and signs with the worker's startup snapshot of endpoints.
 
 mod producer;
 
@@ -76,11 +74,7 @@ impl Endpoint {
         Ok(Self::from_destination(destination, client, keys))
     }
 
-    /// Use a caller-built local test client for an `http` or `https`
-    /// destination with a host and no credentials or fragment. Production code
-    /// must use [`Endpoint::try_new`].
-    ///
-    /// The caller supplies the absolute destination admitted by its client.
+    /// Production code must use [`Endpoint::try_new`].
     #[cfg(feature = "test-support")]
     pub fn with_client(
         destination: Url,
@@ -123,12 +117,9 @@ impl Dispatcher {
         Self { endpoints }
     }
 
-    /// Register `webhooks.deliver` with the existing jobs kind registry.
-    ///
     /// `max_concurrent` bounds the deliveries one engine runs at once, so a
-    /// receiver that answers slowly cannot hold every job slot; `None` leaves
-    /// the engine's slots as the only bound. The dispatcher is consumed into
-    /// the registered handler; no webhook task or retry loop is spawned.
+    /// slow receiver cannot hold every job slot; `None` leaves the engine's
+    /// slots as the only bound.
     pub fn register(
         self,
         kinds: &mut KindsBuilder,

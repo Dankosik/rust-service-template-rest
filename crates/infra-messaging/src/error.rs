@@ -64,21 +64,16 @@ pub enum EnvelopeError {
 pub enum PublishError {
     #[error("messaging publication was rejected")]
     Rejected,
-    /// The broker's answer was lost, so the event may or may not be stored.
     #[error("messaging publication acknowledgement is ambiguous")]
     Ambiguous,
 }
 
-/// A handler's settled classification.
-///
-/// It carries no cause: the adapter never logs feature errors. Log the cause
-/// in the handler, which runs inside the delivery span, so the record shares
-/// its trace with the adapter's `messaging_delivery_failed` event.
+/// Carries no cause: log it in the handler, which runs inside the delivery
+/// span, so the record shares its trace with `messaging_delivery_failed`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum HandlerError {
     #[error("event handler requested retry")]
     Retryable,
-    /// Delivery can never succeed and should go to the dead-letter subject.
     #[error("event handler permanently rejected the event")]
     Permanent,
 }

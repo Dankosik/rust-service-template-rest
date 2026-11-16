@@ -1,9 +1,7 @@
 use std::borrow::Cow;
 
-/// The SQLSTATE of a database error, when the driver supplied a valid one.
-///
-/// Only the PostgreSQL five-byte uppercase-alphanumeric format is returned,
-/// so the value is safe as a structured log field or a metric label.
+/// Only the five-byte uppercase-alphanumeric format, so the value is safe as a
+/// log field or metric label.
 #[must_use]
 pub fn sqlstate(err: &sqlx::Error) -> Option<Cow<'_, str>> {
     err.as_database_error()?.code().filter(|code| {
@@ -14,15 +12,9 @@ pub fn sqlstate(err: &sqlx::Error) -> Option<Cow<'_, str>> {
     })
 }
 
-/// Whether `err` reports a transient condition that a later attempt may not
-/// meet. With a valid SQLSTATE: a lost connection (class `08`), exhausted
-/// resources (class `53`), a serialization failure, deadlock, or uncertain
-/// statement completion (`40001`, `40P01`, `40003`), a server shutting down or
-/// starting (`57P01`, `57P02`, `57P03`), a cancelled statement (`57014`),
-/// an unavailable lock (`55P03`), a session the server ended for idling in a
-/// transaction (`25P03`) or exceeding its transaction timeout (`25P04`), or
-/// a read-only session (`25006`). Without one: a pool that timed out or
-/// closed, or a failed socket or TLS session.
+/// Transient: with a SQLSTATE, classes `08` and `53`, `40001`, `40P01`, `40003`,
+/// `57P01`-`57P03`, `57014`, `55P03`, `25P03`, `25P04`, `25006`; without one, a
+/// timed-out or closed pool and failed socket or TLS sessions.
 #[must_use]
 pub fn is_transient(err: &sqlx::Error) -> bool {
     match sqlstate(err) {
@@ -54,8 +46,7 @@ pub fn is_transient(err: &sqlx::Error) -> bool {
     }
 }
 
-/// The driver-level failure class of `err` (`database` for any
-/// server-reported error); pair it with [`sqlstate`].
+/// Pair with [`sqlstate`]; `database` covers any server-reported error.
 #[must_use]
 pub const fn failure_cause(err: &sqlx::Error) -> &'static str {
     match err {

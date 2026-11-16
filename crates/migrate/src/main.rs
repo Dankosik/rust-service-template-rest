@@ -208,9 +208,8 @@ async fn apply(config: &MigrationConfig, target: Option<i64>) -> Result<Report, 
     run_until_stop(&options).await
 }
 
-/// Apply migrations unless a stop signal arrives first. Dropping the run
-/// drops the connection; the server then ends the session, the advisory
-/// lock, and any open transaction.
+/// Dropping the run drops the connection; the server then ends the session,
+/// the advisory lock, and any open transaction.
 async fn run_until_stop(options: &RunOptions<'_>) -> Result<Report, Failure> {
     #[cfg(unix)]
     {

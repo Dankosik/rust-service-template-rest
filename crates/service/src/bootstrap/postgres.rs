@@ -5,8 +5,7 @@ use service_config::Config;
 
 use super::{BootstrapError, METRICS_MAINTENANCE_INTERVAL};
 
-/// Open the pool when the profile is enabled. An unreachable database fails
-/// startup here rather than serving a readiness that never passes.
+/// An unreachable database fails startup here rather than serving a readiness that never passes.
 pub(super) async fn open(
     config: &Config,
     background: &mut Background,

@@ -95,11 +95,8 @@ impl EventPayload for BridgePayload {
     const SCHEMA_VERSION: u16 = 1;
 }
 
-/// This scenario has one independent expectation: Go-produced raw bytes,
-/// offsets, identities and transfer hashes remain consumable by the production
-/// Rust boundary, while Go's real decoder accepts Rust's production bytes.
-/// A Go wire drift or Rust normalization/identity regression fails here even
-/// when either implementation's unit tests still pass in isolation.
+/// Go-produced bytes, offsets, identities and transfer hashes stay consumable
+/// by the Rust boundary, and Go's real decoder accepts Rust's bytes.
 #[test]
 #[ignore = "CI generates GO_WIRE_FIXTURES with the pinned actual Go package"]
 #[expect(

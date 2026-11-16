@@ -289,8 +289,6 @@ async fn observation_records_timeout_cancellation_and_polled_drop_once() {
     let _subscriber = tracing::subscriber::set_default(diagnostics.clone());
     let _interest = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
     let material = TlsMaterial::new(FIXTURE_HOST);
-    // The recorded 200 status proves the timeout struck after the
-    // response headers, while the body was pending.
     let (address, server) = tls_server_stall_after_headers(&material).await;
     let timed = fixture_client(address, &material)
         .execute(request(), deadline())

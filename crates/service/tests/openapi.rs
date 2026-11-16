@@ -18,9 +18,6 @@ const HTTP_METHODS: &[&str] = &[
     "get", "put", "post", "delete", "options", "head", "patch", "trace",
 ];
 
-/// Problem responses a protected operation must declare: request validation,
-/// both authentication outcomes and the two
-/// unavailability answers.
 const PROTECTED_PROBLEM_STATUSES: &[&str] = &["400", "401", "403", "503", "504"];
 
 fn document() -> Value {
@@ -52,10 +49,8 @@ fn is_public(document: &Value, operation: &Value) -> bool {
     effective_security(document, operation).is_empty()
 }
 
-/// Every alternative is exactly one `http`/`bearer` scheme, with a scope list
-/// of strings (possibly empty). An anonymous alternative, an unknown scheme,
-/// another scheme type, a non-string scope, or an AND-combination is not the
-/// wired bearer path.
+/// An anonymous alternative, an unknown scheme, a non-string scope, or an
+/// AND-combination is not the wired bearer path.
 fn uses_bearer_only(document: &Value, operation: &Value) -> bool {
     let requirements = effective_security(document, operation);
     if requirements.is_empty() {
@@ -83,8 +78,7 @@ fn uses_bearer_only(document: &Value, operation: &Value) -> bool {
     })
 }
 
-/// The declared response for `status`, following a `$ref` into
-/// `components/responses`.
+/// Follows a `$ref` into `components/responses`.
 fn response<'a>(document: &'a Value, operation: &'a Value, status: &str) -> Option<&'a Value> {
     let declared = operation["responses"].get(status)?;
     match declared["$ref"].as_str() {
@@ -129,8 +123,7 @@ fn committed_document_matches_the_generator() {
 
 #[test]
 fn document_has_the_probe_operations() {
-    // Feature operations join the document beside the probes; the probes
-    // themselves are platform behavior every derived service keeps.
+    // The probes are platform behavior every derived service keeps.
     let document = document();
     let ids: Vec<_> = operations(&document)
         .iter()
@@ -277,8 +270,7 @@ fn declares_optional_retry_after(response: &Value) -> bool {
     })
 }
 
-/// The family's components are in every retained document, referenced or
-/// not, as Problem responses.
+/// The components are in every retained document, referenced or not.
 #[test]
 fn retained_idempotency_document_declares_the_family_components() {
     let document = document();
@@ -342,9 +334,8 @@ fn declares_idempotency_key(operation: &Value) -> bool {
 
 // template:end http-idempotency:service-openapi-http-idempotency-contract
 
-/// The classifier fails closed on every alternative that is not exactly the
-/// wired bearer scheme with a scope array, so a protected operation cannot
-/// slip through with an anonymous or unsupported path.
+/// The classifier fails closed so a protected operation cannot slip through
+/// with an anonymous or unsupported path.
 #[rstest::rstest]
 #[case::inherited_bearer(&json!({}), false, true)]
 #[case::explicit_bearer(&json!({"security": [{"bearerAuth": []}]}), false, true)]

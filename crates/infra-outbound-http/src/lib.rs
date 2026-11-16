@@ -1,7 +1,5 @@
-//! A fixed-origin HTTPS client with finite exchange limits.
-//!
-//! The provider owns request content and interpretation. This crate owns
-//! origin admission, bounded transport work, and static error semantics.
+//! A fixed-origin HTTPS client with finite exchange limits. The provider owns request
+//! content and interpretation.
 
 mod observe;
 mod policy;
@@ -29,17 +27,13 @@ pub use url::Url;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
-/// The largest [`Limits::response_header_count`]. Hyper reserves a response
-/// `HeaderMap` for the parsed header count, and `http` 1.5 panics when that
-/// reservation, plus a third and rounded up to a power of two, exceeds its
-/// 32,768-slot index table.
+/// `http` 1.5 panics when the header count Hyper reserves, plus a third and rounded up to a
+/// power of two, exceeds its 32,768-slot index table.
 pub const MAX_RESPONSE_HEADER_COUNT: usize = 24_576;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Limits {
-    /// The longest an exchange may take, from entry to the end of the response body.
     pub operation_timeout: Duration,
-    /// At most [`MAX_RESPONSE_HEADER_COUNT`].
     pub response_header_count: usize,
     pub response_body_bytes: usize,
 }
@@ -72,8 +66,6 @@ pub enum BuildError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// The request URL is not an absolute URL on the client's origin or
-    /// the caller supplied a `Host` header.
     #[error("outbound HTTP target is invalid")]
     InvalidTarget,
     #[error("outbound HTTP operation timed out")]
@@ -91,16 +83,11 @@ pub enum Error {
     },
 }
 
-/// A reusable bounded client for one configured origin. Requests name
-/// absolute URLs on that origin; any other origin is refused before I/O.
 ///
-/// # Request preparation
-///
-/// The client rejects requests with a caller-supplied `Host` header and
-/// sets `Host` from the configured origin. It sends HTTP/1.1, removes
-/// `Transfer-Encoding`, and sets `Content-Length` to the buffered body length
-/// for nonempty bodies and for `POST`, `PUT`, and `PATCH`. For other empty
-/// requests it removes `Content-Length`. If `Accept` is absent, it adds `*/*`.
+/// Requests with a caller-supplied `Host` are rejected; `Host` comes from the configured
+/// origin. Sends HTTP/1.1, removes `Transfer-Encoding`, sets `Content-Length` to the
+/// buffered length for nonempty bodies and `POST`/`PUT`/`PATCH` (removed for other empty
+/// requests), and adds `Accept: */*` when absent.
 #[derive(Clone)]
 pub struct Client {
     origin: policy::Origin,
@@ -122,9 +109,6 @@ impl fmt::Debug for Client {
 }
 
 impl Client {
-    /// Creates a client bound to the origin (scheme, host, and port) of
-    /// `origin`. Its path, query, and fragment are ignored. Construction
-    /// performs no DNS or network I/O.
     pub fn try_new(origin: &Url, limits: Limits) -> Result<Self, BuildError> {
         limits.validate()?;
         let origin = policy::admit_origin(origin)?;
@@ -151,20 +135,17 @@ impl Client {
         }
     }
 
-    /// Sends the trace context of each attempt to the origin through the
-    /// process text-map propagator (W3C `traceparent` and `tracestate`),
-    /// replacing any caller value of those headers. Off by default: a trace
-    /// identifier is data shared with the provider, so the adapter opts in
-    /// for an origin that belongs to the same trace domain.
+    /// Replaces any caller `traceparent`/`tracestate`. Off by default: a trace identifier is
+    /// data shared with the provider, so enable it only for an origin in the same trace
+    /// domain.
     #[must_use]
     pub fn with_trace_context(mut self) -> Self {
         self.propagate_trace_context = true;
         self
     }
 
-    /// Creates the narrow local-HTTP constructor used by downstream mock
-    /// tests, admitting only `http` origins with a literal loopback IP address
-    /// and no userinfo. Production code must use [`Client::try_new`].
+    /// For downstream mock tests: only `http` origins with a literal loopback IP and no
+    /// userinfo. Production code must use [`Client::try_new`].
     #[cfg(feature = "test-support")]
     pub fn try_new_for_test_http(origin: &Url, limits: Limits) -> Result<Self, BuildError> {
         limits.validate()?;
@@ -177,24 +158,12 @@ impl Client {
         ))
     }
 
-    /// Executes one complete buffered exchange before `deadline`.
-    ///
-    /// The request follows the preparation rules on [`Client`].
-    ///
-    /// An [`OperationContext`] request extension additionally bounds cancellation
-    /// and cutoff. The end is fixed on execution entry at the earlier of `deadline` and
-    /// entry plus [`Limits::operation_timeout`]. Admission, setup, DNS and
-    /// complete buffered collection spend that same budget. At or after the
-    /// end, no new transport dispatch or successful operation decision is allowed.
-    ///
-    /// Attempt telemetry starts after the initial stop check and request
-    /// admission. Once started, a completed attempt records its result once
-    /// after the exchange returns. Success requires a fully buffered body and
-    /// a final stop check. Synchronous terminal observation callbacks can delay
-    /// return beyond the deadline without changing the result.
-    /// Dropping this future ends the exchange; it does not undo a provider-side
-    /// effect. A [`UrlTemplate`] request extension names the
-    /// operation in the attempt's span and metric.
+    /// The request follows the preparation rules on [`Client`]. An [`OperationContext`]
+    /// request extension additionally bounds cancellation and cutoff; the end is fixed at
+    /// entry at the earlier of `deadline` and entry plus [`Limits::operation_timeout`], and
+    /// admission, setup, DNS and body collection spend it. Terminal observation callbacks
+    /// can delay return beyond the deadline without changing the result. Dropping the future
+    /// ends the exchange without undoing a provider-side effect.
     pub async fn execute(
         &self,
         request: Request<Bytes>,
@@ -210,23 +179,15 @@ impl Client {
             .await
     }
 
-    /// Fixes the resource operation allowance before a composition begins
-    /// credential acquisition or other preparation. Later execution may only
-    /// shorten this context, never restart its deadline.
+    /// Later execution may only shorten this context, never restart its deadline.
     #[must_use]
     pub fn begin_operation(&self, parent: &OperationContext) -> OperationContext {
         parent.child(self.limits.operation_timeout)
     }
 
-    /// Executes one buffered exchange within the caller context and local ceiling.
-    ///
-    /// The request follows the preparation rules on [`Client`].
-    ///
-    /// An [`OperationContext`] request extension supplies an additional bound;
-    /// neither supplied cancellation scope nor cutoff is discarded. Preparation,
-    /// dispatch and confirmed body EOF all spend the same original allowance.
-    /// A cutoff maps to [`Error::Timeout`] and cancellation to
-    /// [`Error::Cancelled`]; neither undoes a remote effect.
+    /// The request follows the preparation rules on [`Client`]. A cutoff maps to
+    /// [`Error::Timeout`] and cancellation to [`Error::Cancelled`]; neither undoes a remote
+    /// effect.
     pub async fn execute_with_context(
         &self,
         request: Request<Bytes>,
@@ -236,9 +197,8 @@ impl Client {
             .await
     }
 
-    /// Like [`Self::execute_with_context`], with a synchronous callback when
-    /// response headers arrive. It runs once before body admission or reading,
-    /// so it may observe a status even if the exchange later fails.
+    /// The callback runs once on response headers, before body admission, so it may see a
+    /// status even if the exchange later fails.
     pub async fn execute_with_response_status(
         &self,
         request: Request<Bytes>,
@@ -249,11 +209,9 @@ impl Client {
             .await
     }
 
-    /// Like [`Self::execute_with_response_status`], with a synchronous admission
-    /// check after request preparation and immediately before transport handoff.
-    /// Returns [`Error::DispatchRefused`] when the check returns `false` and the
-    /// operation is still active; a timeout or cancellation observed after the
-    /// check takes precedence.
+    /// The check runs after request preparation, just before transport handoff.
+    /// [`Error::DispatchRefused`] when it returns `false` and the operation is still active;
+    /// a later timeout or cancellation takes precedence.
     pub async fn execute_with_dispatch_check(
         &self,
         request: Request<Bytes>,
@@ -339,8 +297,7 @@ impl Client {
     }
 }
 
-/// The scopes that can stop an exchange: the client's operation and the
-/// caller's request extension. The operation's stop wins over the request's.
+/// The operation's stop wins over the request's.
 struct StopScopes<'a> {
     operation: &'a OperationContext,
     request: Option<&'a OperationContext>,
@@ -407,9 +364,8 @@ fn stopped_error(stopped: Stopped) -> Error {
     }
 }
 
-/// Requests at most `limit` bytes of capacity, which the allocator may round up.
-/// [`Limited`] bounds the total bytes appended. Capacity grows as data arrives,
-/// so a declared `Content-Length` cannot reserve memory for unsent bytes.
+/// Capacity grows as data arrives, so a declared `Content-Length` cannot reserve memory for
+/// unsent bytes.
 fn append_within(collected: &mut Vec<u8>, data: &[u8], limit: usize) {
     let required = collected.len().saturating_add(data.len());
     if required > collected.capacity() {

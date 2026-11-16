@@ -45,9 +45,7 @@ impl Transition {
     }
 }
 
-/// An outcome that stores its own row: the write-only view of a [`Transition`].
-///
-/// It carries only the values its statement binds. Labels stay with
+/// Carries only the values its statement binds. Labels stay with
 /// [`Transition`], so a timed-out retry is a [`Self::Retry`] here.
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Write<'a> {
@@ -104,8 +102,6 @@ impl Written {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Unacknowledged;
 
-/// The write-only view of `transition`: the outcome that stores its own row.
-///
 /// The supervisor routes completion through
 /// [`complete_batched`](super::completion::complete_batched). A handler can
 /// complete the claim in its own transaction via
@@ -307,8 +303,6 @@ impl RetryCause {
     }
 }
 
-/// Retry with backoff, or fail as exhausted once the attempt budget is spent.
-///
 /// The nominal delay after attempt `n` is `n^4` seconds: 1 s, 16 s, 81 s, and
 /// so on. The retry statement in [`execute`] jitters it by ±10% and raises it
 /// to the cause's floor.
@@ -327,8 +321,6 @@ fn retry_or_exhaust(number: u16, policy: Policy, text: &str, cause: RetryCause) 
     }
 }
 
-/// The stored summary of a payload that does not decode as `kind`.
-///
 /// The rejected payload is never quoted: it holds untrusted producer or handler
 /// input, and a value copied here would be stored, logged, and exported. The
 /// category, line, and column locate the defect without it.

@@ -2,7 +2,6 @@ use http::{Request, header::AUTHORIZATION};
 
 use crate::OnBehalfOf;
 
-/// Both refusals are composition mistakes of this service.
 #[derive(Clone, Copy)]
 pub(crate) enum AdmissionRefusal {
     AuthorizationConflict,

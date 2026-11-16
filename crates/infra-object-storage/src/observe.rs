@@ -1,7 +1,6 @@
-//! One duration histogram and one span per operation. Neither carries a key,
-//! bucket, endpoint, URL, or provider message. The span and the failure event
-//! carry the provider's request identifiers, which name none of those; on
-//! Amazon S3 the span also carries the region.
+//! One duration histogram and one span per operation, carrying no key, bucket,
+//! endpoint, URL, or provider message. The span and failure event carry the
+//! provider's request identifiers; on Amazon S3 the span also carries the region.
 
 use std::sync::OnceLock;
 use std::time::Instant;
@@ -20,8 +19,7 @@ const OPERATION_DURATION_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0,
 ];
 
-/// Every histogram this crate records. A composition root hands it to the
-/// Prometheus recorder; a metric left out renders the default buckets.
+/// A metric left out of the recorder renders default buckets.
 pub const HISTOGRAMS: &[(&str, &[f64])] =
     &[(OPERATION_DURATION_METRIC, OPERATION_DURATION_BUCKETS)];
 
@@ -47,9 +45,7 @@ impl Operation {
         }
     }
 
-    /// The span name follows OpenTelemetry's `Service.Operation` convention
-    /// for AWS SDK client spans. Presigning has its own method because it
-    /// signs a request locally.
+    /// Follows OpenTelemetry's `Service.Operation` convention for AWS SDK client spans.
     fn rpc_names(self) -> (&'static str, &'static str) {
         match self {
             Self::Put => ("S3.PutObject", "PutObject"),
@@ -79,9 +75,8 @@ impl Outcome {
     }
 }
 
-/// Histogram handles, registered on first use so the scrape shows only
-/// recorded series. A handle stays bound to the recorder of its first use;
-/// bootstrap installs the recorder before it builds the client.
+/// Registered on first use so the scrape shows only recorded series; a handle
+/// stays bound to its first recorder, so bootstrap installs it before the client.
 #[derive(Default, derive_more::Debug)]
 #[debug("Histograms {{ .. }}")]
 pub(crate) struct Histograms(EnumMap<Operation, EnumMap<Outcome, OnceLock<Histogram>>>);
@@ -149,10 +144,9 @@ impl OperationGuard {
         }
     }
 
-    /// Record what the provider calls the request it answered:
-    /// `x-amz-request-id` and S3's `x-amz-id-2`, which its support asks for.
-    /// A failure after this, such as a download body that fails its
-    /// checksum, reports them too. After a retry they name the last attempt.
+    /// `x-amz-request-id` and S3's `x-amz-id-2`, which its support asks for. Later
+    /// failures (such as a checksum-failing body) report them too; after a retry they
+    /// name the last attempt.
     pub(crate) fn answered_by(&mut self, answer: &(impl RequestId + RequestIdExt)) {
         self.request_id = answer.request_id().and_then(identifier);
         self.extended_request_id = answer.extended_request_id().and_then(identifier);
@@ -169,12 +163,11 @@ impl OperationGuard {
         self.finish(Outcome::Ok);
     }
 
-    /// Record a failure. `failure.error_type` is bounded: a provider error
-    /// code, an HTTP status, a transport class, or a fixed local label. The caller's error carries
-    /// no provider detail, so the event is the operator's only record of it
-    /// without tracing: a failure of the store, the configuration, or the
-    /// data is a warning; an answer about the object or the admission limit
-    /// stays at DEBUG.
+    /// `failure.error_type` is bounded: a provider error code, HTTP status, transport
+    /// class, or fixed local label. The caller's error carries no provider detail,
+    /// so this event is the operator's only record without tracing: a failure of the
+    /// store, configuration, or data warns; an answer about the object or admission
+    /// limit stays at DEBUG.
     pub(crate) fn fail(&mut self, failure: &Failure) -> ObjectStorageError {
         self.span.record("error.type", failure.error_type.as_ref());
         self.span.record("otel.status_code", "ERROR");
@@ -230,12 +223,10 @@ impl Drop for OperationGuard {
     }
 }
 
-/// Longest request identifier kept. S3's `x-amz-id-2` is under 100 bytes.
+/// S3's `x-amz-id-2` is under 100 bytes.
 const MAX_IDENTIFIER_BYTES: usize = 128;
 
-/// A request identifier is a provider's header value: keep it only when it
-/// is a short visible-ASCII token, so a store cannot put arbitrary text into
-/// a log line.
+/// Kept only as a short visible-ASCII token, so a store cannot put arbitrary text into a log line.
 fn identifier(value: &str) -> Option<Box<str>> {
     let bounded = !value.is_empty()
         && value.len() <= MAX_IDENTIFIER_BYTES

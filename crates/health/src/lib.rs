@@ -17,8 +17,6 @@ use tokio::sync::watch;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-/// One dependency check.
-///
 /// The probes of one check run together under one deadline, `probe_budget`.
 /// When it passes, every [`Probe::check`] future still running is dropped
 /// and counted as timed out. Implementations must not detach work that would
@@ -49,8 +47,6 @@ impl ProbeError {
 }
 
 // template:begin grpc:health-owner-dropped
-/// The last [`Readiness`] owner was dropped, so no further verdicts will
-/// be published.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("readiness owner dropped")]
 pub struct OwnerDropped;
@@ -93,16 +89,14 @@ const STALE_AFTER_METRIC: &str = "readiness_stale_after_seconds";
 /// tick faster, and a zero period would panic the ticker.
 const MIN_INTERVAL: Duration = Duration::from_millis(1);
 
-/// Cadence and thresholds for the refresher.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RefreshPolicy {
-    /// Time between checks. Timers resolve to a millisecond, so a shorter
-    /// interval, zero included, runs at that pace.
+    /// Timers resolve to a millisecond, so a shorter interval, zero
+    /// included, runs at that pace.
     pub interval: Duration,
-    /// Deadline for one check; every probe runs under it at the same time.
+    /// Deadline shared by all probes of one check.
     pub probe_budget: Duration,
-    /// Failed checks in a row before a ready verdict is withdrawn. Some
-    /// readers act on the first unready answer with no threshold of their
+    /// Some readers act on the first unready answer with no threshold of their
     /// own (a gRPC health `Watch` client drops the backend at once), so one
     /// slow round-trip must not evict an instance. A service that is not
     /// ready yet reports a failure at once.
@@ -110,8 +104,6 @@ pub struct RefreshPolicy {
 }
 
 impl RefreshPolicy {
-    /// How old a verdict may get before it is refused.
-    ///
     /// `stale_after = probe_budget + period * 3` where
     /// `period = interval.max(1ms).max(probe_budget)`, saturated to the maximum
     /// duration. The leading
@@ -132,7 +124,7 @@ impl RefreshPolicy {
 
 #[derive(Clone, Debug)]
 struct State {
-    /// Set by [`Readiness::start_drain`]; wins over any check result.
+    /// Wins over any check result.
     draining: bool,
     last_check: Option<Check>,
     progress: Progress,
@@ -177,7 +169,7 @@ impl ProgressLoss {
 }
 
 impl State {
-    /// Called only under the watch write lock. Returns newly retained evidence.
+    /// Called only under the watch write lock.
     fn expire_progress(&mut self, now: Instant, stale_after: Duration) -> Option<ProgressLoss> {
         if !matches!(self.progress, Progress::Armed) {
             return None;
@@ -212,7 +204,6 @@ impl State {
     }
 }
 
-/// The latest completed probe round after applying the failure threshold.
 #[derive(Clone, Debug)]
 struct Check {
     /// Completion time, not start time: readers measure the cache's age.
@@ -241,21 +232,20 @@ impl fmt::Debug for Readiness {
     }
 }
 
-/// Read side handed to the health handlers and startup admission.
 #[derive(Clone, Debug)]
 pub struct ReadinessReader {
     rx: watch::Receiver<State>,
     stale_after: Duration,
     // template:begin grpc:health-reader-stale-edge
-    /// Timestamp of the check whose stale notification was already delivered.
-    /// Prevents the same expired check from waking a stream repeatedly.
+    /// Check whose stale notification was already delivered, so one expiry
+    /// wakes a stream once.
     stale_edge_for: Option<Instant>,
     // template:end grpc:health-reader-stale-edge
 }
 
 impl Readiness {
-    /// A readiness owner over `probes`. Nothing is checked until
-    /// [`Readiness::refresh`] or [`Readiness::refresh_until`] runs.
+    /// Nothing is checked until [`Readiness::refresh`] or
+    /// [`Readiness::refresh_until`] runs.
     #[must_use]
     pub fn new(probes: Vec<Box<dyn Probe>>, policy: RefreshPolicy) -> Self {
         metrics::describe_counter!(
@@ -308,8 +298,7 @@ impl Readiness {
         }
     }
 
-    /// Mark the service as draining. Takes effect on the next read, not
-    /// after the next refresh.
+    /// Takes effect on the next read, not after the next refresh.
     pub fn start_drain(&self) {
         let mut newly_expired = None;
         self.tx.send_if_modified(|state| {
@@ -326,7 +315,6 @@ impl Readiness {
         }
     }
 
-    /// Require completion progress after successful startup admission.
     /// The admitted check retains its timestamp; arming never renews its age.
     pub fn arm_progress(&self) -> Result<(), NotReady> {
         let mut result = Ok(());
@@ -435,14 +423,8 @@ impl Readiness {
         }
     }
 
-    /// Check every probe at the same time under one deadline and publish the
-    /// verdict after applying the failure threshold. Adding a probe does not
-    /// lengthen the refresh, and a slow probe does not spend another probe's
-    /// budget. When several probes fail, the verdict names the first one in
-    /// registration order.
-    ///
-    /// Startup admission calls this and then reads
-    /// [`ReadinessReader::verdict`] before announcing readiness.
+    /// Probes run concurrently, so a slow probe does not spend another's budget.
+    /// When several fail, the verdict names the first in registration order.
     pub async fn refresh(&self) {
         let observed = self.check_probes().await;
         let completed_at = SystemTime::now()
@@ -518,8 +500,6 @@ impl Readiness {
         }
     }
 
-    /// Refresh every `policy.interval` until `cancel` fires.
-    ///
     /// Checks at once unless startup admission already did. Cancel also drops
     /// an in-flight check, so the tracker join does not wait for
     /// `probe_budget` before dependencies close. An already cancelled token
@@ -629,11 +609,7 @@ fn readiness_transition(previous: Option<&Check>, next: &Check) -> Option<Result
 }
 
 impl ReadinessReader {
-    /// The current verdict without touching any dependency.
-    ///
-    /// A verdict older than [`RefreshPolicy::stale_after`] is refused: a
-    /// stopped or hung refresher would otherwise leave its last "ready"
-    /// standing.
+    /// A verdict older than [`RefreshPolicy::stale_after`] is refused.
     pub fn verdict(&self) -> Result<(), NotReady> {
         let state = self.rx.borrow();
         if state.draining {
@@ -656,15 +632,9 @@ impl ReadinessReader {
     }
 
     // template:begin grpc:health-changed-verdict
-    /// Resolve for an unseen publication or once when the current check
-    /// reaches its stale boundary.
-    ///
-    /// A publication may keep the same readiness verdict; it still updates
-    /// freshness. The caller decides whether its transport needs a new answer.
-    ///
-    /// This observes the cached state only; it never checks a probe. A caller
-    /// must re-read [`Self::verdict`] after this future resolves, which makes
-    /// a publication race use the current monotone drain state.
+    /// Resolves for an unseen publication, which may carry the same verdict, or once
+    /// at the current check's stale boundary. A caller must re-read
+    /// [`Self::verdict`] afterwards so a publication race sees the current drain state.
     pub async fn wait_for_verdict_event(&mut self) -> Result<(), OwnerDropped> {
         if self.rx.has_changed().map_err(|_| OwnerDropped)? {
             return self.rx.changed().await.map_err(|_| OwnerDropped);

@@ -26,10 +26,8 @@ const ENCODED_TAG_BYTES: usize = base64::encoded_len(TAG_BYTES, true).expect("HM
 
 pub const MAX_MESSAGE_ID_BYTES: usize = 255;
 
-/// A decoded HMAC-SHA256 signing key.
-///
-/// Construction accepts the Standard Webhooks base64 form, with its optional
-/// `whsec_` prefix. The encoded value is never retained or exposed.
+/// Accepts the Standard Webhooks base64 form with its optional `whsec_`
+/// prefix. The encoded value is never retained or exposed.
 #[derive(Clone, derive_more::Debug)]
 #[debug("SigningKey([REDACTED])")]
 pub struct SigningKey(hmac::Key);
@@ -58,8 +56,6 @@ impl KeyRing {
         Self { active, previous }
     }
 
-    /// Decode the active key and optional predecessor for one endpoint.
-    ///
     /// A composition root that resolves each key by reference decodes
     /// individual [`SigningKey`] values and uses [`Self::new`] instead.
     pub fn from_encoded(active: &str, previous: Option<&str>) -> Result<Self, InvalidKey> {
@@ -68,11 +64,9 @@ impl KeyRing {
         Ok(Self::new(active, previous))
     }
 
-    /// Create the Standard Webhooks `webhook-signature` value for a message.
-    ///
     /// `timestamp` is the `webhook-timestamp` value in Unix seconds. The
-    /// active signature comes first. A predecessor produces one additional
-    /// space-separated v1 candidate.
+    /// active signature comes first; a predecessor adds one space-separated
+    /// v1 candidate.
     pub fn signatures(
         &self,
         message_id: &[u8],
@@ -134,7 +128,6 @@ pub struct VerifiedMessage {
 }
 
 impl VerifiedMessage {
-    /// The original header bytes, preserved for durable identity.
     #[must_use]
     pub const fn message_id(&self) -> &Bytes {
         &self.message_id
@@ -157,10 +150,10 @@ pub enum ProtocolError {
     BodyTooLarge,
     #[error("webhook signature evidence is incomplete")]
     MissingHeader,
-    /// Repeated identity or timestamp headers disagree.
     #[error("webhook signature evidence is ambiguous")]
     ConflictingHeader,
-    /// The message identifier is empty, contains the signed delimiter, or exceeds [`MAX_MESSAGE_ID_BYTES`].
+    /// The message identifier is empty, contains the signed delimiter, or exceeds
+    /// [`MAX_MESSAGE_ID_BYTES`].
     #[error("webhook message identifier is invalid")]
     InvalidMessageId,
     #[error("webhook timestamp is invalid")]
@@ -232,7 +225,6 @@ fn ensure_timestamp_window(timestamp: i64, now: SystemTime) -> Result<(), Protoc
         .ok_or(ProtocolError::TimestampOutOfWindow)
 }
 
-/// The v1 HMAC-SHA256 tag over `message-id "." canonical-timestamp "." body`.
 fn tag(key: &SigningKey, message_id: &[u8], timestamp: i64, body: &[u8]) -> hmac::Tag {
     let mut context = hmac::Context::with_key(&key.0);
     context.update(message_id);

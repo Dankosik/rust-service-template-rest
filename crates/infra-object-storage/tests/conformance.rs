@@ -1,13 +1,12 @@
-//! Live provider conformance. It writes to a real bucket, so it is ignored
-//! and runs only through `make test-object-storage-conformance
-//! PROVIDER=<provider>` with `OBJECT_STORAGE_CONFORMANCE_WRITES=allow` and the
-//! service's own `APP__OBJECT_STORAGE__*` variables for that bucket.
+//! Live provider conformance; writes to a real bucket, so it is ignored and runs
+//! only through `make test-object-storage-conformance PROVIDER=<provider>` with
+//! `OBJECT_STORAGE_CONFORMANCE_WRITES=allow` and the service's own
+//! `APP__OBJECT_STORAGE__*` variables.
 //!
-//! Every key lives under `conformance/<run>/` and is deleted at the end. The
-//! test asserts the client contract and prints what the provider does beyond
-//! it (checksum echo, trailer acceptance, expected-owner handling), so a
-//! later change can enable a provider feature from recorded evidence. One
-//! provider's result never qualifies another.
+//! Keys live under `conformance/<run>/` and are deleted at the end. It asserts
+//! the client contract and prints what the provider does beyond it, so a later
+//! change can enable a provider feature from recorded evidence. One provider's
+//! result never qualifies another.
 
 #![expect(
     clippy::unwrap_used,
@@ -92,8 +91,7 @@ impl Target {
         .expect("the configured provider tuple must be admitted")
     }
 
-    /// A raw SDK client with the same identity, for recording provider facts
-    /// the client deliberately does not depend on.
+    /// Records provider facts the client deliberately does not depend on.
     fn raw(&self) -> aws_sdk_s3::Client {
         let mut config = aws_sdk_s3::Config::builder()
             .behavior_version(aws_sdk_s3::config::BehaviorVersion::v2026_01_12())

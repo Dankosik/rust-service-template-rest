@@ -46,9 +46,7 @@ impl ClaimPolicy {
     }
 }
 
-/// A claim holding one string or an array of strings: `aud`, and `scope` or
-/// `scp`, whose single string is space-delimited. Strings borrow from the
-/// payload unless they contain escapes.
+/// `aud`, or `scope`/`scp` (whose single string is space-delimited): one string or an array.
 enum Values<'a> {
     One(Cow<'a, str>),
     Many(Vec<Cow<'a, str>>),
@@ -272,8 +270,7 @@ pub(crate) fn validate_jwt_claims(
     })
 }
 
-/// An RFC 7519 `NumericDate`: an unsigned integer, or a number with a
-/// fraction read by [`shared_rules::rfc7519::numeric_date_seconds`].
+/// An RFC 7519 `NumericDate`; fractions go through [`shared_rules::rfc7519::numeric_date_seconds`].
 struct NumericDate(u64);
 
 impl<'de> Deserialize<'de> for NumericDate {

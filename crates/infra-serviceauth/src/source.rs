@@ -83,7 +83,6 @@ impl TokenSource {
         Self(Signing::WithoutKey)
     }
 
-    /// Prepares signing without I/O; signing one token proves the key.
     pub fn try_new(options: SigningOptions) -> Result<Self, SigningError> {
         let key = EncodingKey::from_ec_pem(options.private_key.expose_secret().as_bytes())
             .map_err(|_| SigningError::InvalidKey)?;
@@ -101,8 +100,7 @@ impl TokenSource {
         Ok(Self(Signing::Key(Arc::new(signer))))
     }
 
-    /// A handle that signs tokens addressed to `receiver`. Composition asks
-    /// once per outbound client; each handle reuses its own token.
+    /// A handle that signs tokens addressed to `receiver`, one per outbound client.
     pub fn receiver(&self, receiver: &str) -> Result<ReceiverTokens, SigningError> {
         let audience = ServiceName::parse(receiver).map_err(|_| SigningError::InvalidReceiver)?;
         let state = match &self.0 {
@@ -153,7 +151,6 @@ impl fmt::Debug for ReceiverTokens {
 }
 
 impl ReceiverTokens {
-    /// The `Authorization` value for the next call, marked sensitive, or
     /// `None` while service authentication is off.
     pub fn authorization(&self) -> Result<Option<HeaderValue>, SigningError> {
         let ReceiverState::Active(active) = &self.0 else {

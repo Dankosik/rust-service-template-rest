@@ -29,8 +29,6 @@ impl Producer {
         }
     }
 
-    /// Validate, then enqueue one delivery on the caller's open transaction.
-    ///
     /// Returns the job ID, which is the Standard Webhooks message ID.
     /// Validation failures happen before any insert. A JSON body uses
     /// [`JSON_CONTENT_TYPE`].
@@ -58,9 +56,8 @@ impl Producer {
         }
     }
 
-    /// Admit a delivery without building it: error precedence is body size,
-    /// endpoint, content type (even past the jobs ceiling), then the exact
-    /// serialized size.
+    /// Error precedence: body size, endpoint, content type (even past the jobs
+    /// ceiling), then the exact serialized size.
     async fn preflight(
         &self,
         endpoint_id: &str,

@@ -3,13 +3,10 @@ use std::time::Duration;
 use http::{HeaderMap, HeaderName, StatusCode};
 
 pub(crate) const GRPC_TIMEOUT: HeaderName = HeaderName::from_static("grpc-timeout");
-/// Most digits a `grpc-timeout` value carries before its unit.
 const MAX_TIMEOUT_DIGITS: usize = 8;
 /// The largest wire timeout is eight digits of hours. Tonic panics on longer durations.
 const WIRE_TIMEOUT_MAX: Duration = Duration::from_hours(99_999_999);
 
-/// Splits a request path `/{service}/{method}` whose parts are non-empty and
-/// whose method holds no further `/`.
 pub(crate) fn split_method_path(path: &str) -> Option<(&str, &str)> {
     let (service, method) = path.strip_prefix('/')?.split_once('/')?;
     let valid = !service.is_empty() && !method.is_empty() && !method.contains('/');
@@ -20,8 +17,7 @@ pub(crate) fn method_path(service: &str, method: &str) -> String {
     format!("/{service}/{method}")
 }
 
-/// Parses `grpc-timeout`. A malformed value, including more than eight digits,
-/// is absent. Tonic's own parser is private.
+/// Tonic's own parser is private; a malformed value is absent.
 #[must_use]
 pub fn grpc_timeout(headers: &HeaderMap) -> Option<Duration> {
     headers
@@ -29,8 +25,6 @@ pub fn grpc_timeout(headers: &HeaderMap) -> Option<Duration> {
         .and_then(|value| parse_grpc_timeout(value.as_bytes()))
 }
 
-/// [`grpc_timeout`] read from a tonic request's metadata, without converting
-/// the whole map into headers.
 #[must_use]
 pub fn metadata_grpc_timeout(metadata: &tonic::metadata::MetadataMap) -> Option<Duration> {
     metadata
@@ -69,10 +63,7 @@ pub(crate) fn set_grpc_timeout(headers: &mut HeaderMap, remaining: Duration) {
     }
 }
 
-/// Decodes the initial response headers using tonic's status rules. If they
-/// omit `grpc-status`, the HTTP mapping is provisional until the stream ends.
-/// For generated clients, metrics reflect the RPC outcome after decoding the
-/// response.
+/// Without `grpc-status` the HTTP mapping is provisional until the stream ends.
 pub fn client_response_code<B>(response: &http::Response<B>) -> Option<tonic::Code> {
     decoded_header_status_code(response.headers()).or_else(|| http_status_code(response.status()))
 }
@@ -90,9 +81,8 @@ pub(crate) fn header_status_code(headers: &HeaderMap) -> Option<tonic::Code> {
         .map(|value| tonic::Code::from_bytes(value.as_bytes()))
 }
 
-/// The code a gRPC client infers from an HTTP answer without `grpc-status`,
-/// per gRPC's HTTP-to-gRPC status mapping, which tonic's client applies too.
-/// `None` for `200`, whose status the trailers still carry.
+/// Per gRPC's HTTP-to-gRPC status mapping, as tonic's client applies it; `None` for `200`,
+/// whose status the trailers carry.
 pub(crate) fn http_status_code(status: StatusCode) -> Option<tonic::Code> {
     match status {
         StatusCode::OK => None,

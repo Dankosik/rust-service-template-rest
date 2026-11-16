@@ -93,8 +93,7 @@ fn persistence_counter(kind: &'static str, persistence: Persistence) -> metrics:
     metrics::counter!(PERSISTENCE_METRIC, "kind" => kind, "disposition" => persistence.label())
 }
 
-/// Metric handles of the completed-attempt path for one kind, registered
-/// once instead of looked up by name for every attempt.
+/// Registered once instead of looked up by name for every attempt.
 pub(crate) struct KindMetrics {
     completed: metrics::Counter,
     duration: metrics::Histogram,
@@ -121,14 +120,10 @@ struct AttemptSlots {
     _kind: Option<crate::claim::KindSlot>,
 }
 
-/// One unit of the gauge metric named at construction, held until this drops.
-///
-/// The metric counts a kind of member the engine owns — an admitted attempt or a
-/// queued completion — so the guard names its membership and not claim custody.
+/// The metric counts a member the engine owns, an admitted attempt or a queued
+/// completion, so the guard names its membership and not claim custody.
 struct MetricMembership(metrics::Gauge);
 
-/// The gauge whose units [`MetricMembership`] holds, looked up once.
-///
 /// [`crate::Engine::start`] binds it under the installed recorder; first use
 /// binds it otherwise. A lookup per attempt would hash the name and search the
 /// recorder's registry, one of them under the completion queue lock.
@@ -261,8 +256,7 @@ pub(crate) fn supervise(
     }
 }
 
-/// One span per attempt, named `process <kind>` in an exported trace. The
-/// kind set is the registered one, so the name stays low-cardinality.
+/// The kind set is the registered one, so the span name stays low-cardinality.
 fn attempt_span(attempt: &AttemptId) -> tracing::Span {
     tracing::info_span!(
         "job_attempt",
@@ -412,8 +406,6 @@ fn deadline_reached_or_cleanup_ended(cleanup: &ForcedCleanup, until: Instant) ->
     Instant::now() >= until || cleanup.has_ended()
 }
 
-/// `base + wait`, capped at `limit`: the latest instant a local wait may reach.
-///
 /// A sum that would overflow `Instant` takes `limit`, which every caller already
 /// treats as the outermost bound on its own work.
 fn clamped_deadline(base: Instant, wait: Duration, limit: Instant) -> Instant {
@@ -791,7 +783,6 @@ mod tests {
         assert!(!ran.get());
     }
 
-    /// Collects the fields of every span, from creation and later records.
     #[derive(Clone, Default)]
     struct SpanFields(Arc<std::sync::Mutex<Vec<std::collections::BTreeMap<String, String>>>>);
 

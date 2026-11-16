@@ -13,19 +13,15 @@ pub enum Provider {
         /// `https://<account id>[.eu|.fedramp].r2.cloudflarestorage.com`.
         endpoint: String,
     },
-    /// Railway Buckets (Tigris). Endpoint and region come from the bucket's
-    /// `ENDPOINT` and `REGION` variables.
+    /// Endpoint and region come from the bucket's `ENDPOINT` and `REGION` variables.
     Railway { endpoint: String, region: String },
-    /// Any other S3-compatible store at an HTTPS origin, such as Backblaze
-    /// B2, Ceph, or Hetzner Object Storage. It receives only the common S3
-    /// subset: no upload checksum and no expected bucket owner.
+    /// Receives only the common S3 subset: no upload checksum and no expected bucket owner.
     S3Compatible {
         endpoint: String,
         region: String,
         path_style: bool,
     },
-    /// An S3 emulator for local development and tests. Plaintext is allowed;
-    /// the caller must already have applied the local-only policy.
+    /// Plaintext is allowed; the caller must already have applied the local-only policy.
     Local { endpoint: String, region: String },
 }
 
@@ -44,7 +40,6 @@ impl Provider {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum UploadChecksum {
-    /// Every upload: a header for bytes, an `aws-chunked` trailer for a stream.
     Always,
     /// Bytes only, sent as a signed header: trailer support is undocumented.
     BytesOnly,
@@ -68,11 +63,9 @@ pub(crate) struct Admitted {
     pub(crate) path_style: bool,
     pub(crate) expected_bucket_owner: Option<String>,
     pub(crate) checksum: UploadChecksum,
-    /// The span's `cloud.region`: set only for Amazon S3, where the signing
-    /// region names a real one. Elsewhere it can be a placeholder (`auto`).
+    /// Only Amazon S3; elsewhere the signing region can be a placeholder (`auto`).
     pub(crate) cloud_region: Option<String>,
-    /// [`crate::CredentialSource::WorkloadIdentity`] is accepted: only Amazon
-    /// S3 has an AWS workload identity.
+    /// Only Amazon S3 has an AWS workload identity.
     pub(crate) workload_identity: bool,
 }
 
@@ -164,8 +157,7 @@ enum OriginScheme {
     HttpOrHttps,
 }
 
-/// Reject whitespace, control characters and userinfo before parsing can
-/// normalize them away. Check the remaining origin components after parsing.
+/// Rejects whitespace, control characters and userinfo before parsing can normalize them away.
 fn origin(endpoint: &str, scheme: OriginScheme) -> Result<Url, ConfigError> {
     if shared_rules::uri::has_whitespace_or_control(endpoint)
         || shared_rules::uri::authority_has_userinfo(endpoint)
@@ -261,7 +253,6 @@ mod tests {
         assert_eq!(admitted.checksum, UploadChecksum::Always);
         assert!(!admitted.path_style);
 
-        // Every partition is admitted; its credentials decide what it reaches.
         for region in ["us-gov-west-1", "cn-north-1", "eusc-de-east-1"] {
             let admitted = admit(
                 &Provider::AmazonS3 {
@@ -415,7 +406,6 @@ mod tests {
         assert_eq!(admitted.expected_bucket_owner, None);
         assert_eq!(admitted.checksum, UploadChecksum::Never);
 
-        // A self-hosted store: its own port, path-style, and the default region.
         let admitted = admit(
             &Provider::S3Compatible {
                 endpoint: "https://ceph.internal.example:8443".to_owned(),

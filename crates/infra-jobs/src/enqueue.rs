@@ -18,8 +18,7 @@ const MIN_PAYLOAD_CAPACITY: usize = 256;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct EnqueueOptions<'a> {
-    /// How long the job waits before it may be claimed. The sub-microsecond
-    /// part is dropped. At most [`crate::MAX_DELAY`].
+    /// The sub-microsecond part is dropped. At most [`crate::MAX_DELAY`].
     pub delay: Duration,
     pub unique_key: Option<&'a str>,
 }
@@ -61,8 +60,8 @@ pub enum EnqueueError {
     Database(#[from] sqlx::Error),
 }
 
-/// Count the bytes `serde_json` emits without retaining the JSON. Preflights
-/// own their work budget and apply the size limit to the complete payload.
+/// Counts without retaining the JSON. Preflights own their work budget and
+/// apply the size limit to the complete payload.
 pub fn json_payload_len<T: serde::Serialize + ?Sized>(
     value: &T,
 ) -> Result<usize, serde_json::Error> {
@@ -146,8 +145,6 @@ pub async fn enqueue<K: JobKind>(
     Ok(Enqueued::Created(id))
 }
 
-/// Compare a proposed payload with the live holder of `unique_key`.
-///
 /// Call only after [`enqueue`] returns [`Enqueued::Duplicate`] for the same
 /// kind, key, and payload. The selected row stays locked until the caller
 /// commits or rolls back `tx`; [`LivePayloadComparison::NoLongerLive`] means
@@ -204,18 +201,16 @@ pub async fn compare_live_payload<K: JobKind>(
     })
 }
 
-/// Reserve at most one wake per kind and process per claim cooldown. The slot
-/// is spent before commit, so a skipped wake may leave the job to polling.
+/// The slot is spent before commit, so a skipped wake may leave the job to polling.
 const WAKE_INTERVAL: Duration = crate::claim::CLAIM_COOLDOWN;
 
-/// Reserve this kind's wake slot and report whether the enqueue should send the
-/// notification. Every notifying commit takes PostgreSQL's notify queue lock,
-/// so notifying each enqueue would serialize concurrent committers (measured:
-/// -50% at 16 connections).
+/// Every notifying commit takes PostgreSQL's notify queue lock, so notifying
+/// each enqueue would serialize concurrent committers (measured: -50% at 16
+/// connections).
 ///
-/// The table holds one entry per kind because a worker wakes only for the kinds
-/// it registers: one shared interval would let a notification for one kind
-/// suppress the next kind's, and that kind's worker would wait for its poll.
+/// One entry per kind because a worker wakes only for the kinds it registers:
+/// one shared interval would let one kind's notification suppress the next
+/// kind's, and that kind's worker would wait for its poll.
 fn take_wake_slot(kind: &'static str, now: Instant) -> bool {
     #[cfg(not(feature = "hotpath"))]
     static LAST: Mutex<BTreeMap<&'static str, Instant>> = Mutex::new(BTreeMap::new());
@@ -284,7 +279,6 @@ fn checked_serialized_len(total: usize, chunk_len: usize) -> io::Result<usize> {
         .ok_or_else(|| io::Error::other("serialized payload length overflow"))
 }
 
-/// Validate and bind. A failure has sent nothing.
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 fn prepare<'a, K: JobKind>(
     payload: &K,
@@ -307,7 +301,6 @@ fn prepare<'a, K: JobKind>(
             bytes: writer.total,
         });
     }
-    // A successful serde_json serialization emits UTF-8; reuse its allocation.
     let payload = String::from_utf8(writer.retained).map_err(|error| {
         EnqueueError::Serialize(serde_json::Error::io(io::Error::new(
             io::ErrorKind::InvalidData,

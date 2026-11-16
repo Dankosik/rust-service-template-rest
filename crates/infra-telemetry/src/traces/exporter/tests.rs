@@ -176,12 +176,10 @@ fn collector_root_gets_the_traces_path() {
 fn https_otlp_endpoint_is_admitted_by_the_exporter_client() {
     use futures_util::FutureExt;
 
-    // Without `reqwest-rustls`, reqwest rejects `https://` at export
-    // with "URL scheme is not allowed". Construction succeeding is not
-    // that proof; the request must run. The batch processor hosts the
-    // blocking client off the async workers; a `#[tokio::test]` runtime
-    // cannot drop reqwest's inner runtime. Nothing listens on :1, so
-    // the accepted failure is a transport error, not collector delivery.
+    // Without `reqwest-rustls`, reqwest rejects `https://` only at export, so
+    // the request must run. The batch processor hosts the blocking client off
+    // the async workers; a `#[tokio::test]` runtime cannot drop reqwest's
+    // inner runtime. Nothing listens on :1: a transport error is accepted.
     let exporter = span_exporter(
         &Endpoint::Typed("https://127.0.0.1:1/v1/traces"),
         HashMap::new(),

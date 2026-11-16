@@ -89,8 +89,9 @@ pub struct InvalidParam {
 // contract; `code` is a plain `string` rather than the closed `Code` enum,
 // because oasdiff treats a new enum value in a response as a breaking change
 // and the catalog grows with features; `deny_unknown_fields` is there for the
-// reason given on [`InvalidParam`]. The examples are `Code::BadRequest` as the catalog renders it, so a catalog
-// edit regenerates them instead of leaving a stale copy.
+// reason given on [`InvalidParam`]. The examples are `Code::BadRequest` as the
+// catalog renders it, so a catalog edit regenerates them instead of leaving a
+// stale copy.
 #[serde_with::skip_serializing_none]
 #[derive(Clone, Debug, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -175,7 +176,6 @@ impl Problem {
         self
     }
 
-    /// Emit a `Retry-After` header rounded up to whole seconds (at least one).
     #[must_use]
     pub fn retry_after(mut self, after: Duration) -> Self {
         self.retry_after = Some(after);
@@ -216,14 +216,12 @@ pub(crate) fn complete_problem(mut response: Response, request_id: Option<&str>)
         return response;
     };
     let problem = problem.with_request_id(id.to_owned());
-    // Keep the status and headers already set by the response's owner.
     *response.body_mut() = axum::Json(&problem).into_response().into_body();
     response.headers_mut().remove(CONTENT_LENGTH);
     response.extensions_mut().insert(problem);
     response
 }
 
-/// Whole seconds, rounded up and at least one.
 fn retry_after_value(after: Duration) -> HeaderValue {
     let seconds = after
         .as_secs()
@@ -251,21 +249,13 @@ pub(crate) fn sanitized_internal_error() -> Response {
     sanitized_problem().into_response()
 }
 
-/// Reusable problem responses (`#/components/responses/<Name>`) and their
-/// registration in the document.
-///
-/// Each newtype is the declared shape of one status an operation can answer
-/// with a [`Problem`]; an operation references it as
-/// `(status = <code>, response = <Name>)`. The types exist for the document
-/// and are not constructed at runtime: the runtime value is always a
-/// `Problem`, whose code fixes the status. Their names are distinct from
-/// [`Code`] on purpose: `Code::BadRequest` is what a handler returns,
-/// `responses::BadRequest` is what the contract declares. A new status joins
-/// this module with its first operation; the shared transport set is
-/// [`responses::TransportProblemResponses`]. A response family owned by one
-/// optional pack lives with that pack's seam instead: `authn`, `webhooks`, and
-/// `idempotency`. Doc comments on the newtypes are the response descriptions
-/// in the contract.
+/// Declared shapes (`#/components/responses/<Name>`) never constructed at
+/// runtime: the runtime value is always a [`Problem`], whose code fixes the
+/// status. Names differ from [`Code`] on purpose: `Code::BadRequest` is what a
+/// handler returns, `responses::BadRequest` what the contract declares. A
+/// response family owned by one optional pack lives with that pack's seam
+/// (`authn`, `webhooks`, `idempotency`). Doc comments on the newtypes are the
+/// response descriptions in the contract.
 pub mod responses {
     use utoipa::{IntoResponses, OpenApi, ToResponse};
 
@@ -291,14 +281,10 @@ pub mod responses {
     #[response(content_type = "application/problem+json")]
     pub struct GatewayTimeout(pub Problem);
 
-    /// The shared transport answers operations can declare without colliding
-    /// with probe-owned 503 `text/plain`.
-    /// The hardened chain also emits Problem 503/504/408/405 at runtime; those
-    /// stay out of this group (ready already documents 503 as `text/plain`).
-    /// Header overflow is hyper-native 431 before the router, not a
-    /// `Problem`. Name this type in `responses(...)` beside the operation's
-    /// own answers; a new shared *Problem* status joins here once instead
-    /// of in every operation.
+    /// Shared transport answers that do not collide with probe-owned 503
+    /// `text/plain`. The runtime Problem 503/504/408/405 stay out of this group
+    /// (ready already documents 503 as `text/plain`); header overflow is
+    /// hyper-native 431 before the router.
     #[derive(Debug, IntoResponses)]
     pub enum TransportProblemResponses {
         #[response(status = 400)]

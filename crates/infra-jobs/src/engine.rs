@@ -32,8 +32,6 @@ pub(crate) const RECORD_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 pub(crate) const OPERATION_BACKSTOP: Duration = Duration::from_secs(12);
 const OPERATION_FAILURES_METRIC: &str = "jobs_worker_operation_failures_total";
 
-/// A worker's job engine: one kind set, its attempt slots, and its claim loop.
-///
 /// Not `Clone`, and [`Self::start`] consumes it: a second claim loop on the
 /// same state would let [`Started::drained`] resolve before its attempts end
 /// and exceed each kind's `max_running`.
@@ -61,13 +59,9 @@ pub struct DrainEnd {
     pub timed_out: bool,
 }
 
-/// Why one engine statement did not finish with an acknowledgement.
-///
-/// A failure to `BEGIN` a transaction, or to commit one, reports as
-/// [`Self::Statement`] just like a failed statement, so a caller cannot tell
-/// the three apart. An unknown commit does not prove the write absent: the
-/// retention batch may have deleted its rows before the commit outcome was
-/// lost.
+/// `BEGIN` and commit failures report as [`Self::Statement`]. An unknown commit
+/// does not prove the write absent: the retention batch may have deleted its
+/// rows before the commit outcome was lost.
 #[derive(Debug, thiserror::Error)]
 pub enum OperationError {
     #[error("acquire")]
@@ -89,18 +83,9 @@ impl OperationError {
     }
 }
 
-/// Preserves [`OperationError::Acquire`] and maps begin and commit failures to
-/// [`OperationError::Statement`].
-///
-/// `Begin`, `CommitFailed`, and `CommitUnknown` keep the driver error as the
-/// source and the `statement` label, with no variant, label, or metric
-/// vocabulary of their own. A `Transaction(TxError)` variant that preserved
-/// `is_commit_unknown` the way the operator's error does would be a public
-/// change, and it would buy the engine nothing: its only writing transaction
-/// is the retention batch's delete of expired completed rows, which is
-/// idempotent. A retry after an unknown commit removes whatever rows are left,
-/// the same state a retry after a failed statement reaches; only the next
-/// pass's row count differs.
+/// No commit-unknown variant: the engine's only writing transaction is the
+/// idempotent retention delete, so a retry after an unknown commit reaches the
+/// same state as a retry after a failed statement.
 impl From<infra_postgres::TxError> for OperationError {
     fn from(error: infra_postgres::TxError) -> Self {
         match error {
@@ -113,7 +98,6 @@ impl From<infra_postgres::TxError> for OperationError {
 }
 
 impl Engine {
-    /// Build an engine over a writable UTF8 pool with READ COMMITTED defaults.
     /// Call [`Self::check_startup`] before starting it. Does no I/O.
     ///
     /// This engine owns what a worker process needs once: the `LISTEN`
@@ -122,20 +106,17 @@ impl Engine {
     ///
     /// Construction registers this engine's kinds as a process peer and drops
     /// the published sampling result, so a sample that did not see them is
-    /// never published as current. [`Self::start`] adds no peer.
+    /// never published as current.
     #[must_use]
     pub fn new(pool: PgPool, registry: Kinds, max_workers: NonZeroU32) -> Self {
         Self::build(pool, registry, max_workers, Role::Owner)
     }
 
-    /// A second engine of the same worker process on the same pool, with its
-    /// own kinds, slots, and claim loop, so its work is not delayed by this
-    /// engine's occupied slots.
+    /// A second engine on the same pool with its own kinds, slots, and claim
+    /// loop, so its work is not delayed by this engine's occupied slots.
     ///
     /// It claims under this engine's worker id, and this engine's listener,
-    /// retention, and sampling serve it: start both. Construction registers its
-    /// kinds as a process peer beside this engine's and drops the published
-    /// sampling result.
+    /// retention, and sampling serve it: start both.
     #[must_use]
     pub fn beside(&self, registry: Kinds, max_workers: NonZeroU32) -> Self {
         Self::build(
@@ -191,10 +172,8 @@ impl Engine {
         maintenance::remove_expired(&self.shared).await
     }
 
-    /// Spawn the claim loop on `tracker`, and for an engine built with
-    /// [`Self::new`] also the listener, retention, and process-wide sampling.
-    ///
-    /// Each task runs under a child of `cancel`. Does no I/O before it returns.
+    /// Spawns the claim loop, and for an engine built with [`Self::new`] also
+    /// the listener, retention, and process-wide sampling.
     #[must_use]
     pub fn start(self, tracker: &TaskTracker, cancel: &CancellationToken) -> Started {
         crate::attempt::describe_metrics();
@@ -274,11 +253,8 @@ impl Started {
         self.shared.drain.wait().await;
     }
 
-    /// Cancel unfinished handlers and finish known outcomes inside `budget`.
-    /// Supervisors retain ownership; this method never writes queue rows.
-    ///
-    /// The first call fixes the cleanup deadline. It holds even if this future
-    /// is dropped, and a later call waits for the same deadline.
+    /// Supervisors retain ownership; this method never writes queue rows. The
+    /// first call fixes the cleanup deadline even if this future is dropped.
     #[must_use]
     pub async fn cancel_and_finish(&self, budget: Duration) -> DrainEnd {
         self.stop_claiming();
@@ -446,14 +422,10 @@ impl Drop for DrainParticipant {
     }
 }
 
-/// Ends its start when the supervised attempt ends abnormally.
-///
-/// Armed before submission, including when the supervisor is never polled, so
-/// custody does not depend on the supervisor being run. `stop` is the
-/// claim-stop token of the engine that admitted the claim: an abnormal end, or
-/// an abort while the supervisor is still running, fails the engine through
-/// `failure` and stops new claim rounds through `stop`. The running round keeps
-/// its custody. [`Started::drained`] waits for the claim loop and all supervisors.
+/// Armed before submission, so custody does not depend on the supervisor being
+/// polled. An abnormal end, or an abort while the supervisor runs, fails the
+/// engine and stops new claim rounds through `stop`, the claim-stop token of the
+/// engine that admitted the claim. The running round keeps its custody.
 pub(crate) struct SupervisorGuard {
     stop: CancellationToken,
     failure: CancellationToken,
@@ -505,12 +477,8 @@ impl Drop for SupervisorGuard {
     }
 }
 
-/// Dropped when its task ends, a panic included: an end before the token
-/// was cancelled, or any panic during shutdown, fails the engine.
-///
-/// The worker's staged shutdown owns the order in which work stops after this
-/// guard signals failure. [`SupervisorGuard`] also stops claiming when the
-/// attempt it guards can no longer settle its claim.
+/// An end before the token was cancelled, or any panic during shutdown, fails
+/// the engine. The worker's staged shutdown owns the stop order after that.
 fn task_guard(
     task: &'static str,
     token: CancellationToken,
@@ -562,9 +530,6 @@ impl fmt::Debug for Shared {
     }
 }
 
-/// A forced cleanup: the token supervisors cancel their handlers on, and the
-/// deadline they stop waiting at.
-///
 /// [`Self::begin`] fixes the deadline before it fires the token, so a
 /// supervisor that sees the cancellation also sees the deadline.
 #[derive(Default)]
@@ -580,8 +545,6 @@ struct CleanupWindow {
 }
 
 impl ForcedCleanup {
-    /// The first call fixes the deadline at `budget` from now; a later call
-    /// keeps it.
     fn begin(&self, budget: Duration) -> Instant {
         let window = self.window.get_or_init(|| {
             let started_at = Instant::now();
@@ -607,8 +570,6 @@ impl ForcedCleanup {
             .is_some_and(|window| window.started_at < deadline)
     }
 
-    /// Resolves once the budget of a forced cleanup is spent; pending until
-    /// a cleanup is forced.
     pub(crate) async fn ended(&self) {
         self.force.cancelled().await;
         match self.window.get() {

@@ -31,7 +31,6 @@ const PUBLISH_ADMISSION_REFUSED_TOTAL: &str = "messaging_publish_admission_refus
 #[derive(Debug)]
 pub(crate) struct PublishMetrics {
     outcomes: Outcomes<PublishOutcome>,
-    /// Native admission refusals: every ACK permit was occupied.
     admission_refused: metrics::Counter,
 }
 
@@ -58,8 +57,7 @@ pub struct PublishAck {
 }
 
 impl Producer {
-    /// Dispatches and awaits one confirmed `JetStream` acknowledgment within
-    /// `context`, at most one [`BROKER_OPERATION_BUDGET`] away.
+    /// Bounded by `context` and at most one [`BROKER_OPERATION_BUDGET`].
     pub async fn publish(
         &self,
         event: &PreparedEvent,
@@ -129,7 +127,6 @@ impl Producer {
     }
 }
 
-/// Finalizes the source/outbox envelope before checking this resource's wire bounds.
 fn source_message(
     event: &PreparedEvent,
     span: &tracing::Span,
@@ -165,9 +162,6 @@ impl From<PublicationFailure> for PublishError {
     }
 }
 
-/// Sends the finalized message unchanged and awaits its `JetStream` acknowledgement.
-/// The native client enforces broker size and shared publication admission.
-///
 /// Unlike [`Producer::publish`], this records no span, outcome metric or
 /// drain check; the caller owns those. A full publication window still counts
 /// toward `messaging_publish_admission_refused_total`.

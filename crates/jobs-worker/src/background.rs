@@ -5,8 +5,6 @@ use tokio::task::AbortHandle;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-/// The worker's background tasks and their root cancellation token.
-///
 /// Every task runs until its token is cancelled, and nothing cancels before
 /// teardown, so a task that ends earlier is a panic or a defect: the worker
 /// stops rather than run without it, as the service does. A task spawned

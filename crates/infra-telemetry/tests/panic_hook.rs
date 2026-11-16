@@ -1,5 +1,5 @@
-//! The panic hook and installed subscriber are process-wide. The existing
-//! isolated binary captures their actual output in one bounded child per format.
+//! The panic hook and subscriber are process-wide; one child process per
+//! format captures their actual output.
 
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};

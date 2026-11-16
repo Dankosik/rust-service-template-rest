@@ -26,8 +26,6 @@ use crate::problem::{Code, Problem, body_too_large, sanitized_internal_error};
 /// endpoint is caller-controlled and never becomes a label.
 pub(crate) const WEBHOOK_INGRESS_OUTCOMES_METRIC: &str = "webhook_ingress_outcomes_total";
 
-/// Route state supplied by the composition root.
-///
 /// The route is retained when the inbound profile is selected even if no
 /// endpoint is configured.  That inert state deliberately answers unknown
 /// endpoint before a body is read or signature work starts.
@@ -46,7 +44,6 @@ impl fmt::Debug for WebhookState {
 }
 
 impl WebhookState {
-    /// An enabled inbound profile with no receiving endpoint bindings.
     #[must_use]
     pub const fn inert() -> Self {
         Self { receiver: None }
@@ -109,15 +106,12 @@ enum WebhookProblemResponses {
     Timeout(#[ref_response] GatewayTimeout),
 }
 
-/// The webhook response family's components, registered by [`router`].
 #[derive(OpenApi)]
 #[openapi(components(responses(NotFound, WebhookRejected, ServiceUnavailable, GatewayTimeout)))]
 struct WebhookComponents;
 
-/// The public webhook route with its annotated contract. The state is any
-/// type that hands out a [`WebhookState`]: the composition root keeps the
-/// receiver in its application state, and a route mounted without one does
-/// not compile.
+/// The state is any type that hands out a [`WebhookState`], so a route mounted
+/// without one does not compile.
 #[must_use]
 pub fn router<S>() -> OpenApiRouter<S>
 where
@@ -240,11 +234,9 @@ fn unknown_endpoint() -> Response {
     Problem::new(Code::NotFound).into_response()
 }
 
-/// The outcome of a delivery to a configured endpoint.
 enum EndpointOutcome {
     Accepted,
     Duplicate,
-    /// Carries the static `reason` label.
     Rejected(&'static str),
     Unavailable,
     DeadlineExceeded,

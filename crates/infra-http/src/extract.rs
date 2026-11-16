@@ -285,8 +285,7 @@ fn invalid_path(name: Option<&str>) -> Problem {
     )
 }
 
-/// A rejection the caller cannot cause: the handler's extractor does not fit
-/// its route. Logged for the operator, sanitized for the caller.
+/// The handler's extractor does not fit its route: logged, sanitized for the caller.
 fn wiring_failure(extractor: &'static str) -> Problem {
     tracing::error!(extractor, "http_extractor_wiring_failed");
     sanitized_problem()
@@ -301,8 +300,7 @@ fn with_param(problem: Problem, name: Option<String>) -> Problem {
     }
 }
 
-/// Where deserialization failed, which axum's extractors record through
-/// `serde_path_to_error` and keep in the rejection's source chain.
+/// Axum's extractors record this through `serde_path_to_error` in the rejection's source chain.
 fn failed_member<'a, E>(
     rejection: &'a (dyn StdError + 'static),
 ) -> Option<&'a serde_path_to_error::Path>
@@ -479,7 +477,6 @@ mod tests {
             .unwrap()
     }
 
-    /// The problem body, after checking the envelope every rejection shares.
     async fn problem(response: Response, status: StatusCode, code: &str) -> Value {
         assert_eq!(response.status(), status);
         assert_eq!(

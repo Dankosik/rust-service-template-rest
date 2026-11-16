@@ -44,7 +44,7 @@ impl Completions {
     }
 }
 
-/// One writer per deadline. No writer can hold another deadline's queue.
+/// One writer per deadline, so no writer holds another deadline's queue.
 #[derive(Default)]
 struct CompletionGroup {
     queued: Mutex<Vec<QueuedCompletion>>,
@@ -180,8 +180,6 @@ impl Drop for CompletionBatch {
     }
 }
 
-/// COMPLETE for one fenced claim, for the caller to execute.
-///
 /// Every outcome write fences on `claim_expires_at IS NOT NULL`, which the
 /// table's CHECK makes equivalent to `state = 'running'`. A literal
 /// `state = 'running'` proves the partial `background_jobs_running` predicate,

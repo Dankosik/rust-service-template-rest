@@ -116,8 +116,7 @@ struct Inner {
     audience: ServiceName,
     jwt_type: JwtType,
     trust: TrustRegistry,
-    /// Registered once: a success is the hot path, and a registry lookup per
-    /// call costs more than the increment.
+    /// Registered once: a registry lookup per call costs more than the increment.
     verified: metrics::Counter,
     /// Registered on a reason's first refusal, so the exposition lists only
     /// reasons that happened.
@@ -177,7 +176,6 @@ impl Verifier {
         self.0.trust.callers()
     }
 
-    /// Verifies the `Authorization` values of one call and names its caller.
     /// Records one outcome; a failure logs only its closed reason.
     pub fn authenticate<'a>(
         &self,
@@ -438,9 +436,9 @@ impl Audience<'_> {
     }
 }
 
-/// An RFC 7519 `NumericDate`: an unsigned integer, or a number with a
-/// fraction read by [`shared_rules::rfc7519::numeric_date_seconds`]. The half
-/// second its rounding can move a bound is inside [`LEEWAY_SECONDS`].
+/// An RFC 7519 `NumericDate`; fraction rounding (via
+/// [`shared_rules::rfc7519::numeric_date_seconds`]) moves a bound by at most
+/// half a second, inside [`LEEWAY_SECONDS`].
 struct NumericDate(u64);
 
 impl<'de> Deserialize<'de> for NumericDate {

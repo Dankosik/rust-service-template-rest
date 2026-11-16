@@ -14,10 +14,9 @@ use crate::error::{Failure, LocalFailure};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
-/// Source polls one [`ExactLength::poll_frame`] call makes before it yields,
-/// so a source of ready empty frames cannot monopolize the caller's task.
-/// Tokio's cooperative budget would not bound it: a custom source body need
-/// not touch a Tokio resource.
+/// Bounds source polls per yield so ready empty frames cannot monopolize the
+/// task; Tokio's cooperative budget would not, as a custom body need not touch
+/// a Tokio resource.
 const SOURCE_POLLS_PER_YIELD: usize = 64;
 
 #[derive(Debug)]
@@ -43,15 +42,12 @@ impl UploadSource {
 }
 
 impl PutBody {
-    /// A streamed body that must yield exactly `len` bytes. A body that
-    /// yields more or fewer fails the put with
+    /// A body yielding more or fewer than `len` bytes fails the put with
     /// [`crate::ObjectStorageError::Rejected`] instead of storing a truncated object.
     ///
-    /// The caller owns finite source storage, frame sizes and concurrent uploads.
-    /// Each custom [`Body::poll_frame`] call must do finite, trusted, nonblocking
-    /// work: the wrapper yields after at most 64 source polls, but cannot preempt
-    /// one callback that does not return. The upload retains its existing operation
-    /// deadline and admission until completion, error or cancellation.
+    /// The caller owns source storage, frame sizes and concurrent uploads. Each
+    /// [`Body::poll_frame`] must do finite, trusted, nonblocking work: the wrapper
+    /// yields after 64 source polls but cannot preempt a callback that never returns.
     pub fn stream<B, E>(len: u64, body: B) -> Self
     where
         B: Body<Data = Bytes, Error = E> + Send + 'static,
@@ -75,8 +71,8 @@ impl PutBody {
         self.len == 0
     }
 
-    /// hyper never polls a body declared empty, so validate an empty stream
-    /// before sending and normalize its EOF to an in-memory body.
+    /// hyper never polls a body declared empty: validate it and normalize its EOF
+    /// to an in-memory body.
     pub(crate) async fn normalize_empty_stream(mut self) -> Result<Self, Failure> {
         if self.len != 0 || matches!(self.source, UploadSource::InMemory) {
             return Ok(self);
@@ -89,7 +85,7 @@ impl PutBody {
     }
 }
 
-/// In-memory bytes. The SDK can sign a checksum of them as a header.
+/// The SDK can sign a checksum of in-memory bytes as a header.
 impl From<Bytes> for PutBody {
     fn from(bytes: Bytes) -> Self {
         Self {
@@ -111,13 +107,11 @@ impl From<Vec<u8>> for PutBody {
 struct LengthMismatch;
 
 struct ExactLength {
-    /// The SDK requires a `Sync` body, and a request body (axum's `Body`)
-    /// is not one. The wrapper is sound here: a body is polled only through
-    /// `&mut`.
+    /// The SDK requires `Sync` and axum's `Body` is not; sound here because a body is
+    /// polled only through `&mut`.
     inner: SyncWrapper<UnsyncBoxBody<Bytes, BoxError>>,
     remaining: u64,
     held: Option<Frame<Bytes>>,
-    /// Trailers seen while confirming the end, returned after `held`.
     trailers: Option<Frame<Bytes>>,
     ended: bool,
     mismatch: Arc<AtomicBool>,
@@ -174,7 +168,6 @@ impl Body for ExactLength {
             match polled {
                 Some(Ok(frame)) => {
                     let Some(data) = frame.data_ref() else {
-                        // Trailers end the data; the held frame goes first.
                         if self.remaining != 0 {
                             return self.refuse();
                         }
