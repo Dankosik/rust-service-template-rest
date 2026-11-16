@@ -464,7 +464,9 @@ mod tests {
                 max_body_bytes: 64,
                 request_timeout: Duration::from_secs(1),
                 max_in_flight: None,
+                admission_wait: Duration::from_secs(1),
                 log_health_probes: false,
+                draining: None,
             },
         );
         let mut body = app
@@ -520,7 +522,9 @@ mod tests {
                 max_body_bytes: 64,
                 request_timeout: Duration::from_mins(1),
                 max_in_flight: std::num::NonZeroU32::new(2),
+                admission_wait: Duration::from_mins(1),
                 log_health_probes: false,
+                draining: None,
             },
         );
         let request = Request::builder().uri("/hang").body(Body::empty()).unwrap();
@@ -584,7 +588,9 @@ mod tests {
                 max_body_bytes: 64,
                 request_timeout: Duration::from_secs(5),
                 max_in_flight: std::num::NonZeroU32::new(2),
+                admission_wait: Duration::from_secs(5),
                 log_health_probes: false,
+                draining: None,
             },
         );
         drop(app.oneshot(request).await.unwrap());

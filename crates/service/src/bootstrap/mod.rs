@@ -562,7 +562,9 @@ async fn start(
                 .unwrap_or(usize::MAX),
             request_timeout: config.http.request_timeout,
             max_in_flight: config.http.in_flight_cap(),
+            admission_wait: config.http.admission_wait_cap(),
             log_health_probes: config.http.access_log_health_probes,
+            draining: Some(readiness.reader()),
         },
     );
     #[cfg(feature = "hotpath")]

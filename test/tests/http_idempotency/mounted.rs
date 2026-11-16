@@ -575,7 +575,9 @@ impl Mounted {
                 max_body_bytes: MAX_BODY_BYTES,
                 request_timeout: budget,
                 max_in_flight: NonZeroU32::new(16),
+                admission_wait: budget,
                 log_health_probes: false,
+                draining: None,
             },
         );
         Self {
@@ -937,7 +939,9 @@ async fn final_document_controls_head_policy_and_preserves_native_fallbacks() {
             max_body_bytes: MAX_BODY_BYTES,
             request_timeout: BUDGET,
             max_in_flight: NonZeroU32::new(16),
+            admission_wait: BUDGET,
             log_health_probes: false,
+            draining: None,
         },
     ));
     let explicit = server
@@ -996,7 +1000,9 @@ fn timeout_router(verifier: Verifier, timeout: Duration, delay: Duration) -> Rou
             max_body_bytes: MAX_BODY_BYTES,
             request_timeout: timeout,
             max_in_flight: NonZeroU32::new(16),
+            admission_wait: timeout,
             log_health_probes: false,
+            draining: None,
         },
     )
 }
@@ -1086,7 +1092,9 @@ async fn authentication_and_scope_authorization_work_without_a_composer() {
             max_body_bytes: MAX_BODY_BYTES,
             request_timeout: BUDGET,
             max_in_flight: NonZeroU32::new(16),
+            admission_wait: BUDGET,
             log_health_probes: false,
+            draining: None,
         },
     ));
     let mut responses = Vec::new();
@@ -1165,7 +1173,9 @@ async fn scope_alternatives_are_ored_and_scopes_within_one_are_anded() {
             max_body_bytes: MAX_BODY_BYTES,
             request_timeout: BUDGET,
             max_in_flight: NonZeroU32::new(16),
+            admission_wait: BUDGET,
             log_health_probes: false,
+            draining: None,
         },
     ));
 

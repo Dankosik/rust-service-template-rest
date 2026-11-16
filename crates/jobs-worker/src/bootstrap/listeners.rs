@@ -95,7 +95,9 @@ fn harden_options(config: &Config) -> HardenOptions {
         max_body_bytes: usize::try_from(config.http.max_body_bytes.as_u64()).unwrap_or(usize::MAX),
         request_timeout: config.http.request_timeout,
         max_in_flight: config.http.in_flight_cap(),
+        admission_wait: config.http.admission_wait_cap(),
         log_health_probes: config.http.access_log_health_probes,
+        draining: None,
     }
 }
 

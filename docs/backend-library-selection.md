@@ -68,6 +68,13 @@ CPU per request stayed within ±1% for both options (plain and 64 KiB JSON, five
 
 Docker (since Engine 25), containerd (since 1.8), and systemd (since 240) start containers with a soft `RLIMIT_NOFILE` of `1,024` under a higher hard limit for legacy `select(2)` compatibility; raising soft to hard at startup via `rlimit` prevents `EMFILE` accept failures around 1,000 connections while leaving the hard ceiling platform-owned.
 
+### Overload admission and rollout
+
+Measured on a 4-vCPU Xeon 8168 DigitalOcean c-4 (Debian 13, service on two CPUs with two workers, loopback):
+
+- **`http.admission_wait` of 1 s instead of waiting the whole `http.request_timeout`.** The request budget starts at arrival, so a request admitted at the end of an 8 s wait has no time left. With 16 slots and a 500 ms handler (capacity 32 req/s) and an open-loop arrival of 64 req/s, the 8 s wait answered every request `504` (goodput 0); at 40 req/s successes took 5.8 s (p99 7.9 s). A 200 ms wait kept goodput at 31.8 req/s with successes in 0.69 s and `503` in 0.2 s; a 1 s wait kept 32.0 req/s with successes in 1.49 s. The default matches `grpc.admission_wait`. Reopen for a queue discipline (LIFO, CoDel) if a 1 s tail under overload is too long.
+- **HTTP/1 responses carry `Connection: close` while readiness is draining.** hyper closes a keep-alive connection that is between requests as soon as the listener drains; a client that keeps sending through the readiness propagation delay (a Kubernetes Service, a direct caller) lost one request on each of 256 connections with a 50 µs handler and on 20–27 of 256 with a 10 ms handler. With the header every connection is retired by its own next response during the delay. A client that reopens a connection to the same replica at the instant the listener stops can still lose that request; HTTP/2 and gRPC lost none (`GOAWAY`).
+
 ## Unadopted candidates for future features
 
 | Need | Candidate | Boundary to preserve |

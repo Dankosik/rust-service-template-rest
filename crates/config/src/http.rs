@@ -7,8 +7,9 @@ use serde::Deserialize;
 use shared_rules::hyper::HTTP1_MIN_READ_BUFFER_BYTES;
 
 use crate::listener_limits::{
-    DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_IN_FLIGHT, DEFAULT_REQUEST_TIMEOUT, connection_age_range,
-    connection_count_range, in_flight_range, request_budget_fits_drain, request_timeout_range,
+    DEFAULT_ADMISSION_WAIT, DEFAULT_MAX_CONNECTIONS, DEFAULT_MAX_IN_FLIGHT,
+    DEFAULT_REQUEST_TIMEOUT, connection_age_range, connection_count_range, in_flight_range,
+    request_budget_fits_drain, request_timeout_range,
 };
 use crate::validate::{ValidationError, Violations, duration_range, int_range};
 
@@ -61,10 +62,18 @@ pub struct HttpConfig {
     /// A declared request body length above this ceiling answers 413.
     /// Streaming bodies are checked as handlers or extractors read them.
     pub max_body_bytes: ByteSize,
-    /// Concurrent handler executions before shedding with 503. Zero disables
-    /// shedding; [`Self::in_flight_cap`] gives the adapter form.
+    /// Concurrent handler executions. A request over the limit waits up to
+    /// `admission_wait` for a slot and is then shed with 503. Zero disables
+    /// the limit; [`Self::in_flight_cap`] gives the adapter form.
     #[serde(deserialize_with = "crate::de::unsigned_count")]
     pub max_in_flight: u32,
+    /// Longest wait for a handler slot, never longer than `request_timeout`;
+    /// [`Self::admission_wait_cap`] gives the adapter form. The wait is
+    /// spent out of the request budget: a wait near the whole budget admits
+    /// requests with no time left to finish, so overload ends in 504s
+    /// instead of 503s. Zero sheds at once.
+    #[serde(with = "humantime_serde")]
+    pub admission_wait: Duration,
     /// Accepted connections at once. At the cap the accept loop closes the
     /// socket with no HTTP response. Zero accepts without a bound;
     /// [`Self::connection_cap`] gives the adapter form.
@@ -93,6 +102,7 @@ impl Default for HttpConfig {
             max_header_bytes: ByteSize::kib(16),
             max_body_bytes: ByteSize::mib(1),
             max_in_flight: DEFAULT_MAX_IN_FLIGHT,
+            admission_wait: DEFAULT_ADMISSION_WAIT,
             max_connections: DEFAULT_MAX_CONNECTIONS,
             max_connection_age: Duration::ZERO,
             access_log_health_probes: false,
@@ -136,6 +146,11 @@ impl HttpConfig {
     #[must_use]
     pub fn in_flight_cap(&self) -> Option<NonZeroU32> {
         NonZeroU32::new(self.max_in_flight)
+    }
+
+    #[must_use]
+    pub fn admission_wait_cap(&self) -> Duration {
+        self.admission_wait.min(self.request_timeout)
     }
 
     #[must_use]
@@ -221,6 +236,11 @@ impl HttpConfig {
             1..=ByteSize::gib(1).as_u64(),
         ));
         v.check(in_flight_range("http.max_in_flight", self.max_in_flight));
+        v.check(duration_range(
+            "http.admission_wait",
+            self.admission_wait,
+            Duration::ZERO..=Duration::from_mins(10),
+        ));
         v.check(connection_count_range(
             "http.max_connections",
             self.max_connections,
@@ -291,6 +311,44 @@ mod tests {
         })
         .unwrap_err();
         assert!(errors.names("http.request_timeout"));
+    }
+
+    #[test]
+    fn the_admission_wait_defaults_to_a_second_and_never_outlasts_the_request_budget() {
+        let defaults = HttpConfig::default();
+        assert_eq!(defaults.admission_wait_cap(), Duration::from_secs(1));
+        let short_budget = HttpConfig {
+            request_timeout: Duration::from_millis(500),
+            ..HttpConfig::default()
+        };
+        validate_with(|v| {
+            short_budget.validate(v);
+        })
+        .unwrap();
+        assert_eq!(
+            short_budget.admission_wait_cap(),
+            Duration::from_millis(500)
+        );
+        let immediate = HttpConfig {
+            admission_wait: Duration::ZERO,
+            ..HttpConfig::default()
+        };
+        validate_with(|v| {
+            immediate.validate(v);
+        })
+        .unwrap();
+        assert_eq!(immediate.admission_wait_cap(), Duration::ZERO);
+        let unbounded = HttpConfig {
+            admission_wait: Duration::from_mins(11),
+            ..HttpConfig::default()
+        };
+        assert!(
+            validate_with(|v| {
+                unbounded.validate(v);
+            })
+            .unwrap_err()
+            .names("http.admission_wait")
+        );
     }
 
     #[test]

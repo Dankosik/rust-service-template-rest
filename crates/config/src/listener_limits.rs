@@ -4,6 +4,7 @@ use crate::validate::{ValidationError, duration_range, int_range};
 
 pub(super) const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
 pub(super) const DEFAULT_MAX_IN_FLIGHT: u32 = 256;
+pub(super) const DEFAULT_ADMISSION_WAIT: Duration = Duration::from_secs(1);
 pub(super) const DEFAULT_MAX_CONNECTIONS: u32 = 4096;
 
 pub(super) fn request_timeout_range(key: &str, value: Duration) -> Result<(), ValidationError> {

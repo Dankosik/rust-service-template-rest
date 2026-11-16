@@ -31,7 +31,9 @@ fn harden(app: Router) -> Router {
             max_body_bytes: 64,
             request_timeout: Duration::from_secs(30),
             max_in_flight: None,
+            admission_wait: Duration::from_secs(30),
             log_health_probes: false,
+            draining: None,
         },
     )
 }

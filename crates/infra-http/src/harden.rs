@@ -8,12 +8,14 @@ use axum::Router;
 use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, MatchedPath, Request, State};
 use axum::http::header::{
-    CONTENT_ENCODING, CONTENT_LENGTH, TRAILER, TRANSFER_ENCODING, X_CONTENT_TYPE_OPTIONS,
+    CONNECTION, CONTENT_ENCODING, CONTENT_LENGTH, TRAILER, TRANSFER_ENCODING,
+    X_CONTENT_TYPE_OPTIONS,
 };
-use axum::http::{HeaderValue, StatusCode};
+use axum::http::{HeaderValue, StatusCode, Version};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum_tracing_opentelemetry::middleware::OtelInResponseLayer;
+use health::{NotReady, ReadinessReader};
 use http_body::Body as _;
 use http_body_util::{BodyExt as _, LengthLimitError, Limited};
 use tokio::sync::Semaphore;
@@ -40,7 +42,12 @@ pub struct HardenOptions {
     pub max_body_bytes: usize,
     pub request_timeout: Duration,
     pub max_in_flight: Option<NonZeroU32>,
+    pub admission_wait: Duration,
     pub log_health_probes: bool,
+    /// While this reader reports draining, HTTP/1 responses carry
+    /// `Connection: close`, so keep-alive clients reconnect elsewhere before
+    /// the listener stops instead of losing a request sent to a closed socket.
+    pub draining: Option<ReadinessReader>,
 }
 
 pub fn harden(routes: Router, options: &HardenOptions) -> Router {
@@ -50,13 +57,19 @@ pub fn harden(routes: Router, options: &HardenOptions) -> Router {
         middleware::from_fn_with_state(
             Arc::new(Admission {
                 permits: Semaphore::new(limit.get() as usize),
-                patience: options.request_timeout,
+                patience: options.admission_wait,
             }),
             admit,
         )
     });
 
+    let closing = options
+        .draining
+        .clone()
+        .map(|draining| middleware::from_fn_with_state(draining, close_while_draining));
+
     let chain = ServiceBuilder::new()
+        .layer(option_layer(closing))
         .map_request(request_id::sanitize)
         .layer(SetRequestIdLayer::new(
             request_id::REQUEST_ID_HEADER,
@@ -91,6 +104,21 @@ pub fn harden(routes: Router, options: &HardenOptions) -> Router {
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed);
     routes.layer(chain)
+}
+
+async fn close_while_draining(
+    State(readiness): State<ReadinessReader>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let http1 = request.version() <= Version::HTTP_11;
+    let mut response = next.run(request).await;
+    if http1 && matches!(readiness.verdict(), Err(NotReady::Draining)) {
+        response
+            .headers_mut()
+            .insert(CONNECTION, HeaderValue::from_static("close"));
+    }
+    response
 }
 
 async fn limit_body(State(max_bytes): State<usize>, request: Request, next: Next) -> Response {
