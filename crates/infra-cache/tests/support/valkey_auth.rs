@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use infra_cache::Cache;
+use infra_cache::{Cache, namespace};
 use redis::Value;
 use tokio::io::{AsyncRead, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
@@ -402,7 +402,7 @@ async fn replacement_password_is_authenticated_on_retained_and_new_connections()
             )
         })
         .expect("admit authenticated password-file cache");
-        let namespace = cache.namespace("rotation_auth");
+        let namespace = cache.namespace(namespace!("rotation_auth"));
         let first = next_exchange(&mut events).await;
         assert_exchange(
             &first,

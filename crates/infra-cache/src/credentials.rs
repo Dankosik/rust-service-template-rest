@@ -17,10 +17,30 @@ pub(crate) struct PasswordFile {
     reading: Arc<Semaphore>,
 }
 
+/// Why a read on an open connection produced no password. Only [`Io`] and
+/// [`Empty`] also occur at admission, where they become a [`CacheError`].
+///
+/// [`Io`]: ReadFailure::Io
+/// [`Empty`]: ReadFailure::Empty
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub(crate) enum ReadFailure {
+    #[error("cache password file could not be read ({0})")]
+    Io(ErrorKind),
+    #[error("cache password file is empty")]
+    Empty,
+    #[error("cache password file read is refused while an earlier read is still running")]
+    Busy,
+    #[error("cache password file read did not finish within its bound")]
+    TimedOut,
+    #[error("cache password file read panicked")]
+    Panicked,
+}
+
 impl PasswordFile {
     pub(crate) fn admit(path: PathBuf, username: Option<&str>) -> Result<Self, CacheError> {
-        let content = read_password_file(&path)?;
-        password_from(content)?;
+        let content =
+            read_password_file(&path).map_err(|kind| CacheError::PasswordFile { kind })?;
+        password_from(content).ok_or(CacheError::PasswordFileEmpty)?;
         Ok(Self {
             path,
             username: username
@@ -36,25 +56,22 @@ impl PasswordFile {
     }
 
     /// A blocking read can outlive its caller's wait. While it runs, another
-    /// read fails at once as [`ErrorKind::ResourceBusy`].
-    pub(crate) async fn read(&self) -> Result<Zeroizing<String>, CacheError> {
-        let permit =
-            self.reading
-                .clone()
-                .try_acquire_owned()
-                .map_err(|_| CacheError::PasswordFile {
-                    kind: ErrorKind::ResourceBusy,
-                })?;
+    /// read fails at once as [`ReadFailure::Busy`].
+    pub(crate) async fn read(&self) -> Result<Zeroizing<String>, ReadFailure> {
+        let permit = self
+            .reading
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| ReadFailure::Busy)?;
         let path = self.path.clone();
         let content = tokio::task::spawn_blocking(move || {
             let _permit = permit;
             read_password_file(&path)
         })
         .await
-        .map_err(|_| CacheError::PasswordFile {
-            kind: ErrorKind::Other,
-        })??;
-        password_from(content)
+        .map_err(|_| ReadFailure::Panicked)?
+        .map_err(ReadFailure::Io)?;
+        password_from(content).ok_or(ReadFailure::Empty)
     }
 }
 
@@ -62,14 +79,11 @@ impl PasswordFile {
     clippy::disallowed_methods,
     reason = "startup admission and owned blocking reads; PasswordFile::read keeps at most one in flight"
 )]
-fn read_password_file(path: &Path) -> Result<String, CacheError> {
-    std::fs::read_to_string(path).map_err(|error| CacheError::PasswordFile { kind: error.kind() })
+fn read_password_file(path: &Path) -> Result<String, ErrorKind> {
+    std::fs::read_to_string(path).map_err(|error| error.kind())
 }
 
-fn password_from(content: String) -> Result<Zeroizing<String>, CacheError> {
-    let password = Zeroizing::new(shared_rules::secret_file::value(content));
-    if password.is_empty() {
-        return Err(CacheError::PasswordFileEmpty);
-    }
-    Ok(password)
+fn password_from(content: String) -> Option<Zeroizing<String>> {
+    Some(Zeroizing::new(shared_rules::secret_file::value(content)))
+        .filter(|password| !password.is_empty())
 }

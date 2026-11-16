@@ -64,9 +64,9 @@ async fn a_refused_auth_is_retried_after_the_client_gives_up() {
         )
     })
     .expect("start connect");
-    let namespace = cache.namespace("auth");
+    let namespace = cache.namespace(namespace!("auth"));
 
-    let chain = 7; // 1 initial attempt + 6 retries.
+    let chain = crate::connection::SETUP_BACKOFF_MAX_RETRIES + 1;
     gate.wait_for(
         Duration::from_secs(20),
         "setup retry chain did not progress without traffic",
@@ -100,7 +100,7 @@ async fn a_server_error_reply_redis_rs_does_not_name_is_a_response_failure() {
     })
     .expect("start connect");
 
-    let namespace = cache.namespace("replies");
+    let namespace = cache.namespace(namespace!("replies"));
     assert_eq!(namespace.get("ready").await, Ok(None));
     let connections = server.connections();
     assert_eq!(namespace.get("wrongtype").await, Err(crate::Unavailable));
@@ -127,7 +127,7 @@ async fn a_readonly_reply_reconnects_to_the_new_primary() {
         ..options(&format!("redis://{}", server.address), true, true, None)
     })
     .expect("start connect");
-    let namespace = cache.namespace("failover");
+    let namespace = cache.namespace(namespace!("failover"));
     let ttl = Duration::from_secs(1);
 
     namespace
@@ -169,7 +169,7 @@ async fn a_readonly_reply_after_cancellation_reconnects_to_the_new_primary() {
         ..options(&format!("redis://{}", server.address), true, true, None)
     })
     .expect("start cache");
-    let namespace = cache.namespace("late_readonly");
+    let namespace = cache.namespace(namespace!("late_readonly"));
     let limit = Duration::from_secs(5);
     let ttl = Duration::from_secs(1);
     assert_eq!(
@@ -284,7 +284,7 @@ async fn caller_cancellation_records_cancelled_and_an_expired_deadline_timeout()
     let _recorder = metrics::set_default_local_recorder(&recorder);
     let server = FakeServer::start().await;
     let cache = admitted(&format!("redis://{}", server.address), true, true);
-    let namespace = cache.namespace("stop");
+    let namespace = cache.namespace(namespace!("stop"));
     assert_eq!(namespace.get("ready").await, Ok(None));
 
     let cancelled = OperationContext::with_timeout(Duration::from_secs(1));
@@ -317,7 +317,7 @@ async fn a_slow_reply_within_command_timeout_survives_the_maintenance_ping() {
         ..options(&format!("redis://{}", server.address), true, true, None)
     })
     .expect("start cache");
-    let namespace = cache.namespace("budget");
+    let namespace = cache.namespace(namespace!("budget"));
     assert_eq!(namespace.get("ready").await, Ok(None));
     let connections = server.connections();
 
@@ -336,7 +336,7 @@ async fn a_large_command_timeout_keeps_probes_and_maintenance_usable() {
         ..options(&format!("redis://{}", server.address), true, true, None)
     })
     .expect("start cache");
-    let namespace = cache.namespace("large_budget");
+    let namespace = cache.namespace(namespace!("large_budget"));
     let probe = cache.probe();
     let limit = Duration::from_secs(5);
     tokio::time::timeout(limit, probe.check())
@@ -362,7 +362,7 @@ async fn ping_permission_denial_keeps_the_connection_usable() {
 
     let server = FakeServer::start().await;
     let cache = admitted(&format!("redis://{}", server.address), true, true);
-    let namespace = cache.namespace("ping_permission");
+    let namespace = cache.namespace(namespace!("ping_permission"));
     assert_eq!(namespace.get("ready").await, Ok(None));
     let connections = server.connections();
     let pings = server.command_count("PING", None);
@@ -392,7 +392,7 @@ async fn a_slow_command_survives_an_overlapping_readiness_probe() {
         ..options(&format!("redis://{}", server.address), true, true, None)
     })
     .expect("start cache");
-    let namespace = cache.namespace("probe_budget");
+    let namespace = cache.namespace(namespace!("probe_budget"));
     assert_eq!(namespace.get("ready").await, Ok(None));
     let probe = cache.probe();
 
@@ -429,7 +429,7 @@ async fn a_slow_command_survives_overlapping_password_rotation() {
         )
     })
     .expect("start cache");
-    let namespace = cache.namespace("rotation_budget");
+    let namespace = cache.namespace(namespace!("rotation_budget"));
     assert_eq!(namespace.get("ready").await, Ok(None));
     let connections = server.connections();
     server
@@ -469,7 +469,7 @@ async fn a_slow_command_survives_overlapping_password_rotation() {
 async fn a_dropped_idle_connection_reconnects_before_the_next_call() {
     let server = FakeServer::start().await;
     let cache = admitted(&format!("redis://{}", server.address), true, true);
-    let namespace = cache.namespace("idle");
+    let namespace = cache.namespace(namespace!("idle"));
     assert_eq!(namespace.get("key").await, Ok(None));
     assert_eq!(server.connections(), 1);
 
@@ -488,7 +488,7 @@ async fn a_dropped_idle_connection_reconnects_before_the_next_call() {
 async fn a_replaced_connection_dials_without_waiting_for_a_call() {
     let server = FakeServer::start().await;
     let cache = admitted(&format!("redis://{}", server.address), true, true);
-    let namespace = cache.namespace("warm");
+    let namespace = cache.namespace(namespace!("warm"));
     let ttl = Duration::from_secs(1);
     namespace
         .set("key", b"value", ttl)
@@ -566,7 +566,7 @@ async fn reliability_admission_bounds_connection_waits_without_cancelling_setup(
         admitted(&format!("redis://{}", server.address), true, true)
     });
     assert_work_metrics(&metrics, 0, 0, 0);
-    let namespace = cache.namespace("waiting");
+    let namespace = cache.namespace(namespace!("waiting"));
     let mut waiting = Vec::new();
     // No scheduler yield: the supervisor has not published a connection yet.
     for _ in 0..256 {
@@ -626,7 +626,7 @@ async fn reliability_full_application_window_leaves_probe_and_maintenance_admiss
         ..options(&format!("redis://{}", server.address), true, true, None)
     })
     .expect("start cache");
-    let namespace = cache.namespace("capacity");
+    let namespace = cache.namespace(namespace!("capacity"));
     assert_eq!(namespace.get("ready").await, Ok(None));
     let old = server.stall_existing();
     let mut pending = Vec::from_fn(256, |_| Box::pin(namespace.get("pending")));
@@ -643,7 +643,7 @@ async fn reliability_full_application_window_leaves_probe_and_maintenance_admiss
             || server.command_count("GET", Some("capacity:pending")) == 256,
         ) => {}
     }
-    let sibling = cache.namespace("other_capacity");
+    let sibling = cache.namespace(namespace!("other_capacity"));
     let mut excess = Box::pin(sibling.delete("refused"));
     assert_eq!(
         futures_util::poll!(excess.as_mut()),
@@ -708,7 +708,7 @@ async fn reliability_stalled_generations_recover_without_replaying_writes() {
     let cache = metrics::with_local_recorder(metrics.recorder(), || {
         admitted(&format!("redis://{}", server.address), true, true)
     });
-    let namespace = cache.namespace("stalled");
+    let namespace = cache.namespace(namespace!("stalled"));
     assert_eq!(namespace.get("ready").await, Ok(None));
 
     for cycle in 0..3 {
@@ -781,7 +781,7 @@ async fn reliability_a_probe_reply_timeout_retires_the_connection() {
         })
         .expect("start cache")
     });
-    let namespace = cache.namespace("probe_timeout");
+    let namespace = cache.namespace(namespace!("probe_timeout"));
     let probe = cache.probe();
     assert_eq!(namespace.get("ready").await, Ok(None));
     let old = server.stall_existing();
@@ -872,7 +872,7 @@ async fn a_caller_stop_before_the_ceiling_keeps_the_connection_for_peers() {
         })
         .expect("start cache")
     });
-    let namespace = cache.namespace("caller_stop");
+    let namespace = cache.namespace(namespace!("caller_stop"));
     assert_eq!(namespace.get("ready").await, Ok(None));
     let connections = server.connections();
 
@@ -929,7 +929,7 @@ async fn stopped_contexts_dispatch_no_commands_or_retire_shared_connection() {
 
     let server = FakeServer::start().await;
     let cache = admitted(&format!("redis://{}", server.address), true, true);
-    let namespace = cache.namespace("context");
+    let namespace = cache.namespace(namespace!("context"));
     assert_eq!(namespace.get("ready").await, Ok(None));
     let connections = server.connections();
     for expired in [false, true] {
@@ -978,7 +978,7 @@ async fn dropping_a_command_or_probe_before_dispatch_keeps_the_connection() {
         ..options(&format!("redis://{}", server.address), true, true, None)
     })
     .expect("start cache");
-    let namespace = cache.namespace("yield_before_send");
+    let namespace = cache.namespace(namespace!("yield_before_send"));
     let probe = cache.probe();
     assert_eq!(namespace.get("ready").await, Ok(None));
     let connections = server.connections();
@@ -1022,7 +1022,7 @@ async fn caller_cutoff_bounds_connection_acquisition() {
         ..options(&format!("redis://{}", server.address), true, true, None)
     })
     .expect("cache");
-    let namespace = cache.namespace("acquire");
+    let namespace = cache.namespace(namespace!("acquire"));
     let context = OperationContext::with_timeout(Duration::from_millis(100));
     assert_eq!(
         tokio::time::timeout(
@@ -1044,7 +1044,7 @@ async fn acknowledged_write_keeps_its_result_after_disconnect() {
         ..options(&format!("redis://{}", server.address), true, true, None)
     })
     .expect("start cache");
-    let namespace = cache.namespace("acknowledged_write");
+    let namespace = cache.namespace(namespace!("acknowledged_write"));
     assert_eq!(namespace.get("ready").await, Ok(None));
     let write = namespace.set("key", b"value", Duration::from_secs(10));
     tokio::pin!(write);
@@ -1078,7 +1078,7 @@ async fn cancelling_a_read_with_a_ready_reply_keeps_the_connection() {
         ..options(&format!("redis://{}", server.address), true, true, None)
     })
     .expect("start cache");
-    let namespace = cache.namespace("cancel_ready_read");
+    let namespace = cache.namespace(namespace!("cancel_ready_read"));
     assert_eq!(namespace.get("ready").await, Ok(None));
     let context = OperationContext::unbounded();
     let read = namespace.get_with_context("key", &context);
@@ -1107,7 +1107,7 @@ async fn dropping_an_exchange_with_a_delivered_reply_keeps_the_connection() {
         ..options(&format!("redis://{}", server.address), true, true, None)
     })
     .expect("start cache");
-    let namespace = cache.namespace("drop_ready_reply");
+    let namespace = cache.namespace(namespace!("drop_ready_reply"));
     let probe = cache.probe();
     assert_eq!(namespace.get("ready").await, Ok(None));
 
@@ -1171,7 +1171,7 @@ async fn cancellation_after_write_dispatch_leaves_a_stalled_server_to_maintenanc
         })
         .expect("cache")
     });
-    let namespace = cache.namespace("cancel_effect");
+    let namespace = cache.namespace(namespace!("cancel_effect"));
     assert_eq!(namespace.get("ready").await, Ok(None));
     let old = server.stall_existing();
     let context = OperationContext::with_timeout(Duration::from_secs(5));
@@ -1221,7 +1221,10 @@ async fn an_overdue_ping_runs_before_another_slow_password_refresh() {
         )
     })
     .expect("start cache");
-    assert_eq!(cache.namespace("refresh").get("ready").await, Ok(None));
+    assert_eq!(
+        cache.namespace(namespace!("refresh")).get("ready").await,
+        Ok(None)
+    );
 
     *server.observed.auth_reply_delay.lock().expect("delay lock") = Duration::from_millis(5_500);
     std::fs::write(file.path(), ephemeral_password()).expect("changed password");
@@ -1265,7 +1268,7 @@ async fn reliability_namespace_and_probe_retain_owner_until_live_maintenance_is_
     let cache = metrics::with_local_recorder(metrics.recorder(), || {
         admitted(&format!("redis://{}", server.address), true, true)
     });
-    let namespace = cache.namespace("lifetime");
+    let namespace = cache.namespace(namespace!("lifetime"));
     let probe = cache.probe();
     assert_eq!(namespace.get("ready").await, Ok(None));
     drop(cache);
@@ -1330,7 +1333,7 @@ async fn reliability_rejected_unchanged_password_recovers_without_traffic() {
     );
     options.command_timeout = Duration::from_secs(1);
     let cache = Cache::start(options).expect("start cache");
-    let namespace = cache.namespace("retry_password");
+    let namespace = cache.namespace(namespace!("retry_password"));
     assert_eq!(namespace.get("ready").await, Ok(None));
     assert!(
         password_refresh_samples(&metrics).is_empty(),
@@ -1500,9 +1503,7 @@ async fn a_hung_password_read_is_never_joined_by_a_second() {
     .expect("release the hung read");
     assert_eq!(
         second,
-        Ok(Err(CacheError::PasswordFile {
-            kind: std::io::ErrorKind::ResourceBusy
-        })),
+        Ok(Err(crate::credentials::ReadFailure::Busy)),
         "a second read must fail at once instead of starting another"
     );
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -1566,7 +1567,10 @@ async fn password_refresh_timeout_is_observed_but_cancelled_work_is_not() {
         ))
         .expect("start cache");
         assert_eq!(
-            cache.namespace("refresh_completion").get("ready").await,
+            cache
+                .namespace(namespace!("refresh_completion"))
+                .get("ready")
+                .await,
             Ok(None)
         );
         let old = server.connections();
@@ -1631,7 +1635,10 @@ async fn reliability_password_file_preserves_case_crlf_and_username() {
         ))
         .expect("start cache");
         assert_eq!(
-            cache.namespace("credential_bytes").get("ready").await,
+            cache
+                .namespace(namespace!("credential_bytes"))
+                .get("ready")
+                .await,
             Ok(None),
             "AUTH must preserve password case and spaces, remove one CRLF, and select the correct user"
         );
@@ -1719,7 +1726,7 @@ fn reliability_auth_errors_are_sanitized_through_the_dependency_log_bridge() {
         let dsn = format!("redis://{}", server.address);
         let cache =
             Cache::start(with_password_file(&dsn, file.path().to_path_buf())).expect("start cache");
-        let namespace = cache.namespace("logs");
+        let namespace = cache.namespace(namespace!("logs"));
         assert_eq!(namespace.get("sensitive-key").await, Ok(None));
         std::fs::write(file.path(), format!("{rejected}\n")).expect("rejected password");
         captured
