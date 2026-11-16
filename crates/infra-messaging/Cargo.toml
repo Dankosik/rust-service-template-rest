@@ -72,7 +72,7 @@ sha2 = { workspace = true }
 shared-rules = { workspace = true }
 thiserror = { workspace = true }
 time = { workspace = true, features = ["std", "formatting", "parsing"] }
-tokio = { workspace = true, features = ["fs", "rt", "macros", "sync", "time"] }
+tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
 tokio-util = { workspace = true, features = ["rt"] }
 tracing = { workspace = true, features = ["std"] }
 tracing-opentelemetry = { workspace = true }
