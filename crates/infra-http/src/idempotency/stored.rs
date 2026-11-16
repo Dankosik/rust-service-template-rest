@@ -7,6 +7,7 @@ use axum::http::{HeaderName, HeaderValue, StatusCode};
 use axum::response::Response;
 use http_body_util::{BodyExt, Limited};
 use infra_idempotency_store::{HeaderPair, Record};
+use smallvec::SmallVec;
 
 use super::caused_by_length_limit;
 
@@ -26,10 +27,12 @@ const REPLAYABLE: [HeaderName; 7] = [
     LAST_MODIFIED,
 ];
 
+type StoredHeaders = SmallVec<[(HeaderName, HeaderValue); 4]>;
+
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 pub(super) struct ReplayableResponse {
     status: StatusCode,
-    headers: Vec<(HeaderName, HeaderValue)>,
+    headers: StoredHeaders,
     body: Bytes,
 }
 
@@ -98,7 +101,7 @@ pub(super) async fn capture(response: Response) -> Result<ReplayableResponse, Un
                 .iter()
                 .map(move |value| (name.clone(), value.clone()))
         })
-        .collect::<Vec<_>>();
+        .collect::<StoredHeaders>();
     if header_bytes(&headers) > MAX_TOTAL_STORED_HEADER_BYTES {
         return Err(Unstorable::HeaderLimit);
     }
@@ -160,7 +163,7 @@ pub(super) fn decode(record: Record) -> Result<ReplayableResponse, Undecodable> 
             let value = HeaderValue::try_from(pair.value).map_err(|_| Undecodable::HeaderValue)?;
             Ok((name, value))
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<StoredHeaders, _>>()?;
     if header_bytes(&headers) > MAX_TOTAL_STORED_HEADER_BYTES {
         return Err(Undecodable::HeaderLimit);
     }

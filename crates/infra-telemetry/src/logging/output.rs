@@ -1,9 +1,9 @@
 use enum_map::{Enum, EnumMap, enum_len};
+use parking_lot::RwLock;
 use std::cell::Cell;
 use std::io::{self, Write};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
-use std::sync::{Arc, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -11,9 +11,9 @@ pub(super) const MAX_RECORD_BYTES: usize = 16 * 1024;
 /// With [`MAX_RECORD_BYTES`] and the capture limits, bounds the memory the
 /// log pipeline can hold.
 const QUEUE_RECORDS: usize = 512;
-/// The subscriber holds a sender until the process exits, so the channel
-/// never disconnects on shutdown; the worker polls the closed flag instead.
-const RECEIVE_POLL: Duration = Duration::from_millis(10);
+/// Coalesces buffered writes before flushing an idle sink; once clean, the
+/// writer parks without a timer until a record arrives or shutdown closes.
+const FLUSH_INTERVAL: Duration = Duration::from_millis(10);
 const JOIN_POLL: Duration = Duration::from_millis(1);
 /// Above every [`LoggerShutdownReasons`] bit, so the drain state holds both.
 const DRAINING: u32 = 1 << 31;
@@ -144,26 +144,17 @@ impl Counters {
 #[derive(Debug)]
 struct Shared {
     // No formatting, sink calls, or waits occur under this admission lock.
-    // `submit` holds a read guard across its check and send and `close` waits
-    // for the write guard, so once `close` returns no record is admitted.
-    closed: RwLock<bool>,
+    // `submit` holds a read guard across its check and send and `close` drops
+    // the shutdown sender under the write guard, so once `close` returns no
+    // record is admitted and an idle worker wakes immediately.
+    closed: RwLock<Option<crossbeam_channel::Sender<()>>>,
     drain: AtomicU32,
     counters: Counters,
 }
 
 impl Shared {
     fn close(&self) {
-        *self
-            .closed
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
-    }
-
-    fn is_closed(&self) -> bool {
-        *self
-            .closed
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        let _ = self.closed.write().take();
     }
 
     /// Latches `reason` only once [`LoggerGuard::begin_shutdown`] has marked
@@ -194,24 +185,22 @@ impl Shared {
 
 #[derive(Clone, Debug)]
 pub(super) struct Output {
-    sender: SyncSender<Record>,
+    sender: crossbeam_channel::Sender<Record>,
     shared: Arc<Shared>,
 }
 
 impl Output {
     pub(super) fn submit(&self, record: Record) {
         let sent = {
-            let closed = self
-                .shared
-                .closed
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            (!*closed).then(|| self.sender.try_send(record))
+            let open = self.shared.closed.read();
+            open.is_some().then(|| self.sender.try_send(record))
         };
         match sent {
             Some(Ok(())) => {}
-            Some(Err(TrySendError::Full(_))) => self.record_drop(DropReason::QueueFull),
-            None | Some(Err(TrySendError::Disconnected(_))) => {
+            Some(Err(crossbeam_channel::TrySendError::Full(_))) => {
+                self.record_drop(DropReason::QueueFull);
+            }
+            None | Some(Err(crossbeam_channel::TrySendError::Disconnected(_))) => {
                 self.record_drop(DropReason::Closed);
             }
         }
@@ -230,7 +219,7 @@ impl Output {
 #[must_use = "retain the logger guard and explicitly shut it down before process exit"]
 pub struct LoggerGuard {
     shared: Arc<Shared>,
-    completion: Receiver<()>,
+    completion: crossbeam_channel::Receiver<()>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -272,8 +261,12 @@ impl LoggerGuard {
         let mut reasons = LoggerShutdownReasons::empty();
         match self.completion.recv_timeout(remaining) {
             Ok(()) => {}
-            Err(RecvTimeoutError::Timeout) => return LoggerShutdownReasons::DEADLINE,
-            Err(RecvTimeoutError::Disconnected) => reasons = LoggerShutdownReasons::WORKER,
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                return LoggerShutdownReasons::DEADLINE;
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                reasons = LoggerShutdownReasons::WORKER;
+            }
         }
         while self
             .worker
@@ -310,13 +303,14 @@ impl Drop for LoggerGuard {
 }
 
 pub(super) fn start<W: Write + Send + 'static>(writer: W) -> io::Result<(Output, LoggerGuard)> {
+    let (shutdown_tx, shutdown_rx) = crossbeam_channel::bounded(0);
     let shared = Arc::new(Shared {
-        closed: RwLock::new(false),
+        closed: RwLock::new(Some(shutdown_tx)),
         drain: AtomicU32::new(0),
         counters: Counters::new(),
     });
-    let (sender, records) = mpsc::sync_channel(QUEUE_RECORDS);
-    let (complete, completion) = mpsc::sync_channel(1);
+    let (sender, records) = crossbeam_channel::bounded(QUEUE_RECORDS);
+    let (complete, completion) = crossbeam_channel::bounded(1);
     let worker_shared = Arc::clone(&shared);
     let worker = thread::Builder::new()
         .name("telemetry-writer".into())
@@ -326,7 +320,7 @@ pub(super) fn start<W: Write + Send + 'static>(writer: W) -> io::Result<(Output,
             // including during an unwind. Never retain or format the panic payload.
             let shared: &Shared = &worker_shared;
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-                write_records(writer, records, shared);
+                write_records(writer, records, &shutdown_rx, shared);
             }));
             if result.is_err() {
                 worker_shared.record_sink_error(SinkOperation::Worker);
@@ -347,30 +341,48 @@ pub(super) fn start<W: Write + Send + 'static>(writer: W) -> io::Result<(Output,
     ))
 }
 
-fn write_records<W: Write>(mut writer: W, records: Receiver<Record>, shared: &Shared) {
+fn write_records<W: Write>(
+    mut writer: W,
+    records: crossbeam_channel::Receiver<Record>,
+    shutdown: &crossbeam_channel::Receiver<()>,
+    shared: &Shared,
+) {
     let mut dirty = false;
     // The sink accepted part of a line before failing; the next line starts
     // on a new one, or it would be glued onto that prefix.
     let mut torn = false;
     loop {
-        let record = match records.recv_timeout(RECEIVE_POLL) {
-            Ok(record) => record,
-            // A sender could have committed between the timed receive and the
-            // closed-state observation. Drain any remaining records.
-            Err(RecvTimeoutError::Timeout) if shared.is_closed() => match records.try_recv() {
-                Ok(record) => record,
-                Err(_) => break,
-            },
-            Err(RecvTimeoutError::Timeout) => {
-                if dirty {
+        let record = if let Ok(record) = records.try_recv() {
+            record
+        } else if dirty {
+            crossbeam_channel::select_biased! {
+                recv(records) -> received => match received {
+                    Ok(record) => record,
+                    Err(_) => break,
+                },
+                recv(shutdown) -> _ => match records.try_recv() {
+                    Ok(record) => record,
+                    Err(_) => break,
+                },
+                default(FLUSH_INTERVAL) => {
                     if writer.flush().is_err() {
                         shared.record_sink_error(SinkOperation::Flush);
                     }
                     dirty = false;
+                    continue;
                 }
-                continue;
             }
-            Err(RecvTimeoutError::Disconnected) => break,
+        } else {
+            crossbeam_channel::select_biased! {
+                recv(records) -> received => match received {
+                    Ok(record) => record,
+                    Err(_) => break,
+                },
+                recv(shutdown) -> _ => match records.try_recv() {
+                    Ok(record) => record,
+                    Err(_) => break,
+                },
+            }
         };
         if torn && write_line(&mut writer, b"\n") != Written::Whole {
             shared.record_sink_error(SinkOperation::Write);
@@ -444,6 +456,7 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
     use std::sync::atomic::AtomicBool;
+    use std::sync::mpsc::{self, Receiver, SyncSender};
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(3);
 

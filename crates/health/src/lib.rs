@@ -12,6 +12,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use compact_str::CompactString;
 use futures_util::future::join_all;
 use tokio::sync::watch;
 use tokio::time::Instant;
@@ -38,11 +39,23 @@ pub trait Probe: Send + Sync + 'static {
 /// The HTTP and gRPC health answers never show it.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("{0}")]
-pub struct ProbeError(String);
+pub struct ProbeError(CompactString);
 
 impl ProbeError {
-    pub fn new(message: impl Into<String>) -> Self {
+    pub fn new(message: impl Into<CompactString>) -> Self {
         Self(message.into())
+    }
+
+    #[must_use]
+    pub const fn from_static(message: &'static str) -> Self {
+        Self(CompactString::const_new(message))
+    }
+
+    #[must_use]
+    pub fn format(args: fmt::Arguments<'_>) -> Self {
+        let mut text = CompactString::default();
+        let _ = fmt::Write::write_fmt(&mut text, args);
+        Self(text)
     }
 }
 

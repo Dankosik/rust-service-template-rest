@@ -7,6 +7,7 @@ use axum::http::header::CONTENT_TYPE;
 use axum::http::request::Parts;
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
+use compact_str::{CompactString, format_compact};
 use serde::de::{DeserializeOwned, IgnoredAny};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_path_to_error::Segment;
@@ -53,7 +54,9 @@ where
                         || media_type.suffix() == Some(mime::JSON))
             });
         if !json_content_type {
-            return Err(Problem::new(Code::UnsupportedMediaType).detail(BODY_MEDIA_TYPE_DETAIL));
+            return Err(
+                Problem::new(Code::UnsupportedMediaType).detail_static(BODY_MEDIA_TYPE_DETAIL)
+            );
         }
         let context = request.extensions().get::<RequestContext>().cloned();
         let bytes = read_body(context.as_ref(), Bytes::from_request(request, state))
@@ -150,14 +153,14 @@ fn json_problem(rejection: &JsonRejection, bytes: &[u8]) -> Problem {
             if !std::str::from_utf8(bytes)
                 .is_ok_and(|text| serde_json::from_str::<IgnoredAny>(text).is_ok()) =>
         {
-            Problem::new(Code::BadRequest).detail(BODY_SYNTAX_DETAIL)
+            Problem::new(Code::BadRequest).detail_static(BODY_SYNTAX_DETAIL)
         }
         JsonRejection::JsonDataError(error) => with_param(
-            Problem::new(Code::UnprocessableContent).detail(BODY_SCHEMA_DETAIL),
+            Problem::new(Code::UnprocessableContent).detail_static(BODY_SCHEMA_DETAIL),
             failed_member::<serde_json::Error>(error).and_then(body_pointer),
         ),
         JsonRejection::JsonSyntaxError(_) => {
-            Problem::new(Code::BadRequest).detail(BODY_SYNTAX_DETAIL)
+            Problem::new(Code::BadRequest).detail_static(BODY_SYNTAX_DETAIL)
         }
         _ => wiring_failure("json"),
     }
@@ -165,10 +168,10 @@ fn json_problem(rejection: &JsonRejection, bytes: &[u8]) -> Problem {
 
 fn query_problem(rejection: &QueryRejection) -> Problem {
     with_param(
-        Problem::new(Code::BadRequest).detail(QUERY_DETAIL),
+        Problem::new(Code::BadRequest).detail_static(QUERY_DETAIL),
         failed_member::<serde::de::value::Error>(rejection).and_then(|path| {
             match path.iter().next() {
-                Some(Segment::Map { key }) => Some(format!("query.{key}")),
+                Some(Segment::Map { key }) => Some(format_compact!("query.{key}")),
                 _ => None,
             }
         }),
@@ -280,8 +283,8 @@ impl PathIssue {
 
 fn invalid_path(name: Option<&str>) -> Problem {
     with_param(
-        Problem::new(Code::BadRequest).detail(PATH_DETAIL),
-        name.map(|name| format!("path.{name}")),
+        Problem::new(Code::BadRequest).detail_static(PATH_DETAIL),
+        name.map(|name| format_compact!("path.{name}")),
     )
 }
 
@@ -291,10 +294,10 @@ fn wiring_failure(extractor: &'static str) -> Problem {
     sanitized_problem()
 }
 
-fn with_param(problem: Problem, name: Option<String>) -> Problem {
+fn with_param(problem: Problem, name: Option<CompactString>) -> Problem {
     match name {
         Some(name) if name.len() <= MAX_PARAM_NAME_BYTES => {
-            problem.invalid_param(name, SCHEMA_REASON)
+            problem.invalid_param(name, CompactString::const_new(SCHEMA_REASON))
         }
         _ => problem,
     }
@@ -314,8 +317,8 @@ where
 
 /// The RFC 6901 pointer of a body member, or `None` for the document root or
 /// a position the deserializer could not name.
-fn body_pointer(path: &serde_path_to_error::Path) -> Option<String> {
-    let mut pointer = String::new();
+fn body_pointer(path: &serde_path_to_error::Path) -> Option<CompactString> {
+    let mut pointer = CompactString::default();
     for segment in path {
         pointer.push('/');
         match segment {

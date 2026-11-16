@@ -22,15 +22,14 @@ from template_state import (
     PlannedWrite,
     Refusal,
     ToolFailure,
+    _contains_profile_marker,
+    _manifest_files,
+    _regular_file,
     admit_plan,
     git_head,
     git_root,
     load_lock,
     manifest_entries,
-    _contains_profile_marker,
-    _manifest_files,
-    _regular_file,
-    parse_json_text,
     parse_manifest,
     safe_relative,
     selected_adapters,
@@ -44,17 +43,10 @@ SOURCE_HELPERS = (
     "scripts/template-sync.sh",
     "scripts/lib/template_sync.py",
     "scripts/lib/template_state.py",
-    "scripts/agent-roles-sync.sh",
-    "scripts/codex-agents-sync.sh",
-    "scripts/harness-skills-sync.sh",
-    "scripts/lib/sync-cli.sh",
+    "scripts/agent-harness-sync.py",
 )
 PROFILE_PROJECTION_HELPERS = ("scripts/lib/template_init.py", "scripts/lib/template_profiles.json")
 _INSTRUCTION_PREFIXES = ("docs/",)
-_SETTING_LEAVES = {
-    "claude": (".claude/settings.json", "env", "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH"),
-    "qwen": (".qwen/settings.json", "model", "maxSubagentDepth"),
-}
 _RULE_HEADER = re.compile(r"^\s*([^#\s][^:=]*?)\s*:(?![=])")
 _ASSIGNMENT = re.compile(r"^\s*[A-Za-z_][A-Za-z0-9_.-]*\s*(?::=|\?=|\+=|!=|=)")
 
@@ -71,109 +63,6 @@ class Node:
     mode: int
     data: bytes | None = None
     link_target: str | None = None
-
-
-@dataclass(frozen=True)
-class JsonNode:
-    kind: str
-    start: int
-    end: int
-    members: dict[str, "JsonNode"] | None = None
-
-
-class _JsonScanner:
-    def __init__(self, text: str) -> None:
-        self.text = text
-        self.index = 0
-
-    def parse(self) -> JsonNode:
-        node = self._value()
-        self._space()
-        if self.index != len(self.text):
-            raise Refusal("settings JSON has trailing data")
-        return node
-
-    def _space(self) -> None:
-        while self.index < len(self.text) and self.text[self.index] in " \t\r\n":
-            self.index += 1
-
-    def _string(self) -> tuple[str, int, int]:
-        start = self.index
-        if self.index >= len(self.text) or self.text[self.index] != '"':
-            raise Refusal("settings JSON has an invalid object member")
-        self.index += 1
-        while self.index < len(self.text):
-            character = self.text[self.index]
-            if character == "\\":
-                self.index += 2
-                continue
-            self.index += 1
-            if character == '"':
-                raw = self.text[start:self.index]
-                try:
-                    return json.loads(raw), start, self.index
-                except json.JSONDecodeError as error:
-                    raise Refusal("settings JSON has an invalid string token") from error
-        raise Refusal("settings JSON has an unterminated string")
-
-    def _value(self) -> JsonNode:
-        self._space()
-        start = self.index
-        if start >= len(self.text):
-            raise Refusal("settings JSON has an incomplete value")
-        character = self.text[start]
-        if character == "{":
-            self.index += 1
-            members: dict[str, JsonNode] = {}
-            self._space()
-            if self.index < len(self.text) and self.text[self.index] == "}":
-                self.index += 1
-                return JsonNode("object", start, self.index, members)
-            while True:
-                self._space()
-                key, _key_start, _key_end = self._string()
-                self._space()
-                if self.index >= len(self.text) or self.text[self.index] != ":":
-                    raise Refusal("settings JSON has an invalid object member")
-                self.index += 1
-                value = self._value()
-                if key in members:
-                    raise Refusal("settings JSON has a duplicate key")
-                members[key] = value
-                self._space()
-                if self.index < len(self.text) and self.text[self.index] == "}":
-                    self.index += 1
-                    return JsonNode("object", start, self.index, members)
-                if self.index >= len(self.text) or self.text[self.index] != ",":
-                    raise Refusal("settings JSON has an invalid object separator")
-                self.index += 1
-        if character == "[":
-            self.index += 1
-            self._space()
-            if self.index < len(self.text) and self.text[self.index] == "]":
-                self.index += 1
-                return JsonNode("array", start, self.index)
-            while True:
-                self._value()
-                self._space()
-                if self.index < len(self.text) and self.text[self.index] == "]":
-                    self.index += 1
-                    return JsonNode("array", start, self.index)
-                if self.index >= len(self.text) or self.text[self.index] != ",":
-                    raise Refusal("settings JSON has an invalid array separator")
-                self.index += 1
-        if character == '"':
-            _value, _start, end = self._string()
-            return JsonNode("string", start, end)
-        for literal, kind in (("true", "literal"), ("false", "literal"), ("null", "literal")):
-            if self.text.startswith(literal, start):
-                self.index += len(literal)
-                return JsonNode(kind, start, self.index)
-        while self.index < len(self.text) and self.text[self.index] not in " \t\r\n,]}":
-            self.index += 1
-        if self.index == start:
-            raise Refusal("settings JSON has an invalid value")
-        return JsonNode("number", start, self.index)
 
 
 def _relative(path: Path, root: Path) -> str:
@@ -312,6 +201,8 @@ def _instruction_entry(entry: str, selected: set[str]) -> bool:
     plain = entry.rstrip("/")
     if plain == "AGENTS.md" or plain.startswith(_INSTRUCTION_PREFIXES):
         return True
+    if plain.startswith(".agents/adapters/"):
+        return any(plain in ADAPTERS[adapter].canonical for adapter in selected)
     if plain.startswith(".agents/"):
         return plain != ".agents/codex-project.toml" or "codex" in selected
     return any(plain in ADAPTERS[adapter].canonical for adapter in selected)
@@ -353,16 +244,6 @@ def _validate_source_inputs(snapshot: Path, selected: set[str], manifest: Sequen
             raise Refusal("source canonical skills must not reserve service-owned content")
 
 
-def _run_helper(snapshot: Path, arguments: Sequence[str]) -> None:
-    command = ["bash", os.fspath(snapshot / arguments[0]), *arguments[1:]]
-    try:
-        result = subprocess.run(command, cwd=snapshot, capture_output=True, check=False)
-    except OSError as error:
-        raise ToolFailure("required snapshot helper is unavailable") from error
-    if result.returncode:
-        raise Refusal(f"snapshot helper refused selected projection: {arguments[0]}")
-
-
 def _project_portable(snapshot: Path, target_lock: dict) -> bool:
     source_lock = load_lock(snapshot)
     if source_lock is not None:
@@ -398,7 +279,8 @@ def _project_portable(snapshot: Path, target_lock: dict) -> bool:
             [sys.executable, "-B", "-c", script, os.fspath(snapshot)],
             cwd=snapshot / "scripts/lib",
             input=json.dumps(target_lock).encode("utf-8"),
-            capture_output=True, check=False,
+            capture_output=True,
+            check=False,
         )
     except OSError as error:
         raise ToolFailure("committed profile projection helper is unavailable") from error
@@ -407,15 +289,29 @@ def _project_portable(snapshot: Path, target_lock: dict) -> bool:
     return True
 
 
-def _projection_commands(snapshot: Path, root: Path, harness: str, mode: str) -> None:
-    common = ["--repo", os.fspath(root), "--harness", harness]
-    _run_helper(snapshot, ("scripts/agent-roles-sync.sh", f"--{mode}", *common))
-    if harness in {"all", "codex"}:
-        _run_helper(snapshot, ("scripts/codex-agents-sync.sh", f"--{mode}", *common))
-    if harness in {"all", "claude"}:
-        _run_helper(snapshot, ("scripts/harness-skills-sync.sh", "claude", f"--{mode}", *common))
-    if harness in {"all", "qwen"}:
-        _run_helper(snapshot, ("scripts/harness-skills-sync.sh", "qwen", f"--{mode}", *common))
+def _projection_commands(
+    snapshot: Path, root: Path, harness: str, mode: str, *, require_materialized: bool = False
+) -> None:
+    command = [
+        sys.executable,
+        "-B",
+        os.fspath(snapshot / "scripts/agent-harness-sync.py"),
+        f"--{mode}",
+        "--repo",
+        os.fspath(root),
+        "--harness",
+        harness,
+    ]
+    if require_materialized and mode == "check":
+        command.append("--require-materialized")
+    try:
+        result = subprocess.run(command, cwd=snapshot, capture_output=True, check=False)
+    except OSError as error:
+        raise ToolFailure("required snapshot helper is unavailable") from error
+    if result.returncode:
+        detail = result.stderr.decode("utf-8", errors="replace").strip()
+        suffix = f": {detail}" if detail else ""
+        raise Refusal(f"snapshot helper refused selected projection: scripts/agent-harness-sync.py{suffix}")
 
 
 def _skill_frontmatter_is_valid(path: Path, name: str) -> bool:
@@ -486,6 +382,16 @@ def _remove_private(path: Path) -> None:
         shutil.rmtree(path)
 
 
+def _prune_empty_dirs(directory: Path) -> None:
+    if not directory.is_dir() or directory.is_symlink():
+        return
+    for child in sorted(directory.iterdir()):
+        if child.is_dir() and not child.is_symlink():
+            _prune_empty_dirs(child)
+    if not any(directory.iterdir()):
+        directory.rmdir()
+
+
 def _copy_manifest_to_stage(snapshot: Path, stage: Path, entries: Sequence[Scope], reserved_skills: set[str]) -> None:
     for scope in entries:
         source_nodes = _tree(snapshot, scope, links=False)
@@ -521,77 +427,7 @@ def _remove_unselected_from_stage(stage: Path, selected: set[str]) -> None:
             path = stage / relative.rstrip("/")
             if _path_exists(path):
                 _remove_private(path)
-
-
-def _strict_json(text: str, label: str) -> JsonNode:
-    parse_json_text(text, label)
-    return _JsonScanner(text).parse()
-
-
-def _setting_source_token(snapshot: Path, adapter: str) -> str:
-    relative, parent_key, leaf_key = _SETTING_LEAVES[adapter]
-    path = snapshot / relative
-    _regular_file(path, relative)
-    try:
-        text = path.read_bytes().decode("utf-8")
-    except UnicodeDecodeError as error:
-        raise Refusal(f"{relative} is not UTF-8") from error
-    root = _strict_json(text, relative)
-    if root.kind != "object" or root.members is None:
-        raise Refusal(f"{relative} root must be an object")
-    parent = root.members.get(parent_key)
-    leaf = parent.members.get(leaf_key) if parent is not None and parent.kind == "object" and parent.members else None
-    if leaf is None:
-        raise Refusal(f"{relative} has no managed setting")
-    token = text[leaf.start:leaf.end]
-    if adapter == "claude":
-        if leaf.kind != "string" or re.fullmatch(r'"[0-9]+"', token) is None:
-            raise Refusal(f"{relative} managed setting has an invalid type")
-    elif leaf.kind != "number" or re.fullmatch(r"[1-9][0-9]*", token) is None:
-        raise Refusal(f"{relative} managed setting has an invalid type")
-    return token
-
-
-def _append_member(text: str, node: JsonNode, key: str, token: str) -> str:
-    assert node.kind == "object" and node.members is not None
-    prefix = "," if node.members else ""
-    member = f"{json.dumps(key, ensure_ascii=False, separators=(',', ':'))}:{token}"
-    return f"{text[:node.end - 1]}{prefix}{member}{text[node.end - 1:]}"
-
-
-def _render_setting(snapshot: Path, stage: Path, adapter: str) -> None:
-    relative, parent_key, leaf_key = _SETTING_LEAVES[adapter]
-    token = _setting_source_token(snapshot, adapter)
-    destination = stage / relative
-    if not _path_exists(destination):
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes((json.dumps({parent_key: {leaf_key: json.loads(token)}}, indent=2) + "\n").encode("utf-8"))
-        return
-    _regular_file(destination, relative)
-    try:
-        text = destination.read_bytes().decode("utf-8")
-    except UnicodeDecodeError as error:
-        raise Refusal(f"{relative} is not UTF-8") from error
-    root = _strict_json(text, relative)
-    if root.kind != "object" or root.members is None:
-        raise Refusal(f"{relative} root must be an object")
-    parent = root.members.get(parent_key)
-    if parent is not None and parent.kind != "object":
-        raise Refusal(f"{relative} managed parent must be an object")
-    if parent is None:
-        rendered = _append_member(text, root, parent_key, "{" + json.dumps(leaf_key) + ":" + token + "}")
-    else:
-        assert parent.members is not None
-        leaf = parent.members.get(leaf_key)
-        if leaf is None:
-            rendered = _append_member(text, parent, leaf_key, token)
-        else:
-            # This leaf is the explicit ownership exception.  Its current
-            # JSON type/value is managed drift, so replace the whole token;
-            # strict parsing above still rejects malformed documents.
-            rendered = f"{text[:leaf.start]}{token}{text[leaf.end:]}"
-    _strict_json(rendered, relative)
-    destination.write_bytes(rendered.encode("utf-8"))
+    _prune_empty_dirs(stage / ".agents/adapters")
 
 
 def _required_authorities(root: Path) -> None:
@@ -786,20 +622,13 @@ def _render(snapshot: Path, target: Path, stage: Path, manifest: Sequence[Scope]
     _copy_manifest_to_stage(snapshot, stage, manifest, reserved)
     _projection_commands(snapshot, stage, harness, "preflight")
     _projection_commands(snapshot, stage, harness, "apply")
-    for adapter in selected.intersection(_SETTING_LEAVES):
-        _render_setting(snapshot, stage, adapter)
-    _projection_commands(snapshot, stage, harness, "check")
+    _projection_commands(snapshot, stage, harness, "check", require_materialized=True)
 
 
 def _source_scopes(
-    manifest: Sequence[Scope], selected: set[str], *, profile_projection: bool = False,
+    manifest: Sequence[Scope], *, profile_projection: bool = False
 ) -> tuple[Scope, ...]:
     scopes = list(manifest)
-    # The source snapshot verifies every committed generator projection before
-    # it renders the selected target shape, so none of those inputs may be a
-    # dirty worktree view even when this target selected a narrower adapter.
-    scopes.extend(_adapter_scopes(ADAPTERS, "generated"))
-    scopes.extend(_adapter_scopes(selected, "settings"))
     scopes.extend(Scope(path, False) for path in SOURCE_HELPERS)
     if profile_projection:
         scopes.extend(Scope(path, False) for path in PROFILE_PROJECTION_HELPERS)
@@ -828,6 +657,8 @@ def _run(arguments: argparse.Namespace) -> int:
             raise Refusal("template.lock is incomplete; inspect the init-produced diff and use a fresh template checkout")
         harness = target_lock["profiles"]["agent_harness"]
         selected = set(selected_adapters(harness))
+        source_lock = load_lock(snapshot)
+        source_harness = source_lock["profiles"]["agent_harness"] if source_lock is not None else "all"
         profile_projection = _project_portable(snapshot, target_lock)
         manifest = parse_manifest(
             snapshot,
@@ -836,8 +667,8 @@ def _run(arguments: argparse.Namespace) -> int:
         )
         chosen_manifest = _selected_manifest(snapshot, manifest, selected, arguments.instructions_only)
         _validate_source_inputs(snapshot, selected, manifest)
-        _projection_commands(snapshot, snapshot, "all", "check")
-        source_scopes = _source_scopes(chosen_manifest, selected, profile_projection=profile_projection)
+        _projection_commands(snapshot, snapshot, source_harness, "check")
+        source_scopes = _source_scopes(chosen_manifest, profile_projection=profile_projection)
         _source_dirty(source, source_scopes)
         if git_head(source) != revision:
             raise Refusal("source HEAD changed during sync admission")

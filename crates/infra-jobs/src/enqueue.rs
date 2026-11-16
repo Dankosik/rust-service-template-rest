@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 use std::io::{self, Write};
-use std::sync::Mutex;
 use std::time::Duration;
 
 use infra_postgres::{Tx, observed};
@@ -213,14 +212,21 @@ const WAKE_INTERVAL: Duration = crate::claim::CLAIM_COOLDOWN;
 /// kind's, and that kind's worker would wait for its poll.
 fn take_wake_slot(kind: &'static str, now: Instant) -> bool {
     #[cfg(not(feature = "hotpath"))]
-    static LAST: Mutex<BTreeMap<&'static str, Instant>> = Mutex::new(BTreeMap::new());
+    static LAST: parking_lot::Mutex<BTreeMap<&'static str, Instant>> =
+        parking_lot::Mutex::new(BTreeMap::new());
     #[cfg(feature = "hotpath")]
     static LAST: std::sync::LazyLock<
         hotpath::wrap::std::sync::Mutex<BTreeMap<&'static str, Instant>>,
     > = std::sync::LazyLock::new(|| {
         // The expression arm avoids 0.28.4's unsafe export_name uniqueness check.
-        hotpath::mutex!(Mutex::new(BTreeMap::new()), label = { "jobs-wake" })
+        hotpath::mutex!(
+            std::sync::Mutex::new(BTreeMap::new()),
+            label = { "jobs-wake" }
+        )
     });
+    #[cfg(not(feature = "hotpath"))]
+    let mut last = LAST.lock();
+    #[cfg(feature = "hotpath")]
     let mut last = LAST
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);

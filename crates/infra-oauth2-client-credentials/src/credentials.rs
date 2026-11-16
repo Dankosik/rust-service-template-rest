@@ -1,12 +1,13 @@
 use std::{
     future::Future,
-    sync::{Arc, Mutex, MutexGuard, PoisonError},
+    sync::Arc,
     time::{Duration, SystemTime},
 };
 
 use http::{HeaderMap, header::AUTHORIZATION};
 use infra_outbound_http::Client;
 use operation_context::{Deadline, OperationContext, Stopped};
+use parking_lot::{Mutex, MutexGuard};
 use secrecy::SecretString;
 use tokio::{
     sync::{mpsc, oneshot},
@@ -352,7 +353,7 @@ impl Credentials {
 
 impl Inner {
     fn cached(&self) -> MutexGuard<'_, Cached> {
-        self.cached.lock().unwrap_or_else(PoisonError::into_inner)
+        self.cached.lock()
     }
 
     fn completed_failure(&self, now: Instant) -> Option<AcquisitionError> {

@@ -6,6 +6,7 @@ use axum::extract::{Request, State};
 use axum::http::Method;
 use axum::middleware::{self, Next};
 use axum::response::Response;
+use foldhash::{HashMap, HashMapExt as _};
 use utoipa::openapi::security::{HttpAuthScheme, SecurityScheme};
 use utoipa::openapi::{OpenApi, RefOr, path::Operation};
 use utoipa_axum::router::OpenApiRouter;
@@ -117,7 +118,12 @@ fn compile_operation(
 /// The compiled access table, shared read-only by every request: axum clones
 /// middleware state per request, so the table sits behind an `Arc`.
 #[derive(Clone)]
-pub(crate) struct Policy(Arc<BTreeMap<String, BTreeMap<String, Access>>>);
+pub(crate) struct Policy(Arc<CompiledPolicy>);
+
+struct CompiledPolicy {
+    routes: HashMap<Box<str>, HashMap<Box<str>, Access>>,
+    first_protected: Option<(Box<str>, Box<str>)>,
+}
 
 macro_rules! fixed_path_operations {
     ($item:ident, $borrow:ident) => {
@@ -141,20 +147,21 @@ pub(super) use fixed_path_operations;
 
 impl Policy {
     pub(crate) fn compile(document: &OpenApi) -> Result<Self, FinalizeError> {
-        let mut table = BTreeMap::new();
+        let mut routes = HashMap::with_capacity(document.paths.paths.len());
+        let mut first_protected = None;
         for (path, item) in &document.paths.paths {
             let path = if path.is_empty() {
                 "/".to_owned()
             } else {
                 path.clone()
             };
-            let mut methods = BTreeMap::new();
+            let mut ordered_methods = BTreeMap::new();
             let fixed_operations = fixed_path_operations!(item, as_ref);
             for (method, operation) in fixed_operations {
                 let Some(operation) = operation else {
                     continue;
                 };
-                methods.insert(
+                ordered_methods.insert(
                     method.to_owned(),
                     compile_operation(document, &path, method, operation)?,
                 );
@@ -170,27 +177,39 @@ impl Policy {
                         fault: "fixed_method_in_additional_operations",
                     });
                 }
-                methods.insert(
+                ordered_methods.insert(
                     method.clone(),
                     compile_operation(document, &path, method, operation)?,
                 );
             }
-            table.insert(path, methods);
+            if first_protected.is_none()
+                && let Some((method, _)) = ordered_methods
+                    .iter()
+                    .find(|(_, access)| matches!(access, Access::Protected(..)))
+            {
+                first_protected = Some((path.as_str().into(), method.as_str().into()));
+            }
+            let methods = ordered_methods
+                .into_iter()
+                .map(|(method, access)| (method.into_boxed_str(), access))
+                .collect();
+            routes.insert(path.into_boxed_str(), methods);
         }
-        Ok(Self(Arc::new(table)))
+        Ok(Self(Arc::new(CompiledPolicy {
+            routes,
+            first_protected,
+        })))
     }
 
     fn first_protected(&self) -> Option<(&str, &str)> {
-        self.0.iter().find_map(|(path, methods)| {
-            methods
-                .iter()
-                .find(|(_, access)| matches!(access, Access::Protected(..)))
-                .map(|(method, _)| (path.as_str(), method.as_str()))
-        })
+        self.0
+            .first_protected
+            .as_ref()
+            .map(|(path, method)| (&**path, &**method))
     }
 
     pub(crate) fn access(&self, path: &str, method: &Method) -> Option<&Access> {
-        let methods = self.0.get(path)?;
+        let methods = self.0.routes.get(path)?;
         methods.get(method.as_str()).or_else(|| {
             if method == Method::HEAD {
                 methods.get("GET")

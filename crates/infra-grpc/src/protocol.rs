@@ -37,11 +37,10 @@ fn parse_grpc_timeout(value: &[u8]) -> Option<Duration> {
         return None;
     }
     let (&unit, digits) = value.split_last()?;
-    // `u64::from_str` accepts a leading `+`; the gRPC grammar allows digits only.
-    if !digits.iter().all(u8::is_ascii_digit) {
+    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
         return None;
     }
-    let amount = std::str::from_utf8(digits).ok()?.parse::<u64>().ok()?;
+    let amount: u64 = std::str::from_utf8(digits).ok()?.parse().ok()?;
     match unit {
         b'H' => Some(Duration::from_hours(amount)),
         b'M' => Some(Duration::from_mins(amount)),
@@ -54,11 +53,34 @@ fn parse_grpc_timeout(value: &[u8]) -> Option<Duration> {
 }
 
 pub(crate) fn set_grpc_timeout(headers: &mut HeaderMap, remaining: Duration) {
-    // Tonic exposes its encoder through the request API.
-    let mut request = tonic::Request::new(());
-    request.set_timeout(remaining.min(WIRE_TIMEOUT_MAX));
-    let mut encoded = request.into_parts().0.into_headers();
-    if let Some(value) = encoded.remove(GRPC_TIMEOUT) {
+    const MAX_VALUE: u64 = 99_999_999;
+    let capped = remaining.min(WIRE_TIMEOUT_MAX);
+    let (amount, unit) = if let Ok(nanos) = u64::try_from(capped.as_nanos())
+        && nanos <= MAX_VALUE
+    {
+        (nanos, b'n')
+    } else if let Ok(micros) = u64::try_from(capped.as_micros())
+        && micros <= MAX_VALUE
+    {
+        (micros, b'u')
+    } else if let Ok(millis) = u64::try_from(capped.as_millis())
+        && millis <= MAX_VALUE
+    {
+        (millis, b'm')
+    } else if capped.as_secs() <= MAX_VALUE {
+        (capped.as_secs(), b'S')
+    } else if capped.as_secs() / 60 <= MAX_VALUE {
+        (capped.as_secs() / 60, b'M')
+    } else {
+        ((capped.as_secs() / 3600).min(MAX_VALUE), b'H')
+    };
+    let mut buffer = std::fmt::NumBuffer::new();
+    let digits = amount.format_into(&mut buffer);
+    let mut wire = [0_u8; MAX_TIMEOUT_DIGITS + 1];
+    let len = digits.len();
+    wire[..len].copy_from_slice(digits.as_bytes());
+    wire[len] = unit;
+    if let Ok(value) = http::HeaderValue::from_bytes(&wire[..=len]) {
         headers.insert(GRPC_TIMEOUT, value);
     }
 }
@@ -137,5 +159,36 @@ mod tests {
             metadata_grpc_timeout(&metadata),
             Some(Duration::from_millis(250))
         );
+    }
+
+    #[test]
+    fn set_grpc_timeout_round_trips_and_caps_at_wire_maximum() {
+        for duration in [
+            Duration::ZERO,
+            Duration::from_nanos(1),
+            Duration::from_nanos(99_999_999),
+            Duration::from_millis(100),
+            Duration::from_micros(99_999_999),
+            Duration::from_millis(250),
+            Duration::from_millis(99_999_999),
+            Duration::from_secs(5),
+            Duration::from_secs(99_999_999),
+            Duration::from_hours(2),
+            WIRE_TIMEOUT_MAX,
+            Duration::MAX,
+        ] {
+            let mut actual = http::HeaderMap::new();
+            set_grpc_timeout(&mut actual, duration);
+            let mut request = tonic::Request::new(());
+            request.set_timeout(duration.min(WIRE_TIMEOUT_MAX));
+            let expected = request.into_parts().0.into_headers();
+            assert_eq!(
+                grpc_timeout(&actual),
+                grpc_timeout(&expected),
+                "decoded mismatch for {duration:?}: actual={:?} expected={:?}",
+                actual.get(GRPC_TIMEOUT),
+                expected.get(GRPC_TIMEOUT),
+            );
+        }
     }
 }

@@ -1,9 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::fmt;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use futures_util::FutureExt as _;
 use health::{Probe, ProbeError};
+use parking_lot::Mutex;
 
 use crate::budget::BROKER_OPERATION_BUDGET;
 use crate::error::MessagingError;
@@ -28,7 +30,7 @@ pub(crate) struct PublishWork {
 impl PublishWork {
     pub(crate) fn register(capacity: usize, connection: &str) -> Self {
         let slot = {
-            let mut active = PUBLISH_SLOTS.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut active = PUBLISH_SLOTS.lock();
             let slots = active.entry(connection.to_owned()).or_default();
             let mut slot = 0;
             while !slots.insert(slot) {
@@ -39,7 +41,11 @@ impl PublishWork {
         let connection = connection.to_owned();
         let mut labels = vec![metrics::Label::new("connection", connection.clone())];
         if slot > 0 {
-            labels.push(metrics::Label::new("connection_slot", slot.to_string()));
+            let mut slot_buf = fmt::NumBuffer::new();
+            labels.push(metrics::Label::new(
+                "connection_slot",
+                slot.format_into(&mut slot_buf).to_owned(),
+            ));
         }
         let in_flight = metrics::gauge!("messaging_publish_work_in_flight", labels.iter());
         let last_observed = metrics::gauge!(
@@ -83,7 +89,7 @@ impl Drop for PublishWork {
         self.in_flight.set(f64::NAN);
         self.last_observed.set(0.0);
         self.capacity.set(f64::NAN);
-        let mut active = PUBLISH_SLOTS.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut active = PUBLISH_SLOTS.lock();
         if let Entry::Occupied(mut entry) = active.entry(std::mem::take(&mut self.connection)) {
             let slots = entry.get_mut();
             slots.remove(&self.slot);
@@ -129,17 +135,19 @@ impl Probe for MessagingProbe {
             },
         };
         tracing::warn!(reason = %failure, "messaging_readiness_probe_failed");
-        Err(ProbeError::new("messaging source stream is unavailable"))
+        Err(ProbeError::from_static(
+            "messaging source stream is unavailable",
+        ))
     }
 }
 
 impl MessagingProbe {
     fn check_local_state(&self) -> Result<(), ProbeError> {
         if self.shared.is_draining() {
-            return Err(ProbeError::new("messaging is draining"));
+            return Err(ProbeError::from_static("messaging is draining"));
         }
         if self.shared.has_failed() {
-            return Err(ProbeError::new("messaging consumer failed"));
+            return Err(ProbeError::from_static("messaging consumer failed"));
         }
         if self
             .shared
@@ -153,11 +161,13 @@ impl MessagingProbe {
                 async_nats::connection::State::Connected
             )
         {
-            return Err(ProbeError::new("messaging connection is unavailable"));
+            return Err(ProbeError::from_static(
+                "messaging connection is unavailable",
+            ));
         }
         validate_server(&self.shared.connection.client, self.shared.envelope_limit).map_err(
             |refusal| {
-                ProbeError::new(format!(
+                ProbeError::format(format_args!(
                     "messaging server admission is unavailable ({})",
                     refusal.error_type()
                 ))

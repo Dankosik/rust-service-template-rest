@@ -1,10 +1,8 @@
-use std::{
-    collections::{HashMap, hash_map::Entry},
-    sync::{Arc, Mutex, PoisonError},
-    time::Duration,
-};
+use std::{collections::hash_map::Entry, sync::Arc, time::Duration};
 
+use foldhash::HashMap;
 use moka::Expiry;
+use parking_lot::Mutex;
 use secrecy::{ExposeSecret as _, SecretString};
 use tokio::{sync::watch, time::Instant};
 
@@ -18,7 +16,7 @@ use crate::{
 const EXCHANGE_CACHE_BYTES: u32 = 16 * 1024 * 1024;
 
 pub(crate) struct ExchangeState {
-    pub(crate) cache: moka::future::Cache<SubjectKey, Arc<Token>>,
+    pub(crate) cache: moka::future::Cache<SubjectKey, Arc<Token>, foldhash::quality::RandomState>,
     flights: ExchangeFlights,
 }
 
@@ -37,7 +35,7 @@ impl ExchangeState {
                         .max(minimum_weight)
                 })
                 .expire_after(ExchangedExpiry)
-                .build(),
+                .build_with_hasher(foldhash::quality::RandomState::default()),
             flights: Mutex::default(),
         }
     }
@@ -73,7 +71,7 @@ impl ExchangeState {
     }
 
     fn join(&self, key: SubjectKey) -> ExchangeFlight<'_> {
-        let mut flights = self.flights.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut flights = self.flights.lock();
         match flights.entry(key) {
             Entry::Occupied(entry) => ExchangeFlight::Waiter(entry.get().clone()),
             Entry::Vacant(entry) => {
@@ -116,10 +114,7 @@ impl ExchangeLeader<'_> {
 
 impl Drop for ExchangeLeader<'_> {
     fn drop(&mut self) {
-        self.flights
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(&self.key);
+        self.flights.lock().remove(&self.key);
         if let Some(result) = self.completed.take() {
             self.sender.send_replace(Some(result));
         }

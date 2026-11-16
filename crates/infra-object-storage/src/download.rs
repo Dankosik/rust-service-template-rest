@@ -1,11 +1,12 @@
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
 use aws_sdk_s3::primitives::{ByteStream, ByteStreamError};
 use bytes::Bytes;
 use http_body::{Frame, SizeHint};
 use operation_context::{OperationContext, Stopped};
+use parking_lot::Mutex;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::task::JoinHandle;
 
@@ -13,18 +14,24 @@ use crate::error::{Failure, LocalFailure};
 use crate::observe::OperationGuard;
 use crate::{ObjectMetadata, ObjectStorageError, error};
 
-/// An [`http_body::Body`] of exactly [`ObjectMetadata::size`] bytes. Dropping it
-/// releases the slot and SDK body and records `cancelled`, or `unavailable` if
-/// the operation context already stopped; neither claims socket closure or
-/// completion of SDK-owned work. A terminal failure releases the body before the
-/// error returns, even if the `Download` is retained. A weak timer releases
-/// unpolled retained custody at the original cutoff; a presigned URL suits a
-/// remote slow reader.
+/// An open download. Dropping it releases the admission slot and owned SDK
+/// body; the operation is recorded as `cancelled` unless it already ended or
+/// its operation context has stopped, in which case it records `unavailable`.
+/// A terminal failure releases the body before the error is returned, even if
+/// the failed `Download` is retained. Neither behavior claims socket closure
+/// or completion of work owned by the SDK.
 ///
-/// The final chunk is withheld until EOF is confirmed and the SDK finished any
-/// supported full-object checksum validation. The SDK permits absent checksums
-/// and skips composite (`-N`) or invalid-base64 ones, so success does not attest
-/// validation; a feature needing end-to-end integrity checks its own digest.
+/// It is an [`http_body::Body`] of exactly [`ObjectMetadata::size`] bytes,
+/// so it can be returned as a response body. The slot and the SDK body live
+/// through confirmed EOF/integrity under the original operation context. Its
+/// weak timer releases unpolled retained custody at the same cutoff. A
+/// presigned URL remains the appropriate path for a remote slow reader.
+/// Already delivered bytes are caller-owned. The final chunk is withheld until
+/// the body confirms EOF and the SDK has completed any supported full-object
+/// checksum validation. The SDK permits absent checksums and skips composite
+/// (`-N`) or invalid-base64 checksums. Success does not attest that a checksum
+/// was validated; a feature requiring end-to-end integrity checks its own
+/// authoritative digest.
 #[derive(Debug)]
 pub struct Download {
     metadata: ObjectMetadata,
@@ -49,8 +56,9 @@ enum Status {
     Failed(ObjectStorageError),
 }
 
-/// Terminal code takes the whole cell under the short lock, then destroys and
-/// observes it after unlocking.
+/// The operation lifetime, body, final chunk, permit, and observation move as
+/// one cell. Terminal code takes this entire cell while holding the short lock,
+/// then destroys and observes it after the lock is released.
 #[derive(Debug)]
 struct Resources {
     context: OperationContext,
@@ -71,8 +79,8 @@ struct Completion {
     resources: Resources,
     outcome: Outcome,
     waker: Option<Waker>,
-    /// A ready SDK poll may have produced bytes or an error at the cutoff;
-    /// discarded after the lock is released.
+    /// A ready SDK poll may have produced bytes or an error at the cutoff. It
+    /// is discarded only after releasing the resource-cell lock.
     discarded: Option<Result<Bytes, ByteStreamError>>,
 }
 
@@ -93,15 +101,8 @@ impl Completion {
     }
 }
 
-fn lock(shared: &Mutex<State>) -> MutexGuard<'_, State> {
-    // `Download::poll_chunk` catches a provider-body panic and calls `terminate` on
-    // this cell; keep it usable so a retained `Download` still returns its error.
-    shared
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
 /// A provider poll can advance custody without returning a caller payload.
+/// Empty buffers cross the lock boundary before their destructor runs.
 enum ReadStep {
     Buffered,
     Empty(Bytes),
@@ -150,7 +151,8 @@ impl State {
         (result, completion)
     }
 
-    /// Includes a withheld final chunk; `None` once the download failed.
+    /// Bytes not yet returned to the reader, including a withheld final
+    /// chunk; `None` once the download failed.
     fn unread_bytes(&self) -> Option<u64> {
         match &self.status {
             Status::Open(resources) => Some(
@@ -175,8 +177,8 @@ impl State {
             return self.close_failed(Failure::stopped(stopped));
         }
         self.waker = Some(context.waker().clone());
-        // `poll_chunk` loops over ready chunks without returning, so it spends the
-        // cooperative budget by hand.
+        // `poll_chunk` loops over ready empty and buffered chunks without
+        // returning, so it spends the task's cooperative budget by hand.
         let Poll::Ready(coop) = tokio::task::coop::poll_proceed(context) else {
             return (Poll::Pending, None);
         };
@@ -184,8 +186,8 @@ impl State {
         if polled.is_ready() {
             coop.made_progress();
         }
-        // Strict GET finality: a poll that crossed the cutoff yields no chunk, error
-        // mapping, or EOF.
+        // Strict GET finality: a body poll that crossed the original cutoff
+        // cannot yield a new chunk, error mapping, or successful EOF.
         if let Some(stopped) = resources.context.stopped() {
             let (result, mut completion) = self.close_failed(Failure::stopped(stopped));
             if let (Some(completion), Poll::Ready(item)) = (&mut completion, polled) {
@@ -236,7 +238,7 @@ enum Termination {
 
 fn terminate(shared: &Mutex<State>, termination: Termination) {
     let completion = {
-        let mut state = lock(shared);
+        let mut state = shared.lock();
         let Status::Open(resources) = &state.status else {
             return;
         };
@@ -274,7 +276,7 @@ impl Download {
                 _permit: permit,
             }),
         }));
-        // Captured before the timer first polls so an unexpected exit frees custody.
+        // Capture before the timer can first poll so an unexpected exit frees custody.
         let exit = std::mem::DropGuard::new(Arc::downgrade(&shared), |weak| {
             if let Some(shared) = weak.upgrade() {
                 terminate(
@@ -313,10 +315,11 @@ impl Download {
         context: &mut Context<'_>,
     ) -> Poll<Result<Option<Bytes>, ObjectStorageError>> {
         loop {
-            // A caller that catches the panic may keep this `Download`; slot and body must
-            // not wait for its drop.
+            // `Drop` would release custody too, but a caller that catches the
+            // panic may keep this `Download`; the slot and the body must not
+            // wait for it to be dropped.
             let polled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                lock(&self.shared).poll(context)
+                self.shared.lock().poll(context)
             }));
             let (result, completion) = match polled {
                 Ok(result) => result,
@@ -338,9 +341,10 @@ impl Download {
         }
     }
 
-    /// Returned bytes outlive admission and need a budget at their consumer.
+    /// Consume and collect unread bytes under the original context. Returned
+    /// bytes outlive admission and need a budget at their consumer.
     pub async fn into_bytes(mut self) -> Result<Bytes, ObjectStorageError> {
-        let unread_bytes = lock(&self.shared).unread_bytes().unwrap_or(0);
+        let unread_bytes = self.shared.lock().unread_bytes().unwrap_or(0);
         let mut buffer = Vec::with_capacity(usize::try_from(unread_bytes).unwrap_or(0));
         while let Some(chunk) = self.next_chunk().await? {
             buffer.extend_from_slice(&chunk);
@@ -369,12 +373,14 @@ impl http_body::Body for Download {
     }
 
     fn is_end_stream(&self) -> bool {
-        matches!(lock(&self.shared).status, Status::Succeeded)
+        matches!(self.shared.lock().status, Status::Succeeded)
     }
 
     fn size_hint(&self) -> SizeHint {
-        // Hyper may skip an exact-zero body, so a failed download reports no exact size.
-        lock(&self.shared)
+        // Hyper may skip an exact-zero body, so a failed download reports no
+        // exact size and keeps its error visible.
+        self.shared
+            .lock()
             .unread_bytes()
             .map_or_else(SizeHint::default, SizeHint::with_exact)
     }

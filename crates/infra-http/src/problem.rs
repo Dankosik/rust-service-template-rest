@@ -7,6 +7,7 @@ use std::time::Duration;
 use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE, RETRY_AFTER};
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
+use compact_str::CompactString;
 use serde::Serialize;
 pub use service_failure::Code;
 pub use service_failure::SANITIZED_DETAIL;
@@ -75,12 +76,12 @@ fn http_title(code: Code) -> &'static str {
 pub struct InvalidParam {
     /// An RFC 6901 JSON pointer for a request-body member, or a
     /// `location.name` pair such as `query.limit` for a parameter.
-    #[schema(example = "/slug")]
-    pub name: String,
+    #[schema(value_type = String, example = "/slug")]
+    pub name: CompactString,
     /// Why the contract rejected it. Names the constraint that failed and
     /// never echoes the submitted value.
-    #[schema(example = "maximum string length is 64")]
-    pub reason: String,
+    #[schema(value_type = String, example = "maximum string length is 64")]
+    pub reason: CompactString,
 }
 
 /// RFC 9457 problem details with a stable `code` from the closed failure catalog.
@@ -89,9 +90,8 @@ pub struct InvalidParam {
 // contract; `code` is a plain `string` rather than the closed `Code` enum,
 // because oasdiff treats a new enum value in a response as a breaking change
 // and the catalog grows with features; `deny_unknown_fields` is there for the
-// reason given on [`InvalidParam`]. The examples are `Code::BadRequest` as the
-// catalog renders it, so a catalog edit regenerates them instead of leaving a
-// stale copy.
+// reason given on [`InvalidParam`]. The examples are `Code::BadRequest` as the catalog renders it, so a catalog
+// edit regenerates them instead of leaving a stale copy.
 #[serde_with::skip_serializing_none]
 #[derive(Clone, Debug, Serialize, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -109,14 +109,14 @@ pub struct Problem {
     title: &'static str,
     #[schema(example = json!(http_status(Code::BadRequest).as_u16()))]
     status: u16,
-    #[schema(nullable = false, example = "invalid request framing")]
-    detail: Option<String>,
+    #[schema(value_type = Option<String>, nullable = false, example = "invalid request framing")]
+    detail: Option<CompactString>,
     /// URI reference identifying this occurrence when the service exposes
     /// one.
-    #[schema(nullable = false, format = "uri-reference")]
-    instance: Option<String>,
-    #[schema(nullable = false, example = "9ccecdfd-92c9-4665-a464-06f8ba73cd77")]
-    request_id: Option<String>,
+    #[schema(value_type = Option<String>, nullable = false, format = "uri-reference")]
+    instance: Option<CompactString>,
+    #[schema(value_type = Option<String>, nullable = false, example = "9ccecdfd-92c9-4665-a464-06f8ba73cd77")]
+    request_id: Option<CompactString>,
     /// Which parts of the request failed validation, following the RFC 9457
     /// extension-member example. Present only on a validation rejection,
     /// and never carrying the submitted value.
@@ -148,27 +148,37 @@ impl Problem {
     }
 
     #[must_use]
-    pub fn detail(mut self, detail: impl Into<String>) -> Self {
+    pub fn detail(mut self, detail: impl Into<CompactString>) -> Self {
         self.detail = Some(detail.into());
         self
     }
 
     #[must_use]
-    pub fn instance(mut self, instance: impl Into<String>) -> Self {
+    pub(crate) fn detail_static(mut self, detail: &'static str) -> Self {
+        self.detail = Some(CompactString::const_new(detail));
+        self
+    }
+
+    #[must_use]
+    pub fn instance(mut self, instance: impl Into<CompactString>) -> Self {
         self.instance = Some(instance.into());
         self
     }
 
     /// Filled by problem completion; callers do not thread the id.
     #[must_use]
-    fn with_request_id(mut self, id: String) -> Self {
-        self.request_id = Some(id);
+    fn with_request_id(mut self, id: &str) -> Self {
+        self.request_id = Some(CompactString::from(id));
         self
     }
 
     /// Adds a failed request part by name with the reason; never the submitted value.
     #[must_use]
-    pub fn invalid_param(mut self, name: impl Into<String>, reason: impl Into<String>) -> Self {
+    pub fn invalid_param(
+        mut self,
+        name: impl Into<CompactString>,
+        reason: impl Into<CompactString>,
+    ) -> Self {
         self.invalid_params.push(InvalidParam {
             name: name.into(),
             reason: reason.into(),
@@ -176,6 +186,7 @@ impl Problem {
         self
     }
 
+    /// Emit a `Retry-After` header rounded up to whole seconds (at least one).
     #[must_use]
     pub fn retry_after(mut self, after: Duration) -> Self {
         self.retry_after = Some(after);
@@ -215,13 +226,15 @@ pub(crate) fn complete_problem(mut response: Response, request_id: Option<&str>)
     let Some(problem) = response.extensions_mut().remove::<Problem>() else {
         return response;
     };
-    let problem = problem.with_request_id(id.to_owned());
+    let problem = problem.with_request_id(id);
+    // Keep the status and headers already set by the response's owner.
     *response.body_mut() = axum::Json(&problem).into_response().into_body();
     response.headers_mut().remove(CONTENT_LENGTH);
     response.extensions_mut().insert(problem);
     response
 }
 
+/// Whole seconds, rounded up and at least one.
 fn retry_after_value(after: Duration) -> HeaderValue {
     let seconds = after
         .as_secs()
@@ -234,28 +247,37 @@ fn retry_after_value(after: Duration) -> HeaderValue {
 }
 
 pub(crate) fn body_too_large() -> Problem {
-    Problem::new(Code::RequestEntityTooLarge).detail("request body exceeds the configured limit")
+    Problem::new(Code::RequestEntityTooLarge)
+        .detail_static("request body exceeds the configured limit")
 }
 
 pub(crate) fn body_unreadable() -> Problem {
-    Problem::new(Code::BadRequest).detail("request body could not be read")
+    Problem::new(Code::BadRequest).detail_static("request body could not be read")
 }
 
 pub(crate) fn sanitized_problem() -> Problem {
-    Problem::new(Code::InternalServerError).detail(SANITIZED_DETAIL)
+    Problem::new(Code::InternalServerError).detail_static(SANITIZED_DETAIL)
 }
 
 pub(crate) fn sanitized_internal_error() -> Response {
     sanitized_problem().into_response()
 }
 
-/// Declared shapes (`#/components/responses/<Name>`) never constructed at
-/// runtime: the runtime value is always a [`Problem`], whose code fixes the
-/// status. Names differ from [`Code`] on purpose: `Code::BadRequest` is what a
-/// handler returns, `responses::BadRequest` what the contract declares. A
-/// response family owned by one optional pack lives with that pack's seam
-/// (`authn`, `webhooks`, `idempotency`). Doc comments on the newtypes are the
-/// response descriptions in the contract.
+/// Reusable problem responses (`#/components/responses/<Name>`) and their
+/// registration in the document.
+///
+/// Each newtype is the declared shape of one status an operation can answer
+/// with a [`Problem`]; an operation references it as
+/// `(status = <code>, response = <Name>)`. The types exist for the document
+/// and are not constructed at runtime: the runtime value is always a
+/// `Problem`, whose code fixes the status. Their names are distinct from
+/// [`Code`] on purpose: `Code::BadRequest` is what a handler returns,
+/// `responses::BadRequest` is what the contract declares. A new status joins
+/// this module with its first operation; the shared transport set is
+/// [`responses::TransportProblemResponses`]. A response family owned by one
+/// optional pack lives with that pack's seam instead: `authn`, `webhooks`, and
+/// `idempotency`. Doc comments on the newtypes are the response descriptions
+/// in the contract.
 pub mod responses {
     use utoipa::{IntoResponses, OpenApi, ToResponse};
 
@@ -281,10 +303,14 @@ pub mod responses {
     #[response(content_type = "application/problem+json")]
     pub struct GatewayTimeout(pub Problem);
 
-    /// Shared transport answers that do not collide with probe-owned 503
-    /// `text/plain`. The runtime Problem 503/504/408/405 stay out of this group
-    /// (ready already documents 503 as `text/plain`); header overflow is
-    /// hyper-native 431 before the router.
+    /// The shared transport answers operations can declare without colliding
+    /// with probe-owned 503 `text/plain`.
+    /// The hardened chain also emits Problem 503/504/408/405 at runtime; those
+    /// stay out of this group (ready already documents 503 as `text/plain`).
+    /// Header overflow is hyper-native 431 before the router, not a
+    /// `Problem`. Name this type in `responses(...)` beside the operation's
+    /// own answers; a new shared *Problem* status joins here once instead
+    /// of in every operation.
     #[derive(Debug, IntoResponses)]
     pub enum TransportProblemResponses {
         #[response(status = 400)]
@@ -341,7 +367,7 @@ mod tests {
     async fn renders_problem_json_with_optional_members() {
         let problem = Problem::new(Code::ServiceUnavailable)
             .detail(service_failure::AT_CAPACITY_DETAIL)
-            .with_request_id("req-1".to_owned())
+            .with_request_id("req-1")
             .retry_after(Duration::from_millis(200));
         let response = problem.into_response();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);

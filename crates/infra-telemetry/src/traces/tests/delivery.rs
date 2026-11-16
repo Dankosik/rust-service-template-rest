@@ -465,7 +465,7 @@ struct CapturedSpans(Arc<Mutex<Vec<SpanData>>>);
 
 impl SpanExporter for CapturedSpans {
     fn export(&self, batch: Vec<SpanData>) -> impl Future<Output = OTelSdkResult> + Send {
-        self.0.lock().unwrap().extend(batch);
+        self.0.lock().extend(batch);
         std::future::ready(Ok(()))
     }
 }
@@ -552,7 +552,7 @@ fn collector_diagnostics_cannot_escape_to_local_records_or_span_events() {
                     records.contains("ordinary_event"),
                     "positive local control: {records}"
                 );
-                let spans = spans.0.lock().unwrap();
+                let spans = spans.0.lock();
                 assert_eq!(spans.len(), 1, "SDK diagnostics cannot create extra spans");
                 assert_eq!(spans[0].name, "ordinary_span");
                 assert_eq!(spans[0].events.len(), 1, "only the app event is admitted");

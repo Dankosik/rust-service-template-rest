@@ -1,7 +1,7 @@
 //! Prometheus metrics through the `metrics` facade: one recorder per process.
 //! Each crate that emits a histogram owns its name and any bucket override.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
@@ -10,6 +10,7 @@ use axum::http::header::CONTENT_TYPE;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use metrics_exporter_prometheus::{BuildError, Matcher, PrometheusBuilder, PrometheusHandle};
+use parking_lot::Mutex;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -79,20 +80,14 @@ impl Progress {
     }
 
     fn record(&self, completed: Instant, lag: Duration) -> Duration {
-        let mut sample = self
-            .sample
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut sample = self.sample.lock();
         let max_lag = sample.map_or(lag, |previous| previous.max_lag.max(lag));
         *sample = Some(ProgressSample { completed, max_lag });
         max_lag
     }
 
     fn age_seconds(&self) -> f64 {
-        let sample = *self
-            .sample
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let sample = *self.sample.lock();
         sample.map_or(f64::NAN, |sample| sample.completed.elapsed().as_secs_f64())
     }
 }

@@ -181,7 +181,6 @@ pub(crate) enum VerificationReason {
     Provider(ProviderFailure),
     Inactive,
     Capacity,
-    CacheState,
     // template:end oidc-introspection:authn-introspection-reasons
 }
 
@@ -208,7 +207,6 @@ impl VerificationReason {
             Self::Provider(failure) => failure.label(),
             Self::Inactive => "inactive",
             Self::Capacity => "capacity",
-            Self::CacheState => "introspection_cache_state",
             // template:end oidc-introspection:authn-introspection-reason-labels
         }
     }

@@ -1,11 +1,11 @@
-use std::{
-    fmt,
-    sync::{Arc, Mutex, PoisonError},
-};
+use std::{fmt, sync::Arc};
 
+use arc_swap::ArcSwapOption;
 use http::HeaderValue;
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
+use parking_lot::Mutex;
 use secrecy::{ExposeSecret as _, SecretString};
+use zeroize::Zeroizing;
 
 use crate::{JwtType, KeyId, MAX_TOKEN_LIFETIME_SECONDS, ServiceName, unix_seconds};
 
@@ -109,7 +109,8 @@ impl TokenSource {
             Signing::Key(signer) => ReceiverState::Active(Arc::new(ActiveReceiver {
                 signer: Arc::clone(signer),
                 audience,
-                cached: Mutex::new(None),
+                cached: ArcSwapOption::empty(),
+                refresh: Mutex::new(()),
             })),
         };
         Ok(ReceiverTokens(state))
@@ -128,7 +129,8 @@ enum ReceiverState {
 struct ActiveReceiver {
     signer: Arc<Signer>,
     audience: ServiceName,
-    cached: Mutex<Option<Cached>>,
+    cached: ArcSwapOption<Cached>,
+    refresh: Mutex<()>,
 }
 
 struct Cached {
@@ -162,22 +164,29 @@ impl ReceiverTokens {
 }
 
 impl ActiveReceiver {
-    fn authorization_at(&self, now: u64) -> Result<HeaderValue, SigningError> {
-        let mut cached = self.cached.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(token) = cached
-            .as_ref()
+    fn reusable(cached: Option<&Arc<Cached>>, now: u64) -> Option<HeaderValue> {
+        cached
             .filter(|token| (token.issued_at..token.issued_at + REUSE_SECONDS).contains(&now))
-        {
-            return Ok(token.authorization.clone());
+            .map(|token| token.authorization.clone())
+    }
+
+    fn authorization_at(&self, now: u64) -> Result<HeaderValue, SigningError> {
+        if let Some(authorization) = Self::reusable(self.cached.load().as_ref(), now) {
+            return Ok(authorization);
+        }
+        let _refresh = self.refresh.lock();
+        if let Some(authorization) = Self::reusable(self.cached.load().as_ref(), now) {
+            return Ok(authorization);
         }
         let token = self.signer.sign(self.audience.as_str(), now)?;
+        let bearer = Zeroizing::new(format!("Bearer {}", token.as_str()));
         let mut authorization =
-            HeaderValue::try_from(format!("Bearer {token}")).map_err(|_| SigningError::Signing)?;
+            HeaderValue::from_str(bearer.as_str()).map_err(|_| SigningError::Signing)?;
         authorization.set_sensitive(true);
-        *cached = Some(Cached {
+        self.cached.store(Some(Arc::new(Cached {
             issued_at: now,
             authorization: authorization.clone(),
-        });
+        })));
         Ok(authorization)
     }
 }
@@ -198,7 +207,7 @@ struct Claims<'a> {
 }
 
 impl Signer {
-    fn sign(&self, audience: &str, now: u64) -> Result<String, SigningError> {
+    fn sign(&self, audience: &str, now: u64) -> Result<Zeroizing<String>, SigningError> {
         let claims = Claims {
             iss: self.name.as_str(),
             sub: self.name.as_str(),
@@ -206,7 +215,9 @@ impl Signer {
             iat: now,
             exp: now + MAX_TOKEN_LIFETIME_SECONDS,
         };
-        jsonwebtoken::encode(&self.header, &claims, &self.key).map_err(|_| SigningError::Signing)
+        jsonwebtoken::encode(&self.header, &claims, &self.key)
+            .map(Zeroizing::new)
+            .map_err(|_| SigningError::Signing)
     }
 }
 

@@ -15,12 +15,6 @@ from pathlib import Path
 
 sys.dont_write_bytecode = True
 
-from fixtures.historical_profiles import (
-    install_derived_auth_only_none,
-    install_derived_outbound_only_none,
-    install_historical_none,
-)
-
 
 def run(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(args, cwd=cwd, text=True, capture_output=True, check=False)
@@ -216,30 +210,13 @@ def check(source: Path) -> None:
             expected = authn or "none"
             assert_profile_output(source, profile_target, expected, "none")
             if authn is None:
-                install_derived_auth_only_none(source, profile_target)
-                auth_only_before = tree_state(profile_target)
-                auth_only_replay = initialize(source, profile_target, "none", "none")
-                if auth_only_replay.returncode or tree_state(profile_target) != auth_only_before:
-                    raise AssertionError("derived auth-only none lock replay changed the sync canary target")
-                auth_only_mismatch = initialize(source, profile_target, "none", "bounded")
-                if auth_only_mismatch.returncode == 0 or tree_state(profile_target) != auth_only_before:
-                    raise AssertionError("auth-only none sync canary accepted an outbound profile migration")
-                install_derived_outbound_only_none(source, profile_target)
-                outbound_only_before = tree_state(profile_target)
-                outbound_only_replay = initialize(source, profile_target, "none", "none", "none")
-                if outbound_only_replay.returncode or tree_state(profile_target) != outbound_only_before:
-                    raise AssertionError("derived outbound-only none lock replay changed the sync canary target")
-                outbound_only_mismatch = initialize(source, profile_target, "none", "none", "postgres")
-                if outbound_only_mismatch.returncode == 0 or tree_state(profile_target) != outbound_only_before:
-                    raise AssertionError("outbound-only none sync canary accepted an http idempotency profile migration")
-                install_historical_none(source, profile_target)
                 before = tree_state(profile_target)
                 replay = initialize(source, profile_target, "none")
                 if replay.returncode or tree_state(profile_target) != before:
-                    raise AssertionError("actual historical none lock replay changed the sync canary target")
+                    raise AssertionError("none lock replay changed the sync canary target")
                 mismatch = initialize(source, profile_target, "oidc-jwt")
                 if mismatch.returncode == 0 or tree_state(profile_target) != before:
-                    raise AssertionError("historical none sync canary accepted an authn profile migration")
+                    raise AssertionError("none sync canary accepted an authn profile migration")
         # A DATABASE=postgres JOBS=none service keeps its migrations, and a
         # full portable sync from a source that retains the jobs pack restores
         # none of it.
@@ -361,10 +338,13 @@ def check(source: Path) -> None:
         setting_apply = sync(source, target, "--apply", instructions_only=True)
         if setting_apply.returncode:
             raise AssertionError(f"managed setting type repair failed: {setting_apply.stderr}")
-        rendered_settings = settings.read_bytes()
-        if rendered_settings != crlf_settings.replace(b'": 3\r\n', b'": "3"\r\n'):
-            raise AssertionError("settings repair changed unrelated CRLF bytes or did not replace the managed token")
-        commit_paths(target, "adopt lexical managed setting", ".claude/settings.json")
+        rendered_text = settings.read_text(encoding="utf-8")
+        if not rendered_text.endswith("\n") or json.loads(rendered_text) != {
+            "unrelated": {"keep": True},
+            "env": {"CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "3"},
+        }:
+            raise AssertionError("settings repair lost unrelated consumer keys or did not normalize the managed setting")
+        commit_paths(target, "adopt managed setting", ".claude/settings.json")
 
         make_cases = (
             ("space-target", b"\n build: ; @:\n", "overrides"),

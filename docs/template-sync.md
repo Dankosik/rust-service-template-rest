@@ -8,10 +8,8 @@ authentication, and agent-harness packs. Later synchronization adopts portable
 tooling and instructions from a committed source checkout. The
 [ownership manifest](../template-owned.paths) is the full-sync copy authority;
 the service keeps its application, configuration and local policies.
-For complete runtime updates and rendered-baseline custody, run
-`scripts/template-upgrade.sh` (`docs/template-upgrade.md` in an admitted
-external template checkout). The portable manifest does not gain runtime
-ownership.
+Runtime crates, Cargo manifests, vendor patches, and Dockerfile remain
+service-owned; portable manifest sync never claims runtime ownership.
 
 ## Initialize a service
 
@@ -99,7 +97,7 @@ instructions only, `codex`, `claude`, `qwen`, `cursor`, `grok`, `opencode`, or
 `SERVICE_AUTH` (`--service-auth`) defaults to `none` (`none` | `jwt`); `jwt` requires `GRPC=enabled` and retains `infra-serviceauth`, `[service_auth]`, gRPC admission, and client binding (inert until `service_auth.mode = "jwt"`).
 <!-- template:end service-auth:docs-template-init-service-auth -->
 
-Initialization renames the service package and main binary (keeping `crates/service/`, library name, and `openapi`), drops unselected packs, `source_only` files, and unused `[workspace.dependencies]` (refusing standalone comments outside profile markers), and leaves `init-module.sh` for one-shot replay. Review and commit the diff yourself; the initializer never stages or commits. Cargo lock pruning via `cargo metadata --offline` replaced the hand-maintained feature projector (byte-identical on all 68 runtime graphs on 2026-11-10); reopen a manual projector only if Cargo pruning changes a retained package on a supported graph.
+Initialization renames the service package and main binary (keeping `crates/service/`, library name, and `openapi`), drops unselected packs, `source_only` files, and unused `[workspace.dependencies]` (along with their preceding standalone comment lines), and leaves `init-module.sh` for one-shot replay. Review and commit the diff yourself; the initializer never stages or commits. Cargo lock pruning via `cargo metadata --offline` replaced the hand-maintained feature projector (byte-identical on all 68 runtime graphs on 2026-11-10); reopen a manual projector only if Cargo pruning changes a retained package on a supported graph.
 
 ## Initialization record and replay
 
@@ -207,8 +205,9 @@ To preserve a local canonical skill under `.agents/skills/<name>/` (not collidin
 with source skills), place an empty regular `.service-owned` file beside a valid
 `SKILL.md`; sync preserves that tree and renders selected Claude/Qwen discovery
 links. Claude/Qwen settings sync only `env.CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH`
-and `model.maxSubagentDepth` lexically, preserving all other bytes and refusing
-duplicate keys or non-JSON/non-finite inputs. Codex project config remains an
+and `model.maxSubagentDepth` via canonical `indent=2` JSON merge when drifted
+(leaving consumer settings untouched when already current, and refusing
+duplicate keys or non-JSON/non-finite inputs). Codex project config remains an
 exact generated view.
 
 ## Refusal and recovery
@@ -227,10 +226,11 @@ Initializer and sync are Bash entrypoints over stdlib-only Python 3.11+ and Git
 plumbing (no third-party templating engine, Git library, or network lookup).
 Copier and `cargo-generate` were rejected for lacking exact-manifest ownership,
 selective dirty refusal, and one-shot physical pruning; `git archive` was
-rejected because export attributes can alter committed bytes; whole-file JSON
-serialization was rejected for consumer settings to preserve unrelated bytes.
-`scripts/lib/template_profiles.json` is source-only closed inventory, never
-adopted by sync. Reopen if a maintained tool meets this contract at lower cost.
+rejected because export attributes can alter committed bytes; consumer settings
+remain untouched when their managed key already matches and normalize as
+canonical JSON only when drifted. `scripts/lib/template_profiles.json` is
+source-only closed inventory, never adopted by sync. Reopen if a maintained
+tool meets this contract at lower cost.
 
 ## Validation boundary
 

@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 
+use parking_lot::Mutex;
 use secrecy::{ExposeSecret as _, SecretString};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -83,10 +84,7 @@ impl CredentialsFile {
             .sign(nonce)
             .map_err(|_| CredentialsFileError::Malformed)
             .inspect_err(|error| error.observe_challenge_failure())?;
-        let previous = std::mem::replace(
-            &mut *self.last_jwt.lock().unwrap_or_else(PoisonError::into_inner),
-            jwt.clone(),
-        );
+        let previous = std::mem::replace(&mut *self.last_jwt.lock(), jwt.clone());
         if previous != jwt {
             tracing::info!("messaging_credentials_reloaded");
         }

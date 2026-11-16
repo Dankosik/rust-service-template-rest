@@ -6,6 +6,7 @@ use std::sync::OnceLock;
 use std::time::Instant;
 
 use aws_sdk_s3::operation::{RequestId, RequestIdExt};
+use compact_str::CompactString;
 use enum_map::EnumMap;
 use metrics::{Histogram, Unit};
 use tracing::Span;
@@ -98,8 +99,8 @@ pub(crate) struct OperationGuard {
     operation: Operation,
     span: Span,
     histograms: std::sync::Arc<Histograms>,
-    request_id: Option<Box<str>>,
-    extended_request_id: Option<Box<str>>,
+    request_id: Option<CompactString>,
+    extended_request_id: Option<CompactString>,
     finalized: bool,
 }
 
@@ -169,7 +170,7 @@ impl OperationGuard {
     /// store, configuration, or data warns; an answer about the object or admission
     /// limit stays at DEBUG.
     pub(crate) fn fail(&mut self, failure: &Failure) -> ObjectStorageError {
-        self.span.record("error.type", failure.error_type.as_ref());
+        self.span.record("error.type", failure.error_type.as_str());
         self.span.record("otel.status_code", "ERROR");
         self.finish(Outcome::Failure(failure.error));
         let operation = self.operation.label();
@@ -180,7 +181,7 @@ impl OperationGuard {
                         $level,
                         object_storage.operation = operation,
                         object_storage.outcome = failure.error.label(),
-                        error.type = failure.error_type.as_ref(),
+                        error.type = failure.error_type.as_str(),
                         aws.request_id = self.request_id.as_deref(),
                         aws.extended_request_id = self.extended_request_id.as_deref(),
                         "object_storage_operation_failed"
@@ -226,12 +227,13 @@ impl Drop for OperationGuard {
 /// S3's `x-amz-id-2` is under 100 bytes.
 const MAX_IDENTIFIER_BYTES: usize = 128;
 
-/// Kept only as a short visible-ASCII token, so a store cannot put arbitrary text into a log line.
-fn identifier(value: &str) -> Option<Box<str>> {
+/// Kept only as a short visible-ASCII token, so a store cannot put arbitrary
+/// text into a log line.
+fn identifier(value: &str) -> Option<CompactString> {
     let bounded = !value.is_empty()
         && value.len() <= MAX_IDENTIFIER_BYTES
         && value.bytes().all(|byte| byte.is_ascii_graphic());
-    bounded.then(|| value.into())
+    bounded.then(|| CompactString::from(value))
 }
 
 pub(crate) fn describe() {

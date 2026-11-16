@@ -27,8 +27,8 @@ reference at the paragraph whose unresolved question selects it; do not load
 the whole reference set by default. Keep general manuals, scripts, and assets
 outside decision skills. Cursor, Codex, Grok,
 and OpenCode read `.agents/skills` directly; `.claude/skills` and
-`.qwen/skills` are generated symlink views (`make claude-skills-sync`,
-`make qwen-skills-sync`, checked by `make check-instructions`).
+`.qwen/skills` are generated symlink views (`make agent-harness-sync`, checked
+by `make check-instructions`).
 
 ## Frontmatter
 

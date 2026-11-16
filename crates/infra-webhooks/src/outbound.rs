@@ -108,13 +108,15 @@ fn is_admissible(destination: &Url) -> bool {
 #[derive(derive_more::Debug)]
 #[debug("Dispatcher([REDACTED])")]
 pub struct Dispatcher {
-    endpoints: BTreeMap<String, Endpoint>,
+    endpoints: foldhash::HashMap<String, Endpoint>,
 }
 
 impl Dispatcher {
     #[must_use]
     pub fn new(endpoints: BTreeMap<String, Endpoint>) -> Self {
-        Self { endpoints }
+        Self {
+            endpoints: endpoints.into_iter().collect(),
+        }
     }
 
     /// `max_concurrent` bounds the deliveries one engine runs at once, so a

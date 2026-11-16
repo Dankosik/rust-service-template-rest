@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use sqlx::postgres::PgPool;
 use tokio_util::sync::CancellationToken;
+use zeroize::Zeroizing;
 
 use crate::dsn::{DsnError, password_from};
 
@@ -44,7 +45,7 @@ pub async fn refresh_password_periodically(
 
 #[derive(Default)]
 struct Refresh {
-    current: Option<String>,
+    current: Option<Zeroizing<String>>,
     /// Whether the last read failed, so one outage is one warning.
     unreadable: bool,
 }
@@ -54,7 +55,7 @@ impl Refresh {
         match read(path).await {
             Ok(password) => {
                 self.unreadable = false;
-                if self.current.as_deref() == Some(password.as_str()) {
+                if self.current.as_deref().map(String::as_str) == Some(password.as_str()) {
                     metrics::counter!(REFRESHES_METRIC, "outcome" => "unchanged").increment(1);
                     return;
                 }
@@ -75,7 +76,7 @@ impl Refresh {
     }
 }
 
-async fn read(path: &Path) -> Result<String, DsnError> {
+async fn read(path: &Path) -> Result<Zeroizing<String>, DsnError> {
     let content = tokio::fs::read_to_string(path)
         .await
         .map_err(|err| DsnError::PasswordFile(err.kind()))?;

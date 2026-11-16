@@ -37,10 +37,12 @@ aws-smithy-checksums = { workspace = true }
 aws-smithy-http-client = { workspace = true, features = ["rustls-aws-lc"] }
 aws-smithy-runtime = { workspace = true, features = ["client"] }
 bytes = { workspace = true, features = ["std"] }
+compact_str = { workspace = true }
 health = { workspace = true }
 http-body = { workspace = true }
 http-body-util = { workspace = true }
 metrics = { workspace = true }
+parking_lot = { workspace = true }
 secrecy = { workspace = true }
 shared-rules = { workspace = true }
 sync_wrapper = { workspace = true }

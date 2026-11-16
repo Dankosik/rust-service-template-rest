@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokio::sync::Semaphore;
+use zeroize::Zeroizing;
 
 use crate::CacheError;
 
@@ -36,7 +37,7 @@ impl PasswordFile {
 
     /// A blocking read can outlive its caller's wait. While it runs, another
     /// read fails at once as [`ErrorKind::ResourceBusy`].
-    pub(crate) async fn read(&self) -> Result<String, CacheError> {
+    pub(crate) async fn read(&self) -> Result<Zeroizing<String>, CacheError> {
         let permit =
             self.reading
                 .clone()
@@ -65,8 +66,8 @@ fn read_password_file(path: &Path) -> Result<String, CacheError> {
     std::fs::read_to_string(path).map_err(|error| CacheError::PasswordFile { kind: error.kind() })
 }
 
-fn password_from(content: String) -> Result<String, CacheError> {
-    let password = shared_rules::secret_file::value(content);
+fn password_from(content: String) -> Result<Zeroizing<String>, CacheError> {
+    let password = Zeroizing::new(shared_rules::secret_file::value(content));
     if password.is_empty() {
         return Err(CacheError::PasswordFileEmpty);
     }

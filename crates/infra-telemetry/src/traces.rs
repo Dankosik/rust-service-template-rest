@@ -10,7 +10,7 @@ use exporter::{CollectorTrust, export_timeout, parse_headers, resolve_endpoint, 
 
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use opentelemetry::trace::TracerProvider;
@@ -22,6 +22,7 @@ use opentelemetry_sdk::trace::{
     self as sdktrace, SdkTracer, SdkTracerProvider, SpanData, SpanExporter,
 };
 use opentelemetry_semantic_conventions::attribute;
+use parking_lot::Mutex;
 use secrecy::{ExposeSecret, SecretString};
 
 /// Success does not prove receiver acceptance; SDK queue loss and reported
@@ -252,10 +253,7 @@ impl TracerProviderHandle {
         sdk_budget: Duration,
         deadline: tokio::time::Instant,
     ) -> ProviderShutdown {
-        self.drain
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .draining = true;
+        self.drain.lock().draining = true;
         let allowance = deadline.saturating_duration_since(tokio::time::Instant::now());
         let provider = self.provider;
         let job = tokio::task::spawn_blocking(move || {
@@ -286,12 +284,7 @@ impl TracerProviderHandle {
         if tokio::time::Instant::now() >= deadline {
             observed_here |= ProviderShutdownReasons::DEADLINE;
         }
-        let reasons = self
-            .drain
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .reasons
-            | observed_here;
+        let reasons = self.drain.lock().reasons | observed_here;
         if reasons.is_empty() {
             ProviderShutdown::Completed
         } else {
@@ -328,9 +321,7 @@ struct DrainObservation {
 
 impl DrainObservation {
     fn latch(drain: &Mutex<Self>, failure: SdkFailure, operation: ProviderShutdownReasons) {
-        let mut drain = drain
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut drain = drain.lock();
         if drain.draining {
             drain.reasons |= operation | failure.reason();
         }

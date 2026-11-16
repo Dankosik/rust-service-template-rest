@@ -2,19 +2,22 @@
 
 use std::future::{Future, poll_fn};
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
+use arc_swap::ArcSwap;
 use backon::BackoffBuilder;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use metrics::{Counter, Gauge};
 use operation_context::{Deadline, OperationContext, Stopped};
+use parking_lot::Mutex;
 use redis::aio::MultiplexedConnection;
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, SemaphorePermit, mpsc};
 use tokio::task::AbortHandle;
 use tokio::time::{Instant, sleep_until, timeout, timeout_at};
 use tokio_util::sync::CancellationToken;
+use zeroize::Zeroizing;
 
 use crate::credentials::PasswordFile;
 use crate::observe::{
@@ -121,7 +124,8 @@ struct LinkMetrics {
 }
 
 struct Shared {
-    state: Mutex<State>,
+    state: ArcSwap<State>,
+    write: Mutex<()>,
     changed: Notify,
     retirements: Counter,
 }
@@ -324,30 +328,29 @@ impl std::fmt::Debug for Link {
     }
 }
 
-// A transition notifies only after releasing the lock, so a woken `acquire`
-// does not block on it.
+// A transition notifies only after publishing the new state and releasing the
+// writer lock, so a woken `acquire` sees the published state immediately.
 impl Shared {
-    fn state(&self) -> MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
     fn close(&self) {
-        let previous = std::mem::replace(&mut *self.state(), State::Closed);
-        if let State::Connected(current) = previous {
+        let write = self.write.lock();
+        let previous = self.state.swap(Arc::new(State::Closed));
+        if let State::Connected(current) = &*previous {
             current.retired.cancel();
             self.retirements.increment(1);
         }
+        drop(write);
         self.changed.notify_waiters();
     }
 
     fn retire(&self, generation: &Arc<Generation>) {
-        let mut state = self.state();
+        let write = self.write.lock();
         generation.retired.cancel();
-        if matches!(&*state, State::Connected(current) if Arc::ptr_eq(current, generation)) {
-            *state = State::Connecting;
+        if matches!(&**self.state.load(), State::Connected(current) if Arc::ptr_eq(current, generation))
+        {
+            self.state.store(Arc::new(State::Connecting));
             self.retirements.increment(1);
         }
-        drop(state);
+        drop(write);
         self.changed.notify_waiters();
     }
 
@@ -367,12 +370,12 @@ impl Shared {
     }
 
     fn transition(&self, next: State) -> bool {
-        let mut state = self.state();
-        if matches!(*state, State::Closed) {
+        let write = self.write.lock();
+        if matches!(&**self.state.load(), State::Closed) {
             return false;
         }
-        *state = next;
-        drop(state);
+        self.state.store(Arc::new(next));
+        drop(write);
         self.changed.notify_waiters();
         true
     }
@@ -392,7 +395,7 @@ impl Shared {
     }
 
     fn settled(&self) -> Option<Result<Arc<Generation>, ErrorType>> {
-        match &*self.state() {
+        match &**self.state.load() {
             State::Closed => Some(Err(ErrorType::Io)),
             State::Connected(current) if !current.retired.is_cancelled() => {
                 Some(Ok(current.clone()))
@@ -416,7 +419,8 @@ impl Link {
             retirements,
         } = register_link_metrics();
         let shared = Arc::new(Shared {
-            state: Mutex::new(State::Connecting),
+            state: ArcSwap::from_pointee(State::Connecting),
+            write: Mutex::new(()),
             changed: Notify::new(),
             retirements,
         });
@@ -780,7 +784,7 @@ async fn credentialed_client<'a>(
         .redis_settings()
         .clone()
         .set_username(file.username())
-        .set_password(&password);
+        .set_password(password.as_str());
     let client =
         redis::Client::open(info.set_redis_settings(settings)).map_err(|_| ErrorType::Other)?;
     Ok((client, Some(Rotation::new(file, password))))
@@ -865,7 +869,7 @@ async fn maintain(
 
 struct Rotation<'a> {
     file: &'a PasswordFile,
-    authenticated_password: String,
+    authenticated_password: Zeroizing<String>,
     unreadable_logged: bool,
 }
 
@@ -906,7 +910,7 @@ enum Disposition {
 }
 
 impl<'a> Rotation<'a> {
-    fn new(file: &'a PasswordFile, authenticated_password: String) -> Self {
+    fn new(file: &'a PasswordFile, authenticated_password: Zeroizing<String>) -> Self {
         Self {
             file,
             authenticated_password,
@@ -946,11 +950,11 @@ impl<'a> Rotation<'a> {
                 });
             }
         };
-        if password == self.authenticated_password {
+        if password.as_str() == self.authenticated_password.as_str() {
             return RefreshOutcome::Unchanged;
         }
         let mut command = redis::cmd("AUTH");
-        command.arg(self.file.username()).arg(&password);
+        command.arg(self.file.username()).arg(password.as_str());
         // File I/O must not consume the time owed to commands ahead of AUTH.
         let result = query_until(generation, &command, || {
             let now = Instant::now();

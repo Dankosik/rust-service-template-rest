@@ -640,7 +640,7 @@ impl health::Probe for BucketProbe {
             Err(sdk_error) => {
                 let failure = error::from_sdk(Call::Read, &sdk_error);
                 guard.fail(&failure);
-                Err(health::ProbeError::new(format!(
+                Err(health::ProbeError::format(format_args!(
                     "object storage bucket check failed: {}",
                     failure.error_type
                 )))

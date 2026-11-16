@@ -34,9 +34,10 @@ pub(crate) struct Server {
 
 impl Server {
     pub(crate) fn new(origin: &Origin) -> Self {
+        let mut port = fmt::NumBuffer::new();
         Self {
             address: SharedString::from(origin.host_arc()),
-            port_label: SharedString::from(Arc::<str>::from(origin.port().to_string())),
+            port_label: SharedString::from(Arc::<str>::from(origin.port().format_into(&mut port))),
         }
     }
 }
@@ -247,6 +248,7 @@ fn is_error_status(status: StatusCode) -> bool {
 
 // Static addresses let metrics retain labels for extension codes too; `StatusCode::as_str`
 // borrows its receiver.
+/* jscpd:ignore-start */
 static STATUS_CODES: [StatusCode; 900] = {
     let mut codes = [StatusCode::CONTINUE; 900];
     let mut code = 100_u16;
@@ -263,6 +265,7 @@ static STATUS_CODES: [StatusCode; 900] = {
 fn status_label(status: StatusCode) -> &'static str {
     STATUS_CODES[usize::from(status.as_u16() - 100)].as_str()
 }
+/* jscpd:ignore-end */
 
 /// Read from the typed causes the libraries retain: `tls` for certificate or handshake
 /// refusal, `connect` when no connection was established (name resolution included),

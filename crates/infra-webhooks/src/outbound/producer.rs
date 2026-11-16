@@ -1,6 +1,7 @@
-use std::{collections::BTreeSet, future::poll_fn, task::Poll};
+use std::{future::poll_fn, task::Poll};
 
 use bytes::Bytes;
+use foldhash::HashSet;
 use http::HeaderValue;
 use infra_jobs::{EnqueueError, EnqueueOptions, Enqueued, JobId, json_payload_len};
 use infra_postgres::Tx;
@@ -17,7 +18,7 @@ pub const JSON_CONTENT_TYPE: &str = "application/json";
 
 #[derive(Clone, Debug)]
 pub struct Producer {
-    endpoint_ids: BTreeSet<String>,
+    endpoint_ids: HashSet<String>,
 }
 
 impl Producer {

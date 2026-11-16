@@ -262,7 +262,7 @@ async fn claim(
     policy: &PolicyBinds<'_>,
     requested: i64,
 ) -> Result<Vec<Drawn>, sqlx::Error> {
-    let claim_limits: Vec<_> = policy
+    let claim_limits: smallvec::SmallVec<[i64; 8]> = policy
         .registry
         .iter()
         .map(|registered| {
@@ -377,7 +377,7 @@ async fn claim(
             &policy.lease_offsets_micros,
             requested,
             worker_id,
-            &claim_limits,
+            &claim_limits[..],
             rescued_summary,
         )
         .try_map(|row| row.into_drawn(policy.registry))

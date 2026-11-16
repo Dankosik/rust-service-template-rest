@@ -41,8 +41,8 @@ unrelated major migration;2.1.0 is the smallest released fixed line checked.
 
 The MCP endpoint continues to bind127.0.0.1, retains hotpath's optional token
 middleware, tools and profiler identity. Default builds do not activate this
-dependency. Compatibility must be established by locked feature builds and
-an actual local-only MCP initialize/tools query on the remote CI runner.
+dependency. Compatibility is established by locked feature compilation and
+dependency-tree verification (`make profiling-check`).
 Historical measurements use their original source/version; they are not
 relabelled as measurements of this patched dependency graph.
 

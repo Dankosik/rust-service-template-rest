@@ -5,12 +5,14 @@
 
 use std::mem::DropGuard;
 use std::panic::AssertUnwindSafe;
-use std::sync::{Arc, LazyLock, Once, OnceLock, PoisonError, RwLock};
+use std::sync::{Arc, LazyLock, Once, OnceLock};
 use std::time::{Duration, Instant};
 
+use arc_swap::ArcSwap;
 use foldhash::{HashMap, HashSet};
 use futures_util::FutureExt as _;
 use opentelemetry::context::FutureExt as _;
+use parking_lot::Mutex;
 use tracing::Instrument as _;
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
@@ -204,7 +206,8 @@ const CLIENT_METHOD_LIMIT: usize = 256;
 const CLIENT_COMPONENT_LIMIT: usize = 256;
 static CLIENT_SERIES: LazyLock<Arc<Series>> = LazyLock::new(|| {
     Arc::new(Series::new(Kind::Client {
-        admitted: RwLock::default(),
+        admitted: ArcSwap::default(),
+        admit_lock: Mutex::new(()),
     }))
 });
 
@@ -228,7 +231,8 @@ enum Kind {
         described: HashMap<Box<str>, OnceLock<Arc<Handles>>>,
     },
     Client {
-        admitted: RwLock<HashMap<Box<str>, Arc<Handles>>>,
+        admitted: ArcSwap<HashMap<Box<str>, Arc<Handles>>>,
+        admit_lock: Mutex<()>,
     },
 }
 
@@ -284,9 +288,11 @@ impl Series {
             Kind::Server { described } => described
                 .get_key_value(request.uri().path())
                 .map(|(path, handles)| Arc::clone(handles.get_or_init(|| self.register(path)))),
-            Kind::Client { admitted } => {
-                client_path(request).and_then(|path| self.admit_client_path(admitted, path))
-            }
+            Kind::Client {
+                admitted,
+                admit_lock,
+            } => client_path(request)
+                .and_then(|path| self.admit_client_path(admitted, admit_lock, path)),
         };
         labelled
             .unwrap_or_else(|| Arc::clone(self.unknown.get_or_init(|| self.register(UNKNOWN_PATH))))
@@ -294,27 +300,27 @@ impl Series {
 
     fn admit_client_path(
         &self,
-        admitted: &RwLock<HashMap<Box<str>, Arc<Handles>>>,
+        admitted: &ArcSwap<HashMap<Box<str>, Arc<Handles>>>,
+        admit_lock: &Mutex<()>,
         path: &str,
     ) -> Option<Arc<Handles>> {
-        if let Some(handles) = admitted
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(path)
-        {
+        if let Some(handles) = admitted.load().get(path) {
             return Some(Arc::clone(handles));
         }
-        let mut paths = admitted.write().unwrap_or_else(PoisonError::into_inner);
-        if let Some(handles) = paths.get(path) {
+        let _guard = admit_lock.lock();
+        let current = admitted.load();
+        if let Some(handles) = current.get(path) {
             return Some(Arc::clone(handles));
         }
-        if paths.len() >= CLIENT_METHOD_LIMIT {
+        if current.len() >= CLIENT_METHOD_LIMIT {
             return None;
         }
-        // Admission and handle registration share the write lock. Racing
+        // Admission and handle registration share `admit_lock`. Racing
         // first calls cannot allocate recorder series beyond the bound.
         let handles = self.register(path);
-        paths.insert(path.into(), Arc::clone(&handles));
+        let mut next = (**current).clone();
+        next.insert(path.into(), Arc::clone(&handles));
+        admitted.store(Arc::new(next));
         Some(handles)
     }
 
@@ -826,10 +832,10 @@ mod tests {
             "{rendered}"
         );
         let series = Series::client();
-        let Kind::Client { admitted } = &series.kind else {
+        let Kind::Client { admitted, .. } = &series.kind else {
             panic!("the client series observes the client side");
         };
-        assert_eq!(admitted.read().unwrap().len(), CLIENT_METHOD_LIMIT);
+        assert_eq!(admitted.load().len(), CLIENT_METHOD_LIMIT);
         for (method, status) in [
             ("Header", "OK"),
             ("Trailer", "Aborted"),

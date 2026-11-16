@@ -16,11 +16,6 @@ durable outbound webhooks are all enabled; shipped service binaries expose none
 of its routes or fixture schema.
 
 `tests/jobs/reliability.rs` exercises rollback, concurrent marker arbitration,
-conflict, and uncertain-`COMMIT` readback on PostgreSQL. Full multi-store
-backup/restore and NATS-outage rehearsal is owned by
-`scripts/ci/jobs-reliability-reference.py` (`ALLOW_HEAVY=1 make jobs-reliability-reference`
-on an exact candidate commit, recording diagnostics under
-`target/jobs-reliability-reference/`). Revisit when baseline public APIs,
-logical effect identity, receiver truth boundaries, or worker/pool budgets
-change.
+conflict, and uncertain-`COMMIT` readback on PostgreSQL. Existing jobs, webhook,
+and outbox suites retain their protocol, fencing, and transaction proof.
 <!-- template:end jobs-reference:test-readme-reading-reference -->

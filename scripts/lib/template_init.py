@@ -20,25 +20,29 @@ from typing import Any, Sequence
 from template_state import (
     ADAPTERS,
     AUTHN_CHOICES,
+    CACHE_CHOICES,
     DATABASE_CHOICES,
     GRPC_CHOICES,
     HARNESS_CHOICES,
     HTTP_IDEMPOTENCY_CHOICES,
     INBOUND_WEBHOOKS_CHOICES,
     JOBS_CHOICES,
-    CACHE_CHOICES,
-    OBJECT_STORAGE_CHOICES,
-    SERVICE_AUTH_CHOICES,
-    MESSAGING_CHOICES,
-    OUTBOX_CHOICES,
     LOCK_NAME,
     LOCK_SCHEMA_VERSION,
-    LockSnapshot,
+    MESSAGING_CHOICES,
+    OBJECT_STORAGE_CHOICES,
+    OUTBOUND_AUTH_CHOICES,
+    OUTBOUND_HTTP_CHOICES,
+    OUTBOX_CHOICES,
+    SERVICE_AUTH_CHOICES,
     TEMPLATE_REPOSITORY,
+    WEBHOOKS_CHOICES,
     PlannedLink,
     PlannedWrite,
     Refusal,
     ToolFailure,
+    _contains_profile_marker,
+    _manifest_files,
     admit_plan,
     atomic_write,
     git,
@@ -47,24 +51,19 @@ from template_state import (
     http_idempotency_requirement,
     inbound_webhooks_requirement,
     jobs_requirement,
-    outbox_requirement,
-    service_auth_requirement,
     load_lock,
-    load_lock_snapshot,
     manifest_entries,
-    _manifest_files,
-    OUTBOUND_HTTP_CHOICES,
-    OUTBOUND_AUTH_CHOICES,
-    parse_manifest,
+    outbox_requirement,
     parse_json_bytes,
+    parse_manifest,
     safe_relative,
     selected_adapters,
+    service_auth_requirement,
     snapshot_tree,
     validate_codeowner,
     validate_description,
     validate_repository,
     validate_service_name,
-    WEBHOOKS_CHOICES,
     webhooks_requirement,
     write_plan,
 )
@@ -75,8 +74,7 @@ _MARKER_PREFIX_RE = re.compile(
     r"^[ \t]*(?:(?:#|//)[ \t]*template:(?:begin|end)(?:[ \t]|$)|<!--[ \t]*template:(?:begin|end)(?:[ \t]|$))"
 )
 
-# The inventory, not this parser, declares the supported marker kinds. This
-# recognizes only complete host-comment marker lines so ordinary prose is inert.
+# Recognizes only complete host-comment marker lines so ordinary prose is inert.
 _MARKER_RE = re.compile(
     r"^(?P<indent>[ \t]*)(?:(?P<hash>#)|(?P<slash>//)|(?P<html><!--))"
     r"[ \t]*template:(?P<kind>begin|end)[ \t]+(?P<profile>[a-z0-9]+(?:-[a-z0-9]+)*):(?P<id>[a-z0-9]+(?:-[a-z0-9]+)*)"
@@ -138,7 +136,6 @@ class InitInputs:
 class ProfileData:
     source_only: tuple[str, ...]
     removals: dict[str, tuple[str, ...]]
-    markers: tuple[tuple[str, str, str], ...]
     identity: tuple[dict[str, Any], ...]
 
 
@@ -239,204 +236,77 @@ def parse_inputs(arguments: argparse.Namespace) -> InitInputs:
     return inputs
 
 
-_LEGACY_PROFILE_INVENTORY_KEYS = frozenset(
-    {"schema_version", "source_only", "postgres", "identity", "cargo_lock"}
-)
-_CURRENT_PROFILE_INVENTORY_KEYS = frozenset(
-    {
-        "schema_version",
-        "source_only",
-        "postgres",
-        "authn",
-        "oidc-jwt",
-        "oidc-introspection",
-        "identity",
-        "cargo_lock",
-    }
-)
-_OUTBOUND_PROFILE_INVENTORY_KEYS = frozenset(
-    {
-        *_CURRENT_PROFILE_INVENTORY_KEYS,
-        "outbound-http",
-        "egress-dns",
-        "request-budget",
-    }
-)
-_TLS_FIXTURE_PROFILE_INVENTORY_KEYS = frozenset(
-    {
-        *_OUTBOUND_PROFILE_INVENTORY_KEYS,
-        "tls-fixtures",
-    }
-)
-_HTTP_IDEMPOTENCY_PROFILE_INVENTORY_KEYS = frozenset(
-    {
-        *_TLS_FIXTURE_PROFILE_INVENTORY_KEYS,
-        "http-idempotency",
-        "http-idempotency-mounted",
-    }
-)
-_JOBS_PROFILE_INVENTORY_KEYS = frozenset(
-    {
-        *_HTTP_IDEMPOTENCY_PROFILE_INVENTORY_KEYS,
-        "jobs",
-        "jobs-http-idempotency",
-    }
-)
-_WEBHOOKS_PROFILE_INVENTORY_KEYS = frozenset(
-    {
-        *_JOBS_PROFILE_INVENTORY_KEYS,
-        "webhooks-common",
-        "webhooks",
-        "inbound-webhooks",
-    }
-)
-_MESSAGING_PROFILE_INVENTORY_KEYS = frozenset(
-    {
-        *(_WEBHOOKS_PROFILE_INVENTORY_KEYS - {"egress-dns"}),
-        "messaging",
-        "worker",
-        "service-secrets",
-        "jobs-messaging",
-        "integration",
-    }
-)
-_OUTBOX_LEGACY_PROFILE_INVENTORY_KEYS = frozenset(
-    {*(_MESSAGING_PROFILE_INVENTORY_KEYS - {"jobs-messaging"}), "outbox"}
-)
-_OUTBOX_PROFILE_INVENTORY_KEYS = frozenset({*_MESSAGING_PROFILE_INVENTORY_KEYS, "outbox"})
-
-
-# The DNS-bearing key sets above are supported historical replay input only.
-_TRUSTED_ORIGIN_PROFILE_INVENTORY_KEYS = _WEBHOOKS_PROFILE_INVENTORY_KEYS - {"egress-dns"}
-_OUTBOUND_AUTH_PROFILE_INVENTORY_KEYS = _TRUSTED_ORIGIN_PROFILE_INVENTORY_KEYS | {"outbound-auth"}
-_OUTBOX_LEGACY_OUTBOUND_AUTH_PROFILE_INVENTORY_KEYS = _OUTBOX_LEGACY_PROFILE_INVENTORY_KEYS | {"outbound-auth"}
-_OUTBOX_OUTBOUND_AUTH_PROFILE_INVENTORY_KEYS = _OUTBOX_PROFILE_INVENTORY_KEYS | {"outbound-auth"}
-_SHARED_CONFIG_URL_LEGACY_PROFILE_INVENTORY_KEYS = _OUTBOX_LEGACY_OUTBOUND_AUTH_PROFILE_INVENTORY_KEYS | {"config-url"}
-_SHARED_CONFIG_URL_PROFILE_INVENTORY_KEYS = _OUTBOX_OUTBOUND_AUTH_PROFILE_INVENTORY_KEYS | {"config-url"}
-_GRPC_PROFILE_INVENTORY_KEYS = _SHARED_CONFIG_URL_PROFILE_INVENTORY_KEYS | {
+# The first refusal must remain independent of JSON key order.
+_PROFILE_SECTION_ORDER = (
+    "source-template",
+    "authn",
+    "oidc-jwt",
+    "oidc-introspection",
+    "outbound-http",
+    "request-budget",
+    "outbound-auth",
+    "client-integrations",
     "grpc",
-    "grpc-none",
     "grpc-authn",
     "grpc-transport-tests",
     "grpc-jwt",
     "outbound-auth-grpc",
-    "client-integrations",
-}
-_CACHE_PROFILE_INVENTORY_KEYS = _GRPC_PROFILE_INVENTORY_KEYS | {"cache", "rustls"}
-_JSONWEBTOKEN_PROFILE_INVENTORY_KEYS = _CACHE_PROFILE_INVENTORY_KEYS | {"jsonwebtoken"}
-_OBJECT_STORAGE_PROFILE_INVENTORY_KEYS = _JSONWEBTOKEN_PROFILE_INVENTORY_KEYS | {"object-storage"}
-_RUNTIME_PROGRESS_PROFILE_INVENTORY_KEYS = _OBJECT_STORAGE_PROFILE_INVENTORY_KEYS | {"runtime-progress"}
-_TEST_METRICS_PROFILE_INVENTORY_KEYS = _RUNTIME_PROGRESS_PROFILE_INVENTORY_KEYS | {"test-metrics"}
-_POSTGRES_SUSTAINED_PROFILE_INVENTORY_KEYS = _TEST_METRICS_PROFILE_INVENTORY_KEYS | {"postgres-sustained"}
-_OPERATIONAL_RECOVERY_PROFILE_INVENTORY_KEYS = _TEST_METRICS_PROFILE_INVENTORY_KEYS | {
-    "postgres-grpc-consumers", "postgres-grpc-auth", "test-introspection-fixtures",
-}
-_JOBS_REFERENCE_PROFILE_INVENTORY_KEYS = _TEST_METRICS_PROFILE_INVENTORY_KEYS | {"jobs-reference"}
-_SOURCE_TEMPLATE_PROFILE_INVENTORY_KEYS = (_POSTGRES_SUSTAINED_PROFILE_INVENTORY_KEYS
-    | _OPERATIONAL_RECOVERY_PROFILE_INVENTORY_KEYS | _JOBS_REFERENCE_PROFILE_INVENTORY_KEYS
-    | {"source-template"})
-_TEST_DIGEST_PROFILE_INVENTORY_KEYS = _SOURCE_TEMPLATE_PROFILE_INVENTORY_KEYS | {"test-digest"}
-_SERVICE_AUTH_PROFILE_INVENTORY_KEYS = _TEST_DIGEST_PROFILE_INVENTORY_KEYS | {"service-auth"}
-# Initialization admits the old laboratory inventories. Only replay retains the retired pack.
-_LABORATORY_RETIRED_PROFILE_INVENTORY_KEYS = _SERVICE_AUTH_PROFILE_INVENTORY_KEYS - {"postgres-sustained"}
-
-_UNCONDITIONAL_PROFILE_INVENTORIES = frozenset({
-    _JSONWEBTOKEN_PROFILE_INVENTORY_KEYS,
-    _OBJECT_STORAGE_PROFILE_INVENTORY_KEYS,
-    _RUNTIME_PROGRESS_PROFILE_INVENTORY_KEYS,
-    _TEST_METRICS_PROFILE_INVENTORY_KEYS,
-    _SOURCE_TEMPLATE_PROFILE_INVENTORY_KEYS,
-    _TEST_DIGEST_PROFILE_INVENTORY_KEYS,
-    _SERVICE_AUTH_PROFILE_INVENTORY_KEYS,
-    _LABORATORY_RETIRED_PROFILE_INVENTORY_KEYS,
-    _POSTGRES_SUSTAINED_PROFILE_INVENTORY_KEYS,
-    _OPERATIONAL_RECOVERY_PROFILE_INVENTORY_KEYS,
-    _JOBS_REFERENCE_PROFILE_INVENTORY_KEYS,
-    _CACHE_PROFILE_INVENTORY_KEYS,
-    _GRPC_PROFILE_INVENTORY_KEYS,
-    _OUTBOX_LEGACY_OUTBOUND_AUTH_PROFILE_INVENTORY_KEYS,
-    _OUTBOX_OUTBOUND_AUTH_PROFILE_INVENTORY_KEYS,
-    _SHARED_CONFIG_URL_LEGACY_PROFILE_INVENTORY_KEYS,
-    _SHARED_CONFIG_URL_PROFILE_INVENTORY_KEYS,
-    _OUTBOX_LEGACY_PROFILE_INVENTORY_KEYS,
-    _OUTBOX_PROFILE_INVENTORY_KEYS,
-    _MESSAGING_PROFILE_INVENTORY_KEYS,
-    _OUTBOUND_AUTH_PROFILE_INVENTORY_KEYS,
-    _TRUSTED_ORIGIN_PROFILE_INVENTORY_KEYS,
-})
-
-# The first refusal and the order of marker processing must be independent of JSON key order.
-_PROFILE_SECTION_ORDER = (
-    "source-template",
-    "authn", "oidc-jwt", "oidc-introspection",
-    "outbound-http", "request-budget", "egress-dns", "outbound-auth", "client-integrations",
-    "grpc", "grpc-none", "grpc-authn", "grpc-transport-tests", "grpc-jwt", "outbound-auth-grpc",
-    "runtime-progress", "test-digest", "service-auth", "test-metrics", "postgres-sustained",
-    "jobs-reference", "config-url", "tls-fixtures", "http-idempotency", "http-idempotency-mounted",
-    "postgres-grpc-consumers", "postgres-grpc-auth", "test-introspection-fixtures",
-    "jobs", "jobs-http-idempotency", "webhooks-common", "webhooks", "inbound-webhooks",
-    "messaging", "worker", "service-secrets", "integration", "jobs-messaging", "outbox",
-    "cache", "object-storage", "rustls", "jsonwebtoken",
+    "runtime-progress",
+    "test-digest",
+    "service-auth",
+    "test-metrics",
+    "jobs-reference",
+    "config-url",
+    "tls-fixtures",
+    "http-idempotency",
+    "http-idempotency-mounted",
+    "postgres-grpc-consumers",
+    "postgres-grpc-auth",
+    "test-introspection-fixtures",
+    "jobs",
+    "jobs-http-idempotency",
+    "webhooks-common",
+    "webhooks",
+    "inbound-webhooks",
+    "messaging",
+    "worker",
+    "service-secrets",
+    "integration",
+    "outbox",
+    "cache",
+    "object-storage",
+    "rustls",
+    "jsonwebtoken",
+)
+_VALID_MARKER_PROFILES = frozenset({"postgres", *_PROFILE_SECTION_ORDER})
+_PROFILE_INVENTORY_KEYS = frozenset(
+    {"schema_version", "source_only", "postgres", *_PROFILE_SECTION_ORDER, "identity"}
 )
 
 
-def _profile_data(
-    snapshot: Path,
-    *,
-    historical_authn: bool = False,
-    historical_outbound: bool = False,
-    historical_http_idempotency: bool = False,
-    historical_jobs: bool = False,
-    historical_egress: bool = False,
-) -> ProfileData:
+def _profile_data(snapshot: Path) -> ProfileData:
     profile_path = snapshot / _PROFILE_FILE
     try:
         raw = parse_json_bytes(profile_path.read_bytes(), _PROFILE_FILE)
     except FileNotFoundError:
         raise Refusal("template profile inventory is missing") from None
-    if not isinstance(raw, dict) or raw.get("schema_version") != 1:
-        raise Refusal("template profile inventory has an unsupported schema")
-    keys = frozenset(raw)
-    if not (
-        keys in _UNCONDITIONAL_PROFILE_INVENTORIES
-        or historical_egress and keys in (
-            _OUTBOUND_AUTH_PROFILE_INVENTORY_KEYS | {"egress-dns"},
-            _WEBHOOKS_PROFILE_INVENTORY_KEYS,
-            _JOBS_PROFILE_INVENTORY_KEYS,
-            _OUTBOUND_PROFILE_INVENTORY_KEYS,
-        )
-        or historical_jobs and historical_egress and keys == _HTTP_IDEMPOTENCY_PROFILE_INVENTORY_KEYS - {"tls-fixtures"}
-        or historical_jobs and keys == _HTTP_IDEMPOTENCY_PROFILE_INVENTORY_KEYS
-        or historical_http_idempotency and keys == _TLS_FIXTURE_PROFILE_INVENTORY_KEYS
-        or historical_outbound and keys == _CURRENT_PROFILE_INVENTORY_KEYS
-        or historical_authn and keys == _LEGACY_PROFILE_INVENTORY_KEYS
-    ):
+    if not isinstance(raw, dict) or raw.get("schema_version") != 1 or frozenset(raw) != _PROFILE_INVENTORY_KEYS:
         raise Refusal("template profile inventory has an unsupported schema")
     source_only = _path_list(raw["source_only"], "source_only")
     postgres = raw["postgres"]
-    if not isinstance(postgres, dict) or set(postgres) != {"remove_when_none", "markers"}:
+    if not isinstance(postgres, dict) or set(postgres) != {"remove_when_none"}:
         raise Refusal("template PostgreSQL inventory has an unsupported shape")
     removals = {"postgres": tuple(_path_list(postgres["remove_when_none"], "remove_when_none"))}
-    markers = _markers("postgres", postgres["markers"])
     for profile in _PROFILE_SECTION_ORDER:
-        if profile not in keys:
-            continue
         section = raw[profile]
-        if not isinstance(section, dict) or set(section) != {"remove_when_unselected", "markers"}:
+        if not isinstance(section, dict) or set(section) != {"remove_when_unselected"}:
             raise Refusal(f"template {profile} inventory has an unsupported shape")
         removals[profile] = tuple(_path_list(section["remove_when_unselected"], f"{profile} remove_when_unselected"))
-        markers.extend(_markers(profile, section["markers"]))
     identity = raw["identity"]
     if not isinstance(identity, list):
         raise Refusal("template identity inventory has an unsupported shape")
     _validate_identity_inventory(identity)
-    # Every inventory shape carries this key, including the ones older derived
-    # services hold. Cargo prunes the lock now, so nothing reads the value.
-    if raw["cargo_lock"] != {"schema_version": 1}:
-        raise Refusal("template Cargo.lock inventory has an unsupported shape")
-    if len(markers) != len(set(markers)):
-        raise Refusal("template marker inventory has duplicate profile entries")
-    return ProfileData(tuple(source_only), removals, tuple(markers), tuple(identity))
+    return ProfileData(tuple(source_only), removals, tuple(identity))
 
 
 def _path_list(value: object, label: str) -> list[str]:
@@ -446,26 +316,6 @@ def _path_list(value: object, label: str) -> list[str]:
     if len(paths) != len(set(paths)):
         raise Refusal(f"template {label} inventory has duplicate paths")
     return paths
-
-
-def _markers(profile: str, value: object) -> list[tuple[str, str, str]]:
-    if not isinstance(value, list):
-        raise Refusal("template marker inventory is invalid")
-    markers: list[tuple[str, str, str]] = []
-    for item in value:
-        if not isinstance(item, dict) or set(item) not in ({"path", "id"}, {"path", "ids"}):
-            raise Refusal("template marker inventory has an unsupported entry")
-        path = safe_relative(item["path"])
-        marker_ids = [item["id"]] if "id" in item else item["ids"]
-        if not isinstance(marker_ids, list) or not marker_ids:
-            raise Refusal("template marker inventory has an invalid ids list")
-        for marker_id in marker_ids:
-            if not isinstance(marker_id, str) or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", marker_id):
-                raise Refusal("template marker inventory has an invalid id")
-            markers.append((profile, path, marker_id))
-    if len(markers) != len(set(markers)):
-        raise Refusal("template marker inventory has duplicate entries")
-    return markers
 
 
 def _validate_identity_inventory(value: list[Any]) -> None:
@@ -590,8 +440,6 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
             selected.add("grpc-jwt")
         if inputs.outbound_auth == "oauth2-client-credentials":
             selected.add("outbound-auth-grpc")
-    else:
-        selected.add("grpc-none")
     if (
         inputs.grpc == "enabled"
         and inputs.authn == "oidc-jwt"
@@ -638,8 +486,6 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
             selected.add("jobs-http-idempotency")
     if inputs.messaging == "nats-jetstream":
         selected.add("messaging")
-        if inputs.jobs == "postgres":
-            selected.add("jobs-messaging")
     if inputs.outbox == "postgres":
         selected.add("outbox")
         if inputs.jobs == "postgres" and inputs.webhooks == "durable":
@@ -652,8 +498,12 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
         selected.add("cache")
     if inputs.object_storage == "s3":
         selected.add("object-storage")
-    if (inputs.grpc == "enabled" or inputs.cache == "redis" or inputs.outbound_http == "bounded"
-            or inputs.object_storage == "s3"):
+    if (
+        inputs.grpc == "enabled"
+        or inputs.cache == "redis"
+        or inputs.outbound_http == "bounded"
+        or inputs.object_storage == "s3"
+    ):
         selected.add("rustls")
     # The service crate itself exposes only the PostgreSQL DSN and the inbound
     # webhook signing keys, which require PostgreSQL; other providers read
@@ -680,24 +530,29 @@ def _marker_files(root: Path) -> tuple[tuple[str, Path], ...]:
     files: list[tuple[str, Path]] = []
     for path in root.rglob("*"):
         relative = path.relative_to(root)
-        if ".git" in relative.parts or path.is_symlink() or not path.is_file():
+        if any(part in {".git", "target"} for part in relative.parts) or path.is_symlink() or not path.is_file():
             continue
         files.append((relative.as_posix(), path))
     return tuple(sorted(files))
 
 
 def _apply_markers(
-    snapshot: Path, profiles: ProfileData, inputs: InitInputs,
-    *, files: Sequence[tuple[str, Path]] | None = None,
+    snapshot: Path,
+    _profiles: ProfileData,
+    inputs: InitInputs,
+    *,
+    files: Sequence[tuple[str, Path]] | None = None,
 ) -> None:
-    expected = set(profiles.markers)
     selected = _selected_marker_profiles(inputs)
     seen: set[tuple[str, str, str]] = set()
     for relative, path in _marker_files(snapshot) if files is None else files:
-        try:
-            lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
-        except UnicodeDecodeError:
+        raw = path.read_bytes()
+        if not _contains_profile_marker(raw):
             continue
+        try:
+            lines = raw.decode("utf-8").splitlines(keepends=True)
+        except UnicodeDecodeError as error:
+            raise Refusal(f"profile marker surface is not UTF-8: {relative}") from error
         stack: list[tuple[str, str]] = []
         transformed: list[str] = []
         found = False
@@ -712,9 +567,9 @@ def _apply_markers(
                 continue
             found = True
             kind, profile, marker_id = parsed
-            key = (profile, relative, marker_id)
-            if key not in expected:
+            if profile not in _VALID_MARKER_PROFILES:
                 raise Refusal(f"unknown profile marker in {relative}")
+            key = (profile, relative, marker_id)
             if kind == "begin":
                 if stack:
                     raise Refusal(f"nested profile marker in {relative}")
@@ -730,8 +585,6 @@ def _apply_markers(
             raise Refusal(f"unclosed profile marker in {relative}")
         if found:
             path.write_text("".join(transformed), encoding="utf-8")
-    if seen != expected:
-        raise Refusal("template profile marker inventory does not match source")
 
 
 def project_portable(snapshot: Path, target_lock: dict[str, Any]) -> None:
@@ -740,13 +593,9 @@ def project_portable(snapshot: Path, target_lock: dict[str, Any]) -> None:
         for entry in manifest_entries(snapshot)
         for path in _manifest_files(snapshot, entry)
     )
-    paths = {relative for relative, _path in files}
     profiles = _profile_data(snapshot)
-    portable = ProfileData(
-        (), {}, tuple(marker for marker in profiles.markers if marker[1] in paths), (),
-    )
     inputs = InitInputs(**target_lock["identity"], **target_lock["profiles"])
-    _apply_markers(snapshot, portable, inputs, files=files)
+    _apply_markers(snapshot, profiles, inputs, files=files)
 
 
 def _remove_paths(snapshot: Path, paths: Sequence[str]) -> None:
@@ -771,12 +620,29 @@ def _remove_paths(snapshot: Path, paths: Sequence[str]) -> None:
             raise Refusal(f"planned source removal is unsupported: {relative}")
 
 
+def _prune_empty_dirs(directory: Path) -> None:
+    if not directory.is_dir() or directory.is_symlink():
+        return
+    for child in sorted(directory.iterdir()):
+        if child.is_dir() and not child.is_symlink():
+            _prune_empty_dirs(child)
+    if not any(directory.iterdir()):
+        directory.rmdir()
+
+
 def _remove_unselected_adapters(snapshot: Path, harness: str) -> None:
     selected = set(selected_adapters(harness))
     for adapter, pack in ADAPTERS.items():
         if adapter in selected:
             continue
-        _remove_paths(snapshot, (*pack.canonical, *pack.generated, *pack.settings))
+        _remove_paths(snapshot, pack.canonical)
+        for relative in (*pack.generated, *pack.settings):
+            path = snapshot / relative.rstrip("/")
+            if path.is_symlink() or path.is_file():
+                path.unlink()
+            elif path.is_dir():
+                shutil.rmtree(path)
+    _prune_empty_dirs(snapshot / ".agents/adapters")
 
 
 def _tracked_checkout_is_clean(root: Path) -> None:
@@ -819,8 +685,12 @@ def _lock_bytes(inputs: InitInputs, revision: str, state: str) -> bytes:
 
 
 def _postconditions(
-    root: Path, inputs: InitInputs, profiles: ProfileData, *, initial: bool = False,
-    replay_lock: LockSnapshot | None = None,
+    root: Path,
+    inputs: InitInputs,
+    profiles: ProfileData,
+    *,
+    initial: bool = False,
+    replay_lock: dict[str, Any] | None = None,
 ) -> None:
     try:
         workspace = tomllib.loads((root / "Cargo.toml").read_text(encoding="utf-8"))
@@ -843,10 +713,7 @@ def _postconditions(
         for relative in profiles.source_only:
             if (root / relative.rstrip("/")).exists():
                 raise Refusal(f"source-only output remains: {relative}")
-    selected_profiles = _selected_marker_profiles(inputs)
-    if not initial:
-        selected_profiles |= _retired_pack_profiles(inputs, profiles)
-    _validate_profile_packs(root, profiles, selected_profiles)
+    _validate_profile_packs(root, profiles, _selected_marker_profiles(inputs))
     selected = set(selected_adapters(inputs.agent_harness))
     for adapter, pack in ADAPTERS.items():
         paths = (*pack.canonical, *pack.generated, *pack.settings)
@@ -856,34 +723,16 @@ def _postconditions(
         elif any((root / item.rstrip("/")).exists() or (root / item.rstrip("/")).is_symlink() for item in paths):
             raise Refusal(f"unselected adapter output remains: {adapter}")
     parse_manifest(
-        root, harness=inputs.agent_harness, target_repository=inputs.repository,
-        initializing=initial, _replay_lock=replay_lock,
+        root,
+        harness=inputs.agent_harness,
+        target_repository=inputs.repository,
+        initializing=initial,
+        _replay_lock=replay_lock,
     )
     _validate_generated_ownership(root, inputs.agent_harness)
-    for relative in sorted({path for _profile, path, _marker_id in profiles.markers}):
-        path = root / relative
-        if not path.exists() or path.is_symlink() or not path.is_file():
-            continue
-        try:
-            for line in path.read_text(encoding="utf-8").splitlines():
-                if _marker(line) is not None or _MARKER_PREFIX_RE.match(line):
-                    raise Refusal("initialized output retains an executable profile marker")
-        except UnicodeDecodeError as error:
-                raise Refusal(f"profile marker surface is not UTF-8: {relative}") from error
-
-
-def _retired_pack_profiles(inputs: InitInputs, profiles: ProfileData) -> set[str]:
-    retired: set[str] = set()
-    if "egress-dns" in profiles.removals and inputs.outbound_http == "bounded":
-        retired.add("egress-dns")
-    if (
-        "postgres-sustained" in profiles.removals
-        and inputs.jobs == "postgres"
-        and inputs.http_idempotency == "postgres"
-        and inputs.inbound_webhooks == "standard-webhooks"
-    ):
-        retired.add("postgres-sustained")
-    return retired
+    for _relative, path in _marker_files(root):
+        if _contains_profile_marker(path.read_bytes()):
+            raise Refusal("initialized output retains an executable profile marker")
 
 
 def _validate_profile_packs(root: Path, profiles: ProfileData, selected: set[str]) -> None:
@@ -935,22 +784,13 @@ def _validate_generated_ownership(root: Path, harness: str) -> None:
                 raise Refusal("selected Codex generated ownership shape is invalid")
 
 
-def _replay(root: Path, inputs: InitInputs, snapshot: LockSnapshot) -> int:
-    lock = snapshot.normalized
+def _replay(root: Path, inputs: InitInputs, lock: dict[str, Any]) -> int:
     if lock["state"] != "complete":
         raise Refusal("template.lock is incomplete; inspect the init-produced diff and use a fresh template checkout")
     if lock["identity"] != inputs.identity() or lock["profiles"] != inputs.profiles():
         raise Refusal("template initialization choices differ from the complete template.lock")
-    explicit = snapshot.explicit_profiles
-    profiles = _profile_data(
-        root,
-        historical_authn="authn" not in explicit,
-        historical_outbound="authn" in explicit and "outbound_http" not in explicit,
-        historical_http_idempotency="outbound_http" in explicit and "http_idempotency" not in explicit,
-        historical_jobs="jobs" not in explicit,
-        historical_egress=True,
-    )
-    _postconditions(root, inputs, profiles, replay_lock=snapshot)
+    profiles = _profile_data(root)
+    _postconditions(root, inputs, profiles, replay_lock=lock)
     print("template init: matching complete lock; no changes")
     return 0
 
@@ -992,7 +832,7 @@ def _project_staged(snapshot: Path, inputs: InitInputs, profiles: ProfileData) -
     _remove_paths(snapshot, unselected_removals)
     _remove_unselected_adapters(snapshot, inputs.agent_harness)
     _generate_harness_projection(snapshot, inputs.agent_harness)
-    _check_harness_projection(snapshot, inputs.agent_harness)
+    _check_harness_projection(snapshot, inputs.agent_harness, require_materialized=True)
     _project_workspace_dependencies(snapshot)
 
 
@@ -1093,26 +933,24 @@ def _staged_environment(snapshot: Path) -> dict[str, str]:
     return environment
 
 
-def _harness_commands(snapshot: Path, harness: str, mode: str) -> list[list[str]]:
-    commands = [
-        ["bash", "scripts/agent-roles-sync.sh", f"--{mode}", "--repo", os.fspath(snapshot), "--harness", harness]
+def _run_harness(snapshot: Path, harness: str, mode: str, *, require_materialized: bool = False) -> None:
+    command = [
+        sys.executable,
+        "-B",
+        "scripts/agent-harness-sync.py",
+        f"--{mode}",
+        "--repo",
+        os.fspath(snapshot),
+        "--harness",
+        harness,
     ]
-    selected = set(selected_adapters(harness))
-    if "codex" in selected:
-        commands.append(["bash", "scripts/codex-agents-sync.sh", f"--{mode}", "--repo", os.fspath(snapshot), "--harness", harness])
-    for adapter in ("claude", "qwen"):
-        if adapter in selected:
-            commands.append(["bash", "scripts/harness-skills-sync.sh", adapter, f"--{mode}", "--repo", os.fspath(snapshot), "--harness", harness])
-    return commands
+    if require_materialized and mode == "check":
+        command.append("--require-materialized")
+    _run_staged_command(snapshot, command, f"{mode} harness projection")
 
 
-def _run_harness(snapshot: Path, harness: str, mode: str) -> None:
-    for command in _harness_commands(snapshot, harness, mode):
-        _run_staged_command(snapshot, command, f"{mode} harness projection")
-
-
-def _check_harness_projection(snapshot: Path, harness: str) -> None:
-    _run_harness(snapshot, harness, "check")
+def _check_harness_projection(snapshot: Path, harness: str, *, require_materialized: bool = False) -> None:
+    _run_harness(snapshot, harness, "check", require_materialized=require_materialized)
 
 
 def _generate_harness_projection(snapshot: Path, harness: str) -> None:
@@ -1139,24 +977,6 @@ def _dependency_sections(manifest: dict[str, Any]) -> list[dict[str, Any]]:
     return sections
 
 
-def _declared_dependencies(manifest: dict[str, Any]) -> set[str]:
-    names: set[str] = set()
-    for section in _dependency_sections(manifest):
-        for alias, definition in section.items():
-            if not isinstance(alias, str):
-                raise Refusal("Cargo manifest dependency name is invalid")
-            if isinstance(definition, str):
-                names.add(alias)
-                continue
-            if not isinstance(definition, dict):
-                raise Refusal("Cargo manifest dependency declaration is invalid")
-            package = definition.get("package", alias)
-            if not isinstance(package, str):
-                raise Refusal("Cargo manifest dependency package is invalid")
-            names.add(package)
-    return names
-
-
 def _member_manifests(snapshot: Path) -> list[Path]:
     manifests = [*sorted(snapshot.glob("crates/*/Cargo.toml")), snapshot / "test/Cargo.toml"]
     return [path for path in manifests if path.is_file() and not path.is_symlink()]
@@ -1181,7 +1001,8 @@ def _project_workspace_dependencies(snapshot: Path) -> None:
         for manifest_path in _member_manifests(snapshot):
             for section in _dependency_sections(tomllib.loads(manifest_path.read_text(encoding="utf-8"))):
                 inherited.update(
-                    alias for alias, definition in section.items()
+                    alias
+                    for alias, definition in section.items()
                     if isinstance(definition, dict) and definition.get("workspace") is True
                 )
     except (KeyError, TypeError, UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
@@ -1197,9 +1018,8 @@ def _project_workspace_dependencies(snapshot: Path) -> None:
             table = line.strip()
         matched = _WORKSPACE_DEPENDENCY_RE.match(line)
         if table == "[workspace.dependencies]" and matched is not None and matched.group(1) in unused:
-            # A comment of its own needs a profile marker that removes both.
-            if kept and kept[-1].lstrip().startswith("#"):
-                raise Refusal(f"unused workspace dependency has its own comment: {matched.group(1)}")
+            while kept and kept[-1].lstrip().startswith("#"):
+                kept.pop()
             removed.add(matched.group(1))
             continue
         kept.append(line)
@@ -1213,8 +1033,20 @@ def _project_workspace_dependencies(snapshot: Path) -> None:
     path.write_text(projected, encoding="utf-8")
 
 
+def _is_admitted_adapter_output(relative: str, harness: str) -> bool:
+    for adapter in selected_adapters(harness):
+        pack = ADAPTERS[adapter]
+        for owner in (*pack.generated, *pack.settings):
+            if owner.endswith("/"):
+                if relative.startswith(owner):
+                    return True
+            elif relative == owner:
+                return True
+    return False
+
+
 def _collect_plan(
-    staged: Path, root: Path, owned_removals: Sequence[str]
+    staged: Path, root: Path, owned_removals: Sequence[str], harness: str = "all"
 ) -> tuple[list[PlannedWrite | PlannedLink], list[str]]:
     writes: list[PlannedWrite | PlannedLink] = []
     staged_paths: set[str] = set()
@@ -1226,7 +1058,7 @@ def _collect_plan(
     for path in staged.rglob("*"):
         relative = path.relative_to(staged).as_posix()
         if path.is_symlink():
-            if relative not in tracked:
+            if relative not in tracked and not _is_admitted_adapter_output(relative, harness):
                 raise Refusal(f"staged generation produced an untracked output: {relative}")
             staged_paths.add(relative)
             target = root / relative
@@ -1237,7 +1069,7 @@ def _collect_plan(
             continue
         if path.is_dir():
             continue
-        if relative not in tracked:
+        if relative not in tracked and not _is_admitted_adapter_output(relative, harness):
             raise Refusal(f"staged generation produced an untracked output: {relative}")
         staged_paths.add(relative)
         target = root / relative
@@ -1270,6 +1102,8 @@ def _collect_plan(
     removal_set = set(removals)
     for relative in sorted(candidate_directories, key=lambda item: (len(Path(item).parts), item), reverse=True):
         directory = root / relative
+        if not directory.exists() and not directory.is_symlink():
+            continue
         owned = any(relative == owner or relative.startswith(f"{owner}/") for owner in owned_directories)
         if owned or all(child.relative_to(root).as_posix() in removal_set for child in directory.iterdir()):
             removals.append(relative)
@@ -1280,7 +1114,7 @@ def _collect_plan(
 def initialize(arguments: argparse.Namespace) -> int:
     inputs = parse_inputs(arguments)
     root = git_root(arguments.repo)
-    existing = load_lock_snapshot(root)
+    existing = load_lock(root)
     if existing is not None:
         return _replay(root, inputs, existing)
     _tracked_checkout_is_clean(root)
@@ -1298,7 +1132,7 @@ def initialize(arguments: argparse.Namespace) -> int:
         for adapter, pack in ADAPTERS.items():
             if adapter not in selected_adapters(inputs.agent_harness):
                 owned_removals.extend((*pack.canonical, *pack.generated, *pack.settings))
-        writes, removals = _collect_plan(staged, root, owned_removals)
+        writes, removals = _collect_plan(staged, root, owned_removals, inputs.agent_harness)
         planned_paths = [write.relative for write in writes] + removals + [LOCK_NAME]
         _target_overlap_is_clean(root, planned_paths)
         admit_plan(root, writes, removals)
@@ -1320,7 +1154,13 @@ def initialize(arguments: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     class SingleValue(argparse.Action):
-        def __call__(self, parser: argparse.ArgumentParser, namespace: argparse.Namespace, values: object, option_string: str | None = None) -> None:
+        def __call__(
+            self,
+            parser: argparse.ArgumentParser,
+            namespace: argparse.Namespace,
+            values: object,
+            option_string: str | None = None,
+        ) -> None:
             if getattr(namespace, self.dest, None) is not None:
                 raise argparse.ArgumentError(self, f"{option_string} may be supplied once")
             setattr(namespace, self.dest, values)

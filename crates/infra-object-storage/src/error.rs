@@ -1,11 +1,12 @@
-use std::borrow::Cow;
 use std::error::Error;
+use std::fmt;
 
 use aws_sdk_s3::config::http::HttpResponse;
 use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
 use aws_sdk_s3::operation::delete_object::{DeleteObjectError, DeleteObjectOutput};
 use aws_sdk_s3::primitives::ByteStreamError;
 use aws_smithy_runtime::client::http::body::content_length_enforcement::ContentLengthError;
+use compact_str::CompactString;
 use operation_context::Stopped;
 use shared_rules::error_chain::causes;
 
@@ -103,14 +104,14 @@ enum FailureKind<'a> {
 #[derive(Debug)]
 pub(crate) struct Failure {
     pub(crate) error: ObjectStorageError,
-    pub(crate) error_type: Cow<'static, str>,
+    pub(crate) error_type: CompactString,
 }
 
 impl Failure {
-    fn with_label(error: ObjectStorageError, error_type: &'static str) -> Self {
+    const fn with_label(error: ObjectStorageError, error_type: &'static str) -> Self {
         Self {
             error,
-            error_type: Cow::Borrowed(error_type),
+            error_type: CompactString::const_new(error_type),
         }
     }
 
@@ -182,14 +183,17 @@ pub(crate) fn from_sdk<E>(call: Call, error: &SdkFailure<E>) -> Failure
 where
     E: ProvideErrorMetadata + std::error::Error + 'static,
 {
-    let (kind, error_type): (_, Cow<'static, str>) = match error {
-        SdkError::ConstructionFailure(_) => (FailureKind::NotSent, "construction".into()),
+    let (kind, error_type) = match error {
+        SdkError::ConstructionFailure(_) => (
+            FailureKind::NotSent,
+            CompactString::const_new("construction"),
+        ),
         SdkError::ServiceError(context) => {
             let status = context.raw().status().as_u16();
             let code = context.err().code();
             let error_type = match code {
-                Some(code) if is_identifier(code) => code.to_owned().into(),
-                _ => status.to_string().into(),
+                Some(code) if is_identifier(code) => CompactString::from(code),
+                _ => CompactString::from(status.format_into(&mut fmt::NumBuffer::new())),
             };
             (FailureKind::Status { status, code }, error_type)
         }
@@ -202,15 +206,18 @@ where
                 >,
             ) =>
         {
-            (FailureKind::NoCredentials, "credentials".into())
+            (
+                FailureKind::NoCredentials,
+                CompactString::const_new("credentials"),
+            )
         }
-        SdkError::TimeoutError(_) => (FailureKind::Lost, "timeout".into()),
+        SdkError::TimeoutError(_) => (FailureKind::Lost, CompactString::const_new("timeout")),
         SdkError::DispatchFailure(failure) if failure.is_timeout() => {
-            (FailureKind::Lost, "timeout".into())
+            (FailureKind::Lost, CompactString::const_new("timeout"))
         }
-        SdkError::DispatchFailure(_) => (FailureKind::Lost, "dispatch".into()),
+        SdkError::DispatchFailure(_) => (FailureKind::Lost, CompactString::const_new("dispatch")),
         // A response that could not be read, and any future variant.
-        _ => (FailureKind::Lost, "response".into()),
+        _ => (FailureKind::Lost, CompactString::const_new("response")),
     };
     Failure {
         error: classify(call, kind),
