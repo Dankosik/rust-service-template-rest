@@ -1,5 +1,3 @@
-# template:begin integration:compose-file
-# template:end integration:compose-file
 # template:begin postgres:compose-postgres-header
 # The same file serves `make test-integration-db` and the image rehearsal,
 # which set POSTGRES_PORT=0 for an ephemeral host port and read it back.

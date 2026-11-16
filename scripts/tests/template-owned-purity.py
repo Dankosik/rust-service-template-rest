@@ -6,50 +6,70 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import os
 import shutil
 import sys
 import tempfile
 from pathlib import Path
 
+sys.dont_write_bytecode = True
 
 SOURCE_ONLY_PREFIXES = (
     "make/source.mk",
     "scripts/tests/template-",
-    "scripts/ci/template-init-check.sh",
-    "scripts/ci/initializer-matrix.py",
+    "scripts/template/check_init.sh",
+    "scripts/template/matrix.py",
+    "scripts/template/init.py",
+    "scripts/template/profiles.json",
     "specs/",
-    "evals/",
 )
 SOURCE_ONLY_REQUIRED_PATHS = (
     "make/source.mk",
-    "scripts/ci/template-init-check.sh",
+    "scripts/template/check_init.sh",
+    "scripts/template/matrix.py",
 )
 REQUIRED_SYNC_HELPERS = {
-    "scripts/template-sync.sh",
-    "scripts/lib/template_sync.py",
-    "scripts/lib/template_state.py",
-    "scripts/agent-harness-sync.py",
+    "scripts/template/sync.py",
+    "scripts/template/state.py",
+    "scripts/harness/sync.py",
 }
 
 
 def load_module(root: Path, name: str):
-    module_path = root / f"scripts/lib/{name}.py"
+    template_dir = root / "scripts/template"
+    module_path = template_dir / f"{name}.py"
     spec = importlib.util.spec_from_file_location(name, module_path)
     if spec is None or spec.loader is None:
-        raise AssertionError(f"{name}.py cannot be imported")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+        raise AssertionError(f"scripts/template/{name}.py cannot be imported")
+    added = False
+    if os.fspath(template_dir) not in sys.path:
+        sys.path.insert(0, os.fspath(template_dir))
+        added = True
+    try:
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        return module
+    finally:
+        if added:
+            sys.path.remove(os.fspath(template_dir))
+
+
+def _manifest_covers(entries: tuple[str, ...], helper: str) -> bool:
+    return any(
+        helper == entry.rstrip("/") or (entry.endswith("/") and helper.startswith(entry))
+        for entry in entries
+    )
 
 
 def check(root: Path) -> None:
-    state = load_module(root, "template_state")
-    initializer = load_module(root, "template_init")
-    synchronizer = load_module(root, "template_sync")
+    state = load_module(root, "state")
+    initializer = load_module(root, "init")
+    synchronizer = load_module(root, "sync")
     entries = state.manifest_entries(root)
-    owned = set(entries)
-    profile = json.loads((root / "scripts/lib/template_profiles.json").read_text(encoding="utf-8"))
+    if set(synchronizer.SOURCE_HELPERS) != REQUIRED_SYNC_HELPERS:
+        raise AssertionError("sync SOURCE_HELPERS drifted from REQUIRED_SYNC_HELPERS")
+    profile = json.loads((root / "scripts/template/profiles.json").read_text(encoding="utf-8"))
     non_profile_keys = {"schema_version", "source_only", "identity"}
     if not isinstance(profile, dict) or not non_profile_keys.issubset(profile):
         raise AssertionError("profile inventory is missing top-level metadata keys")
@@ -70,12 +90,23 @@ def check(root: Path) -> None:
             plain = relative.rstrip("/")
             if any(plain == entry.rstrip("/") or plain.startswith(f"{entry.rstrip('/')}/") for entry in entries):
                 raise AssertionError(f"manifest leaks profile-specific {name} output: {relative}")
-    for broad_owner in ("make/", "docs/", "scripts/", "crates/", "scripts/tests/template-sync-canary.py"):
+    for broad_owner in (
+        "make/",
+        "docs/",
+        "scripts/",
+        "scripts/template/",
+        "scripts/profiles/",
+        "scripts/service/",
+        "scripts/tests/",
+        "crates/",
+        "scripts/tests/template-sync-canary.py",
+        "scripts/tests/test_migration_history.py",
+    ):
         if not state._protected_manifest_owner(broad_owner):
             raise AssertionError(f"broad protected owner was admitted: {broad_owner}")
-    if not REQUIRED_SYNC_HELPERS.issubset(owned):
-        missing = sorted(REQUIRED_SYNC_HELPERS - owned)
-        raise AssertionError(f"manifest omits required sync helpers: {missing}")
+    missing_helpers = sorted(helper for helper in REQUIRED_SYNC_HELPERS if not _manifest_covers(entries, helper))
+    if missing_helpers:
+        raise AssertionError(f"manifest omits required sync helpers: {missing_helpers}")
     for entry in entries:
         plain = entry.rstrip("/")
         if state._protected_manifest_owner(entry):
@@ -106,7 +137,8 @@ def check(root: Path) -> None:
                     destination = projected / file.relative_to(root)
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(file, destination)
-            inventory = "scripts/lib/template_profiles.json"
+            inventory = "scripts/template/profiles.json"
+            (projected / inventory).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(root / inventory, projected / inventory)
             profiles = state.validate_profiles({"database": "none", "agent_harness": "all"})
             profiles["grpc"] = grpc

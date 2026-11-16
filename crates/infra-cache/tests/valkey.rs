@@ -33,13 +33,13 @@ static KEYS: AtomicU64 = AtomicU64::new(0);
 
 fn cache_url() -> String {
     std::env::var("CACHE_URL")
-        .unwrap_or_else(|_| panic!("CACHE_URL is unset; run scripts/ci/test-integration-cache.sh"))
+        .unwrap_or_else(|_| panic!("CACHE_URL is unset; run scripts/profiles/integration.sh cache"))
 }
 
 fn upstream_addr(url: &str) -> SocketAddr {
     let Ok(info) = redis::IntoConnectionInfo::into_connection_info(url) else {
         panic!(
-            "CACHE_URL must be a plaintext redis://host:port with no password; run scripts/ci/test-integration-cache.sh"
+            "CACHE_URL must be a plaintext redis://host:port with no password; run scripts/profiles/integration.sh cache"
         );
     };
     let settings = info.redis_settings();
@@ -47,7 +47,7 @@ fn upstream_addr(url: &str) -> SocketAddr {
         (info.addr(), settings.username(), settings.password())
     else {
         panic!(
-            "CACHE_URL must be a plaintext redis://host:port with no password; run scripts/ci/test-integration-cache.sh"
+            "CACHE_URL must be a plaintext redis://host:port with no password; run scripts/profiles/integration.sh cache"
         );
     };
     let ip = host
@@ -55,7 +55,7 @@ fn upstream_addr(url: &str) -> SocketAddr {
         .parse::<IpAddr>()
         .unwrap_or_else(|_| {
             panic!(
-                "CACHE_URL host:port could not be parsed; run scripts/ci/test-integration-cache.sh"
+                "CACHE_URL host:port could not be parsed; run scripts/profiles/integration.sh cache"
             )
         });
     SocketAddr::new(ip, *port)

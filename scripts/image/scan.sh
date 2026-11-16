@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+cd "${ROOT_DIR}"
+if ! python3 "${ROOT_DIR}/scripts/verify/lock.py" --assert-held; then
+	exec python3 "${ROOT_DIR}/scripts/verify/lock.py" -- bash "${ROOT_DIR}/scripts/image/scan.sh" "$@"
+fi
+mode=${1:?security, sbom or filesystem mode is required}
+image=${2:?runtime image is required}
+output=${3:-sbom.cdx.json}
+case "${mode}" in security | sbom | filesystem) ;; *)
+	echo "unsupported scan mode: ${mode}" >&2
+	exit 2
+	;;
+esac
+# shellcheck source=tools/versions.env
+. tools/versions.env
+trivy_cache=${TRIVY_CACHE_VOLUME:-trivy-cache}
+
+# Tags may move between invocations, never between this invocation's checks.
+image_id=$(docker image inspect --format '{{.Id}}' "${image}")
+[[ ${image_id} =~ ^sha256:[0-9a-f]{64}$ ]] || {
+	echo "could not resolve a fixed image ID" >&2
+	exit 1
+}
+umask 077
+temporary=$(mktemp -d "${TMPDIR:-/tmp}/runtime-image-scan.XXXXXXXX")
+container=
+lock_token=${VALIDATION_LOCK_TOKEN:-nolock}
+container_name="runtime-image-inventory-${lock_token:0:12}-$(date +%s)-$$"
+# shellcheck disable=SC2329
+cleanup() {
+	local status=$?
+	trap - EXIT INT TERM HUP
+	if [[ -n ${container} ]]; then
+		docker rm -f -v "${container}" >/dev/null 2>&1 || true
+	fi
+	rm -rf "${temporary}"
+	exit "${status}"
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+python3 "${ROOT_DIR}/scripts/image/inventory.py" --expectations >"${temporary}/expected"
+container=$(docker create --name "${container_name}" --entrypoint /service "${image_id}")
+pruned=()
+while IFS=$'\t' read -r selection path; do
+	case "${selection}" in
+	retained)
+		if ! docker cp "${container}:${path}" "${temporary}/binary" >/dev/null; then
+			echo "${path}: could not copy retained binary from ${image_id}" >&2
+			exit 1
+		fi
+		[[ -f ${temporary}/binary && -s ${temporary}/binary && -x ${temporary}/binary ]] || {
+			echo "${path}: retained entrypoint is not a nonempty executable file" >&2
+			exit 1
+		}
+		rm -rf "${temporary}/binary"
+		;;
+	pruned) pruned+=("${path}") ;;
+	*)
+		echo "invalid binary expectation: ${selection} ${path}" >&2
+		exit 1
+		;;
+	esac
+done <"${temporary}/expected"
+if [[ -n ${pruned[0]:-} ]]; then
+	docker container inspect --format '{{json .Mounts}}' "${container}" >"${temporary}/mounts.json"
+	docker export "${container}" | python3 "${ROOT_DIR}/scripts/image/inventory.py" \
+		--rootfs-mounts "${temporary}/mounts.json" --pruned "${pruned[@]}"
+fi
+docker rm -f -v "${container}" >/dev/null 2>&1 || true
+container=
+[[ ${mode} != filesystem ]] || exit 0
+
+# Admission requires the full package inventory. The security scan filters
+# vulnerabilities with --ignore-unfixed before conversion. The SBOM input
+# retains all vulnerability statuses.
+scan_policy=(--list-all-pkgs=true)
+if [[ ${mode} == security ]]; then scan_policy+=(--ignore-unfixed); fi
+docker run --rm \
+	-v /var/run/docker.sock:/var/run/docker.sock \
+	-v "${trivy_cache}:/root/.cache/trivy" \
+	-v "${temporary}:/work" \
+	-e DOCKER_HOST=unix:///var/run/docker.sock \
+	-e TRIVY_DB_REPOSITORY \
+	"${TRIVY_IMAGE}" image --cache-dir /root/.cache/trivy --quiet \
+	--scanners vuln "${scan_policy[@]}" --format json --output /work/native.json "${image_id}"
+python3 "${ROOT_DIR}/scripts/image/inventory.py" --report "${temporary}/native.json" --image-id "${image_id}"
+
+if [[ ${mode} == security ]]; then
+	docker run --rm --network none -v "${temporary}:/work" "${TRIVY_IMAGE}" convert \
+		--quiet --scanners vuln --severity HIGH,CRITICAL --exit-code 1 \
+		--format table /work/native.json
+else
+	docker run --rm --network none -v "${temporary}:/work" "${TRIVY_IMAGE}" convert \
+		--quiet --format cyclonedx --output /work/sbom.cdx.json /work/native.json
+	# Do not truncate an existing report when scan, admission or conversion fails.
+	mv "${temporary}/sbom.cdx.json" "${output}"
+fi

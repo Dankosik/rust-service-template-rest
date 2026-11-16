@@ -1,0 +1,296 @@
+#!/usr/bin/env python3
+"""Admit each selected binary's native Trivy runtime graph before reporting."""
+
+from __future__ import annotations
+
+import argparse
+import os
+import posixpath
+import re
+import shlex
+import sys
+import tarfile
+import tomllib
+from collections.abc import Sequence
+from pathlib import Path
+from typing import BinaryIO
+
+sys.dont_write_bytecode = True
+
+_SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+sys.path.insert(0, os.fspath(_SCRIPTS_DIR / "template"))
+
+from state import Refusal, parse_json_bytes, selected_profile_map  # noqa: E402
+
+ENTRYPOINTS = {"/service": "service", "/migrate": "migrate", "/jobs-worker": "jobs-worker"}
+
+
+def required_string(value: object, label: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise Refusal(f"{label}: expected a nonempty string")
+    return value
+
+
+def expected_binaries(root: Path) -> dict[str, tuple[str, str, str]]:
+    workspace = tomllib.loads((root / "Cargo.toml").read_text(encoding="utf-8"))
+    profiles = selected_profile_map(root)
+    selected = {"/service"}
+    if profiles["database"] == "postgres":
+        selected.add("/migrate")
+    if profiles["jobs"] == "postgres" or profiles["messaging"] == "nats-jetstream":
+        selected.add("/jobs-worker")
+    entries = {
+        target: {"crate": directory, "source": "src/main.rs"}
+        for target, directory in ENTRYPOINTS.items()
+        if target in selected
+    }
+    # Additional process identities belong to service data, never scan output.
+    if (root / "scripts/ci/service-runtime-binaries.json").exists():
+        raise Refusal(
+            "refusing legacy hook scripts/ci/service-runtime-binaries.json; "
+            "move to scripts/service/runtime-binaries.json"
+        )
+    extension = root / "scripts/service/runtime-binaries.json"
+    if extension.exists():
+        extra = parse_json_bytes(extension.read_bytes(), str(extension))
+        if not isinstance(extra, dict) or not extra:
+            raise Refusal(f"{extension}: expected nonempty binary mapping")
+        for target, entry in extra.items():
+            if not re.fullmatch(r"/[a-zA-Z0-9_-]+", target) or target in ENTRYPOINTS:
+                raise Refusal(f"{extension}: invalid or reserved binary path {target}")
+            if not isinstance(entry, dict) or set(entry) != {"crate", "source"}:
+                raise Refusal(f"{extension}: expected crate and source for {target}")
+            if not isinstance(entry["crate"], str) or not re.fullmatch(r"[a-zA-Z0-9_-]+", entry["crate"]):
+                raise Refusal(f"{extension}: invalid crate directory for {target}")
+            required_string(entry["source"], f"{extension}: binary source")
+        entries.update(extra)
+    expected: dict[str, tuple[str, str, str]] = {}
+    for target, entry in entries.items():
+        directory = entry["crate"]
+        manifest_path = root / "crates" / directory / "Cargo.toml"
+        manifest = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
+        package = manifest.get("package", {})
+        name = required_string(package.get("name"), f"{manifest_path}: package name")
+        version = package.get("version")
+        if version == {"workspace": True}:
+            version = workspace.get("workspace", {}).get("package", {}).get("version")
+        resolved_version = required_string(version, f"{manifest_path}: package version")
+        binary_path = entry["source"]
+        binaries = [binary for binary in manifest.get("bin", []) if binary.get("path") == binary_path]
+        if len(binaries) != 1:
+            raise Refusal(f"{manifest_path}: expected one explicit {binary_path} binary")
+        binary = required_string(binaries[0].get("name"), f"{manifest_path}: binary name")
+        expected[target] = (name, resolved_version, binary)
+    check_outputs(root, expected)
+    return expected
+
+
+def check_outputs(root: Path, expected: dict[str, tuple[str, str, str]]) -> None:
+    path = root / "build/docker/Dockerfile"
+    text = path.read_text(encoding="utf-8")
+    if re.search(r"^[ \t]*#\s*escape\s*=", text, re.M | re.I):
+        raise Refusal(f"{path}: unsupported escape directive")
+    stripped = re.sub(r"(?m)^[ \t]*#.*(?:\r?\n|$)", "", text)
+    arguments: dict[str, str] = {}
+    builds: dict[str, tuple[str, str]] = {}
+    copies: list[list[str]] = []
+    stage = ""
+
+    def expand(value: str) -> str:
+        return re.sub(r"\$\{([A-Z_]+)\}", lambda match: arguments.get(match[1], match[0]), value)
+
+    for line in re.sub(r"\\[ \t]*\r?\n", " ", stripped).splitlines():
+        if not line.strip():
+            continue
+        parts = shlex.split(line)
+        instruction = parts[0].upper()
+        if instruction == "ARG" and len(parts) == 2 and "=" in parts[1]:
+            key, value = parts[1].split("=", 1)
+            arguments[key] = value
+        elif instruction == "FROM":
+            stage = parts[-1] if len(parts) >= 4 and parts[-2].upper() == "AS" else ""
+            copies = []  # Only copies into the final runtime stage are outputs.
+        elif instruction == "RUN" and parts[1:4] == ["cargo", "auditable", "build"]:
+            command = parts[4 : parts.index("&&")] if "&&" in parts else parts[4:]
+            if len(command) != 6 or command[:3] != ["--release", "--locked", "-p"] or command[4] != "--bin":
+                raise Refusal(f"{path}: unsupported auditable build selection in {stage}")
+            if stage in builds:
+                raise Refusal(f"{path}: ambiguous auditable build in {stage}")
+            builds[stage] = (expand(command[3]), expand(command[5]))
+        elif instruction == "COPY":
+            copies.append(parts[1:])
+    actual: dict[str, tuple[str, str]] = {}
+    for parts in copies:
+        if parts[-1] not in ENTRYPOINTS and parts[-1] not in expected:
+            continue
+        target = parts[-1]
+        if target in actual or len(parts) != 3 or not parts[0].startswith("--from="):
+            raise Refusal(f"{path}: ambiguous output {target}")
+        producer = builds.get(parts[0].split("=", 1)[1])
+        source = expand(parts[1])
+        if producer is None or source != "/out/" + producer[1]:
+            raise Refusal(f"{path}: {target} does not select an admitted auditable binary output")
+        actual[target] = producer
+    identities = {target: (name, binary) for target, (name, _version, binary) in expected.items()}
+    if actual != identities:
+        raise Refusal(f"{path}: Docker outputs {actual} disagree with selected manifest binaries {identities}")
+
+
+def normalized_target(value: object) -> str:
+    raw = required_string(value, "Trivy Target")
+    return posixpath.normpath("/" + raw.lstrip("/"))
+
+
+class RootfsMember(tarfile.TarInfo):
+    @classmethod
+    def fromtarfile(cls, archive: tarfile.TarFile) -> tarfile.TarInfo:
+        # TarFile.next() treats some malformed later members as end-of-archive.
+        try:
+            return super().fromtarfile(archive)
+        except tarfile.EOFHeaderError:
+            raise
+        except tarfile.HeaderError as error:
+            raise Refusal(f"invalid rootfs tar header: {error}")
+
+
+def check_pruned_rootfs(source: BinaryIO, mounts: object, pruned: set[str]) -> None:
+    def root_entry(name: str) -> str:
+        canonical = posixpath.normpath("/" + name.lstrip("/"))
+        return "/" + canonical.split("/", 2)[1]
+
+    if not isinstance(mounts, list):
+        raise Refusal("missing container mount inventory")
+    for mount in mounts:
+        destination = mount.get("Destination") if isinstance(mount, dict) else None
+        if not isinstance(destination, str) or not destination.startswith("/"):
+            raise Refusal("invalid container mount destination")
+        entry = root_entry(destination)
+        if entry == "/" or entry in pruned:
+            raise Refusal(f"{destination}: mount prevents pruned entrypoint inspection")
+
+    with tarfile.open(fileobj=source, mode="r|", tarinfo=RootfsMember) as archive:
+        while (member := archive.next()) is not None:
+            archive.members.clear()  # Python 3.11 caches headers even in stream mode.
+            entry = root_entry(member.name)
+            if entry in pruned:
+                raise Refusal(f"{entry}: pruned binary is present in the exported rootfs")
+        # TarFile stops at the first zero block. Docker's complete tar ends with two,
+        # followed only by optional block padding. Read through EOF before returning.
+        assert archive.fileobj is not None
+        if archive.offset == 0 or archive.fileobj.read(tarfile.BLOCKSIZE) != bytes(tarfile.BLOCKSIZE):
+            raise Refusal("incomplete rootfs tar")
+        while padding := archive.fileobj.read(64 * 1024):
+            if len(padding) % tarfile.BLOCKSIZE or padding.strip(b"\0"):
+                raise Refusal("invalid data after rootfs tar end")
+
+
+def admit(report: object, expected: dict[str, tuple[str, str, str]], image_id: str) -> None:
+    if not isinstance(report, dict) or report.get("ArtifactType") != "container_image":
+        raise Refusal("expected a native Trivy container image report")
+    if report.get("Metadata", {}).get("ImageID") != image_id:
+        raise Refusal("Trivy report does not identify the fixed image ID")
+    results = report.get("Results")
+    if not isinstance(results, list) or not all(isinstance(result, dict) for result in results):
+        raise Refusal("Trivy Results is missing or malformed")
+    found: dict[str, dict[str, object]] = {}
+    for result in results:
+        if result.get("Type") != "rustbinary":
+            continue
+        target = normalized_target(result.get("Target"))
+        if target in ENTRYPOINTS and target not in expected:
+            raise Refusal(f"{target}: pruned binary has a Rust inventory")
+        if target not in expected:
+            continue
+        if target in found or result.get("Class") != "lang-pkgs":
+            raise Refusal(f"{target}: ambiguous or incorrectly classified Rust inventory")
+        found[target] = result
+    for target, (name, version, _binary) in expected.items():
+        if target not in found:
+            raise Refusal(f"{target}: missing Rust inventory")
+        packages = found[target].get("Packages")
+        if not isinstance(packages, list) or not packages:
+            raise Refusal(f"{target}: missing runtime packages")
+        by_id: dict[str, dict[str, object]] = {}
+        identities: set[tuple[str, str]] = set()
+        roots: list[str] = []
+        for package in packages:
+            if not isinstance(package, dict):
+                raise Refusal(f"{target}: malformed runtime package")
+            package_id = required_string(package.get("ID"), f"{target}: package ID")
+            identity = (
+                required_string(package.get("Name"), f"{target}: package name"),
+                required_string(package.get("Version"), f"{target}: package version"),
+            )
+            if package_id in by_id or identity in identities:
+                raise Refusal(f"{target}: ambiguous package ID or identity {package_id}")
+            by_id[package_id] = package
+            identities.add(identity)
+            if package.get("Relationship") == "root":
+                roots.append(package_id)
+        if len(roots) != 1:
+            raise Refusal(f"{target}: expected exactly one runtime root")
+        root = by_id[roots[0]]
+        if (root["Name"], root["Version"]) != (name, version):
+            raise Refusal(f"{target}: root identity must be {name}@{version}")
+        if len(by_id) == 1:
+            raise Refusal(f"{target}: root-only inventory has no runtime dependency content")
+        for package_id, package in by_id.items():
+            dependencies = package.get("DependsOn", [])
+            if not isinstance(dependencies, list) or not all(
+                isinstance(dep, str) and dep in by_id for dep in dependencies
+            ):
+                raise Refusal(f"{target}: dangling or malformed dependencies for {package_id}")
+        visited: set[str] = set()
+        pending = roots.copy()
+        while pending:
+            package_id = pending.pop()
+            if package_id not in visited:
+                visited.add(package_id)
+                deps = by_id[package_id].get("DependsOn", [])
+                assert isinstance(deps, list)
+                pending.extend(deps)
+        if visited != set(by_id):
+            raise Refusal(f"{target}: disconnected runtime packages {sorted(set(by_id) - visited)}")
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[2])
+    parser.add_argument(
+        "--expectations",
+        action="store_true",
+        help="print selected and pruned paths for filesystem checks",
+    )
+    parser.add_argument(
+        "--rootfs-mounts",
+        type=Path,
+        help="inspect the exported rootfs on stdin against these container mounts",
+    )
+    parser.add_argument("--pruned", nargs="+")
+    parser.add_argument("--report", type=Path)
+    parser.add_argument("--image-id")
+    args = parser.parse_args(argv)
+    try:
+        if args.rootfs_mounts is not None:
+            if not args.pruned:
+                parser.error("--pruned is required for rootfs inspection")
+            mounts = parse_json_bytes(args.rootfs_mounts.read_bytes(), "container mounts")
+            check_pruned_rootfs(sys.stdin.buffer, mounts, set(args.pruned))
+            return 0
+        expected = expected_binaries(args.repo)
+        if args.expectations:
+            for path in dict.fromkeys([*ENTRYPOINTS, *expected]):
+                print(f"{'retained' if path in expected else 'pruned'}\t{path}")
+        else:
+            if args.report is None or not args.image_id:
+                parser.error("--report and --image-id are required for admission")
+            admit(parse_json_bytes(args.report.read_bytes(), "Trivy report"), expected, args.image_id)
+            print("runtime-image-inventory: admitted runtime graphs for " + ", ".join(expected))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, tarfile.TarError) as error:
+        print(f"runtime-image-inventory: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

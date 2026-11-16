@@ -7,6 +7,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -52,7 +53,7 @@ def check_role_carrier_bytes(target: Path) -> None:
     relative = ".claude/agents/worker-agent.md"
     carrier = target / relative
     original = carrier.read_bytes()
-    command = [sys.executable, "-B", "scripts/agent-harness-sync.py", "--check"]
+    command = [sys.executable, "-B", "scripts/harness/sync.py", "--check"]
 
     def must_be_stale() -> None:
         checked = run(command, cwd=target)
@@ -85,7 +86,7 @@ def check_role_carrier_bytes(target: Path) -> None:
     carrier.unlink()
     carrier.symlink_to("../../README.md")
     try:
-        apply_cmd = [sys.executable, "-B", "scripts/agent-harness-sync.py", "--apply"]
+        apply_cmd = [sys.executable, "-B", "scripts/harness/sync.py", "--apply"]
         if run(apply_cmd, cwd=target).returncode == 0 or sentinel.read_bytes() != sentinel_bytes:
             raise AssertionError("role sync followed or accepted a symlink inside .claude/agents")
     finally:
@@ -102,31 +103,35 @@ def init(
     ]
     replacements = set(extra[::2])
     identity = [value for pair in baseline if pair[0] not in replacements for value in pair]
+    base_env = {k: v for k, v in os.environ.items() if k not in {"PYTHONPATH", "PYTHONHOME"}}
+    base_env["PYTHONDONTWRITEBYTECODE"] = "1"
+    if environment is not None:
+        base_env.update(environment)
     return run(
         [
-            "bash", os.fspath(source / "scripts/init-module.sh"), "--repo", os.fspath(target),
+            sys.executable, "-B", "-E", os.fspath(source / "scripts/template/init.py"), "--repo", os.fspath(target),
             *identity, *extra,
         ],
         cwd=source,
-        env=None if environment is None else {**os.environ, **environment},
+        env=base_env,
     )
 
 
 def load_marker_modules(source: Path):
-    library = source / "scripts/lib"
+    library = source / "scripts/template"
     sys.path.insert(0, os.fspath(library))
     try:
-        module_path = library / "template_init.py"
+        module_path = library / "init.py"
         spec = importlib.util.spec_from_file_location("template_init_safety_probe", module_path)
         if spec is None or spec.loader is None:
-            raise AssertionError("template_init.py cannot be imported")
+            raise AssertionError("scripts/template/init.py cannot be imported")
         module = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = module
         spec.loader.exec_module(module)
-        state = sys.modules.get("template_state")
-        if state is None:
-            raise AssertionError("template_state.py was not imported")
-        return module, state
+        state_mod = sys.modules.get("state")
+        if state_mod is None:
+            raise AssertionError("scripts/template/state.py was not imported")
+        return module, state_mod
     finally:
         sys.path.remove(os.fspath(library))
 
@@ -227,8 +232,8 @@ def assert_snapshot_backpressure(source: Path, work: Path) -> None:
     (repository / "0000-large").write_bytes(b"uncommitted replacement\n")
     command = [sys.executable, "-B", "-c",
                "import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); "
-               "from template_state import snapshot_tree; snapshot_tree(Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4])",
-               os.fspath(source / "scripts/lib"), os.fspath(repository), os.fspath(destination), revision]
+               "from state import snapshot_tree; snapshot_tree(Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4])",
+               os.fspath(source / "scripts/template"), os.fspath(repository), os.fspath(destination), revision]
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=30)
     except subprocess.TimeoutExpired as error:
@@ -238,6 +243,8 @@ def assert_snapshot_backpressure(source: Path, work: Path) -> None:
     actual = {path.name: path.read_bytes() for path in destination.iterdir()}
     if actual != expected:
         raise AssertionError("native snapshot changed committed blob bytes or lost a file")
+    shutil.rmtree(repository, ignore_errors=True)
+    shutil.rmtree(destination, ignore_errors=True)
 
 
 def assert_preflight_extraction(source: Path, work: Path) -> None:
@@ -282,9 +289,9 @@ def assert_preflight_extraction(source: Path, work: Path) -> None:
         before = state(target)
         injected: list[str] = []
 
-        def fail(*_args):
-            injected.append(phase)
-            raise initializer.Refusal(expected)
+        def fail(*_args, _injected=injected, _phase=phase, _expected=expected):
+            _injected.append(_phase)
+            raise initializer.Refusal(_expected)
 
         if phase == "project":
             fault = patch.object(initializer, "_project_staged", fail)
@@ -302,6 +309,7 @@ def assert_preflight_extraction(source: Path, work: Path) -> None:
             raise AssertionError(f"{phase} preflight did not run the injected failure: {injected}")
         if state(target) != before:
             raise AssertionError(f"{phase} preflight failure mutated its target")
+        shutil.rmtree(target, ignore_errors=True)
 
 
 def assert_lock_pruning(source: Path, work: Path) -> None:
@@ -350,13 +358,25 @@ def assert_lock_pruning(source: Path, work: Path) -> None:
         os.environ["PATH"] = path
 
 
+_CLEAN_REFUSAL_CACHE: dict[Path, tuple[Path, str]] = {}
+
+
+def _shared_refusal_target(source: Path, work: Path) -> tuple[Path, str]:
+    cached = _CLEAN_REFUSAL_CACHE.get(work)
+    if cached is not None and cached[0].is_dir():
+        return cached
+    target = work / "_refusal-target"
+    clone(source, target)
+    entry = (target, state(target))
+    _CLEAN_REFUSAL_CACHE[work] = entry
+    return entry
+
+
 def must_refuse(
     source: Path, work: Path, label: str, *extra: str,
     environment: dict[str, str] | None = None, expected: str | None = None,
 ) -> None:
-    target = work / label
-    clone(source, target)
-    before = state(target)
+    target, before = _shared_refusal_target(source, work)
     result = init(source, target, *extra, environment=environment)
     if result.returncode == 0:
         raise AssertionError(f"{label}: initializer unexpectedly succeeded")
@@ -379,23 +399,24 @@ def must_refuse(
 
 
 def must_refuse_raw_description(source: Path, work: Path) -> None:
-    target = work / "non-utf8-description"
-    clone(source, target)
-    before = state(target)
+    target, before = _shared_refusal_target(source, work)
+    clean_env = {k: v for k, v in os.environ.items() if k not in {"PYTHONPATH", "PYTHONHOME"}}
+    clean_env["PYTHONDONTWRITEBYTECODE"] = "1"
     result = subprocess.run(
         [
-            b"bash", os.fsencode(source / "scripts/init-module.sh"), b"--repo", os.fsencode(target),
+            os.fsencode(sys.executable), b"-B", b"-E", os.fsencode(source / "scripts/template/init.py"),
+            b"--repo", os.fsencode(target),
             b"--service-name", b"safety-api", b"--repository", b"https://github.com/example/safety-api",
             b"--description", b"bad\xed\xa0\x80description", b"--codeowner", b"@example/platform",
         ],
-        cwd=os.fspath(source), stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        cwd=os.fspath(source), stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, env=clean_env,
     )
     if result.returncode == 0 or state(target) != before:
         raise AssertionError("non-UTF-8 description was not a preserving refusal")
 
 
 def assert_profile_pack(source: Path, target: Path, profile_name: str, selected: bool) -> None:
-    profile = json.loads((source / "scripts/lib/template_profiles.json").read_text(encoding="utf-8"))
+    profile = json.loads((source / "scripts/template/profiles.json").read_text(encoding="utf-8"))
     key = "remove_when_none" if profile_name == "postgres" else "remove_when_unselected"
     for relative in profile[profile_name][key]:
         path = target / relative.rstrip("/")
@@ -484,9 +505,13 @@ def assert_profile_packs(
     assert_profile_pack(source, target, "object-storage", object_storage == "s3")
     assert_profile_pack(source, target, "worker", jobs == "postgres" or messaging == "nats-jetstream")
     assert_profile_pack(source, target, "service-secrets", database == "postgres")
+    has_compose_integration = (
+        database == "postgres" or messaging == "nats-jetstream" or cache == "redis" or object_storage == "s3"
+    )
+    assert_profile_pack(source, target, "integration", has_compose_integration)
     assert_profile_pack(
-        source, target, "integration",
-        database == "postgres" or messaging == "nats-jetstream" or cache == "redis" or object_storage == "s3",
+        source, target, "container-integration",
+        has_compose_integration or outbound_auth == "oauth2-client-credentials",
     )
     assert_profile_pack(source, target, "webhooks-common", webhooks == "durable" or inbound_webhooks == "standard-webhooks")
     assert_profile_pack(source, target, "webhooks", webhooks == "durable")
@@ -840,6 +865,8 @@ def check(source: Path) -> None:
         must_refuse(source, work, "line-separator", "--description", "bad\u2028description")
         must_refuse(source, work, "paragraph-separator", "--description", "bad\u2029description")
         must_refuse_raw_description(source, work)
+        if work in _CLEAN_REFUSAL_CACHE:
+            shutil.rmtree(_CLEAN_REFUSAL_CACHE.pop(work)[0], ignore_errors=True)
 
         target = work / "success"
         clone(source, target)
@@ -861,8 +888,10 @@ def check(source: Path) -> None:
         assert_lock_outbox(target, "none")
         assert_lock_webhooks(target, "none", "none")
         for removed in [
-            "make/source.mk", "scripts/ci/template-init-check.sh", "scripts/tests/template-init-safety.py",
+            "make/source.mk", "scripts/template/check_init.sh", "scripts/template/matrix.py",
+            "scripts/template/init.py", "scripts/template/profiles.json", "scripts/tests/template-init-safety.py",
             "crates/infra-postgres", "crates/migrate", "migrations", "env/docker-compose.yml",
+            "scripts/profiles/compose.sh", "scripts/profiles/integration.sh",
             "Grok.md", "QWEN.md", ".agents/codex-project.toml",
             ".agents/adapters/qwen", ".agents/adapters/cursor", ".agents/adapters/grok", ".agents/adapters/opencode",
             ".agents/adapters/antigravity", ".agents/rules/antigravity-harness.md", ".agents/agents",
@@ -895,6 +924,7 @@ def check(source: Path) -> None:
         service_skill = target / ".agents/skills/service-local"
         service_skill.mkdir()
         (service_skill / "SKILL.md").write_text(
+            "---\nname: service-local\ndescription: Use when testing service-local skills.\n---\n\n"
             "# Service-local method\nRepository: https://github.com/example/safety-api\n",
             encoding="utf-8",
         )
@@ -909,31 +939,33 @@ def check(source: Path) -> None:
         repeat = init(source, target, "--database", "none", "--agent-harness", "claude")
         if repeat.returncode or state(target) != after:
             raise AssertionError("matching complete-lock initialization was not a byte-preserving no-op")
-        inventory_path = target / "scripts/lib/template_profiles.json"
+        inventory_path = target / "scripts/template/profiles.json"
         lock_path = target / "template.lock"
-        current_inventory = inventory_path.read_bytes()
+        current_inventory = (source / "scripts/template/profiles.json").read_bytes()
         current_lock = lock_path.read_bytes()
         parsed_inventory = json.loads(current_inventory.decode("utf-8"))
-        reordered = dict(parsed_inventory)
-        del reordered["authn"]
-        reordered["outbound-http"] = None
-        reordered["authn"] = None
-        inventory_path.write_text(json.dumps(reordered), encoding="utf-8")
-        invalid_before = state(target)
-        invalid_repeat = init(source, target, "--database", "none", "--agent-harness", "claude")
-        if (
-            invalid_repeat.returncode == 0
-            or "template authn inventory has an unsupported shape" not in invalid_repeat.stderr
-            or state(target) != invalid_before
-        ):
-            raise AssertionError("replay lost the canonical first refusal for reordered profiles")
-        parsed_inventory["unknown-pack"] = {"remove_when_unselected": []}
-        inventory_path.write_text(json.dumps(parsed_inventory, indent=2) + "\n", encoding="utf-8")
-        unknown_before = state(target)
-        unknown_repeat = init(source, target, "--database", "none", "--agent-harness", "claude")
-        if unknown_repeat.returncode == 0 or state(target) != unknown_before:
-            raise AssertionError("unknown inventory pack was accepted or mutated")
-        inventory_path.write_bytes(current_inventory)
+        try:
+            reordered = dict(parsed_inventory)
+            del reordered["authn"]
+            reordered["outbound-http"] = None
+            reordered["authn"] = None
+            inventory_path.write_text(json.dumps(reordered), encoding="utf-8")
+            invalid_before = state(target)
+            invalid_repeat = init(source, target, "--database", "none", "--agent-harness", "claude")
+            if (
+                invalid_repeat.returncode == 0
+                or "template authn inventory has an unsupported shape" not in invalid_repeat.stderr
+                or state(target) != invalid_before
+            ):
+                raise AssertionError("replay lost the canonical first refusal for reordered profiles")
+            parsed_inventory["unknown-pack"] = {"remove_when_unselected": []}
+            inventory_path.write_text(json.dumps(parsed_inventory, indent=2) + "\n", encoding="utf-8")
+            unknown_before = state(target)
+            unknown_repeat = init(source, target, "--database", "none", "--agent-harness", "claude")
+            if unknown_repeat.returncode == 0 or state(target) != unknown_before:
+                raise AssertionError("unknown inventory pack was accepted or mutated")
+        finally:
+            inventory_path.unlink(missing_ok=True)
         assert_outbound_lock_refusals(source, target)
         assert_outbound_auth_lock_refusals(source, target)
         assert_grpc_lock_refusals(source, target)
@@ -972,6 +1004,7 @@ def check(source: Path) -> None:
         malformed = init(source, target, "--database", "none", "--agent-harness", "claude")
         if malformed.returncode == 0 or state(target) != malformed_before:
             raise AssertionError("malformed lock was not a preserving refusal")
+        shutil.rmtree(target, ignore_errors=True)
         postgres_target = work / "postgres-replay"
         clone(source, postgres_target)
         postgres = init(source, postgres_target, "--database", "postgres", "--agent-harness", "core")
@@ -1006,6 +1039,7 @@ def check(source: Path) -> None:
         missing_replay = init(source, postgres_target, "--database", "postgres", "--agent-harness", "core")
         if missing_replay.returncode == 0 or state(postgres_target) != missing_before:
             raise AssertionError("complete postgres lock accepted a missing retained pack")
+        shutil.rmtree(postgres_target, ignore_errors=True)
         for authn in ("oidc-jwt", "oidc-introspection"):
             authn_target = work / f"{authn}-replay"
             clone(source, authn_target)
@@ -1021,6 +1055,7 @@ def check(source: Path) -> None:
             replay = init(source, authn_target, "--database", "none", "--authn", authn, "--agent-harness", "core")
             if replay.returncode or state(authn_target) != authn_before:
                 raise AssertionError(f"complete {authn} lock replay changed target bytes")
+            shutil.rmtree(authn_target, ignore_errors=True)
         outbound_target = work / "outbound-replay"
         clone(source, outbound_target)
         outbound = init(source, outbound_target, "--database", "none", "--outbound-http", "bounded", "--agent-harness", "core")
@@ -1035,6 +1070,7 @@ def check(source: Path) -> None:
         outbound_replay = init(source, outbound_target, "--database", "none", "--outbound-http", "bounded", "--agent-harness", "core")
         if outbound_replay.returncode or state(outbound_target) != outbound_before:
             raise AssertionError("complete bounded outbound lock replay changed target bytes")
+        shutil.rmtree(outbound_target, ignore_errors=True)
         oauth_target = work / "oauth-replay"
         clone(source, oauth_target)
         oauth = init(source, oauth_target, "--database", "none", "--outbound-auth", "oauth2-client-credentials", "--agent-harness", "core")
@@ -1052,6 +1088,7 @@ def check(source: Path) -> None:
         )
         if oauth_replay.returncode or state(oauth_target) != oauth_before:
             raise AssertionError("complete OAuth lock replay changed target bytes")
+        shutil.rmtree(oauth_target, ignore_errors=True)
         grpc_target = work / "grpc-replay"
         clone(source, grpc_target)
         grpc = init(source, grpc_target, "--database", "none", "--grpc", "enabled", "--agent-harness", "core")
@@ -1066,6 +1103,7 @@ def check(source: Path) -> None:
         grpc_replay = init(source, grpc_target, "--database", "none", "--grpc", "enabled", "--agent-harness", "core")
         if grpc_replay.returncode or state(grpc_target) != grpc_before:
             raise AssertionError("complete gRPC lock replay changed target bytes")
+        shutil.rmtree(grpc_target, ignore_errors=True)
         service_auth_target = work / "service-auth-replay"
         clone(source, service_auth_target)
         service_auth_arguments = ("--database", "none", "--grpc", "enabled", "--service-auth", "jwt", "--agent-harness", "core")
@@ -1082,6 +1120,7 @@ def check(source: Path) -> None:
         service_auth_replay = init(source, service_auth_target, *service_auth_arguments)
         if service_auth_replay.returncode or state(service_auth_target) != service_auth_before:
             raise AssertionError("complete service-auth lock replay changed target bytes")
+        shutil.rmtree(service_auth_target, ignore_errors=True)
         http_idempotency_target = work / "http-idempotency-replay"
         clone(source, http_idempotency_target)
         http_idempotency_result = init(
@@ -1108,6 +1147,7 @@ def check(source: Path) -> None:
         )
         if http_idempotency_revert_mismatch.returncode == 0 or state(http_idempotency_target) != http_idempotency_before:
             raise AssertionError("postgres http idempotency lock accepted a profile migration back to none")
+        shutil.rmtree(http_idempotency_target, ignore_errors=True)
         jobs_target = work / "jobs-replay"
         clone(source, jobs_target)
         jobs_result = init(
@@ -1137,6 +1177,7 @@ def check(source: Path) -> None:
                 "'template initialization choices differ from the complete template.lock': "
                 f"{jobs_revert_mismatch.stderr}"
             )
+        shutil.rmtree(jobs_target, ignore_errors=True)
         messaging_target = work / "messaging-replay"
         clone(source, messaging_target)
         messaging_result = init(
@@ -1148,6 +1189,7 @@ def check(source: Path) -> None:
         assert_profile_pack(source, messaging_target, "messaging", True)
         assert_profile_pack(source, messaging_target, "worker", True)
         assert_profile_pack(source, messaging_target, "integration", True)
+        assert_profile_pack(source, messaging_target, "container-integration", True)
         lock = json.loads((messaging_target / "template.lock").read_text(encoding="utf-8"))
         if lock["profiles"].get("messaging") != "nats-jetstream":
             raise AssertionError("template.lock did not record messaging=nats-jetstream")
@@ -1158,6 +1200,7 @@ def check(source: Path) -> None:
         )
         if messaging_replay.returncode or state(messaging_target) != messaging_before:
             raise AssertionError("complete messaging lock replay changed target bytes")
+        shutil.rmtree(messaging_target, ignore_errors=True)
         cache_target = work / "cache-replay"
         clone(source, cache_target)
         cache_result = init(
@@ -1168,6 +1211,7 @@ def check(source: Path) -> None:
             raise AssertionError(f"cache-only initialization failed: {cache_result.stderr}")
         assert_profile_pack(source, cache_target, "cache", True)
         assert_profile_pack(source, cache_target, "integration", True)
+        assert_profile_pack(source, cache_target, "container-integration", True)
         assert_profile_pack(source, cache_target, "tls-fixtures", True)
         assert_profile_pack(source, cache_target, "service-secrets", False)
         assert_profile_pack(source, cache_target, "rustls", True)
@@ -1183,6 +1227,7 @@ def check(source: Path) -> None:
         )
         if cache_replay.returncode or state(cache_target) != cache_before:
             raise AssertionError("complete cache lock replay changed target bytes")
+        shutil.rmtree(cache_target, ignore_errors=True)
         object_storage_target = work / "object-storage-replay"
         clone(source, object_storage_target)
         object_storage_result = init(
@@ -1205,6 +1250,7 @@ def check(source: Path) -> None:
         )
         if object_storage_replay.returncode or state(object_storage_target) != object_storage_before:
             raise AssertionError("complete object storage lock replay changed target bytes")
+        shutil.rmtree(object_storage_target, ignore_errors=True)
         outbox_target = work / "outbox-replay"
         clone(source, outbox_target)
         outbox_result = init(
@@ -1231,6 +1277,7 @@ def check(source: Path) -> None:
         )
         if outbox_revert_mismatch.returncode == 0 or state(outbox_target) != outbox_before:
             raise AssertionError("complete outbox lock accepted a profile migration back to none")
+        shutil.rmtree(outbox_target, ignore_errors=True)
         # Inbound-only needs the request deadline even without outbound HTTP
         # or HTTP idempotency selecting its shared carrier.
         for outbound_http, webhooks in (("bounded", "durable"), ("none", "none")):
@@ -1254,12 +1301,14 @@ def check(source: Path) -> None:
             )
             if webhooks_replay.returncode or state(webhooks_target) != webhooks_before:
                 raise AssertionError("complete webhook lock replay changed target bytes")
+            shutil.rmtree(webhooks_target, ignore_errors=True)
         for permitted in ("union", "raw"):
             allowed = work / f"permitted-{permitted}"
             clone(source, allowed)
             result = init(source, allowed, "--service-name", permitted, "--database", "none")
             if result.returncode:
                 raise AssertionError(f"permitted Rust-adjacent name {permitted} was refused: {result.stderr}")
+            shutil.rmtree(allowed, ignore_errors=True)
     print("template initializer safety: pass")
 
 

@@ -86,8 +86,8 @@ _CARRIER_NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
 
 def _load_initializer(source: Path):
-    library = source / "scripts/lib"
-    module_path = library / "template_init.py"
+    library = source / "scripts/template"
+    module_path = library / "init.py"
     if not library.is_dir() or not module_path.is_file():
         raise RuntimeError("source initializer is missing")
     sys.path.insert(0, os.fspath(library))
@@ -569,7 +569,7 @@ _IMAGE_INPUTS_CHECKERS: dict[Path, Any] = {}
 
 def _image_inputs_checker(source: Path):
     if source not in _IMAGE_INPUTS_CHECKERS:
-        spec = importlib.util.spec_from_file_location("projected_image_inputs", source / "scripts/ci/image-inputs-check.py")
+        spec = importlib.util.spec_from_file_location("projected_image_inputs", source / "scripts/checks/image_inputs.py")
         if spec is None or spec.loader is None:
             raise RuntimeError("image input coverage checker cannot be imported")
         checker = importlib.util.module_from_spec(spec)
@@ -614,8 +614,15 @@ def _project(source: Path, candidate: str, initializer, inputs, destination: Pat
 
 
 def _check_oauth_projections(source: Path, candidate: str, initializer, work: Path) -> None:
+    profile_data = initializer._profile_data(source)
     outbound_paths = frozenset(
-        relative.rstrip("/") for relative in initializer._profile_data(source).removals["outbound-auth"]
+        relative.rstrip("/") for relative in profile_data.removals["outbound-auth"]
+    )
+    integration_paths = frozenset(
+        relative.rstrip("/") for relative in profile_data.removals["integration"]
+    )
+    container_integration_paths = frozenset(
+        relative.rstrip("/") for relative in profile_data.removals["container-integration"]
     )
     scenarios = (
         ("none", "none", "none", "none", "none", "none"),
@@ -631,6 +638,11 @@ def _check_oauth_projections(source: Path, candidate: str, initializer, work: Pa
         with tempfile.TemporaryDirectory(prefix=f"oauth-{index}-", dir=work) as selection:
             nodes = _project(source, candidate, initializer, inputs, Path(selection) / "tree")
         _assert_profile_output(initializer, nodes, "outbound-auth", outbound_paths)
+        _assert_profile_output(initializer, nodes, "container-integration", container_integration_paths)
+        if database == "postgres":
+            _assert_profile_output(initializer, nodes, "integration", integration_paths)
+        else:
+            _assert_no_profile_output(initializer, nodes, "integration", integration_paths)
         profiles = inputs.profiles()
         if profiles["outbound_auth"] != "oauth2-client-credentials" or profiles["outbound_http"] != "bounded":
             raise initializer.Refusal("OAuth projection did not retain its effective bounded HTTP profile")
@@ -740,6 +752,7 @@ def _check_cache_projections(source: Path, candidate: str, initializer, work: Pa
     profile_data = initializer._profile_data(source)
     cache_paths = frozenset(relative.rstrip("/") for relative in profile_data.removals["cache"])
     integration_paths = frozenset(relative.rstrip("/") for relative in profile_data.removals["integration"])
+    container_integration_paths = frozenset(relative.rstrip("/") for relative in profile_data.removals["container-integration"])
     scenarios = (
         ("none", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none"),
         ("postgres", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none"),
@@ -760,6 +773,7 @@ def _check_cache_projections(source: Path, candidate: str, initializer, work: Pa
             nodes = _project(source, candidate, initializer, inputs, Path(selection) / "tree")
         _assert_profile_output(initializer, nodes, "cache", cache_paths)
         _assert_profile_output(initializer, nodes, "integration", integration_paths)
+        _assert_profile_output(initializer, nodes, "container-integration", container_integration_paths)
         if index == 1:
             config_manifest = nodes.get("crates/config/Cargo.toml")
             payload = config_manifest.payload if config_manifest is not None and isinstance(config_manifest.payload, bytes) else b""
@@ -821,6 +835,7 @@ def _project_selection(
     source, candidate, work = context["source"], context["candidate"], context["work"]
     idempotency_paths, jobs_paths, webhook_paths = context["idempotency_paths"], context["jobs_paths"], context["webhook_paths"]
     grpc_paths, combined_grpc_paths = context["grpc_paths"], context["combined_grpc_paths"]
+    container_integration_paths = context["container_integration_paths"]
     harness = "core"
     inputs = _inputs(
         initializer, database, authn, outbound_http, http_idempotency, jobs,
@@ -850,12 +865,14 @@ def _project_selection(
     rules_assertion = _assert_profile_output if database == "postgres" else _assert_no_profile_output
     rules_assertion(initializer, nodes, "postgres", (
         "env/monitoring/postgres-maintenance.rules.yml",
-        "scripts/tests/postgres-maintenance-rules.yml",
+        "env/monitoring/tests/postgres-maintenance-rules.yml",
+        "scripts/tests/test_migration_history.py",
     ))
+    rules_assertion(initializer, nodes, "container-integration", container_integration_paths)
     _assert_profile_output(initializer, nodes, "core", (
         "env/monitoring/service.rules.yml",
-        "scripts/tests/service-rules.yml",
-        "scripts/ci/monitoring-rules.sh",
+        "env/monitoring/tests/service-rules.yml",
+        "scripts/checks/monitoring_rules.sh",
     ))
     if http_idempotency == "none":
         _assert_no_http_idempotency_output(initializer, nodes, idempotency_paths)
@@ -978,10 +995,12 @@ def _check_harness_projections(
             lock_result="agent_harness_only",
         )
 
+
 def _check_object_storage_projections(source: Path, candidate: str, initializer, work: Path) -> None:
     profile_data = initializer._profile_data(source)
     object_storage_paths = frozenset(relative.rstrip("/") for relative in profile_data.removals["object-storage"])
     integration_paths = frozenset(relative.rstrip("/") for relative in profile_data.removals["integration"])
+    container_integration_paths = frozenset(relative.rstrip("/") for relative in profile_data.removals["container-integration"])
     scenarios = (
         ("none", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none"),
         ("postgres", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none", "none"),
@@ -1003,6 +1022,7 @@ def _check_object_storage_projections(source: Path, candidate: str, initializer,
             nodes = _project(source, candidate, initializer, inputs, Path(selection) / "tree")
         _assert_profile_output(initializer, nodes, "object-storage", object_storage_paths)
         _assert_profile_output(initializer, nodes, "integration", integration_paths)
+        _assert_profile_output(initializer, nodes, "container-integration", container_integration_paths)
         if index == 1:
             # Shared test PKI follows the retained consumers checked by _project;
             # object storage alone still does not need the config url edge.
@@ -1163,6 +1183,9 @@ def check(source: Path) -> None:
     combined_grpc_paths = frozenset(
         relative.rstrip("/") for relative in profile_data.removals["outbound-auth-grpc"]
     )
+    container_integration_paths = frozenset(
+        relative.rstrip("/") for relative in profile_data.removals["container-integration"]
+    )
     raw_combinations = (
         len(DATABASES) * len(AUTHN) * len(OUTBOUND_HTTP) * len(HTTP_IDEMPOTENCY) * len(JOBS)
         * len(WEBHOOKS) * len(INBOUND_WEBHOOKS)
@@ -1195,6 +1218,7 @@ def check(source: Path) -> None:
             "source": source, "candidate": candidate, "work": work, "exclusions": exclusions,
             "idempotency_paths": idempotency_paths, "jobs_paths": jobs_paths, "webhook_paths": webhook_paths,
             "grpc_paths": grpc_paths, "combined_grpc_paths": combined_grpc_paths,
+            "container_integration_paths": container_integration_paths,
         }
         selections = [
             (database, authn, outbound_http, http_idempotency, jobs, webhooks, inbound_webhooks)
@@ -1273,15 +1297,9 @@ def check_quality(source: Path) -> None:
     if len(jscpd_matches) != 1:
         raise initializer.Refusal("tools/versions.env must declare one JSCPD_VERSION")
     jscpd_ver = jscpd_matches[0]
-    jscpd_env = dict(
-        os.environ,
-        npm_config_prefer_offline="true",
-        npm_config_ignore_scripts="true",
-        npm_config_audit="false",
-        npm_config_fund="false",
-        npm_config_update_notifier="false",
-    )
-    def check(temporary: str, name: str, inputs) -> None:
+    run_env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+
+    def run_scenario(temporary: str, name: str, inputs) -> None:
         tree = Path(temporary) / name
         _project(source, candidate, initializer, inputs, tree)
         initializer._prune_cargo_lock(tree, inputs)
@@ -1289,13 +1307,13 @@ def check_quality(source: Path) -> None:
         # untracked Rust. A private empty Git index exercises that path.
         commands = (
             ["git", "init", "-q"],
-            [sys.executable, "scripts/ci/architecture-check.py", "--root", os.fspath(tree)],
-            ["npx", "--yes", f"jscpd@{jscpd_ver}", "--config", ".jscpd.json", "."],
+            [sys.executable, "-B", "scripts/checks/architecture.py", "--repo", os.fspath(tree)],
+            [sys.executable, "-B", "scripts/checks/npx.py", f"jscpd@{jscpd_ver}", "--config", ".jscpd.json", "."],
         )
         if name in {"inbound-only", "outbound-only"}:
             commands += (["cargo", "check", "--tests", "-p", "infra-webhooks", "--locked"],)
         for command in commands:
-            result = subprocess.run(command, cwd=tree, env=jscpd_env, capture_output=True, text=True, check=False)
+            result = subprocess.run(command, cwd=tree, env=run_env, capture_output=True, text=True, check=False)
             if result.returncode:
                 raise initializer.Refusal(
                     f"quality projection {name}: {' '.join(command)} failed ({result.returncode})\n"
@@ -1306,7 +1324,7 @@ def check_quality(source: Path) -> None:
     # subprocesses (48 s one after another in CI); records keep scenario order.
     with tempfile.TemporaryDirectory(prefix="template-quality-projections-") as temporary:
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(scenarios)) as pool:
-            checks = [pool.submit(check, temporary, name, inputs) for name, inputs in scenarios]
+            checks = [pool.submit(run_scenario, temporary, name, inputs) for name, inputs in scenarios]
         for (name, inputs), done in zip(scenarios, checks):
             done.result()
             _emit("quality-selection", scenario=name, candidate=candidate,

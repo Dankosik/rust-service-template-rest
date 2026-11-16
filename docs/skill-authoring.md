@@ -2,7 +2,7 @@
 
 This file owns the shape of repository skills under
 `.agents/skills/<name>/`. Read it before adding or editing a skill.
-`make check-skills` enforces the mechanical part. Two classes share the
+`make check-instructions` enforces the mechanical part. Two classes share the
 directory:
 
 - **Decision skills** (`rust-*`, `merge-conflict-resolution`) follow the
@@ -20,8 +20,8 @@ directory:
 
 ## Files
 
-A decision skill holds `SKILL.md` and `LICENSE` (a copy of the repository
-license). It may also hold focused `references/*.md` when a concrete decision
+A decision skill holds `SKILL.md` (the root `LICENSE` covers the repository).
+It may also hold focused `references/*.md` when a concrete decision
 benefits from an example whose context would obscure the main method. Link each
 reference at the paragraph whose unresolved question selects it; do not load
 the whole reference set by default. Keep general manuals, scripts, and assets
@@ -155,7 +155,7 @@ code whose ongoing correctness depends on that owner.
 
 ## Change And Proof
 
-A skill edit is an instruction change: `make check-skills` proves shape, and
+A skill edit is an instruction change: `make check-instructions` proves shape, and
 a read-through of skills that share a trigger proves they still discriminate.
 Structural validity does not establish better model behaviour; see
 [Prompt Maintenance](prompt-maintenance.md#change-and-proof) for behavioral
@@ -175,7 +175,7 @@ carriers state their binding trigger with `Use when` or `Use only`; user-invoked
 workflow skills write human-facing picker descriptions in at most two sentences
 naming the job, deliverable, and boundary. The body is one H1 and at most 600
 words; it may hold lists and links to `docs/spec-first-workflow/**` and
-`docs/agent-harness*`, which own the method. Besides `SKILL.md` and `LICENSE`, a
+`docs/agent-harness*`, which own the method. Besides `SKILL.md`, a
 workflow skill may hold `references/*.md` (examples the body names) and
 `agents/openai.yaml`, the Codex carrier with `allow_implicit_invocation: false`.
 

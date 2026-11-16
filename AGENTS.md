@@ -145,7 +145,7 @@ Select commands from [`make/template.mk`](make/template.mk):
 
 | Changed surface | Local validation |
 | --- | --- |
-| One crate's behavior or tests | `make build` and `make test-package PKG=<crate>`, or `make test-changed PKGS="<crates>"` using `scripts/ci/affected-crates.sh` |
+| One crate's behavior or tests | `make build` and `make test-package PKG=<crate>`, or `make test-changed PKGS="<crates>"` using `scripts/verify/affected_crates.py` |
 | Several crates, `Cargo.toml`, `Cargo.lock`, or `rust-toolchain.toml` | `make build` and `make test` |
 | Observed database behavior (transaction, lock, commit, migration, or readiness) | `ALLOW_HEAVY=1 make test-integration-db` (plus `make migration-check` / `ALLOW_HEAVY=1 make migration-validate` on migration edits) when PostgreSQL is retained |
 | Formatting or lint configuration | `make fmt-check` and `make lint` |
@@ -162,7 +162,7 @@ during initial resolution or an accepted dependency change, inspect its diff,
 and validate with `--locked`. Reuse adequate coverage, count only executed
 required tests as passes within existing harnesses, serialize CPU-heavy
 validation, keep each Git worktree's `target/` separate, and preserve shared
-caches (`make check` and `make verify` acquire `scripts/ci/validation-lock.sh`).
+caches (`make check` and `make verify` acquire `scripts/verify/lock.py`).
 Remove temporary files and clean task worktrees created for the session only
 after accepted results are preserved and no live process or lock uses them.
 

@@ -33,6 +33,7 @@
 #   pages jemalloc returned (docs/backend-library-selection.md).
 
 ARG SERVICE_PACKAGE=service
+ARG IMAGE_TESTS=none
 
 FROM rust:1.100.0-slim-trixie@sha256:e9d95b74296f7126a83ae3d041aeaba1ff4c478f13abc5cc034fcf7c131c3d4a AS chef
 WORKDIR /src
@@ -109,30 +110,31 @@ RUN cargo chef cook --release --locked --recipe-path recipe.json -p jobs-worker
 # template:end worker:docker-jobs-worker-build
 
 # IMAGE_TESTS=unit runs the workspace's unit tests, which need no database
-# or network beyond loopback, in their own debug build. The runtime stage
-# copies this stage's empty marker, so a failing test fails the image build
-# and a platform keeps its previous deployment. The default skips the work.
-FROM chef AS unit-tests
-ARG IMAGE_TESTS=none
+# or network beyond loopback, in their own debug build. Dynamic stage
+# selection leaves unit-tests-unit-run unreachable when IMAGE_TESTS=none, so
+# default builds evaluate zero unit-test COPY or RUN steps; when IMAGE_TESTS=unit,
+# copying the empty marker makes a failing test fail the image build.
+FROM scratch AS unit-tests-none
+
+FROM chef AS unit-tests-unit-run
 ENV CARGO_INCREMENTAL=0
 COPY --from=planner /src/recipe.json recipe.json
 COPY --from=planner /src/vendor /src/vendor
 # procps supplies the kill(1) the signal tests send to their own process.
-RUN case "${IMAGE_TESTS}" in \
-      none) ;; \
-      unit) apt-get update && apt-get install -y --no-install-recommends procps \
-        && rm -rf /var/lib/apt/lists/* \
-        && cargo chef cook --tests --workspace --locked --recipe-path recipe.json ;; \
-      *) echo "IMAGE_TESTS is none or unit" >&2; exit 1 ;; \
-    esac
+RUN apt-get update && apt-get install -y --no-install-recommends procps \
+ && rm -rf /var/lib/apt/lists/* \
+ && cargo chef cook --tests --workspace --locked --recipe-path recipe.json
 COPY . .
 # BuildKit points OTEL_* and TRACEPARENT at its own trace socket inside RUN,
 # and the tests read the process environment as the service does.
-RUN if [ "${IMAGE_TESTS}" = unit ]; then \
-      for name in $(env | sed -n 's/^\(OTEL_[A-Za-z0-9_]*\)=.*/\1/p') TRACEPARENT; do unset "${name}"; done; \
-      cargo test --workspace --lib --bins --locked --no-fail-fast; \
-    fi \
+RUN for name in $(env | sed -n 's/^\(OTEL_[A-Za-z0-9_]*\)=.*/\1/p') TRACEPARENT; do unset "${name}"; done; \
+    cargo test --workspace --lib --bins --locked --no-fail-fast \
  && mkdir /unit-tests
+
+FROM scratch AS unit-tests-unit
+COPY --from=unit-tests-unit-run /unit-tests/ /
+
+FROM unit-tests-${IMAGE_TESTS} AS unit-tests
 
 FROM cooked AS source
 ARG VCS_REF=unknown
@@ -167,9 +169,9 @@ RUN cargo auditable build --release --locked -p jobs-worker --bin jobs-worker \
 # template:end worker:docker-jobs-worker-output
 
 FROM gcr.io/distroless/cc-debian13:nonroot@sha256:cb87acc574abe719b6e5c547384defa2f7b1f24af9605d3f618cf852495d8be2
-# Empty: the dependency alone makes the unit-test gate part of every build.
-COPY --from=unit-tests /unit-tests/ /
-# The version is the Cargo package version; scripts/ci/runtime-image-build.sh
+# Empty: the dependency alone makes the selected unit-test gate part of the build.
+COPY --from=unit-tests / /
+# The version is the Cargo package version; scripts/image/build.sh
 # passes it from the workspace manifest.
 ARG APP_VERSION=unknown
 ARG VCS_REF=unknown

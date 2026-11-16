@@ -16,8 +16,14 @@ from pathlib import Path
 sys.dont_write_bytecode = True
 
 
+def _clean_env() -> dict[str, str]:
+    env = {k: v for k, v in os.environ.items() if k not in {"PYTHONPATH", "PYTHONHOME"}}
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    return env
+
+
 def run(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(args, cwd=cwd, text=True, capture_output=True, check=False)
+    return subprocess.run(args, cwd=cwd, text=True, capture_output=True, check=False, env=_clean_env())
 
 
 def digest(path: Path) -> str:
@@ -39,7 +45,11 @@ def commit_paths(repo: Path, message: str, *paths: str) -> None:
 
 
 def sync(source: Path, target: Path, mode: str, instructions_only: bool = False, *, runner: Path | None = None) -> subprocess.CompletedProcess[str]:
-    args = ["bash", os.fspath((runner or source) / "scripts/template-sync.sh"), mode, "--from", os.fspath(source), "--repo", os.fspath(target)]
+    args = [
+        sys.executable, "-B", "-E",
+        os.fspath((runner or source) / "scripts/template/sync.py"),
+        mode, "--from", os.fspath(source), "--repo", os.fspath(target),
+    ]
     if instructions_only:
         args.append("--instructions-only")
     return run(args, cwd=source)
@@ -72,7 +82,7 @@ def clone(source: Path, destination: Path) -> None:
 
 
 def assert_profile_pack(source: Path, target: Path, profile_name: str, selected: bool) -> None:
-    profile = json.loads((source / "scripts/lib/template_profiles.json").read_text(encoding="utf-8"))
+    profile = json.loads((source / "scripts/template/profiles.json").read_text(encoding="utf-8"))
     key = "remove_when_none" if profile_name == "postgres" else "remove_when_unselected"
     for relative in profile[profile_name][key]:
         path = target / relative.rstrip("/")
@@ -103,22 +113,34 @@ def assert_profile_output(
     for profile, selected in (("authn", authn != "none"), ("oidc-jwt", authn == "oidc-jwt"), ("oidc-introspection", authn == "oidc-introspection")):
         assert_profile_pack(source, target, profile, selected)
     lock = json.loads((target / "template.lock").read_text(encoding="utf-8"))
-    if lock["profiles"].get("authn") != authn:
+    profiles = lock["profiles"]
+    if profiles.get("authn") != authn:
         raise AssertionError(f"sync canary lock did not record authn={authn}")
-    if lock["profiles"].get("outbound_http") != outbound_http:
+    if profiles.get("outbound_http") != outbound_http:
         raise AssertionError(f"sync canary lock did not record outbound_http={outbound_http}")
-    if lock["profiles"].get("http_idempotency") != http_idempotency:
+    if profiles.get("http_idempotency") != http_idempotency:
         raise AssertionError(f"sync canary lock did not record http_idempotency={http_idempotency}")
-    if lock["profiles"].get("jobs") != jobs:
+    if profiles.get("jobs") != jobs:
         raise AssertionError(f"sync canary lock did not record jobs={jobs}")
-    if lock["profiles"].get("webhooks") != webhooks:
+    if profiles.get("webhooks") != webhooks:
         raise AssertionError(f"sync canary lock did not record webhooks={webhooks}")
-    if lock["profiles"].get("inbound_webhooks") != inbound_webhooks:
+    if profiles.get("inbound_webhooks") != inbound_webhooks:
         raise AssertionError(f"sync canary lock did not record inbound_webhooks={inbound_webhooks}")
     assert_profile_pack(source, target, "outbound-http", outbound_http == "bounded")
     assert_tls_fixture_output(source, target)
     assert_profile_pack(source, target, "cache", cache == "redis")
     assert_profile_pack(source, target, "object-storage", object_storage == "s3")
+    has_compose_integration = (
+        profiles.get("database") == "postgres"
+        or profiles.get("messaging") == "nats-jetstream"
+        or cache == "redis"
+        or object_storage == "s3"
+    )
+    assert_profile_pack(source, target, "integration", has_compose_integration)
+    assert_profile_pack(
+        source, target, "container-integration",
+        has_compose_integration or profiles.get("outbound_auth") == "oauth2-client-credentials",
+    )
     assert_profile_pack(
         source, target, "request-budget",
         outbound_http == "bounded" or http_idempotency == "postgres" or inbound_webhooks == "standard-webhooks",
@@ -151,7 +173,7 @@ def initialize(
     inbound_webhooks: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     command = [
-        "bash", os.fspath(source / "scripts/init-module.sh"), "--repo", os.fspath(target),
+        sys.executable, "-B", "-E", os.fspath(source / "scripts/template/init.py"), "--repo", os.fspath(target),
         "--service-name", "canary-api", "--repository", "https://github.com/example/canary-api",
         "--description", "Canary API", "--codeowner", "@example/platform", "--database", database,
         "--agent-harness", "claude",
@@ -227,9 +249,9 @@ def check(source: Path) -> None:
             raise AssertionError(jobs_none_initialized.stderr)
         assert_profile_output(source, jobs_none, "none", "none", jobs="none")
         commit(jobs_none, "initialize postgres without jobs")
-        jobs_owned = jobs_none / "scripts/template-sync.sh"
+        jobs_owned = jobs_none / "scripts/template/sync.py"
         jobs_owned.write_bytes(jobs_owned.read_bytes() + b"\n# committed full-sync drift\n")
-        commit_paths(jobs_none, "committed full sync drift", "scripts/template-sync.sh")
+        commit_paths(jobs_none, "committed full sync drift", "scripts/template/sync.py")
         jobs_apply = sync(source, jobs_none, "--apply")
         if jobs_apply.returncode:
             raise AssertionError(f"postgres jobs-none full sync apply failed: {jobs_apply.stderr}")
@@ -247,7 +269,10 @@ def check(source: Path) -> None:
         skill = target / ".agents/skills/local-service-skill"
         skill.mkdir(parents=True)
         (skill / ".service-owned").write_text("", encoding="utf-8")
-        (skill / "SKILL.md").write_text("---\nname: local-service-skill\ndescription: local\n---\n", encoding="utf-8")
+        (skill / "SKILL.md").write_text(
+            "---\nname: local-service-skill\ndescription: Use when testing local service-owned skills.\n---\n",
+            encoding="utf-8",
+        )
         settings = target / ".claude/settings.json"
         settings_before = digest(settings)
         service_doc = target / "docs/repo-architecture.md"
@@ -375,6 +400,39 @@ def check(source: Path) -> None:
         nested_refusal = sync(nested_source, target, "--check", runner=source)
         if nested_refusal.returncode != 2 or tree_state(target) != nested_before:
             raise AssertionError("nested source/target refusal did not preserve the target")
+
+        # Retired portable manifest entries are refused when dirty and pruned when clean;
+        # legacy scripts/ci/service-* hooks refuse full sync before mutating the target.
+        retired_target = work / "retired-manifest"
+        clone(target, retired_target)
+        retired_script = retired_target / "scripts/ci/legacy-portable.sh"
+        retired_script.parent.mkdir(parents=True, exist_ok=True)
+        retired_script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        manifest_file = retired_target / "template-owned.paths"
+        manifest_file.write_text(
+            manifest_file.read_text(encoding="utf-8") + "scripts/ci/legacy-portable.sh\n",
+            encoding="utf-8",
+        )
+        commit_paths(retired_target, "record legacy portable script", "scripts/ci/legacy-portable.sh", "template-owned.paths")
+
+        legacy_hook = retired_target / "scripts/ci/service-changed-surfaces.sh"
+        legacy_hook.write_text("service_changed_surfaces() { :; }\n", encoding="utf-8")
+        commit_paths(retired_target, "add legacy hook", "scripts/ci/service-changed-surfaces.sh")
+        hook_refusal = sync(source, retired_target, "--apply")
+        if hook_refusal.returncode != 2 or "legacy service hook" not in hook_refusal.stderr:
+            raise AssertionError(f"legacy service hook did not refuse full sync: {hook_refusal.stderr}")
+        run(["git", "rm", "-qf", "scripts/ci/service-changed-surfaces.sh"], cwd=retired_target)
+        commit(retired_target, "remove legacy hook")
+
+        retired_script.write_text("#!/bin/sh\necho dirty\n", encoding="utf-8")
+        dirty_retired = sync(source, retired_target, "--apply")
+        if dirty_retired.returncode != 2 or "dirty selected target path: scripts/ci/legacy-portable.sh" not in dirty_retired.stderr:
+            raise AssertionError(f"dirty retired portable file did not refuse sync: {dirty_retired.stderr}")
+        run(["git", "checkout", "--", "scripts/ci/legacy-portable.sh"], cwd=retired_target)
+
+        retired_apply = sync(source, retired_target, "--apply")
+        if retired_apply.returncode != 0 or retired_script.exists() or (retired_target / "scripts/ci").exists():
+            raise AssertionError(f"clean retired portable file/dir was not pruned on sync: {retired_apply.stderr}")
     print("template sync canary: pass")
 
 

@@ -6,9 +6,10 @@ service and `jobs-worker` already emit. Pages fire on symptoms a client sees,
 an error or latency budget burning or the service gone; tickets cover lost
 capacity, crash loops, a starved runtime and work that stopped draining. Each alert carries a
 `severity` (`page` or `ticket`) and a `runbook_url` to its section below.
-[`scripts/tests/service-rules.yml`](../scripts/tests/service-rules.yml) proves
+[`env/monitoring/tests/service-rules.yml`](../env/monitoring/tests/service-rules.yml) proves
 every alert fires on its fault and stays silent otherwise; `make
-monitoring-rules` runs it with the pinned `promtool`. Rules for a profile ship
+monitoring-rules` (`scripts/checks/monitoring_rules.sh`) runs it with the
+pinned `promtool`. Rules for a profile ship
 only with that profile.
 
 ## Install

@@ -17,7 +17,7 @@ default = ["grpc"]
 grpc = ["dep:infra-grpc", "dep:tonic", "dep:tower"]
 # template:end outbound-auth-grpc:oauth-grpc-feature
 # The Keycloak suite runs only through the explicit integration owner
-# (scripts/ci/test-integration-oauth.sh).
+# (scripts/profiles/integration.sh oauth).
 integration = []
 
 [dependencies]
