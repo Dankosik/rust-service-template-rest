@@ -4,8 +4,6 @@ use url::Url;
 
 use crate::ConfigurationError;
 
-// Keep this range and its admission error in sync with the capacity range in
-// crates/config/src/integrations.rs.
 const EXCHANGE_CACHE_CAPACITY_RANGE: std::ops::RangeInclusive<u32> = 1..=65_536;
 
 /// The client-assertion signing algorithm. One algorithm per key (RFC 8725bis

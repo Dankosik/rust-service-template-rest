@@ -451,7 +451,7 @@ def assert_profile_packs(
     assert_profile_pack(
         source, target, "outbound-auth-grpc", grpc == "enabled" and outbound_auth == "oauth2-client-credentials"
     )
-    assert_profile_pack(source, target, "config-url", messaging == "nats-jetstream" or outbound_auth == "oauth2-client-credentials")
+    assert_profile_pack(source, target, "config-url", messaging == "nats-jetstream")
     assert_profile_pack(
         source, target, "jsonwebtoken",
         authn == "oidc-jwt" or outbound_auth == "oauth2-client-credentials" or service_auth == "jwt",

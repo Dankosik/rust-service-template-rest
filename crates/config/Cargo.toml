@@ -28,9 +28,6 @@ url = { workspace = true, features = ["std"] }
 # template:end config-url:config-url-dependency
 shared-rules = { workspace = true }
 
-[build-dependencies]
-vergen-gitcl = { workspace = true }
-
 [dev-dependencies]
 rstest = { workspace = true }
 tempfile = { workspace = true, features = ["getrandom"] }

@@ -17,7 +17,7 @@ use serde::{Deserialize, Deserializer};
 use crate::de::{blank_secret_as_none, deserialize_scalar};
 // template:end oidc-introspection:authn-occupied-secret-import
 use crate::de::value_free;
-use crate::validate::{ValidationError, Violations, required_when};
+use crate::validate::{Rejected, Violations, required_when};
 
 pub(crate) const AUDIENCE_INPUT_FORM: &str =
     "`authn.audience` must be a string or a list of strings";
@@ -56,13 +56,15 @@ impl<'de> Deserialize<'de> for Audiences {
             Input::One(value) => vec![value],
             Input::Many(values) => values,
         };
-        Self::try_new(values)
+        Self::try_from(values)
             .map_err(|message| value_free(format_args!("`authn.audience` {message}")))
     }
 }
 
-impl Audiences {
-    fn try_new(values: Vec<String>) -> Result<Self, &'static str> {
+impl TryFrom<Vec<String>> for Audiences {
+    type Error = &'static str;
+
+    fn try_from(values: Vec<String>) -> Result<Self, Self::Error> {
         if values.is_empty() {
             return Err("must be a nonempty string or list of nonblank exact values");
         }
@@ -108,7 +110,7 @@ pub enum JwtAlgorithm {
 
 #[derive(Clone, Deserialize)]
 #[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
-pub enum AuthnConfig {
+pub(crate) enum AuthnInput {
     /// No provider is configured. This is the omitted-section default.
     None {},
     // template:begin oidc-jwt:authn-config-jwt-variant
@@ -164,17 +166,54 @@ pub enum AuthnConfig {
     // template:end oidc-introspection:authn-config-introspection-variant
 }
 
+impl std::fmt::Debug for AuthnInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AuthnInput { .. }")
+    }
+}
+
+impl Default for AuthnInput {
+    fn default() -> Self {
+        Self::None {}
+    }
+}
+
+/// The admitted inbound authentication profile.
+#[derive(Clone, Default)]
+pub enum AuthnConfig {
+    #[default]
+    None,
+    // template:begin oidc-jwt:authn-admitted-jwt-variant
+    OidcJwt {
+        issuer: String,
+        audience: Audiences,
+        token_profile: TokenProfile,
+        /// Nonempty.
+        algorithms: Vec<JwtAlgorithm>,
+        /// `None` uses OIDC discovery, then RFC 8414 metadata.
+        jwks_uri: Option<String>,
+    },
+    // template:end oidc-jwt:authn-admitted-jwt-variant
+    // template:begin oidc-introspection:authn-admitted-introspection-variant
+    OidcIntrospection {
+        issuer: String,
+        audience: Audiences,
+        introspection_endpoint: String,
+        introspection_client_id: String,
+        introspection_client_secret: SecretString,
+        provider_concurrency: NonZeroU32,
+        cache_enabled: bool,
+        cache_capacity: usize,
+        cache_ttl: Duration,
+    },
+    // template:end oidc-introspection:authn-admitted-introspection-variant
+}
+
 impl std::fmt::Debug for AuthnConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AuthnConfig")
             .field("mode", &self.mode())
             .finish_non_exhaustive()
-    }
-}
-
-impl Default for AuthnConfig {
-    fn default() -> Self {
-        Self::None {}
     }
 }
 
@@ -262,7 +301,7 @@ impl AuthnConfig {
     #[must_use]
     pub const fn mode(&self) -> &'static str {
         match self {
-            Self::None {} => "none",
+            Self::None => "none",
             // template:begin oidc-jwt:authn-config-jwt-mode
             Self::OidcJwt { .. } => "oidc-jwt",
             // template:end oidc-jwt:authn-config-jwt-mode
@@ -271,93 +310,114 @@ impl AuthnConfig {
             // template:end oidc-introspection:authn-config-introspection-mode
         }
     }
+}
 
-    // template:begin oidc-introspection:authn-required-introspection-secret
-    pub fn require_introspection_client_secret(
-        secret: Option<&SecretString>,
-    ) -> Result<&SecretString, ValidationError> {
-        crate::validate::required(
-            "authn.introspection_client_secret",
-            secret,
-            "authn.mode = oidc-introspection",
-        )
-    }
-    // template:end oidc-introspection:authn-required-introspection-secret
-
-    pub(crate) fn validate(&self, v: &mut Violations) {
+impl AuthnInput {
+    pub(crate) fn admit(self, v: &mut Violations) -> Result<AuthnConfig, Rejected> {
         match self {
             // template:begin oidc-jwt:authn-config-jwt-validation
             Self::OidcJwt {
                 issuer,
+                audience,
+                token_profile,
                 algorithms,
                 jwks_uri,
-                ..
             } => {
-                v.check(required_when(
+                let named = v.take(required_when(
                     "authn.issuer",
-                    issuer,
+                    &issuer,
                     "authn.mode = oidc-jwt",
                 ));
-                if jwks_uri.as_deref().is_some_and(|uri| uri.trim().is_empty()) {
-                    v.check(Err(ValidationError::new(
+                let located = if jwks_uri.as_deref().is_some_and(|uri| uri.trim().is_empty()) {
+                    Err(v.reject(crate::validate::ValidationError::new(
                         "authn.jwks_uri",
                         "must not be blank when set",
-                    )));
-                }
-                if algorithms.is_empty() {
-                    v.check(Err(ValidationError::new(
+                    )))
+                } else {
+                    Ok(())
+                };
+                let signed = if algorithms.is_empty() {
+                    Err(v.reject(crate::validate::ValidationError::new(
                         "authn.algorithms",
                         "must contain at least one supported algorithm",
-                    )));
-                }
+                    )))
+                } else {
+                    Ok(())
+                };
+                named?;
+                located?;
+                signed?;
+                Ok(AuthnConfig::OidcJwt {
+                    issuer,
+                    audience,
+                    token_profile,
+                    algorithms,
+                    jwks_uri,
+                })
             }
             // template:end oidc-jwt:authn-config-jwt-validation
             // template:begin oidc-introspection:authn-config-introspection-validation
             Self::OidcIntrospection {
                 issuer,
+                audience,
                 introspection_endpoint,
                 introspection_client_id,
                 introspection_client_secret,
+                provider_concurrency,
+                cache_enabled,
                 cache_capacity,
                 cache_ttl,
-                ..
             } => {
                 use shared_rules::oidc_introspection::{CACHE_CAPACITY, CACHE_TTL};
 
-                v.check(required_when(
-                    "authn.issuer",
-                    issuer,
-                    "authn.mode = oidc-introspection",
-                ));
-                v.check(required_when(
+                let condition = "authn.mode = oidc-introspection";
+                let named = v.take(required_when("authn.issuer", &issuer, condition));
+                let located = v.take(required_when(
                     "authn.introspection_endpoint",
-                    introspection_endpoint,
-                    "authn.mode = oidc-introspection",
+                    &introspection_endpoint,
+                    condition,
                 ));
-                v.check(required_when(
+                let identified = v.take(required_when(
                     "authn.introspection_client_id",
-                    introspection_client_id,
-                    "authn.mode = oidc-introspection",
+                    &introspection_client_id,
+                    condition,
                 ));
-                v.check(
-                    Self::require_introspection_client_secret(introspection_client_secret.as_ref())
-                        .map(|_| ()),
-                );
-                v.check(crate::validate::int_range(
+                let secret = v.take(crate::validate::required(
+                    "authn.introspection_client_secret",
+                    introspection_client_secret,
+                    condition,
+                ));
+                let capacity = v.take(crate::validate::int_range(
                     "authn.cache_capacity",
-                    *cache_capacity as u64,
+                    cache_capacity as u64,
                     *CACHE_CAPACITY.start() as u64,
                     *CACHE_CAPACITY.end() as u64,
                 ));
-                v.check(crate::validate::duration_range(
+                let retention = v.take(crate::validate::duration_range(
                     "authn.cache_ttl",
-                    *cache_ttl,
+                    cache_ttl,
                     *CACHE_TTL.start(),
                     *CACHE_TTL.end(),
                 ));
+                named?;
+                located?;
+                identified?;
+                capacity?;
+                retention?;
+                Ok(AuthnConfig::OidcIntrospection {
+                    issuer,
+                    audience,
+                    introspection_endpoint,
+                    introspection_client_id,
+                    introspection_client_secret: secret?,
+                    provider_concurrency,
+                    cache_enabled,
+                    cache_capacity,
+                    cache_ttl,
+                })
             }
             // template:end oidc-introspection:authn-config-introspection-validation
-            Self::None {} => {}
+            Self::None {} => Ok(AuthnConfig::None),
         }
     }
 }

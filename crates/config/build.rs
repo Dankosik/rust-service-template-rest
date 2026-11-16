@@ -1,29 +1,54 @@
-//! Stamp the git revision into this crate as `VERGEN_GIT_SHA`.
+//! Stamp the full git revision into this crate as `VERGEN_GIT_SHA`.
 //!
 //! Binaries read it through [`service_config::BuildInfo::from_package_version`].
-//! The image build has no `.git`; it sets `VERGEN_GIT_SHA` from its `VCS_REF`
-//! argument and vergen emits that value verbatim. Without either, vergen
-//! stamps its `VERGEN_IDEMPOTENT_OUTPUT` placeholder, which telemetry would
-//! publish as if it were a revision, so this script restamps it `unknown`.
+//! The image build has no `.git`; it passes the revision in `VERGEN_GIT_SHA`,
+//! which wins when nonblank. The name predates this script and stays, because
+//! the Dockerfile, CI and derived services' pipelines set it. Without either
+//! source the stamp is `unknown`, never a placeholder that telemetry would
+//! publish as if it were a revision.
 
-const VERGEN_PLACEHOLDER: &str = "VERGEN_IDEMPOTENT_OUTPUT";
+use std::process::Command;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // `sha(false)` means the full SHA, not "disable SHA". Short SHA is the
-    // other polarity. Empty git still falls back via `default_on_error`.
-    let gitcl = vergen_gitcl::Gitcl::builder().sha(false).build();
-    let mut emitter = vergen_gitcl::Emitter::default();
-    emitter
-        .default_on_error()
-        .add_instructions(&gitcl)?
-        .emit()?;
-    let placeholder_sha = emitter
-        .cargo_rustc_env_map()
-        .iter()
-        .any(|(key, value)| key.name() == "VERGEN_GIT_SHA" && value == VERGEN_PLACEHOLDER);
-    if placeholder_sha {
-        // Cargo applies `rustc-env` instructions in order, so this one wins.
-        println!("cargo:rustc-env=VERGEN_GIT_SHA=unknown");
+const STAMP: &str = "VERGEN_GIT_SHA";
+
+fn main() {
+    println!("cargo:rerun-if-env-changed={STAMP}");
+    let revision = std::env::var(STAMP)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .or_else(checked_out_revision)
+        .unwrap_or_else(|| "unknown".to_owned());
+    println!("cargo:rustc-env={STAMP}={revision}");
+}
+
+/// `HEAD`'s full SHA, rebuilding when `HEAD` moves to another branch or its
+/// branch gains a commit. `--git-path` resolves both inside a linked worktree.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a build script runs before any async runtime exists"
+)]
+fn checked_out_revision() -> Option<String> {
+    let revision = git(&["rev-parse", "HEAD"])?;
+    let mut watched = vec!["HEAD".to_owned(), "packed-refs".to_owned()];
+    watched.extend(git(&["symbolic-ref", "-q", "HEAD"]));
+    for name in watched {
+        // Cargo reruns on every build for a path that does not exist.
+        if let Some(path) = git(&["rev-parse", "--git-path", &name])
+            && std::path::Path::new(&path).exists()
+        {
+            println!("cargo:rerun-if-changed={path}");
+        }
     }
-    Ok(())
+    Some(revision)
+}
+
+fn git(args: &[&str]) -> Option<String> {
+    let output = Command::new("git").args(args).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_owned())
 }

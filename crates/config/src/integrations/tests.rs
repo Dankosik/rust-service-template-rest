@@ -138,7 +138,7 @@ fn oauth_without_an_algorithm_fails_naming_the_key() {
 }
 
 #[test]
-fn oauth_exchange_cache_capacity_has_a_default_an_environment_form_and_a_range() {
+fn oauth_exchange_cache_capacity_has_a_default_and_an_environment_form() {
     let load = |capacity: Option<&'static str>| {
         let mut variables = vec![
             (
@@ -214,10 +214,6 @@ fn oauth_exchange_cache_capacity_has_a_default_an_environment_form_and_a_range()
     .unwrap();
     assert_eq!(capacity(from_file), 2048);
 
-    for rejected in ["0", "65537"] {
-        let err = load(Some(rejected)).unwrap_err();
-        assert_matches!(&err, Error::Validate(error) if error.iter().any(|e| e.key == "integrations.billing.oauth.exchange_cache_capacity" && e.message == format!("must be between 1 and 65536, got {rejected}")), "{err}");
-    }
     for input in ["many", "yes"] {
         let err = load(Some(input)).unwrap_err();
         assert_matches!(&err, Error::Deserialize(_), "{err}");
@@ -443,7 +439,7 @@ fn oauth_private_key_in_a_file_is_refused() {
 }
 
 #[test]
-fn oauth_invalid_values_fail_with_static_diagnostics() {
+fn oauth_violations_do_not_echo_configured_values() {
     let dir = tempfile::tempdir().unwrap();
     let invalid = write(
         &dir,
@@ -463,14 +459,10 @@ fn oauth_invalid_values_fail_with_static_diagnostics() {
                 "test-private-key",
             ),
             ("APP__INTEGRATIONS__BILLING__OAUTH__KEY_ID", "key-1"),
-            (
-                "APP__INTEGRATIONS__BILLING__OAUTH__ASSERTION_AUDIENCE",
-                "https://identity.example",
-            ),
         ]),
     )
     .unwrap_err();
-    assert_matches!(&err, Error::Validate(error) if error.iter().any(|e| e.key == "integrations.billing.oauth.token_url" && e.message == "must use HTTPS"), "{err}");
+    assert_matches!(&err, Error::Validate(error) if error.iter().any(|e| e.key == "integrations.billing.oauth.assertion_audience" && e.message == "cannot be empty"), "{err}");
     let rendered = err.to_string();
     for value in [
         "identity.example/token",
@@ -551,16 +543,16 @@ fn oauth_invalid_types_have_static_key_diagnostics() {
 }
 
 #[test]
-fn oauth_scope_presence_and_client_id_validation_stays_private() {
+fn oauth_token_url_and_scope_grammar_is_left_to_the_adapter() {
     let dir = tempfile::tempdir().unwrap();
-    let invalid_scope = write(
+    let file = write(
         &dir,
-        "invalid-scope.toml",
-        "[integrations.billing.oauth]\ntoken_url = \"https://identity.example/token\"\nclient_id = \"billing-service\"\nscopes = [\"bad scope\"]\n",
+        "grammar.toml",
+        "[integrations.billing.oauth]\ntoken_url = \"http://identity.example/token\"\nclient_id = \"billing-service\"\nscopes = [\"bad scope\"]\nexchange_cache_capacity = 0\n",
     );
-    let err = load_from(
+    let config = load_from(
         &LoadOptions {
-            config: Some(invalid_scope),
+            config: Some(file),
             ..LoadOptions::default()
         },
         BUILD,
@@ -577,10 +569,15 @@ fn oauth_scope_presence_and_client_id_validation_stays_private() {
             ),
         ]),
     )
-    .unwrap_err();
-    assert_matches!(&err, Error::Validate(error) if error.iter().any(|e| e.key == "integrations.billing.oauth.scopes" && e.message == "must contain RFC 6749 scope tokens"), "{err}");
-    assert!(!err.to_string().contains("bad scope"), "{err}");
+    .unwrap();
+    let oauth = config.integrations["billing"].oauth.as_ref().unwrap();
+    assert_eq!(oauth.token_url, "http://identity.example/token");
+    assert_eq!(oauth.scopes.as_slice(), ["bad scope"]);
+    assert_eq!(oauth.exchange_cache_capacity, 0);
+}
 
+#[test]
+fn oauth_client_id_and_token_url_are_required() {
     let err = load_from(
         &LoadOptions::default(),
         BUILD,
@@ -594,6 +591,20 @@ fn oauth_scope_presence_and_client_id_validation_stays_private() {
     )
     .unwrap_err();
     assert_matches!(&err, Error::Validate(error) if error.iter().any(|e| e.key == "integrations.billing.oauth.client_id" && e.message == "cannot be empty"), "{err}");
+
+    let err = load_from(
+        &LoadOptions::default(),
+        BUILD,
+        env(&[
+            ("APP__INTEGRATIONS__BILLING__OAUTH__ALGORITHM", "RS256"),
+            (
+                "APP__INTEGRATIONS__BILLING__OAUTH__CLIENT_ID",
+                "billing-service",
+            ),
+        ]),
+    )
+    .unwrap_err();
+    assert_matches!(&err, Error::Validate(error) if error.iter().any(|e| e.key == "integrations.billing.oauth.token_url" && e.message == "cannot be empty"), "{err}");
 }
 
 #[test]
@@ -691,34 +702,4 @@ fn oauth_whitespace_audience_is_refused() {
     )
     .unwrap_err();
     assert_matches!(&err, Error::Validate(error) if error.names("integrations.billing.oauth.audience"), "{err}");
-}
-
-#[test]
-fn oauth_userinfo_validation_stays_private() {
-    let err = load_from(
-        &LoadOptions::default(),
-        BUILD,
-        env(&[
-            ("APP__INTEGRATIONS__BILLING__OAUTH__ALGORITHM", "RS256"),
-            (
-                "APP__INTEGRATIONS__BILLING__OAUTH__TOKEN_URL",
-                "https://@identity.example/token",
-            ),
-            (
-                "APP__INTEGRATIONS__BILLING__OAUTH__CLIENT_ID",
-                "billing-service",
-            ),
-            (
-                "APP__INTEGRATIONS__BILLING__OAUTH__PRIVATE_KEY",
-                "test-private-key",
-            ),
-            ("APP__INTEGRATIONS__BILLING__OAUTH__KEY_ID", "key-1"),
-            (
-                "APP__INTEGRATIONS__BILLING__OAUTH__ASSERTION_AUDIENCE",
-                "https://identity.example",
-            ),
-        ]),
-    )
-    .unwrap_err();
-    assert_matches!(&err, Error::Validate(error) if error.iter().any(|e| e.key == "integrations.billing.oauth.token_url" && e.message == "must not include userinfo"), "{err}");
 }

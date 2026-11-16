@@ -81,21 +81,36 @@ pub(crate) struct MessagingInput {
 
 impl Default for MessagingInput {
     fn default() -> Self {
+        let MessagingConfig {
+            urls,
+            credentials: _,
+            root_ca_path,
+            allow_plaintext,
+            tls_first,
+            trusted_network,
+            allow_unauthenticated,
+            source_stream,
+            max_payload_bytes,
+            consumer_durable,
+            consumer_filter_subject,
+            dlq_subject,
+            consumer_concurrency,
+        } = MessagingConfig::default();
         Self {
-            urls: Vec::new(),
+            urls,
             credentials: None,
             credentials_file: None,
-            root_ca_path: None,
-            allow_plaintext: false,
-            tls_first: false,
-            trusted_network: false,
-            allow_unauthenticated: false,
-            source_stream: None,
-            max_payload_bytes: DEFAULT_MAX_PAYLOAD,
-            consumer_durable: None,
-            consumer_filter_subject: None,
-            dlq_subject: None,
-            consumer_concurrency: NonZeroU32::MIN,
+            root_ca_path,
+            allow_plaintext,
+            tls_first,
+            trusted_network,
+            allow_unauthenticated,
+            source_stream,
+            max_payload_bytes,
+            consumer_durable,
+            consumer_filter_subject,
+            dlq_subject,
+            consumer_concurrency,
         }
     }
 }

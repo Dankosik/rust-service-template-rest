@@ -169,7 +169,7 @@ pub(crate) struct ConfigInput {
     integrations: std::collections::BTreeMap<String, IntegrationConfig>,
     // template:end client-integrations:config-input-field
     // template:begin authn:config-input-field
-    authn: AuthnConfig,
+    authn: authn::AuthnInput,
     // template:end authn:config-input-field
     // template:begin service-auth:config-service-auth-input-field
     service_auth: service_auth::ServiceAuthInput,
@@ -223,9 +223,9 @@ impl ConfigInput {
         // template:begin client-integrations:config-validate
         integrations::validate_integrations(&self.integrations, v);
         // template:end client-integrations:config-validate
-        // template:begin authn:config-validate
-        self.authn.validate(v);
-        // template:end authn:config-validate
+        // template:begin authn:config-admit
+        let authn = self.authn.admit(v);
+        // template:end authn:config-admit
         // template:begin service-auth:config-service-auth-admit
         // Only an enabled listener is admitted or rejected; a disabled one is `Ok(None)`.
         let grpc_enabled = !matches!(grpc, Ok(None));
@@ -274,7 +274,7 @@ impl ConfigInput {
                 integrations: self.integrations,
                 // template:end client-integrations:config-admitted-field
                 // template:begin authn:config-admitted-field
-                authn: self.authn,
+                authn: authn?,
                 // template:end authn:config-admitted-field
                 // template:begin service-auth:config-service-auth-admitted-field
                 service_auth: service_auth?,
