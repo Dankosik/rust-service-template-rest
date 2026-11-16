@@ -56,13 +56,15 @@ impl<'de> Deserialize<'de> for Audiences {
             Input::One(value) => vec![value],
             Input::Many(values) => values,
         };
-        Self::try_new(values)
+        Self::try_from(values)
             .map_err(|message| value_free(format_args!("`authn.audience` {message}")))
     }
 }
 
-impl Audiences {
-    fn try_new(values: Vec<String>) -> Result<Self, &'static str> {
+impl TryFrom<Vec<String>> for Audiences {
+    type Error = &'static str;
+
+    fn try_from(values: Vec<String>) -> Result<Self, Self::Error> {
         if values.is_empty() {
             return Err("must be a nonempty string or list of nonblank exact values");
         }

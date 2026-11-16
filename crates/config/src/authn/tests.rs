@@ -238,10 +238,7 @@ fn jwt_accepts_an_optional_nonblank_jwks_uri() {
         };
         jwks_uri
     };
-    assert_eq!(
-        jwks_uri(admit_with(|v| source("").admit(v)).unwrap()),
-        None
-    );
+    assert_eq!(jwks_uri(admit_with(|v| source("").admit(v)).unwrap()), None);
     let explicit = source("jwks_uri = \"https://issuer.example/keys\"\n");
     let explicit = admit_with(|v| explicit.admit(v)).unwrap();
     assert_eq!(
@@ -443,10 +440,7 @@ fn introspection_environment_decodes_and_redacts_the_secret() {
         assert_eq!(provider_concurrency.get(), 7);
         assert_eq!(audience.as_slice(), ["00123"]);
         assert_eq!(introspection_client_id, "false");
-        assert_eq!(
-            introspection_client_secret.expose_secret(),
-            "000042"
-        );
+        assert_eq!(introspection_client_secret.expose_secret(), "000042");
         assert!(!format!("{cfg:?}").contains("000042"));
     }
 }

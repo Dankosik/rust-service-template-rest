@@ -24,6 +24,10 @@ fn main() {
 
 /// `HEAD`'s full SHA, rebuilding when `HEAD` moves to another branch or its
 /// branch gains a commit. `--git-path` resolves both inside a linked worktree.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a build script runs before any async runtime exists"
+)]
 fn checked_out_revision() -> Option<String> {
     let revision = git(&["rev-parse", "HEAD"])?;
     let mut watched = vec!["HEAD".to_owned(), "packed-refs".to_owned()];

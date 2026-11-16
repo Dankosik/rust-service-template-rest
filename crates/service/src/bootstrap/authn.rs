@@ -168,20 +168,21 @@ mod tests {
 
     #[tokio::test]
     async fn introspection_preparation_validates_cache_options_even_when_disabled() {
-        for (capacity, ttl) in [(0, "30s"), (1025, "30s"), (256, "0s"), (256, "301s")] {
+        for (capacity, ttl) in [(0, 30), (1025, 30), (256, 0), (256, 301)] {
             let config = Config {
-                authn: serde_json::from_value(serde_json::json!({
-                "mode": "oidc-introspection",
-                "issuer": "https://issuer.example.test",
-                "audience": "api",
-                "introspection_endpoint": "https://issuer.example.test/introspect?tenant=private",
-                "introspection_client_id": "service",
-                "introspection_client_secret": "fixture-secret",
-                "cache_enabled": false,
-                "cache_capacity": capacity,
-                "cache_ttl": ttl,
-            }))
-                .expect("raw typed configuration"),
+                authn: AuthnConfig::OidcIntrospection {
+                    issuer: "https://issuer.example.test".to_owned(),
+                    audience: service_config::Audiences::try_from(vec!["api".to_owned()])
+                        .expect("nonempty audience"),
+                    introspection_endpoint: "https://issuer.example.test/introspect?tenant=private"
+                        .to_owned(),
+                    introspection_client_id: "service".to_owned(),
+                    introspection_client_secret: "fixture-secret".into(),
+                    provider_concurrency: std::num::NonZeroU32::MIN,
+                    cache_enabled: false,
+                    cache_capacity: capacity,
+                    cache_ttl: std::time::Duration::from_secs(ttl),
+                },
                 ..Config::default()
             };
             let mut background = Background::new(CancellationToken::new());
