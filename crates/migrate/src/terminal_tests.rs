@@ -215,7 +215,8 @@ fn runtime_and_stalled_stdout_share_the_one_second_terminal_allowance() {
 #[test]
 #[expect(
     clippy::disallowed_methods,
-    reason = "isolated terminal child owns its control stdin and captured stdout until the parent finishes the fixture"
+    clippy::exit,
+    reason = "isolated terminal child owns its control stdin, captured stdout, and raw exit code until the parent finishes the fixture"
 )]
 fn terminal_fixture() {
     let Ok(scenario) = std::env::var(FIXTURE) else {

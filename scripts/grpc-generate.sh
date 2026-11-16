@@ -15,7 +15,7 @@ trap 'rm -rf -- "${staging}"' EXIT
 "${buf[@]}" build "${root_dir}/api/proto" \
   --as-file-descriptor-set \
   --output "${staging}/descriptors.binpb"
-cargo run --locked --manifest-path "${root_dir}/tools/grpc-codegen/Cargo.toml" -- \
+CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${root_dir}/target/grpc-codegen}" cargo run --locked --manifest-path "${root_dir}/tools/grpc-codegen/Cargo.toml" -- \
   "${staging}/descriptors.binpb" "${staging}/rust"
 cp -- "${staging}/descriptors.binpb" "${staging}/rust/file_descriptor_set.binpb"
 

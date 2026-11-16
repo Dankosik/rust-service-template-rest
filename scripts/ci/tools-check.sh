@@ -128,6 +128,55 @@ for owner, pattern in (
             print(f"{owner} npx cooldown days is {matches!r}, expected ['7']", file=sys.stderr)
             sys.exit(1)
 
+if Path(".railway/package.json").is_file():
+    railway_npmrc = Path(".railway/.npmrc")
+    if not railway_npmrc.is_file():
+        print("missing .railway/.npmrc alongside .railway/package.json", file=sys.stderr)
+        sys.exit(1)
+    npmrc_kv: dict[str, list[str]] = {}
+    for raw_line in railway_npmrc.read_text(encoding="utf-8").splitlines():
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith(("#", ";")):
+            continue
+        if "=" not in stripped:
+            print(f".railway/.npmrc has non-assignment line: {stripped!r}", file=sys.stderr)
+            sys.exit(1)
+        key, value = (part.strip() for part in stripped.split("=", 1))
+        npmrc_kv.setdefault(key, []).append(value)
+    if npmrc_kv.get("ignore-scripts") != ["true"]:
+        print(
+            f".railway/.npmrc ignore-scripts is {npmrc_kv.get('ignore-scripts')!r}, expected ['true']",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if npmrc_kv.get("min-release-age") != ["7"]:
+        print(
+            f".railway/.npmrc min-release-age is {npmrc_kv.get('min-release-age')!r}, expected ['7']",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+codegen_manifest = Path("tools/grpc-codegen/Cargo.toml")
+root_manifest = Path("Cargo.toml")
+if codegen_manifest.is_file() and root_manifest.is_file():
+    ws_deps = tomllib.loads(root_manifest.read_text(encoding="utf-8")).get("workspace", {}).get("dependencies", {})
+    gen_deps = tomllib.loads(codegen_manifest.read_text(encoding="utf-8")).get("dependencies", {})
+    for gen_name, ws_name in (
+        ("prost", "prost"),
+        ("prost-types", "prost-types"),
+        ("tonic-prost-build", "tonic-prost"),
+    ):
+        gen_entry = gen_deps.get(gen_name)
+        ws_entry = ws_deps.get(ws_name)
+        gen_ver = gen_entry.get("version") if isinstance(gen_entry, dict) else gen_entry
+        ws_ver = ws_entry.get("version") if isinstance(ws_entry, dict) else ws_entry
+        if ws_ver is not None and gen_ver != ws_ver:
+            print(
+                f"tools/grpc-codegen/Cargo.toml pins {gen_name} to {gen_ver!r}, Cargo.toml pins {ws_name} to {ws_ver!r}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
 dependabot = Path(".github/dependabot.yml")
 if dependabot.is_file():
     ecosystems = 0
@@ -173,6 +222,6 @@ PY
 ); then
 	fail "${cooldown_err}"
 fi
-echo "tools-check: 7-day publish-age cooldown agrees across Cargo, npx, dependency-drift, and Dependabot"
+echo "tools-check: 7-day publish-age cooldown and generator pins agree across Cargo, npm, dependency-drift, and Dependabot"
 
 echo "tools-check: ${manifest} passed (${#names[@]} pins)"

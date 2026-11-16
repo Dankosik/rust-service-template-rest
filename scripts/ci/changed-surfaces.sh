@@ -282,7 +282,7 @@ classify() {
 		esac
 		# The Dockerfile carries tool pins too (ARG defaults, FROM digests).
 		case "${file}" in
-		tools/versions.env | scripts/ci/tools-check.sh | build/docker/Dockerfile) mark tool_manifest ;;
+		tools/versions.env | scripts/ci/tools-check.sh | build/docker/Dockerfile | .railway/package.json | .railway/package-lock.json | .railway/.npmrc) mark tool_manifest ;;
 		esac
 		# Only the image build compiles the root manifest's release profile
 		# (tests use the dev profile), and its workspace dependency table is
@@ -718,6 +718,14 @@ HOOK
 	assert_case scripts/ci/tools-check.sh \
 		"tool_manifest shell" \
 		"validation_system"
+	for file in .railway/package.json .railway/package-lock.json .railway/.npmrc; do
+		assert_case "${file}" \
+			"tool_manifest documentation module_initializer" \
+			"cargo_dependencies rust_source initializer_runtime"
+	done
+	assert_case .railway/railway.ts \
+		"documentation module_initializer" \
+		"tool_manifest cargo_dependencies rust_source initializer_runtime"
 	assert_case build/docker/Dockerfile \
 		"runtime_image tool_manifest module_initializer documentation" \
 		"rust_source cargo_dependencies shell validation_system initializer_runtime"

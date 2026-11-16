@@ -415,6 +415,10 @@ fn blocked_stdout_preserves_primary_startup_failure() {
 
 #[test]
 #[ignore = "child-only fixture invoked by blocked_stdout_preserves_primary_startup_failure"]
+#[expect(
+    clippy::exit,
+    reason = "child-only fixture bypasses libtest stdout reporting on a deliberately full pipe"
+)]
 fn blocked_stdout_worker_child() {
     assert!(std::env::var_os("TELEMETRY_BLOCKED_WORKER_CHILD").is_some());
     let result = jobs_worker::run([std::ffi::OsString::from("jobs-worker")], |_| {

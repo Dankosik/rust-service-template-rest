@@ -255,6 +255,14 @@ EOF
 	grep -q '^  make build$' <<<"${output}"
 	grep -q '^  make lint$' <<<"${output}"
 	grep -q '^  make test$' <<<"${output}"
+	# template:begin grpc:verify-grpc-generator-deny-test
+	mkdir -p tools/grpc-codegen
+	: >tools/grpc-codegen/Cargo.toml
+	output=$(bash "${script}" --plan --files tools/grpc-codegen/deny.toml)
+	grep -q '^  make deny$' <<<"${output}"
+	grep -q '^  make grpc-generator-deny$' <<<"${output}"
+	rm -rf tools/grpc-codegen
+	# template:end grpc:verify-grpc-generator-deny-test
 
 	output=$(bash "${script}" --plan --files crates/leaf/src/lib.rs)
 	grep -q '^  make fmt-check$' <<<"${output}"
@@ -374,7 +382,7 @@ MAKE
 )
 
 if [[ ${mode} == self-test ]]; then
-	CI='' ALLOW_FULL='' ALLOW_HEAVY='' REPOSITORY_CI='' VERIFY_RUNTIME_IMAGE='' self_test
+	CI='' ALLOW_FULL='' ALLOW_HEAVY='' REPOSITORY_CI='' VERIFY_RUNTIME_IMAGE='' VERIFY_FORCE='' self_test
 	exit
 fi
 
@@ -551,6 +559,11 @@ fi
 if is_true cargo_dependencies || is_true dependency_policy; then
 	add_command make deny "dependency graph or policy changed" "make deny" cpu false false
 	add_command make dependency-drift "dependency graph or policy changed" "make dependency-drift" cheap false false
+	# template:begin grpc:verify-grpc-generator-deny
+	if [[ -f tools/grpc-codegen/Cargo.toml ]]; then
+		add_command make grpc-generator-deny "standalone generator dependency graph or policy changed" "make grpc-generator-deny" cpu false false
+	fi
+	# template:end grpc:verify-grpc-generator-deny
 fi
 if is_true rust_source || is_true lint_config; then
 	add_command make fmt-check "Rust source or formatting configuration changed" "make fmt-check" cheap false false
