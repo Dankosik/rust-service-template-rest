@@ -146,6 +146,48 @@ tests:
           - labels: 'ALERTS{alertname="ServiceNotReady",alertstate="firing",job="service",instance="a",severity="ticket"}'
             value: 1
 
+  - name: "A starved runtime, a thread pile-up and descriptors near the limit open tickets for that instance only"
+    interval: 1m
+    input_series:
+      - *service_up
+      - series: 'runtime_scheduler_lag_seconds_count{job="service",instance="a"}'
+        values: "0+600x30"
+      - series: 'runtime_scheduler_lag_seconds_bucket{job="service",instance="a",le="0.1"}'
+        values: "0+580x30"
+      - series: 'runtime_scheduler_lag_seconds_count{job="service",instance="b"}'
+        values: "0+600x30"
+      - series: 'runtime_scheduler_lag_seconds_bucket{job="service",instance="b",le="0.1"}'
+        values: "0+599x30"
+      - series: 'process_threads{job="service",instance="a"}'
+        values: "120x30"
+      - series: 'tokio_workers_count{job="service",instance="a"}'
+        values: "4x30"
+      - series: 'process_threads{job="service",instance="b"}'
+        values: "32x30"
+      - series: 'tokio_workers_count{job="service",instance="b"}'
+        values: "24x30"
+      - series: 'process_open_fds{job="service",instance="a"}'
+        values: "900x30"
+      - series: 'process_max_fds{job="service",instance="a"}'
+        values: "1024x30"
+      - series: 'process_open_fds{job="service",instance="b"}'
+        values: "900x30"
+      - series: 'process_max_fds{job="service",instance="b"}'
+        values: "524288x30"
+    promql_expr_test:
+      - expr: 'ALERTS{alertstate="firing"}'
+        eval_time: 14m
+        exp_samples: []
+      - expr: 'ALERTS{alertstate="firing"}'
+        eval_time: 22m
+        exp_samples:
+          - labels: 'ALERTS{alertname="RuntimeSchedulerLagging",alertstate="firing",job="service",instance="a",severity="ticket"}'
+            value: 1
+          - labels: 'ALERTS{alertname="RuntimeThreadsElevated",alertstate="firing",job="service",instance="a",severity="ticket"}'
+            value: 1
+          - labels: 'ALERTS{alertname="OpenFilesNearLimit",alertstate="firing",job="service",instance="a",severity="ticket"}'
+            value: 1
+
   # template:begin grpc:monitoring-grpc-fixture
   - name: "gRPC server faults and slow calls burn their budgets; client errors and health checks do not"
     interval: 1m
