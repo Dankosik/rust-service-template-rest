@@ -918,6 +918,27 @@ async fn the_deadline_bounds_authentication_too() {
     fixture.stop().await;
 }
 
+#[tokio::test]
+async fn a_refused_upload_drains_within_the_call_budget() {
+    let (verifier, provider) = verifier_fixture().await;
+    let echo = Echo::new();
+    let app = opening_app(verifier, &echo, 4);
+    let call = pending_upload(
+        opening_request("/example.v1.EchoService/BidiStream", None, "refused"),
+        "50m",
+    );
+    tokio::time::pause();
+    let started = tokio::time::Instant::now();
+    let response = timeout(WAIT, app.oneshot(call)).await.unwrap().unwrap();
+    let waited = started.elapsed();
+    tokio::time::resume();
+    assert!(waited < Duration::from_millis(50), "waited {waited:?}");
+    let status = grpc_status(&response).unwrap();
+    assert_eq!(status.code(), Code::Unauthenticated, "{status:?}");
+    assert!(echo.calls.lock().is_empty());
+    provider.stop().await;
+}
+
 fn opening_app(verifier: Verifier, echo: &Echo, capacity: u32) -> axum::Router {
     opening_app_waiting(verifier, echo, capacity, limits().max_admission_wait)
 }
@@ -1311,6 +1332,7 @@ async fn a_call_waits_no_longer_than_the_admission_wait() {
     let echo = Echo::new();
     let app = opening_app_waiting(verifier, &echo, 1, Duration::from_millis(200));
     let held = hold_capacity(&app).await;
+    tokio::time::pause();
     let started = tokio::time::Instant::now();
     let response = timeout(
         WAIT,
@@ -1321,10 +1343,11 @@ async fn a_call_waits_no_longer_than_the_admission_wait() {
     .expect("the refusal is answered long before the call budget")
     .unwrap();
     assert!(
-        (Duration::from_millis(150)..Duration::from_secs(2)).contains(&started.elapsed()),
+        (Duration::from_millis(200)..Duration::from_millis(210)).contains(&started.elapsed()),
         "waited {:?}",
         started.elapsed()
     );
+    tokio::time::resume();
     assert_at_capacity(&grpc_status(&response).unwrap());
     let rendered = metrics.render();
     assert!(rendered.contains("grpc_server_shed_requests_total 1"));
@@ -1387,6 +1410,7 @@ async fn a_zero_admission_wait_refuses_a_call_over_the_limit_at_once() {
     let echo = Echo::new();
     let app = opening_app_waiting(verifier, &echo, 1, Duration::ZERO);
     let held = hold_capacity(&app).await;
+    tokio::time::pause();
     let started = tokio::time::Instant::now();
     let response = timeout(
         WAIT,
@@ -1396,11 +1420,8 @@ async fn a_zero_admission_wait_refuses_a_call_over_the_limit_at_once() {
     .await
     .expect("the refusal is answered")
     .unwrap();
-    assert!(
-        started.elapsed() < Duration::from_secs(2),
-        "waited {:?}",
-        started.elapsed()
-    );
+    assert_eq!(started.elapsed(), Duration::ZERO);
+    tokio::time::resume();
     assert_at_capacity(&grpc_status(&response).unwrap());
     let rendered = metrics.render();
     assert!(rendered.contains("grpc_server_shed_requests_total 1"));
@@ -2479,7 +2500,8 @@ async fn calls_are_counted_by_described_method_whatever_ended_them() {
         "12"
     );
 
-    let unary = r#"grpc_service="example.v1.EchoService",grpc_method="Unary""#;
+    let unary = r#"grpc_type="unary",grpc_service="example.v1.EchoService",grpc_method="Unary""#;
+    let unknown = r#"grpc_type="unknown",grpc_service="unknown",grpc_method="unknown""#;
     let expected = [
         format!("grpc_server_started_total{{{unary}}} 4"),
         format!(r#"grpc_server_handled_total{{{unary},grpc_code="OK"}} 1"#),
@@ -2488,8 +2510,8 @@ async fn calls_are_counted_by_described_method_whatever_ended_them() {
         format!(r#"grpc_server_failures_total{{{unary},failure_code="gateway_timeout"}} 1"#),
         format!(r#"grpc_server_handled_total{{{unary},grpc_code="Canceled"}} 1"#),
         format!(r#"grpc_server_handled_total{{{unary},grpc_code="DeadlineExceeded"}} 1"#),
-        r#"grpc_server_started_total{grpc_service="unknown",grpc_method="unknown"} 1"#.to_owned(),
-        r#"grpc_server_handled_total{grpc_service="unknown",grpc_method="unknown",grpc_code="Unimplemented"} 1"#.to_owned(),
+        format!("grpc_server_started_total{{{unknown}}} 1"),
+        format!(r#"grpc_server_handled_total{{{unknown},grpc_code="Unimplemented"}} 1"#),
     ];
     let rendered = timeout(WAIT, async {
         loop {
@@ -2550,7 +2572,7 @@ async fn a_stream_is_counted_with_the_status_that_ended_it() {
     let unread = timeout(
         WAIT,
         client.server_stream(request(ServerStreamRequest {
-            message: "unread".to_owned(),
+            message: "hold-after-first".to_owned(),
         })),
     )
     .await
@@ -2564,11 +2586,12 @@ async fn a_stream_is_counted_with_the_status_that_ended_it() {
         .unwrap();
     assert_eq!(followed.into_inner().message, "after");
 
-    let stream = r#"grpc_service="example.v1.EchoService",grpc_method="ServerStream""#;
+    let stream = r#"grpc_type="server_stream",grpc_service="example.v1.EchoService",grpc_method="ServerStream""#;
     let expected = [
         format!("grpc_server_started_total{{{stream}}} 3"),
         format!(r#"grpc_server_handled_total{{{stream},grpc_code="Aborted"}} 1"#),
         format!(r#"grpc_server_handled_total{{{stream},grpc_code="Internal"}} 1"#),
+        format!(r#"grpc_server_handled_total{{{stream},grpc_code="Canceled"}} 1"#),
         format!(r#"grpc_server_failures_total{{{stream},failure_code="conflict"}} 1"#),
         format!(r#"grpc_server_failures_total{{{stream},failure_code="internal_error"}} 1"#),
     ];

@@ -3,6 +3,10 @@ use std::time::Duration;
 use http::{HeaderMap, HeaderName, StatusCode};
 
 pub(crate) const GRPC_TIMEOUT: HeaderName = HeaderName::from_static("grpc-timeout");
+pub(crate) const GRPC_STATUS: HeaderName = HeaderName::from_static("grpc-status");
+pub(crate) const GRPC_MESSAGE: HeaderName = HeaderName::from_static("grpc-message");
+pub(crate) const GRPC_STATUS_DETAILS: HeaderName =
+    HeaderName::from_static("grpc-status-details-bin");
 const MAX_TIMEOUT_DIGITS: usize = 8;
 const WIRE_TIMEOUT_MAX: Duration = Duration::from_hours(99_999_999);
 
@@ -21,13 +25,6 @@ pub fn grpc_timeout(headers: &HeaderMap) -> Option<Duration> {
     headers
         .get(GRPC_TIMEOUT)
         .and_then(|value| parse_grpc_timeout(value.as_bytes()))
-}
-
-#[must_use]
-pub fn metadata_grpc_timeout(metadata: &tonic::metadata::MetadataMap) -> Option<Duration> {
-    metadata
-        .get(GRPC_TIMEOUT.as_str())
-        .and_then(|value| parse_grpc_timeout(value.as_encoded_bytes()))
 }
 
 fn parse_grpc_timeout(value: &[u8]) -> Option<Duration> {
@@ -76,12 +73,8 @@ pub(crate) fn set_grpc_timeout(headers: &mut HeaderMap, remaining: Duration) {
     }
 }
 
-pub fn client_response_code<B>(response: &http::Response<B>) -> Option<tonic::Code> {
-    decoded_header_status_code(response.headers()).or_else(|| http_status_code(response.status()))
-}
-
 pub(crate) fn decoded_header_status_code(headers: &HeaderMap) -> Option<tonic::Code> {
-    if headers.contains_key("grpc-message") || headers.contains_key("grpc-status-details-bin") {
+    if headers.contains_key(GRPC_MESSAGE) || headers.contains_key(GRPC_STATUS_DETAILS) {
         return tonic::Status::from_header_map(headers).map(|status| status.code());
     }
     header_status_code(headers)
@@ -89,7 +82,7 @@ pub(crate) fn decoded_header_status_code(headers: &HeaderMap) -> Option<tonic::C
 
 pub(crate) fn header_status_code(headers: &HeaderMap) -> Option<tonic::Code> {
     headers
-        .get("grpc-status")
+        .get(GRPC_STATUS)
         .map(|value| tonic::Code::from_bytes(value.as_bytes()))
 }
 
@@ -136,17 +129,6 @@ mod tests {
             assert_eq!(grpc_timeout(&headers), expected, "{value:?}");
         }
         assert_eq!(grpc_timeout(&http::HeaderMap::new()), None);
-    }
-
-    #[test]
-    fn metadata_timeout_reads_the_grpc_timeout_entry() {
-        let mut metadata = tonic::metadata::MetadataMap::new();
-        assert_eq!(metadata_grpc_timeout(&metadata), None);
-        metadata.insert("grpc-timeout", "250m".parse().expect("ASCII value"));
-        assert_eq!(
-            metadata_grpc_timeout(&metadata),
-            Some(Duration::from_millis(250))
-        );
     }
 
     #[test]

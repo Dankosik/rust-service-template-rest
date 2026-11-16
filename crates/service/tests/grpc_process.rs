@@ -876,12 +876,23 @@ fn assert_server_privacy_outputs(
             .any(|event| event.name == "authn_verification_failed")),
         "missing exported authn refusal event"
     );
-    for code in [0_i64, 16] {
+    for code in ["OK", "UNAUTHENTICATED"] {
         assert!(
-            unary
-                .iter()
-                .any(|span| attribute(span, "rpc.grpc.status_code") == Some(&Value::IntValue(code))),
+            unary.iter().any(|span| attribute(span, "rpc.status_code")
+                == Some(&Value::StringValue(code.to_owned()))),
             "missing exported gRPC status {code}"
+        );
+    }
+    for span in &unary {
+        assert_eq!(
+            attribute(span, "rpc.system.name"),
+            Some(&Value::StringValue("grpc".to_owned()))
+        );
+        assert_eq!(
+            attribute(span, "rpc.method"),
+            Some(&Value::StringValue(
+                "example.v1.EchoService/Unary".to_owned()
+            ))
         );
     }
     for excluded in [AUTHORITY, USER_AGENT] {
@@ -975,7 +986,7 @@ fn grpc_server_outputs_withhold_caller_identity_and_client_keeps_destination() {
         };
         assert_eq!(text("server.address"), Some(CLIENT_DESTINATION));
         assert_eq!(text("user_agent.original"), Some(CLIENT_AGENT));
-        assert!(attribute(span, "rpc.grpc.status_code").is_some());
+        assert!(attribute(span, "rpc.status_code").is_some());
         let Some(Value::IntValue(port)) = attribute(span, "server.port") else {
             panic!("client port missing: {span:?}");
         };
@@ -1013,7 +1024,7 @@ fn tls_health_and_http_share_the_example_sigterm_lifecycle() {
     assert_eq!(status, 200);
     assert!(
         metrics.contains(
-            r#"grpc_server_handling_seconds_bucket{grpc_service="example.v1.EchoService",grpc_method="Unary",le="0.005"}"#
+            r#"grpc_server_handling_seconds_bucket{grpc_type="unary",grpc_service="example.v1.EchoService",grpc_method="Unary",le="0.005"}"#
         ),
         "{metrics}"
     );

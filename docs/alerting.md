@@ -62,8 +62,9 @@ within minutes of a fault and reset promptly after recovery.
   other `le` matches no series and silences the alert. Update `le` in both the
   recording rules and alert annotations.
 - **Excluded traffic.** Exclude non-interactive routes (exports, long polls) via
-  `http_route!~`, and exclude long-lived streaming RPCs from latency SLIs via
-  `grpc_method!~`.
+  `http_route!~`. The gRPC latency SLI counts only `grpc_type="unary"`, because a
+  streaming call stays open for its whole lifetime; exclude a slow-by-design
+  unary method via `grpc_method!~`.
 - **Low traffic.** Below ~1 req/min, use ticket windows only or gate page rules
   on minimum request rate (`and sum by(job) (rate(...[1h])) > 1`).
 - **Labels.** Recording rules aggregate `by(job)`; add `http_route` only for
@@ -119,8 +120,8 @@ together with `grpc_server_shed_requests_total` is load shedding;
 
 ### GRPCLatencyBudgetBurn
 
-Calls take longer than 500 ms. Locate the method with
-`grpc_server_handling_seconds_bucket` by `grpc_method`, then follow
+Unary calls take longer than 500 ms. Locate the method with
+`grpc_server_handling_seconds_bucket{grpc_type="unary"}` by `grpc_method`, then follow
 `HTTPLatencyBudgetBurn` for what it waits on. A call over `grpc.max_in_flight`
 waits for a permit, at most `grpc.admission_wait`, before it is served or
 refused, and that wait is part of its handling time;

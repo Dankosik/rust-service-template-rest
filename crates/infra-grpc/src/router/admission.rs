@@ -8,7 +8,7 @@ use axum::response::Response;
 use service_failure::{AT_CAPACITY_DETAIL, AT_CAPACITY_RETRY_AFTER};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-use super::{REJECT_DRAIN, opening_context, reject_with_drain};
+use super::{REJECT_DRAIN, opening_context, reject};
 use crate::Failure;
 use crate::call::Handoff;
 
@@ -101,10 +101,7 @@ async fn reject_at_capacity(request: Request) -> Response {
     let status = Failure::new(service_failure::Code::ServiceUnavailable)
         .retry_after(AT_CAPACITY_RETRY_AFTER)
         .into_status_as(tonic::Code::ResourceExhausted, AT_CAPACITY_DETAIL);
-    let drain = opening_context(&request)
-        .and_then(operation_context::OperationContext::remaining)
-        .map_or(REJECT_DRAIN, |remaining| REJECT_DRAIN.min(remaining / 2));
-    let mut response = reject_with_drain(request, status, drain).await;
+    let mut response = reject(request, status).await;
     response.extensions_mut().insert(Shed);
     response
 }

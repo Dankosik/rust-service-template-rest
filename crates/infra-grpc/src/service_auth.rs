@@ -1,4 +1,3 @@
-use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
@@ -6,6 +5,7 @@ use axum::extract::{Request, State};
 use axum::middleware::Next;
 use axum::response::Response;
 use foldhash::HashMap;
+use futures_util::future::BoxFuture;
 use http::header::AUTHORIZATION;
 use infra_serviceauth::{Caller, ReceiverTokens, ServiceName, Verifier};
 use tonic::body::Body;
@@ -13,7 +13,7 @@ use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 
 use crate::{Client, Failure};
 
-pub const SERVICE_AUTH_CALLS_METRIC: &str = "service_auth_calls_total";
+const SERVICE_AUTH_CALLS_METRIC: &str = "service_auth_calls_total";
 
 pub const REFLECTION_PATHS: [&str; 2] = [
     "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo",
@@ -155,7 +155,7 @@ impl Client {
 impl tower::Service<http::Request<Body>> for ServiceTokenClient {
     type Response = http::Response<Body>;
     type Error = tonic::Status;
-    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+    type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
 
     fn poll_ready(&mut self, _context: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
