@@ -36,7 +36,6 @@ ARG SERVICE_PACKAGE=service
 
 FROM rust:1.100.0-slim-trixie@sha256:e9d95b74296f7126a83ae3d041aeaba1ff4c478f13abc5cc034fcf7c131c3d4a AS chef
 WORKDIR /src
-ENV JEMALLOC_SYS_WITH_MALLOC_CONF=thp:never
 # jemalloc (the service allocator) builds with configure and make; slim has
 # gcc only. curl and xz fetch and unpack the build tools below.
 RUN apt-get update && apt-get install -y --no-install-recommends make curl xz-utils \
@@ -79,6 +78,7 @@ RUN cargo chef prepare --recipe-path recipe.json
 # resolution, as the separate cooks do.
 FROM chef AS cooked
 ENV CARGO_INCREMENTAL=0
+ENV JEMALLOC_SYS_WITH_MALLOC_CONF=thp:never
 COPY --from=planner /src/recipe.json recipe.json
 # Optional profiling dependency must be visible even during a default cook.
 COPY --from=planner /src/vendor/hotpath /src/vendor/hotpath
