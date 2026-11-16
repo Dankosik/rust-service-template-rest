@@ -107,7 +107,6 @@ impl Instance {
                 max_connection_age: None,
             },
         )
-        .await
         .unwrap();
         let address = server.local_addr();
         // template:begin postgres-grpc-consumers:recovery-start-grpc
@@ -548,7 +547,7 @@ mod grpc {
         pub(super) async fn start(pool: PgPool, reader: health::ReadinessReader) -> Self {
             // template:end postgres-grpc-consumers:recovery-grpc-module-3
             // template:begin postgres-grpc-auth:recovery-start-provider
-            let (verifier, provider, provider_cancel) = provider().await;
+            let (verifier, provider, provider_cancel) = provider();
             // template:end postgres-grpc-auth:recovery-start-provider
             // template:begin postgres-grpc-consumers:recovery-grpc-module-4
             let mut services = Services::new();
@@ -581,7 +580,6 @@ mod grpc {
                 router,
                 infra_grpc::server_options(limits),
             )
-            .await
             .unwrap();
             let destination = format!("http://{}", server.local_addr());
             let echo = EchoServiceClient::new(
@@ -698,7 +696,7 @@ mod grpc {
         clippy::disallowed_methods,
         reason = "local non-shipped identity provider fixture"
     )]
-    async fn provider() -> (infra_bearerauthn::Verifier, Server, CancellationToken) {
+    fn provider() -> (infra_bearerauthn::Verifier, Server, CancellationToken) {
         use infra_bearerauthn::{
             EndpointUrl, IntrospectionOptions, IssuerUrl,
             test_support::{FixtureTransport, prepare_introspection_with_fixture},
@@ -725,9 +723,7 @@ mod grpc {
             let expiry = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 3600;
             axum::Json(serde_json::json!({"active": true, "iss": "https://issuer.example", "aud": "api", "sub": "consumer", "exp": expiry}))
         }));
-        let listener = BoundListener::bind("127.0.0.1:0".parse().unwrap())
-            .await
-            .unwrap();
+        let listener = BoundListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
         let server = listener.serve_tls(
             router,
             ServerOptions {

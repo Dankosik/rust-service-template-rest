@@ -337,7 +337,7 @@ async fn prepare(
         .readiness
         .insert(Readiness::new(probes, listeners::refresh_policy(config)))
         .clone();
-    listeners::bind_listeners(config, &metrics, &readiness, background, resources).await?;
+    listeners::bind_listeners(config, &metrics, &readiness, background, resources)?;
     readiness.admit().await.map_err(WorkerError::Admission)?;
     listeners::start_progress(&readiness, background)?;
     Ok(Prepared {

@@ -569,7 +569,6 @@ mod tests {
                 max_connection_age: None,
             },
         )
-        .await
         .unwrap();
         let destination = format!("http://{}", server.local_addr());
         for (method, expected) in [

@@ -19,7 +19,7 @@ pub(super) fn readiness_probes(resources: &Resources) -> Vec<Box<dyn Probe>> {
     probes
 }
 
-pub(super) async fn bind_listeners(
+pub(super) fn bind_listeners(
     config: &Config,
     metrics: &Metrics,
     readiness: &Readiness,
@@ -32,7 +32,7 @@ pub(super) async fn bind_listeners(
     let health = resources
         .listeners
         .health
-        .insert(Server::bind(config.http.addr, app, options).await?);
+        .insert(Server::bind(config.http.addr, app, options)?);
     watch_listener(Listeners::HEALTH, health, background);
     tracing::info!(addr = %health.local_addr(), "http listener bound");
     if let Some(addr) = config.observability.metrics.addr {
@@ -40,7 +40,7 @@ pub(super) async fn bind_listeners(
         let diagnostics = resources
             .listeners
             .diagnostics
-            .insert(Server::bind(addr, routes, options).await?);
+            .insert(Server::bind(addr, routes, options)?);
         watch_listener(Listeners::DIAGNOSTICS, diagnostics, background);
         tracing::info!(addr = %diagnostics.local_addr(), "diagnostics listener bound");
     }

@@ -98,8 +98,6 @@ percent-encoding = { version = "2.3.2", default-features = false }
 # template:begin cache:workspace-cache-client
 pem = { version = "=4.0.0", default-features = false }
 redis = { version = "1.7.1", default-features = false }
-# Keepalive retries are a socket2 method; redis does not re-export the type.
-socket2 = { version = "0.6.5", default-features = false }
 # template:end cache:workspace-cache-client
 # template:begin object-storage:workspace-object-storage-client
 # The AWS SDK family releases weekly and yanked one release on 2026-09-14:
@@ -132,6 +130,7 @@ mime = { version = "0.3.17", default-features = false }
 tokio = { version = "1.53.1", default-features = false }
 tikv-jemallocator = { version = "0.7.0", default-features = false }
 rlimit = { version = "0.11.0", default-features = false }
+socket2 = { version = "0.6.5", default-features = false }
 tokio-util = { version = "0.7.19", default-features = false }
 tower = { version = "0.5.3", default-features = false }
 tower-http = { version = "0.7.1", default-features = false }

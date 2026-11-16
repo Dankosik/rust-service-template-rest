@@ -45,9 +45,13 @@ pub struct HttpConfig {
     /// Separate time limits of this duration apply to protocol detection and
     /// reading a complete HTTP/1 request head. On the first request, those
     /// waits can add up to twice this value. The HTTP/1 timer also bounds
-    /// keep-alive idle time. HTTP/2 request headers have a size limit
-    /// (`max_header_bytes`) and no read timeout from this setting. HTTP/2
-    /// idle uses a separate PING cadence.
+    /// keep-alive idle time, so keep it above the idle timeout of whatever
+    /// reuses connections to this listener: a balancer that reuses a
+    /// connection the service has just closed answers 502. The default
+    /// clears the common 60 s (AWS ALB, nginx upstreams, Railway); Google
+    /// Cloud load balancers hold backend connections for 600 s. HTTP/2
+    /// request headers have a size limit (`max_header_bytes`) and no read
+    /// timeout from this setting. HTTP/2 idle uses a separate PING cadence.
     #[serde(with = "humantime_serde")]
     pub header_read_timeout: Duration,
     /// Budget through the response head, including admission and request body
@@ -97,7 +101,7 @@ impl Default for HttpConfig {
             grace_period: Duration::from_secs(45),
             drain_timeout: Duration::from_secs(25),
             readiness_propagation_delay: Duration::from_secs(15),
-            header_read_timeout: Duration::from_secs(5),
+            header_read_timeout: Duration::from_secs(75),
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             max_header_bytes: ByteSize::kib(16),
             max_body_bytes: ByteSize::mib(1),
@@ -210,7 +214,7 @@ impl HttpConfig {
         v.check(duration_range(
             "http.header_read_timeout",
             self.header_read_timeout,
-            Duration::from_millis(100)..=Duration::from_mins(5),
+            Duration::from_millis(100)..=Duration::from_mins(15),
         ));
         let request_timeout_ok =
             request_timeout_range("http.request_timeout", self.request_timeout);
@@ -395,6 +399,30 @@ mod tests {
             })
             .unwrap_err()
             .names("http.max_header_bytes")
+        );
+    }
+
+    #[test]
+    fn an_idle_connection_outlives_common_balancer_idle_timeouts() {
+        assert!(HttpConfig::default().header_read_timeout > Duration::from_mins(1));
+        let behind_google_cloud = HttpConfig {
+            header_read_timeout: Duration::from_secs(620),
+            ..HttpConfig::default()
+        };
+        validate_with(|v| {
+            behind_google_cloud.validate(v);
+        })
+        .unwrap();
+        let unbounded = HttpConfig {
+            header_read_timeout: Duration::from_mins(16),
+            ..HttpConfig::default()
+        };
+        assert!(
+            validate_with(|v| {
+                unbounded.validate(v);
+            })
+            .unwrap_err()
+            .names("http.header_read_timeout")
         );
     }
 }

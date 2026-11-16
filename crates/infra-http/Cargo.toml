@@ -24,6 +24,7 @@ operation-context = { workspace = true }
 hotpath = { workspace = true, optional = true }
 service-failure = { workspace = true }
 shared-rules = { workspace = true }
+socket2 = { workspace = true, features = ["all"] }
 serde_with = { workspace = true, features = ["std", "macros"] }
 axum = { workspace = true, features = ["http1", "tokio", "matched-path", "original-uri", "tower-log", "tracing", "json", "query"] }
 mime = { workspace = true }
