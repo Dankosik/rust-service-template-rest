@@ -51,10 +51,6 @@ pub struct ClientCertificate {
 
 /// Local startup errors from [`Cache::start`]. Display never includes the DSN,
 /// a password, or Redis error text.
-///
-/// The password-file variants also describe reads during connection setup and
-/// refresh. Refresh counts failed reads and warns on the first failure in
-/// each consecutive run of read failures.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum CacheError {
     #[error("cache DSN is invalid")]
@@ -187,6 +183,46 @@ impl health::Probe for CacheProbe {
             health::ProbeError::format(format_args!("cache ping failed: {}", error.label()))
         })
     }
+}
+
+/// A cache namespace name matching `^[a-z][a-z0-9_]{0,63}$`. It prefixes
+/// every key as `{namespace}:` and labels the cache metrics, so it is
+/// `'static` to keep label cardinality bounded. [`namespace!`] checks a
+/// literal at compile time.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Namespace(&'static str);
+
+impl Namespace {
+    /// `None` when `name` is outside the grammar.
+    #[must_use]
+    pub const fn new(name: &'static str) -> Option<Self> {
+        if namespace::valid_namespace(name) {
+            Some(Self(name))
+        } else {
+            None
+        }
+    }
+}
+
+/// Builds a [`Namespace`] from a string literal; a name outside
+/// `^[a-z][a-z0-9_]{0,63}$` fails to build (`cargo check` alone does not
+/// evaluate the constant).
+///
+/// ```
+/// const SESSIONS: infra_cache::Namespace = infra_cache::namespace!("sessions");
+/// ```
+///
+/// ```compile_fail,E0080
+/// let _ = infra_cache::namespace!("Sessions");
+/// ```
+#[macro_export]
+macro_rules! namespace {
+    ($name:literal) => {
+        const {
+            $crate::Namespace::new($name)
+                .expect("cache namespace must match ^[a-z][a-z0-9_]{0,63}$")
+        }
+    };
 }
 
 /// Each operation/outcome histogram handle binds to the recorder current at

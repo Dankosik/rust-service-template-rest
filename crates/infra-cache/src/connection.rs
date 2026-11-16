@@ -19,12 +19,12 @@ use tokio::time::{Instant, sleep_until, timeout, timeout_at};
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
-use crate::credentials::PasswordFile;
+use crate::ServerEndpoint;
+use crate::credentials::{PasswordFile, ReadFailure};
 use crate::observe::{
     ADMISSION_REFUSED_METRIC, COMMANDS_IN_FLIGHT_METRIC, PASSWORD_REFRESHES_METRIC,
     RETIREMENTS_METRIC,
 };
-use crate::{CacheError, ServerEndpoint};
 
 /// Bounds one whole setup attempt: password read, dial, TLS, and `HELLO`.
 pub(crate) const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -37,7 +37,7 @@ const SETUP_BACKOFF_MAX_DELAY: Duration = Duration::from_secs(2);
 const MIN_GENERATION_SPACING: Duration = Duration::from_secs(2);
 const SETUP_BACKOFF_FACTOR: f32 = 2.0;
 /// Bound one reconnect chain; the supervisor starts the next after a pause.
-const SETUP_BACKOFF_MAX_RETRIES: usize = 6;
+pub(crate) const SETUP_BACKOFF_MAX_RETRIES: usize = 6;
 const PING_INTERVAL: Duration = Duration::from_secs(2);
 const PASSWORD_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 /// Shared by every namespace, including commands waiting for a connection.
@@ -776,7 +776,7 @@ async fn credentialed_client<'a>(
     // Not `auth`: an unreadable mount must not look like a revoked
     // password, which an operator would answer by rotating the secret.
     let password = file.read().await.map_err(|error| {
-        warn_password_file_unreadable(server, &error);
+        warn_password_file_unreadable(server, error);
         ErrorType::Other
     })?;
     let info = admitted.get_connection_info().clone();
@@ -790,7 +790,7 @@ async fn credentialed_client<'a>(
     Ok((client, Some(Rotation::new(file, password))))
 }
 
-fn warn_password_file_unreadable(server: &ServerEndpoint, error: &CacheError) {
+fn warn_password_file_unreadable(server: &ServerEndpoint, error: ReadFailure) {
     tracing::warn!(
         server.address = %server.host,
         server.port = server.port,
@@ -874,7 +874,7 @@ struct Rotation<'a> {
 }
 
 enum RefreshOutcome {
-    ReadFailed(CacheError),
+    ReadFailed(ReadFailure),
     Unchanged,
     AuthAccepted,
     /// The server refused the new password; the authenticated session stays.
@@ -944,11 +944,7 @@ impl<'a> Rotation<'a> {
         let password = match timeout_at(read_deadline, self.file.read()).await {
             Ok(Ok(password)) => password,
             Ok(Err(error)) => return RefreshOutcome::ReadFailed(error),
-            Err(_elapsed) => {
-                return RefreshOutcome::ReadFailed(CacheError::PasswordFile {
-                    kind: std::io::ErrorKind::TimedOut,
-                });
-            }
+            Err(_elapsed) => return RefreshOutcome::ReadFailed(ReadFailure::TimedOut),
         };
         if password.as_str() == self.authenticated_password.as_str() {
             return RefreshOutcome::Unchanged;
@@ -986,7 +982,7 @@ impl<'a> Rotation<'a> {
         match outcome {
             RefreshOutcome::ReadFailed(error) => {
                 if !unreadable_logged {
-                    warn_password_file_unreadable(server, error);
+                    warn_password_file_unreadable(server, *error);
                 }
             }
             RefreshOutcome::Unchanged => {}

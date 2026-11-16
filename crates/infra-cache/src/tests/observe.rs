@@ -12,7 +12,12 @@ fn redis_errors_map_to_bounded_error_types() {
     for (kind, expected) in cases {
         let error = redis::RedisError::from((kind, "hunter2 must not leak"));
         assert_eq!(crate::connection::error_type(&error).label(), expected);
-        assert_ne!(error.to_string(), "");
+    }
+    // With redis-rs timeouts disabled, a timed-out socket (TCP_USER_TIMEOUT)
+    // is the only timeout redis-rs reports; it is not a generic I/O failure.
+    for kind in [std::io::ErrorKind::TimedOut, std::io::ErrorKind::WouldBlock] {
+        let timed_out = redis::RedisError::from(std::io::Error::from(kind));
+        assert_eq!(crate::connection::error_type(&timed_out).label(), "timeout");
     }
     let server = redis::RedisError::from((
         redis::ErrorKind::Server(redis::ServerErrorKind::ResponseError),
@@ -73,7 +78,7 @@ async fn set_admits_only_valid_floored_ttls_before_dispatch_and_observation() {
     let _recorder = metrics::set_default_local_recorder(&recorder);
     let server = FakeServer::start().await;
     let cache = admitted(&format!("redis://{}", server.address), true, true);
-    let namespace = cache.namespace("ttl");
+    let namespace = cache.namespace(namespace!("ttl"));
     assert_eq!(namespace.get("ready").await, Ok(None));
     let connections = server.connections();
     let maximum = Duration::from_millis(i64::MAX.cast_unsigned());
@@ -162,7 +167,7 @@ async fn a_dropped_get_records_cancelled_without_the_key() {
         ..options(&format!("redis://{address}"), true, true, None)
     })
     .expect("start connect admits without a server");
-    let namespace = cache.namespace("obs");
+    let namespace = cache.namespace(namespace!("obs"));
     {
         let mut operation = std::pin::pin!(namespace.get("hunter2-key"));
         let _ = tokio::time::timeout(Duration::from_millis(30), &mut operation).await;
@@ -199,7 +204,7 @@ async fn a_silent_server_records_timeout() {
         ..options(&format!("redis://{address}"), true, true, None)
     })
     .expect("start connect");
-    let namespace = cache.namespace("obs");
+    let namespace = cache.namespace(namespace!("obs"));
     let started = std::time::Instant::now();
     let err = namespace.get("hunter2-key").await.unwrap_err();
     assert_eq!(err.to_string(), "cache unavailable");
@@ -225,7 +230,10 @@ async fn a_reply_inside_the_command_timeout_is_not_cut_short() {
     })
     .expect("start connect");
 
-    assert_eq!(cache.namespace("slow").get("slow").await, Ok(None));
+    assert_eq!(
+        cache.namespace(namespace!("slow")).get("slow").await,
+        Ok(None)
+    );
 }
 
 #[tokio::test]
@@ -238,7 +246,7 @@ async fn each_outcome_records_into_its_own_series() {
     let _recorder = metrics::set_default_local_recorder(&recorder);
     let server = FakeServer::start().await;
     let cache = admitted(&format!("redis://{}", server.address), true, true);
-    let namespace = cache.namespace("series");
+    let namespace = cache.namespace(namespace!("series"));
     assert_eq!(namespace.get("key").await, Ok(None));
     assert_eq!(namespace.get("key").await, Ok(None));
     assert_eq!(

@@ -6,15 +6,11 @@ use redis::{SetExpiry, SetOptions};
 
 use crate::connection::{CommandError, CommandScope};
 use crate::observe::{OperationGuard, Outcome};
-use crate::{Cache, CacheNamespace, SetError, Unavailable};
+use crate::{Cache, CacheNamespace, Namespace, SetError, Unavailable};
 
 impl Cache {
     #[must_use]
-    pub fn namespace(&self, name: &'static str) -> CacheNamespace {
-        assert!(
-            valid_namespace(name),
-            "cache namespace {name:?} must match ^[a-z][a-z0-9_]{{0,63}}$"
-        );
+    pub fn namespace(&self, Namespace(name): Namespace) -> CacheNamespace {
         CacheNamespace {
             cache: self.clone(),
             name,
@@ -211,14 +207,21 @@ struct ExtraCommandCapacity {
     extra_bytes: usize,
 }
 
-fn valid_namespace(name: &str) -> bool {
-    let mut bytes = name.bytes();
-    if !matches!(bytes.next(), Some(b'a'..=b'z')) {
+pub(crate) const fn valid_namespace(name: &str) -> bool {
+    let [first, rest @ ..] = name.as_bytes() else {
+        return false;
+    };
+    if !first.is_ascii_lowercase() || rest.len() > 63 {
         return false;
     }
-    let rest = bytes.len();
-    rest <= 63
-        && bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    let mut rest = rest;
+    while let [byte, tail @ ..] = rest {
+        if !(byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'_') {
+            return false;
+        }
+        rest = tail;
+    }
+    true
 }
 
 /// Writes the prefixed key as one argument straight into the command's

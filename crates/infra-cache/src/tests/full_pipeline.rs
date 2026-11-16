@@ -6,7 +6,7 @@ use health::Probe;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 
 use super::*;
-use crate::{Cache, CacheNamespace};
+use crate::{Cache, CacheNamespace, namespace};
 
 const BUDGET: Duration = Duration::from_secs(30);
 
@@ -131,7 +131,7 @@ async fn dropping_a_mutation_waiting_for_capacity_does_not_enqueue_it() {
     for delete in [false, true] {
         tokio::task::unconstrained(async {
             let mut pipeline = FullPipeline::new().await;
-            let namespace = pipeline.cache.namespace("test");
+            let namespace = pipeline.cache.namespace(namespace!("test"));
             let generation = pipeline.generation.clone();
             let mut peer = pin!(namespace.get("peer"));
             assert!(futures_util::poll!(peer.as_mut()).is_pending());
@@ -173,7 +173,7 @@ async fn dropping_a_mutation_waiting_for_capacity_does_not_enqueue_it() {
 async fn dropping_a_probe_waiting_for_capacity_keeps_the_peer_command() {
     tokio::task::unconstrained(async {
         let mut pipeline = FullPipeline::new().await;
-        let namespace = pipeline.cache.namespace("test");
+        let namespace = pipeline.cache.namespace(namespace!("test"));
         let generation = pipeline.generation.clone();
         let mut peer = pin!(namespace.get("peer"));
         assert!(futures_util::poll!(peer.as_mut()).is_pending());
@@ -200,7 +200,7 @@ async fn dropping_a_dispatched_probe_keeps_the_peer_command() {
     const EXPECTED_REQUESTS: &[u8] = b"*1\r\n$4\r\nPING\r\n*2\r\n$3\r\nGET\r\n$9\r\ntest:peer\r\n";
 
     let mut pipeline = FullPipeline::new().await;
-    let namespace = pipeline.cache.namespace("test");
+    let namespace = pipeline.cache.namespace(namespace!("test"));
     let probe = pipeline.cache.probe();
     let mut check = probe.check();
     assert!(futures_util::poll!(check.as_mut()).is_pending());

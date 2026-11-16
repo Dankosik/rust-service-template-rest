@@ -325,18 +325,19 @@ fn options_debug_redacts_the_dsn() {
 }
 
 #[test]
-#[should_panic(expected = "cache namespace")]
-fn a_namespace_name_outside_the_grammar_panics() {
-    let cache = admitted("redis://127.0.0.1:6379", true, true);
-    let _ = cache.namespace("Bad-Name");
-}
-
-#[test]
-fn a_namespace_name_at_the_length_bound_is_accepted() {
-    let cache = admitted("redis://127.0.0.1:6379", true, true);
-    let name = "a".repeat(64);
-    let name = Box::leak(name.into_boxed_str());
-    let _ = cache.namespace(name);
+fn namespace_names_follow_the_grammar() {
+    let longest = format!("a{}", "_9".repeat(31) + "z");
+    let too_long = format!("{longest}a");
+    let longest: &'static str = longest.leak();
+    let too_long: &'static str = too_long.leak();
+    for accepted in ["a", "a_1", "abc_def9", longest] {
+        assert!(Namespace::new(accepted).is_some(), "{accepted:?} is valid");
+    }
+    for refused in [
+        "", "1a", "_a", "Ab", "aB", "a-b", "a:b", "a b", "é", too_long,
+    ] {
+        assert!(Namespace::new(refused).is_none(), "{refused:?} is invalid");
+    }
 }
 
 #[test]

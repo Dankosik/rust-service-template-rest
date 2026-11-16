@@ -5,7 +5,7 @@ use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
 use secrecy::SecretString;
 use tokio_util::task::AbortOnDropHandle;
 
-use crate::{Cache, CacheError, CacheOptions, ClientCertificate};
+use crate::{Cache, CacheError, CacheOptions, ClientCertificate, Namespace, namespace};
 
 mod admission;
 mod connection;
