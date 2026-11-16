@@ -18,6 +18,12 @@ updates:
       cargo-dependencies:
         patterns:
           - "*"
+    ignore:
+      # sqlx 0.9 reaches parking_lot 0.12 through futures-intrusive, and
+      # cargo-deny bans the duplicate a 0.13 bump creates. Drop this once
+      # sqlx resolves parking_lot 0.13.
+      - dependency-name: "parking_lot"
+        versions: [">=0.13"]
 
   - package-ecosystem: "github-actions"
     directory: "/"
