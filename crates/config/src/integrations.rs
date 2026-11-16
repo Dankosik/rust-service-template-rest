@@ -32,7 +32,7 @@ pub struct IntegrationConfig {
 }
 
 // template:begin grpc:config-integration-grpc-type
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, derive_more::Debug)]
 #[serde(deny_unknown_fields)]
 pub struct GrpcClientConfig {
     /// `http` or `https` URI, admitted by the transport before a channel exists.
@@ -40,20 +40,14 @@ pub struct GrpcClientConfig {
     pub destination: String,
     pub security: GrpcSecurity,
     #[serde(default, deserialize_with = "crate::de::blank_as_none")]
+    #[debug(skip)]
     pub ca_certificate: Option<String>,
     #[serde(default, deserialize_with = "crate::de::blank_as_none")]
+    #[debug(skip)]
     pub certificate: Option<String>,
     #[serde(default, deserialize_with = "crate::de::blank_secret_as_none")]
+    #[debug(skip)]
     pub private_key: Option<SecretString>,
-}
-
-impl std::fmt::Debug for GrpcClientConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("GrpcClientConfig")
-            .field("destination", &self.destination)
-            .field("security", &self.security)
-            .finish_non_exhaustive()
-    }
 }
 // template:end grpc:config-integration-grpc-type
 

@@ -10,9 +10,13 @@ publish = false
 resolver = "3"
 
 [dependencies]
+anyhow = { version = "=1.0.104", default-features = false, features = ["std"] }
 prost = { version = "=0.14.4", default-features = false, features = ["std"] }
 prost-types = { version = "=0.14.4", default-features = false, features = ["std"] }
 tonic-prost-build = { version = "=0.14.9", default-features = false, features = ["cleanup-markdown"] }
+
+[dev-dependencies]
+tempfile = { version = "=3.27.0", default-features = false, features = ["getrandom"] }
 
 [lints.rust]
 unsafe_code = "forbid"

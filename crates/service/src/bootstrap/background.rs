@@ -47,8 +47,10 @@ impl BackgroundRegistration<'_> {
 
 /// Reporting starts the root's failure transition without ending the manager,
 /// which still owns closing admission and joining its admitted work.
+#[derive(derive_more::Debug)]
 pub struct BackgroundFailureReporter {
     name: &'static str,
+    #[debug(skip)]
     failure: watch::Sender<Option<BackgroundFailure>>,
 }
 
@@ -70,15 +72,6 @@ impl BackgroundFailureReporter {
                 false
             }
         });
-    }
-}
-
-impl std::fmt::Debug for BackgroundFailureReporter {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("BackgroundFailureReporter")
-            .field("name", &self.name)
-            .finish_non_exhaustive()
     }
 }
 

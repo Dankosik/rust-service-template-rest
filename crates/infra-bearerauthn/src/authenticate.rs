@@ -1,12 +1,13 @@
-use std::mem::DropGuard;
+use std::{mem::DropGuard, sync::OnceLock};
 
+use enum_map::EnumMap;
 use operation_context::{OperationContext, Stopped};
 
 use crate::{Failure, Principal, Verifier, parse_bearer};
 
 pub(crate) const AUTHN_VERIFICATIONS_METRIC: &str = "authn_verifications_total";
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, enum_map::Enum)]
 pub enum Transport {
     Http,
     Grpc,
@@ -21,42 +22,59 @@ impl Transport {
     }
 }
 
-/// Prepared success handles, so a success needs no registry lookup.
-pub(crate) struct TransportSuccessCounters {
-    http: metrics::Counter,
-    grpc: metrics::Counter,
+struct PerTransport {
+    success: metrics::Counter,
+    refused: EnumMap<Refusal, OnceLock<metrics::Counter>>,
 }
 
-impl TransportSuccessCounters {
+/// Prepared success handles and lazy refusal handles per inbound transport.
+pub(crate) struct TransportCounters(EnumMap<Transport, PerTransport>);
+
+impl TransportCounters {
     pub(crate) fn new() -> Self {
         metrics::describe_counter!(
             AUTHN_VERIFICATIONS_METRIC,
             metrics::Unit::Count,
             "Inbound bearer-authentication verification outcomes."
         );
-        Self {
-            http: counter(Transport::Http, Outcome::Success),
-            grpc: counter(Transport::Grpc, Outcome::Success),
-        }
+        Self(EnumMap::from_fn(|transport: Transport| PerTransport {
+            success: metrics::counter!(
+                AUTHN_VERIFICATIONS_METRIC,
+                "transport" => transport.label(),
+                "result" => "success",
+                "failure" => "none"
+            ),
+            refused: EnumMap::default(),
+        }))
     }
 
-    const fn get(&self, transport: Transport) -> &metrics::Counter {
-        match transport {
-            Transport::Http => &self.http,
-            Transport::Grpc => &self.grpc,
-        }
+    fn record_success(&self, transport: Transport) {
+        self.0[transport].success.increment(1);
+    }
+
+    fn record_refusal(&self, transport: Transport, refusal: Refusal) {
+        let (result, failure) = refusal.labels();
+        self.0[transport].refused[refusal]
+            .get_or_init(|| {
+                metrics::counter!(
+                    AUTHN_VERIFICATIONS_METRIC,
+                    "transport" => transport.label(),
+                    "result" => result,
+                    "failure" => failure
+                )
+            })
+            .increment(1);
     }
 }
 
-#[derive(Clone, Copy)]
-enum Outcome {
-    Success,
+#[derive(Clone, Copy, enum_map::Enum)]
+enum Refusal {
     Failure(Failure),
     TimedOut,
     Cancelled,
 }
 
-impl Outcome {
+impl Refusal {
     const fn from_stopped(stopped: Stopped) -> Self {
         match stopped {
             Stopped::Deadline => Self::TimedOut,
@@ -66,7 +84,6 @@ impl Outcome {
 
     const fn labels(self) -> (&'static str, &'static str) {
         match self {
-            Self::Success => ("success", "none"),
             Self::Failure(Failure::Missing) => ("failure", "missing"),
             Self::Failure(Failure::Malformed) => ("failure", "malformed"),
             Self::Failure(Failure::Invalid) => ("failure", "invalid"),
@@ -75,16 +92,6 @@ impl Outcome {
             Self::Cancelled => ("cancelled", "cancelled"),
         }
     }
-}
-
-fn counter(transport: Transport, outcome: Outcome) -> metrics::Counter {
-    let (result, failure) = outcome.labels();
-    metrics::counter!(
-        AUTHN_VERIFICATIONS_METRIC,
-        "transport" => transport.label(),
-        "result" => result,
-        "failure" => failure
-    )
 }
 
 impl Verifier {
@@ -121,24 +128,25 @@ impl Verifier {
         transport: Transport,
         context: &OperationContext,
     ) -> Result<Principal, Failure> {
+        let counters = &self.counters.transport;
         let outcome = DropGuard::new(transport, |transport| {
-            let outcome = context
+            let refusal = context
                 .stopped()
-                .map_or(Outcome::Cancelled, Outcome::from_stopped);
-            counter(transport, outcome).increment(1);
+                .map_or(Refusal::Cancelled, Refusal::from_stopped);
+            counters.record_refusal(transport, refusal);
         });
         let result = match parse_bearer(authorization) {
             Ok(token) => self.verify_with_context(&token, context).await,
             Err(failure) => Err(failure),
         };
         if let Err(stopped) = context.check() {
-            counter(transport, Outcome::from_stopped(stopped)).increment(1);
+            counters.record_refusal(transport, Refusal::from_stopped(stopped));
             DropGuard::dismiss(outcome);
             return Err(Failure::Unavailable);
         }
         match &result {
-            Ok(_) => self.counters.transport.get(transport).increment(1),
-            Err(failure) => counter(transport, Outcome::Failure(*failure)).increment(1),
+            Ok(_) => counters.record_success(transport),
+            Err(failure) => counters.record_refusal(transport, Refusal::Failure(*failure)),
         }
         DropGuard::dismiss(outcome);
         result

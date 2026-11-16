@@ -29,7 +29,9 @@ infra-jobs = { workspace = true }
 infra-postgres = { workspace = true }
 migrate = { workspace = true }
 secrecy = { workspace = true }
+serde = { workspace = true, features = ["std", "derive"] }
 serde_json = { workspace = true, features = ["std"] }
+serde_with = { workspace = true, features = ["std", "macros"] }
 # template:end jobs:worker-jobs-dependencies
 # template:begin messaging:worker-messaging-dependency
 infra-messaging = { workspace = true }

@@ -181,7 +181,7 @@ impl GrpcInput {
 }
 
 /// The admitted native gRPC listener.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct GrpcConfig {
     pub addr: SocketAddr,
     pub security: GrpcListenerSecurity,
@@ -203,20 +203,6 @@ pub struct GrpcConfig {
     /// is spread by up to 10% either way. Zero keeps a connection for as
     /// long as its peer does.
     pub max_connection_age: Duration,
-}
-
-impl fmt::Debug for GrpcConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("GrpcConfig")
-            .field("addr", &self.addr)
-            .field("security", &self.security)
-            .field("request_timeout", &self.request_timeout)
-            .field("max_in_flight", &self.max_in_flight)
-            .field("admission_wait", &self.admission_wait)
-            .field("max_connections", &self.max_connections)
-            .field("max_connection_age", &self.max_connection_age)
-            .finish_non_exhaustive()
-    }
 }
 
 impl GrpcConfig {
@@ -260,19 +246,14 @@ impl fmt::Debug for GrpcListenerSecurity {
 }
 
 /// PEM material for the TLS listener; a present `client_ca` requires mTLS.
-#[derive(Clone)]
+#[derive(Clone, derive_more::Debug)]
 pub struct GrpcTlsMaterial {
+    #[debug(skip)]
     pub certificate: String,
+    #[debug(skip)]
     pub private_key: SecretString,
+    #[debug("{:?}", client_ca.is_some())]
     pub client_ca: Option<String>,
-}
-
-impl fmt::Debug for GrpcTlsMaterial {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("GrpcTlsMaterial")
-            .field("client_ca", &self.client_ca.is_some())
-            .finish_non_exhaustive()
-    }
 }
 
 const ENABLED: &str = "grpc.enabled is true";

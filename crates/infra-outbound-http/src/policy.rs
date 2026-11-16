@@ -1,4 +1,4 @@
-use std::{fmt, sync::Arc};
+use std::sync::Arc;
 
 use bytes::Bytes;
 use http::{HeaderValue, Method, Request, Uri, Version, header, uri::Scheme};
@@ -8,7 +8,8 @@ use url::Url;
 
 use crate::{BuildError, Error};
 
-#[derive(Clone)]
+#[derive(Clone, derive_more::Debug)]
+#[debug("{scheme}://{host}:{port}")]
 pub(crate) struct Origin {
     scheme: Scheme,
     host: Arc<str>,
@@ -56,12 +57,6 @@ impl Origin {
                     && authority.host().eq_ignore_ascii_case(&self.host)
                     && authority.port_u16().unwrap_or(default_port) == self.port
             })
-    }
-}
-
-impl fmt::Debug for Origin {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{}://{}:{}", self.scheme, self.host, self.port)
     }
 }
 

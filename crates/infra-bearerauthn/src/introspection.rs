@@ -220,7 +220,7 @@ impl IntrospectionVerifier {
     ) -> Result<Principal, VerificationError> {
         context.check().map_err(|_| {
             VerificationError::unavailable(VerificationReason::Provider(
-                crate::ProviderFailure::Timeout,
+                crate::ProviderFailure::Timeout.reason(),
             ))
         })?;
         let Some(cache) = &self.cache else {
@@ -291,7 +291,7 @@ impl IntrospectionVerifier {
             )
             .await
             .map_err(|failure| {
-                VerificationError::unavailable(VerificationReason::Provider(failure))
+                VerificationError::unavailable(VerificationReason::Provider(failure.reason()))
             })?;
         validate_introspection_claims(&response, &self.policy, now()?, token)
     }
@@ -741,7 +741,7 @@ mod tests {
             assert_eq!(
                 error,
                 VerificationError::unavailable(VerificationReason::Provider(
-                    ProviderFailure::Status(status.as_u16())
+                    ProviderFailure::Status(status.as_u16()).reason()
                 ))
             );
             assert_eq!(error.reason.label(), label);

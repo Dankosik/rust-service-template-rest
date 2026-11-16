@@ -8,13 +8,17 @@ use std::{
     collections::BTreeMap,
     fmt,
     num::NonZeroU32,
+    sync::{Arc, OnceLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use bytes::Bytes;
+use enum_map::{Enum, EnumMap};
+use foldhash::HashMap;
 use http::{HeaderMap, HeaderValue, Method, Request, StatusCode, Uri, header};
 use infra_jobs::{Handler, Job, JobError, JobKind, KindsBuilder, Policy};
 use infra_outbound_http::{BuildError, Client, Error as HttpError, Limits};
+use metrics::{Counter, SharedString};
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use url::Url;
@@ -108,14 +112,29 @@ fn is_admissible(destination: &Url) -> bool {
 #[derive(derive_more::Debug)]
 #[debug("Dispatcher([REDACTED])")]
 pub struct Dispatcher {
-    endpoints: foldhash::HashMap<String, Endpoint>,
+    endpoints: HashMap<Arc<str>, ConfiguredEndpoint>,
+    missing_endpoint: OnceLock<Counter>,
+}
+
+struct ConfiguredEndpoint {
+    endpoint: Endpoint,
+    metrics: EndpointMetrics,
 }
 
 impl Dispatcher {
     #[must_use]
     pub fn new(endpoints: BTreeMap<String, Endpoint>) -> Self {
+        let endpoints = endpoints
+            .into_iter()
+            .map(|(endpoint_id, endpoint)| {
+                let id: Arc<str> = Arc::from(endpoint_id);
+                let metrics = EndpointMetrics::new(SharedString::from(Arc::clone(&id)));
+                (id, ConfiguredEndpoint { endpoint, metrics })
+            })
+            .collect();
         Self {
-            endpoints: endpoints.into_iter().collect(),
+            endpoints,
+            missing_endpoint: OnceLock::new(),
         }
     }
 
@@ -138,21 +157,46 @@ impl Dispatcher {
         };
         kinds.register(policy, self)
     }
+
+    fn fail_missing_endpoint(&self, endpoint_id: &str) -> JobError {
+        tracing::info!(
+            webhook.endpoint = endpoint_id,
+            webhook.outcome = "retryable",
+            webhook.reason = "missing_endpoint",
+            http.status = Option::<u16>::None,
+            "webhook_delivery_finished"
+        );
+        // The ID is no longer configured, so it is not a label.
+        self.missing_endpoint
+            .get_or_init(|| {
+                metrics::counter!(
+                    WEBHOOK_DELIVERY_OUTCOMES_METRIC,
+                    "outcome" => "retryable",
+                    "reason" => "missing_endpoint"
+                )
+            })
+            .increment(1);
+        JobError::retryable("missing_endpoint")
+    }
 }
 
 impl Handler<Delivery> for Dispatcher {
     async fn run(&self, job: Job<Delivery>) -> Result<(), JobError> {
         let delivery = job.payload();
         let endpoint_id = delivery.endpoint_id.as_str();
-        let Some(endpoint) = self.endpoints.get(endpoint_id) else {
-            return Err(fail(endpoint_id, DeliveryFailure::MissingEndpoint));
+        let Some(ConfiguredEndpoint { endpoint, metrics }) = self.endpoints.get(endpoint_id) else {
+            return Err(self.fail_missing_endpoint(endpoint_id));
         };
         let Some(timestamp) = unix_timestamp(SystemTime::now()) else {
-            return Err(fail(endpoint_id, DeliveryFailure::ClockUnavailable));
+            return Err(fail(
+                endpoint_id,
+                metrics,
+                DeliveryFailure::ClockUnavailable,
+            ));
         };
         let message_id = job.id().to_string();
         let Some(request) = endpoint.signed_request(delivery, &message_id, timestamp) else {
-            return Err(fail(endpoint_id, DeliveryFailure::InvalidPayload));
+            return Err(fail(endpoint_id, metrics, DeliveryFailure::InvalidPayload));
         };
         let mut endpoint_gone = false;
         let response = endpoint
@@ -167,9 +211,9 @@ impl Handler<Delivery> for Dispatcher {
                 Err(HttpError::ResponseBodyTooLarge | HttpError::Transport { .. })
             )
         {
-            return Err(fail(endpoint_id, DeliveryFailure::EndpointGone));
+            return Err(fail(endpoint_id, metrics, DeliveryFailure::EndpointGone));
         }
-        classify_response(endpoint_id, response, SystemTime::now())
+        classify_response(endpoint_id, metrics, response, SystemTime::now())
     }
 }
 
@@ -221,37 +265,131 @@ pub enum EndpointError {
     Client(#[source] BuildError),
 }
 
+#[derive(Clone, Copy, Debug, Enum)]
+enum OutcomeSlot {
+    Delivered,
+    InvalidPayload,
+    ClockUnavailable,
+    ResponseStatus,
+    EndpointGone,
+    Timeout,
+    Cancelled,
+    ResponseTooLarge,
+    Transport,
+    Client,
+}
+
+struct EndpointMetrics {
+    endpoint: SharedString,
+    outcomes: EnumMap<OutcomeSlot, OnceLock<Counter>>,
+}
+
+impl EndpointMetrics {
+    fn new(endpoint: SharedString) -> Self {
+        Self {
+            endpoint,
+            outcomes: EnumMap::default(),
+        }
+    }
+
+    fn record_delivered(&self) {
+        self.outcomes[OutcomeSlot::Delivered]
+            .get_or_init(|| {
+                metrics::counter!(
+                    WEBHOOK_DELIVERY_OUTCOMES_METRIC,
+                    "endpoint" => self.endpoint.clone(),
+                    "outcome" => "delivered"
+                )
+            })
+            .increment(1);
+    }
+
+    fn record_failure(&self, failure: DeliveryFailure) {
+        self.outcomes[failure.slot()]
+            .get_or_init(|| {
+                metrics::counter!(
+                    WEBHOOK_DELIVERY_OUTCOMES_METRIC,
+                    "endpoint" => self.endpoint.clone(),
+                    "outcome" => failure.outcome(),
+                    "reason" => failure.reason()
+                )
+            })
+            .increment(1);
+    }
+}
+
 #[derive(Clone, Copy)]
 enum DeliveryFailure {
     InvalidPayload,
-    MissingEndpoint,
     ClockUnavailable,
     Status(StatusCode),
     EndpointGone,
-    Exchange(&'static str),
+    Timeout,
+    Cancelled,
+    ResponseTooLarge,
+    Transport,
+    Client,
 }
 
 impl DeliveryFailure {
+    /// Map an HTTP exchange error to its log and metric failure. An error can
+    /// arrive after the client has received response headers, and the receiver
+    /// may already have processed the request.
+    ///
+    /// An invalid target stays retryable, like a missing endpoint: each
+    /// endpoint's client is built for its own destination, so only a
+    /// configuration fix and a worker restart can repair it, and retries keep
+    /// the delivery until then.
+    const fn from_exchange(error: &HttpError) -> Self {
+        match error {
+            HttpError::Timeout => Self::Timeout,
+            HttpError::Cancelled => Self::Cancelled,
+            HttpError::ResponseBodyTooLarge => Self::ResponseTooLarge,
+            HttpError::Transport { .. } => Self::Transport,
+            HttpError::InvalidTarget | HttpError::DispatchRefused => Self::Client,
+        }
+    }
+
+    const fn slot(self) -> OutcomeSlot {
+        match self {
+            Self::InvalidPayload => OutcomeSlot::InvalidPayload,
+            Self::ClockUnavailable => OutcomeSlot::ClockUnavailable,
+            Self::Status(_) => OutcomeSlot::ResponseStatus,
+            Self::EndpointGone => OutcomeSlot::EndpointGone,
+            Self::Timeout => OutcomeSlot::Timeout,
+            Self::Cancelled => OutcomeSlot::Cancelled,
+            Self::ResponseTooLarge => OutcomeSlot::ResponseTooLarge,
+            Self::Transport => OutcomeSlot::Transport,
+            Self::Client => OutcomeSlot::Client,
+        }
+    }
+
     const fn reason(self) -> &'static str {
         match self {
             Self::InvalidPayload => "invalid_payload",
-            Self::MissingEndpoint => "missing_endpoint",
             Self::ClockUnavailable => "clock_unavailable",
             Self::Status(_) => "response_status",
             // The receiver asks for no more deliveries: disable or remove its
             // static binding and restart workers.
             Self::EndpointGone => "endpoint_gone",
-            Self::Exchange(reason) => reason,
+            Self::Timeout => "timeout",
+            Self::Cancelled => "cancelled",
+            Self::ResponseTooLarge => "response_too_large",
+            Self::Transport => "transport",
+            Self::Client => "client",
         }
     }
 
     const fn is_permanent(self) -> bool {
         match self {
             Self::InvalidPayload | Self::EndpointGone => true,
-            Self::MissingEndpoint
-            | Self::ClockUnavailable
+            Self::ClockUnavailable
             | Self::Status(_)
-            | Self::Exchange(_) => false,
+            | Self::Timeout
+            | Self::Cancelled
+            | Self::ResponseTooLarge
+            | Self::Transport
+            | Self::Client => false,
         }
     }
 
@@ -268,9 +406,12 @@ impl DeliveryFailure {
             Self::Status(status) => Some(status),
             Self::EndpointGone => Some(StatusCode::GONE),
             Self::InvalidPayload
-            | Self::MissingEndpoint
             | Self::ClockUnavailable
-            | Self::Exchange(_) => None,
+            | Self::Timeout
+            | Self::Cancelled
+            | Self::ResponseTooLarge
+            | Self::Transport
+            | Self::Client => None,
         }
     }
 }
@@ -281,23 +422,6 @@ impl fmt::Display for DeliveryFailure {
             Self::Status(status) => write!(formatter, "response_status_{}", status.as_u16()),
             _ => formatter.write_str(self.reason()),
         }
-    }
-}
-
-/// Map an HTTP exchange error to its log and metric reason. An error can arrive
-/// after the client has received response headers, and the receiver may already
-/// have processed the request.
-///
-/// An invalid target stays retryable, like a missing endpoint: each endpoint's
-/// client is built for its own destination, so only a configuration fix and a
-/// worker restart can repair it, and retries keep the delivery until then.
-const fn exchange_reason(error: &HttpError) -> &'static str {
-    match error {
-        HttpError::Timeout => "timeout",
-        HttpError::Cancelled => "cancelled",
-        HttpError::ResponseBodyTooLarge => "response_too_large",
-        HttpError::Transport { .. } => "transport",
-        HttpError::InvalidTarget | HttpError::DispatchRefused => "client",
     }
 }
 
@@ -328,6 +452,7 @@ impl Endpoint {
 
 fn classify_response(
     endpoint_id: &str,
+    metrics: &EndpointMetrics,
     response: Result<http::Response<Bytes>, HttpError>,
     response_time: SystemTime,
 ) -> Result<(), JobError> {
@@ -339,20 +464,15 @@ fn classify_response(
                 http.status = response.status().as_u16(),
                 "webhook_delivery_finished"
             );
-            metrics::counter!(
-                WEBHOOK_DELIVERY_OUTCOMES_METRIC,
-                "endpoint" => endpoint_id.to_owned(),
-                "outcome" => "delivered"
-            )
-            .increment(1);
+            metrics.record_delivered();
             Ok(())
         }
         Ok(response) if response.status() == StatusCode::GONE => {
-            Err(fail(endpoint_id, DeliveryFailure::EndpointGone))
+            Err(fail(endpoint_id, metrics, DeliveryFailure::EndpointGone))
         }
         Ok(response) => {
             let failure = DeliveryFailure::Status(response.status());
-            record_failure(endpoint_id, failure);
+            record_failure(endpoint_id, metrics, failure);
             // The capped Retry-After is far inside the jobs delay limit; an
             // invalid delay would still fall back to jobs backoff.
             Err(retry_after(response.headers(), response_time)
@@ -361,13 +481,14 @@ fn classify_response(
         }
         Err(error) => Err(fail(
             endpoint_id,
-            DeliveryFailure::Exchange(exchange_reason(&error)),
+            metrics,
+            DeliveryFailure::from_exchange(&error),
         )),
     }
 }
 
-fn fail(endpoint_id: &str, failure: DeliveryFailure) -> JobError {
-    record_failure(endpoint_id, failure);
+fn fail(endpoint_id: &str, metrics: &EndpointMetrics, failure: DeliveryFailure) -> JobError {
+    record_failure(endpoint_id, metrics, failure);
     if failure.is_permanent() {
         JobError::permanent(failure)
     } else {
@@ -375,7 +496,7 @@ fn fail(endpoint_id: &str, failure: DeliveryFailure) -> JobError {
     }
 }
 
-fn record_failure(endpoint_id: &str, failure: DeliveryFailure) {
+fn record_failure(endpoint_id: &str, metrics: &EndpointMetrics, failure: DeliveryFailure) {
     let outcome = failure.outcome();
     let reason = failure.reason();
     let status = failure.status().map(|status| status.as_u16());
@@ -396,23 +517,7 @@ fn record_failure(endpoint_id: &str, failure: DeliveryFailure) {
             "webhook_delivery_finished"
         );
     }
-    if matches!(failure, DeliveryFailure::MissingEndpoint) {
-        // The ID is no longer configured, so it is not a label.
-        metrics::counter!(
-            WEBHOOK_DELIVERY_OUTCOMES_METRIC,
-            "outcome" => outcome,
-            "reason" => reason
-        )
-        .increment(1);
-    } else {
-        metrics::counter!(
-            WEBHOOK_DELIVERY_OUTCOMES_METRIC,
-            "endpoint" => endpoint_id.to_owned(),
-            "outcome" => outcome,
-            "reason" => reason
-        )
-        .increment(1);
-    }
+    metrics.record_failure(failure);
 }
 
 fn retry_after(headers: &HeaderMap, now: SystemTime) -> Option<Duration> {
@@ -580,36 +685,51 @@ mod tests {
 
     #[test]
     fn each_attempt_is_counted_by_endpoint_outcome_and_reason_without_the_status() {
+        use metrics_util::debugging::DebugValue;
+        use std::collections::BTreeMap;
+
         let response = |status: u16| {
             Ok(http::Response::builder()
                 .status(status)
                 .body(bytes::Bytes::new())
                 .unwrap())
         };
+        let metrics = super::EndpointMetrics::new("partner".into());
+        let dispatcher = super::Dispatcher::new(BTreeMap::new());
         let recorder = DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
         metrics::with_local_recorder(&recorder, || {
             for exchange in [
                 response(204),
+                response(200),
                 response(503),
                 response(410),
                 Err(super::HttpError::Timeout),
             ] {
-                let _ = super::classify_response("partner", exchange, UNIX_EPOCH);
+                let _ = super::classify_response("partner", &metrics, exchange, UNIX_EPOCH);
             }
+            let _ = dispatcher.fail_missing_endpoint("removed");
+            let _ = dispatcher.fail_missing_endpoint("removed");
         });
-        let labels: Vec<Vec<(String, String)>> = snapshotter
+        let mut samples: Vec<(Vec<(String, String)>, u64)> = snapshotter
             .snapshot()
             .into_vec()
-            .iter()
-            .map(|(key, ..)| {
+            .into_iter()
+            .map(|(key, _, _, value)| {
                 let key = key.key();
                 assert_eq!(key.name(), super::WEBHOOK_DELIVERY_OUTCOMES_METRIC);
-                key.labels()
-                    .map(|label| (label.key().to_owned(), label.value().to_owned()))
-                    .collect()
+                let DebugValue::Counter(count) = value else {
+                    panic!("expected counter, got {value:?}");
+                };
+                (
+                    key.labels()
+                        .map(|label| (label.key().to_owned(), label.value().to_owned()))
+                        .collect(),
+                    count,
+                )
             })
             .collect();
+        samples.sort();
         let failure = |outcome: &str, reason: &str| {
             vec![
                 ("endpoint".to_owned(), "partner".to_owned()),
@@ -617,17 +737,35 @@ mod tests {
                 ("reason".to_owned(), reason.to_owned()),
             ]
         };
-        assert_eq!(
-            labels,
-            [
+        let mut expected = vec![
+            (
                 vec![
                     ("endpoint".to_owned(), "partner".to_owned()),
                     ("outcome".to_owned(), "delivered".to_owned()),
                 ],
-                failure("retryable", "response_status"),
-                failure("permanent", "endpoint_gone"),
-                failure("retryable", "timeout"),
-            ]
-        );
+                2,
+            ),
+            (failure("retryable", "response_status"), 1),
+            (failure("permanent", "endpoint_gone"), 1),
+            (failure("retryable", "timeout"), 1),
+            (
+                vec![
+                    ("outcome".to_owned(), "retryable".to_owned()),
+                    ("reason".to_owned(), "missing_endpoint".to_owned()),
+                ],
+                2,
+            ),
+        ];
+        expected.sort();
+        assert_eq!(samples, expected);
+
+        // A second dispatcher in its own local recorder binds its own lazy handles.
+        let second_recorder = DebuggingRecorder::new();
+        let second_snapshotter = second_recorder.snapshotter();
+        let second_dispatcher = super::Dispatcher::new(BTreeMap::new());
+        metrics::with_local_recorder(&second_recorder, || {
+            let _ = second_dispatcher.fail_missing_endpoint("removed");
+        });
+        assert_eq!(second_snapshotter.snapshot().into_vec().len(), 1);
     }
 }

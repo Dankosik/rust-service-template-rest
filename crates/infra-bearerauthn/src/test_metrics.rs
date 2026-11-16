@@ -12,6 +12,7 @@ use tracing_subscriber::{
 
 #[derive(Default)]
 struct BufferedMetrics {
+    registered_counters: Vec<metrics::Key>,
     counters: Vec<(metrics::Key, u64)>,
     histograms: Vec<metrics::Key>,
     acquisitions: Vec<f64>,
@@ -66,10 +67,26 @@ impl Diagnostics {
         let mut buffered = self.metrics.lock().unwrap();
         for (key, _, _, value) in snapshot {
             match value {
-                DebugValue::Counter(count) if count > 0 => {
-                    buffered.counters.push((key.key().clone(), count));
+                DebugValue::Counter(count) => {
+                    if !buffered
+                        .registered_counters
+                        .iter()
+                        .any(|known| known == key.key())
+                    {
+                        buffered.registered_counters.push(key.key().clone());
+                    }
+                    if count > 0 {
+                        if let Some((_, total)) = buffered
+                            .counters
+                            .iter_mut()
+                            .find(|(known, _)| known == key.key())
+                        {
+                            *total += count;
+                        } else {
+                            buffered.counters.push((key.key().clone(), count));
+                        }
+                    }
                 }
-                DebugValue::Counter(_) => {}
                 DebugValue::Gauge(sample) => {
                     assert_eq!(
                         key.key().name(),
@@ -89,6 +106,14 @@ impl Diagnostics {
             }
         }
         buffered
+    }
+
+    #[allow(
+        dead_code,
+        reason = "the introspection-only profile does not assert eager counter registration"
+    )]
+    pub(crate) fn registered_counters(&self) -> Vec<metrics::Key> {
+        self.flush_metrics().registered_counters.clone()
     }
 
     pub(crate) fn take_counters(&self) -> Vec<(metrics::Key, u64)> {

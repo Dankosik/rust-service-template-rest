@@ -21,6 +21,7 @@ default = []
 test-support = []
 
 [dependencies]
+derive_more = { workspace = true, features = ["debug"] }
 operation-context = { workspace = true }
 http = { workspace = true }
 bytes = { workspace = true, features = ["std"] }

@@ -32,8 +32,9 @@ mod test_metrics;
 #[path = "../../../test/fixtures/tls.rs"]
 mod tls;
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
+use enum_map::EnumMap;
 use operation_context::OperationContext;
 
 struct JsonObject<T>(T);
@@ -73,7 +74,7 @@ pub use jwt::{JwtOptions, RefreshTask, TokenProfile, prepare_jwt};
 pub use principal::{Actor, ClaimAccessError, Principal};
 pub use provider::{EndpointUrl, HISTOGRAMS, IssuerUrl, ProviderFailure};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, enum_map::Enum, thiserror::Error)]
 pub enum Failure {
     #[error("bearer authentication is required")]
     Missing,
@@ -159,7 +160,7 @@ impl PreparationError {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, enum_map::Enum)]
 pub(crate) enum VerificationReason {
     MissingClaim,
     MalformedClaims,
@@ -178,7 +179,7 @@ pub(crate) enum VerificationReason {
     Refresh,
     // template:end oidc-jwt:authn-jwt-reasons
     // template:begin oidc-introspection:authn-introspection-reasons
-    Provider(ProviderFailure),
+    Provider(provider::ProviderReason),
     Inactive,
     Capacity,
     // template:end oidc-introspection:authn-introspection-reasons
@@ -247,7 +248,7 @@ fn unix_time(now: std::time::SystemTime) -> Result<std::time::Duration, Verifica
 const TOKEN_VERIFICATIONS_METRIC: &str = "authn_token_verifications_total";
 
 fn record_verification(
-    counters: &SuccessCounters,
+    counters: &VerificationCounters,
     result: Result<Principal, VerificationError>,
 ) -> Result<Principal, Failure> {
     let error = match result {
@@ -259,22 +260,30 @@ fn record_verification(
     };
     let mode = counters.mode;
     let reason = error.reason.label();
-    metrics::counter!(TOKEN_VERIFICATIONS_METRIC, "mode" => mode, "outcome" => "failure", "reason" => reason)
+    counters.refused[error.reason]
+        .get_or_init(|| {
+            metrics::counter!(
+                TOKEN_VERIFICATIONS_METRIC,
+                "mode" => mode,
+                "outcome" => "failure",
+                "reason" => reason
+            )
+        })
         .increment(1);
     tracing::debug!(mode, reason, "authn_verification_failed");
     Err(error.failure)
 }
 
-/// Success counters, registered once at preparation: a success is the hot
-/// path, and a registry lookup per request costs more than the increment.
+/// Prepared success handles and lazy refusal handles per [`Verifier`].
 /// Bootstrap installs the recorder before it prepares a verifier.
-struct SuccessCounters {
+struct VerificationCounters {
     mode: &'static str,
     verified: metrics::Counter,
-    transport: authenticate::TransportSuccessCounters,
+    refused: EnumMap<VerificationReason, OnceLock<metrics::Counter>>,
+    transport: authenticate::TransportCounters,
 }
 
-impl SuccessCounters {
+impl VerificationCounters {
     fn new(mode: &'static str) -> Arc<Self> {
         metrics::describe_counter!(
             TOKEN_VERIFICATIONS_METRIC,
@@ -283,7 +292,8 @@ impl SuccessCounters {
         Arc::new(Self {
             mode,
             verified: metrics::counter!(TOKEN_VERIFICATIONS_METRIC, "mode" => mode, "outcome" => "success", "reason" => "verified"),
-            transport: authenticate::TransportSuccessCounters::new(),
+            refused: EnumMap::default(),
+            transport: authenticate::TransportCounters::new(),
         })
     }
 }
@@ -327,7 +337,7 @@ pub mod test_support {
 #[debug("Verifier([REDACTED])")]
 pub struct Verifier {
     engine: Engine,
-    counters: Arc<SuccessCounters>,
+    counters: Arc<VerificationCounters>,
 }
 
 #[derive(Clone)]
@@ -352,7 +362,7 @@ impl Verifier {
         };
         Self {
             engine,
-            counters: SuccessCounters::new(mode),
+            counters: VerificationCounters::new(mode),
         }
     }
 

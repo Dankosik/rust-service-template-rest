@@ -1,17 +1,19 @@
 use std::cell::Cell;
+use std::collections::BTreeSet;
 use std::io::Write;
 use std::num::NonZeroU32;
 use std::time::Duration;
 
-use infra_jobs::StartupError;
 use infra_jobs::operator::{
-    self as jobs, InputError, Inspection, InspectionMode, InspectionResult, JobSnapshot,
-    OperatorError, RecoveryTarget,
+    self as jobs, FailureReason, InputError, Inspection, InspectionMode, InspectionResult,
+    JobSnapshot, OperatorError, RecoveryTarget,
 };
+use infra_jobs::{JobId, StartupError};
 use infra_postgres::{CloseOutcome, ConnectError, Dsn, Isolation, PgPool, TxOptions};
 use migrate::HistoryError;
 use secrecy::ExposeSecret;
-use serde_json::{Value, json};
+use serde::Serialize;
+use serde_with::{DisplayFromStr, serde_as, skip_serializing_none};
 use service_config::{LoadOptions, PostgresConfig, process_failure};
 
 use crate::cli::{OperatorCommand, RecoveryArgs};
@@ -63,28 +65,18 @@ impl Request {
         }
     }
 
-    fn receipt(&self, outcome: Outcome) -> Value {
-        let mut body = match self {
-            Self::Inspect(query) => {
-                let mut body = json!({});
-                if let Some(id) = query.job_id() {
-                    body["id"] = id.to_string().into();
-                }
-                if let Some(kinds) = query.handled_kinds() {
-                    body["handled_kinds"] = json!(kinds);
-                }
-                body
-            }
-            Self::Redrive(target) | Self::Discard(target) => json!({
-                "id": target.id().to_string(),
-                "kind": target.kind(),
-                "expected_version": target.version().to_string(),
-            }),
-        };
-        body["action"] = self.action().into();
-        body["outcome"] = outcome.as_str().into();
-        body["schema_version"] = 1.into();
-        body
+    fn fields(&self) -> RequestFields<'_> {
+        match self {
+            Self::Inspect(query) => RequestFields::Inspect {
+                id: query.job_id(),
+                handled_kinds: query.handled_kinds(),
+            },
+            Self::Redrive(target) | Self::Discard(target) => RequestFields::Recovery {
+                id: target.id(),
+                kind: target.kind(),
+                expected_version: target.version(),
+            },
+        }
     }
 
     /// The operation was never invoked, so a mutation certainly did not commit.
@@ -96,7 +88,7 @@ impl Request {
                 Outcome::Unavailable
             },
             cause: cause.as_str(),
-            detail: FailureDetail::None,
+            detail: None,
         }
     }
 
@@ -104,7 +96,7 @@ impl Request {
     /// refusal, since each one asks the operator for a different remedy.
     fn refused(&self, cause: Cause, detail: &'static str) -> FailureReceipt {
         FailureReceipt {
-            detail: FailureDetail::Admission(detail),
+            detail: Some(FailureDetail::Admission { detail }),
             ..self.failed_before_start(cause)
         }
     }
@@ -118,7 +110,7 @@ impl Request {
                 Outcome::Unavailable
             },
             cause: cause.as_str(),
-            detail: FailureDetail::None,
+            detail: None,
         }
     }
 
@@ -139,7 +131,9 @@ impl Request {
         FailureReceipt {
             outcome,
             cause: error.cause(),
-            detail: FailureDetail::Database(error.sqlstate().map(std::borrow::Cow::into_owned)),
+            detail: Some(FailureDetail::Database {
+                sqlstate: error.sqlstate().map(std::borrow::Cow::into_owned),
+            }),
         }
     }
 
@@ -176,7 +170,8 @@ fn recovery_target(args: &RecoveryArgs) -> Result<RecoveryTarget, InputError> {
     RecoveryTarget::try_new(&args.id, &args.kind, &args.version)
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 enum Outcome {
     Ok,
     Found,
@@ -188,23 +183,6 @@ enum Outcome {
     Conflict,
     Failed,
     Unknown,
-}
-
-impl Outcome {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Ok => "ok",
-            Self::Found => "found",
-            Self::Missing => "missing",
-            Self::Unavailable => "unavailable",
-            Self::Redriven => "redriven",
-            Self::Discarded => "discarded",
-            Self::Stale => "stale",
-            Self::Conflict => "conflict",
-            Self::Failed => "failed",
-            Self::Unknown => "unknown",
-        }
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -247,13 +225,14 @@ enum Executed {
 struct FailureReceipt {
     outcome: Outcome,
     cause: &'static str,
-    detail: FailureDetail,
+    detail: Option<FailureDetail>,
 }
 
+#[derive(Serialize)]
+#[serde(untagged)]
 enum FailureDetail {
-    None,
-    Admission(&'static str),
-    Database(Option<String>),
+    Admission { detail: &'static str },
+    Database { sqlstate: Option<String> },
 }
 
 struct Report {
@@ -271,62 +250,123 @@ impl From<FailureReceipt> for Report {
 }
 
 impl Report {
-    fn into_receipt(self, request: &Request) -> Value {
-        let mut body = match self.result {
-            Ok(Executed::Inspected(InspectionResult::One { observed_at, item })) => {
-                let outcome = if item.is_some() {
+    fn receipt<'a>(&'a self, request: &'a Request) -> Receipt<'a> {
+        let (outcome, body) = match &self.result {
+            Ok(Executed::Inspected(InspectionResult::One { observed_at, item })) => (
+                if item.is_some() {
                     Outcome::Found
                 } else {
                     Outcome::Missing
-                };
-                let mut body = request.receipt(outcome);
-                body["observed_at"] = observed_at.into();
-                body["item"] = json!(item.as_ref().map(snapshot));
-                body
-            }
+                },
+                Some(ReceiptBody::One {
+                    observed_at,
+                    item: item.as_ref().map(Snapshot::from),
+                }),
+            ),
             Ok(Executed::Inspected(InspectionResult::Page {
                 observed_at,
                 scanned,
                 items,
                 next_cursor,
-            })) => {
-                let mut body = request.receipt(Outcome::Ok);
-                body["observed_at"] = observed_at.into();
-                body["scanned"] = scanned.into();
-                body["items"] = items.iter().map(snapshot).collect();
-                body["complete"] = next_cursor.is_none().into();
-                body["next_cursor"] = json!(next_cursor);
-                body
-            }
-            Ok(Executed::Redriven { new_version }) => {
-                let mut body = request.receipt(Outcome::Redriven);
-                body["new_version"] = new_version.into();
-                body
-            }
-            Ok(Executed::Discarded) => request.receipt(Outcome::Discarded),
+            })) => (
+                Outcome::Ok,
+                Some(ReceiptBody::Page {
+                    observed_at,
+                    scanned: *scanned,
+                    items: items.iter().map(Snapshot::from).collect(),
+                    complete: next_cursor.is_none(),
+                    next_cursor: next_cursor.as_deref(),
+                }),
+            ),
+            Ok(Executed::Redriven { new_version }) => (
+                Outcome::Redriven,
+                Some(ReceiptBody::Redriven { new_version }),
+            ),
+            Ok(Executed::Discarded) => (Outcome::Discarded, None),
             Err(FailureReceipt {
                 outcome,
                 cause,
                 detail,
-            }) => {
-                let mut body = request.receipt(outcome);
-                body["cause"] = cause.into();
-                if outcome == Outcome::Unknown {
-                    body["next_action"] = "inspect the same id before any deliberate retry".into();
-                }
-                match detail {
-                    FailureDetail::None => {}
-                    FailureDetail::Admission(detail) => body["detail"] = detail.into(),
-                    FailureDetail::Database(sqlstate) => body["sqlstate"] = json!(sqlstate),
-                }
-                body
-            }
+            }) => (
+                *outcome,
+                Some(ReceiptBody::Failed(FailureFields {
+                    cause,
+                    next_action: (*outcome == Outcome::Unknown)
+                        .then_some("inspect the same id before any deliberate retry"),
+                    detail: detail.as_ref(),
+                })),
+            ),
         };
-        if self.cleanup_incomplete {
-            body["cleanup"] = "incomplete".into();
+        Receipt {
+            schema_version: 1,
+            action: request.action(),
+            outcome,
+            request: request.fields(),
+            body,
+            cleanup: self.cleanup_incomplete.then_some("incomplete"),
         }
-        body
     }
+}
+
+#[skip_serializing_none]
+#[derive(Serialize)]
+struct Receipt<'a> {
+    schema_version: u8,
+    action: &'static str,
+    outcome: Outcome,
+    #[serde(flatten)]
+    request: RequestFields<'a>,
+    #[serde(flatten)]
+    body: Option<ReceiptBody<'a>>,
+    cleanup: Option<&'static str>,
+}
+
+#[serde_as]
+#[skip_serializing_none]
+#[derive(Serialize)]
+#[serde(untagged)]
+enum RequestFields<'a> {
+    Inspect {
+        #[serde_as(as = "Option<DisplayFromStr>")]
+        id: Option<JobId>,
+        handled_kinds: Option<&'a BTreeSet<String>>,
+    },
+    Recovery {
+        #[serde_as(as = "DisplayFromStr")]
+        id: JobId,
+        kind: &'a str,
+        #[serde_as(as = "DisplayFromStr")]
+        expected_version: i64,
+    },
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum ReceiptBody<'a> {
+    One {
+        observed_at: &'a str,
+        item: Option<Snapshot<'a>>,
+    },
+    Page {
+        observed_at: &'a str,
+        scanned: u16,
+        items: Vec<Snapshot<'a>>,
+        complete: bool,
+        next_cursor: Option<&'a str>,
+    },
+    Redriven {
+        new_version: &'a str,
+    },
+    Failed(FailureFields<'a>),
+}
+
+#[skip_serializing_none]
+#[derive(Serialize)]
+struct FailureFields<'a> {
+    cause: &'static str,
+    next_action: Option<&'static str>,
+    #[serde(flatten)]
+    detail: Option<&'a FailureDetail>,
 }
 
 #[expect(
@@ -345,7 +385,7 @@ pub(crate) fn run(options: &LoadOptions, request: &Request) -> bool {
         }
     };
     let success = report.result.is_ok() && !report.cleanup_incomplete;
-    let receipt = report.into_receipt(request);
+    let receipt = report.receipt(request);
     let mut stdout = std::io::stdout().lock();
     if serde_json::to_writer(&mut stdout, &receipt).is_err()
         || writeln!(stdout).is_err()
@@ -499,31 +539,280 @@ async fn bounded<T>(
     }
 }
 
-fn snapshot(item: &JobSnapshot) -> Value {
-    let JobSnapshot {
-        id,
-        kind,
-        state,
-        version,
-        attempts,
-        failure_reason,
-        created_at,
-        not_before,
-        claim_expires_at,
-        finished_at,
-        recovery_count,
-    } = item;
-    json!({
-        "id": id.to_string(),
-        "kind": kind,
-        "state": state.as_str(),
-        "version": version,
-        "attempts": attempts,
-        "failure_reason": failure_reason.as_ref().map(|reason| reason.as_str()),
-        "created_at": created_at,
-        "not_before": not_before,
-        "claim_expires_at": claim_expires_at,
-        "finished_at": finished_at,
-        "recovery_count": recovery_count,
-    })
+#[serde_as]
+#[derive(Serialize)]
+struct Snapshot<'a> {
+    #[serde_as(as = "DisplayFromStr")]
+    id: JobId,
+    kind: &'a str,
+    state: &'static str,
+    version: &'a str,
+    attempts: i32,
+    failure_reason: Option<&'static str>,
+    created_at: &'a str,
+    not_before: &'a str,
+    claim_expires_at: Option<&'a str>,
+    finished_at: Option<&'a str>,
+    recovery_count: i32,
+}
+
+impl<'a> From<&'a JobSnapshot> for Snapshot<'a> {
+    fn from(item: &'a JobSnapshot) -> Self {
+        let JobSnapshot {
+            id,
+            kind,
+            state,
+            version,
+            attempts,
+            failure_reason,
+            created_at,
+            not_before,
+            claim_expires_at,
+            finished_at,
+            recovery_count,
+        } = item;
+        Self {
+            id: *id,
+            kind,
+            state: state.as_str(),
+            version,
+            attempts: *attempts,
+            failure_reason: failure_reason.map(FailureReason::as_str),
+            created_at,
+            not_before,
+            claim_expires_at: claim_expires_at.as_deref(),
+            finished_at: finished_at.as_deref(),
+            recovery_count: *recovery_count,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use infra_jobs::operator::JobState;
+    use serde_json::{Value, json};
+
+    use super::*;
+
+    const ID: &str = "00000000-0000-4000-8000-000000000001";
+    const OBSERVED_AT: &str = "2026-11-16T00:00:00.000000Z";
+
+    fn render(request: &Request, report: &Report) -> Value {
+        let mut out = Vec::new();
+        serde_json::to_writer(&mut out, &report.receipt(request)).unwrap();
+        serde_json::from_slice(&out).unwrap()
+    }
+
+    fn sample_snapshot() -> JobSnapshot {
+        let id = Inspection::one(ID).unwrap().job_id().unwrap();
+        JobSnapshot {
+            id,
+            kind: "jobs.sample".into(),
+            state: JobState::Failed,
+            version: "9007199254740993".into(),
+            attempts: 3,
+            failure_reason: Some(FailureReason::Exhausted),
+            created_at: "2026-11-15T00:00:00.000000Z".into(),
+            not_before: "2026-11-15T00:01:00.000000Z".into(),
+            claim_expires_at: None,
+            finished_at: Some("2026-11-15T00:02:00.000000Z".into()),
+            recovery_count: 1,
+        }
+    }
+
+    #[test]
+    fn inspection_receipts_preserve_explicit_nulls_and_omit_absent_request_fields() {
+        let one = Request::Inspect(Inspection::one(ID).unwrap());
+        let found = Report {
+            result: Ok(Executed::Inspected(InspectionResult::One {
+                observed_at: OBSERVED_AT.into(),
+                item: Some(sample_snapshot()),
+            })),
+            cleanup_incomplete: false,
+        };
+        assert_eq!(
+            render(&one, &found),
+            json!({
+                "schema_version": 1,
+                "action": "inspect",
+                "outcome": "found",
+                "id": ID,
+                "observed_at": OBSERVED_AT,
+                "item": {
+                    "id": ID,
+                    "kind": "jobs.sample",
+                    "state": "failed",
+                    "version": "9007199254740993",
+                    "attempts": 3,
+                    "failure_reason": "exhausted",
+                    "created_at": "2026-11-15T00:00:00.000000Z",
+                    "not_before": "2026-11-15T00:01:00.000000Z",
+                    "claim_expires_at": null,
+                    "finished_at": "2026-11-15T00:02:00.000000Z",
+                    "recovery_count": 1,
+                },
+            })
+        );
+
+        let missing = Report {
+            result: Ok(Executed::Inspected(InspectionResult::One {
+                observed_at: OBSERVED_AT.into(),
+                item: None,
+            })),
+            cleanup_incomplete: true,
+        };
+        assert_eq!(
+            render(&one, &missing),
+            json!({
+                "schema_version": 1,
+                "action": "inspect",
+                "outcome": "missing",
+                "id": ID,
+                "observed_at": OBSERVED_AT,
+                "item": null,
+                "cleanup": "incomplete",
+            })
+        );
+
+        let unhandled = Request::Inspect(Inspection::unhandled("zebra,alpha", None, 10).unwrap());
+        let page = Report {
+            result: Ok(Executed::Inspected(InspectionResult::Page {
+                observed_at: OBSERVED_AT.into(),
+                scanned: 2,
+                items: Vec::new(),
+                next_cursor: None,
+            })),
+            cleanup_incomplete: false,
+        };
+        assert_eq!(
+            render(&unhandled, &page),
+            json!({
+                "schema_version": 1,
+                "action": "unhandled",
+                "outcome": "ok",
+                "handled_kinds": ["alpha", "zebra"],
+                "observed_at": OBSERVED_AT,
+                "scanned": 2,
+                "items": [],
+                "complete": true,
+                "next_cursor": null,
+            })
+        );
+    }
+
+    #[test]
+    fn recovery_receipts_serialize_versions_as_strings() {
+        let target = RecoveryTarget::try_new(ID, "jobs.sample", "9007199254740993").unwrap();
+        let redrive = Request::Redrive(target.clone());
+        let redriven = Report {
+            result: Ok(Executed::Redriven {
+                new_version: "9007199254740994".into(),
+            }),
+            cleanup_incomplete: false,
+        };
+        assert_eq!(
+            render(&redrive, &redriven),
+            json!({
+                "schema_version": 1,
+                "action": "redrive",
+                "outcome": "redriven",
+                "id": ID,
+                "kind": "jobs.sample",
+                "expected_version": "9007199254740993",
+                "new_version": "9007199254740994",
+            })
+        );
+
+        let discard = Request::Discard(target);
+        let discarded = Report {
+            result: Ok(Executed::Discarded),
+            cleanup_incomplete: false,
+        };
+        assert_eq!(
+            render(&discard, &discarded),
+            json!({
+                "schema_version": 1,
+                "action": "discard",
+                "outcome": "discarded",
+                "id": ID,
+                "kind": "jobs.sample",
+                "expected_version": "9007199254740993",
+            })
+        );
+    }
+
+    #[test]
+    fn failure_receipts_match_contract_variants() {
+        let target = RecoveryTarget::try_new(ID, "jobs.sample", "9007199254740993").unwrap();
+        let redrive = Request::Redrive(target);
+
+        let refused: Report = redrive
+            .refused(Cause::SessionAdmission, "not_writable")
+            .into();
+        assert_eq!(
+            render(&redrive, &refused),
+            json!({
+                "schema_version": 1,
+                "action": "redrive",
+                "outcome": "failed",
+                "id": ID,
+                "kind": "jobs.sample",
+                "expected_version": "9007199254740993",
+                "cause": "session_admission",
+                "detail": "not_writable",
+            })
+        );
+
+        let unknown: Report = redrive.failed_after_start(Cause::Timeout).into();
+        assert_eq!(
+            render(&redrive, &unknown),
+            json!({
+                "schema_version": 1,
+                "action": "redrive",
+                "outcome": "unknown",
+                "id": ID,
+                "kind": "jobs.sample",
+                "expected_version": "9007199254740993",
+                "cause": "timeout",
+                "next_action": "inspect the same id before any deliberate retry",
+            })
+        );
+
+        let stale: Report = redrive.database_error(&OperatorError::Stale).into();
+        assert_eq!(
+            render(&redrive, &stale),
+            json!({
+                "schema_version": 1,
+                "action": "redrive",
+                "outcome": "stale",
+                "id": ID,
+                "kind": "jobs.sample",
+                "expected_version": "9007199254740993",
+                "cause": "stale",
+                "sqlstate": null,
+            })
+        );
+
+        let sqlstate_failure: Report = FailureReceipt {
+            outcome: Outcome::Failed,
+            cause: "database",
+            detail: Some(FailureDetail::Database {
+                sqlstate: Some("57014".into()),
+            }),
+        }
+        .into();
+        assert_eq!(
+            render(&redrive, &sqlstate_failure),
+            json!({
+                "schema_version": 1,
+                "action": "redrive",
+                "outcome": "failed",
+                "id": ID,
+                "kind": "jobs.sample",
+                "expected_version": "9007199254740993",
+                "cause": "database",
+                "sqlstate": "57014",
+            })
+        );
+    }
 }

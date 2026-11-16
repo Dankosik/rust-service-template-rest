@@ -16,7 +16,6 @@
 //! work a second time. A decision in step 1 alone runs no work, and a live
 //! record is never replaced, so it needs no second read.
 
-use std::fmt;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -71,22 +70,13 @@ impl CallerKind {
     }
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, derive_more::Debug)]
 pub struct CallerIdentity {
+    #[debug("\"[REDACTED]\"")]
     pub issuer: String,
     pub kind: CallerKind,
+    #[debug("\"[REDACTED]\"")]
     pub value: String,
-}
-
-impl fmt::Debug for CallerIdentity {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("CallerIdentity")
-            .field("issuer", &"[REDACTED]")
-            .field("kind", &self.kind)
-            .field("value", &"[REDACTED]")
-            .finish()
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, sqlx::Type)]
@@ -523,8 +513,9 @@ mod tests {
             kind: CallerKind::Subject,
             value: "secret-subject".into(),
         };
-        let debug = format!("{caller:?}");
-        assert!(!debug.contains("issuer.example"));
-        assert!(!debug.contains("secret-subject"));
+        assert_eq!(
+            format!("{caller:?}"),
+            r#"CallerIdentity { issuer: "[REDACTED]", kind: Subject, value: "[REDACTED]" }"#
+        );
     }
 }

@@ -30,6 +30,7 @@ mime = { workspace = true }
 axum-tracing-opentelemetry = { workspace = true, features = ["tracing_level_info"] }
 health = { workspace = true }
 # template:begin inbound-webhooks:http-webhooks-dependency
+derive_more = { workspace = true, features = ["debug"] }
 infra-webhooks = { workspace = true }
 # template:end inbound-webhooks:http-webhooks-dependency
 # template:begin authn:http-authn-dependency
@@ -74,6 +75,9 @@ utoipa-axum = { workspace = true }
 uuid = { workspace = true, features = ["v4", "fast-rng"] }
 
 [dev-dependencies]
+# template:begin inbound-webhooks:http-webhooks-test-dependencies
+infra-postgres = { workspace = true }
+# template:end inbound-webhooks:http-webhooks-test-dependencies
 # template:begin grpc:http-tls-test-dependencies
 http = { workspace = true }
 hyper = { workspace = true, features = ["client", "http2"] }

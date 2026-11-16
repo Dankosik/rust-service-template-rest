@@ -634,6 +634,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "31b698c5f9a010f6573133b09e0de5408834d0c82f8d7475a89fc1867a71cd90"
 dependencies = [
  "axum-core",
+ "axum-macros",
  "bytes",
  "form_urlencoded",
  "futures-util",
@@ -701,6 +702,17 @@ dependencies = [
  "serde_path_to_error",
  "tower-layer",
  "tower-service",
+]
+
+[[package]]
+name = "axum-macros"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7aa268c23bfbbd2c4363b9cd302a4f504fb2a9dfe7e3451d66f35dd392e20aca"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -2564,10 +2576,12 @@ dependencies = [
 name = "infra-bearerauthn"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "aws-lc-rs",
  "base64 0.23.1",
  "bytes",
  "derive_more",
+ "enum-map",
  "foldhash",
  "futures-util",
  "http",
@@ -2695,6 +2709,7 @@ dependencies = [
  "axum-tracing-opentelemetry",
  "compact_str",
  "const-hex",
+ "derive_more",
  "enum-map",
  "foldhash",
  "futures-util",
@@ -2751,6 +2766,7 @@ name = "infra-idempotency-store"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "derive_more",
  "infra-postgres",
  "metrics",
  "sqlx",
@@ -2808,6 +2824,7 @@ dependencies = [
  "health",
  "infra-jobs",
  "infra-postgres",
+ "itertools 0.15.0",
  "json-payload",
  "metrics",
  "metrics-exporter-prometheus",
@@ -2822,6 +2839,7 @@ dependencies = [
  "secrecy",
  "serde",
  "serde_json",
+ "serde_with",
  "sha2 0.11.1",
  "shared-rules",
  "tempfile",
@@ -2918,6 +2936,7 @@ name = "infra-outbound-http"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "derive_more",
  "http",
  "http-body-util",
  "hyper",
@@ -3046,6 +3065,7 @@ dependencies = [
  "base64 0.23.1",
  "bytes",
  "derive_more",
+ "enum-map",
  "foldhash",
  "hotpath",
  "http",
@@ -3325,7 +3345,9 @@ dependencies = [
  "parking_lot",
  "rlimit",
  "secrecy",
+ "serde",
  "serde_json",
+ "serde_with",
  "service-config",
  "thiserror",
  "tikv-jemallocator",

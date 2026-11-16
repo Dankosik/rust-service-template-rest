@@ -47,17 +47,18 @@ operation-context = { workspace = true }
 async-nats = { workspace = true, features = ["jetstream", "aws-lc-rs", "nkeys"] }
 async-trait = { workspace = true }
 # template:begin outbox:messaging-outbox-dependencies
-base64 = { workspace = true, features = ["std"] }
 # The outbox adapter prepares jobs through the canonical jobs transaction and
 # deliberately has no direct queue SQL or pool ownership.
 infra-jobs = { workspace = true }
 infra-postgres = { workspace = true }
+serde_with = { workspace = true, features = ["std", "macros", "base64"] }
 # template:end outbox:messaging-outbox-dependencies
 bytes = { workspace = true, features = ["std"] }
 domain-events = { workspace = true }
 foldhash = { workspace = true, features = ["std"] }
 futures-util = { workspace = true, features = ["std"] }
 health = { workspace = true }
+itertools = { workspace = true }
 json-payload = { workspace = true }
 metrics = { workspace = true }
 nkeys = { workspace = true }
