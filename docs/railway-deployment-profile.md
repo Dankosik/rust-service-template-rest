@@ -1,203 +1,100 @@
 # Railway Deployment Profile
 
-This repository is a service template. It carries the deployment policy a
-derived service applies on Railway, as values and as
-[`.railway/railway.ts`](../.railway/railway.ts), and the image tooling to build
-it, but it never connects to a Railway project, service, environment, domain,
-or secret.
+This template ships deployment policy for derived services as IaC in
+[`.railway/railway.ts`](../.railway/railway.ts), without connecting to any live
+Railway project, environment, domain, or secret. `.railway/railway.ts`,
+`build/docker/Dockerfile`, `.dockerignore`, and `crates/config` own exact ports,
+timeouts, watch patterns, and environment variable names; this document records
+only Railway platform behavior, operator obligations, and rollback rules.
 
 ## Infrastructure as code
 
-Railway deprecated Config as Code (`railway.toml` / `railway.json`) in favour
-of Infrastructure as Code: new services cannot opt into Config as Code, and
-existing files stop being read on 2026-12-01. The Railway CLI evaluates
-`.railway/railway.ts` with Node.js 22.6 or newer and the `railway` SDK pinned
-in `.railway/package.json` and its lockfile (`npm ci --prefix .railway`), then
-plans and applies it against the linked project and environment with
-`railway config plan` and `railway config apply`. Railway does not read
-`.railway/` during a deploy, and initialization creates no project, link or
-deployment. After initialization the file is the service's own: the
-initializer writes the service name and repository into it.
+Railway deprecated Config as Code (`railway.toml` / `railway.json`) in favor of
+TypeScript IaC evaluated locally via `npm ci --prefix .railway` and applied with
+`railway config plan` / `railway config apply` (Railway never reads `.railway/`
+automatically during deploys):
 
-- `export const partial` names this repository's slice, so several
-  repositories can each own their services in one project; once one file in an
-  environment names a partial, every file must.
-- The project name comes from the linked context (`ctx.projectName`), and
-  `APP__APP__ENV` takes the environment's name (`ctx.environment`), so one
-  file serves every environment. Only `local` and `development` admit the
-  developer escape hatches; name a Railway environment accordingly.
-- `env` makes the file authoritative for the service's variables: a plan
-  deletes every variable the file does not name. Before the first apply,
-  declare each variable the service reads, or keep a value set out of band with
-  `preserve()`, as the file does for `APP__RUNTIME__WORKER_THREADS`, and review
-  the plan's destructive changes.
-- `PORT` is `8080` because Railway health-checks the port that variable names
-  and the service reads only `http.addr`, which the file sets to `[::]:8080`:
-  that socket also accepts IPv4, and private DNS in a Railway environment
-  created before 2025-10-16 resolves to IPv6 only.
+- `export const partial` scopes IaC to this repository's service slice in a
+  shared project; once one service uses partials in an environment, all must.
+- Declaring `env` makes `.railway/railway.ts` authoritative: `apply` deletes any
+  service variable omitted from `env` unless wrapped in `preserve()`. Review
+  `railway config plan` before applying.
+- `PORT` and `APP__HTTP__ADDR` bind `[::]` so one dual-stack listener serves
+  both IPv4 and legacy IPv6-only Railway private DNS.
 <!-- template:begin service-auth:docs-railway-service-auth -->
-- With `SERVICE_AUTH=jwt` the file sets `APP__SERVICE_AUTH__MODE` and the
-  service's caller name, takes the token type and the trust registry from the
-  shared variables `SERVICE_AUTH_JWT_TYPE` and `SERVICE_AUTH_TRUST`, one value
-  for every service of the environment, and preserves the key id and the
-  signing key, which an operator sets per service and seals. A shared
-  reference does not create the shared variable; set it before the first
-  deploy. `crates/config/src/service_auth.rs` owns the values.
+- With `SERVICE_AUTH=jwt`, create environment-level shared variables for token
+  type and trust registry before the first deploy, and seal per-service signing
+  key variables out of band (`preserve()`).
 <!-- template:end service-auth:docs-railway-service-auth -->
 <!-- template:begin postgres:docs-railway-postgres-migrate -->
-- With the PostgreSQL profile the file enables it, preserves
-  `APP__POSTGRES__DSN` (set it before the first deploy), and runs `/migrate`
-  as the pre-deploy command: Railway starts it in a container of the new image
-  after the build and before that image starts, while the previous deployment
-  keeps serving; a failed or timed-out run fails the deployment and nothing
-  replaces the running one. Railway gives a pre-deploy command no time limit of
-  its own, so `preDeployTimeoutSeconds` (360) bounds it above the migrator's
-  own bound: connect, `postgres.migration_deadline` (5 min) and cleanup.
-  Raise both together. The order is safe under the expand-then-contract migration rule: the old deployment runs
-  against the new schema for the build-to-cutover window plus the overlap, and a
-  rollback's older migrator admits the newer history.
+- With PostgreSQL retained, `/migrate` runs as `preDeployCommand` in the new
+  image before cutover while the old deployment keeps serving. Because Railway
+  sets no default pre-deploy timeout, keep `preDeployTimeoutSeconds` in
+  `.railway/railway.ts` above `postgres.migration_deadline` plus connection
+  overhead, and author expand-then-contract migrations so the old binary
+  tolerates the new schema during build-to-cutover overlap.
 <!-- template:end postgres:docs-railway-postgres-migrate -->
 
-## Independent delivery paths
+`make docs-check` (`scripts/ci/image-inputs-check.py`) verifies that
+`build.watchPatterns` in `.railway/railway.ts` covers `Dockerfile`,
+`.dockerignore`, and `rust-toolchain.toml` inputs so docs/CI/agent edits do not
+trigger redeployments.
 
-Choose one path per derived service and keep its evidence separate.
+## Delivery paths
 
-**Railway source build.** Connect the derived repository and branch; Railway
-builds `build/docker/Dockerfile` from source. Railway passes a service variable
-only to a Dockerfile `ARG` of the same name, so every `ARG` has a default, and
-it sets `RAILWAY_GIT_COMMIT_SHA`, which the Dockerfile bakes as `app.commit`
-(it wins over `VCS_REF`). `app.version` is the Cargo package version. The GHCR
-image published by `cd.yml` is a different build; its signature and
-attestations do not prove what a Railway source build runs.
+Choose one delivery path per derived service and keep its provenance distinct:
 
-**Railway CLI upload.** `railway up <dir> --path-as-root` builds
-`build/docker/Dockerfile` from a prepared directory on Railway's builders and
-deploys the result, so it needs [Authority](../AGENTS.md#authority), and the
-build holds no credential ([The build](#the-build)). [Build
-Speed](build-speed.md#deployment-builds) owns its commit identity, skip marker
-and private dependencies.
-
-**Published image.** With `ENABLE_GHCR_PUBLISH=true` the CD workflow publishes
-a signed, attested `image@sha256:…` reference ([CI/CD Production
-Readiness](ci-cd-production-ready.md)). Deploy that digest after verifying it.
-
-## Repository-owned policy
-
-The runtime deployment values a derived service applies (`.railway/railway.ts`
-is the canonical authority for `build.*` and `watchPatterns`):
-
-| Setting | Value | Why |
-| --- | --- | --- |
-| `deploy.healthcheckPath` | `/health/ready` | the cached readiness verdict, not liveness |
-| `deploy.healthcheckTimeout` | `180` | Railway's default is 300; a derived service with a 5 s warm-up passed 13 s after its container started |
-| `deploy.restartPolicyType` / `restartPolicyMaxRetries` | `ON_FAILURE` / `5` | a clean `SIGTERM` exit (`0`) is not restarted; exit `3` (degraded shutdown) and `1` are |
-| `deploy.overlapSeconds` | `45` | the old deployment is signalled only this long after the new one serves; see [Rollout](#rollout) |
-| `deploy.drainingSeconds` | `45` | see the budget below |
-
-The source build uses the repository root as its context. `make docs-check`
-checks `.railway/railway.ts` against `build/docker/Dockerfile` and the root
-`.dockerignore` allowlist so every admitted file or directory family is covered
-by `build.watchPatterns` while documentation, CI, and agent-only changes do not
-trigger a deployment. `rust-toolchain.toml` is watched alongside the image
-inputs because it pins the Rust builder version. A service whose `.railway/railway.ts`
-deploys a published image (`source: image(...)` with no `build` block) has no
-source build context to watch, and the check reports that instead. This checks
-policy data only; it does not apply IaC or verify live Railway settings.
+- **Railway source build:** Railway builds `build/docker/Dockerfile` directly
+  and injects `RAILWAY_GIT_COMMIT_SHA` (winning over `VCS_REF` as `app.commit`).
+  GHCR signatures from `cd.yml` do not cover source-built Railway images.
+- **Railway CLI upload (`railway up <dir> --path-as-root`):** Requires explicit
+  [Authority](../AGENTS.md#authority); pass the commit SHA into `VCS_REF` since
+  Railway sets no `RAILWAY_GIT_COMMIT_SHA` on uploads ([Build
+  Speed](build-speed.md#deployment-builds)).
+- **Published GHCR image:** Deploy the verified `image@sha256:…` digest produced
+  by `cd.yml` ([CI/CD Production Readiness](ci-cd-production-ready.md)).
 
 ## The build
 
-The image build holds no credential: `make dockerfile-check` refuses
-secret-named `ARG` or `ENV` declarations, and private dependencies enter via
-`vendor-private/` and `.cargo/config.toml` ([Build
-Speed](build-speed.md#deployment-builds)).
-
-`ARG IMAGE_TESTS` defaults to `none`, skipping the debug `cargo test
---workspace --lib --bins` stage in Railway builds because PR and `main` CI run
-those tests. A repository without CI (`REPOSITORY_CI = none`) sets
-`IMAGE_TESTS=unit` in its Railway service variables and declares it in IaC
-`env` (`IMAGE_TESTS=unit ALLOW_HEAVY=1 make runtime-image-build` runs the same
-gate locally). Railway's "Wait for CI" stays an operator choice: it holds each
-deployment until every workflow on the commit ends, including post-merge heavy
-proofs, and skips after two hours when Actions never run.
+Builds hold no credentials (`make dockerfile-check` refuses secret-named `ARG` /
+`ENV` declarations; vendor private crates via `vendor-private/` as described in
+[Build Speed](build-speed.md#deployment-builds)). `ARG IMAGE_TESTS` defaults to
+`none` when CI runs tests; CI-less repositories (`REPOSITORY_CI = none`) must
+set `IMAGE_TESTS=unit` in service variables and `.railway/railway.ts`. Keep
+Railway "Wait for CI" off unless promotion must wait for post-merge workflows.
 
 ## Rollout
 
-Railway routes traffic to a new deployment once `/health/ready` answers `2xx`
-and never polls the path again. It signals the previous deployment
-`overlapSeconds` later and kills it `drainingSeconds` after the signal. On two
-derived services with this policy (2026-10-26) `SIGTERM` reached the old
-process 47 and 48 seconds after the new deployment went active; the old process
-spent the 15 s readiness propagation wait, found nothing left to drain, and
-exited `0`. All 506 public HTTP requests across one of those rollouts completed
-with `2xx` and no proxy upstream error. Railway removes a replica from routing
-on its own schedule, not on the readiness flip, so the overlap, not the
-propagation delay, is what keeps the cutover clean here; the delay stays because
-other platforms do re-poll readiness and it costs 15 s of an idle container.
+Railway routes traffic once `/health/ready` returns `2xx` and **never re-polls
+readiness afterward**, signalling `SIGTERM` after `overlapSeconds` and `SIGKILL`
+after `drainingSeconds`. On Railway, `overlapSeconds` (not
+`http.readiness_propagation_delay`) is what prevents cutover drops; the
+propagation delay remains for platforms that continuously poll `/health/ready`.
 
-## Grace budget
-
-`crates/service/src/bootstrap` validates that `http.grace_period` covers
-`http.drain_timeout` (including readiness propagation delay) plus the staged
-teardown tail. Keep Railway's `deploy.drainingSeconds` in `.railway/railway.ts`
-(and `docker stop --time`, Compose `stop_grace_period`, or Kubernetes
-`terminationGracePeriodSeconds`) at or above `http.grace_period`, and rerun
-`ALLOW_HEAVY=1 make runtime-image-check` whenever either budget changes; a
-shorter platform grace can `SIGKILL` the process mid-drain.
+Keep `deploy.drainingSeconds` in `.railway/railway.ts` (and container/orchestrator
+stop grace elsewhere) at or above `http.grace_period` validated by
+`crates/service/src/bootstrap`, rerunning `ALLOW_HEAVY=1 make runtime-image-check`
+when lifecycle budgets move.
 
 ## Operator-owned configuration
 
-Set `APP__RUNTIME__WORKER_THREADS` explicitly for each process, for example
-`4`, sized to the replica's CPU allocation and workload. Without a limit
-override a Railway replica's limit is the plan's (24 vCPU and 24 GB on two
-derived services in October 2026), and a service that left the key unset ran
-24 workers for an average load of 0.02 vCPU; one Tokio worker per visible core
-adds idle thread and memory overhead. The typed `runtime` setting (`crates/config/src/runtime.rs`)
-uses cgroup-aware available parallelism when unset and always sets the count
-on the runtime builder, so `TOKIO_WORKER_THREADS` is not read. Check the
-effective `runtime.worker_threads` in the process's startup record.
-
-The template deliberately does not choose: the Railway project, environment,
-service, branch, domain, or region; secrets and connection references;
-replica count, CPU, memory, autoscaling, or spend; private reachability for
-the separate metrics listener, whose shipped `0.0.0.0:9090` address binds
-every IPv4 interface (set `[::]:9090` if IPv6 scraping is needed); alerting or
-an external uptime check; release approval, rollback authority, and retention.
-
-Enable Railway "Wait for CI" only when promotion must wait for every
-workflow on the commit ([the build](#the-build) has its cost). Treat the
-deployment healthcheck as a startup and promotion gate, not continuous
-monitoring.
+- **Set `APP__RUNTIME__WORKER_THREADS` explicitly** (e.g., `4` sized to actual
+  CPU quota): unthrottled Railway plans expose 24+ host vCPUs (`crates/config`
+  ignores `TOKIO_WORKER_THREADS` and reads cgroup parallelism when unset),
+  wasting idle threads and RSS on low-CPU services.
+- **Isolate diagnostics:** Keep the separate metrics listener unreachable from
+  public networks (override its bind address to `[::]:<port>` if scraping over
+  IPv6 private networking).
 
 ## Rollback
 
-For source deployment, retain the successful Railway deployment identity and
-source revision, and verify that its image is still within the provider's
-retention window. [Railway rollback](https://docs.railway.com/deployments/deployment-actions)
-restores that retained image and its custom variables. Rebuilding old source
-through Redeploy is a new build, with the [mutable input limits](ci-cd-production-ready.md#runtime-image)
-that implies; it is not proof of the previously accepted artifact.
-
-For image deployment, retain and verify the accepted immutable digest as the
-primary rollback identity. A mutable tag or old source commit cannot replace it.
-Pair either artifact with compatible configuration, including overlays, external
-references and secret custody; unknown configuration fields can make an older binary refuse startup.
-
-Before rollback, establish the service's schema/data and event/job payload
-compatibility window under its [Production Contract](production-contract.md#operation-and-recovery).
-Newer successful migration history does not prove old SQL compatibility.
-After rollback, verify readiness, `app.version` and `app.commit` in the
-`service_starting` record and the service's user path. Those observations do not
-establish mixed-version compatibility or restore/reconciliation success.
-
-## Change proof for this profile
-
-1. review the diff of this file, `.railway/railway.ts` and the Dockerfile for
-   policy alignment, and run `make docs-check`;
-2. evaluate the IaC file with the pinned SDK (`npm ci --prefix .railway`,
-   then `railway config plan` from the linked checkout) and read the plan's
-   variable changes before any apply;
-3. take `make runtime-image-build` and `make runtime-image-check` from CI's
-   `image` job (`make verify` leaves both to CI on an image change;
-   `ALLOW_HEAVY=1` runs them locally) and confirm the clean stop inside 45 s;
-4. leave project-specific settings and live deployment evidence to the
-   derived service's operator.
+- **Source deployments:** Use [Railway rollback](https://docs.railway.com/deployments/deployment-actions)
+  within image retention rather than Redeploy (which triggers a fresh build with
+  mutable upstream inputs).
+- **Image deployments:** Roll back by verified immutable `sha256` digest, never
+  mutable tags, paired with compatible configuration (older binaries reject
+  unknown config keys).
+- **State compatibility:** Confirm schema and job/event payload compatibility
+  under [Production Contract](production-contract.md#operation-and-recovery)
+  before rolling back, then verify `/health/ready`, `app.version`, and
+  `app.commit` in `service_starting`.

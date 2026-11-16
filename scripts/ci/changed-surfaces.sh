@@ -317,7 +317,7 @@ classify() {
 		*.md | docs/* | specs/* | lychee.toml | .dockerignore | build/docker/* | scripts/ci/image-inputs-check.py | scripts/tests/image-inputs-check.py | .railway/*) mark documentation ;;
 		esac
 		case "${file}" in
-		.editorconfig | .gitattributes | .gitignore | LICENSE | .github/CODEOWNERS | .github/ISSUE_TEMPLATE/*) mark no_validation_required ;;
+		.editorconfig | .gitattributes | .gitignore | .gitkeep | */.gitkeep | LICENSE | .github/CODEOWNERS | .github/ISSUE_TEMPLATE/*) mark no_validation_required ;;
 		esac
 		case "${file}" in
 		template.lock | template-owned.paths | scripts/lib/template_*.py | scripts/lib/template_profiles.json | Makefile | make/*.mk | scripts/ci/runtime-image-inventory.py | scripts/ci/runtime-image-scan.sh | scripts/tests/runtime-image-inventory.py | scripts/ci/image-inputs-check.py | scripts/tests/image-inputs-check.py | scripts/ci/changed-surfaces.sh | scripts/ci/git-changed-paths.sh | scripts/ci/affected-crates.sh | scripts/ci/verify.sh | scripts/ci/validation-lock.sh | scripts/ci/validation-lock.py | scripts/tests/validation-lock-test.py)
@@ -363,7 +363,7 @@ classify() {
 		.claude/* | .codex/* | .cursor/* | .qwen/* | .grok/* | .opencode/* | \
 		docs/repo-architecture.md | docs/production-contract.md | docs/backend-library-selection.md | \
 		docs/ci-cd-production-ready.md | docs/railway-deployment-profile.md | .railway/* | \
-		docs/validation/* | docs/template-sync.md | docs/decisions/* | docs/alerting.md)
+		docs/template-sync.md | docs/decisions/* | docs/alerting.md)
 			mark module_initializer
 			;;
 		esac; fi

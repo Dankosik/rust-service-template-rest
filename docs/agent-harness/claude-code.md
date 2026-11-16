@@ -1,7 +1,7 @@
 # Claude Code Harness Adapter
 
-Use installed `Agent` and `Goal` controls as native authority (supported by
-Claude Code 2.1.227; recheck after runtime changes).
+Use installed `Agent` and `Goal` controls as native authority; callable tool
+schemas outrank prose.
 
 ## Native Map
 

@@ -32,60 +32,45 @@ inhibit_rules:
 
 ## Objectives
 
-The template's defaults; change them in the expressions, not in a separate
-configuration surface.
+[`env/monitoring/service.rules.yml`](../env/monitoring/service.rules.yml) is the
+source of truth for exact SLI ratios, thresholds, windows, and `for` durations;
+tune objectives directly in those rule expressions rather than introducing a
+second configuration surface:
 
-| SLI | Good event | Objective (budget) |
-| --- | --- | --- |
-| HTTP availability | a response below 500; `/health/live` and `/health/ready` are not traffic | 99.9% (0.001) |
-| HTTP latency | a response within 500 ms (`le="0.5"`) | 99% (0.01) |
+- **HTTP availability & latency:** Non-5xx responses (excluding `/health/live`
+  and `/health/ready`) and responses within the latency bucket threshold.
 <!-- template:begin grpc:docs-alerting-grpc-objectives -->
-| gRPC availability | any status except `Unknown`, `DeadlineExceeded`, `ResourceExhausted`, `Internal`, `Unavailable`, `DataLoss`; health and reflection services excluded | 99.9% (0.001) |
-| gRPC latency | a call handled within 500 ms | 99% (0.01) |
+- **gRPC availability & latency:** Calls not ending in server-fault statuses
+  (`Unknown`, `DeadlineExceeded`, `ResourceExhausted`, `Internal`,
+  `Unavailable`, `DataLoss`), excluding health and reflection services, and
+  calls handled within the latency bucket threshold.
 <!-- template:end grpc:docs-alerting-grpc-objectives -->
 
-The service sheds load with `503` over HTTP and `RESOURCE_EXHAUSTED` over gRPC;
-both count against availability, because the client did not get an answer.
-Client errors do not.
-
-Each SLO alerts on the four multi-window, multi-burn-rate pairs of the
-[SRE workbook](https://sre.google/workbook/alerting-on-slos/): an alert fires
-when both the long and the short window burn faster than the factor, so it
-starts within minutes of a fault and stops soon after recovery.
-
-| Severity | Long window | Short window | Burn factor | `for` | Budget spent when it fires |
-| --- | --- | --- | --- | --- | --- |
-| page | 1h | 5m | 14.4 | 2m | 2% of 30 days |
-| page | 6h | 30m | 6 | 15m | 5% |
-| ticket | 1d | 2h | 3 | 1h | 10% |
-| ticket | 3d | 6h | 1 | 3h | 10% |
+Load-shedding replies (`503` over HTTP, `RESOURCE_EXHAUSTED` over gRPC) count
+against availability because the client received no answer; client errors do
+not. Each SLO pairs fast and slow multi-window burn-rate rules from the
+[SRE workbook](https://sre.google/workbook/alerting-on-slos/) so pages fire
+within minutes of a fault and reset promptly after recovery.
 
 ## Tuning
 
-- **Objective.** The budget is `1 - objective`. Moving HTTP availability to
-  99.5% replaces `0.001` with `0.005` in the four `HTTPErrorBudgetBurn` rules.
-- **Latency threshold.** It must be a histogram bucket boundary: no series
-  matches any other `le`, so the ratio is empty and the alert never fires. HTTP buckets are
-  1, 2.5, 5, 10, 25, 50, 100, 250, 500 ms and 1, 2.5, 5, 10 s; gRPC buckets
-  are the Prometheus defaults. Change `le="0.5"` in both the recording rules
-  and the summary.
-- **Excluded traffic.** Add routes that are not user traffic (an admin
-  export, a long poll) to the `http_route!~` matcher. Streaming gRPC methods
-  hold a call open for their whole lifetime; exclude them from the latency SLI
-  with `grpc_method!~`.
-- **Low traffic.** At a few requests an hour one failure is a large ratio.
-  Below about one request a minute, prefer the ticket windows only, or add
-  `and sum by(job) (rate(...[1h])) > 1` to the page rules.
-- **Labels.** Ratios aggregate `by(job)`. Per-route objectives multiply the
-  series by the route count; add `http_route` to the `by` clause only for the
-  few routes that carry their own objective.
-
-The burn rules record `job:slo_<protocol>_<errors|slow>:ratio_rate<window>`
-for 5m, 30m, 1h, 2h, 6h, 1d and 3d. A dashboard can chart those directly
-together with `http_server_shed_requests_total`,
-`http_server_active_requests`, `runtime_scheduler_lag_seconds` and the pool
-gauges. The template ships no dashboard: a JSON model is tied to one Grafana
-version and datasource, while these series answer the same questions.
+- **Objective.** The error budget is `1 - objective`; update the budget factor in
+  all four burn-rate rules for that SLI together.
+- **Latency threshold.** Must match an emitted histogram bucket boundary (`le`)
+  defined in `crates/infra-http` (`HISTOGRAMS`) or the Prometheus recorder; any
+  other `le` matches no series and silences the alert. Update `le` in both the
+  recording rules and alert annotations.
+- **Excluded traffic.** Exclude non-interactive routes (exports, long polls) via
+  `http_route!~`, and exclude long-lived streaming RPCs from latency SLIs via
+  `grpc_method!~`.
+- **Low traffic.** Below ~1 req/min, use ticket windows only or gate page rules
+  on minimum request rate (`and sum by(job) (rate(...[1h])) > 1`).
+- **Labels.** Recording rules aggregate `by(job)`; add `http_route` only for
+  routes that genuinely require an independent SLO. The template ships no
+  Grafana JSON model because series in `service.rules.yml` (`job:slo_*`,
+  `http_server_shed_requests_total`, `http_server_active_requests`,
+  `runtime_scheduler_lag_seconds`, and pool gauges) plot directly across Grafana
+  versions.
 
 ## Runbooks
 

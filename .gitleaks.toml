@@ -251,7 +251,7 @@ regexes = [
     '''\A\QUAFHG6FUD2UU4SDFVAFUL5LDFO2XM4WYM76UNXTPJYJK7EEMYRBHT2VE\E\z''',
 ]
 # Public C6 fixtures authored once by official nsc v2.15.0 under an isolated
-# temporary store; public identities and regeneration: env/nats/auth-rotation/README.md.
+# temporary store (no signing seeds retained): env/nats/auth-rotation/nats-server.conf.
 # Scope is exact fixture path AND complete detected JWT bytes for the jwt rule.
 
 [[allowlists]]

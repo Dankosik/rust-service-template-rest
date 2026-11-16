@@ -1,7 +1,7 @@
 # Qwen Code Harness Adapter
 
-Use installed Qwen agent controls as native authority (supported by Qwen Code
-0.21.9; recheck after runtime changes).
+Use installed Qwen agent controls as native authority; callable tool schemas
+outrank prose.
 
 ## Native Map
 
