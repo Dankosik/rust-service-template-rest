@@ -1789,8 +1789,8 @@ async fn p9_postgres_timeouts_allow_a_same_key_retry(pool: PgPool) {
             captured.histogram_samples(
                 "db_client_operation_duration_seconds",
                 &[
-                    ("db_query_summary", "lock and read idempotency record"),
-                    ("error_type", sqlstate),
+                    ("db.query.summary", "lock and read idempotency record"),
+                    ("error.type", sqlstate),
                 ],
             ) > 0
         );
