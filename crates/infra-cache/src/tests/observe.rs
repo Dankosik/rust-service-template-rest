@@ -195,13 +195,8 @@ async fn a_silent_server_records_timeout() {
         }
     });
     let cache = Cache::start(CacheOptions {
-        dsn: SecretString::from(format!("redis://{address}")),
-        password_file: None,
-        root_ca_path: None,
-        client_certificate: None,
-        allow_plaintext: true,
-        allow_unauthenticated: true,
         command_timeout: Duration::from_millis(200),
+        ..options(&format!("redis://{address}"), true, true, None)
     })
     .expect("start connect");
     let namespace = cache.namespace("obs");

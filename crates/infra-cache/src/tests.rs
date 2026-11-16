@@ -54,6 +54,28 @@ fn with_password_file(dsn: &str, password_file: PathBuf) -> CacheOptions {
     }
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test-owned temporary file setup completes before the corresponding fixture assertion"
+)]
+fn temp_file(contents: impl AsRef<[u8]>) -> tempfile::NamedTempFile {
+    let file = tempfile::NamedTempFile::new().expect("temp file");
+    std::fs::write(file.path(), contents).expect("write temp file");
+    file
+}
+
+/// Names the leaked secret by position so the failure never reprints it.
+fn assert_no_leak(err: &(impl std::fmt::Display + std::fmt::Debug), secrets: &[&str]) {
+    let rendered = format!("{err} {err:?}");
+    for (index, secret) in secrets.iter().enumerate() {
+        assert!(
+            !rendered.contains(secret),
+            "secret #{index} of {} leaked into the error output",
+            secrets.len()
+        );
+    }
+}
+
 fn observation_recorder() -> metrics_exporter_prometheus::PrometheusRecorder {
     let mut builder = PrometheusBuilder::new();
     for &(name, buckets) in crate::HISTOGRAMS {

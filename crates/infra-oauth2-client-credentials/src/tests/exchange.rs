@@ -48,10 +48,7 @@ async fn an_exchanged_token_is_reused_per_subject_but_not_across_subjects() {
 async fn the_configured_capacity_bounds_how_many_subjects_keep_their_exchanged_token() {
     let fixture = Fixture::new().await;
     fixture.token_json("200 OK", &exchange_response("exchanged"));
-    let credentials = fixture.prepare(Options {
-        exchange_cache_capacity: 1,
-        ..fixture.options(&[], None)
-    });
+    let credentials = fixture.prepare_with(|options| options.exchange_cache_capacity = 1);
     let client = credentials.http(fixture.resource_client());
     let cache = &credentials.0.inner.exchange.cache;
     for subject in ["alice", "bob"] {
@@ -86,10 +83,7 @@ async fn a_capacity_that_does_not_divide_the_payload_target_keeps_every_configur
     const SUBJECTS: u32 = 5;
     let fixture = Fixture::new().await;
     fixture.token_json("200 OK", &exchange_response("exchanged"));
-    let credentials = fixture.prepare(Options {
-        exchange_cache_capacity: SUBJECTS,
-        ..fixture.options(&[], None)
-    });
+    let credentials = fixture.prepare_with(|options| options.exchange_cache_capacity = SUBJECTS);
     let client = credentials.http(fixture.resource_client());
     let cache = &credentials.0.inner.exchange.cache;
     for _ in 0..2 {
@@ -230,10 +224,7 @@ async fn concurrent_on_behalf_of_calls_for_one_subject_share_one_exchange() {
     let fixture = Fixture::new().await;
     fixture.token_json("200 OK", &exchange_response("shared"));
     let client = fixture
-        .prepare(Options {
-            provider_concurrency: 1,
-            ..fixture.options(&[], None)
-        })
+        .prepare_with(|options| options.provider_concurrency = 1)
         .http(fixture.resource_client());
     let gate = fixture.block_tokens();
     let mut leader = Box::pin(client.execute(
@@ -263,10 +254,7 @@ async fn concurrent_on_behalf_of_calls_for_one_subject_share_one_exchange() {
 async fn provider_capacity_is_shared_across_grants_but_hits_and_waiters_do_not_consume_it() {
     let fixture = Fixture::new().await;
     fixture.token_json("200 OK", &exchange_response("shared"));
-    let credentials = fixture.prepare(Options {
-        provider_concurrency: 2,
-        ..fixture.options(&[], None)
-    });
+    let credentials = fixture.prepare_with(|options| options.provider_concurrency = 2);
     let client = credentials.http(fixture.resource_client());
     client
         .execute(
@@ -343,10 +331,7 @@ async fn provider_capacity_is_shared_across_grants_but_hits_and_waiters_do_not_c
 async fn cancelling_an_exchange_releases_capacity_without_releasing_a_live_waiters_leader() {
     let fixture = Fixture::new().await;
     fixture.token_json("200 OK", &exchange_response("replacement"));
-    let credentials = fixture.prepare(Options {
-        provider_concurrency: 1,
-        ..fixture.options(&[], None)
-    });
+    let credentials = fixture.prepare_with(|options| options.provider_concurrency = 1);
     let client = credentials.http(fixture.resource_client());
     let gate = fixture.block_tokens();
     let mut leader = Box::pin(client.execute(
@@ -401,10 +386,7 @@ async fn a_waiter_gets_its_own_attempt_budget_after_its_leader_times_out() {
     )
     .unwrap();
     let client = fixture
-        .prepare(Options {
-            provider_concurrency: 1,
-            ..fixture.options(&[], None)
-        })
+        .prepare_with(|options| options.provider_concurrency = 1)
         .http(resource);
     let gate = fixture.block_tokens();
     let mut leader = Box::pin(client.execute(
@@ -488,10 +470,7 @@ async fn a_failed_exchange_is_not_cached() {
     let fixture = Fixture::new().await;
     fixture.token_raw(response("500 Internal Server Error", b"{}"));
     let client = fixture
-        .prepare(Options {
-            provider_concurrency: 1,
-            ..fixture.options(&[], None)
-        })
+        .prepare_with(|options| options.provider_concurrency = 1)
         .http(fixture.resource_client());
     for _ in 0..2 {
         let result = client

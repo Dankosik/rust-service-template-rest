@@ -1,11 +1,10 @@
-use std::assert_matches;
 use std::path::Path;
 
 use super::*;
 use crate::Config;
 use crate::LoadOptions;
-use crate::load::{Error, load_from};
-use crate::test_support::{BUILD, env, write};
+use crate::load::load_from;
+use crate::test_support::{BUILD, assert_secret_in_file, assert_unknown_env_key_fails, env, write};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
 
@@ -183,22 +182,10 @@ fn cache_empty_root_ca_path_unsets_the_file_value() {
 
 #[test]
 fn cache_dsn_in_a_file_is_refused() {
-    let dir = tempfile::tempdir().unwrap();
-    let leaked = write(
-        &dir,
-        "leaked.toml",
+    assert_secret_in_file(
         "[cache]\ndsn = \"redis://:hunter2@127.0.0.1:6379\"\n",
+        "cache.dsn",
     );
-    let err = load_from(
-        &LoadOptions {
-            config: Some(leaked),
-            ..LoadOptions::default()
-        },
-        BUILD,
-        env(&[]),
-    )
-    .unwrap_err();
-    assert_matches!(&err, Error::SecretInFile { key, .. } if key == "cache.dsn", "{err}");
 }
 
 #[test]
@@ -268,12 +255,5 @@ fn cache_client_certificate_paths_are_set_from_the_environment_together() {
 
 #[test]
 fn cache_unknown_environment_key_fails_loading() {
-    assert_matches!(
-        load_from(
-            &LoadOptions::default(),
-            BUILD,
-            env(&[("APP__CACHE__UNKNOWN", "x")]),
-        ),
-        Err(Error::Deserialize(_))
-    );
+    assert_unknown_env_key_fails("APP__CACHE__UNKNOWN");
 }

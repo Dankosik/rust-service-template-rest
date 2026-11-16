@@ -44,6 +44,9 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "sy
 [dependencies.async-nats]
 workspace = true
 features = ["jetstream"]
+[dependencies.derive_more]
+workspace = true
+features = ["from"]
 [dependencies.domain-events]
 workspace = true
 [dependencies.infra-messaging]

@@ -10,7 +10,7 @@ fn plaintext_without_the_allow_flag_is_refused() {
     ))
     .unwrap_err();
     assert_eq!(err, CacheError::PlaintextRefused);
-    assert!(!format!("{err} {err:?}").contains("hunter2"));
+    assert_no_leak(&err, &["hunter2"]);
 }
 
 #[test]
@@ -54,7 +54,7 @@ fn insecure_tls_fragment_is_refused() {
     ))
     .unwrap_err();
     assert_eq!(err, CacheError::InsecureTlsRefused);
-    assert!(!format!("{err} {err:?}").contains("hunter2"));
+    assert_no_leak(&err, &["hunter2"]);
 }
 
 #[test]
@@ -88,17 +88,12 @@ fn a_missing_root_ca_file_reports_only_the_io_kind() {
     std::assert_matches!(err, CacheError::CaFile { kind } if kind == std::io::ErrorKind::NotFound,
         "{err:?}"
     );
-    assert!(!format!("{err} {err:?}").contains("secret"));
+    assert_no_leak(&err, &["secret"]);
 }
 
 #[test]
-#[expect(
-    clippy::disallowed_methods,
-    reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
-)]
 fn a_root_ca_without_a_pem_certificate_is_invalid() {
-    let file = tempfile::NamedTempFile::new().expect("temp ca");
-    std::fs::write(file.path(), b"not a certificate").expect("write ca");
+    let file = temp_file(b"not a certificate");
     let err = Cache::start(options(
         "rediss://:hunter2@127.0.0.1:6379",
         false,
@@ -107,21 +102,12 @@ fn a_root_ca_without_a_pem_certificate_is_invalid() {
     ))
     .unwrap_err();
     assert_eq!(err, CacheError::InvalidCa);
-    assert!(!format!("{err} {err:?}").contains("hunter2"));
+    assert_no_leak(&err, &["hunter2"]);
 }
 
 #[test]
-#[expect(
-    clippy::disallowed_methods,
-    reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
-)]
 fn a_root_ca_with_a_certificate_header_and_invalid_base64_is_invalid() {
-    let file = tempfile::NamedTempFile::new().expect("temp ca");
-    std::fs::write(
-        file.path(),
-        b"-----BEGIN CERTIFICATE-----\n!!!!\n-----END CERTIFICATE-----\n",
-    )
-    .expect("write ca");
+    let file = temp_file(b"-----BEGIN CERTIFICATE-----\n!!!!\n-----END CERTIFICATE-----\n");
     let err = Cache::start(options(
         "rediss://:hunter2@127.0.0.1:6379",
         false,
@@ -130,21 +116,15 @@ fn a_root_ca_with_a_certificate_header_and_invalid_base64_is_invalid() {
     ))
     .unwrap_err();
     assert_eq!(err, CacheError::InvalidCa);
-    assert!(!format!("{err} {err:?}").contains("hunter2"));
+    assert_no_leak(&err, &["hunter2"]);
 }
 
-#[expect(
-    clippy::disallowed_methods,
-    reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
-)]
 fn write_pem(label: &str, der: &[u8]) -> tempfile::NamedTempFile {
     let pem = pem::encode_config(
         &pem::Pem::new(label, der),
         pem::EncodeConfig::new().set_line_ending(pem::LineEnding::LF),
     );
-    let file = tempfile::NamedTempFile::new().expect("temp pem");
-    std::fs::write(file.path(), pem).expect("write pem");
-    file
+    temp_file(pem)
 }
 
 #[test]
@@ -221,7 +201,7 @@ fn a_missing_client_certificate_or_key_file_reports_only_the_io_kind() {
     std::assert_matches!(err, CacheError::ClientCertificateFile { kind } if kind == std::io::ErrorKind::NotFound,
         "{err:?}"
     );
-    assert!(!format!("{err} {err:?}").contains("/no/such"), "{err:?}");
+    assert_no_leak(&err, &["/no/such"]);
 
     let err = Cache::start(with_client_certificate(
         TLS_DSN,
@@ -232,18 +212,13 @@ fn a_missing_client_certificate_or_key_file_reports_only_the_io_kind() {
     std::assert_matches!(err, CacheError::ClientKeyFile { kind } if kind == std::io::ErrorKind::NotFound,
         "{err:?}"
     );
-    assert!(!format!("{err} {err:?}").contains("/no/such"), "{err:?}");
+    assert_no_leak(&err, &["/no/such"]);
 }
 
 #[test]
-#[expect(
-    clippy::disallowed_methods,
-    reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
-)]
 fn a_client_certificate_file_without_a_pem_certificate_is_invalid() {
     let (_, key) = client_identity();
-    let file = tempfile::NamedTempFile::new().expect("temp certificate");
-    std::fs::write(file.path(), b"not a certificate").expect("write certificate");
+    let file = temp_file(b"not a certificate");
     let err = Cache::start(with_client_certificate(
         TLS_DSN,
         file.path().to_path_buf(),
@@ -280,10 +255,6 @@ fn a_root_ca_in_valid_pem_but_not_x509_is_invalid() {
 }
 
 #[test]
-#[expect(
-    clippy::disallowed_methods,
-    reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
-)]
 fn a_client_key_that_is_unusable_or_belongs_to_another_certificate_is_invalid() {
     let (cert, _) = client_identity();
     let (_, other_key) = client_identity();
@@ -295,8 +266,7 @@ fn a_client_key_that_is_unusable_or_belongs_to_another_certificate_is_invalid() 
     .unwrap_err();
     assert_eq!(err, CacheError::InvalidClientKey);
 
-    let garbage = tempfile::NamedTempFile::new().expect("temp key");
-    std::fs::write(garbage.path(), b"not a key").expect("write key");
+    let garbage = temp_file(b"not a key");
     let err = Cache::start(with_client_certificate(
         TLS_DSN,
         cert.path().to_path_buf(),
@@ -304,14 +274,14 @@ fn a_client_key_that_is_unusable_or_belongs_to_another_certificate_is_invalid() 
     ))
     .unwrap_err();
     assert_eq!(err, CacheError::InvalidClientKey);
-    assert!(!format!("{err} {err:?}").contains("hunter2"));
+    assert_no_leak(&err, &["hunter2"]);
 }
 
 #[test]
 fn an_unparseable_dsn_does_not_echo_the_password() {
     let err = Cache::start(options("not a url hunter2", true, true, None)).unwrap_err();
     assert_eq!(err, CacheError::InvalidDsn);
-    assert!(!format!("{err} {err:?}").contains("hunter2"));
+    assert_no_leak(&err, &["hunter2"]);
 }
 
 #[test]
@@ -370,13 +340,8 @@ fn a_namespace_name_at_the_length_bound_is_accepted() {
 }
 
 #[test]
-#[expect(
-    clippy::disallowed_methods,
-    reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
-)]
 fn a_password_file_admits_a_dsn_without_a_password() {
-    let file = tempfile::NamedTempFile::new().expect("temp password");
-    std::fs::write(file.path(), "hunter2\n").expect("write password");
+    let file = temp_file("hunter2\n");
     on_runtime(|| {
         Cache::start(with_password_file(
             "redis://127.0.0.1:6379",
@@ -387,27 +352,18 @@ fn a_password_file_admits_a_dsn_without_a_password() {
 }
 
 #[test]
-#[expect(
-    clippy::disallowed_methods,
-    reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
-)]
 fn a_password_in_the_dsn_and_a_password_file_are_refused_together() {
-    let file = tempfile::NamedTempFile::new().expect("temp password");
-    std::fs::write(file.path(), "from-file").expect("write password");
+    let file = temp_file("from-file");
     let err = Cache::start(with_password_file(
         "redis://:hunter2@127.0.0.1:6379",
         file.path().to_path_buf(),
     ))
     .unwrap_err();
     assert_eq!(err, CacheError::PasswordInDsn);
-    assert!(!format!("{err} {err:?}").contains("hunter2"));
+    assert_no_leak(&err, &["hunter2"]);
 }
 
 #[test]
-#[expect(
-    clippy::disallowed_methods,
-    reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
-)]
 fn an_unreadable_or_empty_password_file_fails_admission() {
     let missing = PathBuf::from("/no/such/cache-password");
     let err = Cache::start(with_password_file("redis://127.0.0.1:6379", missing)).unwrap_err();
@@ -416,8 +372,7 @@ fn an_unreadable_or_empty_password_file_fails_admission() {
     );
     assert!(!err.to_string().contains("/no/such"), "{err}");
 
-    let file = tempfile::NamedTempFile::new().expect("temp password");
-    std::fs::write(file.path(), "\n").expect("write password");
+    let file = temp_file("\n");
     let err = Cache::start(with_password_file(
         "redis://127.0.0.1:6379",
         file.path().to_path_buf(),

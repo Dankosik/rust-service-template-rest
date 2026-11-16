@@ -4,7 +4,7 @@ use std::num::NonZeroU32;
 use super::*;
 use crate::LoadOptions;
 use crate::load::{Error, load_from};
-use crate::test_support::{BUILD, env, write};
+use crate::test_support::{BUILD, assert_secret_in_file, assert_unknown_env_key_fails, env, write};
 
 #[test]
 fn defaults_are_inactive_and_within_the_delivery_budget() {
@@ -405,32 +405,13 @@ fn messaging_url_list_parsing_preserves_scalar_secret_bytes() {
 
 #[test]
 fn messaging_credentials_in_a_file_are_refused() {
-    let dir = tempfile::tempdir().unwrap();
-    let leaked = write(
-        &dir,
-        "leaked.toml",
+    assert_secret_in_file(
         "[messaging]\ncredentials = \"fixture-credentials\"\n",
+        "messaging.credentials",
     );
-    let err = load_from(
-        &LoadOptions {
-            config: Some(leaked),
-            ..LoadOptions::default()
-        },
-        BUILD,
-        env(&[]),
-    )
-    .unwrap_err();
-    assert_matches!(&err, Error::SecretInFile { key, .. } if key == "messaging.credentials", "{err}");
 }
 
 #[test]
 fn messaging_unknown_environment_key_fails_loading() {
-    assert_matches!(
-        load_from(
-            &LoadOptions::default(),
-            BUILD,
-            env(&[("APP__MESSAGING__UNKNOWN", "x")]),
-        ),
-        Err(Error::Deserialize(_))
-    );
+    assert_unknown_env_key_fails("APP__MESSAGING__UNKNOWN");
 }

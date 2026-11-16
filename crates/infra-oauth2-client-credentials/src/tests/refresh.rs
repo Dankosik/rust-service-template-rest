@@ -539,10 +539,7 @@ async fn capacity_refused_background_refresh_keeps_the_token_and_retry_spacing()
         "200 OK",
         &serde_json::json!({"access_token":"kept", "token_type":"Bearer", "expires_in":3600}),
     );
-    let credentials = fixture.prepare(Options {
-        provider_concurrency: 1,
-        ..fixture.options(&[], None)
-    });
+    let credentials = fixture.prepare_with(|options| options.provider_concurrency = 1);
     let client = credentials.http(fixture.resource_client());
     client
         .execute(fixture.request(), deadline(Duration::from_secs(10)))

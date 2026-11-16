@@ -48,28 +48,20 @@ const PRESIGN_MIN: Duration = Duration::from_secs(1);
 const PRESIGN_MAX: Duration = Duration::from_hours(7 * 24);
 
 /// [`Debug`] prints the provider name and limits only.
+#[derive(derive_more::Debug)]
 pub struct ObjectStorageOptions {
+    #[debug("{:?}", provider.name())]
     pub provider: Provider,
     /// On Railway the hashed `BUCKET`, not the display name.
+    #[debug(skip)]
     pub bucket: String,
+    #[debug(skip)]
     pub credentials: CredentialSource,
     pub max_object_bytes: u64,
     /// The excess is refused with [`ObjectStorageError::Busy`]. A download holds its
     /// slot until it ends, is dropped, or its operation stops.
     pub max_concurrency: usize,
     pub operation_timeout: Duration,
-}
-
-impl std::fmt::Debug for ObjectStorageOptions {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("ObjectStorageOptions")
-            .field("provider", &self.provider.name())
-            .field("max_object_bytes", &self.max_object_bytes)
-            .field("max_concurrency", &self.max_concurrency)
-            .field("operation_timeout", &self.operation_timeout)
-            .finish_non_exhaustive()
-    }
 }
 
 /// Clones share admission.

@@ -4,13 +4,13 @@ use super::*;
 async fn a_refused_auth_is_retried_after_the_client_gives_up() {
     let gate = FakeServer::start().await;
     let cache = Cache::start(CacheOptions {
-        dsn: SecretString::from(format!("redis://:secret@{}", gate.address)),
-        password_file: None,
-        root_ca_path: None,
-        client_certificate: None,
-        allow_plaintext: true,
-        allow_unauthenticated: false,
         command_timeout: Duration::from_millis(200),
+        ..options(
+            &format!("redis://:secret@{}", gate.address),
+            true,
+            false,
+            None,
+        )
     })
     .expect("start connect");
     let namespace = cache.namespace("auth");
@@ -44,13 +44,8 @@ async fn a_server_error_reply_redis_rs_does_not_name_is_a_response_failure() {
     let _recorder = metrics::set_default_local_recorder(&recorder);
     let server = FakeServer::start().await;
     let cache = Cache::start(CacheOptions {
-        dsn: SecretString::from(format!("redis://{}", server.address)),
-        password_file: None,
-        root_ca_path: None,
-        client_certificate: None,
-        allow_plaintext: true,
-        allow_unauthenticated: true,
         command_timeout: Duration::from_secs(2),
+        ..options(&format!("redis://{}", server.address), true, true, None)
     })
     .expect("start connect");
 
@@ -77,13 +72,8 @@ async fn a_server_error_reply_redis_rs_does_not_name_is_a_response_failure() {
 async fn a_readonly_reply_reconnects_to_the_new_primary() {
     let server = FakeServer::start().await;
     let cache = Cache::start(CacheOptions {
-        dsn: SecretString::from(format!("redis://{}", server.address)),
-        password_file: None,
-        root_ca_path: None,
-        client_certificate: None,
-        allow_plaintext: true,
-        allow_unauthenticated: true,
         command_timeout: Duration::from_millis(200),
+        ..options(&format!("redis://{}", server.address), true, true, None)
     })
     .expect("start connect");
     let namespace = cache.namespace("failover");
@@ -189,13 +179,13 @@ async fn a_refused_hello_is_reported_as_auth() {
 
     let gate = FakeServer::start().await;
     let cache = Cache::start(CacheOptions {
-        dsn: SecretString::from(format!("redis://:secret@{}", gate.address)),
-        password_file: None,
-        root_ca_path: None,
-        client_certificate: None,
-        allow_plaintext: true,
-        allow_unauthenticated: false,
         command_timeout: Duration::from_millis(200),
+        ..options(
+            &format!("redis://:secret@{}", gate.address),
+            true,
+            false,
+            None,
+        )
     })
     .expect("start connect");
 
@@ -217,8 +207,7 @@ async fn a_password_file_unreadable_at_setup_is_not_reported_as_auth() {
     let server = FakeServer::start().await;
     let password = ephemeral_password();
     server.require_password(&password);
-    let file = tempfile::NamedTempFile::new().expect("password file");
-    std::fs::write(file.path(), &password).expect("password");
+    let file = temp_file(&password);
     let cache = Cache::start(with_password_file(
         &format!("redis://{}", server.address),
         file.path().to_path_buf(),
@@ -380,8 +369,7 @@ async fn a_slow_command_survives_overlapping_password_rotation() {
     let initial = ephemeral_password();
     let rotated = ephemeral_password();
     server.require_password(&initial);
-    let file = tempfile::NamedTempFile::new().expect("password file");
-    std::fs::write(file.path(), &initial).expect("initial password");
+    let file = temp_file(&initial);
     let cache = Cache::start(CacheOptions {
         command_timeout: Duration::from_secs(10),
         ..with_password_file(
@@ -1165,8 +1153,7 @@ async fn an_overdue_ping_runs_before_another_slow_password_refresh() {
     let server = FakeServer::start().await;
     let initial = ephemeral_password();
     server.require_password(&initial);
-    let file = tempfile::NamedTempFile::new().expect("password file");
-    std::fs::write(file.path(), initial).expect("initial password");
+    let file = temp_file(initial);
     let cache = Cache::start(CacheOptions {
         command_timeout: Duration::from_secs(10),
         ..with_password_file(
@@ -1277,8 +1264,7 @@ async fn reliability_rejected_unchanged_password_recovers_without_traffic() {
     let pending = ephemeral_password();
     let later = ephemeral_password();
     server.require_password(&initial);
-    let file = tempfile::NamedTempFile::new().expect("password file");
-    std::fs::write(file.path(), format!("{initial}\n")).expect("initial password");
+    let file = temp_file(format!("{initial}\n"));
     let mut options = with_password_file(
         &format!("redis://{}", server.address),
         file.path().to_path_buf(),
@@ -1504,8 +1490,7 @@ async fn password_refresh_timeout_is_observed_but_cancelled_work_is_not() {
         let initial = ephemeral_password();
         let replacement = ephemeral_password();
         server.require_password(&initial);
-        let file = tempfile::NamedTempFile::new().expect("password file");
-        std::fs::write(file.path(), &initial).expect("initial password");
+        let file = temp_file(&initial);
         let cache = Cache::start(with_password_file(
             &format!("redis://{}", server.address),
             file.path().to_path_buf(),
@@ -1561,10 +1546,6 @@ async fn password_refresh_timeout_is_observed_but_cancelled_work_is_not() {
 }
 
 #[tokio::test]
-#[expect(
-    clippy::disallowed_methods,
-    reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
-)]
 async fn reliability_password_file_preserves_case_crlf_and_username() {
     for user in [None, Some("ServiceUser")] {
         let server = FakeServer::start().await;
@@ -1572,8 +1553,7 @@ async fn reliability_password_file_preserves_case_crlf_and_username() {
         server.require_password(&password);
         *server.observed.username.lock().expect("username lock") =
             Some(user.unwrap_or("default").to_owned());
-        let file = tempfile::NamedTempFile::new().expect("password file");
-        std::fs::write(file.path(), format!("{password}\r\n")).expect("password with CRLF");
+        let file = temp_file(format!("{password}\r\n"));
         let authority = user.map_or_else(
             || server.address.to_string(),
             |user| format!("{user}@{}", server.address),
@@ -1668,8 +1648,7 @@ fn reliability_auth_errors_are_sanitized_through_the_dependency_log_bridge() {
         *server.observed.auth_error.lock().expect("auth error lock") =
             format!("{marker} {rejected}");
         server.require_password(&accepted);
-        let file = tempfile::NamedTempFile::new().expect("password file");
-        std::fs::write(file.path(), format!("{accepted}\n")).expect("initial password");
+        let file = temp_file(format!("{accepted}\n"));
         let dsn = format!("redis://{}", server.address);
         let cache =
             Cache::start(with_password_file(&dsn, file.path().to_path_buf())).expect("start cache");
