@@ -1,0 +1,19 @@
+[package]
+name = "nats-test-support"
+description = "NATS wire relays that drop, filter, or observe protocol frames in messaging tests."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+base64 = { workspace = true, features = ["std"] }
+bytes = { workspace = true, features = ["std"] }
+serde_json = { workspace = true, features = ["std"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+tokio-util = { workspace = true }

@@ -340,7 +340,7 @@
   },
   "tls-fixtures": {
     "remove_when_unselected": [
-      "test/fixtures/tls.rs"
+      "crates/tls-test-support/"
     ]
   },
   "request-budget": {
@@ -411,6 +411,7 @@
       "vendor/async-nats/",
       "crates/domain-events/",
       "crates/infra-messaging/",
+      "crates/nats-test-support/",
       "crates/config/src/messaging.rs",
       "crates/config/src/messaging/",
       "crates/jobs-worker/src/bootstrap/messaging.rs",

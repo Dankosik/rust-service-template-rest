@@ -27,9 +27,6 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-#[path = "../support/relay.rs"]
-mod relay;
-
 mod admission;
 mod connection;
 mod credentials;
@@ -38,7 +35,7 @@ mod delivery;
 mod durable;
 mod probe;
 mod publish;
-use relay::{
+use nats_test_support::{
     AckDroppingRelay, AuthObservingRelay, eventually, is_stream_publish_ack, relay_target,
 };
 

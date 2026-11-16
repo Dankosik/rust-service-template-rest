@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Enforce service-owned crate directions on Cargo dependency declarations."""
+"""Enforce service-owned crate directions on Cargo dependency declarations and #[path] inclusions."""
 
 import argparse
 import json
 from pathlib import Path, PurePosixPath
+import re
 import subprocess
 import sys
 
@@ -126,6 +127,31 @@ def _workspace_packages(metadata, root):
     return result
 
 
+_PATH_ATTRIBUTE = re.compile(r'#\[\s*path\s*=\s*"([^"]+)"\s*\]')
+
+
+def cross_package_path_inclusions(manifests, root):
+    directories = sorted(
+        ((Path(root) / manifest).parent.resolve() for manifest in manifests),
+        key=lambda directory: len(directory.parts),
+        reverse=True,
+    )
+
+    def owner(path):
+        return next((d for d in directories if path == d or d in path.parents), None)
+
+    diagnostics = []
+    for directory in directories:
+        for source in sorted(directory.rglob("*.rs")):
+            if "target" in source.relative_to(directory).parts or owner(source) != directory:
+                continue
+            for match in _PATH_ATTRIBUTE.finditer(source.read_text(encoding="utf-8")):
+                if owner((source.parent / match.group(1)).resolve()) != directory:
+                    label = source.relative_to(Path(root).resolve()).as_posix()
+                    diagnostics.append(f"{label}: #[path] reaches outside its package ({match.group(1)})")
+    return diagnostics
+
+
 def _edge_label(package, path, dependency):
     kind = dependency.get("kind")
     details = [f"kind={kind if kind is not None else 'normal'}"]
@@ -197,6 +223,7 @@ def check(metadata, policy, root):
                     allowed = True
             if target_role in rule.get("deny_roles", []) or not allowed:
                 diagnostics.append(f"{label}: {rule['rule']} forbids {target} (role={target_role})")
+    diagnostics.extend(cross_package_path_inclusions(packages, root))
     return sorted(diagnostics)
 
 
@@ -215,7 +242,7 @@ def main():
         for diagnostic in diagnostics:
             print(f"architecture-check: {diagnostic}", file=sys.stderr)
         return 1
-    print("architecture-check: declared workspace dependency directions pass")
+    print("architecture-check: declared workspace dependency directions and #[path] inclusions pass")
     return 0
 
 

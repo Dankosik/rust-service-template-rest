@@ -477,7 +477,7 @@ duplication-check: ## Reject substantial Rust clones outside inline jscpd ignore
 	@command -v npx >/dev/null 2>&1 || { echo "duplication-check requires Node.js (npx) for jscpd@$(JSCPD_VERSION)" >&2; exit 2; }
 	$(NPX_ENV) $(JSCPD) --config .jscpd.json .
 
-architecture-check: ## Enforce declared workspace dependency directions
+architecture-check: ## Enforce declared workspace dependency directions and in-package #[path] inclusions
 	python3 scripts/ci/architecture-check.py
 
 quality-check-self-test: ## Exercise checker fixtures and native-tool smoke cases

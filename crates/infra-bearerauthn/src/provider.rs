@@ -506,7 +506,7 @@ pub(crate) fn fixture_acceptor(host: &str) -> (tokio_rustls::TlsAcceptor, Vec<u8
         pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
     };
 
-    let material = crate::tls::TlsMaterial::new(host);
+    let material = tls_test_support::TlsMaterial::new(host);
     let config = ServerConfig::builder_with_provider(std::sync::Arc::new(
         tokio_rustls::rustls::crypto::aws_lc_rs::default_provider(),
     ))

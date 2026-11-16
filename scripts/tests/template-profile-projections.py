@@ -588,7 +588,9 @@ def _project(source: Path, candidate: str, initializer, inputs, destination: Pat
     except (OSError, ValueError) as error:
         raise initializer.Refusal(f"projected image input coverage: {error}") from error
     nodes = _tree(destination, initializer)
-    _assert_tls_fixture_ownership(initializer, nodes, profiles.removals["tls-fixtures"])
+    _assert_tls_fixture_ownership(
+        initializer, nodes, (relative.rstrip("/") for relative in profiles.removals["tls-fixtures"])
+    )
     _assert_workspace_dependencies_inherited(initializer, nodes)
     _assert_profile_output(initializer, nodes, "unconditional operation context", (
         "crates/operation-context/Cargo.toml",
@@ -1361,15 +1363,14 @@ def _check_tls_canary_projection(source: Path, initializer) -> None:
             root = Path(temporary)
             (root / "Cargo.toml").write_bytes((source / "Cargo.toml").read_bytes())
             initializer._apply_markers(root, manifest_profiles, inputs)
-            fixture = root / "test/fixtures/tls.rs"
+            fixture = root / "crates/tls-test-support"
             if expected:
-                fixture.parent.mkdir(parents=True)
-                fixture.write_bytes((source / "test/fixtures/tls.rs").read_bytes())
+                fixture.mkdir(parents=True)
             canary.assert_tls_fixture_output(source, root)
             # Independent negative control: the expected fixture cannot vanish
             # behind the same computed profile predicate used for projection.
             if expected:
-                fixture.unlink()
+                fixture.rmdir()
                 try:
                     canary.assert_tls_fixture_output(source, root)
                 except AssertionError:

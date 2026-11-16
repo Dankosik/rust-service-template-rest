@@ -181,7 +181,7 @@ classify() {
 		# Both checks use the whole declared workspace; a new clone can match
 		# unchanged source. Standalone tool workspaces are not scanned as Rust.
 		case "${file}" in
-		crates/*.rs | test/*.rs) mark duplication ;;
+		crates/*.rs | test/*.rs) mark duplication architecture ;;
 		esac
 		case "${file}" in
 		Cargo.toml | Cargo.lock | */Cargo.toml | */Cargo.lock | rust-toolchain.toml | \
@@ -199,7 +199,7 @@ classify() {
 		# The same job proves the query metadata, which every checked
 		# statement and every migration can invalidate.
 	if [[ ${database} == postgres ]]; then case "${file}" in
-		crates/infra-postgres/* | crates/infra-idempotency-store/* | crates/infra-jobs/* | crates/infra-webhooks/* | crates/jobs-worker/* | crates/migrate/* | test/* | env/docker-compose.yml | env/pgbouncer/* | scripts/ci/test-integration-db.sh | scripts/lib/compose-postgres.sh | \
+		crates/infra-postgres/* | crates/infra-idempotency-store/* | crates/infra-jobs/* | crates/infra-webhooks/* | crates/jobs-worker/* | crates/migrate/* | crates/tls-test-support/* | test/* | env/docker-compose.yml | env/pgbouncer/* | scripts/ci/test-integration-db.sh | scripts/lib/compose-postgres.sh | \
 		migrations/*.sql | .sqlx/* | crates/*/.sqlx/* | .cargo/config.toml | scripts/ci/sqlx-prepare.sh)
 			mark db_integration
 			;;
@@ -224,14 +224,14 @@ classify() {
 			;;
 		esac; fi
 	if [[ ${messaging} == nats-jetstream ]]; then case "${file}" in
-	Cargo.toml | Cargo.lock | crates/domain-events/* | crates/infra-messaging/* | crates/config/Cargo.toml | crates/config/src/messaging.rs | \
+	Cargo.toml | Cargo.lock | crates/domain-events/* | crates/infra-messaging/* | crates/nats-test-support/* | crates/config/Cargo.toml | crates/config/src/messaging.rs | \
 	crates/jobs-worker/* | crates/service/Cargo.toml | crates/service/src/bootstrap/* | env/docker-compose.yml | env/nats/* | \
 	test/tests/messaging_outbox.rs | test/tests/messaging_recovery.rs | test/fixtures/messaging_recovery.sql | scripts/ci/test-integration-db.sh | scripts/ci/test-integration-messaging.sh | scripts/messaging-go-compat.sh | make/template.mk | .github/workflows/ci.yml)
 		mark messaging_integration
 		;;
 	esac; fi
 	if [[ ${cache} == redis ]]; then case "${file}" in
-	Cargo.toml | Cargo.lock | crates/infra-cache/* | test/fixtures/tls.rs | crates/config/Cargo.toml | crates/config/src/cache.rs | \
+	Cargo.toml | Cargo.lock | crates/infra-cache/* | crates/tls-test-support/* | crates/config/Cargo.toml | crates/config/src/cache.rs | \
 	crates/service/Cargo.toml | crates/service/src/bootstrap/* | env/docker-compose.yml | \
 	scripts/ci/test-integration-cache.sh | make/template.mk | .github/workflows/ci.yml)
 		mark cache_integration
@@ -337,8 +337,8 @@ classify() {
 		scripts/ci/template-init-check.sh | scripts/ci/initializer-matrix.py | scripts/tests/template-* | \
 		crates/config/src/* | crates/config/Cargo.toml | crates/service/src/* | crates/service/tests/* | crates/service/Cargo.toml | \
 		crates/infra-bearerauthn/* | crates/infra-outbound-http/* | crates/infra-idempotency-store/* | crates/infra-webhooks/* | crates/infra-http/Cargo.toml | crates/infra-http/src/authn.rs | crates/infra-http/src/context.rs | crates/infra-http/src/idempotency/* | crates/infra-http/src/harden.rs | crates/infra-http/src/harden/* | crates/infra-http/src/lib.rs | crates/infra-http/src/problem.rs | crates/infra-http/src/webhooks.rs | \
-		crates/infra-postgres/* | crates/migrate/* | crates/infra-jobs/* | crates/jobs-worker/* | crates/domain-events/* | crates/infra-messaging/* | crates/infra-cache/* | \
-		crates/infra-object-storage/* | crates/operation-context/* | crates/shared-rules/* | crates/infra-telemetry/src/logging.rs | crates/infra-telemetry/src/logging/tests.rs | crates/service-failure/* | crates/infra-oauth2-client-credentials/* | \
+		crates/infra-postgres/* | crates/migrate/* | crates/infra-jobs/* | crates/jobs-worker/* | crates/domain-events/* | crates/infra-messaging/* | crates/nats-test-support/* | crates/infra-cache/* | \
+		crates/infra-object-storage/* | crates/operation-context/* | crates/shared-rules/* | crates/tls-test-support/* | crates/infra-telemetry/src/logging.rs | crates/infra-telemetry/src/logging/tests.rs | crates/service-failure/* | crates/infra-oauth2-client-credentials/* | \
 		test/* | migrations/* | .sqlx/* | .cargo/config.toml | .config/nextest.toml | scripts/ci/sqlx-prepare.sh)
 			mark module_initializer initializer_runtime
 			;;
@@ -501,7 +501,7 @@ HOOK
 
 	# Gate selection is independent of the existing Rust/build routes.
 	for file in crates/config/build.rs crates/health/src/lib.rs test/tests/probes.rs; do
-		assert_case "${file}" "duplication" "architecture"
+		assert_case "${file}" "duplication architecture" ""
 	done
 	assert_case .jscpd.json "duplication" "architecture"
 	for file in quality/architecture.json scripts/ci/architecture-check.py; do
@@ -651,7 +651,7 @@ HOOK
 	assert_case docs/decisions/outbound-http-decisions.md \
 		"documentation module_initializer" \
 		"rust_source cargo_dependencies initializer_runtime"
-	assert_case test/fixtures/tls.rs \
+	assert_case crates/tls-test-support/src/lib.rs \
 		"rust_source module_initializer initializer_runtime db_integration" \
 		"cargo_dependencies documentation"
 	assert_case crates/service/tests/lifecycle.rs \

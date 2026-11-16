@@ -67,6 +67,7 @@ skip = [
     { crate = "getrandom@0.3", reason = "rand 0.9 and aws-sdk-s3 have not moved to getrandom 0.4" },
     { crate = "hashbrown@0.16", reason = "moka and metrics-exporter-prometheus transitive chain alongside indexmap on 0.17" },
     { crate = "itertools@0.13", reason = "prost-derive 0.14 has not moved to itertools 0.15" },
+    { crate = "pem@3", reason = "jsonwebtoken 11 has not moved to pem 4, which rcgen uses in tls-test-support" },
     { crate = "rand@0.8", reason = "nkeys 0.4 via async-nats has not moved to rand 0.10" },
     { crate = "rand@0.9", reason = "metrics-util 0.20 and opentelemetry_sdk 0.33 have not moved to rand 0.10" },
     { crate = "rand_chacha@0.3", reason = "rand 0.8 via nkeys alongside rand 0.9 on rand_chacha 0.9" },

@@ -404,7 +404,7 @@ mod tests {
         cancel: &CancellationToken,
     ) -> impl Future<Output = ()> + use<> {
         let host = "authn.fixture.test";
-        let material = crate::tls::TlsMaterial::new(host);
+        let material = tls_test_support::TlsMaterial::new(host);
         let deny_dns = CancellationToken::new();
         deny_dns.cancel();
         let provider = crate::provider::new_fixture_client(

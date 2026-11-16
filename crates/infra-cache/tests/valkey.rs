@@ -4,9 +4,6 @@
     reason = "integration tests assert Valkey behavior and own their fixture setup"
 )]
 
-#[path = "../../../test/fixtures/tls.rs"]
-mod tls;
-
 #[path = "support/valkey_auth.rs"]
 mod valkey_auth;
 
@@ -19,6 +16,7 @@ use health::Probe;
 use infra_cache::{Cache, CacheOptions, ClientCertificate, HISTOGRAMS, Unavailable, namespace};
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
 use secrecy::SecretString;
+use tls_test_support::{TlsMaterial, new_issuer};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinSet;
 use tokio_rustls::TlsAcceptor;
@@ -197,11 +195,11 @@ async fn proxy_one(mut inbound: TcpStream, upstream: SocketAddr, acceptor: Optio
     }
 }
 
-fn tls_acceptor(material: &tls::TlsMaterial) -> TlsAcceptor {
+fn tls_acceptor(material: &TlsMaterial) -> TlsAcceptor {
     acceptor(material, None)
 }
 
-fn acceptor(material: &tls::TlsMaterial, client_ca: Option<&[u8]>) -> TlsAcceptor {
+fn acceptor(material: &TlsMaterial, client_ca: Option<&[u8]>) -> TlsAcceptor {
     let provider = Arc::new(tokio_rustls::rustls::crypto::aws_lc_rs::default_provider());
     let builder = ServerConfig::builder_with_provider(provider.clone())
         .with_safe_default_protocol_versions()
@@ -420,7 +418,7 @@ async fn a_proxy_outage_degrades_and_recovery_hits_again() {
 
 #[tokio::test]
 async fn a_trusted_ca_roundtrips_through_a_terminating_proxy() {
-    let material = tls::TlsMaterial::new("localhost");
+    let material = TlsMaterial::new("localhost");
     let ca = write_pem(&material.root);
     let upstream = upstream_addr(&cache_url());
     let proxy = Proxy::tls(upstream, tls_acceptor(&material)).await;
@@ -444,7 +442,7 @@ async fn a_trusted_ca_roundtrips_through_a_terminating_proxy() {
 
 #[tokio::test]
 async fn a_recovered_tls_dial_keeps_the_hostname_while_the_endpoint_changes() {
-    let material = tls::TlsMaterial::new("localhost");
+    let material = TlsMaterial::new("localhost");
     let ca = write_pem(&material.root);
     let upstream = upstream_addr(&cache_url());
     let mut proxy = Proxy::tls(upstream, tls_acceptor(&material)).await;
@@ -490,7 +488,7 @@ async fn a_recovered_tls_dial_keeps_the_hostname_while_the_endpoint_changes() {
     reason = "test-owned CA rotation replaces an existing fixture file before rebuilding the cache"
 )]
 async fn a_rebuilt_cache_reads_the_replaced_ca_after_recovery() {
-    let first = tls::TlsMaterial::new("localhost");
+    let first = TlsMaterial::new("localhost");
     let ca = write_pem(&first.root);
     let upstream = upstream_addr(&cache_url());
     let mut proxy = Proxy::tls(upstream, tls_acceptor(&first)).await;
@@ -507,7 +505,7 @@ async fn a_rebuilt_cache_reads_the_replaced_ca_after_recovery() {
         .await
         .expect("initial TLS write");
 
-    let replacement = tls::TlsMaterial::new("localhost");
+    let replacement = TlsMaterial::new("localhost");
     std::fs::write(ca.path(), pem_block("CERTIFICATE", &replacement.root))
         .expect("replace CA file");
     proxy.stop().await;
@@ -540,8 +538,8 @@ async fn a_rebuilt_cache_reads_the_replaced_ca_after_recovery() {
 
 #[tokio::test]
 async fn an_untrusted_ca_is_unavailable() {
-    let material = tls::TlsMaterial::new("localhost");
-    let ca = write_pem(tls::new_issuer().der());
+    let material = TlsMaterial::new("localhost");
+    let ca = write_pem(new_issuer().der());
     let upstream = upstream_addr(&cache_url());
     let proxy = Proxy::tls(upstream, tls_acceptor(&material)).await;
     let cache = Cache::start(options(
@@ -560,7 +558,7 @@ async fn an_untrusted_ca_is_unavailable() {
 
 #[tokio::test]
 async fn a_client_certificate_roundtrips_through_a_proxy_that_requires_one() {
-    let material = tls::TlsMaterial::new("localhost");
+    let material = TlsMaterial::new("localhost");
     let ca = write_pem(&material.root);
     let identity = ClientIdentity::new();
     let upstream = upstream_addr(&cache_url());
@@ -588,7 +586,7 @@ async fn a_client_certificate_roundtrips_through_a_proxy_that_requires_one() {
 
 #[tokio::test]
 async fn a_proxy_that_requires_a_client_certificate_refuses_a_client_without_one() {
-    let material = tls::TlsMaterial::new("localhost");
+    let material = TlsMaterial::new("localhost");
     let ca = write_pem(&material.root);
     let identity = ClientIdentity::new();
     let upstream = upstream_addr(&cache_url());

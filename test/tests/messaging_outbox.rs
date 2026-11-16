@@ -31,19 +31,12 @@ use infra_webhooks::inbound::{
 use infra_webhooks::protocol::KeyRing;
 // template:end inbound-webhooks:outbox-test-messaging-outbox-inbound-imports-2
 use integration_tests::{close_pools, dsn_for, poll_until};
+use nats_test_support::AckDroppingRelay;
 use sqlx::Row;
 use tokio::sync::Notify;
 use tokio::time::{Instant, timeout};
 use tokio_util::sync::{CancellationToken, DropGuard};
 use tokio_util::task::TaskTracker;
-
-#[path = "../../crates/infra-messaging/tests/support/relay.rs"]
-#[allow(
-    dead_code,
-    reason = "outbox tests reuse ACK fault injection; the shared authentication relay is exercised by the messaging tests"
-)]
-mod relay;
-use relay::AckDroppingRelay;
 
 const WAIT: Duration = Duration::from_secs(10);
 const POLL: Duration = Duration::from_millis(20);

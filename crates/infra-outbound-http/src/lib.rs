@@ -6,9 +6,6 @@ mod transport;
 mod test_support;
 #[cfg(test)]
 mod tests;
-#[cfg(test)]
-#[path = "../../../test/fixtures/tls.rs"]
-mod tls;
 
 use std::time::Duration;
 

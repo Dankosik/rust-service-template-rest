@@ -103,6 +103,33 @@ class Architecture(unittest.TestCase):
         edge["optional"] = True
         self.assertEqual([], self.verdict())
 
+    def test_path_inclusion_may_not_leave_its_package(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            files = {
+                "crates/owner/Cargo.toml": "",
+                "crates/owner/src/lib.rs": '#[path = "inner/kept.rs"]\nmod kept;\n'
+                '#[path = "../../other/src/shared.rs"]\nmod shared;\n',
+                "crates/owner/src/inner/kept.rs": "",
+                "crates/owner/tests/it.rs": '#[ path = "../../../test/fixtures/x.rs" ]\nmod x;\n',
+                "crates/other/Cargo.toml": "",
+                "crates/other/src/shared.rs": "",
+                "test/Cargo.toml": "",
+                "test/tests/own.rs": '#[path = "../fixtures/x.rs"]\nmod x;\n',
+                "test/fixtures/x.rs": "",
+            }
+            for relative, text in files.items():
+                (root / relative).parent.mkdir(parents=True, exist_ok=True)
+                (root / relative).write_text(text)
+            manifests = ["crates/owner/Cargo.toml", "crates/other/Cargo.toml", "test/Cargo.toml"]
+            self.assertEqual(
+                [
+                    "crates/owner/src/lib.rs: #[path] reaches outside its package (../../other/src/shared.rs)",
+                    "crates/owner/tests/it.rs: #[path] reaches outside its package (../../../test/fixtures/x.rs)",
+                ],
+                sorted(arch.cross_package_path_inclusions(manifests, root)),
+            )
+
     def test_unknown_member_kind_and_escaping_local_dependency(self) -> None:
         self.meta["packages"].append(
             {"id": "new", "name": "new", "manifest_path": str(ROOT / "crates/new/Cargo.toml"), "dependencies": []}

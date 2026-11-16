@@ -1,3 +1,5 @@
+#![expect(clippy::expect_used, reason = "relay failures are test failures")]
+
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -9,7 +11,7 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
-pub(crate) async fn eventually<T>(
+pub async fn eventually<T>(
     budget: Duration,
     what: &str,
     mut probe: impl AsyncFnMut() -> Option<T>,
@@ -26,21 +28,23 @@ pub(crate) async fn eventually<T>(
     .expect(what)
 }
 
-pub(crate) struct AckDroppingRelay {
-    pub(crate) url: String,
-    pub(crate) dropped_ack: CancellationToken,
+#[derive(Debug)]
+pub struct AckDroppingRelay {
+    pub url: String,
+    pub dropped_ack: CancellationToken,
     task: JoinHandle<()>,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct AuthObservations {
     first_closed: bool,
     refused: bool,
     latest_public_user: Option<String>,
 }
 
-pub(crate) struct AuthObservingRelay {
-    pub(crate) url: String,
+#[derive(Debug)]
+pub struct AuthObservingRelay {
+    pub url: String,
     close_first: CancellationToken,
     stop: CancellationToken,
     observations: watch::Sender<AuthObservations>,
@@ -48,7 +52,7 @@ pub(crate) struct AuthObservingRelay {
 }
 
 impl AuthObservingRelay {
-    pub(crate) async fn start(target_url: &str) -> Self {
+    pub async fn start(target_url: &str) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("authentication relay listener");
@@ -93,7 +97,7 @@ impl AuthObservingRelay {
         }
     }
 
-    pub(crate) async fn close_old_connection(&self) {
+    pub async fn close_old_connection(&self) {
         self.close_first.cancel();
         self.wait_for(
             Duration::from_secs(5),
@@ -103,7 +107,7 @@ impl AuthObservingRelay {
         .await;
     }
 
-    pub(crate) async fn wait_for_broker_refusal(&self) {
+    pub async fn wait_for_broker_refusal(&self) {
         self.wait_for(
             Duration::from_secs(10),
             |state| state.refused,
@@ -112,7 +116,7 @@ impl AuthObservingRelay {
         .await;
     }
 
-    pub(crate) async fn wait_for_latest_public_user(&self, user: &str) {
+    pub async fn wait_for_latest_public_user(&self, user: &str) {
         self.wait_for(
             Duration::from_secs(10),
             |state| state.latest_public_user.as_deref() == Some(user),
@@ -135,11 +139,11 @@ impl AuthObservingRelay {
     }
 
     #[must_use]
-    pub(crate) fn latest_public_user(&self) -> Option<String> {
+    pub fn latest_public_user(&self) -> Option<String> {
         self.observations.borrow().latest_public_user.clone()
     }
 
-    pub(crate) async fn finish(self) {
+    pub async fn finish(self) {
         self.stop.cancel();
         timeout(Duration::from_secs(3), self.task)
             .await
@@ -149,7 +153,7 @@ impl AuthObservingRelay {
 }
 
 impl AckDroppingRelay {
-    pub(crate) async fn start(stream: &str) -> Self {
+    pub async fn start(stream: &str) -> Self {
         let stream = stream.to_owned();
         let mut dropped = false;
         Self::start_filtering(move |payload| {
@@ -163,13 +167,13 @@ impl AckDroppingRelay {
         .await
     }
 
-    pub(crate) async fn start_filtering(
+    pub async fn start_filtering(
         mut drop_reply: impl FnMut(&[u8]) -> bool + Send + 'static,
     ) -> Self {
         Self::start_with_filters(|_, _| false, move |_, payload| drop_reply(payload)).await
     }
 
-    pub(crate) async fn intercept_second_pull(
+    pub async fn intercept_second_pull(
         subject: String,
     ) -> (Self, oneshot::Receiver<(String, Bytes)>) {
         let (intercepted, pull) = oneshot::channel();
@@ -202,7 +206,7 @@ impl AckDroppingRelay {
         (relay, pull)
     }
 
-    pub(crate) async fn start_source_ack(stream: &str, durable: &str, drop_request: bool) -> Self {
+    pub async fn start_source_ack(stream: &str, durable: &str, drop_request: bool) -> Self {
         let identity = format!(".{stream}.{durable}.");
         let reply_subject = Arc::new(Mutex::new(None::<String>));
         let sent_reply = Arc::clone(&reply_subject);
@@ -271,13 +275,13 @@ impl AckDroppingRelay {
         }
     }
 
-    pub(crate) async fn wait_for_drop(&self) {
+    pub async fn wait_for_drop(&self) {
         timeout(Duration::from_secs(5), self.dropped_ack.cancelled())
             .await
             .expect("configured ACK crosses the relay");
     }
 
-    pub(crate) async fn join(self) {
+    pub async fn join(self) {
         timeout(Duration::from_secs(3), self.task)
             .await
             .expect("relay finishes after client close")
@@ -289,12 +293,14 @@ impl AckDroppingRelay {
     }
 }
 
-pub(crate) fn is_stream_publish_ack(payload: &[u8], stream: &str) -> bool {
+#[must_use]
+pub fn is_stream_publish_ack(payload: &[u8], stream: &str) -> bool {
     serde_json::from_slice::<serde_json::Value>(payload)
         .is_ok_and(|reply| reply["stream"] == stream && reply["seq"].is_u64())
 }
 
-pub(crate) fn relay_target(url: &str) -> String {
+#[must_use]
+pub fn relay_target(url: &str) -> String {
     let authority = url
         .strip_prefix("nats://")
         .expect("integration NATS scheme")
@@ -411,7 +417,7 @@ fn public_user_from_connect(line: &[u8]) -> Option<String> {
     jwt_subject(connect.get("jwt")?.as_str()?)
 }
 
-pub(crate) fn jwt_subject(jwt: &str) -> Option<String> {
+pub fn jwt_subject(jwt: &str) -> Option<String> {
     use base64::Engine as _;
 
     let payload = jwt.split('.').nth(1)?;

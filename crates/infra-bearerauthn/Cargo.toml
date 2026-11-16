@@ -8,13 +8,6 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
-# cargo-shear 1.14.0 scans target directories, missing the #[path] inclusion
-# of test/fixtures/tls.rs. Remove this exception when it follows that source.
-# The full template's jwks.rs also uses rcgen, so cargo-shear calls the
-# exception redundant there; a projection without JWT keeps only the #[path] use.
-[package.metadata.cargo-shear]
-ignored = ["rcgen"]
-
 [lints]
 workspace = true
 
@@ -75,8 +68,9 @@ hyper-util = { workspace = true, features = ["tokio"] }
 metrics-util = { workspace = true, features = ["debugging"] }
 # template:begin oidc-jwt:authn-jwt-dev-dependency
 proptest = { workspace = true, features = ["std"] }
-# template:end oidc-jwt:authn-jwt-dev-dependency
 rcgen = { workspace = true, features = ["pem", "aws_lc_rs"] }
+# template:end oidc-jwt:authn-jwt-dev-dependency
+tls-test-support = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "net", "rt-multi-thread", "test-util"] }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs", "tls12"] }
 tracing-subscriber = { workspace = true, features = ["std", "registry"] }

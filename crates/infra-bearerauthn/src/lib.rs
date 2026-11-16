@@ -20,10 +20,6 @@ mod test_helpers;
 #[cfg(test)]
 mod test_metrics;
 
-#[cfg(test)]
-#[path = "../../../test/fixtures/tls.rs"]
-mod tls;
-
 use std::sync::{Arc, OnceLock};
 
 use enum_map::EnumMap;

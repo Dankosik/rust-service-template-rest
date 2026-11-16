@@ -2604,6 +2604,7 @@ dependencies = [
  "serde_json",
  "shared-rules",
  "thiserror",
+ "tls-test-support",
  "tokio",
  "tokio-rustls",
  "tokio-util",
@@ -2638,6 +2639,7 @@ dependencies = [
  "socket2",
  "tempfile",
  "thiserror",
+ "tls-test-support",
  "tokio",
  "tokio-rustls",
  "tokio-util",
@@ -2829,6 +2831,7 @@ dependencies = [
  "json-payload",
  "metrics",
  "metrics-exporter-prometheus",
+ "nats-test-support",
  "nkeys",
  "opentelemetry",
  "opentelemetry_sdk",
@@ -2948,11 +2951,11 @@ dependencies = [
  "opentelemetry",
  "opentelemetry_sdk",
  "operation-context",
- "rcgen",
  "rustls",
  "rustls-platform-verifier",
  "shared-rules",
  "thiserror",
+ "tls-test-support",
  "tokio",
  "tokio-rustls",
  "tower",
@@ -3149,10 +3152,10 @@ dependencies = [
  "metrics-util",
  "migrate",
  "moka",
+ "nats-test-support",
  "nix",
  "operation-context",
  "proptest",
- "rcgen",
  "regex",
  "reqwest",
  "rust_decimal",
@@ -3166,6 +3169,7 @@ dependencies = [
  "strsim",
  "tempfile",
  "time",
+ "tls-test-support",
  "tokio",
  "tokio-rustls",
  "tokio-util",
@@ -3703,6 +3707,17 @@ dependencies = [
  "smallvec",
  "tagptr",
  "uuid",
+]
+
+[[package]]
+name = "nats-test-support"
+version = "0.1.0"
+dependencies = [
+ "base64 0.23.1",
+ "bytes",
+ "serde_json",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -5833,6 +5848,13 @@ name = "tinyvec"
 version = "1.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
+
+[[package]]
+name = "tls-test-support"
+version = "0.1.0"
+dependencies = [
+ "rcgen",
+]
 
 [[package]]
 name = "tokio"
