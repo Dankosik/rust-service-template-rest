@@ -17,8 +17,6 @@ use crate::GrpcSecurity;
 use crate::validate::missing;
 // template:end grpc:config-integration-grpc-import
 
-/// One named integration's optional client input.
-///
 /// The loader keeps this section's values out of a decode failure whichever
 /// source set them, as `Debug` does below.
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -59,8 +57,6 @@ impl std::fmt::Debug for GrpcClientConfig {
 // template:end grpc:config-integration-grpc-type
 
 // template:begin outbound-auth:config-integration-oauth-types
-/// One immutable OAuth client-credentials tuple.
-///
 /// A missing text key decodes empty and is refused by validation, which
 /// names the key; `algorithm` has no empty form and is refused when decoded.
 #[derive(Clone, Deserialize, derive_more::Debug)]

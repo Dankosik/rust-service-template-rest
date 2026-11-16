@@ -6,11 +6,11 @@
 !.env.example
 
 .artifacts/
-/.ci/native-transport/
-/.ci/profile-mcp/
 /sbom.cdx.json
 *.profraw
 *.profdata
+__pycache__/
+*.py[cod]
 
 .idea/
 .vscode/
@@ -22,3 +22,18 @@
 
 # The Railway SDK that `npm ci --prefix .railway` installs for railway.ts.
 .railway/node_modules/
+
+# template:begin source-template:gitignore-generated-harnesses
+/CLAUDE.md
+/QWEN.md
+/Grok.md
+/opencode.json
+/.codex/
+/.claude/
+/.qwen/
+/.cursor/
+/.grok/
+/.opencode/
+/.agents/agents/
+/.agents/rules/
+# template:end source-template:gitignore-generated-harnesses

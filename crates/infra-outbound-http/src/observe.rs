@@ -11,24 +11,18 @@ use shared_rules::{
 
 use crate::{Error, StopScopes, policy::Origin};
 
-/// OpenTelemetry `http.client.request.duration`, in the recorder's
-/// Prometheus naming.
 pub const REQUEST_DURATION_METRIC: &str = "http_client_request_duration_seconds";
 
 pub const REQUEST_DURATION_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0,
 ];
 
-/// Every histogram this crate records. A composition root hands it to the
-/// Prometheus recorder; a metric left out renders the default buckets.
+/// A metric left out of this list renders the default buckets.
 pub const HISTOGRAMS: &[(&str, &[f64])] = &[(REQUEST_DURATION_METRIC, REQUEST_DURATION_BUCKETS)];
 
-/// The path template of a request, such as `/v1/items/{id}`: OpenTelemetry
-/// `url.template`. Insert it as a request extension to tell one provider
-/// operation from another; the attempt's span is then named
-/// `{method} {template}` and both the span and the duration metric carry the
-/// template. Supply a static template with placeholders for variable path
-/// segments so requests for the same operation share a metric label.
+/// OpenTelemetry `url.template`: insert as a request extension to name the operation. Use a
+/// static template with placeholders for variable segments so requests for one operation
+/// share a metric label.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UrlTemplate(pub &'static str);
 
@@ -40,17 +34,16 @@ pub(crate) struct Server {
 
 impl Server {
     pub(crate) fn new(origin: &Origin) -> Self {
+        let mut port = fmt::NumBuffer::new();
         Self {
             address: SharedString::from(origin.host_arc()),
-            port_label: SharedString::from(Arc::<str>::from(origin.port().to_string())),
+            port_label: SharedString::from(Arc::<str>::from(origin.port().format_into(&mut port))),
         }
     }
 }
 
-/// How an attempt ended, as its `outbound.outcome` label names it.
 #[derive(Clone, Copy)]
 enum Outcome {
-    /// A response was buffered to its end, whatever its status.
     Response,
     Failed(&'static str),
     Cancelled,
@@ -77,12 +70,8 @@ impl Outcome {
     }
 }
 
-/// One polled outbound attempt. [`Attempt::start`] returns a drop guard that
-/// borrows the stop scopes so it can record the cause when its parent drops
-/// the exchange.
-///
-/// [`Attempt::finish`] borrows the result and logs a transport failure's
-/// causes once; the attempt itself keeps none.
+/// [`Attempt::start`] returns a drop guard that borrows the stop scopes so it can record the
+/// cause when its parent drops the exchange.
 pub(crate) struct Attempt {
     started: Instant,
     method: &'static str,
@@ -138,8 +127,6 @@ impl Attempt {
         self.span.clone()
     }
 
-    /// Writes this attempt's context with the process text-map propagator, so
-    /// the provider's server span becomes a child of this client span.
     pub(crate) fn inject_trace_context(&self, headers: &mut HeaderMap) {
         tracing_opentelemetry_instrumentation_sdk::http::inject_context(
             &tracing_opentelemetry_instrumentation_sdk::find_context_from_tracing(&self.span),
@@ -235,9 +222,7 @@ fn describe_histogram() {
     });
 }
 
-/// The OpenTelemetry HTTP client span name: `{method} {url.template}`, or the
-/// method alone without a template; `HTTP` stands for a method that is not a
-/// known one.
+/// `HTTP` stands for a method that is not a known one.
 struct SpanName {
     method: &'static str,
     template: Option<&'static str>,
@@ -261,8 +246,9 @@ fn is_error_status(status: StatusCode) -> bool {
     status.as_u16() >= 400
 }
 
-// StatusCode::as_str borrows its receiver. Static addresses let metrics
-// retain those labels for extension codes as well as standard codes.
+// Static addresses let metrics retain labels for extension codes too; `StatusCode::as_str`
+// borrows its receiver.
+/* jscpd:ignore-start */
 static STATUS_CODES: [StatusCode; 900] = {
     let mut codes = [StatusCode::CONTINUE; 900];
     let mut code = 100_u16;
@@ -279,12 +265,11 @@ static STATUS_CODES: [StatusCode; 900] = {
 fn status_label(status: StatusCode) -> &'static str {
     STATUS_CODES[usize::from(status.as_u16() - 100)].as_str()
 }
+/* jscpd:ignore-end */
 
-/// The class of a transport failure, read from the typed causes the libraries
-/// retain: `tls` for a certificate or handshake refusal, `connect` when no
-/// connection was established (name resolution included), `protocol` for a
-/// response head hyper refused to parse, and `transport` for the rest, such
-/// as a connection lost during the exchange.
+/// Read from the typed causes the libraries retain: `tls` for certificate or handshake
+/// refusal, `connect` when no connection was established (name resolution included),
+/// `protocol` for a response head hyper refused to parse, `transport` for the rest.
 fn transport_error_type(source: &(dyn StdError + 'static)) -> &'static str {
     let causes = || shared_rules::error_chain::causes(source);
     if causes().any(<dyn StdError>::is::<rustls::Error>) {

@@ -164,8 +164,8 @@ fn population_failure_and_cancellation_retain_dated_success_until_recovery() {
 
 #[test]
 fn clock_inconsistency_never_replaces_a_valid_population_with_empty() {
-    // A stable clock starts at wall=1000. Request mono=1s, receipt mono=2s.
-    // Each row violates a distinct clock/sample condition, independently of SQL.
+    // Clock starts at wall=1000; request mono=1s, receipt mono=2s. Each row
+    // violates a distinct clock condition.
     for (request_wall, receipt_wall, database_time, oldest) in [
         (1001.0, 1002.0, 1008.0, None), // database ahead of receipt bracket
         (1001.0, 1002.0, 995.0, None),  // database behind request bracket

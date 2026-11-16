@@ -10,15 +10,12 @@
 //! Numeric failures retain every run and reopen the frozen design; they never
 //! cause a retry with a different rate, quota, deadline, or acceptance threshold.
 //!
-//! Cgroup 1-CPU quota starvation-proof rationale: pinning the service container
-//! to a 100 ms / 100 ms cgroup v2 CPU quota (1 CPU) with `runtime.worker_threads=1`,
-//! one blocking CPU permit (no queue), and external load/stub peers outside that
-//! quota forces cheap unary traffic, bounded uploads/preparation, stdout
-//! backpressure, and CPU saturation to contend for the sole Tokio worker and
-//! cgroup slice. Requiring `cpu.stat` throttling (`nr_throttled` and
-//! `throttled_usec` rising) plus 90%+ interval occupancy proves CPU enforcement
-//! was exercised, while the separate uncooperative negative control confirms
-//! the sampler and cheap-traffic gap oracle catch sole-worker starvation.
+//! The service runs under a 100 ms / 100 ms cgroup v2 quota (1 CPU) with
+//! `runtime.worker_threads=1` and one blocking CPU permit, so traffic, uploads,
+//! preparation and stdout backpressure contend for the sole worker. Rising
+//! `cpu.stat` throttling plus 90%+ interval occupancy proves the quota was
+//! exercised; the uncooperative negative control proves the sampler and gap
+//! oracle catch sole-worker starvation.
 
 #![cfg(unix)]
 #![expect(
@@ -2271,9 +2268,8 @@ async fn cleanup_containers(prefix: &str, evidence: &Evidence, failures: &mut Ve
     }
 }
 
-/// Owns the real quota boundary that source and paused-clock tests cannot see.
-/// A worker polling monopoly, early permit release, stale zero-lag report, or
-/// logging sink wait changes the external result despite passing unit tests.
+/// Catches what source and paused-clock tests cannot: a worker polling monopoly,
+/// early permit release, stale zero-lag report, or logging sink wait.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "explicit release-image R5 proof; needs Docker cgroup v2, image/source/results inputs; about six minutes"]
 async fn bounded_sources_preserve_process_progress_under_one_cpu_quota() {

@@ -509,8 +509,6 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, Serve
 use rustls::{ClientConfig, RootCertStore, ServerConfig};
 use tokio_rustls::TlsConnector;
 
-/// A server and a client configuration for `localhost` under one fresh CA,
-/// both TLS 1.3 with the requested ALPN protocol.
 fn localhost_tls(alpn: &[u8]) -> (ServerConfig, ClientConfig) {
     use rcgen::{
         BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa,

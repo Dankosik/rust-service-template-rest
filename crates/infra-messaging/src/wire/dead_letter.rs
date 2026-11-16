@@ -87,7 +87,6 @@ pub(crate) fn dead_letter_bounds(
     })
 }
 
-/// Keeps whole first identity and trace values that fit the source header budget.
 pub(crate) fn dead_letter_headers(
     original: &HeaderMap,
     subject: &str,
@@ -217,11 +216,11 @@ fn record_id(
     publication_id: &str,
 ) -> Result<String, EnvelopeError> {
     let stored_at = format_timestamp(stored_at)?;
-    let sequence = stream_sequence.to_string();
+    let mut sequence = std::fmt::NumBuffer::new();
     let mut hash = Sha256::new();
     hash.update(stream.as_bytes());
     hash.update([0]);
-    hash.update(sequence.as_bytes());
+    hash.update(stream_sequence.format_into(&mut sequence).as_bytes());
     hash.update([0]);
     hash.update(stored_at.as_bytes());
     hash.update([0]);

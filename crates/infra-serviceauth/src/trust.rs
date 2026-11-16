@@ -1,7 +1,9 @@
-use std::{collections::BTreeMap, fmt};
+use std::fmt;
 
 use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED, ParsedPublicKey};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use foldhash::HashSet;
+use indexmap::IndexMap;
 use jsonwebtoken::jwk::{
     AlgorithmParameters, EllipticCurve, Jwk, KeyAlgorithm, KeyOperations, PublicKeyUse,
 };
@@ -14,7 +16,7 @@ use crate::{InvalidKeyId, InvalidServiceName, KeyId, ServiceName};
 /// P-256 public signing keys. Every entry must be usable: a registry is
 /// operator input, and a skipped key would surface only as refused calls.
 pub struct TrustRegistry {
-    callers: BTreeMap<ServiceName, Vec<TrustedKey>>,
+    callers: IndexMap<ServiceName, Vec<TrustedKey>, foldhash::quality::RandomState>,
 }
 
 pub(crate) struct TrustedKey {
@@ -79,11 +81,15 @@ impl TrustRegistry {
         if entries.is_empty() {
             return Err(TrustError::document("the trust registry names no caller"));
         }
-        let mut callers = BTreeMap::new();
+        let mut callers = IndexMap::with_capacity_and_hasher(
+            entries.len(),
+            foldhash::quality::RandomState::default(),
+        );
         for (name, set) in entries {
             let (caller, keys) = parse_caller(&name, set)?;
             callers.insert(caller, keys);
         }
+        callers.sort_keys();
         Ok(Self { callers })
     }
 
@@ -129,12 +135,13 @@ impl<'de> Deserialize<'de> for Entries {
             }
             fn visit_map<A: de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
                 let mut entries: Vec<(String, DuplicateCheckedJson)> = Vec::new();
+                let mut seen: HashSet<String> = HashSet::default();
                 let mut repeated = None;
                 // Read to the end even after a repeat: serde_json's `end_map`
                 // refuses a visitor that stops early, and `parse` turns any
                 // serde error into the unnamed document error.
                 while let Some((name, value)) = map.next_entry::<String, DuplicateCheckedJson>()? {
-                    if repeated.is_none() && entries.iter().any(|(known, _)| *known == name) {
+                    if repeated.is_none() && !seen.insert(name.clone()) {
                         repeated = Some(name.clone());
                     }
                     entries.push((name, value));

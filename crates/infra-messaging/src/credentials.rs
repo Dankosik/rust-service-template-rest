@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 
+use parking_lot::Mutex;
 use secrecy::{ExposeSecret as _, SecretString};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -29,7 +30,6 @@ impl CredentialsFileError {
         metrics::counter!("messaging_credentials_file_challenges_total", "outcome" => "failed", "reason" => reason).increment(1);
     }
 
-    /// The closed `error.type` of this failure.
     pub(crate) const fn error_type(self) -> &'static str {
         match self {
             Self::Unreadable(_) => "unreadable_credentials_file",
@@ -37,8 +37,7 @@ impl CredentialsFileError {
         }
     }
 
-    /// The I/O error kind of an unreadable file, a closed vocabulary that
-    /// tells a missing file from a forbidden one without the path.
+    /// Tells a missing file from a forbidden one without the path.
     pub(crate) fn io_error_kind(self) -> Option<tracing::field::DebugValue<std::io::ErrorKind>> {
         match self {
             Self::Unreadable(kind) => Some(tracing::field::debug(kind)),
@@ -59,8 +58,7 @@ pub(crate) struct CredentialsFile {
 }
 
 impl CredentialsFile {
-    /// Reads the file once so an unreadable or malformed one fails startup
-    /// instead of every later connection attempt.
+    /// Fails startup on a bad file instead of every later connection attempt.
     pub(crate) async fn admit(path: PathBuf) -> Result<Self, CredentialsFileError> {
         let (jwt, _) = read(&path).await?;
         Ok(Self {
@@ -86,10 +84,7 @@ impl CredentialsFile {
             .sign(nonce)
             .map_err(|_| CredentialsFileError::Malformed)
             .inspect_err(|error| error.observe_challenge_failure())?;
-        let previous = std::mem::replace(
-            &mut *self.last_jwt.lock().unwrap_or_else(PoisonError::into_inner),
-            jwt.clone(),
-        );
+        let previous = std::mem::replace(&mut *self.last_jwt.lock(), jwt.clone());
         if previous != jwt {
             tracing::info!("messaging_credentials_reloaded");
         }
@@ -109,9 +104,8 @@ async fn read(path: &Path) -> Result<(String, nkeys::KeyPair), CredentialsFileEr
     parse(content.expose_secret())
 }
 
-/// The user JWT and key of a credentials file: the first and the second
-/// value that stands alone on a line between two dashed marker lines, the
-/// layout `nsc` writes and the NATS clients read.
+/// The first and second value that stands alone on a line between dashed
+/// marker lines, the layout `nsc` writes and the NATS clients read.
 fn parse(content: &str) -> Result<(String, nkeys::KeyPair), CredentialsFileError> {
     let lines: Vec<&str> = content.lines().map(str::trim).collect();
     let mut values = lines
@@ -163,7 +157,6 @@ mod tests {
                 .is_ok()
         );
 
-        // Windows line endings and a missing final line break still parse.
         let (jwt, key) = parse(content.replace('\n', "\r\n").trim_end()).unwrap();
         assert_eq!(jwt, "eyJ0eXAiOiJKV1QifQ.eyJzdWIiOiJVIn0.c2ln");
         assert_eq!(key.public_key(), user.public_key());
@@ -264,7 +257,6 @@ mod tests {
         assert_eq!(error, CredentialsFileError::Malformed);
         assert!(!error.to_string().contains("sentinel"), "{error}");
 
-        // A file that breaks after admission fails that connection only.
         let user = nkeys::KeyPair::new_user();
         std::fs::write(&path, creds("user.jwt.value", &user)).unwrap();
         let credentials = CredentialsFile::admit(path.clone()).await.unwrap();

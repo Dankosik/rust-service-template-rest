@@ -1,20 +1,18 @@
 //! The span is built as the HTTP adapter's observe builds its own: only the
-//! operation name and kind are `tracing` fields, because the JSON log layer
-//! serializes every span field and repeats it on each record inside the call;
-//! the RPC attributes go to the OpenTelemetry span alone, and nothing is
-//! `Span::record`ed afterwards, since every record re-serializes the fields.
-//!
-//! Native clients report the outcome after tonic validates the response.
-//! Server calls and direct HTTP service users report at the transport boundary.
+//! operation name and kind are `tracing` fields because the JSON log layer serializes every
+//! span field on each record inside the call; RPC attributes go to the OpenTelemetry span
+//! alone and nothing is `Span::record`ed afterwards.
 
 use std::mem::DropGuard;
 use std::panic::AssertUnwindSafe;
-use std::sync::{Arc, LazyLock, Once, OnceLock, PoisonError, RwLock};
+use std::sync::{Arc, LazyLock, Once, OnceLock};
 use std::time::{Duration, Instant};
 
+use arc_swap::ArcSwap;
 use foldhash::{HashMap, HashSet};
 use futures_util::FutureExt as _;
 use opentelemetry::context::FutureExt as _;
+use parking_lot::Mutex;
 use tracing::Instrument as _;
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use tracing_opentelemetry_instrumentation_sdk::http as otel_http;
@@ -33,15 +31,13 @@ const CLIENT_STARTED: &str = "grpc_client_started_total";
 const CLIENT_DIAGNOSTIC_BYTES: usize = 1024;
 const CLIENT_HANDLED: &str = "grpc_client_handled_total";
 pub(crate) const CLIENT_HANDLING_SECONDS: &str = "grpc_client_handling_seconds";
-/// Prometheus client default buckets shared by call duration and admission wait.
-/// Explicit boundaries keep `go-grpc-middleware` dashboard queries against
-/// `_bucket` compatible when the recorder's defaults differ.
+/// Prometheus client default buckets; explicit so `go-grpc-middleware` `_bucket` dashboard
+/// queries work when the recorder defaults differ.
 pub const HANDLING_SECONDS_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
 ];
 
-/// Every histogram this crate records. A composition root hands it to the
-/// Prometheus recorder; a metric left out renders the default buckets.
+/// A metric left out of this list renders the default buckets.
 pub const HISTOGRAMS: &[(&str, &[f64])] = &[
     (SERVER_HANDLING_SECONDS, HANDLING_SECONDS_BUCKETS),
     (CLIENT_HANDLING_SECONDS, HANDLING_SECONDS_BUCKETS),
@@ -50,9 +46,6 @@ pub const HISTOGRAMS: &[(&str, &[f64])] = &[
 
 static DESCRIBE: Once = Once::new();
 
-/// Server span and metrics. A panicking handler, or a response stream that
-/// panics, becomes a sanitized `Internal` answer, observed like any other
-/// call.
 pub(crate) async fn observe(
     axum::extract::State(series): axum::extract::State<Arc<Series>>,
     request: axum::extract::Request,
@@ -66,8 +59,8 @@ pub(crate) async fn observe(
         .instrument(call.span().clone());
     let mut response = match &fallback {
         None => answer.await,
-        // The span is disabled: keep the caller's context current instead,
-        // so it still reaches outbound calls.
+        // Disabled span: keep the caller's context current so it still reaches outbound
+        // calls.
         Some(context) => answer.with_context(context.clone()).await,
     }
     .unwrap_or_else(|_panic| crate::status::internal_status().into_http());
@@ -82,10 +75,8 @@ pub(crate) async fn observe(
     .map(axum::body::Body::new)
 }
 
-/// One observed call: counted as started when created and as handled, with
-/// its status code, when finished. A call dropped before that was abandoned
-/// by its caller, which stopped waiting, reset the stream or stopped reading
-/// it, and is recorded as `Canceled`, as grpc-go records it.
+/// A call dropped before it finishes was abandoned by its caller and is recorded as
+/// `Canceled`, as grpc-go does.
 pub(crate) struct Call {
     handles: Arc<Handles>,
     side: Side,
@@ -121,9 +112,8 @@ impl Call {
         self.side
     }
 
-    /// The catalog failure behind the status: several share one status code,
-    /// and during an incident which one is the whole question. Bounded by
-    /// the catalog.
+    /// Several catalog failures share one status code; during an incident which one is the
+    /// question.
     pub(crate) fn failed(&self, failure: service_failure::Code) {
         self.span.set_attribute("failure.code", failure.as_str());
         self.handles.failed(failure);
@@ -148,8 +138,6 @@ impl Drop for Call {
     }
 }
 
-/// The RPC span with its OpenTelemetry attributes, named after the label
-/// path's method: `unknown/unknown` for a path that is no known method.
 fn make_span<B>(
     request: &http::Request<B>,
     handles: &Handles,
@@ -184,8 +172,6 @@ fn make_span<B>(
     span
 }
 
-/// The status code attribute, and an error status for the codes the RPC
-/// semantic conventions treat as errors on that side of the call.
 fn update_span(span: &tracing::Span, code: tonic::Code, side: Side) {
     span.set_attribute("rpc.grpc.status_code", i64::from(code as i32));
     if otel_http::grpc::status_is_error(code as u16, matches!(side, Side::Server)) {
@@ -209,32 +195,26 @@ pub(crate) fn admission_waiting() -> impl Drop {
     })
 }
 
-/// Publishes the shed counter at zero, so a scrape tells "never shed" from
-/// "not exported".
+/// Zero publication tells "never shed" from "not exported".
 pub(crate) fn register_shed() {
     describe();
     metrics::counter!(SERVER_SHED).increment(0);
 }
 
-/// Path whose labels are `unknown`.
 const UNKNOWN_PATH: &str = "";
 const CLIENT_METHOD_LIMIT: usize = 256;
 const CLIENT_COMPONENT_LIMIT: usize = 256;
 static CLIENT_SERIES: LazyLock<Arc<Series>> = LazyLock::new(|| {
     Arc::new(Series::new(Kind::Client {
-        admitted: RwLock::default(),
+        admitted: ArcSwap::default(),
+        admit_lock: Mutex::new(()),
     }))
 });
 
-/// Metric handles by call path, registered on first use so a call does not
-/// rebuild label strings and look its series up in the recorder. The server
-/// labels the described methods of its registered services and counts every
-/// other path under `unknown`, so a caller-chosen path cannot create a
-/// series. All clients share a finite, never-evicted set of matching native
-/// generated-method candidates. This limits observation, never routing.
-///
-/// A call resolves its handles once, when it starts, and records through
-/// them without another lookup.
+/// Handles are registered on first use so a call does not rebuild labels or look up the
+/// recorder. The server labels only described methods and counts other paths as `unknown`,
+/// so a caller-chosen path cannot create a series; clients share a finite, never-evicted
+/// candidate set. This limits observation, never routing.
 #[derive(derive_more::Debug)]
 #[debug("Series {{ .. }}")]
 pub(crate) struct Series {
@@ -242,35 +222,28 @@ pub(crate) struct Series {
     handled_metric: &'static str,
     handling_seconds_metric: &'static str,
     kind: Kind,
-    /// Handles of every path that is not a label.
     unknown: OnceLock<Arc<Handles>>,
 }
 
-/// Which side a [`Series`] observes, and so which paths become labels.
 enum Kind {
-    /// Only the described methods of the registered services. The set is
-    /// fixed at startup, so finding a call's handles takes no lock.
+    /// Fixed at startup, so finding handles takes no lock.
     Server {
         described: HashMap<Box<str>, OnceLock<Arc<Handles>>>,
     },
-    /// Generated-method candidates, up to [`CLIENT_METHOD_LIMIT`].
     Client {
-        admitted: RwLock<HashMap<Box<str>, Arc<Handles>>>,
+        admitted: ArcSwap<HashMap<Box<str>, Arc<Handles>>>,
+        admit_lock: Mutex<()>,
     },
 }
 
-/// The series of one label path.
 struct Handles {
-    /// `service/method`, the span name.
     span_name: Box<str>,
     service: Arc<str>,
     method: Arc<str>,
     handled_metric: &'static str,
     started: metrics::Counter,
     handling_seconds: metrics::Histogram,
-    /// Indexed by status code.
     handled: [OnceLock<metrics::Counter>; 17],
-    /// Indexed by catalog code.
     failed: [OnceLock<metrics::Counter>; service_failure::Code::ALL.len()],
 }
 
@@ -310,46 +283,44 @@ impl Series {
         }
     }
 
-    /// The handles of the request's label path, `unknown` when its path is
-    /// not a label.
     fn handles<B>(&self, request: &http::Request<B>) -> Arc<Handles> {
         let labelled = match &self.kind {
             Kind::Server { described } => described
                 .get_key_value(request.uri().path())
                 .map(|(path, handles)| Arc::clone(handles.get_or_init(|| self.register(path)))),
-            Kind::Client { admitted } => {
-                client_path(request).and_then(|path| self.admit_client_path(admitted, path))
-            }
+            Kind::Client {
+                admitted,
+                admit_lock,
+            } => client_path(request)
+                .and_then(|path| self.admit_client_path(admitted, admit_lock, path)),
         };
         labelled
             .unwrap_or_else(|| Arc::clone(self.unknown.get_or_init(|| self.register(UNKNOWN_PATH))))
     }
 
-    /// The handles of `path` while the client label set has room for it,
-    /// `None` once [`CLIENT_METHOD_LIMIT`] other paths hold it.
     fn admit_client_path(
         &self,
-        admitted: &RwLock<HashMap<Box<str>, Arc<Handles>>>,
+        admitted: &ArcSwap<HashMap<Box<str>, Arc<Handles>>>,
+        admit_lock: &Mutex<()>,
         path: &str,
     ) -> Option<Arc<Handles>> {
-        if let Some(handles) = admitted
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(path)
-        {
+        if let Some(handles) = admitted.load().get(path) {
             return Some(Arc::clone(handles));
         }
-        let mut paths = admitted.write().unwrap_or_else(PoisonError::into_inner);
-        if let Some(handles) = paths.get(path) {
+        let _guard = admit_lock.lock();
+        let current = admitted.load();
+        if let Some(handles) = current.get(path) {
             return Some(Arc::clone(handles));
         }
-        if paths.len() >= CLIENT_METHOD_LIMIT {
+        if current.len() >= CLIENT_METHOD_LIMIT {
             return None;
         }
-        // Admission and handle registration share the write lock. Racing
+        // Admission and handle registration share `admit_lock`. Racing
         // first calls cannot allocate recorder series beyond the bound.
         let handles = self.register(path);
-        paths.insert(path.into(), Arc::clone(&handles));
+        let mut next = (**current).clone();
+        next.insert(path.into(), Arc::clone(&handles));
+        admitted.store(Arc::new(next));
         Some(handles)
     }
 
@@ -394,10 +365,8 @@ impl Handles {
     }
 }
 
-/// The request path when it matches the call's generated method metadata
-/// within the label size bounds; validated before any label is allocated. The
-/// public extension is forgeable, so a match still passes the global
-/// admission cap.
+/// Validated before any label is allocated. The public extension is forgeable, so a match
+/// still passes the global admission cap.
 fn client_path<B>(request: &http::Request<B>) -> Option<&str> {
     let method = request.extensions().get::<tonic::GrpcMethod<'static>>()?;
     if method.service().len() > CLIENT_COMPONENT_LIMIT
@@ -411,8 +380,6 @@ fn client_path<B>(request: &http::Request<B>) -> Option<&str> {
     matches.then_some(path)
 }
 
-/// Splits `/package.Service/Method`; [`UNKNOWN_PATH`] and any other path
-/// outside that grammar are `unknown/unknown`.
 fn service_and_method(path: &str) -> (&str, &str) {
     crate::protocol::split_method_path(path).unwrap_or(("unknown", "unknown"))
 }
@@ -479,7 +446,6 @@ fn describe() {
     });
 }
 
-/// The grpc-go code names used by the grpc-ecosystem metrics.
 const fn code_name(code: tonic::Code) -> &'static str {
     match code {
         tonic::Code::Ok => "OK",
@@ -528,8 +494,8 @@ mod tests {
         assert_eq!(code_name(tonic::Code::Unauthenticated), "Unauthenticated");
     }
 
-    /// One recorder owns the process-wide client handles for this unit-test
-    /// binary. Replacing/resetting that registry for tests would evade its bound.
+    /// One recorder owns the process-wide client handles; resetting that registry for tests
+    /// would evade its bound.
     #[tokio::test]
     #[expect(
         clippy::too_many_lines,
@@ -684,7 +650,6 @@ mod tests {
                 assert_eq!(status, expected);
                 assert!(body.frame().await.is_none());
             }
-            // The cancellation case drops its still-open response here.
         }
         let adapter =
             crate::Client::try_new(&destination, crate::ClientSecurity::Plaintext, WAIT).unwrap();
@@ -784,8 +749,6 @@ mod tests {
         assert!(handle.render().contains(empty_ok));
         drop(empty);
         drop(generated);
-        // A call refused before dispatch counts with the status its caller
-        // receives, not as abandoned.
         let refusing =
             crate::Client::try_new(&destination, crate::ClientSecurity::Plaintext, WAIT).unwrap();
         let status = refusing
@@ -795,8 +758,6 @@ mod tests {
             ))
             .refuse(tonic::Status::unavailable("credentials unavailable"));
         assert_eq!(status.code(), tonic::Code::Unavailable);
-        // An HTTP answer without `grpc-status`, as a proxy sends, counts with
-        // the code a gRPC client infers from its HTTP status.
         let mut proxied =
             crate::Client::try_new(&destination, crate::ClientSecurity::Plaintext, WAIT).unwrap();
         let response = tokio::time::timeout(
@@ -855,7 +816,6 @@ mod tests {
                 Some(("bounded.Service", method)),
             )));
         }
-        // An admitted identity is retained after saturation and reconstruction.
         let mut client =
             crate::Client::try_new(&destination, crate::ClientSecurity::Plaintext, WAIT).unwrap();
         drop(client.call(client_request(
@@ -872,10 +832,10 @@ mod tests {
             "{rendered}"
         );
         let series = Series::client();
-        let Kind::Client { admitted } = &series.kind else {
+        let Kind::Client { admitted, .. } = &series.kind else {
             panic!("the client series observes the client side");
         };
-        assert_eq!(admitted.read().unwrap().len(), CLIENT_METHOD_LIMIT);
+        assert_eq!(admitted.load().len(), CLIENT_METHOD_LIMIT);
         for (method, status) in [
             ("Header", "OK"),
             ("Trailer", "Aborted"),

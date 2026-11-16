@@ -3,15 +3,13 @@ use infra_serviceauth::{
 };
 use service_config::{Config, ServiceAuthConfig, ServiceSigningKey, ValidationError};
 
-/// What the gRPC listener verifies and what outbound clients sign with.
 pub(super) struct PreparedServiceAuth {
     /// `Some` exactly when `service_auth.mode = "jwt"`.
     pub(super) verifier: Option<Verifier>,
     pub(super) tokens: TokenSource,
 }
 
-/// Admits the trust inputs before any listener binds. The adapter owns the
-/// name, type, registry and key grammar; each refusal names its key.
+/// The adapter owns the name, type, registry and key grammar; each refusal names its key.
 pub(super) fn prepare(config: &Config) -> Result<PreparedServiceAuth, ValidationError> {
     let ServiceAuthConfig::Jwt {
         name,

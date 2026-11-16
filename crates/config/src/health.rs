@@ -19,8 +19,7 @@ pub struct HealthConfig {
     pub refresh_interval: Duration,
     /// One deadline for a background check; every probe runs under it at
     /// the same time, and the verdict names the first probe that failed or
-    /// ran out of it. `/health/ready` itself never runs a probe; it serves
-    /// the cached verdict. Also feeds the staleness bound described on
+    /// ran out of it. Also feeds the staleness bound described on
     /// [`Self::refresh_interval`].
     #[serde(with = "humantime_serde")]
     pub probe_budget: Duration,

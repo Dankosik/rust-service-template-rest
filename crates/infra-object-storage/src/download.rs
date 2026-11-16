@@ -1,11 +1,12 @@
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
 use aws_sdk_s3::primitives::{ByteStream, ByteStreamError};
 use bytes::Bytes;
 use http_body::{Frame, SizeHint};
 use operation_context::{OperationContext, Stopped};
+use parking_lot::Mutex;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::task::JoinHandle;
 
@@ -98,15 +99,6 @@ impl Completion {
             waker.wake();
         }
     }
-}
-
-fn lock(shared: &Mutex<State>) -> MutexGuard<'_, State> {
-    // `Download::poll_chunk` catches a provider-body panic and then calls
-    // `terminate` on this same cell; a retained `Download` must still return
-    // its terminal error. Keep the cell usable instead of panicking again.
-    shared
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// A provider poll can advance custody without returning a caller payload.
@@ -246,7 +238,7 @@ enum Termination {
 
 fn terminate(shared: &Mutex<State>, termination: Termination) {
     let completion = {
-        let mut state = lock(shared);
+        let mut state = shared.lock();
         let Status::Open(resources) = &state.status else {
             return;
         };
@@ -327,7 +319,7 @@ impl Download {
             // panic may keep this `Download`; the slot and the body must not
             // wait for it to be dropped.
             let polled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                lock(&self.shared).poll(context)
+                self.shared.lock().poll(context)
             }));
             let (result, completion) = match polled {
                 Ok(result) => result,
@@ -352,7 +344,7 @@ impl Download {
     /// Consume and collect unread bytes under the original context. Returned
     /// bytes outlive admission and need a budget at their consumer.
     pub async fn into_bytes(mut self) -> Result<Bytes, ObjectStorageError> {
-        let unread_bytes = lock(&self.shared).unread_bytes().unwrap_or(0);
+        let unread_bytes = self.shared.lock().unread_bytes().unwrap_or(0);
         let mut buffer = Vec::with_capacity(usize::try_from(unread_bytes).unwrap_or(0));
         while let Some(chunk) = self.next_chunk().await? {
             buffer.extend_from_slice(&chunk);
@@ -381,13 +373,14 @@ impl http_body::Body for Download {
     }
 
     fn is_end_stream(&self) -> bool {
-        matches!(lock(&self.shared).status, Status::Succeeded)
+        matches!(self.shared.lock().status, Status::Succeeded)
     }
 
     fn size_hint(&self) -> SizeHint {
         // Hyper may skip an exact-zero body, so a failed download reports no
         // exact size and keeps its error visible.
-        lock(&self.shared)
+        self.shared
+            .lock()
             .unread_bytes()
             .map_or_else(SizeHint::default, SizeHint::with_exact)
     }

@@ -8,15 +8,10 @@ use infra_postgres::{Tx, TxError, TxOptions, in_tx_with_acquire_deadline};
 
 use super::{Incoming, async_trait};
 
-/// An adapter that applies one retained delivery inside its transaction.
-///
 /// `tx` stays open, and holds a pooled connection, until `process` returns
 /// and the job completes in it. Keep `process` to database effects. For an
 /// effect outside PostgreSQL, enqueue a job on `tx` and let that job make the
 /// call, so a slow recipient holds neither a transaction nor a connection.
-///
-/// Implement it under [`async_trait`](macro@async_trait), the workspace idiom
-/// for object-safe async traits.
 #[async_trait]
 pub trait Consumer: Send + Sync + 'static {
     /// An `Err` rolls back every effect made on `tx`, and its [`JobError`] class

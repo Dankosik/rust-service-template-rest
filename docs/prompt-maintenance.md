@@ -23,6 +23,11 @@ Cursor's [rules](https://cursor.com/docs/rules.md),
 OpenCode's [agents](https://opencode.ai/docs/agents),
 [skills](https://opencode.ai/docs/skills), [config](https://opencode.ai/docs/config),
 and [CLI](https://opencode.ai/docs/cli) own current OpenCode 1 controls.
+Antigravity's [rules](https://antigravity.google/docs/rules.md),
+[skills](https://antigravity.google/docs/skills.md), and
+[subagents](https://antigravity.google/docs/subagents.md) own current
+Antigravity controls; its subagent `tools` names follow those docs, not the
+names the running agent reports.
 Product system-prompt history is observational evidence, not a harness
 contract.
 

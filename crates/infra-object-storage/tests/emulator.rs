@@ -18,8 +18,7 @@ use infra_object_storage::{
 };
 use secrecy::SecretString;
 
-/// The bucket the Compose service creates before it listens; the client
-/// never manages buckets. A supplied emulator must hold it already.
+/// The Compose service creates it; the client never manages buckets.
 const BUCKET: &str = "template-bucket";
 
 struct Emulator {

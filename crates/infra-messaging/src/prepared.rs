@@ -34,7 +34,6 @@ pub(crate) struct PreparedEventParts {
 }
 
 impl Registry {
-    /// Uses the registered subject with the bounds of [`PreparedEvent::prepare`].
     pub fn prepare<T: EventPayload + Serialize>(
         &self,
         event: &Event<T>,
@@ -49,13 +48,12 @@ impl Registry {
 }
 
 impl PreparedEvent {
-    /// Serialization runs once and synchronously. Retained JSON is bounded by
-    /// `max_payload_bytes`; excess output is counted until serialization ends,
-    /// preserving a later serializer error. Custom serializers must be finite,
-    /// trusted, nonblocking code. Callers own source size, collection cardinality
-    /// and concurrent preparation within their operation deadline. That deadline
-    /// and the output bound cannot preempt a callback or bound its private
-    /// allocations. Bound the source before invoking this synchronous API.
+    /// Serialization runs once and synchronously, retaining at most
+    /// `max_payload_bytes`; excess output is counted so a later serializer
+    /// error still wins. Neither the deadline nor the output bound can preempt
+    /// a serializer callback or bound its allocations: custom serializers must
+    /// be finite and nonblocking, and callers bound the source size,
+    /// cardinality and concurrent preparation.
     pub fn prepare<T: EventPayload + Serialize>(
         subject: impl Into<String>,
         event: &Event<T>,
@@ -90,10 +88,8 @@ impl PreparedEvent {
         if crate::wire::is_zero_time(occurred_at) {
             return Err(EnvelopeError::CreatedAtRequired);
         }
-        // A caller can retry the retained payload without reformatting it; the
-        // created-at text is derived from `occurred_at` when the envelope is
-        // encoded. Check the range here so preparation rejects an unencodable
-        // time rather than a later publication attempt.
+        // The created-at text is derived at encode time; check the range here
+        // so preparation, not a later publication attempt, rejects it.
         crate::wire::check_timestamp(occurred_at)?;
         Ok(Self {
             subject,
@@ -149,11 +145,9 @@ impl PreparedEvent {
     pub fn subject(&self) -> &str {
         &self.subject
     }
-    /// The subject as the client's reference-counted type.
     pub(crate) fn subject_handle(&self) -> &Subject {
         &self.subject
     }
-    /// The logical event identity consumers deduplicate by.
     #[must_use]
     pub fn message_id(&self) -> &str {
         &self.message_id

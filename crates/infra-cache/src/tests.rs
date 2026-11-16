@@ -189,8 +189,7 @@ async fn serve_resp(
         if socket.observed.silence_all.load(Ordering::SeqCst)
             || socket.id <= socket.observed.silence_through.load(Ordering::SeqCst)
         {
-            // Keep reading to detect client EOF and count dispatched commands,
-            // but never answer a slot on a deliberately stalled connection.
+            // Keep reading to see EOF and count commands, never answering.
             continue;
         }
         if arguments.first().is_some_and(|command| command == "AUTH")

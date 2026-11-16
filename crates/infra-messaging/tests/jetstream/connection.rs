@@ -1,7 +1,6 @@
 use super::*;
 
-/// Disconnects one real broker connection and holds replacement connections
-/// until the test explicitly restores the network path.
+/// Holds replacement connections until the test restores the network path.
 struct OutageRelay {
     url: String,
     pause: CancellationToken,

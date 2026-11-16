@@ -16,8 +16,8 @@ pub(crate) const CLEANUP_DURATION_BUCKETS: &[f64] = &[
     600.0, 1200.0, 1800.0, 3600.0,
 ];
 
-/// Matches the jobs retention backstop, with room for pool acquisition, the
-/// cleanup statement, and transaction acknowledgement.
+/// Matches the jobs retention backstop plus pool acquisition, the statement,
+/// and commit acknowledgement.
 const CLEANUP_BATCH_BUDGET: Duration = Duration::from_secs(12);
 const CLEANUP_STATEMENT_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -46,7 +46,6 @@ pub enum PassEnd {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CleanupPassResult {
-    /// Rows removed by batches whose commits were acknowledged.
     pub removed_rows: u64,
     pub end: PassEnd,
 }
@@ -101,12 +100,9 @@ fn describe_cleanup() {
     );
 }
 
-/// Whole-pass cleanup evidence, including direct and concurrent callers.
-///
 /// Start inside the polled pass before its first wait. Record a batch only
-/// after its transaction confirms commit, including an empty terminal batch.
-/// Mark the terminal disposition completed or failed; dropping an unfinished
-/// pass records cancellation and preserves its earlier confirmed progress.
+/// after its commit is confirmed; dropping an unfinished pass records
+/// cancellation and keeps earlier confirmed progress.
 #[derive(Debug)]
 pub struct CleanupPass {
     cleanup: Cleanup,
@@ -129,7 +125,6 @@ pub enum CleanupError {
     Statement,
     #[error("commit")]
     Commit,
-    /// The batch missed its client-side deadline and may have committed.
     #[error("cleanup batch timed out")]
     TimedOut,
 }
@@ -181,10 +176,9 @@ impl CleanupPass {
         }
     }
 
-    /// Pass `batch_limit` to each delete and stop when it removes fewer rows
-    /// or the owner cancels between batches. Count only acknowledged commits;
-    /// earlier confirmed batches stay committed on failure. A short batch does
-    /// not establish that the eligible population is empty.
+    /// Stops when a batch removes fewer than `batch_limit` rows (which does not
+    /// prove the population is empty) or the owner cancels. Counts only acknowledged
+    /// commits; earlier confirmed batches stay committed on failure.
     #[allow(
         clippy::too_many_arguments,
         reason = "each cleanup owner supplies its pool, transaction options, cancellation, batch cap, metric, log event, and delete query"
@@ -281,7 +275,6 @@ impl CleanupPass {
         Err(failure)
     }
 
-    /// Publish a known successful commit before the next wait in the pass.
     pub fn committed(&mut self, rows: u64) {
         self.batches.increment(1);
         self.rows.increment(rows);

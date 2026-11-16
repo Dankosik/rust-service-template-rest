@@ -27,7 +27,7 @@ lints and CI, and written as instructions the agent follows. You describe the
 behavior. The agent builds it inside fixed boundaries and proves it before
 merge.
 
-Works with Claude Code, Codex, Cursor, Qwen Code, Grok and OpenCode.
+Works with Claude Code, Codex, Cursor, Qwen Code, Grok, OpenCode and Antigravity.
 
 ## Start a service
 
@@ -61,6 +61,16 @@ Works with Claude Code, Codex, Cursor, Qwen Code, Grok and OpenCode.
   only the checks a change touches.
 - One canonical instruction set lives in `.agents`. Initialization installs only
   the adapters `AGENT_HARNESS` selects.
+
+<!-- template:begin source-template:readme-harness-sync -->
+This template repository does not commit the generated agent files
+(`CLAUDE.md`, `.claude/`, `.agents/agents/` and the other harness folders).
+After you clone or pull it, run `make agent-harness-sync` so your agent finds
+its instructions and subagents. To change a subagent, edit `.agents/roles` or
+`.agents/role-classes`, then run the same command; the next sync overwrites
+direct edits to generated files. A service created from the template commits
+these files, so this step is not needed there.
+<!-- template:end source-template:readme-harness-sync -->
 
 ## What the service includes
 
@@ -149,8 +159,7 @@ curl http://127.0.0.1:8080/health/ready
 ```
 
 `make help` lists every command. Later template changes arrive through
-[template sync](docs/template-sync.md) and the
-[runtime upgrade guide](docs/template-upgrade.md).
+[template sync](docs/template-sync.md).
 
 ## Documentation
 

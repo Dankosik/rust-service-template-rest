@@ -22,7 +22,9 @@ integration = []
 
 [dependencies]
 derive_more = { workspace = true, features = ["debug"] }
+foldhash = { workspace = true, features = ["std"] }
 operation-context = { workspace = true }
+parking_lot = { workspace = true }
 # template:begin outbound-auth-grpc:oauth-grpc-dependencies
 infra-grpc = { workspace = true, optional = true }
 tonic = { workspace = true, optional = true }
@@ -43,7 +45,8 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "time", "sync", "macros"] }
 tracing = { workspace = true, features = ["std"] }
 url = { workspace = true, features = ["std"] }
-uuid = { workspace = true, features = ["v4"] }
+uuid = { workspace = true, features = ["v4", "fast-rng", "serde"] }
+zeroize = { workspace = true, features = ["alloc", "serde"] }
 
 [dev-dependencies]
 # template:begin outbound-auth-grpc:oauth-grpc-test-dependencies

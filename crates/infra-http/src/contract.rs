@@ -6,6 +6,7 @@ use axum::extract::{Request, State};
 use axum::http::Method;
 use axum::middleware::{self, Next};
 use axum::response::Response;
+use foldhash::{HashMap, HashMapExt as _};
 use utoipa::openapi::security::{HttpAuthScheme, SecurityScheme};
 use utoipa::openapi::{OpenApi, RefOr, path::Operation};
 use utoipa_axum::router::OpenApiRouter;
@@ -15,16 +16,12 @@ use crate::probes::{is_health_probe_operation, is_health_probe_route};
 use crate::problem::SANITIZED_DETAIL;
 use crate::problem::sanitized_internal_error;
 
-/// A closed finalization error naming the first operation that failed; no
-/// partially served contract is returned.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum FinalizeError {
-    /// A protected operation requires enabled authentication.
     #[error(
         "HTTP contract finalization failed: {method} {path} is protected and requires enabled authentication"
     )]
     ProtectedOperation { path: String, method: String },
-    /// An operation's effective security policy is unsupported or ambiguous.
     #[error(
         "HTTP contract finalization failed: {method} {path} has an unsupported or ambiguous effective security policy ({fault})"
     )]
@@ -42,8 +39,6 @@ pub enum FinalizeError {
     ReservedProbeRoute { path: String, method: String },
 }
 
-/// Finalize a document whose operations are all public.
-///
 /// A served route the document does not describe is not opened: it answers a
 /// sanitized 500 at request time.
 pub fn finalize_public<S>(contract: OpenApiRouter<S>) -> Result<Router<S>, FinalizeError>
@@ -91,7 +86,6 @@ pub(crate) enum Access {
     ),
 }
 
-/// One operation's access, after refusing a reserved probe template.
 fn compile_operation(
     document: &OpenApi,
     path: &str,
@@ -124,7 +118,12 @@ fn compile_operation(
 /// The compiled access table, shared read-only by every request: axum clones
 /// middleware state per request, so the table sits behind an `Arc`.
 #[derive(Clone)]
-pub(crate) struct Policy(Arc<BTreeMap<String, BTreeMap<String, Access>>>);
+pub(crate) struct Policy(Arc<CompiledPolicy>);
+
+struct CompiledPolicy {
+    routes: HashMap<Box<str>, HashMap<Box<str>, Access>>,
+    first_protected: Option<(Box<str>, Box<str>)>,
+}
 
 macro_rules! fixed_path_operations {
     ($item:ident, $borrow:ident) => {
@@ -148,20 +147,21 @@ pub(super) use fixed_path_operations;
 
 impl Policy {
     pub(crate) fn compile(document: &OpenApi) -> Result<Self, FinalizeError> {
-        let mut table = BTreeMap::new();
+        let mut routes = HashMap::with_capacity(document.paths.paths.len());
+        let mut first_protected = None;
         for (path, item) in &document.paths.paths {
             let path = if path.is_empty() {
                 "/".to_owned()
             } else {
                 path.clone()
             };
-            let mut methods = BTreeMap::new();
+            let mut ordered_methods = BTreeMap::new();
             let fixed_operations = fixed_path_operations!(item, as_ref);
             for (method, operation) in fixed_operations {
                 let Some(operation) = operation else {
                     continue;
                 };
-                methods.insert(
+                ordered_methods.insert(
                     method.to_owned(),
                     compile_operation(document, &path, method, operation)?,
                 );
@@ -177,27 +177,39 @@ impl Policy {
                         fault: "fixed_method_in_additional_operations",
                     });
                 }
-                methods.insert(
+                ordered_methods.insert(
                     method.clone(),
                     compile_operation(document, &path, method, operation)?,
                 );
             }
-            table.insert(path, methods);
+            if first_protected.is_none()
+                && let Some((method, _)) = ordered_methods
+                    .iter()
+                    .find(|(_, access)| matches!(access, Access::Protected(..)))
+            {
+                first_protected = Some((path.as_str().into(), method.as_str().into()));
+            }
+            let methods = ordered_methods
+                .into_iter()
+                .map(|(method, access)| (method.into_boxed_str(), access))
+                .collect();
+            routes.insert(path.into_boxed_str(), methods);
         }
-        Ok(Self(Arc::new(table)))
+        Ok(Self(Arc::new(CompiledPolicy {
+            routes,
+            first_protected,
+        })))
     }
 
     fn first_protected(&self) -> Option<(&str, &str)> {
-        self.0.iter().find_map(|(path, methods)| {
-            methods
-                .iter()
-                .find(|(_, access)| matches!(access, Access::Protected(..)))
-                .map(|(method, _)| (path.as_str(), method.as_str()))
-        })
+        self.0
+            .first_protected
+            .as_ref()
+            .map(|(path, method)| (&**path, &**method))
     }
 
     pub(crate) fn access(&self, path: &str, method: &Method) -> Option<&Access> {
-        let methods = self.0.get(path)?;
+        let methods = self.0.routes.get(path)?;
         methods.get(method.as_str()).or_else(|| {
             if method == Method::HEAD {
                 methods.get("GET")
@@ -226,7 +238,6 @@ async fn enforce_public(State(policy): State<Policy>, request: Request, next: Ne
     }
 }
 
-/// Normalize a finalized router mounted beneath an outer axum nest.
 pub(crate) fn contract_path(extensions: &axum::http::Extensions) -> Option<&str> {
     let matched = extensions.get::<axum::extract::MatchedPath>()?.as_str();
     let inner = extensions
@@ -238,7 +249,6 @@ pub(crate) fn contract_path(extensions: &axum::http::Extensions) -> Option<&str>
     Some(inner)
 }
 
-/// The one security scheme name a requirement may use.
 const BEARER_SCHEME: &str = "bearerAuth";
 
 #[derive(Clone, Copy, Debug)]
@@ -259,11 +269,8 @@ impl PolicyFault {
 }
 
 impl Access {
-    /// An operation's effective security. A requirement object must have
-    /// exactly one `bearerAuth` key, whose scope list may be empty; any other
-    /// scheme, an anonymous `{}`, or a multi-key (AND-of-schemes) requirement
-    /// is unsupported and fails finalization instead of silently narrowing
-    /// access.
+    /// Any scheme other than one `bearerAuth` key, an anonymous `{}`, or an
+    /// AND-of-schemes requirement fails finalization instead of silently narrowing access.
     fn from_operation(document: &OpenApi, operation: &Operation) -> Result<Self, PolicyFault> {
         let security = operation.security.as_ref().or(document.security.as_ref());
         let Some(requirements) = security.filter(|requirements| !requirements.is_empty()) else {

@@ -293,7 +293,6 @@ fn shutdown(handle: TracerProviderHandle) -> ProviderShutdown {
 }
 
 /// Each request is observed before the test permits its scripted response.
-/// The finite script's thread is joined after the last response.
 #[expect(
     clippy::disallowed_methods,
     reason = "finite collector fixture owns blocking accept and joins its scripted thread"
@@ -324,8 +323,7 @@ fn scripted_collector(
     (Collector { addr, requests }, release, thread)
 }
 
-/// Configure only batch size and timer for deterministic test scheduling;
-/// the real SDK batch processor and exporter wrapper own all completion.
+/// Only batch size and timer are configured, for deterministic scheduling.
 fn batch_handle(exporter: impl SpanExporter + 'static) -> TracerProviderHandle {
     let drain = Arc::default();
     let processor = sdktrace::BatchSpanProcessor::builder(ObservedExporter {
@@ -467,7 +465,7 @@ struct CapturedSpans(Arc<Mutex<Vec<SpanData>>>);
 
 impl SpanExporter for CapturedSpans {
     fn export(&self, batch: Vec<SpanData>) -> impl Future<Output = OTelSdkResult> + Send {
-        self.0.lock().unwrap().extend(batch);
+        self.0.lock().extend(batch);
         std::future::ready(Ok(()))
     }
 }
@@ -554,7 +552,7 @@ fn collector_diagnostics_cannot_escape_to_local_records_or_span_events() {
                     records.contains("ordinary_event"),
                     "positive local control: {records}"
                 );
-                let spans = spans.0.lock().unwrap();
+                let spans = spans.0.lock();
                 assert_eq!(spans.len(), 1, "SDK diagnostics cannot create extra spans");
                 assert_eq!(spans[0].name, "ordinary_span");
                 assert_eq!(spans[0].events.len(), 1, "only the app event is admitted");

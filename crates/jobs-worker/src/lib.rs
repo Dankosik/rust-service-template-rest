@@ -41,8 +41,6 @@ type PostgresMessages = Box<
 
 impl<'a> Registration<'a> {
     // template:begin outbox:worker-with-postgres-messages
-    /// Add database-backed message handlers after the worker admits its shared pool.
-    ///
     /// Declare routes through `messages` during ordinary registration. This hook
     /// declares consumer intent before dependency I/O and receives the same registry
     /// after pool admission and migration-history verification, before broker admission.
@@ -71,8 +69,8 @@ impl<'a> Registration<'a> {
         self.config
     }
 
-    /// Spawn a background task the worker owns: `start` builds it from a
-    /// token cancelled at the background-join stage, which then joins it.
+    /// `start` builds the task from a token cancelled at the background-join
+    /// stage, which then joins it.
     ///
     /// The task must run until that token is cancelled. One that returns or
     /// panics earlier stops the worker with exit code 1, and the failure
@@ -92,9 +90,8 @@ impl<'a> Registration<'a> {
         self.background.spawn(name, start);
     }
 
-    /// Each call returns a new child of the background token, cancelled at the
-    /// background-join stage. Cancelling the returned token does not stop the
-    /// worker.
+    /// A new child of the background token, cancelled at the background-join
+    /// stage. Cancelling it does not stop the worker.
     #[must_use]
     pub fn shutdown(&self) -> CancellationToken {
         self.background.cancel.child_token()
@@ -105,15 +102,13 @@ type Register<'r> = Box<dyn FnOnce(&mut Registration<'_>) -> Result<(), BuildErr
 
 const BUILD_INFO: BuildInfo = BuildInfo::from_package_version(env!("CARGO_PKG_VERSION"));
 
-/// The process stopped on a signal but a stage voted degraded, including a forced drain.
 const EXIT_DEGRADED_SHUTDOWN: u8 = 3;
 
-/// Parse flags, load configuration, run the worker, and map the result to an
-/// exit code. The first item of `args` is the program name, as in
-/// [`std::env::args_os`]. A composition with no retained capability refuses after
-/// configuration is loaded. `--help` prints clap's help and exits 0; a flag
-/// error prints one generic usage line and exits 2.
-/// Later failures do not call [`std::process::exit`].
+/// The first item of `args` is the program name, as in [`std::env::args_os`].
+/// A composition with no retained capability refuses after configuration is
+/// loaded. `--help` prints clap's help and exits 0; a flag error prints one
+/// generic usage line and exits 2. Later failures do not call
+/// [`std::process::exit`].
 pub fn run<I, R>(args: I, register: R) -> ExitCode
 where
     I: IntoIterator<Item = OsString>,

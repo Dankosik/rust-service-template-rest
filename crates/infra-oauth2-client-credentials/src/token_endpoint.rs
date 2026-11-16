@@ -70,7 +70,6 @@ impl TokenEndpoint {
         self.uri.host()
     }
 
-    /// Performs one client-credentials token request and records its outcome.
     /// The caller includes the [`FETCH_TIMEOUT`] cap in `deadline`.
     pub(crate) async fn fetch_service_token(
         &self,
@@ -79,9 +78,7 @@ impl TokenEndpoint {
         self.fetch_token(Grant::ClientCredentials, deadline).await
     }
 
-    /// Performs one token-exchange request for `subject`, bounded by
-    /// `deadline`, and records its outcome. Only the caller that owns the
-    /// active exchange for the subject runs this attempt.
+    /// Only the caller that owns the active exchange for the subject runs this attempt.
     pub(crate) async fn fetch_exchange(
         &self,
         subject: &SecretString,
@@ -222,7 +219,7 @@ impl Grant<'_> {
 
 #[derive(Deserialize)]
 struct TokenResponse {
-    access_token: String,
+    access_token: zeroize::Zeroizing<String>,
     token_type: String,
     #[serde(default, deserialize_with = "deserialize_lifetime")]
     expires_in: Option<u64>,

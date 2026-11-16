@@ -1,13 +1,10 @@
-//! The probe shares the pool so readiness can reflect saturation in the
-//! pool that serves requests. The background refresher applies its failure
-//! threshold and bounds the whole check. The acquire budget bounds the wait
-//! for a connection inside it.
+//! The probe shares the request pool so readiness reflects its saturation; the
+//! refresher owns the failure threshold and the whole-check bound.
 
 use health::{Probe, ProbeError};
 use sqlx::Connection;
 use sqlx::postgres::PgPool;
 
-/// `health::Probe` over a pooled ping.
 #[derive(Clone, Debug)]
 pub struct PostgresProbe {
     pool: PgPool,
@@ -34,22 +31,24 @@ impl Probe for PostgresProbe {
     }
 }
 
-/// The verdict message names the failure class without dependency
-/// internals; the driver's own text can quote server details. A server
-/// rejection carries its SQLSTATE, a bounded code that tells an
-/// authentication failure (`28P01`) from other rejections.
+/// Names the failure class without dependency internals, since the driver's text
+/// can quote server details; a server rejection carries its bounded SQLSTATE.
 fn probe_error(err: &sqlx::Error) -> ProbeError {
-    ProbeError::new(match err {
-        sqlx::Error::PoolTimedOut => "no connection available inside the acquire budget".to_owned(),
-        sqlx::Error::PoolClosed => "pool is closed".to_owned(),
-        sqlx::Error::Io(_) => "connection failed".to_owned(),
-        sqlx::Error::Tls(_) => "tls handshake failed".to_owned(),
+    match err {
+        sqlx::Error::PoolTimedOut => {
+            ProbeError::from_static("no connection available inside the acquire budget")
+        }
+        sqlx::Error::PoolClosed => ProbeError::from_static("pool is closed"),
+        sqlx::Error::Io(_) => ProbeError::from_static("connection failed"),
+        sqlx::Error::Tls(_) => ProbeError::from_static("tls handshake failed"),
         sqlx::Error::Database(_) => match crate::error::sqlstate(err) {
-            Some(code) => format!("server rejected the readiness check (SQLSTATE {code})"),
-            None => "server rejected the readiness check".to_owned(),
+            Some(code) => ProbeError::format(format_args!(
+                "server rejected the readiness check (SQLSTATE {code})"
+            )),
+            None => ProbeError::from_static("server rejected the readiness check"),
         },
-        _ => "readiness check failed".to_owned(),
-    })
+        _ => ProbeError::from_static("readiness check failed"),
+    }
 }
 
 #[cfg(test)]

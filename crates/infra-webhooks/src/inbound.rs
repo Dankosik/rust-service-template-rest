@@ -1,10 +1,8 @@
 //! Durable receipt admission and processing for inbound Standard Webhooks.
 //!
-//! This module verifies a configured endpoint through its [`Verifier`] before
-//! it reaches PostgreSQL, then owns the one transaction that writes a receipt
-//! and enqueues processing.
-//! Processing invokes one explicit adopter callback and completes its fenced job
-//! in that callback's transaction.
+//! A [`Verifier`] authenticates each delivery before it reaches PostgreSQL;
+//! one transaction then writes the receipt and enqueues processing, which
+//! completes its fenced job in the adopter callback's transaction.
 
 mod maintenance;
 mod processing;
@@ -47,7 +45,6 @@ const READ_COMMITTED: TxOptions = TxOptions {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReceiptOutcome {
-    /// The receipt and processing job committed together.
     Accepted,
     /// The endpoint and message identity were already retained; first admission wins.
     Duplicate,
@@ -59,13 +56,10 @@ pub enum ReceiveError {
     UnknownEndpoint,
     #[error("inbound webhook delivery was rejected: {}", .0.reason())]
     Rejected(Rejection),
-    /// Receipt persistence or its commit acknowledgement was unavailable.
     #[error("inbound webhook receipt storage is unavailable")]
     Unavailable,
 }
 
-/// Why a [`Verifier`] refused a delivery.
-///
 /// The type guarantees only a `'static` label. The label becomes a log field
 /// and a metric label, so a [`Verifier`] keeps its own set of reasons small and
 /// `snake_case`, and never builds one from request, signature, or key bytes.
@@ -92,16 +86,13 @@ impl From<ProtocolError> for Rejection {
     }
 }
 
-/// One endpoint's sender authentication.
-///
 /// [`KeyRing`] is the Standard Webhooks verifier. A provider that signs
-/// another way implements this for its own scheme and keeps the durable
-/// receipt, deduplication, and processing path.
+/// another way implements this and keeps the durable receipt, deduplication,
+/// and processing path.
 pub trait Verifier: Send + Sync + 'static {
-    /// Authenticate one delivery and return its message identity: the
-    /// provider's stable ID for this message, 1 to [`MAX_MESSAGE_ID_BYTES`](crate::protocol::MAX_MESSAGE_ID_BYTES)
-    /// bytes, equal on every redelivery. `body` is the raw request body and
-    /// `now` the admission time for replay windows.
+    /// The identity is the provider's stable ID for this message, 1 to
+    /// [`MAX_MESSAGE_ID_BYTES`](crate::protocol::MAX_MESSAGE_ID_BYTES) bytes,
+    /// equal on every redelivery. `now` is the admission time for replay windows.
     fn authenticate(
         &self,
         headers: &HeaderMap,
@@ -129,8 +120,7 @@ pub struct Receiver {
 }
 
 impl Receiver {
-    /// Build a receiver over each configured endpoint's verifier, so one
-    /// receiver can mix schemes. Construction does no I/O.
+    /// One receiver can mix verifier schemes. Construction does no I/O.
     #[must_use]
     pub fn new(
         pool: PgPool,
@@ -147,8 +137,6 @@ impl Receiver {
         self.endpoints.contains_key(endpoint_id)
     }
 
-    /// Verify and atomically retain an inbound delivery.
-    ///
     /// A duplicate must pass verification again. A successful result means the
     /// receipt transaction was acknowledged; it never claims the consumer ran.
     /// `deadline` bounds only the wait for a pooled connection. Each attempt
@@ -173,10 +161,8 @@ impl Receiver {
         .await
     }
 
-    /// Verify and atomically retain an inbound delivery, taking ownership of its body.
-    ///
-    /// See [`Self::receive`] for admission and deadline semantics. The body
-    /// moves into the winning receipt's payload without a copy.
+    /// Like [`Self::receive`], but the body moves into the winning receipt's
+    /// payload without a copy.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub async fn receive_bytes(
         &self,
@@ -327,8 +313,6 @@ fn receipt_unavailable(endpoint_id: &str, error: &ReceiptFailure) -> ReceiveErro
     ReceiveError::Unavailable
 }
 
-/// Authenticate a delivery and return its message identity.
-///
 /// Both bounds are checked here as well as in [`KeyRing::verify`], so they
 /// hold for every verifier; the identity bound protects the indexed receipt
 /// key. The signed-content `.` rule stays with Standard Webhooks.
@@ -416,7 +400,6 @@ impl Incoming {
         &self.message_id
     }
 
-    /// The first accepted Content-Type header bytes, when present.
     #[must_use]
     pub fn content_type(&self) -> Option<&[u8]> {
         self.content_type.as_deref()

@@ -103,6 +103,7 @@ releasing scope.
 | Grok Build CLI, TUI, or ACP | [Grok Build](agent-harness/grok-build.md) |
 | Cursor IDE, CLI, or Cloud Agents | [Cursor](agent-harness/cursor.md) |
 | OpenCode CLI, TUI, desktop, or IDE | [OpenCode](agent-harness/opencode.md) |
+| Antigravity App, CLI, or IDE | [Antigravity](agent-harness/antigravity.md) |
 
 Never mix control planes in one outcome. A task, subagent, worktree, model, or
 Goal is a carrier—never authorization or unit ownership. Use a durable Goal

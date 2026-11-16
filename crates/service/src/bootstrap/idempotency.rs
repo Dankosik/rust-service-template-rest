@@ -6,8 +6,7 @@ use service_config::{Config, HttpIdempotencyConfig, ValidationError};
 
 use super::BootstrapError;
 
-/// The composer through which idempotent operations join the contract. It
-/// has a store only when both the pool and a retention are set; otherwise
+/// Has a store only when both the pool and a retention are set; otherwise
 /// activation refuses the missing value if an idempotent operation is served.
 pub(super) fn prepare(
     config: &Config,
@@ -23,8 +22,7 @@ pub(super) fn prepare(
         })
 }
 
-/// Start the composed boundary when it serves at least one. An inactive
-/// boundary makes no query, starts no task, and requires no value.
+/// An inactive boundary makes no query, starts no task, and requires no value.
 pub(super) async fn activate(
     composer: Composer,
     config: &Config,
@@ -39,8 +37,6 @@ pub(super) async fn activate(
     }
 }
 
-/// Why a served idempotent operation has no store: the configuration key
-/// that is missing, or an unavailable store when every key is set.
 fn unconfigured(config: &Config) -> BootstrapError {
     match config
         .http_idempotency
@@ -51,9 +47,8 @@ fn unconfigured(config: &Config) -> BootstrapError {
     }
 }
 
-/// Start an active boundary before readiness admission. It needs
-/// `postgres.enabled`, a set `http_idempotency.retention`, and the store's
-/// schema on a writable session; the cleanup task then joins the background set.
+/// Needs `postgres.enabled`, a set `http_idempotency.retention`, and the store's
+/// schema on a writable session.
 async fn start(
     store: Store,
     operations: std::num::NonZeroUsize,
@@ -86,12 +81,9 @@ mod tests {
 
     #[tokio::test]
     async fn an_inactive_boundary_touches_no_store_and_spawns_no_task() {
-        // A contract without an idempotent operation: only the family's
-        // components, which every retained document carries.
         let composer = Composer::inert();
         let mut background = Background::new(CancellationToken::new());
-        // An active boundary would refuse this configuration at its first
-        // check: `postgres.enabled` is false and no retention is set.
+        // An active boundary would refuse this default configuration.
         activate(composer, &Config::default(), &mut background)
             .await
             .expect("an inactive boundary requires no value");

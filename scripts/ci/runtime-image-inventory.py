@@ -14,7 +14,7 @@ import tomllib
 from typing import BinaryIO
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
-from template_state import Refusal, parse_json_bytes, selected_jobs, selected_messaging, selected_profiles
+from template_state import Refusal, parse_json_bytes, selected_profile_map
 
 ENTRYPOINTS = {"/service": "service", "/migrate": "migrate", "/jobs-worker": "jobs-worker"}
 
@@ -27,10 +27,11 @@ def required_string(value: object, label: str) -> str:
 
 def expected_binaries(root: Path) -> dict[str, tuple[str, str, str]]:
     workspace = tomllib.loads((root / "Cargo.toml").read_text())
+    profiles = selected_profile_map(root)
     selected = {"/service"}
-    if selected_profiles(root)[0] == "postgres":
+    if profiles["database"] == "postgres":
         selected.add("/migrate")
-    if selected_jobs(root) == "postgres" or selected_messaging(root) == "nats-jetstream":
+    if profiles["jobs"] == "postgres" or profiles["messaging"] == "nats-jetstream":
         selected.add("/jobs-worker")
     entries = {target: {"crate": directory, "source": "src/main.rs"}
                for target, directory in ENTRYPOINTS.items() if target in selected}

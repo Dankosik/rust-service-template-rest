@@ -1,31 +1,27 @@
-//! `sqlx` is permissive: every `PgConnectOptions` constructor starts from the
-//! libpq environment (`PGHOST`, `PGSSLROOTCERT`, ...), falls back to
-//! `.pgpass` when the URL has no password, accepts Unix sockets and
-//! `allow`/`prefer` TLS fallback, and warns with key *and value* on a
-//! parameter it does not know. The template's policy is one explicit,
-//! self-contained URL: what the operator set is exactly what connects, and a
-//! diagnostic never carries the value. This module checks the URL text before
-//! `sqlx` sees it and then reads the driver's own interpretation back.
+//! `sqlx` is permissive: constructors start from the libpq environment, fall
+//! back to `.pgpass`, accept Unix sockets and `allow`/`prefer` TLS fallback,
+//! and warn with key *and value* on an unknown parameter. The template's
+//! policy is one explicit, self-contained URL whose diagnostics never carry a
+//! value, so this module checks the URL text before `sqlx` sees it and reads
+//! the driver's interpretation back.
 //!
-//! The password is the one component with a second admitted source: a file
-//! the platform rewrites when it rotates the credential. The URL then carries
-//! no password, so there is still exactly one.
+//! The password may come from a file the platform rewrites on rotation; the URL
+//! then carries none, so there is still exactly one source.
 
 use std::path::{Path, PathBuf};
 
 use sqlx::ConnectOptions;
 use sqlx::postgres::{PgConnectOptions, PgSslMode};
 use url::Url;
+use zeroize::Zeroizing;
 
-/// Environment variables `sqlx` would still merge into an admitted URL
-/// (`sqlx-postgres/src/options/mod.rs`). Every other libpq variable it reads
-/// is overwritten by a component the URL must carry, by the password file,
-/// or by `application_name`, so it cannot change what connects and is not
-/// refused.
+/// Variables `sqlx` still merges into an admitted URL
+/// (`sqlx-postgres/src/options/mod.rs`); every other libpq variable is
+/// overwritten by a required component, so it is not refused.
 const AMBIENT_ENVIRONMENT: [&str; 4] = ["PGSSLROOTCERT", "PGSSLCERT", "PGSSLKEY", "PGOPTIONS"];
 
-/// Why a connection string was refused. Messages name the rule, never the
-/// value; a key name is quoted only when it is the operator's own parameter.
+/// Messages name the rule, never the value; a key is quoted only when it is the
+/// operator's own parameter.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum DsnError {
     #[error("postgres dsn is empty")]
@@ -84,25 +80,22 @@ impl std::fmt::Debug for Dsn {
 }
 
 impl Dsn {
-    /// A non-empty `PGSSLROOTCERT`, `PGSSLCERT`, `PGSSLKEY`, or `PGOPTIONS`
-    /// in the environment is refused too, not only URL text.
+    /// A non-empty `PGSSLROOTCERT`, `PGSSLCERT`, `PGSSLKEY`, or `PGOPTIONS` in the
+    /// environment is refused too.
     pub fn admit(raw: &str) -> Result<Self, DsnError> {
         Self::admit_with(raw, None)
     }
 
-    /// [`Dsn::admit`] with the password read from `password_file` when one
-    /// is given (`postgres.password_file`). The URL must then carry no
-    /// password; the file holds the password alone, and its trailing line
-    /// breaks are not part of it.
+    /// [`Dsn::admit`] with the password read from `password_file`; the URL must then
+    /// carry none, and the file's trailing line breaks are not part of it.
     pub fn admit_with(raw: &str, password_file: Option<&Path>) -> Result<Self, DsnError> {
         Self::admit_from(raw, password_file, |name| {
             std::env::var_os(name).is_some_and(|value| !value.is_empty())
         })
     }
 
-    /// [`Dsn::admit`] with an explicit occupancy lookup, so the ambient rule
-    /// can be tested without mutating the process environment. `true` means
-    /// the named variable is set to a non-empty value.
+    /// [`Dsn::admit`] with an explicit occupancy lookup, so tests need not mutate
+    /// the process environment.
     #[cfg(test)]
     pub(crate) fn admit_with_environment<F>(raw: &str, occupied: F) -> Result<Self, DsnError>
     where
@@ -139,15 +132,13 @@ impl Dsn {
         if options.get_host().contains(',') {
             return Err(DsnError::MultipleHosts);
         }
-        // URL brackets delimit an IPv6 literal; neither the dial nor TLS
-        // ServerName accepts them as part of that IP identity.
+        // URL brackets around an IPv6 literal are not accepted by the dial or TLS ServerName.
         let options = match url.host() {
             Some(url::Host::Ipv6(host)) => options.host(&host.to_string()),
             _ => options,
         };
-        // Without a password in the URL the driver took one from
-        // `PGPASSWORD` or `.pgpass`; the file's value replaces it, so neither
-        // ever connects.
+        // Without a URL password the driver took one from `PGPASSWORD` or `.pgpass`;
+        // the file's value replaces it.
         let options = match password_file {
             Some(path) => options.password(&read_password(path)?),
             None => options,
@@ -185,8 +176,7 @@ impl Dsn {
 
     #[must_use]
     pub fn ssl_mode_name(&self) -> &'static str {
-        // `allow` and `prefer` never pass admission; they are named only to
-        // keep the match total.
+        // `allow` and `prefer` never pass admission; named only to keep the match total.
         match self.options.get_ssl_mode() {
             PgSslMode::Disable => "disable",
             PgSslMode::Allow => "allow",
@@ -202,23 +192,21 @@ impl Dsn {
     clippy::disallowed_methods,
     reason = "startup PostgreSQL admission owns the initial password read; refresh uses async IO"
 )]
-fn read_password(path: &Path) -> Result<String, DsnError> {
+fn read_password(path: &Path) -> Result<Zeroizing<String>, DsnError> {
     let content =
         std::fs::read_to_string(path).map_err(|err| DsnError::PasswordFile(err.kind()))?;
     password_from(content)
 }
 
-pub(crate) fn password_from(content: String) -> Result<String, DsnError> {
-    let password = shared_rules::secret_file::value(content);
+pub(crate) fn password_from(content: String) -> Result<Zeroizing<String>, DsnError> {
+    let password = Zeroizing::new(shared_rules::secret_file::value(content));
     if password.is_empty() {
         return Err(DsnError::PasswordFileEmpty);
     }
     Ok(password)
 }
 
-/// Every component the driver would otherwise take from the environment,
-/// `.pgpass`, or its own defaults. With a password file the URL carries no
-/// password instead.
+/// Every component the driver would otherwise take from the environment, `.pgpass`, or defaults.
 fn require_components(url: &Url, password_from_file: bool) -> Result<(), DsnError> {
     if url.host_str().is_none_or(str::is_empty) {
         return Err(DsnError::Missing("host"));
@@ -242,15 +230,9 @@ fn require_components(url: &Url, password_from_file: bool) -> Result<(), DsnErro
     Ok(())
 }
 
-/// Admit `sslmode` (once, with a mode that has one TLS outcome) and an
-/// optional `sslrootcert`; refuse every other key before `sqlx` can log its
-/// value.
-///
-/// `allow` and `prefer` negotiate TLS per attempt, so two connections from
-/// one pool could differ in what they protect. `sslrootcert` names the CA
-/// file of a private certificate authority (RDS, Cloud SQL, an in-house CA);
-/// `sqlx` adds it to the bundled webpki roots and ignores it under
-/// `require`, so it is admitted only where it is actually verified.
+/// `allow` and `prefer` negotiate TLS per attempt, so connections from one pool
+/// could differ in protection. `sslrootcert` names a private CA file; `sqlx`
+/// ignores it under `require`, so it is admitted only where it is verified.
 fn check_parameters(url: &Url) -> Result<(), DsnError> {
     let mut verifies_certificate = None;
     let mut has_root_cert = false;
@@ -281,8 +263,7 @@ fn check_parameters(url: &Url) -> Result<(), DsnError> {
     Ok(())
 }
 
-/// A parameter key for a diagnostic: the operator's own spelling, capped so
-/// a pathological string cannot flood a log line.
+/// Capped so a pathological key cannot flood a log line.
 fn bounded(key: &str) -> String {
     const MAX: usize = 32;
     match key.char_indices().nth(MAX) {
@@ -356,8 +337,8 @@ mod tests {
             socket.write_all(b"S").await.unwrap();
             let mut record_header = [0; 5];
             socket.read_exact(&mut record_header).await.unwrap();
-            // A real rustls ClientHello requires successful ServerName
-            // conversion of the same host used by the IPv6 TCP dial.
+            // A real rustls ClientHello requires a successful ServerName conversion of the
+            // dialed IPv6 host.
             assert_eq!(record_header[0], 22);
             assert_eq!(record_header[1], 3);
             assert!(u16::from_be_bytes([record_header[3], record_header[4]]) > 0);
@@ -438,7 +419,6 @@ mod tests {
             parse("postgres://app:pw@h1,h2:5432/app?sslmode=disable").err(),
             Some(DsnError::MultipleHosts)
         );
-        // `h1:5432,h2:5432` is not a URL at all.
         assert_eq!(
             parse("postgres://app:pw@h1:5432,h2:5432/app?sslmode=disable").err(),
             Some(DsnError::Invalid)
@@ -577,7 +557,7 @@ mod tests {
         assert_eq!(ipv6.ssl_mode_name(), "verify-full");
 
         std::fs::write(&file, " p w \r\n").unwrap();
-        assert_eq!(read_password(&file).unwrap(), " p w ");
+        assert_eq!(read_password(&file).unwrap().as_str(), " p w ");
         dir.close().unwrap();
     }
 
@@ -585,7 +565,7 @@ mod tests {
     fn diagnostics_and_debug_never_carry_credentials() {
         let dsn = parse(VALID).unwrap();
         let rendered = format!("{dsn:?}");
-        // The assertions carry no message: a failure must not print the rendering.
+        // No assertion messages: a failure must not print the rendering.
         assert!(rendered.contains("db.internal"));
         assert!(!rendered.contains("s3cret"));
         assert!(!rendered.contains("app:"));

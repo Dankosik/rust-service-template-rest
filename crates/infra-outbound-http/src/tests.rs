@@ -168,7 +168,6 @@ async fn largest_header_count_limit_admits_that_many_response_headers() {
 
 #[tokio::test]
 async fn response_head_beyond_the_parser_buffer_is_a_transport_error() {
-    // Hyper's default HTTP/1 buffer ceiling is 8192 + 4096 * 100 bytes.
     const HEAD_BYTES: usize = 512 * 1024;
     let material = TlsMaterial::new(FIXTURE_HOST);
     let listener = TcpListener::bind("127.0.0.1:0")
@@ -185,7 +184,6 @@ async fn response_head_beyond_the_parser_buffer_is_a_transport_error() {
                 "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nX-Large: {}\r\n\r\n",
                 "a".repeat(HEAD_BYTES)
             );
-            // The client closes once its buffer is full; the write may fail.
             let _ = stream.write_all(head.as_bytes()).await;
         })
         .await
@@ -483,8 +481,6 @@ async fn terminal_observation_preserves_the_timely_operation_result_once() {
     let response = client.execute(request(), end).await.unwrap();
     assert_eq!(response.status(), http::StatusCode::OK);
     assert!(Instant::now() > end, "terminal callback crossed the end");
-    // The response is complete. Retire remaining TLS teardown before
-    // the artificial clock jump can run the fixture's own timer.
     server.abort();
     if let Err(error) = server.await {
         assert!(error.is_cancelled());
@@ -564,8 +560,6 @@ async fn ready_response_after_the_fixed_end_is_timeout() {
     std::assert_matches!(result, Err(Error::Timeout), "{result:?}");
 }
 
-/// A listener that completes no further handshakes: its accept queue is
-/// full, so the kernel drops new SYNs and a connect to it stays pending.
 async fn unresponsive_listener() -> (SocketAddr, tokio::net::TcpListener, Vec<TcpStream>) {
     let socket = tokio::net::TcpSocket::new_v4().expect("unresponsive socket");
     socket

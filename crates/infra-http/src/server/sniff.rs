@@ -6,8 +6,6 @@ use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::time::{Instant, Sleep};
 
-/// The HTTP/2 connection preface, which hyper-util's protocol sniff compares
-/// the first bytes of a connection against.
 pub(super) const HTTP2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 
 /// A socket whose reads fail once `timeout` passes with the protocol still
@@ -21,7 +19,6 @@ pub(super) const HTTP2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 /// connection without a response.
 pub(super) struct SniffDeadline<IO> {
     io: IO,
-    /// The preface bytes matched so far and the deadline, until decided.
     undecided: Option<(usize, Pin<Box<Sleep>>)>,
 }
 

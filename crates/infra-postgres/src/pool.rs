@@ -1,13 +1,9 @@
-//! Budgets are constants rather than configuration keys: a service that
-//! needs different ones changes them here, in one reviewed place, instead
-//! of every deployment discovering its own. The pool size is the exception
-//! and comes from configuration, because the right value depends on the
-//! database and on how many instances share it.
+//! Budgets are constants, not configuration keys; only the pool size is
+//! configured, because it depends on the database and the number of instances
+//! sharing it.
 //!
-//! A budget the session does not actually carry is not a budget, so opening
-//! the pool reads the effective values back and refuses a session without
-//! them: a pooler in front of the database may drop what the startup packet
-//! published.
+//! Opening the pool reads the effective session values back and refuses a
+//! session without them: a pooler may drop what the startup packet published.
 
 use std::future::Future;
 use std::num::NonZeroU32;
@@ -22,84 +18,56 @@ use crate::dsn::Dsn;
 use crate::observe::{acquisition, observed};
 use crate::transaction::Isolation;
 
-/// Bound on waiting for a pooled connection, including opening a new one.
-/// The startup connection draws the same budget.
+/// Includes opening a new connection; the startup connection draws the same budget.
 pub const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// Client bound on the entire mandatory session readback, including
-/// acquisition: the acquire budget plus room for the readback itself. Partial
-/// replies do not restart it.
+/// The acquire budget plus room for the readback; partial replies do not restart it.
 const SESSION_VERIFICATION_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Client bound on closing a pool whose session admission failed, so a
-/// refused startup is reported instead of waiting on a remote socket close.
+/// Reports a refused startup instead of waiting on a remote socket close.
 const SESSION_REJECTION_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Session default for `statement_timeout` on every pooled connection.
-/// Matches the default HTTP request budget (`http.request_timeout` 8s). It
-/// is not kept in lockstep with a configured request timeout; both stay
-/// independent adapter vs operator values.
+/// Matches the default `http.request_timeout` (8s) but is deliberately not kept
+/// in lockstep with it.
 pub(crate) const STATEMENT_TIMEOUT: Duration = Duration::from_secs(8);
 
-/// Session default for `idle_in_transaction_session_timeout` on every
-/// pooled connection. Same duration as [`STATEMENT_TIMEOUT`] by policy, but
-/// a separate constant so a later edit of one setting does not silently
-/// retune the other.
-///
-/// It covers what `statement_timeout` cannot: a transaction that ran a fast
-/// statement and then lost its client holds its locks while no statement is
-/// running at all.
+/// Same value as [`STATEMENT_TIMEOUT`] but a separate constant so editing one
+/// does not retune the other. Covers a transaction that lost its client and
+/// holds locks with no statement running, which `statement_timeout` cannot.
 pub(crate) const IDLE_IN_TRANSACTION_TIMEOUT: Duration = Duration::from_secs(8);
 
-/// Statements slower than this are logged at `warn` with their SQL text and
-/// duration. Routine statement logging defaults to off to avoid repeating
-/// every query and carrying data into logs through driver error paths.
-/// The `hotpath` feature enables routine statement logging at `debug`.
+/// Routine statement logging stays off so SQL and data do not reach logs through
+/// driver error paths; the `hotpath` feature enables it at `debug`.
 const SLOW_STATEMENT_THRESHOLD: Duration = Duration::from_secs(1);
 
-/// A pooled connection idle longer than this is pinged before it is handed
-/// out; a busier one is handed out as is. The `sqlx` default pings on every
-/// acquire, which doubles the round trips of a single-statement request.
-/// Same threshold as pgx's pool, which the Go template uses. A connection the
-/// server dropped while it was busy fails its next statement either way.
+/// The `sqlx` default pings on every acquire, doubling the round trips of a
+/// single-statement request. Same threshold as pgx's pool.
 const PING_IDLE_AFTER: Duration = Duration::from_secs(1);
 
-/// A pooled connection older than this is retired when it is returned to the
-/// pool or checked for idleness, instead of being reused; a session already
-/// handed out is never interrupted. Retirement is how a pool picks up what
-/// changed since a connection opened: a rotated password, a changed role or
-/// database default, a DNS answer that moved to another server. The driver's
-/// own default, named here because password rotation depends on it.
+/// Retirement picks up a rotated password, changed role or database defaults,
+/// or a moved DNS answer. The driver default, named because password rotation
+/// depends on it.
 pub(crate) const MAX_CONNECTION_LIFETIME: Duration = Duration::from_mins(30);
 
-/// A pooled connection unused for this long is closed, so a pool sized for a
-/// peak returns its server slots after it. The driver's own default.
 pub(crate) const IDLE_CONNECTION_TIMEOUT: Duration = Duration::from_mins(10);
 
-/// Bound on the ping of a connection idle past [`PING_IDLE_AFTER`]. A peer
-/// that vanished without a reset (a load balancer's idle cut-off, a failed
-/// node) never answers, and an unbounded ping would spend the caller's whole acquire budget on one dead connection;
-/// past this bound the connection is discarded and the acquire moves on to
-/// the next one or opens a new one. Each dead connection still costs its
-/// caller this bound, so a pool with two or more of them fails one acquire
-/// before it is clean again. It is a hang guard, not a latency target: a slow
-/// but live server is waited for, and every discard is logged as
-/// `postgres_idle_ping_failed`. It stays below [`ACQUIRE_TIMEOUT`] so one
-/// dead connection still leaves time to open a replacement.
+/// Hang guard, not a latency target: a peer that vanished without a reset never
+/// answers, and an unbounded ping would spend the whole acquire budget on one
+/// dead connection. Discards are logged as `postgres_idle_ping_failed`. Stays
+/// below [`ACQUIRE_TIMEOUT`] so a replacement can still open; each dead
+/// connection costs its caller this bound.
 const IDLE_PING_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConnectError {
-    /// No connection could be established inside [`ACQUIRE_TIMEOUT`]; the
-    /// pool retries a refused or unreachable target until the budget ends,
-    /// so this is what an unreachable database looks like at startup.
+    /// The pool retries a refused or unreachable target until the budget ends, so
+    /// this is an unreachable database at startup.
     #[error("postgres connect: no connection established inside the {budget:?} acquire budget")]
     Timeout { budget: Duration },
     #[error("postgres session verification: did not complete inside the {budget:?} budget")]
     SessionVerificationTimeout { budget: Duration },
     #[error("postgres session admission: {0}")]
     Connect(#[source] sqlx::Error),
-    /// The session does not carry a timeout inside the template's budget.
     /// `found_ms` is the effective value; zero is PostgreSQL's "no limit".
     #[error(
         "postgres session: {setting} is {}, expected a limit of at most {budget:?}; {}",
@@ -133,13 +101,12 @@ fn found(milliseconds: i64) -> String {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SessionSettingsSource {
-    /// Published by this process in every connection's startup packet. Works
-    /// against PostgreSQL directly and through a pooler that applies startup
-    /// parameters.
+    /// Published in every connection's startup packet; works through a pooler that
+    /// applies startup parameters.
     #[default]
     Startup,
-    /// Nothing is published; the database role or the database carries them
-    /// (`ALTER ROLE ... SET`). For a pooler that refuses startup parameters.
+    /// The database role or database carries them (`ALTER ROLE ... SET`), for a
+    /// pooler that refuses startup parameters.
     Server,
 }
 
@@ -162,10 +129,7 @@ pub struct PoolOptions<'a> {
     pub session_settings_source: SessionSettingsSource,
 }
 
-/// What a one-off session (the migrator) decides per connection.
-///
-/// The `Duration` fields are PostgreSQL session GUCs, not the client
-/// connect wait. The caller of [`connect_session`] bounds that wait.
+/// The `Duration` fields are PostgreSQL session GUCs, not the client connect wait.
 #[derive(Clone, Debug)]
 pub struct SessionOptions<'a> {
     pub application_name: &'a str,
@@ -175,8 +139,7 @@ pub struct SessionOptions<'a> {
     pub extra: &'a [(&'a str, &'a str)],
 }
 
-/// Constructs the native pool without connecting. Retain it before awaiting
-/// [`admit_pool`] so cancellation or unwind cannot lose its cleanup owner.
+/// Retain the pool before awaiting [`admit_pool`] so cancellation cannot lose its cleanup owner.
 #[must_use]
 pub fn prepare_pool(dsn: &Dsn, options: &PoolOptions<'_>) -> PgPool {
     crate::observe::describe();
@@ -202,11 +165,8 @@ pub fn prepare_pool(dsn: &Dsn, options: &PoolOptions<'_>) -> PgPool {
         .idle_timeout(IDLE_CONNECTION_TIMEOUT)
         .test_before_acquire(false)
         .before_acquire(ping_if_idle)
-        // sqlx grows a connection's read and write buffers to the largest
-        // message it carried and keeps them until the connection closes; one
-        // large body per connection would otherwise stay resident for the
-        // connection's lifetime. Shrinking on release keeps idle connections
-        // at the driver's default buffer size.
+        // sqlx keeps buffers grown to the largest message a connection carried;
+        // shrinking on release stops one large body from staying resident.
         .after_release(|conn, _meta| {
             conn.shrink_buffers();
             Box::pin(async { Ok(true) })
@@ -215,8 +175,7 @@ pub fn prepare_pool(dsn: &Dsn, options: &PoolOptions<'_>) -> PgPool {
 }
 
 /// `operation` is a callsite-owned static label, never a request or SQL value.
-/// Slow successes and native acquire timeouts are logged; cancellation leaves
-/// the native future and its ownership to `SQLx` without inventing an outcome.
+/// Cancellation leaves the native future to `SQLx` without inventing an outcome.
 #[expect(
     clippy::disallowed_methods,
     reason = "the pool adapter owns the native checkout"
@@ -233,11 +192,9 @@ pub async fn acquire(
     .await
 }
 
-/// The pool bounds each native wait by its fixed acquire timeout, so this waits
-/// again while `deadline` allows. Each wait queues behind those that arrived
-/// meanwhile; a connection still frees in the order the pool serves it. A wait
-/// that ends at `deadline` is the native `PoolTimedOut`, so callers keep one
-/// failure to map.
+/// Waits again while `deadline` allows, since the pool bounds each native wait by
+/// its fixed acquire timeout. A wait ending at `deadline` is the native
+/// `PoolTimedOut`, so callers map one failure.
 #[expect(
     clippy::disallowed_methods,
     reason = "the pool adapter owns the native checkout"
@@ -286,8 +243,6 @@ fn ping_if_idle(
                 sqlx::Error::Io(std::io::ErrorKind::TimedOut.into()),
             ),
         };
-        // The acquire moves on to another connection; this line is the only
-        // trace of the discarded one.
         tracing::warn!(
             idle_for = ?meta.idle_for,
             elapsed = ?started.elapsed(),
@@ -299,13 +254,11 @@ fn ping_if_idle(
     })
 }
 
-/// One client deadline covers acquisition and the complete readback;
-/// [`ConnectError::SessionVerificationTimeout`] reports it. Cancellation
-/// leaves cleanup to the caller; this function never closes the caller's pool.
+/// One client deadline covers acquisition and the complete readback.
+/// Cancellation leaves cleanup to the caller; this never closes the caller's pool.
 ///
-/// Use the same [`PoolOptions::default_isolation`] and
-/// [`PoolOptions::session_settings_source`] as in [`prepare_pool`]. They
-/// determine the expected isolation level and the advice on a mismatch.
+/// Pass the same [`PoolOptions::default_isolation`] and
+/// [`PoolOptions::session_settings_source`] as to [`prepare_pool`].
 pub async fn admit_pool(pool: &PgPool, options: &PoolOptions<'_>) -> Result<(), ConnectError> {
     let budget = SESSION_VERIFICATION_TIMEOUT;
     tokio::time::timeout(budget, verify_session(pool, options))
@@ -313,11 +266,9 @@ pub async fn admit_pool(pool: &PgPool, options: &PoolOptions<'_>) -> Result<(), 
         .map_err(|_| ConnectError::SessionVerificationTimeout { budget })?
 }
 
-/// Process roots use [`prepare_pool`] and [`admit_pool`] to retain cleanup ownership.
-/// Verification and rejection cleanup each have their own client bound; failed
-/// admission closes the pool within its bound and records an incomplete close
-/// separately. These sequential waits are not a whole-bootstrap or remote
-/// socket-close bound.
+/// Process roots use [`prepare_pool`] and [`admit_pool`] to retain cleanup
+/// ownership. Verification and rejection cleanup have separate client bounds;
+/// these sequential waits are not a whole-bootstrap or socket-close bound.
 pub async fn connect(dsn: &Dsn, options: &PoolOptions<'_>) -> Result<PgPool, ConnectError> {
     let pool = prepare_pool(dsn, options);
     if let Err(refused) = admit_pool(&pool, options).await {
@@ -333,10 +284,9 @@ pub async fn connect(dsn: &Dsn, options: &PoolOptions<'_>) -> Result<PgPool, Con
 }
 
 /// Publishing a setting does not prove the session has it: PgBouncer before
-/// 1.26 accepts a startup parameter it is told to track or ignore and drops
-/// it, and with [`SessionSettingsSource::Server`] nothing is published at all. A
-/// stricter limit than the template's is admitted; no limit, or a looser
-/// one, is not.
+/// 1.26 drops a tracked or ignored startup parameter, and with
+/// [`SessionSettingsSource::Server`] nothing is published. A stricter limit
+/// than the template's is admitted; no limit, or a looser one, is not.
 async fn verify_session(pool: &PgPool, options: &PoolOptions<'_>) -> Result<(), ConnectError> {
     let session = observed("check session budgets", async {
         let mut connection = acquire(pool, "check session budgets").await?;
@@ -401,8 +351,7 @@ fn check_budget(
     }
 }
 
-/// Used by the migration runner, whose budgets and extra GUCs differ from
-/// the pool's. [`PgConnectOptions`] stay in this crate.
+/// For the migration runner, whose budgets and extra GUCs differ from the pool's.
 pub async fn connect_session(
     dsn: &Dsn,
     options: &SessionOptions<'_>,
@@ -433,13 +382,8 @@ pub async fn connect_session(
     .await
 }
 
-/// Connect options that publish `settings` through the startup packet, so a
-/// connection opened later carries them too, without a round trip.
-///
-/// `extra_float_digits` is left to the server: the driver would otherwise
-/// publish `2`, which every supported server already treats like its own
-/// default, and which a pooler refuses as a startup parameter it does not
-/// track.
+/// `extra_float_digits` is left to the server: the driver would publish `2`,
+/// which a pooler that refuses untracked startup parameters rejects.
 fn session_connect_options<'a>(
     dsn: &Dsn,
     application_name: &str,
@@ -452,8 +396,7 @@ fn session_connect_options<'a>(
         .log_statements(log::LevelFilter::Off);
     #[cfg(feature = "hotpath")]
     let options = options.log_statements(log::LevelFilter::Debug);
-    // The driver sends an `options` parameter even for an empty list, and a
-    // pooler that refuses startup parameters refuses that one too.
+    // The driver sends `options` even for an empty list, which such a pooler refuses.
     let mut settings = settings.into_iter().peekable();
     if settings.peek().is_some() {
         options.options(settings)
@@ -462,17 +405,9 @@ fn session_connect_options<'a>(
     }
 }
 
-/// Render a duration as a PostgreSQL runtime-parameter value.
-///
-/// Rounded up rather than truncated so a non-zero caller never publishes
-/// less time than its budget: one millisecond more cannot fail a statement
-/// that would have succeeded; one millisecond less can cancel one. The unit
-/// is written out because a bare integer is read against each setting's own
-/// default unit.
-///
-/// `Duration::ZERO` renders `0ms`. PostgreSQL treats `0` as disable for
-/// `statement_timeout`, `idle_in_transaction_session_timeout`, and
-/// `lock_timeout` — that is not a zero-length bound.
+/// Rounded up so a non-zero caller never publishes less than its budget. The
+/// unit is written out because a bare integer uses each setting's own default
+/// unit. `Duration::ZERO` renders `0ms`, which PostgreSQL treats as disabled.
 #[must_use]
 pub fn format_pg_duration(duration: Duration) -> String {
     format!("{}ms", duration.as_nanos().div_ceil(1_000_000))
@@ -543,8 +478,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_unreachable_host_fails_inside_the_acquire_budget() {
-        // Port 1 on loopback is refused at once; the pool keeps retrying
-        // until the acquire budget ends, which is the bound asserted here.
+        // Port 1 on loopback is refused at once; the pool retries until the acquire budget ends.
         let dsn = Dsn::admit_with_environment(
             "postgres://app:pw@127.0.0.1:1/app?sslmode=disable",
             |_| false,

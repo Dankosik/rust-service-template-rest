@@ -93,9 +93,7 @@ impl Pki {
     }
 }
 
-/// One export through the exporter the trust material builds. The batch
-/// processor runs the blocking client on its own thread; here it finishes
-/// in one poll.
+/// One export through the exporter the trust material builds.
 fn export(collector: &Collector, trust: &CollectorTrust) -> OTelSdkResult {
     span_exporter(
         &Endpoint::Typed(&format!("https://{}/v1/traces", collector.addr)),

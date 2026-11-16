@@ -1,12 +1,7 @@
-//! Prometheus metrics through the `metrics` facade.
-//!
-//! One recorder per process. HTTP server metrics come from the HTTP adapter,
-//! process metrics from `metrics-process`, runtime metrics from
-//! `tokio-metrics`; this module owns the recorder, the periodic upkeep, the
-//! scheduler progress sampler, and the scrape route. Each crate that emits a
-//! histogram owns its name and any override of the default buckets.
+//! Prometheus metrics through the `metrics` facade: one recorder per process.
+//! Each crate that emits a histogram owns its name and any bucket override.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
@@ -15,6 +10,7 @@ use axum::http::header::CONTENT_TYPE;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use metrics_exporter_prometheus::{BuildError, Matcher, PrometheusBuilder, PrometheusHandle};
+use parking_lot::Mutex;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -84,20 +80,14 @@ impl Progress {
     }
 
     fn record(&self, completed: Instant, lag: Duration) -> Duration {
-        let mut sample = self
-            .sample
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut sample = self.sample.lock();
         let max_lag = sample.map_or(lag, |previous| previous.max_lag.max(lag));
         *sample = Some(ProgressSample { completed, max_lag });
         max_lag
     }
 
     fn age_seconds(&self) -> f64 {
-        let sample = *self
-            .sample
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let sample = *self.sample.lock();
         sample.map_or(f64::NAN, |sample| sample.completed.elapsed().as_secs_f64())
     }
 }
@@ -118,10 +108,8 @@ pub struct Metrics {
 }
 
 impl Metrics {
-    /// Installs the process-global recorder. The built-in scheduler lag buckets
-    /// take precedence over any valid entry for `runtime_scheduler_lag_seconds`.
-    /// Other histograms use the supplied buckets or the Prometheus client
-    /// defaults.
+    /// The built-in scheduler lag buckets take precedence over any entry for
+    /// `runtime_scheduler_lag_seconds`.
     pub fn install(histograms: &[(&str, &[f64])]) -> Result<Self, MetricsError> {
         let mut builder = PrometheusBuilder::new().set_buckets(DEFAULT_BUCKETS)?;
         for &(name, buckets) in histograms {
@@ -164,12 +152,10 @@ impl Metrics {
         self.handle.render()
     }
 
-    /// Observe scheduler progress every 100 ms after the previous completion.
-    /// Run once under the process background tracker with its child token.
-    /// The first sample waits a full interval; resumed lateness is retained in
-    /// the histogram and cumulative maximum, with no reset or catch-up samples.
-    /// Scrapes compute age
-    /// independently, so an observer that stops making progress becomes stale.
+    /// Run once under the process background tracker. The first sample waits a
+    /// full interval; resumed lateness is retained in the histogram and
+    /// maximum, with no catch-up samples. Scrapes compute age independently,
+    /// so a stalled sampler becomes stale.
     pub async fn runtime_progress(self, cancel: CancellationToken) {
         let mut expected = Instant::now() + PROGRESS_INTERVAL;
         loop {
@@ -204,8 +190,7 @@ impl Metrics {
     }
 }
 
-/// Publish Tokio runtime metrics on `interval` until cancelled. Uses the
-/// stable subset; `--cfg tokio_unstable` adds poll and queue detail.
+/// Uses the stable subset; `--cfg tokio_unstable` adds poll and queue detail.
 pub async fn runtime_metrics(interval: Duration, cancel: CancellationToken) {
     let reporter = tokio_metrics::RuntimeMetricsReporterBuilder::default()
         .with_interval(interval)
@@ -213,14 +198,10 @@ pub async fn runtime_metrics(interval: Duration, cancel: CancellationToken) {
     let _ = cancel.run_until_cancelled(reporter).await;
 }
 
-/// The diagnostics router: `GET /metrics` only. Serve it on the private
-/// diagnostics listener, never on the application listener.
-///
-/// That listener is intentionally outside the application `harden` chain:
-/// Prometheus text, not Problem JSON; no scrape-on-scrape HTTP metrics,
-/// spans, or access logs; the address is trusted-private. `http.*`
-/// `ServerOptions` still apply as shared transport policy (header timeout
-/// and size, connection cap, drain), not request-level policy.
+/// Serve on the private diagnostics listener, never the application one. That
+/// listener is outside the application `harden` chain: Prometheus text, not
+/// Problem JSON; no scrape HTTP metrics, spans, or access logs. `http.*`
+/// `ServerOptions` still apply as transport policy.
 #[expect(
     clippy::disallowed_methods,
     reason = "the private Prometheus listener is outside the application OpenAPI contract"
@@ -272,10 +253,6 @@ mod tests {
             .unwrap_or_else(|| panic!("missing metric {series}"))
     }
 
-    // This owns the scheduler observation contract: a sampler-only age update,
-    // an immediate startup tick, catch-up ticks or cancellation losing to a
-    // ready timer all fail here. Existing runtime reporter tests cannot cover
-    // the separate monotonic snapshot read by Metrics clones.
     #[tokio::test(start_paused = true)]
     async fn progress_scrape_preserves_unknown_startup_late_ticks_and_staleness() {
         let metrics = Metrics::install(&[]).expect("install recorder");

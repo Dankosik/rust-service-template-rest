@@ -9,25 +9,21 @@ use sqlx::postgres::PgConnection;
 
 use crate::history::{PendingError, applied_history, pending};
 
-/// Session `statement_timeout` and `idle_in_transaction_session_timeout` of
-/// the migration connection. DDL on a large table legitimately runs longer
-/// than a request, and a statement that holds a table lock must not run for
-/// as long as [`RunOptions::deadline`] allows. [`apply_outside_transaction`]
-/// lifts it.
+/// Session `statement_timeout` and `idle_in_transaction_session_timeout`.
+/// DDL on a large table outlasts a request, but a statement holding a table
+/// lock must not run as long as [`RunOptions::deadline`] allows.
+/// [`apply_outside_transaction`] lifts it.
 const STATEMENT_TIMEOUT: Duration = Duration::from_mins(2);
-/// Session `lock_timeout`, which also bounds the wait for the advisory
-/// session lock another migrator may hold. [`apply_outside_transaction`]
-/// lifts it.
+/// Also bounds the wait for the advisory session lock another migrator may
+/// hold. [`apply_outside_transaction`] lifts it.
 const LOCK_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Clone, Debug)]
 pub struct RunOptions<'a> {
     pub dsn: &'a Dsn,
     pub application_name: &'a str,
-    /// Bound on lock, history, and every pending migration after a live
-    /// session exists. Connect is not inside this value; a
-    /// `-- no-transaction` migration receives the remaining deadline.
-    /// Must fit the monotonic clock's range.
+    /// Bounds lock, history, and every pending migration once a session
+    /// exists; connect is outside it. Must fit the monotonic clock's range.
     pub deadline: Duration,
     pub statement_timeout: Duration,
     pub lock_timeout: Duration,
@@ -75,16 +71,13 @@ pub enum RunError {
         "migration {version} runs outside a transaction and the database holds invalid indexes ({indexes}); drop each with DROP INDEX CONCURRENTLY, then run again"
     )]
     InvalidIndexes { version: i64, indexes: String },
-    /// Two embedded migrations carry one version, so the history can name at
-    /// most one of them.
     #[error("migration version {0} is embedded more than once")]
     DuplicateVersion(i64),
     #[error(transparent)]
     Migrate(#[from] MigrateError),
 }
 
-/// PostgreSQL `lock_not_available`: `lock_timeout` fired, including on
-/// `pg_advisory_lock`.
+/// `lock_timeout` fired, including on `pg_advisory_lock`.
 const LOCK_NOT_AVAILABLE: &str = "55P03";
 
 impl RunError {
@@ -92,7 +85,6 @@ impl RunError {
         match self {
             Self::Connect(_)
             | Self::ConnectTimeout(_)
-            // The live session dropped during bookkeeping.
             | Self::Migrate(MigrateError::Execute(sqlx::Error::Io(_) | sqlx::Error::Tls(_))) => {
                 "connect"
             }
@@ -134,8 +126,7 @@ impl RunFailure {
     }
 }
 
-/// Each migration and its history row share one transaction, except a
-/// `-- no-transaction` migration, whose row is written after its statement.
+/// A `-- no-transaction` migration writes its history row after its statement.
 pub async fn run(migrator: &Migrator, options: &RunOptions<'_>) -> Result<Report, RunFailure> {
     run_cutoff(options.deadline)?;
     let session = SessionOptions {
@@ -198,8 +189,7 @@ fn run_cutoff(budget: Duration) -> Result<tokio::time::Instant, RunFailure> {
         })
 }
 
-/// The lock is held before the history is read, so `before` and `applied`
-/// describe this run.
+/// The lock is held before the history is read, so `before` and `applied` describe this run.
 async fn apply_pending(
     conn: &mut PgConnection,
     migrator: &Migrator,

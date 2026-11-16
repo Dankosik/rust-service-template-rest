@@ -165,10 +165,9 @@ impl CollectorTrust {
     }
 }
 
-/// Why an exporter could not be built. Any of these degrades to
-/// [`ExporterState::Degraded`](super::ExporterState::Degraded) with the fixed reason `exporter_build`: the
-/// text stays out of logs by the configuration source policy, and is read
-/// only by tests. Names the variable, never file content.
+/// Degrades to [`ExporterState::Degraded`](super::ExporterState::Degraded)
+/// with the fixed reason `exporter_build`; the text stays out of logs and is
+/// read only by tests. Names the variable, never file content.
 #[derive(Debug, thiserror::Error)]
 pub(super) enum ExporterError {
     #[error(transparent)]
@@ -209,8 +208,6 @@ pub(super) fn span_exporter(
     timeout: Duration,
     env: &impl Fn(&str) -> Option<OsString>,
 ) -> Result<opentelemetry_otlp::SpanExporter, ExporterError> {
-    // Always OTLP/HTTP protobuf. An environment endpoint still lets the SDK
-    // pick the URL; it does not select gRPC or another protocol.
     let mut builder = opentelemetry_otlp::SpanExporter::builder()
         .with_http()
         .with_protocol(opentelemetry_otlp::Protocol::HttpBinary)

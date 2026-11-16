@@ -34,8 +34,7 @@ pub(super) fn key_parameter() -> Parameter {
         .build()
 }
 
-/// Construct the one generated replay response header. It is optional: only a
-/// decoded stored success carries the string value `true` on the wire.
+/// Optional: only a decoded stored success carries the string value `true`.
 pub(super) fn replay_header() -> RefOr<Header> {
     HeaderBuilder::new()
         .schema(Some(

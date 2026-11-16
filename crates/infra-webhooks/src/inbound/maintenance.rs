@@ -24,13 +24,11 @@ pub const CLEANUP_RUNS_METRIC: &str = "webhook_receipt_cleanup_runs_total";
 pub const CLEANUP_REMOVED_METRIC: &str = "webhook_receipt_cleanup_removed_receipts_total";
 
 impl Receiver {
-    /// Delete expired receipts in batches of at most 500, returning confirmed
-    /// progress after a short batch. Each batch is its own transaction and
-    /// skips receipts another cleanup holds. An admission's
-    /// `ON CONFLICT DO NOTHING` locks no existing receipt.
-    /// Confirmed counts do not certify an empty expired population.
-    /// Earlier batches stay committed. A timeout leaves the batch's
-    /// commit outcome unconfirmed.
+    /// Batches of at most 500, each its own transaction that skips receipts
+    /// another cleanup holds; an admission's `ON CONFLICT DO NOTHING` locks no
+    /// existing receipt. Confirmed counts do not certify an empty expired
+    /// population. Earlier batches stay committed; a timeout leaves the
+    /// batch's commit outcome unconfirmed.
     pub async fn remove_expired(&self) -> Result<u64, CleanupError> {
         self.remove_expired_pass(None)
             .await
@@ -71,9 +69,8 @@ impl Receiver {
         Ok(deleted.rows_affected())
     }
 
-    /// Run periodic cleanup and independent population observation in the same
-    /// tracked owner. Neither failure changes readiness. Cancellation drops
-    /// both loops, including any transaction in flight.
+    /// Neither failure changes readiness. Cancellation drops both loops,
+    /// including any transaction in flight.
     pub async fn run_cleanup(self, cancel: CancellationToken) {
         metrics::describe_counter!(
             CLEANUP_RUNS_METRIC,

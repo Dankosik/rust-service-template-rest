@@ -11,8 +11,6 @@ use sha2::{Digest as _, Sha256};
 
 pub(super) const MAX_DECODED_KEY_BYTES: usize = 255;
 
-/// The accepted key grammar, shared by the generated parameter and the runtime
-/// rejection.
 pub(super) const KEY_GRAMMAR: &str = "An unquoted value is visible ASCII; a value beginning with `\"` is an IETF Structured Field string.";
 
 const SCOPE_DOMAIN: &[u8] = b"http-idempotency/scope/v2";
@@ -116,7 +114,9 @@ pub(super) fn request_fingerprint(
     // An absent or empty trailer section keeps the persisted v1 fingerprint.
     if let Some(trailers) = trailers.filter(|trailers| !trailers.is_empty()) {
         hasher.update(b"trailers/v1\0");
-        let mut fields = trailers.iter().collect::<Vec<_>>();
+        let mut fields = trailers
+            .iter()
+            .collect::<smallvec::SmallVec<[(&HeaderName, &axum::http::HeaderValue); 4]>>();
         // Stable sort removes ordering between field names while keeping the
         // order of repeated values for each name.
         fields.sort_by(|(left, _), (right, _)| left.as_str().cmp(right.as_str()));

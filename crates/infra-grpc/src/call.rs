@@ -1,13 +1,15 @@
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
+use atomic_take::AtomicTake;
 use bytes::Bytes;
 use futures_util::FutureExt as _;
 use http::HeaderMap;
 use http_body::{Body, Frame, SizeHint};
 use opentelemetry::trace::SpanKind;
+use parking_lot::Mutex;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio_util::task::AbortOnDropHandle;
 
@@ -18,22 +20,20 @@ use crate::status::internal_status;
 use operation_context::{OperationContext, Stopped};
 use tokio_util::sync::DropGuard;
 
-/// Transfers one value through HTTP extensions, which require `Clone`:
-/// cloning the holder never clones the value, which one owner takes.
+/// Moves one value through `Clone`-only HTTP extensions; one owner takes it.
 #[derive_where::derive_where(Clone)]
-pub(crate) struct Handoff<T>(Arc<Mutex<Option<T>>>);
+pub(crate) struct Handoff<T>(Arc<AtomicTake<T>>);
 
 impl<T> Handoff<T> {
     pub(crate) fn new(value: T) -> Self {
-        Self(Arc::new(Mutex::new(Some(value))))
+        Self(Arc::new(AtomicTake::new(value)))
     }
 
     pub(crate) fn take(self) -> Option<T> {
-        lock(&self.0).take()
+        self.0.take()
     }
 }
 
-/// What the terminal response owner keeps until the call's status is known.
 #[derive(Default)]
 pub(crate) struct ResponseCustody {
     /// The lifetime that stops the response; `None` starts no stop watcher.
@@ -44,9 +44,7 @@ pub(crate) struct ResponseCustody {
 
 pub(crate) type ResponseStatusObserver = Box<dyn FnOnce(tonic::Code) + Send>;
 
-/// Guards a call keeps until its status is known. They drop in declaration
-/// order, after the response body and the call record: the admission
-/// permit, then the upload, then the cancellation of propagated work.
+/// Dropped in declaration order after the response body and call record.
 #[derive(Default)]
 #[expect(dead_code, reason = "each guard acts only when dropped")]
 pub(crate) struct Held {
@@ -56,9 +54,6 @@ pub(crate) struct Held {
 }
 
 impl ResponseCustody {
-    /// The custody the server layers hand over in the response extensions:
-    /// the caller lifetime from the `opening` layer, its cancellation guard,
-    /// and the business admission permit.
     pub(crate) fn take_from_server_response<B>(response: &mut http::Response<B>) -> Self {
         let extensions = response.extensions_mut();
         Self {
@@ -86,8 +81,7 @@ pub(crate) enum Side {
 }
 
 impl Side {
-    /// A server answers its own deadline with the catalog failure; a client
-    /// reports the caller's deadline as the bare status.
+    /// A server answers its own deadline with the catalog failure; a client with the bare status.
     pub(crate) fn deadline(self) -> tonic::Status {
         match self {
             Self::Server => crate::Failure::new(service_failure::Code::GatewayTimeout).into(),
@@ -120,7 +114,6 @@ fn header_catalog_code(headers: &HeaderMap) -> Option<service_failure::Code> {
         .and_then(crate::status::catalog_code)
 }
 
-/// The transport outcome and the code derived from the response.
 #[derive(Clone, Copy)]
 struct Outcome {
     code: tonic::Code,
@@ -150,9 +143,8 @@ impl Outcome {
         }
     }
 
-    /// The outcome of response headers. A server's own failure is taken from
-    /// the status tonic leaves in the extensions when it writes one, which
-    /// saves decoding it from the headers again.
+    /// A server's own failure comes from the status tonic leaves in the extensions, skipping
+    /// a header decode.
     fn from_response<B>(observation: &Observation, response: &http::Response<B>) -> Option<Self> {
         let side = observation.side();
         match (side, response.extensions().get::<tonic::Status>()) {
@@ -164,7 +156,6 @@ impl Outcome {
         }
     }
 
-    /// Reads the outcome from trailers or the initial headers of a trailers-only answer.
     fn from_status_headers(observation: &Observation, headers: &HeaderMap) -> Option<Self> {
         let response_code = header_status_code(headers)?;
         Some(Self {
@@ -190,10 +181,6 @@ fn store_waker(slot: &mut Option<Waker>, waker: &Waker) {
         Some(stored) => stored.clone_from(waker),
         None => *slot = Some(waker.clone()),
     }
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 pub(crate) enum Observation {
@@ -232,7 +219,6 @@ struct Resources<B> {
     _held: Held,
 }
 
-/// A call whose status is not known yet, with everything only it needs.
 struct OpenCall<B: Body> {
     resources: Resources<B>,
     context: Option<OperationContext>,
@@ -242,8 +228,7 @@ struct OpenCall<B: Body> {
     on_status: Option<ResponseStatusObserver>,
 }
 
-/// Where a response stands. A locally generated status waits in `Trailers`
-/// until the body is polled once more.
+/// A locally generated status waits in `Trailers` until the body is polled once more.
 enum Phase<B: Body> {
     Open(OpenCall<B>),
     Trailers(HeaderMap),
@@ -288,7 +273,6 @@ impl<B: Body> State<B> {
         Some(self.side.stopped(reason))
     }
 
-    /// Ends an open call, moving to `next`; `None` once it has ended.
     fn close(&mut self, next: Phase<B>, outcome: Outcome) -> Option<Completion<B>> {
         match std::mem::replace(&mut self.phase, next) {
             Phase::Open(open) => Some(Completion { open, outcome }),
@@ -299,7 +283,6 @@ impl<B: Body> State<B> {
         }
     }
 
-    /// Completes with a locally generated status, sent as the trailers.
     fn complete_with(&mut self, status: &tonic::Status) -> Option<Completion<B>> {
         if let Phase::Open(open) = &self.phase {
             open.resources.observation.record_local_stop(status);
@@ -313,7 +296,6 @@ impl<B: Body> State<B> {
         )
     }
 
-    /// Completes with a locally generated status and yields its trailers.
     fn end_with(
         &mut self,
         status: &tonic::Status,
@@ -322,7 +304,6 @@ impl<B: Body> State<B> {
         (self.take_terminal(), completion)
     }
 
-    /// Completes from a frame the body yielded; `None` while the call is open.
     fn complete_from(&mut self, polled: &ResponseFramePoll<B::Error>) -> Option<Completion<B>> {
         let Phase::Open(open) = &self.phase else {
             return None;
@@ -474,8 +455,6 @@ where
         this
     }
 
-    /// Spawns the task that completes the call once `context` stops, even
-    /// while nobody polls the body.
     fn watch(&mut self, context: OperationContext, side: Side) {
         let weak = Arc::downgrade(&self.state);
         #[cfg(test)]
@@ -517,7 +496,7 @@ where
 }
 
 fn terminate<B: Body>(state: &Mutex<State<B>>, status: &tonic::Status) {
-    let completion = lock(state).complete_with(status);
+    let completion = state.lock().complete_with(status);
     if let Some(mut completion) = completion {
         if let Some(waker) = completion.open.waker.take() {
             waker.wake();
@@ -536,7 +515,7 @@ where
     fn poll_frame(self: Pin<&mut Self>, context: &mut Context<'_>) -> ResponseFramePoll<B::Error> {
         let this = self.get_mut();
         this.reap_watcher(context);
-        let mut state = lock(&this.state);
+        let mut state = this.state.lock();
         let mut panic = None;
         let (polled, completion) = if let Some(status) = state.stopped_status() {
             state.end_with(&status)
@@ -575,7 +554,6 @@ where
         };
         drop(state);
         if let Some(completion) = completion {
-            // Dropping the handle aborts the watcher.
             this.watcher = None;
             completion.finish();
         }
@@ -586,11 +564,11 @@ where
     }
 
     fn is_end_stream(&self) -> bool {
-        matches!(lock(&self.state).phase, Phase::Done)
+        matches!(self.state.lock().phase, Phase::Done)
     }
 
     fn size_hint(&self) -> SizeHint {
-        match &lock(&self.state).phase {
+        match &self.state.lock().phase {
             Phase::Open(open) => open.resources.body.size_hint(),
             Phase::Trailers(_) | Phase::Done => SizeHint::with_exact(0),
         }
@@ -599,7 +577,7 @@ where
 
 impl<B: Body> Drop for ResponseBody<B> {
     fn drop(&mut self) {
-        let phase = std::mem::replace(&mut lock(&self.state).phase, Phase::Done);
+        let phase = std::mem::replace(&mut self.state.lock().phase, Phase::Done);
         drop(self.watcher.take());
         // Call's drop records cancellation only while still open.
         drop(phase);
@@ -629,7 +607,7 @@ pub(crate) fn upload(body: tonic::body::Body) -> (tonic::body::Body, UploadGuard
 impl Drop for UploadGuard {
     fn drop(&mut self) {
         let (body, waker) = {
-            let mut state = lock(&self.0);
+            let mut state = self.0.lock();
             (state.body.take(), state.waker.take())
         };
         if let Some(waker) = waker {
@@ -647,7 +625,7 @@ impl Body for Upload {
         self: Pin<&mut Self>,
         context: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
-        let mut state = lock(&self.0);
+        let mut state = self.0.lock();
         store_waker(&mut state.waker, context.waker());
         let Some(body) = state.body.as_mut() else {
             return Poll::Ready(None);
@@ -666,11 +644,12 @@ impl Body for Upload {
     }
 
     fn is_end_stream(&self) -> bool {
-        lock(&self.0).body.as_ref().is_none_or(Body::is_end_stream)
+        self.0.lock().body.as_ref().is_none_or(Body::is_end_stream)
     }
 
     fn size_hint(&self) -> SizeHint {
-        lock(&self.0)
+        self.0
+            .lock()
             .body
             .as_ref()
             .map_or_else(|| SizeHint::with_exact(0), Body::size_hint)
@@ -982,7 +961,7 @@ mod tests {
                 self: Pin<&mut Self>,
                 _cx: &mut Context<'_>,
             ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
-                lock(&self.0).push(
+                self.0.lock().push(
                     opentelemetry::Context::current()
                         .span()
                         .span_context()
@@ -1017,7 +996,7 @@ mod tests {
             .span_context()
             .trace_id();
         assert!(futures_util::poll!(body.frame()).is_pending());
-        assert_eq!(*lock(&seen), [trace_id]);
+        assert_eq!(*seen.lock(), [trace_id]);
         assert_eq!(
             opentelemetry::Context::current()
                 .span()

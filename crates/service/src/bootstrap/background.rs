@@ -11,10 +11,7 @@ pub(crate) struct BackgroundFailure {
     pub(crate) panicked: bool,
 }
 
-/// Startup-only access to the service's existing background task owner.
-///
-/// Bootstrap lends this non-cloneable capability while registering adapters.
-/// It cannot change the root cancellation token, runtime or shutdown budget.
+/// Startup-only; cannot change the root cancellation token, runtime or shutdown budget.
 #[derive(derive_more::Debug)]
 #[debug("BackgroundRegistration {{ .. }}")]
 pub struct BackgroundRegistration<'a> {
@@ -22,20 +19,15 @@ pub struct BackgroundRegistration<'a> {
 }
 
 impl BackgroundRegistration<'_> {
-    /// Register one process-lifetime manager before traffic admission.
-    ///
-    /// `start` must construct its future promptly. The child token fires in
-    /// the existing background-join stage. On cancellation, close feature
+    /// `start` must construct its future promptly. On cancellation, close feature
     /// admission and wait for every admitted operation before returning `Ok`.
     /// On live work failure, close admission, call the reporter immediately,
     /// then retain completion ownership until all admitted work ends before
     /// returning `Err`. Reporting failure does not complete or detach the task.
     ///
-    /// An early `Ok`, any panic, or any `Err` is a failure. Errors are never
-    /// formatted here. A failure while serving stops the process with exit 1;
-    /// a failure during requested cleanup makes its outcome degraded (exit 3).
-    /// The service's existing join deadline bounds the wait, not the lifetime
-    /// of a started blocking operation; expiry cannot certify its termination.
+    /// An early `Ok`, any panic, or any `Err` is a failure: exit 1 while
+    /// serving, degraded (exit 3) during cleanup. The join deadline bounds the
+    /// wait, not a started blocking operation; expiry cannot certify its termination.
     pub fn spawn<F, E>(
         &mut self,
         name: &'static str,
@@ -53,17 +45,14 @@ impl BackgroundRegistration<'_> {
     }
 }
 
-/// A manager's static-name failure signal into the existing service latch.
-///
-/// Reporting starts the root's failure transition without ending the manager.
-/// The manager still owns closing admission and joining all its admitted work.
+/// Reporting starts the root's failure transition without ending the manager,
+/// which still owns closing admission and joining its admitted work.
 pub struct BackgroundFailureReporter {
     name: &'static str,
     failure: watch::Sender<Option<BackgroundFailure>>,
 }
 
 impl BackgroundFailureReporter {
-    /// Latch this manager's failure without exposing its error or ending it.
     /// Repeated reports cannot replace the first observed process failure.
     pub fn report(&self) {
         self.record(false);
@@ -110,7 +99,6 @@ impl Background {
         }
     }
 
-    /// A token that fires when teardown cancels this owner's tasks.
     pub(crate) fn child_token(&self) -> CancellationToken {
         self.cancel.child_token()
     }
@@ -174,7 +162,6 @@ impl Background {
         });
     }
 
-    /// Cancel every task's token; teardown then joins them.
     pub(super) fn cancel(&self) {
         self.cancel.cancel();
     }

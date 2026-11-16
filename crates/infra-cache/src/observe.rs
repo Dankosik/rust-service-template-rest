@@ -12,15 +12,13 @@ use crate::{ServerEndpoint, Unavailable};
 
 const OPERATION_DURATION_METRIC: &str = "cache_operation_duration_seconds";
 
-/// Buckets in seconds for [`OPERATION_DURATION_METRIC`].
 /// A timeout whose measured duration exceeds the highest finite bucket lands
 /// only in `+Inf`.
 const OPERATION_DURATION_BUCKETS: &[f64] = &[
     0.0005, 0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 1.0,
 ];
 
-/// Every histogram this crate records. A composition root hands it to the
-/// Prometheus recorder; a metric left out renders the default buckets.
+/// A metric left out of the recorder's bucket list renders the default buckets.
 pub const HISTOGRAMS: &[(&str, &[f64])] =
     &[(OPERATION_DURATION_METRIC, OPERATION_DURATION_BUCKETS)];
 
@@ -47,8 +45,7 @@ pub(crate) enum Outcome {
 }
 
 impl Outcome {
-    /// The `outcome` label. A timeout keeps its own value so an alert on it
-    /// needs no second label.
+    /// A timeout keeps its own value so an alert on it needs no second label.
     fn label(self) -> &'static str {
         match self {
             Self::Hit => "hit",
@@ -61,11 +58,10 @@ impl Outcome {
     }
 }
 
-/// One namespace's histogram handles, registered on first use so the scrape
-/// shows only series that were recorded. Resolving a labelled key on every
-/// call would hash and look it up in the recorder instead. A handle stays
-/// bound to the recorder of its first use; bootstrap installs the recorder
-/// before it opens the cache.
+/// Registered on first use so the scrape shows only recorded series, and to
+/// avoid hashing a labelled key on every call. A handle stays bound to the
+/// recorder of its first use; bootstrap installs the recorder before it opens
+/// the cache.
 #[derive(Default, derive_more::Debug)]
 #[debug("NamespaceHistograms {{ .. }}")]
 pub(crate) struct NamespaceHistograms(EnumMap<Operation, EnumMap<Outcome, OnceLock<Histogram>>>);

@@ -4,9 +4,8 @@ use service_config::Config;
 
 use super::BootstrapError;
 
-/// Connect the optional cache. An outage at startup is logged, not fatal:
-/// the cache is not a readiness probe, and callers fall back to the source
-/// of truth.
+/// An outage at startup is logged, not fatal: the cache is not a readiness
+/// probe, and callers fall back to the source of truth.
 pub(super) async fn open(
     config: &Config,
     retained: &mut Option<Cache>,

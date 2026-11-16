@@ -96,7 +96,6 @@ pub struct JwtType(Arc<str>);
 pub struct InvalidJwtType;
 
 impl JwtType {
-    /// Admits a token type and keeps its short lowercase form.
     pub fn parse(value: &str) -> Result<Self, InvalidJwtType> {
         let short = rfc7515::typ_subtype(value).ok_or(InvalidJwtType)?;
         let name = short.as_bytes();

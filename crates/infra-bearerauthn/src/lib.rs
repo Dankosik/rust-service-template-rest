@@ -73,7 +73,6 @@ pub use jwt::{JwtOptions, RefreshTask, TokenProfile, prepare_jwt};
 pub use principal::{Actor, ClaimAccessError, Principal};
 pub use provider::{EndpointUrl, HISTOGRAMS, IssuerUrl, ProviderFailure};
 
-/// The fixed authentication outcomes each inbound transport maps to its response.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum Failure {
     #[error("bearer authentication is required")]
@@ -182,7 +181,6 @@ pub(crate) enum VerificationReason {
     Provider(ProviderFailure),
     Inactive,
     Capacity,
-    CacheState,
     // template:end oidc-introspection:authn-introspection-reasons
 }
 
@@ -209,7 +207,6 @@ impl VerificationReason {
             Self::Provider(failure) => failure.label(),
             Self::Inactive => "inactive",
             Self::Capacity => "capacity",
-            Self::CacheState => "introspection_cache_state",
             // template:end oidc-introspection:authn-introspection-reason-labels
         }
     }
@@ -309,7 +306,6 @@ pub mod test_support {
     }
 
     impl FixtureTransport {
-        /// Creates the sole fixture mapping: one named TLS endpoint to loopback.
         pub fn try_new(
             fixture_host: &str,
             fixture_addr: std::net::SocketAddr,

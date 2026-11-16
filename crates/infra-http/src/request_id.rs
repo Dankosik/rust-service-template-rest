@@ -8,7 +8,6 @@ use axum::http::{HeaderValue, Request};
 use tower_http::request_id::{MakeRequestId, RequestId};
 use uuid::Uuid;
 
-/// The correlation header this crate accepts, generates, and echoes.
 pub const REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("x-request-id");
 
 const MAX_REQUEST_ID_BYTES: usize = 128;

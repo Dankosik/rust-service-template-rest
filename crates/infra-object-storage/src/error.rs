@@ -1,49 +1,43 @@
-use std::borrow::Cow;
 use std::error::Error;
+use std::fmt;
 
 use aws_sdk_s3::config::http::HttpResponse;
 use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
 use aws_sdk_s3::operation::delete_object::{DeleteObjectError, DeleteObjectOutput};
 use aws_sdk_s3::primitives::ByteStreamError;
 use aws_smithy_runtime::client::http::body::content_length_enforcement::ContentLengthError;
+use compact_str::CompactString;
 use operation_context::Stopped;
 use shared_rules::error_chain::causes;
 
-/// Why an operation failed. Each variant tells the caller what it may do next.
-///
-/// Display and Debug never contain a key, bucket, endpoint, URL, or provider text.
+/// Each variant tells the caller what it may do next. Display and Debug never
+/// contain a key, bucket, endpoint, URL, or provider text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, enum_map::Enum, thiserror::Error)]
 pub enum ObjectStorageError {
     #[error("object not found")]
     NotFound,
     #[error("object already exists")]
     AlreadyExists,
-    /// A declared or stored size exceeds `max_object_bytes`. A put sends
-    /// nothing; a get refuses the body after receiving its headers.
+    /// A put sends nothing; a get refuses the body after receiving headers.
     #[error("object exceeds the configured size limit")]
     TooLarge,
-    /// The process admission limit is full. Nothing was sent.
+    /// Nothing was sent.
     #[error("object storage admission limit reached")]
     Busy,
-    /// Transient failure; retrying the same operation is safe. A read failed,
-    /// the workload identity yielded no credentials (nothing was sent), or
-    /// the provider refused a mutation before applying it (409, 429, 503, or
-    /// S3's `RequestTimeout`). A mutation makes one attempt, so no earlier
-    /// attempt can have applied it.
+    /// Retrying is safe: a failed read, no workload-identity credentials (nothing
+    /// sent), or a provider refusal before applying a mutation (409, 429, 503, S3's
+    /// `RequestTimeout`). A mutation makes one attempt, so none can have applied.
     #[error("object storage unavailable")]
     Unavailable,
-    /// Permanent refusal, such as 400, 403, or a missing bucket: credentials,
-    /// configuration, or input are wrong. Retrying will not help.
+    /// Permanent (400, 403, a missing bucket): credentials, configuration, or input are wrong.
     #[error("object storage rejected the request")]
     Rejected,
-    /// A mutation may or may not have taken effect: a timeout, a lost
-    /// response, or a 500, 502, or 504. Reconcile before relying on either
+    /// A timeout, lost response, or 500, 502, 504. Reconcile before relying on either
     /// state; a create-only retry may find this call's own object.
     #[error("object storage mutation outcome is unknown")]
     OutcomeUnknown,
-    /// A checksum mismatch detected by the SDK, a range or unsized response,
-    /// or a download body whose length differs from its declared size.
-    /// Absent or skipped checksums do not produce this error.
+    /// Checksum mismatch, a range or unsized response, or a body differing from its
+    /// declared size; absent or skipped checksums do not.
     #[error("object storage integrity check failed")]
     Integrity,
 }
@@ -110,14 +104,14 @@ enum FailureKind<'a> {
 #[derive(Debug)]
 pub(crate) struct Failure {
     pub(crate) error: ObjectStorageError,
-    pub(crate) error_type: Cow<'static, str>,
+    pub(crate) error_type: CompactString,
 }
 
 impl Failure {
-    fn with_label(error: ObjectStorageError, error_type: &'static str) -> Self {
+    const fn with_label(error: ObjectStorageError, error_type: &'static str) -> Self {
         Self {
             error,
-            error_type: Cow::Borrowed(error_type),
+            error_type: CompactString::const_new(error_type),
         }
     }
 
@@ -179,7 +173,7 @@ pub(crate) fn interpret_delete_result(
 ) -> Result<(), Failure> {
     match result {
         Ok(_) => Ok(()),
-        // S3 and R2 answer 204 for an absent key. Some stores report NoSuchKey.
+        // S3 and R2 answer 204 for an absent key; some stores report NoSuchKey.
         Err(error) if error.code() == Some("NoSuchKey") => Ok(()),
         Err(error) => Err(from_sdk(Call::UnconditionalMutation, error)),
     }
@@ -189,19 +183,22 @@ pub(crate) fn from_sdk<E>(call: Call, error: &SdkFailure<E>) -> Failure
 where
     E: ProvideErrorMetadata + std::error::Error + 'static,
 {
-    let (kind, error_type): (_, Cow<'static, str>) = match error {
-        SdkError::ConstructionFailure(_) => (FailureKind::NotSent, "construction".into()),
+    let (kind, error_type) = match error {
+        SdkError::ConstructionFailure(_) => (
+            FailureKind::NotSent,
+            CompactString::const_new("construction"),
+        ),
         SdkError::ServiceError(context) => {
             let status = context.raw().status().as_u16();
             let code = context.err().code();
             let error_type = match code {
-                Some(code) if is_identifier(code) => code.to_owned().into(),
-                _ => status.to_string().into(),
+                Some(code) if is_identifier(code) => CompactString::from(code),
+                _ => CompactString::from(status.format_into(&mut fmt::NumBuffer::new())),
             };
             (FailureKind::Status { status, code }, error_type)
         }
-        // The SDK reports a failed credential load as a dispatch failure,
-        // although it happens before the request is signed.
+        // The SDK reports a failed credential load as a dispatch failure, though it
+        // precedes signing.
         SdkError::DispatchFailure(_)
             if shared_rules::error_chain::causes(error).any(
                 <dyn std::error::Error>::is::<
@@ -209,15 +206,18 @@ where
                 >,
             ) =>
         {
-            (FailureKind::NoCredentials, "credentials".into())
+            (
+                FailureKind::NoCredentials,
+                CompactString::const_new("credentials"),
+            )
         }
-        SdkError::TimeoutError(_) => (FailureKind::Lost, "timeout".into()),
+        SdkError::TimeoutError(_) => (FailureKind::Lost, CompactString::const_new("timeout")),
         SdkError::DispatchFailure(failure) if failure.is_timeout() => {
-            (FailureKind::Lost, "timeout".into())
+            (FailureKind::Lost, CompactString::const_new("timeout"))
         }
-        SdkError::DispatchFailure(_) => (FailureKind::Lost, "dispatch".into()),
+        SdkError::DispatchFailure(_) => (FailureKind::Lost, CompactString::const_new("dispatch")),
         // A response that could not be read, and any future variant.
-        _ => (FailureKind::Lost, "response".into()),
+        _ => (FailureKind::Lost, CompactString::const_new("response")),
     };
     Failure {
         error: classify(call, kind),
@@ -240,12 +240,9 @@ fn classify(call: Call, kind: FailureKind<'_>) -> ObjectStorageError {
             (_, Some("NoSuchBucket")) => E::Rejected,
             (404, _) if call == Call::Read => E::NotFound,
             (412, _) if call == Call::CreateOnly => E::AlreadyExists,
-            // Refused before applying: a conflicting concurrent write,
-            // throttling, a provider shedding load, or a body the provider
-            // stopped waiting for (S3's `400 RequestTimeout`). A mutation
-            // makes one attempt, so this reply is the only one.
+            // A conflicting write, throttling, load shedding, or a body the provider stopped
+            // waiting for (S3's `400 RequestTimeout`); one attempt means this is the only reply.
             (409 | 429 | 503, _) | (_, Some("RequestTimeout")) => E::Unavailable,
-            // An unsupported header or operation is permanent.
             (501, _) => E::Rejected,
             (500..=599, _) => call.ambiguous(),
             _ => E::Rejected,
@@ -253,10 +250,9 @@ fn classify(call: Call, kind: FailureKind<'_>) -> ObjectStorageError {
     }
 }
 
-/// The status a reply's error stands for. S3 can answer a PUT or DELETE with
-/// 200 and an `<Error>` body when it fails after accepting the request, so a
-/// success status carries no cause: the code names it, and an unknown code is
-/// a server failure because the mutation may have applied.
+/// S3 can answer a PUT or DELETE with 200 and an `<Error>` body when it fails
+/// after accepting the request, so a success status carries no cause: the code
+/// names it, and an unknown code is a server failure because it may have applied.
 fn classification_status(status: u16, code: Option<&str>) -> u16 {
     if !(200..300).contains(&status) {
         return status;

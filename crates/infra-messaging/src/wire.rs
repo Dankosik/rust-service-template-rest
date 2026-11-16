@@ -18,14 +18,12 @@ pub const MESSAGE_ID: &str = "Message-Id";
 pub const EVENT_TYPE: &str = "Event-Type";
 pub const EVENT_SCHEMA: &str = "Event-Schema";
 pub const CREATED_AT: &str = "Created-At";
-/// Header the broker reads to deduplicate publications.
 pub const NATS_MSG_ID: &str = "Nats-Msg-Id";
 pub const ORIGINAL_SUBJECT: &str = "Original-Subject";
 pub const DEAD_LETTER_REASON: &str = "Dead-Letter-Reason";
 
 /// NATS enforces this encoded-header ceiling independently of message size.
 pub(crate) const NATIVE_HEADER_LIMIT_BYTES: usize = 65_535;
-/// The longest identity header value: message and publication ID, event type.
 pub(crate) const IDENTITY_MAX_BYTES: usize = 256;
 const SHA256_HEX_LEN: usize = 64;
 /// The `NATS/1.0` status line and the blank line that ends a header block.
@@ -56,8 +54,6 @@ pub struct InboundEnvelope {
     pub(crate) payload: Bytes,
 }
 
-/// Builds the exact five normal identity headers from an immutable prepared event.
-///
 /// The bounds enforced by [`PreparedEvent`] keep these headers within
 /// [`HEADER_LIMIT_BYTES`].
 pub fn encode_prepared(event: &PreparedEvent) -> Result<HeaderMap, EnvelopeError> {
@@ -73,11 +69,8 @@ pub fn encode_prepared(event: &PreparedEvent) -> Result<HeaderMap, EnvelopeError
     Ok(headers)
 }
 
-/// Decodes the Go envelope before allocating a typed handler payload.
-///
-/// Requires `Message-Id`, `Event-Type`, `Event-Schema`, `Created-At` and
-/// `Nats-Msg-Id`. `Nats-Msg-Id` is validated and not returned; the logical
-/// identity is `Message-Id`.
+/// `Nats-Msg-Id` is validated and not returned; the logical identity is
+/// `Message-Id`.
 pub fn decode_envelope(
     subject: &str,
     headers: &HeaderMap,
@@ -130,7 +123,6 @@ pub fn decode_envelope(
     })
 }
 
-/// The first value of each identity header.
 #[derive(Default)]
 struct Found<'a> {
     message_id: Option<&'a str>,
@@ -176,9 +168,6 @@ pub(crate) fn valid_subject(subject: &str) -> bool {
     !previous_dot
 }
 
-/// Whether the concrete `subject` is selected by the NATS `filter`.
-///
-/// `subject` is a concrete subject accepted by [`valid_subject`].
 pub(crate) fn matches_filter(filter: &str, subject: &str) -> bool {
     let mut filter_tokens = filter.split('.');
     let mut subject_tokens = subject.split('.');
@@ -263,7 +252,6 @@ pub(crate) const fn valid_identity(value: &str) -> bool {
     true
 }
 
-/// The `: ` after a header name and the line break after its value.
 const HEADER_LINE_FRAMING_BYTES: usize = ": \r\n".len();
 
 fn header_line_bytes(name: &str, value: &str) -> usize {
@@ -302,8 +290,6 @@ pub(crate) fn format_timestamp(value: OffsetDateTime) -> Result<String, Envelope
         .ok_or(EnvelopeError::CreatedAtOutOfRange)
 }
 
-/// Checks that [`format_timestamp`] accepts `value` without building the
-/// text.
 pub(crate) fn check_timestamp(value: OffsetDateTime) -> Result<(), EnvelopeError> {
     value
         .checked_to_offset(UtcOffset::UTC)

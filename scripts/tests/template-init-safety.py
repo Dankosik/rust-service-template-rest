@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import dataclasses
 import hashlib
 import importlib.util
 import json
@@ -17,20 +16,6 @@ from unittest.mock import patch
 
 
 sys.dont_write_bytecode = True
-
-from fixtures.historical_profiles import (
-    HISTORICAL_EGRESS_PACK,
-    install_derived_auth_only_none,
-    install_derived_outbound_only_none,
-    install_historical_none,
-)
-
-_HISTORICAL_HTTP_IDEMPOTENCY_REVISION = "4819113b21c110e69f3f1d4d26f3bf9337c83b72"
-_HTTP_IDEMPOTENCY_ONLY_PROFILE_KEYS = (
-    "schema_version", "source_only", "postgres", "authn", "oidc-jwt", "oidc-introspection",
-    "identity", "cargo_lock", "outbound-http", "egress-dns", "request-budget", "http-idempotency",
-    "http-idempotency-mounted",
-)
 
 
 def run(args: list[str], *, cwd: Path, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -67,7 +52,7 @@ def check_role_carrier_bytes(target: Path) -> None:
     relative = ".claude/agents/worker-agent.md"
     carrier = target / relative
     original = carrier.read_bytes()
-    command = ["bash", "scripts/agent-roles-sync.sh", "--check"]
+    command = [sys.executable, "-B", "scripts/agent-harness-sync.py", "--check"]
 
     def must_be_stale() -> None:
         checked = run(command, cwd=target)
@@ -88,6 +73,24 @@ def check_role_carrier_bytes(target: Path) -> None:
     checked = run(command, cwd=target)
     if checked.returncode:
         raise AssertionError(f"role check refused restored carrier: {checked.stderr}")
+    stray = target / ".claude/agents/stray.txt"
+    stray.write_text("stray\n", encoding="utf-8")
+    try:
+        if run(command, cwd=target).returncode == 0:
+            raise AssertionError("role check accepted a stray non-role file inside .claude/agents")
+    finally:
+        stray.unlink(missing_ok=True)
+    sentinel = target / "README.md"
+    sentinel_bytes = sentinel.read_bytes()
+    carrier.unlink()
+    carrier.symlink_to("../../README.md")
+    try:
+        apply_cmd = [sys.executable, "-B", "scripts/agent-harness-sync.py", "--apply"]
+        if run(apply_cmd, cwd=target).returncode == 0 or sentinel.read_bytes() != sentinel_bytes:
+            raise AssertionError("role sync followed or accepted a symlink inside .claude/agents")
+    finally:
+        carrier.unlink(missing_ok=True)
+        carrier.write_bytes(original)
 
 
 def init(
@@ -107,28 +110,6 @@ def init(
         cwd=source,
         env=None if environment is None else {**os.environ, **environment},
     )
-
-
-def install_derived_http_idempotency_only_none(source: Path, target: Path) -> None:
-    profile = json.loads((source / "scripts/lib/template_profiles.json").read_text(encoding="utf-8"))
-    profile["egress-dns"] = HISTORICAL_EGRESS_PACK
-    http_idempotency_only = {key: profile[key] for key in _HTTP_IDEMPOTENCY_ONLY_PROFILE_KEYS}
-    (target / "scripts/lib/template_profiles.json").write_text(
-        json.dumps(http_idempotency_only, indent=2) + "\n", encoding="utf-8"
-    )
-    lock = json.loads((target / "template.lock").read_text(encoding="utf-8"))
-    # The http-idempotency generation's five-field shape, whatever an earlier
-    # fixture left in the lock: a missing selection there means `none`.
-    profiles = lock["profiles"]
-    lock["profiles"] = {
-        "database": profiles["database"],
-        "authn": profiles.get("authn", "none"),
-        "outbound_http": profiles.get("outbound_http", "none"),
-        "http_idempotency": profiles.get("http_idempotency", "none"),
-        "agent_harness": profiles["agent_harness"],
-    }
-    lock["source"]["checkout_revision"] = _HISTORICAL_HTTP_IDEMPOTENCY_REVISION
-    (target / "template.lock").write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
 
 
 def load_marker_modules(source: Path):
@@ -167,7 +148,6 @@ def assert_marker_syntax(source: Path, work: Path) -> None:
     profile = initializer.ProfileData(
         source_only=(),
         removals={},
-        markers=(("authn", "marker.txt", "one"), ("authn", "marker.txt", "two")),
         identity=(),
     )
     inputs = initializer.InitInputs(
@@ -194,7 +174,8 @@ def assert_marker_syntax(source: Path, work: Path) -> None:
     for label, contents in (
         ("duplicate", "# template:begin authn:one\n# template:end authn:one\n# template:begin authn:one\n# template:end authn:one\n"),
         ("nested", "# template:begin authn:one\n# template:begin authn:two\n# template:end authn:two\n# template:end authn:one\n"),
-        ("missing", "# ordinary content\n"),
+        ("unclosed", "# template:begin authn:one\n"),
+        ("mismatched", "# template:begin authn:one\n# template:end authn:two\n"),
     ):
         marker_root = work / f"marker-{label}"
         marker_root.mkdir()
@@ -222,26 +203,6 @@ def assert_marker_syntax(source: Path, work: Path) -> None:
             raise
     else:
         raise AssertionError("unknown marker in active source was accepted")
-
-    laboratory_inputs = dataclasses.replace(
-        inputs, database="postgres", jobs="postgres", http_idempotency="postgres",
-        inbound_webhooks="standard-webhooks",
-    )
-    historical = dataclasses.replace(profile, removals={
-        "egress-dns": ("crates/infra-egress-dns/",),
-        "postgres-sustained": ("test/tests/postgres_sustained/",),
-    })
-    for label, registry, replayed, expected in (
-        ("current registry", profile, laboratory_inputs, set()),
-        ("historical registry without its consumers", historical, inputs, set()),
-        ("historical laboratory", historical, laboratory_inputs, {"postgres-sustained"}),
-        (
-            "historical egress pack", historical,
-            dataclasses.replace(inputs, outbound_http="bounded"), {"egress-dns"},
-        ),
-    ):
-        if initializer._retired_pack_profiles(replayed, registry) != expected:
-            raise AssertionError(f"{label}: replay retains the wrong retired packs")
 
 
 def assert_snapshot_backpressure(source: Path, work: Path) -> None:
@@ -527,7 +488,6 @@ def assert_profile_packs(
         source, target, "integration",
         database == "postgres" or messaging == "nats-jetstream" or cache == "redis" or object_storage == "s3",
     )
-    assert_profile_pack(source, target, "jobs-messaging", jobs == "postgres" and messaging == "nats-jetstream")
     assert_profile_pack(source, target, "webhooks-common", webhooks == "durable" or inbound_webhooks == "standard-webhooks")
     assert_profile_pack(source, target, "webhooks", webhooks == "durable")
     assert_profile_pack(source, target, "inbound-webhooks", inbound_webhooks == "standard-webhooks")
@@ -587,7 +547,7 @@ def assert_outbound_lock_refusals(source: Path, target: Path) -> None:
     lock_path = target / "template.lock"
     original = lock_path.read_bytes()
     cases = (
-        ("missing-authn", lambda profiles: profiles.pop("authn")),
+        ("missing-agent-harness", lambda profiles: profiles.pop("agent_harness")),
         ("missing-database", lambda profiles: profiles.pop("database")),
         ("unknown-profile-field", lambda profiles: profiles.update(unexpected="value")),
         ("unknown-outbound-value", lambda profiles: profiles.update(outbound_http="unbounded")),
@@ -648,7 +608,6 @@ def assert_http_idempotency_lock_refusals(source: Path, target: Path) -> None:
             "http-idempotency-without-authn",
             lambda profiles: profiles.update(http_idempotency="postgres", database="postgres"),
         ),
-        ("missing-outbound-http-with-http-idempotency", lambda profiles: profiles.pop("outbound_http")),
         ("unknown-http-idempotency-value", lambda profiles: profiles.update(http_idempotency="mysql")),
     )
     for label, mutate in cases:
@@ -670,7 +629,6 @@ def assert_jobs_lock_refusals(source: Path, target: Path) -> None:
         ("jobs-without-database", lambda profiles: profiles.update(jobs="postgres")),
         ("unknown-jobs-value", lambda profiles: profiles.update(jobs="redis")),
         ("null-jobs-value", lambda profiles: profiles.update(jobs=None)),
-        ("missing-http-idempotency-with-jobs", lambda profiles: profiles.pop("http_idempotency")),
     )
     for label, mutate in cases:
         lock = json.loads(original)
@@ -716,7 +674,6 @@ def assert_webhook_lock_refusals(source: Path, target: Path) -> None:
         ("unknown-inbound-webhooks-value", lambda profiles: profiles.update(inbound_webhooks="signed")),
         ("webhooks-without-outbound-http", lambda profiles: profiles.update(webhooks="durable", database="postgres", jobs="postgres")),
         ("inbound-webhooks-without-jobs", lambda profiles: profiles.update(inbound_webhooks="standard-webhooks", database="postgres")),
-        ("missing-webhooks", lambda profiles: profiles.pop("webhooks")),
     )
     for label, mutate in cases:
         lock = json.loads(original)
@@ -887,6 +844,7 @@ def check(source: Path) -> None:
         target = work / "success"
         clone(source, target)
         local_adapter_note = target / ".codex/service-note.txt"
+        local_adapter_note.parent.mkdir(parents=True, exist_ok=True)
         local_adapter_note.write_text("service-owned sibling\n", encoding="utf-8")
         result = init(source, target, "--database", "none", "--agent-harness", "claude")
         if result.returncode:
@@ -904,11 +862,12 @@ def check(source: Path) -> None:
         assert_lock_webhooks(target, "none", "none")
         for removed in [
             "make/source.mk", "scripts/ci/template-init-check.sh", "scripts/tests/template-init-safety.py",
-            "scripts/tests/fixtures/",
             "crates/infra-postgres", "crates/migrate", "migrations", "env/docker-compose.yml",
             "Grok.md", "QWEN.md", ".agents/codex-project.toml",
+            ".agents/adapters/qwen", ".agents/adapters/cursor", ".agents/adapters/grok", ".agents/adapters/opencode",
+            ".agents/adapters/antigravity", ".agents/rules/antigravity-harness.md", ".agents/agents",
             ".codex/config.toml", ".codex/agents", ".cursor/rules/agent-harness.mdc", ".cursor/agents",
-            ".grok/rules/harness.md", ".grok/agents", ".grok/roles", "opencode.json",
+            ".grok/rules/harness.md", ".grok/agents", ".grok/roles", "opencode.json", ".opencode/.gitignore",
             ".opencode/rules/harness.md", ".opencode/agents", ".opencode/commands/orchestrator.md",
             ".opencode/plugins/task-subagents.js", ".qwen/agents", ".qwen/skills", ".qwen/settings.json",
         ]:
@@ -916,7 +875,8 @@ def check(source: Path) -> None:
                 raise AssertionError(f"none/claude output retained {removed}")
         if local_adapter_note.read_text(encoding="utf-8") != "service-owned sibling\n":
             raise AssertionError("initializer changed unrelated product-root content")
-        for empty_parent in (".cursor", ".grok", ".qwen", ".opencode/commands", ".opencode/plugins", ".opencode/rules"):
+        for empty_parent in (".cursor", ".grok", ".qwen", ".opencode/commands", ".opencode/plugins", ".opencode/rules",
+                             ".agents/rules"):
             if (target / empty_parent).exists():
                 raise AssertionError(f"initializer retained an empty removed-pack parent: {empty_parent}")
         for parent in (".codex", ".cursor", ".grok", ".opencode", ".qwen"):
@@ -949,19 +909,12 @@ def check(source: Path) -> None:
         repeat = init(source, target, "--database", "none", "--agent-harness", "claude")
         if repeat.returncode or state(target) != after:
             raise AssertionError("matching complete-lock initialization was not a byte-preserving no-op")
-        # A complete DNS-generation inventory is accepted only for no-op
-        # replay. Current projection must never select or emit its DNS pack.
         inventory_path = target / "scripts/lib/template_profiles.json"
         lock_path = target / "template.lock"
         current_inventory = inventory_path.read_bytes()
         current_lock = lock_path.read_bytes()
-        install_derived_outbound_only_none(source, target)
-        historical_before = state(target)
-        historical_repeat = init(source, target, "--database", "none", "--agent-harness", "claude")
-        if historical_repeat.returncode or state(target) != historical_before:
-            raise AssertionError("previous DNS inventory replay was not byte-preserving")
-        historical_inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
-        reordered = dict(historical_inventory)
+        parsed_inventory = json.loads(current_inventory.decode("utf-8"))
+        reordered = dict(parsed_inventory)
         del reordered["authn"]
         reordered["outbound-http"] = None
         reordered["authn"] = None
@@ -973,15 +926,14 @@ def check(source: Path) -> None:
             or "template authn inventory has an unsupported shape" not in invalid_repeat.stderr
             or state(target) != invalid_before
         ):
-            raise AssertionError("historical replay lost the canonical first refusal for reordered profiles")
-        historical_inventory["unknown-pack"] = {"remove_when_unselected": [], "markers": []}
-        inventory_path.write_text(json.dumps(historical_inventory, indent=2) + "\n", encoding="utf-8")
+            raise AssertionError("replay lost the canonical first refusal for reordered profiles")
+        parsed_inventory["unknown-pack"] = {"remove_when_unselected": []}
+        inventory_path.write_text(json.dumps(parsed_inventory, indent=2) + "\n", encoding="utf-8")
         unknown_before = state(target)
         unknown_repeat = init(source, target, "--database", "none", "--agent-harness", "claude")
         if unknown_repeat.returncode == 0 or state(target) != unknown_before:
-            raise AssertionError("unknown historical inventory was accepted or mutated")
+            raise AssertionError("unknown inventory pack was accepted or mutated")
         inventory_path.write_bytes(current_inventory)
-        lock_path.write_bytes(current_lock)
         assert_outbound_lock_refusals(source, target)
         assert_outbound_auth_lock_refusals(source, target)
         assert_grpc_lock_refusals(source, target)
@@ -989,33 +941,8 @@ def check(source: Path) -> None:
         assert_jobs_lock_refusals(source, target)
         assert_outbox_lock_refusals(source, target)
         assert_webhook_lock_refusals(source, target)
-        install_derived_auth_only_none(source, target)
-        auth_only_before = state(target)
-        auth_only_repeat = init(source, target, "--database", "none", "--authn", "none", "--agent-harness", "claude")
-        if auth_only_repeat.returncode or state(target) != auth_only_before:
-            raise AssertionError("derived auth-only none lock replay was not byte-preserving")
-        auth_only_mismatch = init(
-            source, target, "--database", "none", "--authn", "none", "--outbound-http", "bounded", "--agent-harness", "claude"
-        )
-        if auth_only_mismatch.returncode == 0 or state(target) != auth_only_before:
-            raise AssertionError("auth-only none lock accepted an outbound profile migration")
-        install_derived_outbound_only_none(source, target)
-        outbound_only_before = state(target)
-        outbound_only_repeat = init(source, target, "--database", "none", "--authn", "none", "--agent-harness", "claude")
-        if outbound_only_repeat.returncode or state(target) != outbound_only_before:
-            raise AssertionError("derived outbound-only none lock replay was not byte-preserving")
-        outbound_only_mismatch = init(
-            source, target, "--database", "postgres", "--authn", "oidc-jwt", "--http-idempotency", "postgres",
-            "--agent-harness", "claude",
-        )
-        if outbound_only_mismatch.returncode == 0 or state(target) != outbound_only_before:
-            raise AssertionError("outbound-only none lock accepted an http idempotency profile migration")
-        (target / "scripts/lib/template_profiles.json").write_bytes(
-            (source / "scripts/lib/template_profiles.json").read_bytes()
-        )
-        lock = json.loads((target / "template.lock").read_text(encoding="utf-8"))
-        # A five-field lock against the current inventory: a missing selection
-        # means `none`, and the matching replay keeps its bytes.
+        lock = json.loads(current_lock.decode("utf-8"))
+        # Optional capability fields omitted from an older lock normalize to `none`.
         profiles = lock["profiles"]
         lock["profiles"] = {
             "database": profiles["database"],
@@ -1024,37 +951,22 @@ def check(source: Path) -> None:
             "http_idempotency": profiles.get("http_idempotency", "none"),
             "agent_harness": profiles["agent_harness"],
         }
-        (target / "template.lock").write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
+        lock_path.write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
         five_field_before = state(target)
         five_field_repeat = init(source, target, "--database", "none", "--authn", "none", "--agent-harness", "claude")
         if five_field_repeat.returncode or state(target) != five_field_before:
             raise AssertionError("five-field none lock replay was not byte-preserving")
-        install_derived_http_idempotency_only_none(source, target)
-        http_idempotency_only_before = state(target)
-        http_idempotency_only_repeat = init(
-            source, target, "--database", "none", "--authn", "none", "--agent-harness", "claude"
-        )
-        if http_idempotency_only_repeat.returncode or state(target) != http_idempotency_only_before:
-            raise AssertionError("derived http-idempotency-only none lock replay was not byte-preserving")
         jobs_migration = init(
             source, target, "--database", "postgres", "--jobs", "postgres", "--agent-harness", "claude"
         )
-        if jobs_migration.returncode == 0 or state(target) != http_idempotency_only_before:
-            raise AssertionError("http-idempotency-only none lock accepted a jobs profile migration")
+        if jobs_migration.returncode == 0 or state(target) != five_field_before:
+            raise AssertionError("five-field none lock accepted a jobs profile migration")
         if "template initialization choices differ from the complete template.lock" not in jobs_migration.stderr:
             raise AssertionError(
                 "jobs profile migration refusal did not name "
                 "'template initialization choices differ from the complete template.lock': "
                 f"{jobs_migration.stderr}"
             )
-        install_historical_none(source, target)
-        historical_before = state(target)
-        historical_repeat = init(source, target, "--database", "none", "--authn", "none", "--agent-harness", "claude")
-        if historical_repeat.returncode or state(target) != historical_before:
-            raise AssertionError("actual historical none lock replay was not byte-preserving")
-        historical_mismatch = init(source, target, "--database", "none", "--authn", "oidc-jwt", "--agent-harness", "claude")
-        if historical_mismatch.returncode == 0 or state(target) != historical_before:
-            raise AssertionError("historical none lock accepted an authn profile migration")
         (target / "template.lock").write_text("{\"state\": []}\n", encoding="utf-8")
         malformed_before = state(target)
         malformed = init(source, target, "--database", "none", "--agent-harness", "claude")

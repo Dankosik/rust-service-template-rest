@@ -1371,12 +1371,11 @@ async fn reliability_rejected_unchanged_password_recovers_without_traffic() {
     );
     server.require_password(&pending);
     // Acceptance changes while the rejected reply is still delayed. Every
-    // fixture reply arrives within 1 s (the configured command/PING budget).
-    // Completion-relative refresh scheduling lets the PINGs at 6, 8.4 and
-    // 10.8 s push this controlled recovery past 7 s; the general AUTH hang
-    // guard remains the adapter's five seconds.
-    // Keep file bytes and sockets unchanged, and issue no cache operations;
-    // the client must consume a successful reply, not merely send another AUTH.
+    // fixture reply arrives within 1 s; completion-relative refresh scheduling
+    // lets the PINGs at 6, 8.4 and 10.8 s push this recovery past 7 s, while
+    // the general AUTH hang guard stays at five seconds. File bytes and sockets
+    // stay unchanged and no cache operations run: the client must consume a
+    // successful reply, not merely send another AUTH.
     captured
         .wait_for(Duration::from_secs(7), |logs| {
             logs.contains("cache_password_reloaded")

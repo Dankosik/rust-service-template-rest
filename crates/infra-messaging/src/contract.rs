@@ -37,11 +37,8 @@ pub enum ContractError {
 }
 
 impl Registry {
-    /// Renders every route as an `AsyncAPI` 3.0 document: one channel per
-    /// subject, one message per event type and schema version with the
-    /// envelope headers and a JSON Schema 2020-12 payload. Schema references
-    /// to local components are moved into the payload's definitions. External
-    /// references are preserved and may require a separate schema resource.
+    /// Local schema references move into the payload's definitions; external
+    /// ones are preserved and may need a separate schema resource.
     ///
     /// The document has no operations, because a route does not say whether
     /// this process publishes or consumes it. Keys are sorted, so the same
@@ -97,9 +94,8 @@ impl Registry {
 const CREATED_AT_DESCRIPTION: &str =
     "RFC 3339 time; a consumer refuses the zero time 0001-01-01T00:00:00Z as malformed.";
 
-/// One event type and version: the five identity headers every publication
-/// carries and a payload schema whose local references resolve independently
-/// of the surrounding `AsyncAPI` document.
+/// The payload schema's local references resolve independently of the
+/// surrounding `AsyncAPI` document.
 fn message(
     event_type: &str,
     schema_version: u16,

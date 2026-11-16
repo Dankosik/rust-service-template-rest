@@ -32,8 +32,7 @@ mod tests {
         )
     }
 
-    /// The resolver replaced `_` with spaces; the canonical filename therefore
-    /// yields words of `[a-z0-9]` separated by single spaces.
+    /// The resolver replaced `_` with spaces.
     fn is_canonical_description(description: &str) -> bool {
         !description.is_empty()
             && description.split(' ').all(|word| {

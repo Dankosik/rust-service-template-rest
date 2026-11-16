@@ -16,13 +16,11 @@ use bytes::Bytes;
 use time::OffsetDateTime;
 
 type HandlerFuture = Pin<Box<dyn Future<Output = Result<(), HandlerError>> + Send>>;
-/// Starts the typed handler with an event's ID, time and payload, or returns
 /// `None` when the payload is not the handler's type.
 type ErasedHandler = Arc<
     dyn Fn(String, OffsetDateTime, Bytes, OperationContext) -> Option<HandlerFuture> + Send + Sync,
 >;
 
-/// Why a delivery ended without a handler's success.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DispatchError {
     /// No handler is registered for this event type and schema version on
@@ -43,8 +41,6 @@ pub(crate) struct RouteKey<'a> {
     pub(crate) schema_version: u16,
 }
 
-/// The route key of a payload type; rejects an invalid event type and
-/// version zero at compile time.
 pub(crate) const fn route_key<T: EventPayload>() -> RouteKey<'static> {
     const {
         assert!(
@@ -90,8 +86,6 @@ impl Route {
         }
     }
 
-    /// Declares the subject and keeps the payload type's schema, so
-    /// [`Registry::asyncapi`] can describe the event.
     #[must_use]
     pub fn documented<T: EventPayload + utoipa::ToSchema>(subject: impl Into<String>) -> Self {
         Self {
@@ -178,7 +172,6 @@ impl std::fmt::Debug for Registry {
 }
 
 impl Registry {
-    /// Rejects duplicate routes, invalid subjects, and event types NATS would trim.
     pub fn try_new(routes: impl IntoIterator<Item = Route>) -> Result<Self, RegistryError> {
         let mut mapped = HashMap::default();
         for route in routes {
@@ -214,9 +207,8 @@ impl Registry {
         Ok(Self { routes: mapped })
     }
 
-    /// Registers a typed handler. It receives the event and an
-    /// [`OperationContext`] carrying the fixed delivery deadline and
-    /// cancellation; broker metadata stays outside feature code.
+    /// The handler gets an [`OperationContext`] with the fixed delivery
+    /// deadline and cancellation; broker metadata stays outside feature code.
     pub fn register<T, F, Fut>(&mut self, handler: F) -> Result<(), RegistryError>
     where
         T: EventPayload + DeserializeOwned + 'static,
@@ -256,7 +248,6 @@ impl Registry {
         self.routes.values().any(|entry| entry.handler.is_some())
     }
 
-    /// Refuses a consuming worker with no registered typed behavior.
     pub fn require_handlers(&self) -> Result<(), RegistryError> {
         if self.has_handlers() {
             Ok(())
@@ -275,8 +266,6 @@ impl Registry {
         self.routes.values().map(|entry| &entry.route)
     }
 
-    /// Every route with a registered handler. A route without one is one
-    /// this process only publishes to.
     pub(crate) fn handled_routes(&self) -> impl Iterator<Item = &Route> {
         self.routes
             .values()
@@ -407,7 +396,6 @@ mod tests {
         }
     }
 
-    /// Routes both types and handles `Created`, rejecting a zero quantity.
     fn registry() -> Registry {
         let mut registry = Registry::try_new([
             Route::new::<Created>("orders.created"),

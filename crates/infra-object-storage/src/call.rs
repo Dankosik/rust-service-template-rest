@@ -8,20 +8,16 @@ use crate::ObjectStorageError;
 use crate::error::{Call, Failure};
 use crate::observe::OperationGuard;
 
-/// Standard retry for reads. A put or delete makes one attempt: the SDK
-/// keeps only the last attempt's reply, so after a retry a refusal could
-/// hide an earlier attempt that applied the mutation, and a create-only
-/// retry could meet this call's own lost success as `AlreadyExists`.
+/// Standard retry for reads. A put or delete makes one attempt: the SDK keeps only
+/// the last reply, so a retry could hide an earlier applied attempt, and a
+/// create-only retry could meet its own lost success as `AlreadyExists`.
 const MAX_ATTEMPTS: u32 = 3;
-/// The SDK's default 20 s backoff cap can outlast an interactive operation budget.
+/// The SDK's default 20 s cap can outlast an interactive operation budget.
 const MAX_BACKOFF: Duration = Duration::from_secs(1);
-/// TCP and TLS connect bound per attempt; the SDK default of the pinned
-/// behavior version, stated so an SDK bump cannot move it. The attempt bound
-/// caps it when that is shorter.
+/// The pinned behavior version's SDK default, stated so an SDK bump cannot move it.
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(3100);
-/// A read attempt is bounded at `operation_timeout / READ_ATTEMPT_SHARE`, so
-/// one attempt that hangs before its response headers leaves room for a
-/// retry and its backoff. The SDK sets no attempt bound itself.
+/// Leaves room for a retry and its backoff after an attempt that hangs before
+/// response headers; the SDK sets no attempt bound.
 const READ_ATTEMPT_SHARE: u32 = 2;
 
 pub(crate) fn call_policy(
@@ -48,10 +44,8 @@ pub(crate) fn call_policy(
     (timeout, retry_config)
 }
 
-/// Poll only while a context is live. A definitive mutation result from a
-/// poll that began live remains internally authoritative even when that poll
-/// crosses the cooperative cutoff. Read callers perform their strict postcheck
-/// before transferring or returning newly observed data.
+/// A definitive mutation result from a poll that began live stays authoritative
+/// even if that poll crosses the cutoff. Reads postcheck strictly before returning data.
 pub(crate) async fn within<T>(
     context: &OperationContext,
     future: impl std::future::Future<Output = T>,
@@ -82,7 +76,6 @@ pub(crate) async fn within<T>(
 
 pub(crate) struct Interrupted {
     pub(crate) stopped: Stopped,
-    /// The future was polled at least once, so a request may have been sent.
     polled: bool,
 }
 

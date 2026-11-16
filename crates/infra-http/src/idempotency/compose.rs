@@ -33,10 +33,8 @@ pub struct Composer {
     operations: usize,
 }
 
-/// Whether composition served any idempotent operation, and with what store.
 #[derive(Debug)]
 pub enum Activation {
-    /// No idempotent operation needs a store or maintenance task.
     Inactive,
     /// The store must be checked and maintained before readiness admission.
     Active {
@@ -45,11 +43,12 @@ pub enum Activation {
     },
     /// Idempotent operations are served by a composer without a store, which
     /// startup must refuse.
-    Unconfigured { operations: NonZeroUsize },
+    Unconfigured {
+        operations: NonZeroUsize,
+    },
 }
 
 impl Composer {
-    /// A composer whose routes arbitrate through `store`.
     #[must_use]
     pub fn new(store: Store) -> Self {
         Self {
@@ -68,15 +67,10 @@ impl Composer {
         }
     }
 
-    /// Make one annotated route carrier idempotent and generate its served
-    /// contract metadata.
-    ///
-    /// Key handling stays inside final authentication. An invalid declaration
-    /// stops route assembly before the service can serve it.
-    /// Finalization requires the assembled operation to have protected
-    /// effective security so capture can receive a verified caller.
-    /// Declare every header that can change the intended effect as an inline
-    /// request parameter so its values participate in retry matching.
+    /// Key handling stays inside final authentication, which finalization requires
+    /// so capture receives a verified caller. Declare every header that can change
+    /// the intended effect as an inline request parameter so its values
+    /// participate in retry matching.
     pub fn route<S>(
         &mut self,
         routes: UtoipaMethodRouter<S>,
@@ -104,9 +98,6 @@ impl Composer {
         ))
     }
 
-    /// Register the generated idempotency Problem components for the contract
-    /// document merge.
-    ///
     /// The target document must already include the `ProblemComponents`
     /// registration from [`crate::router()`]: the generated family references
     /// the shared [`Problem`] and [`crate::problem::InvalidParam`] schemas and
@@ -116,7 +107,6 @@ impl Composer {
         IdempotencyComponents::openapi()
     }
 
-    /// Select activation from successfully composed routes alone.
     #[must_use]
     pub fn finish(self) -> Activation {
         let Some(operations) = NonZeroUsize::new(self.operations) else {
@@ -129,7 +119,6 @@ impl Composer {
     }
 }
 
-/// Per-route middleware state for one idempotent operation.
 #[derive(Clone)]
 struct RouteState {
     /// `None` under an inert composer, whose routes answer a wiring failure.
@@ -154,8 +143,6 @@ async fn run_attempt(State(state): State<RouteState>, request: Request, next: Ne
     }
 }
 
-/// Insert the [`Attempt`] the handler's extractor takes and restore the
-/// bounded body, or answer the refusal.
 async fn capture_attempt(
     state: RouteState,
     request: Request,
@@ -232,7 +219,6 @@ async fn capture_attempt(
     ))
 }
 
-/// Read the bounded body whole, or answer the 413/400 refusal.
 #[expect(
     clippy::result_large_err,
     reason = "the error is the refusal response the middleware returns"

@@ -31,7 +31,6 @@ use sniff::SniffDeadline;
 
 pub(crate) const CONNECTIONS_REFUSED_METRIC: &str = "http_server_connections_refused_total";
 
-/// Connection-level policy the router cannot express.
 #[derive(Clone, Copy, Debug)]
 pub struct ServerOptions {
     /// Time an HTTP/1 connection may take to deliver a complete request head.
@@ -52,18 +51,16 @@ pub struct ServerOptions {
     /// Accepted connections at once; `None` accepts without a bound.
     pub max_connections: Option<NonZeroU32>,
     /// Age from socket acceptance, including TLS preparation, after which a
-    /// connection is told to finish and close as at drain. A connection still
-    /// being prepared is dropped. HTTP/2 gets GOAWAY and its open streams
-    /// complete, HTTP/1 closes after the response in flight. A client that reconnects is
-    /// balanced again, which a long-lived connection behind a
-    /// connection-level balancer never is. Each connection's age is spread
-    /// by up to 10% either way, as grpc-go spreads `MaxConnectionAge`, so
-    /// connections opened together do not all close together. `None` keeps
+    /// connection is told to finish and close as at drain (one still being
+    /// prepared is dropped). HTTP/2 gets GOAWAY and open streams complete;
+    /// HTTP/1 closes after the response in flight. A reconnecting client is
+    /// balanced again, which a long-lived connection behind a connection-level
+    /// balancer never is. Each age is spread by up to 10% either way, as grpc-go
+    /// does, so connections opened together do not close together. `None` keeps
     /// a connection for as long as its peer does.
     pub max_connection_age: Option<Duration>,
 }
 
-/// Server failures visible to the composition root.
 #[derive(Debug, thiserror::Error)]
 pub enum ServerError {
     #[error("bind http listener {addr}: {source}")]
@@ -85,16 +82,13 @@ pub enum AcceptFailure {
     Panicked,
 }
 
-/// How the drain ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Drained {
-    /// Every connection closed inside the budget.
     Complete,
     /// The accept loop joined, but the budget expired with connections still
     /// open. Force cancellation was requested; completion is not confirmed.
     /// `remaining_connections` is the count at force cancellation.
     TimedOut {
-        /// Connections still open when force cancellation was requested.
         remaining_connections: usize,
     },
 }
@@ -113,7 +107,6 @@ struct ConnectionShutdown {
     /// Stop accepting and ask every connection to finish its current request
     /// and close; a connection still being prepared is dropped.
     finish: CancellationToken,
-    /// Drop every connection at once, when the drain budget is spent.
     force: CancellationToken,
 }
 
@@ -144,7 +137,6 @@ impl ConnectionInfo {
     }
 }
 
-/// A bound TCP socket whose accept task has not started.
 #[derive(Debug)]
 pub struct BoundListener {
     listener: TcpListener,
@@ -152,7 +144,6 @@ pub struct BoundListener {
 }
 
 impl BoundListener {
-    /// Reserve the address before starting an accept task.
     pub async fn bind(addr: SocketAddr) -> Result<Self, ServerError> {
         let listener = TcpListener::bind(addr)
             .await
@@ -174,8 +165,6 @@ impl BoundListener {
     }
 
     // template:begin grpc:http-bound-listener-tls
-    /// Start accepting TLS connections on the current Tokio runtime.
-    ///
     /// The handshake is bounded by [`ServerOptions::header_read_timeout`].
     /// A handshake error, timeout, or drain closes the connection before any
     /// request can be in flight.
@@ -217,10 +206,8 @@ impl BoundListener {
 }
 
 impl Server {
-    /// Bind `addr` and start accepting on the current Tokio runtime.
-    ///
-    /// Returns once the listener is bound. Initialize request-visible state
-    /// before calling: the accept task can serve requests before this returns.
+    /// Initialize request-visible state before calling: the accept task can
+    /// serve requests before this returns.
     pub async fn bind(
         addr: SocketAddr,
         app: Router,
@@ -229,7 +216,6 @@ impl Server {
         Ok(BoundListener::bind(addr).await?.serve(app, options))
     }
 
-    /// The address the listener actually bound, including an OS-assigned port.
     #[must_use]
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
@@ -255,15 +241,10 @@ impl Server {
         }
     }
 
-    /// Stop accepting, tell every connection to finish its current request
-    /// and close, and wait up to `budget` for them to do so.
-    ///
-    /// Returns [`ServerError::AcceptTask`] when the accept loop failed. The
-    /// connection drain still runs within the same deadline, but its
-    /// [`Drained`] result is not returned. Returns
-    /// [`ServerError::AcceptTimeout`] when the accept loop's termination is
-    /// unconfirmed; that path force-cancels the remaining connections and
-    /// returns without joining them.
+    /// [`ServerError::AcceptTask`] (accept loop failed) still runs the connection
+    /// drain within the same deadline but drops its [`Drained`] result.
+    /// [`ServerError::AcceptTimeout`] (termination unconfirmed) force-cancels the
+    /// remaining connections and returns without joining them.
     pub async fn drain(mut self, budget: Duration) -> Result<Drained, ServerError> {
         let deadline = deadline_after(budget);
         self.connection_shutdown.finish.cancel();
@@ -307,8 +288,7 @@ impl Drop for Server {
     }
 }
 
-/// Template HTTP/2 PING cadence. Independent of `header_read_timeout`,
-/// which is the HTTP/1 idle bound.
+/// HTTP/2 PING cadence, independent of `header_read_timeout` (the HTTP/1 idle bound).
 const HTTP2_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(20);
 const HTTP2_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -509,8 +489,6 @@ async fn accept_loop<F, Fut, IO>(
     drop(listener);
 }
 
-/// One accepted connection from preparation to close: graceful on `finish`
-/// or at its age, dropped at once on `force`.
 fn serve_connection<F, Fut, IO>(
     stream: TcpStream,
     peer: SocketAddr,
@@ -581,7 +559,6 @@ where
     }
 }
 
-/// Resolves when drain starts or the connection reaches its age.
 async fn wind_down(finish: &CancellationToken, age_deadline: Option<Instant>) {
     if let Some(deadline) = age_deadline {
         tokio::select! {
@@ -596,7 +573,6 @@ async fn wind_down(finish: &CancellationToken, age_deadline: Option<Instant>) {
 /// `age` scaled by a factor drawn from 0.9 to 1.1. The draw is the standard
 /// library's randomly keyed hasher: enough to spread closes, not a secret.
 fn spread(age: Duration) -> Duration {
-    /// Connection ages spread this many permille either way.
     const AGE_SPREAD_PERMILLE: u32 = 100;
     let draw = RandomState::new().build_hasher().finish() % u64::from(2 * AGE_SPREAD_PERMILLE + 1);
     let permille = 1000 - AGE_SPREAD_PERMILLE + u32::try_from(draw).unwrap_or(AGE_SPREAD_PERMILLE);

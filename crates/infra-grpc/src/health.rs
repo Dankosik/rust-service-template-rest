@@ -54,9 +54,8 @@ impl Health for Adapter {
     }
 }
 
-/// Sends the current status, then each change. Ends after reporting drain, so
-/// watchers never hold the listener drain. An unknown service is reported as
-/// `SERVICE_UNKNOWN` and the stream stays open, as the health protocol requires.
+/// Ends after reporting drain, so watchers never hold the listener drain. An unknown service
+/// stays open as `SERVICE_UNKNOWN`, per the health protocol.
 fn watch(
     mut reader: ReadinessReader,
     known: bool,

@@ -54,12 +54,10 @@ use self::signals::Signals;
 
 pub(crate) const BUILD_INFO: BuildInfo = BuildInfo::from_package_version(env!("CARGO_PKG_VERSION"));
 
-/// Exit code when the process shut down but a teardown stage overran its
-/// budget: the platform and the process test can tell it from a crash.
+/// Distinguishes a teardown overrun from a crash.
 const EXIT_DEGRADED_SHUTDOWN: u8 = 3;
 
-/// Bound for waiting on runtime shutdown after ordered teardown. Running
-/// blocking work may outlive this wait and is never certified terminated.
+/// Running blocking work may outlive this wait and is never certified terminated.
 const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
 const METRICS_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(10);
@@ -146,8 +144,7 @@ pub(crate) enum BootstrapError {
     Panicked,
 }
 
-/// Run a blocking startup step off the runtime task that owns the stop
-/// signals, so a filesystem read cannot postpone SIGTERM handling.
+/// Keeps a filesystem read from postponing SIGTERM handling.
 #[allow(
     dead_code,
     reason = "the postgres and cache profiles are optional; a dependency-free service retains no blocking startup call"
@@ -166,10 +163,7 @@ where
         .map_err(Into::into)
 }
 
-/// Parse flags, load configuration, run the service, and map the result to
-/// an exit code. `--help` exits 0 and a flag error exits 2, both printed by
-/// clap. Later failures do not call `process::exit`, so destructors run.
-/// Version is not a loader flag.
+/// Later failures do not call `process::exit`, so destructors run.
 pub(crate) fn run<I>(
     args: I,
     // template:begin grpc:bootstrap-run-registration-parameter
@@ -270,10 +264,9 @@ async fn serve(
                 *logger_installed = true;
                 install_panic_hook();
                 // Docker, containerd and systemd start processes with a soft limit of
-                // 1024 open files under a much higher hard limit, keeping the low value
-                // for `select(2)` callers. Nothing here calls `select`, so raise the
-                // soft limit to the hard one, as the Go runtime does since 1.19;
-                // otherwise every connection past about a thousand fails to accept.
+                // 1024 open files for `select(2)` callers. Nothing here calls `select`,
+                // so raise it to the hard limit, as Go does since 1.19; otherwise
+                // every connection past about a thousand fails to accept.
                 if let Err(error) = rlimit::increase_nofile_limit(u64::MAX) {
                     tracing::warn!(error = %error, "open_file_limit_unchanged");
                 }
@@ -372,7 +365,6 @@ async fn serve(
     }
 }
 
-/// Which side ended the race between startup and a stop signal.
 enum StartupRace {
     Completed,
     Stopped,
@@ -464,7 +456,6 @@ fn background_error(failure: BackgroundFailure) -> BootstrapError {
     }
 }
 
-/// Open dependencies, compose and admit the routes, and bind the listeners.
 /// What startup opens lands in `dependencies` or `background`, so teardown
 /// releases it on every path, including a startup dropped at a stop signal.
 #[allow(
@@ -527,8 +518,7 @@ async fn start(
         },
     ));
 
-    // Built before any route or registration reads it, so both transports
-    // hand their handlers the same dependencies.
+    // Built before any route or registration reads it, so both transports share it.
     let state = crate::AppState {
         readiness: readiness.reader(),
         // template:begin inbound-webhooks:bootstrap-webhooks-route-state
@@ -574,8 +564,7 @@ async fn start(
     // template:begin http-idempotency:bootstrap-http-idempotency-activation
     idempotency::activate(composer, config, background).await?;
     // template:end http-idempotency:bootstrap-http-idempotency-activation
-    // Reserve every configured socket before publishing a ready verdict.
-    // Until dependency admission succeeds, none of them accepts requests.
+    // Sockets are reserved before the ready verdict; none accepts until admission succeeds.
     let app_listener = BoundListener::bind(config.http.addr).await?;
     let diagnostics_listener = match config.observability.metrics.addr {
         Some(addr) => Some(BoundListener::bind(addr).await?),
@@ -771,7 +760,6 @@ mod tests {
     }
 
     // template:begin service-auth:bootstrap-service-auth-test
-    /// The whole echo contract, each method admitting one caller.
     mod service_auth_registration {
         use std::pin::Pin;
 

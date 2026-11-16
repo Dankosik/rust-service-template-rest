@@ -47,7 +47,7 @@ impl Default for JobsConfig {
 impl JobsConfig {
     /// One connection per concurrent attempt plus at most two for the
     /// worker's claiming, outcome recording, maintenance, and
-    /// readiness probe. Called only by the worker.
+    /// readiness probe.
     pub fn validate_pool_capacity(&self, postgres: &PostgresConfig) -> Result<(), ValidationError> {
         let required = self.ordinary_pool_requirement();
         if u64::from(postgres.max_connections.get()) < required {

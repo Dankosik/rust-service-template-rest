@@ -1,5 +1,6 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
 
+use indexmap::IndexMap;
 use serde::Deserialize;
 
 use crate::claims::Scopes;
@@ -90,7 +91,6 @@ impl Principal {
         self.identity.client_id.as_deref()
     }
 
-    /// The normalized, exact-case scopes from verified token evidence.
     #[must_use]
     pub fn scopes(&self) -> &[String] {
         self.identity.scopes.as_slice()
@@ -161,7 +161,7 @@ pub enum ClaimAccessError {
 const MAX_CLAIM_NESTING: u8 = 127;
 
 enum ClaimValue<'a> {
-    Object(Vec<(String, Self)>),
+    Object(IndexMap<String, Self, foldhash::fast::RandomState>),
     Array(Vec<Self>),
     Scalar(&'a str),
 }
@@ -232,15 +232,16 @@ impl<'a> ClaimJson<'a> {
             Some(b'{' | b'[') if depth == 0 => Err(ClaimAccessError::InvalidShape),
             Some(b'{') => {
                 self.take('{');
-                let mut members = BTreeMap::new();
-                let mut first = None;
+                // `IndexMap` preserves insertion order (keeping the first key
+                // first for serde_json's special first-key features) while
+                // replacing duplicate members in place with their last value.
+                let mut members = IndexMap::with_hasher(foldhash::fast::RandomState::default());
                 if !self.take('}') {
                     loop {
                         let (key, _) = self.scalar::<String>()?;
                         if !self.take(':') {
                             return Err(ClaimAccessError::InvalidShape);
                         }
-                        first.get_or_insert_with(|| key.clone());
                         members.insert(key, self.value(depth - 1)?);
                         if self.take('}') {
                             break;
@@ -250,12 +251,7 @@ impl<'a> ClaimJson<'a> {
                         }
                     }
                 }
-                // Serde JSON features can give the first object key special
-                // meaning. Keep it first when decoding the normalized JSON.
-                let first = first.and_then(|key| members.remove_entry(&key));
-                Ok(ClaimValue::Object(
-                    first.into_iter().chain(members).collect(),
-                ))
+                Ok(ClaimValue::Object(members))
             }
             Some(b'[') => {
                 self.take('[');

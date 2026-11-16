@@ -41,8 +41,8 @@ fingerprint_candidate() {
 		cat "${files_path}"
 		printf '%s\n' tools/versions.env
 		if [[ ${surface_duplication:-false} == true || ${surface_architecture:-false} == true ]]; then
-			printf '%s\n' .jscpd.json quality/duplication-baseline.json quality/architecture.json \
-				scripts/ci/duplication-check.py scripts/ci/architecture-check.py scripts/tests/quality-checks.py
+			printf '%s\n' .jscpd.json quality/architecture.json \
+				scripts/ci/architecture-check.py scripts/tests/quality-checks.py
 		fi
 	)
 	: >"${tmp}/file-hashes"
@@ -99,7 +99,7 @@ assert_failed() {
 
 self_test() (
 	unset VALIDATION_LOCK_TOKEN VALIDATION_LOCK_DOMAIN VALIDATION_LOCK_HELD VALIDATION_LOCK_DIR
-	local output fixture scratch script attempt_path receipts_before crate path
+	local output fixture scratch script attempt_path receipts_before crate
 	plan_section() { sed -n "/^$1:\$/,/^[^ ]/p" <<<"${output}"; }
 	fixture=$(mktemp -d)
 	trap 'rm -rf -- "${fixture}"' EXIT
@@ -192,11 +192,10 @@ LOCK
 		[[ $(fingerprint_candidate) != "${original}" ]] || assert_failed
 		rm deleted
 		[[ $(fingerprint_candidate) == "${original}" ]] || assert_failed
-		mkdir quality
-		printf '{"cases": []}\n' >quality/duplication-baseline.json
+		printf '{"threshold": 0}\n' >.jscpd.json
 		surface_duplication=true
 		original=$(fingerprint_candidate)
-		printf '{"cases": ["changed"]}\n' >quality/duplication-baseline.json
+		printf '{"threshold": 1}\n' >.jscpd.json
 		[[ $(fingerprint_candidate) != "${original}" ]] || assert_failed
 	)
 	bash "${ROOT_DIR}/scripts/ci/git-changed-paths.sh" --self-test
@@ -224,7 +223,7 @@ LOCK
 		output=$(ALLOW_FULL=1 bash "${script}" --plan --files scripts/ci/initializer-matrix.py)
 		grep -q '^  make template-init-check$' <<<"$(plan_section commands)"
 		grep -q '^  make template-init-artifacts ARTIFACT_GRAPHS=1,7,47,65$' <<<"$(plan_section ci-owned)"
-		output=$(bash "${script}" --files scripts/tests/fixtures/template-profiles-b206.json)
+		output=$(bash "${script}" --files scripts/tests/template-fixture.json)
 		grep -q '^verification not applicable locally: CI owns make template-init-check' <<<"${output}"
 		output=$(ALLOW_HEAVY=1 bash "${script}" --plan --files crates/infra-messaging/src/lib.rs)
 		grep -q '^  make template-init-artifacts ARTIFACT_GRAPHS=47,65$' <<<"$(plan_section commands)"
@@ -241,12 +240,10 @@ EOF
 	if grep -q 'template-init-check\|template-init-artifacts' <<<"${output}"; then return 1; fi
 	rm template.lock
 
-	for path in .jscpd.json quality/duplication-baseline.json scripts/ci/duplication-check.py; do
-		output=$(bash "${script}" --plan --files "${path}")
-		grep -q '^  make duplication-check$' <<<"${output}"
-		grep -q '^  make quality-check-self-test$' <<<"${output}"
-		if grep -q '^  make architecture-check$' <<<"${output}"; then return 1; fi
-	done
+	output=$(bash "${script}" --plan --files .jscpd.json)
+	grep -q '^  make duplication-check$' <<<"${output}"
+	grep -q '^  make quality-check-self-test$' <<<"${output}"
+	if grep -q '^  make architecture-check$' <<<"${output}"; then return 1; fi
 	output=$(bash "${script}" --plan --files quality/architecture.json)
 	grep -q '^  make architecture-check$' <<<"${output}"
 	grep -q '^  make quality-check-self-test$' <<<"${output}"
@@ -316,7 +313,7 @@ MAKE
 
 	if [[ -f ${ROOT_DIR}/make/source.mk ]]; then
 		: >make/source.mk
-		output=$(VERIFY_FORCE=1 bash "${script}" --files .agents/roles/worker-agent.toml scripts/tests/fixtures/template-profiles-b206.json)
+		output=$(VERIFY_FORCE=1 bash "${script}" --files .agents/roles/worker-agent.toml scripts/tests/template-fixture.json)
 		grep -q '^status: partially_verified$' <<<"${output}"
 		grep -q '^ci_owned: make template-init-check;make template-init-artifacts ARTIFACT_GRAPHS=1,7,47,65$' <<<"${output}"
 		rm make/source.mk
@@ -624,9 +621,6 @@ if is_true db_integration; then
 	add_command make test-integration-db "database adapter, runner, or database proof changed" "make test-integration-db" docker true true
 	if [[ ${ci_mode} == none ]]; then
 		add_command make integration-compile "no CI compiles the integration suites the change does not run" "make integration-compile" cpu false false
-	fi
-	if [[ -f make/source.mk ]]; then
-		add_command make jobs-reliability-reference "database adapter, runner, or the jobs reference changed" "make jobs-reliability-reference" docker true true
 	fi
 	add_command make sqlx-check "a checked statement, a migration, or the query metadata changed" "make sqlx-check" docker true true
 fi

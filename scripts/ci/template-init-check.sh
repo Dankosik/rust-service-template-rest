@@ -34,7 +34,7 @@ runtime_graph_selected() {
 
 while (($#)); do
 	case "$1" in
-	--self-test | --source-checks | --projections-only | --quality-projections | --image-context | --list-graphs)
+	--self-test | --source-checks | --projections-only | --quality-projections | --list-graphs)
 		[[ ${mode} == full ]] || { echo "validation modes cannot be combined" >&2; exit 2; }
 		mode=${1#--}
 		shift
@@ -55,7 +55,7 @@ while (($#)); do
 		shift 2
 		;;
 	*)
-		echo "usage: $0 [--repo ROOT] [--source-checks|--projections-only|--quality-projections|--image-context|--runtime-graphs IDS|--artifact-graphs IDS|--list-graphs|--self-test]" >&2
+		echo "usage: $0 [--repo ROOT] [--source-checks|--projections-only|--quality-projections|--runtime-graphs IDS|--artifact-graphs IDS|--list-graphs|--self-test]" >&2
 		exit 2
 		;;
 	esac
@@ -205,8 +205,6 @@ recorder_self_test() {
 	for invalid in 2 48 '1,7,7' '1,65,64'; do
 		if validate_artifact_graphs "${invalid}"; then echo "noncanonical artifact selection accepted" >&2; return 1; fi
 	done
-	bash "${ROOT_DIR}/scripts/ci/measure.sh" --self-test
-	python3 "${ROOT_DIR}/scripts/ci/image-results.py" --self-test
 	snapshot_failure_self_test "${fixture}"
 	artifact_recorder_self_test "${fixture}"
 	printf 'template initializer graph selection self-test: pass\n'
@@ -296,8 +294,6 @@ record_source_suites() {
 		"${scrubbed_identity[@]}" python3 "${source}/scripts/tests/template-init-safety.py" --source "${source}"
 	record_command "${receipt}" "${log_dir}/source-sync-canary.log" "source-sync-canary" \
 		"${scrubbed_identity[@]}" python3 "${source}/scripts/tests/template-sync-canary.py" --source "${source}"
-	record_command "${receipt}" "${log_dir}/source-upgrade.log" "source-upgrade" \
-		"${scrubbed_identity[@]}" python3 "${source}/scripts/tests/template-upgrade.py" --source "${source}"
 }
 
 run_artifact() {
@@ -596,10 +592,6 @@ run_validation() {
 			"${scrubbed_identity[@]}" python3 "${source}/scripts/tests/template-profile-projections.py" --source "${source}" --self-test
 		record_command "${receipt}" "${log_dir}/projections.log" "canonical-projections" \
 			"${scrubbed_identity[@]}" python3 "${source}/scripts/tests/template-profile-projections.py" --source "${source}"
-	fi
-	if [[ ${mode} == image-context ]]; then
-		record_command "${receipt}" "${log_dir}/image-context.log" "image-context-metadata" \
-			"${scrubbed_identity[@]}" python3 "${source}/scripts/tests/template-profile-projections.py" --source "${source}" --image-context
 	fi
 	if [[ ${mode} == quality-projections ]]; then
 		record_command "${receipt}" "${log_dir}/quality-projections.log" "quality-projections" \

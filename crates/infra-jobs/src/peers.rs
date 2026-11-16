@@ -1,5 +1,6 @@
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::Arc;
 
+use parking_lot::{Mutex, MutexGuard};
 use tokio::sync::Notify;
 
 use crate::{Kinds, maintenance};
@@ -41,7 +42,7 @@ pub(crate) struct PeerRegistry {
 impl PeerRegistry {
     /// The peer list is never held across an `.await`.
     fn lock(&self) -> MutexGuard<'_, Peers> {
-        self.peers.lock().unwrap_or_else(PoisonError::into_inner)
+        self.peers.lock()
     }
 
     pub(crate) fn register(

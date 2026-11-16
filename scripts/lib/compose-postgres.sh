@@ -9,7 +9,6 @@ unset PGHOSTADDR PGHOST PGPORT PGUSER PGPASSWORD PGDATABASE PGSSLMODE \
 COMPOSE_POSTGRES_USER=app
 COMPOSE_POSTGRES_PASSWORD=app
 COMPOSE_POSTGRES_DB=app
-COMPOSE_POSTGRES_OVERRIDE=
 COMPOSE_PROJECT=
 
 require_docker() {
@@ -25,24 +24,11 @@ require_docker() {
 }
 
 compose_postgres() {
-	local files=(-f env/docker-compose.yml)
-	if [[ -n ${COMPOSE_POSTGRES_OVERRIDE} ]]; then
-		files+=(-f "${COMPOSE_POSTGRES_OVERRIDE}")
-	fi
-	POSTGRES_PORT=0 PGBOUNCER_PORT=0 docker compose -p "${COMPOSE_PROJECT}" "${files[@]}" "$@"
+	POSTGRES_PORT=0 PGBOUNCER_PORT=0 docker compose -p "${COMPOSE_PROJECT}" -f env/docker-compose.yml "$@"
 }
 
 compose_postgres_up() {
 	local prefix=${1:-service-postgres}
-	if (($#)); then shift; fi
-	COMPOSE_POSTGRES_OVERRIDE=
-	if (($#)); then
-		if [[ $# != 2 || $1 != --override-file || $2 != /* || ! -f $2 ]]; then
-			echo "compose PostgreSQL override requires --override-file ABSOLUTE_FILE" >&2
-			return 2
-		fi
-		COMPOSE_POSTGRES_OVERRIDE=$2
-	fi
 	COMPOSE_PROJECT="${prefix}-${VALIDATION_LOCK_TOKEN:0:12}-$(date +%s)-$$"
 	COMPOSE_NETWORK="${COMPOSE_PROJECT}_default"
 	compose_postgres up -d --wait postgres

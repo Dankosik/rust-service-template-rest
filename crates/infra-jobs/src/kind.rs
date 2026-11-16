@@ -19,11 +19,8 @@ pub(crate) const MAX_KIND_LEN: usize = 64;
 pub(crate) const DEFAULT_MAX_ATTEMPTS: u16 = 25;
 pub const MAX_ATTEMPTS: u16 = 25;
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_mins(1);
-/// Delay of [`JobError::unavailable`], in microseconds. A refunded attempt does
-/// not count, so the delay cannot grow with attempts as the retry backoff
-/// (`retry_or_exhaust` in `crate::attempt::outcome`) does; 10 s sits between
-/// that backoff's first two steps, long enough for an overloaded dependency
-/// to drain and short enough to notice its recovery.
+/// A refunded attempt does not count, so this delay cannot grow with attempts
+/// as the retry backoff does; 10 s sits between that backoff's first two steps.
 pub(crate) const UNAVAILABLE_DELAY_MICROS: i64 = 10_000_000;
 pub const MIN_TIMEOUT: Duration = Duration::from_secs(1);
 pub const MAX_TIMEOUT: Duration = Duration::from_hours(1);
@@ -44,8 +41,6 @@ pub(crate) fn checked_delay_micros(duration: Duration) -> Result<i64, InvalidDel
 
 pub(crate) const MAX_ERROR_SUMMARY_BYTES: usize = 1024;
 
-/// A payload type a worker can run.
-///
 /// Deserialization must be bounded, nonblocking, and free of effects. The worker
 /// catches preparation panics, but cannot preempt synchronous work.
 pub trait JobKind: Serialize + DeserializeOwned + Send + Sync + 'static {
@@ -60,8 +55,7 @@ pub trait JobKind: Serialize + DeserializeOwned + Send + Sync + 'static {
 pub struct JobId(pub(crate) uuid::Uuid);
 
 impl JobId {
-    /// A time-ordered id: consecutive enqueues append to the primary key
-    /// instead of writing random index pages.
+    /// Time-ordered, so enqueues append to the primary key index.
     pub(crate) fn new_v7() -> Self {
         Self(uuid::Uuid::now_v7())
     }
@@ -106,16 +100,14 @@ impl<K: JobKind> Job<K> {
         self.attempt.cancellation.clone()
     }
 
-    /// This attempt's local deadline: its registered timeout, capped by the
-    /// supervisor's lease deadline. After it passes, the supervisor signals
-    /// cancellation before polling the handler again for cleanup. Synchronous
-    /// handler work already in progress cannot be preempted.
+    /// The registered timeout, capped by the supervisor's lease deadline. After
+    /// it passes, the supervisor signals cancellation and polls the handler once
+    /// more for cleanup; synchronous work in progress cannot be preempted.
     #[must_use]
     pub const fn deadline(&self) -> Instant {
         self.attempt.attempt_deadline
     }
 
-    /// A child scope under this attempt's existing deadline and cancellation.
     /// Cancelling the returned context cannot cancel the attempt or sibling work.
     #[must_use]
     pub fn context(&self) -> OperationContext {
@@ -125,18 +117,15 @@ impl<K: JobKind> Job<K> {
         )
     }
 
-    /// Complete this fenced claim on the caller's already-open transaction.
-    ///
     /// Propagate this error out of the transaction closure so stale ownership
-    /// rolls back earlier business writes. This method never commits or retries.
-    /// It fences this job row; another enqueue of the same logical operation
-    /// needs business effect identity of its own.
+    /// rolls back earlier business writes. Never commits or retries. It fences
+    /// this job row only; another enqueue of the same logical operation needs
+    /// business effect identity of its own.
     ///
     /// The handler still returns `Ok(())` after the commit; the engine's own
-    /// completion then finds the row completed and changes nothing. A commit
-    /// whose outcome is unknown converts into a retryable [`JobError`]; the
-    /// engine's fenced retry write changes nothing if the commit landed, and
-    /// schedules another attempt if it did not.
+    /// completion then changes nothing. A commit of unknown outcome converts
+    /// into a retryable [`JobError`]; the engine's fenced retry write changes
+    /// nothing if the commit landed, and schedules another attempt if not.
     pub async fn complete_in_tx(&self, tx: &mut Tx<'_>) -> Result<(), CompleteError> {
         let complete = crate::attempt::complete_query(crate::attempt::ClaimFence {
             job_id: self.attempt.job_id,
@@ -185,8 +174,6 @@ pub(crate) enum Disposition {
     Snooze { delay_micros: i64 },
 }
 
-/// A handler disposition. [`Display`](std::fmt::Display) is the summary.
-///
 /// Not a [`std::error::Error`]: that impl would overlap the blanket
 /// `From<E: Error>` below with the reflexive `From<T> for T` (E0119), and the
 /// blanket impl is what lets `?` in a handler convert any error.
@@ -198,8 +185,8 @@ pub struct JobError {
 }
 
 impl JobError {
-    /// A retryable failure. The summary is `error`'s [`Display`](std::fmt::Display) text alone;
-    /// `?` on an [`std::error::Error`] also keeps its sources.
+    /// The summary is `error`'s [`Display`](std::fmt::Display) text alone; `?`
+    /// on an [`std::error::Error`] also keeps its sources.
     #[must_use]
     pub fn retryable(error: impl fmt::Display) -> Self {
         Self {
@@ -216,10 +203,8 @@ impl JobError {
         }
     }
 
-    /// Retry no sooner than `delay`, spending this attempt.
-    ///
-    /// The queue keeps its jittered backoff and rounds this floor up to a
-    /// whole microsecond for PostgreSQL. The floor never bypasses exhaustion.
+    /// Spends this attempt. The queue keeps its jittered backoff and rounds the
+    /// floor up to a whole microsecond; the floor never bypasses exhaustion.
     pub fn retry_after_at_least(
         error: impl fmt::Display,
         delay: Duration,
@@ -233,7 +218,6 @@ impl JobError {
         })
     }
 
-    /// Schedule again without a failure, refunding this attempt exactly once.
     pub fn snooze(delay: Duration) -> Result<Self, InvalidDelay> {
         Ok(Self {
             disposition: Disposition::Snooze {
@@ -243,17 +227,16 @@ impl JobError {
         })
     }
 
-    /// A dependency was overloaded or unavailable (a gRPC `RESOURCE_EXHAUSTED`
-    /// or `UNAVAILABLE`, an HTTP `429` or `503`, an exhausted pool). Schedule
-    /// again after a fixed delay without spending an attempt, so a dependency
-    /// that is down for longer than the retry budget does not exhaust the job
-    /// and stop its work. The summary is logged with the snooze.
+    /// For a dependency's overload or outage (gRPC `RESOURCE_EXHAUSTED` or
+    /// `UNAVAILABLE`, HTTP `429` or `503`, an exhausted pool): schedules again
+    /// after a fixed delay without spending an attempt, so an outage longer
+    /// than the retry budget does not exhaust the job.
     ///
-    /// Use it for the dependency's own refusal, never for a failure of the job:
-    /// a refunded attempt never exhausts, so a condition that does not clear
-    /// shows only in `jobs_attempts_total{outcome="snoozed"}` and the queue's
-    /// age. A pool acquire timeout found by [`shared_rules::error_chain::causes`]
-    /// converts into this on its own.
+    /// Never use it for a failure of the job: a refunded attempt never
+    /// exhausts, so a condition that does not clear shows only in
+    /// `jobs_attempts_total{outcome="snoozed"}` and the queue's age. A pool
+    /// acquire timeout found by [`shared_rules::error_chain::causes`] converts
+    /// into this on its own.
     #[must_use]
     pub fn unavailable(error: impl fmt::Display) -> Self {
         Self {
@@ -270,13 +253,11 @@ impl JobError {
     }
 }
 
-/// A retryable failure whose summary is `error`'s text and its bounded
-/// [source chain](shared_rules::error_chain::sources).
-///
-/// Retryable, except when a cause within [`shared_rules::error_chain::causes`] is
-/// [`sqlx::Error::PoolTimedOut`]: waiting for a connection that did not come is
-/// the pool's capacity, not a fault of the job, so that conversion schedules a
-/// snooze instead (see [`JobError::unavailable`]).
+/// Retryable with `error`'s text and bounded [source
+/// chain](shared_rules::error_chain::sources) as the summary, except when a
+/// cause within [`shared_rules::error_chain::causes`] is
+/// [`sqlx::Error::PoolTimedOut`]: that is pool capacity, not a fault of the
+/// job, so it snoozes instead (see [`JobError::unavailable`]).
 impl<E> From<E> for JobError
 where
     E: std::error::Error + Send + Sync + 'static,
@@ -293,9 +274,6 @@ where
     }
 }
 
-/// Whether `error` or one of its sources is the pool's acquire timeout: a wait
-/// for a connection that did not come is the pool's capacity, not a fault of
-/// the job.
 fn pool_timed_out(error: &(dyn std::error::Error + 'static)) -> bool {
     shared_rules::error_chain::causes(error).any(|error| {
         matches!(
@@ -305,13 +283,10 @@ fn pool_timed_out(error: &(dyn std::error::Error + 'static)) -> bool {
     })
 }
 
-/// `error`'s text, then each source whose text the summary does not already
-/// contain: an error that prints its cause (`"complete job: {0}"`) is not
-/// repeated, and one that keeps its cause only in `source()` does not lose it.
-///
-/// Once the summary reaches [`MAX_ERROR_SUMMARY_BYTES`], no further sources
-/// are read. The final append can cross the limit, which the stored summary's
-/// sanitizer enforces.
+/// Skips sources whose text the summary already contains, so an error that
+/// prints its cause (`"complete job: {0}"`) is not repeated. Stops reading
+/// sources at [`MAX_ERROR_SUMMARY_BYTES`]; the final append can cross the
+/// limit, which the stored summary's sanitizer enforces.
 fn with_sources(error: &(dyn std::error::Error + 'static)) -> String {
     let mut summary = error.to_string();
     let mut sources = shared_rules::error_chain::sources(error);
@@ -327,8 +302,6 @@ fn with_sources(error: &(dyn std::error::Error + 'static)) -> String {
     summary
 }
 
-/// A handler for one job kind.
-///
 /// Keep work within the job's deadline and cancellation, and own and join child
 /// work. Retries can overlap earlier blocking or remote work; external effects
 /// need recipient-scoped idempotency and ambiguous-outcome reconciliation.
@@ -347,7 +320,6 @@ where
     }
 }
 
-/// The claiming worker's attempt budget, timeout, and concurrency for one kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Policy {
     /// From 1 through [`MAX_ATTEMPTS`].
@@ -355,9 +327,8 @@ pub struct Policy {
     /// From [`MIN_TIMEOUT`] through [`MAX_TIMEOUT`].
     pub timeout: Duration,
     /// The most attempts of this kind one engine runs at once. The engine
-    /// claims no more than the free part, so the kind's due jobs wait in the
-    /// queue and the engine's other slots stay free for its other kinds.
-    /// `None` leaves the engine's slots as the only bound.
+    /// claims no more than the free part, so due jobs wait in the queue and
+    /// the engine's other slots stay free for its other kinds.
     pub max_running: Option<NonZeroU32>,
 }
 
@@ -399,8 +370,7 @@ impl KindsBuilder {
         self
     }
 
-    /// Check every registered kind. The first failure wins, in registration
-    /// order: an invalid name, a duplicate name, then a policy outside its range.
+    /// The first failure wins, in registration order.
     pub fn validate(self) -> Result<Kinds, KindError> {
         if self.entries.is_empty() {
             return Err(KindError::NoKinds);
@@ -512,8 +482,6 @@ pub(crate) const fn is_valid_kind_name(name: &str) -> bool {
     true
 }
 
-/// Assert a statically declared kind name at compile time.
-///
 /// Use `const _: () = infra_jobs::assert_valid_kind_name(MyKind::NAME);`.
 /// Runtime registration and enqueue still validate names independently.
 ///

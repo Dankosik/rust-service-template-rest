@@ -17,6 +17,20 @@ names=(
 load_profiles() {
 	local root raw key value
 	root=$(pwd)
+	if [[ ! -e "${root}/template.lock" && ! -L "${root}/template.lock" && ! -L "${root}" && -d "${root}" ]]; then
+		database=postgres
+		messaging=none
+		[[ -d "${root}/crates/infra-messaging" ]] && messaging=nats-jetstream
+		cache=none
+		[[ -d "${root}/crates/infra-cache" ]] && cache=redis
+		object_storage=none
+		[[ -d "${root}/crates/infra-object-storage" ]] && object_storage=s3
+		outbound_auth=none
+		[[ -d "${root}/crates/infra-oauth2-client-credentials" ]] && outbound_auth=oauth2-client-credentials
+		outbox=none
+		[[ -f "${root}/crates/infra-messaging/src/outbox.rs" ]] && outbox=postgres
+		return 0
+	fi
 	raw=$(env -u PYTHONPATH -u PYTHONHOME PYTHONDONTWRITEBYTECODE=1 python3 -B "${root}/scripts/lib/template_state.py" profile --repo "${root}" --fields database messaging cache object_storage outbound_auth outbox) || {
 		echo "cannot resolve selected template profiles" >&2
 		return 2
@@ -136,7 +150,6 @@ classify() {
 			mark rust_source cargo_dependencies runtime_image
 			[[ ${source_only} != true ]] || mark module_initializer initializer_runtime
 			;;
-		scripts/ci/hotpath-*.py) mark cargo_dependencies ;;
 		scripts/ci/cargo-artifact.py)
 			# The profiler and historical actor are source-only; recovery stays manual.
 			[[ ${source_only} != true ]] || mark cargo_dependencies module_initializer
@@ -178,7 +191,7 @@ classify() {
 			;;
 		esac
 		case "${file}" in
-		.jscpd.json | quality/duplication-baseline.json | scripts/ci/duplication-check.py) mark duplication ;;
+		.jscpd.json) mark duplication ;;
 		quality/architecture.json | scripts/ci/architecture-check.py) mark architecture ;;
 		esac
 		# Database-backed proof: the adapter, the runner, the test crate and
@@ -187,7 +200,7 @@ classify() {
 		# statement and every migration can invalidate.
 	if [[ ${database} == postgres ]]; then case "${file}" in
 		crates/infra-postgres/* | crates/infra-idempotency-store/* | crates/infra-jobs/* | crates/infra-webhooks/* | crates/jobs-worker/* | crates/migrate/* | test/* | env/docker-compose.yml | env/pgbouncer/* | scripts/ci/test-integration-db.sh | scripts/lib/compose-postgres.sh | \
-		migrations/*.sql | .sqlx/* | crates/*/.sqlx/* | .cargo/config.toml | scripts/ci/sqlx-prepare.sh | scripts/ci/jobs-reliability-reference.py)
+		migrations/*.sql | .sqlx/* | crates/*/.sqlx/* | .cargo/config.toml | scripts/ci/sqlx-prepare.sh)
 			mark db_integration
 			;;
 		esac
@@ -279,7 +292,6 @@ classify() {
 		esac
 		case "${file}" in
 		.github/workflows/* | .github/actions/* | .github/codeql/*) mark github_workflows ;;
-		scripts/ci/image-results.py) mark github_workflows validation_system ;;
 		.github/dependabot.yml) mark dependency_automation ;;
 		esac
 		case "${file}" in
@@ -297,7 +309,7 @@ classify() {
 		.gitleaks.toml | .gitleaksignore) mark secret_scanning ;;
 		esac
 		case "${file}" in
-		template.lock | template-owned.paths | scripts/lib/template_*.py | scripts/lib/template_profiles.json | AGENTS.md | CLAUDE.md | QWEN.md | Grok.md | opencode.json | .agents/* | .claude/* | .codex/* | .cursor/* | .qwen/* | .grok/* | .opencode/* | docs/skill-authoring.md | docs/agent-harness.md | docs/agent-harness/* | docs/spec-first-workflow.md | docs/spec-first-workflow/* | docs/prompt-composition.md | docs/prompt-maintenance.md | scripts/check-skills.py | scripts/agent-roles-sync.sh | scripts/codex-agents-sync.sh | scripts/harness-skills-sync.sh | scripts/lib/sync-cli.sh)
+		template.lock | template-owned.paths | scripts/lib/template_*.py | scripts/lib/template_profiles.json | AGENTS.md | CLAUDE.md | QWEN.md | Grok.md | opencode.json | .agents/* | .claude/* | .codex/* | .cursor/* | .qwen/* | .grok/* | .opencode/* | docs/skill-authoring.md | docs/agent-harness.md | docs/agent-harness/* | docs/spec-first-workflow.md | docs/spec-first-workflow/* | docs/prompt-composition.md | docs/prompt-maintenance.md | scripts/check-skills.py | scripts/agent-harness-sync.py)
 			mark agent_instructions
 			;;
 		esac
@@ -308,7 +320,7 @@ classify() {
 		.editorconfig | .gitattributes | .gitignore | LICENSE | .github/CODEOWNERS | .github/ISSUE_TEMPLATE/*) mark no_validation_required ;;
 		esac
 		case "${file}" in
-		template.lock | template-owned.paths | scripts/lib/template_*.py | scripts/lib/template_profiles.json | Makefile | make/*.mk | scripts/ci/runtime-image-inventory.py | scripts/ci/runtime-image-scan.sh | scripts/tests/runtime-image-inventory.py | scripts/ci/image-inputs-check.py | scripts/tests/image-inputs-check.py | scripts/ci/changed-surfaces.sh | scripts/ci/git-changed-paths.sh | scripts/ci/affected-crates.sh | scripts/ci/verify.sh | scripts/ci/validation-lock.sh | scripts/ci/validation-lock.py | scripts/tests/validation-lock-test.py | scripts/ci/measure.sh)
+		template.lock | template-owned.paths | scripts/lib/template_*.py | scripts/lib/template_profiles.json | Makefile | make/*.mk | scripts/ci/runtime-image-inventory.py | scripts/ci/runtime-image-scan.sh | scripts/tests/runtime-image-inventory.py | scripts/ci/image-inputs-check.py | scripts/tests/image-inputs-check.py | scripts/ci/changed-surfaces.sh | scripts/ci/git-changed-paths.sh | scripts/ci/affected-crates.sh | scripts/ci/verify.sh | scripts/ci/validation-lock.sh | scripts/ci/validation-lock.py | scripts/tests/validation-lock-test.py)
 			mark validation_system
 			;;
 		esac
@@ -320,9 +332,9 @@ classify() {
 		if [[ ${source_only} == true ]]; then case "${file}" in
 		Cargo.toml | Cargo.lock | rust-toolchain.toml | template.lock | Makefile | make/*.mk | \
 		api/openapi/* | env/config/* | .github/workflows/ci.yml | \
-		scripts/init-module.sh | scripts/template-sync.sh | scripts/template-upgrade.sh | scripts/lib/template_*.py | scripts/lib/template_profiles.json | \
+		scripts/init-module.sh | scripts/template-sync.sh | scripts/lib/template_*.py | scripts/lib/template_profiles.json | \
 		template-owned.paths | \
-		scripts/ci/template-init-check.sh | scripts/ci/initializer-matrix.py | scripts/tests/template-* | scripts/tests/fixtures/template-profiles-b206.json | scripts/tests/fixtures/historical_profiles.py | \
+		scripts/ci/template-init-check.sh | scripts/ci/initializer-matrix.py | scripts/tests/template-* | \
 		crates/config/src/* | crates/config/Cargo.toml | crates/service/src/* | crates/service/tests/* | crates/service/Cargo.toml | \
 		crates/infra-bearerauthn/* | crates/infra-outbound-http/* | crates/infra-idempotency-store/* | crates/infra-webhooks/* | crates/infra-http/Cargo.toml | crates/infra-http/src/authn.rs | crates/infra-http/src/context.rs | crates/infra-http/src/idempotency/* | crates/infra-http/src/harden.rs | crates/infra-http/src/harden/* | crates/infra-http/src/lib.rs | crates/infra-http/src/problem.rs | crates/infra-http/src/webhooks.rs | \
 		crates/infra-postgres/* | crates/migrate/* | crates/infra-jobs/* | crates/jobs-worker/* | crates/domain-events/* | crates/infra-messaging/* | crates/infra-cache/* | \
@@ -341,17 +353,17 @@ classify() {
 			;;
 		# template:end service-auth:classifier-service-auth-initializer
 		env/monitoring/*.rules.yml | scripts/tests/*-rules.yml | scripts/ci/monitoring-rules.sh | \
-		.jscpd.json | ruff.toml | quality/*.json | scripts/ci/duplication-check.py | scripts/ci/architecture-check.py | scripts/tests/quality-checks.py | \
+		.jscpd.json | ruff.toml | quality/*.json | scripts/ci/architecture-check.py | scripts/tests/quality-checks.py | \
 		.dockerignore | build/docker/Dockerfile | scripts/ci/image-inputs-check.py | scripts/tests/image-inputs-check.py | README.md | SECURITY.md | .gitleaks.toml | lychee.toml | \
 		.github/CODEOWNERS | .github/ISSUE_TEMPLATE/* | .github/dependabot.yml | \
 		.github/workflows/cd.yml | .github/actions/publish-image/action.yml | .github/actions/rust-toolchain/action.yml | \
-		scripts/ci/changed-surfaces.sh | scripts/ci/verify.sh | scripts/ci/image-results.py | scripts/ci/runtime-image-build.sh | scripts/ci/runtime-image-inventory.py | scripts/ci/runtime-image-scan.sh | scripts/tests/runtime-image-inventory.py | \
+		scripts/ci/changed-surfaces.sh | scripts/ci/verify.sh | scripts/ci/runtime-image-build.sh | scripts/ci/runtime-image-inventory.py | scripts/ci/runtime-image-scan.sh | scripts/tests/runtime-image-inventory.py | \
 		scripts/ci/validation-lock.sh | scripts/ci/validation-lock.py | scripts/tests/validation-lock-test.py | \
-		.agents/* | AGENTS.md | CLAUDE.md | QWEN.md | Grok.md | opencode.json | \
+		scripts/agent-harness-sync.py | .agents/* | AGENTS.md | CLAUDE.md | QWEN.md | Grok.md | opencode.json | \
 		.claude/* | .codex/* | .cursor/* | .qwen/* | .grok/* | .opencode/* | \
 		docs/repo-architecture.md | docs/production-contract.md | docs/backend-library-selection.md | \
 		docs/ci-cd-production-ready.md | docs/railway-deployment-profile.md | .railway/* | \
-		docs/validation/* | docs/template-sync.md | docs/template-upgrade.md | docs/decisions/* | docs/alerting.md)
+		docs/validation/* | docs/template-sync.md | docs/decisions/* | docs/alerting.md)
 			mark module_initializer
 			;;
 		esac; fi
@@ -445,7 +457,7 @@ union_classify() (
 
 assert_case() {
 	local file=$1 true_names=$2 false_names=$3 output name
-	output="$(printf '%s\n' "${file}" | (cd "${classifier_root}" && bash scripts/ci/changed-surfaces.sh))"
+	output="$(cd "${classifier_root}" && classify <<<"${file}")"
 	for name in ${true_names}; do
 		has_line "${output}" "${name}=true" || {
 			printf '%s: expected %s=true\n%s\n' "${file}" "${name}" "${output}" >&2
@@ -491,9 +503,7 @@ HOOK
 	for file in crates/config/build.rs crates/health/src/lib.rs test/tests/probes.rs; do
 		assert_case "${file}" "duplication" "architecture"
 	done
-	for file in .jscpd.json quality/duplication-baseline.json scripts/ci/duplication-check.py; do
-		assert_case "${file}" "duplication" "architecture"
-	done
+	assert_case .jscpd.json "duplication" "architecture"
 	for file in quality/architecture.json scripts/ci/architecture-check.py; do
 		assert_case "${file}" "architecture" "duplication"
 	done
@@ -547,9 +557,6 @@ HOOK
 	assert_case crates/infra-jobs/src/lib.rs \
 		"rust_source db_integration module_initializer initializer_runtime" \
 		"cargo_dependencies migrations documentation"
-	assert_case scripts/ci/jobs-reliability-reference.py \
-		"db_integration" \
-		"rust_source cargo_dependencies migrations module_initializer initializer_runtime"
 	assert_case crates/jobs-worker/src/main.rs \
 		"rust_source db_integration module_initializer initializer_runtime" \
 		"cargo_dependencies migrations documentation"
@@ -720,8 +727,6 @@ HOOK
 	for file in scripts/ci/image-inputs-check.py scripts/tests/image-inputs-check.py; do
 		assert_case "${file}" "documentation validation_system module_initializer" "runtime_image initializer_runtime cargo_dependencies"
 	done
-	assert_case scripts/ci/image-results.py \
-		"github_workflows validation_system module_initializer" "runtime_image initializer_runtime cargo_dependencies"
 	assert_case scripts/ci/runtime-image-inventory.py \
 		"runtime_image validation_system module_initializer initializer_artifacts" "initializer_runtime cargo_dependencies"
 	assert_case scripts/ci/runtime-image-scan.sh \
@@ -780,11 +785,12 @@ HOOK
 	assert_case opencode.json \
 		"agent_instructions" \
 		"documentation no_validation_required"
-	for file in scripts/agent-roles-sync.sh scripts/codex-agents-sync.sh scripts/harness-skills-sync.sh scripts/lib/sync-cli.sh; do
-		assert_case "${file}" \
-			"agent_instructions shell" \
-			"validation_system tool_manifest"
-	done
+	assert_case .agents/adapters/claude/CLAUDE.md \
+		"agent_instructions documentation module_initializer" \
+		"rust_source"
+	assert_case scripts/agent-harness-sync.py \
+		"agent_instructions python module_initializer" \
+		"shell validation_system tool_manifest initializer_runtime"
 	assert_case crates/infra-postgres/src/dsn.rs \
 		"rust_source db_integration" \
 		"migrations cargo_dependencies"
@@ -814,7 +820,6 @@ HOOK
 			"rust_source cargo_dependencies runtime_image module_initializer initializer_runtime" \
 			"migrations dependency_policy"
 	done
-	assert_case scripts/ci/hotpath-mcp-check.py "cargo_dependencies" "rust_source runtime_image validation_system"
 	for file in vendor/sqlx-core/src/pool/connection.rs vendor/sqlx-core/Cargo.toml vendor/sqlx-core/PATCHES.md; do
 		assert_case "${file}" \
 			"rust_source cargo_dependencies db_integration runtime_image module_initializer initializer_runtime" \
@@ -833,9 +838,6 @@ HOOK
 		"rust_source migrations"
 	assert_case test/Cargo.toml \
 		"cargo_dependencies db_integration" \
-		"rust_source"
-	assert_case test/README.md \
-		"documentation db_integration" \
 		"rust_source"
 	assert_case env/docker-compose.yml \
 		"db_integration migrations runtime_image" \
@@ -877,13 +879,7 @@ HOOK
 	assert_case scripts/tests/template-profile-projections.py \
 		"module_initializer initializer_runtime" \
 		"rust_source cargo_dependencies shell github_workflows db_integration"
-	assert_case scripts/template-upgrade.sh \
-		"module_initializer initializer_runtime shell" \
-		"rust_source cargo_dependencies github_workflows db_integration"
-	for file in scripts/tests/fixtures/template-profiles-b206.json scripts/tests/fixtures/historical_profiles.py; do
-		assert_case "${file}" "module_initializer initializer_runtime" "rust_source cargo_dependencies shell github_workflows db_integration"
-	done
-	for file in changed-surfaces git-changed-paths affected-crates verify validation-lock measure; do
+	for file in changed-surfaces git-changed-paths affected-crates verify validation-lock; do
 		assert_case "scripts/ci/${file}.sh" \
 			"validation_system shell" \
 			"tool_manifest rust_source initializer_runtime"

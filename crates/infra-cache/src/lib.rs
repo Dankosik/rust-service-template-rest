@@ -37,15 +37,14 @@ pub struct CacheOptions {
     /// Permit a DSN with no password and no password file. Callers must
     /// already have applied the local-only policy.
     pub allow_unauthenticated: bool,
-    /// Bound for one command, including the wait for a reconnect.
+    /// Includes the wait for a reconnect.
     pub command_timeout: Duration,
 }
 
-/// The certificate and key a client presents on a TLS address. Both files are
-/// read once, at admission.
+/// Both files are read once, at admission.
 #[derive(Clone, Debug)]
 pub struct ClientCertificate {
-    /// PEM file of the certificate chain, leaf first.
+    /// Leaf first.
     pub cert_path: PathBuf,
     pub key_path: PathBuf,
 }
@@ -102,15 +101,11 @@ pub enum CacheError {
     ClientBuild,
 }
 
-/// A command that did not return a usable success, distinct from a cache miss
-/// (`Ok(None)`).
-///
-/// This covers an outage, a timeout, caller cancellation, a local command slot
-/// refusal, a retired connection generation, and a server error reply such as
-/// `WRONGTYPE`, `OOM`, or `READONLY`. A command refused locally because every
-/// command slot is taken returns the same error without contacting the
+/// Distinct from a cache miss (`Ok(None)`): covers an outage, timeout,
+/// cancellation, a retired connection generation, and a server error reply
+/// such as `WRONGTYPE`, `OOM`, or `READONLY`. A command refused locally
+/// because every slot is taken returns the same error without contacting the
 /// server; `cache_command_admission_refused_total` tells the two apart.
-/// The caller chooses a fallback or rejects an operation that requires the cache.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("cache unavailable")]
 pub struct Unavailable;
@@ -141,9 +136,6 @@ impl Cache {
     /// Must be called from a Tokio runtime with the time and I/O drivers enabled.
     /// Configured password and TLS files are read synchronously, so an async
     /// caller runs this on the blocking pool with the runtime entered.
-    ///
-    /// A returned handle may still be connecting. Commands and the [`CacheProbe`]
-    /// report connection failures through their results.
     ///
     /// Install the intended metrics recorder first: the connection's counter
     /// and gauge handles bind to the recorder current here.
@@ -192,7 +184,7 @@ impl health::Probe for CacheProbe {
 
     async fn check(&self) -> Result<(), health::ProbeError> {
         self.cache.link.probe().await.map_err(|error| {
-            health::ProbeError::new(format!("cache ping failed: {}", error.label()))
+            health::ProbeError::format(format_args!("cache ping failed: {}", error.label()))
         })
     }
 }

@@ -39,8 +39,6 @@ pub(crate) struct Claimed {
     pub(crate) kind_slot: Option<KindSlot>,
 }
 
-/// One attempt's place under its kind's `max_running`.
-///
 /// Wake on release because the claim loop can consume the last free place
 /// concurrently with it. The loop coalesces wakes and applies its cooldown.
 #[derive(Debug)]
@@ -149,7 +147,6 @@ enum Next {
     Idle,
 }
 
-/// The shortest gap between the starts of two claims that do not follow a full round.
 pub(crate) const CLAIM_COOLDOWN: Duration = Duration::from_millis(25);
 
 async fn cooldown(stop: &CancellationToken, last_claim: Instant) -> ControlFlow<()> {
@@ -233,8 +230,6 @@ async fn send_claim(shared: &Shared, policy: &PolicyBinds<'_>, requested: i64) -
     }
 }
 
-/// Claim due pending jobs and expired running jobs, up to the free slots.
-///
 /// The same statement settles what a claim finds: a job whose attempt budget
 /// is spent fails as `exhausted` instead of running, a rescued expired lease
 /// records why, and every running claim spends one attempt and takes a new
@@ -242,13 +237,12 @@ async fn send_claim(shared: &Shared, policy: &PolicyBinds<'_>, requested: i64) -
 /// ([`crate::attempt`]).
 ///
 /// Each per-kind scan locks rows while it reads them (`SKIP LOCKED` inside the
-/// lateral), so a row another session holds is skipped and the scan moves on.
-/// Choosing ids first and locking them afterwards hands concurrent workers the
-/// same few ids: the losers claim nothing until the next poll.
+/// lateral). Choosing ids first and locking them afterwards hands concurrent
+/// workers the same few ids: the losers claim nothing until the next poll.
 ///
 /// A kind's `claim_limit` is the free slots, or the free part of its
-/// `max_running` when that is smaller. It bounds each scan and, through the
-/// rank, the kind's due and expired rows together.
+/// `max_running` when that is smaller; it bounds the kind's due and expired
+/// rows together through the rank.
 ///
 /// The two state literals are the access path as much as the filter:
 /// `state = 'pending'` and `state = 'running'` prove the partial
@@ -268,7 +262,7 @@ async fn claim(
     policy: &PolicyBinds<'_>,
     requested: i64,
 ) -> Result<Vec<Drawn>, sqlx::Error> {
-    let claim_limits: Vec<_> = policy
+    let claim_limits: smallvec::SmallVec<[i64; 8]> = policy
         .registry
         .iter()
         .map(|registered| {
@@ -383,7 +377,7 @@ async fn claim(
             &policy.lease_offsets_micros,
             requested,
             worker_id,
-            &claim_limits,
+            &claim_limits[..],
             rescued_summary,
         )
         .try_map(|row| row.into_drawn(policy.registry))
@@ -421,8 +415,7 @@ impl<'a> PolicyBinds<'a> {
     }
 }
 
-/// The kind's timeout plus [`LEASE_RESERVE`], shared by the database lease
-/// and the local deadline.
+/// Shared by the database lease and the local deadline.
 ///
 /// The database counts from the statement timestamp. The worker counts from
 /// before pool acquisition so it can stop writing before the lease expires.
@@ -434,8 +427,8 @@ fn saturating_micros(duration: Duration) -> i64 {
     i64::try_from(duration.as_micros()).unwrap_or(i64::MAX)
 }
 
-/// A slot count as a statement bind. Counts come from `u32` limits, so the
-/// fallback never runs; it would claim one row rather than unbounded ones.
+/// Counts come from `u32` limits, so the fallback never runs; it would claim
+/// one row rather than unbounded ones.
 fn slot_count(count: usize) -> i64 {
     i64::try_from(count).unwrap_or(1)
 }

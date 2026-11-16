@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::sync::{Arc, Weak};
 
 use infra_postgres::observed;
+use parking_lot::{Mutex, MutexGuard};
+use smallvec::SmallVec;
 use tokio::sync::oneshot::{self, error::TryRecvError};
 use tokio::time::Instant;
 
@@ -30,10 +32,7 @@ impl Default for Completions {
 
 impl Completions {
     fn group(&self, deadline: Instant) -> Arc<CompletionGroup> {
-        let mut groups = self
-            .groups
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut groups = self.groups.lock();
         if let Some(group) = groups.get(&deadline).and_then(Weak::upgrade) {
             return group;
         }
@@ -44,7 +43,7 @@ impl Completions {
     }
 }
 
-/// One writer per deadline. No writer can hold another deadline's queue.
+/// One writer per deadline, so no writer holds another deadline's queue.
 #[derive(Default)]
 struct CompletionGroup {
     queued: Mutex<Vec<QueuedCompletion>>,
@@ -110,9 +109,7 @@ impl CompletionGroup {
     }
 
     fn lock_queue(&self) -> MutexGuard<'_, Vec<QueuedCompletion>> {
-        self.queued
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.queued.lock()
     }
 
     async fn writer_or_reply(
@@ -180,8 +177,6 @@ impl Drop for CompletionBatch {
     }
 }
 
-/// COMPLETE for one fenced claim, for the caller to execute.
-///
 /// Every outcome write fences on `claim_expires_at IS NOT NULL`, which the
 /// table's CHECK makes equivalent to `state = 'running'`. A literal
 /// `state = 'running'` proves the partial `background_jobs_running` predicate,
@@ -227,7 +222,7 @@ async fn write_batch(shared: &Shared, mut batch: CompletionBatch, deadline: Inst
     // The batch's bind arrays live in this scope so the statement future ends,
     // and its borrow of them with it, before any reply wakes a waiter.
     let result = {
-        let (ids, generations): (Vec<_>, Vec<_>) = batch
+        let (ids, generations): (SmallVec<[uuid::Uuid; 16]>, SmallVec<[i64; 16]>) = batch
             .queued
             .iter()
             .map(|queued| (queued.fence.job_id.0, queued.fence.generation))
@@ -251,8 +246,8 @@ async fn write_batch(shared: &Shared, mut batch: CompletionBatch, deadline: Inst
                          WHERE job.id = done.id AND job.claim_generation = done.generation \
                            AND job.claim_expires_at IS NOT NULL \
                          RETURNING done.position AS \"position!\"",
-                        &ids,
-                        &generations,
+                        &ids[..],
+                        &generations[..],
                     )
                     .fetch_all(&mut *connection),
                 )

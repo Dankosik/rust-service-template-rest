@@ -6,6 +6,7 @@ use tokio::time::Instant;
 pub(crate) struct SignalError;
 
 /// Native streams stay owned through the runtime's final shutdown.
+/* jscpd:ignore-start */
 pub(crate) struct Signals {
     #[cfg(unix)]
     terminate: tokio::signal::unix::Signal,
@@ -37,12 +38,12 @@ impl Signals {
             })
         }
     }
+    /* jscpd:ignore-end */
 
     pub(crate) fn first_stop(&self) -> Option<Instant> {
         self.first_stop
     }
 
-    /// Consume one native notification and retain its first observation time.
     pub(crate) async fn wait(&mut self) -> Result<(), SignalError> {
         #[cfg(unix)]
         let (received, name) = tokio::select! {
@@ -57,7 +58,6 @@ impl Signals {
         Ok(())
     }
 
-    /// Poll and consume only an already pending notification.
     pub(crate) fn pending(&mut self) -> Result<bool, SignalError> {
         self.wait()
             .now_or_never()

@@ -12,7 +12,6 @@ pub use population::{
     MaintenancePopulation, PopulationSample, in_observation_tx,
 };
 
-// Keep the target used by maintenance log filters when a call site moves.
 const LOG_TARGET: &str = module_path!();
 
 const CLEANUP_INTERVAL: Duration = Duration::from_mins(1);
@@ -40,8 +39,7 @@ pub async fn run_scheduled_cleanup<E, P, S>(
     cleanup: Cleanup,
     runs_metric: &'static str,
     cancel: &CancellationToken,
-    // Not `AsyncFnMut`: the compiler cannot prove its futures `Send` for a
-    // spawned owner.
+    // Not `AsyncFnMut`: the compiler cannot prove its futures `Send` for a spawned owner.
     mut pass: impl FnMut() -> P,
     mut sample: impl FnMut() -> S,
 ) where
@@ -51,13 +49,11 @@ pub async fn run_scheduled_cleanup<E, P, S>(
     if cancel.is_cancelled() {
         return;
     }
-    // Started under the same check as the passes, so a cancelled owner never
-    // publishes an observer start.
+    // Started under the passes' check, so a cancelled owner never publishes an observer start.
     let mut observer = MaintenanceObserver::start(MaintenancePopulation::Cleanup(cleanup));
     let passes = async {
         let mut schedule = CleanupSchedule::new(cleanup);
-        // `run_until_cancelled` polls these loops before the token, so each
-        // loop checks it before starting new work.
+        // `run_until_cancelled` polls these loops before the token, so each checks it first.
         while !cancel.is_cancelled() {
             schedule.next().await;
             if cancel.is_cancelled() {

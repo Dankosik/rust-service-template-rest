@@ -12,10 +12,13 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+arc-swap = { workspace = true }
 async-stream = { workspace = true }
+atomic-take = { workspace = true }
 derive-where = { workspace = true }
 derive_more = { workspace = true, features = ["debug"] }
 foldhash = { workspace = true, features = ["std"] }
+parking_lot = { workspace = true }
 tokio-util = { workspace = true, features = ["rt"] }
 operation-context = { workspace = true }
 axum = { workspace = true }

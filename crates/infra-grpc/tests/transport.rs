@@ -80,12 +80,10 @@ use tonic_types::StatusExt as _;
 
 // template:begin authn:grpc-transport-test-accepted-token
 const ACCEPTED: &str = "accepted";
-/// A token the provider reports active but without any scope.
 const UNSCOPED: &str = "unscoped";
 const UNARY_PATH: &str = "/example.v1.EchoService/Unary";
 // template:end authn:grpc-transport-test-accepted-token
 
-/// The ordinary test client's whole-RPC budget.
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(10);
 
 const WAIT: Duration = Duration::from_secs(5);
@@ -315,7 +313,6 @@ impl EchoService for Echo {
     }
 }
 
-/// Source destruction, including while no further message is polled.
 fn notify_on_drop(notify: Arc<Notify>) -> impl Drop {
     std::mem::DropGuard::new(notify, |notify| notify.notify_one())
 }
@@ -339,12 +336,10 @@ impl Fixture {
         Self::open(false, None).await
     }
 
-    /// A TLS listener for `pki`; `mtls` requires a client certificate.
     async fn tls(pki: &Pki, mtls: bool) -> Self {
         Self::open(true, Some((pki, mtls))).await
     }
 
-    /// A TLS listener at one controlled loopback address.
     async fn tls_at(pki: &Pki, address: SocketAddr) -> Self {
         Self::open_with_at(
             true,
@@ -356,7 +351,6 @@ impl Fixture {
         .await
     }
 
-    /// A plaintext listener that sheds above `max_in_flight` business calls.
     async fn limited(max_in_flight: u32) -> Self {
         let limits = Limits {
             max_in_flight: NonZeroU32::new(max_in_flight),
@@ -486,9 +480,7 @@ impl Fixture {
     }
 }
 
-/// The configuration defaults, without a connection age and with an admission
-/// wait as long as the call budget, so a test's own budget decides how long a
-/// call over the limit waits.
+/// Defaults, without a connection age and with an admission wait as long as the call budget.
 fn limits() -> Limits {
     Limits {
         request_timeout: Duration::from_secs(8),
@@ -705,7 +697,6 @@ async fn client_observation_fallback_preserves_raw_request_routing() {
     fixture.stop().await;
 }
 
-/// The `google.rpc.ErrorInfo` reason of a catalog failure.
 fn reason(status: &Status) -> String {
     let info = status.get_error_details().error_info().cloned();
     let info = info.expect("error info");
@@ -727,9 +718,6 @@ fn assert_at_capacity(status: &Status) {
     assert_eq!(retry_delay(status), Some(Duration::from_secs(1)));
 }
 
-/// A caller budget no longer than the router's reserve for answering a refusal:
-/// nothing is left to wait for a permit with, so a call over its limit is
-/// refused at once.
 const IMPATIENT: Duration = Duration::from_millis(100);
 
 fn impatient<T>(mut call: Request<T>) -> Request<T> {
@@ -835,7 +823,6 @@ async fn a_principal_without_a_declared_scope_is_denied_before_the_handler() {
     assert_eq!(reason(&denied), "FORBIDDEN");
     assert!(fixture.echo.calls.lock().expect("observations").is_empty());
 
-    // A method with no declared requirement admits any authenticated caller.
     let mut undeclared = timeout(
         WAIT,
         echo.server_stream(unscoped(ServerStreamRequest {
@@ -895,9 +882,8 @@ fn a_scope_requirement_needs_a_described_method_of_a_registered_service_and_is_d
 // template:end authn:grpc-transport-test-insufficient-scope
 
 // template:begin authn:grpc-transport-test-rejection-flood
-/// Each rejected call is answered before its request DATA arrives. Without
-/// reading that DATA first, h2 resets every such stream and closes the
-/// connection after 1024 resets, failing the calls still on it.
+/// Answering before the request DATA arrives makes h2 reset each stream and close the
+/// connection after 1024 resets.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rejected_calls_do_not_close_the_shared_connection() {
     let fixture = Fixture::plaintext().await;
@@ -942,8 +928,6 @@ fn impatient_raw(mut call: http::Request<axum::body::Body>) -> http::Request<axu
     call
 }
 
-/// The provider never answers, so the call's 100 ms are spent before any
-/// handler: the deadline is the caller's, whichever step uses it up.
 #[tokio::test]
 async fn the_deadline_bounds_authentication_too() {
     let fixture = Fixture::plaintext().await;
@@ -1149,8 +1133,6 @@ async fn opening_and_terminal_capacity_have_independent_lifetimes() {
     assert!(Status::from_header_map(first.headers()).is_none());
     let gate = Arc::new(Hold::new());
     *provider.gate.lock().unwrap() = Some(Arc::clone(&gate));
-    // The terminal slots stay occupied, so the call waits for one after its
-    // authentication and is refused when its budget, less the reserve, is spent.
     let mut slow = opening_request(UNARY_PATH, Some("slow"), "slow");
     slow.headers_mut()
         .insert("grpc-timeout", "1500m".parse().unwrap());
@@ -1163,7 +1145,6 @@ async fn opening_and_terminal_capacity_have_independent_lifetimes() {
     })
     .await
     .unwrap();
-    // One open stream releases opening capacity; slow auth reserves no terminal slot.
     let second = timeout(
         WAIT,
         app.clone().oneshot(opening_request(
@@ -1176,7 +1157,6 @@ async fn opening_and_terminal_capacity_have_independent_lifetimes() {
     .unwrap()
     .unwrap();
     assert!(Status::from_header_map(second.headers()).is_none());
-    // Both terminal slots remain occupied, but missing credentials still reach auth.
     let missing = app
         .clone()
         .oneshot(opening_request(UNARY_PATH, None, "missing"))
@@ -1250,7 +1230,6 @@ async fn opening_timeout_releases_capacity_and_zero_disables_both_counts() {
             Code::DeadlineExceeded
         );
         assert_eq!(provider.calls.load(Ordering::Acquire), 1);
-        // New requests may finish while shutdown still owns the held connection.
         *provider.gate.lock().unwrap() = None;
         let mut held = Vec::new();
         for _ in 0..=usize::from(capacity == 0) {
@@ -1273,8 +1252,6 @@ async fn opening_timeout_releases_capacity_and_zero_disables_both_counts() {
     }
 }
 
-/// A call over the limit waits for a permit within its budget and is served
-/// when one frees: nothing is refused, so nothing is counted as shed.
 #[tokio::test]
 async fn a_call_over_the_limit_waits_for_a_permit_and_is_served() {
     use tower::ServiceExt as _;
@@ -1367,8 +1344,6 @@ async fn a_waiting_call_with_an_open_upload_is_refused_with_retry_info() {
     provider.stop().await;
 }
 
-/// The wait is bounded by `max_admission_wait` even when the caller's budget,
-/// or the router's own request limit, would allow far longer.
 #[tokio::test]
 async fn a_call_waits_no_longer_than_the_admission_wait() {
     use tower::ServiceExt as _;
@@ -1438,7 +1413,6 @@ async fn both_admission_queues_share_the_call_wait_limit() {
     assert!(futures_util::poll!(waiting.as_mut()).is_pending());
     tokio::time::advance(Duration::from_millis(750)).await;
 
-    // The headers release opening capacity while the stream still holds terminal capacity.
     echo.hold.release();
     let held = timeout(Duration::from_millis(100), holding)
         .await
@@ -1458,8 +1432,6 @@ async fn both_admission_queues_share_the_call_wait_limit() {
     provider.stop().await;
 }
 
-/// A zero admission wait refuses a call over the limit at once, without a wait
-/// to record, though its budget would allow one.
 #[tokio::test]
 async fn a_zero_admission_wait_refuses_a_call_over_the_limit_at_once() {
     use tower::ServiceExt as _;
@@ -1605,7 +1577,6 @@ async fn the_configured_limit_sheds_the_next_call_without_starving_health() {
     fixture.stop().await;
 }
 
-/// The first response message proves opening, while Hold retains stream work.
 #[tokio::test]
 async fn opened_stream_holds_capacity_until_terminal_release() {
     let fixture = Fixture::limited(1).await;
@@ -1780,7 +1751,6 @@ async fn opened_stream_without_caller_deadline_outlives_both_opening_caps() {
             .is_some()
     );
     fixture.echo.hold.wait_for(1).await;
-    // Waiting beyond both opening budgets cannot terminate an opened stream.
     assert!(
         timeout(Duration::from_millis(200), response.message())
             .await
@@ -1971,8 +1941,6 @@ async fn unary_deadline_is_deadline_exceeded_on_the_raw_http2_response() {
     fixture.stop().await;
 }
 
-/// The `grpc-status` response header of a unary `deadline` request with a
-/// 100 ms `grpc-timeout`, sent to `path` without a client-side timer.
 async fn raw_call(address: SocketAddr, path: &str) -> String {
     let stream = TcpStream::connect(address).await.expect("connect");
     let (mut sender, connection) = hyper::client::conn::http2::handshake(
@@ -2668,7 +2636,6 @@ async fn calls_are_counted_by_described_method_whatever_ended_them() {
     .expect("answered call")
     .unwrap();
 
-    // A handler's own catalog failure.
     let classified = timeout(
         WAIT,
         client.unary(request(UnaryRequest {
@@ -2680,7 +2647,6 @@ async fn calls_are_counted_by_described_method_whatever_ended_them() {
     .unwrap_err();
     assert_eq!(classified.code(), Code::InvalidArgument);
 
-    // The caller stops waiting while the handler runs.
     let abandoned = tokio::spawn({
         let mut client = client.clone();
         async move {
@@ -2695,7 +2661,6 @@ async fn calls_are_counted_by_described_method_whatever_ended_them() {
     abandoned.abort();
     assert!(abandoned.await.unwrap_err().is_cancelled());
 
-    // The server's own deadline, and a method the contract does not have.
     assert_eq!(raw_call(fixture.address, ECHO_SERVICE_UNARY).await, "4");
     assert_eq!(
         raw_call(fixture.address, "/example.v1.EchoService/Invented").await,
@@ -2714,7 +2679,6 @@ async fn calls_are_counted_by_described_method_whatever_ended_them() {
         r#"grpc_server_started_total{grpc_service="unknown",grpc_method="unknown"} 1"#.to_owned(),
         r#"grpc_server_handled_total{grpc_service="unknown",grpc_method="unknown",grpc_code="Unimplemented"} 1"#.to_owned(),
     ];
-    // The server learns of the abandoned call when the reset arrives.
     let rendered = timeout(WAIT, async {
         loop {
             let rendered = handle.render();
@@ -2737,7 +2701,6 @@ async fn calls_are_counted_by_described_method_whatever_ended_them() {
     fixture.stop().await;
 }
 
-/// A stream's status arrives in its trailers, after the response headers.
 #[tokio::test]
 async fn a_stream_is_counted_with_the_status_that_ended_it() {
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
@@ -2776,7 +2739,6 @@ async fn a_stream_is_counted_with_the_status_that_ended_it() {
         assert_eq!(ended.message(), detail, "{message}");
     }
 
-    // A caller that stops reading abandons the call.
     let unread = timeout(
         WAIT,
         client.server_stream(request(ServerStreamRequest {
@@ -2788,7 +2750,6 @@ async fn a_stream_is_counted_with_the_status_that_ended_it() {
     .unwrap();
     drop(unread);
 
-    // The connection outlives the stream that panicked.
     let followed = timeout(
         WAIT,
         client.unary(request(UnaryRequest {
@@ -2839,7 +2800,6 @@ fn stalled_unary_response(
         .unwrap()
 }
 
-/// A peer that accepts and never answers: the call's own deadline ends it.
 #[tokio::test]
 async fn client_budget_includes_unary_data_and_trailers_after_peer_headers() {
     for send_data in [false, true] {
@@ -2897,7 +2857,6 @@ async fn client_budget_includes_unary_data_and_trailers_after_peer_headers() {
     }
 }
 
-/// A peer that accepts and never answers: the call's own deadline ends it.
 #[tokio::test]
 async fn a_call_whose_deadline_runs_out_is_deadline_exceeded_not_unavailable() {
     let listener = tokio::net::TcpListener::bind(loopback())
@@ -2920,7 +2879,6 @@ async fn a_call_whose_deadline_runs_out_is_deadline_exceeded_not_unavailable() {
     assert_eq!(status.code(), Code::DeadlineExceeded);
     assert_eq!(status.message(), "request deadline exceeded");
 
-    // A call that sets no deadline is still bounded by the client's own.
     let bounded = infra_grpc::Client::try_new(
         &format!("http://{address}"),
         ClientSecurity::Plaintext,
@@ -3061,7 +3019,6 @@ fn tls_client(address: SocketAddr, material: ClientTlsMaterial) -> infra_grpc::C
 
 // template:begin authn:grpc-transport-test-auth-provider
 struct ProviderFixture {
-    /// While set, the provider reads a request and never answers it.
     silent: Arc<AtomicBool>,
     gate: Arc<Mutex<Option<Arc<Hold>>>>,
     calls: Arc<AtomicUsize>,

@@ -1,14 +1,9 @@
-//! The process logger.
+//! The process logger: one subscriber per process, with `log` records bridged
+//! by `tracing-log`'s `LogTracer`, installed before the subscriber.
 //!
-//! One subscriber per process: a filter from the typed level directive
-//! (`EnvFilter` grammar), a JSON or text formatting layer, and, when a tracer provider
-//! exists, the OpenTelemetry layer that gives every span an OpenTelemetry context so
-//! JSON records carry `trace_id` and `span_id`. `log` records are bridged by
-//! `tracing-log`'s `LogTracer`, installed before the subscriber.
-//!
-//! The directive chooses the records. Spans at INFO and above exist under
-//! every directive, so a quieter `log.level` neither stops trace export nor
-//! strips the request fields and trace context from the records that remain.
+//! Spans at INFO and above exist under every directive, so a quieter
+//! `log.level` neither stops trace export nor strips the request fields and
+//! trace context from the records that remain.
 
 mod format;
 mod output;
@@ -95,10 +90,8 @@ pub fn install_subscriber(options: &LoggingOptions<'_>) -> Result<LoggerGuard, L
         // template:end object-storage:telemetry-sdk-log-cap-apply
         .with(otel)
         .with(format);
-    // `try_init` sets the subscriber before the `log` bridge, so a taken
-    // `log` slot would leave a subscriber whose writer this early return
-    // closes. The bridge goes first; until the subscriber follows, bridged
-    // records reach no subscriber, as before any installation.
+    // The bridge goes first: a taken `log` slot after the subscriber was set
+    // would leave a subscriber whose writer this early return closes.
     let max_level = subscriber.max_level_hint().unwrap_or(LevelFilter::TRACE);
     tracing_log::LogTracer::builder()
         .with_max_level(max_level.as_log())
@@ -158,16 +151,13 @@ fn directive_filters(directive: &str) -> Result<DirectiveFilters, LoggingError> 
 }
 
 /// The directive's filter under the process-wide [`Admission`] rules: SDK
-/// diagnostic targets are refused, except known diagnostics, which
+/// diagnostic targets are refused except known diagnostics, which
 /// [`Layer::event_enabled`] counts through [`sdk_diagnostics::observe`] as
-/// their only output; `log` bridge records are decided per event; and every
-/// span at INFO and above is enabled.
+/// their only output; `log` bridge records are decided per event; every span
+/// at INFO and above is enabled.
 ///
-/// The HTTP and gRPC server spans, the job attempt span, and the client
-/// spans are INFO. Under a plain filter `log.level = warn` disables them:
-/// nothing is exported, and the remaining records lose the request id and
-/// trace context those spans carry. A span more verbose than INFO still
-/// follows the directive.
+/// The server, job attempt, and client spans are INFO; a plain filter with
+/// `log.level = warn` would disable them.
 struct WithInfoSpans<F>(F);
 
 fn is_span_at_info_or_above(metadata: &Metadata<'_>) -> bool {
@@ -256,12 +246,11 @@ impl<S: Subscriber, F: Layer<S>> Layer<S> for WithInfoSpans<F> {
 
 /// The directive as `Targets` when that filters exactly like `EnvFilter`.
 ///
-/// `EnvFilter` takes a shared lock on every span creation, enter, exit,
-/// record, and close to track span directives (`target[span{field}]`);
-/// `Targets` decides once per callsite. `Targets` reads an empty segment
-/// (`info,`) as `error` where `EnvFilter` skips it, and an empty level
-/// (`app=`) as `error` where `EnvFilter` reads `trace`, so such a directive
-/// stays with `EnvFilter` too.
+/// `EnvFilter` takes a shared lock on every span operation to track span
+/// directives (`target[span{field}]`); `Targets` decides once per callsite.
+/// `Targets` reads an empty segment (`info,`) or empty level (`app=`) as
+/// `error` where `EnvFilter` skips it or reads `trace`, so those stay with
+/// `EnvFilter`.
 fn static_targets(directive: &str) -> Option<Targets> {
     if directive.contains('[')
         || directive
