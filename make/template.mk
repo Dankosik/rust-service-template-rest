@@ -48,16 +48,18 @@ ifeq ($(CI),true)
 CARGO_DENY ?= cargo-deny
 CARGO_NEXTEST ?= cargo-nextest
 CARGO_SHEAR ?= cargo-shear
+TYPOS ?= typos
 ZIZMOR ?= zizmor
 else
 CARGO_DENY ?= $(TOOLS_ROOT)/cargo-deny-$(CARGO_DENY_VERSION)/bin/cargo-deny
 CARGO_NEXTEST ?= $(TOOLS_ROOT)/cargo-nextest-$(CARGO_NEXTEST_VERSION)/bin/cargo-nextest
 CARGO_SHEAR ?= $(TOOLS_ROOT)/cargo-shear-$(CARGO_SHEAR_VERSION)/bin/cargo-shear
+TYPOS ?= $(TOOLS_ROOT)/typos-cli-$(TYPOS_VERSION)/bin/typos
 ZIZMOR ?= $(TOOLS_ROOT)/zizmor-$(ZIZMOR_VERSION)/bin/zizmor
 endif
 CARGO_MUTANTS ?= $(TOOLS_ROOT)/cargo-mutants-$(CARGO_MUTANTS_VERSION)/bin/cargo-mutants
 # Only binaries under TOOLS_ROOT are build prerequisites; PATH names are not.
-CARGO_TOOLS := $(filter $(TOOLS_ROOT)/%,$(CARGO_DENY) $(CARGO_NEXTEST) $(CARGO_SHEAR) $(ZIZMOR))
+CARGO_TOOLS := $(filter $(TOOLS_ROOT)/%,$(CARGO_DENY) $(CARGO_NEXTEST) $(CARGO_SHEAR) $(TYPOS) $(ZIZMOR))
 # `cargo nextest` finds its subcommand binary on PATH; a local pin is not there.
 NEXTEST_PATH = $(if $(filter $(TOOLS_ROOT)/%,$(CARGO_NEXTEST)),env PATH="$(dir $(CARGO_NEXTEST)):$$PATH")
 # nextest runs every test binary at once, where `cargo test` runs them one
@@ -94,7 +96,7 @@ TEMPLATE_STANDARD_TARGETS := help template-init template-sync build run test tes
 	check check-unlocked check-instructions clean \
 	agent-harness-sync agent-harness-check \
 	openapi-generate openapi-check openapi-lint openapi-breaking openapi-breaking-since \
-	tools-check deny dependency-drift unused-deps secret-scan secret-scan-history actionlint zizmor shellcheck python-lint docs-check profiling-check \
+	tools-check deny dependency-drift unused-deps typos secret-scan secret-scan-history actionlint zizmor shellcheck python-lint docs-check profiling-check \
 	dockerfile-check runtime-image-build runtime-image-check container-security container-sbom \
 	publish-image-metadata-check integration-compile monitoring-rules \
 	native-transport-regressions \
@@ -284,11 +286,14 @@ agent-harness-check: check-instructions ## Verify canonical .agents sources and 
 check-instructions: ## Validate .agents/skills, canonical roles, and materialized harness carriers
 	python3 scripts/harness/sync.py --check --repo . $(if $(wildcard make/source.mk),,--require-materialized)
 
+$(TOOLS_ROOT)/typos-cli-$(TYPOS_VERSION)/bin/typos:
+	$(CARGO) install --locked --root "$(TOOLS_ROOT)/typos-cli-$(TYPOS_VERSION)" --version "$(TYPOS_VERSION)" typos-cli
+
 $(TOOLS_ROOT)/%:
 	$(CARGO) install --locked --root "$(TOOLS_ROOT)/$(firstword $(subst /, ,$*))" --version "$(patsubst $(notdir $@)-%,%,$(firstword $(subst /, ,$*)))" $(notdir $@)
 
 tools-check: $(CARGO_TOOLS) ## Prove tools/versions.env shape, Cargo pins, Dockerfile parity, and 7-day cooldowns
-	CARGO_DENY="$(CARGO_DENY)" CARGO_NEXTEST="$(CARGO_NEXTEST)" CARGO_SHEAR="$(CARGO_SHEAR)" ZIZMOR="$(ZIZMOR)" python3 scripts/checks/tools.py
+	CARGO_DENY="$(CARGO_DENY)" CARGO_NEXTEST="$(CARGO_NEXTEST)" CARGO_SHEAR="$(CARGO_SHEAR)" TYPOS="$(TYPOS)" ZIZMOR="$(ZIZMOR)" python3 scripts/checks/tools.py
 
 deny: $(filter $(TOOLS_ROOT)/%,$(CARGO_DENY)) ## Advisories, licenses, bans, and sources over the locked graph (deny.toml)
 	$(CARGO_DENY) --locked check
@@ -299,6 +304,9 @@ dependency-drift: ## Vendored forks: patch applied, no advisory on the base, ups
 unused-deps: $(filter $(TOOLS_ROOT)/%,$(CARGO_SHEAR)) ## Fail on a declared dependency no crate uses (cargo-shear)
 	$(CARGO_SHEAR) --locked
 	@if [ -f tools/grpc-codegen/Cargo.toml ]; then $(CARGO_SHEAR) --locked tools/grpc-codegen; fi
+
+typos: $(filter $(TOOLS_ROOT)/%,$(TYPOS)) ## Check source code, contracts, and documentation for typos
+	$(TYPOS) --config .typos.toml
 
 secret-scan: ## Gitleaks over the worktree (locally) and the commits since BASE_REF
 	$(call REQUIRE_GO,gitleaks@v$(GITLEAKS_VERSION))
@@ -314,12 +322,22 @@ secret-scan-history: ## Gitleaks over HEAD and every reachable ancestor; ALLOW_H
 	$(call REQUIRE_GO,gitleaks@v$(GITLEAKS_VERSION))
 	$(GITLEAKS) git $(GITLEAKS_FLAGS) --log-opts=HEAD .
 
-# The shellcheck and pyflakes integrations would run whatever binary the host
-# has on PATH; they are off so the result is the same everywhere. Shell
-# scripts get the pinned ShellCheck through `make shellcheck`.
-actionlint: ## Lint GitHub Actions workflows
+# pyflakes would run whatever binary the host has on PATH, so it stays off;
+# workflow `run:` steps get the pinned ShellCheck container (or local
+# shellcheck when Docker is unavailable, matching `make shellcheck`).
+actionlint: ## Lint GitHub Actions workflows and their inline shell steps
 	$(call REQUIRE_GO,actionlint@v$(ACTIONLINT_VERSION))
-	$(ACTIONLINT) -shellcheck= -pyflakes=
+	@work=$$(mktemp -d "$${TMPDIR:-/tmp}/actionlint.XXXXXXXX") && \
+	trap 'rm -rf "$$work"' EXIT HUP INT TERM && \
+	if [ "$(CI)" = "true" ] || (command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1); then \
+		printf '%s\n' '#!/bin/sh' 'exec docker run -i --rm --read-only --network none -v "$(CURDIR):$(CURDIR):ro" -w "$(CURDIR)" "$(SHELLCHECK_IMAGE)" "$$@"' >"$$work/shellcheck"; \
+	elif command -v shellcheck >/dev/null 2>&1; then \
+		printf '%s\n' '#!/bin/sh' 'exec shellcheck "$$@"' >"$$work/shellcheck"; \
+	else \
+		echo "$@ requires Docker ($(SHELLCHECK_IMAGE)) or local shellcheck" >&2; exit 2; \
+	fi && \
+	chmod +x "$$work/shellcheck" && \
+	$(ACTIONLINT) -shellcheck="$$work/shellcheck" -pyflakes=
 
 # Every executed workflow and local action is owned by this .github tree.
 # Vendored upstream automation stays archival source, outside this gate's inputs.
@@ -484,7 +502,7 @@ check: ## Full repository gate under the validation lock; ALLOW_FULL=1 (CI sets 
 	$(FULL_GUARD)
 	$(VALIDATION_LOCK) $(MAKE) check-unlocked
 
-check-unlocked: fmt-check lint test unused-deps openapi-lint check-instructions docs-check \
+check-unlocked: fmt-check lint test unused-deps typos openapi-lint check-instructions docs-check \
 	duplication-check architecture-check quality-check-self-test \
 	$(POSTGRES_CHECK_TARGETS) $(MONITORING_RULE_CHECK_TARGETS) $(SOURCE_CHECK_TARGETS) \
 	changed-surfaces-check affected-crates-check validation-lock-self-test verify-check

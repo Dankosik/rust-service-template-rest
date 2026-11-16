@@ -5,9 +5,12 @@ line-length = 100
 extend-exclude = ["vendor"]
 
 [lint]
-# E4/E7/E9 import, statement and syntax errors; F pyflakes; B bugbear. B904
-# (`raise ... from`) and B905 (`zip(strict=)`) are left out: they ask for style rewrites.
-select = ["E4", "E7", "E9", "F", "B"]
+# Bug-finding rulesets only (no formatting or style-rewrite rules):
+# E4/E7/E9 import/statement/syntax, F pyflakes, B bugbear, PLE pylint errors,
+# RUF ruff defects (unused noqa, mutable defaults, ambiguous unicode),
+# PIE misc defects, C4 comprehensions, ISC implicit string concatenation,
+# T10 debugger leftovers, LOG/G logging defects, PGH blanket noqa/type-ignore.
+select = ["E4", "E7", "E9", "F", "B", "PLE", "RUF", "PIE", "C4", "ISC", "T10", "LOG", "G", "PGH"]
 ignore = ["B904", "B905"]
 
 [lint.per-file-ignores]

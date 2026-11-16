@@ -318,9 +318,7 @@ mod tests {
 
     use axum::Router;
     use axum::body::Body;
-    use axum::http::header::CONTENT_TYPE;
     use axum::http::{Method, Request as HttpRequest};
-    use axum::response::Response;
     use axum::routing::{get, post};
     use http_body_util::BodyExt;
     use serde::Deserialize;

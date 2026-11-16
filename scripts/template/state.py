@@ -528,6 +528,7 @@ _PROTECTED_MANIFEST_FILES = frozenset(
         "SECURITY.md",
         ".gitleaks.toml",
         ".jscpd.json",
+        ".typos.toml",
         "deny.toml",
         "template.lock",
         "make/service.mk",

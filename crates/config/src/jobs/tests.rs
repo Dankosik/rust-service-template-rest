@@ -1,6 +1,4 @@
 use std::assert_matches;
-use std::num::NonZeroU32;
-
 use std::time::Duration;
 
 use secrecy::SecretString;

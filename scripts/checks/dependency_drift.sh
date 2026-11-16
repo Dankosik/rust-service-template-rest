@@ -172,6 +172,7 @@ if [[ ${upstream} == true ]]; then
 CARGO_DENY_VERSION|crates|cargo-deny|
 CARGO_NEXTEST_VERSION|crates|cargo-nextest|
 CARGO_SHEAR_VERSION|crates|cargo-shear|
+TYPOS_VERSION|crates|typos-cli|
 ZIZMOR_VERSION|crates|zizmor|
 CARGO_MUTANTS_VERSION|crates|cargo-mutants|
 SQLX_CLI_VERSION|crates|sqlx-cli|

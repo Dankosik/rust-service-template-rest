@@ -12,6 +12,11 @@ fn output(args: &[&str]) -> Output {
     output_with_env(args, &[])
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "process integration tests execute the compiled worker binary synchronously"
+)]
 fn output_with_env(args: &[&str], env: &[(&str, &str)]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_jobs-worker"))
         .args(args)
@@ -358,6 +363,7 @@ fn operator_help_is_available_before_configuration() {
 #[test]
 #[expect(
     clippy::disallowed_methods,
+    clippy::disallowed_types,
     reason = "synchronous fixture polling waits for owned child or thread completion within its existing timeout"
 )]
 fn blocked_stdout_preserves_primary_startup_failure() {

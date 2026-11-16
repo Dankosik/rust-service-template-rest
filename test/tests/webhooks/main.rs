@@ -19,7 +19,6 @@ mod inbound;
 mod outbound;
 // template:end webhooks:test-webhooks-outbound-module
 
-use std::future::Future;
 use std::time::Duration;
 
 // template:begin inbound-webhooks:test-webhooks-inbound-postgres

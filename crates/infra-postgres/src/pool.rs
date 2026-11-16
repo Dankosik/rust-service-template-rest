@@ -1,4 +1,3 @@
-use std::future::Future;
 use std::num::NonZeroU32;
 use std::pin::Pin;
 use std::time::Duration;

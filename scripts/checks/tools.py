@@ -40,6 +40,7 @@ _CARGO_TOOLS = (
     ("CARGO_DENY", "cargo-deny", "CARGO_DENY_VERSION"),
     ("CARGO_NEXTEST", "cargo-nextest", "CARGO_NEXTEST_VERSION"),
     ("CARGO_SHEAR", "cargo-shear", "CARGO_SHEAR_VERSION"),
+    ("TYPOS", "typos-cli", "TYPOS_VERSION"),
     ("ZIZMOR", "zizmor", "ZIZMOR_VERSION"),
 )
 
@@ -305,12 +306,10 @@ def check_cooldown_agreement(repo: Path) -> str:
     codegen_manifest = repo / "tools/grpc-codegen/Cargo.toml"
     root_manifest = repo / "Cargo.toml"
     if codegen_manifest.is_file() and root_manifest.is_file():
-        ws_deps = (
-            tomllib.loads(root_manifest.read_text(encoding="utf-8"))
-            .get("workspace", {})
-            .get("dependencies", {})
-        )
-        gen_deps = tomllib.loads(codegen_manifest.read_text(encoding="utf-8")).get("dependencies", {})
+        root_toml = tomllib.loads(root_manifest.read_text(encoding="utf-8"))
+        gen_toml = tomllib.loads(codegen_manifest.read_text(encoding="utf-8"))
+        ws_deps = root_toml.get("workspace", {}).get("dependencies", {})
+        gen_deps = gen_toml.get("dependencies", {})
         for gen_name, ws_name in (
             ("prost", "prost"),
             ("prost-types", "prost-types"),
@@ -325,6 +324,28 @@ def check_cooldown_agreement(repo: Path) -> str:
                     f"tools/grpc-codegen/Cargo.toml pins {gen_name} to {gen_ver!r}, "
                     f"Cargo.toml pins {ws_name} to {ws_ver!r}"
                 )
+        ws_pkg = root_toml.get("workspace", {}).get("package", {})
+        gen_pkg = gen_toml.get("package", {})
+        for key in ("edition", "rust-version"):
+            if ws_pkg.get(key) != gen_pkg.get(key):
+                raise ToolsCheckError(
+                    f"tools/grpc-codegen/Cargo.toml package.{key} is {gen_pkg.get(key)!r}, "
+                    f"Cargo.toml workspace.package.{key} is {ws_pkg.get(key)!r}"
+                )
+        ws_lints = root_toml.get("workspace", {}).get("lints", {})
+        gen_lints = gen_toml.get("lints", {})
+        expected_lints = {
+            table: (
+                {k: v for k, v in rules.items() if k != "unused_workspace_dependencies"}
+                if table == "cargo" and isinstance(rules, dict)
+                else rules
+            )
+            for table, rules in ws_lints.items()
+        }
+        if gen_lints != expected_lints:
+            raise ToolsCheckError(
+                "tools/grpc-codegen/Cargo.toml [lints] differs from Cargo.toml [workspace.lints]"
+            )
 
     dependabot = repo / ".github/dependabot.yml"
     if dependabot.is_file():

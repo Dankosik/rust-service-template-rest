@@ -1,6 +1,5 @@
 use std::io;
 use std::net::{IpAddr, Ipv4Addr};
-use std::num::NonZeroU32;
 
 use axum::routing::get;
 use opentelemetry::trace::TracerProvider as _;
@@ -405,7 +404,7 @@ async fn oversized_header_is_431() {
     assert!(
         text.starts_with("HTTP/1.1 431 "),
         "{}",
-        &text[..text.floor_char_boundary(80)]
+        text.get(..text.floor_char_boundary(80)).unwrap_or(&text)
     );
     server.drain(Duration::from_secs(1)).await.unwrap();
 }

@@ -19,7 +19,7 @@ sys.dont_write_bytecode = True
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts/template"))
-from state import TEMPLATE_REPOSITORY  # noqa: E402
+from state import TEMPLATE_REPOSITORY
 
 
 def _write_executable(path: Path, body: str) -> str:
@@ -161,7 +161,7 @@ class ToolsCheckTests(unittest.TestCase):
             "EMPTY_BANNER": "0",
             "VERSION_STATUS": "0",
         }
-        for var in ("CARGO_DENY", "CARGO_NEXTEST", "CARGO_SHEAR", "ZIZMOR"):
+        for var in ("CARGO_DENY", "CARGO_NEXTEST", "CARGO_SHEAR", "TYPOS", "ZIZMOR"):
             banner = f'. "{self.root}/tools/versions.env"\nprintf "tool v%s (build 1.0.0)\\n" "${{{var}_VERSION}}"'
             if var == "CARGO_DENY":
                 banner = f'[ "$EMPTY_BANNER" = 1 ] || {{ {banner}; }}\nexit "$VERSION_STATUS"'
@@ -290,6 +290,13 @@ class ToolsCheckTests(unittest.TestCase):
             bad_codegen = self.run_tools()
             self.assertNotEqual(bad_codegen.returncode, 0)
             self.assertIn("tonic-prost-build", bad_codegen.stderr)
+            codegen_toml.write_text(
+                original_codegen.replace('bare_urls = "warn"', 'bare_urls = "allow"'),
+                encoding="utf-8",
+            )
+            bad_lints = self.run_tools()
+            self.assertNotEqual(bad_lints.returncode, 0)
+            self.assertIn("[lints] differs", bad_lints.stderr)
             codegen_toml.write_text(original_codegen, encoding="utf-8")
 
         bypass_sh = self.root / "scripts/profiles/bypass.sh"

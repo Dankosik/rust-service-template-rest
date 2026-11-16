@@ -278,7 +278,7 @@ fn a_client_key_that_is_unusable_or_belongs_to_another_certificate_is_invalid() 
 }
 
 #[test]
-fn an_unparseable_dsn_does_not_echo_the_password() {
+fn an_unparsable_dsn_does_not_echo_the_password() {
     let err = Cache::start(options("not a url hunter2", true, true, None)).unwrap_err();
     assert_eq!(err, CacheError::InvalidDsn);
     assert_no_leak(&err, &["hunter2"]);

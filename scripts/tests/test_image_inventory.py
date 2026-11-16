@@ -18,7 +18,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(ROOT / "scripts/template"))
-from state import TEMPLATE_REPOSITORY  # noqa: E402
+from state import TEMPLATE_REPOSITORY
 
 IMAGE_ID = "sha256:" + "a" * 64
 

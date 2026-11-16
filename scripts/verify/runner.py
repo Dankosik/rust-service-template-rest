@@ -321,8 +321,10 @@ def _build_plan(
 
     if is_true("rust_source") or is_true("lint_config"):
         add_command("make", "fmt-check", "Rust source or formatting configuration changed", "cheap")
+        add_command("make", "typos", "Rust source or lint configuration changed", "cheap")
     elif ci_mode == "none" and is_true("cargo_dependencies"):
         add_command("make", "fmt-check", "no CI formats the workspace after a dependency change", "cheap")
+        add_command("make", "typos", "no CI checks spelling after a dependency change", "cheap")
 
     if workspace_rust:
         reason = "dependency, lockfile, or toolchain changes can affect every crate"

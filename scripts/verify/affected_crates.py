@@ -89,7 +89,7 @@ def select_affected_crates(repo: Path | str, files: Sequence[str]) -> tuple[str,
             else:
                 production_dirs.add(crate_dir)
             continue
-        if path.endswith(("/Cargo.toml", "/Cargo.lock")) or path.endswith(".rs"):
+        if path.endswith(("/Cargo.toml", "/Cargo.lock", ".rs")):
             return ("workspace", [])
 
     touched_dirs = production_dirs | test_only_dirs

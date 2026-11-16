@@ -11,6 +11,7 @@ const TEST_NAME: &str = "panic_payloads_and_thread_identity_are_withheld";
 #[test]
 #[expect(
     clippy::disallowed_methods,
+    clippy::disallowed_types,
     reason = "subprocess fixture owns bounded completion polling and capture-file reads through child teardown"
 )]
 fn panic_payloads_and_thread_identity_are_withheld() {

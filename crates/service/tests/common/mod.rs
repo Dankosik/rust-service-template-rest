@@ -7,6 +7,10 @@ use std::time::{Duration, Instant};
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 
+#[expect(
+    clippy::disallowed_types,
+    reason = "synchronous process fixture configures the spawned child binary"
+)]
 pub(crate) fn baseline_env(command: &mut Command) -> &mut Command {
     command
         .env_clear()
@@ -19,6 +23,7 @@ pub(crate) fn baseline_env(command: &mut Command) -> &mut Command {
 }
 
 #[expect(
+    clippy::disallowed_types,
     clippy::expect_used,
     reason = "a broken fixture or setup fails the test"
 )]
@@ -36,6 +41,7 @@ pub(crate) fn spawn_stdout_lines(child: &mut Child) -> (mpsc::Receiver<String>, 
 }
 
 #[expect(
+    clippy::disallowed_types,
     clippy::expect_used,
     reason = "a broken fixture or setup fails the test"
 )]
@@ -43,6 +49,11 @@ pub(crate) fn terminate(child: &Child) {
     kill(Pid::from_raw(child.id().cast_signed()), Signal::SIGTERM).expect("send SIGTERM");
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "synchronous lifecycle fixture polls the spawned child binary over loopback HTTP"
+)]
 pub(crate) fn agent() -> ureq::Agent {
     ureq::Agent::config_builder()
         .proxy(None)

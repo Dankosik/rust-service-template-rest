@@ -1,3 +1,7 @@
+#[expect(
+    clippy::disallowed_types,
+    reason = "a build script runs before any async runtime exists"
+)]
 use std::process::Command;
 
 const STAMP: &str = "VERGEN_GIT_SHA";
@@ -31,6 +35,11 @@ fn checked_out_revision() -> Option<String> {
     Some(revision)
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "a build script runs before any async runtime exists"
+)]
 fn git(args: &[&str]) -> Option<String> {
     let output = Command::new("git").args(args).output().ok()?;
     if !output.status.success() {

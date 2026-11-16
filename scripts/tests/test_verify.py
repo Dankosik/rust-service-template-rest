@@ -22,11 +22,11 @@ for _dir in (VERIFY_DIR, ROOT / "scripts/template"):
 if shutil.which("cargo") is None and (Path.home() / ".cargo/bin/cargo").is_file():
     os.environ["PATH"] = f"{Path.home() / '.cargo/bin'}:{os.environ.get('PATH', '')}"
 
-import affected_crates  # noqa: E402
-import changed_paths  # noqa: E402
-import runner  # noqa: E402
-from state import TEMPLATE_REPOSITORY  # noqa: E402
-import surfaces  # noqa: E402
+import affected_crates
+import changed_paths
+import runner
+from state import TEMPLATE_REPOSITORY
+import surfaces
 
 
 def _git(repo: Path, *args: str) -> str:

@@ -547,6 +547,7 @@ mod tests {
     #[test]
     #[expect(
         clippy::disallowed_methods,
+        clippy::disallowed_types,
         reason = "synchronous fixture polling waits for owned child or thread completion within its existing timeout"
     )]
     fn first_stop_preserves_a_queued_second_stop_for_drain() {

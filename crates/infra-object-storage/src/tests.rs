@@ -954,6 +954,7 @@ async fn the_span_names_the_region_only_on_amazon() {
 
 #[expect(
     clippy::disallowed_methods,
+    clippy::disallowed_types,
     clippy::print_stdout,
     reason = "the synchronous fixture owns the child entry marker, bounded completion and teardown"
 )]

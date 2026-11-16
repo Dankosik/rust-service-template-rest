@@ -203,7 +203,7 @@ def all_surfaces_report(repo: Path, *, post_merge: bool = False) -> Classificati
     repo = Path(repo)
     profiles = _load_profiles(repo)
     source_only = (repo / "make/source.mk").is_file()
-    surfaces = {name: True for name in SURFACE_NAMES}
+    surfaces = dict.fromkeys(SURFACE_NAMES, True)
     if profiles["database"] == "none":
         surfaces["db_integration"] = False
         surfaces["migrations"] = False
@@ -245,7 +245,7 @@ def classify_report(
     source_only = (repo / "make/source.mk").is_file()
     p9_retained = (repo / "test/tests/http_idempotency/mounted.rs").is_file()
 
-    surfaces: dict[str, bool] = {name: False for name in SURFACE_NAMES}
+    surfaces: dict[str, bool] = dict.fromkeys(SURFACE_NAMES, False)
     clean_files = [f for raw in files if (f := raw.strip("\r\n"))]
     hook_marks = _run_service_hook(repo, clean_files)
     unclassified: list[str] = []
@@ -418,7 +418,7 @@ def classify_report(
         if _matches(file, "deny.toml", "scripts/checks/dependency_drift.sh"):
             mark("dependency_policy")
 
-        if _matches(file, "clippy.toml", "rustfmt.toml", "Cargo.toml"):
+        if _matches(file, "clippy.toml", "rustfmt.toml", ".typos.toml", "Cargo.toml"):
             mark("lint_config")
 
         if _matches(

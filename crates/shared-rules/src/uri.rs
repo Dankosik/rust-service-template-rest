@@ -13,8 +13,10 @@ pub fn authority_has_userinfo(url: &str) -> bool {
     } else {
         return false;
     };
-    let authority_end = authority.find(['/', '?', '#']).unwrap_or(authority.len());
-    authority[..authority_end].contains('@')
+    let (authority, _) = authority
+        .split_once(['/', '?', '#'])
+        .unwrap_or((authority, ""));
+    authority.contains('@')
 }
 
 #[must_use]

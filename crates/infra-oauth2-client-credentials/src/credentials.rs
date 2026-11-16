@@ -1,5 +1,4 @@
 use std::{
-    future::Future,
     sync::Arc,
     time::{Duration, SystemTime},
 };

@@ -1,0 +1,29 @@
+# Source-code and contract spellcheck (`make typos`).
+# Service-owned so derived services can record domain terms without sync drift.
+
+[files]
+extend-exclude = [
+    "vendor/**",
+    ".sqlx/**",
+]
+
+[default]
+extend-ignore-re = [
+    # W3C Trace Context specification example span-id.
+    "00f067aa0ba902b7",
+    # Escaped UTF-8 café fixture literal.
+    '"caf\\u\{e9\}"',
+    # Intentional typo-distance and unknown-field suggestion test inputs.
+    'levenshtein\("config", "confg"\)',
+    'APP__LOG__LEVL',
+    'unknown field `levl`',
+    'unknown_field\("levl"',
+    # Combined POSIX/GNU grep -F -o short flags.
+    'grep -Fo\b',
+]
+
+[default.extend-identifiers]
+RTO = "RTO"
+
+[default.extend-words]
+wrk = "wrk"

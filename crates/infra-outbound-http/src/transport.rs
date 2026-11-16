@@ -14,6 +14,10 @@ pub(crate) type Transport = hyper_util::client::legacy::Client<
 >;
 
 #[cfg(not(test))]
+#[expect(
+    clippy::cfg_not_test,
+    reason = "unit tests substitute the deterministic FixtureResolver without altering the Client type"
+)]
 pub(crate) type Resolver = hyper_util::client::legacy::connect::dns::GaiResolver;
 #[cfg(test)]
 pub(crate) type Resolver = crate::test_support::FixtureResolver;

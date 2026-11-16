@@ -17,7 +17,6 @@ mod mounted;
 // template:end http-idempotency-mounted:http-idempotency-mounted-module
 
 use std::fmt::Write as _;
-use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;

@@ -7,7 +7,7 @@
 
 use std::{
     collections::BTreeMap,
-    future::{Future, poll_fn},
+    future::poll_fn,
     pin::Pin,
     sync::{Arc, Mutex},
     task::Poll,

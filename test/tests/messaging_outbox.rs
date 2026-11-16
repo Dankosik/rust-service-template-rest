@@ -1079,7 +1079,7 @@ fn admission_deadline() -> Instant {
 }
 
 fn webhook_headers(message_id: &str, body: &[u8]) -> http::HeaderMap {
-    let timestamp: i64 = time::OffsetDateTime::now_utc().unix_timestamp();
+    let timestamp = time::OffsetDateTime::now_utc().unix_timestamp();
     let keys = KeyRing::from_encoded(WEBHOOK_KEY, None).expect("fixture key");
     let mut headers = http::HeaderMap::new();
     headers.insert(

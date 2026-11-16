@@ -1,7 +1,5 @@
 use std::future::Future as _;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::task::Waker;
 use std::time::Duration;
 
 use http_body::Body as _;

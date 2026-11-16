@@ -1,7 +1,7 @@
 use std::assert_matches;
 use std::{
     convert::Infallible,
-    future::{Future, poll_fn},
+    future::poll_fn,
     net::SocketAddr,
     pin::Pin,
     sync::{

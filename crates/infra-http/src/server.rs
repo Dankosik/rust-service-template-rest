@@ -1,4 +1,3 @@
-use std::future::Future;
 use std::hash::{BuildHasher as _, Hasher as _, RandomState};
 use std::mem::DropGuard;
 use std::net::SocketAddr;

@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::future::Future;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1136,9 +1135,10 @@ async fn x2_listener_shutdown_joins_while_postgres_is_silent(pool: PgPool) {
 async fn x2_a_lost_listener_reconnects_with_the_pools_rotated_password(pool: PgPool) {
     let mut url = url_for(&pool, DATABASE_URL).await;
     let database = url.path().trim_start_matches('/').to_owned();
+    let tail_start = database.ceil_char_boundary(database.len().saturating_sub(24));
     let role = format!(
         "listening_{}",
-        &database[database.len().saturating_sub(24)..]
+        database.get(tail_start..).unwrap_or(&database)
     );
     for statement in [
         format!("DROP ROLE IF EXISTS {role:?}"),

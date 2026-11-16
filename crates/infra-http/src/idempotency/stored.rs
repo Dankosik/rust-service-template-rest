@@ -182,8 +182,6 @@ fn header_bytes(headers: &[(HeaderName, HeaderValue)]) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use http_body_util::BodyExt;
-
     use super::*;
 
     fn response(status: u16, headers: &[(&str, &str)], body: impl Into<Body>) -> Response {

@@ -16,11 +16,11 @@ async fn permanent_failure_transfers_original_record_then_redrive_keeps_logical_
     let mut registry = registry(&fixture);
     registry
         .register::<ExampleEvent, _, _>(move |_, _| {
-            if let Some(sender) = called_tx
+            let sender = called_tx
                 .lock()
                 .expect("test handler signal lock must not be poisoned")
-                .take()
-            {
+                .take();
+            if let Some(sender) = sender {
                 let _ = sender.send(());
             }
             async { Err(HandlerError::Permanent) }

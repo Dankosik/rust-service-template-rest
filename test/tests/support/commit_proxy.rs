@@ -240,7 +240,8 @@ impl CommitProxy {
     }
 
     pub(crate) fn fired(&self) -> Option<Fault> {
-        match *lock(&self.arming) {
+        let state = *lock(&self.arming);
+        match state {
             Arming::Fired(fault) => Some(fault),
             Arming::Idle | Arming::Armed(_) => None,
         }

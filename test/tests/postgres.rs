@@ -751,9 +751,10 @@ async fn through_a_pooler_the_database_carries_the_budgets_when_nothing_is_publi
 async fn a_rotated_password_file_reaches_the_connections_opened_after_it(pool: PgPool) {
     let dsn = dsn_for(&pool).await;
     let database = dsn.database();
+    let tail_start = database.ceil_char_boundary(database.len().saturating_sub(24));
     let role = format!(
         "rotating_{}",
-        &database[database.len().saturating_sub(24)..]
+        database.get(tail_start..).unwrap_or(database)
     );
     sqlx::query(AssertSqlSafe(format!(
         "CREATE ROLE {role:?} LOGIN PASSWORD 'first'"

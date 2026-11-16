@@ -355,7 +355,7 @@ impl Echo {
             .map_err(|_| Status::internal("fixture key rejected"))?;
         let result = self.storage.put(&key, body, PutOptions::default()).await;
         *work = true;
-        if let Ok(()) = result {
+        if result == Ok(()) {
             self.counts.upload_completed.fetch_add(1, Ordering::SeqCst);
             Ok("ok".to_owned())
         } else {

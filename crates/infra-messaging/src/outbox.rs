@@ -145,7 +145,8 @@ impl PreparedEvent {
                     budget = PREFLIGHT_BYTES_PER_POLL;
                     continue;
                 }
-                total += infra_jobs::json_payload_len(&field[offset..end])
+                let chunk = field.get(offset..end).unwrap_or_default();
+                total += infra_jobs::json_payload_len(chunk)
                     .map_err(infra_jobs::EnqueueError::Serialize)?
                     - 2;
                 budget -= end - offset;
@@ -300,7 +301,6 @@ fn raw_payload_capacity(overhead: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use std::future::Future;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll, Wake, Waker};
@@ -375,7 +375,7 @@ mod tests {
     #[test]
     fn stored_intent_rejects_invalid_base64_before_broker_dispatch() {
         let baseline = serde_json::to_value(PublishDomainEvent::from(&prepared(
-            Bytes::from_static(br"{}"),
+            Bytes::from_static(b"{}"),
         )))
         .unwrap();
 
@@ -400,7 +400,7 @@ mod tests {
 
     #[test]
     fn storage_preserves_distinct_redrive_publication_identity() {
-        let mut parts = Parts::new(Bytes::from_static(br"{}"));
+        let mut parts = Parts::new(Bytes::from_static(b"{}"));
         parts.publication_id = "redrive-8e51b5a19b7924ce".to_owned();
         let event = parts.event();
 
@@ -416,7 +416,7 @@ mod tests {
 
     #[test]
     fn payload_limit_fits_exact_base64_boundary_for_varied_metadata() {
-        let compact = PublishDomainEvent::from(&prepared(Bytes::from_static(br"{}")));
+        let compact = PublishDomainEvent::from(&prepared(Bytes::from_static(b"{}")));
         let wide = PublishDomainEvent {
             format_version: FORMAT_VERSION,
             subject: "s".repeat(256),

@@ -250,6 +250,7 @@ fn sdk_log_cap(directive: &str) -> SdkCap {
 #[cfg(test)]
 #[expect(
     clippy::disallowed_methods,
+    clippy::disallowed_types,
     reason = "synchronous fixture polling waits for owned child completion within its existing timeout"
 )]
 pub(super) fn wait_for_child(

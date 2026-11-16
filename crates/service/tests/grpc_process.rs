@@ -53,6 +53,10 @@ const JWT_SIGNING_DER: &[u8] =
 
 const DIAGNOSTIC_BYTES: usize = 64 * 1024;
 
+#[expect(
+    clippy::disallowed_types,
+    reason = "gRPC process fixture owns the spawned example Child handle"
+)]
 struct Example {
     child: Child,
     lines: mpsc::Receiver<String>,
@@ -62,6 +66,11 @@ struct Example {
     verified_root: PathBuf,
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "gRPC process fixture spawns and polls the example binary synchronously"
+)]
 impl Example {
     fn spawn(fixture: &OidcFixture, certificate: &str, private_key: &str) -> Self {
         Self::spawn_with(fixture, certificate, private_key, &[])
@@ -118,7 +127,7 @@ impl Example {
             let overflow = bytes.len() > DIAGNOSTIC_BYTES || drained.as_ref().is_ok_and(|n| *n > 0);
             bytes.truncate(DIAGNOSTIC_BYTES);
             let text = String::from_utf8_lossy_owned(bytes);
-            let captured = match read.and(drained.map(|_| ())) {
+            let captured = match read.and(drained).map(|_| ()) {
                 Err(error) => Err(format!("stderr capture failed: {error}; captured: {text}")),
                 Ok(()) if overflow => {
                     Err(format!("stderr exceeded capture bound; captured: {text}"))
@@ -255,6 +264,10 @@ impl Example {
     }
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "Drop reaps the owned gRPC example child process on teardown"
+)]
 impl Drop for Example {
     fn drop(&mut self) {
         if self.child.try_wait().ok().flatten().is_none() {
@@ -436,6 +449,11 @@ async fn serve_oidc(
     }
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "process fixture builds the gRPC example binary once before spawning it"
+)]
 fn example_binary() -> PathBuf {
     static BINARY: OnceLock<PathBuf> = OnceLock::new();
     BINARY
@@ -1109,6 +1127,11 @@ fn registered_background_fixture() {
 }
 
 #[test]
+#[expect(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "subprocess fixture spawns the current test binary to verify background exit codes"
+)]
 fn registered_feature_work_joins_and_reports_primary_or_cleanup_failure() {
     let scenarios = [
         ("complete", 0),
