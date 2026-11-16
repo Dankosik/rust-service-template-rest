@@ -34,8 +34,8 @@ for concrete modules, types, and commands.
    crate with the `test` role in `quality/architecture.json`. It depends on no
    workspace crate, appears only in dev-dependencies, and leaves with the
    template profile of its last consumer. A helper that needs one crate's types
-   stays behind that crate's `test-support` feature. Tests never include
-   another package's source through `#[path]`.
+   stays behind that crate's `test-support` feature. `make architecture-check`
+   rejects a `#[path]` that reaches outside its own package.
 5. Trust, ingress/egress, dependency criticality, failure mapping (`crates/service-failure`),
    readiness (`crates/health`), and staged shutdown budgets (`crates/service/src/bootstrap`)
    are enforced explicitly at their owning runtime boundaries.

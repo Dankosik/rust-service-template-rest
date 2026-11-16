@@ -181,7 +181,7 @@ classify() {
 		# Both checks use the whole declared workspace; a new clone can match
 		# unchanged source. Standalone tool workspaces are not scanned as Rust.
 		case "${file}" in
-		crates/*.rs | test/*.rs) mark duplication ;;
+		crates/*.rs | test/*.rs) mark duplication architecture ;;
 		esac
 		case "${file}" in
 		Cargo.toml | Cargo.lock | */Cargo.toml | */Cargo.lock | rust-toolchain.toml | \
@@ -501,7 +501,7 @@ HOOK
 
 	# Gate selection is independent of the existing Rust/build routes.
 	for file in crates/config/build.rs crates/health/src/lib.rs test/tests/probes.rs; do
-		assert_case "${file}" "duplication" "architecture"
+		assert_case "${file}" "duplication architecture" ""
 	done
 	assert_case .jscpd.json "duplication" "architecture"
 	for file in quality/architecture.json scripts/ci/architecture-check.py; do
