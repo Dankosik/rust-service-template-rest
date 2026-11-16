@@ -8,8 +8,8 @@ use secrecy::SecretString;
 use super::*;
 use crate::LoadOptions;
 use crate::PostgresSessionBudgets;
-use crate::load::{Error, load_from, load_jobs_operator_from};
-use crate::test_support::{BUILD, env, write};
+use crate::load::{Error, load_jobs_operator_from};
+use crate::test_support::{env, load_env, write};
 use crate::validate::validate_with;
 
 fn parse(toml: &str) -> Result<JobsConfig, toml::de::Error> {
@@ -155,12 +155,7 @@ fn jobs_max_workers_is_not_secret_like() {
 
 #[test]
 fn jobs_environment_sets_max_workers() {
-    let cfg = load_from(
-        &LoadOptions::default(),
-        BUILD,
-        env(&[("APP__JOBS__MAX_WORKERS", "8")]),
-    )
-    .unwrap();
+    let cfg = load_env(&[("APP__JOBS__MAX_WORKERS", "8")]);
     assert_eq!(cfg.jobs.max_workers.get(), 8);
 }
 

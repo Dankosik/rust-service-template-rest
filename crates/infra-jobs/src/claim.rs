@@ -15,7 +15,7 @@ use crate::engine::{
     CANCEL_MARGIN, LEASE_RESERVE, Operation, OperationError, POLL_INTERVAL, Shared, backstop,
     observe_failure, observe_recovery,
 };
-use crate::kind::{JobId, Registered};
+use crate::kind::{JobId, Registered, saturating_micros};
 use crate::trace_context::Carrier;
 
 pub const CLAIM_DURATION_METRIC: &str = "jobs_claim_duration_seconds";
@@ -421,10 +421,6 @@ impl<'a> PolicyBinds<'a> {
 /// before pool acquisition so it can stop writing before the lease expires.
 fn lease_offset(timeout: Duration) -> Duration {
     timeout.saturating_add(LEASE_RESERVE)
-}
-
-fn saturating_micros(duration: Duration) -> i64 {
-    i64::try_from(duration.as_micros()).unwrap_or(i64::MAX)
 }
 
 /// Counts come from `u32` limits, so the fallback never runs; it would claim

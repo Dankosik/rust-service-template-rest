@@ -1,5 +1,6 @@
 use axum::http::HeaderName;
 use axum::http::header::CONTENT_TYPE;
+use itertools::Itertools as _;
 use utoipa::openapi::RefOr;
 use utoipa::openapi::path::{Operation, Parameter, ParameterIn, PathItem, Paths};
 use utoipa::openapi::response::Response;
@@ -73,8 +74,7 @@ pub(super) struct PreparedOperation {
 pub(super) fn prepare(paths: &mut Paths) -> Result<PreparedOperation, CompositionError> {
     let subject = route_subject(paths);
     let shape = || CompositionError::new(&subject, Rule::Shape);
-    let mut items = paths.paths.values_mut();
-    let (Some(item), None) = (items.next(), items.next()) else {
+    let Ok(item) = paths.paths.values_mut().exactly_one() else {
         return Err(shape());
     };
     if item.ref_path.is_some() {
@@ -139,7 +139,7 @@ fn prepare_key_parameter(
     operation_id: &str,
 ) -> Result<(), CompositionError> {
     let generated_key = key_parameter();
-    let mut existing_keys = operation
+    let existing_keys = operation
         .parameters
         .as_deref()
         .into_iter()
@@ -152,12 +152,12 @@ fn prepare_key_parameter(
             parameter.parameter_in == ParameterIn::Header
                 && parameter.name.eq_ignore_ascii_case(KEY_HEADER)
         });
-    match (existing_keys.next(), existing_keys.next()) {
-        (None, None) => operation
+    match existing_keys.at_most_one() {
+        Ok(None) => operation
             .parameters
             .get_or_insert_default()
             .push(generated_key.into()),
-        (Some(existing), None) if existing == &generated_key => {}
+        Ok(Some(existing)) if existing == &generated_key => {}
         _ => return Err(CompositionError::new(operation_id, Rule::KeyParameter)),
     }
     Ok(())
@@ -223,17 +223,17 @@ fn prepare_success_headers(
     operation_id: &str,
     status: &str,
 ) -> Result<(), CompositionError> {
-    let mut replay_headers = response
+    let replay_headers = response
         .headers
         .iter()
         .filter(|(name, _)| name.eq_ignore_ascii_case(REPLAYED_HEADER));
-    match (replay_headers.next(), replay_headers.next()) {
-        (None, None) => {
+    match replay_headers.at_most_one() {
+        Ok(None) => {
             response
                 .headers
                 .insert(REPLAYED_HEADER.to_owned(), replay_header());
         }
-        (Some((_, header)), None) if header == &replay_header() => {}
+        Ok(Some((_, header))) if header == &replay_header() => {}
         _ => {
             return Err(CompositionError::new(
                 operation_id,
@@ -258,16 +258,16 @@ fn prepare_success_headers(
 }
 
 fn one_operation_mut(item: &mut PathItem) -> Option<(&'static str, &mut Operation)> {
-    let mut operations = fixed_path_operations!(item, as_mut)
+    fixed_path_operations!(item, as_mut)
         .into_iter()
         .filter_map(|(method, operation)| operation.map(|operation| (method, operation)))
         .chain(
             item.additional_operations
                 .values_mut()
                 .map(|operation| ("additional", operation)),
-        );
-    let operation = operations.next()?;
-    operations.next().is_none().then_some(operation)
+        )
+        .exactly_one()
+        .ok()
 }
 
 fn route_subject(paths: &Paths) -> String {

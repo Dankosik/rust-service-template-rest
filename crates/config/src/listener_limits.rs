@@ -12,8 +12,7 @@ pub(super) fn request_timeout_range(key: &str, value: Duration) -> Result<(), Va
     duration_range(
         key,
         value,
-        Duration::from_millis(100),
-        Duration::from_mins(10),
+        Duration::from_millis(100)..=Duration::from_mins(10),
     )
 }
 
@@ -38,16 +37,20 @@ pub(super) fn request_budget_fits_drain(
 }
 
 pub(super) fn in_flight_range(key: &str, value: u32) -> Result<(), ValidationError> {
-    int_range(key, u64::from(value), 0, 100_000)
+    int_range(key, value, 0..=100_000)
 }
 
 pub(super) fn connection_count_range(key: &str, value: u32) -> Result<(), ValidationError> {
-    int_range(key, u64::from(value), 0, 1_000_000)
+    int_range(key, value, 0..=1_000_000)
 }
 
 pub(super) fn connection_age_range(key: &str, value: Duration) -> Result<(), ValidationError> {
     if value.is_zero() {
         return Ok(());
     }
-    duration_range(key, value, Duration::from_secs(1), Duration::from_hours(24))
+    duration_range(
+        key,
+        value,
+        Duration::from_secs(1)..=Duration::from_hours(24),
+    )
 }

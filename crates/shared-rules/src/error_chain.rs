@@ -36,13 +36,7 @@ fn bounded_chain<'a>(
     error: &'a (dyn Error + 'static),
     mut next: impl FnMut(&'a (dyn Error + 'static)) -> Option<&'a (dyn Error + 'static)>,
 ) -> impl Iterator<Item = &'a (dyn Error + 'static)> {
-    let mut current = Some(error);
-    std::iter::once(error)
-        .chain(std::iter::from_fn(move || {
-            current = current.and_then(&mut next);
-            current
-        }))
-        .take(MAX_CHAIN_ENTRIES)
+    std::iter::successors(Some(error), move |&error| next(error)).take(MAX_CHAIN_ENTRIES)
 }
 
 /// Displays up to 64 entries starting with the error, separated by `: `.

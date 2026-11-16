@@ -13,7 +13,7 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use compact_str::CompactString;
+use compact_str::{CompactString, ToCompactString as _};
 use futures_util::future::join_all;
 use tokio::sync::watch;
 use tokio::time::Instant;
@@ -50,9 +50,7 @@ impl ProbeError {
 
     #[must_use]
     pub fn format(args: fmt::Arguments<'_>) -> Self {
-        let mut text = CompactString::default();
-        let _ = fmt::Write::write_fmt(&mut text, args);
-        Self(text)
+        Self(args.to_compact_string())
     }
 }
 

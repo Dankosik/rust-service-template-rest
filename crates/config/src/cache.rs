@@ -146,8 +146,7 @@ impl CacheInput {
         let command_timeout = v.take(duration_range(
             "cache.command_timeout",
             self.command_timeout,
-            Duration::from_millis(1),
-            Duration::from_secs(10),
+            Duration::from_millis(1)..=Duration::from_secs(10),
         ));
         // The comparison needs both timeouts in range; the cache range above
         // also keeps the doubling far from overflow.

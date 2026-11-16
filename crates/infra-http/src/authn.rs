@@ -292,10 +292,10 @@ mod tests {
     use axum::body::Body;
     use axum::http::StatusCode;
     use axum::http::header::CONTENT_TYPE;
-    use http_body_util::BodyExt as _;
     use tower::ServiceExt as _;
 
     use super::*;
+    use crate::test_support::body_json;
 
     #[tokio::test]
     async fn cancelled_operation_context_answers_service_unavailable_not_authentication_unavailable()
@@ -329,8 +329,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert!(!response.headers().contains_key(WWW_AUTHENTICATE));
         assert_eq!(response.headers()[CONTENT_TYPE], "application/problem+json");
-        let bytes = response.into_body().collect().await.unwrap().to_bytes();
-        let problem: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let problem = body_json(response).await;
         assert_eq!(problem["code"], "service_unavailable");
     }
 }

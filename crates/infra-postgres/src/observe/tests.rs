@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use metrics::Key;
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
-use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+use metrics_util::debugging::DebuggingRecorder;
 use sqlx::postgres::PgPoolOptions;
 
 use super::*;
@@ -138,20 +138,14 @@ async fn separate_pools_report_their_own_limits() {
     };
     super::record_metrics(&pool(5), "write");
     super::record_metrics(&pool(20), "read");
-    let snapshot = snapshotter.snapshot().into_vec();
+    let snapshot = snapshotter.snapshot().into_hashmap();
     for (pool_name, expected) in [("write", 5.0), ("read", 20.0)] {
         let target = Key::from_parts(
             CONNECTION_MAX_METRIC,
             &[("db.client.connection.pool.name", pool_name)],
         );
-        let actual = snapshot
-            .iter()
-            .find_map(|(composite, _, _, value)| (composite.key() == &target).then_some(value));
-        assert_eq!(
-            actual,
-            Some(&DebugValue::Gauge(expected.into())),
-            "{target}: {snapshot:?}"
-        );
+        let actual = crate::test_metrics::gauge(&snapshot, &target);
+        assert_eq!(actual, Some(expected), "{target}: {snapshot:?}");
     }
 }
 
@@ -265,7 +259,7 @@ async fn a_statement_records_its_duration_by_summary_and_by_how_it_failed() {
     )
     .await;
     assert!(abandoned.is_err());
-    let snapshot = snapshotter.snapshot().into_vec();
+    let snapshot = snapshotter.snapshot().into_hashmap();
     for target in [
         Key::from_parts(
             OPERATION_DURATION_METRIC,
@@ -299,12 +293,7 @@ async fn a_statement_records_its_duration_by_summary_and_by_how_it_failed() {
             ],
         ),
     ] {
-        let count = snapshot
-            .iter()
-            .find_map(|(composite, _, _, value)| match value {
-                DebugValue::Histogram(samples) if composite.key() == &target => Some(samples.len()),
-                _ => None,
-            });
+        let count = crate::test_metrics::histogram_len(&snapshot, &target);
         assert_eq!(count, Some(1), "{target} is missing from {snapshot:?}");
     }
     assert_eq!(snapshot.len(), 4, "{snapshot:?}");

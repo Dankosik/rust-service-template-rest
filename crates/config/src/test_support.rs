@@ -2,7 +2,7 @@ use std::assert_matches;
 use std::path::PathBuf;
 
 use crate::load::{Error, load_from};
-use crate::{BuildInfo, LoadOptions};
+use crate::{BuildInfo, Config, LoadOptions};
 
 pub(crate) const BUILD: BuildInfo = BuildInfo {
     version: "1.2.3",
@@ -24,6 +24,10 @@ pub(crate) fn env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         .iter()
         .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
         .collect()
+}
+
+pub(crate) fn load_env(pairs: &[(&str, &str)]) -> Config {
+    load_from(&LoadOptions::default(), BUILD, env(pairs)).unwrap()
 }
 
 pub(crate) fn assert_secret_in_file(toml: &str, key: &str) {

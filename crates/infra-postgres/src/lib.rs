@@ -5,6 +5,8 @@ mod maintenance;
 mod observe;
 mod pool;
 mod probe;
+#[cfg(test)]
+mod test_metrics;
 mod transaction;
 
 pub use credentials::{PASSWORD_REFRESH_INTERVAL, refresh_password_periodically};

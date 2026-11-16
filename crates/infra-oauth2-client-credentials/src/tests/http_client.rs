@@ -17,20 +17,14 @@ async fn a_client_requiring_a_subject_refuses_a_request_without_one_before_any_i
     let client = credentials
         .http(fixture.resource_client())
         .require_on_behalf_of();
-    let error = client
-        .execute(fixture.request(), deadline(Duration::from_secs(10)))
-        .await
-        .unwrap_err();
+    let error = fixture.send(&client).await.unwrap_err();
     assert_matches!(error, Error::SubjectRequired);
     assert_eq!(fixture.token_requests().len(), 1);
     assert_eq!(fixture.resource_requests().len(), 1);
 
-    fixture.token_json("200 OK", &exchange_response("exchanged"));
-    client
-        .execute(
-            fixture.on_behalf_of_request("alice"),
-            deadline(Duration::from_secs(10)),
-        )
+    fixture.token_json(StatusCode::OK, &exchange_response("exchanged"));
+    fixture
+        .send_request(&client, fixture.on_behalf_of_request("alice"))
         .await
         .unwrap();
     assert_eq!(
@@ -57,9 +51,7 @@ async fn token_http_telemetry_distinguishes_deadline_from_cancellation() {
         let recorder = DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
         let _recorder = metrics::set_default_local_recorder(&recorder);
-        let client = fixture
-            .credentials(&[], None)
-            .http(fixture.resource_client());
+        let client = fixture.client();
         let budget = Duration::from_secs(2);
         let context = OperationContext::with_timeout(budget);
         let mut exchange = Box::pin(client.execute_with_context(fixture.request(), &context));
@@ -113,9 +105,7 @@ async fn token_http_telemetry_distinguishes_deadline_from_cancellation() {
 async fn an_elapsed_deadline_wins_over_request_cancellation_during_token_wait() {
     let fixture = Fixture::new().await;
     let gate = fixture.block_tokens();
-    let client = fixture
-        .credentials(&[], None)
-        .http(fixture.resource_client());
+    let client = fixture.client();
     let operation = OperationContext::with_timeout(Duration::from_secs(1));
     let request_context = OperationContext::unbounded();
     let mut request = fixture.request();
@@ -138,9 +128,7 @@ async fn an_elapsed_deadline_wins_over_request_cancellation_during_token_wait() 
 #[tokio::test]
 async fn an_elapsed_deadline_wins_over_request_cancellation_before_token_work() {
     let fixture = Fixture::new().await;
-    let client = fixture
-        .credentials(&[], None)
-        .http(fixture.resource_client());
+    let client = fixture.client();
     let operation = OperationContext::with_timeout(Duration::ZERO);
     let request_context = OperationContext::unbounded();
     request_context.cancel();
@@ -199,11 +187,11 @@ async fn token_failures_are_sanitized_and_never_dispatch_the_resource() {
             AcquisitionError::Rejected(Rejection::Other),
         ),
         (
-            response("503 Service Unavailable", b"provider-secret-body"),
+            response(StatusCode::SERVICE_UNAVAILABLE, b"provider-secret-body"),
             AcquisitionError::Unavailable,
         ),
         (
-            response("429 Too Many Requests", b"provider-secret-body"),
+            response(StatusCode::TOO_MANY_REQUESTS, b"provider-secret-body"),
             AcquisitionError::Unavailable,
         ),
         (
@@ -232,20 +220,20 @@ async fn token_failures_are_sanitized_and_never_dispatch_the_resource() {
         ),
         (
             response(
-                "400 Bad Request",
+                StatusCode::BAD_REQUEST,
                 br#"{"error":"invalid\u005fclient","error_description":"provider-secret-body"}"#,
             ),
             AcquisitionError::Rejected(Rejection::InvalidClient),
         ),
         (
             response(
-                "400 Bad Request",
+                StatusCode::BAD_REQUEST,
                 br#"{"error":"provider-secret-body"}"#,
             ),
             AcquisitionError::Rejected(Rejection::Other),
         ),
         (
-            response("400 Bad Request", br#"{"error":{"invalid_client":null}}"#),
+            response(StatusCode::BAD_REQUEST, br#"{"error":{"invalid_client":null}}"#),
             AcquisitionError::Rejected(Rejection::Other),
         ),
         (
@@ -258,7 +246,7 @@ async fn token_failures_are_sanitized_and_never_dispatch_the_resource() {
         ),
         (
             json_response(
-                "200 OK",
+                StatusCode::OK,
                 &serde_json::json!({"access_token":"token", "token_type":"MAC", "expires_in":3600}),
             ),
             AcquisitionError::InvalidResponse,
@@ -270,16 +258,14 @@ async fn token_failures_are_sanitized_and_never_dispatch_the_resource() {
         (
             // RFC 6749 section 5.1 defines a number; a string is not admitted.
             json_response(
-                "200 OK",
+                StatusCode::OK,
                 &serde_json::json!({"access_token":"token", "token_type":"Bearer", "expires_in":"3600"}),
             ),
             AcquisitionError::InvalidResponse,
         ),
     ] {
         fixture.token_raw(response);
-        let error = fixture
-            .credentials(&[], None)
-            .http(fixture.resource_client())
+        let error = fixture.client()
             .execute(fixture.request(), deadline(Duration::from_secs(10)))
             .await
             .unwrap_err();
@@ -295,10 +281,8 @@ async fn token_failures_are_sanitized_and_never_dispatch_the_resource() {
 async fn token_acquisition_stops_at_the_fetch_deadline_without_dispatching_the_resource() {
     let fixture = Fixture::new().await;
     let gate = fixture.block_tokens();
-    let client = fixture
-        .credentials(&[], None)
-        .http(fixture.resource_client());
-    let mut timed = Box::pin(client.execute(fixture.request(), deadline(Duration::from_secs(10))));
+    let client = fixture.client();
+    let mut timed = Box::pin(fixture.send(&client));
     tokio::select! { () = fixture.token_received() => {}, result = &mut timed => panic!("response must be gated: {result:?}"), }
     tokio::time::pause();
     tokio::time::advance(FETCH_TIMEOUT).await;
@@ -322,8 +306,7 @@ async fn caller_authorization_conflict_refuses_before_token_or_resource_io() {
         );
         assert_matches!(
             fixture
-                .credentials(&[], None)
-                .http(fixture.resource_client())
+                .client()
                 .execute(conflicting, deadline(Duration::from_secs(10)))
                 .await,
             Err(Error::AuthorizationConflict)
@@ -337,34 +320,21 @@ async fn caller_authorization_conflict_refuses_before_token_or_resource_io() {
 #[tokio::test]
 async fn resource_401_and_403_pass_through_and_only_401_evicts_the_token() {
     let fixture = Fixture::new().await;
-    for (status, follow_up_fetches) in [("401 Unauthorized", 1), ("403 Forbidden", 0)] {
-        fixture.resource_status("200 OK");
-        let client = fixture
-            .credentials(&[], None)
-            .http(fixture.resource_client());
+    for (status, follow_up_fetches) in [(StatusCode::UNAUTHORIZED, 1), (StatusCode::FORBIDDEN, 0)] {
+        fixture.resource_status(StatusCode::OK);
+        let client = fixture.client();
         let before_tokens = fixture.token_requests().len();
         let before_resources = fixture.resource_requests().len();
-        client
-            .execute(fixture.request(), deadline(Duration::from_secs(10)))
-            .await
-            .unwrap();
+        fixture.send(&client).await.unwrap();
         advance(EVICTION_MIN_AGE).await;
         fixture.resource_status(status);
         assert_eq!(
-            client
-                .execute(fixture.request(), deadline(Duration::from_secs(10)))
-                .await
-                .unwrap()
-                .status()
-                .as_u16(),
-            status[..3].parse::<u16>().unwrap()
+            fixture.send(&client).await.unwrap().status().as_u16(),
+            status.as_u16()
         );
         assert_eq!(fixture.token_requests().len(), before_tokens + 1);
         assert_eq!(fixture.resource_requests().len(), before_resources + 2);
-        client
-            .execute(fixture.request(), deadline(Duration::from_secs(10)))
-            .await
-            .unwrap();
+        fixture.send(&client).await.unwrap();
         assert_eq!(
             fixture.token_requests().len(),
             before_tokens + 1 + follow_up_fetches
@@ -387,11 +357,11 @@ async fn an_oversized_401_evicts_the_token_without_hiding_the_body_error() {
         )
         .unwrap(),
     );
-    let call = || client.execute(fixture.request(), deadline(Duration::from_secs(10)));
+    let call = || fixture.send(&client);
     call().await.unwrap();
     advance(EVICTION_MIN_AGE).await;
     *fixture.state.resource_response.lock().unwrap() =
-        response("401 Unauthorized", b"oversized response");
+        response(StatusCode::UNAUTHORIZED, b"oversized response");
     assert_matches!(
         call().await,
         Err(Error::Resource(
@@ -401,9 +371,9 @@ async fn an_oversized_401_evicts_the_token_without_hiding_the_body_error() {
     assert_eq!(fixture.resource_requests().len(), 2);
     assert_eq!(fixture.token_requests().len(), 1);
 
-    fixture.resource_status("200 OK");
+    fixture.resource_status(StatusCode::OK);
     fixture.token_json(
-        "200 OK",
+        StatusCode::OK,
         &serde_json::json!({"access_token": "replacement", "token_type": "Bearer", "expires_in": 60}),
     );
     call().await.unwrap();
@@ -419,27 +389,19 @@ async fn an_oversized_401_evicts_the_token_without_hiding_the_body_error() {
 async fn a_resource_that_refuses_every_token_costs_one_token_request_per_eviction_age() {
     let fixture = Fixture::new().await;
     fixture.token_json(
-        "200 OK",
+        StatusCode::OK,
         &serde_json::json!({"access_token": "refused", "token_type": "Bearer", "expires_in": 3600}),
     );
-    fixture.resource_status("401 Unauthorized");
-    let client = fixture
-        .credentials(&[], None)
-        .http(fixture.resource_client());
+    fixture.resource_status(StatusCode::UNAUTHORIZED);
+    let client = fixture.client();
     for token_requests in [1, 2] {
         for _ in 0..3 {
-            let response = client
-                .execute(fixture.request(), deadline(Duration::from_secs(10)))
-                .await
-                .unwrap();
+            let response = fixture.send(&client).await.unwrap();
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
             assert_eq!(fixture.token_requests().len(), token_requests);
         }
         advance(EVICTION_MIN_AGE).await;
-        client
-            .execute(fixture.request(), deadline(Duration::from_secs(10)))
-            .await
-            .unwrap();
+        fixture.send(&client).await.unwrap();
     }
     fixture.finish().await;
 }
@@ -448,7 +410,7 @@ async fn a_resource_that_refuses_every_token_costs_one_token_request_per_evictio
 async fn a_late_401_does_not_evict_a_newer_token() {
     let fixture = Fixture::new().await;
     fixture.token_json(
-        "200 OK",
+        StatusCode::OK,
         &serde_json::json!({"access_token": "first", "token_type": "Bearer", "expires_in": 60}),
     );
     let credentials = fixture.credentials(&[], None);
@@ -458,14 +420,14 @@ async fn a_late_401_does_not_evict_a_newer_token() {
         .await
         .unwrap();
     advance(EVICTION_MIN_AGE).await;
-    fixture.resource_status("401 Unauthorized");
+    fixture.resource_status(StatusCode::UNAUTHORIZED);
     let gate = fixture.block_resources();
-    let mut stale = Box::pin(client.execute(fixture.request(), deadline(Duration::from_secs(10))));
+    let mut stale = Box::pin(fixture.send(&client));
     tokio::select! { () = fixture.resource_received() => {}, result = &mut stale => panic!("response must be gated: {result:?}"), }
 
     *credentials.cached() = Cached::default();
     fixture.token_json(
-        "200 OK",
+        StatusCode::OK,
         &serde_json::json!({"access_token": "second", "token_type": "Bearer", "expires_in": 60}),
     );
     credentials
@@ -476,11 +438,8 @@ async fn a_late_401_does_not_evict_a_newer_token() {
     gate.add_permits(1);
     assert_eq!(stale.await.unwrap().status(), StatusCode::UNAUTHORIZED);
     *fixture.state.resource_gate.lock().unwrap() = None;
-    fixture.resource_status("200 OK");
-    client
-        .execute(fixture.request(), deadline(Duration::from_secs(10)))
-        .await
-        .unwrap();
+    fixture.resource_status(StatusCode::OK);
+    fixture.send(&client).await.unwrap();
     assert_eq!(fixture.token_requests().len(), 2);
     assert_eq!(
         fixture

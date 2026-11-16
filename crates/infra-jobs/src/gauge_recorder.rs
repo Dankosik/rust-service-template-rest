@@ -1,5 +1,6 @@
 use metrics::{Key, Level, Metadata, Recorder as _};
 use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
+use metrics_util::{CompositeKey, MetricKind};
 
 const RESTORE_METADATA: Metadata<'static> = Metadata::new(module_path!(), Level::INFO, None);
 
@@ -30,20 +31,20 @@ impl Gauges {
             Some(kind) => Key::from_parts(name, &[("kind", kind)]),
             None => Key::from_name(name),
         };
-        let mut found = None;
         // `Snapshotter::snapshot` swaps every gauge to zero; restore each raw
         // value so subsequent decrements and untouched series stay intact.
-        for (composite, _, _, value) in self.snapshotter.snapshot().into_vec() {
+        let series = self.snapshotter.snapshot().into_hashmap();
+        for (composite, (_, _, value)) in &series {
             if let DebugValue::Gauge(gauge) = value {
-                let raw = gauge.into_inner();
                 self.recorder
                     .register_gauge(composite.key(), &RESTORE_METADATA)
-                    .set(raw);
-                if composite.key() == &target {
-                    found = Some(raw);
-                }
+                    .set(gauge.into_inner());
             }
         }
+        let found = match series.get(&CompositeKey::new(MetricKind::Gauge, target.clone())) {
+            Some((_, _, DebugValue::Gauge(gauge))) => Some(gauge.into_inner()),
+            _ => None,
+        };
         found.unwrap_or_else(|| panic!("missing gauge {target}"))
     }
 }

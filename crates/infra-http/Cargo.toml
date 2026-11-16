@@ -27,6 +27,7 @@ shared-rules = { workspace = true }
 serde_with = { workspace = true, features = ["std", "macros"] }
 axum = { workspace = true, features = ["http1", "tokio", "matched-path", "original-uri", "tower-log", "tracing", "json", "query"] }
 mime = { workspace = true }
+itertools = { workspace = true, features = ["use_std"] }
 axum-tracing-opentelemetry = { workspace = true, features = ["tracing_level_info"] }
 health = { workspace = true }
 # template:begin inbound-webhooks:http-webhooks-dependency
@@ -83,7 +84,6 @@ http = { workspace = true }
 hyper = { workspace = true, features = ["client", "http2"] }
 rcgen = { workspace = true, features = ["pem", "crypto", "aws_lc_rs"] }
 # template:end grpc:http-tls-test-dependencies
-itertools = { workspace = true, features = ["use_std"] }
 uuid = { workspace = true, features = ["std"] }
 axum-test = { workspace = true }
 futures-util = { workspace = true, features = ["std"] }

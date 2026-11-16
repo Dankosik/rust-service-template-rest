@@ -212,7 +212,8 @@ mod tests {
     use super::{Document, JwtAlgorithm, TokenProfile};
     use crate::{
         jwks::tests::{ensure_crypto_provider, jwk, rsa_signing},
-        test_metrics::Diagnostics,
+        test_helpers::runtime,
+        test_metrics::{Diagnostics, labeled},
     };
 
     #[test]
@@ -475,10 +476,7 @@ mod tests {
         let metadata = format!(
             r#"{{"issuer":"https://{FIXTURE_HOST}:PORT/tenant","jwks_uri":"https://{FIXTURE_HOST}:PORT/keys?tenant=private"}}"#
         );
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
+        let runtime = runtime(false);
         let port = metrics::with_local_recorder(diagnostics.recorder(), || {
             tracing::dispatcher::with_default(&dispatch, || {
                 runtime.block_on(async {
@@ -547,11 +545,7 @@ mod tests {
         let _registration_anchor =
             tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         let dispatch = diagnostics.dispatch();
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .start_paused(true)
-            .build()
-            .unwrap();
+        let runtime = runtime(true);
         metrics::with_local_recorder(diagnostics.recorder(), || {
             tracing::dispatcher::with_default(&dispatch, || {
                 runtime.block_on(async {
@@ -587,11 +581,7 @@ mod tests {
         assert_eq!(samples.len(), 2);
         assert_eq!(spans.len(), 2);
         for (index, outcome) in ["cancelled", "provider_timeout"].into_iter().enumerate() {
-            assert!(
-                samples[index]
-                    .labels()
-                    .any(|label| label.key() == "outcome" && label.value() == outcome)
-            );
+            assert!(labeled(&samples[index], &[("outcome", outcome)]));
             assert!(spans[index].ends_with(&format!(
                 "error.type=\"{outcome}\";otel.status_code=\"ERROR\";"
             )));

@@ -1,7 +1,7 @@
 use super::*;
 use crate::LoadOptions;
 use crate::load::{Error, load_from};
-use crate::test_support::{BUILD, assert_secret_in_file, env};
+use crate::test_support::{BUILD, assert_secret_in_file, env, load_env};
 use crate::validate::{ValidationErrors, admit_with};
 use std::assert_matches;
 
@@ -129,23 +129,18 @@ fn service_auth_environment_decodes_and_the_signing_key_stays_secret() {
     use secrecy::ExposeSecret as _;
 
     let trust = r#"{"orders": {"keys": []}}"#;
-    let cfg = load_from(
-        &LoadOptions::default(),
-        BUILD,
-        env(&[
-            ("APP__APP__ENV", "production"),
-            ("APP__GRPC__ENABLED", "true"),
-            ("APP__GRPC__ADDR", "127.0.0.1:0"),
-            ("APP__GRPC__SECURITY", "plaintext"),
-            ("APP__SERVICE_AUTH__MODE", "jwt"),
-            ("APP__SERVICE_AUTH__NAME", "catalog"),
-            ("APP__SERVICE_AUTH__JWT_TYPE", "example-svc+jwt"),
-            ("APP__SERVICE_AUTH__TRUST", trust),
-            ("APP__SERVICE_AUTH__KEY_ID", "catalog/production/2026-10"),
-            ("APP__SERVICE_AUTH__PRIVATE_KEY", "env-signing-key"),
-        ]),
-    )
-    .unwrap();
+    let cfg = load_env(&[
+        ("APP__APP__ENV", "production"),
+        ("APP__GRPC__ENABLED", "true"),
+        ("APP__GRPC__ADDR", "127.0.0.1:0"),
+        ("APP__GRPC__SECURITY", "plaintext"),
+        ("APP__SERVICE_AUTH__MODE", "jwt"),
+        ("APP__SERVICE_AUTH__NAME", "catalog"),
+        ("APP__SERVICE_AUTH__JWT_TYPE", "example-svc+jwt"),
+        ("APP__SERVICE_AUTH__TRUST", trust),
+        ("APP__SERVICE_AUTH__KEY_ID", "catalog/production/2026-10"),
+        ("APP__SERVICE_AUTH__PRIVATE_KEY", "env-signing-key"),
+    ]);
     let crate::ServiceAuthConfig::Jwt {
         name,
         jwt_type,

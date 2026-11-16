@@ -315,11 +315,7 @@ mod tests {
 
     #[test]
     fn sealing_replay_metadata_after_the_handler_trusts_only_provenance() {
-        let mut replay = Response::new(Body::empty());
-        *replay.status_mut() = StatusCode::CREATED;
-        replay
-            .headers_mut()
-            .insert(REPLAYED_HEADER, HeaderValue::from_static("forged"));
+        let replay = (StatusCode::CREATED, [(REPLAYED_HEADER, "forged")]).into_response();
         let replay = super::super::execute::mark_provenance(replay, Provenance::Replayed);
         let replay = seal_replay_metadata(replay, "test");
         assert_eq!(
@@ -328,20 +324,12 @@ mod tests {
         );
         assert_eq!(replay.headers().get_all(REPLAYED_HEADER).iter().count(), 1);
 
-        let mut executed = Response::new(Body::empty());
-        *executed.status_mut() = StatusCode::CREATED;
-        executed
-            .headers_mut()
-            .insert(REPLAYED_HEADER, HeaderValue::from_static("forged"));
+        let executed = (StatusCode::CREATED, [(REPLAYED_HEADER, "forged")]).into_response();
         let executed = super::super::execute::mark_provenance(executed, Provenance::Executed);
         let executed = seal_replay_metadata(executed, "test");
         assert!(!executed.headers().contains_key(REPLAYED_HEADER));
 
-        let mut failure = Response::new(Body::empty());
-        *failure.status_mut() = StatusCode::BAD_REQUEST;
-        failure
-            .headers_mut()
-            .insert(REPLAYED_HEADER, HeaderValue::from_static("forged"));
+        let failure = (StatusCode::BAD_REQUEST, [(REPLAYED_HEADER, "forged")]).into_response();
         let failure = seal_replay_metadata(failure, "test");
         assert_eq!(failure.status(), StatusCode::BAD_REQUEST);
         assert!(!failure.headers().contains_key(REPLAYED_HEADER));

@@ -370,9 +370,9 @@ impl AttemptOutcome {
 mod tests {
     use axum::http::StatusCode;
     use axum::http::header::{CONTENT_TYPE, RETRY_AFTER};
-    use http_body_util::BodyExt;
 
     use super::*;
+    use crate::test_support::body_json;
 
     fn scope() -> ScopeKey {
         ScopeKey::from_digest([1; 32])
@@ -418,13 +418,7 @@ mod tests {
             assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
             assert_eq!(response.headers()[RETRY_AFTER], "1");
             assert_eq!(response.headers()[CONTENT_TYPE], "application/problem+json");
-            let body = response
-                .into_body()
-                .collect()
-                .await
-                .expect("body")
-                .to_bytes();
-            let problem: serde_json::Value = serde_json::from_slice(&body).expect("problem");
+            let problem = body_json(response).await;
             assert_eq!(problem["code"], "idempotency_unavailable");
         }
     }
@@ -440,14 +434,7 @@ mod tests {
             "application/problem+json"
         );
         assert!(answer.response.headers().get(RETRY_AFTER).is_none());
-        let body = answer
-            .response
-            .into_body()
-            .collect()
-            .await
-            .expect("body")
-            .to_bytes();
-        let problem: serde_json::Value = serde_json::from_slice(&body).expect("problem");
+        let problem = body_json(answer.response).await;
         assert_eq!(problem["code"], "internal_error");
     }
 }

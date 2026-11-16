@@ -2,6 +2,7 @@ use metrics::{Key, Level, Metadata, Recorder as _};
 use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
 
 use super::*;
+use crate::test_metrics::{self, Series};
 
 const RESTORE_METADATA: Metadata<'static> = Metadata::new(module_path!(), Level::INFO, None);
 
@@ -20,30 +21,26 @@ impl TestMetrics {
         }
     }
 
-    fn snapshot(&self) -> Vec<(metrics_util::CompositeKey, DebugValue)> {
+    fn snapshot(&self) -> Series {
         // `Snapshotter::snapshot` resets counters and gauges to zero; restore
         // them so repeated assertions see retained gauges and cumulative totals.
-        self.snapshotter
-            .snapshot()
-            .into_vec()
-            .into_iter()
-            .map(|(composite, _, _, value)| {
-                match &value {
-                    DebugValue::Counter(count) if *count != 0 => {
-                        self.recorder
-                            .register_counter(composite.key(), &RESTORE_METADATA)
-                            .increment(*count);
-                    }
-                    DebugValue::Gauge(gauge) => {
-                        self.recorder
-                            .register_gauge(composite.key(), &RESTORE_METADATA)
-                            .set(gauge.into_inner());
-                    }
-                    _ => {}
+        let series = self.snapshotter.snapshot().into_hashmap();
+        for (composite, (_, _, value)) in &series {
+            match value {
+                DebugValue::Counter(count) if *count != 0 => {
+                    self.recorder
+                        .register_counter(composite.key(), &RESTORE_METADATA)
+                        .increment(*count);
                 }
-                (composite, value)
-            })
-            .collect()
+                DebugValue::Gauge(gauge) => {
+                    self.recorder
+                        .register_gauge(composite.key(), &RESTORE_METADATA)
+                        .set(gauge.into_inner());
+                }
+                _ => {}
+            }
+        }
+        series
     }
 
     fn gauge(&self, name: &str) -> f64 {
@@ -51,22 +48,11 @@ impl TestMetrics {
             format!("postgres_maintenance_{name}"),
             &[("population", "jobs")],
         );
-        self.snapshot()
-            .into_iter()
-            .find_map(|(composite, value)| match value {
-                DebugValue::Gauge(gauge) if composite.key() == &target => Some(gauge.into_inner()),
-                _ => None,
-            })
-            .unwrap_or_else(|| panic!("missing {target}"))
+        test_metrics::gauge(&self.snapshot(), &target).unwrap_or_else(|| panic!("missing {target}"))
     }
 
     fn counter(&self, target: &Key) -> u64 {
-        self.snapshot()
-            .into_iter()
-            .find_map(|(composite, value)| match value {
-                DebugValue::Counter(count) if composite.key() == target => Some(count),
-                _ => None,
-            })
+        test_metrics::counter(&self.snapshot(), target)
             .unwrap_or_else(|| panic!("missing {target}"))
     }
 

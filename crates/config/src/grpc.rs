@@ -121,8 +121,7 @@ impl GrpcInput {
             violations.check(duration_range(
                 "grpc.admission_wait",
                 self.admission_wait,
-                Duration::ZERO,
-                self.request_timeout,
+                Duration::ZERO..=self.request_timeout,
             ));
         }
         violations.check(in_flight_range("grpc.max_in_flight", self.max_in_flight));

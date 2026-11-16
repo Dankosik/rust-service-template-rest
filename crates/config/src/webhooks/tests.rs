@@ -6,7 +6,7 @@ use secrecy::SecretString;
 use super::{WebhookEndpointConfig, WebhooksConfig};
 use crate::LoadOptions;
 use crate::load::{Error, load_from};
-use crate::test_support::{BUILD, assert_secret_in_file, env, write};
+use crate::test_support::{BUILD, assert_secret_in_file, env, load_env, write};
 use crate::validate::validate_with;
 
 #[test]
@@ -71,26 +71,21 @@ fn rejects_empty_signing_secrets() {
 fn webhooks_environment_builds_endpoint_local_signing_keys() {
     use secrecy::ExposeSecret as _;
 
-    let cfg = load_from(
-        &LoadOptions::default(),
-        BUILD,
-        env(&[
-            (
-                "APP__WEBHOOKS__ENDPOINTS__PARTNER__URL",
-                "https://partner.example/events",
-            ),
-            (
-                "APP__WEBHOOKS__ENDPOINTS__PARTNER__SECRET",
-                "fixture-current-secret",
-            ),
-            (
-                "APP__WEBHOOKS__ENDPOINTS__PARTNER__PREVIOUS_SECRET",
-                "fixture-previous-secret",
-            ),
-            ("APP__WEBHOOKS__MAX_CONCURRENT_DELIVERIES", "4"),
-        ]),
-    )
-    .unwrap();
+    let cfg = load_env(&[
+        (
+            "APP__WEBHOOKS__ENDPOINTS__PARTNER__URL",
+            "https://partner.example/events",
+        ),
+        (
+            "APP__WEBHOOKS__ENDPOINTS__PARTNER__SECRET",
+            "fixture-current-secret",
+        ),
+        (
+            "APP__WEBHOOKS__ENDPOINTS__PARTNER__PREVIOUS_SECRET",
+            "fixture-previous-secret",
+        ),
+        ("APP__WEBHOOKS__MAX_CONCURRENT_DELIVERIES", "4"),
+    ]);
     assert_eq!(
         cfg.webhooks
             .max_concurrent_deliveries
@@ -210,22 +205,17 @@ fn webhooks_blank_environment_secret_is_refused() {
 
 #[test]
 fn webhooks_blank_previous_secret_ends_the_rotation() {
-    let cfg = load_from(
-        &LoadOptions::default(),
-        BUILD,
-        env(&[
-            (
-                "APP__WEBHOOKS__ENDPOINTS__PARTNER__URL",
-                "https://partner.example/events",
-            ),
-            (
-                "APP__WEBHOOKS__ENDPOINTS__PARTNER__SECRET",
-                "fixture-current-secret",
-            ),
-            ("APP__WEBHOOKS__ENDPOINTS__PARTNER__PREVIOUS_SECRET", "  "),
-        ]),
-    )
-    .unwrap();
+    let cfg = load_env(&[
+        (
+            "APP__WEBHOOKS__ENDPOINTS__PARTNER__URL",
+            "https://partner.example/events",
+        ),
+        (
+            "APP__WEBHOOKS__ENDPOINTS__PARTNER__SECRET",
+            "fixture-current-secret",
+        ),
+        ("APP__WEBHOOKS__ENDPOINTS__PARTNER__PREVIOUS_SECRET", "  "),
+    ]);
     assert!(cfg.webhooks.endpoints["partner"].previous_secret.is_none());
 }
 

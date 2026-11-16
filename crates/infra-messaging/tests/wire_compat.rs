@@ -13,8 +13,6 @@ use std::env;
 use std::fs;
 
 use async_nats::HeaderMap;
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD;
 use bytes::Bytes;
 use domain_events::{Event, EventPayload};
 use infra_messaging::wire::{
@@ -23,8 +21,11 @@ use infra_messaging::wire::{
 };
 use infra_messaging::{Registry, Route};
 use serde::Deserialize;
+use serde_with::base64::Base64;
+use serde_with::serde_as;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
+use time::macros::utc_datetime;
 
 const FIXTURE_PATH_ENV: &str = "GO_WIRE_FIXTURES";
 const EXPORT_PATH_ENV: &str = "GO_WIRE_RUST_EXPORT";
@@ -40,13 +41,14 @@ struct FixtureSet {
 struct FixtureCase {
     name: String,
     inbound: WireRecord,
-    decoded: DecodedRecord,
+    decoded: EventRecord,
     reencoded: WireRecord,
     reencoded_go_decodes: bool,
     dlq: WireRecord,
     restored: EventRecord,
 }
 
+#[serde_as]
 #[derive(Debug, Deserialize)]
 struct EventRecord {
     subject: String,
@@ -57,30 +59,31 @@ struct EventRecord {
     created_at: String,
     unix_seconds: i64,
     nanosecond: u32,
-    body_base64: String,
+    #[serde(rename = "body_base64")]
+    #[serde_as(as = "Base64")]
+    body: Vec<u8>,
 }
 
+impl EventRecord {
+    fn occurred_at(&self) -> OffsetDateTime {
+        OffsetDateTime::from_unix_timestamp_nanos(
+            i128::from(self.unix_seconds) * 1_000_000_000 + i128::from(self.nanosecond),
+        )
+        .expect("fixture instant is representable")
+    }
+}
+
+#[serde_as]
 #[derive(Debug, Deserialize, serde::Serialize)]
 struct WireRecord {
     subject: String,
     headers: BTreeMap<String, String>,
-    body_base64: String,
+    #[serde(rename = "body_base64")]
+    #[serde_as(as = "Base64")]
+    body: Vec<u8>,
     stream: String,
     stream_sequence: u64,
     stored_at: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct DecodedRecord {
-    subject: String,
-    message_id: String,
-    publication_id: String,
-    event_type: String,
-    schema: String,
-    created_at: String,
-    unix_seconds: i64,
-    nanosecond: u32,
-    body_base64: String,
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
@@ -145,7 +148,7 @@ fn fixtures() -> FixtureSet {
 )]
 fn verify_go_record_in_rust(fixture: &FixtureCase) {
     let inbound_headers = headers(&fixture.inbound.headers);
-    let inbound_body = body(&fixture.inbound.body_base64);
+    let inbound_body = Bytes::from(fixture.inbound.body.clone());
     let decoded = decode_envelope(
         &fixture.inbound.subject,
         &inbound_headers,
@@ -172,20 +175,14 @@ fn verify_go_record_in_rust(fixture: &FixtureCase) {
         fixture.name
     );
     assert_eq!(
-        decoded.occurred_at().unix_timestamp(),
-        fixture.decoded.unix_seconds,
-        "{} UTC seconds",
-        fixture.name
-    );
-    assert_eq!(
-        decoded.occurred_at().nanosecond(),
-        fixture.decoded.nanosecond,
-        "{} UTC nanoseconds",
+        decoded.occurred_at(),
+        fixture.decoded.occurred_at(),
+        "{} UTC instant",
         fixture.name
     );
     assert_eq!(
         decoded.payload().as_ref(),
-        body(&fixture.decoded.body_base64).as_ref(),
+        fixture.decoded.body.as_slice(),
         "{} raw payload",
         fixture.name
     );
@@ -211,7 +208,7 @@ fn verify_go_record_in_rust(fixture: &FixtureCase) {
         let reencoded = decode_envelope(
             &fixture.reencoded.subject,
             &headers(&fixture.reencoded.headers),
-            body(&fixture.reencoded.body_base64),
+            Bytes::from(fixture.reencoded.body.clone()),
         )
         .unwrap_or_else(|error| {
             panic!(
@@ -220,20 +217,14 @@ fn verify_go_record_in_rust(fixture: &FixtureCase) {
             )
         });
         assert_eq!(
-            reencoded.occurred_at().unix_timestamp(),
-            fixture.decoded.unix_seconds,
-            "{} re-emitted UTC seconds",
-            fixture.name
-        );
-        assert_eq!(
-            reencoded.occurred_at().nanosecond(),
-            fixture.decoded.nanosecond,
-            "{} re-emitted UTC nanoseconds",
+            reencoded.occurred_at(),
+            fixture.decoded.occurred_at(),
+            "{} re-emitted UTC instant",
             fixture.name
         );
         assert_eq!(
             reencoded.payload().as_ref(),
-            body(&fixture.decoded.body_base64).as_ref(),
+            fixture.decoded.body.as_slice(),
             "{} re-emitted raw payload",
             fixture.name
         );
@@ -270,7 +261,7 @@ fn verify_go_record_in_rust(fixture: &FixtureCase) {
 
     let restored = restore_dead_letter(DeadLetterRecord {
         headers: headers(&fixture.dlq.headers),
-        payload: body(&fixture.dlq.body_base64),
+        payload: Bytes::from(fixture.dlq.body.clone()),
         stream: fixture.dlq.stream.clone(),
         stream_sequence: fixture.dlq.stream_sequence,
         stored_at: parse_timestamp(&fixture.dlq.stored_at),
@@ -307,15 +298,9 @@ fn verify_go_record_in_rust(fixture: &FixtureCase) {
         fixture.name
     );
     assert_eq!(
-        restored.occurred_at().unix_timestamp(),
-        fixture.restored.unix_seconds,
-        "{} restored UTC seconds",
-        fixture.name
-    );
-    assert_eq!(
-        restored.occurred_at().nanosecond(),
-        fixture.restored.nanosecond,
-        "{} restored UTC nanoseconds",
+        restored.occurred_at(),
+        fixture.restored.occurred_at(),
+        "{} restored UTC instant",
         fixture.name
     );
     assert_eq!(
@@ -325,7 +310,7 @@ fn verify_go_record_in_rust(fixture: &FixtureCase) {
     );
     assert_eq!(
         restored.payload().as_ref(),
-        body(&fixture.restored.body_base64).as_ref(),
+        fixture.restored.body.as_slice(),
         "{} restored raw payload",
         fixture.name
     );
@@ -340,7 +325,7 @@ fn verify_production_limits(fixtures: &FixtureSet) {
     let decoded = decode_envelope(
         &boundary.inbound.subject,
         &headers(&boundary.inbound.headers),
-        body(&boundary.inbound.body_base64),
+        Bytes::from(boundary.inbound.body.clone()),
     )
     .expect("Go's 256-byte identity and v65535 remain admitted");
     assert_eq!(decoded.message_id().len(), 256);
@@ -367,7 +352,7 @@ fn verify_production_limits(fixtures: &FixtureSet) {
         decode_envelope(
             &fixtures.cases[0].inbound.subject,
             &oversized_headers,
-            body(&fixtures.cases[0].inbound.body_base64),
+            Bytes::from(fixtures.cases[0].inbound.body.clone()),
         )
         .is_err(),
         "production decoding enforces the 8 KiB header bound"
@@ -385,7 +370,7 @@ fn rust_production_records() -> Vec<WireRecord> {
     vec![WireRecord {
         subject: prepared.subject().to_owned(),
         headers: header_values(&headers),
-        body_base64: STANDARD.encode(prepared.payload()),
+        body: prepared.payload().to_vec(),
         stream: "RUST_EXPORTS".to_owned(),
         stream_sequence: 1,
         stored_at: "2026-09-26T12:37:00.000000003Z".to_owned(),
@@ -395,7 +380,7 @@ fn rust_production_records() -> Vec<WireRecord> {
 fn bridge_event(id: impl Into<String>) -> Event<BridgePayload> {
     Event {
         id: id.into(),
-        occurred_at: parse_timestamp("2026-09-26T12:34:56.123456789Z").to_utc(),
+        occurred_at: utc_datetime!(2026-09-26 12:34:56.123456789),
         payload: BridgePayload {
             amount: 1.0,
             escaped: "\\u0041".to_owned(),
@@ -424,13 +409,6 @@ fn header_values(headers: &HeaderMap) -> BTreeMap<String, String> {
             (name.to_string(), values[0].to_string())
         })
         .collect()
-}
-
-fn body(encoded: &str) -> Bytes {
-    STANDARD
-        .decode(encoded)
-        .expect("fixture body is base64")
-        .into()
 }
 
 fn parse_timestamp(value: &str) -> OffsetDateTime {

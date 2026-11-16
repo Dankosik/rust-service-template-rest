@@ -134,10 +134,7 @@ impl ReplayableResponse {
     pub(super) fn into_response(self) -> Response {
         let mut response = Response::new(Body::from(self.body));
         *response.status_mut() = self.status;
-        let headers = response.headers_mut();
-        for (name, value) in self.headers {
-            headers.append(name, value);
-        }
+        response.headers_mut().extend(self.headers);
         response
     }
 }

@@ -1,7 +1,5 @@
 use super::*;
-use crate::LoadOptions;
-use crate::load::load_from;
-use crate::test_support::{BUILD, env};
+use crate::test_support::load_env;
 use crate::validate::validate_with;
 
 fn parse(toml: &str) -> Result<HttpIdempotencyConfig, toml::de::Error> {
@@ -100,12 +98,7 @@ fn the_retention_key_is_not_treated_as_secret_like() {
 
 #[test]
 fn http_idempotency_environment_sets_the_retention() {
-    let cfg = load_from(
-        &LoadOptions::default(),
-        BUILD,
-        env(&[("APP__HTTP_IDEMPOTENCY__RETENTION", "2h")]),
-    )
-    .unwrap();
+    let cfg = load_env(&[("APP__HTTP_IDEMPOTENCY__RETENTION", "2h")]);
     assert_eq!(
         cfg.http_idempotency.retention,
         Some(Duration::from_hours(2))

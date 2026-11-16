@@ -290,8 +290,7 @@ impl Verifier {
         {
             return Err(Reason::Audience);
         }
-        let (Some(NumericDate(issued_at)), Some(NumericDate(expires_at))) =
-            (claims.iat, claims.exp)
+        let Some((NumericDate(issued_at), NumericDate(expires_at))) = claims.iat.zip(claims.exp)
         else {
             return Err(Reason::Claims);
         };
@@ -471,12 +470,25 @@ fn present<'de, D: Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error>
 mod tests {
     use super::*;
     use crate::test_support::{TestKey, registry};
+    use serde_json::{Value::Null, json};
     use std::assert_matches;
 
     const NOW: u64 = 1_800_000_000;
     const TYPE: &str = "example-svc+jwt";
 
-    type Change = Box<dyn Fn(&mut serde_json::Value)>;
+    type Changes<'a> = &'a [(&'a str, Option<serde_json::Value>)];
+
+    /// `None` removes the member.
+    fn apply(target: &mut serde_json::Value, changes: Changes<'_>) {
+        for (member, value) in changes {
+            match value {
+                Some(value) => target[*member] = value.clone(),
+                None => {
+                    target.as_object_mut().unwrap().remove(*member);
+                }
+            }
+        }
+    }
 
     struct Case {
         orders: TestKey,
@@ -643,91 +655,42 @@ mod tests {
     #[test]
     fn audience_lifetime_and_identity_follow_the_contract() {
         let case = Case::new();
-        let cases: Vec<(Change, Reason)> = vec![
+        let cases: [(Changes<'_>, Reason); 17] = [
+            (&[("aud", Some(json!("inventory")))], Reason::Audience),
             (
-                Box::new(|claims| claims["aud"] = "inventory".into()),
+                &[("aud", Some(json!(["catalog", "billing"])))],
                 Reason::Audience,
             ),
+            (&[("aud", Some(json!([])))], Reason::Audience),
+            (&[("aud", None)], Reason::Audience),
+            (&[("sub", Some(json!("billing")))], Reason::Subject),
+            (&[("sub", None)], Reason::Subject),
+            (&[("iss", None)], Reason::Issuer),
+            (&[("iat", None)], Reason::Claims),
+            (&[("exp", None)], Reason::Claims),
+            (&[("exp", Some(json!(NOW + 61)))], Reason::Lifetime),
+            (&[("exp", Some(json!(NOW)))], Reason::Lifetime),
             (
-                Box::new(|claims| claims["aud"] = serde_json::json!(["catalog", "billing"])),
-                Reason::Audience,
-            ),
-            (
-                Box::new(|claims| claims["aud"] = serde_json::json!([])),
-                Reason::Audience,
-            ),
-            (
-                Box::new(|claims| {
-                    claims.as_object_mut().unwrap().remove("aud");
-                }),
-                Reason::Audience,
-            ),
-            (
-                Box::new(|claims| claims["sub"] = "billing".into()),
-                Reason::Subject,
-            ),
-            (
-                Box::new(|claims| {
-                    claims.as_object_mut().unwrap().remove("sub");
-                }),
-                Reason::Subject,
-            ),
-            (
-                Box::new(|claims| {
-                    claims.as_object_mut().unwrap().remove("iss");
-                }),
-                Reason::Issuer,
-            ),
-            (
-                Box::new(|claims| {
-                    claims.as_object_mut().unwrap().remove("iat");
-                }),
-                Reason::Claims,
-            ),
-            (
-                Box::new(|claims| {
-                    claims.as_object_mut().unwrap().remove("exp");
-                }),
-                Reason::Claims,
-            ),
-            (
-                Box::new(|claims| claims["exp"] = (NOW + 61).into()),
-                Reason::Lifetime,
-            ),
-            (
-                Box::new(|claims| claims["exp"] = NOW.into()),
-                Reason::Lifetime,
-            ),
-            (
-                Box::new(|claims| {
-                    claims["iat"] = (NOW - 90).into();
-                    claims["exp"] = (NOW - 30).into();
-                }),
+                &[
+                    ("iat", Some(json!(NOW - 90))),
+                    ("exp", Some(json!(NOW - 30))),
+                ],
                 Reason::Expired,
             ),
             (
-                Box::new(|claims| {
-                    claims["iat"] = (NOW + 31).into();
-                    claims["exp"] = (NOW + 90).into();
-                }),
+                &[
+                    ("iat", Some(json!(NOW + 31))),
+                    ("exp", Some(json!(NOW + 90))),
+                ],
                 Reason::NotYetValid,
             ),
-            (
-                Box::new(|claims| claims["nbf"] = (NOW + 31).into()),
-                Reason::NotYetValid,
-            ),
-            (
-                Box::new(|claims| claims["nbf"] = serde_json::Value::Null),
-                Reason::Claims,
-            ),
-            (Box::new(|claims| claims["iss"] = 7.into()), Reason::Claims),
-            (
-                Box::new(|claims| claims["exp"] = "soon".into()),
-                Reason::Claims,
-            ),
+            (&[("nbf", Some(json!(NOW + 31)))], Reason::NotYetValid),
+            (&[("nbf", Some(Null))], Reason::Claims),
+            (&[("iss", Some(json!(7)))], Reason::Claims),
+            (&[("exp", Some(json!("soon")))], Reason::Claims),
         ];
-        for (change, expected) in cases {
-            let token = case.signed(|_, claims| change(claims));
+        for (changes, expected) in cases {
+            let token = case.signed(|_, claims| apply(claims, changes));
             assert_eq!(case.check(&token), Err(expected), "{token}");
         }
         let token = case.signed(|_, claims| {
@@ -794,74 +757,26 @@ mod tests {
     #[test]
     fn the_header_selects_nothing_but_the_contract_algorithm_type_and_kid() {
         let case = Case::new();
-        let cases: Vec<(Change, Reason)> = vec![
-            (
-                Box::new(|header| header["alg"] = "none".into()),
-                Reason::Algorithm,
-            ),
-            (
-                Box::new(|header| header["alg"] = "es256".into()),
-                Reason::Algorithm,
-            ),
-            (Box::new(|header| header["alg"] = 7.into()), Reason::Header),
-            (
-                Box::new(|header| {
-                    header.as_object_mut().unwrap().remove("alg");
-                }),
-                Reason::Header,
-            ),
-            (
-                Box::new(|header| header["alg"] = "HS256".into()),
-                Reason::Algorithm,
-            ),
-            (
-                Box::new(|header| header["alg"] = "RS256".into()),
-                Reason::Algorithm,
-            ),
-            (
-                Box::new(|header| header["typ"] = "JWT".into()),
-                Reason::Type,
-            ),
-            (
-                Box::new(|header| header["typ"] = "at+jwt".into()),
-                Reason::Type,
-            ),
-            (
-                Box::new(|header| {
-                    header.as_object_mut().unwrap().remove("typ");
-                }),
-                Reason::Type,
-            ),
-            (
-                Box::new(|header| {
-                    header.as_object_mut().unwrap().remove("kid");
-                }),
-                Reason::KeyId,
-            ),
-            (Box::new(|header| header["kid"] = "".into()), Reason::KeyId),
-            (
-                Box::new(|header| header["crit"] = serde_json::json!(["exp"])),
-                Reason::Header,
-            ),
-            (
-                Box::new(|header| header["crit"] = serde_json::json!([])),
-                Reason::Header,
-            ),
-            (
-                Box::new(|header| header["crit"] = serde_json::Value::Null),
-                Reason::Header,
-            ),
-            (
-                Box::new(|header| header["kid"] = serde_json::Value::Null),
-                Reason::KeyId,
-            ),
-            (
-                Box::new(|header| header["typ"] = serde_json::Value::Null),
-                Reason::Type,
-            ),
+        let cases: [(Changes<'_>, Reason); 16] = [
+            (&[("alg", Some(json!("none")))], Reason::Algorithm),
+            (&[("alg", Some(json!("es256")))], Reason::Algorithm),
+            (&[("alg", Some(json!(7)))], Reason::Header),
+            (&[("alg", None)], Reason::Header),
+            (&[("alg", Some(json!("HS256")))], Reason::Algorithm),
+            (&[("alg", Some(json!("RS256")))], Reason::Algorithm),
+            (&[("typ", Some(json!("JWT")))], Reason::Type),
+            (&[("typ", Some(json!("at+jwt")))], Reason::Type),
+            (&[("typ", None)], Reason::Type),
+            (&[("kid", None)], Reason::KeyId),
+            (&[("kid", Some(json!("")))], Reason::KeyId),
+            (&[("crit", Some(json!(["exp"])))], Reason::Header),
+            (&[("crit", Some(json!([])))], Reason::Header),
+            (&[("crit", Some(Null))], Reason::Header),
+            (&[("kid", Some(Null))], Reason::KeyId),
+            (&[("typ", Some(Null))], Reason::Type),
         ];
-        for (change, expected) in cases {
-            let token = case.signed(|header, _| change(header));
+        for (changes, expected) in cases {
+            let token = case.signed(|header, _| apply(header, changes));
             assert_eq!(case.check(&token), Err(expected), "{token}");
         }
         // A key embedded in the header is never used: billing's public key

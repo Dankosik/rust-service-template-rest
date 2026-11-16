@@ -700,7 +700,7 @@ async fn target_and_caller_headers_reach_the_wire_unchanged() {
         .execute(request, deadline())
         .await
         .expect("captured request response");
-    let wire = String::from_utf8(captured.await.expect("captured request")).expect("ASCII request");
+    let wire = captured.await.expect("captured request");
     assert!(wire.starts_with("GET //other.fixture.test/items%23safe?q=%23 HTTP/1.1\r\n"));
     let wire = wire.to_ascii_lowercase();
     assert!(wire.contains("host: provider.fixture.test\r\n"));
@@ -724,7 +724,7 @@ async fn buffered_body_length_replaces_caller_framing_on_the_wire() {
         .execute(request, deadline())
         .await
         .expect("captured request response");
-    let wire = String::from_utf8(captured.await.expect("captured request")).expect("ASCII request");
+    let wire = captured.await.expect("captured request");
     assert!(wire.starts_with("POST /fixture HTTP/1.1\r\n"), "{wire}");
     let wire = wire.to_ascii_lowercase();
     assert!(wire.contains("content-length: 5\r\n"), "{wire}");
@@ -745,7 +745,7 @@ async fn the_client_sets_host_and_a_default_accept_on_the_wire() {
         )
         .await
         .expect("captured request response");
-    let wire = String::from_utf8(captured.await.expect("captured request")).expect("ASCII request");
+    let wire = captured.await.expect("captured request");
     assert!(wire.starts_with("GET /items HTTP/1.1\r\n"), "{wire}");
     let wire = wire.to_ascii_lowercase();
     assert!(
@@ -782,8 +782,9 @@ async fn an_empty_body_is_framed_by_its_method_on_the_wire() {
             .execute(request, deadline())
             .await
             .expect("captured request response");
-        let wire = String::from_utf8(captured.await.expect("captured request"))
-            .expect("ASCII request")
+        let wire = captured
+            .await
+            .expect("captured request")
             .to_ascii_lowercase();
         let lengths = wire
             .lines()
@@ -828,7 +829,7 @@ async fn opted_in_client_sends_the_context_of_its_named_client_span() {
         .execute(request, deadline())
         .await
         .expect("captured request response");
-    let wire = String::from_utf8(captured.await.expect("captured request")).expect("ASCII request");
+    let wire = captured.await.expect("captured request");
     server.await.expect("capture fixture server succeeds");
 
     let spans = exporter.get_finished_spans().expect("exported spans");

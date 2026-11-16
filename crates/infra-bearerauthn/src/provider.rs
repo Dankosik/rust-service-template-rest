@@ -664,6 +664,21 @@ mod tests {
         request
     }
 
+    /// A `200 OK` response whose `content-length` matches `body`; an empty
+    /// `content_type` omits the header.
+    fn http_ok(content_type: &str, body: &str) -> Vec<u8> {
+        let content_type = if content_type.is_empty() {
+            String::new()
+        } else {
+            format!("content-type: {content_type}\r\n")
+        };
+        format!(
+            "HTTP/1.1 200 OK\r\n{content_type}content-length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes()
+    }
+
     fn fixture_client(address: std::net::SocketAddr, root: &[u8]) -> ProviderClient {
         new_fixture_client(FIXTURE_HOST, address, root, CancellationToken::new()).unwrap()
     }
@@ -717,18 +732,12 @@ mod tests {
         stream: tokio::net::TcpStream,
         acceptor: tokio_rustls::TlsAcceptor,
     ) -> Vec<u8> {
-        respond(
-            stream,
-            acceptor,
-            b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{}".to_vec(),
-            false,
-        )
-        .await
+        respond(stream, acceptor, http_ok("", "{}"), false).await
     }
 
     #[tokio::test(start_paused = true)]
     async fn stalled_dns_expires_at_connect_budget_then_same_client_uses_later_candidate() {
-        let response = b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{}".to_vec();
+        let response = http_ok("", "{}");
         let (address, root, server) = tls_server(response, false).await;
         // Reserve a refused endpoint without releasing its port to another test.
         let refused = tokio::net::TcpSocket::new_v4().unwrap();
@@ -874,15 +883,8 @@ mod tests {
     // template:begin oidc-jwt:authn-provider-tls-bounds-test
     #[tokio::test]
     async fn jwt_fixture_transport_uses_trusted_private_tls_and_enforces_body_and_time_bounds() {
-        for content_type in [
-            "",
-            "content-type: text/plain\r\n",
-            "content-type: application/json\r\n",
-        ] {
-            let response = format!(
-                "HTTP/1.1 200 OK\r\n{content_type}content-length: 11\r\n\r\n{{\"keys\":[]}}"
-            )
-            .into_bytes();
+        for content_type in ["", "text/plain", "application/json"] {
+            let response = http_ok(content_type, r#"{"keys":[]}"#);
             let (address, root, server) = tls_server(response, false).await;
             let endpoint = EndpointUrl::parse(&format!(
                 "https://{FIXTURE_HOST}:{}/keys?token=private%2Fvalue&x=1&x=2",
@@ -945,7 +947,7 @@ mod tests {
 
         use crate::test_metrics::Diagnostics;
 
-        let response = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 16\r\n\r\n{\"active\":false}".to_vec();
+        let response = http_ok("application/json", r#"{"active":false}"#);
         let (address, root, server) = tls_server(response, false).await;
         let body = fixture_client(address, &root)
             .post_introspection_form_json(
@@ -967,11 +969,8 @@ mod tests {
         let _registration_anchor =
             tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         let dispatch = diagnostics.dispatch();
-        for content_type in ["", "content-type: text/plain\r\n"] {
-            let response = format!(
-                "HTTP/1.1 200 OK\r\n{content_type}content-length: 16\r\n\r\n{{\"active\":false}}"
-            )
-            .into_bytes();
+        for content_type in ["", "text/plain"] {
+            let response = http_ok(content_type, r#"{"active":false}"#);
             let (address, root, server) = tls_server(response, false).await;
             assert_eq!(
                 fixture_client(address, &root)
@@ -1019,13 +1018,7 @@ mod tests {
                 // Never answer the ClientHello; observe the client release this socket.
                 while stalled.read(&mut buffer).await.unwrap() != 0 {}
                 let (stream, _) = listener.accept().await.unwrap();
-                respond(
-                    stream,
-                    acceptor,
-                    b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{}".to_vec(),
-                    false,
-                )
-                .await
+                respond(stream, acceptor, http_ok("", "{}"), false).await
             })
             .await
             .unwrap()

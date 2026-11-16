@@ -1,3 +1,4 @@
+use std::ops::RangeInclusive;
 use std::time::Duration;
 
 use crate::load::variable_name;
@@ -128,16 +129,15 @@ pub(crate) fn validate_with(
 pub(crate) fn duration_range(
     key: &str,
     value: Duration,
-    min: Duration,
-    max: Duration,
+    range: RangeInclusive<Duration>,
 ) -> Result<(), ValidationError> {
-    if value < min || value > max {
+    if !range.contains(&value) {
         return Err(ValidationError::new(
             key,
             format!(
                 "must be between {} and {}, got {}",
-                humantime::format_duration(min),
-                humantime::format_duration(max),
+                humantime::format_duration(*range.start()),
+                humantime::format_duration(*range.end()),
                 humantime::format_duration(value)
             ),
         ));
@@ -145,11 +145,19 @@ pub(crate) fn duration_range(
     Ok(())
 }
 
-pub(crate) fn int_range(key: &str, value: u64, min: u64, max: u64) -> Result<(), ValidationError> {
-    if value < min || value > max {
+pub(crate) fn int_range<T: Copy + PartialOrd + std::fmt::Display>(
+    key: &str,
+    value: T,
+    range: RangeInclusive<T>,
+) -> Result<(), ValidationError> {
+    if !range.contains(&value) {
         return Err(ValidationError::new(
             key,
-            format!("must be between {min} and {max}, got {value}"),
+            format!(
+                "must be between {} and {}, got {value}",
+                range.start(),
+                range.end()
+            ),
         ));
     }
     Ok(())
@@ -228,7 +236,7 @@ mod tests {
     #[case::maximum(10, true)]
     #[case::above_maximum(11, false)]
     fn int_range_is_inclusive(#[case] value: u64, #[case] valid: bool) {
-        assert_eq!(int_range("limit", value, 1, 10).is_ok(), valid);
+        assert_eq!(int_range("limit", value, 1..=10).is_ok(), valid);
     }
 
     #[rstest::rstest]
@@ -240,8 +248,7 @@ mod tests {
         let result = duration_range(
             "http.request_timeout",
             Duration::from_millis(milliseconds),
-            Duration::from_millis(100),
-            Duration::from_mins(10),
+            Duration::from_millis(100)..=Duration::from_mins(10),
         );
         assert_eq!(result.is_ok(), valid);
     }
@@ -251,8 +258,7 @@ mod tests {
         let err = duration_range(
             "http.request_timeout",
             Duration::from_millis(10),
-            Duration::from_millis(100),
-            Duration::from_mins(10),
+            Duration::from_millis(100)..=Duration::from_mins(10),
         )
         .unwrap_err();
         assert_eq!(

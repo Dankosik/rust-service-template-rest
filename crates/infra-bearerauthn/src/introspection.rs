@@ -348,7 +348,7 @@ mod tests {
             Arc, Mutex,
             atomic::{AtomicUsize, Ordering},
         },
-        time::{Duration, SystemTime, UNIX_EPOCH},
+        time::{Duration, UNIX_EPOCH},
     };
     use tokio::{
         net::TcpListener,
@@ -366,7 +366,7 @@ mod tests {
         claims::{ClaimPolicy, validate_introspection_claims},
         parse_bearer,
         provider::{ProviderClient, fixture_acceptor, new_fixture_client},
-        test_metrics::Diagnostics,
+        test_metrics::{Diagnostics, labeled},
     };
     use operation_context::{OperationContext, Stopped};
 
@@ -482,7 +482,10 @@ mod tests {
                 requests: Arc::new(Mutex::new(Vec::new())),
                 response: Arc::new(Mutex::new((
                     StatusCode::OK,
-                    Bytes::from(active_response("subject", epoch_now() + 600)),
+                    Bytes::from(active_response(
+                        "subject",
+                        jsonwebtoken::get_current_timestamp() + 600,
+                    )),
                 ))),
                 gate: Arc::clone(&gate),
             };
@@ -570,12 +573,6 @@ mod tests {
         }
     }
 
-    fn epoch_now() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-    }
     fn active_response(subject: &str, expiry: u64) -> Vec<u8> {
         serde_json::to_vec(&serde_json::json!({"active":true,"iss":"https://issuer.example","aud":"api","exp":expiry,"sub":subject,"scope":"read write"})).unwrap()
     }
@@ -778,7 +775,7 @@ mod tests {
         let independent = fixture.verifier(Some(cache_options(2)));
         fixture.respond(
             StatusCode::OK,
-            &active_response("new-subject", epoch_now() + 600),
+            &active_response("new-subject", jsonwebtoken::get_current_timestamp() + 600),
         );
         assert_eq!(
             verify(&independent, b"Bearer first")
@@ -834,7 +831,10 @@ mod tests {
             (br#"{"active":false}"#.to_vec(), Some(Failure::Invalid)),
             (br#"{"active":true}"#.to_vec(), Some(Failure::Invalid)),
             (b"{".to_vec(), Some(Failure::Unavailable)),
-            (active_response("subject", epoch_now() - 1), None),
+            (
+                active_response("subject", jsonwebtoken::get_current_timestamp() - 1),
+                None,
+            ),
         ] {
             fixture.respond(StatusCode::OK, &response);
             let before = fixture.calls();
@@ -849,18 +849,18 @@ mod tests {
     #[tokio::test]
     async fn concurrent_misses_share_provider_capacity_including_nonretained_success_and_errors() {
         let fixture = Fixture::new().await;
-        let oversized = serde_json::to_vec(&serde_json::json!({"active":true,"iss":"https://issuer.example","aud":"api","exp":epoch_now()+600,"sub":"subject","custom":"x".repeat(64*1024)})).unwrap();
+        let oversized = serde_json::to_vec(&serde_json::json!({"active":true,"iss":"https://issuer.example","aud":"api","exp":jsonwebtoken::get_current_timestamp()+600,"sub":"subject","custom":"x".repeat(64*1024)})).unwrap();
         for (status, response, expected, retained) in [
             (
                 StatusCode::OK,
-                active_response("subject", epoch_now() + 600),
+                active_response("subject", jsonwebtoken::get_current_timestamp() + 600),
                 None,
                 true,
             ),
             (StatusCode::OK, oversized, None, false),
             (
                 StatusCode::OK,
-                active_response("subject", epoch_now() - 1),
+                active_response("subject", jsonwebtoken::get_current_timestamp() - 1),
                 None,
                 false,
             ),
@@ -911,7 +911,7 @@ mod tests {
             if expected.is_some() {
                 fixture.respond(
                     StatusCode::OK,
-                    &active_response("recovered", epoch_now() + 600),
+                    &active_response("recovered", jsonwebtoken::get_current_timestamp() + 600),
                 );
                 assert_eq!(
                     verify(&verifier, b"Bearer shared").await.unwrap().subject(),
@@ -996,22 +996,13 @@ mod tests {
                 panic!("expected one inbound authentication outcome, got {counters:?}");
             };
             assert_eq!(key.name(), "authn_verifications_total");
-            for label in ["result", "failure"] {
-                assert!(
-                    key.labels()
-                        .any(|value| value.key() == label && value.value() == inbound)
-                );
-            }
+            assert!(labeled(key, &[("result", inbound), ("failure", inbound)]));
             let samples = diagnostics.take_histograms();
             let [sample] = samples.as_slice() else {
                 panic!("expected one provider histogram sample, got {samples:?}");
             };
             assert_eq!(sample.name(), "authn_provider_request_duration_seconds");
-            assert!(
-                sample
-                    .labels()
-                    .any(|label| label.key() == "outcome" && label.value() == provider)
-            );
+            assert!(labeled(sample, &[("outcome", provider)]));
             let spans = diagnostics.take_spans();
             assert!(spans.iter().any(|span| {
                 span.contains("authn.operation=\"introspection\";")
@@ -1056,11 +1047,7 @@ mod tests {
                 let samples = diagnostics.take_histograms();
                 assert_eq!(samples.len(), 1);
                 assert_eq!(samples[0].name(), "authn_provider_request_duration_seconds");
-                assert!(
-                    samples[0]
-                        .labels()
-                        .any(|label| { label.key() == "outcome" && label.value() == expected })
-                );
+                assert!(labeled(&samples[0], &[("outcome", expected)]));
                 let spans = diagnostics.take_spans();
                 assert!(spans.iter().any(|span| {
                     span.contains("authn.operation=\"introspection\";")
@@ -1141,7 +1128,7 @@ mod tests {
     async fn retained_evidence_checks_forward_expiry_and_backward_not_before() {
         let context = OperationContext::unbounded();
         let fixture = Fixture::new().await;
-        let base = epoch_now();
+        let base = jsonwebtoken::get_current_timestamp();
         let token = parse_bearer([b"Bearer calendar".as_slice()]).unwrap();
         for (expiry, not_before, changed) in [
             (base + 60, None, base + 60),
@@ -1201,7 +1188,7 @@ mod tests {
     async fn joined_cache_hit_rechecks_the_current_entry() {
         let context = OperationContext::unbounded();
         let fixture = Fixture::new().await;
-        let base = epoch_now();
+        let base = jsonwebtoken::get_current_timestamp();
         let token = parse_bearer([b"Bearer provenance".as_slice()]).unwrap();
         let key = super::token_digest(&token);
         for (elapsed_seconds, replacement) in [(0, false), (60, false), (60, true)] {
@@ -1305,7 +1292,7 @@ mod tests {
     async fn joined_fresh_delivery_uses_each_callers_current_lifetime() {
         let context = OperationContext::unbounded();
         let fixture = Fixture::new().await;
-        let base = epoch_now();
+        let base = jsonwebtoken::get_current_timestamp();
         let token = parse_bearer([b"Bearer delayed".as_slice()]).unwrap();
         for (expiry, not_before, delivery, expected) in [
             (base + 30, None, Some(base + 59), None),
@@ -1379,7 +1366,7 @@ mod tests {
     async fn replacement_starts_its_own_fixed_retention() {
         let context = OperationContext::unbounded();
         let fixture = Fixture::new().await;
-        let base = epoch_now();
+        let base = jsonwebtoken::get_current_timestamp();
         fixture.respond(StatusCode::OK, &active_response("old", base + 60));
         let verifier = fixture.verifier(Some(
             IntrospectionCacheOptions::try_new(1, Duration::from_secs(2)).unwrap(),

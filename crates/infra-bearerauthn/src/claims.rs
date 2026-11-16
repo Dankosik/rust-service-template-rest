@@ -442,7 +442,7 @@ impl Scopes {
 #[cfg(test)]
 mod tests {
     use super::ClaimPolicy;
-    use crate::{Failure, VerificationReason};
+    use crate::{Failure, VerificationReason, test_helpers::merged};
 
     #[test]
     fn json_object_requires_named_members() {
@@ -638,14 +638,13 @@ mod tests {
     #[test]
     fn rfc9068_requires_its_claims() {
         let verify = |extra: serde_json::Value| {
-            let mut claims = serde_json::json!({
-                "iss": "https://issuer.example", "aud": "api",
-                "exp": 200, "sub": "subject", "client_id": "client", "jti": "id", "iat": 100,
-            });
-            claims
-                .as_object_mut()
-                .unwrap()
-                .extend(extra.as_object().unwrap().clone());
+            let claims = merged(
+                serde_json::json!({
+                    "iss": "https://issuer.example", "aud": "api",
+                    "exp": 200, "sub": "subject", "client_id": "client", "jti": "id", "iat": 100,
+                }),
+                &extra,
+            );
             validate_jwt_claims(
                 claims.to_string().into_bytes(),
                 &policy(),
@@ -671,13 +670,12 @@ mod tests {
     #[test]
     fn jwt_act_identifies_the_outermost_actor_and_rejects_malformed_evidence() {
         let verify = |extra: serde_json::Value| {
-            let mut claims = serde_json::json!({
-                "iss": "https://issuer.example", "aud": "api", "exp": 1000, "sub": "subject",
-            });
-            claims
-                .as_object_mut()
-                .unwrap()
-                .extend(extra.as_object().unwrap().clone());
+            let claims = merged(
+                serde_json::json!({
+                    "iss": "https://issuer.example", "aud": "api", "exp": 1000, "sub": "subject",
+                }),
+                &extra,
+            );
             validate_jwt_claims(
                 claims.to_string().into_bytes(),
                 &policy(),
@@ -767,11 +765,10 @@ mod tests {
     #[test]
     fn introspection_act_identifies_the_outermost_actor_and_rejects_malformed_evidence() {
         let verify = |extra: serde_json::Value| {
-            let mut response = serde_json::json!({"active":true,"iss":"https://issuer.example","aud":"api","exp":130,"sub":"subject"});
-            response
-                .as_object_mut()
-                .unwrap()
-                .extend(extra.as_object().unwrap().clone());
+            let response = merged(
+                serde_json::json!({"active":true,"iss":"https://issuer.example","aud":"api","exp":130,"sub":"subject"}),
+                &extra,
+            );
             validate_introspection_claims(
                 response.to_string().as_bytes(),
                 &policy(),
@@ -859,11 +856,10 @@ mod tests {
             (serde_json::json!({"scope":"read  write"}), None),
             (serde_json::json!({"scope":["read write"]}), None),
         ] {
-            let mut response = serde_json::json!({"active":true,"iss":"https://issuer.example","aud":"api","exp":130,"sub":"subject"});
-            response
-                .as_object_mut()
-                .unwrap()
-                .extend(extra.as_object().unwrap().clone());
+            let response = merged(
+                serde_json::json!({"active":true,"iss":"https://issuer.example","aud":"api","exp":130,"sub":"subject"}),
+                &extra,
+            );
             // template:begin oidc-introspection:authn-claims-scope-introspection-assertion
             {
                 let result = validate_introspection_claims(

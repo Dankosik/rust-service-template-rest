@@ -1,6 +1,6 @@
 use super::*;
 use crate::load::{Error, load_from};
-use crate::test_support::{BUILD, assert_secret_in_file, env, write};
+use crate::test_support::{BUILD, assert_secret_in_file, env, load_env, write};
 use crate::validate::admit_with;
 use crate::{HttpConfig, LoadOptions, ValidationErrors};
 use std::assert_matches;
@@ -191,16 +191,11 @@ fn admitted_debug_names_the_mode_but_not_the_material() {
 
 #[test]
 fn grpc_environment_enables_an_explicit_plaintext_listener() {
-    let cfg = load_from(
-        &LoadOptions::default(),
-        BUILD,
-        env(&[
-            ("APP__GRPC__ENABLED", "true"),
-            ("APP__GRPC__ADDR", "127.0.0.1:0"),
-            ("APP__GRPC__SECURITY", "plaintext"),
-        ]),
-    )
-    .unwrap();
+    let cfg = load_env(&[
+        ("APP__GRPC__ENABLED", "true"),
+        ("APP__GRPC__ADDR", "127.0.0.1:0"),
+        ("APP__GRPC__SECURITY", "plaintext"),
+    ]);
     let grpc = cfg.grpc.unwrap();
     assert_eq!(grpc.addr.port(), 0);
     assert_matches!(grpc.security, GrpcListenerSecurity::Plaintext);

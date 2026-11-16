@@ -540,6 +540,7 @@ fn unix_timestamp(now: SystemTime) -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
+    use metrics::Label;
     use metrics_util::debugging::DebuggingRecorder;
     use std::assert_matches;
     use std::time::{Duration, UNIX_EPOCH};
@@ -711,7 +712,7 @@ mod tests {
             let _ = dispatcher.fail_missing_endpoint("removed");
             let _ = dispatcher.fail_missing_endpoint("removed");
         });
-        let mut samples: Vec<(Vec<(String, String)>, u64)> = snapshotter
+        let mut samples: Vec<(Vec<Label>, u64)> = snapshotter
             .snapshot()
             .into_vec()
             .into_iter()
@@ -721,27 +722,22 @@ mod tests {
                 let DebugValue::Counter(count) = value else {
                     panic!("expected counter, got {value:?}");
                 };
-                (
-                    key.labels()
-                        .map(|label| (label.key().to_owned(), label.value().to_owned()))
-                        .collect(),
-                    count,
-                )
+                (key.labels().cloned().collect(), count)
             })
             .collect();
         samples.sort();
-        let failure = |outcome: &str, reason: &str| {
+        let failure = |outcome: &'static str, reason: &'static str| {
             vec![
-                ("endpoint".to_owned(), "partner".to_owned()),
-                ("outcome".to_owned(), outcome.to_owned()),
-                ("reason".to_owned(), reason.to_owned()),
+                Label::new("endpoint", "partner"),
+                Label::new("outcome", outcome),
+                Label::new("reason", reason),
             ]
         };
         let mut expected = vec![
             (
                 vec![
-                    ("endpoint".to_owned(), "partner".to_owned()),
-                    ("outcome".to_owned(), "delivered".to_owned()),
+                    Label::new("endpoint", "partner"),
+                    Label::new("outcome", "delivered"),
                 ],
                 2,
             ),
@@ -750,8 +746,8 @@ mod tests {
             (failure("retryable", "timeout"), 1),
             (
                 vec![
-                    ("outcome".to_owned(), "retryable".to_owned()),
-                    ("reason".to_owned(), "missing_endpoint".to_owned()),
+                    Label::new("outcome", "retryable"),
+                    Label::new("reason", "missing_endpoint"),
                 ],
                 2,
             ),
