@@ -232,8 +232,11 @@ comments).
 Agents are the sole readers of this codebase: express facts through names,
 types, tests, and assertions first. Restrict documents to decision reasons,
 runbooks, and policies that code, committed contracts, and `make help` leave
-unstated. Restrict comments to non-code reasons (including concrete boundary
-divergences that rule out an apparent `std` or dependency replacement), external
-constraints, and cross-item invariants—plus product-output doc comments
-(`utoipa` descriptions, `clap` help, config section notes)—and update or delete
-comments on touched items.
+unstated. Write no comment by default; add one only where a reader of the code
+alone would likely make a wrong change: a non-code reason (including a concrete
+boundary divergence that rules out an apparent `std` or dependency
+replacement), an external constraint, or an invariant spanning items. Keep it
+to the fewest words that carry that fact, and never restate names, signatures,
+returned error variants, the order of calls, or a lint's `reason`. Product-output
+doc comments (`utoipa` descriptions, `clap` help, config section notes) are
+exempt. Update or delete comments on touched items.
