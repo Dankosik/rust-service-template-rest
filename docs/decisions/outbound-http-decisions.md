@@ -4,6 +4,14 @@
 limits, error variants, and dependency pins. This record keeps only rejected
 alternatives, external protocol constraints, and reopen conditions.
 
+The `reqwest` rejection covers this client only and leaves the template with the
+`outbound-http` profile; the `infra-telemetry` OTLP exporter keeps its
+`reqwest` transport.
+<!-- template:begin authn:docs-outbound-http-authn-scope -->
+`infra-bearerauthn` provider calls keep `reqwest` for the reasons in [library
+selection](../backend-library-selection.md#rejected-candidates).
+<!-- template:end authn:docs-outbound-http-authn-scope -->
+
 | Rejected alternative | Why rejected | Reopen condition |
 | --- | --- | --- |
 | `reqwest`, `reqwest-middleware`, or `tower::retry` | `reqwest` adds URL/header copies and redirect/retry/proxy/decompression layers this profile disables; generic retry middleware hides operation-specific idempotency and deadline accounting ([vendored Happy Eyeballs patch](../../vendor/hyper-util/PATCHES.md) covers `hyper-util`). | Upstream `hyper-util` / `hyper-rustls` drops required transport hooks, or a caller requires HTTP/2 or proxy negotiation. |

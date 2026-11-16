@@ -157,6 +157,30 @@ async fn an_exchanged_token_without_lifetime_is_request_only() {
 }
 
 #[tokio::test]
+async fn a_waiter_exchanges_again_instead_of_taking_its_leaders_request_only_token() {
+    let fixture = Fixture::new().await;
+    let mut response = exchange_response("request-only");
+    response.as_object_mut().unwrap().remove("expires_in");
+    fixture.token_json(StatusCode::OK, &response);
+    let client = fixture.client();
+    let gate = fixture.block_tokens();
+    let mut leader =
+        Box::pin(fixture.send_request(&client, fixture.on_behalf_of_request("subject")));
+    tokio::select! { () = fixture.token_received() => {}, result = &mut leader => panic!("leader must be gated: {result:?}"), }
+    let mut waiter =
+        Box::pin(fixture.send_request(&client, fixture.on_behalf_of_request("subject")));
+    poll_pending(waiter.as_mut()).await;
+    assert_eq!(fixture.token_requests().len(), 1);
+    gate.add_permits(1);
+    leader.await.unwrap();
+    tokio::select! { () = fixture.token_received() => {}, result = &mut waiter => panic!("waiter must exchange again: {result:?}"), }
+    gate.add_permits(1);
+    waiter.await.unwrap();
+    assert_eq!(fixture.token_requests().len(), 2);
+    fixture.finish().await;
+}
+
+#[tokio::test]
 async fn an_exchanged_token_past_its_reuse_cutoff_is_exchanged_once_more() {
     let fixture = Fixture::new().await;
     fixture.token_json(StatusCode::OK, &exchange_response("first"));
