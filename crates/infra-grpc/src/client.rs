@@ -190,10 +190,7 @@ impl Client {
 }
 
 fn earliest(left: Option<Deadline>, right: Option<Deadline>) -> Option<Deadline> {
-    match (left, right) {
-        (Some(left), Some(right)) => Some(left.earlier(right)),
-        (left, right) => left.or(right),
-    }
+    left.into_iter().chain(right).reduce(Deadline::earlier)
 }
 
 impl PreparedCall {

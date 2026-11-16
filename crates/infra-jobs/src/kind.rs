@@ -34,7 +34,11 @@ pub(crate) fn checked_delay_micros(duration: Duration) -> Result<i64, InvalidDel
     if duration > MAX_DELAY {
         return Err(InvalidDelay);
     }
-    i64::try_from(duration.as_micros()).map_err(|_| InvalidDelay)
+    Ok(saturating_micros(duration))
+}
+
+pub(crate) fn saturating_micros(duration: Duration) -> i64 {
+    i64::try_from(duration.as_micros()).unwrap_or(i64::MAX)
 }
 
 pub(crate) const MAX_ERROR_SUMMARY_BYTES: usize = 1024;

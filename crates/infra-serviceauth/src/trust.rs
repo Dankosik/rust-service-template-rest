@@ -167,9 +167,6 @@ impl<'de> Deserialize<'de> for DuplicateCheckedJson {
             fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
                 Ok(DuplicateCheckedJson(Some(value.into())))
             }
-            fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
-                Ok(DuplicateCheckedJson(Some(value.into())))
-            }
             fn visit_unit<E>(self) -> Result<Self::Value, E> {
                 Ok(DuplicateCheckedJson(Some(serde_json::Value::Null)))
             }

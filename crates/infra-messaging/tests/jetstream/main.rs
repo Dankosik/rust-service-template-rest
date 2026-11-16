@@ -38,7 +38,9 @@ mod delivery;
 mod durable;
 mod probe;
 mod publish;
-use relay::{AckDroppingRelay, AuthObservingRelay, is_stream_publish_ack, relay_target};
+use relay::{
+    AckDroppingRelay, AuthObservingRelay, eventually, is_stream_publish_ack, relay_target,
+};
 
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(1);
 
@@ -285,60 +287,35 @@ async fn wait_for_source_ack_at_least(fixture: &Fixture, stream_sequence: u64) {
     wait_for_source_ack_within(fixture, stream_sequence, Duration::from_secs(3)).await;
 }
 
+async fn durable(fixture: &Fixture) -> consumer::PullConsumer {
+    fixture
+        .jetstream
+        .get_consumer_from_stream(&fixture.durable, &fixture.stream)
+        .await
+        .expect("fixture durable remains available")
+}
+
 async fn wait_for_source_ack_within(fixture: &Fixture, stream_sequence: u64, budget: Duration) {
-    timeout(budget, async {
-        let mut cadence = tokio::time::interval(Duration::from_millis(10));
-        loop {
-            let stream = fixture
-                .jetstream
-                .get_stream(&fixture.stream)
-                .await
-                .expect("fixture stream remains available");
-            let durable: consumer::PullConsumer = stream
-                .get_consumer(&fixture.durable)
-                .await
-                .expect("fixture durable remains available");
-            let info = durable
-                .get_info()
-                .await
-                .expect("fixture consumer state is observable");
-            if info.ack_floor.stream_sequence >= stream_sequence && info.num_ack_pending == 0 {
-                return;
-            }
-            cadence.tick().await;
-        }
-    })
-    .await
-    .expect("successful handler must receive a confirmed source acknowledgment");
+    eventually(
+        budget,
+        "successful handler must receive a confirmed source acknowledgment",
+        async || {
+            let durable = durable(fixture).await;
+            let info = durable.cached_info();
+            (info.ack_floor.stream_sequence >= stream_sequence && info.num_ack_pending == 0)
+                .then_some(())
+        },
+    )
+    .await;
 }
 
 async fn wait_for_source_unacked(fixture: &Fixture) {
-    timeout(Duration::from_secs(3), async {
-        let mut cadence = tokio::time::interval(Duration::from_millis(10));
-        loop {
-            let stream = fixture
-                .jetstream
-                .get_stream(&fixture.stream)
-                .await
-                .expect("fixture stream remains available");
-            let durable: consumer::PullConsumer = stream
-                .get_consumer(&fixture.durable)
-                .await
-                .expect("fixture durable remains available");
-            if durable
-                .get_info()
-                .await
-                .expect("fixture consumer state is observable")
-                .num_ack_pending
-                >= 1
-            {
-                return;
-            }
-            cadence.tick().await;
-        }
-    })
-    .await
-    .expect("terminal source delivery must remain unacknowledged");
+    eventually(
+        Duration::from_secs(3),
+        "terminal source delivery must remain unacknowledged",
+        async || (durable(fixture).await.cached_info().num_ack_pending >= 1).then_some(()),
+    )
+    .await;
 }
 
 async fn wait_for_dead_letter(fixture: &Fixture) -> async_nats::jetstream::message::StreamMessage {
@@ -349,38 +326,27 @@ async fn wait_for_dead_letter_after(
     fixture: &Fixture,
     after_sequence: u64,
 ) -> async_nats::jetstream::message::StreamMessage {
-    timeout(Duration::from_secs(3), async {
-        let mut cadence = tokio::time::interval(Duration::from_millis(10));
-        loop {
+    eventually(
+        Duration::from_secs(3),
+        "terminal source delivery must be transferred to the DLQ",
+        async || {
             let stream = fixture
                 .jetstream
                 .get_stream(&fixture.dlq_stream)
                 .await
                 .expect("fixture DLQ stream remains available");
-            if let Ok(record) = stream
+            stream
                 .get_last_raw_message_by_subject(&fixture.dlq_subject)
                 .await
-                && record.sequence > after_sequence
-            {
-                return record;
-            }
-            cadence.tick().await;
-        }
-    })
+                .ok()
+                .filter(|record| record.sequence > after_sequence)
+        },
+    )
     .await
-    .expect("terminal source delivery must be transferred to the DLQ")
 }
 
 async fn redeliver_until_attempt(fixture: &Fixture, target_attempt: i64) {
-    let stream = fixture
-        .jetstream
-        .get_stream(&fixture.stream)
-        .await
-        .expect("fixture stream remains available");
-    let consumer: consumer::PullConsumer = stream
-        .get_consumer(&fixture.durable)
-        .await
-        .expect("fixture durable remains available");
+    let consumer = durable(fixture).await;
     for attempt in 1..target_attempt {
         let mut batch = consumer
             .fetch()

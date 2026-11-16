@@ -44,7 +44,7 @@ impl Refresh {
         match read(path).await {
             Ok(password) => {
                 self.unreadable = false;
-                if self.current.as_deref().map(String::as_str) == Some(password.as_str()) {
+                if self.current.as_ref() == Some(&password) {
                     metrics::counter!(REFRESHES_METRIC, "outcome" => "unchanged").increment(1);
                     return;
                 }
@@ -94,7 +94,7 @@ mod tests {
     )]
     async fn the_pool_follows_the_file_and_keeps_its_password_while_the_file_is_unreadable() {
         use metrics::Key;
-        use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+        use metrics_util::debugging::DebuggingRecorder;
 
         let recorder = DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
@@ -140,16 +140,11 @@ mod tests {
         assert!(!refresh.unreadable);
         assert_eq!(password(&pool).as_deref(), Some("third"));
         dir.close().unwrap();
-        let snapshot = snapshotter.snapshot().into_vec();
+        let snapshot = snapshotter.snapshot().into_hashmap();
         assert_eq!(snapshot.len(), 3, "{snapshot:?}");
         for (outcome, expected) in [("installed", 3), ("read_failed", 3), ("unchanged", 1)] {
             let target = Key::from_parts(REFRESHES_METRIC, &[("outcome", outcome)]);
-            let actual = snapshot
-                .iter()
-                .find_map(|(composite, _, _, value)| match value {
-                    DebugValue::Counter(count) if composite.key() == &target => Some(*count),
-                    _ => None,
-                });
+            let actual = crate::test_metrics::counter(&snapshot, &target);
             assert_eq!(actual, Some(expected), "{target}: {snapshot:?}");
         }
         let debug = format!("{snapshot:?}");

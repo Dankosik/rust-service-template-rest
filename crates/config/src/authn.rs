@@ -378,15 +378,13 @@ impl AuthnInput {
                 ));
                 let capacity = v.take(crate::validate::int_range(
                     "authn.cache_capacity",
-                    cache_capacity as u64,
-                    *CACHE_CAPACITY.start() as u64,
-                    *CACHE_CAPACITY.end() as u64,
+                    cache_capacity,
+                    CACHE_CAPACITY,
                 ));
                 let retention = v.take(crate::validate::duration_range(
                     "authn.cache_ttl",
                     cache_ttl,
-                    *CACHE_TTL.start(),
-                    *CACHE_TTL.end(),
+                    CACHE_TTL,
                 ));
                 named?;
                 located?;

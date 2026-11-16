@@ -21,19 +21,7 @@ async fn consumer_reconciles_its_named_durable_without_stream_administration() {
         .await
         .expect("adapter creates or reconciles only its named durable consumer")
         .start(&cancel);
-    let stream = fixture
-        .jetstream
-        .get_stream(&fixture.stream)
-        .await
-        .expect("adapter must not remove the operator-owned source stream");
-    let durable: consumer::PullConsumer = stream
-        .get_consumer(&fixture.durable)
-        .await
-        .expect("adapter creates the configured durable consumer");
-    let actual = durable
-        .get_info()
-        .await
-        .expect("created durable consumer has observable configuration");
+    let actual = durable(&fixture).await.cached_info().clone();
     assert_eq!(actual.config.filter_subject, fixture.subject);
     assert_eq!(actual.config.max_deliver, -1);
     assert_eq!(actual.config.ack_policy, consumer::AckPolicy::Explicit);
@@ -156,22 +144,12 @@ async fn deleting_a_durable_with_a_waiting_batch_stops_the_consumer() {
         .register::<ExampleEvent, _, _>(|_, _| async { Ok(()) })
         .unwrap();
     let mut handle = messaging.consumer(registered).await.unwrap().start(&cancel);
-    timeout(Duration::from_secs(3), async {
-        let mut cadence = tokio::time::interval(Duration::from_millis(20));
-        loop {
-            let durable: consumer::PullConsumer = fixture
-                .jetstream
-                .get_consumer_from_stream(&fixture.durable, &fixture.stream)
-                .await
-                .unwrap();
-            if durable.cached_info().num_waiting > 0 {
-                break;
-            }
-            cadence.tick().await;
-        }
-    })
-    .await
-    .expect("the broker observes a waiting batch");
+    eventually(
+        Duration::from_secs(3),
+        "the broker observes a waiting batch",
+        async || (durable(&fixture).await.cached_info().num_waiting > 0).then_some(()),
+    )
+    .await;
     fixture
         .jetstream
         .delete_consumer_from_stream(&fixture.durable, &fixture.stream)
@@ -331,11 +309,7 @@ async fn an_unanswered_identity_check_blocks_pulls_without_losing_the_consumer()
             .await
             .is_err()
     );
-    let durable: consumer::PullConsumer = fixture
-        .jetstream
-        .get_consumer_from_stream(&fixture.durable, &fixture.stream)
-        .await
-        .unwrap();
+    let durable = durable(&fixture).await;
     assert_eq!(durable.cached_info().num_ack_pending, 0);
     assert_eq!(durable.cached_info().num_pending, 1);
     refuse_info.store(false, Ordering::SeqCst);
@@ -437,11 +411,7 @@ async fn drain_interrupts_identity_waits_and_joins_any_admitted_delivery() {
         for started in &started {
             assert_eq!(started.is_cancelled(), admit_delivery);
         }
-        let durable: consumer::PullConsumer = fixture
-            .jetstream
-            .get_consumer_from_stream(&fixture.durable, &fixture.stream)
-            .await
-            .unwrap();
+        let durable = durable(&fixture).await;
         assert_eq!(durable.cached_info().num_ack_pending, 0);
         assert_eq!(
             durable.cached_info().num_pending,

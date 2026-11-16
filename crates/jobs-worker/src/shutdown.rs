@@ -62,19 +62,10 @@ pub(crate) fn validate_grace_budget(http: &HttpConfig) -> Result<(), GraceBudget
     Ok(())
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Outcome {
     Graceful,
     Degraded,
-}
-
-impl Outcome {
-    fn combine(self, other: Self) -> Self {
-        match other {
-            Self::Graceful => self,
-            Self::Degraded => Self::Degraded,
-        }
-    }
 }
 
 enum DrainOutcome {
@@ -151,7 +142,7 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
         budget.remaining(LISTENERS),
     )
     .await;
-    outcome = outcome.combine(listeners_outcome);
+    outcome = outcome.max(listeners_outcome);
     let background_outcome = stage(
         "background_join",
         join_background(&background, budget.remaining(BACKGROUND_JOIN)),
@@ -181,14 +172,14 @@ pub(crate) async fn run(plan: Plan<'_>) -> Outcome {
         background_outcome
     };
     // template:end jobs:worker-shutdown-native-failures
-    outcome = outcome.combine(background_outcome);
+    outcome = outcome.max(background_outcome);
     if background_outcome == Outcome::Degraded {
         tracing::warn!("background_join_failed");
     } else {
         tracing::info!("background_joined");
     }
     let dependencies_outcome = close_dependencies(&mut resources, dependency_deadline).await;
-    outcome = outcome.combine(dependencies_outcome);
+    outcome = outcome.max(dependencies_outcome);
     if background.failure().is_some() {
         outcome = Outcome::Degraded;
     }
@@ -388,7 +379,7 @@ async fn close_listeners(listeners: Listeners, budget: Duration) -> Outcome {
             close_diagnostics(diagnostics, budget)
         ),
     );
-    health_outcome.combine(diagnostics_outcome)
+    health_outcome.max(diagnostics_outcome)
 }
 
 async fn close_health(server: Option<Server>, budget: Duration) -> Outcome {
@@ -527,7 +518,7 @@ async fn close_dependencies(resources: &mut Resources, deadline: Instant) -> Out
         stage("postgres_close", pool_close),
         stage("messaging_close", messaging_close),
     );
-    pool.combine(messaging)
+    pool.max(messaging)
 }
 
 async fn finish_telemetry(
@@ -561,7 +552,7 @@ async fn finish_telemetry(
             }
         })
         .await;
-        outcome = outcome.combine(trace_outcome);
+        outcome = outcome.max(trace_outcome);
     }
     tracing::info!(?outcome, logger_pending = true, "shutdown_finishing");
     if let Some(logger) = resources.logger.take() {
@@ -577,7 +568,7 @@ async fn finish_telemetry(
             }
         })
         .await;
-        outcome = outcome.combine(logger_outcome);
+        outcome = outcome.max(logger_outcome);
     }
     outcome
 }

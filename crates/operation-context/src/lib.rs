@@ -47,11 +47,7 @@ impl Deadline {
     #[must_use]
     pub fn earlier(self, other: Self) -> Self {
         let now = Instant::now();
-        if self.remaining_at(now) <= other.remaining_at(now) {
-            self
-        } else {
-            other
-        }
+        std::cmp::min_by_key(self, other, |deadline| deadline.remaining_at(now))
     }
 
     pub async fn wait(self) {

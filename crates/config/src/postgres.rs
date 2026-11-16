@@ -93,9 +93,8 @@ impl PostgresInput {
         };
         violations.check(int_range(
             "postgres.max_connections",
-            u64::from(self.max_connections.get()),
-            1,
-            500,
+            self.max_connections.get(),
+            1..=500,
         ));
         let Some(dsn) = dsn else {
             return Ok(None);
@@ -142,8 +141,7 @@ impl MigrationInput {
         v.check(duration_range(
             "postgres.migration_deadline",
             self.postgres.migration_deadline,
-            Duration::from_secs(1),
-            Duration::from_hours(24),
+            Duration::from_secs(1)..=Duration::from_hours(24),
         ));
         let postgres = self.postgres.admit(v);
         let admitted = postgres.map(|postgres| MigrationConfig {

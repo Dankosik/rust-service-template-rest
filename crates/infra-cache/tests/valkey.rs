@@ -151,8 +151,7 @@ async fn bind_port(host: IpAddr, port: u16) -> TcpListener {
     loop {
         match TcpListener::bind(addr).await {
             Ok(listener) => return listener,
-            Err(error) if tokio::time::Instant::now() < deadline => {
-                let _ = error;
+            Err(_) if tokio::time::Instant::now() < deadline => {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
             Err(error) => panic!("rebind {addr}: {error}"),

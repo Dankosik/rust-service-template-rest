@@ -3,7 +3,9 @@ use std::path::Path;
 use super::*;
 use crate::LoadOptions;
 use crate::load::load_from;
-use crate::test_support::{BUILD, assert_secret_in_file, assert_unknown_env_key_fails, env, write};
+use crate::test_support::{
+    BUILD, assert_secret_in_file, assert_unknown_env_key_fails, env, load_env, write,
+};
 use crate::validate::{ValidationErrors, admit_with};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
@@ -160,18 +162,13 @@ fn an_active_cache_must_leave_half_the_request_budget() {
 fn cache_environment_reads_the_dsn_and_redacts_it() {
     use secrecy::ExposeSecret as _;
 
-    let cfg = load_from(
-        &LoadOptions::default(),
-        BUILD,
-        env(&[
-            ("APP__CACHE__DSN", "redis://:hunter2@127.0.0.1:6379"),
-            ("APP__CACHE__COMMAND_TIMEOUT", "200ms"),
-            ("APP__APP__ENV", "local"),
-            ("APP__CACHE__ALLOW_PLAINTEXT", "true"),
-            ("APP__CACHE__ALLOW_UNAUTHENTICATED", "true"),
-        ]),
-    )
-    .unwrap();
+    let cfg = load_env(&[
+        ("APP__CACHE__DSN", "redis://:hunter2@127.0.0.1:6379"),
+        ("APP__CACHE__COMMAND_TIMEOUT", "200ms"),
+        ("APP__APP__ENV", "local"),
+        ("APP__CACHE__ALLOW_PLAINTEXT", "true"),
+        ("APP__CACHE__ALLOW_UNAUTHENTICATED", "true"),
+    ]);
     assert_eq!(
         cfg.cache.dsn.as_ref().unwrap().expose_secret(),
         "redis://:hunter2@127.0.0.1:6379"
@@ -244,15 +241,10 @@ fn cache_password_file_is_a_path_a_file_or_the_environment_may_set() {
 
 #[test]
 fn cache_client_certificate_paths_are_set_from_the_environment_together() {
-    let cfg = load_from(
-        &LoadOptions::default(),
-        BUILD,
-        env(&[
-            ("APP__CACHE__CLIENT_CERT_PATH", "/run/tls/client.crt"),
-            ("APP__CACHE__CLIENT_KEY_PATH", "/run/tls/client.key"),
-        ]),
-    )
-    .unwrap();
+    let cfg = load_env(&[
+        ("APP__CACHE__CLIENT_CERT_PATH", "/run/tls/client.crt"),
+        ("APP__CACHE__CLIENT_KEY_PATH", "/run/tls/client.key"),
+    ]);
     let certificate = cfg.cache.client_certificate.as_ref().unwrap();
     assert_eq!(certificate.cert_path, Path::new("/run/tls/client.crt"));
     assert_eq!(certificate.key_path, Path::new("/run/tls/client.key"));

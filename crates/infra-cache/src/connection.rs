@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use backon::BackoffBuilder;
-use futures_util::stream::{FuturesUnordered, StreamExt};
+use futures_util::stream::StreamExt;
 use metrics::{Counter, Gauge};
 use operation_context::{Deadline, OperationContext, Stopped};
 use parking_lot::Mutex;
@@ -696,17 +696,9 @@ impl SetupBackoff {
 }
 
 async fn drain_abandoned_replies(mut replies: mpsc::UnboundedReceiver<AbandonedReply>) {
-    let mut pending = FuturesUnordered::new();
-    loop {
-        tokio::select! {
-            biased;
-            _ = pending.next(), if !pending.is_empty() => {}
-            reply = replies.recv() => match reply {
-                Some(reply) => pending.push(reply.wait()),
-                None => return,
-            }
-        }
-    }
+    futures_util::stream::poll_fn(|cx| replies.poll_recv(cx))
+        .for_each_concurrent(None, AbandonedReply::wait)
+        .await;
 }
 
 async fn setup_attempt<'a>(

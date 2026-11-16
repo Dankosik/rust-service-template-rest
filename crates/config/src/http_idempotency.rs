@@ -40,8 +40,7 @@ impl HttpIdempotencyConfig {
             violations.check(duration_range(
                 Self::RETENTION_KEY,
                 retention,
-                Duration::from_mins(1),
-                Duration::from_hours(30 * 24),
+                Duration::from_mins(1)..=Duration::from_hours(30 * 24),
             ));
         }
     }

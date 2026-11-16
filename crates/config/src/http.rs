@@ -125,12 +125,11 @@ impl HttpConfig {
     pub(crate) fn validate(&self, v: &mut Violations) -> HttpTimings {
         let second = Duration::from_secs(1);
         let ten_minutes = Duration::from_mins(10);
-        let grace_ok = duration_range("http.grace_period", self.grace_period, second, ten_minutes);
+        let grace_ok = duration_range("http.grace_period", self.grace_period, second..=ten_minutes);
         let drain_ok = duration_range(
             "http.drain_timeout",
             self.drain_timeout,
-            second,
-            ten_minutes,
+            second..=ten_minutes,
         );
         let ranges_ok = grace_ok.is_ok() && drain_ok.is_ok();
         let drain_in_range = drain_ok.is_ok();
@@ -169,8 +168,7 @@ impl HttpConfig {
         v.check(duration_range(
             "http.header_read_timeout",
             self.header_read_timeout,
-            Duration::from_millis(100),
-            Duration::from_mins(5),
+            Duration::from_millis(100)..=Duration::from_mins(5),
         ));
         let request_timeout_ok =
             request_timeout_range("http.request_timeout", self.request_timeout);
@@ -188,14 +186,12 @@ impl HttpConfig {
         v.check(int_range(
             "http.max_header_bytes",
             self.max_header_bytes.as_u64(),
-            u64::from(HTTP1_MIN_READ_BUFFER_BYTES),
-            ByteSize::mib(1).as_u64(),
+            u64::from(HTTP1_MIN_READ_BUFFER_BYTES)..=ByteSize::mib(1).as_u64(),
         ));
         v.check(int_range(
             "http.max_body_bytes",
             self.max_body_bytes.as_u64(),
-            1,
-            ByteSize::gib(1).as_u64(),
+            1..=ByteSize::gib(1).as_u64(),
         ));
         v.check(in_flight_range("http.max_in_flight", self.max_in_flight));
         v.check(connection_count_range(

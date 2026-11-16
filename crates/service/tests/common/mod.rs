@@ -1,4 +1,47 @@
+use std::io::{BufRead, BufReader};
+use std::process::{Child, Command};
+use std::sync::mpsc;
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
+
+use nix::sys::signal::{Signal, kill};
+use nix::unistd::Pid;
+
+pub(crate) fn baseline_env(command: &mut Command) -> &mut Command {
+    command
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("APP__HTTP__ADDR", "127.0.0.1:0")
+        .env("APP__OBSERVABILITY__METRICS__ADDR", "127.0.0.1:0")
+        .env("APP__HTTP__READINESS_PROPAGATION_DELAY", "300ms")
+        .env("APP__HTTP__REQUEST_TIMEOUT", "2s")
+        .env("APP__LOG__FORMAT", "json")
+}
+
+#[expect(
+    clippy::expect_used,
+    reason = "a broken fixture or setup fails the test"
+)]
+pub(crate) fn spawn_stdout_lines(child: &mut Child) -> (mpsc::Receiver<String>, JoinHandle<()>) {
+    let stdout = child.stdout.take().expect("piped stdout");
+    let (tx, lines) = mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    (lines, reader)
+}
+
+#[expect(
+    clippy::expect_used,
+    reason = "a broken fixture or setup fails the test"
+)]
+pub(crate) fn terminate(child: &Child) {
+    kill(Pid::from_raw(child.id().cast_signed()), Signal::SIGTERM).expect("send SIGTERM");
+}
 
 pub(crate) fn agent() -> ureq::Agent {
     ureq::Agent::config_builder()

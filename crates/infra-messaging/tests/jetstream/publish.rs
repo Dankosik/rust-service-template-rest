@@ -150,25 +150,20 @@ async fn cancelled_publications_hold_the_shared_window_until_native_cleanup() {
     std::assert_matches!(refused, Err(PublishError::Rejected));
     assert_eq!(observed.load(Ordering::SeqCst), capacity);
 
-    timeout(Duration::from_secs(7), async {
-        let mut cadence = tokio::time::interval(Duration::from_millis(20));
-        loop {
-            cadence.tick().await;
-            match producer
-                .publish(&prepared, &context(deadline(), &healthy))
-                .await
-            {
-                Ok(ack) => {
-                    assert!(ack.duplicate);
-                    break;
-                }
-                Err(PublishError::Rejected) => {}
-                Err(PublishError::Ambiguous) => panic!("restored ACK path must confirm"),
-            }
-        }
-    })
-    .await
-    .expect("native cleanup restores publication without replacing the resource");
+    let ack = eventually(
+        Duration::from_secs(7),
+        "native cleanup restores publication without replacing the resource",
+        async || match producer
+            .publish(&prepared, &context(deadline(), &healthy))
+            .await
+        {
+            Ok(ack) => Some(ack),
+            Err(PublishError::Rejected) => None,
+            Err(PublishError::Ambiguous) => panic!("restored ACK path must confirm"),
+        },
+    )
+    .await;
+    assert!(ack.duplicate);
     close(messaging).await;
     relay.join().await;
     fixture.cleanup().await;

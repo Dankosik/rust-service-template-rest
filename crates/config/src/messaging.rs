@@ -177,8 +177,7 @@ impl MessagingInput {
         let payload = v.take(int_range(
             "messaging.max_payload_bytes",
             self.max_payload_bytes.as_u64(),
-            1,
-            MAX_RESIDENT_DELIVERY_BYTES - DELIVERY_OVERHEAD_BYTES,
+            1..=MAX_RESIDENT_DELIVERY_BYTES - DELIVERY_OVERHEAD_BYTES,
         ));
         let concurrency = payload.and_then(|()| {
             v.take(resident_delivery_bound(

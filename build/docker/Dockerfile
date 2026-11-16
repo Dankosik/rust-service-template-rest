@@ -162,7 +162,7 @@ RUN cargo auditable build --release --locked -p jobs-worker --bin jobs-worker \
  && touch -d "@${SOURCE_DATE_EPOCH}" /out/jobs-worker
 # template:end worker:docker-jobs-worker-output
 
-FROM gcr.io/distroless/cc-debian13:nonroot@sha256:cc66d222f0a7ec996b78a99fe76a969bc80b539a5016ad866c14d1949bc6d0ab
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:cb87acc574abe719b6e5c547384defa2f7b1f24af9605d3f618cf852495d8be2
 # Empty: the dependency alone makes the unit-test gate part of every build.
 COPY --from=unit-tests /unit-tests/ /
 # The version is the Cargo package version; scripts/ci/runtime-image-build.sh

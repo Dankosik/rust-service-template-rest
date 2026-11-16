@@ -13,9 +13,7 @@ use async_nats::jetstream::response::Response;
 use async_nats::jetstream::stream::RawMessage;
 use async_nats::{HeaderMap, HeaderName, HeaderValue};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use infra_messaging::wire::{
-    DeadLetterRecord, EVENT_TYPE, MESSAGE_ID, prefixed_digest_hex, restore_dead_letter,
-};
+use infra_messaging::wire::{DeadLetterRecord, EVENT_TYPE, MESSAGE_ID, restore_dead_letter};
 use infra_messaging::{
     BROKER_OPERATION_BUDGET, CloseOutcome, Credentials, Messaging, MessagingOptions,
     MessagingStartup, PreparedEvent, PublishError,
@@ -273,7 +271,7 @@ impl Resources {
 }
 
 fn digest(bytes: &[u8]) -> String {
-    prefixed_digest_hex("", &Sha256::digest(bytes).into())
+    const_hex::encode(Sha256::digest(bytes))
 }
 
 #[derive(Clone, Copy)]

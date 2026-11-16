@@ -388,25 +388,16 @@ mod tests {
     use axum::body::Body;
     use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
 
-    fn duration_series(snapshotter: &Snapshotter) -> Vec<Vec<(String, String)>> {
+    fn duration_series(snapshotter: &Snapshotter) -> Vec<Vec<Label>> {
         let mut series: Vec<_> = snapshotter
             .snapshot()
             .into_vec()
             .into_iter()
             .filter(|(key, ..)| key.key().name() == REQUEST_DURATION_METRIC)
-            .map(|(key, ..)| {
-                key.key()
-                    .labels()
-                    .map(|label| (label.key().to_owned(), label.value().to_owned()))
-                    .collect()
-            })
+            .map(|(key, ..)| key.key().labels().cloned().collect())
             .collect();
         series.sort();
         series
-    }
-
-    fn pair(key: &str, value: &str) -> (String, String) {
-        (key.to_owned(), value.to_owned())
     }
 
     #[test]
@@ -424,16 +415,15 @@ mod tests {
                 );
             }
         });
-        let expected: Vec<_> = (100..=999)
+        let mut expected: Vec<_> = (100..=999)
             .map(|code: u16| {
                 vec![
-                    pair("http_request_method", "_OTHER"),
-                    pair("http_response_status_code", &code.to_string()),
-                    pair("http_route", "<unmatched>"),
+                    Label::new("http_request_method", "_OTHER"),
+                    Label::new("http_response_status_code", code.to_string()),
+                    Label::new("http_route", "<unmatched>"),
                 ]
             })
             .collect();
-        let mut expected = expected;
         expected.sort();
         assert_eq!(duration_series(&snapshotter), expected);
     }
@@ -448,7 +438,7 @@ mod tests {
                 series.record_duration("GET", "/items/{id}", status, Duration::from_millis(1));
             }
         });
-        let samples: Vec<_> = snapshotter
+        let mut samples: Vec<_> = snapshotter
             .snapshot()
             .into_vec()
             .into_iter()
@@ -463,7 +453,6 @@ mod tests {
                 _ => None,
             })
             .collect();
-        let mut samples = samples;
         samples.sort();
         assert_eq!(
             samples,
@@ -557,9 +546,9 @@ mod tests {
         assert_eq!(
             duration_series(&snapshotter),
             [vec![
-                pair("http_request_method", "GET"),
-                pair("http_response_status_code", "499"),
-                pair("http_route", "/hang"),
+                Label::new("http_request_method", "GET"),
+                Label::new("http_response_status_code", "499"),
+                Label::new("http_route", "/hang"),
             ]]
         );
     }

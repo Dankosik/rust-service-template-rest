@@ -9,6 +9,23 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
+pub(crate) async fn eventually<T>(
+    budget: Duration,
+    what: &str,
+    mut probe: impl AsyncFnMut() -> Option<T>,
+) -> T {
+    timeout(budget, async {
+        loop {
+            if let Some(value) = probe().await {
+                return value;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect(what)
+}
+
 pub(crate) struct AckDroppingRelay {
     pub(crate) url: String,
     pub(crate) dropped_ack: CancellationToken,
@@ -196,16 +213,14 @@ impl AckDroppingRelay {
                     .unwrap_or_default()
                     .split_ascii_whitespace()
                     .collect::<Vec<_>>();
-                if !seen_request
-                    && fields.first() == Some(&"PUB")
-                    && fields.get(1).is_some_and(|subject| {
-                        subject.starts_with("$JS.ACK.") && subject.contains(&identity)
-                    })
-                    && fields.len() == 4
+                if let ["PUB", subject, reply, _] = fields[..]
+                    && !seen_request
+                    && subject.starts_with("$JS.ACK.")
+                    && subject.contains(&identity)
                     && payload == b"+ACK"
                 {
                     seen_request = true;
-                    *sent_reply.lock().expect("ACK reply lock") = Some(fields[2].to_owned());
+                    *sent_reply.lock().expect("ACK reply lock") = Some(reply.to_owned());
                     return drop_request;
                 }
                 false
@@ -391,11 +406,14 @@ fn is_broker_auth_refusal(line: &[u8]) -> bool {
 }
 
 fn public_user_from_connect(line: &[u8]) -> Option<String> {
-    use base64::Engine as _;
-
     let connect = line.strip_prefix(b"CONNECT ")?;
     let connect = serde_json::from_slice::<serde_json::Value>(connect).ok()?;
-    let jwt = connect.get("jwt")?.as_str()?;
+    jwt_subject(connect.get("jwt")?.as_str()?)
+}
+
+pub(crate) fn jwt_subject(jwt: &str) -> Option<String> {
+    use base64::Engine as _;
+
     let payload = jwt.split('.').nth(1)?;
     let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(payload)

@@ -51,27 +51,20 @@ fn parse_grpc_timeout(value: &[u8]) -> Option<Duration> {
 }
 
 pub(crate) fn set_grpc_timeout(headers: &mut HeaderMap, remaining: Duration) {
-    const MAX_VALUE: u64 = 99_999_999;
-    let capped = remaining.min(WIRE_TIMEOUT_MAX);
-    let (amount, unit) = if let Ok(nanos) = u64::try_from(capped.as_nanos())
-        && nanos <= MAX_VALUE
-    {
-        (nanos, b'n')
-    } else if let Ok(micros) = u64::try_from(capped.as_micros())
-        && micros <= MAX_VALUE
-    {
-        (micros, b'u')
-    } else if let Ok(millis) = u64::try_from(capped.as_millis())
-        && millis <= MAX_VALUE
-    {
-        (millis, b'm')
-    } else if capped.as_secs() <= MAX_VALUE {
-        (capped.as_secs(), b'S')
-    } else if capped.as_secs() / 60 <= MAX_VALUE {
-        (capped.as_secs() / 60, b'M')
-    } else {
-        ((capped.as_secs() / 3600).min(MAX_VALUE), b'H')
-    };
+    const NANOS_PER_UNIT: [(u8, u128); 5] = [
+        (b'n', 1),
+        (b'u', 1_000),
+        (b'm', 1_000_000),
+        (b'S', 1_000_000_000),
+        (b'M', 60_000_000_000),
+    ];
+    const MAX_VALUE: u128 = 99_999_999;
+    let nanos = remaining.min(WIRE_TIMEOUT_MAX).as_nanos();
+    let (unit, amount) = NANOS_PER_UNIT
+        .into_iter()
+        .map(|(unit, per_unit)| (unit, nanos / per_unit))
+        .find(|&(_, amount)| amount <= MAX_VALUE)
+        .unwrap_or((b'H', nanos / 3_600_000_000_000));
     let mut buffer = std::fmt::NumBuffer::new();
     let digits = amount.format_into(&mut buffer);
     let mut wire = [0_u8; MAX_TIMEOUT_DIGITS + 1];
@@ -168,6 +161,9 @@ mod tests {
             Duration::from_millis(99_999_999),
             Duration::from_secs(5),
             Duration::from_secs(99_999_999),
+            Duration::from_mins(99_999_999),
+            Duration::from_secs(99_999_999 * 60 + 59),
+            Duration::from_mins(100_000_000),
             Duration::from_hours(2),
             WIRE_TIMEOUT_MAX,
             Duration::MAX,

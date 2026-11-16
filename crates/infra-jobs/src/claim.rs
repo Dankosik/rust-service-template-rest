@@ -15,7 +15,7 @@ use crate::engine::{
     CANCEL_MARGIN, LEASE_RESERVE, Operation, OperationError, POLL_INTERVAL, Shared, backstop,
     observe_failure, observe_recovery,
 };
-use crate::kind::{JobId, Registered};
+use crate::kind::{JobId, Registered, saturating_micros};
 use crate::trace_context::Carrier;
 
 pub const CLAIM_DURATION_METRIC: &str = "jobs_claim_duration_seconds";
@@ -382,10 +382,6 @@ impl<'a> PolicyBinds<'a> {
 
 fn lease_offset(timeout: Duration) -> Duration {
     timeout.saturating_add(LEASE_RESERVE)
-}
-
-fn saturating_micros(duration: Duration) -> i64 {
-    i64::try_from(duration.as_micros()).unwrap_or(i64::MAX)
 }
 
 fn slot_count(count: usize) -> i64 {

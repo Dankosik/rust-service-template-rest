@@ -5,14 +5,13 @@
     reason = "a broken fixture or setup fails the test"
 )]
 
-use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 mod common;
 
-use common::{get, poll_until};
+use common::{baseline_env, get, poll_until, spawn_stdout_lines, terminate};
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 
@@ -25,15 +24,8 @@ struct Service {
 impl Service {
     fn command(env: &[(&str, &str)]) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_service"));
-        command
-            .env_clear()
-            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-            .env("APP__HTTP__ADDR", "127.0.0.1:0")
-            .env("APP__OBSERVABILITY__METRICS__ADDR", "127.0.0.1:0")
-            .env("APP__HTTP__READINESS_PROPAGATION_DELAY", "300ms")
+        baseline_env(&mut command)
             .env("APP__HTTP__DRAIN_TIMEOUT", "3s")
-            .env("APP__HTTP__REQUEST_TIMEOUT", "2s")
-            .env("APP__LOG__FORMAT", "json")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         command.envs(env.iter().copied());
@@ -43,15 +35,7 @@ impl Service {
     fn spawn(env: &[(&str, &str)]) -> Self {
         let mut command = Self::command(env);
         let mut child = command.spawn().expect("spawn service binary");
-        let stdout = child.stdout.take().expect("piped stdout");
-        let (tx, lines) = mpsc::channel();
-        let reader = std::thread::spawn(move || {
-            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                if tx.send(line).is_err() {
-                    break;
-                }
-            }
-        });
+        let (lines, reader) = spawn_stdout_lines(&mut child);
         Self {
             child,
             lines,
@@ -76,12 +60,15 @@ impl Service {
         }
     }
 
+    fn await_addr(&self, message: &str) -> String {
+        self.await_record(message)["addr"]
+            .as_str()
+            .expect("addr field")
+            .to_owned()
+    }
+
     fn terminate(&self) {
-        kill(
-            Pid::from_raw(self.child.id().cast_signed()),
-            Signal::SIGTERM,
-        )
-        .expect("send SIGTERM");
+        terminate(&self.child);
     }
 
     fn wait(self) -> (Option<i32>, String) {
@@ -146,14 +133,8 @@ fn wait_child(child: &mut Child, budget: Duration) -> std::process::ExitStatus {
 #[test]
 fn serves_probes_and_metrics_then_drains_on_sigterm_with_exit_zero() {
     let service = Service::spawn(&[]);
-    let api = service.await_record("http listener bound")["addr"]
-        .as_str()
-        .expect("addr field")
-        .to_owned();
-    let diagnostics = service.await_record("diagnostics listener bound")["addr"]
-        .as_str()
-        .expect("addr field")
-        .to_owned();
+    let api = service.await_addr("http listener bound");
+    let diagnostics = service.await_addr("diagnostics listener bound");
     service.await_record("service_ready");
 
     let ready = format!("http://{api}/health/ready");
@@ -290,16 +271,9 @@ fn a_full_application_listener_refuses_probes_with_or_without_diagnostics() {
             ("APP__HTTP__MAX_CONNECTIONS", "2"),
             ("APP__HTTP__MAX_IN_FLIGHT", "2"),
         ]);
-        let api = service.await_record("http listener bound")["addr"]
-            .as_str()
-            .expect("addr field")
-            .to_owned();
-        let diagnostics = diagnostics_enabled.then(|| {
-            service.await_record("diagnostics listener bound")["addr"]
-                .as_str()
-                .expect("addr field")
-                .to_owned()
-        });
+        let api = service.await_addr("http listener bound");
+        let diagnostics =
+            diagnostics_enabled.then(|| service.await_addr("diagnostics listener bound"));
         service.await_record("service_ready");
         let app_live = format!("http://{api}/health/live");
 
@@ -370,15 +344,7 @@ fn invalid_configuration_exits_one_with_a_broken_stderr_pipe() {
 // template:begin cache:service-cache-lifecycle-admission
 #[test]
 fn a_cache_outage_at_startup_still_becomes_ready() {
-    #[expect(
-        clippy::disallowed_methods,
-        clippy::disallowed_types,
-        reason = "the startup outage fixture reserves a loopback port and closes it before launching the child"
-    )]
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("closed port");
-    let port = listener.local_addr().expect("closed port").port();
-    drop(listener);
-    let dsn = format!("redis://127.0.0.1:{port}");
+    let dsn = format!("redis://{}", available_address());
     let service = Service::spawn(&[
         ("APP__APP__ENV", "local"),
         ("APP__CACHE__DSN", &dsn),
@@ -389,10 +355,7 @@ fn a_cache_outage_at_startup_still_becomes_ready() {
     let startup = service.await_record("cache_unavailable_at_startup");
     let reason = startup["reason"].as_str().expect("reason field");
     assert!(!reason.is_empty(), "{startup}");
-    let api = service.await_record("http listener bound")["addr"]
-        .as_str()
-        .expect("addr field")
-        .to_owned();
+    let api = service.await_addr("http listener bound");
     service.await_record("service_ready");
     let ready = format!("http://{api}/health/ready");
     assert!(
@@ -405,25 +368,12 @@ fn a_cache_outage_at_startup_still_becomes_ready() {
 }
 
 #[test]
-#[expect(
-    clippy::disallowed_methods,
-    reason = "synchronous fixture polling waits for owned child or thread completion within its existing timeout"
-)]
 fn production_plaintext_cache_dsn_exits_before_the_listener() {
-    let mut service = Service::spawn(&[
+    let service = Service::spawn(&[
         ("APP__APP__ENV", "production"),
         ("APP__CACHE__DSN", "redis://127.0.0.1:6379"),
         ("APP__CACHE__COMMAND_TIMEOUT", "1s"),
     ]);
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while service.child.try_wait().expect("poll startup").is_none() {
-        if Instant::now() >= deadline {
-            let _ = service.child.kill();
-            let _ = service.child.wait();
-            panic!("plaintext cache DSN did not exit before the listener");
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
     let (code, stdout, stderr) = service.wait_output();
     assert_eq!(code, Some(1), "stdout: {stdout}; stderr: {stderr}");
     assert!(stdout.contains("plaintext"), "startup refusal: {stdout}");
@@ -551,25 +501,14 @@ fn storage_env<'a>(
 
 #[test]
 fn an_unreachable_bucket_still_becomes_ready_without_a_request() {
-    #[expect(
-        clippy::disallowed_methods,
-        clippy::disallowed_types,
-        reason = "the startup outage fixture reserves a loopback port and closes it before launching the child"
-    )]
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("closed port");
-    let port = listener.local_addr().expect("closed port").port();
-    drop(listener);
-    let endpoint = format!("http://127.0.0.1:{port}");
+    let endpoint = format!("http://{}", available_address());
     let service = Service::spawn(&storage_env("local", "local", &endpoint));
     let configured = service.await_record("object_storage_configured");
     assert_eq!(
         configured["object_storage.provider"], "local",
         "{configured}"
     );
-    let api = service.await_record("http listener bound")["addr"]
-        .as_str()
-        .expect("addr field")
-        .to_owned();
+    let api = service.await_addr("http listener bound");
     service.await_record("service_ready");
     let ready = format!("http://{api}/health/ready");
     assert!(
@@ -656,10 +595,7 @@ fn active_inbound_webhook_endpoint_refuses_without_postgres_before_listener_admi
 #[test]
 fn inert_inbound_webhook_route_rejects_unknown_endpoint_without_signature_work() {
     let service = Service::spawn(&[]);
-    let api = service.await_record("http listener bound")["addr"]
-        .as_str()
-        .expect("addr field")
-        .to_owned();
+    let api = service.await_addr("http listener bound");
     service.await_record("service_ready");
 
     let status = common::agent()
@@ -723,10 +659,7 @@ fn ambient_otlp_credentials_are_refused_under_a_typed_endpoint() {
 #[test]
 fn disabled_authentication_leaves_public_probes_unaffected() {
     let service = Service::spawn(&[("APP__AUTHN__MODE", "none")]);
-    let api = service.await_record("http listener bound")["addr"]
-        .as_str()
-        .expect("addr field")
-        .to_owned();
+    let api = service.await_addr("http listener bound");
     service.await_record("service_ready");
 
     let response = common::agent()

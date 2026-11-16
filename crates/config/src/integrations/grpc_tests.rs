@@ -1,34 +1,29 @@
 use crate::LoadOptions;
 use crate::load::{Error, load_from};
-use crate::test_support::{BUILD, env};
+use crate::test_support::{BUILD, env, load_env};
 use std::assert_matches;
 
 #[test]
 fn grpc_integration_environment_builds_a_lazy_client_tuple() {
-    let cfg = load_from(
-        &LoadOptions::default(),
-        BUILD,
-        env(&[
-            (
-                "APP__INTEGRATIONS__BILLING__GRPC__DESTINATION",
-                "https://billing.example:8443",
-            ),
-            ("APP__INTEGRATIONS__BILLING__GRPC__SECURITY", "tls"),
-            (
-                "APP__INTEGRATIONS__BILLING__GRPC__CA_CERTIFICATE",
-                "public-ca",
-            ),
-            (
-                "APP__INTEGRATIONS__BILLING__GRPC__CERTIFICATE",
-                "public-client-cert",
-            ),
-            (
-                "APP__INTEGRATIONS__BILLING__GRPC__PRIVATE_KEY",
-                "private-client-key",
-            ),
-        ]),
-    )
-    .unwrap();
+    let cfg = load_env(&[
+        (
+            "APP__INTEGRATIONS__BILLING__GRPC__DESTINATION",
+            "https://billing.example:8443",
+        ),
+        ("APP__INTEGRATIONS__BILLING__GRPC__SECURITY", "tls"),
+        (
+            "APP__INTEGRATIONS__BILLING__GRPC__CA_CERTIFICATE",
+            "public-ca",
+        ),
+        (
+            "APP__INTEGRATIONS__BILLING__GRPC__CERTIFICATE",
+            "public-client-cert",
+        ),
+        (
+            "APP__INTEGRATIONS__BILLING__GRPC__PRIVATE_KEY",
+            "private-client-key",
+        ),
+    ]);
     let grpc = cfg
         .integrations
         .get("billing")

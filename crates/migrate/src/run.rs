@@ -100,6 +100,15 @@ impl From<PendingError> for RunError {
     }
 }
 
+impl From<RunError> for RunFailure {
+    fn from(error: RunError) -> Self {
+        Self {
+            error,
+            report: Report::default(),
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error("{error}")]
 pub struct RunFailure {
@@ -129,14 +138,8 @@ pub async fn run(migrator: &Migrator, options: &RunOptions<'_>) -> Result<Report
     };
     let mut conn = tokio::time::timeout(ACQUIRE_TIMEOUT, connect_session(options.dsn, &session))
         .await
-        .map_err(|_| RunFailure {
-            error: RunError::ConnectTimeout(ACQUIRE_TIMEOUT),
-            report: Report::default(),
-        })?
-        .map_err(|error| RunFailure {
-            error: RunError::Connect(error),
-            report: Report::default(),
-        })?;
+        .map_err(|_| RunError::ConnectTimeout(ACQUIRE_TIMEOUT))?
+        .map_err(RunError::Connect)?;
     let deadline_at = run_cutoff(options.deadline)?;
     let mut report = Report::default();
     let outcome = tokio::time::timeout_at(
@@ -162,10 +165,7 @@ fn run_cutoff(budget: Duration) -> Result<tokio::time::Instant, RunFailure> {
     tokio::time::Instant::now()
         .checked_add(budget)
         .filter(|deadline| deadline.checked_add(Duration::from_millis(1)).is_some())
-        .ok_or_else(|| RunFailure {
-            error: RunError::InvalidDeadline(budget),
-            report: Report::default(),
-        })
+        .ok_or_else(|| RunError::InvalidDeadline(budget).into())
 }
 
 async fn apply_pending(

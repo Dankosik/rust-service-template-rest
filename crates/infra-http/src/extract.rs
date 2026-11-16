@@ -8,6 +8,7 @@ use axum::http::request::Parts;
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use compact_str::{CompactString, format_compact};
+use itertools::Itertools as _;
 use serde::de::{DeserializeOwned, IgnoredAny};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_path_to_error::Segment;
@@ -254,13 +255,7 @@ impl PathIssue {
                         .find(|(name, _)| *name == key.as_str())
                         .map(|(name, _)| name),
                     Some(Segment::Seq { index }) => params.iter().nth(*index).map(|(name, _)| name),
-                    _ => {
-                        let mut params = params.iter();
-                        params
-                            .next()
-                            .filter(|_| params.next().is_none())
-                            .map(|(name, _)| name)
-                    }
+                    _ => params.iter().exactly_one().ok().map(|(name, _)| name),
                 };
                 invalid_path(name)
             }
@@ -334,6 +329,7 @@ mod tests {
 
     use super::*;
     use crate::problem::SANITIZED_DETAIL;
+    use crate::test_support::body_json;
     use crate::{HardenOptions, REQUEST_ID_HEADER, harden};
 
     #[derive(Deserialize)]
@@ -470,8 +466,7 @@ mod tests {
             "application/problem+json"
         );
         let request_id = response.headers().get(&REQUEST_ID_HEADER).cloned();
-        let bytes = response.into_body().collect().await.unwrap().to_bytes();
-        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        let body = body_json(response).await;
         assert_eq!(body["code"], code);
         assert_eq!(
             body["request_id"].as_str(),
@@ -522,8 +517,7 @@ mod tests {
             response.headers().get(CONTENT_TYPE).unwrap(),
             "application/problem+json"
         );
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        let problem: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let problem = body_json(response).await;
         assert_eq!(problem["code"], "internal_error");
     }
 

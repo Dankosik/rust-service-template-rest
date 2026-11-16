@@ -30,6 +30,13 @@ impl tracing::field::Visit for Fields {
     }
 }
 
+pub(crate) fn labeled(key: &metrics::Key, labels: &[(&str, &str)]) -> bool {
+    labels.iter().all(|(name, value)| {
+        key.labels()
+            .any(|label| label.key() == *name && label.value() == *value)
+    })
+}
+
 #[derive(Clone)]
 pub(crate) struct Diagnostics {
     recorder: Arc<DebuggingRecorder>,

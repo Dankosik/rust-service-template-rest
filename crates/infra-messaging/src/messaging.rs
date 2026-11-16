@@ -19,9 +19,10 @@ use crate::wire::HEADER_LIMIT_BYTES;
 
 pub(crate) const PUBLICATION_WINDOW_BYTES: usize = 64 * 1024 * 1024;
 
-#[derive(Clone)]
+#[derive(Clone, derive_more::Debug)]
 pub struct MessagingOptions {
     pub connection_name: String,
+    #[debug("{} servers", servers.len())]
     pub servers: Vec<String>,
     pub credentials: Option<Credentials>,
     pub root_ca_path: Option<PathBuf>,
@@ -36,23 +37,6 @@ pub struct MessagingOptions {
 pub enum Credentials {
     Inline(SecretString),
     File(PathBuf),
-}
-
-impl std::fmt::Debug for MessagingOptions {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("MessagingOptions")
-            .field("connection_name", &self.connection_name)
-            .field("server_count", &self.servers.len())
-            .field("credentials", &self.credentials)
-            .field("root_ca_path", &self.root_ca_path)
-            .field("allow_plaintext", &self.allow_plaintext)
-            .field("tls_first", &self.tls_first)
-            .field("source_stream", &self.source_stream)
-            .field("max_payload_bytes", &self.max_payload_bytes)
-            .field("consumer", &self.consumer)
-            .finish()
-    }
 }
 
 #[derive(Clone, Debug)]

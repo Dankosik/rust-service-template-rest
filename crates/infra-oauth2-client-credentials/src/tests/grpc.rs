@@ -15,6 +15,7 @@ use std::{
 use grpc_contracts::example::v1::{
     UnaryRequest, UnaryResponse, echo_service_client::EchoServiceClient,
 };
+use http::StatusCode;
 use hyper::{Request as HyperRequest, Response as HyperResponse, body::Incoming};
 use hyper_util::{
     rt::{TokioExecutor, TokioIo},
@@ -356,13 +357,13 @@ async fn acquisition_failure_prevents_dispatch_and_reports_whether_it_may_pass_l
     let resource = Resource::new().await;
     for (status, body, code, reason) in [
         (
-            "500 Internal Server Error",
+            StatusCode::INTERNAL_SERVER_ERROR,
             serde_json::json!({"error": "private"}),
             Code::Unavailable,
             AcquisitionError::Unavailable,
         ),
         (
-            "400 Bad Request",
+            StatusCode::BAD_REQUEST,
             serde_json::json!({"error": "invalid_client", "error_description": "private"}),
             Code::Unauthenticated,
             AcquisitionError::Rejected(Rejection::InvalidClient),
@@ -484,7 +485,7 @@ async fn one_cached_bearer_is_sent_and_reused() {
         .unwrap()
         .into_inner();
     tokens.token_json(
-        "200 OK",
+        StatusCode::OK,
         &serde_json::json!({"access_token": "other", "token_type": "Bearer", "expires_in": 60}),
     );
     let second = client
@@ -555,7 +556,7 @@ async fn a_dropped_refresh_driver_closes_cached_grpc_calls_before_dispatch() {
 async fn a_token_past_its_reuse_cutoff_is_refreshed_before_dispatch() {
     let tokens = Fixture::new().await;
     tokens.token_json(
-        "200 OK",
+        StatusCode::OK,
         &serde_json::json!({"access_token": "cached", "token_type": "Bearer", "expires_in": 60}),
     );
     let resource = Resource::new().await;
@@ -747,7 +748,7 @@ async fn unauthenticated_in_terminal_trailers_evicts_without_replay() {
     assert_eq!(tokens.token_requests().len(), 1);
 
     tokens.token_json(
-        "200 OK",
+        StatusCode::OK,
         &serde_json::json!({"access_token": "replacement", "token_type": "Bearer", "expires_in": 60}),
     );
     resource
@@ -769,7 +770,7 @@ async fn unauthenticated_in_terminal_trailers_evicts_without_replay() {
 async fn a_late_rejection_does_not_evict_a_newer_cached_token() {
     let tokens = Fixture::new().await;
     tokens.token_json(
-        "200 OK",
+        StatusCode::OK,
         &serde_json::json!({"access_token": "first", "token_type": "Bearer", "expires_in": 60}),
     );
     let resource = Resource::new().await;
@@ -788,7 +789,7 @@ async fn a_late_rejection_does_not_evict_a_newer_cached_token() {
     }
     *credentials.cached() = crate::credentials::Cached::default();
     tokens.token_json(
-        "200 OK",
+        StatusCode::OK,
         &serde_json::json!({"access_token": "second", "token_type": "Bearer", "expires_in": 60}),
     );
     credentials
@@ -880,7 +881,7 @@ async fn http_401_without_grpc_status_evicts_and_another_status_does_not() {
 #[tokio::test]
 async fn on_behalf_of_dispatches_the_exchanged_token_instead_of_the_service_token() {
     let tokens = Fixture::new().await;
-    tokens.token_json("200 OK", &super::exchange_response("exchanged-token"));
+    tokens.token_json(StatusCode::OK, &super::exchange_response("exchanged-token"));
     let resource = Resource::new().await;
     let credentials = tokens.credentials(&[], None);
     let mut request = rpc(
@@ -930,7 +931,7 @@ async fn a_client_requiring_a_subject_is_internal_without_one_before_any_io() {
     assert_eq!(tokens.token_requests().len(), 1);
     assert_eq!(resource.calls(), 1);
 
-    tokens.token_json("200 OK", &super::exchange_response("exchanged-token"));
+    tokens.token_json(StatusCode::OK, &super::exchange_response("exchanged-token"));
     let mut request = rpc(message(), Duration::from_secs(10));
     request
         .extensions_mut()

@@ -7,7 +7,9 @@ use secrecy::ExposeSecret as _;
 use super::*;
 use crate::LoadOptions;
 use crate::load::{Error, load_from};
-use crate::test_support::{BUILD, assert_secret_in_file, assert_unknown_env_key_fails, env, write};
+use crate::test_support::{
+    BUILD, assert_secret_in_file, assert_unknown_env_key_fails, env, load_env, write,
+};
 use crate::validate::{ValidationErrors, admit_with};
 
 fn admit(input: MessagingInput, app_env: &str) -> Result<MessagingConfig, ValidationErrors> {
@@ -262,26 +264,21 @@ fn resident_delivery_memory_is_bounded(
 
 #[test]
 fn messaging_environment_decodes_lists_and_redacts_credentials() {
-    let cfg = load_from(
-        &LoadOptions::default(),
-        BUILD,
-        env(&[
-            (
-                "APP__MESSAGING__URLS",
-                "tls://nats-a.example:4222,tls://nats-b.example:4222",
-            ),
-            ("APP__MESSAGING__CREDENTIALS", "fixture-credentials"),
-            ("APP__MESSAGING__ROOT_CA_PATH", "/etc/nats/root-ca.pem"),
-            ("APP__MESSAGING__TLS_FIRST", "true"),
-            ("APP__MESSAGING__SOURCE_STREAM", "events"),
-            ("APP__MESSAGING__MAX_PAYLOAD_BYTES", "2 MiB"),
-            ("APP__MESSAGING__CONSUMER_DURABLE", "service-events"),
-            ("APP__MESSAGING__CONSUMER_FILTER_SUBJECT", "events.>"),
-            ("APP__MESSAGING__DLQ_SUBJECT", "events.dlq"),
-            ("APP__MESSAGING__CONSUMER_CONCURRENCY", "2"),
-        ]),
-    )
-    .unwrap();
+    let cfg = load_env(&[
+        (
+            "APP__MESSAGING__URLS",
+            "tls://nats-a.example:4222,tls://nats-b.example:4222",
+        ),
+        ("APP__MESSAGING__CREDENTIALS", "fixture-credentials"),
+        ("APP__MESSAGING__ROOT_CA_PATH", "/etc/nats/root-ca.pem"),
+        ("APP__MESSAGING__TLS_FIRST", "true"),
+        ("APP__MESSAGING__SOURCE_STREAM", "events"),
+        ("APP__MESSAGING__MAX_PAYLOAD_BYTES", "2 MiB"),
+        ("APP__MESSAGING__CONSUMER_DURABLE", "service-events"),
+        ("APP__MESSAGING__CONSUMER_FILTER_SUBJECT", "events.>"),
+        ("APP__MESSAGING__DLQ_SUBJECT", "events.dlq"),
+        ("APP__MESSAGING__CONSUMER_CONCURRENCY", "2"),
+    ]);
     assert_eq!(
         cfg.messaging.urls,
         vec![
@@ -306,18 +303,13 @@ fn messaging_environment_decodes_lists_and_redacts_credentials() {
 
 #[test]
 fn messaging_trusted_network_admits_plaintext_in_production() {
-    let cfg = load_from(
-        &LoadOptions::default(),
-        BUILD,
-        env(&[
-            ("APP__APP__ENV", "production"),
-            ("APP__MESSAGING__URLS", "nats://nats.internal:4222"),
-            ("APP__MESSAGING__TRUSTED_NETWORK", "true"),
-            ("APP__MESSAGING__CREDENTIALS", "fixture-credentials"),
-            ("APP__MESSAGING__SOURCE_STREAM", "events"),
-        ]),
-    )
-    .unwrap();
+    let cfg = load_env(&[
+        ("APP__APP__ENV", "production"),
+        ("APP__MESSAGING__URLS", "nats://nats.internal:4222"),
+        ("APP__MESSAGING__TRUSTED_NETWORK", "true"),
+        ("APP__MESSAGING__CREDENTIALS", "fixture-credentials"),
+        ("APP__MESSAGING__SOURCE_STREAM", "events"),
+    ]);
     assert!(cfg.messaging.trusted_network);
     assert!(cfg.messaging.plaintext_admitted());
     cfg.messaging.validate_producer().unwrap();
@@ -447,15 +439,10 @@ fn messaging_urls_accept_a_file_list_and_refuse_other_shapes() {
 #[test]
 fn messaging_url_list_parsing_preserves_scalar_secret_bytes() {
     for secret in ["00123", "TRUE"] {
-        let cfg = load_from(
-            &LoadOptions::default(),
-            BUILD,
-            env(&[
-                ("APP__MESSAGING__URLS", "tls://nats.example:4222"),
-                ("APP__MESSAGING__CREDENTIALS", secret),
-            ]),
-        )
-        .unwrap();
+        let cfg = load_env(&[
+            ("APP__MESSAGING__URLS", "tls://nats.example:4222"),
+            ("APP__MESSAGING__CREDENTIALS", secret),
+        ]);
         assert_eq!(cfg.messaging.urls, ["tls://nats.example:4222"]);
         assert_matches!(
             &cfg.messaging.credentials,

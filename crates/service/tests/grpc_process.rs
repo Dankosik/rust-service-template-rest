@@ -6,7 +6,7 @@
     reason = "a broken fixture or setup fails the test"
 )]
 
-use std::io::{BufRead as _, BufReader, Read as _};
+use std::io::Read as _;
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -15,11 +15,9 @@ use std::time::{Duration, Instant};
 
 mod common;
 
-use common::poll_until;
+use common::{baseline_env, poll_until, spawn_stdout_lines, terminate};
 use grpc_contracts::example::v1::{UnaryRequest, echo_service_client::EchoServiceClient};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode, jwk::Jwk};
-use nix::sys::signal::{Signal, kill};
-use nix::unistd::Pid;
 use opentelemetry_proto::tonic::{
     collector::trace::v1::ExportTraceServiceRequest, common::v1::any_value::Value, trace::v1::Span,
 };
@@ -92,14 +90,8 @@ impl Example {
         environment: &[(&str, &str)],
     ) -> Self {
         fixture.verify_tls_material();
-        command
-            .env_clear()
-            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-            .env("APP__HTTP__ADDR", "127.0.0.1:0")
-            .env("APP__OBSERVABILITY__METRICS__ADDR", "127.0.0.1:0")
-            .env("APP__HTTP__READINESS_PROPAGATION_DELAY", "300ms")
+        baseline_env(&mut command)
             .env("APP__HTTP__DRAIN_TIMEOUT", "10s")
-            .env("APP__HTTP__REQUEST_TIMEOUT", "2s")
             .env("APP__GRPC__ENABLED", "true")
             .env("APP__GRPC__ADDR", "127.0.0.1:0")
             .env("APP__GRPC__SECURITY", "tls")
@@ -109,20 +101,11 @@ impl Example {
             .env("APP__AUTHN__ISSUER", &fixture.issuer)
             .env("APP__AUTHN__AUDIENCE", "grpc-example")
             .env("SSL_CERT_FILE", &fixture.root_path)
-            .env("APP__LOG__FORMAT", "json")
             .envs(environment.iter().copied())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         let mut child = command.spawn().expect("spawn gRPC example");
-        let stdout = child.stdout.take().expect("piped stdout");
-        let (tx, lines) = mpsc::channel();
-        let stdout_reader = std::thread::spawn(move || {
-            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                if tx.send(line).is_err() {
-                    break;
-                }
-            }
-        });
+        let (lines, stdout_reader) = spawn_stdout_lines(&mut child);
         let mut stderr = child.stderr.take().expect("piped stderr");
         let (stderr_tx, stderr_rx) = mpsc::channel();
         let stderr_reader = std::thread::spawn(move || {
@@ -235,11 +218,7 @@ impl Example {
     }
 
     fn terminate(&self) {
-        kill(
-            Pid::from_raw(self.child.id().cast_signed()),
-            Signal::SIGTERM,
-        )
-        .expect("send SIGTERM");
+        terminate(&self.child);
     }
 
     #[expect(

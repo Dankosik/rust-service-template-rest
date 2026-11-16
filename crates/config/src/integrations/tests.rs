@@ -1,6 +1,6 @@
 use super::*;
 use crate::load::{Error, load_from};
-use crate::test_support::{BUILD, assert_secret_in_file, env, write};
+use crate::test_support::{BUILD, assert_secret_in_file, env, load_env, write};
 use crate::{Config, LoadOptions};
 use std::assert_matches;
 
@@ -32,39 +32,34 @@ fn whitespace_only_private_key_is_refused() {
 fn oauth_environment_builds_a_named_tuple_and_redacts_its_values() {
     use secrecy::ExposeSecret;
 
-    let cfg = load_from(
-        &LoadOptions::default(),
-        BUILD,
-        env(&[
-            ("APP__INTEGRATIONS__BILLING__OAUTH__ALGORITHM", "RS256"),
-            (
-                "APP__INTEGRATIONS__BILLING__OAUTH__TOKEN_URL",
-                "https://identity.example/oauth2/token?tenant=blue",
-            ),
-            (
-                "APP__INTEGRATIONS__BILLING__OAUTH__CLIENT_ID",
-                "billing-service",
-            ),
-            (
-                "APP__INTEGRATIONS__BILLING__OAUTH__PRIVATE_KEY",
-                "test-private-key",
-            ),
-            ("APP__INTEGRATIONS__BILLING__OAUTH__KEY_ID", "key-1"),
-            (
-                "APP__INTEGRATIONS__BILLING__OAUTH__ASSERTION_AUDIENCE",
-                "https://identity.example",
-            ),
-            (
-                "APP__INTEGRATIONS__BILLING__OAUTH__SCOPES",
-                "billing.read billing.write",
-            ),
-            (
-                "APP__INTEGRATIONS__BILLING__OAUTH__AUDIENCE",
-                "https://billing-api.example",
-            ),
-        ]),
-    )
-    .unwrap();
+    let cfg = load_env(&[
+        ("APP__INTEGRATIONS__BILLING__OAUTH__ALGORITHM", "RS256"),
+        (
+            "APP__INTEGRATIONS__BILLING__OAUTH__TOKEN_URL",
+            "https://identity.example/oauth2/token?tenant=blue",
+        ),
+        (
+            "APP__INTEGRATIONS__BILLING__OAUTH__CLIENT_ID",
+            "billing-service",
+        ),
+        (
+            "APP__INTEGRATIONS__BILLING__OAUTH__PRIVATE_KEY",
+            "test-private-key",
+        ),
+        ("APP__INTEGRATIONS__BILLING__OAUTH__KEY_ID", "key-1"),
+        (
+            "APP__INTEGRATIONS__BILLING__OAUTH__ASSERTION_AUDIENCE",
+            "https://identity.example",
+        ),
+        (
+            "APP__INTEGRATIONS__BILLING__OAUTH__SCOPES",
+            "billing.read billing.write",
+        ),
+        (
+            "APP__INTEGRATIONS__BILLING__OAUTH__AUDIENCE",
+            "https://billing-api.example",
+        ),
+    ]);
 
     let oauth = cfg
         .integrations
@@ -327,31 +322,26 @@ fn oauth_algorithm_accepts_ps256_and_es256() {
         ("PS256", crate::OAuthAlgorithm::Ps256),
         ("ES256", crate::OAuthAlgorithm::Es256),
     ] {
-        let cfg = load_from(
-            &LoadOptions::default(),
-            BUILD,
-            env(&[
-                (
-                    "APP__INTEGRATIONS__BILLING__OAUTH__TOKEN_URL",
-                    "https://identity.example/token",
-                ),
-                (
-                    "APP__INTEGRATIONS__BILLING__OAUTH__CLIENT_ID",
-                    "billing-service",
-                ),
-                (
-                    "APP__INTEGRATIONS__BILLING__OAUTH__PRIVATE_KEY",
-                    "test-private-key",
-                ),
-                ("APP__INTEGRATIONS__BILLING__OAUTH__KEY_ID", "key-1"),
-                (
-                    "APP__INTEGRATIONS__BILLING__OAUTH__ASSERTION_AUDIENCE",
-                    "https://identity.example",
-                ),
-                ("APP__INTEGRATIONS__BILLING__OAUTH__ALGORITHM", value),
-            ]),
-        )
-        .unwrap();
+        let cfg = load_env(&[
+            (
+                "APP__INTEGRATIONS__BILLING__OAUTH__TOKEN_URL",
+                "https://identity.example/token",
+            ),
+            (
+                "APP__INTEGRATIONS__BILLING__OAUTH__CLIENT_ID",
+                "billing-service",
+            ),
+            (
+                "APP__INTEGRATIONS__BILLING__OAUTH__PRIVATE_KEY",
+                "test-private-key",
+            ),
+            ("APP__INTEGRATIONS__BILLING__OAUTH__KEY_ID", "key-1"),
+            (
+                "APP__INTEGRATIONS__BILLING__OAUTH__ASSERTION_AUDIENCE",
+                "https://identity.example",
+            ),
+            ("APP__INTEGRATIONS__BILLING__OAUTH__ALGORITHM", value),
+        ]);
         let oauth = cfg
             .integrations
             .get("billing")

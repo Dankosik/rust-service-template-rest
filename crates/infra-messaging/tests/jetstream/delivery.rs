@@ -483,11 +483,7 @@ async fn pulls_reserve_handler_slots_and_drain_leaves_unadmitted_messages_at_the
         let mut cadence = tokio::time::interval(Duration::from_millis(20));
         while Instant::now() < observed_until {
             cadence.tick().await;
-            let durable: consumer::PullConsumer = fixture
-                .jetstream
-                .get_consumer_from_stream(&fixture.durable, &fixture.stream)
-                .await
-                .expect("the durable consumer exists");
+            let durable = durable(&fixture).await;
             assert_eq!(durable.cached_info().num_ack_pending, 2);
             assert_eq!(durable.cached_info().num_pending, 2);
             assert_eq!(durable.cached_info().num_redelivered, 0);
@@ -502,11 +498,7 @@ async fn pulls_reserve_handler_slots_and_drain_leaves_unadmitted_messages_at_the
         .expect("one freed slot admits the next event")
         .expect("handler channel remains connected");
     assert_eq!(next, "event-next");
-    let durable: consumer::PullConsumer = fixture
-        .jetstream
-        .get_consumer_from_stream(&fixture.durable, &fixture.stream)
-        .await
-        .expect("the durable remains observable");
+    let durable = durable(&fixture).await;
     assert_eq!(durable.cached_info().num_ack_pending, 2);
     assert_eq!(durable.cached_info().num_pending, 1);
 

@@ -17,6 +17,7 @@ use tracing_subscriber::layer::SubscriberExt;
 
 use super::*;
 use crate::request_id::REQUEST_ID_HEADER;
+use crate::test_support::body_json;
 
 fn options() -> HardenOptions {
     HardenOptions {
@@ -54,11 +55,6 @@ fn app(options: &HardenOptions) -> Router {
         .route("/panic", get(handler_3))
         .route("/echo", post(handler_4));
     harden(routes, options)
-}
-
-async fn body_json(response: Response) -> serde_json::Value {
-    let bytes = response.into_body().collect().await.unwrap().to_bytes();
-    serde_json::from_slice(&bytes).unwrap()
 }
 
 fn request(method: Method, uri: &str) -> HttpRequest<Body> {

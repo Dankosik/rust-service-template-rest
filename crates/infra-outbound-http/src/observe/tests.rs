@@ -246,7 +246,7 @@ async fn url_template_names_the_operation_in_the_span_and_the_metric() {
         .await
         .expect("HTTP error statuses remain responses");
     let wire = captured.await.expect("captured request");
-    assert!(wire.starts_with(b"GET /items/sentinel-path HTTP/1.1\r\n"));
+    assert!(wire.starts_with("GET /items/sentinel-path HTTP/1.1\r\n"));
     server.await.expect("capture fixture server succeeds");
 
     let scrape = recorder.handle().render();

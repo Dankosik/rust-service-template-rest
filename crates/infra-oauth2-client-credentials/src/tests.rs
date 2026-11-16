@@ -15,7 +15,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use http::{Request, StatusCode, header};
+use http::{Request, Response, StatusCode, header};
 use infra_outbound_http::Client;
 use operation_context::OperationContext;
 use rcgen::{KeyPair, PKCS_RSA_SHA256};
@@ -30,7 +30,8 @@ use tokio::{
 use url::Url;
 
 use crate::{
-    AcquisitionError, Algorithm, Credentials, Error, OnBehalfOf, Options, RefreshDriver, Rejection,
+    AcquisitionError, Algorithm, AuthenticatedClient, Credentials, Error, OnBehalfOf, Options,
+    RefreshDriver, Rejection,
     credentials::{Cached, acquisition_deadline},
     options::Admitted,
     token::EVICTION_MIN_AGE,
@@ -104,14 +105,14 @@ impl Fixture {
         let endpoint = origin.join(TOKEN_PATH).unwrap();
         let state = Arc::new(FixtureState {
             token_response: Mutex::new(json_response(
-                "200 OK",
+                StatusCode::OK,
                 &serde_json::json!({
                     "access_token": "fixture-token",
                     "token_type": "Bearer",
                     "expires_in": 60,
                 }),
             )),
-            resource_response: Mutex::new(response("200 OK", b"ok")),
+            resource_response: Mutex::new(response(StatusCode::OK, b"ok")),
             token_requests: Mutex::new(Vec::new()),
             resource_requests: Mutex::new(Vec::new()),
             token_received: Semaphore::new(0),
@@ -189,6 +190,24 @@ impl Fixture {
         Client::try_new_for_test_http(&self.origin, TOKEN_LIMITS).unwrap()
     }
 
+    fn client(&self) -> AuthenticatedClient {
+        self.credentials(&[], None).http(self.resource_client())
+    }
+
+    async fn send(&self, client: &AuthenticatedClient) -> Result<Response<Bytes>, Error> {
+        self.send_request(client, self.request()).await
+    }
+
+    async fn send_request(
+        &self,
+        client: &AuthenticatedClient,
+        request: Request<Bytes>,
+    ) -> Result<Response<Bytes>, Error> {
+        client
+            .execute(request, deadline(Duration::from_secs(10)))
+            .await
+    }
+
     fn request(&self) -> Request<Bytes> {
         Request::get(self.origin.join(RESOURCE_PATH).unwrap().as_str())
             .body(Bytes::new())
@@ -203,7 +222,7 @@ impl Fixture {
         request
     }
 
-    fn token_json(&self, status: &str, body: &serde_json::Value) {
+    fn token_json(&self, status: StatusCode, body: &serde_json::Value) {
         *self.state.token_response.lock().unwrap() = json_response(status, body);
     }
 
@@ -211,7 +230,7 @@ impl Fixture {
         *self.state.token_response.lock().unwrap() = response;
     }
 
-    fn resource_status(&self, status: &str) {
+    fn resource_status(&self, status: StatusCode) {
         *self.state.resource_response.lock().unwrap() = response(status, b"resource");
     }
 
@@ -225,19 +244,11 @@ impl Fixture {
     }
 
     async fn token_received(&self) {
-        tokio::time::timeout(Duration::from_secs(2), self.state.token_received.acquire())
-            .await
-            .unwrap()
-            .unwrap()
-            .forget();
+        take_event(&self.state.token_received).await;
     }
 
     async fn token_completed(&self) {
-        tokio::time::timeout(Duration::from_secs(2), self.state.token_completed.acquire())
-            .await
-            .unwrap()
-            .unwrap()
-            .forget();
+        take_event(&self.state.token_completed).await;
     }
 
     fn block_resources(&self) -> Arc<Semaphore> {
@@ -247,14 +258,7 @@ impl Fixture {
     }
 
     async fn resource_received(&self) {
-        tokio::time::timeout(
-            Duration::from_secs(2),
-            self.state.resource_received.acquire(),
-        )
-        .await
-        .unwrap()
-        .unwrap()
-        .forget();
+        take_event(&self.state.resource_received).await;
     }
 
     fn token_requests(&self) -> Vec<CapturedRequest> {
@@ -280,6 +284,14 @@ impl Fixture {
             .unwrap()
             .unwrap();
     }
+}
+
+async fn take_event(events: &Semaphore) {
+    tokio::time::timeout(Duration::from_secs(2), events.acquire())
+        .await
+        .unwrap()
+        .unwrap()
+        .forget();
 }
 
 async fn serve(
@@ -379,9 +391,11 @@ async fn read_request(stream: &mut TcpStream) -> CapturedRequest {
     }
 }
 
-fn response(status: &str, body: &[u8]) -> Vec<u8> {
+fn response(status: StatusCode, body: &[u8]) -> Vec<u8> {
     let mut response = format!(
-        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        "HTTP/1.1 {} {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        status.as_str(),
+        status.canonical_reason().unwrap(),
         body.len()
     )
     .into_bytes();
@@ -389,7 +403,7 @@ fn response(status: &str, body: &[u8]) -> Vec<u8> {
     response
 }
 
-fn json_response(status: &str, body: &serde_json::Value) -> Vec<u8> {
+fn json_response(status: StatusCode, body: &serde_json::Value) -> Vec<u8> {
     response(status, &serde_json::to_vec(body).unwrap())
 }
 

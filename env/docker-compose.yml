@@ -45,7 +45,7 @@ services:
   # template:end postgres:compose-postgres-service
   # template:begin messaging:compose-nats-service
   nats:
-    image: nats:2.15.2-alpine3.22@sha256:823e7f1d6d8ffe3b30dbd73d4a06bbb939acf94929f7fdf224404da7a05bafb5
+    image: nats:2.15.2-alpine3.22@sha256:afae2fdbe2e326c65e1246cb83b9d05d319188734f3bd577ac8072daae78a10f
     command: ["-c", "/etc/nats/nats-server.conf"]
     ports:
       - "${NATS_PORT:-4222}:4222"

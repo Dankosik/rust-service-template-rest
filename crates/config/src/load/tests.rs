@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use super::*;
 use crate::LogFormat;
-use crate::test_support::{BUILD, env, write};
+use crate::test_support::{BUILD, env, load_env, write};
 
 #[rstest::rstest]
 #[case::word("partner", true)]
@@ -23,7 +23,7 @@ fn env_addressable_names(#[case] name: &str, #[case] addressable: bool) {
 
 #[test]
 fn defaults_alone_produce_a_valid_snapshot() {
-    let cfg = load_from(&LoadOptions::default(), BUILD, env(&[])).unwrap();
+    let cfg = load_env(&[]);
     assert_eq!(cfg.http.addr, "0.0.0.0:8080".parse().unwrap());
     assert_eq!(cfg.app.version, "1.2.3");
     assert_eq!(cfg.app.commit, "abc123");
@@ -34,12 +34,7 @@ fn defaults_alone_produce_a_valid_snapshot() {
 
 #[test]
 fn runtime_workers_load_from_the_environment_and_zero_names_its_key() {
-    let cfg = load_from(
-        &LoadOptions::default(),
-        BUILD,
-        env(&[("APP__RUNTIME__WORKER_THREADS", "4")]),
-    )
-    .unwrap();
+    let cfg = load_env(&[("APP__RUNTIME__WORKER_THREADS", "4")]);
     assert_eq!(
         cfg.runtime.worker_threads.map(std::num::NonZeroUsize::get),
         Some(4)
@@ -67,12 +62,7 @@ fn runtime_workers_load_from_the_environment_and_zero_names_its_key() {
 #[test]
 fn log_filter_keeps_spaces_in_a_span_field_value() {
     let filter = "[postgres_statement{db.query.summary=complete jobs}]=debug";
-    let config = load_from(
-        &LoadOptions::default(),
-        BUILD,
-        env(&[("APP__LOG__LEVEL", filter)]),
-    )
-    .unwrap();
+    let config = load_env(&[("APP__LOG__LEVEL", filter)]);
     assert_eq!(config.log.level, filter);
 }
 
@@ -94,37 +84,22 @@ fn shipped_local_configuration_loads_without_environment_overrides() {
 
 #[test]
 fn empty_instance_id_is_vacant_none() {
-    let empty = load_from(
-        &LoadOptions::default(),
-        BUILD,
-        env(&[("APP__APP__INSTANCE_ID", "")]),
-    )
-    .unwrap();
+    let empty = load_env(&[("APP__APP__INSTANCE_ID", "")]);
     assert_eq!(empty.app.instance_id, None);
-    let set = load_from(
-        &LoadOptions::default(),
-        BUILD,
-        env(&[("APP__APP__INSTANCE_ID", "  pod-a  ")]),
-    )
-    .unwrap();
+    let set = load_env(&[("APP__APP__INSTANCE_ID", "  pod-a  ")]);
     assert_eq!(set.app.instance_id.as_deref(), Some("pod-a"));
 }
 
 #[test]
 fn empty_dsn_and_otlp_headers_are_vacant_none() {
-    let cfg = load_from(
-        &LoadOptions::default(),
-        BUILD,
-        env(&[
-            // template:begin postgres:load-empty-dsn-env
-            ("APP__POSTGRES__DSN", ""),
-            ("APP__POSTGRES__PASSWORD_FILE", "  "),
-            // template:end postgres:load-empty-dsn-env
-            ("APP__OBSERVABILITY__OTEL__EXPORTER__OTLP_HEADERS", "  "),
-            ("APP__OBSERVABILITY__OTEL__EXPORTER__OTLP_ENDPOINT", "  "),
-        ]),
-    )
-    .unwrap();
+    let cfg = load_env(&[
+        // template:begin postgres:load-empty-dsn-env
+        ("APP__POSTGRES__DSN", ""),
+        ("APP__POSTGRES__PASSWORD_FILE", "  "),
+        // template:end postgres:load-empty-dsn-env
+        ("APP__OBSERVABILITY__OTEL__EXPORTER__OTLP_HEADERS", "  "),
+        ("APP__OBSERVABILITY__OTEL__EXPORTER__OTLP_ENDPOINT", "  "),
+    ]);
     // template:begin postgres:load-empty-dsn-assertion
     assert!(cfg.postgres.is_none());
     // template:end postgres:load-empty-dsn-assertion
@@ -362,15 +337,10 @@ fn only_numeric_zero_disables_the_http_in_flight_cap() {
 
 #[test]
 fn http_can_limit_connections_below_concurrent_requests() {
-    let cfg = load_from(
-        &LoadOptions::default(),
-        BUILD,
-        env(&[
-            ("APP__HTTP__MAX_CONNECTIONS", "4"),
-            ("APP__HTTP__MAX_IN_FLIGHT", "32"),
-        ]),
-    )
-    .unwrap();
+    let cfg = load_env(&[
+        ("APP__HTTP__MAX_CONNECTIONS", "4"),
+        ("APP__HTTP__MAX_IN_FLIGHT", "32"),
+    ]);
     assert_eq!(
         cfg.http.connection_cap().map(std::num::NonZeroU32::get),
         Some(4)
@@ -460,21 +430,16 @@ fn an_overlay_cannot_hide_keys_inside_arrays() {
 
 #[test]
 fn env_parses_durations_sizes_numbers_and_enums() {
-    let cfg = load_from(
-        &LoadOptions::default(),
-        BUILD,
-        env(&[
-            ("APP__HTTP__REQUEST_TIMEOUT", "500ms"),
-            ("APP__HTTP__MAX_BODY_BYTES", "2 MiB"),
-            ("APP__HTTP__MAX_IN_FLIGHT", "12"),
-            ("APP__HTTP__MAX_CONNECTION_AGE", "1h"),
-            ("APP__HTTP__ACCESS_LOG_HEALTH_PROBES", "true"),
-            ("APP__LOG__FORMAT", "text"),
-            ("APP__OBSERVABILITY__OTEL__TRACES_SAMPLER", "always_on"),
-            ("APP__OBSERVABILITY__OTEL__TRACES_SAMPLER_ARG", "0.5"),
-        ]),
-    )
-    .unwrap();
+    let cfg = load_env(&[
+        ("APP__HTTP__REQUEST_TIMEOUT", "500ms"),
+        ("APP__HTTP__MAX_BODY_BYTES", "2 MiB"),
+        ("APP__HTTP__MAX_IN_FLIGHT", "12"),
+        ("APP__HTTP__MAX_CONNECTION_AGE", "1h"),
+        ("APP__HTTP__ACCESS_LOG_HEALTH_PROBES", "true"),
+        ("APP__LOG__FORMAT", "text"),
+        ("APP__OBSERVABILITY__OTEL__TRACES_SAMPLER", "always_on"),
+        ("APP__OBSERVABILITY__OTEL__TRACES_SAMPLER_ARG", "0.5"),
+    ]);
     assert_eq!(cfg.http.request_timeout, Duration::from_millis(500));
     assert_eq!(cfg.http.max_body_bytes, bytesize::ByteSize::mib(2));
     assert_eq!(cfg.http.max_in_flight, 12);
@@ -623,15 +588,10 @@ fn secrets_in_files_are_refused_and_empty_placeholders_allowed() {
 
 #[test]
 fn secret_from_env_is_accepted_and_redacted() {
-    let cfg = load_from(
-        &LoadOptions::default(),
-        BUILD,
-        env(&[(
-            "APP__OBSERVABILITY__OTEL__EXPORTER__OTLP_HEADERS",
-            "authorization=Bearer s3cr3t",
-        )]),
-    )
-    .unwrap();
+    let cfg = load_env(&[(
+        "APP__OBSERVABILITY__OTEL__EXPORTER__OTLP_HEADERS",
+        "authorization=Bearer s3cr3t",
+    )]);
     assert!(cfg.observability.otel.exporter.otlp_headers.is_some());
     assert!(!format!("{cfg:?}").contains("s3cr3t"));
 }
@@ -675,16 +635,11 @@ fn nonzero_counts_reject_zero_and_boolean_text() {
 
 #[test]
 fn drain_timeout_and_probe_budget_load_from_env() {
-    let canonical = load_from(
-        &LoadOptions::default(),
-        BUILD,
-        env(&[
-            ("APP__HTTP__DRAIN_TIMEOUT", "20s"),
-            ("APP__HTTP__REQUEST_TIMEOUT", "4s"),
-            ("APP__HEALTH__PROBE_BUDGET", "3s"),
-        ]),
-    )
-    .unwrap();
+    let canonical = load_env(&[
+        ("APP__HTTP__DRAIN_TIMEOUT", "20s"),
+        ("APP__HTTP__REQUEST_TIMEOUT", "4s"),
+        ("APP__HEALTH__PROBE_BUDGET", "3s"),
+    ]);
     assert_eq!(canonical.http.drain_timeout, Duration::from_secs(20));
     assert_eq!(canonical.health.probe_budget, Duration::from_secs(3));
 
@@ -912,15 +867,10 @@ fn variables_that_are_not_unicode_are_refused() {
 
 #[test]
 fn typed_version_and_commit_override_build_info() {
-    let cfg = load_from(
-        &LoadOptions::default(),
-        BUILD,
-        env(&[
-            ("APP__APP__VERSION", "9.9.9"),
-            ("APP__APP__COMMIT", "deadbeef"),
-        ]),
-    )
-    .unwrap();
+    let cfg = load_env(&[
+        ("APP__APP__VERSION", "9.9.9"),
+        ("APP__APP__COMMIT", "deadbeef"),
+    ]);
     assert_eq!(cfg.app.version, "9.9.9");
     assert_eq!(cfg.app.commit, "deadbeef");
 }

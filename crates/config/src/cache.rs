@@ -131,8 +131,7 @@ impl CacheInput {
         let command_timeout = v.take(duration_range(
             "cache.command_timeout",
             self.command_timeout,
-            Duration::from_millis(1),
-            Duration::from_secs(10),
+            Duration::from_millis(1)..=Duration::from_secs(10),
         ));
         let command_timeout = match (command_timeout, request_timeout) {
             (Ok(()), Some(limit)) if self.dsn.is_some() && self.command_timeout * 2 > limit => {

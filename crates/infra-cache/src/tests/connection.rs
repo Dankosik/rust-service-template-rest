@@ -1,3 +1,5 @@
+use std::sync::atomic::Ordering;
+
 use metrics::{Key, Level, Metadata, Recorder as _};
 use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
 
@@ -71,17 +73,11 @@ async fn a_refused_auth_is_retried_after_the_client_gives_up() {
         || gate.attempts() >= chain,
     )
     .await;
-    gate.accept_auth
-        .store(true, std::sync::atomic::Ordering::SeqCst);
+    gate.accept_auth.store(true, Ordering::SeqCst);
     gate.wait_for(
         Duration::from_secs(5),
         "authentication did not recover without traffic after the first setup chain",
-        || {
-            gate.observed
-                .auth_successes
-                .load(std::sync::atomic::Ordering::SeqCst)
-                > 0
-        },
+        || gate.observed.auth_successes.load(Ordering::SeqCst) > 0,
     )
     .await;
     assert_eq!(namespace.get("key").await, Ok(None));
@@ -167,9 +163,7 @@ async fn a_readonly_reply_reconnects_to_the_new_primary() {
         .set("key", b"value", ttl)
         .await
         .expect("set on the current primary");
-    server
-        .primary
-        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    server.primary.fetch_add(1, Ordering::SeqCst);
     assert_eq!(
         namespace.set("key", b"value", ttl).await,
         Err(crate::SetError::Unavailable(crate::Unavailable))
@@ -209,9 +203,7 @@ async fn a_readonly_reply_after_cancellation_reconnects_to_the_new_primary() {
         tokio::time::timeout(limit, namespace.get("ready")).await,
         Ok(Ok(None))
     );
-    server
-        .primary
-        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    server.primary.fetch_add(1, Ordering::SeqCst);
     let (release, held) = tokio::sync::oneshot::channel();
     *server
         .observed
@@ -389,7 +381,6 @@ async fn a_large_command_timeout_keeps_probes_and_maintenance_usable() {
 #[tokio::test]
 async fn ping_permission_denial_keeps_the_connection_usable() {
     use health::Probe;
-    use std::sync::atomic::Ordering;
 
     let server = FakeServer::start().await;
     let cache = admitted(&format!("redis://{}", server.address), true, true);
@@ -525,9 +516,7 @@ async fn a_replaced_connection_dials_without_waiting_for_a_call() {
         .set("key", b"value", ttl)
         .await
         .expect("set on the current primary");
-    server
-        .primary
-        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    server.primary.fetch_add(1, Ordering::SeqCst);
     assert_eq!(
         namespace.set("key", b"value", ttl).await,
         Err(crate::SetError::Unavailable(crate::Unavailable))
@@ -922,10 +911,7 @@ async fn a_caller_stop_before_the_ceiling_keeps_the_connection_for_peers() {
 #[tokio::test]
 async fn reliability_final_owner_drop_cancels_inflight_setup() {
     let server = FakeServer::start().await;
-    server
-        .observed
-        .silence_all
-        .store(true, std::sync::atomic::Ordering::SeqCst);
+    server.observed.silence_all.store(true, Ordering::SeqCst);
     let cache = admitted(&format!("redis://{}", server.address), true, true);
     server
         .wait_for(
@@ -1034,10 +1020,7 @@ async fn caller_cutoff_bounds_connection_acquisition() {
     use operation_context::OperationContext;
 
     let server = FakeServer::start().await;
-    server
-        .observed
-        .silence_all
-        .store(true, std::sync::atomic::Ordering::SeqCst);
+    server.observed.silence_all.store(true, Ordering::SeqCst);
     let cache = Cache::start(CacheOptions {
         command_timeout: Duration::from_secs(5),
         ..options(&format!("redis://{}", server.address), true, true, None)
@@ -1323,8 +1306,6 @@ async fn reliability_namespace_and_probe_retain_owner_until_live_maintenance_is_
     reason = "one retained connection must carry rejection, recovery, file outage and cumulative metric assertions through the same scenario"
 )]
 async fn reliability_rejected_unchanged_password_recovers_without_traffic() {
-    use std::sync::atomic::Ordering;
-
     let metrics = TestMetrics::new();
     let _recorder = metrics::set_default_local_recorder(metrics.recorder());
 
@@ -1581,10 +1562,7 @@ async fn password_refresh_timeout_is_observed_but_cancelled_work_is_not() {
         );
         let old = server.connections();
         server.require_password(&replacement);
-        server
-            .observed
-            .silence_auth
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        server.observed.silence_auth.store(true, Ordering::SeqCst);
         std::fs::write(file.path(), &replacement).expect("replacement password");
         server
             .wait_for(

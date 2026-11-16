@@ -152,10 +152,8 @@ async fn opening(
     use operation_context::{Deadline, OperationContext};
     let origin = tokio::time::Instant::now();
     let caller = grpc_timeout(request.headers());
-    let budget = match (cap, caller) {
-        (Some(cap), Some(caller)) => cap.min(caller),
-        (Some(budget), None) | (None, Some(budget)) => budget,
-        (None, None) => return next.run(request).await,
+    let Some(budget) = cap.into_iter().chain(caller).min() else {
+        return next.run(request).await;
     };
     let cancellation = tokio_util::sync::CancellationToken::new();
     let opening_context =

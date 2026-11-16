@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeMap,
+    future::Future,
     net::SocketAddr,
     sync::{Arc, Mutex},
     task::{Context, Poll},
@@ -12,7 +13,7 @@ use hyper_util::client::legacy::connect::dns::Name;
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpListener,
+    net::{TcpListener, TcpStream},
     sync::oneshot,
     task::JoinHandle,
     time::Instant,
@@ -23,6 +24,7 @@ use tokio_rustls::{
         ServerConfig,
         pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
     },
+    server::TlsStream,
 };
 
 use crate::{Client, Limits, Url, policy, tls::TlsMaterial};
@@ -245,10 +247,15 @@ pub(crate) async fn read_request_headers<S: tokio::io::AsyncRead + Unpin>(
     headers
 }
 
-pub(crate) async fn tls_server(
+async fn spawn_tls_fixture<T, F, Fut>(
     material: &TlsMaterial,
-    response: &'static [u8],
-) -> (SocketAddr, JoinHandle<()>) {
+    handler: F,
+) -> (SocketAddr, JoinHandle<T>)
+where
+    T: Default + Send + 'static,
+    F: FnOnce(TlsStream<TcpStream>) -> Fut + Send + 'static,
+    Fut: Future<Output = T> + Send,
+{
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("fixture listener");
@@ -257,119 +264,84 @@ pub(crate) async fn tls_server(
     let server = tokio::spawn(async move {
         tokio::time::timeout(Duration::from_secs(3), async move {
             let (socket, _) = listener.accept().await.expect("fixture accepts connection");
-            let Ok(mut stream) = acceptor.accept(socket).await else {
-                return;
-            };
-            read_request_headers(&mut stream).await;
-            stream
-                .write_all(response)
-                .await
-                .expect("fixture writes response");
-            stream.shutdown().await.expect("fixture closes response");
+            match acceptor.accept(socket).await {
+                Ok(stream) => handler(stream).await,
+                Err(_) => T::default(),
+            }
         })
         .await
-        .expect("TLS fixture completes within its budget");
+        .expect("TLS fixture completes within its budget")
     });
     (address, server)
+}
+
+async fn respond_and_close(mut stream: TlsStream<TcpStream>, response: &[u8]) {
+    stream
+        .write_all(response)
+        .await
+        .expect("fixture writes response");
+    stream.shutdown().await.expect("fixture closes response");
+}
+
+pub(crate) async fn tls_server(
+    material: &TlsMaterial,
+    response: &'static [u8],
+) -> (SocketAddr, JoinHandle<()>) {
+    spawn_tls_fixture(material, move |mut stream| async move {
+        read_request_headers(&mut stream).await;
+        respond_and_close(stream, response).await;
+    })
+    .await
 }
 
 pub(crate) async fn tls_server_capture(
     material: &TlsMaterial,
     response: &'static [u8],
-) -> (SocketAddr, oneshot::Receiver<Vec<u8>>, JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("capture fixture listener");
-    let address = listener.local_addr().expect("capture fixture address");
-    let acceptor = fixture_acceptor(material);
+) -> (SocketAddr, oneshot::Receiver<String>, JoinHandle<()>) {
     let (captured_send, captured) = oneshot::channel();
-    let server = tokio::spawn(async move {
-        tokio::time::timeout(Duration::from_secs(3), async move {
-            let (socket, _) = listener
-                .accept()
-                .await
-                .expect("capture fixture accepts connection");
-            let Ok(mut stream) = acceptor.accept(socket).await else {
-                return;
-            };
-            let request = read_request_headers(&mut stream).await;
-            captured_send
-                .send(request)
-                .expect("capture receiver stays available");
-            stream
-                .write_all(response)
-                .await
-                .expect("capture fixture writes response");
-            stream
-                .shutdown()
-                .await
-                .expect("capture fixture closes response");
-        })
-        .await
-        .expect("TLS fixture completes within its budget");
-    });
+    let (address, server) = spawn_tls_fixture(material, move |mut stream| async move {
+        let request = read_request_headers(&mut stream).await;
+        captured_send
+            .send(String::from_utf8(request).expect("ASCII request"))
+            .expect("capture receiver stays available");
+        respond_and_close(stream, response).await;
+    })
+    .await;
     (address, captured, server)
 }
 
 pub(crate) async fn tls_server_stall_after_headers(
     material: &TlsMaterial,
 ) -> (SocketAddr, JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("stall fixture listener");
-    let address = listener.local_addr().expect("stall fixture address");
-    let acceptor = fixture_acceptor(material);
-    let server = tokio::spawn(async move {
-        tokio::time::timeout(Duration::from_secs(3), async move {
-            let (socket, _) = listener
-                .accept()
-                .await
-                .expect("stall fixture accepts connection");
-            let Ok(mut stream) = acceptor.accept(socket).await else {
-                return;
-            };
-            read_request_headers(&mut stream).await;
-            stream
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\n")
-                .await
-                .expect("stall fixture writes headers");
-            stream.flush().await.expect("stall fixture flushes headers");
-            std::future::pending::<()>().await;
-        })
-        .await
-        .expect("TLS fixture completes within its budget");
-    });
-    (address, server)
+    spawn_tls_fixture(material, |mut stream| async move {
+        read_request_headers(&mut stream).await;
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\n")
+            .await
+            .expect("stall fixture writes headers");
+        stream.flush().await.expect("stall fixture flushes headers");
+        std::future::pending::<()>().await;
+    })
+    .await
 }
 
 pub(crate) async fn tls_server_reuses_one_connection(
     material: &TlsMaterial,
 ) -> (SocketAddr, JoinHandle<usize>) {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("pool fixture listener");
-    let address = listener.local_addr().expect("pool fixture address");
-    let acceptor = fixture_acceptor(material);
-    let server = tokio::spawn(async move {
-        tokio::time::timeout(Duration::from_secs(3), async move {
-            let (socket, _) = listener.accept().await.expect("pooled request connects");
-            let mut stream = acceptor.accept(socket).await.expect("pooled TLS handshake");
-            read_request_headers(&mut stream).await;
-            stream
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
-                .await
-                .expect("first pooled response");
-            stream.flush().await.expect("first pooled response flushes");
-            read_request_headers(&mut stream).await;
-            stream
-                .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
-                .await
-                .expect("second pooled response");
-            stream.shutdown().await.expect("pooled connection closes");
-            1
-        })
-        .await
-        .expect("pool fixture completes within its budget")
-    });
-    (address, server)
+    spawn_tls_fixture(material, |mut stream| async move {
+        read_request_headers(&mut stream).await;
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+            .await
+            .expect("first pooled response");
+        stream.flush().await.expect("first pooled response flushes");
+        read_request_headers(&mut stream).await;
+        respond_and_close(
+            stream,
+            b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n",
+        )
+        .await;
+        1
+    })
+    .await
 }

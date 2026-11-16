@@ -5,13 +5,7 @@
     reason = "integration fixtures fail closed with their local setup context"
 )]
 
-use std::{
-    net::SocketAddr,
-    num::NonZeroU32,
-    pin::Pin,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{net::SocketAddr, num::NonZeroU32, pin::Pin, sync::Arc, time::Duration};
 
 // template:begin authn:grpc-transport-test-auth-std-imports
 use std::{
@@ -39,6 +33,7 @@ use infra_grpc::{
     Limits, ServerTlsMaterial, Services, TlsMaterialError, server_options, server_tls_config,
 };
 use infra_http::{BoundListener, Drained, Server};
+use parking_lot::Mutex;
 use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa, KeyPair,
     KeyUsagePurpose,
@@ -174,7 +169,7 @@ impl Echo {
             .get::<infra_grpc::ResponseContext>()
             .expect("response work has its own lifetime carrier");
         assert!(!response.operation().cancellation().is_cancelled());
-        self.calls.lock().expect("observations").push(SeenCall {
+        self.calls.lock().push(SeenCall {
             cardinality: seen,
             // template:begin authn:grpc-transport-test-seen-principal
             had_identity: request
@@ -511,6 +506,16 @@ fn plaintext_client(address: SocketAddr) -> infra_grpc::Client {
     .expect("plaintext client")
 }
 
+fn unary(message: &str) -> UnaryRequest {
+    UnaryRequest {
+        message: message.to_owned(),
+    }
+}
+
+fn grpc_status<B>(response: &http::Response<B>) -> Option<Status> {
+    Status::from_header_map(response.headers())
+}
+
 fn request<T>(message: T) -> Request<T> {
     let metadata = tonic::metadata::MetadataMap::new();
     // template:begin authn:grpc-transport-test-bearer
@@ -562,7 +567,7 @@ async fn seed_ready(readiness: &Readiness) {
 }
 
 fn assert_seen(echo: &Echo, expected: &[Seen]) {
-    let calls = echo.calls.lock().expect("observations");
+    let calls = echo.calls.lock();
     assert_eq!(calls.len(), expected.len());
     for (call, cardinality) in calls.iter().zip(expected) {
         assert_eq!(call.cardinality, *cardinality);
@@ -578,15 +583,10 @@ async fn all_cardinalities_round_trip() {
     let fixture = Fixture::plaintext().await;
     let mut client = fixture.echo_client();
 
-    let unary = timeout(
-        WAIT,
-        client.unary(request(UnaryRequest {
-            message: "one".to_owned(),
-        })),
-    )
-    .await
-    .expect("unary")
-    .unwrap();
+    let unary = timeout(WAIT, client.unary(request(unary("one"))))
+        .await
+        .expect("unary")
+        .unwrap();
     assert_eq!(unary.into_inner().message, "one");
 
     let client_stream = timeout(
@@ -727,22 +727,15 @@ fn impatient<T>(mut call: Request<T>) -> Request<T> {
 async fn missing_and_malformed_bearers_are_unauthenticated_and_health_is_public() {
     let fixture = Fixture::plaintext().await;
     let mut echo = fixture.echo_client();
-    let missing = timeout(
-        WAIT,
-        echo.unary(Request::new(UnaryRequest {
-            message: "missing".to_owned(),
-        })),
-    )
-    .await
-    .expect("missing bearer")
-    .unwrap_err();
+    let missing = timeout(WAIT, echo.unary(Request::new(unary("missing"))))
+        .await
+        .expect("missing bearer")
+        .unwrap_err();
     assert_eq!(missing.code(), Code::Unauthenticated);
     assert_eq!(missing.message(), "authentication failed");
     assert_eq!(reason(&missing), "AUTHENTICATION_REQUIRED");
 
-    let mut malformed = Request::new(UnaryRequest {
-        message: "malformed".to_owned(),
-    });
+    let mut malformed = Request::new(unary("malformed"));
     malformed
         .metadata_mut()
         .insert("authorization", "Bearer bad token".parse().unwrap());
@@ -753,7 +746,7 @@ async fn missing_and_malformed_bearers_are_unauthenticated_and_health_is_public(
     assert_eq!(malformed.code(), Code::Unauthenticated);
     assert_eq!(malformed.message(), "authentication failed");
     assert_eq!(reason(&malformed), "AUTHENTICATION_MALFORMED");
-    assert!(fixture.echo.calls.lock().expect("observations").is_empty());
+    assert!(fixture.echo.calls.lock().is_empty());
 
     let mut health = fixture.health();
     let check = timeout(
@@ -803,22 +796,17 @@ async fn a_principal_without_a_declared_scope_is_denied_before_the_handler() {
     let fixture = Fixture::plaintext().await;
     let mut echo = fixture.echo_client();
 
-    let denied = timeout(
-        WAIT,
-        echo.unary(unscoped(UnaryRequest {
-            message: "denied".to_owned(),
-        })),
-    )
-    .await
-    .expect("unscoped unary")
-    .unwrap_err();
+    let denied = timeout(WAIT, echo.unary(unscoped(unary("denied"))))
+        .await
+        .expect("unscoped unary")
+        .unwrap_err();
     assert_eq!(denied.code(), Code::PermissionDenied);
     assert_eq!(
         denied.message(),
         "the verified principal lacks the required scope"
     );
     assert_eq!(reason(&denied), "FORBIDDEN");
-    assert!(fixture.echo.calls.lock().expect("observations").is_empty());
+    assert!(fixture.echo.calls.lock().is_empty());
 
     let mut undeclared = timeout(
         WAIT,
@@ -890,9 +878,7 @@ async fn rejected_calls_do_not_close_the_shared_connection() {
             let mut codes = Vec::new();
             for _ in 0..1000 {
                 let rejected = echo
-                    .unary(Request::new(UnaryRequest {
-                        message: "missing".to_owned(),
-                    }))
+                    .unary(Request::new(unary("missing")))
                     .await
                     .unwrap_err();
                 codes.push(rejected.code());
@@ -931,7 +917,7 @@ async fn the_deadline_bounds_authentication_too() {
         .await
         .expect("the deadline answers while the provider is silent");
     assert_eq!(status, "4");
-    assert!(fixture.echo.calls.lock().expect("observations").is_empty());
+    assert!(fixture.echo.calls.lock().is_empty());
     fixture.stop().await;
 }
 
@@ -1018,7 +1004,7 @@ async fn opening_admission_counts_auth_followers_and_recovers_after_cancellation
     let echo = Echo::new();
     let app = opening_app(verifier, &echo, 2);
     let gate = Arc::new(Hold::new());
-    *provider.gate.lock().unwrap() = Some(Arc::clone(&gate));
+    *provider.gate.lock() = Some(Arc::clone(&gate));
     let mut leader = Box::pin(app.clone().oneshot(opening_request(
         UNARY_PATH,
         Some(ACCEPTED),
@@ -1049,10 +1035,10 @@ async fn opening_admission_counts_auth_followers_and_recovers_after_cancellation
         .await
         .unwrap()
         .unwrap();
-        assert_at_capacity(&Status::from_header_map(response.headers()).unwrap());
+        assert_at_capacity(&grpc_status(&response).unwrap());
     }
     assert_eq!(provider.calls.load(Ordering::Acquire), 1);
-    assert!(echo.calls.lock().unwrap().is_empty());
+    assert!(echo.calls.lock().is_empty());
     assert!(
         metrics
             .render()
@@ -1071,7 +1057,7 @@ async fn opening_admission_counts_auth_followers_and_recovers_after_cancellation
         .await
         .unwrap()
         .unwrap();
-        assert!(Status::from_header_map(response.headers()).is_none());
+        assert!(grpc_status(&response).is_none());
     }
     tokio::time::pause();
     let response = app
@@ -1083,7 +1069,7 @@ async fn opening_admission_counts_auth_followers_and_recovers_after_cancellation
         .await
         .unwrap();
     tokio::time::resume();
-    assert_at_capacity(&Status::from_header_map(response.headers()).unwrap());
+    assert_at_capacity(&grpc_status(&response).unwrap());
     assert!(
         metrics
             .render()
@@ -1097,11 +1083,11 @@ async fn opening_admission_counts_auth_followers_and_recovers_after_cancellation
         .await
         .unwrap();
     assert_eq!(
-        Status::from_header_map(response.headers()).unwrap().code(),
+        grpc_status(&response).unwrap().code(),
         Code::Unauthenticated
     );
     drop(leader);
-    *provider.gate.lock().unwrap() = None;
+    *provider.gate.lock() = None;
     gate.release();
     let response = timeout(
         WAIT,
@@ -1110,8 +1096,8 @@ async fn opening_admission_counts_auth_followers_and_recovers_after_cancellation
     .await
     .unwrap()
     .unwrap();
-    assert!(Status::from_header_map(response.headers()).is_none());
-    assert_eq!(echo.calls.lock().unwrap().len(), 1);
+    assert!(grpc_status(&response).is_none());
+    assert_eq!(echo.calls.lock().len(), 1);
     provider.stop().await;
 }
 
@@ -1130,9 +1116,9 @@ async fn opening_and_terminal_capacity_have_independent_lifetimes() {
         ))
         .await
         .unwrap();
-    assert!(Status::from_header_map(first.headers()).is_none());
+    assert!(grpc_status(&first).is_none());
     let gate = Arc::new(Hold::new());
-    *provider.gate.lock().unwrap() = Some(Arc::clone(&gate));
+    *provider.gate.lock() = Some(Arc::clone(&gate));
     let mut slow = opening_request(UNARY_PATH, Some("slow"), "slow");
     slow.headers_mut()
         .insert("grpc-timeout", "1500m".parse().unwrap());
@@ -1156,30 +1142,27 @@ async fn opening_and_terminal_capacity_have_independent_lifetimes() {
     .await
     .unwrap()
     .unwrap();
-    assert!(Status::from_header_map(second.headers()).is_none());
+    assert!(grpc_status(&second).is_none());
     let missing = app
         .clone()
         .oneshot(opening_request(UNARY_PATH, None, "missing"))
         .await
         .unwrap();
-    assert_eq!(
-        Status::from_header_map(missing.headers()).unwrap().code(),
-        Code::Unauthenticated
-    );
+    assert_eq!(grpc_status(&missing).unwrap().code(), Code::Unauthenticated);
     gate.release();
     let response = timeout(WAIT, authenticating).await.unwrap().unwrap();
     assert_eq!(
-        Status::from_header_map(response.headers()).unwrap().code(),
+        grpc_status(&response).unwrap().code(),
         Code::ResourceExhausted
     );
-    assert_eq!(echo.calls.lock().unwrap().len(), 2);
+    assert_eq!(echo.calls.lock().len(), 2);
     drop(first);
     drop(second);
     let recovered = app
         .oneshot(opening_request(UNARY_PATH, Some(ACCEPTED), "recovered"))
         .await
         .unwrap();
-    assert!(Status::from_header_map(recovered.headers()).is_none());
+    assert!(grpc_status(&recovered).is_none());
     provider.stop().await;
 }
 
@@ -1190,7 +1173,7 @@ async fn opening_timeout_releases_capacity_and_zero_disables_both_counts() {
         let echo = Echo::new();
         let app = opening_app(verifier, &echo, capacity);
         let gate = Arc::new(Hold::new());
-        *provider.gate.lock().unwrap() = Some(Arc::clone(&gate));
+        *provider.gate.lock() = Some(Arc::clone(&gate));
         let mut request = opening_request(UNARY_PATH, Some(ACCEPTED), "slow");
         request
             .headers_mut()
@@ -1215,7 +1198,7 @@ async fn opening_timeout_releases_capacity_and_zero_disables_both_counts() {
             .await
             .unwrap();
         assert_eq!(
-            Status::from_header_map(response.headers()).unwrap().code(),
+            grpc_status(&response).unwrap().code(),
             if capacity == 0 {
                 Code::Unauthenticated
             } else {
@@ -1224,11 +1207,11 @@ async fn opening_timeout_releases_capacity_and_zero_disables_both_counts() {
         );
         let response = timeout(WAIT, slow).await.unwrap().unwrap();
         assert_eq!(
-            Status::from_header_map(response.headers()).unwrap().code(),
+            grpc_status(&response).unwrap().code(),
             Code::DeadlineExceeded
         );
         assert_eq!(provider.calls.load(Ordering::Acquire), 1);
-        *provider.gate.lock().unwrap() = None;
+        *provider.gate.lock() = None;
         let mut held = Vec::new();
         for _ in 0..=usize::from(capacity == 0) {
             let response = timeout(
@@ -1242,7 +1225,7 @@ async fn opening_timeout_releases_capacity_and_zero_disables_both_counts() {
             .await
             .unwrap()
             .unwrap();
-            assert!(Status::from_header_map(response.headers()).is_none());
+            assert!(grpc_status(&response).is_none());
             held.push(response);
         }
         drop(held);
@@ -1259,7 +1242,7 @@ async fn a_call_over_the_limit_waits_for_a_permit_and_is_served() {
     let echo = Echo::new();
     let app = opening_app(verifier, &echo, 1);
     let held = hold_capacity(&app).await;
-    assert!(Status::from_header_map(held.headers()).is_none());
+    assert!(grpc_status(&held).is_none());
     let mut waiting = Box::pin(app.clone().oneshot(opening_request(
         UNARY_PATH,
         Some(ACCEPTED),
@@ -1277,8 +1260,8 @@ async fn a_call_over_the_limit_waits_for_a_permit_and_is_served() {
     );
     drop(held);
     let response = timeout(WAIT, waiting).await.unwrap().unwrap();
-    assert!(Status::from_header_map(response.headers()).is_none());
-    assert_eq!(echo.calls.lock().unwrap().len(), 2);
+    assert!(grpc_status(&response).is_none());
+    assert_eq!(echo.calls.lock().len(), 2);
     let rendered = metrics.render();
     assert!(rendered.contains("grpc_server_shed_requests_total 0"));
     assert!(rendered.contains("grpc_server_admission_wait_seconds_count 1"));
@@ -1314,7 +1297,7 @@ async fn a_waiting_call_with_an_open_upload_is_refused_with_retry_info() {
         "the call waited for its budget less the reserve"
     );
     tokio::time::resume();
-    assert_at_capacity(&Status::from_header_map(response.headers()).unwrap());
+    assert_at_capacity(&grpc_status(&response).unwrap());
     let rendered = metrics.render();
     assert!(rendered.contains("grpc_server_shed_requests_total 1"));
     assert!(rendered.contains("grpc_server_admission_wait_seconds_count 1"));
@@ -1345,7 +1328,7 @@ async fn a_call_waits_no_longer_than_the_admission_wait() {
         "waited {:?}",
         started.elapsed()
     );
-    assert_at_capacity(&Status::from_header_map(response.headers()).unwrap());
+    assert_at_capacity(&grpc_status(&response).unwrap());
     let rendered = metrics.render();
     assert!(rendered.contains("grpc_server_shed_requests_total 1"));
     assert!(rendered.contains("grpc_server_admission_wait_seconds_count 1"));
@@ -1384,14 +1367,14 @@ async fn both_admission_queues_share_the_call_wait_limit() {
         .await
         .expect("the held stream returns headers")
         .unwrap();
-    assert!(Status::from_header_map(held.headers()).is_none());
+    assert!(grpc_status(&held).is_none());
 
     let response = timeout(Duration::from_millis(300), waiting)
         .await
         .expect("the second queue uses the remaining wait budget")
         .unwrap();
     assert!(started.elapsed() >= Duration::from_secs(1));
-    assert_at_capacity(&Status::from_header_map(response.headers()).unwrap());
+    assert_at_capacity(&grpc_status(&response).unwrap());
     assert_seen(&echo, &[Seen::ServerStream]);
     drop(held);
     tokio::time::resume();
@@ -1421,7 +1404,7 @@ async fn a_zero_admission_wait_refuses_a_call_over_the_limit_at_once() {
         "waited {:?}",
         started.elapsed()
     );
-    assert_at_capacity(&Status::from_header_map(response.headers()).unwrap());
+    assert_at_capacity(&grpc_status(&response).unwrap());
     let rendered = metrics.render();
     assert!(rendered.contains("grpc_server_shed_requests_total 1"));
     assert!(!rendered.contains("grpc_server_admission_wait_seconds_count"));
@@ -1446,7 +1429,7 @@ async fn rejected_ready_empty_frames_cooperate_with_other_tasks() {
     ));
     let response = timeout(WAIT, app.oneshot(request)).await.unwrap().unwrap();
     assert_eq!(
-        Status::from_header_map(response.headers()).unwrap().code(),
+        grpc_status(&response).unwrap().code(),
         Code::Unauthenticated
     );
     assert!(
@@ -1462,34 +1445,23 @@ async fn rejected_ready_empty_frames_cooperate_with_other_tasks() {
 #[tokio::test]
 async fn the_configured_limit_sheds_the_next_call_without_starving_health() {
     let fixture = Fixture::limited(2).await;
-    timeout(
-        WAIT,
-        fixture.echo_client().unary(request(UnaryRequest {
-            message: "warm".to_owned(),
-        })),
-    )
-    .await
-    .expect("warm call")
-    .unwrap();
+    timeout(WAIT, fixture.echo_client().unary(request(unary("warm"))))
+        .await
+        .expect("warm call")
+        .unwrap();
 
     let held = fixture.echo_client();
     let calls = Vec::from_fn(2, |_| {
         let mut client = held.clone();
-        tokio::spawn(async move {
-            client
-                .unary(request(UnaryRequest {
-                    message: "hold".to_owned(),
-                }))
-                .await
-        })
+        tokio::spawn(async move { client.unary(request(unary("hold"))).await })
     });
     fixture.echo.hold.wait_for(2).await;
 
     let exhausted = timeout(
         WAIT,
-        fixture.echo_client().unary(impatient(request(UnaryRequest {
-            message: "overflow".to_owned(),
-        }))),
+        fixture
+            .echo_client()
+            .unary(impatient(request(unary("overflow")))),
     )
     .await
     .expect("overflow call")
@@ -1517,15 +1489,10 @@ async fn the_configured_limit_sheds_the_next_call_without_starving_health() {
     .await
     .expect("held calls finish");
 
-    let followed = timeout(
-        WAIT,
-        fixture.echo_client().unary(request(UnaryRequest {
-            message: "after".to_owned(),
-        })),
-    )
-    .await
-    .expect("call after release")
-    .unwrap();
+    let followed = timeout(WAIT, fixture.echo_client().unary(request(unary("after"))))
+        .await
+        .expect("call after release")
+        .unwrap();
     assert_eq!(followed.into_inner().message, "after");
     drop(held);
     fixture.stop().await;
@@ -1555,14 +1522,9 @@ async fn opened_stream_holds_capacity_until_terminal_release() {
         "hold-after-first"
     );
     fixture.echo.hold.wait_for(1).await;
-    let second = timeout(
-        WAIT,
-        client.unary(impatient(request(UnaryRequest {
-            message: "must shed".to_owned(),
-        }))),
-    )
-    .await
-    .expect("overload is answered");
+    let second = timeout(WAIT, client.unary(impatient(request(unary("must shed")))))
+        .await
+        .expect("overload is answered");
     fixture.echo.hold.release();
     assert_eq!(
         timeout(WAIT, stream.message())
@@ -1580,15 +1542,10 @@ async fn opened_stream_holds_capacity_until_terminal_release() {
             .unwrap()
             .is_none()
     );
-    let recovered = timeout(
-        WAIT,
-        client.unary(request(UnaryRequest {
-            message: "admitted".to_owned(),
-        })),
-    )
-    .await
-    .expect("capacity recovers")
-    .unwrap();
+    let recovered = timeout(WAIT, client.unary(request(unary("admitted"))))
+        .await
+        .expect("capacity recovers")
+        .unwrap();
     fixture.stop().await;
     assert_eq!(second.unwrap_err().code(), Code::ResourceExhausted);
     assert_eq!(recovered.into_inner().message, "admitted");
@@ -1633,15 +1590,10 @@ async fn duplex_progresses_before_request_eof_and_drop_stops_upload_and_recovers
             message
         );
     }
-    let shed = timeout(
-        WAIT,
-        client.unary(impatient(request(UnaryRequest {
-            message: "occupied".to_owned(),
-        }))),
-    )
-    .await
-    .unwrap()
-    .unwrap_err();
+    let shed = timeout(WAIT, client.unary(impatient(request(unary("occupied")))))
+        .await
+        .unwrap()
+        .unwrap_err();
     assert_eq!(shed.code(), Code::ResourceExhausted);
     drop(response);
     timeout(WAIT, upload_dropped.notified())
@@ -1653,15 +1605,10 @@ async fn duplex_progresses_before_request_eof_and_drop_stops_upload_and_recovers
     timeout(WAIT, fixture.echo.stream_dropped.notified())
         .await
         .expect("server drops request/response work");
-    let admitted = timeout(
-        WAIT,
-        client.unary(request(UnaryRequest {
-            message: "recovered".to_owned(),
-        })),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let admitted = timeout(WAIT, client.unary(request(unary("recovered"))))
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(admitted.into_inner().message, "recovered");
     drop(sender);
     fixture.stop().await;
@@ -1815,15 +1762,10 @@ async fn supplied_caller_deadline_expires_open_stream_and_recovers_capacity() {
     timeout(WAIT, fixture.echo.stream_dropped.notified())
         .await
         .expect("deadline releases server stream");
-    let recovered = timeout(
-        WAIT,
-        client.unary(request(UnaryRequest {
-            message: "recovered".to_owned(),
-        })),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let recovered = timeout(WAIT, client.unary(request(unary("recovered"))))
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(recovered.into_inner().message, "recovered");
     fixture.stop().await;
 }
@@ -1863,9 +1805,7 @@ async fn unread_flow_controlled_response_releases_server_work_at_caller_deadline
         .expect("unread server stream is released");
     let recovered = timeout(
         WAIT,
-        fixture.echo_client().unary(request(UnaryRequest {
-            message: "recovered".to_owned(),
-        })),
+        fixture.echo_client().unary(request(unary("recovered"))),
     )
     .await
     .unwrap()
@@ -1903,22 +1843,13 @@ async fn raw_call(address: SocketAddr, path: &str) -> String {
     let driver = tokio::spawn(async move {
         let _ = connection.await;
     });
-    let mut timeout_request = Request::new(());
-    timeout_request.set_timeout(Duration::from_millis(100));
-    let grpc_timeout = timeout_request
-        .metadata()
-        .get("grpc-timeout")
-        .expect("set_timeout header")
-        .to_str()
-        .unwrap()
-        .to_owned();
     let builder = http::Request::builder()
         .method("POST")
         .uri(format!("http://{address}{path}"))
         .header("host", address.to_string())
         .header("content-type", "application/grpc")
         .header("te", "trailers")
-        .header("grpc-timeout", grpc_timeout);
+        .header("grpc-timeout", "100m");
     // template:begin authn:grpc-transport-test-deadline-bearer
     let builder = builder.header("authorization", format!("Bearer {ACCEPTED}"));
     // template:end authn:grpc-transport-test-deadline-bearer
@@ -1944,9 +1875,7 @@ fn grpc_frame(message: &str) -> bytes::Bytes {
     use bytes::{BufMut as _, BytesMut};
     use prost::Message as _;
 
-    let payload = UnaryRequest {
-        message: message.to_owned(),
-    };
+    let payload = unary(message);
     let len = payload.encoded_len();
     let mut frame = BytesMut::with_capacity(5 + len);
     frame.put_u8(0);
@@ -1960,9 +1889,7 @@ async fn metadata_up_to_16_kib_is_served_and_larger_metadata_is_refused() {
     let fixture = Fixture::plaintext().await;
     let call = |padding: usize| {
         let mut echo = fixture.echo_client();
-        let mut call = request(UnaryRequest {
-            message: "padded".to_owned(),
-        });
+        let mut call = request(unary("padded"));
         call.metadata_mut()
             .insert("x-padding", "a".repeat(padding).parse().unwrap());
         async move { timeout(WAIT, echo.unary(call)).await.expect("padded call") }
@@ -1980,23 +1907,16 @@ async fn metadata_up_to_16_kib_is_served_and_larger_metadata_is_refused() {
 #[tokio::test]
 async fn handler_panic_is_internal_and_the_server_keeps_serving() {
     let fixture = Fixture::plaintext().await;
-    let error = timeout(
-        WAIT,
-        fixture.echo_client().unary(request(UnaryRequest {
-            message: "panic".to_owned(),
-        })),
-    )
-    .await
-    .expect("panic call")
-    .unwrap_err();
+    let error = timeout(WAIT, fixture.echo_client().unary(request(unary("panic"))))
+        .await
+        .expect("panic call")
+        .unwrap_err();
     assert_eq!(error.code(), Code::Internal);
     assert_eq!(error.message(), "request failed");
     assert_eq!(reason(&error), "INTERNAL_ERROR");
     let followed = timeout(
         WAIT,
-        fixture.echo_client().unary(request(UnaryRequest {
-            message: "after-panic".to_owned(),
-        })),
+        fixture.echo_client().unary(request(unary("after-panic"))),
     )
     .await
     .expect("call after panic")
@@ -2010,9 +1930,7 @@ async fn a_handler_failure_carries_its_reason_and_field_violations() {
     let fixture = Fixture::plaintext().await;
     let error = timeout(
         WAIT,
-        fixture.echo_client().unary(request(UnaryRequest {
-            message: "classified".to_owned(),
-        })),
+        fixture.echo_client().unary(request(unary("classified"))),
     )
     .await
     .expect("classified call")
@@ -2173,15 +2091,10 @@ async fn tls13_with_a_trusted_ca_succeeds_and_tls12_is_refused() {
             identity: None,
         },
     ));
-    let response = timeout(
-        WAIT,
-        client.unary(request(UnaryRequest {
-            message: "tls13".to_owned(),
-        })),
-    )
-    .await
-    .expect("tls unary")
-    .unwrap();
+    let response = timeout(WAIT, client.unary(request(unary("tls13"))))
+        .await
+        .expect("tls unary")
+        .unwrap();
     assert_eq!(response.into_inner().message, "tls13");
     assert_tls_denied(fixture.address, &pki, None, true).await;
     drop(client);
@@ -2203,30 +2116,20 @@ async fn a_new_dial_uses_the_replaced_localhost_address_without_changing_tls_ide
     )
     .unwrap();
     let mut client = EchoServiceClient::new(client);
-    let response = timeout(
-        WAIT,
-        client.unary(request(UnaryRequest {
-            message: "ipv4".to_owned(),
-        })),
-    )
-    .await
-    .expect("first localhost dial")
-    .unwrap();
+    let response = timeout(WAIT, client.unary(request(unary("ipv4"))))
+        .await
+        .expect("first localhost dial")
+        .unwrap();
     assert_eq!(response.into_inner().message, "ipv4");
     assert_seen(&first.echo, &[Seen::Unary]);
     first.stop().await;
 
     let replacement =
         Fixture::tls_at(&pki, format!("[::1]:{port}").parse::<SocketAddr>().unwrap()).await;
-    let response = timeout(
-        WAIT,
-        client.unary(request(UnaryRequest {
-            message: "ipv6".to_owned(),
-        })),
-    )
-    .await
-    .expect("same client opens a new localhost dial")
-    .unwrap();
+    let response = timeout(WAIT, client.unary(request(unary("ipv6"))))
+        .await
+        .expect("same client opens a new localhost dial")
+        .unwrap();
     assert_eq!(response.into_inner().message, "ipv6");
     assert_seen(&replacement.echo, &[Seen::Unary]);
     replacement.stop().await;
@@ -2249,15 +2152,10 @@ async fn rebuilding_a_client_is_required_to_adopt_replacement_tls_material() {
         )
         .unwrap(),
     );
-    let status = timeout(
-        WAIT,
-        stale_client.unary(request(UnaryRequest {
-            message: "stale".to_owned(),
-        })),
-    )
-    .await
-    .expect("stale-root client is bounded")
-    .unwrap_err();
+    let status = timeout(WAIT, stale_client.unary(request(unary("stale"))))
+        .await
+        .expect("stale-root client is bounded")
+        .unwrap_err();
     assert_eq!(status.code(), Code::Unavailable);
 
     let mut rebuilt_client = EchoServiceClient::new(
@@ -2271,15 +2169,10 @@ async fn rebuilding_a_client_is_required_to_adopt_replacement_tls_material() {
         )
         .unwrap(),
     );
-    let response = timeout(
-        WAIT,
-        rebuilt_client.unary(request(UnaryRequest {
-            message: "replacement".to_owned(),
-        })),
-    )
-    .await
-    .expect("rebuilt client reaches the replacement TLS material")
-    .unwrap();
+    let response = timeout(WAIT, rebuilt_client.unary(request(unary("replacement"))))
+        .await
+        .expect("rebuilt client reaches the replacement TLS material")
+        .unwrap();
     assert_eq!(response.into_inner().message, "replacement");
     assert_seen(&fixture.echo, &[Seen::Unary]);
     fixture.stop().await;
@@ -2310,15 +2203,10 @@ async fn mtls_refuses_a_client_without_a_trusted_certificate() {
             }),
         },
     ));
-    let response = timeout(
-        WAIT,
-        client.unary(request(UnaryRequest {
-            message: "mtls".to_owned(),
-        })),
-    )
-    .await
-    .expect("mtls unary")
-    .unwrap();
+    let response = timeout(WAIT, client.unary(request(unary("mtls"))))
+        .await
+        .expect("mtls unary")
+        .unwrap();
     assert_eq!(response.into_inner().message, "mtls");
     drop(client);
     fixture.stop().await;
@@ -2571,36 +2459,20 @@ async fn calls_are_counted_by_described_method_whatever_ended_them() {
     let fixture = Fixture::plaintext().await;
     let mut client = fixture.echo_client();
 
-    timeout(
-        WAIT,
-        client.unary(request(UnaryRequest {
-            message: "answered".to_owned(),
-        })),
-    )
-    .await
-    .expect("answered call")
-    .unwrap();
+    timeout(WAIT, client.unary(request(unary("answered"))))
+        .await
+        .expect("answered call")
+        .unwrap();
 
-    let classified = timeout(
-        WAIT,
-        client.unary(request(UnaryRequest {
-            message: "classified".to_owned(),
-        })),
-    )
-    .await
-    .expect("classified call")
-    .unwrap_err();
+    let classified = timeout(WAIT, client.unary(request(unary("classified"))))
+        .await
+        .expect("classified call")
+        .unwrap_err();
     assert_eq!(classified.code(), Code::InvalidArgument);
 
     let abandoned = tokio::spawn({
         let mut client = client.clone();
-        async move {
-            client
-                .unary(request(UnaryRequest {
-                    message: "hold".to_owned(),
-                }))
-                .await
-        }
+        async move { client.unary(request(unary("hold"))).await }
     });
     fixture.echo.hold.wait_for(1).await;
     abandoned.abort();
@@ -2691,15 +2563,10 @@ async fn a_stream_is_counted_with_the_status_that_ended_it() {
     .unwrap();
     drop(unread);
 
-    let followed = timeout(
-        WAIT,
-        client.unary(request(UnaryRequest {
-            message: "after".to_owned(),
-        })),
-    )
-    .await
-    .expect("call after the streams")
-    .unwrap();
+    let followed = timeout(WAIT, client.unary(request(unary("after"))))
+        .await
+        .expect("call after the streams")
+        .unwrap();
     assert_eq!(followed.into_inner().message, "after");
 
     let stream = r#"grpc_service="example.v1.EchoService",grpc_method="ServerStream""#;
@@ -2771,9 +2638,7 @@ async fn client_budget_includes_unary_data_and_trailers_after_peer_headers() {
         .unwrap();
         let call = tokio::spawn(async move {
             EchoServiceClient::new(adapter)
-                .unary(Request::new(UnaryRequest {
-                    message: "request".to_owned(),
-                }))
+                .unary(Request::new(unary("request")))
                 .await
         });
         timeout(WAIT, peer_polled.notified())
@@ -2809,9 +2674,7 @@ async fn a_call_whose_deadline_runs_out_is_deadline_exceeded_not_unavailable() {
         std::future::pending::<()>().await;
     });
     let mut client = EchoServiceClient::new(plaintext_client(address));
-    let mut call = Request::new(UnaryRequest {
-        message: "unanswered".to_owned(),
-    });
+    let mut call = Request::new(unary("unanswered"));
     call.set_timeout(Duration::from_millis(100));
     let status = timeout(WAIT, client.unary(call))
         .await
@@ -2828,9 +2691,7 @@ async fn a_call_whose_deadline_runs_out_is_deadline_exceeded_not_unavailable() {
     .expect("bounded client");
     let status = timeout(
         WAIT,
-        EchoServiceClient::new(bounded).unary(Request::new(UnaryRequest {
-            message: "unanswered".to_owned(),
-        })),
+        EchoServiceClient::new(bounded).unary(Request::new(unary("unanswered"))),
     )
     .await
     .expect("the client timeout ends the call")
@@ -2862,9 +2723,7 @@ async fn stalled_tls_dial_is_released_and_the_same_client_recovers() {
         );
         let mut call = tokio::spawn(async move {
             let mut client = EchoServiceClient::new(adapter);
-            let mut message = request(UnaryRequest {
-                message: "stalled".to_owned(),
-            });
+            let mut message = request(unary("stalled"));
             if shorter_caller {
                 message.set_timeout(Duration::from_secs(1));
             }
@@ -2887,11 +2746,7 @@ async fn stalled_tls_dial_is_released_and_the_same_client_recovers() {
             let (mut client, result) = timeout(WAIT, &mut call).await.unwrap().unwrap();
             assert_eq!(result.unwrap_err().code(), Code::DeadlineExceeded);
             call = tokio::spawn(async move {
-                let result = client
-                    .unary(request(UnaryRequest {
-                        message: "still stalled".to_owned(),
-                    }))
-                    .await;
+                let result = client.unary(request(unary("still stalled"))).await;
                 (client, result)
             });
         } else {
@@ -2920,15 +2775,10 @@ async fn stalled_tls_dial_is_released_and_the_same_client_recovers() {
             let mut outgoing = TcpStream::connect(address).await.unwrap();
             tokio::io::copy_bidirectional(&mut incoming, &mut outgoing).await
         });
-        let response = timeout(
-            WAIT,
-            client.unary(request(UnaryRequest {
-                message: "recovered".to_owned(),
-            })),
-        )
-        .await
-        .expect("the same client redials after the stalled attempt")
-        .unwrap();
+        let response = timeout(WAIT, client.unary(request(unary("recovered"))))
+            .await
+            .expect("the same client redials after the stalled attempt")
+            .unwrap();
         assert_eq!(response.into_inner().message, "recovered");
         assert_seen(&healthy.echo, &[Seen::Unary]);
         drop(client);
@@ -3065,7 +2915,7 @@ async fn answer_introspection(
             let unscoped = url::form_urlencoded::parse(&body)
                 .any(|(name, value)| name == "token" && value == UNSCOPED);
             calls.fetch_add(1, Ordering::Release);
-            let held = gate.lock().unwrap().clone();
+            let held = gate.lock().clone();
             if let Some(held) = held {
                 held.wait().await;
             }

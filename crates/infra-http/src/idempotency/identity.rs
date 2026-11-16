@@ -3,6 +3,7 @@ use std::borrow::Cow;
 use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderMap, HeaderName, Method, Uri};
 use infra_idempotency_store::{CallerIdentity, CallerKind, Digest, ScopeKey};
+use itertools::Itertools as _;
 use sha2::{Digest as _, Sha256};
 
 pub(super) const MAX_DECODED_KEY_BYTES: usize = 255;
@@ -31,11 +32,7 @@ pub(super) fn caller_identity(
 }
 
 pub(super) fn decode_key<'a>(values: impl IntoIterator<Item = &'a [u8]>) -> Option<Cow<'a, [u8]>> {
-    let mut values = values.into_iter();
-    let value = values.next()?;
-    if values.next().is_some() {
-        return None;
-    }
+    let value = values.into_iter().exactly_one().ok()?;
     let value = str::from_utf8(value)
         .ok()?
         .trim_matches([' ', '\t'])
@@ -49,7 +46,7 @@ pub(super) fn decode_key<'a>(values: impl IntoIterator<Item = &'a [u8]>) -> Opti
             return None;
         }
         Cow::Owned(String::from(value).into_bytes())
-    } else if value.iter().all(|byte| (0x21..=0x7e).contains(byte)) {
+    } else if value.iter().all(u8::is_ascii_graphic) {
         Cow::Borrowed(value)
     } else {
         return None;
@@ -158,9 +155,7 @@ mod tests {
     }
 
     fn decode_digest(hex: &str) -> Digest {
-        let mut digest = [0; 32];
-        const_hex::decode_to_slice(hex, &mut digest).expect("64 hex digits");
-        digest
+        const_hex::decode_to_array(hex).expect("64 hex digits")
     }
 
     #[test]
