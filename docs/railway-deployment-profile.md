@@ -19,8 +19,9 @@ automatically during deploys):
 - Declaring `env` makes `.railway/railway.ts` authoritative: `apply` deletes any
   service variable omitted from `env` unless wrapped in `preserve()`. Review
   `railway config plan` before applying.
-- `PORT` and `APP__HTTP__ADDR` bind `[::]` so one dual-stack listener serves
-  both IPv4 and legacy IPv6-only Railway private DNS.
+- `APP__HTTP__ADDR` binds `[::]:8080`, so one dual-stack listener serves both
+  IPv4 and legacy IPv6-only Railway private DNS. The service never reads
+  `PORT`; it is set to the same port only for Railway's health check.
 <!-- template:begin service-auth:docs-railway-service-auth -->
 - With `SERVICE_AUTH=jwt`, create environment-level shared variables for token
   type and trust registry before the first deploy, and seal per-service signing
