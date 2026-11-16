@@ -36,7 +36,8 @@ fn credentials_seed(credentials: &str) -> &str {
 }
 
 fn credentials_public_user(credentials: &str) -> String {
-    relay::jwt_subject(credentials_jwt(credentials)).expect("fixture JWT names a user subject")
+    nats_test_support::jwt_subject(credentials_jwt(credentials))
+        .expect("fixture JWT names a user subject")
 }
 
 fn credentials_document(jwt: &str, seed: &str) -> String {

@@ -21,7 +21,6 @@ use tracing::instrument::WithSubscriber as _;
 use super::{PoolEvents, dsn_at, dsn_for, server_address, template_pool};
 
 // template:begin postgres-grpc-auth:recovery-auth-tls
-use super::postgres_tls_material as tls;
 // template:end postgres-grpc-auth:recovery-auth-tls
 
 const WAIT: Duration = Duration::from_secs(25);
@@ -708,7 +707,7 @@ mod grpc {
             self,
             pki_types::{CertificateDer, PrivatePkcs8KeyDer},
         };
-        let material = tls::TlsMaterial::new("provider.test");
+        let material = tls_test_support::TlsMaterial::new("provider.test");
         let config = rustls::ServerConfig::builder_with_provider(Arc::new(
             rustls::crypto::aws_lc_rs::default_provider(),
         ))

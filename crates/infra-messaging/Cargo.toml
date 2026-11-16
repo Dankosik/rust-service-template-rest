@@ -8,10 +8,6 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
-# Shared via #[path] across tests/jetstream/main.rs and test/tests/messaging_outbox.rs.
-[package.metadata.cargo-shear]
-ignored-paths = ["tests/support/relay.rs"]
-
 [features]
 integration = []
 
@@ -83,6 +79,7 @@ utoipa = { workspace = true, features = ["macros"] }
 [dev-dependencies]
 base64 = { workspace = true, features = ["std"] }
 metrics-exporter-prometheus = { workspace = true }
+nats-test-support = { workspace = true }
 opentelemetry_sdk = { workspace = true, features = ["testing", "trace"] }
 proptest = { workspace = true, features = ["std"] }
 rcgen = { workspace = true, features = ["crypto", "pem", "aws_lc_rs"] }

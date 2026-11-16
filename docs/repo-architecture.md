@@ -24,11 +24,22 @@ for concrete modules, types, and commands.
    exists only with its first real artifact. `crates/shared-rules` stays pure and
    `std`-only under its crate-level membership test; `crates/json-payload`
    separately owns the `serde`-dependent finite-float payload check shared only
-   by `infra-messaging` and `infra-jobs`.
-4. Trust, ingress/egress, dependency criticality, failure mapping (`crates/service-failure`),
+   by `infra-messaging` and `infra-jobs`; `crates/operation-context` owns the
+   deadline and cancellation lineage its listed operation owners propagate.
+   Production code that several crates need but that requires an external
+   type narrows its inputs to `std` types and joins `crates/shared-rules`;
+   when it cannot, each caller keeps its own copy until a single-purpose
+   contract crate such as `json-payload` earns an owner.
+4. Test code shared by several crates lives in a `crates/<topic>-test-support`
+   crate with the `test` role in `quality/architecture.json`. It depends on no
+   workspace crate, appears only in dev-dependencies, and leaves with the
+   template profile of its last consumer. A helper that needs one crate's types
+   stays behind that crate's `test-support` feature. Tests never include
+   another package's source through `#[path]`.
+5. Trust, ingress/egress, dependency criticality, failure mapping (`crates/service-failure`),
    readiness (`crates/health`), and staged shutdown budgets (`crates/service/src/bootstrap`)
    are enforced explicitly at their owning runtime boundaries.
-5. A task-local design may retain, replace, or remove current architecture,
+6. A task-local design may retain, replace, or remove current architecture,
    naming the changed owner and its proving surface.
 
 ## Domain Vocabulary

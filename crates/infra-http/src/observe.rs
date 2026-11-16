@@ -13,7 +13,7 @@ use foldhash::HashMap;
 use metrics::{Gauge, Histogram, Label, SharedString};
 use opentelemetry::context::FutureExt as _;
 use parking_lot::Mutex;
-use shared_rules::otel_http::request_method;
+use shared_rules::otel_http::{request_method, response_status_code};
 use tower_http::request_id::RequestId;
 use tracing::Instrument as _;
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
@@ -358,24 +358,9 @@ fn duration_histogram(method: &'static str, route: &str, status: StatusCode) -> 
     metrics::histogram!(REQUEST_DURATION_METRIC, labels)
 }
 
-/* jscpd:ignore-start */
-static STATUS_CODES: [StatusCode; 900] = {
-    let mut codes = [StatusCode::CONTINUE; 900];
-    let mut code = 100_u16;
-    while code <= 999 {
-        codes[(code - 100) as usize] = match StatusCode::from_u16(code) {
-            Ok(status) => status,
-            Err(_) => panic!("status table contains an invalid code"),
-        };
-        code += 1;
-    }
-    codes
-};
-
 fn status_label(status: StatusCode) -> &'static str {
-    STATUS_CODES[usize::from(status.as_u16() - 100)].as_str()
+    response_status_code(status.as_u16()).unwrap_or_default()
 }
-/* jscpd:ignore-end */
 
 fn suppresses_access_log(log_health_probes: bool, method: &Method, route: &str) -> bool {
     !log_health_probes && method == Method::GET && is_health_probe_route(route)

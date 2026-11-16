@@ -74,6 +74,8 @@
     "crates/migrate/Cargo.toml": {"role": "migrator"},
     "crates/service/Cargo.toml": {"role": "root"},
     "crates/service-failure/Cargo.toml": {"role": "contract"},
+    "crates/nats-test-support/Cargo.toml": {"role": "test"},
+    "crates/tls-test-support/Cargo.toml": {"role": "test"},
     "test/Cargo.toml": {"role": "test"}
   },
   "roles": {

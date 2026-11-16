@@ -54,6 +54,7 @@ metrics-util = { workspace = true, features = ["debugging"] }
 pem = { workspace = true }
 rcgen = { workspace = true, features = ["pem", "aws_lc_rs"] }
 tempfile = { workspace = true, features = ["getrandom"] }
-tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "test-util", "time"] }
+tls-test-support = { workspace = true }
+tokio ={ workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "test-util", "time"] }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }
 tokio-util = { workspace = true, features = ["rt"] }

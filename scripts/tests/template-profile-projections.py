@@ -1361,15 +1361,14 @@ def _check_tls_canary_projection(source: Path, initializer) -> None:
             root = Path(temporary)
             (root / "Cargo.toml").write_bytes((source / "Cargo.toml").read_bytes())
             initializer._apply_markers(root, manifest_profiles, inputs)
-            fixture = root / "test/fixtures/tls.rs"
+            fixture = root / "crates/tls-test-support"
             if expected:
-                fixture.parent.mkdir(parents=True)
-                fixture.write_bytes((source / "test/fixtures/tls.rs").read_bytes())
+                fixture.mkdir(parents=True)
             canary.assert_tls_fixture_output(source, root)
             # Independent negative control: the expected fixture cannot vanish
             # behind the same computed profile predicate used for projection.
             if expected:
-                fixture.unlink()
+                fixture.rmdir()
                 try:
                     canary.assert_tls_fixture_output(source, root)
                 except AssertionError:

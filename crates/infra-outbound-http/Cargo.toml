@@ -8,11 +8,6 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
-# cargo-shear 1.14.0 scans target directories, missing the #[path] inclusion
-# of test/fixtures/tls.rs. Remove this exception when it follows that source.
-[package.metadata.cargo-shear]
-ignored = ["rcgen"]
-
 [lints]
 workspace = true
 
@@ -43,7 +38,7 @@ url = { workspace = true, features = ["std"] }
 metrics-exporter-prometheus = { workspace = true }
 opentelemetry = { workspace = true, features = ["trace"] }
 opentelemetry_sdk = { workspace = true, features = ["testing", "trace"] }
-rcgen = { workspace = true, features = ["pem", "aws_lc_rs"] }
+tls-test-support = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "test-util", "time"] }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs", "tls12"] }
 tower = { workspace = true }

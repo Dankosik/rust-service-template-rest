@@ -4,9 +4,11 @@ use std::{
 };
 
 use bytes::Bytes;
-use http::{Request, StatusCode, header};
+use http::{Request, header};
 
-use crate::{Error, Limits, UrlTemplate, test_support::*, tls::TlsMaterial};
+use tls_test_support::TlsMaterial;
+
+use crate::{Error, Limits, UrlTemplate, test_support::*};
 
 const REQUEST_SENTINELS: [&str; 6] = [
     "sentinel-path",
@@ -16,14 +18,6 @@ const REQUEST_SENTINELS: [&str; 6] = [
     "sentinel-value",
     "SENTINEL-METHOD",
 ];
-
-#[test]
-fn every_response_status_has_its_three_digit_label() {
-    for code in 100..=999 {
-        let status = StatusCode::from_u16(code).expect("valid HTTP status");
-        assert_eq!(super::status_label(status), code.to_string());
-    }
-}
 
 async fn exercise_completed_attempts() {
     let material = TlsMaterial::new(FIXTURE_HOST);

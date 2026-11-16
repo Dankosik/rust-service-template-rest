@@ -36,6 +36,7 @@ use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::Executor as _;
+use tls_test_support::TlsMaterial;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::{JoinError, JoinSet};
 use tokio_rustls::TlsAcceptor;
@@ -51,11 +52,6 @@ use crate::commit_proxy::{CommitProxy, Fault};
 use crate::{
     Hold, RETENTION, RETRY_PAUSE, WAIT, bounded, close_pools, count, make_read_only, template_pool,
 };
-
-#[path = "../../fixtures/tls.rs"]
-mod tls;
-
-use tls::TlsMaterial;
 
 const WIDGETS: &str = "/widgets";
 const PRIMARY_PREFIX: &str = "/primary";

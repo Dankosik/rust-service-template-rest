@@ -1788,9 +1788,6 @@ async fn a_migration_that_fails_is_the_execute_stage(pool: PgPool) {
     assert_eq!(applied_count(&pool).await, 0);
 }
 
-#[path = "../fixtures/tls.rs"]
-mod postgres_tls_material;
-
 struct PostgresTlsRelay {
     cancel: CancellationToken,
     _cancel_guard: tokio_util::sync::DropGuard,
@@ -1808,7 +1805,7 @@ impl PostgresTlsMaterial {
         use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
         use tokio_rustls::rustls;
 
-        let material = postgres_tls_material::TlsMaterial::new("localhost");
+        let material = tls_test_support::TlsMaterial::new("localhost");
         let tls = rustls::ServerConfig::builder_with_provider(std::sync::Arc::new(
             rustls::crypto::aws_lc_rs::default_provider(),
         ))

@@ -27,7 +27,9 @@ use tokio_rustls::{
     server::TlsStream,
 };
 
-use crate::{Client, Limits, Url, policy, tls::TlsMaterial};
+use tls_test_support::TlsMaterial;
+
+use crate::{Client, Limits, Url, policy};
 
 pub(crate) const FIXTURE_HOST: &str = "provider.fixture.test";
 pub(crate) const FIXTURE_URL: &str = "https://provider.fixture.test/fixture";

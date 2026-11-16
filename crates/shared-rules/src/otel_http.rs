@@ -17,9 +17,49 @@ pub fn request_method(method: &str) -> &'static str {
     }
 }
 
+static STATUS_CODE_DIGITS: [[u8; 3]; 900] = {
+    let mut digits = [[0; 3]; 900];
+    let mut index = 0;
+    let mut hundreds = b'1';
+    while hundreds <= b'9' {
+        let mut tens = b'0';
+        while tens <= b'9' {
+            let mut ones = b'0';
+            while ones <= b'9' {
+                digits[index] = [hundreds, tens, ones];
+                index += 1;
+                ones += 1;
+            }
+            tens += 1;
+        }
+        hundreds += 1;
+    }
+    digits
+};
+
+static STATUS_CODES: [&str; 900] = {
+    let mut codes = [""; 900];
+    let mut index = 0;
+    while index < codes.len() {
+        codes[index] = match str::from_utf8(&STATUS_CODE_DIGITS[index]) {
+            Ok(code) => code,
+            Err(_) => panic!("status digits are ASCII"),
+        };
+        index += 1;
+    }
+    codes
+};
+
+#[must_use]
+pub fn response_status_code(code: u16) -> Option<&'static str> {
+    STATUS_CODES
+        .get(usize::from(code.checked_sub(100)?))
+        .copied()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{OTHER_METHOD, request_method};
+    use super::{OTHER_METHOD, request_method, response_status_code};
 
     #[test]
     fn a_named_method_is_its_own_value() {
@@ -34,6 +74,20 @@ mod tests {
     fn any_other_method_shares_one_value() {
         for method in ["get", "PROPFIND", "", "GET "] {
             assert_eq!(request_method(method), OTHER_METHOD, "{method:?}");
+        }
+    }
+
+    #[test]
+    fn every_three_digit_status_is_its_decimal_text() {
+        for code in 100..=999_u16 {
+            assert_eq!(response_status_code(code), Some(code.to_string().as_str()));
+        }
+    }
+
+    #[test]
+    fn a_code_outside_three_digits_has_no_value() {
+        for code in [0, 99, 1000, u16::MAX] {
+            assert_eq!(response_status_code(code), None, "{code}");
         }
     }
 }

@@ -8,14 +8,6 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
-# template:begin postgres:test-postgres-tls-dependency-scan
-# cargo-shear 1.14.0 misses #[path] inclusions of test/fixtures/tls.rs in
-# test/tests/postgres.rs and test/tests/http_idempotency/mounted.rs. Remove this
-# exception when it follows those sources.
-[package.metadata.cargo-shear]
-ignored = ["rcgen"]
-# template:end postgres:test-postgres-tls-dependency-scan
-
 [lints]
 workspace = true
 
@@ -90,6 +82,7 @@ features = ["test-support"]
 async-nats = { workspace = true, features = ["jetstream"] }
 domain-events = { workspace = true }
 infra-messaging = { workspace = true }
+nats-test-support = { workspace = true }
 operation-context = { workspace = true }
 # template:end outbox:test-messaging-outbox-dependencies
 # template:begin test-digest:test-digest-dependency
@@ -148,7 +141,7 @@ health = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["std", "registry"] }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs", "tls12"] }
-rcgen = { workspace = true, features = ["pem", "aws_lc_rs"] }
+tls-test-support = { workspace = true }
 # template:end postgres:test-postgres-health-dependency
 # template:begin postgres:test-migrate-dependency
 migrate = { workspace = true }

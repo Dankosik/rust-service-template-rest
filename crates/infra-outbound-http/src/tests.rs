@@ -9,7 +9,9 @@ use tokio::{
     time::Instant,
 };
 
-use crate::{Error, Limits, MAX_RESPONSE_HEADER_COUNT, test_support::*, tls::TlsMaterial};
+use tls_test_support::TlsMaterial;
+
+use crate::{Error, Limits, MAX_RESPONSE_HEADER_COUNT, test_support::*};
 
 #[tokio::test]
 async fn standard_request_returns_standard_response_with_full_body() {

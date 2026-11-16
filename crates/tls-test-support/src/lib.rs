@@ -4,19 +4,11 @@ use rcgen::{
 };
 
 #[derive(Debug)]
-pub(crate) struct TlsMaterial {
-    pub(crate) cert: Vec<u8>,
-    pub(crate) key: Vec<u8>,
-    #[allow(
-        dead_code,
-        reason = "shared #[path] fixture; PEM-root callers read root_pem instead of DER root"
-    )]
-    pub(crate) root: Vec<u8>,
-    #[allow(
-        dead_code,
-        reason = "shared #[path] fixture; DER-root callers read root instead of root_pem"
-    )]
-    pub(crate) root_pem: String,
+pub struct TlsMaterial {
+    pub cert: Vec<u8>,
+    pub key: Vec<u8>,
+    pub root: Vec<u8>,
+    pub root_pem: String,
 }
 
 impl TlsMaterial {
@@ -25,7 +17,7 @@ impl TlsMaterial {
         clippy::expect_used,
         reason = "fixture setup failures are test failures"
     )]
-    pub(crate) fn new(host: &str) -> Self {
+    pub fn new(host: &str) -> Self {
         assert!(!host.is_empty(), "TLS fixture host must not be empty");
         let issuer = new_issuer();
         let leaf_key = KeyPair::generate().expect("generate TLS fixture leaf key");
@@ -45,11 +37,12 @@ impl TlsMaterial {
     }
 }
 
+#[must_use]
 #[allow(
     clippy::expect_used,
     reason = "fixture setup failures are test failures"
 )]
-pub(crate) fn new_issuer() -> CertifiedIssuer<'static, KeyPair> {
+pub fn new_issuer() -> CertifiedIssuer<'static, KeyPair> {
     let mut params = CertificateParams::default();
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];

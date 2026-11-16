@@ -69,6 +69,7 @@ jobs-worker = { path = "crates/jobs-worker" }
 # template:begin messaging:workspace-messaging-crates
 domain-events = { path = "crates/domain-events" }
 infra-messaging = { path = "crates/infra-messaging" }
+nats-test-support = { path = "crates/nats-test-support" }
 # template:end messaging:workspace-messaging-crates
 # template:begin cache:workspace-cache-crates
 infra-cache = { path = "crates/infra-cache" }
@@ -259,6 +260,7 @@ ureq = { version = "3.4.2", default-features = false }
 # template:begin tls-fixtures:workspace-tls-fixtures
 tokio-rustls = { version = "0.26.6", default-features = false }
 rcgen = { version = "0.14.10", default-features = false }
+tls-test-support = { path = "crates/tls-test-support" }
 # template:end tls-fixtures:workspace-tls-fixtures
 
 # `make lint` promotes warnings to errors; levels here default to `warn` so

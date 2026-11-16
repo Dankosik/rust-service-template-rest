@@ -6,7 +6,7 @@ use tracing::Span;
 
 use shared_rules::{
     error_chain::DisplayErrorChain,
-    otel_http::{OTHER_METHOD, request_method},
+    otel_http::{OTHER_METHOD, request_method, response_status_code},
 };
 
 use crate::{Error, StopScopes, policy::Origin};
@@ -229,24 +229,9 @@ fn is_error_status(status: StatusCode) -> bool {
     status.as_u16() >= 400
 }
 
-/* jscpd:ignore-start */
-static STATUS_CODES: [StatusCode; 900] = {
-    let mut codes = [StatusCode::CONTINUE; 900];
-    let mut code = 100_u16;
-    while code <= 999 {
-        codes[(code - 100) as usize] = match StatusCode::from_u16(code) {
-            Ok(status) => status,
-            Err(_) => panic!("status table contains an invalid code"),
-        };
-        code += 1;
-    }
-    codes
-};
-
 fn status_label(status: StatusCode) -> &'static str {
-    STATUS_CODES[usize::from(status.as_u16() - 100)].as_str()
+    response_status_code(status.as_u16()).unwrap_or_default()
 }
-/* jscpd:ignore-end */
 
 fn transport_error_type(source: &(dyn StdError + 'static)) -> &'static str {
     let causes = || shared_rules::error_chain::causes(source);
