@@ -28,11 +28,15 @@
 #   the historical byte-equality experiment documented in delivery policy.
 #   Locked resolution is not a future binary/image equality guarantee: APT
 #   inputs, this frontend tag and tool/package availability can change.
+# - JEMALLOC_SYS_WITH_MALLOC_CONF bakes `thp:never` into the allocator: on a
+#   host whose transparent huge pages are `always`, khugepaged refills the
+#   pages jemalloc returned (docs/backend-library-selection.md).
 
 ARG SERVICE_PACKAGE=service
 
 FROM rust:1.100.0-slim-trixie@sha256:e9d95b74296f7126a83ae3d041aeaba1ff4c478f13abc5cc034fcf7c131c3d4a AS chef
 WORKDIR /src
+ENV JEMALLOC_SYS_WITH_MALLOC_CONF=thp:never
 # jemalloc (the service allocator) builds with configure and make; slim has
 # gcc only. curl and xz fetch and unpack the build tools below.
 RUN apt-get update && apt-get install -y --no-install-recommends make curl xz-utils \

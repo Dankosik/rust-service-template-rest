@@ -52,5 +52,11 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "
 tokio-util = { workspace = true, features = ["rt"] }
 tracing = { workspace = true, features = ["std"] }
 
+# jemalloc compiles background purging out of Mach-O builds and
+# tikv-jemalloc-sys leaves it off on musl; the feature would bake
+# `background_thread:true` into binaries that refuse it at startup.
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
+tikv-jemallocator = { workspace = true, features = ["background_threads"] }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

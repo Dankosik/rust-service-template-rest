@@ -54,6 +54,16 @@ Measured on a 4-vCPU Xeon 8280 DigitalOcean c-4 (`linux/amd64`, fat LTO, 5 inter
 
 Long-running binaries select `jemalloc` (`tikv-jemallocator`) because it matches `mimalloc`'s CPU reduction (−12% to −20% on JSON/PostgreSQL, −3% to −11% on background workers) while returning idle pages to the OS (`79.5 MB` vs `98.5 MB` post-soak worker RSS).
 
+jemalloc purges freed pages only from the thread that allocates in the same arena unless its background threads run, so Linux glibc builds enable `background_threads`, and the runtime image bakes `thp:never`. Measured on a 4-vCPU Xeon 8168 DigitalOcean c-4 (Debian 13, service on two CPUs with two workers, a 20 s burst of 64 KiB JSON over 256 connections, then 90 s idle):
+
+| Resident memory | Host THP `madvise`, no background threads | `madvise`, background threads | Host THP `always`, no background threads | `always`, background threads | `always`, background threads + `thp:never` |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| At start | 13.9 MB | 13.8 MB | 30.6 MB | 30.3 MB | 23.4 MB |
+| Burst peak | 35.3 MB | 39.3 MB | 64.2 MB | 50.4 MB | 52.3 MB |
+| After 90 s idle | 31.1 MB | 15.1 MB | 65.2 MB | 48.3 MB | 25.8 MB |
+
+CPU per request stayed within ±1% for both options (plain and 64 KiB JSON, five interleaved 15 s rounds); resident memory under sustained 64 KiB load rose by about 6 MB because application threads no longer purge inline. With `always`, khugepaged collapses the sparse regions jemalloc purged back into huge pages, outside the allocator's own accounting. `_RJEM_MALLOC_CONF` overrides the baked options at process start. The `stats` feature (needed by `tikv-jemalloc-ctl` gauges) cost 6% CPU per request on the 64 KiB path and stays off; reopen it when allocator-level memory attribution is needed.
+
 ### Open-file limit
 
 Docker (since Engine 25), containerd (since 1.8), and systemd (since 240) start containers with a soft `RLIMIT_NOFILE` of `1,024` under a higher hard limit for legacy `select(2)` compatibility; raising soft to hard at startup via `rlimit` prevents `EMFILE` accept failures around 1,000 connections while leaving the hard ceiling platform-owned.
