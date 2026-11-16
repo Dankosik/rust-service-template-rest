@@ -6,16 +6,20 @@
 //! the span's fields.
 
 use std::mem::DropGuard;
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
+use arc_swap::ArcSwap;
 use axum::extract::{MatchedPath, Request, State};
 use axum::http::{Method, StatusCode, Uri};
 use axum::middleware::Next;
 use axum::response::Response;
+use compact_str::{CompactString, format_compact};
+use enum_map::{Enum, EnumMap};
 use foldhash::HashMap;
 use metrics::{Gauge, Histogram, Label, SharedString};
 use opentelemetry::context::FutureExt as _;
+use parking_lot::Mutex;
 use shared_rules::otel_http::request_method;
 use tower_http::request_id::RequestId;
 use tracing::Instrument as _;
@@ -239,9 +243,13 @@ fn make_span(
     connection: Option<&ConnectionInfo>,
 ) -> tracing::Span {
     let route = matched.map(MatchedPath::as_str);
+    let span_name = match route {
+        Some(route) => format_compact!("{method} {route}"),
+        None => CompactString::const_new(method),
+    };
     let span = otel_trace_span!(
         "HTTP request",
-        otel.name = format!("{method} {}", route.unwrap_or_default()).trim(),
+        otel.name = span_name.as_str(),
         otel.kind = ?opentelemetry::trace::SpanKind::Server,
         request_id,
     );
@@ -276,8 +284,41 @@ fn update_span_from_response(span: &tracing::Span, status: StatusCode) {
     span.set_attribute("http.response.status_code", i64::from(status.as_u16()));
     if status.is_server_error() {
         // The conventions name a failed response by its status code.
-        span.set_attribute("error.type", status.as_str().to_owned());
+        span.set_attribute("error.type", status_label(status));
         span.set_status(opentelemetry::trace::Status::error(""));
+    }
+}
+
+#[derive(Clone, Copy, Debug, Enum)]
+enum MethodSlot {
+    Connect,
+    Delete,
+    Get,
+    Head,
+    Options,
+    Patch,
+    Post,
+    Put,
+    Query,
+    Trace,
+    Other,
+}
+
+impl MethodSlot {
+    fn from_label(method: &'static str) -> Self {
+        match method {
+            "CONNECT" => Self::Connect,
+            "DELETE" => Self::Delete,
+            "GET" => Self::Get,
+            "HEAD" => Self::Head,
+            "OPTIONS" => Self::Options,
+            "PATCH" => Self::Patch,
+            "POST" => Self::Post,
+            "PUT" => Self::Put,
+            "QUERY" => Self::Query,
+            "TRACE" => Self::Trace,
+            _ => Self::Other,
+        }
     }
 }
 
@@ -294,28 +335,18 @@ type RouteDurations = HashMap<(&'static str, u16), Histogram>;
 /// composition root installs the recorder before the router serves.
 #[derive(Debug, Default)]
 struct Series {
-    active: RwLock<HashMap<&'static str, Gauge>>,
-    durations: RwLock<HashMap<Box<str>, RouteDurations>>,
+    active: EnumMap<MethodSlot, OnceLock<Gauge>>,
+    durations: ArcSwap<HashMap<Box<str>, RouteDurations>>,
+    durations_write: Mutex<()>,
 }
 
 impl Series {
     fn active_gauge(&self, method: &'static str) -> Gauge {
-        let known = self
-            .active
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(method)
-            .cloned();
-        known.unwrap_or_else(|| {
-            self.active
-                .write()
-                .unwrap_or_else(PoisonError::into_inner)
-                .entry(method)
-                .or_insert_with(
-                    || metrics::gauge!(ACTIVE_REQUESTS_METRIC, "http_request_method" => method),
-                )
-                .clone()
-        })
+        self.active[MethodSlot::from_label(method)]
+            .get_or_init(
+                || metrics::gauge!(ACTIVE_REQUESTS_METRIC, "http_request_method" => method),
+            )
+            .clone()
     }
 
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
@@ -330,22 +361,29 @@ impl Series {
         let seconds = elapsed.as_secs_f64();
         if let Some(histogram) = self
             .durations
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
+            .load()
             .get(route)
             .and_then(|route_durations| route_durations.get(&key))
         {
             histogram.record(seconds);
             return;
         }
-        self.durations
-            .write()
-            .unwrap_or_else(PoisonError::into_inner)
-            .entry(route.into())
+        let _guard = self.durations_write.lock();
+        let current = self.durations.load_full();
+        if let Some(histogram) = current
+            .get(route)
+            .and_then(|route_durations| route_durations.get(&key))
+        {
+            histogram.record(seconds);
+            return;
+        }
+        let histogram = duration_histogram(method, route, status);
+        let mut next = (*current).clone();
+        next.entry(route.into())
             .or_default()
-            .entry(key)
-            .or_insert_with(|| duration_histogram(method, route, status))
-            .record(seconds);
+            .insert(key, histogram.clone());
+        self.durations.store(Arc::new(next));
+        histogram.record(seconds);
     }
 }
 

@@ -18,19 +18,9 @@ impl SpanExporter for ShutdownExporter {
     }
 
     fn shutdown_with_timeout(&self, timeout: Duration) -> OTelSdkResult {
-        self.attempted
-            .lock()
-            .unwrap()
-            .take()
-            .unwrap()
-            .send(timeout)
-            .unwrap();
+        self.attempted.lock().take().unwrap().send(timeout).unwrap();
         if let Some(release) = &self.release {
-            release
-                .lock()
-                .unwrap()
-                .recv_timeout(Duration::from_secs(2))
-                .unwrap();
+            release.lock().recv_timeout(Duration::from_secs(2)).unwrap();
         }
         Ok(())
     }

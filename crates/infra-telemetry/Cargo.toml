@@ -16,8 +16,11 @@ hotpath = ["dep:hotpath", "hotpath/hotpath", "hotpath/sqlx"]
 
 [dependencies]
 arrayvec = { workspace = true }
+crossbeam-channel = { workspace = true, features = ["std"] }
 enum-map = { workspace = true, features = ["derive"] }
 const-hex = { workspace = true }
+parking_lot = { workspace = true }
+smallvec = { workspace = true, features = ["const_generics"] }
 hotpath = { workspace = true, optional = true }
 axum = { workspace = true, features = ["http1", "tokio"] }
 bitflags = { workspace = true }

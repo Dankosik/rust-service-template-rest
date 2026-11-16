@@ -222,7 +222,7 @@ impl Grant<'_> {
 
 #[derive(Deserialize)]
 struct TokenResponse {
-    access_token: String,
+    access_token: zeroize::Zeroizing<String>,
     token_type: String,
     #[serde(default, deserialize_with = "deserialize_lifetime")]
     expires_in: Option<u64>,

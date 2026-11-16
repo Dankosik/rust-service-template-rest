@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use sqlx::ConnectOptions;
 use sqlx::postgres::{PgConnectOptions, PgSslMode};
 use url::Url;
+use zeroize::Zeroizing;
 
 /// Environment variables `sqlx` would still merge into an admitted URL
 /// (`sqlx-postgres/src/options/mod.rs`). Every other libpq variable it reads
@@ -202,14 +203,14 @@ impl Dsn {
     clippy::disallowed_methods,
     reason = "startup PostgreSQL admission owns the initial password read; refresh uses async IO"
 )]
-fn read_password(path: &Path) -> Result<String, DsnError> {
+fn read_password(path: &Path) -> Result<Zeroizing<String>, DsnError> {
     let content =
         std::fs::read_to_string(path).map_err(|err| DsnError::PasswordFile(err.kind()))?;
     password_from(content)
 }
 
-pub(crate) fn password_from(content: String) -> Result<String, DsnError> {
-    let password = shared_rules::secret_file::value(content);
+pub(crate) fn password_from(content: String) -> Result<Zeroizing<String>, DsnError> {
+    let password = Zeroizing::new(shared_rules::secret_file::value(content));
     if password.is_empty() {
         return Err(DsnError::PasswordFileEmpty);
     }
@@ -577,7 +578,7 @@ mod tests {
         assert_eq!(ipv6.ssl_mode_name(), "verify-full");
 
         std::fs::write(&file, " p w \r\n").unwrap();
-        assert_eq!(read_password(&file).unwrap(), " p w ");
+        assert_eq!(read_password(&file).unwrap().as_str(), " p w ");
         dir.close().unwrap();
     }
 

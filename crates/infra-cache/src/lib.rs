@@ -192,7 +192,7 @@ impl health::Probe for CacheProbe {
 
     async fn check(&self) -> Result<(), health::ProbeError> {
         self.cache.link.probe().await.map_err(|error| {
-            health::ProbeError::new(format!("cache ping failed: {}", error.label()))
+            health::ProbeError::format(format_args!("cache ping failed: {}", error.label()))
         })
     }
 }

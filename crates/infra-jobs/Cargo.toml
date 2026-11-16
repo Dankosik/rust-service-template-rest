@@ -25,16 +25,18 @@ infra-postgres = { workspace = true }
 json-payload = { workspace = true }
 metrics = { workspace = true }
 opentelemetry = { workspace = true, features = ["trace"] }
+parking_lot = { workspace = true }
 serde = { workspace = true, features = ["std"] }
 serde_json = { workspace = true, features = ["std"] }
 shared-rules = { workspace = true }
+smallvec = { workspace = true, features = ["const_generics"] }
 sqlx = { workspace = true, features = ["macros", "postgres", "runtime-tokio", "tls-rustls-aws-lc-rs", "uuid"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
 tokio-util = { workspace = true, features = ["rt"] }
 tracing = { workspace = true, features = ["std"] }
 tracing-opentelemetry = { workspace = true }
-uuid = { workspace = true, features = ["std", "v4", "v7"] }
+uuid = { workspace = true, features = ["std", "v4", "v7", "fast-rng"] }
 
 [dev-dependencies]
 proptest = { workspace = true, features = ["std"] }

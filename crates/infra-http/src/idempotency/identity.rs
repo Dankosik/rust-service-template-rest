@@ -116,7 +116,9 @@ pub(super) fn request_fingerprint(
     // An absent or empty trailer section keeps the persisted v1 fingerprint.
     if let Some(trailers) = trailers.filter(|trailers| !trailers.is_empty()) {
         hasher.update(b"trailers/v1\0");
-        let mut fields = trailers.iter().collect::<Vec<_>>();
+        let mut fields = trailers
+            .iter()
+            .collect::<smallvec::SmallVec<[(&HeaderName, &axum::http::HeaderValue); 4]>>();
         // Stable sort removes ordering between field names while keeping the
         // order of repeated values for each name.
         fields.sort_by(|(left, _), (right, _)| left.as_str().cmp(right.as_str()));

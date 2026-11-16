@@ -42,8 +42,13 @@ infra-idempotency-store = { workspace = true }
 infra-postgres = { workspace = true }
 sha2 = { workspace = true }
 sfv = { workspace = true, features = ["parsed-types"] }
+smallvec = { workspace = true, features = ["const_generics"] }
 # template:end http-idempotency:http-idempotency-dependencies
+arc-swap = { workspace = true }
+compact_str = { workspace = true, features = ["serde"] }
+enum-map = { workspace = true, features = ["derive"] }
 foldhash = { workspace = true, features = ["std"] }
+parking_lot = { workspace = true }
 http-body = { workspace = true }
 http-body-util = { workspace = true }
 hyper-util = { workspace = true, features = ["server", "server-auto", "service", "tokio", "http1", "http2"] }

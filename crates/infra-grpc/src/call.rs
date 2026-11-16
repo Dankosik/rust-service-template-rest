@@ -1,13 +1,15 @@
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
+use atomic_take::AtomicTake;
 use bytes::Bytes;
 use futures_util::FutureExt as _;
 use http::HeaderMap;
 use http_body::{Body, Frame, SizeHint};
 use opentelemetry::trace::SpanKind;
+use parking_lot::Mutex;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio_util::task::AbortOnDropHandle;
 
@@ -21,15 +23,15 @@ use tokio_util::sync::DropGuard;
 /// Transfers one value through HTTP extensions, which require `Clone`:
 /// cloning the holder never clones the value, which one owner takes.
 #[derive_where::derive_where(Clone)]
-pub(crate) struct Handoff<T>(Arc<Mutex<Option<T>>>);
+pub(crate) struct Handoff<T>(Arc<AtomicTake<T>>);
 
 impl<T> Handoff<T> {
     pub(crate) fn new(value: T) -> Self {
-        Self(Arc::new(Mutex::new(Some(value))))
+        Self(Arc::new(AtomicTake::new(value)))
     }
 
     pub(crate) fn take(self) -> Option<T> {
-        lock(&self.0).take()
+        self.0.take()
     }
 }
 
@@ -190,10 +192,6 @@ fn store_waker(slot: &mut Option<Waker>, waker: &Waker) {
         Some(stored) => stored.clone_from(waker),
         None => *slot = Some(waker.clone()),
     }
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 pub(crate) enum Observation {
@@ -517,7 +515,7 @@ where
 }
 
 fn terminate<B: Body>(state: &Mutex<State<B>>, status: &tonic::Status) {
-    let completion = lock(state).complete_with(status);
+    let completion = state.lock().complete_with(status);
     if let Some(mut completion) = completion {
         if let Some(waker) = completion.open.waker.take() {
             waker.wake();
@@ -536,7 +534,7 @@ where
     fn poll_frame(self: Pin<&mut Self>, context: &mut Context<'_>) -> ResponseFramePoll<B::Error> {
         let this = self.get_mut();
         this.reap_watcher(context);
-        let mut state = lock(&this.state);
+        let mut state = this.state.lock();
         let mut panic = None;
         let (polled, completion) = if let Some(status) = state.stopped_status() {
             state.end_with(&status)
@@ -586,11 +584,11 @@ where
     }
 
     fn is_end_stream(&self) -> bool {
-        matches!(lock(&self.state).phase, Phase::Done)
+        matches!(self.state.lock().phase, Phase::Done)
     }
 
     fn size_hint(&self) -> SizeHint {
-        match &lock(&self.state).phase {
+        match &self.state.lock().phase {
             Phase::Open(open) => open.resources.body.size_hint(),
             Phase::Trailers(_) | Phase::Done => SizeHint::with_exact(0),
         }
@@ -599,7 +597,7 @@ where
 
 impl<B: Body> Drop for ResponseBody<B> {
     fn drop(&mut self) {
-        let phase = std::mem::replace(&mut lock(&self.state).phase, Phase::Done);
+        let phase = std::mem::replace(&mut self.state.lock().phase, Phase::Done);
         drop(self.watcher.take());
         // Call's drop records cancellation only while still open.
         drop(phase);
@@ -629,7 +627,7 @@ pub(crate) fn upload(body: tonic::body::Body) -> (tonic::body::Body, UploadGuard
 impl Drop for UploadGuard {
     fn drop(&mut self) {
         let (body, waker) = {
-            let mut state = lock(&self.0);
+            let mut state = self.0.lock();
             (state.body.take(), state.waker.take())
         };
         if let Some(waker) = waker {
@@ -647,7 +645,7 @@ impl Body for Upload {
         self: Pin<&mut Self>,
         context: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
-        let mut state = lock(&self.0);
+        let mut state = self.0.lock();
         store_waker(&mut state.waker, context.waker());
         let Some(body) = state.body.as_mut() else {
             return Poll::Ready(None);
@@ -666,11 +664,12 @@ impl Body for Upload {
     }
 
     fn is_end_stream(&self) -> bool {
-        lock(&self.0).body.as_ref().is_none_or(Body::is_end_stream)
+        self.0.lock().body.as_ref().is_none_or(Body::is_end_stream)
     }
 
     fn size_hint(&self) -> SizeHint {
-        lock(&self.0)
+        self.0
+            .lock()
             .body
             .as_ref()
             .map_or_else(|| SizeHint::with_exact(0), Body::size_hint)
@@ -982,7 +981,7 @@ mod tests {
                 self: Pin<&mut Self>,
                 _cx: &mut Context<'_>,
             ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
-                lock(&self.0).push(
+                self.0.lock().push(
                     opentelemetry::Context::current()
                         .span()
                         .span_context()
@@ -1017,7 +1016,7 @@ mod tests {
             .span_context()
             .trace_id();
         assert!(futures_util::poll!(body.frame()).is_pending());
-        assert_eq!(*lock(&seen), [trace_id]);
+        assert_eq!(*seen.lock(), [trace_id]);
         assert_eq!(
             opentelemetry::Context::current()
                 .span()

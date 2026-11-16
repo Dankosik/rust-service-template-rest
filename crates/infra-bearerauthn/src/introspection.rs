@@ -1,17 +1,18 @@
 use std::{
-    collections::HashMap,
     future::Future,
     num::NonZeroUsize,
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use foldhash::HashMap;
 use futures_util::{
     FutureExt,
     future::{BoxFuture, Shared, WeakShared},
 };
 use moka::{Expiry, future::Cache};
 use operation_context::OperationContext;
+use parking_lot::Mutex;
 use secrecy::{ExposeSecret, SecretString};
 use shared_rules::oidc_introspection::{CACHE_CAPACITY, CACHE_TTL};
 use tokio::sync::Semaphore;
@@ -84,7 +85,7 @@ pub(crate) struct IntrospectionVerifier {
 }
 
 struct PositiveCache {
-    retained: Cache<TokenDigest, VerifiedIntrospection>,
+    retained: Cache<TokenDigest, VerifiedIntrospection, foldhash::quality::RandomState>,
     fills: Mutex<HashMap<TokenDigest, WeakShared<FillFuture>>>,
 }
 
@@ -93,18 +94,11 @@ type FillResult = Result<Fill, VerificationError>;
 type FillFuture = BoxFuture<'static, FillResult>;
 
 impl PositiveCache {
-    fn join_fill<F>(
-        &self,
-        key: TokenDigest,
-        start: impl FnOnce() -> F,
-    ) -> Result<FillWaiter<'_>, VerificationError>
+    fn join_fill<F>(&self, key: TokenDigest, start: impl FnOnce() -> F) -> FillWaiter<'_>
     where
         F: Future<Output = FillResult> + Send + 'static,
     {
-        let mut fills = self
-            .fills
-            .lock()
-            .map_err(|_| VerificationError::unavailable(VerificationReason::CacheState))?;
+        let mut fills = self.fills.lock();
         let shared = fills
             .get(&key)
             .and_then(WeakShared::upgrade)
@@ -115,10 +109,10 @@ impl PositiveCache {
                 }
                 shared
             });
-        Ok(FillWaiter {
+        FillWaiter {
             shared,
             registration: FillRegistration { cache: self, key },
-        })
+        }
     }
 }
 
@@ -145,8 +139,8 @@ struct FillRegistration<'a> {
 
 impl FillRegistration<'_> {
     fn retire(&self, completed: &Shared<FillFuture>) {
-        if let Ok(mut fills) = self.cache.fills.lock()
-            && let Some(current) = fills.get(&self.key).and_then(WeakShared::upgrade)
+        let mut fills = self.cache.fills.lock();
+        if let Some(current) = fills.get(&self.key).and_then(WeakShared::upgrade)
             && current.ptr_eq(completed)
         {
             fills.remove(&self.key);
@@ -156,10 +150,10 @@ impl FillRegistration<'_> {
 
 impl Drop for FillRegistration<'_> {
     fn drop(&mut self) {
-        if let Ok(mut fills) = self.cache.fills.lock()
-            && fills
-                .get(&self.key)
-                .is_some_and(|fill| fill.upgrade().is_none())
+        let mut fills = self.cache.fills.lock();
+        if fills
+            .get(&self.key)
+            .is_some_and(|fill| fill.upgrade().is_none())
         {
             fills.remove(&self.key);
         }
@@ -199,7 +193,7 @@ impl IntrospectionVerifier {
                 retained: Cache::builder()
                     .max_capacity(cache.capacity as u64)
                     .expire_after(Retention { ttl: cache.ttl })
-                    .build(),
+                    .build_with_hasher(foldhash::quality::RandomState::default()),
                 fills: Mutex::default(),
             }),
         }))
@@ -260,7 +254,7 @@ impl IntrospectionVerifier {
                         retained.insert(key, value.clone()).await;
                         Ok(Fill::Fresh(value))
                     }
-                })?
+                })
                 .wait()
                 .await?;
             if let Fill::Fresh(value) = filled {
@@ -1186,12 +1180,10 @@ mod tests {
             let before = fixture.calls();
             let gate = Arc::new(Semaphore::new(0));
             let publication_gate = gate.clone();
-            let publication = cache
-                .join_fill(key, || async move {
-                    publication_gate.acquire().await.unwrap().forget();
-                    Ok(super::Fill::RecheckCache)
-                })
-                .unwrap();
+            let publication = cache.join_fill(key, || async move {
+                publication_gate.acquire().await.unwrap().forget();
+                Ok(super::Fill::RecheckCache)
+            });
             let mut publication = Box::pin(publication.wait());
             assert!(futures_util::poll!(publication.as_mut()).is_pending());
             if elapsed_seconds == 0 {

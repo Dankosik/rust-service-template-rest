@@ -21,6 +21,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use arrayvec::ArrayVec;
 use opentelemetry::trace::TraceContextExt as _;
+use smallvec::SmallVec;
 use tracing::dispatcher::WeakDispatch;
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id, Record as SpanRecord};
@@ -115,16 +116,26 @@ fn enter_format() -> Result<impl Drop, DropReason> {
 
 /// Grows with what is written; `limit` bounds it, escaped strings and
 /// `collect_str` streaming included.
-struct Bytes {
-    buf: Vec<u8>,
+struct Bytes<const INLINE: usize = 0> {
+    buf: SmallVec<[u8; INLINE]>,
     limit: usize,
     failed: bool,
 }
 
-impl Bytes {
+impl Bytes<0> {
     fn new(limit: usize, capacity: usize) -> Self {
         Self {
-            buf: Vec::with_capacity(capacity),
+            buf: SmallVec::with_capacity(capacity),
+            limit,
+            failed: false,
+        }
+    }
+}
+
+impl<const INLINE: usize> Bytes<INLINE> {
+    const fn inline(limit: usize) -> Self {
+        Self {
+            buf: SmallVec::new_const(),
             limit,
             failed: false,
         }
@@ -171,7 +182,7 @@ impl Bytes {
     }
 }
 
-impl io::Write for Bytes {
+impl<const INLINE: usize> io::Write for Bytes<INLINE> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         self.append(bytes);
         if self.failed {
@@ -185,7 +196,7 @@ impl io::Write for Bytes {
     }
 }
 
-impl fmt::Write for Bytes {
+impl<const INLINE: usize> fmt::Write for Bytes<INLINE> {
     fn write_str(&mut self, text: &str) -> fmt::Result {
         self.append(text.as_bytes());
         if self.failed { Err(fmt::Error) } else { Ok(()) }
@@ -200,7 +211,7 @@ struct Entry {
 }
 
 struct Scratch {
-    values: Bytes,
+    values: Bytes<SCRATCH_CAPACITY>,
     fields: ArrayVec<Entry, MAX_EVENT_FIELDS>,
     /// The record lacks something its call site gave: a value or field that did
     /// not fit, or the fields of a span with no cache.
@@ -210,7 +221,7 @@ struct Scratch {
 impl Scratch {
     fn new(value_limit: usize) -> Self {
         Self {
-            values: Bytes::new(value_limit, SCRATCH_CAPACITY),
+            values: Bytes::inline(value_limit),
             fields: ArrayVec::new(),
             truncated: false,
         }
@@ -337,12 +348,12 @@ impl Scratch {
 
 /// The inside of a JSON string, escaped as `serde_json` escapes it, written
 /// until one byte short of the buffer's limit: the closing quote's.
-struct Quoted<'a> {
-    values: &'a mut Bytes,
+struct Quoted<'a, const INLINE: usize> {
+    values: &'a mut Bytes<INLINE>,
     cut: bool,
 }
 
-impl fmt::Write for Quoted<'_> {
+impl<const INLINE: usize> fmt::Write for Quoted<'_, INLINE> {
     fn write_str(&mut self, text: &str) -> fmt::Result {
         let mut rest = text;
         loop {
@@ -368,7 +379,7 @@ impl fmt::Write for Quoted<'_> {
     }
 }
 
-impl Quoted<'_> {
+impl<const INLINE: usize> Quoted<'_, INLINE> {
     /// Stopping the formatter here also ends a source that streams.
     fn stop(&mut self) -> fmt::Result {
         self.cut = true;

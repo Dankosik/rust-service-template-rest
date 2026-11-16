@@ -1,5 +1,6 @@
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 
+use parking_lot::Mutex;
 use tokio::sync::watch;
 use tokio::task::AbortHandle;
 use tokio_util::sync::CancellationToken;
@@ -54,10 +55,7 @@ impl Background {
             let _guard = guard;
             task.await;
         });
-        self.aborts
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(task.abort_handle());
+        self.aborts.lock().push(task.abort_handle());
     }
 
     pub(crate) fn failure(&self) -> Option<&'static str> {
@@ -69,12 +67,7 @@ impl Background {
     }
 
     pub(crate) fn abort(&self) {
-        for task in self
-            .aborts
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .iter()
-        {
+        for task in self.aborts.lock().iter() {
             task.abort();
         }
     }
