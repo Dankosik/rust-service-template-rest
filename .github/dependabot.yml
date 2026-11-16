@@ -24,6 +24,10 @@ updates:
       # sqlx resolves parking_lot 0.13.
       - dependency-name: "parking_lot"
         versions: [">=0.13"]
+      # The runtime tonic is a patched vendor copy (vendor/tonic/PATCHES.md);
+      # the generator moves only together with that patch.
+      - dependency-name: "tonic*"
+        versions: [">0.14.8"]
 
   - package-ecosystem: "github-actions"
     directory: "/"
