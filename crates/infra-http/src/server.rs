@@ -25,8 +25,6 @@ use sniff::SniffDeadline;
 
 pub(crate) const CONNECTIONS_REFUSED_METRIC: &str = "http_server_connections_refused_total";
 
-// `TcpListener::bind` listens with mio's fixed backlog of 128; the kernel caps
-// this request at `net.core.somaxconn`.
 const LISTEN_BACKLOG: u32 = 65_535;
 
 #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
@@ -115,8 +113,6 @@ pub struct BoundListener {
 }
 
 impl BoundListener {
-    /// Registers the socket with the Tokio reactor, so it panics outside a
-    /// runtime.
     pub fn bind(addr: SocketAddr) -> Result<Self, ServerError> {
         let listener = listen(addr).map_err(|source| ServerError::Bind { addr, source })?;
         let local_addr = listener
@@ -191,7 +187,6 @@ fn configure_accepted(stream: &TcpStream) {
 }
 
 impl Server {
-    /// Panics outside a Tokio runtime, like [`BoundListener::bind`].
     pub fn bind(
         addr: SocketAddr,
         app: Router,

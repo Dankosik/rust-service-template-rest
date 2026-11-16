@@ -545,7 +545,7 @@ mod grpc {
         pub(super) async fn start(pool: PgPool, reader: health::ReadinessReader) -> Self {
             // template:end postgres-grpc-consumers:recovery-grpc-module-3
             // template:begin postgres-grpc-auth:recovery-start-provider
-            let (verifier, provider, provider_cancel) = provider().await;
+            let (verifier, provider, provider_cancel) = provider();
             // template:end postgres-grpc-auth:recovery-start-provider
             // template:begin postgres-grpc-consumers:recovery-grpc-module-4
             let mut services = Services::new();
@@ -694,7 +694,7 @@ mod grpc {
         clippy::disallowed_methods,
         reason = "local non-shipped identity provider fixture"
     )]
-    async fn provider() -> (infra_bearerauthn::Verifier, Server, CancellationToken) {
+    fn provider() -> (infra_bearerauthn::Verifier, Server, CancellationToken) {
         use infra_bearerauthn::{
             EndpointUrl, IntrospectionOptions, IssuerUrl,
             test_support::{FixtureTransport, prepare_introspection_with_fixture},

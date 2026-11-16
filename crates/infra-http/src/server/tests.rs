@@ -681,7 +681,7 @@ async fn a_burst_of_connections_waits_in_the_listen_queue_instead_of_being_dropp
 
 #[cfg(target_os = "linux")]
 #[tokio::test]
-async fn an_accepted_connection_gives_up_on_a_peer_that_stops_acknowledging() {
+async fn an_accepted_connection_carries_the_user_timeout_and_no_delay() {
     let listener = TcpListener::bind(loopback()).await.unwrap();
     let client = TcpStream::connect(listener.local_addr().unwrap())
         .await
