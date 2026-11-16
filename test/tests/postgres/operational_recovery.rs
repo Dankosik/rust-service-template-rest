@@ -63,7 +63,9 @@ fn http_router(pool: PgPool, readiness: &Readiness) -> axum::Router {
             max_body_bytes: 1024 * 1024,
             request_timeout: Duration::from_secs(8),
             max_in_flight: NonZeroU32::new(256),
+            admission_wait: Duration::from_secs(8),
             log_health_probes: false,
+            draining: None,
         },
     )
 }

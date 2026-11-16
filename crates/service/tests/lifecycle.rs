@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 mod common;
 
-use common::{baseline_env, get, poll_until, spawn_stdout_lines, terminate};
+use common::{agent, baseline_env, get, poll_until, spawn_stdout_lines, terminate};
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 
@@ -144,6 +144,8 @@ fn serves_probes_and_metrics_then_drains_on_sigterm_with_exit_zero() {
     );
     let (status, body) = get(&format!("http://{api}/health/live")).unwrap();
     assert_eq!((status, body.as_str()), (200, "ok"));
+    let serving = agent().get(&ready).call().unwrap();
+    assert!(!serving.headers().contains_key("connection"));
 
     let (status, _) = get(&format!("http://{api}/missing")).unwrap();
     assert_eq!(status, 404);
@@ -174,6 +176,12 @@ fn serves_probes_and_metrics_then_drains_on_sigterm_with_exit_zero() {
     assert!(
         poll_until(&ready, 503, Duration::from_millis(250)),
         "readiness must flip to 503 before the listener closes"
+    );
+    let draining = agent().get(&ready).call().unwrap();
+    assert_eq!(
+        draining.headers()["connection"],
+        "close",
+        "a keep-alive client is told to reconnect while the listener still serves"
     );
     let (code, stdout, stderr) = service.wait_output();
     let took = started.elapsed();

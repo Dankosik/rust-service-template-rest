@@ -60,7 +60,9 @@ fn mounted_receiver_with_limit(
             max_body_bytes,
             request_timeout: budget,
             max_in_flight: None,
+            admission_wait: budget,
             log_health_probes: false,
+            draining: None,
         },
     )
 }

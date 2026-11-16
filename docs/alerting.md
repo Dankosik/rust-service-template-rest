@@ -79,7 +79,7 @@ within minutes of a fault and reset promptly after recovery.
 
 Clients receive 5xx answers faster than the objective allows. In the
 `http_request` log, `termination="load_shed"` identifies a 503 sent after the
-request waited `http.request_timeout` for a permit. Check
+request waited `http.admission_wait` for a permit. Check
 `http_server_shed_requests_total` and `http_server_admission_wait_seconds`
 for the frequency and duration of those waits. For an admitted webhook with
 `problem_code="service_unavailable"`, correlate by `request_id` with the

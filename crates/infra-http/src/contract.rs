@@ -336,7 +336,9 @@ mod tests {
                 max_body_bytes: 1024,
                 request_timeout: Duration::from_secs(1),
                 max_in_flight: NonZeroU32::new(2),
+                admission_wait: Duration::from_secs(1),
                 log_health_probes: false,
+                draining: None,
             },
         )
     }
@@ -598,7 +600,9 @@ mod tests {
                 max_body_bytes: 1024,
                 request_timeout: Duration::from_secs(1),
                 max_in_flight: NonZeroU32::new(2),
+                admission_wait: Duration::from_secs(1),
                 log_health_probes: false,
+                draining: None,
             },
         );
         let response = app

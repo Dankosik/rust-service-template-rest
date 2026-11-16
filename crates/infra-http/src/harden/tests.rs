@@ -24,7 +24,9 @@ fn options() -> HardenOptions {
         max_body_bytes: 64,
         request_timeout: Duration::from_millis(200),
         max_in_flight: NonZeroU32::new(2),
+        admission_wait: Duration::from_millis(200),
         log_health_probes: false,
+        draining: None,
     }
 }
 
@@ -553,6 +555,90 @@ async fn a_request_is_shed_when_a_permit_frees_after_its_wait_budget() {
     assert_eq!(shed.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(shed.headers()[RETRY_AFTER], "1");
     assert_eq!(started.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_request_is_shed_after_the_admission_wait_while_its_budget_is_still_open() {
+    use std::task::{Context, Waker};
+
+    let started = Arc::new(AtomicUsize::new(0));
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let routes = holding_routes(started.clone(), gate.clone());
+    let options = HardenOptions {
+        request_timeout: Duration::from_secs(8),
+        admission_wait: Duration::from_millis(200),
+        max_in_flight: NonZeroU32::new(1),
+        ..options()
+    };
+    let app = harden(routes, &options);
+    let mut holder = std::pin::pin!(app.clone().oneshot(request(Method::GET, "/hold")));
+    let cx = &mut Context::from_waker(Waker::noop());
+    assert!(holder.as_mut().poll(cx).is_pending());
+
+    let arrived = tokio::time::Instant::now();
+    let shed = app
+        .clone()
+        .oneshot(request(Method::GET, "/hold"))
+        .await
+        .unwrap();
+    assert_eq!(shed.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(shed.headers()[RETRY_AFTER], "1");
+    let waited = arrived.elapsed();
+    assert!(waited >= options.admission_wait && waited < Duration::from_secs(1));
+    assert_eq!(started.load(Ordering::SeqCst), 1);
+
+    gate.notify_waiters();
+    assert_eq!(holder.await.unwrap().status(), StatusCode::OK);
+    let served = app.oneshot(request(Method::GET, "/hold"));
+    gate.notify_one();
+    assert_eq!(served.await.unwrap().status(), StatusCode::OK);
+}
+
+fn draining_reader() -> (health::Readiness, health::ReadinessReader) {
+    let readiness = health::Readiness::new(
+        Vec::new(),
+        health::RefreshPolicy {
+            interval: Duration::from_secs(1),
+            probe_budget: Duration::from_secs(1),
+            failure_threshold: NonZeroU32::MIN,
+        },
+    );
+    let reader = readiness.reader();
+    (readiness, reader)
+}
+
+#[tokio::test]
+async fn http1_responses_ask_the_client_to_reconnect_only_while_draining() {
+    let (readiness, reader) = draining_reader();
+    readiness.refresh().await;
+    let app = app(&HardenOptions {
+        draining: Some(reader),
+        ..options()
+    });
+
+    let serving = app
+        .clone()
+        .oneshot(request(Method::GET, "/ok"))
+        .await
+        .unwrap();
+    assert_eq!(serving.status(), StatusCode::OK);
+    assert!(!serving.headers().contains_key(CONNECTION));
+
+    readiness.start_drain();
+    for uri in ["/ok", "/missing"] {
+        let draining = app
+            .clone()
+            .oneshot(request(Method::GET, uri))
+            .await
+            .unwrap();
+        assert_eq!(draining.headers()[CONNECTION], "close", "{uri}");
+    }
+
+    let mut multiplexed = request(Method::GET, "/ok");
+    *multiplexed.version_mut() = Version::HTTP_2;
+    let multiplexed = app.oneshot(multiplexed).await.unwrap();
+    assert_eq!(multiplexed.status(), StatusCode::OK);
+    assert!(!multiplexed.headers().contains_key(CONNECTION));
 }
 
 #[tokio::test(start_paused = true)]
