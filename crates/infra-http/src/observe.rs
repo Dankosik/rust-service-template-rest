@@ -63,7 +63,7 @@ pub(crate) fn describe() {
     metrics::describe_counter!(
         SHED_REQUESTS_METRIC,
         metrics::Unit::Count,
-        "Requests rejected without running a handler because no in-flight permit freed within the request timeout."
+        "Requests rejected without running a handler because no in-flight permit freed within the admission wait."
     );
 }
 
