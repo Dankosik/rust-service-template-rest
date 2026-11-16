@@ -1,15 +1,14 @@
 //! Immutable named outbound integration configuration.
 //!
-//! This section validates static operator input only. It neither constructs a
-//! credential owner nor performs token or resource I/O.
+//! This section admits configuration shape only. Token URL, scope and cache
+//! capacity admission belong to the credentials adapter, as destination
+//! admission belongs to the gRPC transport. Neither section constructs a
+//! credential owner or performs token or resource I/O.
 
 use std::collections::BTreeMap;
 
 use secrecy::SecretString;
 use serde::Deserialize;
-// template:begin outbound-auth:config-integration-oauth-url-import
-use url::Url;
-// template:end outbound-auth:config-integration-oauth-url-import
 
 use crate::ValidationError;
 use crate::validate::Violations;
@@ -92,9 +91,6 @@ impl OAuthConfig {
     /// One retained token per user active within a token lifetime on one
     /// replica.
     const DEFAULT_EXCHANGE_CACHE_CAPACITY: u32 = 1024;
-    // Keep in sync with direct Options admission in
-    // crates/infra-oauth2-client-credentials/src/options.rs.
-    const EXCHANGE_CACHE_CAPACITY_RANGE: std::ops::RangeInclusive<u32> = 1..=65_536;
     /// Matches introspection's default while bounding distinct token attempts.
     const DEFAULT_PROVIDER_CONCURRENCY: std::num::NonZeroU32 =
         std::num::NonZeroU32::new(32).expect("32 is nonzero");
@@ -246,7 +242,7 @@ impl GrpcClientConfig {
 // template:begin outbound-auth:config-integration-oauth-validation
 impl OAuthConfig {
     fn validate(&self, prefix: &str, v: &mut Violations) {
-        v.check(validate_token_url(
+        v.check(crate::validate::non_blank(
             &format!("{prefix}.token_url"),
             &self.token_url,
         ));
@@ -280,53 +276,7 @@ impl OAuthConfig {
                 "cannot be empty when configured",
             )));
         }
-        if self
-            .scopes
-            .0
-            .iter()
-            .any(|scope| !shared_rules::rfc6749::is_scope_token(scope))
-        {
-            v.check(Err(ValidationError::new(
-                format!("{prefix}.scopes"),
-                "must contain RFC 6749 scope tokens",
-            )));
-        }
-        let capacity = Self::EXCHANGE_CACHE_CAPACITY_RANGE;
-        v.check(crate::validate::int_range(
-            &format!("{prefix}.exchange_cache_capacity"),
-            u64::from(self.exchange_cache_capacity),
-            u64::from(*capacity.start()),
-            u64::from(*capacity.end()),
-        ));
     }
-}
-
-fn validate_token_url(key: &str, token_url: &str) -> Result<(), ValidationError> {
-    if shared_rules::uri::has_whitespace_or_control(token_url) {
-        return Err(ValidationError::new(
-            key,
-            "must not contain whitespace or controls",
-        ));
-    }
-
-    let url = Url::parse(token_url)
-        .map_err(|_| ValidationError::new(key, "must be a valid HTTPS URL"))?;
-    if url.scheme() != "https" {
-        return Err(ValidationError::new(key, "must use HTTPS"));
-    }
-    if url.host().is_none() {
-        return Err(ValidationError::new(key, "must have a host"));
-    }
-    if !url.username().is_empty()
-        || url.password().is_some()
-        || shared_rules::uri::authority_has_userinfo(token_url)
-    {
-        return Err(ValidationError::new(key, "must not include userinfo"));
-    }
-    if url.fragment().is_some() {
-        return Err(ValidationError::new(key, "must not include a fragment"));
-    }
-    Ok(())
 }
 
 #[cfg(test)]

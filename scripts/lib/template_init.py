@@ -447,7 +447,7 @@ def _selected_marker_profiles(inputs: InitInputs) -> set[str]:
         and inputs.object_storage == "s3"
     ):
         selected.add("runtime-progress")
-    if inputs.messaging == "nats-jetstream" or inputs.outbound_auth == "oauth2-client-credentials":
+    if inputs.messaging == "nats-jetstream":
         selected.add("config-url")
     if inputs.service_auth == "jwt":
         selected.add("service-auth")
