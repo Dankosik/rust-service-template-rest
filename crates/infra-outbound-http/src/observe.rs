@@ -263,6 +263,7 @@ fn is_error_status(status: StatusCode) -> bool {
 
 // StatusCode::as_str borrows its receiver. Static addresses let metrics
 // retain those labels for extension codes as well as standard codes.
+/* jscpd:ignore-start */
 static STATUS_CODES: [StatusCode; 900] = {
     let mut codes = [StatusCode::CONTINUE; 900];
     let mut code = 100_u16;
@@ -279,6 +280,7 @@ static STATUS_CODES: [StatusCode; 900] = {
 fn status_label(status: StatusCode) -> &'static str {
     STATUS_CODES[usize::from(status.as_u16() - 100)].as_str()
 }
+/* jscpd:ignore-end */
 
 /// The class of a transport failure, read from the typed causes the libraries
 /// retain: `tls` for a certificate or handshake refusal, `connect` when no

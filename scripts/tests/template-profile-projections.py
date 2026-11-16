@@ -245,6 +245,10 @@ def _admitted_adapter_nodes(
     admitted: dict[str, AdmittedNode] = {}
     for scope in exclusions:
         plain = scope.rstrip("/")
+        for parent in Path(plain).parents[:-1]:
+            parent_rel = parent.as_posix()
+            if parent_rel != ".agents" and parent_rel not in admitted:
+                admitted[parent_rel] = _require_admitted(nodes, parent_rel, "directory", 0o755, initializer)
         if not scope.endswith("/"):
             admitted[plain] = _require_admitted(nodes, plain, "file", 0o644, initializer)
             continue
@@ -282,7 +286,7 @@ def _validate_admitted_nodes(
     nodes: dict[str, Node], exclusions: Iterable[str], admitted: dict[str, AdmittedNode], initializer
 ) -> None:
     for path, node in nodes.items():
-        if not _excluded(path, exclusions):
+        if not _excluded(path, exclusions) and path not in admitted:
             continue
         expected = admitted.get(path)
         if expected is None:
@@ -810,11 +814,88 @@ def _project_selection(
     initializer, context: dict[str, Any], database: str, authn: str, outbound_http: str,
     http_idempotency: str, jobs: str, webhooks: str, inbound_webhooks: str,
 ) -> None:
-    source, candidate, work, exclusions = context["source"], context["candidate"], context["work"], context["exclusions"]
+    source, candidate, work = context["source"], context["candidate"], context["work"]
     idempotency_paths, jobs_paths, webhook_paths = context["idempotency_paths"], context["jobs_paths"], context["webhook_paths"]
     grpc_paths, combined_grpc_paths = context["grpc_paths"], context["combined_grpc_paths"]
-    reference: dict[str, Node] | None = None
-    reference_lock: bytes | None = None
+    harness = "core"
+    inputs = _inputs(
+        initializer, database, authn, outbound_http, http_idempotency, jobs,
+        webhooks, inbound_webhooks, harness,
+    )
+    with tempfile.TemporaryDirectory(
+        prefix=(
+            f"{database}-{authn}-{outbound_http}-{http_idempotency}-{jobs}-"
+            f"{webhooks}-{inbound_webhooks}-{harness}-"
+        ),
+        dir=work,
+    ) as selection:
+        nodes = _project(
+            source, candidate, initializer, inputs, Path(selection) / "tree"
+        )
+    manifest = nodes.get("test/Cargo.toml")
+    dev = {}
+    if manifest is not None:
+        assert isinstance(manifest.payload, bytes)
+        test_manifest = tomllib.loads(manifest.payload.decode())
+        dev = test_manifest.get("dev-dependencies", {})
+    needs_metrics = jobs == "postgres" or http_idempotency == "postgres"
+    if ("metrics" in dev) != needs_metrics:
+        raise initializer.Refusal("test metrics dependency does not match its retained jobs/idempotency consumers")
+    if ("sha2" in dev) != (inputs.outbox == "postgres"):
+        raise initializer.Refusal("test digest dependency does not match its retained outbox consumer")
+    rules_assertion = _assert_profile_output if database == "postgres" else _assert_no_profile_output
+    rules_assertion(initializer, nodes, "postgres", (
+        "env/monitoring/postgres-maintenance.rules.yml",
+        "scripts/tests/postgres-maintenance-rules.yml",
+    ))
+    _assert_profile_output(initializer, nodes, "core", (
+        "env/monitoring/service.rules.yml",
+        "scripts/tests/service-rules.yml",
+        "scripts/ci/monitoring-rules.sh",
+    ))
+    if http_idempotency == "none":
+        _assert_no_http_idempotency_output(initializer, nodes, idempotency_paths)
+    if jobs == "none":
+        _assert_no_jobs_output(initializer, nodes, jobs_paths)
+    if webhooks == "none" and inbound_webhooks == "none":
+        _assert_no_profile_output(
+            initializer, nodes, "webhooks-common", webhook_paths["webhooks-common"]
+        )
+    if webhooks == "none":
+        _assert_no_profile_output(initializer, nodes, "webhooks", webhook_paths["webhooks"])
+    if inbound_webhooks == "none":
+        _assert_no_profile_output(
+            initializer, nodes, "inbound-webhooks", webhook_paths["inbound-webhooks"]
+        )
+    _assert_no_profile_output(initializer, nodes, "grpc", grpc_paths)
+    _assert_no_profile_output(
+        initializer, nodes, "outbound-auth-grpc", combined_grpc_paths
+    )
+    _assert_introspection_cache_output(initializer, nodes, authn)
+    digest = _tree_digest(nodes)
+    lock = initializer._lock_bytes(inputs, candidate, "complete")
+    lock_sha256 = hashlib.sha256(lock).hexdigest()
+    _emit(
+        "selection",
+        database=database,
+        authn=authn,
+        outbound_http=outbound_http,
+        http_idempotency=http_idempotency,
+        jobs=jobs,
+        webhooks=webhooks,
+        inbound_webhooks=inbound_webhooks,
+        harness=harness,
+        identity=inputs.identity(),
+        profiles=inputs.profiles(),
+        tree_sha256=digest,
+        lock_sha256=lock_sha256,
+    )
+
+
+def _check_harness_projections(
+    source: Path, candidate: str, initializer, work: Path, exclusions: tuple[str, ...],
+) -> None:
+    database = authn = outbound_http = http_idempotency = jobs = webhooks = inbound_webhooks = "none"
     identity = _inputs(
         initializer, database, authn, outbound_http, http_idempotency, jobs,
         webhooks, inbound_webhooks, "core",
@@ -823,18 +904,12 @@ def _project_selection(
         initializer, database, authn, outbound_http, http_idempotency, jobs,
         webhooks, inbound_webhooks, "all",
     )
-    with tempfile.TemporaryDirectory(
-        prefix=(
-            f"{database}-{authn}-{outbound_http}-{http_idempotency}-{jobs}-"
-            f"{webhooks}-{inbound_webhooks}-all-"
-        ),
-        dir=work,
-    ) as selection:
-        all_nodes = _project(
-            source, candidate, initializer, all_inputs, Path(selection) / "tree"
-        )
+    with tempfile.TemporaryDirectory(prefix="harness-all-", dir=work) as selection:
+        all_nodes = _project(source, candidate, initializer, all_inputs, Path(selection) / "tree")
     admitted = _admitted_adapter_nodes(source, all_nodes, exclusions, initializer)
-    projected = {"all": all_nodes}
+    projected: dict[str, dict[str, Node]] = {"all": all_nodes}
+    reference: dict[str, Node] | None = None
+    reference_lock: bytes | None = None
     for harness in HARNESSES:
         inputs = _inputs(
             initializer, database, authn, outbound_http, http_idempotency, jobs,
@@ -845,59 +920,9 @@ def _project_selection(
         if harness in projected:
             nodes = projected[harness]
         else:
-            with tempfile.TemporaryDirectory(
-                prefix=(
-                    f"{database}-{authn}-{outbound_http}-{http_idempotency}-{jobs}-"
-                    f"{webhooks}-{inbound_webhooks}-{harness}-"
-                ),
-                dir=work,
-            ) as selection:
-                nodes = _project(
-                    source, candidate, initializer, inputs, Path(selection) / "tree"
-                )
-        manifest = nodes.get("test/Cargo.toml")
-        dev = {}
-        if manifest is not None:
-            assert isinstance(manifest.payload, bytes)
-            test_manifest = tomllib.loads(manifest.payload.decode())
-            dev = test_manifest.get("dev-dependencies", {})
-        needs_metrics = jobs == "postgres" or http_idempotency == "postgres"
-        if ("metrics" in dev) != needs_metrics:
-            raise initializer.Refusal("test metrics dependency does not match its retained jobs/idempotency consumers")
-        if ("sha2" in dev) != (inputs.outbox == "postgres"):
-            raise initializer.Refusal("test digest dependency does not match its retained outbox consumer")
-        rules_assertion = _assert_profile_output if database == "postgres" else _assert_no_profile_output
-        rules_assertion(initializer, nodes, "postgres", (
-            "env/monitoring/postgres-maintenance.rules.yml",
-            "scripts/tests/postgres-maintenance-rules.yml",
-        ))
-        _assert_profile_output(initializer, nodes, "core", (
-            "env/monitoring/service.rules.yml",
-            "scripts/tests/service-rules.yml",
-            "scripts/ci/monitoring-rules.sh",
-        ))
-        if http_idempotency == "none":
-            _assert_no_http_idempotency_output(initializer, nodes, idempotency_paths)
-        if jobs == "none":
-            _assert_no_jobs_output(initializer, nodes, jobs_paths)
-        if webhooks == "none" and inbound_webhooks == "none":
-            _assert_no_profile_output(
-                initializer, nodes, "webhooks-common", webhook_paths["webhooks-common"]
-            )
-        if webhooks == "none":
-            _assert_no_profile_output(initializer, nodes, "webhooks", webhook_paths["webhooks"])
-        if inbound_webhooks == "none":
-            _assert_no_profile_output(
-                initializer, nodes, "inbound-webhooks", webhook_paths["inbound-webhooks"]
-            )
-        _assert_no_profile_output(initializer, nodes, "grpc", grpc_paths)
-        _assert_no_profile_output(
-            initializer, nodes, "outbound-auth-grpc", combined_grpc_paths
-        )
-        _assert_introspection_cache_output(initializer, nodes, authn)
-        digest = _tree_digest(nodes)
+            with tempfile.TemporaryDirectory(prefix=f"harness-{harness}-", dir=work) as selection:
+                nodes = _project(source, candidate, initializer, inputs, Path(selection) / "tree")
         lock = initializer._lock_bytes(inputs, candidate, "complete")
-        lock_sha256 = hashlib.sha256(lock).hexdigest()
         _emit(
             "selection",
             database=database,
@@ -910,8 +935,8 @@ def _project_selection(
             harness=harness,
             identity=inputs.identity(),
             profiles=inputs.profiles(),
-            tree_sha256=digest,
-            lock_sha256=lock_sha256,
+            tree_sha256=_tree_digest(nodes),
+            lock_sha256=hashlib.sha256(lock).hexdigest(),
         )
         if harness == "core":
             reference = nodes
@@ -948,6 +973,7 @@ def _project_selection(
             tree_result="equal",
             lock_result="agent_harness_only",
         )
+
 def _check_object_storage_projections(source: Path, candidate: str, initializer, work: Path) -> None:
     profile_data = initializer._profile_data(source)
     object_storage_paths = frozenset(relative.rstrip("/") for relative in profile_data.removals["object-storage"])
@@ -1156,7 +1182,7 @@ def check(source: Path) -> None:
         candidate=candidate,
         checker_sha256=_checker_identity(),
         exclusions=exclusions,
-        selections=admitted_combinations * len(HARNESSES),
+        selections=admitted_combinations + len(HARNESSES),
         refused_selections=refused_combinations,
     )
     with tempfile.TemporaryDirectory(prefix="template-profile-projections-") as temporary:
@@ -1206,6 +1232,7 @@ def check(source: Path) -> None:
                 sys.stdout.write(records)
                 if refusal is not None:
                     raise initializer.Refusal(refusal)
+        _check_harness_projections(source, candidate, initializer, work, exclusions)
         _check_oauth_projections(source, candidate, initializer, work)
         _check_messaging_without_jobs(source, candidate, initializer, work)
         _check_grpc_projections(source, candidate, initializer, work)
@@ -1213,58 +1240,6 @@ def check(source: Path) -> None:
         _check_object_storage_projections(source, candidate, initializer, work)
         _check_service_auth_projections(source, candidate, initializer, work)
         _check_runtime_progress_projections(source, candidate, initializer, work)
-
-
-def check_image_context(source: Path) -> None:
-    initializer = _load_initializer(source)
-    source = initializer.git_root(source)
-    initializer._tracked_checkout_is_clean(source)
-    candidate = initializer.git_head(source)
-    inputs = _inputs(initializer, "none", "none", "none", "none", "none", "none", "none", "core")
-    channel = tomllib.loads((source / "rust-toolchain.toml").read_text())["toolchain"]["channel"]
-    with tempfile.TemporaryDirectory(prefix="template-image-context-") as temporary:
-        work = Path(temporary).resolve()
-        tree, admitted = work / "minimal", work / "admitted"
-        _project(source, candidate, initializer, inputs, tree)
-        initializer._prune_cargo_lock(tree, inputs)
-        # The canonical minimum removes the PostgreSQL helper library and jobs
-        # fixture binary. Its real integration-test targets must keep Cargo's
-        # workspace member valid without adding a placeholder target.
-        if (tree / "test/src/lib.rs").exists() or (tree / "test/src/bin/jobs_worker_fixture.rs").exists():
-            raise initializer.Refusal("image-context graph 1 unexpectedly retained a library or fixture binary")
-        lock = (tree / "Cargo.lock").read_bytes()
-        # Native BuildKit applies the actual root .dockerignore. This scratch
-        # COPY exports input files only: no runtime image, Rust build or RUN.
-        exported = subprocess.run(
-            ["docker", "buildx", "build", "--progress=plain", "--file", "-",
-             "--output", f"type=local,dest={admitted}", os.fspath(tree)],
-            input="FROM scratch\nCOPY . /\n", capture_output=True, text=True,
-        )
-        if exported.returncode:
-            raise initializer.Refusal(f"image-context export failed ({exported.returncode})\n{exported.stdout}{exported.stderr}")
-        # cargo-chef 0.1.78 prepare uses no-deps with an existing lock and no
-        # member filter. Match that boundary, adding locked/offline safeguards.
-        command = ["rustup", "run", channel, "cargo", "metadata", "--locked", "--offline",
-                   "--no-deps", "--format-version", "1"]
-        metadata = subprocess.run(command, cwd=admitted, capture_output=True, text=True)
-        if metadata.returncode:
-            raise initializer.Refusal(
-                f"image-context graph 1: {' '.join(command)} failed ({metadata.returncode})\n{metadata.stderr}"
-            )
-        if (admitted / "Cargo.lock").read_bytes() != lock:
-            raise initializer.Refusal("image-context metadata changed the projected lockfile")
-        packages = json.loads(metadata.stdout)["packages"]
-        test_packages = [package for package in packages if package["name"] == "integration-tests"]
-        if len(test_packages) != 1 or not test_packages[0]["targets"]:
-            raise initializer.Refusal("image-context graph 1 lost the integration-test package targets")
-        targets = test_packages[0]["targets"]
-        for target in targets:
-            path = Path(target["src_path"])
-            if target["kind"] != ["test"] or not path.is_relative_to(admitted / "test/tests") or not path.is_file():
-                raise initializer.Refusal("image-context graph 1 did not discover retained real test targets")
-        _emit("image-context", graph=1, candidate=candidate, toolchain=channel,
-              lock_sha256=hashlib.sha256(lock).hexdigest(),
-              test_targets=sorted(target["name"] for target in targets), result="passed")
 
 
 def check_quality(source: Path) -> None:
@@ -1289,6 +1264,19 @@ def check_quality(source: Path) -> None:
             initializer, "postgres", "none", "none", "none", "postgres", "none", "standard-webhooks", "core",
         )),
     )
+    versions = (source / "tools/versions.env").read_text(encoding="utf-8")
+    jscpd_matches = re.findall(r"^JSCPD_VERSION=([0-9]+\.[0-9]+\.[0-9]+)$", versions, re.M)
+    if len(jscpd_matches) != 1:
+        raise initializer.Refusal("tools/versions.env must declare one JSCPD_VERSION")
+    jscpd_ver = jscpd_matches[0]
+    jscpd_env = dict(
+        os.environ,
+        npm_config_prefer_offline="true",
+        npm_config_ignore_scripts="true",
+        npm_config_audit="false",
+        npm_config_fund="false",
+        npm_config_update_notifier="false",
+    )
     def check(temporary: str, name: str, inputs) -> None:
         tree = Path(temporary) / name
         _project(source, candidate, initializer, inputs, tree)
@@ -1298,12 +1286,12 @@ def check_quality(source: Path) -> None:
         commands = (
             ["git", "init", "-q"],
             [sys.executable, "scripts/ci/architecture-check.py", "--root", os.fspath(tree)],
-            [sys.executable, "scripts/ci/duplication-check.py", "--root", os.fspath(tree)],
+            ["npx", "--yes", f"jscpd@{jscpd_ver}", "--config", ".jscpd.json", "."],
         )
         if name in {"inbound-only", "outbound-only"}:
             commands += (["cargo", "check", "--tests", "-p", "infra-webhooks", "--locked"],)
         for command in commands:
-            result = subprocess.run(command, cwd=tree, capture_output=True, text=True, check=False)
+            result = subprocess.run(command, cwd=tree, env=jscpd_env, capture_output=True, text=True, check=False)
             if result.returncode:
                 raise initializer.Refusal(
                     f"quality projection {name}: {' '.join(command)} failed ({result.returncode})\n"
@@ -1330,11 +1318,7 @@ def _expect_refusal(initializer, action, label: str) -> None:
 
 
 def _check_test_digest_projection(source: Path, initializer) -> None:
-    profiles = initializer._profile_data(source)
-    manifest_profiles = initializer.ProfileData(
-        source_only=(), removals={}, identity=(),
-        markers=tuple(marker for marker in profiles.markers if marker[1] == "test/Cargo.toml"),
-    )
+    manifest_profiles = initializer.ProfileData(source_only=(), removals={}, identity=())
     for label, outbox, laboratory_inputs, expected in (
         ("neither", False, False, False), ("outbox", True, False, True),
         ("retired laboratory inputs", False, True, False),
@@ -1362,11 +1346,7 @@ def _check_tls_canary_projection(source: Path, initializer) -> None:
     assert spec is not None and spec.loader is not None
     canary = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(canary)
-    profiles = initializer._profile_data(source)
-    manifest_profiles = initializer.ProfileData(
-        source_only=(), removals={}, identity=(),
-        markers=tuple(marker for marker in profiles.markers if marker[1] == "Cargo.toml"),
-    )
+    manifest_profiles = initializer.ProfileData(source_only=(), removals={}, identity=())
     for label, database, messaging, storage, expected in (
         ("none", "none", "none", "none", False),
         ("postgres-only", "postgres", "none", "none", True),
@@ -1419,12 +1399,13 @@ def _check_workspace_dependency_projection(initializer) -> None:
             'unused = { version = "1", default-features = false }\n', ""
         ):
             raise AssertionError("workspace projection did not drop exactly the uninherited declaration")
-        # A declaration with its own comment needs a profile marker that owns both.
+        # Preceding standalone comment lines move with the pruned declaration.
         (root / "Cargo.toml").write_text(workspace.replace("unused =", "# Its reason.\nunused ="), encoding="utf-8")
-        _expect_refusal(
-            initializer, lambda: initializer._project_workspace_dependencies(root),
-            "uninherited workspace declaration with its own comment",
-        )
+        initializer._project_workspace_dependencies(root)
+        if (root / "Cargo.toml").read_text(encoding="utf-8") != workspace.replace(
+            'unused = { version = "1", default-features = false }\n', ""
+        ):
+            raise AssertionError("workspace projection did not drop preceding comment lines of an uninherited declaration")
 
 
 def self_test(source: Path) -> None:
@@ -1562,7 +1543,6 @@ def self_test(source: Path) -> None:
     jobs_profiles = initializer.ProfileData(
         source_only=(),
         removals={},
-        markers=(("jobs", "fixture.rs", "registered-marker"),),
         identity=(),
     )
     jobs_inputs = _inputs(
@@ -1581,14 +1561,14 @@ def self_test(source: Path) -> None:
             "// template:begin jobs:registered-marker\n"
             "kept\n"
             "// template:end jobs:registered-marker\n"
-            "// template:begin jobs:unregistered-marker\n"
-            "// template:end jobs:unregistered-marker\n",
+            "// template:begin unknown-profile:unregistered-marker\n"
+            "// template:end unknown-profile:unregistered-marker\n",
             encoding="utf-8",
         )
         _expect_refusal(
             initializer,
             lambda: initializer._apply_markers(marker_root, jobs_profiles, jobs_inputs),
-            "unregistered jobs marker",
+            "unknown profile marker",
         )
     jobs_removals = initializer._profile_data(source).removals["jobs"]
     if "crates/infra-jobs/" not in jobs_removals:
@@ -1618,14 +1598,11 @@ def main() -> int:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--self-test", action="store_true")
     mode.add_argument("--quality-only", action="store_true")
-    mode.add_argument("--image-context", action="store_true")
     arguments = parser.parse_args()
     try:
         source = arguments.source.resolve(strict=True)
         if arguments.self_test:
             self_test(source)
-        elif arguments.image_context:
-            check_image_context(source)
         elif arguments.quality_only:
             check_quality(source)
         else:

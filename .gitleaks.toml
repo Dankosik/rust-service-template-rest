@@ -286,31 +286,6 @@ regexes = [
     '''\A\QeyJ0eXAiOiJKV1QiLCJhbGciOiJlZDI1NTE5LW5rZXkifQ.eyJqdGkiOiJUTTUyRFpGUURBM1dNVVMzV0lTMzZNSE4zNFZVQUlWNTZXSlQ2RUtSWjJIQUYzNkVYVDVBIiwiaWF0IjoxNzkxMzIzNDUxLCJpc3MiOiJPQUJVSEQzTEpRWkZHWk02VVpSRDcyVUFYRDVGVExPU0pWVERQT01DM0ZGVzU0SEU0QVRTUUJMRCIsIm5hbWUiOiJ0cmFuc3BvcnQtcmVjb3ZlcnkiLCJzdWIiOiJBQ0xaQTQ2U1RCQUdKTkRRRlVRRDJUUEM2UlRHVVBBU0tTRUU2V0FHUEJDNVRKQ0JZNURZR1JESSIsIm5hdHMiOnsibGltaXRzIjp7InN1YnMiOjEyOCwiZGF0YSI6LTEsInBheWxvYWQiOjEwNDg1NzYsImltcG9ydHMiOi0xLCJleHBvcnRzIjotMSwid2lsZGNhcmRzIjp0cnVlLCJkaXNhbGxvd19iZWFyZXIiOnRydWUsImNvbm4iOjE2LCJsZWFmIjotMSwiZGlza19zdG9yYWdlIjo2NzEwODg2NCwic3RyZWFtcyI6OCwiY29uc3VtZXIiOjgsIm1heF9hY2tfcGVuZGluZyI6LTEsIm1lbV9tYXhfc3RyZWFtX2J5dGVzIjotMSwiZGlza19tYXhfc3RyZWFtX2J5dGVzIjotMX0sImRlZmF1bHRfcGVybWlzc2lvbnMiOnsicHViIjp7fSwic3ViIjp7fX0sImF1dGhvcml6YXRpb24iOnt9LCJ0eXBlIjoiYWNjb3VudCIsInZlcnNpb24iOjJ9fQ.q3S6iiFy2cBWS5W5dgi09jPrD_8csE60L476iawivOJJTlQLqO2p4R4Wn2sI-BC0LbCGv4nPWjPW1tHsy2d-DA\E\z''',
 ]
 
-# Gitleaks v8.30.1 supports targetRules, condition=AND and regexTarget=line:
-# https://github.com/gitleaks/gitleaks/blob/v8.30.1/README.md#configuration
-# The native receipt maps source paths to SHA256. These ten exact file/digest
-# pairs caused twenty generic-api-key findings (two graph witnesses) and were
-# independently compared with their current files. A changed digest, another
-# field, another file or another rule remains scanned. Do not exclude .ci.
-[[allowlists]]
-description = "Exact verified async-nats source SHA256 fields in the generated native receipt"
-targetRules = ["generic-api-key"]
-condition = "AND"
-regexTarget = "line"
-paths = ['''\A\Q.ci/native-transport/receipt.json\E\z''']
-regexes = [
-    '''\A\s*\Q"vendor/async-nats/src/auth.rs": "0dfb029988a58eda4c8a9d84a8365489437e89ea9e6f7958d2d255901b8328a6"\E,?\s*\z''',
-    '''\A\s*\Q"vendor/async-nats/src/auth_utils.rs": "de89ec2cd07673e5621c10051ee8a70ea274aa2792d86cd81a19a38ec2a9e512"\E,?\s*\z''',
-    '''\A\s*\Q"vendor/async-nats/tests/configs/TestUser.creds": "47247665ddb65d7646f7a585086c8a3cf57d651a18f9a7ae2902739fd56d6391"\E,?\s*\z''',
-    '''\A\s*\Q"vendor/async-nats/tests/configs/certs/client-key.pem": "d75ce5553b193cf332cc50288bc93a83fceb153a77226c6622a2f577b81fca6b"\E,?\s*\z''',
-    '''\A\s*\Q"vendor/async-nats/tests/configs/certs/ip-key.pem": "a7328dbfa7c946d55bed8c1167218b226ae5bd2fda2f23c7b443911510ad3762"\E,?\s*\z''',
-    '''\A\s*\Q"vendor/async-nats/tests/configs/certs/rootCA-key.pem": "a61e3218d5fc63b2a81908c1e4abe90f9f0b2f7878457606abdc15e6e4092c73"\E,?\s*\z''',
-    '''\A\s*\Q"vendor/async-nats/tests/configs/certs/server-key.pem": "4650596f739988d08cc468ecc657ea131be111dbd496f6a17fd5974b7bbf3531"\E,?\s*\z''',
-    '''\A\s*\Q"vendor/async-nats/tests/configs/nkey.conf": "3d39cd406a317f9038f7107bfea4034d8d0c2809c03b98eba45f49c5f055f773"\E,?\s*\z''',
-    '''\A\s*\Q"vendor/async-nats/tests/configs/token.conf": "4d9edaea4dff7ebe2d492b4d846063363a20c94a5657eca3137aab14eba6af36"\E,?\s*\z''',
-    '''\A\s*\Q"vendor/async-nats/tests/nkey_tests.rs": "a6188e69ac49fef4fa04deaa87951c95addde1bafcf1f80b94aefa0728455cc4"\E,?\s*\z''',
-]
-
 # Public synthetic operator/account fixture retained from PR 258.
 # Exact file SHA256: 5c637ecfc7e70ab2ffb8eb0440ad2e8855632f79911ff996532f933f4f16d901
 [[allowlists]]

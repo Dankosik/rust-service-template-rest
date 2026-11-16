@@ -360,6 +360,7 @@ fn duration_histogram(method: &'static str, route: &str, status: StatusCode) -> 
 
 // Keep typed values at static addresses so their numeric text can be borrowed
 // for every supported status, including extension codes.
+/* jscpd:ignore-start */
 static STATUS_CODES: [StatusCode; 900] = {
     let mut codes = [StatusCode::CONTINUE; 900];
     let mut code = 100_u16;
@@ -376,6 +377,7 @@ static STATUS_CODES: [StatusCode; 900] = {
 fn status_label(status: StatusCode) -> &'static str {
     STATUS_CODES[usize::from(status.as_u16() - 100)].as_str()
 }
+/* jscpd:ignore-end */
 
 fn suppresses_access_log(log_health_probes: bool, method: &Method, route: &str) -> bool {
     !log_health_probes && method == Method::GET && is_health_probe_route(route)

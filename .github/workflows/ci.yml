@@ -4,7 +4,7 @@ name: ci
 # reports; `make verify` reads the same classifier. `required` is the one
 # status to protect: it fails on any failed or cancelled gate and accepts a
 # gate the surfaces did not select. Pull requests run the gate; the long
-# proofs (initializer, images, runtime progress, jobs reliability) run after
+# proofs (initializer, images, runtime progress) run after
 # merge, on main, and .github/workflows/main-health.yml reports a red main and
 # moves the `green` branch. A push to main replaces its pending run, so one run
 # can cover several merges: it classifies the diff from `green`, not from the
@@ -182,9 +182,9 @@ jobs:
           set -euo pipefail
           if [[ -n "${BASE_SHA}" ]]; then
             git fetch --no-tags --depth=1 origin "${BASE_SHA}"
-            GRPC_BASE_REF="${BASE_SHA}" bash ./scripts/ci/measure.sh grpc-schema -- make grpc-check
+            GRPC_BASE_REF="${BASE_SHA}" make grpc-check
           else
-            GRPC_BASE_REF=HEAD bash ./scripts/ci/measure.sh grpc-schema -- make grpc-check
+            GRPC_BASE_REF=HEAD make grpc-check
           fi
   # template:end grpc:ci-grpc-job
 
@@ -199,7 +199,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Rule syntax and deterministic fixtures
-        run: bash ./scripts/ci/measure.sh monitoring-rules -- make monitoring-rules
+        run: make monitoring-rules
 
   quality:
     needs: changes
@@ -271,7 +271,7 @@ jobs:
           needs.changes.outputs.rust_source == 'true' ||
           needs.changes.outputs.cargo_dependencies == 'true' ||
           needs.changes.outputs.lint_config == 'true'
-        run: bash ./scripts/ci/measure.sh quality-format -- make fmt-check
+        run: make fmt-check
       - name: Affected crates
         # Pull requests select the changed crates and their dependents; every
         # other event, and any manifest, lockfile, or toolchain change, runs
@@ -305,31 +305,28 @@ jobs:
           set -euo pipefail
           if [[ "${CARGO_DEPENDENCIES}" == true || "${FALLBACK}" == true ]] || [[ "${RUST_SOURCE}" == true && "${EVENT_NAME}" != pull_request && "${EVENT_NAME}" != merge_group ]]; then
             # Keep going here so MAKEFLAGS cannot leak the flag to native builds.
-            bash ./scripts/ci/measure.sh quality-workspace -- bash -c '
-              result=0
-              for target in lint build test; do
-                make "$target" || result=1
-              done
-              exit "$result"
-            '
-            exit 0
+            result=0
+            for target in lint build test; do
+              make "${target}" || result=1
+            done
+            exit "${result}"
           fi
           if [[ "${LINT_CONFIG}" == true ]]; then
-            bash ./scripts/ci/measure.sh quality-lint -- make lint
+            make lint
           elif [[ -n "${LINT_PACKAGES}" ]]; then
-            bash ./scripts/ci/measure.sh quality-lint-changed -- make lint-changed PKGS="${LINT_PACKAGES}"
+            make lint-changed PKGS="${LINT_PACKAGES}"
           fi
           if [[ -n "${TEST_PACKAGES}" ]]; then
-            bash ./scripts/ci/measure.sh quality-test-changed -- make test-changed PKGS="${TEST_PACKAGES}"
+            make test-changed PKGS="${TEST_PACKAGES}"
           elif [[ "${RUST_SOURCE}" == true ]]; then
             echo "no crate selected for tests"
           fi
       - name: Unused dependencies
         if: needs.changes.outputs.rust_source == 'true' || needs.changes.outputs.cargo_dependencies == 'true'
-        run: bash ./scripts/ci/measure.sh quality-unused-deps -- make unused-deps
+        run: make unused-deps
       - name: OpenAPI
         if: needs.changes.outputs.openapi == 'true'
-        run: bash ./scripts/ci/measure.sh quality-openapi -- make openapi-check
+        run: make openapi-check
       - name: Generate handler OpenAPI diagnostic
         # The committed-file drift check remains above. This always-run step
         # preserves the assembled handler output when it reports stale bytes.
@@ -338,7 +335,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p .ci/generated-openapi
-          bash ./scripts/ci/measure.sh quality-openapi-generate -- make openapi-generate OPENAPI_FILE=.ci/generated-openapi/service.yaml
+          make openapi-generate OPENAPI_FILE=.ci/generated-openapi/service.yaml
           test -s .ci/generated-openapi/service.yaml
       - name: Upload generated OpenAPI diagnostic
         if: always() && steps.generated-openapi.outcome == 'success'
@@ -355,7 +352,7 @@ jobs:
           set -euo pipefail
           git fetch --no-tags --depth=1 origin "${BASE_SHA}"
           git show "${BASE_SHA}:api/openapi/service.yaml" >/tmp/openapi-base.yaml
-          bash ./scripts/ci/measure.sh quality-openapi-breaking -- make openapi-breaking BASE_OPENAPI=/tmp/openapi-base.yaml
+          make openapi-breaking BASE_OPENAPI=/tmp/openapi-base.yaml
       # template:begin postgres:ci-quality-migrations
       - name: Migrations
         # Static append-only history against the base, the lint of the added
@@ -370,15 +367,15 @@ jobs:
           set -euo pipefail
           if [[ -n "${BASE_SHA}" ]]; then
             git fetch --no-tags --depth=1 origin "${BASE_SHA}"
-            bash ./scripts/ci/measure.sh quality-migrations -- make migration-check BASE_REF="${BASE_SHA}"
+            make migration-check BASE_REF="${BASE_SHA}"
           else
-            bash ./scripts/ci/measure.sh quality-migrations -- make migration-check BASE_REF=HEAD
+            make migration-check BASE_REF=HEAD
           fi
-          bash ./scripts/ci/measure.sh quality-migration-history -- make migration-history-self-test
+          make migration-history-self-test
       # template:end postgres:ci-quality-migrations
       - name: Instructions
         if: needs.changes.outputs.agent_instructions == 'true'
-        run: bash ./scripts/ci/measure.sh quality-instructions -- make check-instructions
+        run: make check-instructions
       - name: Readability checker prerequisites
         if: needs.changes.outputs.duplication == 'true' || needs.changes.outputs.architecture == 'true'
         run: |
@@ -386,13 +383,13 @@ jobs:
           command -v npx
       - name: Readability checker self-test
         if: needs.changes.outputs.duplication == 'true' || needs.changes.outputs.architecture == 'true'
-        run: bash ./scripts/ci/measure.sh quality-checkers -- make quality-check-self-test
+        run: make quality-check-self-test
       - name: Rust duplication
         if: needs.changes.outputs.duplication == 'true'
-        run: bash ./scripts/ci/measure.sh quality-duplication -- make duplication-check
+        run: make duplication-check
       - name: Declared architecture
         if: needs.changes.outputs.architecture == 'true'
-        run: bash ./scripts/ci/measure.sh quality-architecture -- make architecture-check
+        run: make architecture-check
       - name: Readability profile projections
         if: needs.changes.outputs.duplication == 'true' || needs.changes.outputs.architecture == 'true'
         env:
@@ -401,7 +398,7 @@ jobs:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
         run: |
           if [ -f make/source.mk ]; then
-            bash ./scripts/ci/measure.sh quality-projections -- make template-quality-projections
+            make template-quality-projections
           fi
 
   # Quality checks that need no workspace build of their own run beside
@@ -434,29 +431,14 @@ jobs:
       - name: Fetch locked Cargo packages
         run: cargo fetch --locked
       - name: Native transport regressions
-        # The helper records root and excluded-package graph identities, then
-        # runs every selected vendor filter serially with locked Cargo.
+        # Runs every selected vendor filter serially with locked Cargo.
         if: needs.changes.outputs.cargo_dependencies == 'true'
         env:
           CARGO_TARGET_DIR: target
-        run: bash ./scripts/ci/measure.sh quality-native-transport -- make native-transport-regressions
-      - name: Upload native transport receipt
-        if: always() && needs.changes.outputs.cargo_dependencies == 'true'
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: native-transport-receipt
-          path: .ci/native-transport/receipt.json
-          if-no-files-found: error
+        run: make native-transport-regressions
       - name: Optional profiling configurations
         if: '!cancelled()'
-        run: bash ./scripts/ci/measure.sh quality-profiling -- make profiling-check
-      - name: Preserve profiling compatibility receipt
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: profile-mcp-${{ github.sha }}
-          path: .ci/profile-mcp
-          if-no-files-found: ignore
+        run: make profiling-check
 
   quality-validation:
     needs: [changes, secrets]
@@ -477,7 +459,7 @@ jobs:
         run: cargo fetch --locked
       - name: Validation routing
         # Four independent self-tests over private fixtures, run side by side.
-        run: bash ./scripts/ci/measure.sh quality-validation-system -- make -j4 --output-sync=target changed-surfaces-check affected-crates-check validation-lock-self-test verify-check
+        run: make -j4 --output-sync=target changed-surfaces-check affected-crates-check validation-lock-self-test verify-check
 
   security:
     needs: [changes, secrets]
@@ -522,7 +504,7 @@ jobs:
           tool: cargo-deny@${{ env.CARGO_DENY_VERSION }},zizmor@${{ env.ZIZMOR_VERSION }}
       - name: Dependency policy
         if: needs.changes.outputs.cargo_dependencies == 'true' || needs.changes.outputs.dependency_policy == 'true'
-        run: bash ./scripts/ci/measure.sh security-deny -- make deny
+        run: make deny
       - name: Vendored fork drift
         # cargo-deny matches advisories only against registry sources, so the
         # vendored [patch] crates need their own check.
@@ -537,7 +519,7 @@ jobs:
         if: needs.changes.outputs.github_workflows == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: bash ./scripts/ci/measure.sh security-zizmor -- make zizmor
+        run: make zizmor
 
   secrets:
     needs: changes
@@ -567,9 +549,9 @@ jobs:
         run: |
           set -euo pipefail
           if [[ -z "${BASE_SHA}" ]]; then
-            bash ./scripts/ci/measure.sh secrets-history -- make secret-scan-history
+            make secret-scan-history
           else
-            bash ./scripts/ci/measure.sh secrets-range -- make secret-scan BASE_REF="${BASE_SHA}"
+            make secret-scan BASE_REF="${BASE_SHA}"
           fi
       - name: Save Go tool caches
         if: >-
@@ -612,7 +594,7 @@ jobs:
           key: go-tools-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('tools/versions.env') }}
       - name: Workflows
         if: needs.changes.outputs.github_workflows == 'true'
-        run: bash ./scripts/ci/measure.sh delivery-actionlint -- make actionlint
+        run: make actionlint
       - name: Shell
         if: needs.changes.outputs.shell == 'true'
         env:
@@ -620,15 +602,15 @@ jobs:
         run: |
           set -euo pipefail
           if [[ -z "${BASE_SHA}" ]]; then
-            bash ./scripts/ci/measure.sh delivery-shellcheck -- make shellcheck
+            make shellcheck
           else
             git fetch --no-tags --depth=1 origin "${BASE_SHA}"
             files=$(bash ./scripts/ci/git-changed-paths.sh --diff "${BASE_SHA}" HEAD | while IFS= read -r file; do if [[ ${file} == *.sh && -f ${file} ]]; then printf '%s ' "${file}"; fi; done)
-            bash ./scripts/ci/measure.sh delivery-shellcheck -- make shellcheck SHELL_FILES="${files% }"
+            make shellcheck SHELL_FILES="${files% }"
           fi
       - name: Python
         if: needs.changes.outputs.python == 'true'
-        run: bash ./scripts/ci/measure.sh delivery-python -- make python-lint
+        run: make python-lint
       - name: Install pinned Cargo tools
         if: needs.changes.outputs.tool_manifest == 'true'
         uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
@@ -636,7 +618,7 @@ jobs:
           tool: cargo-deny@${{ env.CARGO_DENY_VERSION }},cargo-nextest@${{ env.CARGO_NEXTEST_VERSION }},cargo-shear@${{ env.CARGO_SHEAR_VERSION }},zizmor@${{ env.ZIZMOR_VERSION }}
       - name: Tool manifest
         if: needs.changes.outputs.tool_manifest == 'true'
-        run: bash ./scripts/ci/measure.sh delivery-tools -- make tools-check
+        run: make tools-check
       - name: Set up Buildx
         id: buildx
         if: needs.changes.outputs.runtime_image == 'true'
@@ -649,10 +631,10 @@ jobs:
         env:
           VALIDATION_BUILDER_NAME: ${{ steps.buildx.outputs.name }}
           VALIDATION_BUILDER_EXCLUSIVE: "1"
-        run: bash ./scripts/ci/measure.sh delivery-dockerfile -- make dockerfile-check
+        run: make dockerfile-check
       - name: Publication metadata
         if: needs.changes.outputs.publication_metadata == 'true'
-        run: bash ./scripts/ci/measure.sh delivery-publication-metadata -- make publish-image-metadata-check
+        run: make publish-image-metadata-check
 
   image-source:
     needs: changes
@@ -660,13 +642,6 @@ jobs:
     runs-on: ubuntu-latest
     # Keep the existing ceiling until matched native measurement justifies narrowing it.
     timeout-minutes: 90
-    env:
-      IMAGE_LANE: source
-    outputs:
-      artifact-id: ${{ steps.proof.outputs.artifact-id }}
-      artifact-digest: ${{ steps.proof.outputs.artifact-digest }}
-      artifact-url: ${{ steps.proof.outputs.artifact-url }}
-      producing-attempt: ${{ steps.provenance.outputs.attempt }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -677,9 +652,6 @@ jobs:
         with:
           use: false
           cleanup: false
-      - name: Record producing attempt
-        id: provenance
-        run: printf 'attempt=%s\n' "${GITHUB_RUN_ATTEMPT}" >>"${GITHUB_OUTPUT}"
       # No BuildKit cache import or export: the lane runs for image, manifest
       # and lockfile changes, which change the cooked recipe anyway, and the
       # exported stage never survived the repository's 10 GB cache budget
@@ -690,42 +662,37 @@ jobs:
           SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
           VALIDATION_BUILDER_NAME: ${{ steps.buildx.outputs.name }}
           VALIDATION_BUILDER_EXCLUSIVE: "1"
-          MEASURE_OUTPUT_DIR: ${{ runner.temp }}/image-proof-source
         run: |
           set -euo pipefail
-          bash ./scripts/ci/measure.sh image-build -- make runtime-image-build
+          mkdir -p "${RUNNER_TEMP}/image-proof-source"
+          make runtime-image-build
           image_id=$(docker image inspect --format '{{.Id}}' service:ci)
           [[ ${image_id} =~ ^sha256:[a-f0-9]{64}$ ]]
           printf 'image_id=%s\n' "${image_id}" >>"${GITHUB_OUTPUT}"
-          printf '%s\n' "${image_id}" >"${MEASURE_OUTPUT_DIR}/image-id"
+          printf '%s\n' "${image_id}" >"${RUNNER_TEMP}/image-proof-source/image-id"
         id: source-image
       - name: Runtime image lifecycle
         if: needs.changes.outputs.runtime_image == 'true' && needs.changes.outputs.migrations != 'true'
         env:
           VCS_REF: ${{ github.sha }}
           IMAGE_ID: ${{ steps.source-image.outputs.image_id }}
-          MEASURE_OUTPUT_DIR: ${{ runner.temp }}/image-proof-source
-        run: bash ./scripts/ci/measure.sh image-lifecycle -- make runtime-image-check RUNTIME_IMAGE="${IMAGE_ID}" RUNTIME_EXPECTED_COMMIT="${VCS_REF}"
+        run: make runtime-image-check RUNTIME_IMAGE="${IMAGE_ID}" RUNTIME_EXPECTED_COMMIT="${VCS_REF}"
       # template:begin postgres:ci-image-migration-rehearsal
       - name: Migration rehearsal
         if: needs.changes.outputs.runtime_image == 'true' && needs.changes.outputs.migrations == 'true'
         env:
           VCS_REF: ${{ github.sha }}
           IMAGE_ID: ${{ steps.source-image.outputs.image_id }}
-          MEASURE_OUTPUT_DIR: ${{ runner.temp }}/image-proof-source
-        run: bash ./scripts/ci/measure.sh image-migration-rehearsal -- env REQUIRE_DOCKER=1 make migration-validate RUNTIME_IMAGE="${IMAGE_ID}" RUNTIME_EXPECTED_COMMIT="${VCS_REF}"
+        run: env REQUIRE_DOCKER=1 make migration-validate RUNTIME_IMAGE="${IMAGE_ID}" RUNTIME_EXPECTED_COMMIT="${VCS_REF}"
       # template:end postgres:ci-image-migration-rehearsal
       - name: Image vulnerabilities
-        run: bash ./scripts/ci/measure.sh image-security -- make container-security CONTAINER_IMAGE="${IMAGE_ID}"
+        run: make container-security CONTAINER_IMAGE="${IMAGE_ID}"
         env:
           IMAGE_ID: ${{ steps.source-image.outputs.image_id }}
-          MEASURE_OUTPUT_DIR: ${{ runner.temp }}/image-proof-source
       - name: Source image SBOM
         env:
           IMAGE_ID: ${{ steps.source-image.outputs.image_id }}
-          MEASURE_ARTIFACT_PATH: ${{ runner.temp }}/image-proof-source/source.cdx.json
-          MEASURE_OUTPUT_DIR: ${{ runner.temp }}/image-proof-source
-        run: bash ./scripts/ci/measure.sh image-sbom -- make container-sbom CONTAINER_IMAGE="${IMAGE_ID}" SBOM_OUTPUT="${MEASURE_ARTIFACT_PATH}"
+        run: make container-sbom CONTAINER_IMAGE="${IMAGE_ID}" SBOM_OUTPUT="${RUNNER_TEMP}/image-proof-source/source.cdx.json"
       - name: Upload image proof
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -735,7 +702,6 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
           overwrite: false
-        id: proof
 
   image-derived:
     needs: changes
@@ -756,24 +722,12 @@ jobs:
       fail-fast: false
       max-parallel: 2
       matrix: ${{ fromJSON(needs.changes.outputs.artifact_matrix || '{"include":[]}') }}
-    env:
-      IMAGE_LANE: derived
-    outputs:
-      # A matrix job's outputs come from whichever leg finished last; the
-      # `image` aggregate reads them as one leg's proof beside the result.
-      artifact-id: ${{ steps.proof.outputs.artifact-id }}
-      artifact-digest: ${{ steps.proof.outputs.artifact-digest }}
-      artifact-url: ${{ steps.proof.outputs.artifact-url }}
-      producing-attempt: ${{ steps.provenance.outputs.attempt }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Set up Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-      - name: Record producing attempt
-        id: provenance
-        run: printf 'attempt=%s\n' "${GITHUB_RUN_ATTEMPT}" >>"${GITHUB_OUTPUT}"
       - name: Install initializer toolchain
         uses: ./.github/actions/rust-toolchain # zizmor: ignore[self-repository]
       - name: Cargo caches
@@ -785,45 +739,21 @@ jobs:
           cache-bin: "false"
           save-if: "false"
       - name: Fetch locked initializer packages
-        run: bash ./scripts/ci/measure.sh image-derived-fetch -- cargo fetch --locked
-        env:
-          MEASURE_OUTPUT_DIR: ${{ runner.temp }}/image-proof-derived
+        run: cargo fetch --locked
       - name: Initialized release artifacts
         env:
           GRAPHS: ${{ matrix.graphs }}
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
-          MEASURE_OUTPUT_DIR: ${{ runner.temp }}/image-proof-derived
-        run: bash ./scripts/ci/measure.sh image-derived-artifacts -- make template-init-artifacts ARTIFACT_GRAPHS="${GRAPHS}"
+        run: make template-init-artifacts ARTIFACT_GRAPHS="${GRAPHS}"
       - name: Upload image proof
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: image-proof-derived-${{ matrix.graphs }}-${{ github.run_attempt }}
-          path: |
-            ${{ github.workspace }}/.git/codex/template-init
-            ${{ runner.temp }}/image-proof-derived
+          path: ${{ github.workspace }}/.git/codex/template-init
           include-hidden-files: true
           if-no-files-found: error
           overwrite: false
-        id: proof
-
-  image:
-    needs:
-      - changes
-      - image-source
-      - image-derived
-    if: always()
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Admit selected image lanes
-        env:
-          IMAGE_NEEDS: ${{ toJSON(needs) }}
-          IMAGE_DEFERRED: ${{ needs.changes.outputs.post_merge != 'true' }}
-        run: python3 scripts/ci/image-results.py
 
   # template:begin runtime-progress:ci-runtime-progress-job
   runtime-progress:
@@ -847,7 +777,7 @@ jobs:
           shared-key: runtime-progress
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Release process under one CPU quota
-        run: bash ./scripts/ci/measure.sh runtime-progress -- make runtime-progress-proof
+        run: make runtime-progress-proof
       - name: Preserve every quota observation and build identity
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -898,7 +828,7 @@ jobs:
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Database-backed proof
         if: matrix.suite == 'db'
-        run: bash ./scripts/ci/measure.sh integration-db -- make test-integration-db
+        run: make test-integration-db
       - name: Load tool manifest
         run: grep -v '^#' tools/versions.env | grep . >>"${GITHUB_ENV}"
       - name: Restore sqlx-cli
@@ -912,7 +842,7 @@ jobs:
           key: sqlx-cli-${{ runner.os }}-${{ runner.arch }}-${{ env.SQLX_CLI_VERSION }}
       - name: Query metadata
         if: matrix.suite == 'db'
-        run: bash ./scripts/ci/measure.sh integration-query-metadata -- make sqlx-check
+        run: make sqlx-check
       - name: Save sqlx-cli
         if: >-
           matrix.suite == 'db' &&
@@ -924,13 +854,13 @@ jobs:
           key: ${{ steps.sqlx-cli-cache.outputs.cache-primary-key }}
       - name: Cache proof
         if: matrix.suite == 'services' && needs.changes.outputs.cache_integration == 'true'
-        run: bash ./scripts/ci/measure.sh integration-cache -- env REQUIRE_DOCKER=1 make test-integration-cache
+        run: env REQUIRE_DOCKER=1 make test-integration-cache
       - name: Object storage proof
         if: matrix.suite == 'services' && needs.changes.outputs.object_storage_integration == 'true'
-        run: bash ./scripts/ci/measure.sh integration-object-storage -- env REQUIRE_DOCKER=1 make test-integration-object-storage
+        run: env REQUIRE_DOCKER=1 make test-integration-object-storage
       - name: JetStream proof
         if: matrix.suite == 'services' && needs.changes.outputs.messaging_integration == 'true'
-        run: bash ./scripts/ci/measure.sh integration-messaging -- env REQUIRE_DOCKER=1 make test-integration-messaging
+        run: env REQUIRE_DOCKER=1 make test-integration-messaging
       - name: Install Go for wire compatibility
         if: matrix.suite == 'services' && needs.changes.outputs.messaging_integration == 'true'
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -987,48 +917,6 @@ jobs:
           if-no-files-found: error
   # template:end integration:ci-integration-job
 
-  # template:begin source-template:ci-jobs-reliability-job
-  jobs-reliability:
-    # The source template's recovery and upgrade reference beside the
-    # database suite: three release builds and fixed fault windows that used
-    # to lengthen `integration` by about eighteen minutes. It owns its own
-    # Compose project through `make jobs-reliability-reference`.
-    needs: changes
-    if: needs.changes.outputs.db_integration == 'true' && needs.changes.outputs.post_merge == 'true'
-    name: jobs reliability reference
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    env:
-      COMPOSE_PROJECT_NAME: jobs-reliability-reference
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          # The derived rehearsal adopts an exact older baseline.
-          fetch-depth: 0
-          # Bind its runtime/adoption receipt to the PR candidate itself.
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-          persist-credentials: false
-      - name: Install pinned toolchain
-        uses: ./.github/actions/rust-toolchain # zizmor: ignore[self-repository]
-      - name: Cargo caches
-        # The source candidate's release dependencies; the derived checkouts
-        # build in their own targets outside the workspace.
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.2 # zizmor: ignore[cache-poisoning]
-        with:
-          cache-bin: "false"
-          shared-key: jobs-reliability
-          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-      - name: Recovery and upgrade reference
-        run: bash ./scripts/ci/measure.sh jobs-reliability -- make jobs-reliability-reference
-      - name: Upload jobs reliability diagnosis
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: jobs-reliability-reference
-          path: target/jobs-reliability-reference/
-          if-no-files-found: ignore
-  # template:end source-template:ci-jobs-reliability-job
-
   # template:begin outbound-auth:ci-oauth-integration-job
   oauth-integration:
     needs: [changes, secrets]
@@ -1048,10 +936,7 @@ jobs:
       - name: Keycloak proof
         # No Cargo cache: one crate's test build, selected only when the
         # OAuth surface changes, is not worth a saved target of its own.
-        run: >-
-          bash ./scripts/ci/measure.sh integration-oauth --
-          env REQUIRE_DOCKER=1
-          make test-integration-oauth
+        run: env REQUIRE_DOCKER=1 make test-integration-oauth
   # template:end outbound-auth:ci-oauth-integration-job
 
   initializer:
@@ -1102,17 +987,16 @@ jobs:
         if: matrix.part == 'source'
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
-        run: bash ./scripts/ci/measure.sh template-initializer-source -- bash ./scripts/ci/template-init-check.sh --source-checks
+        run: bash ./scripts/ci/template-init-check.sh --source-checks
       - name: Runtime graphs
         if: matrix.part != 'source'
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
-          PART: ${{ matrix.part }}
           GRAPHS: ${{ matrix.graphs }}
           # The runner has Docker; graphs with retained database suites fail
           # rather than refuse if it is ever missing.
           REQUIRE_DOCKER: "1"
-        run: bash ./scripts/ci/measure.sh "template-initializer-${PART}" -- bash ./scripts/ci/template-init-check.sh --runtime-graphs "${GRAPHS}"
+        run: bash ./scripts/ci/template-init-check.sh --runtime-graphs "${GRAPHS}"
 
   initializer-projections:
     # The canonical projections need no Cargo, so they run beside the matrix
@@ -1132,7 +1016,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
       - name: Canonical projections
-        run: bash ./scripts/ci/measure.sh template-initializer-projections -- make template-init-projections
+        run: make template-init-projections
 
   docs:
     needs: [changes, secrets]
@@ -1145,7 +1029,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Links
-        run: bash ./scripts/ci/measure.sh docs-links -- make docs-check
+        run: make docs-check
 
   required:
     if: always()
@@ -1161,16 +1045,14 @@ jobs:
       - security
       - secrets
       - delivery
-      - image
+      - image-source
+      - image-derived
       # template:begin runtime-progress:ci-required-runtime-progress-need
       - runtime-progress
       # template:end runtime-progress:ci-required-runtime-progress-need
       # template:begin integration:ci-required-integration-need
       - integration
       # template:end integration:ci-required-integration-need
-      # template:begin source-template:ci-required-jobs-reliability-need
-      - jobs-reliability
-      # template:end source-template:ci-required-jobs-reliability-need
       # template:begin outbound-auth:ci-required-oauth-integration-need
       - oauth-integration
       # template:end outbound-auth:ci-required-oauth-integration-need
