@@ -156,6 +156,12 @@ impl Fixture {
         self.prepare(self.options(scopes, audience))
     }
 
+    fn prepare_with(&self, adjust: impl FnOnce(&mut Options)) -> Credentials {
+        let mut options = self.options(&[], None);
+        adjust(&mut options);
+        self.prepare(options)
+    }
+
     fn prepare(&self, options: Options) -> Credentials {
         let (credentials, driver) = self.build(options);
         self.drive(driver);

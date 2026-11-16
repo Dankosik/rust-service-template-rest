@@ -139,14 +139,17 @@ impl PreparedRequest {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, derive_more::From)]
 pub enum Error {
     InvalidOperation,
     Conflict,
     MissingIntent,
     Control,
+    #[from]
     Database(sqlx::Error),
+    #[from]
     Transaction(TxError),
+    #[from]
     Json(serde_json::Error),
     Enqueue(infra_jobs::EnqueueError),
     Outbox(infra_messaging::outbox::OutboxEnqueueError),
@@ -177,21 +180,6 @@ impl fmt::Display for Error {
     }
 }
 impl std::error::Error for Error {}
-impl From<TxError> for Error {
-    fn from(error: TxError) -> Self {
-        Self::Transaction(error)
-    }
-}
-impl From<sqlx::Error> for Error {
-    fn from(error: sqlx::Error) -> Self {
-        Self::Database(error)
-    }
-}
-impl From<serde_json::Error> for Error {
-    fn from(error: serde_json::Error) -> Self {
-        Self::Json(error)
-    }
-}
 
 pub async fn migrate(pool: &PgPool) -> Result<(), Error> {
     in_tx(pool, async |tx| {

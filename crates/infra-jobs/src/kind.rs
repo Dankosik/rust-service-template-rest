@@ -342,6 +342,7 @@ impl Default for Policy {
     }
 }
 
+#[derive(Default)]
 pub struct KindsBuilder {
     entries: Vec<Registered>,
 }
@@ -394,12 +395,6 @@ impl KindsBuilder {
         Ok(Kinds {
             entries: self.entries.into_iter().map(Arc::new).collect(),
         })
-    }
-}
-
-impl Default for KindsBuilder {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

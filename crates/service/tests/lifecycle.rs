@@ -106,6 +106,13 @@ impl Service {
     }
 }
 
+fn records(stdout: &str) -> Vec<serde_json::Value> {
+    stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
 impl Drop for Service {
     fn drop(&mut self) {
         if self.child.try_wait().ok().flatten().is_none() {
@@ -192,10 +199,7 @@ fn serves_probes_and_metrics_then_drains_on_sigterm_with_exit_zero() {
     );
     let (code, stdout, stderr) = service.wait_output();
     let took = started.elapsed();
-    let records: Vec<serde_json::Value> = stdout
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
+    let records = records(&stdout);
     let trace = records
         .iter()
         .find(|record| record["message"] == "trace_shutdown_completed")
@@ -248,10 +252,7 @@ fn resumed_service_exits_one_after_progress_loss_without_diagnostics_or_probe_re
     std::thread::sleep(Duration::from_secs(3));
     kill(pid, Signal::SIGCONT).expect("resume admitted service");
     let (code, stdout, stderr) = service.wait_output();
-    let records: Vec<serde_json::Value> = stdout
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
+    let records = records(&stdout);
     let losses: Vec<_> = records
         .iter()
         .filter(|record| record["message"] == "readiness_progress_lost")
@@ -541,6 +542,24 @@ fn a_stop_signal_reaches_startup_during_a_blocking_postgres_password_file_read()
 // template:end postgres:service-postgres-lifecycle-admission
 
 // template:begin object-storage:service-object-storage-lifecycle-admission
+fn storage_env<'a>(
+    app_env: &'a str,
+    provider: &'a str,
+    endpoint: &'a str,
+) -> [(&'static str, &'a str); 6] {
+    [
+        ("APP__APP__ENV", app_env),
+        ("APP__OBJECT_STORAGE__PROVIDER", provider),
+        ("APP__OBJECT_STORAGE__ENDPOINT", endpoint),
+        ("APP__OBJECT_STORAGE__BUCKET", "template-bucket"),
+        ("APP__OBJECT_STORAGE__ACCESS_KEY_ID", "template"),
+        (
+            "APP__OBJECT_STORAGE__SECRET_ACCESS_KEY",
+            "hunter2-object-storage",
+        ),
+    ]
+}
+
 #[test]
 fn an_unreachable_bucket_still_becomes_ready_without_a_request() {
     #[expect(
@@ -552,17 +571,7 @@ fn an_unreachable_bucket_still_becomes_ready_without_a_request() {
     let port = listener.local_addr().expect("closed port").port();
     drop(listener);
     let endpoint = format!("http://127.0.0.1:{port}");
-    let service = Service::spawn(&[
-        ("APP__APP__ENV", "local"),
-        ("APP__OBJECT_STORAGE__PROVIDER", "local"),
-        ("APP__OBJECT_STORAGE__ENDPOINT", &endpoint),
-        ("APP__OBJECT_STORAGE__BUCKET", "template-bucket"),
-        ("APP__OBJECT_STORAGE__ACCESS_KEY_ID", "template"),
-        (
-            "APP__OBJECT_STORAGE__SECRET_ACCESS_KEY",
-            "hunter2-object-storage",
-        ),
-    ]);
+    let service = Service::spawn(&storage_env("local", "local", &endpoint));
     let configured = service.await_record("object_storage_configured");
     assert_eq!(
         configured["object_storage.provider"], "local",
@@ -589,18 +598,8 @@ fn an_unreachable_bucket_still_becomes_ready_without_a_request() {
 
 #[test]
 fn production_emulator_provider_exits_before_the_listener() {
-    let (code, stderr) = Service::spawn(&[
-        ("APP__APP__ENV", "production"),
-        ("APP__OBJECT_STORAGE__PROVIDER", "local"),
-        ("APP__OBJECT_STORAGE__ENDPOINT", "http://127.0.0.1:7070"),
-        ("APP__OBJECT_STORAGE__BUCKET", "template-bucket"),
-        ("APP__OBJECT_STORAGE__ACCESS_KEY_ID", "template"),
-        (
-            "APP__OBJECT_STORAGE__SECRET_ACCESS_KEY",
-            "hunter2-object-storage",
-        ),
-    ])
-    .wait();
+    let (code, stderr) =
+        Service::spawn(&storage_env("production", "local", "http://127.0.0.1:7070")).wait();
     assert_eq!(code, Some(1), "stderr: {stderr}");
     assert!(
         stderr.contains("object_storage.provider"),
@@ -614,27 +613,15 @@ fn production_emulator_provider_exits_before_the_listener() {
 
 #[test]
 fn an_r2_endpoint_outside_cloudflare_exits_before_the_listener() {
-    let (code, stdout, stderr) = Service::spawn(&[
-        ("APP__APP__ENV", "production"),
-        ("APP__OBJECT_STORAGE__PROVIDER", "cloudflare_r2"),
-        (
-            "APP__OBJECT_STORAGE__ENDPOINT",
-            "https://storage.example.com",
-        ),
-        ("APP__OBJECT_STORAGE__BUCKET", "template-bucket"),
-        ("APP__OBJECT_STORAGE__ACCESS_KEY_ID", "template"),
-        (
-            "APP__OBJECT_STORAGE__SECRET_ACCESS_KEY",
-            "hunter2-object-storage",
-        ),
-    ])
+    let (code, stdout, stderr) = Service::spawn(&storage_env(
+        "production",
+        "cloudflare_r2",
+        "https://storage.example.com",
+    ))
     .wait_output();
     assert_eq!(code, Some(1), "stderr: {stderr}");
     // Provider endpoint admission runs after the shared logger is installed.
-    let records: Vec<serde_json::Value> = stdout
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
+    let records = records(&stdout);
     let failure = records
         .iter()
         .find(|record| record["message"] == "service failed")

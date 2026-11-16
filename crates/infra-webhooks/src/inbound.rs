@@ -358,18 +358,21 @@ impl AsRef<[u8]> for ReceiveBody<'_> {
 /// optional refuses a row without it, so a rolling deploy or a rollback still
 /// needs it on the wire. A reader ignores it, whatever its value.
 #[serde_as]
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, derive_more::Debug, Deserialize, Serialize)]
 pub struct Incoming {
     #[serde(skip_deserializing, default = "incoming_version")]
     version: u8,
     endpoint_id: String,
+    #[debug("{:?}", "[REDACTED]")]
     #[serde_as(serialize_as = "StreamingBase64", deserialize_as = "Base64")]
     message_id: Bytes,
+    #[debug("{:?}", content_type.is_some())]
     #[serde_as(
         serialize_as = "Option<StreamingBase64>",
         deserialize_as = "Option<Base64>"
     )]
     content_type: Option<Vec<u8>>,
+    #[debug("{:?}", "[REDACTED]")]
     #[serde_as(serialize_as = "StreamingBase64", deserialize_as = "Base64")]
     body: Bytes,
 }
@@ -411,19 +414,6 @@ impl Incoming {
     }
 }
 
-impl fmt::Debug for Incoming {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("Incoming")
-            .field("version", &self.version)
-            .field("endpoint_id", &self.endpoint_id)
-            .field("message_id", &"[REDACTED]")
-            .field("content_type", &self.content_type.is_some())
-            .field("body", &"[REDACTED]")
-            .finish()
-    }
-}
-
 impl JobKind for Incoming {
     const NAME: &'static str = "webhooks.process";
 }
@@ -434,6 +424,20 @@ const _: () = infra_jobs::assert_valid_kind_name(Incoming::NAME);
 mod tests {
     use super::*;
     use crate::protocol::MAX_BODY_BYTES;
+
+    #[test]
+    fn incoming_debug_hides_message_id_and_body() {
+        let incoming = Incoming::new(
+            "partner",
+            Bytes::from_static(b"secret-id"),
+            Some(b"text/plain"),
+            Bytes::from_static(b"secret-body"),
+        );
+        assert_eq!(
+            format!("{incoming:?}"),
+            r#"Incoming { version: 1, endpoint_id: "partner", message_id: "[REDACTED]", content_type: true, body: "[REDACTED]" }"#
+        );
+    }
 
     #[tokio::test]
     async fn a_body_over_the_bound_is_rejected_before_any_verifier_or_write() {

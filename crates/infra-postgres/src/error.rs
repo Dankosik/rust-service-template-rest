@@ -95,18 +95,11 @@ pub(crate) mod tests {
         sqlx::Error::Database(Box::new(TestDatabaseError { code }))
     }
 
-    #[derive(Debug)]
+    #[derive(Debug, thiserror::Error)]
+    #[error("database")]
     struct TestDatabaseError {
         code: &'static str,
     }
-
-    impl std::fmt::Display for TestDatabaseError {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str("database")
-        }
-    }
-
-    impl std::error::Error for TestDatabaseError {}
 
     impl sqlx::error::DatabaseError for TestDatabaseError {
         fn message(&self) -> &'static str {

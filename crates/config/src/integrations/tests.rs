@@ -1,6 +1,6 @@
 use super::*;
 use crate::load::{Error, load_from};
-use crate::test_support::{BUILD, env, write};
+use crate::test_support::{BUILD, assert_secret_in_file, env, write};
 use crate::{Config, LoadOptions};
 use std::assert_matches;
 
@@ -431,22 +431,10 @@ fn oauth_client_secret_is_refused_as_an_unknown_key() {
 
 #[test]
 fn oauth_private_key_in_a_file_is_refused() {
-    let dir = tempfile::tempdir().unwrap();
-    let leaked = write(
-        &dir,
-        "leaked.toml",
+    assert_secret_in_file(
         "[integrations.billing.oauth]\nprivate_key = \"test-private-key\"\n",
+        "integrations.billing.oauth.private_key",
     );
-    let err = load_from(
-        &LoadOptions {
-            config: Some(leaked),
-            ..LoadOptions::default()
-        },
-        BUILD,
-        env(&[]),
-    )
-    .unwrap_err();
-    assert_matches!(&err, Error::SecretInFile { key, .. } if key == "integrations.billing.oauth.private_key", "{err}");
 }
 
 #[test]

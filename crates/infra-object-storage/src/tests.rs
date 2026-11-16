@@ -65,7 +65,10 @@ fn credentials_are_required_and_redacted() {
         endpoint: R2_ENDPOINT.to_owned(),
     });
     let rendered_options = format!("{options:?}");
-    assert!(!rendered_options.contains("hunter2"), "{rendered_options}");
+    assert_eq!(
+        rendered_options,
+        r#"ObjectStorageOptions { provider: "cloudflare_r2", max_object_bytes: 1024, max_concurrency: 2, operation_timeout: 2s, .. }"#
+    );
     let storage = ObjectStorage::try_new(options).unwrap();
     let rendered = format!("{storage:?}");
     assert!(!rendered.contains("hunter2"), "{rendered}");
@@ -268,6 +271,16 @@ fn key() -> ObjectKey {
     ObjectKey::try_new("results/op-1.json").unwrap()
 }
 
+async fn put_json(storage: &ObjectStorage) -> Result<(), ObjectStorageError> {
+    storage
+        .put(
+            &key(),
+            Bytes::from_static(b"{}").into(),
+            PutOptions::default(),
+        )
+        .await
+}
+
 fn fragmented_body(mut bytes: Bytes) -> Body {
     Body::from_stream(async_stream::stream! {
         while !bytes.is_empty() {
@@ -369,14 +382,7 @@ async fn a_provider_without_proven_checksums_gets_no_checksum_headers() {
     std::sync::Arc::get_mut(&mut storage.inner)
         .unwrap()
         .checksum = UploadChecksum::Never;
-    storage
-        .put(
-            &key(),
-            Bytes::from_static(b"{}").into(),
-            PutOptions::default(),
-        )
-        .await
-        .unwrap();
+    put_json(&storage).await.unwrap();
     let seen = stub.seen();
     let names: Vec<&str> = seen[0]
         .headers
@@ -411,13 +417,7 @@ async fn failed_create_only_put_is_not_retried_and_is_unknown() {
 async fn mutations_make_one_attempt() {
     let stub = Stub::start(|_, _| xml_error(StatusCode::SERVICE_UNAVAILABLE, "SlowDown")).await;
     let storage = stub.storage(|_| {});
-    let result = storage
-        .put(
-            &key(),
-            Bytes::from_static(b"{}").into(),
-            PutOptions::default(),
-        )
-        .await;
+    let result = put_json(&storage).await;
     assert_eq!(result, Err(ObjectStorageError::Unavailable));
     assert_eq!(stub.seen().len(), 1);
 
@@ -746,13 +746,7 @@ async fn a_mutation_keeps_the_whole_budget_for_its_one_attempt() {
     // Slower than a read attempt's share of the 2 s budget, but inside it.
     let stub = Stub::start_with_delay(Duration::from_millis(1300), |_, _| ok_empty()).await;
     let storage = stub.storage(|_| {});
-    let result = storage
-        .put(
-            &key(),
-            Bytes::from_static(b"{}").into(),
-            PutOptions::default(),
-        )
-        .await;
+    let result = put_json(&storage).await;
     assert_eq!(result, Ok(()));
     assert_eq!(storage.delete(&key()).await, Ok(()));
     assert_eq!(stub.seen().len(), 2);

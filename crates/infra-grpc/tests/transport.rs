@@ -77,6 +77,7 @@ use tonic_reflection::pb::v1::{
 };
 use tonic_reflection::pb::v1alpha;
 use tonic_types::StatusExt as _;
+use tower::ServiceExt as _;
 
 // template:begin authn:grpc-transport-test-accepted-token
 const ACCEPTED: &str = "accepted";
@@ -661,8 +662,6 @@ fn tokio_stream_once<T>(item: T) -> impl tonic::codegen::tokio_stream::Stream<It
 #[tokio::test]
 async fn client_observation_fallback_preserves_raw_request_routing() {
     use http_body_util::BodyExt as _;
-    use tower::ServiceExt as _;
-
     let fixture = Fixture::plaintext().await;
     for mismatched_extension in [false, true] {
         let builder = http::Request::builder()
@@ -975,6 +974,17 @@ fn opening_app_waiting(
     .unwrap()
 }
 
+async fn hold_capacity(app: &axum::Router) -> axum::response::Response {
+    app.clone()
+        .oneshot(opening_request(
+            "/example.v1.EchoService/ServerStream",
+            Some(ACCEPTED),
+            "hold-after-first",
+        ))
+        .await
+        .unwrap()
+}
+
 fn opening_request(
     path: &str,
     bearer: Option<&str>,
@@ -1007,8 +1017,6 @@ fn pending_upload(
 
 #[tokio::test]
 async fn opening_admission_counts_auth_followers_and_recovers_after_cancellation() {
-    use tower::ServiceExt as _;
-
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
     let metrics = recorder.handle();
     let _recorder = metrics::set_default_local_recorder(&recorder);
@@ -1115,8 +1123,6 @@ async fn opening_admission_counts_auth_followers_and_recovers_after_cancellation
 
 #[tokio::test]
 async fn opening_and_terminal_capacity_have_independent_lifetimes() {
-    use tower::ServiceExt as _;
-
     let (verifier, provider) = verifier_fixture().await;
     let echo = Echo::new();
     let app = opening_app(verifier, &echo, 2);
@@ -1185,8 +1191,6 @@ async fn opening_and_terminal_capacity_have_independent_lifetimes() {
 
 #[tokio::test]
 async fn opening_timeout_releases_capacity_and_zero_disables_both_counts() {
-    use tower::ServiceExt as _;
-
     for capacity in [1, 0] {
         let (verifier, provider) = verifier_fixture().await;
         let echo = Echo::new();
@@ -1254,23 +1258,13 @@ async fn opening_timeout_releases_capacity_and_zero_disables_both_counts() {
 
 #[tokio::test]
 async fn a_call_over_the_limit_waits_for_a_permit_and_is_served() {
-    use tower::ServiceExt as _;
-
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
     let metrics = recorder.handle();
     let _recorder = metrics::set_default_local_recorder(&recorder);
     let (verifier, provider) = verifier_fixture().await;
     let echo = Echo::new();
     let app = opening_app(verifier, &echo, 1);
-    let held = app
-        .clone()
-        .oneshot(opening_request(
-            "/example.v1.EchoService/ServerStream",
-            Some(ACCEPTED),
-            "hold-after-first",
-        ))
-        .await
-        .unwrap();
+    let held = hold_capacity(&app).await;
     assert!(Status::from_header_map(held.headers()).is_none());
     let mut waiting = Box::pin(app.clone().oneshot(opening_request(
         UNARY_PATH,
@@ -1300,23 +1294,13 @@ async fn a_call_over_the_limit_waits_for_a_permit_and_is_served() {
 
 #[tokio::test]
 async fn a_waiting_call_with_an_open_upload_is_refused_with_retry_info() {
-    use tower::ServiceExt as _;
-
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
     let metrics = recorder.handle();
     let _recorder = metrics::set_default_local_recorder(&recorder);
     let (verifier, provider) = verifier_fixture().await;
     let echo = Echo::new();
     let app = opening_app(verifier, &echo, 1);
-    let held = app
-        .clone()
-        .oneshot(opening_request(
-            "/example.v1.EchoService/ServerStream",
-            Some(ACCEPTED),
-            "hold-after-first",
-        ))
-        .await
-        .unwrap();
+    let held = hold_capacity(&app).await;
     let call = pending_upload(
         opening_request(
             "/example.v1.EchoService/BidiStream",
@@ -1346,23 +1330,13 @@ async fn a_waiting_call_with_an_open_upload_is_refused_with_retry_info() {
 
 #[tokio::test]
 async fn a_call_waits_no_longer_than_the_admission_wait() {
-    use tower::ServiceExt as _;
-
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
     let metrics = recorder.handle();
     let _recorder = metrics::set_default_local_recorder(&recorder);
     let (verifier, provider) = verifier_fixture().await;
     let echo = Echo::new();
     let app = opening_app_waiting(verifier, &echo, 1, Duration::from_millis(200));
-    let held = app
-        .clone()
-        .oneshot(opening_request(
-            "/example.v1.EchoService/ServerStream",
-            Some(ACCEPTED),
-            "hold-after-first",
-        ))
-        .await
-        .unwrap();
+    let held = hold_capacity(&app).await;
     let started = tokio::time::Instant::now();
     let response = timeout(
         WAIT,
@@ -1388,8 +1362,6 @@ async fn a_call_waits_no_longer_than_the_admission_wait() {
 
 #[tokio::test]
 async fn both_admission_queues_share_the_call_wait_limit() {
-    use tower::ServiceExt as _;
-
     let (verifier, provider) = verifier_fixture().await;
     let echo = Echo::new();
     let app = opening_app_waiting(verifier, &echo, 1, Duration::from_secs(1));
@@ -1434,23 +1406,13 @@ async fn both_admission_queues_share_the_call_wait_limit() {
 
 #[tokio::test]
 async fn a_zero_admission_wait_refuses_a_call_over_the_limit_at_once() {
-    use tower::ServiceExt as _;
-
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
     let metrics = recorder.handle();
     let _recorder = metrics::set_default_local_recorder(&recorder);
     let (verifier, provider) = verifier_fixture().await;
     let echo = Echo::new();
     let app = opening_app_waiting(verifier, &echo, 1, Duration::ZERO);
-    let held = app
-        .clone()
-        .oneshot(opening_request(
-            "/example.v1.EchoService/ServerStream",
-            Some(ACCEPTED),
-            "hold-after-first",
-        ))
-        .await
-        .unwrap();
+    let held = hold_capacity(&app).await;
     let started = tokio::time::Instant::now();
     let response = timeout(
         WAIT,
@@ -1475,8 +1437,6 @@ async fn a_zero_admission_wait_refuses_a_call_over_the_limit_at_once() {
 
 #[tokio::test]
 async fn rejected_ready_empty_frames_cooperate_with_other_tasks() {
-    use tower::ServiceExt as _;
-
     let (verifier, provider) = verifier_fixture().await;
     let app = opening_app(verifier, &Echo::new(), 1);
     let progressed = Arc::new(AtomicBool::new(false));

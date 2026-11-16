@@ -1,7 +1,7 @@
 use super::*;
 use crate::LoadOptions;
 use crate::load::{Error, load_from};
-use crate::test_support::{BUILD, env, write};
+use crate::test_support::{BUILD, assert_secret_in_file, env, write};
 use std::assert_matches;
 
 fn railway() -> ObjectStorageConfig {
@@ -279,22 +279,10 @@ fn object_storage_environment_selects_credentials_and_addressing() {
 
 #[test]
 fn object_storage_secret_in_a_file_is_refused() {
-    let dir = tempfile::tempdir().unwrap();
-    let leaked = write(
-        &dir,
-        "leaked.toml",
+    assert_secret_in_file(
         "[object_storage]\nsecret_access_key = \"hunter2\"\n",
+        "object_storage.secret_access_key",
     );
-    let err = load_from(
-        &LoadOptions {
-            config: Some(leaked),
-            ..LoadOptions::default()
-        },
-        BUILD,
-        env(&[]),
-    )
-    .unwrap_err();
-    assert_matches!(&err, Error::SecretInFile { key, .. } if key == "object_storage.secret_access_key", "{err}");
 }
 
 #[test]

@@ -1,7 +1,7 @@
 use super::*;
 use crate::LoadOptions;
 use crate::load::load_from;
-use crate::test_support::{BUILD, env, write};
+use crate::test_support::{BUILD, assert_secret_in_file, env, write};
 use std::assert_matches;
 
 fn parse(toml: &str) -> Result<AuthnConfig, toml::de::Error> {
@@ -592,22 +592,10 @@ fn jwt_environment_preserves_a_supplied_token_profile_and_jwks_uri() {
 // template:begin oidc-introspection:load-introspection-secret-file
 #[test]
 fn introspection_secret_in_a_file_is_refused() {
-    let dir = tempfile::tempdir().unwrap();
-    let leaked = write(
-        &dir,
-        "leaked.toml",
+    assert_secret_in_file(
         "[authn]\nintrospection_client_secret = \"file-secret\"\n",
+        "authn.introspection_client_secret",
     );
-    let err = load_from(
-        &LoadOptions {
-            config: Some(leaked),
-            ..LoadOptions::default()
-        },
-        BUILD,
-        env(&[]),
-    )
-    .unwrap_err();
-    assert_matches!(&err, crate::load::Error::SecretInFile { key, .. } if key == "authn.introspection_client_secret", "{err}");
 }
 // template:end oidc-introspection:load-introspection-secret-file
 

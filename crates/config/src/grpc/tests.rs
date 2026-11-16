@@ -1,6 +1,6 @@
 use super::*;
 use crate::load::{Error, load_from};
-use crate::test_support::{BUILD, env, write};
+use crate::test_support::{BUILD, assert_secret_in_file, env, write};
 use crate::{HttpConfig, LoadOptions};
 use std::assert_matches;
 
@@ -237,19 +237,8 @@ fn grpc_private_key_is_environment_only_and_debug_is_redacted() {
     .unwrap();
     assert!(!format!("{cfg:?}").contains("private-key-material"));
 
-    let leaked = write(
-        &dir,
-        "leaked.toml",
+    assert_secret_in_file(
         "[grpc]\nprivate_key = \"private-key-material\"\n",
+        "grpc.private_key",
     );
-    let err = load_from(
-        &LoadOptions {
-            config: Some(leaked),
-            ..LoadOptions::default()
-        },
-        BUILD,
-        env(&[]),
-    )
-    .unwrap_err();
-    assert_matches!(&err, Error::SecretInFile { key, .. } if key == "grpc.private_key", "{err}");
 }

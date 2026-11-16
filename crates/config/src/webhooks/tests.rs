@@ -6,7 +6,7 @@ use secrecy::SecretString;
 use super::{WebhookEndpointConfig, WebhooksConfig};
 use crate::LoadOptions;
 use crate::load::{Error, load_from};
-use crate::test_support::{BUILD, env, write};
+use crate::test_support::{BUILD, assert_secret_in_file, env, write};
 
 #[test]
 fn defaults_are_inert() {
@@ -109,22 +109,10 @@ fn webhooks_environment_builds_endpoint_local_signing_keys() {
 
 #[test]
 fn webhooks_secret_in_a_file_is_refused() {
-    let dir = tempfile::tempdir().unwrap();
-    let leaked = write(
-        &dir,
-        "leaked.toml",
+    assert_secret_in_file(
         "[webhooks.endpoints.partner]\nsecret = \"whsec_private\"\n",
+        "webhooks.endpoints.partner.secret",
     );
-    let err = load_from(
-        &LoadOptions {
-            config: Some(leaked),
-            ..LoadOptions::default()
-        },
-        BUILD,
-        env(&[]),
-    )
-    .unwrap_err();
-    assert_matches!(&err, Error::SecretInFile { key, .. } if key == "webhooks.endpoints.partner.secret", "{err}");
 }
 
 #[test]

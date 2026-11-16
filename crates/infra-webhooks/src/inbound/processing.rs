@@ -87,6 +87,7 @@ impl fmt::Debug for Consumers {
     }
 }
 
+#[derive(Debug)]
 pub struct Processor {
     consumers: Consumers,
 }
@@ -99,15 +100,6 @@ impl Processor {
 
     pub fn register(self, kinds: &mut KindsBuilder) -> &mut KindsBuilder {
         kinds.register(Policy::default(), self)
-    }
-}
-
-impl fmt::Debug for Processor {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("Processor")
-            .field("consumers", &self.consumers)
-            .finish()
     }
 }
 
@@ -198,6 +190,15 @@ mod tests {
             .require(["partner", "other"])
             .expect_err("unbound endpoint");
         assert_eq!(missing.endpoint_id, "other");
+    }
+
+    #[test]
+    fn processor_debug_shows_binding_count_only() {
+        let processor = Processor::new(Consumers::new());
+        assert_eq!(
+            format!("{processor:?}"),
+            "Processor { consumers: Consumers { binding_count: 0 } }"
+        );
     }
 
     #[test]

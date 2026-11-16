@@ -1,6 +1,8 @@
+use std::assert_matches;
 use std::path::PathBuf;
 
-use crate::BuildInfo;
+use crate::load::{Error, load_from};
+use crate::{BuildInfo, LoadOptions};
 
 pub(crate) const BUILD: BuildInfo = BuildInfo {
     version: "1.2.3",
@@ -22,4 +24,26 @@ pub(crate) fn env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         .iter()
         .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
         .collect()
+}
+
+pub(crate) fn assert_secret_in_file(toml: &str, key: &str) {
+    let dir = tempfile::tempdir().unwrap();
+    let leaked = write(&dir, "leaked.toml", toml);
+    let err = load_from(
+        &LoadOptions {
+            config: Some(leaked),
+            ..LoadOptions::default()
+        },
+        BUILD,
+        env(&[]),
+    )
+    .unwrap_err();
+    assert_matches!(&err, Error::SecretInFile { key: found, .. } if found == key, "{err}");
+}
+
+pub(crate) fn assert_unknown_env_key_fails(variable: &str) {
+    assert_matches!(
+        load_from(&LoadOptions::default(), BUILD, env(&[(variable, "x")])),
+        Err(Error::Deserialize(_))
+    );
 }

@@ -105,10 +105,7 @@ async fn a_waiter_reuses_a_shared_failure_but_not_a_request_only_token() {
     ] {
         fixture.token_json("200 OK", body);
         let client = fixture
-            .prepare(Options {
-                provider_concurrency: 1,
-                ..fixture.options(&[], None)
-            })
+            .prepare_with(|options| options.provider_concurrency = 1)
             .http(fixture.resource_client());
         let gate = fixture.block_tokens();
         let before_tokens = fixture.token_requests().len();
@@ -158,10 +155,7 @@ async fn a_waiter_reuses_a_shared_failure_but_not_a_request_only_token() {
 async fn cancelling_service_token_acquisition_allows_a_waiter_to_retry() {
     let fixture = Fixture::new().await;
     let client = fixture
-        .prepare(Options {
-            provider_concurrency: 1,
-            ..fixture.options(&[], None)
-        })
+        .prepare_with(|options| options.provider_concurrency = 1)
         .http(fixture.resource_client());
     let gate = fixture.block_tokens();
     let context = OperationContext::with_timeout(Duration::from_secs(10));
@@ -296,10 +290,7 @@ async fn the_fetch_cap_is_unavailable_with_an_unrepresentable_resource_deadline(
 async fn each_waiter_keeps_its_own_deadline_without_cancelling_the_leader() {
     let fixture = Fixture::new().await;
     let client = fixture
-        .prepare(Options {
-            provider_concurrency: 1,
-            ..fixture.options(&[], None)
-        })
+        .prepare_with(|options| options.provider_concurrency = 1)
         .http(fixture.resource_client());
     let gate = fixture.block_tokens();
     let mut leader = Box::pin(client.execute(fixture.request(), deadline(Duration::from_secs(10))));

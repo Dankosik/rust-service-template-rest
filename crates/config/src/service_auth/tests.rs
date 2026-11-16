@@ -1,7 +1,7 @@
 use super::*;
 use crate::LoadOptions;
 use crate::load::{Error, load_from};
-use crate::test_support::{BUILD, env, write};
+use crate::test_support::{BUILD, assert_secret_in_file, env};
 use std::assert_matches;
 
 fn jwt(extra: &str) -> ServiceAuthConfig {
@@ -114,22 +114,10 @@ fn service_auth_environment_decodes_and_the_signing_key_stays_secret() {
 
 #[test]
 fn service_auth_signing_key_in_a_file_is_refused() {
-    let dir = tempfile::tempdir().unwrap();
-    let leaked = write(
-        &dir,
-        "leaked.toml",
+    assert_secret_in_file(
         "[service_auth]\nmode = \"jwt\"\nprivate_key = \"file-key\"\n",
+        "service_auth.private_key",
     );
-    let err = load_from(
-        &LoadOptions {
-            config: Some(leaked),
-            ..LoadOptions::default()
-        },
-        BUILD,
-        env(&[]),
-    )
-    .unwrap_err();
-    assert_matches!(&err, Error::SecretInFile { key, .. } if key == "service_auth.private_key", "{err}");
 }
 
 #[test]

@@ -10,7 +10,9 @@ use crate::error::ConfigError;
 use crate::provider::Admitted;
 
 /// [`Debug`] prints the variant only.
+#[derive(derive_more::Debug)]
 pub enum CredentialSource {
+    #[debug("AccessKey")]
     AccessKey {
         access_key_id: String,
         secret_access_key: SecretString,
@@ -19,15 +21,6 @@ pub enum CredentialSource {
     /// Identity), then the EC2 instance profile, refreshed by the SDK.
     /// [`crate::Provider::AmazonS3`] only.
     WorkloadIdentity,
-}
-
-impl std::fmt::Debug for CredentialSource {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(match self {
-            Self::AccessKey { .. } => "AccessKey",
-            Self::WorkloadIdentity => "WorkloadIdentity",
-        })
-    }
 }
 
 impl CredentialSource {
