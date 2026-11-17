@@ -539,6 +539,41 @@ def _assert_workspace_dependencies_inherited(initializer, nodes: dict[str, Node]
         raise initializer.Refusal(f"workspace declares dependencies no retained member inherits: {sorted(unused)}")
 
 
+def _declared_crates(root: Path) -> dict[str, frozenset[str]]:
+    declared: dict[str, frozenset[str]] = {}
+    for manifest in (*sorted(root.glob("crates/*/Cargo.toml")), root / "test/Cargo.toml"):
+        if not manifest.is_file():
+            continue
+        tables = tomllib.loads(manifest.read_text(encoding="utf-8"))
+        declared[manifest.parent.relative_to(root).as_posix()] = frozenset(
+            name.replace("-", "_")
+            for table in ("dependencies", "dev-dependencies", "build-dependencies")
+            for name in tables.get(table, {})
+        )
+    return declared
+
+
+def _assert_dropped_crates_unnamed(
+    initializer, nodes: dict[str, Node], source: dict[str, frozenset[str]], projected: dict[str, frozenset[str]],
+) -> None:
+    # A retained file that still names a crate its projected manifest dropped
+    # fails only in the post-merge initializer matrix (#782).
+    for package, names in source.items():
+        dropped = names - projected.get(package, names)
+        if not dropped:
+            continue
+        named = re.compile(rb"(?<![\w:])(" + "|".join(sorted(dropped)).encode() + rb")::")
+        for relative, node in nodes.items():
+            if not (relative.startswith(f"{package}/") and relative.endswith(".rs")):
+                continue
+            assert isinstance(node.payload, bytes)
+            found = named.search(node.payload)
+            if found:
+                raise initializer.Refusal(
+                    f"{relative} names `{found[1].decode()}`, which this projection drops from {package}/Cargo.toml"
+                )
+
+
 def _assert_introspection_cache_output(initializer, nodes: dict[str, Node], authn: str) -> None:
     # The projected public configuration and adapter API must exist only for
     # introspection. These are profile contracts, not private implementation names.
@@ -580,6 +615,7 @@ def _image_inputs_checker(source: Path):
 
 def _project(source: Path, candidate: str, initializer, inputs, destination: Path) -> dict[str, Node]:
     initializer.snapshot_tree(source, destination, candidate)
+    source_crates = _declared_crates(destination)
     profiles = initializer._profile_data(destination)
     initializer._project_staged(destination, inputs, profiles)
     initializer._postconditions(destination, inputs, profiles, initial=True)
@@ -592,6 +628,7 @@ def _project(source: Path, candidate: str, initializer, inputs, destination: Pat
         initializer, nodes, (relative.rstrip("/") for relative in profiles.removals["tls-fixtures"])
     )
     _assert_workspace_dependencies_inherited(initializer, nodes)
+    _assert_dropped_crates_unnamed(initializer, nodes, source_crates, _declared_crates(destination))
     _assert_profile_output(initializer, nodes, "unconditional operation context", (
         "crates/operation-context/Cargo.toml",
         "crates/operation-context/src/lib.rs",
