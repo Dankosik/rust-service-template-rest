@@ -149,8 +149,10 @@ migrate = { workspace = true }
 # template:begin test-metrics:test-metrics-dependency
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
-metrics-util = { workspace = true, features = ["debugging"] }
 # template:end test-metrics:test-metrics-dependency
+# template:begin test-metrics-util:test-metrics-util-dependency
+metrics-util = { workspace = true, features = ["debugging"] }
+# template:end test-metrics-util:test-metrics-util-dependency
 # template:begin http-idempotency:test-http-idempotency-dependencies
 infra-idempotency-store = { workspace = true }
 # template:end http-idempotency:test-http-idempotency-dependencies
