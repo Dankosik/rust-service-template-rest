@@ -5,7 +5,7 @@ use std::assert_matches;
 async fn an_exchanged_token_is_reused_per_subject_but_not_across_subjects() {
     let fixture = Fixture::new().await;
     fixture.token_json(StatusCode::OK, &exchange_response("first"));
-    let client = fixture.client(IdentityMode::OnBehalfOf);
+    let client = fixture.exchange_client();
     fixture
         .send_request(&client, fixture.on_behalf_of_request("alice"))
         .await
@@ -37,9 +37,9 @@ async fn an_exchanged_token_is_reused_per_subject_but_not_across_subjects() {
 async fn the_configured_capacity_bounds_how_many_subjects_keep_their_exchanged_token() {
     let fixture = Fixture::new().await;
     fixture.token_json(StatusCode::OK, &exchange_response("exchanged"));
-    let credentials = fixture.prepare_with(|options| options.exchange_cache_capacity = 1);
-    let client = credentials.http(fixture.resource_client(), IdentityMode::OnBehalfOf);
-    let cache = &credentials.0.inner.exchange.cache;
+    let exchange_tokens = fixture.exchange_tokens(&[], None, 1);
+    let client = exchange_tokens.http(fixture.resource_client());
+    let cache = exchange_tokens.cache();
     for subject in ["alice", "bob"] {
         fixture
             .send_request(&client, fixture.on_behalf_of_request(subject))
@@ -66,9 +66,9 @@ async fn a_capacity_that_does_not_divide_the_payload_target_keeps_every_configur
     const SUBJECTS: u32 = 5;
     let fixture = Fixture::new().await;
     fixture.token_json(StatusCode::OK, &exchange_response("exchanged"));
-    let credentials = fixture.prepare_with(|options| options.exchange_cache_capacity = SUBJECTS);
-    let client = credentials.http(fixture.resource_client(), IdentityMode::OnBehalfOf);
-    let cache = &credentials.0.inner.exchange.cache;
+    let exchange_tokens = fixture.exchange_tokens(&[], None, SUBJECTS);
+    let client = exchange_tokens.http(fixture.resource_client());
+    let cache = exchange_tokens.cache();
     for _ in 0..2 {
         for subject in 0..SUBJECTS {
             fixture
@@ -90,8 +90,8 @@ async fn a_capacity_that_does_not_divide_the_payload_target_keeps_every_configur
 async fn exchanged_cache_evicts_large_payloads_before_the_entry_target() {
     const PAYLOAD_TARGET: usize = 16 * 1024 * 1024;
     let fixture = Fixture::new().await;
-    let credentials = fixture.credentials(&[], None);
-    let client = credentials.http(fixture.resource_client(), IdentityMode::OnBehalfOf);
+    let exchange_tokens = fixture.exchange_tokens(&[], None, EXCHANGE_CAPACITY);
+    let client = exchange_tokens.http(fixture.resource_client());
     let prefix = "x".repeat(512 * 1024 - 16);
     for index in 0..33 {
         fixture.token_json(
@@ -106,7 +106,7 @@ async fn exchanged_cache_evicts_large_payloads_before_the_entry_target() {
             .await
             .unwrap();
     }
-    let cache = &credentials.0.inner.exchange.cache;
+    let cache = exchange_tokens.cache();
     cache.run_pending_tasks().await;
     let payload = cache
         .iter()
@@ -127,7 +127,7 @@ async fn a_short_lived_exchanged_token_serves_its_own_request_after_one_exchange
     let mut short = exchange_response("short");
     short["expires_in"] = serde_json::json!(5);
     fixture.token_json(StatusCode::OK, &short);
-    let client = fixture.client(IdentityMode::OnBehalfOf);
+    let client = fixture.exchange_client();
     for expected_exchanges in 1..=2 {
         fixture
             .send_request(&client, fixture.on_behalf_of_request("alice"))
@@ -144,7 +144,7 @@ async fn an_exchanged_token_without_lifetime_is_request_only() {
     let mut response = exchange_response("request-only");
     response.as_object_mut().unwrap().remove("expires_in");
     fixture.token_json(StatusCode::OK, &response);
-    let client = fixture.client(IdentityMode::OnBehalfOf);
+    let client = fixture.exchange_client();
     for _ in 0..2 {
         fixture
             .send_request(&client, fixture.on_behalf_of_request("subject"))
@@ -162,7 +162,7 @@ async fn a_waiter_exchanges_again_instead_of_taking_its_leaders_request_only_tok
     let mut response = exchange_response("request-only");
     response.as_object_mut().unwrap().remove("expires_in");
     fixture.token_json(StatusCode::OK, &response);
-    let client = fixture.client(IdentityMode::OnBehalfOf);
+    let client = fixture.exchange_client();
     let gate = fixture.block_tokens();
     let mut leader =
         Box::pin(fixture.send_request(&client, fixture.on_behalf_of_request("subject")));
@@ -184,7 +184,7 @@ async fn a_waiter_exchanges_again_instead_of_taking_its_leaders_request_only_tok
 async fn an_exchanged_token_past_its_reuse_cutoff_is_exchanged_once_more() {
     let fixture = Fixture::new().await;
     fixture.token_json(StatusCode::OK, &exchange_response("first"));
-    let client = fixture.client(IdentityMode::OnBehalfOf);
+    let client = fixture.exchange_client();
     let execute = || async {
         fixture
             .send_request(&client, fixture.on_behalf_of_request("alice"))
@@ -214,8 +214,16 @@ async fn concurrent_on_behalf_of_calls_for_one_subject_share_one_exchange() {
     let fixture = Fixture::new().await;
     fixture.token_json(StatusCode::OK, &exchange_response("shared"));
     let client = fixture
-        .prepare_with(|options| options.provider_concurrency = 1)
-        .http(fixture.resource_client(), IdentityMode::OnBehalfOf);
+        .exchange_tokens_with(
+            Options {
+                provider_concurrency: 1,
+                ..fixture.options()
+            },
+            &[],
+            None,
+            EXCHANGE_CAPACITY,
+        )
+        .http(fixture.resource_client());
     let gate = fixture.block_tokens();
     let mut leader =
         Box::pin(fixture.send_request(&client, fixture.on_behalf_of_request("subject")));
@@ -240,19 +248,25 @@ async fn concurrent_on_behalf_of_calls_for_one_subject_share_one_exchange() {
 async fn provider_capacity_is_shared_across_grants_but_hits_and_waiters_do_not_consume_it() {
     let fixture = Fixture::new().await;
     fixture.token_json(StatusCode::OK, &exchange_response("shared"));
-    let credentials = fixture.prepare_with(|options| options.provider_concurrency = 2);
-    let client = credentials.http(fixture.resource_client(), IdentityMode::OnBehalfOf);
+    let registration = fixture.build(Options {
+        provider_concurrency: 2,
+        ..fixture.options()
+    });
+    let exchange_tokens = registration
+        .exchange_tokens(TokenTarget::default(), EXCHANGE_CAPACITY)
+        .unwrap();
+    let (service_tokens, driver) = registration.service_tokens(TokenTarget::default());
+    fixture.drive(driver);
+    let client = exchange_tokens.http(fixture.resource_client());
     fixture
         .send_request(&client, fixture.on_behalf_of_request("cached"))
         .await
         .unwrap();
     let gate = fixture.block_tokens();
-    let service_client = credentials.http(fixture.resource_client(), IdentityMode::Service);
+    let service_client = service_tokens.http(fixture.resource_client());
     let mut service = Box::pin(fixture.send(&service_client));
     tokio::select! { () = fixture.token_received() => {}, result = &mut service => panic!("service must be gated: {result:?}"), }
-    let other_binding = credentials
-        .clone()
-        .http(fixture.resource_client(), IdentityMode::OnBehalfOf);
+    let other_binding = exchange_tokens.clone().http(fixture.resource_client());
     let mut exchange =
         Box::pin(fixture.send_request(&other_binding, fixture.on_behalf_of_request("active")));
     tokio::select! { () = fixture.token_received() => {}, result = &mut exchange => panic!("exchange must be gated: {result:?}"), }
@@ -303,9 +317,17 @@ async fn provider_capacity_is_shared_across_grants_but_hits_and_waiters_do_not_c
 async fn cancelling_an_exchange_releases_capacity_without_releasing_a_live_waiters_leader() {
     let fixture = Fixture::new().await;
     fixture.token_json(StatusCode::OK, &exchange_response("replacement"));
-    let credentials = fixture.prepare_with(|options| options.provider_concurrency = 1);
-    let client = credentials.http(fixture.resource_client(), IdentityMode::OnBehalfOf);
-    let service_client = credentials.http(fixture.resource_client(), IdentityMode::Service);
+    let registration = fixture.build(Options {
+        provider_concurrency: 1,
+        ..fixture.options()
+    });
+    let exchange_tokens = registration
+        .exchange_tokens(TokenTarget::default(), EXCHANGE_CAPACITY)
+        .unwrap();
+    let (service_tokens, driver) = registration.service_tokens(TokenTarget::default());
+    fixture.drive(driver);
+    let client = exchange_tokens.http(fixture.resource_client());
+    let service_client = service_tokens.http(fixture.resource_client());
     let gate = fixture.block_tokens();
     let mut leader =
         Box::pin(fixture.send_request(&client, fixture.on_behalf_of_request("subject")));
@@ -354,8 +376,16 @@ async fn a_waiter_gets_its_own_attempt_budget_after_its_leader_times_out() {
     )
     .unwrap();
     let client = fixture
-        .prepare_with(|options| options.provider_concurrency = 1)
-        .http(resource, IdentityMode::OnBehalfOf);
+        .exchange_tokens_with(
+            Options {
+                provider_concurrency: 1,
+                ..fixture.options()
+            },
+            &[],
+            None,
+            EXCHANGE_CAPACITY,
+        )
+        .http(resource);
     let gate = fixture.block_tokens();
     let mut leader = Box::pin(client.execute(
         fixture.on_behalf_of_request("subject"),
@@ -383,7 +413,7 @@ async fn a_waiter_gets_its_own_attempt_budget_after_its_leader_times_out() {
 async fn a_resource_401_evicts_only_that_subjects_exchanged_token() {
     let fixture = Fixture::new().await;
     fixture.token_json(StatusCode::OK, &exchange_response("shared"));
-    let client = fixture.client(IdentityMode::OnBehalfOf);
+    let client = fixture.exchange_client();
     fixture
         .send_request(&client, fixture.on_behalf_of_request("alice"))
         .await
@@ -419,8 +449,16 @@ async fn a_failed_exchange_is_not_cached() {
     let fixture = Fixture::new().await;
     fixture.token_raw(response(StatusCode::INTERNAL_SERVER_ERROR, b"{}"));
     let client = fixture
-        .prepare_with(|options| options.provider_concurrency = 1)
-        .http(fixture.resource_client(), IdentityMode::OnBehalfOf);
+        .exchange_tokens_with(
+            Options {
+                provider_concurrency: 1,
+                ..fixture.options()
+            },
+            &[],
+            None,
+            EXCHANGE_CAPACITY,
+        )
+        .http(fixture.resource_client());
     for _ in 0..2 {
         let result = fixture
             .send_request(&client, fixture.on_behalf_of_request("subject"))

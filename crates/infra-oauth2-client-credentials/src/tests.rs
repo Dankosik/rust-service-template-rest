@@ -30,8 +30,8 @@ use tokio::{
 use url::Url;
 
 use crate::{
-    AcquisitionError, Algorithm, AuthenticatedClient, Credentials, Error, IdentityMode, OnBehalfOf,
-    Options, RefreshDriver, Rejection,
+    AcquisitionError, Algorithm, AuthenticatedClient, Error, ExchangeTokens, OnBehalfOf, Options,
+    RefreshDriver, Registration, Rejection, ServiceTokens, TokenTarget,
     credentials::{Cached, acquisition_deadline},
     options::Admitted,
     token::EVICTION_MIN_AGE,
@@ -58,6 +58,7 @@ const RESOURCE_PATH: &str = "/resource";
 const ASSERTION_AUDIENCE: &str = "https://issuer.example";
 const GRANT_TYPE_TOKEN_EXCHANGE: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
 const ACCESS_TOKEN_TYPE: &str = "urn:ietf:params:oauth:token-type:access_token";
+const EXCHANGE_CAPACITY: u32 = 1024;
 
 #[derive(Clone, Debug)]
 struct CapturedRequest {
@@ -94,6 +95,7 @@ struct Fixture {
     task: JoinHandle<()>,
     driver_shutdown: watch::Sender<()>,
     drivers: Mutex<Vec<JoinHandle<()>>>,
+    registrations: Mutex<Vec<Registration>>,
     key: KeyPair,
 }
 
@@ -132,11 +134,12 @@ impl Fixture {
             task,
             driver_shutdown,
             drivers: Mutex::default(),
+            registrations: Mutex::default(),
             key: KeyPair::generate_for(&PKCS_RSA_SHA256).unwrap(),
         }
     }
 
-    fn options(&self, scopes: &[&str], audience: Option<&str>) -> Options {
+    fn options(&self) -> Options {
         Options {
             token_url: self.endpoint.to_string(),
             client_id: "client:id".to_owned(),
@@ -144,32 +147,54 @@ impl Fixture {
             key_id: "key-1".to_owned(),
             algorithm: Algorithm::Rs256,
             assertion_audience: ASSERTION_AUDIENCE.to_owned(),
-            scopes: scopes.iter().map(|scope| (*scope).to_owned()).collect(),
-            audience: audience.map(str::to_owned),
-            exchange_cache_capacity: 1024,
             provider_concurrency: 32,
         }
     }
 
-    fn credentials(&self, scopes: &[&str], audience: Option<&str>) -> Credentials {
-        self.prepare(self.options(scopes, audience))
+    fn service_tokens(&self, scopes: &[&str], audience: Option<&str>) -> ServiceTokens {
+        self.service_tokens_with(self.options(), scopes, audience)
     }
 
-    fn prepare_with(&self, adjust: impl FnOnce(&mut Options)) -> Credentials {
-        let mut options = self.options(&[], None);
-        adjust(&mut options);
-        self.prepare(options)
-    }
-
-    fn prepare(&self, options: Options) -> Credentials {
-        let (credentials, driver) = self.build(options);
+    fn service_tokens_with(
+        &self,
+        options: Options,
+        scopes: &[&str],
+        audience: Option<&str>,
+    ) -> ServiceTokens {
+        let registration = self.build(options);
+        let (tokens, driver) = registration.service_tokens(token_target(scopes, audience));
         self.drive(driver);
-        credentials
+        self.registrations.lock().unwrap().push(registration);
+        tokens
     }
 
-    fn build(&self, options: Options) -> (Credentials, RefreshDriver) {
+    fn exchange_tokens(
+        &self,
+        scopes: &[&str],
+        audience: Option<&str>,
+        capacity: u32,
+    ) -> ExchangeTokens {
+        self.exchange_tokens_with(self.options(), scopes, audience, capacity)
+    }
+
+    fn exchange_tokens_with(
+        &self,
+        options: Options,
+        scopes: &[&str],
+        audience: Option<&str>,
+        capacity: u32,
+    ) -> ExchangeTokens {
+        let registration = self.build(options);
+        let tokens = registration
+            .exchange_tokens(token_target(scopes, audience), capacity)
+            .unwrap();
+        self.registrations.lock().unwrap().push(registration);
+        tokens
+    }
+
+    fn build(&self, options: Options) -> Registration {
         let admitted = Admitted::try_new_for_test(options, self.endpoint.clone()).unwrap();
-        Credentials::build(
+        Registration::build(
             admitted,
             Client::try_new_for_test_http(&self.origin, TOKEN_LIMITS).unwrap(),
         )
@@ -190,9 +215,13 @@ impl Fixture {
         Client::try_new_for_test_http(&self.origin, TOKEN_LIMITS).unwrap()
     }
 
-    fn client(&self, mode: IdentityMode) -> AuthenticatedClient {
-        self.credentials(&[], None)
-            .http(self.resource_client(), mode)
+    fn service_client(&self) -> AuthenticatedClient {
+        self.service_tokens(&[], None).http(self.resource_client())
+    }
+
+    fn exchange_client(&self) -> AuthenticatedClient {
+        self.exchange_tokens(&[], None, EXCHANGE_CAPACITY)
+            .http(self.resource_client())
     }
 
     async fn send(&self, client: &AuthenticatedClient) -> Result<Response<Bytes>, Error> {
@@ -285,6 +314,14 @@ impl Fixture {
             .unwrap()
             .unwrap();
     }
+}
+
+fn token_target(scopes: &[&str], audience: Option<&str>) -> TokenTarget {
+    let scopes = scopes
+        .iter()
+        .map(|scope| (*scope).to_owned())
+        .collect::<Vec<_>>();
+    TokenTarget::try_new(&scopes, audience.map(str::to_owned)).unwrap()
 }
 
 async fn take_event(events: &Semaphore) {

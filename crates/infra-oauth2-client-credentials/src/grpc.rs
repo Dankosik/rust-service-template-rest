@@ -11,36 +11,39 @@ use tonic::{Code, Status, body::Body};
 use tower::Service;
 
 use crate::{
-    AcquisitionError, ConfigurationError, Credentials, IdentityMode,
-    credentials::acquisition_deadline,
-    request_admission::{AdmissionRefusal, admit_request_subject},
+    AcquisitionError, ConfigurationError, ExchangeTokens, ServiceTokens,
+    credentials::{TokenSource, acquisition_deadline},
+    request_admission::{AdmissionRefusal, take_request_subject},
 };
 
 #[derive(Clone, derive_more::Debug)]
 #[debug("grpc::AuthenticatedClient([REDACTED])")]
 pub struct AuthenticatedClient {
-    credentials: Credentials,
+    tokens: TokenSource,
     resource: Client,
-    mode: IdentityMode,
 }
 
-impl Credentials {
-    pub fn grpc(
-        &self,
-        resource: Client,
-        mode: IdentityMode,
-    ) -> Result<AuthenticatedClient, ConfigurationError> {
+impl ServiceTokens {
+    pub fn grpc(&self, resource: Client) -> Result<AuthenticatedClient, ConfigurationError> {
+        AuthenticatedClient::new(TokenSource::Service(self.clone()), resource)
+    }
+}
+
+impl ExchangeTokens {
+    pub fn grpc(&self, resource: Client) -> Result<AuthenticatedClient, ConfigurationError> {
+        AuthenticatedClient::new(TokenSource::Exchange(self.clone(), ()), resource)
+    }
+}
+
+impl AuthenticatedClient {
+    fn new(tokens: TokenSource, resource: Client) -> Result<Self, ConfigurationError> {
         if !resource.uses_tls() {
             return Err(ConfigurationError {
                 key: "grpc_resource",
                 reason: "must use TLS to carry OAuth2 bearer tokens",
             });
         }
-        Ok(AuthenticatedClient {
-            credentials: self.clone(),
-            resource,
-            mode,
-        })
+        Ok(Self { tokens, resource })
     }
 }
 
@@ -54,22 +57,20 @@ impl Service<Request<Body>> for AuthenticatedClient {
     }
 
     fn call(&mut self, mut request: Request<Body>) -> Self::Future {
-        let admission = admit_request_subject(&mut request, self.mode);
+        let subject = take_request_subject(&mut request);
         let mut prepared = self.resource.prepare_call(request);
         let context = prepared.opening_context().clone();
-        let precheck = self
-            .credentials
-            .check_lifecycle(acquisition_deadline(&context))
-            .map_err(acquisition_status)
-            .and_then(|()| admission.map_err(admission_status));
-        let on_behalf_of = match precheck {
-            Ok(subject) => subject,
-            Err(status) => return Box::pin(std::future::ready(Err(prepared.refuse(status)))),
+        let grant = match self.tokens.admit(subject, acquisition_deadline(&context)) {
+            Ok(grant) => grant,
+            Err(refusal) => {
+                return Box::pin(std::future::ready(Err(
+                    prepared.refuse(admission_status(refusal))
+                )));
+            }
         };
-        let credentials = self.credentials.clone();
         Box::pin(async move {
-            let token = match credentials
-                .acquire_for_request(on_behalf_of, acquisition_deadline(&context))
+            let token = match grant
+                .acquire_for_request(acquisition_deadline(&context))
                 .await
             {
                 Ok(acquired) => acquired,
@@ -109,6 +110,7 @@ fn admission_status(refusal: AdmissionRefusal) -> Status {
         AdmissionRefusal::UnexpectedSubject => {
             Status::internal("service identity does not accept an on-behalf-of subject")
         }
+        AdmissionRefusal::Acquisition(error) => acquisition_status(error),
     }
 }
 

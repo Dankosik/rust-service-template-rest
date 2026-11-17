@@ -6,7 +6,7 @@ use http::header::AUTHORIZATION;
 use infra_serviceauth::ReceiverTokens;
 use tonic::body::Body;
 
-use crate::Client;
+use crate::{Client, call::client_stopped};
 
 #[derive(Clone, Debug)]
 pub struct ServiceTokenClient {
@@ -35,6 +35,10 @@ impl tower::Service<http::Request<Body>> for ServiceTokenClient {
 
     fn call(&mut self, request: http::Request<Body>) -> Self::Future {
         let mut prepared = self.resource.prepare_call(request);
+        if let Err(reason) = prepared.opening_context().check() {
+            let status = prepared.refuse(client_stopped(reason));
+            return Box::pin(std::future::ready(Err(status)));
+        }
         if prepared.headers_mut().contains_key(AUTHORIZATION) {
             return Box::pin(std::future::ready(Err(prepared.refuse(
                 tonic::Status::internal("authorization conflicts with the service token"),
@@ -65,13 +69,14 @@ mod tests {
     use infra_serviceauth::{
         JwtType, KeyId, ServiceName, SigningOptions, TokenSource, test_support::TestKey,
     };
+    use operation_context::OperationContext;
     use tower::ServiceExt as _;
 
     use super::*;
     use crate::ClientSecurity;
 
     #[tokio::test]
-    async fn service_token_client_redacts_debug_and_refuses_caller_authorization() {
+    async fn service_token_client_redacts_debug_and_checks_stops_before_authorization() {
         let key = TestKey::new("orders/2026-10");
         let source = TokenSource::try_new(SigningOptions {
             name: ServiceName::parse("orders").unwrap(),
@@ -95,17 +100,31 @@ mod tests {
             "{formatted}"
         );
 
-        let request = http::Request::builder()
-            .method("POST")
-            .uri("/example.v1.EchoService/Unary")
-            .header(AUTHORIZATION, "Bearer caller-token")
-            .body(Body::empty())
-            .unwrap();
-        let status = bound.oneshot(request).await.unwrap_err();
-        assert_eq!(status.code(), tonic::Code::Internal);
-        assert_eq!(
-            status.message(),
-            "authorization conflicts with the service token"
-        );
+        let cancelled = OperationContext::unbounded();
+        cancelled.cancel();
+        for (context, code, message) in [
+            (
+                OperationContext::unbounded(),
+                tonic::Code::Internal,
+                "authorization conflicts with the service token",
+            ),
+            (cancelled, tonic::Code::Cancelled, "request cancelled"),
+            (
+                OperationContext::with_timeout(Duration::ZERO),
+                tonic::Code::DeadlineExceeded,
+                "request deadline exceeded",
+            ),
+        ] {
+            let request = http::Request::builder()
+                .method("POST")
+                .uri("/example.v1.EchoService/Unary")
+                .header(AUTHORIZATION, "Bearer caller-token")
+                .extension(context)
+                .body(Body::empty())
+                .unwrap();
+            let status = bound.clone().oneshot(request).await.unwrap_err();
+            assert_eq!(status.code(), code);
+            assert_eq!(status.message(), message);
+        }
     }
 }
