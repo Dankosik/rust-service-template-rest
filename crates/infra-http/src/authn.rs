@@ -8,7 +8,7 @@ use axum::response::{IntoResponse, Response};
 use infra_bearerauthn::{
     DelegationCredential, Failure, PresentedToken, Principal, Transport, Verifier,
 };
-use operation_context::{OperationContext, Stopped};
+use operation_context::OperationContext;
 use service_failure::INSUFFICIENT_SCOPE_DETAIL;
 use utoipa::{IntoResponses, ToResponse};
 
@@ -169,7 +169,7 @@ fn authorize(
     delegate: bool,
 ) -> Result<(Principal, Option<DelegationCredential>), Response> {
     if let Some(stopped) = operation.stopped() {
-        return Err(stopped_response(stopped));
+        return Err(Problem::from(stopped).into_response());
     }
     let (principal, token) = result.map_err(failure_response)?;
     if !alternatives
@@ -179,19 +179,12 @@ fn authorize(
         return Err(insufficient_scope_response());
     }
     if let Some(stopped) = operation.stopped() {
-        return Err(stopped_response(stopped));
+        return Err(Problem::from(stopped).into_response());
     }
     Ok((
         principal,
         delegate.then(|| token.into_delegation_credential()),
     ))
-}
-
-fn stopped_response(stopped: Stopped) -> Response {
-    match stopped {
-        Stopped::Deadline => crate::context::budget_expired_response(),
-        Stopped::Cancelled => crate::context::cancelled_response(),
-    }
 }
 
 fn insufficient_scope_response() -> Response {

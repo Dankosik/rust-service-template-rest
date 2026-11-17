@@ -1,6 +1,6 @@
 use std::mem::DropGuard;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use axum::body::{Body, Bytes, to_bytes};
@@ -26,7 +26,13 @@ use crate::request_id::REQUEST_ID_HEADER;
 #[derive(Clone, Debug)]
 pub struct RequestContext {
     operation: OperationContext,
-    upload_reads: Option<Arc<AtomicUsize>>,
+    upload_reads: Option<Arc<UploadReads>>,
+}
+
+#[derive(Debug, Default)]
+struct UploadReads {
+    pending: AtomicUsize,
+    pending_at_deadline: AtomicBool,
 }
 
 impl RequestContext {
@@ -62,15 +68,30 @@ pub(crate) async fn collect_body(
 // template:end http-idempotency:http-idempotency-collect-body
 
 async fn track_body_read<F: Future>(context: Option<&RequestContext>, read: F) -> F::Output {
-    let _upload_read = context
-        .and_then(|context| context.upload_reads.as_deref())
-        .map(|reads| {
-            reads.fetch_add(1, Ordering::Relaxed);
-            DropGuard::new(reads, |reads| {
-                reads.fetch_sub(1, Ordering::Relaxed);
-            })
-        });
-    read.await
+    let Some((reads, deadline)) = context.and_then(|context| {
+        context
+            .upload_reads
+            .as_deref()
+            .zip(context.operation.deadline())
+    }) else {
+        return read.await;
+    };
+    let mut read = std::pin::pin!(read);
+    let mut pending = None;
+    std::future::poll_fn(|cx| {
+        let polled = read.as_mut().poll(cx);
+        if polled.is_pending() && pending.is_none() && !deadline.expired() {
+            reads.pending.fetch_add(1, Ordering::Relaxed);
+            pending = Some(DropGuard::new(reads, move |reads| {
+                if deadline.expired() {
+                    reads.pending_at_deadline.store(true, Ordering::Relaxed);
+                }
+                reads.pending.fetch_sub(1, Ordering::Release);
+            }));
+        }
+        polled
+    })
+    .await
 }
 
 #[derive(Clone, Debug)]
@@ -193,14 +214,17 @@ pub(crate) async fn opening(
             Some(deadline),
             response_context.operation().cancellation().clone(),
         ),
-        upload_reads: (!request.body().is_end_stream()).then(|| Arc::new(AtomicUsize::new(0))),
+        upload_reads: (!request.body().is_end_stream()).then(Arc::default),
     };
     let version = request.version();
     let upload_version = || {
         context
             .upload_reads
             .as_ref()
-            .filter(|reads| reads.load(Ordering::Relaxed) != 0)
+            .filter(|reads| {
+                reads.pending.load(Ordering::Acquire) != 0
+                    || reads.pending_at_deadline.load(Ordering::Relaxed)
+            })
             .map(|_| version)
     };
     request.extensions_mut().insert(context.operation.clone());
@@ -229,8 +253,7 @@ pub(crate) async fn opening(
 fn stopped_response(reason: Stopped, upload: Option<Version>) -> Response {
     match (reason, upload) {
         (Stopped::Deadline, Some(version)) => upload_timeout_response(version),
-        (Stopped::Deadline, None) => budget_expired_response(),
-        (Stopped::Cancelled, _) => cancelled_response(),
+        _ => Problem::from(reason).into_response(),
     }
 }
 
@@ -247,14 +270,14 @@ fn upload_timeout_response(version: Version) -> Response {
     response
 }
 
-pub(crate) fn budget_expired_response() -> Response {
-    Problem::new(Code::GatewayTimeout)
-        .detail("request budget expired before a response could be committed")
-        .into_response()
-}
-
-pub(crate) fn cancelled_response() -> Response {
-    Problem::new(Code::ServiceUnavailable).into_response()
+impl From<Stopped> for Problem {
+    fn from(reason: Stopped) -> Self {
+        match reason {
+            Stopped::Deadline => Self::new(Code::GatewayTimeout)
+                .detail("request budget expired before a response could be committed"),
+            Stopped::Cancelled => Self::new(Code::ServiceUnavailable),
+        }
+    }
 }
 
 #[cfg(test)]
