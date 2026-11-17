@@ -219,8 +219,7 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
             // template:end http-idempotency:http-policy-compile-mounts
         )?;
         outcomes::compose(
-            document,
-            probes,
+            document, probes,
             // template:begin authn:http-compose-policy
             &policy,
             // template:end authn:http-compose-policy
@@ -270,9 +269,7 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
         let routes = match authentication {
             Authentication::Public => finalize_public(self.routes, policy)?,
             // template:begin authn:http-assembly-finalize
-            Authentication::Bearer(verifier) => {
-                crate::authn::finalize(self.routes, policy, *verifier)
-            }
+            Authentication::Bearer(auth) => crate::authn::finalize(self.routes, policy, *auth),
             // template:end authn:http-assembly-finalize
         };
         // template:begin http-idempotency:http-build-bind-store

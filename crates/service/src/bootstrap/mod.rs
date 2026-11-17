@@ -513,7 +513,8 @@ async fn start(
         dependencies.postgres.as_ref(),
         background,
         // template:end http-idempotency:bootstrap-http-idempotency-resources
-    ).await?;
+    )
+    .await?;
     let http = config.http.listener();
     let app_listener = BoundListener::bind(http.addr)?;
     let diagnostics_listener = match config.observability.metrics.addr {
@@ -572,7 +573,10 @@ async fn start(
     Ok(prepared)
 }
 
-#[allow(clippy::unused_async, reason = "only the idempotency profile checks the store before serving")]
+#[allow(
+    clippy::unused_async,
+    reason = "only the idempotency profile checks the store before serving"
+)]
 async fn http_application(
     state: crate::AppState,
     auth: Authentication,
@@ -594,7 +598,8 @@ async fn http_application(
     };
     // template:begin http-idempotency:bootstrap-http-idempotency-activation
     if let Some(mounted) = idempotency::prepare(contract.idempotent_operations(), config, pool)? {
-        let app = contract.build_with_idempotency_store(state, auth, &options, mounted.store.clone())?;
+        let app =
+            contract.build_with_idempotency_store(state, auth, &options, mounted.store.clone())?;
         mounted.activate(background).await?;
         return Ok(app);
     }

@@ -546,6 +546,7 @@ def classify_report(
                 "crates/infra-http-transport/*", "crates/infra-http/Cargo.toml", "crates/infra-http/src/authn.rs",
                 "crates/infra-http/src/context.rs", "crates/infra-http/src/idempotency/*",
                 "crates/infra-http/src/harden.rs", "crates/infra-http/src/harden/*",
+                "crates/infra-http/src/contract.rs", "crates/infra-http/src/contract/*",
                 "crates/infra-http/src/lib.rs", "crates/infra-http/src/problem.rs",
                 "crates/infra-postgres/*", "crates/migrate/*",
                 "crates/infra-jobs/*", "crates/jobs-worker/*", "crates/domain-events/*",

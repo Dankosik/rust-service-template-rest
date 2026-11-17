@@ -20,27 +20,33 @@ pub(super) fn prepare(
     let Some(operations) = std::num::NonZeroUsize::new(mounted) else {
         return Ok(None);
     };
-    let retention = config.http_idempotency.required_retention(config.postgres.is_some())?;
+    let retention = config
+        .http_idempotency
+        .required_retention(config.postgres.is_some())?;
     let pool = postgres_pool.ok_or(infra_idempotency_store::StartupError::Unavailable)?;
     let store = Store::new(pool.clone(), retention).map_err(|error| {
         ValidationError::new(HttpIdempotencyConfig::RETENTION_KEY, error.to_string())
     })?;
-    Ok(Some(MountedStore { store, operations, retention }))
+    Ok(Some(MountedStore {
+        store,
+        operations,
+        retention,
+    }))
 }
 
 impl MountedStore {
     pub(super) async fn activate(self, background: &mut Background) -> Result<(), BootstrapError> {
-    self.store.check_startup().await?;
-    background.spawn(
-        "idempotency_cleanup",
-        self.store.run_cleanup(background.child_token()),
-    );
-    tracing::info!(
-        http_idempotency.operations = self.operations.get(),
-        http_idempotency.retention = ?self.retention,
-        "http_idempotency_active"
-    );
-    Ok(())
+        self.store.check_startup().await?;
+        background.spawn(
+            "idempotency_cleanup",
+            self.store.run_cleanup(background.child_token()),
+        );
+        tracing::info!(
+            http_idempotency.operations = self.operations.get(),
+            http_idempotency.retention = ?self.retention,
+            "http_idempotency_active"
+        );
+        Ok(())
     }
 }
 

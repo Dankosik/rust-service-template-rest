@@ -246,7 +246,11 @@ mod idempotency_tests {
         }
         for (status, header) in [("400", "WWW-Authenticate"), ("503", "Retry-After")] {
             let response = &operation["responses"][status];
-            assert!(response["content"].get("application/problem+json").is_some());
+            assert!(
+                response["content"]
+                    .get("application/problem+json")
+                    .is_some()
+            );
             assert!(response["headers"].get(header).is_some());
         }
         assert_eq!(operation["responses"]["201"]["description"], "created");

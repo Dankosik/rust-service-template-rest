@@ -54,13 +54,14 @@ where
                 Problem::new(Code::UnsupportedMediaType).detail_static(BODY_MEDIA_TYPE_DETAIL)
             );
         }
-        let bytes = read_request_bytes(request)
-            .await
-            .map_err(|rejection| match rejection.status() {
-                StatusCode::PAYLOAD_TOO_LARGE => body_too_large(),
-                StatusCode::BAD_REQUEST => body_unreadable(),
-                _ => wiring_failure("json"),
-            })?;
+        let bytes =
+            read_request_bytes(request)
+                .await
+                .map_err(|rejection| match rejection.status() {
+                    StatusCode::PAYLOAD_TOO_LARGE => body_too_large(),
+                    StatusCode::BAD_REQUEST => body_unreadable(),
+                    _ => wiring_failure("json"),
+                })?;
         match axum::Json::<T>::from_bytes(&bytes) {
             Ok(axum::Json(value)) => Ok(Self(value)),
             Err(rejection) => Err(json_problem(&rejection, &bytes)),
