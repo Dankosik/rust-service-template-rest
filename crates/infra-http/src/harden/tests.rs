@@ -746,8 +746,11 @@ async fn a_request_that_waits_out_its_patience_is_shed_and_logged() {
     assert!(!fields.iter().any(|field| field.starts_with("termination=")));
 }
 
-#[tokio::test]
-async fn probes_are_answered_while_every_in_flight_permit_is_held() {
+async fn probe_admission_app() -> (
+    crate::Application,
+    Arc<tokio::sync::Notify>,
+    Arc<tokio::sync::Notify>,
+) {
     #[utoipa::path(get, path = "/hold", responses((status = 200)))]
     async fn hold(
         axum::extract::State(gates): axum::extract::State<(
@@ -781,18 +784,28 @@ async fn probes_are_answered_while_every_in_flight_permit_is_held() {
                 .with_state((Arc::clone(&started), Arc::clone(&gate))),
         )
         .unwrap();
-    let mut options = options();
-    options.max_in_flight = NonZeroU32::new(1);
-    options.admission_wait = Duration::ZERO;
-    options.request_timeout = Duration::from_secs(30);
     let app = routes
         .with_probes("/")
         .unwrap()
         .with_probes("/api")
         .unwrap()
-        .build(readiness.reader(), crate::Authentication::Public, &options)
+        .build(
+            readiness.reader(),
+            crate::Authentication::Public,
+            &HardenOptions {
+                max_in_flight: NonZeroU32::new(1),
+                admission_wait: Duration::ZERO,
+                request_timeout: Duration::from_secs(30),
+                ..options()
+            },
+        )
         .unwrap();
+    (app, started, gate)
+}
 
+#[tokio::test]
+async fn probes_are_answered_while_every_in_flight_permit_is_held() {
+    let (app, started, gate) = probe_admission_app().await;
     let holder = tokio::spawn({
         let app = app.clone();
         async move { app.oneshot(request(Method::GET, "/hold")).await.unwrap() }

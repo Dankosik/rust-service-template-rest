@@ -418,7 +418,7 @@ mod tests {
             };
             *parameters = Some(vec![
                 serde_json::from_value(serde_json::json!({
-                    "in": "cookie", "name": "variant", "schema": {"type": "string"}
+                    "in": "cookie", "name": "variant", "required": false, "schema": {"type": "string"}
                 }))
                 .unwrap(),
             ]);

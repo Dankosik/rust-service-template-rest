@@ -225,7 +225,10 @@ impl<S: Clone + Send + Sync + 'static> HttpContract<S> {
             || metadata.tags.is_some()
             || metadata.webhooks.is_some()
             || metadata.external_docs.is_some()
-            || metadata.extensions.is_some()
+            || metadata
+                .extensions
+                .as_ref()
+                .is_some_and(|extensions| !extensions.is_empty())
             || metadata.json_schema_dialect.is_some()
             || !metadata.schema.is_empty()
             || metadata.self_uri.is_some()
@@ -985,7 +988,7 @@ mod tests {
     use std::time::Duration;
 
     use axum::body::Body;
-    use axum::http::header::{ALLOW, CONTENT_TYPE};
+    use axum::http::header::CONTENT_TYPE;
     use axum::http::{Request, StatusCode};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
@@ -1031,8 +1034,7 @@ mod tests {
         )
     }
 
-    #[tokio::test]
-    async fn public_query_and_additional_method_reach_the_registered_service() {
+    fn mixed_method_contract() -> HttpContract<()> {
         let query = serde_json::from_value(serde_json::json!({
             "responses": {"200": {"description": "ok"}, "503": {
                     "description": "index rebuilding",
@@ -1074,7 +1076,12 @@ mod tests {
                 || async { StatusCode::OK },
             )
             .unwrap();
-        let contract = HttpContract::default().nest("/api", contract).unwrap();
+        HttpContract::default().nest("/api", contract).unwrap()
+    }
+
+    #[tokio::test]
+    async fn public_query_and_additional_method_reach_the_registered_service() {
+        let contract = mixed_method_contract();
         let published = contract.clone().into_openapi().unwrap();
         let published = serde_json::to_value(published).unwrap();
         assert_eq!(published["openapi"], "3.2.0");

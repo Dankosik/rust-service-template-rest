@@ -106,7 +106,7 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
-    use crate::{Application, Authentication, HardenOptions, HttpContract};
+    use crate::{Application, Authentication, HardenOptions};
 
     fn options() -> HardenOptions {
         HardenOptions {
