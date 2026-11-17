@@ -109,9 +109,20 @@ def check_outputs(root: Path, expected: dict[str, tuple[str, str, str]]) -> None
             arguments[key] = value
         elif instruction == "FROM":
             stage = parts[-1] if len(parts) >= 4 and parts[-2].upper() == "AS" else ""
-            copies = []  # Only copies into the final runtime stage are outputs.
-        elif instruction == "RUN" and parts[1:4] == ["cargo", "auditable", "build"]:
-            command = parts[4 : parts.index("&&")] if "&&" in parts else parts[4:]
+            copies = []
+        elif instruction == "RUN":
+            if parts[1:4] == ["cargo", "auditable", "build"]:
+                command = parts[4 : parts.index("&&")] if "&&" in parts else parts[4:]
+            elif parts[1:6] == ["build()", "{", "cargo", "auditable", "build"]:
+                if (
+                    parts[12:18] != ["$@;", "}", "&&", "case", "${PGO}", "in"]
+                    or "esac" not in parts
+                    or parts[parts.index("esac") + 1 : parts.index("esac") + 4] != ["&&", "build", "&&"]
+                ):
+                    raise Refusal(f"{path}: unsupported auditable build wrapper in {stage}")
+                command = parts[6:12]
+            else:
+                continue
             if len(command) != 6 or command[:3] != ["--release", "--locked", "-p"] or command[4] != "--bin":
                 raise Refusal(f"{path}: unsupported auditable build selection in {stage}")
             if stage in builds:
