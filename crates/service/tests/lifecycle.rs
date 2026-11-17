@@ -374,6 +374,7 @@ fn a_stop_signal_reaches_startup_during_a_blocking_cache_password_file_read() {
     assert_stop_reaches_blocking_password_file(
         "APP__CACHE__PASSWORD_FILE",
         &[
+            ("APP__APP__ENV", "local"),
             ("APP__CACHE__DSN", "redis://127.0.0.1:1"),
             ("APP__CACHE__ALLOW_PLAINTEXT", "true"),
             ("APP__CACHE__COMMAND_TIMEOUT", "500ms"),
