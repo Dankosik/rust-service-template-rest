@@ -27,6 +27,17 @@ the population.
    `absent(up{job="service"})` dead-man check, with your scrape job names:
    `sd 'service\|jobs-worker' 'orders-api|orders-worker' env/monitoring/service.rules.yml`.
 3. Point `runbook_url` at this page in your repository.
+   Give the input series and expected alerts in the rule fixtures the same
+   job names as the deployed targets. For the example above, run:
+
+   ```sh
+   sd -F 'job="service"' 'job="orders-api"' env/monitoring/tests/service-rules.yml
+   sd -F 'job="jobs-worker"' 'job="orders-worker"' env/monitoring/tests/service-rules.yml
+   ```
+
+   If worker disappearance should page, include a reachable worker in
+   normal fixtures and cover its disappearance with only the API present.
+   Run `make monitoring-rules` before activating the configured rules.
 4. Route `severity="page"` to the pager and `severity="ticket"` to the queue.
    Burn-rate alerts share their name across windows and differ by
    `long_window`, so inhibit the slower window while a faster one fires:
