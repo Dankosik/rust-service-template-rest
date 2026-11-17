@@ -74,7 +74,9 @@ pub enum ExporterState {
         has_client_certificate: bool,
     },
     Disabled,
-    Degraded,
+    Degraded {
+        stage: ExporterBuildStage,
+    },
 }
 
 impl ExporterState {
@@ -83,7 +85,7 @@ impl ExporterState {
         match self {
             ExporterState::Initialized { .. } => "initialized",
             ExporterState::Disabled => "disabled",
-            ExporterState::Degraded => "degraded",
+            ExporterState::Degraded { .. } => "degraded",
         }
     }
 
@@ -100,10 +102,40 @@ impl ExporterState {
                 "trace exporter initialized"
             ),
             ExporterState::Disabled => {}
-            ExporterState::Degraded => tracing::warn!(
+            ExporterState::Degraded { stage } => tracing::warn!(
                 reason = %"exporter_build",
+                stage = stage.as_str(),
                 "trace exporter degraded; spans are recorded but not exported"
             ),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExporterBuildStage {
+    SdkBuild,
+    TrustFileRead,
+    TrustFileInvalid,
+    ClientIdentityInvalid,
+    ClientIdentityIncomplete,
+    HttpClientBuild,
+    HttpClientThreadStart,
+    HttpClientThreadPanicked,
+    CompressionConfig,
+}
+
+impl ExporterBuildStage {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::SdkBuild => "sdk_build",
+            Self::TrustFileRead => "trust_file_read",
+            Self::TrustFileInvalid => "trust_file_invalid",
+            Self::ClientIdentityInvalid => "client_identity_invalid",
+            Self::ClientIdentityIncomplete => "client_identity_incomplete",
+            Self::HttpClientBuild => "http_client_build",
+            Self::HttpClientThreadStart => "http_client_thread_start",
+            Self::HttpClientThreadPanicked => "http_client_thread_panicked",
+            Self::CompressionConfig => "compression_config",
         }
     }
 }
@@ -182,7 +214,9 @@ fn tracer_provider(
                     has_client_certificate: trust.client_certificate.is_some(),
                 }
             }
-            Err(_withheld) => ExporterState::Degraded,
+            Err(error) => ExporterState::Degraded {
+                stage: error.stage(),
+            },
         },
     };
 

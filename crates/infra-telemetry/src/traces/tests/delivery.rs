@@ -220,41 +220,46 @@ fn a_finished_span_reaches_the_collector_with_the_typed_headers() {
     clippy::disallowed_methods,
     reason = "test-owned temporary file setup or rotation completes before the corresponding fixture assertion"
 )]
-fn unusable_trust_material_degrades_the_exporter_and_names_the_variable() {
+fn unusable_trust_material_emits_a_safe_startup_warning() {
+    use crate::logging::{LoggerShutdown, LoggingFormat, tests::capture};
+
     let files = tempfile::tempdir().expect("directory for trust files");
     let file = |variable, name: &str| TrustFile {
         variable,
         path: files.path().join(name),
     };
     std::fs::write(files.path().join("text.pem"), "not PEM\n").expect("write a file");
-    for (trust, expected) in [
+    let mut options = options("https://127.0.0.1:1/private-collector-path");
+    options.otlp_headers = Some(SecretString::from("authorization=private-header-value"));
+
+    for (trust, expected_stage) in [
         (
             CollectorTrust {
                 certificate: Some(file(CERTIFICATE_VARS[0], "absent.pem")),
                 ..CollectorTrust::default()
             },
-            "read the file OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE names",
+            "trust_file_read",
         ),
         (
             CollectorTrust {
                 certificate: Some(file(CERTIFICATE_VARS[1], "text.pem")),
                 ..CollectorTrust::default()
             },
-            "the file OTEL_EXPORTER_OTLP_CERTIFICATE names holds no certificate",
+            "trust_file_invalid",
         ),
         (
             CollectorTrust {
                 client_certificate: Some(file(CLIENT_CERTIFICATE_VARS[1], "text.pem")),
                 ..CollectorTrust::default()
             },
-            "OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE is set without OTEL_EXPORTER_OTLP_CLIENT_KEY",
+            "client_identity_incomplete",
         ),
         (
             CollectorTrust {
                 client_key: Some(file(CLIENT_KEY_VARS[1], "text.pem")),
                 ..CollectorTrust::default()
             },
-            "OTEL_EXPORTER_OTLP_CLIENT_KEY is set without OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE",
+            "client_identity_incomplete",
         ),
         (
             CollectorTrust {
@@ -262,21 +267,36 @@ fn unusable_trust_material_degrades_the_exporter_and_names_the_variable() {
                 client_key: Some(file(CLIENT_KEY_VARS[1], "text.pem")),
                 ..CollectorTrust::default()
             },
-            "the client certificate and key files are not a usable PEM identity",
+            "client_identity_invalid",
         ),
     ] {
-        let error = span_exporter(
-            &Endpoint::Typed("https://127.0.0.1:1"),
-            HashMap::new(),
-            &trust,
-            export_timeout(&|_: &str| None),
-            &|_: &str| None,
-        )
-        .expect_err("unusable trust material prevents construction");
-        assert!(error.to_string().starts_with(expected));
-        let handle = tracer_provider(&options("https://127.0.0.1:1"), |_| None, &trust)
+        let handle = tracer_provider(&options, |_| None, &trust)
             .expect("unusable trust material is not a startup failure");
-        assert_eq!(handle.exporter_state, ExporterState::Degraded, "{expected}");
+        assert_eq!(
+            handle.exporter_state.as_str(),
+            "degraded",
+            "{expected_stage}"
+        );
+
+        let (dispatch, logger, records) = capture(LoggingFormat::Json, "info", Some(&handle));
+        tracing::dispatcher::with_default(&dispatch, || handle.exporter_state.log());
+        std::assert_matches!(
+            logger.shutdown(std::time::Instant::now() + WAIT),
+            LoggerShutdown::Completed(_)
+        );
+
+        let mut warning: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(&records.records()).expect("one JSON startup warning");
+        warning.retain(|key, _| !matches!(key.as_str(), "target" | "timestamp"));
+        assert_eq!(
+            serde_json::Value::Object(warning),
+            serde_json::json!({
+                "level": "WARN",
+                "message": "trace exporter degraded; spans are recorded but not exported",
+                "reason": "exporter_build",
+                "stage": expected_stage,
+            })
+        );
     }
 }
 
